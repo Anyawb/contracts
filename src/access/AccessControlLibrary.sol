@@ -2,8 +2,8 @@
 pragma solidity ^0.8.20;
 
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { EventLibrary } from "./EventLibrary.sol";
-import { ModuleAccessLibrary } from "./ModuleAccessLibrary.sol";
+import { EventLibrary } from "../libraries/EventLibrary.sol";
+import { ModuleAccessLibrary } from "../libraries/ModuleAccessLibrary.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 

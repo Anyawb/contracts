@@ -8,7 +8,7 @@ import { IGuaranteeFundManager } from "../interfaces/IGuaranteeFundManager.sol";
 import { VaultTypes } from "../Vault/VaultTypes.sol";
 import { ExternalModuleRevertedRaw, AmountIsZero, InvalidAmounts, AssetNotAllowed, ZeroAddress } from "../errors/StandardErrors.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
-import { GracefulDegradation } from "./GracefulDegradation.sol";
+import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
 
 /// @title VaultBusinessLogicLibrary
 /// @notice 业务逻辑库，提供VaultBusinessLogic的重复功能

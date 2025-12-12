@@ -4,15 +4,15 @@ pragma solidity ^0.8.20;
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { IRegistryUpgradeEvents } from "../interfaces/IRegistryUpgradeEvents.sol";
-import { RewardTypes } from "./RewardTypes.sol";
-import { IServiceConfig } from "./interfaces/IServiceConfig.sol";
+import { RewardTypes } from "../Reward/RewardTypes.sol";
+import { IServiceConfig } from "../Reward/interfaces/IServiceConfig.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { VaultTypes } from "../Vault/VaultTypes.sol";
 import { ZeroAddress } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
+import { RewardModuleBase } from "../Reward/internal/RewardModuleBase.sol";
 
 /// @title BaseServiceConfig - 服务配置基础抽象合约
 /// @notice 提供服务配置模块的基础功能和通用逻辑

@@ -26,9 +26,13 @@ const config: HardhatUserConfig = {
       },
     },
   },
+  // 添加 remappings 以支持 @openzeppelin 导入
+  // Hardhat 会自动从 node_modules 解析，但显式配置可以避免问题
   paths: {
     // 仅扫描 ./src 来避免将 node_modules 误判为本地源码
     sources: './src',
+    // 显式指定根目录，确保 node_modules 可以被解析
+    root: './',
   },
   networks: {
     hardhat: {

@@ -1,0 +1,48 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      }
+    ],
+    "name": "recordSnapshot",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "collateralIn",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "collateralOut",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "borrow",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "repay",
+        "type": "uint256"
+      }
+    ],
+    "name": "updateUserStats",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]

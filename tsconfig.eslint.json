@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "scripts/**/*",
+    "types/**/*",
+    ".eslintrc.js",
+    "Frontend/**/*",
+    "ai-services/**/*"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+} 

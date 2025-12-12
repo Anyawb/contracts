@@ -1,0 +1,9 @@
+{
+  "network": "default",
+  "assets": [
+    { "address": "0xA0b86a33E6441b8c4C8C8C8C8C8C8C8C8C8C8C8", "coingeckoId": "usd-coin",  "decimals": 6,  "maxPriceAge": 3600, "active": true },
+    { "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "coingeckoId": "weth",      "decimals": 18, "maxPriceAge": 3600, "active": true }
+  ]
+}
+
+

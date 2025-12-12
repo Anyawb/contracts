@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  hardhat:
+    build:
+      context: ..
+      dockerfile: hardhat-node/Dockerfile
+    container_name: hardhat-node
+    restart: unless-stopped
+    ports:
+      - "8545:8545"
+    environment:
+      - NODE_OPTIONS=--max_old_space_size=4096
+      - HARDHAT_NETWORK=localhost
+    volumes:
+      - contract_build:/app/build
+      - ./deployments:/app/deployments
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8545"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  deployer:
+    image: node:20-bullseye
+    container_name: hardhat-deployer
+    working_dir: /app
+    restart: "no"
+    depends_on:
+      - hardhat
+    command: sh -lc "(npm ci || npm install) && node scripts/deploy.js"
+    volumes:
+      - ..:/app
+      - contract_build:/app/build
+    environment:
+      - HARDHAT_NETWORK=docker
+      - RPC_URL=http://hardhat:8545
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: hardhat-nginx
+    restart: always
+    depends_on:
+      - deployer
+    ports:
+      - "8080:80" # 若与宿主机已有 Nginx 冲突，请改用 8080；独立主机可改回 80:80
+    volumes:
+      - contract_build:/usr/share/nginx/html/config
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  contract_build:
+    driver: local
+
+

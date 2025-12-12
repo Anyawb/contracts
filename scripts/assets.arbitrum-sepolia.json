@@ -1,0 +1,11 @@
+{
+  "network": "arbitrum-sepolia",
+  "chainId": 421614,
+  "assets": [
+    { "address": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d", "coingeckoId": "usd-coin",  "decimals": 6,  "maxPriceAge": 3600, "active": true },
+    { "address": "0x980B62Da83eFf3D4576C647993b0c1D7faf17c73", "coingeckoId": "weth",      "decimals": 18, "maxPriceAge": 3600, "active": true },
+    { "address": "0x2f25d402829ca4085b8ea4d3bc68bf999f3f3e3c", "coingeckoId": "arbitrum",  "decimals": 18, "maxPriceAge": 3600, "active": true }
+  ]
+}
+
+

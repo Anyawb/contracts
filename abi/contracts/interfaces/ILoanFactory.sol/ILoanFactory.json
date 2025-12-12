@@ -1,0 +1,50 @@
+[
+  {
+    "inputs": [],
+    "name": "LoanFactory__NotAuthorized",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "proxyAddr",
+        "type": "address"
+      }
+    ],
+    "name": "LoanDeployed",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes",
+        "name": "initCalldata",
+        "type": "bytes"
+      }
+    ],
+    "name": "deployLoan",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "proxyAddr",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]

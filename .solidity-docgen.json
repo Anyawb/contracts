@@ -1,0 +1,11 @@
+{
+  "input": "./contracts",
+  "output": "./docs/contracts",
+  "language": "en",
+  "pages": "files",
+  "templates": "node_modules/solidity-docgen/dist/templates",
+  "solcArgs": {
+    "viaIR": true
+  },
+  "exclude": ["contracts/Mocks", "contracts/mocks"]
+} 

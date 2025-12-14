@@ -1,5 +1,0 @@
-{
-    "filter_paths": "node_modules,test,scripts,mocks,interfaces,examples,tools",
-    "detectors_to_exclude": "uninitialized-state-variables,low-level-calls,too-many-digits"
-  }
-  

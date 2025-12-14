@@ -1,7 +1,7 @@
-# RWA 借贷平台核心逻辑说明 v2.0
+# RWA 借贷平台核心逻辑说明 v3.0
 
-> 最后更新：2025-01-27  
-> 基于当前智能合约实际实现，包含 ACM 权限管理、真实资金流转、资产白名单、SafeERC20 等最新特性
+> 最后更新：2025-12  
+> 基于当前智能合约实际实现，包含双架构设计（事件驱动 + View层缓存）、ACM 权限管理、真实资金流转、撮合结算、保证金系统、资产白名单、SafeERC20 等最新特性13
 
 ---
 
@@ -23,7 +23,16 @@
 
 ## 1. 系统架构总览
 
-### 1.1 核心模块架构
+### 1.1 双架构设计
+
+RWA 借贷平台采用**双架构设计**，结合事件驱动架构和 View 层缓存架构：
+
+- **事件驱动架构**：所有操作通过事件记录，支持数据库收集和 AI 分析
+- **View 层缓存架构**：提供快速免费查询，所有查询函数使用 view（0 gas）
+- **实时数据流**：数据库实时收集和处理事件数据
+- **Gas 优化**：查询免费，只在数据更新时支付 Gas
+
+### 1.2 核心模块架构
 
 ```mermaid
 graph TB
@@ -32,83 +41,96 @@ graph TB
         Keeper[Keeper Bot]
     end
     
-    subgraph "核心业务层"
-        VaultCore[VaultCore]
-        VaultView[VaultView]
-        VaultStorage[VaultStorage]
-        VaultAdmin[VaultAdmin]
+    subgraph "入口层（极简）"
+        VaultCore[VaultCore<br/>极简入口]
+    end
+    
+    subgraph "View层（双架构协调器）"
+        VaultView[VaultView<br/>双架构智能协调器]
+    end
+    
+    subgraph "业务逻辑层"
+        VaultBusinessLogic[VaultBusinessLogic<br/>业务逻辑模块]
+        SettlementMatchLib[SettlementMatchLib<br/>撮合结算库]
+    end
+    
+    subgraph "账本层"
+        CollateralManager[CollateralManager<br/>抵押物管理]
+        LendingEngine[LendingEngine<br/>借贷引擎/订单管理]
     end
     
     subgraph "功能模块层"
-        CollateralManager[CollateralManager]
-        LendingEngine[LendingEngine]
-        HealthFactor[HealthFactorCalculator]
-        StatisticsView[StatisticsView]
+        GuaranteeFundManager[GuaranteeFundManager<br/>保证金管理]
+        EarlyRepaymentGM[EarlyRepaymentGM<br/>提前还款保证金]
+        LiquidationManager[LiquidationManager<br/>清算管理]
+        FeeRouter[FeeRouter<br/>费用路由]
+        RewardManager[RewardManager<br/>奖励管理]
     end
     
     subgraph "基础设施层"
-        AssetWhitelist[AssetWhitelist]
-        FeeRouter[FeeRouter]
-        RewardManager[RewardManager]
-        Oracle[ValuationOracleAdapter]
+        AssetWhitelist[AssetWhitelist<br/>资产白名单]
+        PriceOracle[PriceOracle<br/>价格预言机]
+        StatisticsView[StatisticsView<br/>统计视图]
+        HealthView[HealthView<br/>健康因子视图]
     end
     
     subgraph "权限管理层"
-        ACM[AccessControlManager]
-        ActionKeys[ActionKeys]
-        ModuleKeys[ModuleKeys]
+        ACM[AccessControlManager<br/>统一权限控制]
+        ActionKeys[ActionKeys<br/>44个动作键]
+        ModuleKeys[ModuleKeys<br/>模块键]
     end
     
     subgraph "治理层"
-        Governance[CrossChainGovernance]
-        Registry[Registry]
-    end
-    
-    subgraph "常量库"
-        VaultTypes[VaultTypes]
-        VaultMath[VaultMath]
+        Registry[Registry<br/>模块注册中心]
+        VaultAdmin[VaultAdmin<br/>治理入口]
     end
     
     User --> VaultCore
-    User --> VaultView
-    Keeper --> VaultCore
+    VaultCore --> VaultView
+    VaultView --> VaultBusinessLogic
+    VaultBusinessLogic --> SettlementMatchLib
+    VaultBusinessLogic --> CollateralManager
+    VaultBusinessLogic --> LendingEngine
+    VaultBusinessLogic --> GuaranteeFundManager
+    VaultBusinessLogic --> EarlyRepaymentGM
+    LendingEngine --> CollateralManager
+    LendingEngine --> FeeRouter
+    LendingEngine --> RewardManager
+    VaultView --> StatisticsView
+    VaultView --> HealthView
+    VaultBusinessLogic --> AssetWhitelist
+    VaultBusinessLogic --> PriceOracle
     VaultCore --> ACM
-    VaultView --> ACM
-    VaultCore --> VaultStorage
-    VaultView --> VaultStorage
-    VaultCore --> CollateralManager
-    VaultCore --> LendingEngine
-    VaultCore --> HealthFactor
-    VaultCore --> AssetWhitelist
-    VaultCore --> FeeRouter
-    VaultCore --> RewardManager
-    VaultCore --> Oracle
-    Governance --> ACM
-    ACM --> Registry
+    VaultBusinessLogic --> ACM
     Registry --> ModuleKeys
     Registry --> ActionKeys
+    ACM --> Registry
 ```
 
-### 1.2 模块职责分工
+### 1.3 模块职责分工
 
 | 模块 | 职责 | 状态 | 特性 |
 |------|------|------|------|
-| **VaultCore** | 核心业务逻辑，处理用户操作 | ✅ 已实现 | 真实资金流转、SafeERC20、批量操作 |
-| **VaultView** | 查询接口，提供所有只读功能 | ✅ 已实现 | 高效查询、预览功能、统计信息 |
-| **VaultStorage** | 存储管理，模块地址注册 | ✅ 已实现 | 模块化设计、动态调用、可升级 |
-| **VaultAdmin** | 极简治理入口 | ✅ 已实现 | 健康因子下发、升级鉴权 |
+| **VaultCore** | 极简入口，传送数据至 View 层 | ✅ 已实现 | 双架构设计、极简实现、Registry 升级能力 |
+| **VaultView** | 双架构智能协调器 | ✅ 已实现 | 事件驱动、View 层缓存、模块分发、免费查询 |
+| **VaultBusinessLogic** | 业务逻辑模块 | ✅ 已实现 | 真实资金流转、撮合结算、SafeERC20、批量操作 |
+| **SettlementMatchLib** | 撮合结算库 | ✅ 已实现 | 原子化操作、订单落地、保证金锁定 |
 | **CollateralManager** | 抵押物管理，记录用户余额 | ✅ 已实现 | 真实 token 转账、事件记录 |
-| **LendingEngine** | 借贷引擎，管理债务记录 | ✅ 已实现 | SafeERC20、费用分配 |
-| **HealthFactorCalculator** | 健康因子计算 | ✅ 已实现 | 实时风险监控 |
+| **LendingEngine** | 借贷引擎，管理贷款订单 | ✅ 已实现 | 订单生命周期、SafeERC20、费用分配、LoanNFT |
+| **GuaranteeFundManager** | 保证金基金管理 | ✅ 已实现 | 资金托管、三方分发、批量操作 |
+| **EarlyRepaymentGM** | 提前还款保证金管理 | ✅ 已实现 | 记录管理、规则计算、早偿结算 |
+| **LiquidationManager** | 清算管理 | ✅ 已实现 | 模块化清算、风险评估、奖励分配 |
 | **AssetWhitelist** | 资产白名单管理 | ✅ 已实现 | 治理控制、批量操作 |
 | **FeeRouter** | 费用路由与分配 | ✅ 已实现 | 多币种支持、暂停机制 |
 | **RewardManager** | 积分奖励管理 | ✅ 已实现 | 动态积分、惩罚机制 |
-| **ValuationOracleAdapter** | 预言机适配器 | ✅ 已实现 | 多预言机支持、缓存机制、可升级 |
+| **PriceOracle** | 价格预言机 | ✅ 已实现 | 多预言机支持、缓存机制、优雅降级 |
+| **StatisticsView** | 统计视图 | ✅ 已实现 | 数据聚合、保证金统计、活跃用户统计 |
+| **HealthView** | 健康因子视图 | ✅ 已实现 | 健康因子缓存、风险状态推送 |
 | **AccessControlManager** | 统一权限控制中心 | ✅ 已实现 | 多级权限、角色管理、权限缓存、批量操作 |
-| **CrossChainGovernance** | 跨链治理 | ✅ 已实现 | 提案创建、投票、执行 |
-| **Registry** | 模块注册中心 | ✅ 已实现 | 延时升级、模块管理 |
+| **Registry** | 模块注册中心 | ✅ 已实现 | 延时升级、模块管理、Registry 家族 |
+| **VaultAdmin** | 极简治理入口 | ✅ 已实现 | 健康因子下发、升级鉴权 |
 | **ModuleKeys** | 模块常量库 | ✅ 已实现 | 模块标识、字符串映射、类型安全 |
-| **ActionKeys** | 动作常量库 | ✅ 已实现 | 26个标准化动作、权限分发、事件追踪 |
+| **ActionKeys** | 动作常量库 | ✅ 已实现 | **44个**标准化动作、权限分发、事件追踪 |
 | **VaultTypes** | 事件和数据结构 | ✅ 已实现 | 标准化事件、数据结构定义 |
 | **VaultMath** | 数学计算库 | ✅ 已实现 | 统一数学计算、健康因子、LTV、百分比计算 |
 
@@ -152,37 +174,28 @@ bytes32 public constant OPERATOR_ROLE = ActionKeys.ACTION_DEPOSIT;
 | 级别 | 名称 | 描述 | 典型用途 | 权限范围 |
 |------|------|------|----------|----------|
 | 0 | NONE | 无权限 | 普通用户 | 仅查询公开数据 |
-| 1 | VIEWER | 只读权限 | 审计员、分析师 | 查看内部数据 |
-| 2 | OPERATOR | 操作权限 | 业务操作员 | 执行基本业务操作 |
-| 3 | KEEPER | Keeper权限 | 自动化机器人 | 执行自动化操作 |
-| 4 | ADMIN | 管理员权限 | 系统管理员 | 系统参数管理 |
-| 5 | OWNER | 所有者权限 | 治理委员会 | 最高权限，包括角色管理 |
+| 1 | VIEWER | 只读权限 | 审计员、分析师 | 查看内部数据（需拥有查看相关角色） |
+| 2 | OPERATOR | 操作权限 | 业务操作员 | 执行基本业务操作（需拥有业务相关角色） |
+| 4 | ADMIN | 管理员权限 | 系统管理员 | 系统参数管理（需拥有管理相关角色） |
 
-#### 🔒 **权限转换规则**
-```solidity
-// 权限转换限制
-function _isValidPermissionTransition(PermissionLevel oldLevel, PermissionLevel newLevel) internal pure returns (bool) {
-    // 不允许直接从 NONE 跳级到 OWNER
-    if (oldLevel < PermissionLevel.ADMIN && newLevel == PermissionLevel.OWNER) {
-        return false;
-    }
-    // 不允许从 KEEPER 直接跳级到 OWNER
-    if (oldLevel == PermissionLevel.KEEPER && newLevel == PermissionLevel.OWNER) {
-        return false;
-    }
-    return true;
-}
-```
+**注意**: 当前实现中，KEEPER 和 OWNER 权限级别未在 PermissionLevel 枚举中实现。Keeper 功能通过独立的 `_keeper` 地址和 `onlyKeeper` 修饰符实现，Owner 功能通过 `_owner` 地址和 `onlyOwner` 修饰符实现。
 
-**转换路径**:
-- `NONE` → `ADMIN` → `OWNER` ✅
-- `NONE` → `OWNER` ❌
-- `KEEPER` → `OWNER` ❌
+#### 🔒 **权限级别说明**
+
+当前实现采用**基于角色的权限系统**，权限级别根据账户拥有的角色动态推断：
+
+**权限级别推断规则**:
+- 拥有 `ACTION_SET_PARAMETER` 或 `ACTION_UPGRADE_MODULE` 角色 → `ADMIN`
+- 拥有 `ACTION_DEPOSIT` 或 `ACTION_BORROW` 等业务角色 → `OPERATOR`
+- 拥有 `ACTION_VIEW` 等查看角色 → `VIEWER`
+- 无任何角色 → `NONE`
+
+**注意**: 当前实现不支持直接设置权限级别，也不支持 OWNER 和 KEEPER 权限级别。如需更高级别的权限控制，应通过授予相应的角色来实现。
 
 ### 2.3 角色管理系统
 
 #### 🎯 **ActionKeys 角色定义**
-ACM 使用 `ActionKeys` 库中定义的 26 个标准化动作作为角色标识符：
+ACM 使用 `ActionKeys` 库中定义的 **44 个**标准化动作作为角色标识符：
 
 ```solidity
 // 基础业务动作
@@ -225,32 +238,40 @@ contract LoanNFT {
 }
 ```
 
-### 2.4 权限缓存机制
+### 2.4 权限级别推断机制
 
-#### ⚡ **缓存特性**
-- **时间缓存**: 权限在指定时间内有效
-- **批量操作**: 支持批量权限设置和查询
-- **缓存失效**: 自动处理缓存过期
+#### ⚡ **动态推断特性**
+- **基于角色**: 权限级别根据账户拥有的角色动态推断
+- **优先级**: ADMIN > OPERATOR > VIEWER > NONE
+- **简化设计**: 当前实现采用简化架构，权限级别由角色自动推断，不直接设置
 
-#### 🔧 **缓存实现**
+#### 🔧 **权限推断实现**
 ```solidity
-struct PermissionCache {
-    PermissionLevel level;
-    uint256 timestamp;
-    bool isValid;
-}
-
-mapping(address => PermissionCache) public permissionCache;
-uint256 public cacheExpirationTime = 30 minutes;
-
-function getCachedPermission(address user) external view returns (PermissionLevel) {
-    PermissionCache memory cache = permissionCache[user];
-    if (cache.isValid && block.timestamp - cache.timestamp < cacheExpirationTime) {
-        return cache.level;
+function getUserPermission(address user) external view returns (PermissionLevel level) {
+    if (user == address(0)) return PermissionLevel.NONE;
+    
+    // 检查是否拥有管理员角色
+    if (hasRole(ActionKeys.ACTION_SET_PARAMETER, user) || 
+        hasRole(ActionKeys.ACTION_UPGRADE_MODULE, user)) {
+        return PermissionLevel.ADMIN;
     }
-    return userPermissions[user];
+    
+    // 检查是否拥有操作员角色
+    if (hasRole(ActionKeys.ACTION_DEPOSIT, user) || 
+        hasRole(ActionKeys.ACTION_BORROW, user)) {
+        return PermissionLevel.OPERATOR;
+    }
+    
+    // 检查是否拥有查看者角色
+    if (hasRole(ActionKeys.ACTION_VIEW, user)) {
+        return PermissionLevel.VIEWER;
+    }
+    
+    return PermissionLevel.NONE;
 }
 ```
+
+**注意**: 当前实现中，权限级别是根据角色动态推断的，不支持直接设置权限级别。如需更细粒度的权限控制，应通过授予/撤销相应的 ActionKeys 角色来实现。
 
 ### 2.5 事件记录系统
 
@@ -282,113 +303,182 @@ emit VaultTypes.ActionExecuted(
 
 ## 3. 核心合约模块
 
-### 3.1 VaultCore（核心业务逻辑）
+### 3.1 VaultCore（极简入口）
 
 #### 📋 **核心功能**
-- **统一业务入口**：所有用户操作通过此合约
-- **真实资金流转**：使用 SafeERC20 进行安全转账
-- **模块化调用**：通过 VaultStorage 动态调用各功能模块
-- **批量操作支持**：高效的批量存款、借款、还款、提取
+- **极简入口**：双架构设计的极简入口合约
+- **数据传送**：将用户操作传送至 View 层处理
+- **Registry 升级**：支持 Registry 模块升级能力
+- **地址暴露**：暴露 Registry 和 View 合约地址
 
 #### 🔧 **主要函数**
 ```solidity
-// 基础操作
-function deposit(address asset, uint256 amount) external whenNotPaused nonReentrant
-function withdraw(address asset, uint256 amount) external whenNotPaused nonReentrant
-function borrow(address asset, uint256 amount) external whenNotPaused nonReentrant
-function repay(address asset, uint256 amount) external whenNotPaused nonReentrant
+// 用户操作（传送数据至 View 层）
+function deposit(address asset, uint256 amount) external
+function withdraw(address asset, uint256 amount) external
+function borrow(address asset, uint256 amount) external
+function repay(address asset, uint256 amount) external
 
-// 复合操作
-function depositAndBorrow(
-    address collateralAsset,
-    uint256 collateralAmount,
-    address borrowAsset,
-    uint256 borrowAmount
-) external
+// Registry 基础升级能力
+function upgradeModule(bytes32 moduleKey, address newAddress) external onlyAdmin
+function executeModuleUpgrade(bytes32 moduleKey) external onlyAdmin
 
-function repayAndWithdraw(
-    address repayAsset,
-    uint256 repayAmount,
-    address withdrawAsset,
-    uint256 withdrawAmount
-) external
-
-// 批量操作
-function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external
-function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external
-function batchRepay(address[] calldata assets, uint256[] calldata amounts) external
-function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external
+// 基础查询
+function registryAddrVar() external view returns (address)
+function getRegistry() external view returns (address)
+function getModule(bytes32 moduleKey) external view returns (address)
 ```
 
-#### 🛡️ **安全特性**
-- **ReentrancyGuard**：防止重入攻击
-- **Pausable**：紧急暂停机制
-- **SafeERC20**：安全的 ERC20 操作
-- **资产白名单**：仅允许治理批准的资产
-- **模块化错误处理**：统一的 try/catch 错误处理
+#### 🛡️ **设计特点**
+- **极简实现**：移除复杂逻辑（权限验证、业务委托、资产白名单验证、暂停/恢复）
+- **双架构支持**：遵循双架构设计，只负责传送数据
+- **可升级**：支持 UUPS 升级模式
 
-# 📋 **核心功能**
-- **高效查询**：提供所有用户状态和系统信息的查询
-- **预览功能**：支持操作前的状态预览
-- **统计信息**：提供详细的统计数据和风险指标
+### 3.2 VaultView（双架构智能协调器）
+
+#### 📋 **核心功能**
+- **双架构协调**：事件驱动 + View 层缓存
+- **用户操作处理**：接收 VaultCore 传送的操作，分发到相应模块
+- **View 层缓存**：提供快速免费查询（0 gas）
+- **数据推送**：统一数据推送接口，支持数据库收集
 
 #### 🔧 **主要函数**
 ```solidity
-// 用户状态查询
+// 用户操作处理（由 VaultCore 调用）
+function processUserOperation(
+    address user,
+    bytes32 operationType,
+    address asset,
+    uint256 amount,
+    uint256 timestamp
+) external onlyAuthorizedContract
+
+// 数据推送接口（由业务模块调用）
+function pushUserPositionUpdate(
+    address user,
+    address asset,
+    uint256 collateral,
+    uint256 debt
+) external onlyBusinessContract
+
+function pushSystemStateUpdate(
+    address asset,
+    uint256 totalCollateral,
+    uint256 totalDebt
+) external onlyBusinessContract
+
+// 查询接口（免费查询，0 gas）
+function getUserPosition(address user, address asset) external view 
+    returns (uint256 collateral, uint256 debt)
 function getUserCollateral(address user, address asset) external view returns (uint256)
 function getUserDebt(address user, address asset) external view returns (uint256)
-function getUserHealthFactor(address user) external view returns (uint256)
-function getUserTotalCollateral(address user) external view returns (uint256)
-function getUserTotalDebt(address user) external view returns (uint256)
+function isUserCacheValid(address user) external view returns (bool)
+// 注意：健康因子查询已移至 HealthView 模块
 
-// 资产状态查询
-function getTotalCollateral(address asset) external view returns (uint256)
-function getTotalDebt(address asset) external view returns (uint256)
-function getAssetPrice(address asset) external view returns (uint256)
+// 批量查询
+function batchGetUserPositions(address[] calldata users, address[] calldata assets) 
+    external view returns (UserPosition[] memory)
+function batchGetAssetPrices(address[] calldata assets) external view returns (uint256[] memory)
+// 注意：健康因子批量查询已移至 HealthView 模块
 
-// 系统状态查询
-function getVaultCap() external view returns (uint256)
-function getMinHealthFactor() external view returns (uint256)
-function getLiquidationThreshold() external view returns (uint256)
-
-// 预览功能
-function previewBorrow(address user, address asset, uint256 amount) external view returns (uint256)
-function previewRepay(address user, address asset, uint256 amount) external view returns (uint256)
-function previewWithdraw(address user, address asset, uint256 amount) external view returns (uint256)### 3.2 VaultView（查询接口）
-
-###
+// 缓存管理
+function clearExpiredCache(address user) external onlyAdmin
+function getCacheStats() external view returns (uint256, uint256, uint256, uint256)
+function refreshModuleCache() external onlyAdmin
 ```
 
-### 3.3 VaultStorage（存储管理）
+#### 🛡️ **设计特点**
+- **模块地址缓存**：1小时有效期，减少 Registry 查询
+- **View 层缓存**：5分钟有效期，提供快速查询
+- **事件驱动**：统一事件发出，支持数据库收集
+- **数据推送**：使用 DataPushLibrary 统一推送
+
+### 3.3 VaultBusinessLogic（业务逻辑模块）
 
 #### 📋 **核心功能**
-- **模块地址管理**：集中管理所有功能模块的地址
-- **动态调用支持**：支持模块的动态替换和升级
-- **配置存储**：存储系统配置参数
+- **真实资金流转**：处理代币转入/转出
+- **撮合结算**：通过 SettlementMatchLib 进行原子化撮合
+- **保证金管理**：集成保证金锁定和释放
+- **批量操作**：支持批量业务操作
 
 #### 🔧 **主要函数**
 ```solidity
-// 模块地址查询
-function getNamedModule(string memory name) external view returns (address)
-function getCollateralManager() external view returns (address)
-function getLendingEngine() external view returns (address)
-function getHealthFactorCalculator() external view returns (address)
-function getStatisticsView() external view returns (address) // 替代 getVaultStatistics
-function getFeeRouter() external view returns (address)
-function getRewardManager() external view returns (address)
-function getAssetWhitelist() external view returns (address)
+// 基础业务操作
+function deposit(address user, address asset, uint256 amount) external
+function withdraw(address user, address asset, uint256 amount) external
+function borrow(address user, address asset, uint256 amount) external
+function repay(address user, address asset, uint256 amount) external
 
-// 代币地址查询
-function getSettlementTokenAddr() external view returns (address)
-function getRwaTokenAddr() external view returns (address)
+// 带利率的借款（通过撮合结算）
+function borrowWithRate(
+    address user,
+    address lender,
+    address asset,
+    uint256 amount,
+    uint256 annualRateBps,
+    uint16 termDays
+) external
 
-// 系统配置
-function vaultCap() external view returns (uint256)
-function minHealthFactor() external view returns (uint256)
-function liquidationThreshold() external view returns (uint256)
+// 显式关单还款（触发早偿结算）
+function repayWithStop(address user, address asset, uint256 amount, bool stop) external
+
+// 撮合结算（完整流程）
+function finalizeMatch(
+    SettlementIntentLib.BorrowIntent calldata borrowIntent,
+    SettlementIntentLib.LendIntent[] calldata lendIntents,
+    bytes calldata sigBorrower,
+    bytes[] calldata sigLenders
+) external
+
+// 出借资金保留
+function reserveForLending(
+    address lender,
+    address asset,
+    uint256 amount,
+    bytes32 lendIntentHash
+) external
+
+// 取消资金保留
+function cancelReserve(bytes32 lendIntentHash) external
 ```
 
-### 3.4 VaultAdmin（极简治理入口）
+#### 🛡️ **设计特点**
+- **撮合结算**：使用 SettlementMatchLib 进行原子化操作
+- **保证金集成**：自动锁定和释放保证金
+- **SafeERC20**：所有 ERC20 操作使用安全转账
+- **ReentrancyGuard**：防止重入攻击
+
+### 3.4 LendingEngine（借贷引擎/订单管理）
+
+#### 📋 **核心功能**
+- **订单生命周期管理**：创建、还款、状态更新
+- **LoanNFT 集成**：每个订单对应一个 NFT
+- **费用分配**：自动计算和分配还款手续费
+- **优雅降级**：价格预言机异常时的降级处理
+
+#### 🔧 **主要函数**
+```solidity
+// 订单创建（由 SettlementMatchLib 调用，需要 ACTION_ORDER_CREATE 权限）
+function createLoanOrder(LoanOrder calldata order) external returns (uint256 orderId)
+// LoanOrder 结构体包含：principal, rate, term, borrower, lender, asset, startTimestamp, maturity, repaidAmount
+
+// 还款处理（需要 ACTION_REPAY 权限）
+function repay(uint256 orderId, uint256 repayAmount) external
+
+// 查询功能
+function getLoanOrder(uint256 orderId) external view returns (LoanOrder memory)
+function getUserOrders(address user) external view returns (uint256[] memory)
+function calculateExpectedInterest(address user, address asset, uint256 amount) 
+    external view returns (uint256)
+```
+
+#### 🛡️ **设计特点**
+- **onlyVaultCore**：仅 VaultCore 可调用账本写入
+- **LoanNFT**：每个订单对应一个 NFT，便于追踪
+- **费用分配**：自动计算还款手续费并分配给 FeeRouter
+- **优雅降级**：集成 GracefulDegradation 库处理价格异常
+
+### 3.5 VaultAdmin（极简治理入口）
 
 #### 📋 **核心功能**
 - **参数下发**：最小健康因子路由至 LiquidationRiskManager
@@ -407,7 +497,7 @@ function _authorizeUpgrade(address newImplementation) internal override
 function getRegistryAddr() external view returns (address)
 ```
 
-### 3.5 CollateralManager（抵押物管理）
+### 3.6 CollateralManager（抵押物管理）
 
 #### 📋 **核心功能**
 - **用户余额管理**：记录每个用户的抵押物余额
@@ -416,21 +506,26 @@ function getRegistryAddr() external view returns (address)
 
 #### 🔧 **主要函数**
 ```solidity
-// 记账：增加用户抵押物
-function depositCollateral(address user, address asset, uint256 amount) external onlyVault
+// 核心业务逻辑（由 VaultView 调用）
+function processDeposit(address user, address asset, uint256 amount) external onlyVaultView
+function processWithdraw(address user, address asset, uint256 amount) external onlyVaultView
 
-// 记账：扣减用户抵押物
-function withdrawCollateral(address user, address asset, uint256 amount) external onlyVault
+// 兼容性接口（重定向到核心函数）
+function depositCollateral(address user, address asset, uint256 amount) external onlyVaultView
+function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultView
 
-// 强制清算：真实转账
-function forceWithdrawCollateral(address user, uint256 amount, address to) external onlyVault
+// 批量操作
+function batchProcessDeposit(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultView
+function batchProcessWithdraw(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultView
 
 // 查询功能
 function getCollateral(address user, address asset) external view returns (uint256)
 function getTotalCollateralByAsset(address asset) external view returns (uint256)
+function getUserCollateralAssets(address user) external view returns (address[] memory)
+function getUserTotalCollateralValue(address user) external view returns (uint256)
 ```
 
-### 3.6 AssetWhitelist（资产白名单）
+### 3.7 AssetWhitelist（资产白名单）
 
 #### 📋 **核心功能**
 - **资产白名单管理**：控制哪些 ERC20 资产可以交易
@@ -442,17 +537,26 @@ function getTotalCollateralByAsset(address asset) external view returns (uint256
 // 检查资产是否允许
 function isAssetAllowed(address asset) external view returns (bool)
 
-// 添加资产到白名单
-function addAllowedAsset(address asset) external onlyRole(GOVERNANCE_ROLE)
+// 添加资产到白名单（需要 ACTION_ADD_WHITELIST 权限）
+function addAllowedAsset(address asset) external
 
-// 批量添加资产
-function batchAddAllowedAssets(address[] calldata assets) external onlyRole(GOVERNANCE_ROLE)
+// 从白名单移除资产（需要 ACTION_REMOVE_WHITELIST 权限）
+function removeAllowedAsset(address asset) external
+
+// 批量添加资产（需要 ACTION_ADD_WHITELIST 权限）
+function batchAddAllowedAssets(address[] calldata assets) external
+
+// 批量移除资产（需要 ACTION_REMOVE_WHITELIST 权限）
+function batchRemoveAllowedAssets(address[] calldata assets) external
 
 // 获取所有支持的资产
 function getAllowedAssets() external view returns (address[] memory)
+
+// 获取资产详细信息
+function getAssetInfo(address asset) external view returns (AssetInfo memory)
 ```
 
-### 3.7 AccessControlManager（统一权限控制中心）
+### 3.8 AccessControlManager（统一权限控制中心）
 
 #### 📋 **核心功能**
 - **多级权限管理**：支持从 NONE 到 OWNER 的 6 级权限
@@ -463,10 +567,9 @@ function getAllowedAssets() external view returns (address[] memory)
 
 #### 🔧 **主要函数**
 ```solidity
-// 权限级别管理
-function setUserPermission(address user, PermissionLevel level) external onlyOwner
+// 权限级别查询（动态推断）
 function getUserPermission(address user) external view returns (PermissionLevel)
-function batchSetUserPermissions(address[] calldata users, PermissionLevel[] calldata levels) external onlyOwner
+// 注意：权限级别根据角色动态推断，不支持直接设置
 
 // 角色管理
 function grantRole(bytes32 role, address account) external onlyOwner
@@ -474,16 +577,16 @@ function revokeRole(bytes32 role, address account) external onlyOwner
 function hasRole(bytes32 role, address account) external view returns (bool)
 function requireRole(bytes32 role, address caller) external view
 
-// 权限缓存
-function getCachedPermission(address user) external view returns (PermissionLevel)
-function clearPermissionCache(address user) external onlyOwner
+// Keeper 管理
+function setKeeper(address newKeeper) external onlyOwner
+function getKeeper() external view returns (address)
 
-// 紧急恢复
-function initiateEmergencyRecovery(address newKeeper) external onlyKeeper
-function executeEmergencyRecovery() external
+// 紧急暂停
+function emergencyPause(string memory reason) external onlyKeeper
+function emergencyUnpause() external onlyKeeper
 ```
 
-### 3.8 CrossChainGovernance（跨链治理）
+### 3.9 CrossChainGovernance（跨链治理）
 
 #### 📋 **核心功能**
 - **提案管理**：创建、投票、执行治理提案
@@ -492,29 +595,36 @@ function executeEmergencyRecovery() external
 
 #### 🔧 **主要函数**
 ```solidity
-// 提案管理
+// 提案管理（需要 GOVERNANCE_ROLE 权限）
 function createProposal(
-    address[] memory targets,
-    uint256[] memory values,
-    string[] memory signatures,
-    bytes[] memory calldatas,
-    string memory description
-) external returns (uint256)
+    string calldata description,
+    bytes[] calldata actions,
+    address[] calldata targets,
+    uint256 votingPeriod
+) external returns (uint256 proposalId)
 
 // 投票
-function castVote(uint256 proposalId, uint8 support) external
+function castVote(uint256 proposalId, VoteOption option) external
 
-// 执行提案
-function execute(
-    address[] memory targets,
-    uint256[] memory values,
-    string[] memory signatures,
-    bytes[] memory calldatas,
-    bytes32 descriptionHash
-) external payable returns (uint256)
+// 执行提案（需要 EXECUTOR_ROLE 权限）
+function executeProposal(uint256 proposalId) external
+
+// 跨链投票
+function receiveCrossChainVote(
+    uint256 proposalId,
+    uint256 chainId,
+    uint256 forVotes,
+    uint256 againstVotes,
+    uint256 abstainVotes,
+    bytes calldata signature
+) external
+
+// 查询功能
+function getProposalState(uint256 proposalId) external view returns (ProposalState)
+function getProposal(uint256 proposalId) external view returns (Proposal memory)
 ```
 
-### 3.9 Registry（模块注册中心）
+### 3.10 Registry（模块注册中心）
 
 #### 📋 **核心功能**
 - **模块地址映射**：维护 `key => address` 映射关系
@@ -525,19 +635,23 @@ function execute(
 ```solidity
 // 模块查询
 function getModule(bytes32 key) external view returns (address)
-function getModuleFromString(string memory name) external view returns (address)
+function getModuleOrRevert(bytes32 key) external view returns (address)
 
-// 模块管理
-function registerModule(bytes32 key, address module) external onlyTimelock
-function updateModule(bytes32 key, address newModule) external onlyTimelock
+// 模块管理（通过 RegistryCore 模块）
+function setModule(bytes32 key, address module) external
+function setModuleWithReplaceFlag(bytes32 key, address module, bool replace) external
 
-// 延时升级
-function scheduleUpgrade(bytes32 key, address newModule, uint256 delay) external onlyTimelock
-function executeUpgrade(bytes32 key) external onlyTimelock
-function cancelUpgrade(bytes32 key) external onlyTimelock
+// 延时升级（通过 RegistryUpgradeManager 模块）
+function scheduleUpgrade(bytes32 key, address newModule, uint256 delay) external
+function executeModuleUpgrade(bytes32 key) external
+function cancelUpgrade(bytes32 key) external
+
+// 治理管理（通过 RegistryAdmin 模块）
+function setAdmin(address newAdmin) external
+function acceptAdmin() external
 ```
 
-### 3.10 ModuleKeys & ActionKeys（常量库）
+### 3.11 ModuleKeys & ActionKeys（常量库）
 
 #### 📋 **核心功能**
 - **模块标识**：提供所有模块的唯一标识常量
@@ -577,60 +691,77 @@ function getActionKeyString(bytes32 key) external pure returns (string memory)
 
 ## 4. 真实资金流转逻辑
 
-### 3.1 资金流转架构
+### 4.1 双架构数据流
+
+```
+用户操作 → VaultCore（极简入口）→ VaultView（双架构协调器）
+         → VaultBusinessLogic（业务逻辑）→ SettlementMatchLib（撮合结算）
+         → LendingEngine（账本写入）→ View 层缓存更新 + 事件推送
+         → 数据库收集 + 免费查询
+```
+
+### 4.2 资金流转架构（双架构设计）
 
 ```mermaid
 sequenceDiagram
     participant User as 用户
-    participant VaultCore as VaultCore
-    participant VaultStorage as VaultStorage
-    participant Manager as CollateralManager
-    participant Engine as LendingEngine
-    participant Whitelist as AssetWhitelist
+    participant VaultCore as VaultCore<br/>极简入口
+    participant VaultView as VaultView<br/>双架构协调器
+    participant VaultBL as VaultBusinessLogic<br/>业务逻辑
+    participant Settlement as SettlementMatchLib<br/>撮合结算
+    participant CM as CollateralManager<br/>抵押物管理
+    participant LE as LendingEngine<br/>借贷引擎
+    participant GFM as GuaranteeFundManager<br/>保证金管理
+    participant ERGM as EarlyRepaymentGM<br/>早偿保证金
     participant Token as ERC20 Token
 
-    Note over User,Token: 存入抵押物流程
-    User->>VaultCore: deposit(asset, amount)
-    VaultCore->>VaultStorage: getNamedModule("assetWhitelist")
-    VaultCore->>Whitelist: isAssetAllowed(asset)
-    Whitelist-->>VaultCore: allowed = true
-    VaultCore->>Token: safeTransferFrom(user, vault, amount)
-    VaultCore->>VaultStorage: getNamedModule("collateralManager")
-    VaultCore->>Manager: depositCollateral(user, asset, amount)
-    VaultCore->>VaultCore: _checkHealthFactor()
-    VaultCore-->>User: 完成存入
+    Note over User,Token: 借款流程（带保证金，通过撮合结算）
+    User->>VaultBusinessLogic: finalizeMatch(borrowIntent, lendIntents, sigs)
+    VaultBusinessLogic->>Settlement: finalizeAtomicFull(...)
+    Settlement->>CM: depositCollateral(可选)
+    Settlement->>Token: safeTransfer(user, amount)
+    Settlement->>LE: createLoanOrder(...)
+    LE->>LE: mintLoanNFT(...)
+    Settlement->>ERGM: lockGuaranteeRecord(...)
+    Settlement->>GFM: lockGuarantee(user, asset, interest)
+    LE->>VaultView: pushUserPositionUpdate(...)
+    VaultView->>VaultView: 更新缓存 + 事件推送
+    VaultBusinessLogic-->>User: 完成借款
 
-    Note over User,Token: 借款流程
+    Note over User,Token: 基础借款流程（无利率）
     User->>VaultCore: borrow(asset, amount)
-    VaultCore->>VaultStorage: getNamedModule("lendingEngine")
-    VaultCore->>Engine: borrow(user, asset, amount, 0, 0)
-    VaultCore->>Token: safeTransfer(user, amount)
-    VaultCore-->>User: 完成借款
+    VaultCore->>VaultView: processUserOperation("BORROW", ...)
+    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultBL->>Token: safeTransfer(user, amount)
+    VaultBL-->>User: 完成借款
 
     Note over User,Token: 还款流程
     User->>VaultCore: repay(asset, amount)
-    VaultCore->>Token: safeTransferFrom(user, vault, amount)
-    VaultCore->>VaultStorage: getNamedModule("lendingEngine")
-    VaultCore->>Engine: repay(user, asset, amount)
-    VaultCore-->>User: 完成还款
+    VaultCore->>VaultView: processUserOperation("REPAY", ...)
+    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultBL->>Token: safeTransferFrom(user, VaultBL, amount)
+    VaultBL->>LE: repay(user, asset, amount)
+    VaultBL-->>User: 完成还款
 
     Note over User,Token: 提取抵押物流程
     User->>VaultCore: withdraw(asset, amount)
-    VaultCore->>VaultStorage: getNamedModule("collateralManager")
-    VaultCore->>Manager: withdrawCollateral(user, asset, amount)
-    VaultCore->>Token: safeTransfer(user, amount)
-    VaultCore-->>User: 完成提取
+    VaultCore->>VaultView: processUserOperation("WITHDRAW", ...)
+    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultBL->>CM: withdrawCollateral(user, asset, amount)
+    VaultBL->>Token: safeTransfer(user, amount)
+    VaultBL-->>User: 完成提取
 ```
 
-### 3.2 模块化调用机制
+### 4.3 模块化调用机制
 
 #### 🔧 **动态模块调用**
 ```solidity
 import { ModuleKeys } from "contracts/constants/ModuleKeys.sol";
+import { Registry } from "contracts/registry/Registry.sol";
 
-// 通过 VaultStorage 获取模块地址
-address collateralManager = IVaultStorage(vaultStorage).getNamedModule(
-    ModuleKeys.getModuleKeyFromString("collateralManager")
+// 通过 Registry 获取模块地址
+address collateralManager = Registry(_registryAddr).getModuleOrRevert(
+    ModuleKeys.KEY_CM
 );
 
 // 使用接口进行调用
@@ -643,7 +774,7 @@ try ICollateralManager(collateralManager).depositCollateral(user, asset, amount)
 }
 ```
 
-### 3.3 SafeERC20 安全特性
+### 4.4 SafeERC20 安全特性
 
 #### 🛡️ **安全优势**
 - **防止假成功**：处理返回 `false` 的非标准 ERC20
@@ -662,17 +793,14 @@ IERC20(token).safeTransferFrom(from, to, amount);
 IERC20(token).safeApprove(spender, amount);
 ```
 
-### 3.4 资产白名单验证
+### 4.5 资产白名单验证
 
 #### 🔍 **验证流程**
 ```solidity
-function _validateAssetAllowed(address asset) internal view {
-    address assetWhitelistAddr = IVaultStorage(vaultStorage).getNamedModule(
-        ModuleKeys.getModuleKeyFromString("assetWhitelist")
-    );
-    if (assetWhitelistAddr != address(0)) {
-        bool allowed = IAssetWhitelist(assetWhitelistAddr).isAssetAllowed(asset);
-        if (!allowed) {
+function _checkAssetWhitelist(address asset) internal view {
+    address assetWhitelist = _getModuleAddress(ModuleKeys.KEY_ASSET_WHITELIST);
+    if (assetWhitelist != address(0)) {
+        if (!IAssetWhitelist(assetWhitelist).isAssetAllowed(asset)) {
             revert AssetNotAllowed();
         }
     }
@@ -683,7 +811,7 @@ function _validateAssetAllowed(address asset) internal view {
 
 ## 5. 资产白名单管理
 
-### 4.1 白名单机制设计
+### 5.1 白名单机制设计
 
 #### 🎯 **设计目标**
 - **安全性**：防止恶意资产进入系统
@@ -692,164 +820,416 @@ function _validateAssetAllowed(address asset) internal view {
 
 #### 🔧 **实现方式**
 ```solidity
-contract AssetWhitelist is AccessControl {
-    mapping(address => bool) public allowedAssets;
-    address[] public allowedAssetsList;
+contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IRegistryUpgradeEvents {
+    /// @notice Registry合约地址
+    address private _registryAddr;
     
-    function isAssetAllowed(address asset) external view returns (bool) {
-        return allowedAssets[asset];
+    /// @notice 资产白名单映射
+    mapping(address => bool) private _allowedAssets;
+    
+    /// @notice 支持的资产地址列表
+    address[] private _assetList;
+    
+    /// @notice 资产索引映射：asset → index（优化数组操作）
+    mapping(address => uint256) private _assetIndex;
+    
+    /// @notice 资产数量计数器
+    uint256 private _assetCount;
+    
+    /// @notice 资产详细信息映射
+    mapping(address => AssetInfo) private _assetInfo;
+    
+    struct AssetInfo {
+        bool isActive;
+        uint256 addedAt;
+        address addedBy;
+        uint256 lastUpdated;
+        uint256 updateCount;
     }
     
-    function addAllowedAsset(address asset) external onlyRole(GOVERNANCE_ROLE) {
-        require(asset != address(0), "Zero address");
-        require(!allowedAssets[asset], "Asset already allowed");
+    function isAssetAllowed(address asset) external view returns (bool) {
+        return _allowedAssets[asset];
+    }
+    
+    function addAllowedAsset(address asset) external onlyValidRegistry {
+        _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
+        if (asset == address(0)) revert ZeroAddress();
+        if (_allowedAssets[asset]) revert AmountIsZero(); // 已存在
         
-        allowedAssets[asset] = true;
-        allowedAssetsList.push(asset);
+        _allowedAssets[asset] = true;
+        _assetList.push(asset);
+        _assetIndex[asset] = _assetList.length - 1;
+        _assetCount++;
         
-        emit AssetAdded(asset);
+        _assetInfo[asset] = AssetInfo({
+            isActive: true,
+            addedAt: block.timestamp,
+            addedBy: msg.sender,
+            lastUpdated: block.timestamp,
+            updateCount: 1
+        });
+        
+        emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, block.timestamp);
+        
+        // 记录标准化动作事件
+        emit VaultTypes.ActionExecuted(
+            ActionKeys.ACTION_ADD_WHITELIST,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
+            msg.sender,
+            block.timestamp
+        );
     }
 }
 ```
 
-### 4.2 批量操作优化
+### 5.2 批量操作优化
 
 #### ⚡ **批量添加**
 ```solidity
-function batchAddAllowedAssets(address[] calldata assets) external onlyRole(GOVERNANCE_ROLE) {
+function batchAddAllowedAssets(address[] calldata assets) external onlyValidRegistry {
+    _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
+    if (assets.length == 0) revert AmountIsZero();
+    
+    uint256 addedCount = 0;
     for (uint256 i = 0; i < assets.length; i++) {
         address asset = assets[i];
-        if (asset != address(0) && !allowedAssets[asset]) {
-            allowedAssets[asset] = true;
-            allowedAssetsList.push(asset);
-            emit AssetAdded(asset);
+        if (asset != address(0) && !_allowedAssets[asset]) {
+            _allowedAssets[asset] = true;
+            _assetList.push(asset);
+            _assetIndex[asset] = _assetList.length - 1;
+            _assetCount++;
+            
+            _assetInfo[asset] = AssetInfo({
+                isActive: true,
+                addedAt: block.timestamp,
+                addedBy: msg.sender,
+                lastUpdated: block.timestamp,
+                updateCount: 1
+            });
+            
+            addedCount++;
         }
     }
+    
+    emit AssetsBatchAdded(
+        ActionKeys.ACTION_ADD_WHITELIST,
+        assets,
+        msg.sender,
+        addedCount,
+        assets.length
+    );
+    
+    // 记录标准化动作事件
+    emit VaultTypes.ActionExecuted(
+        ActionKeys.ACTION_ADD_WHITELIST,
+        ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
+        msg.sender,
+        block.timestamp
+    );
 }
 ```
 
 #### ⚡ **批量移除**
 ```solidity
-function batchRemoveAllowedAssets(address[] calldata assets) external onlyRole(GOVERNANCE_ROLE) {
+function batchRemoveAllowedAssets(address[] calldata assets) external onlyValidRegistry {
+    _requireRole(ActionKeys.ACTION_REMOVE_WHITELIST, msg.sender);
+    if (assets.length == 0) revert AmountIsZero();
+    
+    uint256 removedCount = 0;
     for (uint256 i = 0; i < assets.length; i++) {
         address asset = assets[i];
-        if (allowedAssets[asset]) {
-            allowedAssets[asset] = false;
-            emit AssetRemoved(asset);
+        if (asset != address(0) && _allowedAssets[asset]) {
+            _allowedAssets[asset] = false;
+            _assetCount--;
+            
+            // 更新资产信息
+            _assetInfo[asset].isActive = false;
+            _assetInfo[asset].lastUpdated = block.timestamp;
+            _assetInfo[asset].updateCount++;
+            
+            // 从数组中移除（优化实现）
+            uint256 index = _assetIndex[asset];
+            if (index < _assetList.length - 1) {
+                address lastAsset = _assetList[_assetList.length - 1];
+                _assetList[index] = lastAsset;
+                _assetIndex[lastAsset] = index;
+            }
+            _assetList.pop();
+            delete _assetIndex[asset];
+            
+            removedCount++;
         }
     }
+    
+    emit AssetsBatchRemoved(
+        ActionKeys.ACTION_REMOVE_WHITELIST,
+        assets,
+        msg.sender,
+        removedCount,
+        assets.length
+    );
+    
+    // 记录标准化动作事件
+    emit VaultTypes.ActionExecuted(
+        ActionKeys.ACTION_REMOVE_WHITELIST,
+        ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
+        msg.sender,
+        block.timestamp
+    );
 }
 ```
+
+### 5.3 资产信息管理
+
+#### 📊 **资产详细信息**
+系统维护每个资产的详细信息，包括：
+- **isActive**：资产是否激活
+- **addedAt**：添加时间戳
+- **addedBy**：添加者地址
+- **lastUpdated**：最后更新时间戳
+- **updateCount**：更新次数
+
+#### 🔧 **查询功能**
+```solidity
+// 获取资产详细信息
+function getAssetInfo(address asset) external view returns (AssetInfo memory)
+
+// 获取支持的资产数量
+function getAssetCount() external view returns (uint256)
+
+// 根据索引获取资产地址
+function getAssetAtIndex(uint256 index) external view returns (address)
+
+// 获取所有支持的资产
+function getAllowedAssets() external view returns (address[] memory)
+```
+
+#### 🔧 **资产信息更新**
+```solidity
+// 更新资产信息（需要 ACTION_SET_PARAMETER 权限）
+function updateAssetInfo(address asset) external onlyValidRegistry {
+    _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+    if (asset == address(0)) revert ZeroAddress();
+    if (!_allowedAssets[asset]) revert AmountIsZero();
+    
+    _assetInfo[asset].lastUpdated = block.timestamp;
+    _assetInfo[asset].updateCount++;
+    
+    emit AssetInfoUpdated(
+        ActionKeys.ACTION_SET_PARAMETER,
+        asset,
+        msg.sender,
+        block.timestamp
+    );
+}
+```
+
+### 5.4 优化特性
+
+#### ⚡ **数组操作优化**
+- **索引映射**：使用 `_assetIndex` 映射实现 O(1) 的资产查找
+- **高效移除**：批量移除时使用交换最后一个元素的方式，避免数组遍历
+- **计数器**：使用 `_assetCount` 计数器快速获取资产数量
+
+#### 🛡️ **安全特性**
+- **Registry 集成**：通过 Registry 获取 ACM 进行权限验证
+- **标准化事件**：所有操作都发出 `VaultTypes.ActionExecuted` 事件
+- **错误处理**：使用自定义错误 `ZeroAddress` 和 `AmountIsZero`
+- **UUPS 升级**：支持可升级合约模式
 
 ---
 
 ## 6. 借贷业务流程
 
-### 5.1 存款流程
+### 6.1 撮合结算机制
 
-#### 📋 **流程步骤**
-1. **输入验证**：检查资产地址和金额
-2. **白名单验证**：确认资产在白名单中
-3. **余额检查**：验证用户余额充足
-4. **转账执行**：安全转账到合约
-5. **记账更新**：更新用户抵押物余额
-6. **健康因子检查**：验证操作后的风险状态
-7. **事件记录**：记录存款事件
+系统采用**撮合结算**机制，通过 `SettlementMatchLib` 实现原子化操作：
 
-#### 🔧 **代码实现**
+#### 📋 **撮合流程**
+
+1. **意向提交**：借款方和出借方提交意向（BorrowIntent / LendIntent）
+2. **资金保留**：出借方资金先进入保留池（LendReserve）
+3. **撮合匹配**：系统匹配借款意向和出借意向
+4. **原子结算**：通过 `SettlementMatchLib.finalizeAtomicFull` 一次性完成：
+   - 抵押物存入（可选）
+   - 债务记账（通过 VaultCore.borrowFor）
+   - 订单创建（通过 KEY_ORDER_ENGINE 模块，包含 LoanNFT + Reward + DataPush）
+   - 借款手续费分发（FeeRouter.distributeNormal）
+   - 净额转账给借款人（净额 = 借款金额 - 平台费 - 生态费）
+   
+   **注意**：`finalizeAtomicFull` 不包含保证金锁定，需要在业务层单独处理（如需要）
+
+#### 🔧 **核心函数**
+
 ```solidity
-function deposit(address asset, uint256 amount) external whenNotPaused nonReentrant {
-    if (amount == 0) revert AmountIsZero();
-    if (asset == address(0)) revert ZeroAddress();
+// 撮合结算（完整流程，需要 sigBorrower 参数）
+function finalizeMatch(
+    SettlementIntentLib.BorrowIntent calldata borrowIntent,
+    SettlementIntentLib.LendIntent[] calldata lendIntents,
+    bytes calldata sigBorrower,
+    bytes[] calldata sigLenders
+) external
 
-    // 验证资产是否在白名单中
-    _validateAssetAllowed(asset);
-
-    // 检查用户余额是否足够
-    uint256 userBalance = IERC20(asset).balanceOf(msg.sender);
-    if (userBalance < amount) revert InsufficientBalance();
-
-    // 安全转账
-    IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-    
-    // 记账更新
-    _tryDepositCollateral(msg.sender, asset, amount);
-
-    // 健康因子检查
-    _checkUserHealthFactor(msg.sender, asset, settlementTokenAddr);
-
-    // 事件记录
-    emit VaultTypes.Deposit(msg.sender, asset, amount, block.timestamp);
-}
-```
-
-### 5.2 借款流程
-
-#### 📋 **流程步骤**
-1. **输入验证**：检查资产地址和金额
-2. **白名单验证**：确认资产在白名单中
-3. **流动性检查**：验证合约余额充足
-4. **债务记录**：记录用户借款
-5. **转账执行**：安全转账给用户
-6. **健康因子检查**：验证操作后的风险状态
-7. **事件记录**：记录借款事件
-
-#### 🔧 **代码实现**
-```solidity
-function borrow(address asset, uint256 amount) external whenNotPaused nonReentrant {
-    if (amount == 0) revert AmountIsZero();
-    if (asset == address(0)) revert ZeroAddress();
-    
-    // 验证结算代币是否在白名单中
-    _validateAssetAllowed(asset);
-
-    // 检查合约余额是否足够
-    uint256 contractBalance = IERC20(asset).balanceOf(address(this));
-    if (contractBalance < amount) revert InsufficientLiquidity();
-    
-    // 记录借款
-    _tryRecordBorrow(msg.sender, asset, amount);
-
-    // 安全转账结算代币给用户
-    IERC20(asset).safeTransfer(msg.sender, amount);
-
-    // 健康因子检查
-    _checkUserHealthFactor(msg.sender, rwaTokenAddr, asset);
-    
-    // 事件记录
-    emit VaultTypes.Borrow(msg.sender, asset, amount, block.timestamp);
-}
-```
-
-### 5.3 复合操作流程
-
-#### 📋 **存款并借款**
-```solidity
-function depositAndBorrow(
+// 原子化结算（由 SettlementMatchLib 提供，不包含保证金锁定）
+function finalizeAtomic(
+    address registry,
+    address borrower,
+    address lender,
     address collateralAsset,
     uint256 collateralAmount,
     address borrowAsset,
-    uint256 borrowAmount
-) external whenNotPaused nonReentrant {
-    // 1. 存入抵押物
-    IERC20(collateralAsset).safeTransferFrom(msg.sender, address(this), collateralAmount);
-    _tryDepositCollateral(msg.sender, collateralAsset, collateralAmount);
-    
-    // 2. 借款
-    _tryRecordBorrow(msg.sender, borrowAsset, borrowAmount);
-    IERC20(borrowAsset).safeTransfer(msg.sender, borrowAmount);
-    
-    // 3. 健康因子检查
-    _checkUserHealthFactor(msg.sender, collateralAsset, borrowAsset);
-    
-    // 4. 事件记录
-    emit VaultTypes.DepositAndBorrow(msg.sender, collateralAsset, collateralAmount, borrowAsset, borrowAmount, block.timestamp);
-}
+    uint256 amount,
+    uint16 termDays,
+    uint256 rateBps
+) internal returns (uint256 orderId)
+
+// 完整编排（包含手续费分发和净额转账）
+function finalizeAtomicFull(
+    address registry,
+    address borrower,
+    address lender,
+    address collateralAsset,
+    uint256 collateralAmount,
+    address borrowAsset,
+    uint256 amount,
+    uint16 termDays,
+    uint256 rateBps
+) internal returns (uint256 orderId)
 ```
+
+### 6.2 借款流程（带保证金）
+
+#### 📋 **完整流程**
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant VaultCore as VaultCore
+    participant VaultView as VaultView
+    participant VaultBL as VaultBusinessLogic
+    participant Settlement as SettlementMatchLib
+    participant CM as CollateralManager
+    participant LE as LendingEngine
+    participant ERGM as EarlyRepaymentGM
+    participant GFM as GuaranteeFundManager
+    participant Token as ERC20 Token
+
+    User->>VaultBusinessLogic: borrowWithRate(user, lender, asset, amount, rate, term)
+    VaultBusinessLogic->>Settlement: finalizeAtomic(...)
+    
+    alt 有抵押物
+        Settlement->>CM: depositCollateral(...)
+    end
+    
+    Settlement->>VaultCore: borrowFor(borrower, asset, amount, termDays)
+    Settlement->>OrderEngine: createLoanOrder(order)
+    Note over OrderEngine: LoanNFT + Reward + DataPush 由 LendingEngine 统一完成
+    
+    Note over Settlement: 注意：保证金锁定不在 finalizeAtomic 中，<br/>应在业务层单独处理（如需要）
+    
+    LE->>VaultView: pushUserPositionUpdate(...)
+    VaultView->>VaultView: 更新缓存 + 事件推送
+    
+    VaultBusinessLogic-->>User: 完成借款
+```
+
+#### 🔧 **关键步骤**
+
+1. **用户发起借款**：调用 `VaultBusinessLogic.borrowWithRate()` 或 `finalizeMatch()`，传入利率和期限
+2. **撮合结算**：通过 `SettlementMatchLib.finalizeAtomic()` 或 `finalizeAtomicFull()` 原子化执行：
+   - 可选：存入抵押物（CollateralManager.depositCollateral）
+   - 资金拨付给借款人（从业务层合约余额划转）
+   - 债务记账（通过 VaultCore.borrowFor 写入账本）
+   - 订单创建（通过 KEY_ORDER_ENGINE 模块调用 createLoanOrder）
+   - LoanNFT 铸造、Reward 奖励、DataPush 推送（由 LendingEngine 统一完成）
+   - **finalizeAtomicFull 额外步骤**：借款手续费分发（FeeRouter.distributeNormal）和净额转账
+3. **保证金锁定**（如需要）：应在业务层单独处理，不在 finalizeAtomic 中
+4. **缓存更新**：LendingEngine 推送仓位更新到 VaultView
+5. **事件推送**：VaultView 更新缓存并发出事件
+
+### 6.3 还款流程（早偿结算）
+
+#### 📋 **完整流程**
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant VaultCore as VaultCore
+    participant VaultView as VaultView
+    participant VaultBL as VaultBusinessLogic
+    participant LE as LendingEngine
+    participant ERGM as EarlyRepaymentGM
+    participant GFM as GuaranteeFundManager
+    participant Token as ERC20 Token
+
+    User->>VaultBusinessLogic: repayWithStop(user, asset, amount, stop=true)
+    VaultBusinessLogic->>Token: safeTransferFrom(user, VaultBusinessLogic, amount)
+    Note over VaultBusinessLogic: 账本更新由 VaultCore → LendingEngine 统一触发
+    Note over VaultBusinessLogic: LendingEngine.repay(orderId, repayAmount) 需要 orderId
+    
+    alt stop=true 或 债务=0
+        VaultBL->>ERGM: settleEarlyRepayment(user, asset, amount)
+        ERGM->>ERGM: 计算早偿结果（罚金/返还/平台费）
+        ERGM->>GFM: settleEarlyRepayment(user, asset, lender, platform, refund, penalty, fee)
+        GFM->>Token: safeTransfer(user, refund)
+        GFM->>Token: safeTransfer(lender, penalty)
+        GFM->>Token: safeTransfer(platform, fee)
+    end
+    
+    LE->>VaultView: pushUserPositionUpdate(...)
+    VaultView->>VaultView: 更新缓存 + 事件推送
+    
+    VaultBusinessLogic-->>User: 完成还款
+```
+
+#### 🔧 **关键步骤**
+
+1. **用户发起还款**：调用 `VaultBusinessLogic.repayWithStop()`，设置 `stop=true` 触发早偿结算
+2. **代币转入**：从用户转入还款金额到 VaultBusinessLogic 合约
+3. **债务记账**：账本更新由 VaultCore → LendingEngine 统一触发（需要 orderId）
+4. **早偿结算**（如果 `stop=true`）：
+   - VaultBusinessLogic 调用 `EarlyRepaymentGM.settleEarlyRepayment(user, asset, amount)`
+   - EarlyRepaymentGM 计算早偿结果（罚金/返还/平台费）
+   - EarlyRepaymentGM 调用 `GuaranteeFundManager.settleEarlyRepayment()` 进行一次性三路分发：
+     - 返还给借款方（refundToBorrower）
+     - 罚金给贷款方（penaltyToLender）
+     - 平台手续费给平台（platformFee）
+5. **缓存更新**：LendingEngine 推送仓位更新到 VaultView
+6. **事件推送**：VaultView 更新缓存并发出事件
+
+### 6.4 保证金系统集成
+
+#### 📋 **保证金流程**
+
+保证金系统在借款和还款流程中集成：
+
+1. **借款时**（如需要保证金）：
+   - `EarlyRepaymentGM.lockGuaranteeRecord()` - 记录保证金信息（不转账，仅 VaultCore 可调用）
+   - `GuaranteeFundManager.lockGuarantee()` - 真实锁定资金（从用户转入托管池，仅 VaultCore 可调用）
+   - **注意**：`SettlementMatchLib.finalizeAtomic()` 和 `finalizeAtomicFull()` 不包含保证金锁定，需要在业务层单独处理
+
+2. **还款时**（早偿结算）：
+   - `EarlyRepaymentGM.settleEarlyRepayment(user, asset, amount)` - 计算并关闭记录（仅 VaultCore 可调用）
+   - `GuaranteeFundManager.settleEarlyRepayment(user, asset, lender, platform, refund, penalty, fee)` - 三路分发（仅 VaultCore 可调用）：
+     - 返还给借款方（refundToBorrower）
+     - 罚金给贷款方（penaltyToLender）
+     - 平台手续费给平台（platformFee）
+
+3. **清算时**（违约）：
+   - `EarlyRepaymentGM.processDefault()` - 处理违约
+   - `GuaranteeFundManager.forfeitGuarantee()` - 没收保证金给费用接收者
+
+**权限说明**：
+- 保证金相关函数仅 `VaultCore` 可调用（通过 `onlyVaultCore` 修饰符）
+- 业务层需要通过 VaultCore 间接调用，或由 VaultCore 统一编排
+
+详见 [保证金系统实现文档](./GuaranteeFundImplementation.md)
 
 ---
 
-### 6.1 健康因子计算
+## 7. 清算机制
+
+### 7.1 健康因子计算
 
 #### 📋 **计算公式**
 ```
@@ -858,36 +1238,26 @@ function depositAndBorrow(
 
 #### 🔧 **实现代码**
 ```solidity
-// 使用 VaultMath 库进行统一数学计算
-function calculateHealthFactor(uint256 collateral, uint256 debt) external pure returns (uint256) {
-    return VaultMath.calculateHealthFactor(collateral, debt);
+// 清算系统中使用 LiquidationViewLibrary 计算健康因子（包含清算阈值）
+function calculateHealthFactor(
+    uint256 totalCollateralValue,
+    uint256 totalDebtValue,
+    uint256 liquidationThreshold
+) internal pure returns (uint256 healthFactor) {
+    if (totalDebtValue == 0) {
+        return 1e20; // MAX_HEALTH_FACTOR
+    }
+    // 健康因子 = (总抵押物价值 * 清算阈值) / 总债务价值
+    healthFactor = (totalCollateralValue * liquidationThreshold) / totalDebtValue;
 }
 ```
 
-#### 📊 **VaultMath 库功能**
-```solidity
-library VaultMath {
-    // 健康因子计算
-    function calculateHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256)
-    
-    // 贷款价值比计算
-    function calculateLTV(uint256 debt, uint256 collateral) internal pure returns (uint256)
-    
-    // 百分比计算
-    function percentageMul(uint256 value, uint256 percentage) internal pure returns (uint256)
-    function percentageDiv(uint256 value, uint256 percentage) internal pure returns (uint256)
-    
-    // 债务和抵押计算
-    function calculateMaxDebt(uint256 collateral, uint256 maxLTV) internal pure returns (uint256)
-    function calculateMinCollateral(uint256 debt, uint256 maxLTV) internal pure returns (uint256)
-    
-    // 奖励和费用计算
-    function calculateBonus(uint256 amount, uint256 bonus) internal pure returns (uint256)
-    function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256)
-}
-```
+> **注意**：
+> - 清算系统使用 `LiquidationViewLibrary.calculateHealthFactor()`，该函数包含清算阈值参数
+> - `VaultMath.calculateHealthFactor()` 是简化版本，不包含清算阈值，主要用于基础计算
+> - VaultMath 库的详细功能和使用标准请参考 [第17章 VaultMath 数学计算标准](#17-vaultmath-数学计算标准)
 
-### 6.2 清算触发条件
+### 7.2 清算触发条件
 
 #### ⚠️ **清算条件**
 - 健康因子 < 最小健康因子阈值
@@ -901,128 +1271,206 @@ function isLiquidatable(address user) external view returns (bool) {
 }
 ```
 
-### 6.3 清算执行流程
+### 7.3 清算执行流程（模块化清算系统）
 
 #### 📋 **清算步骤**
-1. **清算检查**：验证用户是否可清算
-2. **债务计算**：计算用户总债务
-3. **抵押物计算**：计算用户总抵押物
-4. **清算执行**：执行清算操作
-5. **奖励分配**：分配清算奖励
+`LiquidationCoreOperations.executeLiquidation()` 执行的核心步骤：
+1. **抵押物扣押**：通过 `LiquidationCollateralManager` 扣押用户抵押物
+2. **债务减少**：通过 `LiquidationDebtManager` 强制减少用户债务
+3. **奖励计算**：计算清算奖励金额
 
-#### 🔧 **清算实现**
+**完整的清算流程还包括**：
+- **清算检查**：`LiquidationRiskManager` 验证用户是否可清算（健康因子 < 清算阈值，默认 105%）
+- **风险评估**：计算清算风险和奖励
+- **奖励分配**：`LiquidationRewardDistributor` 分配清算残值（平台 3%，风险储备 2%，贷款方 17%，清算人 78%）
+- **保证金没收**：`LiquidationGuaranteeManager` 处理保证金没收（如果适用）
+
+#### 🔧 **清算实现（LiquidationManager）**
 ```solidity
-function liquidate(address user, address collateralAsset, uint256 amount) external {
-    require(isLiquidatable(user), "User not liquidatable");
-    require(amount > 0, "Amount must be positive");
-    
-    // 执行清算
-    _tryWithdrawCollateral(user, collateralAsset, amount);
-    
-    // 分配清算奖励
-    uint256 reward = calculateLiquidationReward(amount);
-    _transferLiquidationReward(msg.sender, reward);
-    
-    emit LiquidationExecuted(user, collateralAsset, amount, msg.sender, reward);
+function liquidate(
+    address targetUser,
+    address collateralAsset,
+    address debtAsset,
+    uint256 collateralAmount,
+    uint256 debtAmount
+) external override whenNotPaused nonReentrant onlyLiquidator 
+    returns (uint256 bonus) 
+{
+    // 真实落地清算：扣押 → 减债 → 奖励计算 → 事件
+    bonus = LiquidationCoreOperations.executeLiquidation(
+        targetUser,
+        collateralAsset,
+        debtAsset,
+        collateralAmount,
+        debtAmount,
+        msg.sender,
+        liquidationConfigStorage,
+        _moduleCache,
+        _userCollateralSeizureRecords,
+        _userTotalLiquidationAmount,
+        _liquidatorCollateralStats
+    );
+
+    // 单点推送：仅通过 KEY_LIQUIDATION_VIEW（LiquidatorView）
+    _pushLiquidationEvent(
+        targetUser, collateralAsset, debtAsset, 
+        collateralAmount, debtAmount, msg.sender, bonus
+    );
 }
 ```
+
+**清算系统架构**：
+- **LiquidationManager**：清算入口和协调器
+- **LiquidationRiskManager**：风险评估和健康因子检查
+- **LiquidationCollateralManager**：抵押物扣押管理
+- **LiquidationDebtManager**：债务减少管理
+- **LiquidationRewardManager**：奖励计算和分配
+- **LiquidationGuaranteeManager**：保证金没收管理
+
+详见 [清算系统集成总结文档](./liquidation-system-integration-summary.md)
 
 ---
 
 ## 8. 预言机系统
 
-### 7.1 多预言机支持
+### 8.1 PriceOracle 概述
 
-#### 📋 **支持的预言机**
-- **CoinGecko**：主要价格源
-- **Chainlink**：备用价格源
-- **自定义预言机**：支持自定义价格源
+PriceOracle 是一个基于 CoinGecko API 的多资产价格预言机系统，为平台提供实时、可靠的价格数据服务。
 
-#### 🔧 **预言机适配器**
+#### 📋 **核心功能**
+- **多资产支持**：支持多种 ERC20 资产价格查询
+- **价格更新**：支持手动和批量价格更新
+- **价格验证**：价格有效性和时效性检查（通过 `maxPriceAge` 配置）
+- **优雅降级**：集成 GracefulDegradation 库处理价格异常
+- **权限控制**：基于 AccessControlManager 的细粒度权限管理
+- **可升级性**：使用 UUPS 代理模式，支持合约升级
+
+#### 🔧 **核心接口**
 ```solidity
-contract ValuationOracleAdapter {
-    mapping(address => address) public priceOracles;
+interface IPriceOracle {
+    // 价格查询
+    function getPrice(address asset) external view returns (uint256 price, uint256 timestamp, uint256 decimals);
+    function getPrices(address[] calldata assets) external view returns (uint256[] memory prices, uint256[] memory timestamps, uint256[] memory decimalsArray);
+    function isPriceValid(address asset) external view returns (bool);
     
-    function getAssetPrice(address asset) external view returns (uint256 price) {
-        address oracle = priceOracles[asset];
-        require(oracle != address(0), "Oracle not found");
-        
-        try IPriceOracle(oracle).getPrice(asset) returns (uint256 p) {
-            return p;
-        } catch {
-            revert("Oracle call failed");
-        }
-    }
+    // 资产配置
+    function configureAsset(address asset, string calldata coingeckoId, uint256 decimals, uint256 maxPriceAge) external;
+    function getAssetConfig(address asset) external view returns (AssetConfig memory);
+    
+    // 价格更新（需要 ACTION_UPDATE_PRICE 权限）
+    function updatePrice(address asset, uint256 price, uint256 timestamp) external;
+    function updatePrices(address[] calldata assets, uint256[] calldata prices, uint256[] calldata timestamps) external;
 }
 ```
 
-### 7.2 价格缓存机制
+#### 📊 **数据结构**
+```solidity
+struct PriceData {
+    uint256 price;        // 价格（8位精度）
+    uint256 timestamp;    // 价格更新时间戳
+    uint256 decimals;     // 价格精度
+    bool isValid;         // 价格是否有效
+}
+
+struct AssetConfig {
+    string coingeckoId;   // CoinGecko 资产 ID
+    uint256 decimals;     // 资产精度
+    bool isActive;        // 资产是否激活
+    uint256 maxPriceAge;  // 最大价格年龄（秒）
+}
+```
+
+### 8.2 价格缓存机制
 
 #### ⚡ **缓存策略**
-- **时间缓存**：价格在指定时间内有效
-- **偏差缓存**：价格偏差在阈值内时使用缓存
-- **紧急缓存**：网络异常时使用最后有效价格
+- **时间缓存**：价格在指定时间内有效（通过 `maxPriceAge` 配置）
+- **价格验证**：检查价格有效性和时效性
+- **优雅降级**：集成 GracefulDegradation 库处理价格异常
 
-#### 🔧 **缓存实现**
-```solidity
-struct PriceCache {
-    uint256 price;
-    uint256 timestamp;
-    bool isValid;
-}
-
-mapping(address => PriceCache) public priceCache;
-
-function getCachedPrice(address asset) external view returns (uint256) {
-    PriceCache memory cache = priceCache[asset];
-    if (cache.isValid && block.timestamp - cache.timestamp < CACHE_DURATION) {
-        return cache.price;
-    }
-    return getAssetPrice(asset);
-}
-```
+> **详细说明**：关于 PriceOracle 的完整架构设计、使用指南、集成示例和最佳实践，请参考 [PriceOracle 使用指南](../Usage-Guide/PriceOracle-Guide.md)。
 
 ---
 
 ## 9. 费用与分账
 
-### 8.1 费用结构
+### 9.1 费用结构
 
 #### 💰 **费用类型**
-- **存款费用**：存入抵押物时收取
-- **借款费用**：借款时收取
-- **还款费用**：还款时收取
-- **清算费用**：清算时收取
+- **存款费用**：存入抵押物时收取（通过 `chargeDepositFee` 计算）
+- **借款费用**：借款时收取（通过 `chargeBorrowFee` 计算）
+- **其他费用**：通过 `distributeNormal` 或 `distributeDynamic` 分配，使用 `feeType` 参数区分类型（如还款费用、清算费用等）
 
 #### 🔧 **费用计算**
 ```solidity
 // 使用 VaultMath 库进行统一费用计算
-function calculateDepositFee(uint256 amount) external view returns (uint256) {
-    return VaultMath.calculateFee(amount, depositFeeRate);
+function chargeDepositFee(address user, uint256 amount) external view returns (uint256 fee) {
+    return _calculateFee(amount);  // 使用总费率（platformFeeBps + ecosystemFeeBps）
 }
 
-function calculateBorrowFee(uint256 amount) external view returns (uint256) {
-    return VaultMath.calculateFee(amount, borrowFeeRate);
+function chargeBorrowFee(address user, uint256 amount) external view returns (uint256 fee) {
+    return _calculateFee(amount);  // 使用总费率（platformFeeBps + ecosystemFeeBps）
+}
+
+function _calculateFee(uint256 amount) internal view returns (uint256 fee) {
+    uint256 totalFeeBps = _platformFeeBps + _ecosystemFeeBps;
+    return VaultMath.calculateFee(amount, totalFeeBps);
 }
 ```
 
-### 8.2 费用分配
+### 9.2 费用分配（FeeRouter）
 
 #### 📊 **分配比例**
-- **协议费用**：70% 分配给协议金库
-- **奖励费用**：20% 分配给奖励池
-- **运营费用**：10% 分配给运营团队
+- **平台费用**：`platformFeeBps`（基点，可配置）
+- **生态费用**：`ecosystemFeeBps`（基点，可配置）
+- **剩余金额**：返还给调用者（通常是资金池或引擎）
+- **约束**：`platformFeeBps + ecosystemFeeBps < 10000`（必须小于 100%）
 
 #### 🔧 **分配实现**
 ```solidity
-function distributeFees(uint256 totalFee) internal {
-    uint256 protocolFee = totalFee * 70 / 100;
-    uint256 rewardFee = totalFee * 20 / 100;
-    uint256 operationFee = totalFee * 10 / 100;
+function _distribute(address token, uint256 amount, bytes32 feeType) internal whenNotPaused {
+    (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) = 
+        _calculateDistribution(amount, _platformFeeBps, _ecosystemFeeBps);
+    _executeFeeDistribution(token, platformAmt, ecoAmt, remaining, feeType, amount);
+}
+
+function _calculateDistribution(
+    uint256 amount,
+    uint256 platformBps,
+    uint256 ecoBps
+) internal pure returns (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) {
+    platformAmt = VaultMath.calculateFee(amount, platformBps);
+    ecoAmt = VaultMath.calculateFee(amount, ecoBps);
+    remaining = amount - platformAmt - ecoAmt;
+}
+
+function _executeFeeDistribution(
+    address token,
+    uint256 platformAmt,
+    uint256 ecoAmt,
+    uint256 remaining,
+    bytes32 feeType,
+    uint256 totalAmount
+) internal {
+    // 先从调用者地址拉取全部费用金额（需要调用者预先 approve 给本合约）
+    if (totalAmount > 0) {
+        IERC20Upgradeable(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+    }
     
-    _transferToProtocol(protocolFee);
-    _transferToRewardPool(rewardFee);
-    _transferToOperation(operationFee);
+    // 分发费用
+    if (platformAmt > 0) {
+        IERC20Upgradeable(token).safeTransfer(_platformTreasury, platformAmt);
+    }
+    if (ecoAmt > 0) {
+        IERC20Upgradeable(token).safeTransfer(_ecosystemVault, ecoAmt);
+    }
+    if (remaining > 0) {
+        // 剩余金额返还给调用者（通常是资金池/编排合约）
+        IERC20Upgradeable(token).safeTransfer(msg.sender, remaining);
+    }
+    
+    // 更新统计和缓存
+    _feeStatistics[token][feeType] += totalAmount;
+    emit FeeDistributed(token, platformAmt, ecoAmt);
 }
 ```
 
@@ -1030,71 +1478,127 @@ function distributeFees(uint256 totalFee) internal {
 
 ## 10. 安全特性
 
-### 9.1 重入攻击防护
+### 10.1 重入攻击防护
 
 #### 🛡️ **防护机制**
-- **ReentrancyGuard**：使用 OpenZeppelin 的重入保护
-- **状态更新顺序**：先更新状态，后调用外部函数
-- **函数修饰符**：所有外部函数使用 nonReentrant
+- **ReentrancyGuardUpgradeable**：使用 OpenZeppelin 的可升级重入保护
+- **状态更新顺序**：遵循 CEI（Checks-Effects-Interactions）模式，先检查条件，再更新状态，最后调用外部函数
+- **函数修饰符**：所有可能改变状态的外部函数使用 `nonReentrant` 修饰符
 
 #### 🔧 **实现示例**
 ```solidity
-function deposit(address asset, uint256 amount) external whenNotPaused nonReentrant {
-    // 1. 验证输入
-    _validateInputs(asset, amount);
-    
-    // 2. 更新状态
-    _updateUserBalance(msg.sender, asset, amount, true);
-    
-    // 3. 外部调用
-    IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-    
-    // 4. 事件记录
-    emit Deposit(msg.sender, asset, amount);
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+
+contract VaultBusinessLogic is 
+    Initializable, 
+    UUPSUpgradeable, 
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable 
+{
+    function reserveForLending(
+        address lender,
+        address asset,
+        uint256 amount,
+        bytes32 lendIntentHash
+    ) external whenNotPaused nonReentrant {
+        // 1. 检查条件（Checks）
+        if (asset == address(0)) revert ZeroAddress();
+        if (amount == 0) revert AmountIsZero();
+        
+        // 2. 更新状态（Effects）
+        _lendReserves.reserve(lender, asset, amount, lendIntentHash);
+        
+        // 3. 外部调用（Interactions）
+        IERC20(asset).safeTransferFrom(lender, address(this), amount);
+    }
 }
 ```
 
-### 9.2 权限控制
+### 10.2 权限控制
 
-#### 🔐 **权限层级**
-- **治理权限**：系统参数配置、模块升级
-- **操作权限**：业务操作、紧急控制
-- **查询权限**：只读查询、统计信息
+#### 🔐 **权限系统架构**
+系统使用 `AccessControlManager` 进行统一的权限管理，基于 `ActionKeys` 实现细粒度权限控制。
+
+**权限级别**（`PermissionLevel` 枚举）：
+- **NONE**：无权限
+- **VIEWER**：查看权限（查询系统数据、用户数据等）
+- **OPERATOR**：操作权限（设置参数、升级模块、暂停系统等）
+- **ADMIN**：管理员权限（最高权限）
+
+**核心权限动作**（`ActionKeys`）：
+- `ACTION_ADMIN`：管理员权限
+- `ACTION_SET_PARAMETER`：设置参数权限
+- `ACTION_UPGRADE_MODULE`：升级模块权限
+- `ACTION_PAUSE_SYSTEM`：暂停系统权限
+- `ACTION_UNPAUSE_SYSTEM`：恢复系统权限
+- `ACTION_DEPOSIT`、`ACTION_BORROW`、`ACTION_REPAY` 等：业务操作权限
 
 #### 🔧 **权限实现**
 ```solidity
-contract VaultCore is AccessControl {
-    bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
-    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
+import { ActionKeys } from "../constants/ActionKeys.sol";
+import { Registry } from "../registry/Registry.sol";
+import { ModuleKeys } from "../constants/ModuleKeys.sol";
+
+contract VaultBusinessLogic {
+    address private _registryAddr;
     
-    modifier onlyGovernance() {
-        require(hasRole(GOVERNANCE_ROLE, msg.sender), "Governance only");
+    function _requireRole(bytes32 actionKey, address user) internal view {
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(actionKey, user);
+    }
+    
+    modifier onlyRole(bytes32 actionKey) {
+        _requireRole(actionKey, msg.sender);
         _;
     }
     
-    modifier onlyOperator() {
-        require(hasRole(OPERATOR_ROLE, msg.sender), "Operator only");
-        _;
+    function configureAsset(address asset, uint256 maxLTV) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        // 需要 ACTION_SET_PARAMETER 权限
     }
 }
 ```
 
-### 9.3 紧急暂停
+### 10.3 紧急暂停
 
 #### 🚨 **暂停机制**
-- **全局暂停**：暂停所有业务操作
-- **模块暂停**：暂停特定模块功能
-- **紧急恢复**：紧急情况下快速恢复
+- **全局暂停**：通过 `PausableUpgradeable` 暂停所有业务操作
+- **权限控制**：暂停/恢复操作需要相应的 `ActionKeys` 权限
+- **紧急恢复**：紧急情况下快速恢复系统运行
 
 #### 🔧 **暂停实现**
 ```solidity
-contract VaultCore is Pausable {
-    function pause() external onlyGovernance {
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { ActionKeys } from "../constants/ActionKeys.sol";
+
+contract VaultBusinessLogic is 
+    Initializable, 
+    UUPSUpgradeable, 
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable 
+{
+    function pause() external onlyValidRegistry {
+        _requireRole(ActionKeys.ACTION_PAUSE_SYSTEM, msg.sender);
         _pause();
+        
+        emit VaultTypes.ActionExecuted(
+            ActionKeys.ACTION_PAUSE_SYSTEM,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_PAUSE_SYSTEM),
+            msg.sender,
+            block.timestamp
+        );
     }
     
-    function unpause() external onlyGovernance {
+    function unpause() external onlyValidRegistry {
+        _requireRole(ActionKeys.ACTION_UNPAUSE_SYSTEM, msg.sender);
         _unpause();
+        
+        emit VaultTypes.ActionExecuted(
+            ActionKeys.ACTION_UNPAUSE_SYSTEM,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_UNPAUSE_SYSTEM),
+            msg.sender,
+            block.timestamp
+        );
     }
     
     modifier whenNotPaused() {
@@ -1108,86 +1612,181 @@ contract VaultCore is Pausable {
 
 ## 11. 升级与治理
 
-### 10.1 UUPS 升级模式
+### 11.1 UUPS 升级模式
 
 #### 🔄 **升级机制**
 - **实现合约升级**：升级业务逻辑而不影响存储
 - **代理合约不变**：用户地址保持不变
 - **数据安全**：升级过程中数据不丢失
+- **权限控制**：通过 `AccessControlManager` 验证 `ACTION_UPGRADE_MODULE` 权限
 
 #### 🔧 **升级实现**
 ```solidity
-contract VaultCore is UUPSUpgradeable {
-    function _authorizeUpgrade(address newImplementation) internal override onlyGovernance {
-        // 升级授权逻辑
-    }
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { ActionKeys } from "../constants/ActionKeys.sol";
+import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
+
+contract VaultBusinessLogic is UUPSUpgradeable {
+    address private _registryAddr;
     
-    function upgradeTo(address newImplementation) external onlyGovernance {
-        _upgradeTo(newImplementation);
+    function _authorizeUpgrade(address newImplementation) internal override {
+        // 通过 Registry 获取 AccessControlManager 并验证权限
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
+        
+        if (newImplementation == address(0)) revert ZeroAddress();
+        
+        // 记录升级动作
+        emit VaultTypes.ActionExecuted(
+            ActionKeys.ACTION_UPGRADE_MODULE,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
+            msg.sender,
+            block.timestamp
+        );
     }
 }
 ```
 
-### 10.2 模块化升级
+### 11.2 模块化升级（Registry 系统）
 
-#### 🧩 **模块升级**
-- **独立升级**：每个模块可以独立升级
-- **接口兼容**：保持接口向后兼容
-- **渐进升级**：支持渐进式功能升级
+#### 🧩 **升级流程**
+系统通过 `Registry` 统一管理模块升级，支持两种升级方式：
 
-#### 🔧 **模块管理**
+1. **立即升级**：直接设置新模块地址（首次部署或紧急情况）
+2. **延时升级**：计划升级 → 等待延时 → 执行升级（推荐方式，提供安全缓冲）
+
+#### 🔧 **Registry 升级管理**
 ```solidity
-contract VaultStorage {
-    mapping(string => address) public modules;
-    
-    function registerModule(string memory name, address module) external onlyGovernance {
-        modules[name] = module;
-        emit ModuleRegistered(name, module);
-    }
-    
-    function updateModule(string memory name, address newModule) external onlyGovernance {
-        address oldModule = modules[name];
-        modules[name] = newModule;
-        emit ModuleUpdated(name, oldModule, newModule);
-    }
+import { Registry } from "../registry/Registry.sol";
+import { ModuleKeys } from "../constants/ModuleKeys.sol";
+
+// 立即升级（首次部署或紧急替换）
+function setModule(bytes32 key, address moduleAddr) external onlyOwner whenNotPaused {
+    // 直接设置模块地址，无延时
+}
+
+// 延时升级流程（推荐）
+// 1. 计划升级
+function scheduleModuleUpgrade(bytes32 key, address newAddr) external onlyOwner whenNotPaused {
+    // 创建升级计划，设置执行时间（当前时间 + minDelay）
+    // 升级计划存储在 pendingUpgrades 映射中
+}
+
+// 2. 执行升级（延时到期后）
+function executeModuleUpgrade(bytes32 key) external onlyOwner nonReentrant whenNotPaused {
+    // 检查延时是否到期
+    // 执行升级，更新模块地址
+    // 记录升级历史
+}
+
+// 3. 取消升级（可选）
+function cancelModuleUpgrade(bytes32 key) external onlyOwner whenNotPaused {
+    // 取消待执行的升级计划
 }
 ```
 
-### 10.3 治理投票
+#### 📊 **升级特性**
+- **延时保护**：通过 `minDelay` 设置最小延时时间，防止恶意升级
+- **升级历史**：记录所有模块升级历史（最多保留 100 条）
+- **批量升级**：支持批量设置多个模块地址
+- **权限控制**：只有 `owner` 可以执行升级操作
+
+### 11.3 跨链治理投票
 
 #### 🗳️ **投票机制**
-- **提案创建**：治理地址创建升级提案
-- **投票期**：设定投票期限
-- **执行期**：投票通过后的执行期限
-- **时间锁**：防止恶意升级
+系统使用 `CrossChainGovernance` 合约实现跨链治理，支持多链投票聚合。
+
+**提案状态**：
+- `Pending`：待投票
+- `Active`：投票中
+- `Succeeded`：投票成功
+- `Executed`：已执行
+- `Defeated`：投票失败
+- `Expired`：已过期
+
+**投票选项**：
+- `Against`：反对
+- `For`：赞成
+- `Abstain`：弃权
 
 #### 🔧 **治理实现**
 ```solidity
-contract Governance {
+contract CrossChainGovernance is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
+    bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
+    bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
+    
     struct Proposal {
-        address target;
-        bytes data;
+        uint256 proposalId;
+        address proposer;
+        string description;
         uint256 forVotes;
         uint256 againstVotes;
+        uint256 abstainVotes;
         uint256 startTime;
         uint256 endTime;
+        uint256 executionTime;
         bool executed;
+        bool canceled;
+        ProposalState state;
+        uint256 quorum;
+        uint256 chainId;
+        bytes[] actions;      // 执行动作数组
+        address[] targets;    // 目标合约数组
     }
     
-    mapping(uint256 => Proposal) public proposals;
+    // 创建提案（需要 GOVERNANCE_ROLE 权限）
+    function createProposal(
+        string calldata description,
+        bytes[] calldata actions,
+        address[] calldata targets,
+        uint256 votingPeriod
+    ) external onlyRole(GOVERNANCE_ROLE) returns (uint256 proposalId);
     
-    function createProposal(address target, bytes calldata data) external onlyGovernance returns (uint256) {
-        // 创建提案逻辑
-    }
+    // 投票
+    function vote(uint256 proposalId, VoteOption option) external;
     
-    function vote(uint256 proposalId, bool support) external {
-        // 投票逻辑
-    }
+    // 执行提案（需要 EXECUTOR_ROLE 权限，投票通过后需等待 executionDelay）
+    function executeProposal(uint256 proposalId) external onlyRole(EXECUTOR_ROLE) nonReentrant;
     
-    function executeProposal(uint256 proposalId) external {
-        // 执行提案逻辑
-    }
+    // 接收跨链投票
+    function receiveCrossChainVote(
+        uint256 proposalId,
+        uint256 chainId,
+        uint256 forVotes,
+        uint256 againstVotes,
+        uint256 abstainVotes,
+        uint256 totalWeight,
+        address validator,
+        bytes calldata signature
+    ) external onlyRole(EXECUTOR_ROLE) nonReentrant;
 }
+```
+
+#### 🔄 **升级提案示例**
+```solidity
+// 创建模块升级提案
+bytes[] memory actions = new bytes[](1);
+actions[0] = abi.encodeWithSignature(
+    "scheduleModuleUpgrade(bytes32,address)",
+    ModuleKeys.KEY_VAULT_BUSINESS_LOGIC,
+    newImplementationAddress
+);
+
+address[] memory targets = new address[](1);
+targets[0] = registryAddress;
+
+uint256 proposalId = governance.createProposal(
+    "Upgrade VaultBusinessLogic to v2.0",
+    actions,
+    targets,
+    7 days  // 投票期7天
+);
+
+// 投票通过后，执行提案
+governance.executeProposal(proposalId);
+
+// 延时到期后，执行升级
+registry.executeModuleUpgrade(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
 ```
 
 ---
@@ -1219,410 +1818,3 @@ contract Governance {
 - **升级安全**：模块化升级不影响用户资金
 - **错误处理**：统一的错误处理和事件机制
 
----
-
-## 11. 多 Vault + 多币种结算架构
-
-### 11.1 主要模块架构
-
-| 模块 | 职责 | 是否可多实例 |
-|------|------|--------------|
-| **CollateralVault** | 单一资产类别的抵押 & 借贷池；负责 LTV 计算、债务记录、抵押管理 | ✅（每类资产 1 个） |
-| **LendingEngine** | 链上贷款账本；铸造 LoanNFT；计算利息与还款；对接 FeeRouter | ❌（全局 1 个） |
-| **FeeRouter** | 统一手续费分账；97/2/1 拆分；支持 Pause & 升级 | ❌ |
-| **LiquidationEngine** | 统一清算调度；Keeper 调用 `liquidate()` | ❌ |
-| **LendingPool** | 结算币池；放贷与回收资金（USDC / USDT / ETH / BTC…） | ✅（按币种或策略多实例） |
-| **PriceOracle** | 预言机聚合；Chainlink / Pyth / 自签多源取中值 | ❌ |
-| **KeeperRegistry** | Keeper 角色与权限管理 | ❌ |
-| **LoanNFT** | 贷款凭证 SBT/NFT；记录 loanId/状态 | ❌ |
-| **RewardManager** | 平台积分 ERC20；履约 / 清算激励 | ❌ |
-| **Governance** | DAO & 多签；注册 / 升级模块 | ❌ |
-| **FundingPool** | （预留）内部闪电贷资金池 | 🚧 TODO |
-| **StatisticsView** | 统计视图与聚合指标 | ✅ |
-
-### 11.2 治理注册流程
-
-1. **部署新 Vault**：部署 `CollateralVault`（或 Clone）并初始化，设置 ACM 权限管理器和基础参数。
-2. **注册到 Registry**：DAO 通过 `Registry.setModule(moduleName, vaultAddress)` 将 Vault 注册到系统注册表。
-3. **配置 VaultStorage**：通过 `VaultStorage.registerModule(moduleName, vaultAddress)` 将 Vault 注册到存储模块。
-4. **设置权限**：DAO 通过 ACM 为 Vault 授予必要的操作权限（如 `ACTION_DEPOSIT`、`ACTION_BORROW` 等）。
-5. **配置 FeeRouter**：通过 `FeeRouter.setCaller(vaultAddress, true)` 将 Vault 加入费用分发白名单。
-6. **监控集成**：Vault 自动纳入 Keeper 监控和清算白名单。
-7. **治理管理**：若 Vault 作废，可由治理通过 `Registry.removeModule()` 和 `VaultStorage.unregisterModule()` 移除。
-
-### 11.3 数据/调用流示意
-```mermaid
-sequenceDiagram
-    participant User
-    participant Vault
-    participant LendingPool
-    participant Liquidator as Keeper
-    participant Engine as LiquidationEngine
-    participant Router as FeeRouter
-    participant Oracle
-
-    User->>Vault: depositCollateral()
-    Vault->>Oracle: getPrice()
-    User->>LendingPool: borrow(settlementToken)
-    LendingPool->>Router: pay 0.03% fee
-
-    loop HF monitor
-        Oracle-->>Vault: price update
-        Vault->>KeeperRegistry: healthFactor()
-    end
-
-    Liquidator->>Engine: liquidate(vault, user, price)
-    Engine->>Vault: repay + withdrawCollateral
-    Engine->>Router: distributeLiquidation(token, collateralValue)
-    Router->>LendingPool: 97%
-    Router->>Reserve: 2%
-    Router->>Treasury: 1%
-```
-
-### 11.4 抵押 & 借贷流程（多 Vault）
-
-1. **抵押**：用户向目标 Vault 存入 RWA 资产；Vault 通过 Oracle 计算实时 LTV。  
-2. **借款**：用户调用 LendingPool 借出 Vault 所指定的结算币（`getSettlementToken()`），当前平台支持 **USDT / USDC / ETH / BTC** 共 4 种可选结算币。  
-3. **费用**：借方、贷方各支付 0.03% 手续费，由 FeeRouter 分配至 Treasury。  
-4. **健康监控**：KeeperRegistry 周期性调用 Vault 计算用户/全局 HF。
-
-### 11.5 多币种结算支持
-
-- 每个 Vault 实现 `getSettlementToken()` 返回其结算币地址；
-- LiquidationEngine 在运行时动态加载 IERC20 接口；
-- FeeRouter 内部已支持任意 ERC20（或 address(0) 代表 ETH）。
-
-### 11.6 Vault 生命周期（治理 & 工厂）
-
-| 阶段 | 调用者 | 关键函数 | 说明 |
-|------|--------|----------|------|
-| 部署 | Factory / 手动 | `CollateralVault.constructor()` | 初始化参数 |
-| 注册 | DAO | `registerVault(vault)` / `registerVaultBatch()` | 纳入白名单 |
-| 运营 | 用户 / Keeper | `deposit`, `borrow`, `liquidate` | 正常业务 |
-| 升级 | Governance | UUPS `upgradeProxy` | 需 validateUpgrade |
-| 注销 | DAO | `unregisterVault(vault)` | 停止新业务；迁移后销毁 |
-
----
-
-## 12. 贷款期限与续约规则
-
-### 12.1 固定期限
-平台 V1 仅开放 4 档贷款期限：
-
-| 档位 | 对应秒数 |
-|------|----------|
-| 5 天 | 432 000 |
-| 10 天| 864 000 |
-| 15 天| 1 296 000 |
-| 30 天| 2 592 000 |
-
-用户（借方/贷方）创建意向时必须从以上列表中选择。合约侧通过 `require(duration ∈ AllowedDurations)` 强校验，确保前端/SDK 无法绕过。
-
-### 12.2 自动续约
-- 借方、贷方均可在到期前勾选「自动续约」。
-- 续约时系统 **不再重复收取撮合手续费**；`FeeRouter` 仅在首次 `matchOrder()` 成功时扣 0.03%。
-- 续约会重置 `endTimestamp` 并触发新的 `BorrowMatched`/`LendMatched` 事件，以便前端刷新倒计时。
-
-### 12.3 积分驱动的长期期限解锁（V1-alpha 新增）
-
-为奖励履约记录优秀的用户，平台引入**信用积分阈值 = 500 分**的概念。当用户积分余额（`RewardPoints.balanceOf(user)`）达到或超过 `300 × 10¹⁸` 时，可在借款时解锁更长期限。
-
-| 当前积分余额 | 可选贷款期限 |
-|--------------|-----------------------------------------------------------|
-| < `300 × 10¹⁸` | 5 天、10 天、15 天、30 天 |
-| ≥ `300 × 10¹⁸`| 5 天、10 天、15 天、30 天、90 天、180 天、365 天 |
-
-执行逻辑（链上）：
-
-1. `LendingEngine.borrow(user, amount, collateral, termDays)` 被调用；
-2. 合约内部通过 `rewardManager.rewardToken()` 拿到积分代币地址，再读取 `balanceOf(user)` 得到 `userPoints`；
-3. `_isAllowedTerm(termDays, userPoints)` 进行白名单校验：
-   - 若 `userPoints < 300 * 1e18` 仅允许 5/10/15/30；
-   - 否则 5/10/15/30/90/180/365 全部可选；
-4. 校验失败则 `revert LendingEngine__InvalidTerm(termDays, userPoints)`；
-5. 校验通过后，将 `termDays * 1 days` 作为 `durationSec` 传入 `RewardManager.onLoanEvent()` 完成积分初始化。
-
-> **实现要点**：常量比较需包含 18 位精度。
-
-前端 / SDK 建议：
-* 页面渲染前读取 `RewardPoints.balanceOf(user)`，动态生成期限下拉框；
-* 若借款成功后积分跌破 300，提示用户「下次借款将恢复 30 天上限」，以免体验落差。
-
----
-
-## 13. 积分与惩罚规则
-
-### 13.1 基础 & 奖励公式
-```
-BasePoints = 金额_USDT ÷ 100 × 期限_天 ÷ 5
-Bonus      = BasePoints × 5 %  （当且仅当借款全过程 HealthFactor ≥ 1.5）
-Total      = BasePoints + Bonus
-```
-> Bonus 只在当期计算一次，上限为 BasePoints 的 100%；若已达 100% 则不再追加。
-
-### 13.2 续约积分
-每次续约都会重新计算 `BasePoints`，并再次评估是否满足 5 % Bonus 条件。理论上同一笔贷款可以积累多期积分。
-
-### 13.3 违约惩罚（欠分模式）
-- 发生清算时，系统扣除 `BasePoints × 1.1`；
-- 若账户当前积分不足，余额被清零，剩余部分记入 `PenaltyLedger[account]`；
-- 后续获得的新积分将 **先抵消欠分**，`PenaltyLedger` 归零后才开始累加正积分；
-- `PenaltyLedger` 对外暴露为只读 view，以便前端提醒用户"尚欠 X 积分"。
-
----
-
-## 14. FeeRouter 详细逻辑
-
-### 14.1 关键状态 & 事件
-| 变量 | 说明 |
-|-------|------|
-| `accessControlManager` | ACM 权限管理器地址，用于权限验证 |
-| `platformTreasury` | 平台收入金库地址 |
-| `ecosystemVault`  | 生态金库地址（社区 / 激励） |
-| `platformFeeBps` / `ecosystemFeeBps` | 分账比例，单位 **bps (1e4 = 100 %)**，两者之和 **必须 < 10 000** |
-| `_feeCache` | 费用缓存：token → feeType → cachedAmount |
-| `_dynamicFees` | 动态费用配置：token → feeType → feeBps |
-| `_supportedTokens` | 支持的代币列表 |
-| `_feeStatistics` | 费用统计：token → feeType → totalAmount |
-
-事件：
-* `FeeDistributed(token, platformAmount, ecoAmount, feeType)` — 每次分账成功后触发；`feeType` 使用 ActionKeys 常量。
-* `FeeConfigUpdated(platformBps, ecoBps)`
-* `TreasuryUpdated(platformTreasury, ecosystemVault)`
-* `DynamicFeeUpdated(token, feeType, oldFee, newFee)`
-* `TokenSupported(token, supported)`
-* `BatchFeeDistributed(token, totalAmount, operations)`
-* `AccessControlManagerUpdated(oldACM, newACM)`
-* `PermissionVerified(caller, actionKey, hasPermission, timestamp)`
-
-### 14.2 初始化
-```solidity
-initialize(
-    address accessControlManager_,
-    address platformTreasury_,
-    address ecosystemVault_,
-    uint256 platformBps_,
-    uint256 ecoBps_
-)
-```
-* 校验：任一地址不可为 0；`platformBps_ + ecoBps_ < 10 000`。
-* 设置：ACM 权限管理器、金库地址、费用比例。
-* 记录：标准化动作事件 `ACTION_SET_PARAMETER`。
-
-### 14.3 管理函数（需要 ACM 权限）
-| 函数 | 所需权限 | 描述 |
-|-------|----------|------|
-| `setFeeConfig(platformBps, ecoBps)` | `ACTION_SET_PARAMETER` | 修改分账比例；仍需总和 < 10 000 |
-| `setTreasury(platformTreasury, ecosystemVault)` | `ACTION_SET_PARAMETER` | 更新收款地址 |
-| `setDynamicFee(token, feeType, feeBps)` | `ACTION_SET_PARAMETER` | 设置特定代币的动态费用 |
-| `setTokenSupport(token, supported)` | `ACTION_SET_PARAMETER` | 添加/移除支持的代币 |
-| `updateAccessControlManager(newACM)` | `ACTION_UPGRADE_MODULE` | 更新 ACM 地址 |
-| `pause()` / `unpause()` | `ACTION_PAUSE_SYSTEM` / `ACTION_UNPAUSE_SYSTEM` | 临时冻结 / 恢复全部手续费分发 |
-
-### 14.4 分发函数（需要 ACM 权限 & whenNotPaused）
-| 函数 | 所需权限 | feeType | 典型调用者 |
-|--------|----------|---------|-----------|
-| `distributeNormal(token, amount)` | `ACTION_DEPOSIT` | `ACTION_DEPOSIT` | LendingEngine (还款 / 撮合) |
-| `distributeLiquidationFee(token, amount)` | `ACTION_LIQUIDATE` | `ACTION_LIQUIDATE` | LiquidationEngine |
-| `distributeBatch(token, amounts, feeTypes)` | `ACTION_DEPOSIT` | 动态 | 批量分发 |
-
-计算逻辑（内部 `_distribute()`）：
-```text
-platformAmt  = amount × platformFeeBps   / 10 000
-ecoAmt       = amount × ecosystemFeeBps / 10 000
-remaining    = amount - platformAmt - ecoAmt   // 余量返还 msg.sender
-```
-全部转账使用 `SafeERC20Upgradeable.safeTransfer`；当 `remaining > 0` 时返还调用合约（通常是资金池或引擎）。
-
-### 14.5 查询函数
-| 函数 | 说明 |
-|------|------|
-| `isCaller(address)` | 检查地址是否有分发权限 |
-| `getFeeStatistics(token, feeType)` | 获取费用统计信息 |
-| `getSupportedTokens()` | 获取支持的代币列表 |
-| `getDynamicFee(token, feeType)` | 获取动态费用配置 |
-
-### 14.6 安全特性
-* **ACM 权限控制**：所有敏感操作都需要通过 ACM 验证权限。
-* **标准化动作**：使用 ActionKeys 常量进行权限验证和事件记录。
-* **暂停机制**：支持 OpenZeppelin `PausableUpgradeable`，紧急情况下可冻结资金流。
-* **升级安全**：`_authorizeUpgrade()` 仅允许 `ACTION_UPGRADE_MODULE` 权限进行 UUPS 升级。
-* **安全转账**：全程使用 `SafeERC20Upgradeable` 处理非标准 ERC20。
-* **权限验证事件**：每次权限验证都会触发 `PermissionVerified` 事件，便于审计。
-* **动态费用**：支持针对不同代币和费用类型设置不同的费率。
-* **批量操作**：支持批量费用分发，提高 Gas 效率。
-
----
-
-## 15. Gas 费用展示（测试环境）
-所有 Hardhat 测试在结束时都会打印关键交易的 Gas 统计表：
-
-| 字段 | 说明 |
-|------|------|
-| gasUsed | L2 消耗的 Gas 单位 |
-| fee(ETH) | `gasUsed × gasPrice` |
-| fee(USDT)| `fee(ETH) × ETH/USDT`，测试中使用 MockOracle 固定 `1 ETH = 2 000 USDT` |
-
-Arbitrum 的 L1 CallData 费用在本地 Hardhat 网络无法精确复现，如需更精确成本，推荐使用 `--network arbitrum-goerli` 在测试网重新跑一次脚本来收集真实数据。
-
----
-
-## 16. 核心合约模块详细说明
-
-### 16.1 LendingEngine
-
-| 维度 | 说明 |
-| --- | --- |
-| 职责 | • 记录并管理 **贷款订单** 全生命周期<br/>• 调用 `LoanNFT` 铸造/更新贷款凭证<br/>• 处理借方（或第三方）还款并计算利息<br/>• 向 `FeeRouter` 上报并分配还款手续费 |
-| 关键角色 | `DEFAULT_ADMIN_ROLE` — 管理员，可暂停合约与升级合约<br/>`MATCH_ENGINE_ROLE` — 链下撮合服务，仅此角色可调用 `createLoanOrder` |
-| 数据结构 | `LoanOrder { principal, rate(bps), term, borrower, lender, asset, startTimestamp, maturity, repaidAmount }` |
-| 核心流程 | 1. **createLoanOrder**（仅撮合服务）<br/>&nbsp;&nbsp;• 生成 `orderId` → 存储订单<br/>&nbsp;&nbsp;• `LoanNFT.mintLoanCertificate()` → NFT 状态设为 `Active`<br/>2. **repay**（任何地址）<br/>&nbsp;&nbsp;• 计算应还总额：`interest = principal × rate × term / (365d × 10 000)`<br/>&nbsp;&nbsp;• 校验未超额 & 未重复归还<br/>&nbsp;&nbsp;• 计算手续费 **0.06 %**（`REPAY_FEE_BPS = 6`）<br/>&nbsp;&nbsp;• `feeRouter.distributeNormal()` 分发手续费<br/>&nbsp;&nbsp;• 将净额转给贷方<br/>&nbsp;&nbsp;• 若已全部还清 → `LoanNFT.updateLoanStatus(..., Repaid)` |
-| 事件 | `LoanOrderCreated(orderId, borrower, lender, principal)`<br/>`LoanRepaid(orderId, payer, repayAmount)` |
-| 安全控制 | • `pause/unpause`：管理员可紧急冻结 `createLoanOrder` & `repay`<br/>• 所有 ERC20 流转使用 `SafeERC20`<br/>• 初始化时检查零地址；构造函数 `_disableInitializers()` 防重入 |
-
-### 16.2 合约交互流程（顺序图）
-
-```mermaid
-sequenceDiagram
-    participant Matcher as MatchEngine (off-chain)
-    participant Engine  as LendingEngine
-    participant NFT     as LoanNFT
-    participant Fee     as FeeRouter
-    participant Borrow  as Borrower
-    participant Lender  as Lender
-    participant Token   as ERC20
-
-    Matcher->>Engine: createLoanOrder(order)
-    Engine->>NFT: mintLoanCertificate(borrower, metadata)
-    NFT-->>Engine: tokenId
-    Note right of Engine: LoanOrderCreated
-
-    Borrow->>Token: approve(repayAmount)
-    Borrow->>Engine: repay(orderId, repayAmount)
-
-    Engine->>Fee: distributeNormal(token, feeAmount)
-    Engine->>Token: transferFrom(Borrow, Lender, lenderAmount)
-    Fee->>Token: transfer(platformTreasury / ecosystemVault)
-    Engine->>NFT: updateLoanStatus(tokenId, Repaid)
-    Note right of Engine: LoanRepaid
-```
-
----
-
-## 17. VaultMath 数学计算标准
-
-### 17.1 统一数学计算库
-
-#### 📋 **设计原则**
-- **单一职责**：VaultMath 作为唯一的数学计算库
-- **统一标准**：所有数学计算都使用 VaultMath 库
-- **向后兼容**：VaultUtils 的数学函数保留但标记为已迁移
-- **类型安全**：使用 Solidity 原生类型，避免精度损失
-
-#### 🔧 **核心功能**
-```solidity
-library VaultMath {
-    // 健康因子计算
-    function calculateHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256)
-    
-    // 贷款价值比计算
-    function calculateLTV(uint256 debt, uint256 collateral) internal pure returns (uint256)
-    
-    // 百分比计算
-    function percentageMul(uint256 value, uint256 percentage) internal pure returns (uint256)
-    function percentageDiv(uint256 value, uint256 percentage) internal pure returns (uint256)
-    
-    // 债务和抵押计算
-    function calculateMaxDebt(uint256 collateral, uint256 maxLTV) internal pure returns (uint256)
-    function calculateMinCollateral(uint256 debt, uint256 maxLTV) internal pure returns (uint256)
-    
-    // 奖励和费用计算
-    function calculateBonus(uint256 amount, uint256 bonus) internal pure returns (uint256)
-    function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256)
-}
-```
-
-### 17.2 使用标准
-
-#### ✅ **推荐做法**
-```solidity
-// ✅ 正确：使用 VaultMath 库
-import { VaultMath } from "../VaultMath.sol";
-
-function calculateUserHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256) {
-    return VaultMath.calculateHealthFactor(collateral, debt);
-}
-
-function calculateUserLTV(uint256 debt, uint256 collateral) internal pure returns (uint256) {
-    return VaultMath.calculateLTV(debt, collateral);
-}
-
-function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256) {
-    return VaultMath.calculateFee(amount, feeRate);
-}
-```
-
-#### ❌ **避免做法**
-```solidity
-// ❌ 错误：重复实现数学计算
-function calculateHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256) {
-    if (debt == 0) return type(uint256).max;
-    return (collateral * 10000) / debt;
-}
-
-// ❌ 错误：使用 VaultUtils 的数学函数（已迁移）
-function calculateLTV(uint256 debt, uint256 collateral) internal pure returns (uint256) {
-    return VaultUtils.calculateLTV(debt, collateral); // 已迁移到 VaultMath
-}
-```
-
-### 17.3 迁移指南
-
-#### 📋 **迁移步骤**
-1. **导入 VaultMath**：在合约中添加 `import { VaultMath } from "../VaultMath.sol";`
-2. **替换函数调用**：将 VaultUtils 的数学函数调用替换为 VaultMath
-3. **更新注释**：添加使用 VaultMath 的说明
-4. **测试验证**：确保计算结果一致
-
-#### 🔧 **迁移示例**
-```solidity
-// 迁移前
-import { VaultUtils } from "./VaultUtils.sol";
-
-function _calculateHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256) {
-    return VaultUtils.calculateHealthFactor(collateral, debt, 0);
-}
-
-// 迁移后
-import { VaultMath } from "./VaultMath.sol";
-
-function _calculateHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256) {
-    return VaultMath.calculateHealthFactor(collateral, debt);
-}
-```
-
-### 17.4 精度处理
-
-#### 📊 **精度标准**
-- **健康因子**：以 basis points (bps) 为单位，10000 = 100%
-- **LTV**：以 basis points (bps) 为单位，10000 = 100%
-- **费用率**：以 basis points (bps) 为单位，100 = 1%
-- **奖励率**：以 basis points (bps) 为单位，100 = 1%
-
-#### 🔧 **精度示例**
-```solidity
-// 健康因子 150% = 15000 bps
-uint256 healthFactor = VaultMath.calculateHealthFactor(1500, 1000); // 返回 15000
-
-// LTV 80% = 8000 bps
-uint256 ltv = VaultMath.calculateLTV(800, 1000); // 返回 8000
-
-// 费用 1.5% = 150 bps
-uint256 fee = VaultMath.calculateFee(1000, 150); // 返回 15
-```
-
----
-
-**文档版本**: v2.2  
-**最后更新**: 2025年7月  
-**维护者**: AI Assistant 

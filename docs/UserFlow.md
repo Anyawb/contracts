@@ -49,11 +49,29 @@ flowchart TD
 若同为借款人或出借人，按区块时间戳排序
 
 💰 撮合与上链落地逻辑（统一编排：SettlementMatchLib.finalizeAtomicFull）
-撮合成功后（VBL 仅做签名/保留校验）：
-1) 库内调用 `VaultCore.borrowFor(borrower, asset, amount, termDays)` 完成账本写入（命中 `onlyVaultCore`）。
-2) 调用订单引擎 `LendingEngine.createLoanOrder(order)` 完成订单创建、LoanNFT 铸造与统一 DataPush/奖励。
-3) 费用分发：库内先授权 FeeRouter，调用 `FeeRouter.distributeNormal(token, amount)` 拉取并分发费用，再返还余量给编排合约。
-4) 净额发放：将 `amount - 平台费 - 生态费` 的净额转给借方（与 UserFlow 显示一致）。
+撮合成功后（VBL 仅做签名/保留校验），`SettlementMatchLib.finalizeAtomicFull` 执行以下步骤：
+
+1) **白名单与权限检查**：验证资产白名单和调用者权限（ACTION_ORDER_CREATE）
+
+2) **可选抵押物存入**：如果提供了抵押资产，通过 `CollateralManager.depositCollateral` 存入抵押物
+
+3) **账本写入**：通过 `VaultCore.borrowFor(borrower, asset, amount, termDays)` 完成账本写入
+   - ⚠️ **注意**：当前 `VaultCore.sol` 中 `borrowFor` 函数在接口 `IVaultCore` 中定义但尚未实现
+   - 实际账本写入通过 `VaultView.processUserOperation` 处理，更新 View 层缓存
+   - 对于 BORROW 操作，VaultView 更新本地债务缓存 `_userDebt[user][asset]`
+
+4) **订单创建**：调用订单引擎 `LendingEngine.createLoanOrder(order)` 完成：
+   - 订单创建与存储
+   - LoanNFT 铸造（带重试机制）
+   - 统一 DataPush 事件推送
+   - 奖励触发（RewardManager.onLoanEvent）
+
+5) **费用分发**：库内先授权 FeeRouter，调用 `FeeRouter.distributeNormal(token, amount)` 拉取并分发费用
+   - 平台费和生态费从借款金额中扣除
+   - FeeRouter 从调用者（VaultBusinessLogic）拉取费用
+
+6) **净额发放**：将 `amount - 平台费 - 生态费` 的净额转给借方
+   - 净额 = amount - (amount × platformFeeBps / 10000) - (amount × ecoFeeBps / 10000)
 
 订单记录包括：
 - 抵押资产地址与数量
@@ -65,9 +83,14 @@ flowchart TD
 📦 借款释放与记账流程（撮合路径）
 借款人在完成抵押（可选）后：
 
-- 账本写入与风险/视图推送由 LE + View 路径统一处理；VBL 不直接访问预言机。
-- 费用在编排中执行：FeeRouter 拉取分发后返还余量，借方收到净额。
-- 示例费率（可配置）：借/贷各 0.03%。
+- **账本写入流程**：
+  - `SettlementMatchLib.finalizeAtomicFull` 调用 `VaultCore.borrowFor`（当前通过 call 方式，需实现）
+  - `VaultCore` 将操作传送至 `VaultView.processUserOperation`
+  - `VaultView` 验证操作、更新本地缓存（`_userDebt[user][asset] += amount`）、发出事件
+  - 账本写入与风险/视图推送由 LendingEngine + View 路径统一处理；VBL 不直接访问预言机
+
+- **费用处理**：费用在编排中执行：FeeRouter 从 VaultBusinessLogic 拉取费用并分发，借方收到净额
+- **示例费率**（可配置）：平台费和生态费各 0.03%（具体费率由 FeeRouter 配置决定）
 
 🧮 示例：800 USDT 借款 → 各扣 0.24 USDT → 借方净得 799.52 USDT（含方向差异以 FeeRouter 配置为准）
 
@@ -80,15 +103,40 @@ flowchart TD
 
 🧾 到期还款流程
 ✅ 借方主动还款（履约）
-借方归还：
 
-借款本金 + 利息 + 平台还款手续费（0.06%）
+**还款流程**（通过 `LendingEngine.repay(orderId, repayAmount)`）：
 
-平台归还给贷方：
+1. **借方还款**：借方调用 `LendingEngine.repay`，传入订单ID和还款金额（本金 + 利息）
+   - 需要 `ACTION_REPAY` 权限
+   - 还款金额必须 > 0 且 ≤ 剩余应还金额
+   - 订单必须存在且未完全还清
 
-本金 + 利息 - 0.03% 手续费
+2. **费用计算与分发**：
+   - 还款手续费 = 还款金额 × 0.06% (REPAY_FEE_BPS = 6)
+   - 贷方收到金额 = 还款金额 - 还款手续费
+   - 手续费从借方转入 LendingEngine 合约，再授权给 FeeRouter
+   - 手续费通过 `FeeRouter.distributeNormal` 分发（带优雅降级，失败时记录但不中断流程）
 
-双方自动获得平台积分（可用于权益、奖励）
+3. **资金流转**：
+   - 借方需先授权 LendingEngine 合约可转出还款金额
+   - 手续费部分转入 LendingEngine，再授权给 FeeRouter
+   - 贷方收到金额从借方直接转入贷方地址（`safeTransferFrom`）
+
+4. **状态更新**：
+   - 更新订单还款状态：`ord.repaidAmount += _repayAmount`
+   - 如果全部还清（`repaidAmount >= totalDue`），更新 LoanNFT 状态为 `Repaid`
+   - 发出 `LoanRepaid` 事件和 DataPush 事件（DATA_TYPE_LOAN_REPAID）
+
+5. **奖励触发**：
+   - 检查是否按期且足额还款：
+     - 按期窗口：到期日 ±24小时（ON_TIME_WINDOW = 24 hours）
+     - 足额：`repaidAmount >= totalDue`
+   - 调用 `RewardManager.onLoanEvent(borrower, repayAmount, 0, isOnTimeAndFullyRepaid)` 触发积分奖励
+   - 借方和贷方根据履约情况获得积分
+
+**示例**：还款 800 USDT（本金 + 利息）
+- 还款手续费：800 × 0.06% = 0.48 USDT
+- 贷方收到：800 - 0.48 = 799.52 USDT
 
 ❌ 违约清算逻辑
 情况一：到期未还
@@ -120,21 +168,31 @@ sequenceDiagram
     participant Borrower as 用户2（借方）
     participant Lender as 用户3（贷方）
     participant VBL as VaultBusinessLogic
+    participant MatchLib as SettlementMatchLib
     participant VaultCore as VaultCore
+    participant VaultView as VaultView
     participant LE as LendingEngine
     participant Router as FeeRouter
-    participant Keeper as Keeper
     participant System as 撮合系统
 
     Borrower->>System: 提交借贷意向（800 USDT）
     Lender->>System: 提交出借意向（10000 USDT）
     System-->>VBL: 撮合成功（校验签名/保留）→ finalizeMatch
-    VBL->>VaultCore: borrowFor(borrower, asset, 800, termDays)
-    VaultCore->>LE: 账本写入（onlyVaultCore）
-    VBL->>LE: createLoanOrder(order)（统一 DataPush/NFT/奖励）
-    VBL->>Router: approve & distributeNormal(token, 800)
-    Router-->>VBL: 返还余量（remaining）
-    VBL-->>Borrower: 转账净额（800-平台费-生态费）
+    VBL->>MatchLib: finalizeAtomicFull(...)
+    MatchLib->>MatchLib: 1. 白名单与权限检查
+    MatchLib->>MatchLib: 2. 可选抵押物存入（CollateralManager）
+    MatchLib->>VaultCore: 3. borrowFor(borrower, asset, 800, termDays)
+    Note over VaultCore: ⚠️ 当前需实现此函数
+    VaultCore->>VaultView: processUserOperation(ACTION_BORROW)
+    VaultView->>VaultView: 更新本地缓存 _userDebt
+    VaultView-->>MatchLib: 账本写入完成
+    MatchLib->>LE: 4. createLoanOrder(order)
+    LE->>LE: 创建订单、铸造NFT、触发奖励、DataPush
+    MatchLib->>Router: 5. approve & distributeNormal(token, 800)
+    Router->>Router: 扣除平台费和生态费
+    Router-->>MatchLib: 费用分发完成
+    MatchLib->>MatchLib: 6. 计算净额 = 800 - 平台费 - 生态费
+    MatchLib-->>Borrower: 转账净额（约 799.52 USDT）
     Note over Borrower, Lender: 开始计息周期
 🎁 积分激励机制（可扩展）
 触发行为	借方奖励	贷方奖励
@@ -147,5 +205,3 @@ sequenceDiagram
 Vault 未注册或未审核 → 禁止借贷操作；
 
 池子资金利用率过高 → 提示等待或提高利率；
-
-到期资产价格变动 > 5% → 借方 24 小时内需应对，否则全额违约。

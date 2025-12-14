@@ -1,32 +1,23 @@
 /**
- * Arbitrum Sepolia 测试网部署脚本
+ * Arbitrum Sepolia 测试网部署脚本（符合 contracts/docs/Architecture-Guide.md）
  * Arbitrum Sepolia Testnet Deployment Script
  * 
  * 该脚本用于将智能合约系统部署到 Arbitrum Sepolia 测试网
  * This script deploys the smart contract system to Arbitrum Sepolia testnet
+ * - 部署 Registry 核心模块（Registry + RegistryCore）
+ * - 部署并注册核心业务与视图模块
+ * - 写入 deployments/arbitrum-sepolia.json 与 frontend-config/contracts-arbitrum-sepolia.ts
  */
 
 import fs from 'fs';
 import path from 'path';
 import { loadAssetsConfig, configureAssets } from '../utils/configure-assets';
 
-// 定义 keyOf 函数，用于生成模块键
-function keyOf(upperSnake: string): string {
-  return ethers.keccak256(ethers.toUtf8Bytes(upperSnake));
-}
-
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const hre = require('hardhat');
-const { ethers } = hre;
-const { upgrades } = hre;
+const { ethers, upgrades, network } = hre;
 
-/**
- * 部署记录接口
- * Deployment record interface
- */
-interface DeployRecord {
-  [key: string]: string;
-}
+type DeployMap = Record<string, string>;
 
 /**
  * Arbitrum Sepolia 网络配置
@@ -39,62 +30,44 @@ const ARBITRUM_SEPOLIA_CONFIG = {
   explorer: 'https://sepolia.arbiscan.io'
 };
 
-/**
- * 部署记录文件路径
- * Deployment record file path
- */
-const DEPLOY_PATH = path.join(__dirname, '../deployments/arbitrum-sepolia.json');
+const DEPLOY_DIR = path.join(__dirname, '..', 'deployments');
+const DEPLOY_FILE = path.join(DEPLOY_DIR, 'arbitrum-sepolia.json');
+// 将前端配置输出到仓库根目录的 frontend-config，供前端直接导入使用
+const FRONTEND_DIR = path.join(__dirname, '..', '..', '..', 'frontend-config');
+const FRONTEND_FILE = path.join(FRONTEND_DIR, 'contracts-arbitrum-sepolia.ts');
 
-/**
- * 加载部署记录文件
- * Load deployment record file
- */
-function loadDeploymentFile(): DeployRecord {
-  if (fs.existsSync(DEPLOY_PATH)) {
-    return JSON.parse(fs.readFileSync(DEPLOY_PATH, 'utf-8'));
-  }
+function load(): DeployMap {
+  if (fs.existsSync(DEPLOY_FILE)) return JSON.parse(fs.readFileSync(DEPLOY_FILE, 'utf8')) as DeployMap;
   return {};
 }
 
-/**
- * 保存部署记录文件
- * Save deployment record file
- * @param data 部署记录数据 Deployment record data
- */
-function saveDeploymentFile(data: DeployRecord) {
-  fs.mkdirSync(path.dirname(DEPLOY_PATH), { recursive: true });
-  fs.writeFileSync(DEPLOY_PATH, JSON.stringify(data, null, 2));
+function save(map: DeployMap) {
+  fs.mkdirSync(DEPLOY_DIR, { recursive: true });
+  fs.writeFileSync(DEPLOY_FILE, JSON.stringify(map, null, 2));
 }
 
-/**
- * 部署普通合约
- * Deploy regular contract
- * @param name 合约名称 Contract name
- * @param args 构造函数参数 Constructor arguments
- */
-async function deploy(name: string, ...args: unknown[]): Promise<string> {
-  const factory = await ethers.getContractFactory(name);
-  const contract = await factory.deploy(...args);
-  await contract.waitForDeployment();
-  const address = await contract.getAddress();
-  console.log(`✅ ${name} deployed @ ${address}`);
-  return address;
+function keyOf(upperSnake: string): string {
+  return ethers.keccak256(ethers.toUtf8Bytes(upperSnake));
 }
 
-/**
- * 部署可升级合约
- * Deploy upgradeable contract
- * @param name 合约名称 Contract name
- * @param args 初始化函数参数 Initializer arguments
- * @param options 部署选项 Deployment options
- */
-async function deployProxy(name: string, args: unknown[] = [], options?: unknown): Promise<string> {
-  const factory = await ethers.getContractFactory(name);
-  const proxy = await upgrades.deployProxy(factory, args, options);
-  await proxy.waitForDeployment();
-  const address = await proxy.getAddress();
-  console.log(`✅ ${name} (Proxy) deployed @ ${address}`);
-  return address;
+async function deployRegular(name: string, ...args: unknown[]): Promise<string> {
+  const f = await ethers.getContractFactory(name);
+  const c = await f.deploy(...args);
+  await c.waitForDeployment();
+  const addr = await c.getAddress();
+  console.log(`✅ ${name} deployed @ ${addr}`);
+  return addr;
+}
+
+async function deployProxy(name: string, args: unknown[] = [], opts: Record<string, unknown> = {}): Promise<string> {
+  const f = await ethers.getContractFactory(name);
+  // 默认添加unsafeAllow配置来处理构造函数问题
+  const defaultOpts = { unsafeAllow: ['constructor'], ...opts };
+  const p = await upgrades.deployProxy(f, args, defaultOpts);
+  await p.waitForDeployment();
+  const addr = await p.getAddress();
+  console.log(`✅ ${name} (proxy) deployed @ ${addr}`);
+  return addr;
 }
 
 /**
@@ -173,15 +146,18 @@ async function backupWalletAssets(): Promise<void> {
   console.log(`✅ 钱包资产已备份到 Wallet assets backed up to: ${backupFile}`);
 }
 
-/**
- * 主部署函数
- * Main deployment function
- */
-async function main(): Promise<void> {
-  console.log('🚀 开始部署到 Arbitrum Sepolia 测试网...');
-  console.log('🚀 Starting deployment to Arbitrum Sepolia testnet...');
-  
-  const deployed = loadDeploymentFile();
+async function main() {
+  console.log(`Network: ${network.name}`);
+  // 确保 artifacts 可用：在脚本开始时编译（适配 CI/冷启动）
+  try {
+    await hre.run('compile');
+  } catch (e) {
+    console.log('⚠️ Compile step failed or skipped:', e);
+  }
+  const [deployer] = await ethers.getSigners();
+  console.log(`Deployer: ${deployer.address}`);
+
+  const deployed: DeployMap = load();
   
   try {
     // 1. 环境检查 Environment check
@@ -190,24 +166,112 @@ async function main(): Promise<void> {
     // 2. 备份钱包资产 Backup wallet assets
     await backupWalletAssets();
     
-    // 3. 部署 Registry Deploy Registry
+    // 3. 部署 Registry + 核心子模块
+    // 建议最小延迟 2 天（测试网）
+    const MIN_DELAY = 2 * 24 * 60 * 60; // 2 days
+
     if (!deployed.Registry) {
-      console.log('📋 部署 Registry...');
-      const minDelay = 2 * 24 * 60 * 60; // 2 days
-      deployed.Registry = await deploy('Registry', minDelay);
-      saveDeploymentFile(deployed);
+      // UUPS 可升级合约，使用 Proxy 部署并初始化
+      deployed.Registry = await deployProxy('Registry', [MIN_DELAY, deployer.address, deployer.address]);
+      save(deployed);
+    }
+
+    if (!deployed.RegistryCore) {
+      // 关键：将 RegistryCore 的 admin 设为 Registry 地址
+      deployed.RegistryCore = await deployProxy('RegistryCore', [deployed.Registry, MIN_DELAY]);
+      save(deployed);
+      const registry = await ethers.getContractAt('Registry', deployed.Registry);
+      await (await registry.setRegistryCore(deployed.RegistryCore)).wait();
+      console.log('🔗 RegistryCore linked to Registry');
+    }
+
+    // 可选：部署并挂载升级/治理子模块
+    if (!deployed.RegistryUpgradeManager) {
+      deployed.RegistryUpgradeManager = await deployProxy('RegistryUpgradeManager', [deployed.Registry]);
+      save(deployed);
+      try {
+        const registry = await ethers.getContractAt('Registry', deployed.Registry);
+        await (await registry.setUpgradeManager(deployed.RegistryUpgradeManager)).wait();
+        console.log('🔗 RegistryUpgradeManager linked');
+      } catch (error) {
+        console.log('⚠️ RegistryUpgradeManager linking failed:', error);
+      }
+    }
+
+    if (!deployed.RegistryAdmin) {
+      deployed.RegistryAdmin = await deployProxy('RegistryAdmin');
+      save(deployed);
+      try {
+        const registry = await ethers.getContractAt('Registry', deployed.Registry);
+        await (await registry.setRegistryAdmin(deployed.RegistryAdmin)).wait();
+        console.log('🔗 RegistryAdmin linked');
+      } catch (error) {
+        console.log('⚠️ RegistryAdmin linking failed:', error);
+      }
+    }
+
+    // 部署动态模块键注册表
+    if (!deployed.RegistryDynamicModuleKey) {
+      try {
+        deployed.RegistryDynamicModuleKey = await deployProxy('RegistryDynamicModuleKey', [
+          deployer.address, // registrationAdmin
+          deployer.address  // systemAdmin
+        ]);
+        save(deployed);
+        console.log('✅ RegistryDynamicModuleKey deployed @', deployed.RegistryDynamicModuleKey);
+      } catch (error) {
+        console.log('⚠️ RegistryDynamicModuleKey deployment failed:', error);
+      }
     }
     
-    // 4. 部署权限系统 Deploy access control system
+    // 4. 部署核心/视图/账本与支撑模块
     if (!deployed.AccessControlManager) {
-      console.log('🔐 部署权限系统...');
-      const [deployer] = await ethers.getSigners();
-      
-      deployed.AccessControlManager = await deployProxy('AccessControlManager', [deployer.address]);
-      deployed.AssetWhitelist = await deployProxy('AssetWhitelist', [deployer.address, deployed.Registry]);
-      deployed.AuthorityWhitelist = await deployProxy('AuthorityWhitelist', [deployer.address]);
-      
-      saveDeploymentFile(deployed);
+      // 非升级合约（构造函数接收 owner）
+      deployed.AccessControlManager = await deployRegular('AccessControlManager', deployer.address);
+      save(deployed);
+    }
+
+    // 为部署者赋权：ADMIN + 只读（VIEW_*）权限
+    try {
+      const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+      const adminAddress = deployer.address;
+
+      const roleNames = [
+        'ACTION_ADMIN',
+        // 读权限（全量覆盖）
+        'VIEW_SYSTEM_DATA',
+        'VIEW_USER_DATA',
+        'VIEW_DEGRADATION_DATA',
+        'VIEW_CACHE_DATA',
+        'VIEW_PRICE_DATA',
+        'VIEW_RISK_DATA',
+        'VIEW_LIQUIDATION_DATA',
+        // 可选：查询管理
+        'QUERY_MANAGER',
+      ];
+      for (const r of roleNames) {
+        const role = ethers.keccak256(ethers.toUtf8Bytes(r));
+        try {
+          await (await acm.grantRole(role, adminAddress)).wait();
+          console.log(`🔑 Granted ${r} to ${adminAddress}`);
+        } catch (e) {
+          // 角色已存在会 revert: RoleAlreadyGranted()，忽略
+          console.log(`⚠️ Role ${r} already granted or failed:`, e);
+        }
+      }
+      console.log('🔐 AccessControlManager: admin granted ADMIN + read-only roles');
+    } catch (e) {
+      console.log('⚠️ AccessControlManager grant roles skipped:', e);
+    }
+
+    if (!deployed.AssetWhitelist) {
+      deployed.AssetWhitelist = await deployProxy('AssetWhitelist', [deployed.Registry]);
+      save(deployed);
+    }
+
+    if (!deployed.AuthorityWhitelist) {
+      deployed.AuthorityWhitelist = await deployProxy('AuthorityWhitelist', [deployed.Registry]);
+      save(deployed);
     }
     
     // 5. 部署预言机系统 Deploy oracle system
@@ -290,10 +354,16 @@ async function main(): Promise<void> {
         console.log('⚠️ 预言机系统验证失败:', error);
       }
       
-      saveDeploymentFile(deployed);
+      save(deployed);
+    }
+
+    if (!deployed.FeeRouter) {
+      // platformBps / ecoBps 示例：9 (=0.09%), 1 (=0.01%)
+      deployed.FeeRouter = await deployProxy('FeeRouter', [deployed.Registry, deployer.address, deployer.address, 9, 1]);
+      save(deployed);
     }
     
-    // 6. 部署完整的奖励系统 Deploy complete reward system
+    // 5. 部署完整的奖励系统 Deploy complete reward system
     if (!deployed.RewardPoints) {
       console.log('🎁 部署完整的奖励系统...');
       console.log('🎁 Deploying Complete Reward System...');
@@ -306,575 +376,567 @@ async function main(): Promise<void> {
       });
       
       deployed.RewardManagerCore = await deployProxy('RewardManagerCore', [
-        deployed.Registry, // registryAddr
-        deployed.AccessControlManager, // acmAddr
+        deployed.Registry,
         ethers.parseUnits('10', 18),  // baseUsd: 每 100 USD 基础分
         ethers.parseUnits('1', 18),   // perDay: 每天积分
         ethers.parseUnits('500', 18), // bonus: 提前还款奖励 (5%)
         ethers.parseUnits('100', 18)  // baseEth: 每 1 ETH 基础分
       ]);
       
-      deployed.RewardCore = await deployProxy('RewardCore', [
-        deployed.Registry, // registryAddr
-        deployed.AccessControlManager // acmAddr
-      ]);
+      deployed.RewardCore = await deployProxy('RewardCore', [deployed.Registry]);
       
-      // 2. 部署服务配置合约
-      console.log('⚙️ 部署服务配置合约...');
-      deployed.FeatureUnlockConfig = await deployProxy('FeatureUnlockConfig', [
-        deployed.AccessControlManager // acmAddr
-      ]);
-      
-      deployed.GovernanceAccessConfig = await deployProxy('GovernanceAccessConfig', [
-        deployed.AccessControlManager // acmAddr
-      ]);
-      
-      deployed.PriorityServiceConfig = await deployProxy('PriorityServiceConfig', [
-        deployed.AccessControlManager // acmAddr
-      ]);
-      
-      deployed.AdvancedAnalyticsConfig = await deployProxy('AdvancedAnalyticsConfig', [
-        deployed.AccessControlManager // acmAddr
-      ]);
-      
-      deployed.TestnetFeaturesConfig = await deployProxy('TestnetFeaturesConfig', [
-        deployed.AccessControlManager // acmAddr
-      ]);
+      // 2. 部署服务配置合约（如果需要）
+      // 注意：这些配置合约在本地部署中未包含，保持原逻辑
       
       // 3. 部署积分消费合约
       console.log('🎮 部署积分消费合约...');
       deployed.RewardConsumption = await deployProxy('RewardConsumption', [
-        deployed.Registry, // registryAddr
-        deployed.AccessControlManager // acmAddr
+        deployed.RewardCore || ethers.ZeroAddress,
+        deployed.Registry
       ]);
       
       // 4. 部署奖励管理合约
       console.log('🎮 部署奖励管理合约...');
-      deployed.RewardManager = await deployProxy('RewardManager', [
-        deployed.Registry,
-        deployed.RewardPoints,
-        deployed.RewardManagerCore
-      ]);
+      deployed.RewardManager = await deployProxy('RewardManager', [deployed.Registry]);
       
-      deployed.RewardConfig = await deployProxy('RewardConfig', [
-        deployed.Registry, // registryAddr
-        deployed.AccessControlManager // acmAddr
-      ]);
-      // RewardView（只读聚合 + DataPush）
+      deployed.RewardConfig = await deployProxy('RewardConfig', [deployed.Registry]);
+      
       if (!deployed.RewardView) {
-        deployed.RewardView = await deployProxy('RewardView', [
-          deployed.Registry
-        ]);
+        deployed.RewardView = await deployProxy('RewardView', [deployed.Registry]);
       }
       
-      saveDeploymentFile(deployed);
+      save(deployed);
       
-      // 5. 配置 Reward 系统权限
-      console.log('🔐 配置 Reward 系统权限...');
+      // MINTER_ROLE 授权（RewardPoints -> RMCore/RewardCore）
       try {
-        const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
-        
-        // 授予 SET_PARAMETER 权限
-        const SET_PARAMETER_ROLE = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
-        await acm.grantRole(SET_PARAMETER_ROLE, deployer.address);
-        console.log('✅ Deployer 已获得 SET_PARAMETER 权限');
-        
-        // 授予 UPGRADE_MODULE 权限
-        const UPGRADE_MODULE_ROLE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
-        await acm.grantRole(UPGRADE_MODULE_ROLE, deployer.address);
-        console.log('✅ Deployer 已获得 UPGRADE_MODULE 权限');
-        
-        // 授予 GRANT_ROLE 权限
-        const GRANT_ROLE_ROLE = ethers.keccak256(ethers.toUtf8Bytes('GRANT_ROLE'));
-        await acm.grantRole(GRANT_ROLE_ROLE, deployer.address);
-        console.log('✅ Deployer 已获得 GRANT_ROLE 权限');
-
-        // 为 RewardPoints 授予 MINTER_ROLE 给核心模块（发放/消费）
         if (deployed.RewardPoints) {
-          const rewardPoints = await ethers.getContractAt('RewardPoints', deployed.RewardPoints);
-          const MINTER_ROLE = await rewardPoints.MINTER_ROLE();
-          try {
-            if (deployed.RewardManagerCore) {
-              await rewardPoints.grantRole(MINTER_ROLE, deployed.RewardManagerCore);
-              console.log('✅ RewardPoints: 已授予 MINTER_ROLE 给 RewardManagerCore');
+          const code = await ethers.provider.getCode(deployed.RewardPoints);
+          if (!code || code === '0x') {
+            console.log('⚠️ RewardPoints has no code at', deployed.RewardPoints, '- skip MINTER_ROLE grant');
+          } else {
+            const rp = await ethers.getContractAt('RewardPoints', deployed.RewardPoints);
+            
+            // 检查合约是否已初始化
+            try {
+              const name = await rp.name();
+              console.log('✅ RewardPoints is initialized, name:', name);
+            } catch (initError) {
+              console.log('⚠️ RewardPoints not initialized, attempting to initialize...');
+              try {
+                await (await rp.initialize(deployer.address)).wait();
+                console.log('✅ RewardPoints initialized with deployer as admin');
+              } catch (initErr) {
+                console.log('⚠️ RewardPoints initialization failed:', initErr);
+              }
             }
-          } catch (e) {
-            console.log('⚠️ 授予 RewardManagerCore MINTER_ROLE 失败（可能已授予或地址缺失）:', e);
-          }
-          try {
-            if (deployed.RewardCore) {
-              await rewardPoints.grantRole(MINTER_ROLE, deployed.RewardCore);
-              console.log('✅ RewardPoints: 已授予 MINTER_ROLE 给 RewardCore');
+            
+            // 使用合约的MINTER_ROLE常量
+            try {
+              const MINTER_ROLE = await rp.MINTER_ROLE();
+              console.log('✅ Got MINTER_ROLE from contract:', MINTER_ROLE);
+              
+              if (deployed.RewardManagerCore) {
+                try { 
+                  await (await rp.grantRole(MINTER_ROLE, deployed.RewardManagerCore)).wait(); 
+                  console.log('✅ Granted MINTER_ROLE to RewardManagerCore');
+                } catch (error) { 
+                  console.log('⚠️ RewardManagerCore MINTER_ROLE grant failed:', error); 
+                }
+              }
+              if (deployed.RewardCore) {
+                try { 
+                  await (await rp.grantRole(MINTER_ROLE, deployed.RewardCore)).wait(); 
+                  console.log('✅ Granted MINTER_ROLE to RewardCore');
+                } catch (error) { 
+                  console.log('⚠️ RewardCore MINTER_ROLE grant failed:', error); 
+                }
+              }
+              console.log('🔐 RewardPoints MINTER_ROLE granted');
+            } catch (roleError) {
+              console.log('⚠️ Failed to get MINTER_ROLE from contract, using fallback:', roleError);
+              // 回退方案：使用手动计算的哈希
+              const MINTER_ROLE = ethers.keccak256(ethers.toUtf8Bytes('MINTER_ROLE'));
+              if (deployed.RewardManagerCore) {
+                try { await (await rp.grantRole(MINTER_ROLE, deployed.RewardManagerCore)).wait(); } catch (error) { console.log('⚠️ RewardManagerCore MINTER_ROLE grant failed (fallback):', error); }
+              }
+              if (deployed.RewardCore) {
+                try { await (await rp.grantRole(MINTER_ROLE, deployed.RewardCore)).wait(); } catch (error) { console.log('⚠️ RewardCore MINTER_ROLE grant failed (fallback):', error); }
+              }
             }
-          } catch (e) {
-            console.log('⚠️ 授予 RewardCore MINTER_ROLE 失败（可能已授予或地址缺失）:', e);
           }
         }
-        
       } catch (error) {
-        console.log('⚠️ Reward 系统权限配置失败，可能已经配置过:', error);
-      }
-      
-      // 6. 配置服务价格
-      console.log('💰 配置服务价格...');
-      try {
-        // 配置功能解锁服务价格
-        const featureUnlock = await ethers.getContractAt('FeatureUnlockConfig', deployed.FeatureUnlockConfig);
-        await featureUnlock.updateConfig(0, ethers.parseUnits('300', 18), 30 * 24 * 60 * 60, true);  // Basic
-        await featureUnlock.updateConfig(1, ethers.parseUnits('800', 18), 30 * 24 * 60 * 60, true);  // Standard
-        await featureUnlock.updateConfig(2, ethers.parseUnits('1500', 18), 30 * 24 * 60 * 60, true); // Premium
-        await featureUnlock.updateConfig(3, ethers.parseUnits('3000', 18), 30 * 24 * 60 * 60, true); // VIP
-        console.log('✅ 功能解锁服务价格配置完成');
-        
-        // 配置治理访问服务价格
-        const governanceAccess = await ethers.getContractAt('GovernanceAccessConfig', deployed.GovernanceAccessConfig);
-        await governanceAccess.updateConfig(0, ethers.parseUnits('500', 18), 30 * 24 * 60 * 60, true);  // Basic
-        await governanceAccess.updateConfig(1, ethers.parseUnits('1000', 18), 30 * 24 * 60 * 60, true); // Standard
-        await governanceAccess.updateConfig(2, ethers.parseUnits('2000', 18), 30 * 24 * 60 * 60, true); // Premium
-        await governanceAccess.updateConfig(3, ethers.parseUnits('5000', 18), 30 * 24 * 60 * 60, true); // VIP
-        console.log('✅ 治理访问服务价格配置完成');
-        
-      } catch (error) {
-        console.log('⚠️ 服务价格配置失败，可能已经配置过:', error);
-      }
-      
-      // 7. 验证 Reward 系统部署
-      console.log('🔍 验证 Reward 系统部署...');
-      try {
-        const rewardManager = await ethers.getContractAt('RewardManagerCore', deployed.RewardManagerCore);
-        const baseUsd = await rewardManager.basePointPerHundredUsd();
-        const perDay = await rewardManager.durationPointPerDay();
-        console.log(`✅ RewardManagerCore 配置: 基础分/100 USD = ${ethers.formatEther(baseUsd)}, 每天积分 = ${ethers.formatEther(perDay)}`);
-        
-        const featureUnlock = await ethers.getContractAt('FeatureUnlockConfig', deployed.FeatureUnlockConfig);
-        const basicConfig = await featureUnlock.getConfig(0);
-        console.log(`✅ FeatureUnlock Basic 配置: 价格 = ${ethers.formatEther(basicConfig.price)}, 时长 = ${basicConfig.duration} 秒`);
-        
-      } catch (error) {
-        console.log('⚠️ Reward 系统验证失败:', error);
+        console.log('⚠️ RewardPoints MINTER_ROLE setup failed:', error);
       }
     }
     
-    // 7. 部署 Vault 系统 Deploy Vault system
-    if (!deployed.VaultCore) {
-      console.log('🏦 部署 Vault 系统...');
-      const [deployer] = await ethers.getSigners();
+    // 6. 部署 Vault 系统 Deploy Vault system
+    // CollateralManager（CM）
+    if (!deployed.CollateralManager) {
+      deployed.CollateralManager = await deployProxy('CollateralManager', [deployed.Registry]);
+      save(deployed);
+    }
+
+    // LendingEngine（核心账本）
+    if (!deployed.LendingEngine) {
+      deployed.LendingEngine = await deployProxy('LendingEngine', [deployed.Registry]);
+      save(deployed);
+    }
       
-      // 部署 Vault 模块 Deploy Vault modules
-      // CollateralManager.initialize(address initialRegistryAddr)
-      deployed.CollateralManager = await deployProxy('CollateralManager', [
-        deployed.Registry
-      ]);
-      // LendingEngine.initialize(address initialRegistryAddr)
-      deployed.LendingEngine = await deployProxy('LendingEngine', [
-        deployed.Registry
-      ]);
-      deployed.HealthFactorCalculator = await deployProxy('HealthFactorCalculator', [
-        deployed.Registry,
-        deployed.AccessControlManager,
-        deployed.PriceOracle
-      ]);
-      // 统计模块迁移至视图层：部署 StatisticsView 作为 KEY_STATS 目标模块
-      deployed.StatisticsView = await deployProxy('StatisticsView', [
-        deployed.Registry
-      ]);
-      deployed.GuaranteeFundManager = await deployProxy('GuaranteeFundManager', [deployer.address]);
-      deployed.FeeRouter = await deployProxy('FeeRouter', [
-        deployed.AccessControlManager, // accessControlManager
-        deployer.address, // platformTreasury
-        deployer.address, // ecosystemVault
-        9,                // platformBps (0.09% = 9 基点)
-        1                 // ecoBps (0.01% = 1 基点)
-      ]);
-      
-      // 部署 VaultStorage Deploy VaultStorage（严格禁止 Mock；从配置文件读取真实地址）
-      // VaultStorage.initialize(address initialRegistry, address initialRwaToken, address initialSettlementToken)
+    // LiquidationRiskManager（清算风险管理器）
+    if (!deployed.LiquidationRiskManager) {
+      try {
+        const initialMaxCacheDuration = 300; // 5分钟
+        const initialMaxBatchSize = 50;
+        // 先部署所需库
+        const riskLibFactory = await ethers.getContractFactory('src/Vault/liquidation/libraries/LiquidationRiskLib.sol:LiquidationRiskLib');
+        const riskLib = await riskLibFactory.deploy();
+        await riskLib.waitForDeployment();
+        const riskLibAddr = await riskLib.getAddress();
+        console.log('📚 LiquidationRiskLib deployed @', riskLibAddr);
+
+        const riskBatchLibFactory = await ethers.getContractFactory('src/Vault/liquidation/libraries/LiquidationRiskBatchLib.sol:LiquidationRiskBatchLib');
+        const riskBatchLib = await riskBatchLibFactory.deploy();
+        await riskBatchLib.waitForDeployment();
+        const riskBatchLibAddr = await riskBatchLib.getAddress();
+        console.log('📚 LiquidationRiskBatchLib deployed @', riskBatchLibAddr);
+
+        // 使用已链接库创建工厂并通过 Proxy 部署
+        const lrmFactory = await ethers.getContractFactory(
+          'src/Vault/liquidation/modules/LiquidationRiskManager.sol:LiquidationRiskManager',
+          {
+            libraries: {
+              LiquidationRiskLib: riskLibAddr,
+              LiquidationRiskBatchLib: riskBatchLibAddr,
+            },
+          }
+        );
+        // 通过 UUPS Proxy 部署，并允许链接外部库
+        const lrmProxy = await upgrades.deployProxy(
+          lrmFactory,
+          [
+            deployed.Registry,
+            deployed.AccessControlManager,
+            initialMaxCacheDuration,
+            initialMaxBatchSize
+          ],
+          {
+            unsafeAllowLinkedLibraries: true,
+            unsafeAllow: ['constructor'],
+          }
+        );
+        await lrmProxy.waitForDeployment();
+        deployed.LiquidationRiskManager = await lrmProxy.getAddress();
+        save(deployed);
+        console.log('✅ LiquidationRiskManager deployed @', deployed.LiquidationRiskManager);
+      } catch (error) {
+        console.log('⚠️ LiquidationRiskManager deployment failed:', error);
+      }
+    }
+
+    // VaultLendingEngine（Vault借贷引擎）
+    if (!deployed.VaultLendingEngine) {
+      try {
+        const assets = loadAssetsConfig(ARBITRUM_SEPOLIA_CONFIG.name, ARBITRUM_SEPOLIA_CONFIG.chainId);
+        const usdc = assets.find((a) => a.coingeckoId === 'usd-coin');
+        if (!usdc || !usdc.address) {
+          throw new Error('缺少 USDC/Settlement Token 配置');
+        }
+        if (!deployed.SettlementToken) {
+          deployed.SettlementToken = usdc.address;
+          save(deployed);
+        }
+        deployed.VaultLendingEngine = await deployProxy('src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine', [deployed.PriceOracle, deployed.SettlementToken, deployed.Registry]);
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ VaultLendingEngine deployment failed:', error);
+      }
+    }
+
+    // EarlyRepaymentGuaranteeManager（提前还款保证金管理器）
+    if (!deployed.EarlyRepaymentGuaranteeManager) {
+      try {
+        deployed.EarlyRepaymentGuaranteeManager = await deployProxy('src/Vault/modules/EarlyRepaymentGuaranteeManager.sol:EarlyRepaymentGuaranteeManager', [deployed.VaultCore || ethers.ZeroAddress, deployed.Registry, deployer.address, 500]); // 5% 平台费率
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ EarlyRepaymentGuaranteeManager deployment failed:', error);
+      }
+    }
+
+    // VaultStorage + VaultBusinessLogic + VaultView + VaultCore
+    if (!deployed.VaultStorage) {
       const assets = loadAssetsConfig(ARBITRUM_SEPOLIA_CONFIG.name, ARBITRUM_SEPOLIA_CONFIG.chainId);
       const usdc = assets.find((a) => a.coingeckoId === 'usd-coin');
       if (!usdc || !usdc.address) {
-        throw new Error('缺少 USDC/Settlement Token 配置，请在 scripts/config/assets.arbitrum-sepolia.json 配置 usd-coin 地址');
+        throw new Error('缺少 USDC/Settlement Token 配置，请在 assets.arbitrum-sepolia.json 配置 usd-coin 地址');
       }
-      // RWA Token：测试网阶段如无真实 RWA Token，可使用已存在的业务代币地址；不再部署任何 Mock
+      // RWA Token：测试网阶段如无真实 RWA Token，可使用已存在的业务代币地址
       if (!deployed.RWAToken) {
-        // 如果没有真实 RWA 地址，请在配置中添加一个可用地址（例如某稳定币地址），这里强制从配置读取
         const rwa = assets.find((a) => a.coingeckoId && a.coingeckoId !== 'usd-coin');
         if (!rwa || !rwa.address) throw new Error('缺少 RWA Token 配置，请在 assets.arbitrum-sepolia.json 添加一个 RWA 资产地址');
         deployed.RWAToken = rwa.address;
-        saveDeploymentFile(deployed);
+        save(deployed);
       }
       if (!deployed.SettlementToken) {
         deployed.SettlementToken = usdc.address;
-        saveDeploymentFile(deployed);
+        save(deployed);
       }
-      deployed.VaultStorage = await deployProxy('VaultStorage', [
-        deployed.Registry,
-        deployed.RWAToken,
-        deployed.SettlementToken
-      ]);
-      
-      // 部署 VaultBusinessLogic Deploy VaultBusinessLogic（按本仓库接口：initialize(registry, settlementToken)）
+      deployed.VaultStorage = await deployProxy('VaultStorage', [deployed.Registry, deployed.RWAToken, deployed.SettlementToken]);
+      save(deployed);
+    }
+
+    if (!deployed.VaultBusinessLogic) {
+      if (!deployed.SettlementToken) {
+        const assets = loadAssetsConfig(ARBITRUM_SEPOLIA_CONFIG.name, ARBITRUM_SEPOLIA_CONFIG.chainId);
+        const usdc = assets.find((a) => a.coingeckoId === 'usd-coin');
+        if (!usdc || !usdc.address) throw new Error('缺少 SettlementToken 配置');
+        deployed.SettlementToken = usdc.address;
+        save(deployed);
+      }
       deployed.VaultBusinessLogic = await deployProxy('VaultBusinessLogic', [deployed.Registry, deployed.SettlementToken]);
-      
-      // 部署 VaultCore Deploy VaultCore（按本仓库接口：initialize(registry, view)）
-      // 先部署 VaultView，再将其地址作为第二参数
-      if (!deployed.VaultView) {
-        deployed.VaultView = await deployProxy('VaultView', [deployed.Registry]);
-      }
-      deployed.VaultCore = await deployProxy('VaultCore', [
-        deployed.Registry,
-        deployed.VaultView
-      ]);
-      
-      // 部署 VaultAdmin（按当前实现需要 registry/storage，若接口不匹配则跳过）
+      save(deployed);
+    }
+
+    // 先部署一个临时的 VaultView 用于 VaultCore 初始化
+    if (!deployed.VaultView) {
+      console.log('🚀 Deploying temporary VaultView for VaultCore initialization...');
+      deployed.VaultView = await deployProxy('src/Vault/VaultView.sol:VaultView', [deployed.Registry]);
+      save(deployed);
+      console.log('✅ Temporary VaultView deployed @', deployed.VaultView);
+    }
+
+    if (!deployed.VaultCore) {
+      // VaultCore.initialize(registry, view)
+      deployed.VaultCore = await deployProxy('VaultCore', [deployed.Registry, deployed.VaultView]);
+      save(deployed);
+    }
+
+    // GuaranteeFundManager
+    if (!deployed.GuaranteeFundManager) {
       try {
-        deployed.VaultAdmin = await deployProxy('VaultAdmin', [
-          deployed.Registry,
-          deployed.VaultStorage
-        ]);
-      } catch (e) {
-        console.log('ℹ️ VaultAdmin 部署失败或接口不匹配，跳过:', e);
-      }
-      
-      saveDeploymentFile(deployed);
-    }
-
-    // 7.x 部署清算视图与健康视图模块（方案A所需）
-    // SystemView -> LiquidatorView.initialize 依赖
-    if (!deployed.SystemView && deployed.Registry) {
-      console.log('🖥️ 部署 SystemView...');
-      deployed.SystemView = await deployProxy('SystemView', [
-        deployed.Registry
-      ]);
-      saveDeploymentFile(deployed);
-    }
-
-    if (!deployed.HealthView && deployed.Registry) {
-      console.log('🫀 部署 HealthView...');
-      deployed.HealthView = await deployProxy('HealthView', [
-        deployed.Registry
-      ]);
-      saveDeploymentFile(deployed);
-    }
-
-    if (!deployed.LiquidatorView && deployed.Registry) {
-      console.log('🧾 部署 LiquidatorView...');
-      const systemViewAddr = deployed.SystemView;
-      if (!systemViewAddr) {
-        console.log('⚠️ 缺少 SystemView，跳过 LiquidatorView 部署');
-      } else {
-        deployed.LiquidatorView = await deployProxy('LiquidatorView', [
-          deployed.Registry,
-          systemViewAddr
-        ]);
-        saveDeploymentFile(deployed);
+        // initialize(address vaultCore, address registry, address upgradeAdmin)
+        deployed.GuaranteeFundManager = await deployProxy('GuaranteeFundManager', [deployed.VaultCore || ethers.ZeroAddress, deployed.Registry, deployer.address]);
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ GuaranteeFundManager deployment failed:', error);
       }
     }
 
-    // 7.y 部署其它 View/工具：StatisticsView/PositionView/PreviewView/DashboardView/UserView/AccessControlView
+    // ====== View 层（全面）======
+    // HealthView（可选但前端会优先尝试，存在更佳）
+    if (!deployed.HealthView) {
+      try {
+        deployed.HealthView = await deployProxy('HealthView', [deployed.Registry]);
+        save(deployed);
+      } catch {
+        // 模块缺失不阻断部署
+      }
+    }
+
+    // SystemView / StatisticsView / PositionView / PreviewView / DashboardView / UserView
+    // SystemView 暂不需要部署，已移除
+    if (!deployed.RegistryView) {
+      try { deployed.RegistryView = await deployProxy('src/Vault/view/modules/RegistryView.sol:RegistryView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RegistryView deployment failed:', error); }
+    }
+
     if (!deployed.StatisticsView) {
-      console.log('📊 部署 StatisticsView...');
-      deployed.StatisticsView = await deployProxy('StatisticsView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.StatisticsView = await deployProxy('StatisticsView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ StatisticsView deployment failed:', error); }
     }
     if (!deployed.PositionView) {
-      console.log('👤 部署 PositionView...');
-      deployed.PositionView = await deployProxy('PositionView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.PositionView = await deployProxy('PositionView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ PositionView deployment failed:', error); }
     }
     if (!deployed.PreviewView) {
-      console.log('🔎 部署 PreviewView...');
-      deployed.PreviewView = await deployProxy('PreviewView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.PreviewView = await deployProxy('PreviewView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ PreviewView deployment failed:', error); }
     }
     if (!deployed.DashboardView) {
-      console.log('📈 部署 DashboardView...');
-      deployed.DashboardView = await deployProxy('DashboardView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.DashboardView = await deployProxy('DashboardView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ DashboardView deployment failed:', error); }
     }
     if (!deployed.UserView) {
-      console.log('👥 部署 UserView...');
-      deployed.UserView = await deployProxy('UserView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.UserView = await deployProxy('UserView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ UserView deployment failed:', error); }
     }
+
+    // 其它 View 与工具视图
     if (!deployed.AccessControlView) {
-      console.log('🔐 部署 AccessControlView...');
-      deployed.AccessControlView = await deployProxy('AccessControlView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.AccessControlView = await deployProxy('AccessControlView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ AccessControlView deployment failed:', error); }
     }
     if (!deployed.CacheOptimizedView) {
-      console.log('🧰 部署 CacheOptimizedView...');
-      deployed.CacheOptimizedView = await deployProxy('CacheOptimizedView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.CacheOptimizedView = await deployProxy('CacheOptimizedView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ CacheOptimizedView deployment failed:', error); }
     }
     if (!deployed.LendingEngineView) {
-      console.log('🔍 部署 LendingEngineView...');
-      deployed.LendingEngineView = await deployProxy('LendingEngineView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.LendingEngineView = await deployProxy('LendingEngineView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ LendingEngineView deployment failed:', error); }
     }
     if (!deployed.FeeRouterView) {
-      console.log('💵 部署 FeeRouterView...');
-      deployed.FeeRouterView = await deployProxy('FeeRouterView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.FeeRouterView = await deployProxy('FeeRouterView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ FeeRouterView deployment failed:', error); }
     }
     if (!deployed.RiskView) {
-      console.log('⚠️ 部署 RiskView...');
-      deployed.RiskView = await deployProxy('RiskView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.RiskView = await deployProxy('RiskView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RiskView deployment failed:', error); }
     }
     if (!deployed.ViewCache) {
-      console.log('🗃️ 部署 ViewCache...');
-      deployed.ViewCache = await deployProxy('ViewCache', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try { deployed.ViewCache = await deployProxy('ViewCache', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ ViewCache deployment failed:', error); }
+    }
+    if (!deployed.EventHistoryManager) {
+      try { deployed.EventHistoryManager = await deployProxy('EventHistoryManager', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ EventHistoryManager deployment failed:', error); }
+    }
+    // 估值视图（可选）
+    if (!deployed.ValuationOracleView) {
+      try { deployed.ValuationOracleView = await deployProxy('ValuationOracleView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ ValuationOracleView deployment failed:', error); }
     }
 
     // ====== 监控模块 ======
     // 第一步：部署不依赖其他监控模块的基础模块
     if (!deployed.DegradationCore) {
-      console.log('🔍 部署 DegradationCore...');
-      deployed.DegradationCore = await deployProxy('contracts/monitor/DegradationCore.sol:DegradationCore', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try {
+        deployed.DegradationCore = await deployProxy('src/monitor/DegradationCore.sol:DegradationCore', [deployed.Registry]);
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ DegradationCore deployment failed:', error);
+      }
     }
 
     if (!deployed.DegradationStorage) {
-      console.log('💾 部署 DegradationStorage...');
-      deployed.DegradationStorage = await deployProxy('contracts/monitor/DegradationStorage.sol:DegradationStorage', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try {
+        deployed.DegradationStorage = await deployProxy('src/monitor/DegradationStorage.sol:DegradationStorage', [deployed.Registry]);
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ DegradationStorage deployment failed:', error);
+      }
     }
 
     if (!deployed.ModuleHealthView) {
-      console.log('🫀 部署 ModuleHealthView...');
-      deployed.ModuleHealthView = await deployProxy('contracts/Vault/view/modules/ModuleHealthView.sol:ModuleHealthView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
+      try {
+        deployed.ModuleHealthView = await deployProxy('src/Vault/view/modules/ModuleHealthView.sol:ModuleHealthView', [deployed.Registry]);
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ ModuleHealthView deployment failed:', error);
+      }
     }
 
     // 第二步：部署依赖其他监控模块的 DegradationMonitor
     if (!deployed.DegradationMonitor && deployed.DegradationCore && deployed.DegradationStorage && deployed.ModuleHealthView) {
-      console.log('📊 部署 DegradationMonitor...');
-      deployed.DegradationMonitor = await deployProxy('contracts/monitor/DegradationMonitor.sol:DegradationMonitor', [deployed.Registry, deployer.address, deployed.DegradationCore, deployed.DegradationStorage, deployed.ModuleHealthView, ethers.ZeroAddress, deployer.address]);
-      saveDeploymentFile(deployed);
-    }
-
-    // ====== 业务模块 ======
-    if (!deployed.VaultLendingEngine) {
-      console.log('🏦 部署 VaultLendingEngine...');
-      deployed.VaultLendingEngine = await deployProxy('contracts/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine', [deployed.PriceOracle, deployed.SettlementToken, deployed.Registry]);
-      saveDeploymentFile(deployed);
-    }
-
-    if (!deployed.EarlyRepaymentGuaranteeManager) {
-      console.log('🔄 部署 EarlyRepaymentGuaranteeManager...');
-      deployed.EarlyRepaymentGuaranteeManager = await deployProxy('contracts/Vault/modules/EarlyRepaymentGuaranteeManager.sol:EarlyRepaymentGuaranteeManager', [deployed.VaultCore, deployed.Registry, deployer.address, 500]);
-      saveDeploymentFile(deployed);
-    }
-
-    // ====== View模块 ======
-    if (!deployed.BatchView) {
-      console.log('📦 部署 BatchView...');
-      deployed.BatchView = await deployProxy('contracts/Vault/view/modules/BatchView.sol:BatchView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
-    }
-    if (!deployed.EventHistoryManager) {
-      console.log('🧾 部署 EventHistoryManager...');
-      deployed.EventHistoryManager = await deployProxy('EventHistoryManager', [deployed.Registry]);
-      saveDeploymentFile(deployed);
-    }
-    if (!deployed.ValuationOracleView) {
-      console.log('🔮 部署 ValuationOracleView...');
-      deployed.ValuationOracleView = await deployProxy('ValuationOracleView', [deployed.Registry]);
-      saveDeploymentFile(deployed);
-    }
-
-    // 尝试部署 LiquidationRiskManager（如为抽象则跳过）
-    if (!deployed.LiquidationRiskManager && deployed.Registry && deployed.AccessControlManager) {
-      console.log('🛡️ 尝试部署 LiquidationRiskManager...');
       try {
-        deployed.LiquidationRiskManager = await deployProxy('LiquidationRiskManager', [
-          deployed.Registry,
-          deployed.AccessControlManager,
-          300, // maxCacheDuration
-          50   // maxBatchSize
-        ]);
-        saveDeploymentFile(deployed);
-      } catch (e) {
-        console.log('ℹ️ 跳过 LiquidationRiskManager 部署（未提供具体实现或为抽象合约）');
+        deployed.DegradationMonitor = await deployProxy('src/monitor/DegradationMonitor.sol:DegradationMonitor', [deployed.Registry, deployer.address, deployed.DegradationCore, deployed.DegradationStorage, deployed.ModuleHealthView, ethers.ZeroAddress, deployer.address]);
+        save(deployed);
+        console.log('✅ DegradationMonitor deployed @ ' + deployed.DegradationMonitor);
+      } catch (error) {
+        console.log('⚠️ DegradationMonitor deployment failed:', error);
       }
     }
-    
-    // 8. 注册模块到 Registry Register modules to Registry
-    if (deployed.Registry) {
-      console.log('📋 注册模块到 Registry...');
-      const registry = await ethers.getContractAt('Registry', deployed.Registry);
-      
-      // 合约名 -> 模块 Key（UPPER_SNAKE）映射
-      const NAME_TO_KEY: Record<string, string> = {
-        AccessControlManager: 'ACCESS_CONTROL_MANAGER',
-        AssetWhitelist: 'ASSET_WHITELIST',
-        AuthorityWhitelist: 'AUTHORITY_WHITELIST',
-        PriceOracle: 'PRICE_ORACLE',
-        CoinGeckoPriceUpdater: 'COINGECKO_PRICE_UPDATER',
-        FeeRouter: 'FEE_ROUTER',
-        FeeRouterView: 'FEE_ROUTER_VIEW',
-        RewardPoints: 'REWARD_POINTS',
-        RewardManagerCore: 'REWARD_MANAGER_CORE',
-        RewardCore: 'REWARD_CORE',
-        RewardConsumption: 'REWARD_CONSUMPTION',
-        RewardManager: 'REWARD_MANAGER',
-        RewardConfig: 'REWARD_CONFIG',
-        RewardView: 'REWARD_VIEW',
-        FeatureUnlockConfig: 'FEATURE_UNLOCK_CONFIG',
-        GovernanceAccessConfig: 'GOVERNANCE_ACCESS_CONFIG',
-        PriorityServiceConfig: 'PRIORITY_SERVICE_CONFIG',
-        AdvancedAnalyticsConfig: 'ADVANCED_ANALYTICS_CONFIG',
-        TestnetFeaturesConfig: 'TESTNET_FEATURES_CONFIG',
-        CollateralManager: 'COLLATERAL_MANAGER',
-        LendingEngine: 'LENDING_ENGINE',
-        LendingEngineView: 'LENDING_ENGINE_VIEW',
-        StatisticsView: 'VAULT_STATISTICS', // KEY_STATS 阶段性映射
-        GuaranteeFundManager: 'GUARANTEE_FUND_MANAGER',
-        VaultStorage: 'VAULT_STORAGE',
-        VaultBusinessLogic: 'VAULT_BUSINESS_LOGIC',
-        VaultCore: 'VAULT_CORE',
-        // VaultView: 'VAULT_VIEW', // 建议通过 KEY_VAULT_CORE 解析
-        VaultAdmin: 'VAULT_ADMIN',
-        SystemView: 'SYSTEM_VIEW',
-        HealthView: 'HEALTH_VIEW',
-        PositionView: 'POSITION_VIEW',
-        PreviewView: 'PREVIEW_VIEW',
-        DashboardView: 'DASHBOARD_VIEW',
-        UserView: 'USER_VIEW',
-        AccessControlView: 'ACCESS_CONTROL_VIEW',
-        CacheOptimizedView: 'CACHE_OPTIMIZED_VIEW',
-        RiskView: 'RISK_VIEW',
-        ViewCache: 'VIEW_CACHE',
-        EventHistoryManager: 'EVENT_HISTORY_MANAGER',
-        ValuationOracleView: 'VALUATION_ORACLE_VIEW',
-        LiquidatorView: 'LIQUIDATION_VIEW',
-        LiquidationRiskManager: 'LIQUIDATION_RISK_MANAGER',
-        // 监控模块
-        DegradationCore: 'DEGRADATION_CORE',
-        DegradationMonitor: 'DEGRADATION_MONITOR',
-        DegradationStorage: 'DEGRADATION_STORAGE',
-        ModuleHealthView: 'MODULE_HEALTH_VIEW',
-        // 业务模块
-        VaultLendingEngine: 'VAULT_LENDING_ENGINE',
-        EarlyRepaymentGuaranteeManager: 'EARLY_REPAYMENT_GUARANTEE_MANAGER',
-        // View模块
-        BatchView: 'BATCH_VIEW'
-      };
 
+    // BatchView（批量视图）
+    if (!deployed.BatchView) {
+      try {
+        deployed.BatchView = await deployProxy('src/Vault/view/modules/BatchView.sol:BatchView', [deployed.Registry]);
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ BatchView deployment failed:', error);
+      }
+    }
+
+    // LiquidatorView（需要 SystemView）
+    if (!deployed.LiquidatorView) {
+      // 第二个参数为历史兼容位（LiquidatorView.initialize 的 legacy SystemView），不再使用，这里使用非零占位（Registry）
+      try { deployed.LiquidatorView = await deployProxy('LiquidatorView', [deployed.Registry, deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ LiquidatorView deployment failed:', error); }
+    }
+
+    // LoanNFT（账本用到的 NFT）
+    if (!deployed.LoanNFT) {
+      try { deployed.LoanNFT = await deployProxy('LoanNFT', ['RWA Loan', 'RWLN', 'https://example.com/metadata/', deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ LoanNFT deployment failed:', error); }
+    }
+    
+    // 7) 注册模块到 Registry（通过 NAME -> UPPER_SNAKE -> bytes32 key）
+    const registry = await ethers.getContractAt('Registry', deployed.Registry);
+
+    const NAME_TO_KEY: Record<string, string> = {
+      RegistrySignatureManager: 'REGISTRY_SIGNATURE_MANAGER',
+      RegistryHistoryManager: 'REGISTRY_HISTORY_MANAGER',
+      RegistryBatchManager: 'REGISTRY_BATCH_MANAGER',
+      RegistryHelper: 'REGISTRY_HELPER',
+      RegistryDynamicModuleKey: 'REGISTRY_DYNAMIC_MODULE_KEY',
+      AccessControlManager: 'ACCESS_CONTROL_MANAGER',
+      AssetWhitelist: 'ASSET_WHITELIST',
+      AuthorityWhitelist: 'AUTHORITY_WHITELIST',
+      PriceOracle: 'PRICE_ORACLE',
+      CoinGeckoPriceUpdater: 'COINGECKO_PRICE_UPDATER',
+      FeeRouter: 'FEE_ROUTER',
+      FeeRouterView: 'FEE_ROUTER_VIEW',
+      RewardPoints: 'REWARD_POINTS',
+      RewardManagerCore: 'REWARD_MANAGER_CORE',
+      RewardCore: 'REWARD_CORE',
+      RewardConsumption: 'REWARD_CONSUMPTION',
+      RewardManager: 'REWARD_MANAGER',
+      RewardConfig: 'REWARD_CONFIG',
+      RewardView: 'REWARD_VIEW',
+      CollateralManager: 'COLLATERAL_MANAGER',
+      LendingEngine: 'LENDING_ENGINE',
+      LendingEngineView: 'LENDING_ENGINE_VIEW',
+      VaultBusinessLogic: 'VAULT_BUSINESS_LOGIC',
+      VaultCore: 'VAULT_CORE',
+      // VaultView: 'VAULT_VIEW', // 架构建议通过 KEY_VAULT_CORE 解析，不强依赖
+      VaultStorage: 'VAULT_STORAGE',
+      VaultLendingEngine: 'VAULT_LENDING_ENGINE',
+      EarlyRepaymentGuaranteeManager: 'EARLY_REPAYMENT_GUARANTEE_MANAGER',
+      HealthView: 'HEALTH_VIEW',
+      // 不注册未部署的 RWA Token
+      SystemView: 'SYSTEM_VIEW',
+      StatisticsView: 'STATISTICS_VIEW',
+      PositionView: 'POSITION_VIEW',
+      PreviewView: 'PREVIEW_VIEW',
+      DashboardView: 'DASHBOARD_VIEW',
+      UserView: 'USER_VIEW',
+      RegistryView: 'REGISTRY_VIEW',
+      AccessControlView: 'ACCESS_CONTROL_VIEW',
+      CacheOptimizedView: 'CACHE_OPTIMIZED_VIEW',
+      RiskView: 'RISK_VIEW',
+      ViewCache: 'VIEW_CACHE',
+      EventHistoryManager: 'EVENT_HISTORY_MANAGER',
+      ValuationOracleView: 'VALUATION_ORACLE_VIEW',
+      LiquidatorView: 'LIQUIDATOR_VIEW',
+      GuaranteeFundManager: 'GUARANTEE_FUND_MANAGER',
+      LoanNFT: 'LOAN_NFT',
+      // 监控模块
+      DegradationCore: 'DEGRADATION_CORE',
+      DegradationMonitor: 'DEGRADATION_MONITOR',
+      DegradationStorage: 'DEGRADATION_STORAGE',
+      ModuleHealthView: 'MODULE_HEALTH_VIEW',
+      BatchView: 'BATCH_VIEW',
+    };
+
+      // 实际注册的模块清单（只注册已部署的）
       const modules = [
         'AccessControlManager',
         'AssetWhitelist',
         'AuthorityWhitelist',
         'PriceOracle',
         'CoinGeckoPriceUpdater',
-        // 'ValuationOracleAdapter', // DEPRECATED
-        'FeeRouter',
-        'FeeRouterView',
-        'RewardPoints',
-        'RewardManagerCore',
-        'RewardCore',
-        'RewardConsumption',
-        'RewardManager',
-        'RewardConfig',
-        'RewardView',
-        'FeatureUnlockConfig',
-        'GovernanceAccessConfig',
-        'PriorityServiceConfig',
-        'AdvancedAnalyticsConfig',
-        'TestnetFeaturesConfig',
-        'CollateralManager',
-        'LendingEngine',
-        'LendingEngineView',
-        'StatisticsView',
-        'GuaranteeFundManager',
-        'VaultStorage',
-        'VaultBusinessLogic',
-        'VaultCore',
-        'VaultAdmin',
-        // 监控模块
+        'VaultLendingEngine',
+        'EarlyRepaymentGuaranteeManager',
         'DegradationCore',
         'DegradationMonitor',
         'DegradationStorage',
         'ModuleHealthView',
-        // 业务模块
-        'VaultLendingEngine',
-        'EarlyRepaymentGuaranteeManager',
-        // View模块
-        'BatchView'
+        'BatchView',
+        'FeeRouter',
+        'FeeRouterView',
+        'CollateralManager',
+        'LendingEngine',
+        'LendingEngineView',
+        'VaultBusinessLogic',
+        'VaultCore',
+        'VaultStorage',
+        'HealthView',
+        'SystemView',
+        'StatisticsView',
+        'PositionView',
+        'PreviewView',
+        'DashboardView',
+        'UserView',
+        'RegistryView',
+        'AccessControlView',
+        'CacheOptimizedView',
+        'RiskView',
+        'ViewCache',
+        'EventHistoryManager',
+        'RewardView',
+        'RewardConfig',
+        'RewardConsumption',
+        'ValuationOracleView',
+        'LiquidatorView',
+        'GuaranteeFundManager',
+        'LoanNFT',
+        'RegistryDynamicModuleKey', // 添加动态模块键注册表
       ];
-      
-      for (const moduleName of modules) {
-        if (deployed[moduleName]) {
-          try {
-            const upperSnake = NAME_TO_KEY[moduleName];
-            if (!upperSnake) {
-              console.log(`⚠️ 跳过未知模块映射（缺少 Key）：${moduleName}`);
-              continue;
-            }
-            await registry.setModule(keyOf(upperSnake), deployed[moduleName]);
-            console.log(`✅ ${moduleName} (${upperSnake}) 已注册到 Registry`);
-            // 绑定 RewardPoints 后立即做 MINTER_ROLE 授权
-            if (moduleName === 'RewardPoints') {
-              try {
-                const rewardPoints = await ethers.getContractAt('RewardPoints', deployed.RewardPoints);
-                const MINTER_ROLE = await rewardPoints.MINTER_ROLE();
-                if (deployed.RewardManagerCore) {
-                  await rewardPoints.grantRole(MINTER_ROLE, deployed.RewardManagerCore);
-                  console.log('✅ (即时) RewardPoints: 已授予 MINTER_ROLE 给 RewardManagerCore');
-                }
-                if (deployed.RewardCore) {
-                  await rewardPoints.grantRole(MINTER_ROLE, deployed.RewardCore);
-                  console.log('✅ (即时) RewardPoints: 已授予 MINTER_ROLE 给 RewardCore');
-                }
-              } catch (e) {
-                console.log('⚠️ (即时) MINTER_ROLE 授权失败（可能尚未部署核心模块或已授权）:', e);
-              }
-            }
-          } catch (error) {
-            console.log(`⚠️ ${moduleName} 注册失败: ${error}`);
-          }
+
+      for (const name of modules) {
+        const addr = deployed[name];
+        if (!addr) continue;
+        const upperSnake = NAME_TO_KEY[name];
+        if (!upperSnake) continue;
+        try {
+          await (await registry.setModule(keyOf(upperSnake), addr)).wait();
+          console.log(`📌 Registered ${name} -> ${upperSnake}`);
+        } catch (e) {
+          console.log(`⚠️ Skip register ${name}:`, e);
         }
       }
 
-      // 8.1 关键模块使用 bytes32 KEY 绑定（清算与健康路径所需）
+      // 补充：若存在 LiquidationRiskManager，但未在映射中，则单独注册到 KEY_LIQUIDATION_RISK_MANAGER
+      if (deployed.LiquidationRiskManager) {
+        try {
+          await (await registry.setModule(keyOf('LIQUIDATION_RISK_MANAGER'), deployed.LiquidationRiskManager)).wait();
+          console.log('📌 Registered LiquidationRiskManager -> LIQUIDATION_RISK_MANAGER');
+        } catch (e) {
+          console.log('⚠️ Skip register LiquidationRiskManager:', e);
+        }
+      }
+
+      // 设置动态模块键注册表到Registry
+      if (deployed.RegistryDynamicModuleKey) {
+        try {
+          await (await registry.setDynamicModuleKeyRegistry(deployed.RegistryDynamicModuleKey)).wait();
+          console.log('✅ Dynamic module key registry set in Registry');
+        } catch (error) {
+          console.log('⚠️ Failed to set dynamic module key registry:', error);
+        }
+      }
+
+      // 现在部署 VaultView（在模块注册完成后）
+      if (!deployed.VaultView) {
+        console.log('🚀 Deploying VaultView after module registration...');
+        deployed.VaultView = await deployProxy('src/Vault/VaultView.sol:VaultView', [deployed.Registry]);
+        save(deployed);
+        console.log('✅ VaultView deployed @', deployed.VaultView);
+      }
+
+      // 3.1 附加绑定：将 KEY_LIQUIDATION_MANAGER 绑定到 VaultBusinessLogic（统一清算入口）
       try {
         if (deployed.VaultBusinessLogic) {
-          await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.VaultBusinessLogic);
-          console.log(`✅ 已绑定 Registry.KEY_LIQUIDATION_MANAGER -> ${deployed.VaultBusinessLogic}`);
+          await (await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.VaultBusinessLogic)).wait();
+          console.log(`✅ Bound KEY_LIQUIDATION_MANAGER -> ${deployed.VaultBusinessLogic}`);
         }
         if (deployed.HealthView) {
-          await registry.setModule(keyOf('HEALTH_VIEW'), deployed.HealthView);
-          console.log(`✅ 已绑定 Registry.KEY_HEALTH_VIEW -> ${deployed.HealthView}`);
+          try { await (await registry.setModule(keyOf('HEALTH_VIEW'), deployed.HealthView)).wait(); } catch (error) { console.log('⚠️ HealthView binding failed:', error); }
         }
         if (deployed.LiquidatorView) {
-          await registry.setModule(keyOf('LIQUIDATION_VIEW'), deployed.LiquidatorView);
-          console.log(`✅ 已绑定 Registry.KEY_LIQUIDATION_VIEW -> ${deployed.LiquidatorView}`);
+          try { await (await registry.setModule(keyOf('LIQUIDATOR_VIEW'), deployed.LiquidatorView)).wait(); } catch (error) { console.log('⚠️ LiquidatorView binding failed:', error); }
         }
-        if (deployed.LiquidationRiskManager) {
-          await registry.setModule(keyOf('LIQUIDATION_RISK_MANAGER'), deployed.LiquidationRiskManager);
-          console.log(`✅ 已绑定 Registry.KEY_LIQUIDATION_RISK_MANAGER -> ${deployed.LiquidationRiskManager}`);
+        if (deployed.StatisticsView) {
+          try { await (await registry.setModule(keyOf('VAULT_STATISTICS'), deployed.StatisticsView)).wait(); console.log(`✅ Bound KEY_STATS (VAULT_STATISTICS) -> ${deployed.StatisticsView}`); } catch (error) { console.log('⚠️ StatisticsView binding failed:', error); }
         }
-      } catch (error) {
-        console.log('⚠️ 清算相关模块 KEY 绑定失败:', error);
+      } catch (e) {
+        console.log('⚠️ Extra KEY binding failed:', e);
       }
-    }
-    
-    // 9. 生成前端配置 Generate frontend configuration
-    console.log('📄 生成前端配置文件...');
-    const configPath = path.join(__dirname, '../../frontend-config');
-    const configFile = path.join(configPath, 'contracts-arbitrum-sepolia.ts');
-    
-    if (!fs.existsSync(configPath)) {
-      fs.mkdirSync(configPath, { recursive: true });
-    }
-    
-    const configContent = `// 自动生成的合约配置文件 - Arbitrum Sepolia
+
+      // 3.2 断言校验（增强容错）：
+      // - 优先校验 VaultCore 是否为有效合约；
+      // - 读取 viewContractAddrVar()，若失败则回退：直接将 KEY_VAULT_VIEW 绑定到本次部署的 VaultView；
+      //   这样前端依旧可以通过 Registry 解析 View 地址使用系统。
+      try {
+        if (!deployed.VaultCore || !deployed.VaultView) throw new Error('Missing VaultCore or VaultView address');
+
+        const code = await ethers.provider.getCode(deployed.VaultCore);
+        console.log('🔎 VaultCore @', deployed.VaultCore, 'codeLen =', code.length);
+        if (!code || code === '0x') throw new Error('VaultCore address has no code');
+
+        // 直接确保 KEY_VAULT_VIEW 绑定为本次部署的 VaultView
+        const KEY_VAULT_VIEW = keyOf('VAULT_VIEW');
+        try {
+          await (await registry.setModule(KEY_VAULT_VIEW, deployed.VaultView)).wait();
+          console.log('✅ Bound KEY_VAULT_VIEW ->', deployed.VaultView);
+        } catch (bindErr) {
+          console.log('⚠️ Binding KEY_VAULT_VIEW failed:', bindErr);
+        }
+      } catch (e) {
+        console.log('⚠️ Assertion step encountered error but continued (safe fallback applied when possible):', e);
+      }
+
+    // 4) 生成前端配置
+    fs.mkdirSync(FRONTEND_DIR, { recursive: true });
+    const frontendContent = `// 自动生成的合约配置文件 - Arbitrum Sepolia
 // Auto-generated contract configuration file - Arbitrum Sepolia
 // 生成时间 Generated at: ${new Date().toISOString()}
 
 export const CONTRACT_ADDRESSES = {
-  ${Object.entries(deployed).map(([name, address]) => `  ${name}: '${address}'`).join(',\n')}
+  ${Object.entries(deployed).map(([k, v]) => `  ${k}: '${v}'`).join(',\n')}
 };
 
 export const NETWORK_CONFIG = {
@@ -888,35 +950,13 @@ export const NETWORK_CONFIG = {
 // import { CONTRACT_ADDRESSES, NETWORK_CONFIG } from './contracts-arbitrum-sepolia';
 // const vaultCoreAddress = CONTRACT_ADDRESSES.VaultCore;
 `;
+    fs.writeFileSync(FRONTEND_FILE, frontendContent);
+    console.log(`📝 Frontend config written: ${FRONTEND_FILE}`);
 
-    fs.writeFileSync(configFile, configContent);
-    console.log(`✅ 前端配置文件已生成 Frontend config file generated: ${configFile}`);
-
-    // 9.x 配置清算路径权限（授予 VaultView LIQUIDATE 权限）
-    try {
-      if (deployed.AccessControlManager && deployed.VaultView) {
-        const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
-        const LIQUIDATE_ROLE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
-        await acm.grantRole(LIQUIDATE_ROLE, deployed.VaultView);
-        console.log(`✅ 清算权限：已为 VaultView 授予 LIQUIDATE 权限 -> ${deployed.VaultView}`);
-      }
-    } catch (e) {
-      console.log('⚠️ 清算权限配置失败（可能已授权）:', e);
-    }
-    
-    // 10. 输出部署信息 Output deployment information
-    console.log('\n🎉 Arbitrum Sepolia 部署完成！');
-    console.log('🎉 Arbitrum Sepolia deployment completed!');
-    console.log('='.repeat(60));
-    console.log('📋 部署地址 Deployment addresses:');
-    Object.entries(deployed).forEach(([name, address]) => {
-      console.log(`${name}: ${address}`);
-    });
-    console.log('='.repeat(60));
-    console.log(`🌐 网络 Network: ${ARBITRUM_SEPOLIA_CONFIG.name}`);
-    console.log(`🔗 浏览器 Explorer: ${ARBITRUM_SEPOLIA_CONFIG.explorer}`);
-    console.log('📄 配置文件 Config file: frontend-config/contracts-arbitrum-sepolia.ts');
-    console.log('='.repeat(60));
+    // 5) 输出摘要
+    console.log('\n==== Deployment Addresses (arbitrum-sepolia) ====');
+    Object.entries(deployed).forEach(([n, a]) => console.log(`${n}: ${a}`));
+    console.log('========================================\n');
     
   } catch (error) {
     console.error('❌ 部署失败 Deployment failed:', error);
@@ -924,8 +964,7 @@ export const NETWORK_CONFIG = {
   }
 }
 
-// 执行主函数 Execute main function
-main().catch((error) => {
-  console.error('部署过程中出错 Error during deployment:', error);
+main().catch((e) => {
+  console.error(e);
   process.exit(1);
 }); 

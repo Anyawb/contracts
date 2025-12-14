@@ -15,62 +15,110 @@
 
 ### 3.1. 项目目录结构
 
-项目采用标准的 Hardhat 目录结构。
+项目采用标准的 Hardhat 目录结构，所有智能合约源代码位于 `src/` 目录下。
 
 ```
-contracts/
+src/
 ├─ constants/                   # 常量库（ModuleKeys / ActionKeys）
 │  ├─ ModuleKeys.sol           # 模块 KEY_ 常量及映射函数
-│  └─ ActionKeys.sol           # 动作 ACTION_ 常量及映射函数
+│  ├─ ActionKeys.sol           # 动作 ACTION_ 常量及映射函数
+│  ├─ DataPushLibrary.sol      # 统一数据推送库
+│  └─ DataPushTypes.sol        # 数据推送类型定义
 ├─ Vault/                      # 核心业务 Vault 合约聚合层
+│  ├─ VaultCore.sol            # 极简入口合约（双架构设计）
+│  ├─ VaultView.sol            # 双架构智能协调器（查询接口）
+│  ├─ VaultStorage.sol         # 存储合约（Registry系统集成）
+│  ├─ VaultRouter.sol          # 路由合约（权限校验与模块分发）
 │  ├─ VaultMath.sol            # 统一数学计算库
-├─ registry/                    # Timelock 模块注册中心
-│  └─ Registry.sol              # schedule / execute / cancel 模块地址
-├─ vault/                       # 对外路由层
-│  └─ VaultRouter.sol           # 调度 CollateralManager、LendingEngine 等模块
-├─ Vault/                      # 核心业务 Vault 合约聚合层
-│  ├─ CollateralVault.sol          # 聚合调用路由，面向前端暴露 API
-│  ├─ CollateralVaultStorage.sol   # 所有存储变量（upgrade-safe）
-│  ├─ CollateralVaultAccess.sol    # 权限修饰符集合
-│  ├─ CollateralVaultTypes.sol     # 错误、事件、常量
-│  ├─ VaultMath.sol                # 统一数学计算库
-│  ├─ CollateralVaultView.sol      # 只读接口聚合
-│  └─ modules/                     # 具体业务子模块
-│     ├─ CollateralManager.sol        # 抵押资产管理
-│     ├─ LendingEngine.sol            # 借贷账本
-│     ├─ HealthFactorCalculator.sol   # HF 计算/清算判定
-│     ├─ StatisticsView.sol           # 统计视图（替代 VaultStatistics）
-│     └─ ValuationOracleAdapter.sol   # 价格预言机适配
-│  └─ IAccessControlManager.sol # requireRole / hasRole 接口
-├─ mocks/                       # 单元 / 集成测试用 Mock 合约
+│  ├─ VaultTypes.sol           # 类型定义（错误、事件、常量）
+│  ├─ VaultBase.sol            # 基础合约（共享功能）
+│  ├─ VaultAccess.sol          # 访问控制基础合约
+│  ├─ VaultAdmin.sol           # 管理功能合约
+│  ├─ modules/                 # 具体业务子模块
+│  │  ├─ CollateralManager.sol        # 抵押资产管理
+│  │  ├─ VaultLendingEngine.sol      # Vault借贷引擎
+│  │  ├─ VaultBusinessLogic.sol      # 业务逻辑模块
+│  │  ├─ EarlyRepaymentGuaranteeManager.sol  # 提前还款保证金管理
+│  │  └─ GuaranteeFundManager.sol   # 保证金基金管理
+│  ├─ view/                    # View层模块
+│  │  └─ modules/              # View层子模块
+│  │     ├─ UserView.sol              # 用户视图
+│  │     ├─ HealthView.sol            # 健康因子视图
+│  │     ├─ StatisticsView.sol        # 统计视图
+│  │     ├─ RewardView.sol            # 奖励视图
+│  │     ├─ LiquidatorView.sol        # 清算视图
+│  │     └─ ...                       # 其他视图模块
+│  └─ liquidation/             # 清算模块
+│     ├─ modules/              # 清算子模块
+│     │  ├─ LiquidationManager.sol    # 清算管理器
+│     │  ├─ LiquidationRiskManager.sol # 清算风险管理器
+│     │  ├─ LiquidationRewardManager.sol # 清算奖励管理器
+│     │  └─ ...                       # 其他清算模块
+│     └─ libraries/            # 清算库
+├─ registry/                    # Registry 模块注册中心
+│  ├─ Registry.sol              # 主注册表入口
+│  ├─ RegistryCore.sol          # 核心业务逻辑
+│  ├─ RegistryUpgradeManager.sol # 升级管理器
+│  ├─ RegistryAdmin.sol         # 治理管理员
+│  └─ RegistryDynamicModuleKey.sol # 动态模块键注册表
+├─ core/                        # 核心业务合约
+│  ├─ LendingEngine.sol         # 订单引擎（core/LendingEngine）
+│  ├─ PriceOracle.sol           # 价格预言机
+│  ├─ FeeRouter.sol             # 手续费路由
+│  ├─ LoanNFT.sol               # 贷款NFT
+│  └─ CoinGeckoPriceUpdater.sol # CoinGecko价格更新器
+├─ access/                      # 访问控制模块
+│  ├─ AccessControlManager.sol  # 访问控制管理器
+│  └─ AssetWhitelist.sol       # 资产白名单
+├─ Reward/                      # 奖励系统
+│  ├─ RewardManager.sol         # 奖励管理器
+│  ├─ RewardManagerCore.sol    # 奖励管理核心
+│  ├─ RewardCore.sol            # 奖励核心
+│  └─ RewardConsumption.sol    # 奖励消费
+├─ Governance/                  # 治理模块
+│  └─ CrossChainGovernance.sol  # 跨链治理
+├─ libraries/                   # 共享库
+│  ├─ SettlementMatchLib.sol   # 撮合结算库
+│  ├─ GracefulDegradation.sol  # 优雅降级库
+│  └─ ...                       # 其他库
+├─ interfaces/                  # 接口定义
+│  ├─ IRegistry.sol             # Registry接口
+│  ├─ IVaultCore.sol            # VaultCore接口
+│  ├─ IVaultView.sol            # VaultView接口
+│  └─ ...                       # 其他接口
+├─ Mocks/                       # 单元 / 集成测试用 Mock 合约
 │  ├─ MockCollateralManager.sol # 模拟抵押管理
 │  ├─ MockLendingEngine.sol     # 模拟借贷引擎
 │  └─ MockAccessControlManager.sol # 可配置角色的 Mock
-└─ Libraries/                    # 工具库
+└─ errors/                      # 标准错误定义
+   └─ StandardErrors.sol        # 统一错误定义
 ```
 
 #### 3.1.1 模块功能说明
 
 | 模块 | 主要职责 | 关键交互 |
 |------|----------|----------|
-| **CollateralManager** | 1. 用户存 / 取抵押品<br/>2. 调用 PriceOracle 获取实时价格<br/>3. 校验 `minCollateralValue`（最小抵押价值）<br/>4. 计算并上报手续费至 FeeRouter | • PriceOracle<br/>• FeeRouter<br/>• Vault / LendingPool |
-| **LoanFactory** | 1. 根据借贷条款部署 Loan 合约（proxy / clone）<br/>2. 校验参数合法性（借款人、额度、期限） | • MatchEngine<br/>• CollateralManager<br/>• LoanManager |
-| **LoanManager** | 1. 铸造并管理 Loan NFT（ERC-721）<br/>2. 记录 Loan 条款与状态<br/>3. 提供查询、批量过滤接口 | • LoanFactory<br/>• LendingPool<br/>• LiquidationEngine |
-| **LendingPool** | 1. 承接 USDT 等稳定币流动性<br/>2. 根据 Loan 条款放款并收息<br/>3. 扣除还款手续费并分发 | • LoanManager<br/>• RewardManager<br/>• FeeRouter |
-| **LiquidationEngine** | 1. 监控贷款健康度（与 Oracle / CollateralManager 协作）<br/>2. 触发违约清算逻辑<br/>3. 分配清算所得资产 | • LoanManager<br/>• CollateralManager<br/>• LendingPool |
-| **RewardManager** | 1. 依据借贷 / 清算行为发放平台积分<br/>2. 积分可接入 DAO 治理、费用折扣、空投等<br/>3. 提供可升级的奖励规则接口 | • LendingPool<br/>• Governance |
-| **MatchEngine** | 1. 链下 / 混合模式撮合投资者与借款人<br/>2. 调用 LoanFactory & CollateralManager 完成撮配<br/>3. 输出撮合报告供链上验证 | • LoanFactory<br/>• CollateralManager |
-| **ModuleKeys** | 提供全局 `bytes32` 模块常量，避免硬编码，支持字符串映射 | • Registry<br/>• VaultRouter |
-| **ActionKeys** | 提供全局 `bytes32` 动作常量，用于权限分发和事件追踪 | • Registry<br/>• VaultRouter |
-| **Registry** | 1. `key => address` 模块地址映射<br/>2. 延时升级三步：`schedule / cancel / execute`<br/>3. 仅 Timelock / DAO 拥有者可操作 | • VaultRouter<br/>• Governance |
-| **VaultRouter** | 1. 统一入口，校验权限并路由至具体模块<br/>2. 触发标准化事件 `VaultAction`<br/>3. 支持 pause / upgrade 跟随 Router 合约 | • Registry<br/>• AccessControlManager |
-| **AccessControlManager** | 1. 集中角色管理 (`requireRole / hasRole`)<br/>2. 支持角色动态增删、事件通知 | • 全链路调用者（VaultRouter / 模块） |
-| **CollateralVault** | 1. 对外 API：`depositAndBorrow / repayAndWithdraw`<br/>2. 聚合子模块 & 权限校验<br/>3. 触发统一事件 | • CollateralManager<br/>• LendingEngine<br/>• HealthFactorCalculator |
-| **CollateralManager** | 管理用户抵押物 & 限额；与 Oracle 交互 | • CollateralVault<br/>• Registry |
-| **LendingEngine** | 记录债务余额 & 利息；处理借款/还款 | • CollateralVault |
-| **HealthFactorCalculator** | 计算 HF、决定清算条件 | • CollateralVault<br/>• CollateralManager |
-| **StatisticsView** | 统计写入(push*)与只读查询 | • CollateralVault |
-| **ValuationOracleAdapter** | 多预言机聚合价格 | • CollateralManager |
+| **VaultCore** | 1. 极简入口合约，处理用户操作（deposit/withdraw/borrow/repay）<br/>2. 传送数据至 View 层<br/>3. 支持 Registry 升级能力 | • VaultView<br/>• Registry |
+| **VaultView** | 1. 双架构智能协调器：用户操作处理、模块分发<br/>2. View层缓存：提供快速免费查询（0 gas）<br/>3. 事件驱动：统一事件发出，支持数据库收集 | • VaultCore<br/>• CollateralManager<br/>• VaultLendingEngine<br/>• Registry |
+| **VaultStorage** | 1. 纯Registry系统存储合约<br/>2. 提供统一的模块管理和状态存储<br/>3. 集成ACM进行权限控制 | • Registry<br/>• AccessControlManager |
+| **VaultRouter** | 1. 路由合约，权限校验与模块分发<br/>2. 提供原子性操作保护<br/>3. 集成优雅降级机制 | • Registry<br/>• AccessControlManager<br/>• CollateralManager<br/>• VaultLendingEngine |
+| **CollateralManager** | 1. 用户存 / 取抵押品<br/>2. 调用 PriceOracle 获取实时价格<br/>3. 计算并上报手续费至 FeeRouter<br/>4. 数据推送到 View 层缓存 | • PriceOracle<br/>• FeeRouter<br/>• VaultView<br/>• Registry |
+| **VaultLendingEngine** | 1. Vault借贷引擎，管理借贷记录和债务计算<br/>2. 账本变更后推送 VaultView<br/>3. 计算并推送健康因子到 HealthView | • VaultView<br/>• HealthView<br/>• Registry |
+| **VaultBusinessLogic** | 1. 业务逻辑模块：代币转入/转出、抵押与保证金联动<br/>2. 唯一奖励触发<br/>3. 批量编排 | • CollateralManager<br/>• VaultLendingEngine<br/>• RewardManager<br/>• Registry |
+| **LendingEngine** (core/) | 1. 订单引擎：记录并管理贷款订单全生命周期<br/>2. 调用 LoanNFT 铸造/更新贷款凭证<br/>3. 处理还款并计算利息<br/>4. 向 FeeRouter 上报并分配还款手续费 | • LoanNFT<br/>• FeeRouter<br/>• RewardManager<br/>• Registry |
+| **LiquidationManager** | 1. 清算编排入口<br/>2. 协调清算流程<br/>3. 触发清算事件 | • CollateralManager<br/>• VaultLendingEngine<br/>• LiquidationRiskManager<br/>• Registry |
+| **LiquidationRiskManager** | 1. 健康因子与风控聚合<br/>2. 清算风险评估<br/>3. 提供只读查询接口 | • HealthView<br/>• Registry |
+| **RewardManager** | 1. 依据借贷行为发放平台积分<br/>2. 积分可接入 DAO 治理、费用折扣、空投等<br/>3. 提供可升级的奖励规则接口 | • LendingEngine<br/>• RewardView<br/>• Registry |
+| **ModuleKeys** | 提供全局 `bytes32` 模块常量，避免硬编码，支持字符串映射 | • Registry<br/>• 所有模块 |
+| **ActionKeys** | 提供全局 `bytes32` 动作常量，用于权限分发和事件追踪 | • AccessControlManager<br/>• 所有模块 |
+| **Registry** | 1. `key => address` 模块地址映射<br/>2. 延时升级三步：`schedule / cancel / execute`<br/>3. 仅 Owner / UpgradeAdmin 可操作 | • 所有模块<br/>• Governance |
+| **AccessControlManager** | 1. 集中角色管理 (`requireRole / hasRole`)<br/>2. 支持角色动态增删、事件通知 | • 全链路调用者（所有模块） |
+| **PriceOracle** | 1. 价格预言机：提供资产价格信息<br/>2. 支持多源价格聚合<br/>3. 价格更新与查询 | • CollateralManager<br/>• VaultLendingEngine<br/>• Registry |
+| **FeeRouter** | 1. 统一手续费分账<br/>2. 支持平台/生态分账比例配置<br/>3. 费用分发与统计 | • LendingEngine<br/>• CollateralManager<br/>• Registry |
+| **EarlyRepaymentGuaranteeManager** | 1. 提前还款保证金管理<br/>2. 锁定、释放、没收保证金<br/>3. 提前还款结算 | • GuaranteeFundManager<br/>• Registry |
+| **GuaranteeFundManager** | 1. 保证金基金管理<br/>2. 锁定、释放、没收保证金<br/>3. 保证金统计 | • EarlyRepaymentGuaranteeManager<br/>• Registry |
+| **StatisticsView** | 1. 统计视图：活跃用户、全局抵押/债务、保证金聚合<br/>2. 业务入口统一推送<br/>3. 只读查询接口（0 gas） | • VaultView<br/>• 业务模块 |
+| **HealthView** | 1. 健康因子视图：缓存健康因子和风险状态<br/>2. 数据推送接口<br/>3. 只读查询接口（0 gas） | • VaultLendingEngine<br/>• LiquidationRiskManager |
 
 ### 3.2. 模块与动作常量库（ModuleKeys / ActionKeys）
 
@@ -87,24 +135,30 @@ contracts/
 
 #### 3.2.2 典型用法
 ```solidity
-import { ModuleKeys } from "contracts/constants/ModuleKeys.sol";
-import { ActionKeys } from "contracts/constants/ActionKeys.sol";
+import { IRegistry } from "../interfaces/IRegistry.sol";
+import { ModuleKeys } from "../constants/ModuleKeys.sol";
+import { ActionKeys } from "../constants/ActionKeys.sol";
+import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 
-// 动态查找模块
-address registry = IVaultStorage(vaultStorage).getNamedModule(
-    ModuleKeys.getModuleKeyFromString("registry")
-);
+// 动态查找模块（推荐使用 Registry）
+address registryAddr = ...; // Registry 地址
+IRegistry registry = IRegistry(registryAddr);
 
-// 动作权限分发
-if (actionKey == ActionKeys.ACTION_CLAIM_REWARD) {
-    // 处理积分领取逻辑
-}
+// 获取模块地址（未注册则回滚）
+address collateralManager = registry.getModuleOrRevert(ModuleKeys.KEY_CM);
+address accessControl = registry.getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
 
-// 模块注册
-IVaultStorage(vaultStorage).registerModule(
-    ModuleKeys.getModuleKeyString(ModuleKeys.KEY_COLLATERAL_MANAGER),
-    collateralManagerAddress
-);
+// 动作权限验证
+IAccessControlManager acm = IAccessControlManager(accessControl);
+acm.requireRole(ActionKeys.ACTION_DEPOSIT, msg.sender);
+
+// 模块注册（仅 Owner 可调用）
+registry.setModule(ModuleKeys.KEY_CM, collateralManagerAddress);
+
+// 或使用延时升级（推荐）
+registry.scheduleModuleUpgrade(ModuleKeys.KEY_CM, newCollateralManagerAddress);
+// 等待 minDelay 后
+registry.executeModuleUpgrade(ModuleKeys.KEY_CM);
 ```
 
 #### 3.2.3 映射函数
@@ -293,9 +347,9 @@ interface IVault {
     function initialize(address rwaToken, address vaultManager) external;
 }
 
-contract CollateralVault is IVault {
+contract VaultCore is IVaultCore {
     // 参数名与接口保持一致
-    function initialize(address rwaToken, address vaultManager) external override {
+    function initialize(address initialRegistryAddr, address initialViewContractAddr) external override {
         // 实现逻辑
     }
 }
@@ -308,43 +362,44 @@ contract CollateralVault is IVault {
 1. **错误引用规范**
 ```solidity
 // ❌ 避免 - 直接引用错误
-revert CollateralVault__NotVaultManager();
-revert HealthFactorCalculator__InvalidParameter("param", value);
+revert VaultBusinessLogic__NotAuthorized();
+revert VaultBusinessLogic__InvalidParameter("param", value);
 
 // ✅ 推荐 - 使用完整的接口名称引用错误
-revert ICollateralVaultErrors.CollateralVault__NotVaultManager();
-revert ICollateralVaultErrors.HealthFactorCalculator__InvalidParameter("param", value);
+revert IVaultBusinessLogicErrors.VaultBusinessLogic__NotAuthorized();
+revert IVaultBusinessLogicErrors.VaultBusinessLogic__InvalidParameter("param", value);
 ```
 
 2. **事件引用规范**
 ```solidity
 // ❌ 避免 - 直接引用事件
-emit UserStatusChanged(user, true, healthFactor, block.timestamp);
-emit PriceDeviationDetected(oldPrice, newPrice, block.timestamp);
+emit UserOperationProcessed(user, asset, amount, block.timestamp);
+emit MatchCompleted(orderId, borrower, lender, block.timestamp);
 
 // ✅ 推荐 - 使用完整的接口名称引用事件
-emit ICollateralVaultEvents.UserStatusChanged(user, true, healthFactor, block.timestamp);
-emit ICollateralVaultEvents.PriceDeviationDetected(oldPrice, newPrice, block.timestamp);
+emit IVaultBusinessLogicEvents.UserOperationProcessed(user, asset, amount, block.timestamp);
+emit IVaultBusinessLogicEvents.MatchCompleted(orderId, borrower, lender, block.timestamp);
 ```
 
 3. **错误和事件接口组织**
 ```solidity
 // ✅ 推荐 - 将错误定义在专门的接口中
-interface ICollateralVaultErrors {
-    error CollateralVault__NotVaultManager();
-    error HealthFactorCalculator__InvalidParameter(string param, uint256 value);
+interface IVaultBusinessLogicErrors {
+    error VaultBusinessLogic__NotAuthorized();
+    error VaultBusinessLogic__InvalidParameter(string param, uint256 value);
+    error VaultBusinessLogic__InsufficientBalance();
     // ... 其他错误定义
 }
 
 // ✅ 推荐 - 将事件定义在专门的接口中
-interface ICollateralVaultEvents {
-    event UserStatusChanged(address user, bool status, uint256 healthFactor, uint256 timestamp);
-    event PriceDeviationDetected(uint256 oldPrice, uint256 newPrice, uint256 timestamp);
+interface IVaultBusinessLogicEvents {
+    event UserOperationProcessed(address indexed user, address indexed asset, uint256 amount, uint256 timestamp);
+    event MatchCompleted(uint256 indexed orderId, address indexed borrower, address indexed lender, uint256 timestamp);
     // ... 其他事件定义
 }
 
 // ✅ 推荐 - 在合约中继承错误和事件接口
-contract HealthFactorCalculator is ICollateralVaultErrors, ICollateralVaultEvents {
+contract VaultBusinessLogic is IVaultBusinessLogicErrors, IVaultBusinessLogicEvents {
     // ... 合约实现
 }
 ```
@@ -439,7 +494,7 @@ jobs:
 
 在代码审查时，检查以下项目：
 
-- [ ] 合约名使用 PascalCase（如 `CollateralVault`）
+- [ ] 合约名使用 PascalCase（如 `VaultCore`、`VaultBusinessLogic`）
 - [ ] 接口名以 `I` 开头（如 `ICollateralManager`）
 - [ ] 公共状态变量使用 camelCase（如 `loanAmount`）
 - [ ] 私有状态变量使用 `_` 前缀（如 `_collateralRatio`）
@@ -465,9 +520,9 @@ jobs:
 
 | 原变量名     | 新变量名     | 文件名                              | 说明 |
 |--------------|--------------|-------------------------------------|------|
-| __gap        | _gap__       | contracts/Vault/CollateralVault.sol | 保持 slot 不动，仅改名 |
-| hfCalculator | _hfCalculator| 同上                                | 避免遮蔽 |
-| valuationOracle | _valuationOracle | 同上                            | 避免遮蔽 |
+| __gap        | _gap__       | src/Vault/VaultCore.sol | 保持 slot 不动，仅改名 |
+| registryAddr | _registryAddr| src/Vault/VaultBusinessLogic.sol | 避免遮蔽 |
+| viewContractAddr | _viewContractAddr | src/Vault/VaultCore.sol | 避免遮蔽 |
 
 #### 3.5.3. 代码审查模板
 
@@ -515,29 +570,53 @@ pragma solidity ^0.8.20;
 
 ### 4.2. 合约布局顺序
 合约内部代码应遵循以下顺序，以提高可读性：
-1.  State Variables (状态变量)
-2.  Events (事件)
-3.  Modifiers (修饰符)
-4.  Constructor (构造函数)
-5.  External/Public Functions (外部/公共函数，按管理、核心、视图等功能分组)
-6.  Internal Functions (内部函数)
-7.  Private Functions (私有函数)
+
+**对于可升级合约（UUPS）：**
+1.  SPDX License Identifier
+2.  Pragma 版本声明
+3.  Imports（按标准库、项目库、接口、错误分组）
+4.  State Variables (状态变量)
+5.  Events (事件)
+6.  Errors (自定义错误)
+7.  Modifiers (修饰符)
+8.  Constructor (构造函数，调用 `_disableInitializers()`)
+9.  Initializer (初始化函数)
+10. External/Public Functions (外部/公共函数，按管理、核心、视图等功能分组)
+11. Internal Functions (内部函数)
+12. Private Functions (私有函数)
+13. UUPS Upgrade Functions (`_authorizeUpgrade`)
+14. Storage Gap (`uint256[__] private __gap;`)
+
+**对于普通合约：**
+1.  SPDX License Identifier
+2.  Pragma 版本声明
+3.  Imports
+4.  State Variables (状态变量)
+5.  Events (事件)
+6.  Errors (自定义错误)
+7.  Modifiers (修饰符)
+8.  Constructor (构造函数)
+9.  External/Public Functions (外部/公共函数)
+10. Internal Functions (内部函数)
+11. Private Functions (私有函数)
 
 ### 4.3. NatSpec 注释
 所有 `public` 和 `external` 函数、以及所有合约都必须包含完整的 NatSpec 注释。
 ```solidity
-/// @title VaultManager（极致安全版）
+/// @title VaultCore（双架构设计）
 /// @author Your Name
-/// @notice 管理 RWA Token 对应的金库
-/// @dev 详细说明实现细节
-contract VaultManager is IVaultManager, ReentrancyGuard, Pausable {
+/// @notice 极简入口合约 - 事件驱动 + View层缓存
+/// @dev 遵循双架构设计：极简入口，传送数据至View层，支持Registry升级
+/// @dev 使用 UUPS 可升级模式，通过 AccessControlManager 验证升级权限
+contract VaultCore is Initializable, UUPSUpgradeable {
     // ...
 }
 
-/// @notice 注册一个新的金库
-/// @param rwaToken RWA 代币地址
-/// @param vault 金库合约地址
-function registerVault(address rwaToken, address vault) external {
+/// @notice 用户存款操作
+/// @param asset 资产地址
+/// @param amount 存款金额
+/// @dev 传送数据至 View 层处理
+function deposit(address asset, uint256 amount) external {
     // ...
 }
 ```
@@ -551,8 +630,25 @@ function registerVault(address rwaToken, address vault) external {
 
 ### 5.1. Reentrancy Guard (防重入)
 所有可能与外部合约交互并改变状态的函数都必须使用 `nonReentrant` 修饰符。
+
+**对于可升级合约**，使用 `ReentrancyGuardUpgradeable`：
 ```solidity
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+
+contract MyContract is Initializable, ReentrancyGuardUpgradeable {
+    function initialize() external initializer {
+        __ReentrancyGuard_init();
+    }
+    
+    function criticalAction() external nonReentrant {
+        // ...
+    }
+}
+```
+
+**对于普通合约**，使用 `ReentrancyGuard`：
+```solidity
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 contract MyContract is ReentrancyGuard {
     function criticalAction() external nonReentrant {
@@ -586,14 +682,79 @@ contract MyContract is ReentrancyGuard {
     ```
 
 ### 5.3. 访问控制
--   **分层权限**: 使用 `Owner` 和 `Operator` (或 `Registrar`) 两种角色。`Owner` 拥有最高权限，`Operator` 负责日常操作。
--   **修饰符**: 使用 `onlyOwner` 和 `onlyOperator` 修饰符进行权限控制。
--   **时间锁 (Timelock)**: **强烈建议**为所有关键的 `onlyOwner` 管理功能（如升级合约、修改关键参数）添加时间锁机制，为社区提供反应时间。
+系统使用统一的 `AccessControlManager` (ACM) 进行权限管理，通过 `Registry` 系统获取 ACM 地址。
+
+-   **权限系统**: 使用 `ActionKeys` 定义所有系统动作，通过 `AccessControlManager` 进行权限验证
+-   **权限级别**: 使用 `PermissionLevel` 枚举（NONE, VIEWER, OPERATOR, ADMIN, SUPER_ADMIN）
+-   **权限验证**: 使用 `requireRole()` 函数进行权限验证，未授权则 revert
+-   **时间锁 (Timelock)**: **强烈建议**为所有关键的管理功能（如升级合约、修改关键参数）通过 Registry 的延时升级机制添加时间锁，为社区提供反应时间
+
+**典型用法：**
+```solidity
+import { IRegistry } from "../interfaces/IRegistry.sol";
+import { ModuleKeys } from "../constants/ModuleKeys.sol";
+import { ActionKeys } from "../constants/ActionKeys.sol";
+import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
+
+contract MyContract {
+    address private _registryAddr;
+    
+    function _requireRole(bytes32 actionKey, address user) internal view {
+        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(actionKey, user);
+    }
+    
+    modifier onlyRole(bytes32 actionKey) {
+        _requireRole(actionKey, msg.sender);
+        _;
+    }
+    
+    function criticalAction() external onlyRole(ActionKeys.ACTION_DEPOSIT) {
+        // ...
+    }
+}
+```
 
 ### 5.4. Pausable 紧急暂停
 所有核心合约都应继承 `Pausable`，为应对紧急情况提供 "暂停开关"。
+
+**对于可升级合约**，使用 `PausableUpgradeable`：
 ```solidity
-import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { IRegistry } from "../interfaces/IRegistry.sol";
+import { ModuleKeys } from "../constants/ModuleKeys.sol";
+import { ActionKeys } from "../constants/ActionKeys.sol";
+import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
+
+contract MyContract is Initializable, PausableUpgradeable {
+    address private _registryAddr;
+    
+    function initialize(address registryAddr) external initializer {
+        __Pausable_init();
+        _registryAddr = registryAddr;
+    }
+    
+    function criticalAction() external whenNotPaused {
+        // ...
+    }
+
+    function pause() external {
+        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_PAUSE_SYSTEM, msg.sender);
+        _pause();
+    }
+    
+    function unpause() external {
+        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_UNPAUSE_SYSTEM, msg.sender);
+        _unpause();
+    }
+}
+```
+
+**对于普通合约**，使用 `Pausable`：
+```solidity
+import "@openzeppelin/contracts/security/Pausable.sol";
 
 contract MyContract is Pausable {
     function criticalAction() external whenNotPaused {
@@ -659,19 +820,30 @@ library VaultMath {
     function percentageDiv(uint256 value, uint256 percentage) internal pure returns (uint256)
     
     // 债务和抵押计算
-    function calculateMaxDebt(uint256 collateral, uint256 maxLTV) internal pure returns (uint256)
+    function calculateMaxBorrowable(uint256 collateral, uint256 currentDebt, uint256 maxLTV) internal pure returns (uint256)
     function calculateMinCollateral(uint256 debt, uint256 maxLTV) internal pure returns (uint256)
     
     // 奖励和费用计算
-    function calculateBonus(uint256 amount, uint256 bonus) internal pure returns (uint256)
+    function calculateLiquidationBonus(uint256 amount, uint256 bonus) internal pure returns (uint256)
     function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256)
+    function calculateAmountAfterFee(uint256 amount, uint256 feeRate) internal pure returns (uint256)
+    
+    // 清算相关计算
+    function calculateLiquidationResidual(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
+    function calculateResidualRatio(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
+    function calculateLiquidationEfficiency(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
+    function calculateLiquidationLoss(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
+    function calculateLiquidationLossRatio(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
+    function calculateOptimalLiquidationAmount(uint256 collateralValue, uint256 debtValue, uint256 maxLiquidationRatio) internal pure returns (uint256)
+    function calculateRemainingCollateral(uint256 originalCollateral, uint256 liquidationAmount) internal pure returns (uint256)
+    function calculateRemainingDebt(uint256 originalDebt, uint256 liquidationAmount) internal pure returns (uint256)
 }
 ```
 
 **使用标准：**
 ```solidity
 // ✅ 正确：使用 VaultMath 库
-import { VaultMath } from "../VaultMath.sol";
+import { VaultMath } from "../Vault/VaultMath.sol";
 
 function calculateUserHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256) {
     return VaultMath.calculateHealthFactor(collateral, debt);
@@ -683,6 +855,10 @@ function calculateUserLTV(uint256 debt, uint256 collateral) internal pure return
 
 function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256) {
     return VaultMath.calculateFee(amount, feeRate);
+}
+
+function calculateMaxBorrowable(uint256 collateral, uint256 currentDebt, uint256 maxLTV) internal pure returns (uint256) {
+    return VaultMath.calculateMaxBorrowable(collateral, currentDebt, maxLTV);
 }
 ```
 
@@ -986,7 +1162,7 @@ describe('ContractName – 测试模块', function () {
     const [governance, alice, bob]: SignerWithAddress[] = await ethers.getSigners();
     
     // 部署合约
-    const vaultFactory = (await ethers.getContractFactory('CollateralVault')) as CollateralVault__factory;
+    const vaultFactory = (await ethers.getContractFactory('VaultCore')) as VaultCore__factory;
     const vault = await vaultFactory.deploy();
     await vault.waitForDeployment();
     

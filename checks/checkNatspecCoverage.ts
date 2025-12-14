@@ -1,2 +1,0 @@
-export {};
-await import('./checkNatspecCoverage'); 

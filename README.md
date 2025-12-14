@@ -218,7 +218,7 @@ MIT License
 
 ## 📞 联系方式
 
-如有问题或建议，请通过 Issue 或 Pull Request 联系。
+如有问题或建议，请通过 微信群 或 Telegram工作群 联系。
 
 ---
 

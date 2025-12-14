@@ -1,101 +1,225 @@
-# Smart Contracts Repository
+# RWA 借贷平台智能合约仓库
 
-This is a standalone repository containing all smart contracts for the RWA Lending Platform.
+这是 RWA（现实世界资产）借贷平台的独立智能合约仓库，包含完整的智能合约源代码、测试、部署脚本和文档。
 
-## Overview
+## 📋 项目概述
 
-This repository contains:
-- **Solidity Contracts**: All smart contract source files (`.sol`)
-- **Tests**: Comprehensive test suite (`.test.ts`, `.spec.ts`)
-- **Scripts**: Deployment and utility scripts
-- **ABI Files**: Compiled contract ABIs
-- **Documentation**: Contract documentation and guides
-- **Configuration**: Hardhat, TypeScript, and other configuration files
+本仓库包含 RWA 借贷平台的所有智能合约实现，采用模块化架构设计，通过 Registry 系统实现统一的模块管理和升级能力。
 
-## Structure
+### 核心特性
+
+- **模块化架构**：所有功能模块通过 Registry 系统统一管理
+- **双架构设计**：事件驱动架构 + View 层缓存架构，优化 Gas 成本
+- **可升级性**：使用 UUPS 代理模式，支持合约升级
+- **权限控制**：统一的 AccessControlManager 权限管理系统
+- **标准化**：使用 ModuleKeys 和 ActionKeys 进行标准化标识
+- **完整测试**：全面的测试套件，覆盖核心功能模块
+
+## 📁 项目结构
 
 ```
 contracts/
-├── access/              # Access control contracts
-├── constants/           # Constants and configuration
-├── core/               # Core business logic contracts
-├── errors/             # Custom error definitions
-├── Governance/         # Governance contracts
-├── interfaces/         # Contract interfaces
-├── libraries/          # Solidity libraries
-├── Mocks/              # Mock contracts for testing
-├── monitor/            # Monitoring and degradation contracts
-├── registry/           # Registry contracts
-├── Reward/             # Reward system contracts
-├── strategies/         # Strategy contracts
-├── Token/              # Token contracts
-├── utils/              # Utility contracts
-├── Vault/              # Vault contracts
-├── scripts/            # Deployment and utility scripts
-├── test/               # Test files
-├── abi/                # Compiled ABIs
-├── deployments/        # Deployment addresses and configs
-├── docs/               # Documentation
-├── frontend-config/    # Frontend integration configs
-├── hardhat-node/       # Hardhat node configuration
-└── src/                # Additional source files
+├── src/                    # 智能合约源代码
+│   ├── access/            # 访问控制模块
+│   ├── constants/         # 常量定义（ModuleKeys, ActionKeys等）
+│   ├── core/              # 核心业务合约（价格预言机等）
+│   ├── errors/            # 标准错误定义
+│   ├── Governance/        # 治理模块
+│   ├── interfaces/        # 接口定义
+│   ├── libraries/         # 共享库文件
+│   ├── Mocks/             # 测试用 Mock 合约
+│   ├── monitor/           # 系统监控模块
+│   ├── registry/          # Registry 模块注册系统
+│   ├── Reward/            # 奖励系统
+│   ├── strategies/        # 策略合约
+│   ├── Token/             # 代币合约
+│   ├── utils/             # 工具库
+│   └── Vault/             # 金库系统（核心业务逻辑）
+│       ├── liquidation/   # 清算模块
+│       ├── modules/       # 业务模块
+│       └── view/          # 视图模块
+├── test/                  # 测试文件
+├── scripts/               # 部署和工具脚本
+│   ├── deploy/           # 部署脚本
+│   ├── checks/            # 检查脚本
+│   ├── docs/             # 文档生成脚本
+│   └── tasks/            # Hardhat 任务
+├── docs/                  # 项目文档
+│   ├── Usage-Guide/      # 使用指南
+│   └── Test-Guide/       # 测试指南
+├── deployments/           # 部署地址和配置
+├── configs/               # 配置文件
+└── hardhat.config.ts      # Hardhat 配置
 ```
 
-## Getting Started
+## 🏗️ 核心模块
 
-### Prerequisites
+### 1. Registry 系统
+模块注册中心，统一管理所有模块地址和升级流程。
 
-- Node.js (v18+)
-- npm or yarn
-- Hardhat
+### 2. Vault 系统
+金库系统，管理抵押物、借贷、还款等核心业务逻辑，包括：
+- **核心合约**：VaultCore、VaultView、VaultStorage、VaultRouter
+- **业务模块**：CollateralManager、LendingEngine、GuaranteeFundManager 等
+- **清算模块**：完整的清算系统，包含风险管理、奖励分配等
+- **视图模块**：20+ 个视图模块，提供快速免费查询
 
-### Installation
+### 3. Reward 系统
+奖励积分系统，管理用户积分、消费和特权。
+
+### 4. Core 模块
+核心业务合约，包括价格预言机、手续费路由等。
+
+详细文档请参考 [docs/PlatformLogic.md](./docs/PlatformLogic.md) 和 [src/README.md](./src/README.md)。
+
+## 🚀 快速开始
+
+### 环境要求
+
+- **Node.js**: v18 或更高版本
+- **npm** 或 **yarn**
+- **Hardhat**: 已包含在依赖中
+
+### 安装依赖
 
 ```bash
 npm install
 ```
 
-### Configuration
+### 配置环境变量
 
-1. Copy `.env.template` to `.env`
-2. Fill in your environment variables (RPC URLs, private keys, etc.)
+1. 复制环境变量模板：
+```bash
+cp .env.template .env
+```
 
-### Compile Contracts
+2. 填写必要的环境变量：
+   - RPC URLs（Arbitrum、Arbitrum Sepolia 等）
+   - 私钥（用于部署和测试）
+   - 其他配置项
+
+### 编译合约
 
 ```bash
 npm run compile
 ```
 
-### Run Tests
+### 运行测试
 
 ```bash
+# 运行所有测试
 npm test
+
+# 运行测试并生成 Gas 报告
+npm run gas
+
+# 生成测试覆盖率报告
+npm run coverage
 ```
 
-### Deploy to Local Network
+### 本地开发
 
 ```bash
+# 启动本地 Hardhat 节点
 npm run node
+
+# 在另一个终端部署到本地网络
 npm run deploy:localhost
 ```
 
-## Available Scripts
+## 📜 可用脚本
 
-- `npm run compile` - Compile contracts
-- `npm run test` - Run tests
-- `npm run node` - Start local Hardhat node
-- `npm run deploy:localhost` - Deploy to local network
-- `npm run coverage` - Generate test coverage
-- `npm run lint:sol` - Lint Solidity files
-- `npm run format:sol` - Format Solidity files
-- `npm run docs` - Generate documentation
+### 开发脚本
 
-## Networks
+- `npm run compile` - 编译智能合约
+- `npm run test` - 运行测试套件
+- `npm run node` - 启动本地 Hardhat 节点
+- `npm run deploy:localhost` - 部署到本地网络
+- `npm run coverage` - 生成测试覆盖率报告
+- `npm run gas` - 运行测试并生成 Gas 报告
 
-- **localhost**: Local development network
-- **arbitrum**: Arbitrum One mainnet
-- **arbitrumSepolia**: Arbitrum Sepolia testnet
+### 代码质量
 
-## License
+- `npm run lint:sol` - 检查 Solidity 代码规范
+- `npm run format:sol` - 格式化 Solidity 代码
+- `npm run format:check:sol` - 检查代码格式
+- `npm run size` - 检查合约大小
 
-MIT
+### 文档生成
+
+- `npm run docs` - 生成 Solidity 文档
+- `npm run docs:abi` - 生成 ABI 文档
+- `npm run docs:errors` - 生成错误文档
+- `npm run docs:all` - 生成所有文档
+
+### 检查脚本
+
+- `npm run checks:run-all` - 运行所有检查
+- `npm run checks:env` - 检查环境变量
+- `npm run checks:keys` - 检查模块键配置
+- `npm run checks:roles` - 检查角色权限
+- `npm run checks:registry` - 检查 Registry 配置
+- `npm run ci:check` - CI 检查
+
+### 清理脚本
+
+- `npm run clean` - 清理 Hardhat 缓存
+- `npm run clean:all` - 清理所有缓存
+- `npm run clean:hardhat` - 清理 Hardhat 缓存
+
+### CLI 工具
+
+- `npm run cli` - 运行 CLI 工具（交互式命令行工具）
+
+## 🌐 支持的网络
+
+- **localhost**: 本地开发网络（Hardhat 节点）
+- **arbitrum**: Arbitrum One 主网
+- **arbitrumSepolia**: Arbitrum Sepolia 测试网
+
+## 📚 文档
+
+项目包含完整的文档系统，位于 `docs/` 目录：
+
+- **[平台逻辑说明](./docs/PlatformLogic.md)** - 系统架构和核心逻辑
+- **[架构指南](./docs/Architecture-Guide.md)** - 架构设计说明
+- **[使用指南](./docs/Usage-Guide/)** - 各模块使用指南
+- **[测试指南](./docs/Test-Guide/)** - 测试相关文档
+- **[智能合约标准](./docs/SmartContractStandard.md)** - 开发规范
+
+## 🔧 技术栈
+
+- **Solidity**: 0.8.20
+- **Hardhat**: 开发框架
+- **TypeScript**: 测试和脚本语言
+- **OpenZeppelin**: 安全合约库
+- **Ethers.js**: 以太坊交互库
+
+## 🔐 安全特性
+
+- UUPS 可升级代理模式
+- 统一的权限管理系统（ACM）
+- 资产白名单机制
+- 价格预言机集成
+- 完整的清算机制
+- SafeERC20 安全转账
+
+## 📝 许可证
+
+MIT License
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request。在贡献代码前，请确保：
+
+1. 代码通过所有测试
+2. 遵循项目的代码规范
+3. 更新相关文档
+
+## 📞 联系方式
+
+如有问题或建议，请通过 Issue 或 Pull Request 联系。
+
+---
+
+**注意**：部署到主网前，请务必进行充分测试和安全审计。

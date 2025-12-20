@@ -67,6 +67,12 @@ const config: HardhatUserConfig = {
     outDir: 'types',
     target: 'ethers-v6',
   },
+  contractSizer: {
+    // 仅关注主合约体积，避免 mock/辅助合约噪音
+    only: ['VaultLendingEngine'],
+    runOnCompile: false,
+    strict: false,
+  },
 };
 
 export default config; 

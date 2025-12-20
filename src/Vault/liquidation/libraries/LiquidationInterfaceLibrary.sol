@@ -211,23 +211,10 @@ library LiquidationInterfaceLibrary {
         address targetUserAddr,
         ModuleCache.ModuleCacheStorage storage moduleCache
     ) internal view returns (uint256 healthFactor) {
-        // 使用 moduleCache 获取借贷引擎地址
-        address lendingEngineAddr = ModuleCache.get(moduleCache, ModuleKeys.KEY_LE, DEFAULT_CACHE_MAX_AGE);
-        if (lendingEngineAddr != address(0)) {
-            try ILendingEngineBasic(lendingEngineAddr).getUserHealthFactor(targetUserAddr) returns (uint256 healthFactorValue) {
-                healthFactor = healthFactorValue;
-            } catch {
-                // 如果获取失败，使用简化版本
-                (uint256 totalCollateralValue, uint256 totalDebtValue) = LiquidationViewLibrary._getUserValuesSimple(targetUserAddr, moduleCache);
-                uint256 liquidationThreshold = 1e18; // 默认100%
-                healthFactor = LiquidationViewLibrary.calculateHealthFactor(totalCollateralValue, totalDebtValue, liquidationThreshold);
-            }
-        } else {
-            // 如果没有借贷引擎，使用简化版本
-            (uint256 totalCollateralValue, uint256 totalDebtValue) = LiquidationViewLibrary._getUserValuesSimple(targetUserAddr, moduleCache);
-            uint256 liquidationThreshold = 1e18; // 默认100%
-            healthFactor = LiquidationViewLibrary.calculateHealthFactor(totalCollateralValue, totalDebtValue, liquidationThreshold);
-        }
+        // 账本端已移除健康因子接口，使用简化路径
+        (uint256 totalCollateralValue, uint256 totalDebtValue) = LiquidationViewLibrary._getUserValuesSimple(targetUserAddr, moduleCache);
+        uint256 liquidationThreshold = 1e18; // 默认100%
+        healthFactor = LiquidationViewLibrary.calculateHealthFactor(totalCollateralValue, totalDebtValue, liquidationThreshold);
     }
 
     /**

@@ -9,6 +9,7 @@ import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 
 import { IRegistry } from "../interfaces/IRegistry.sol";
+import { IRegistryStorageMigrator } from "../interfaces/IRegistryStorageMigrator.sol";
 import { IRegistryDynamicModuleKey } from "../interfaces/IRegistryDynamicModuleKey.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { RegistryStorage } from "./RegistryStorageLibrary.sol";
@@ -59,6 +60,12 @@ contract Registry is
     error EmergencyAdminNotAuthorized(address caller, address emergencyAdmin);
     /// @notice 零地址错误
     error ZeroAddress();
+    /// @notice 存储版本不匹配
+    error StorageVersionMismatch(uint256 expected, uint256 actual);
+    /// @notice 存储迁移目标非法（必须递增）
+    error InvalidMigrationTarget(uint256 fromVersion, uint256 toVersion);
+    /// @notice 迁移合约执行失败
+    error MigratorFailed(address migrator, bytes reason);
 
     // ============ Constants ============
     /// @notice 最大延迟时间（7天）
@@ -540,6 +547,38 @@ contract Registry is
         uint256 oldDelay = RegistryStorage.layout().minDelay;
         RegistryStorage.layout().minDelay = uint64(newDelay);
         emit RegistryEvents.MinDelayChanged(oldDelay, newDelay);
+    }
+
+    /// @notice 通过迁移合约执行存储迁移（保持固定 STORAGE_SLOT 不变）
+    /// @param fromVersion 预期的当前存储版本
+    /// @param toVersion 目标存储版本（必须大于当前版本）
+    /// @param migrator 迁移合约地址
+    /// @dev 迁移流程：
+    ///      1) 校验当前版本 == fromVersion 且 toVersion 递增
+    ///      2) 迁移前执行 validateStorageLayout()
+    ///      3) 调用迁移合约执行实际搬迁/初始化（不改槽位）
+    ///      4) bump storageVersion 至 toVersion
+    ///      5) 迁移后再次 validateStorageLayout()
+    function migrateStorage(uint256 fromVersion, uint256 toVersion, address migrator) external override onlyOwner {
+        if (migrator == address(0)) revert ZeroAddress();
+
+        uint256 cur = RegistryStorage.getStorageVersion();
+        if (cur != fromVersion) revert StorageVersionMismatch(fromVersion, cur);
+        if (toVersion <= cur) revert InvalidMigrationTarget(fromVersion, toVersion);
+
+        // 迁移前校验，确保关键字段未被破坏
+        RegistryStorage.validateStorageLayout();
+
+        // 执行迁移逻辑（数据搬迁/初始化），保持 STORAGE_SLOT 不变（delegatecall）
+        bytes memory data = abi.encodeWithSelector(IRegistryStorageMigrator.migrate.selector, fromVersion, toVersion);
+        (bool ok, bytes memory reason) = migrator.delegatecall(data);
+        if (!ok) revert MigratorFailed(migrator, reason);
+
+        // 版本递增并做迁移后校验
+        RegistryStorage.upgradeStorageVersion(toVersion);
+        RegistryStorage.validateStorageLayout();
+
+        emit RegistryEvents.StorageMigrated(fromVersion, toVersion, migrator);
     }
 
     /// @notice 升级存储版本（仅治理地址可调用）

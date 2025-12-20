@@ -75,6 +75,16 @@ contract CollateralManager is
         _;
     }
 
+    /// @notice 允许 VaultView 或 LiquidationManager（清算路径）调用
+    modifier onlyVaultViewOrLiquidationManager() {
+        address viewAddr = _resolveVaultViewAddr();
+        address liquidationManager = _resolveLiquidationManagerAddr();
+        if (msg.sender != viewAddr && msg.sender != liquidationManager) {
+            revert CollateralManager__UnauthorizedAccess();
+        }
+        _;
+    }
+
     /*━━━━━━━━━━━━━━━ 构造和初始化 ━━━━━━━━━━━━━━━*/
     
     /// @notice 初始化函数
@@ -158,7 +168,7 @@ contract CollateralManager is
     /// @param asset 资产地址
     /// @param amount 提取金额
     /// @dev 纯业务逻辑：处理抵押物提取，更新View层缓存
-    function processWithdraw(address user, address asset, uint256 amount) public onlyVaultView nonReentrant {
+    function processWithdraw(address user, address asset, uint256 amount) public onlyVaultViewOrLiquidationManager nonReentrant {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (asset == address(0)) revert CollateralManager__ZeroAddress();
         if (amount == 0) revert CollateralManager__InvalidAmount();
@@ -274,7 +284,7 @@ contract CollateralManager is
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external onlyVaultView nonReentrant {
+    ) external onlyVaultViewOrLiquidationManager nonReentrant {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (assets.length != amounts.length) revert CollateralManager__LengthMismatch();
         if (assets.length == 0) revert CollateralManager__InvalidAmount();
@@ -333,7 +343,7 @@ contract CollateralManager is
      /// @param asset 资产地址
      /// @param amount 提取金额
      /// @dev 双架构设计：重定向到 processWithdraw
-     function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultView {
+    function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultViewOrLiquidationManager {
          processWithdraw(user, asset, amount);
      }
      
@@ -507,6 +517,11 @@ contract CollateralManager is
     function _resolveVaultViewAddr() internal view returns (address) {
         address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
         return IVaultCoreMinimal(vaultCore).viewContractAddrVar();
+    }
+
+    /// @notice 解析当前有效的 LiquidationManager 地址（通过 Registry）
+    function _resolveLiquidationManagerAddr() internal view returns (address) {
+        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
     }
 
     /// @notice 获取价格预言机地址

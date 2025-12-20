@@ -19,8 +19,6 @@ import { LiquidationAccessControl } from "../libraries/LiquidationAccessControl.
 import { ILiquidationEventsView } from "../../../interfaces/ILiquidationEventsView.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { IRegistry } from "../../../interfaces/IRegistry.sol";
-// 通过 VaultCore 解析 VaultView 地址（统一路由入口）
-interface IVaultCoreMinimal { function viewContractAddrVar() external view returns (address); }
 
 /**
  * @title LiquidationManager
@@ -259,23 +257,18 @@ abstract contract LiquidationManager is
         address liquidator,
         uint256 bonus
     ) internal {
-        // 二跳：Manager -> VaultView (forward) -> LiquidatorView（单点写入）
-        address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        address vaultView = IVaultCoreMinimal(vaultCore).viewContractAddrVar();
-        (bool ok, ) = vaultView.call(
-            abi.encodeWithSignature(
-                "forwardPushLiquidationUpdate(address,address,address,uint256,uint256,address,uint256,uint256)",
-                user,
-                collateralAsset,
-                debtAsset,
-                collateralAmount,
-                debtAmount,
-                liquidator,
-                bonus,
-                block.timestamp
-            )
+        // 单点推送：直接调用 LiquidatorView，避免多跳转发
+        address eventsView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_VIEW);
+        ILiquidationEventsView(eventsView).pushLiquidationUpdate(
+            user,
+            collateralAsset,
+            debtAsset,
+            collateralAmount,
+            debtAmount,
+            liquidator,
+            bonus,
+            block.timestamp
         );
-        require(ok, "forwardPushLiquidationUpdate failed");
     }
 
     function _pushBatchLiquidationEvent(
@@ -287,22 +280,17 @@ abstract contract LiquidationManager is
         address liquidator,
         uint256[] memory bonuses
     ) internal {
-        address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        address vaultView = IVaultCoreMinimal(vaultCore).viewContractAddrVar();
-        (bool ok, ) = vaultView.call(
-            abi.encodeWithSignature(
-                "forwardPushBatchLiquidationUpdate(address[],address[],address[],uint256[],uint256[],address,uint256[],uint256)",
-                users,
-                collateralAssets,
-                debtAssets,
-                collateralAmounts,
-                debtAmounts,
-                liquidator,
-                bonuses,
-                block.timestamp
-            )
+        address eventsView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_VIEW);
+        ILiquidationEventsView(eventsView).pushBatchLiquidationUpdate(
+            users,
+            collateralAssets,
+            debtAssets,
+            collateralAmounts,
+            debtAmounts,
+            liquidator,
+            bonuses,
+            block.timestamp
         );
-        require(ok, "forwardPushBatchLiquidationUpdate failed");
     }
 
     /* ============ Core Query Functions ============ */

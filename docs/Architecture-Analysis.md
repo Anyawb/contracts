@@ -72,7 +72,7 @@
 
 ## 🔴 文档与代码一致性问题
 
-### 1. VaultCore 代码示例与实际不一致 ⚠️ **需更新**
+### 1. VaultCore 代码示例与实际不一致 ⚠️ **需更新** ✅ 已修改
 
 #### 问题描述
 Architecture-Guide.md 文档中的代码示例使用**字符串类型**操作标识符，而实际代码使用 **bytes32 常量**。
@@ -92,6 +92,12 @@ function deposit(address asset, uint256 amount) external {
     IVaultView(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.timestamp);
 }
 ```
+
+#### 命名规范说明
+根据 `SmartContractStandard.md` 第131行和 `ActionKeys.sol` 的实际实现：
+- ✅ **正确命名**：使用带下划线的 UPPER_SNAKE_CASE，如 `ACTION_DEPOSIT`、`ACTION_BORROW`、`ACTION_REPAY`、`ACTION_WITHDRAW`
+- ❌ **错误命名**：不使用不带下划线的命名，如 `ACTIONDEPOSIT`、`ACTIONBORROW`
+- 所有 ActionKeys 常量都遵循 `ACTION_XXX` 格式，类型为 `bytes32 constant`
 
 #### 影响
 - ❌ 开发者可能按照文档编写错误代码
@@ -119,71 +125,45 @@ function deposit(address asset, uint256 amount) external {
 
 ## ⚠️ 潜在问题分析
 
-### 1. 缓存数据一致性问题 ⚠️ **高风险**
+### 1. 缓存数据一致性问题 ⚠️ **高风险** ✅ 已解决
 
 #### 问题描述
 - View层缓存与账本数据可能不同步
 - 如果业务模块推送失败，缓存会过时
 - 缓存过期机制（5分钟）可能导致数据不一致
 
-#### 具体场景
-```solidity
-// 场景1：推送失败
-LendingEngine.borrow() {
-    // 账本更新成功
-    _userDebt[user][asset] += amount;
-    
-    // 推送失败（gas不足、revert等）
-    try IVaultView(viewAddr).pushUserPositionUpdate(...) { } 
-    catch { }  // 静默失败，缓存未更新
-}
+#### 当前状态（已实施解决方案）
+- ✅ **缓存验证机制**：`getUserPositionWithValidity()` 返回 `(collateral, debt, isValid)`；缓存失效自动回退到账本（`PositionView`）。
+- ✅ **推送失败策略分层**：清算/借还路径的视图推送失败会回滚主交易（强一致）；仅在 `PositionView` guarded 读取失败时 emit `CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason)`，主流程不中断。
+- ✅ **链上重试入口**：`PositionView.retryUserPositionUpdate(user, asset)`（admin）重读最新账本后重推缓存；失败再次 emit 事件，幂等。
+- ✅ **管理员同步/回退**：读路径回退账本；若需手动修复可用重试入口。
 
-// 场景2：缓存过期
-// 用户查询时，缓存已过期（5分钟），但业务逻辑可能已更新
-function getUserPosition() {
-    if (block.timestamp - _cacheTimestamps[user] > CACHE_DURATION) {
-        // 缓存过期，但可能返回旧数据
-        return (_userCollateral[user][asset], _userDebt[user][asset]);
-    }
-}
-```
+#### 测试文件：
 
-#### 影响
-- ❌ 用户查询到过时数据
-- ❌ 前端显示错误信息
-- ❌ 可能导致用户做出错误决策
+- **主要测试文件**：
+  - `test/Vault/view/PositionView.cache-validity.test.ts` - 缓存有效性测试
+    - 验证缓存过期时自动回退到账本
+    - 验证 `getUserPositionWithValidity` 返回正确的 `isValid` 标识
+    - 验证账本读取失败时发出 `CacheUpdateFailed` 事件
+    - 验证推送数据与账本不一致时回滚
+  
+  - `test/Vault/view/VaultView.cache-consistency.test.ts` - 缓存一致性测试
+    - 验证缓存有效时返回缓存值并标记有效
+    - 验证缓存过期时自动回退到账本最新值并标记无效
+    - 验证 `syncUserPositionFromLedger` 管理员同步功能
+    - 验证模块缓存过期时通过 Registry 回退到账本
+    - 验证业务白名单（CM/LE/VBL）缓存失效时自动刷新并放行
+    - 验证非白名单地址调用被拒绝
+    - 验证模块缓存管理（refreshModuleCache、isModuleCacheValid）
+    - 验证缓存清理与统计（clearExpiredCache、getCacheStats）
+    - 验证业务推送接口（pushUserPositionUpdate）覆盖缓存并权限校验
+    - 验证缓存有效期边界条件
+  
+  - `test/Vault/liquidation/LiquidationDebtManager.cache-push.test.ts` - 清算缓存推送测试
+    - 验证 View 地址缺失时应直接回滚
+    - 验证推送到 View 失败时应回滚（不再静默处理）
 
-#### 解决方案建议
-1. **添加缓存验证机制**：
-   ```solidity
-   function getUserPosition(address user, address asset) external view 
-       returns (uint256 collateral, uint256 debt, bool isValid) {
-       bool cacheValid = (block.timestamp - _cacheTimestamps[user]) < CACHE_DURATION;
-       if (!cacheValid) {
-           // 从账本读取真实数据
-           collateral = ICollateralManager(_cachedCollateralManager).getCollateral(user, asset);
-           debt = ILendingEngine(_cachedLendingEngine).getDebt(user, asset);
-           return (collateral, debt, false);
-       }
-       return (_userCollateral[user][asset], _userDebt[user][asset], true);
-   }
-   ```
-
-2. **强制推送机制**：
-   ```solidity
-   // 业务模块必须推送，失败则revert
-   function borrow(...) external {
-       _processBorrow(...);
-       // 必须成功，否则整个交易失败
-       IVaultView(viewAddr).pushUserPositionUpdate(...);
-   }
-   ```
-
-3. **定期同步机制**：
-   - 添加管理员函数，定期从账本同步数据到缓存
-   - 或使用链下服务监控并修复不一致
-
-### 2. 推送失败处理问题 ⚠️ **中风险**
+### 2. 推送失败处理问题 ⚠️ **中风险** ✅ 已解决
 
 #### 问题描述
 当前代码中，推送失败时使用 `try-catch` 静默处理：
@@ -193,27 +173,21 @@ function getUserPosition() {
 try IVaultView(viewAddr).pushUserPositionUpdate(user, asset, collateral, debt) { } 
 catch { }
 ```
-
 #### 影响
 - ❌ 账本更新成功，但缓存未更新
 - ❌ 数据不一致，但用户不知道
 - ❌ 难以追踪和修复
 
-#### 解决方案建议
-1. **记录推送失败事件**：
-   ```solidity
-   event CacheUpdateFailed(address indexed user, address indexed asset, bytes reason);
-   
-   try IVaultView(viewAddr).pushUserPositionUpdate(...) { } 
-   catch (bytes memory reason) {
-       emit CacheUpdateFailed(user, asset, reason);
-       // 可以选择revert或继续
-   }
-   ```
+#### 解决方案与现状
+- ✅ **事件已实现（限 guarded 读取失败）**：`PositionView` 在账本读取失败时 emit `CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason)`；主流程不中断。
+- ✅ **链下重试**：监听事件 → 队列 → admin 账户调用 `PositionView.retryUserPositionUpdate` 重读账本后重推。
+- ✅ **清算/借还强一致**：`LendingEngine/LiquidationDebtManager` 的视图推送失败会回滚，避免账本/缓存分叉。
 
-2. **重试机制**：
-   - 链下服务监听失败事件
-   - 自动重试推送更新
+#### 测试文件：
+
+- **主要测试文件**：
+  - `test/Vault/view/PositionView.cache-validity.test.ts` - 验证账本读取失败时发出 `CacheUpdateFailed` 事件
+  - `test/Vault/liquidation/LiquidationDebtManager.cache-push.test.ts` - 验证清算路径推送失败发出事件（不回滚）
 
 ### 3. 并发更新问题 ⚠️ **中风险**
 
@@ -350,7 +324,7 @@ mapping(address => mapping(address => uint256)) private _userCollateralV2; // �
    }
    ```
 
-### 7. VaultLendingEngine 规模过大 ⚠️ **高风险**
+### 7. VaultLendingEngine 规模过大 ⚠️ **高风险** ✅ 已验证
 
 #### 问题描述
 文档强调模块应该"纯业务逻辑"且简化，但实际代码中：
@@ -374,7 +348,30 @@ LendingEngineAccounting (~300行) - 债务核算
 LendingEngineValuation (~300行)  - 估值与优雅降级
 ```
 
-### 8. 双入口风险 ⚠️ **高风险**
+#### 当前状态（已实施拆分）
+- ✅ 已拆分为库模块：`LendingEngineStorage.sol`、`LendingEngineCore.sol`、`LendingEngineAccounting.sol`、`LendingEngineValuation.sol`
+- ✅ 主合约 `VaultLendingEngine.sol` 行数缩减至 ~600 行
+- ✅ 部署体积：16.245 KiB（符合限制）
+
+#### 测试文件：
+
+- **主要测试文件**：`test/Vault/VaultLendingEngine.refactor.test.ts`
+  - 专门针对拆分后的账本与入口一致性测试
+  - 覆盖统一入口（borrow/repay 仅允许 KEY_VAULT_CORE）、清算直达入口（forceReduceDebt 需 ACTION_LIQUIDATE）
+  - 验证账本写入与视图推送、健康推送等功能
+  - 测试边界用例：零金额、超额还款、全额还清/全额清算等
+  
+- **相关测试文件**：
+  - `test/Vault/VaultLendingEngine.dual-entry.test.ts` - 双入口一致性回归测试
+  - `test/LendingEngine.test.ts` - LendingEngine 核心功能测试（已跳过，待代理模式适配）
+
+- **拆分后的模块库**（位于 `src/Vault/modules/lendingEngine/`）：
+  - `LendingEngineStorage.sol` - 存储布局访问器
+  - `LendingEngineCore.sol` - 编排入口（borrow/repay/forceReduceDebt）
+  - `LendingEngineAccounting.sol` - 借/还/清算账本写入
+  - `LendingEngineValuation.sol` - 债务估值与优雅降级
+
+### 8. 双入口风险 ⚠️ **高风险** ✅ 已验证
 
 #### 问题描述
 文档声明（第460行）：
@@ -402,9 +399,29 @@ modifier onlyVaultCore() {
 - ❌ 权限校验可能不一致
 
 #### 解决方案建议
-1. 明确定义哪些函数可以被清算模块直接调用
-2. 确保所有绕过 VaultCore 的路径也正确更新缓存和推送事件
-3. 添加端到端测试验证所有入口的一致性
+1. 明确仅 `forceReduceDebt` 允许清算直达账本；其余写入统一经 `VaultCore`。
+2. 确保直达路径同样推送缓存/风险：`_pushUserPositionToView`、`_pushHealthStatus` 已在 `forceReduceDebt` 内调用。
+3. 权限统一走 ACM：清算调用需 `ActionKeys.ACTION_LIQUIDATE`。
+4. 端到端测试覆盖双入口一致性（借/还走 VaultCore，清算走直达），校验事件与缓存同步。
+
+#### 当前状态（与 Architecture-Guide 对齐）
+- 已采用“方案 B”：业务/撮合入口走 `VaultCore → LendingEngine`；清算入口保留直达账本（Registry 绑定 `KEY_LIQUIDATION_MANAGER`），并在账本落账后统一推送 View/Health。
+- 估值与优雅降级仅在 LendingEngine 估值路径触发，避免业务层重复。
+
+#### 测试文件：
+
+- **主要测试文件**：`test/Vault/VaultLendingEngine.dual-entry.test.ts`
+  - 专门针对双入口一致性回归测试
+  - 覆盖业务入口（borrow/repay 仅允许 KEY_VAULT_CORE）和清算入口（forceReduceDebt 需 ACTION_LIQUIDATE）
+  - 验证账本与缓存一致性（View/Health 同步）
+  
+- **相关测试文件**：`test/Vault/VaultLendingEngine.refactor.test.ts`
+  - 包含 `onlyVaultCore guard` 测试套件
+  - 包含 `forceReduceDebt (liquidation path)` 测试套件
+  
+- **其他相关测试**：
+  - `test/Vault/modules/VaultBusinessLogic.liquidation.test.ts` - 清算流程中的 forceReduceDebt 测试
+  - `test/Vault/view/LiquidationViewForward.test.ts` - View 层转发功能测试
 
 ### 9. VaultView 命名误导问题 ⚠️ **中风险**
 
@@ -427,7 +444,7 @@ function processUserOperation(...) external onlyAuthorizedContract {
 #### 解决方案建议
 考虑将 `VaultView` 重命名为 `VaultRouter` 或 `VaultCoordinator` 以更准确反映其职责。
 
-### 10. Registry 存储槽位冲突风险 ⚠️ **高风险**
+### 10. Registry 存储槽位冲突风险 ⚠️ **高风险** ✅ 已验证
 
 #### 问题描述
 文档设计（第876-880行）使用固定槽位：
@@ -449,8 +466,10 @@ bytes32 internal constant STORAGE_SLOT = keccak256("registry.storage.v1");
 2. 强制在每次升级前运行 `validateStorageLayout()`
 3. 提供详细的迁移脚本模板
 4. 在 CI 中加入存储布局检查
+5. **已落地**：新增 `Registry.migrateStorage(fromVersion, toVersion, migrator)`，保持固定 `STORAGE_SLOT`，迁移前后调用 `validateStorageLayout()`，并通过外部迁移合约执行数据搬迁后再 bump `storageVersion`，已在事件库中添加 `StorageMigrated` 事件用于审计；配套测试：`test/RegistryStorageMigration.test.ts`
 
-### 11. 清算流程复杂性 ⚠️ **中风险**
+
+### 11. 清算流程复杂性 ⚠️ **中风险** ✅ 已完成
 
 #### 问题描述
 文档第464-496行描述的清算流程涉及多个模块：
@@ -473,6 +492,49 @@ bytes32 internal constant STORAGE_SLOT = keccak256("registry.storage.v1");
 - 扣押成功但减债失败
 - 减债成功但事件推送失败
 - 并发清算同一用户
+
+#### 当前状态（已实施解决方案）
+- ✅ **原子性保证**：`VaultBusinessLogic.liquidate` 采用原子性设计，扣押 → 减债 → 事件推送，任一步失败即整体回滚，确保无部分状态更新。
+- ✅ **权限集中验证**：清算入口统一使用 `onlyLiquidator` 修饰符，通过 `AccessControlManager` 统一校验，避免权限校验分散。
+- ✅ **事件单点推送**：清算事件仅通过 `LiquidationEventsView.pushLiquidationUpdate` 单点推送，避免事件双发或遗漏。
+
+#### 测试文件：
+- **主要测试文件**：
+  - `test/Vault/liquidation/Liquidation.failure-scenarios.test.ts` - 清算失败场景端到端测试（24个测试用例，全部通过）
+    - **核心失败场景**（3个用例）：
+      - 验证扣押成功但减债失败时整体回滚
+      - 验证事件推送失败时回滚减债与扣押
+      - 验证防止同一用户的并发清算导致重复事件或异常状态
+    - **权限与参数验证**（3个用例）：
+      - 验证非清算人调用被拒绝
+      - 验证零地址参数被拒绝
+      - 验证零金额被拒绝
+    - **扣押失败场景**（2个用例）：
+      - 验证抵押不足时应回滚
+      - 验证扣押失败时不应影响债务
+    - **模块缺失场景**（3个用例）：
+      - 验证 CollateralManager 未注册时应回滚
+      - 验证 LendingEngine 未注册时应回滚
+      - 验证 LiquidationView 未注册时应回滚
+    - **成功清算后的状态验证**（2个用例）：
+      - 验证成功清算后正确更新抵押和债务
+      - 验证成功清算后发出事件
+    - **部分清算场景**（2个用例）：
+      - 验证部分清算后允许继续清算剩余部分
+      - 验证部分清算后不应超过剩余债务
+    - **边界条件**（3个用例）：
+      - 验证处理最小金额清算（1 wei）
+      - 验证拒绝超过可用抵押的清算
+      - 验证拒绝超过可用债务的清算
+    - **多清算人场景**（2个用例）：
+      - 验证不同清算人能清算同一用户
+      - 验证不同清算人的奖励分别累计
+    - **清算奖励验证**（2个用例）：
+      - 验证清算奖励正确记录
+      - 验证零奖励清算正常工作
+    - **状态一致性验证**（2个用例）：
+      - 验证清算失败后所有状态保持不变
+      - 验证多次失败清算不累积状态变化
 
 ### 12. Reward 模块入口收紧验证 ⚠️ **中风险**
 
@@ -509,7 +571,7 @@ bytes32 internal constant STORAGE_SLOT = keccak256("registry.storage.v1");
 
 ---
 
-### 14. 权限和安全性问题 ⚠️ **高风险**
+### 14. 权限和安全性问题 ⚠️ **高风险** ✅ 已解决
 
 #### 问题描述
 数据推送接口需要严格的权限控制：
@@ -551,6 +613,37 @@ modifier onlyBusinessContract() {
    - 推送时验证数据合理性
    - 与账本数据对比验证
 
+#### 修改方案更改为
+- **1h 模块缓存 + 自动刷新（fail-closed）**：`VaultView/PositionView.onlyBusinessContract` 使用 1 小时缓存的 CM/LE/VBL 地址，过期或缺失自动刷新后再校验，非白名单直接拒绝。
+- **角色与白名单双重校验**：`PositionView.pushUserPositionUpdate` 还需 `ACTION_VIEW_PUSH` 角色；`VaultView` 依赖白名单。
+- **推送对账与失败打点**：PositionView 写缓存前重读 CM/LE，数值不一致则回滚，读取失败 emit `CacheUpdateFailed`；VaultView 走信任路径。清算/借还路径视图推送失败会回滚主交易，保持强一致。
+- **运维刷新**：模块地址变更后由 admin 调用 `refreshModuleCache`（VaultView/PositionView），避免缓存过期导致推送被拒。
+
+#### 当前状态（已实施解决方案）
+- ✅ **1h 模块缓存机制**：VaultView/PositionView 使用 1 小时模块地址缓存（MODULE_CACHE_DURATION = 3600），过期或缺失时自动刷新后再校验白名单，兼顾性能与安全性。
+- ✅ **白名单 + 角色双重校验**：
+  - PositionView：白名单（CM/LE/VaultCore/VBL）+ `ACTION_VIEW_PUSH` 角色双重校验
+  - VaultView：白名单（CM/LE/VBL）校验
+- ✅ **推送对账机制**：PositionView 写缓存前从 CM/LE 重读账本，数值不一致则 `PositionView__LedgerMismatch` 回滚；账本读取失败 emit `CacheUpdateFailed` 事件供链下重试。
+- ✅ **运维刷新接口**：admin 可调用 `refreshModuleCache()` 手动刷新模块缓存，模块地址变更后需及时刷新。
+
+#### 测试文件：
+- **主要测试文件**：
+  - `test/Vault/view/PositionView.cache-validity.test.ts` - PositionView 权限与数据校验测试
+    - 验证非业务模块调用被拒绝
+    - 验证业务模块缺推送角色时被 MissingRole 拒绝
+    - 验证非白名单地址即便拥有推送角色也会被拒绝
+    - 验证推送数据与账本不一致时回滚
+    - 验证账本读取失败时发出 CacheUpdateFailed 事件
+    - 验证管理员可通过 retryUserPositionUpdate 修复缓存
+    - 验证业务模块有权限时可推送并写缓存
+  - `test/Vault/view/VaultView.cache-consistency.test.ts` - VaultView 缓存一致性与权限测试
+    - 验证缓存失效时白名单地址调用应自动刷新并放行
+    - 验证非白名单地址调用应被拒绝
+    - 验证 pushUserPositionUpdate 非业务地址应被拒绝
+    - 验证 refreshModuleCache 应更新模块缓存并发出事件
+    - 验证模块缓存过期后 isModuleCacheValid 应为 false
+
 ### 8. 测试复杂度问题 ⚠️ **低风险**
 
 #### 问题描述
@@ -568,92 +661,116 @@ modifier onlyBusinessContract() {
 
 > **验证状态**：以下问题已通过代码级分析确认存在（2025-12-15 二次验证）
 
-### 15. 借贷流程控制流断裂 ⚠️ **P0 阻断性问题** ✅ 已验证
+### 15. 借贷流程控制流断裂 ⚠️ **P0 阻断性问题** ✅ 已解决
 
-#### 问题描述
-根据架构文档，`VaultCore` 应统一调用 `LendingEngine` 进行账本写入。但实际代码路径如下：
+#### 问题描述（历史问题，已修复）
+根据架构文档，`VaultCore` 应统一调用 `LendingEngine` 进行账本写入。但历史代码路径存在问题：
 1. `VaultCore.borrow` 调用 `VaultView.processUserOperation`。
 2. `VaultView.processUserOperation` 调用 `_distributeToModule`。
 3. `VaultView._distributeToModule` 针对 `ACTION_BORROW` **未执行任何操作**（空代码块）。
 4. `VaultLendingEngine.borrow` 具有 `onlyVaultCore` 修饰符，要求 `msg.sender` 必须为 `VaultCore`。
 
-**结果**：标准借贷流程无法执行。`VaultCore` 委托给 `VaultView`，但 `VaultView` 不作为，且即使 `VaultView` 尝试调用 `LendingEngine`，也会因权限校验失败（`msg.sender` 为 `VaultView` 而非 `VaultCore`）而 revert。
+**历史结果**：标准借贷流程无法执行。`VaultCore` 委托给 `VaultView`，但 `VaultView` 不作为，且即使 `VaultView` 尝试调用 `LendingEngine`，也会因权限校验失败（`msg.sender` 为 `VaultView` 而非 `VaultCore`）而 revert。
 
-#### 代码验证证据
+#### 当前状态（已实施解决方案）
+- ✅ **采用方案 A**：`VaultCore` 直接调用 `LendingEngine`（`ILendingEngineBasic.borrow/repay`），不再经过 `VaultView` 进行账本写入操作。
+- ✅ **实现细节**：
+  - `VaultCore.borrow()`（第84-88行）：直接从 Registry 解析 `KEY_LE`，调用 `ILendingEngineBasic.borrow(msg.sender, asset, amount, 0, 0)`
+  - `VaultCore.repay()`（第94-98行）：直接从 Registry 解析 `KEY_LE`，调用 `ILendingEngineBasic.repay(msg.sender, asset, amount)`
+  - `VaultView._distributeToModule()`：对 `ACTION_BORROW` 和 `ACTION_REPAY` 保持空代码块，仅更新本地缓存（`_updateLocalState`），符合"写入不经 View"原则
+  - `LendingEngine` 通过 `onlyVaultCore` 修饰符确保仅 `KEY_VAULT_CORE` 可调用账本写入函数
+- ✅ **符合架构原则**：遵循 Architecture-Guide.md 中"写入不经 View"的核心原则，账本写入统一由 VaultCore 执行，View 层仅负责缓存更新和事件发出。
+- ✅ **View 推送失败处理**：遵循 Architecture-Guide.md 的"最佳努力"模式（第41-46行），使用 try/catch 处理 View 推送失败，失败时发出 `CacheUpdateFailed` 事件，主流程不回滚，保障账本写入的可用性。
 
-**VaultCore.borrow()** (第77-80行)：
-```solidity
-function borrow(address asset, uint256 amount) external {
-    require(amount > 0, "Amount must be positive");
-    IVaultView(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_BORROW, asset, amount, block.timestamp);
-}
+#### 数据流路径
 ```
-→ 调用 `VaultView.processUserOperation()`
+用户调用 VaultCore.borrow/repay
+  ↓
+VaultCore 直接从 Registry 解析 KEY_LE
+  ↓
+直接调用 ILendingEngineBasic.borrow/repay（账本写入）
+  ↓
+LendingEngine 内部：
+  1. 更新账本（recordBorrow/recordRepay）
+  2. 推送 View 缓存（_pushUserPositionToView，最佳努力模式）
+  3. 推送健康状态（_pushHealthStatus）
+  4. 触发奖励（_notifyRewardManager）
+```
 
-**VaultView._distributeToModule()** (第261-282行) — **问题所在**：
+#### 测试文件：
+- **主要测试文件**：
+  - `test/Vault/VaultLendingEngine.refactor.test.ts` - VaultLendingEngine 拆分后的账本与入口一致性测试（28个测试用例）
+    - 验证 `onlyVaultCore` 权限保护：非 VaultCore 调用 `borrow/repay` 应被拒绝
+    - 验证统一入口：`borrow/repay` 仅允许 `KEY_VAULT_CORE` 调用
+    - 验证账本写入与视图推送：借/还后 VaultView 缓存正确更新
+    - 验证健康推送：借/清算后 HealthView 收到 `pushRiskStatus`
+    - 验证清算直达入口：`forceReduceDebt` 需 `ACTION_LIQUIDATE` 权限，且会同步 View/Health
+    - 验证边界条件：零金额、超额还款、完整还款/清算等场景
+    - 验证事件发出：`DebtRecorded`、`UserTotalDebtValueUpdated` 等事件
+  - `test/Vault/VaultLendingEngine.dual-entry.test.ts` - 双入口（VaultCore + LiquidationManager）测试（19个测试用例）
+    - 验证 `borrow/repay` 通过 VaultCore 调用时更新账本和 View/Health 缓存
+    - 验证非 `KEY_VAULT_CORE` 调用者被拒绝（`VaultLendingEngine__OnlyVaultCore` 错误）
+    - 验证 VaultCore borrow 后直接清算保持 View 同步
+    - 验证借/还操作的端到端流程（账本更新 → View 缓存 → Health 推送）
+    - **验证 View 推送失败处理**：当 VaultView push 失败时，发出 `CacheUpdateFailed` 事件，但 borrow 操作成功完成（最佳努力模式，符合 Architecture-Guide.md）
+    - 验证模块缺失场景：KEY_HEALTH_VIEW、KEY_CM、KEY_ACCESS_CONTROL 缺失时的回滚行为
+
+---
+
+### 16. 奖励模块触发缺失 ⚠️ **P0 阻断性问题** ✅ 已解决
+
+#### 问题描述（历史问题，已修复）
+架构文档要求"账本落账后触发奖励"，并指定路径为 `LendingEngine` -> `RewardManager`。
+历史代码中借贷逻辑（`borrow`/`repay`）无任何对 `RewardManager` 的调用，奖励触发功能缺失。
+
+#### 当前状态（已实施解决方案）
+- ✅ **奖励触发已实现**：`LendingEngineCore.borrow()` 和 `repay()` 函数中已集成奖励触发逻辑。
+- ✅ **实现细节**：
+  - `LendingEngineCore.borrow()`（第30-35行）：账本落账后调用 `_notifyRewardManager(s, user, amount)`
+  - `LendingEngineCore.repay()`（第38-43行）：账本落账后调用 `_notifyRewardManager(s, user, amount)`
+  - `_notifyRewardManager()`（第65-78行）：最佳努力模式，从 Registry 获取 `KEY_REWARD_MANAGER_V1`，调用 `IRewardManager.onLoanEvent(user, amount, 0, true)`
+  - 奖励触发失败不影响主流程：使用 try/catch 处理，RewardManager 未配置或调用失败时静默忽略
+- ✅ **符合架构原则**：遵循 Architecture-Guide.md 第610行的"最佳努力触发 `RewardManager.onLoanEvent`"要求，保障账本写入的可用性。
+
+#### 实现代码
 ```solidity
-function _distributeToModule(...) internal onlyValidRegistry {
-    if (operationType == ActionKeys.ACTION_DEPOSIT) {
-        address collateralManager = _getCachedCollateralManager();
-        ICollateralManager(collateralManager).depositCollateral(user, asset, amount);
-    } else if (operationType == ActionKeys.ACTION_WITHDRAW) {
-        address collateralManager = _getCachedCollateralManager();
-        ICollateralManager(collateralManager).withdrawCollateral(user, asset, amount);
-    } else if (operationType == ActionKeys.ACTION_BORROW) {
-        // 账本写入统一由 VaultCore 执行；View 层不再直写账本
-        // <-- 空代码块！没有调用 LendingEngine.borrow()！
-    } else if (operationType == ActionKeys.ACTION_REPAY) {
-        // 账本写入统一由 VaultCore 执行；View 层不再直写账本
-        // <-- 空代码块！没有调用 LendingEngine.repay()！
+// LendingEngineCore.sol 第29-35行
+function borrow(LendingEngineStorage.Layout storage s, address user, address asset, uint256 amount) internal {
+    s.recordBorrow(user, asset, amount);
+    _pushUserPositionToView(s, user, asset);
+    _pushHealthStatus(s, user);
+    _notifyRewardManager(s, user, amount);  // 奖励触发
+}
+
+// LendingEngineCore.sol 第65-78行
+function _notifyRewardManager(LendingEngineStorage.Layout storage s, address user, uint256 amount) internal {
+    address rewardManager;
+    try Registry(s._registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_MANAGER_V1) returns (address addr) {
+        rewardManager = addr;
+    } catch {
+        return;  // RewardManager 未配置时静默返回
+    }
+
+    try IRewardManager(rewardManager).onLoanEvent(user, amount, 0, true) {
+        // ignore
+    } catch {
+        // ignore reward failure  // 奖励触发失败不影响主流程
     }
 }
 ```
 
-**VaultLendingEngine.borrow()** (第452-468行) 权限限制：
-```solidity
-function borrow(...) external override onlyValidRegistry nonReentrant onlyVaultCore {
-    // 只允许 VaultCore 直接调用，但 VaultCore 从未直接调用此函数
-}
-```
+#### 测试文件：
 
-#### 影响
-- ❌ **核心业务功能不可用**：借款和还款无法通过标准入口执行。
-- ❌ **架构逻辑自相矛盾**：代码实现与"VaultCore 统一入口"的声明完全背离。
+**奖励触发测试覆盖（已通过）**
 
-#### 改进建议
-- **方案 A（推荐）**：修改 `VaultCore`，使其直接调用 `LendingEngine`（`ILendingEngineBasic.borrow`），不再经过 `VaultView` 进行写操作。
-- **方案 B**：修改 `VaultLendingEngine` 权限，允许 `VaultView` 调用，并在 `VaultView` 中补充调用逻辑（不推荐，违背 View 层只读原则）。
+- **LendingEngine ↔ RewardManager 集成**：核心借款/还款流程完成后触发奖励（最佳努力，失败不回滚），对应测试用例：
+  - `test/Vault/VaultLendingEngine.refactor.test.ts` - 使用 `MockRewardManager` 验证借款/还款时调用奖励接口
+  - `test/Vault/VaultLendingEngine.dual-entry.test.ts` - 双入口路径下的奖励触发验证
 
----
+- **端到端撮合结算**：完整撮合流程（出借保留 → 签名校验 → 落账 → 费用 → 净额发放）覆盖奖励触发链路：
+  - `test/Reward/Settlement.e2e.test.ts` - 已跑通并通过，落账后会调用 LendingEngine，继而触发 `_notifyRewardManager`（最佳努力模式）
 
-### 16. 奖励模块触发缺失 ⚠️ **P0 阻断性问题** ✅ 已验证
-
-#### 问题描述
-架构文档要求“账本落账后触发奖励”，并指定路径为 `LendingEngine` -> `RewardManager`。
-实际审计 `VaultLendingEngine.sol` 发现：
-- 借贷逻辑（`borrow`/`repay`）中无任何对 `RewardManager` 的调用。
-- 原有的奖励触发代码被注释说明“奖励触发函数移除”。
-- `VaultLendingEngine` 未继承包含奖励逻辑的基类。
-
-#### 代码验证证据
-
-**VaultLendingEngine.sol** 第1009-1013行：
-```solidity
-/// @notice 通知RewardManager处理积分奖励
-/// @param user 用户地址
-/// @param amount 操作金额
-/// @param isRepayment 是否为还款操作
-// 奖励触发函数移除  <-- 明确注释说明已移除
-```
-
-**grep 搜索结果**：在 `VaultLendingEngine.sol` 中搜索 `onLoanEvent` 无任何结果。
-
-#### 影响
-- ❌ **奖励系统失效**：用户借贷无法获得任何积分奖励。
-- ❌ **业务承诺未兑现**：积分激励机制完全未接入。
-
-#### 改进建议
-- 在 `VaultLendingEngine.recordBorrow` 和 `repay` 函数末尾（状态更新成功后），恢复对 `RewardManager.onLoanEvent` 的调用。
+- **最佳努力语义验证**：测试中使用的 `MockRewardManager` 确认调用发生；若未配置或调用失败，链路不回滚（与文档要求一致）
 
 ---
 
@@ -685,6 +802,13 @@ ok; // silence  <-- 显式忽略返回值
 #### 改进建议
 - 至少应发出 `HealthPushFailed` 事件，以便链下监控系统感知并介入。
 
+#### 当前实现与测试（已对齐 Architecture-Guide）
+- 实现情况：`VaultLendingEngineCore._pushHealthStatus` 已改为 try/catch 最佳努力模式，失败不回滚，emit `CacheUpdateFailed` 与 `HealthPushFailed`（包含 user/healthView/totalCollateral/totalDebt/reason）；依赖缺失、无代码、Collateral 合计读取失败、HealthView revert、LRM 缺失、健康因子溢出等都会告警。
+- 覆盖测试：
+  - `test/Vault/VaultLendingEngine.dual-entry.test.ts`（通过）：借款/还款/forceReduceDebt 多路径；HealthView 无代码、revert；LRM 无代码；CM total 读取失败；多资产/批量式清算路径下均触发 `HealthPushFailed` 而不回滚。
+  - 相关 mock：`src/Mocks/RevertingHealthView.sol`、`src/Mocks/RevertingCollateralTotals.sol`。
+  - 测试结果：最新运行 29/29 用例全部通过。
+
 ---
 
 ### 18. 仓位推送可用性风险 ⚠️ **P1 高风险** ✅ 已验证
@@ -715,9 +839,18 @@ function _pushUserPositionToView(address user, address asset) internal {
 #### 改进建议
 - 评估是否需要降级为 `try-catch` 模式，或确认"强一致性"是预期行为。建议在文档中明确此权衡。
 
+#### 当前实现与测试（已对齐 Architecture-Guide）
+- 实现情况：`LendingEngineCore._pushUserPositionToView` 已改为 try/catch 最佳努力模式，失败不回滚，emit `CacheUpdateFailed`（包含 user/asset/viewAddr/collateral/debt/reason）；依赖缺失（CM 或 View 地址为零）、无代码、Collateral 读取失败、VaultView revert 等都会告警。
+- 覆盖测试：
+  - `test/Vault/VaultLendingEngine.dual-entry.test.ts`（通过）：borrow 操作在 VaultView revert 时仍成功完成，发出 `CacheUpdateFailed` 事件而不回滚。
+  - `test/Vault/view/PositionView.cache-validity.test.ts`（通过）：账本读取失败、债务读取失败时发出 `CacheUpdateFailed`，支持管理员通过 `retryUserPositionUpdate` 手动重试。
+  - `test/Vault/liquidation/LiquidationDebtManager.cache-push.test.ts`（通过）：清算模块的仓位推送也采用相同的最佳努力模式。
+  - 相关 mock：`src/Mocks/RevertingVaultView.sol`。
+  - 测试结果：相关用例全部通过。
+
 ---
 
-### 19. VaultCore 缺少 viewContractAddrVar 公开方法 ⚠️ **P0 阻断性问题** 🆕 新发现
+### 19. VaultCore 缺少 viewContractAddrVar 公开方法 ⚠️ **P0 阻断性问题** 🆕 新发现 ✅ 已解决
 
 #### 问题描述
 多个模块（`VaultLendingEngine`、`CollateralManager`、`VaultBusinessLogic`、`LiquidationManager` 等）通过以下方式解析 VaultView 地址：
@@ -756,6 +889,42 @@ function viewContractAddrVar() external view returns (address) {
     return _viewContractAddr;
 }
 ```
+
+#### 当前实现与测试（已对齐 Architecture-Guide）
+- 实现情况：`VaultCore.sol` 已添加 `viewContractAddrVar()` 公开方法（第63-67行），供各业务/清算模块通过 `IVaultCoreMinimal` 接口解析 VaultView 地址使用。
+- 代码位置：
+  ```63:67:src/Vault/VaultCore.sol
+  /// @notice 获取 View 层合约地址
+  /// @dev 供各业务/清算模块解析 VaultView 地址使用
+  function viewContractAddrVar() external view returns (address) {
+      return _viewContractAddr;
+  }
+  ```
+- 覆盖测试：
+  - `test/StatisticsResolution.frontend.test.ts`（通过）：验证通过 `KEY_VAULT_CORE.viewContractAddrVar()` 解析 View 地址的回退路径。
+  - `test/GuaranteeAndRisk.integrated.test.ts`（通过）：验证 VaultBusinessLogic 通过 `viewContractAddrVar()` 解析 View 地址。
+  - `test/Vault/VaultLendingEngine.refactor.test.ts`（通过）：验证 VaultLendingEngine 通过 `_resolveVaultViewAddr()` 调用 `viewContractAddrVar()` 正常工作。
+  - `test/Vault/viewContractAddrVar.comprehensive.test.ts`（新增，13/13 通过）：全面测试覆盖文档中描述的所有影响场景：
+    - **模块间通信测试**（4个测试）：
+      - ✅ VaultCore.viewContractAddrVar() 返回正确的 VaultView 地址
+      - ✅ VaultLendingEngine._resolveVaultViewAddr() 正确解析 View 地址
+      - ✅ CollateralManager._resolveVaultViewAddr() 正确解析 View 地址
+      - ✅ VaultBusinessLogic._resolveVaultViewAddr() 正确解析 View 地址
+    - **_pushUserPositionToView 功能测试**（3个测试）：
+      - ✅ borrow 时仓位推送正常工作
+      - ✅ repay 时仓位推送正常工作
+      - ✅ viewContractAddrVar 为空时的错误处理（符合实现要求）
+    - **仓位推送完整性测试**（2个测试）：
+      - ✅ 所有模块的仓位推送功能正常工作
+      - ✅ 多资产场景下仓位推送正常工作
+    - **模块间通信完整性验证**（2个测试）：
+      - ✅ 所有模块通过 IVaultCoreMinimal 接口访问 viewContractAddrVar
+      - ✅ VaultCore.viewContractAddrVar 变更后，所有模块能获取新地址
+    - **边界情况和错误处理**（2个测试）：
+      - ✅ VaultCore 未注册时模块正确处理
+      - ✅ viewContractAddrVar 返回零地址时，_pushUserPositionToView 发出事件但不回滚
+  - 相关 mock：`src/Mocks/MockVaultCoreView.sol`、`src/Mocks/MockVaultCore.sol` 实现了 `viewContractAddrVar()` 用于测试。
+  - 测试结果：所有测试用例全部通过（13/13），模块间通信正常，所有影响场景均已覆盖验证。
 
 
 ## ✅ 优势总结

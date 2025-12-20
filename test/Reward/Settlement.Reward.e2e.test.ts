@@ -65,59 +65,61 @@ describe('Settlement + Reward end-to-end (借款→落账→锁定→按期释�
     )) as unknown as MockERC20;
     await usdt.waitForDeployment();
 
-    // 4) 部署 LoanNFT 并初始化
-    loanNft = (await (await ethers.getContractFactory('LoanNFT')).deploy()) as unknown as LoanNFT;
+    // 4) 部署 LoanNFT（Proxy）并初始化
+    loanNft = (await upgrades.deployProxy(
+      await ethers.getContractFactory('src/core/LoanNFT.sol:LoanNFT'),
+      ['Loan NFT', 'LOAN', 'https://api.example.com/token/', await registry.getAddress()],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as LoanNFT;
     await loanNft.waitForDeployment();
-    await loanNft.initialize(
-      'Loan NFT',
-      'LOAN',
-      'https://api.example.com/token/',
-      await registry.getAddress()
-    );
     await registry.setModule(KEY.LOAN_NFT(), await loanNft.getAddress());
 
     // 5) 部署 FeeRouter 并初始化
-    feeRouter = (await (await ethers.getContractFactory('FeeRouter')).deploy()) as unknown as FeeRouter;
+    feeRouter = (await upgrades.deployProxy(
+      await ethers.getContractFactory('src/core/FeeRouter.sol:FeeRouter'),
+      [
+        await registry.getAddress(),
+        await governance.getAddress(),
+        await governance.getAddress(),
+        50, // platformBps 0.5%
+        20  // ecoBps 0.2%
+      ],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as FeeRouter;
     await feeRouter.waitForDeployment();
-    await feeRouter.initialize(
-      await registry.getAddress(),
-      await governance.getAddress(),
-      await governance.getAddress(),
-      50, // platformBps 0.5%
-      20 // ecoBps 0.2%
-    );
     await registry.setModule(KEY.FR(), await feeRouter.getAddress());
 
-    // 6) 部署 RewardPoints / RewardManagerCore / RewardManager
-    rewardPoints = (await (await ethers.getContractFactory('RewardPoints')).deploy()) as unknown as RewardPoints;
+    // 6) 部署 RewardPoints / RewardManagerCore / RewardManager（全部使用 Proxy）
+    const rpFactory = await ethers.getContractFactory('src/Token/RewardPoints.sol:RewardPoints');
+    rewardPoints = (await upgrades.deployProxy(
+      rpFactory,
+      [await governance.getAddress()],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as RewardPoints;
     await rewardPoints.waitForDeployment();
-    await rewardPoints.initialize(await governance.getAddress());
     await registry.setModule(KEY.RP(), await rewardPoints.getAddress());
 
-    rewardManagerCore = (await (await ethers.getContractFactory('RewardManagerCore')).deploy()) as unknown as RewardManagerCore;
+    rewardManagerCore = (await upgrades.deployProxy(
+      await ethers.getContractFactory('RewardManagerCore'),
+      [
+        await registry.getAddress(),
+        ethers.parseUnits('100', 18),
+        10,
+        0, // 关闭 earlyRepayBonus，采用扣罚规则
+        ethers.parseUnits('50', 18)
+      ],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as RewardManagerCore;
     await rewardManagerCore.waitForDeployment();
-    // baseUsd, perDay, bonus, baseEth（采用默认建议）
-    await rewardManagerCore.initialize(
-      await registry.getAddress(),
-      ethers.parseUnits('100', 18),
-      10,
-      0, // 关闭 earlyRepayBonus，采用扣罚规则
-      ethers.parseUnits('50', 18)
-    );
     await registry.setModule(KEY.RM_CORE(), await rewardManagerCore.getAddress());
 
-    const rewardManagerImpl = await (await ethers.getContractFactory('RewardManager')).deploy();
-    await rewardManagerImpl.waitForDeployment();
-    const proxyFactory = await ethers.getContractFactory('ERC1967ProxyMock');
-    const rmProxy = await proxyFactory.deploy(
-      await rewardManagerImpl.getAddress(),
-      rewardManagerImpl.interface.encodeFunctionData('initialize', [await registry.getAddress()])
-    );
-    await rmProxy.waitForDeployment();
-    rewardManager = (await ethers.getContractAt(
-      'RewardManager',
-      await rmProxy.getAddress()
+    rewardManager = (await upgrades.deployProxy(
+      await ethers.getContractFactory('RewardManager'),
+      [await registry.getAddress()],
+      { unsafeAllow: ['constructor'] }
     )) as unknown as RewardManager;
+    await rewardManager.waitForDeployment();
+    await registry.setModule(KEY.RM(), await rewardManager.getAddress());
     await registry.setModule(KEY.RM(), await rewardManager.getAddress());
 
     // 授权：RewardPoints MINTER_ROLE → RewardManagerCore
@@ -125,9 +127,12 @@ describe('Settlement + Reward end-to-end (借款→落账→锁定→按期释�
     await rewardPoints.connect(governance).grantRole(MINTER_ROLE, await rewardManagerCore.getAddress());
 
     // 7) 部署 LendingEngine 并初始化
-    lendingEngine = (await (await ethers.getContractFactory('LendingEngine')).deploy()) as unknown as LendingEngine;
+    lendingEngine = (await upgrades.deployProxy(
+      await ethers.getContractFactory('src/core/LendingEngine.sol:LendingEngine'),
+      [await registry.getAddress()],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as LendingEngine;
     await lendingEngine.waitForDeployment();
-    await lendingEngine.initialize(await registry.getAddress());
     await registry.setModule(KEY.LE(), await lendingEngine.getAddress());
 
     // 8) （可选）部署 VBL（本用例不强依赖 finalizeMatch，直接调用 LendingEngine 流程验证 Reward ）

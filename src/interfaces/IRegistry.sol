@@ -156,6 +156,12 @@ interface IRegistry {
     /// @notice 升级存储版本（仅治理地址可调用）
     /// @param newVersion 新的存储版本
     function upgradeStorageVersion(uint256 newVersion) external;
+    
+    /// @notice 通过外部迁移合约执行存储迁移（保持固定 STORAGE_SLOT）
+    /// @param fromVersion 预期的当前存储版本
+    /// @param toVersion 目标存储版本
+    /// @param migrator 迁移合约地址
+    function migrateStorage(uint256 fromVersion, uint256 toVersion, address migrator) external;
 
     /// @notice 暂停系统（仅治理地址可调用）
     function pause() external;

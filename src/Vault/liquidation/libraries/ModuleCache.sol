@@ -308,9 +308,11 @@ library ModuleCache {
             if (!self.allowTimeRollback) {
                 revert ModuleCache__TimeRollbackDetected(block.timestamp, timestamp);
             }
-            return moduleAddr; // 允许时间回退时直接返回
+            // 允许时间回退时直接返回，避免后续减法潜在下溢
+            return moduleAddr;
         }
         
+        // 经过上面的分支后，确保 block.timestamp >= timestamp，再做减法以避免下溢 panic
         uint256 cacheAge = block.timestamp - timestamp;
         if (cacheAge > maxAge) {
             revert ModuleCache__CacheExpired(moduleKey, cacheAge, maxAge);

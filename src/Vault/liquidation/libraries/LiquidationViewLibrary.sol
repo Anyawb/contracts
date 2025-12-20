@@ -1132,238 +1132,116 @@ library LiquidationViewLibrary {
     /* ============ Advanced Query Functions ============ */
     
     /**
-     * @notice 计算最优清算组合
-     * @notice Calculate optimal liquidation combination
-     * @param targetUser 用户地址 User address
-     * @param maxDebtReduction 最大债务减少量 Maximum debt reduction
-     * @param maxCollateralReduction 最大抵押物减少量 Maximum collateral reduction
-     * @param lendingEngine 借贷引擎地址 Lending engine address
+     * @notice 计算最优清算组合（占位，账本端已移除接口）
      * @return optimalDebtReduction 最优债务减少量 Optimal debt reduction
      * @return optimalCollateralReduction 最优抵押物减少量 Optimal collateral reduction
      * @return healthFactor 健康因子 Health factor
      */
     function calculateOptimalLiquidationCombination(
-        address targetUser,
-        uint256 maxDebtReduction,
-        uint256 maxCollateralReduction,
-        address lendingEngine
-    ) internal view returns (
+        address /* targetUser */,
+        uint256 /* maxDebtReduction */,
+        uint256 /* maxCollateralReduction */,
+        address /* lendingEngine */
+    ) internal pure returns (
         uint256 optimalDebtReduction,
         uint256 optimalCollateralReduction,
         uint256 healthFactor
     ) {
-        if (lendingEngine != address(0)) {
-            try ILendingEngineBasic(lendingEngine).calculateOptimalLiquidation(
-                targetUser,
-                maxDebtReduction,
-                maxCollateralReduction
-            ) returns (
-                uint256 debtReduction,
-                uint256 collateralReduction,
-                uint256 hf
-            ) {
-                optimalDebtReduction = debtReduction;
-                optimalCollateralReduction = collateralReduction;
-                healthFactor = hf;
-            } catch {
-                optimalDebtReduction = 0;
-                optimalCollateralReduction = 0;
-                healthFactor = 0;
-            }
-        } else {
-            optimalDebtReduction = 0;
-            optimalCollateralReduction = 0;
-            healthFactor = 0;
-        }
+        optimalDebtReduction = 0;
+        optimalCollateralReduction = 0;
+        healthFactor = 0;
     }
 
     /**
-     * @notice 预览清算债务状态
-     * @notice Preview liquidation debt state
-     * @param targetUser 用户地址 User address
-     * @param debtReduction 债务减少量 Debt reduction
-     * @param collateralReduction 抵押物减少量 Collateral reduction
-     * @param lendingEngine 借贷引擎地址 Lending engine address
+     * @notice 预览清算债务状态（占位，账本端已移除接口）
      * @return newHealthFactor 新健康因子 New health factor
      * @return newRiskScore 新风险评分 New risk score
      * @return newRiskLevel 新风险等级 New risk level
      */
     function previewLiquidationDebtState(
-        address targetUser,
-        uint256 debtReduction,
-        uint256 collateralReduction,
-        address lendingEngine
-    ) internal view returns (
+        address /* targetUser */,
+        uint256 /* debtReduction */,
+        uint256 /* collateralReduction */,
+        address /* lendingEngine */
+    ) internal pure returns (
         uint256 newHealthFactor,
         uint256 newRiskScore,
         uint256 newRiskLevel
     ) {
-        if (lendingEngine != address(0)) {
-            try ILendingEngineBasic(lendingEngine).previewLiquidationState(
-                targetUser,
-                debtReduction,
-                collateralReduction
-            ) returns (
-                uint256 healthFactor,
-                uint256 riskScore,
-                uint256 riskLevel
-            ) {
-                newHealthFactor = healthFactor;
-                newRiskScore = riskScore;
-                newRiskLevel = riskLevel;
-            } catch {
-                newHealthFactor = 0;
-                newRiskScore = 0;
-                newRiskLevel = 0;
-            }
-        } else {
-            newHealthFactor = 0;
-            newRiskScore = 0;
-            newRiskLevel = 0;
-        }
+        newHealthFactor = 0;
+        newRiskScore = 0;
+        newRiskLevel = 0;
     }
 
     /**
-     * @notice 获取高风险用户列表
-     * @notice Get high risk user list
-     * @param riskThreshold 风险阈值 Risk threshold
-     * @param limit 限制数量 Limit
-     * @param lendingEngine 借贷引擎地址 Lending engine address
+     * @notice 获取高风险用户列表（占位，账本端已移除接口）
      * @return users 用户地址数组 User addresses array
      * @return riskScores 风险评分数组 Risk scores array
      */
     function getHighRiskUserList(
-        uint256 riskThreshold,
-        uint256 limit,
-        address lendingEngine
-    ) internal view returns (
+        uint256 /* riskThreshold */,
+        uint256 /* limit */,
+        address /* lendingEngine */
+    ) internal pure returns (
         address[] memory users,
         uint256[] memory riskScores
     ) {
-        if (lendingEngine != address(0)) {
-            try ILendingEngineBasic(lendingEngine).getHighRiskUsers(riskThreshold, limit) returns (
-                address[] memory highRiskUsers,
-                uint256[] memory scores
-            ) {
-                users = highRiskUsers;
-                riskScores = scores;
-            } catch {
-                users = new address[](0);
-                riskScores = new uint256[](0);
-            }
-        } else {
-            users = new address[](0);
-            riskScores = new uint256[](0);
-        }
+        users = new address[](0);
+        riskScores = new uint256[](0);
     }
 
     /**
-     * @notice 获取可清算用户列表
-     * @notice Get liquidatable user list
-     * @param healthFactorThreshold 健康因子阈值 Health factor threshold
-     * @param limit 限制数量 Limit
-     * @param lendingEngine 借贷引擎地址 Lending engine address
+     * @notice 获取可清算用户列表（占位，账本端已移除接口）
      * @return users 用户地址数组 User addresses array
      * @return healthFactors 健康因子数组 Health factors array
      */
     function getLiquidatableUserList(
-        uint256 healthFactorThreshold,
-        uint256 limit,
-        address lendingEngine
-    ) internal view returns (
+        uint256 /* healthFactorThreshold */,
+        uint256 /* limit */,
+        address /* lendingEngine */
+    ) internal pure returns (
         address[] memory users,
         uint256[] memory healthFactors
     ) {
-        if (lendingEngine != address(0)) {
-            try ILendingEngineBasic(lendingEngine).getLiquidatableUsers(healthFactorThreshold, limit) returns (
-                address[] memory liquidatableUsers,
-                uint256[] memory factors
-            ) {
-                users = liquidatableUsers;
-                healthFactors = factors;
-            } catch {
-                users = new address[](0);
-                healthFactors = new uint256[](0);
-            }
-        } else {
-            users = new address[](0);
-            healthFactors = new uint256[](0);
-        }
+        users = new address[](0);
+        healthFactors = new uint256[](0);
     }
 
     /**
-     * @notice 计算最优清算路径
-     * @notice Calculate optimal liquidation path
-     * @param targetUser 用户地址 User address
-     * @param targetHealthFactor 目标健康因子 Target health factor
-     * @param lendingEngine 借贷引擎地址 Lending engine address
+     * @notice 计算最优清算路径（占位，账本端已移除接口）
      * @return liquidationSteps 清算步骤数组 Liquidation steps array
      * @return totalDebtReduction 总债务减少量 Total debt reduction
      * @return totalCollateralReduction 总抵押物减少量 Total collateral reduction
      */
     function calculateOptimalLiquidationPath(
-        address targetUser,
-        uint256 targetHealthFactor,
-        address lendingEngine
-    ) internal view returns (
+        address /* targetUser */,
+        uint256 /* targetHealthFactor */,
+        address /* lendingEngine */
+    ) internal pure returns (
         address[] memory liquidationSteps,
         uint256 totalDebtReduction,
         uint256 totalCollateralReduction
     ) {
-        if (lendingEngine != address(0)) {
-            try ILendingEngineBasic(lendingEngine).calculateOptimalLiquidationPath(
-                targetUser,
-                targetHealthFactor
-            ) returns (
-                address[] memory steps,
-                uint256 debtReduction,
-                uint256 collateralReduction
-            ) {
-                liquidationSteps = steps;
-                totalDebtReduction = debtReduction;
-                totalCollateralReduction = collateralReduction;
-            } catch {
-                liquidationSteps = new address[](0);
-                totalDebtReduction = 0;
-                totalCollateralReduction = 0;
-            }
-        } else {
-            liquidationSteps = new address[](0);
-            totalDebtReduction = 0;
-            totalCollateralReduction = 0;
-        }
+        liquidationSteps = new address[](0);
+        totalDebtReduction = 0;
+        totalCollateralReduction = 0;
     }
 
     /**
-     * @notice 批量优化清算策略
-     * @notice Batch optimize liquidation strategies
+     * @notice 批量优化清算策略（占位，账本端已移除接口）
      * @param userAddresses 用户地址数组 User addresses array
-     * @param targetHealthFactors 目标健康因子数组 Target health factors array
-     * @param lendingEngine 借贷引擎地址 Lending engine address
      * @return strategies 策略数组 Strategies array
      */
     function batchOptimizeLiquidationStrategies(
         address[] calldata userAddresses,
-        uint256[] calldata targetHealthFactors,
-        address lendingEngine
-    ) internal view returns (bytes[] memory strategies) {
+        uint256[] calldata /* targetHealthFactors */,
+        address /* lendingEngine */
+    ) internal pure returns (bytes[] memory strategies) {
         uint256 length = userAddresses.length;
         strategies = new bytes[](length);
-
-        if (lendingEngine != address(0)) {
-            for (uint256 i = 0; i < length;) {
-                if (userAddresses[i] != address(0)) {
-                    try ILendingEngineBasic(lendingEngine).optimizeLiquidationStrategy(
-                        userAddresses[i],
-                        targetHealthFactors[i]
-                    ) returns (bytes memory strategy) {
-                        strategies[i] = strategy;
-                    } catch {
-                        strategies[i] = "";
-                    }
-                }
-                unchecked { ++i; }
-            }
+        for (uint256 i = 0; i < length;) {
+            strategies[i] = "";
+            unchecked { ++i; }
         }
     }
 

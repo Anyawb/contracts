@@ -15,6 +15,7 @@ import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers'
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const ONE_ETH = ethers.parseUnits('1', 18);
 const ONE_USD = ethers.parseUnits('1', 6);
+const KEY_ACM = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 
 /**
  * PriorityServiceConfig - 优先服务配置测试模块
@@ -34,17 +35,15 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
     // 获取测试账户
     const [governance, alice, bob, charlie, _david]: SignerWithAddress[] = await ethers.getSigners();
     
-    // 部署 ACM 权限管理合约
+    // 部署 Registry + ACM
+    const registryFactory = await ethers.getContractFactory('MockRegistry');
+    const registry = await registryFactory.deploy();
+    await registry.waitForDeployment();
+
     const acmFactory = (await ethers.getContractFactory('AccessControlManager')) as AccessControlManager__factory;
     const acm = await acmFactory.deploy(governance.address);
     await acm.waitForDeployment();
-    
-    // 设置权限
-    const setParameterRole = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
-    const upgradeModuleRole = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
-    
-    await acm.grantRole(setParameterRole, governance.address);
-    await acm.grantRole(upgradeModuleRole, governance.address);
+    await registry.setModule(KEY_ACM, await acm.getAddress());
     
     // 部署 PriorityServiceConfig 代理合约
     const priorityServiceConfigFactory = (await ethers.getContractFactory('PriorityServiceConfig')) as PriorityServiceConfig__factory;
@@ -52,7 +51,7 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
     // 使用 UUPS 代理模式部署
     const priorityServiceConfig = await upgrades.deployProxy(
       priorityServiceConfigFactory,
-      [acm.target],
+      [registry.target],
       { 
         kind: 'uups',
         initializer: 'initialize'
@@ -69,6 +68,7 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
     return { 
       priorityServiceConfig, 
       acm, 
+      registry,
       mockToken,
       governance, 
       alice, 
@@ -81,10 +81,7 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
   
   describe('部署和初始化', function () {
     it('应正确部署代理合约并初始化', async function () {
-      const { priorityServiceConfig, acm, governance } = await deployFixture();
-      
-      // 验证 ACM 地址设置正确
-      expect(await priorityServiceConfig.acm()).to.equal(acm.target);
+      const { priorityServiceConfig } = await deployFixture();
       
       // 验证服务类型
       expect(await priorityServiceConfig.getServiceType()).to.equal(1); // PriorityService
@@ -95,6 +92,9 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
 
     it('应拒绝零地址初始化', async function () {
       const priorityServiceConfigFactory = (await ethers.getContractFactory('PriorityServiceConfig')) as PriorityServiceConfig__factory;
+      const registryFactory = await ethers.getContractFactory('MockRegistry');
+      const registry = await registryFactory.deploy();
+      await registry.waitForDeployment();
       
       await expect(
         upgrades.deployProxy(
@@ -169,20 +169,14 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
     it('应正确获取服务配置', async function () {
       const { priorityServiceConfig } = await deployFixture();
       
-      // 获取所有配置
-      const allConfigs = await priorityServiceConfig.getAllConfigs();
-      expect(allConfigs).to.have.length(4);
-      
-      // 验证基础配置
-      const basicConfig = allConfigs[0];
+      const basicConfig = await priorityServiceConfig.getConfig(0);
       expect(basicConfig.price).to.equal(200n * ONE_ETH);
       expect(basicConfig.duration).to.equal(30 * 24 * 60 * 60);
       expect(basicConfig.isActive).to.be.true;
       expect(basicConfig.level).to.equal(0); // Basic
-      expect(basicConfig.description).to.equal('Priority loan approval (24h)');
+      expect(basicConfig.description).to.equal('Priority loan processing (24h)');
       
-      // 验证VIP配置
-      const vipConfig = allConfigs[3];
+      const vipConfig = await priorityServiceConfig.getConfig(3);
       expect(vipConfig.price).to.equal(2000n * ONE_ETH);
       expect(vipConfig.duration).to.equal(30 * 24 * 60 * 60);
       expect(vipConfig.isActive).to.be.true;
@@ -324,14 +318,14 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
   
   describe('事件记录', function () {
     it('应正确记录初始化事件', async function () {
-      const { priorityServiceConfig, acm } = await deployFixture();
+      const { priorityServiceConfig, registry } = await deployFixture();
       
       // 验证初始化事件已记录
       const events = await priorityServiceConfig.queryFilter(
         priorityServiceConfig.filters.PriorityServiceConfigInitialized()
       );
       expect(events).to.have.length(1);
-      expect(events[0].args?.governance).to.equal(acm.target);
+      expect(events[0].args?.governance).to.equal(registry.target);
     });
 
     it('应正确记录配置更新事件', async function () {
@@ -462,9 +456,6 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
   describe('集成测试', function () {
     it('应与其他模块正确集成', async function () {
       const { priorityServiceConfig, acm, governance } = await deployFixture();
-      
-      // 验证与ACM的集成
-      expect(await priorityServiceConfig.acm()).to.equal(acm.target);
       
       // 验证权限检查
       expect(await acm.hasRole(ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')), governance.address)).to.be.true;

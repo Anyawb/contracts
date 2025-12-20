@@ -42,6 +42,9 @@ contract VaultView is Initializable, UUPSUpgradeable {
     
     /// @notice 价格预言机地址缓存
     address private _cachedPriceOracle;
+
+    /// @notice 业务逻辑模块地址缓存（VaultBusinessLogic）
+    address private _cachedVaultBusinessLogic;
     
     /// @notice 模块缓存时间戳
     uint256 private _moduleCacheTimestamp;
@@ -96,10 +99,12 @@ contract VaultView is Initializable, UUPSUpgradeable {
     /// @notice 业务合约验证修饰符
     modifier onlyBusinessContract() {
         // 允许业务模块调用：CollateralManager / LendingEngineBasic / VaultBusinessLogic
-        address collateralManager = _getCachedCollateralManager();
-        address lendingEngine = _getCachedLendingEngine();
-        address vbl = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
-        if (msg.sender != collateralManager && msg.sender != lendingEngine && msg.sender != vbl) {
+        _ensureModuleCache();
+        if (
+            msg.sender != _cachedCollateralManager &&
+            msg.sender != _cachedLendingEngine &&
+            msg.sender != _cachedVaultBusinessLogic
+        ) {
             revert VaultView__UnauthorizedAccess();
         }
         _;
@@ -142,7 +147,18 @@ contract VaultView is Initializable, UUPSUpgradeable {
         // 兼容保留：不再依赖 HF_CALC
         _cachedHealthFactorCalculator = address(0);
         _cachedPriceOracle = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
+        _cachedVaultBusinessLogic = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
         _moduleCacheTimestamp = block.timestamp;
+    }
+
+    /// @notice 模块缓存是否仍在有效期内
+    function _isModuleCacheValid() internal view returns (bool) {
+        return (block.timestamp - _moduleCacheTimestamp) <= MODULE_CACHE_DURATION;
+    }
+
+    /// @notice 直接从 Registry 获取模块地址（无缓存依赖）
+    function _getModuleAddress(bytes32 moduleKey) internal view returns (address) {
+        return Registry(_registryAddrVar).getModuleOrRevert(moduleKey);
     }
     
     /// @notice 获取缓存的抵押管理器地址
@@ -179,6 +195,27 @@ contract VaultView is Initializable, UUPSUpgradeable {
             revert VaultView__ModuleCacheExpired();
         }
         return _cachedPriceOracle;
+    }
+
+    /// @notice 获取缓存的业务逻辑模块地址
+    function _getCachedVaultBusinessLogic() internal view returns (address vbl) {
+        if (block.timestamp - _moduleCacheTimestamp > MODULE_CACHE_DURATION) {
+            revert VaultView__ModuleCacheExpired();
+        }
+        return _cachedVaultBusinessLogic;
+    }
+
+    /// @dev 保证缓存有效；过期或未初始化时自动刷新
+    function _ensureModuleCache() internal {
+        bool cacheValid = _isModuleCacheValid();
+        if (
+            !cacheValid ||
+            _cachedCollateralManager == address(0) ||
+            _cachedLendingEngine == address(0) ||
+            _cachedVaultBusinessLogic == address(0)
+        ) {
+            _refreshModuleCache();
+        }
     }
     
     /// @notice 手动刷新模块缓存（管理员功能）
@@ -385,6 +422,22 @@ contract VaultView is Initializable, UUPSUpgradeable {
     }
     
     /*━━━━━━━━━━━━━━━ 查询接口（免费查询）━━━━━━━━━━━━━━━*/
+
+    /// @notice 从账本直接读取用户位置（不依赖缓存）
+    /// @dev 仅内部使用，保证在缓存失效或缺失时仍可获取真实数据
+    function _readLedgerPosition(address user, address asset) internal view returns (uint256 collateral, uint256 debt) {
+        // 尽量复用有效缓存，否则直接从 Registry 解析
+        address collateralManager = _isModuleCacheValid() ? _cachedCollateralManager : address(0);
+        address lendingEngine = _isModuleCacheValid() ? _cachedLendingEngine : address(0);
+        if (collateralManager == address(0)) {
+            collateralManager = _getModuleAddress(ModuleKeys.KEY_CM);
+        }
+        if (lendingEngine == address(0)) {
+            lendingEngine = _getModuleAddress(ModuleKeys.KEY_LE);
+        }
+        collateral = ICollateralManager(collateralManager).getCollateral(user, asset);
+        debt = ILendingEngineBasic(lendingEngine).getDebt(user, asset);
+    }
     
     /// @notice 获取用户位置 - 免费查询接口
     /// @param user 用户地址
@@ -394,7 +447,31 @@ contract VaultView is Initializable, UUPSUpgradeable {
     /// @dev 0 gas，快速查询
     function getUserPosition(address user, address asset) external view 
         returns (uint256 collateral, uint256 debt) {
-        return (_userCollateral[user][asset], _userDebt[user][asset]);
+        (collateral, debt, ) = _getUserPositionWithValidity(user, asset);
+    }
+
+    /// @notice 获取用户位置（含缓存有效性标识）
+    /// @param user 用户地址
+    /// @param asset 资产地址
+    /// @return collateral 抵押数量
+    /// @return debt 债务数量
+    /// @return isValid 缓存是否有效（true=缓存值，false=实时账本值）
+    /// @dev 缓存失效时自动回退到账本真实数据，避免返回过期值
+    function getUserPositionWithValidity(address user, address asset) external view
+        returns (uint256 collateral, uint256 debt, bool isValid) {
+        return _getUserPositionWithValidity(user, asset);
+    }
+
+    /// @notice 内部实现：获取用户位置（含缓存有效性标识）
+    /// @dev 供内部复用，避免外部调用开销
+    function _getUserPositionWithValidity(address user, address asset) internal view
+        returns (uint256 collateral, uint256 debt, bool isValid) {
+        isValid = (block.timestamp - _cacheTimestamps[user]) < CACHE_DURATION;
+        if (!isValid) {
+            (collateral, debt) = _readLedgerPosition(user, asset);
+            return (collateral, debt, false);
+        }
+        return (_userCollateral[user][asset], _userDebt[user][asset], true);
     }
     
     /// @notice 获取用户抵押数量 - 免费查询接口
@@ -423,6 +500,21 @@ contract VaultView is Initializable, UUPSUpgradeable {
     /// @dev 0 gas，快速查询
     function isUserCacheValid(address user) external view returns (bool isValid) {
         return (block.timestamp - _cacheTimestamps[user]) < CACHE_DURATION;
+    }
+
+    /// @notice 手动从账本同步用户仓位到缓存（管理员）
+    /// @dev 用于修复缓存失效或推送失败场景，确保 View 与账本一致
+    function syncUserPositionFromLedger(address user, address asset) external onlyAdmin {
+        (uint256 collateral, uint256 debt) = _readLedgerPosition(user, asset);
+        _userCollateral[user][asset] = collateral;
+        _userDebt[user][asset] = debt;
+        _cacheTimestamps[user] = block.timestamp;
+
+        emit CacheSyncedFromLedger(user, asset, collateral, debt, block.timestamp);
+        DataPushLibrary._emitData(
+            keccak256("CACHE_SYNCED_FROM_LEDGER"),
+            abi.encode(user, asset, collateral, debt, block.timestamp)
+        );
     }
     
     // 移除直接计算器读取；健康因子建议从 HealthView 读取
@@ -612,6 +704,15 @@ contract VaultView is Initializable, UUPSUpgradeable {
         address indexed asset,
         uint256 totalCollateral,
         uint256 totalDebt,
+        uint256 timestamp
+    );
+
+    /// @notice 管理员手动从账本同步缓存事件
+    event CacheSyncedFromLedger(
+        address indexed user,
+        address indexed asset,
+        uint256 collateral,
+        uint256 debt,
         uint256 timestamp
     );
     

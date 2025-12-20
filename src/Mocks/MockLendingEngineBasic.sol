@@ -56,7 +56,8 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     /// @param amount 减少金额
     function forceReduceDebt(address user, address asset, uint256 amount) external override {
         uint256 currentDebt = _userDebt[user][asset];
-        if (amount > currentDebt) amount = currentDebt;
+        // For liquidation, insufficient debt should revert (matches typical engine behavior and helps test atomicity)
+        require(currentDebt >= amount, "Insufficient debt");
         _userDebt[user][asset] = currentDebt - amount;
         _totalByAsset[asset] -= amount;
         _userTotalValue[user] = _userTotalValue[user] > amount ? _userTotalValue[user] - amount : 0;
@@ -69,6 +70,7 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     /// @param asset 资产地址
     /// @return 债务数量
     function getDebt(address user, address asset) external view override returns (uint256) {
+        if (!mockSuccess) revert("MockLendingEngine: getDebt failed");
         return _userDebt[user][asset];
     }
     
@@ -128,118 +130,6 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     /// @return 债务价值
     function calculateDebtValue(address user, address asset) external view override returns (uint256) {
         return _userDebt[user][asset];
-    }
-    
-    /// @notice 计算最优清算
-    /// @param user 用户地址
-    /// @param maxDebtReduction 最大债务减少量
-    /// @param maxCollateralReduction 最大抵押物减少量
-    /// @return debtReduction 债务减少量
-    /// @return collateralReduction 抵押物减少量
-    /// @return healthFactor 健康因子
-    function calculateOptimalLiquidation(
-        address user,
-        uint256 maxDebtReduction,
-        uint256 maxCollateralReduction
-    ) external pure override returns (
-        uint256 debtReduction,
-        uint256 collateralReduction,
-        uint256 healthFactor
-    ) {
-        // Mock实现：返回0
-        // 注意：user、maxDebtReduction、maxCollateralReduction参数在此Mock实现中未使用，但保留以符合接口规范
-        user; maxDebtReduction; maxCollateralReduction;
-        return (0, 0, 0);
-    }
-    
-    /// @notice 预览清算状态
-    /// @param user 用户地址
-    /// @param debtReduction 债务减少量
-    /// @param collateralReduction 抵押物减少量
-    /// @return newHealthFactor 新健康因子
-    /// @return newRiskScore 新风险分数
-    /// @return newRiskLevel 新风险等级
-    function previewLiquidationState(
-        address user,
-        uint256 debtReduction,
-        uint256 collateralReduction
-    ) external pure override returns (
-        uint256 newHealthFactor,
-        uint256 newRiskScore,
-        uint256 newRiskLevel
-    ) {
-        // Mock实现：返回0
-        // 注意：user、debtReduction、collateralReduction参数在此Mock实现中未使用，但保留以符合接口规范
-        user; debtReduction; collateralReduction;
-        return (0, 0, 0);
-    }
-    
-    /// @notice 获取用户健康因子
-    /// @param user 用户地址
-    /// @return 健康因子
-    function getUserHealthFactor(address user) external pure override returns (uint256) {
-        // Mock实现：返回10000（健康）
-        // 注意：user参数在此Mock实现中未使用，但保留以符合接口规范
-        user;
-        return 10000;
-    }
-    
-    /// @notice 获取用户风险分数
-    /// @param user 用户地址
-    /// @return 风险分数
-    function getUserRiskScore(address user) external pure override returns (uint256) {
-        // Mock实现：返回0（低风险）
-        // 注意：user参数在此Mock实现中未使用，但保留以符合接口规范
-        user;
-        return 0;
-    }
-    
-    /// @notice 获取高风险用户
-    /// @param riskThreshold 风险阈值
-    /// @param limit 限制数量
-    /// @return users 用户地址数组
-    /// @return riskScores 风险分数数组
-    function getHighRiskUsers(uint256 riskThreshold, uint256 limit) external pure override returns (address[] memory users, uint256[] memory riskScores) {
-        // Mock实现：返回空数组
-        // 注意：riskThreshold和limit参数在此Mock实现中未使用，但保留以符合接口规范
-        riskThreshold; limit;
-        return (new address[](0), new uint256[](0));
-    }
-    
-    /// @notice 获取可清算用户
-    /// @param healthFactorThreshold 健康因子阈值
-    /// @param limit 限制数量
-    /// @return users 用户地址数组
-    /// @return healthFactors 健康因子数组
-    function getLiquidatableUsers(uint256 healthFactorThreshold, uint256 limit) external pure override returns (address[] memory users, uint256[] memory healthFactors) {
-        // Mock实现：返回空数组
-        // 注意：healthFactorThreshold和limit参数在此Mock实现中未使用，但保留以符合接口规范
-        healthFactorThreshold; limit;
-        return (new address[](0), new uint256[](0));
-    }
-    
-    /// @notice 计算最优清算路径
-    /// @param user 用户地址
-    /// @param targetHealthFactor 目标健康因子
-    /// @return liquidationSteps 清算步骤
-    /// @return totalDebtReduction 总债务减少量
-    /// @return totalCollateralReduction 总抵押物减少量
-    function calculateOptimalLiquidationPath(address user, uint256 targetHealthFactor) external pure override returns (address[] memory liquidationSteps, uint256 totalDebtReduction, uint256 totalCollateralReduction) {
-        // Mock实现：返回空数组和0
-        // 注意：user和targetHealthFactor参数在此Mock实现中未使用，但保留以符合接口规范
-        user; targetHealthFactor;
-        return (new address[](0), 0, 0);
-    }
-    
-    /// @notice 优化清算策略
-    /// @param user 用户地址
-    /// @param targetHealthFactor 目标健康因子
-    /// @return 清算策略
-    function optimizeLiquidationStrategy(address user, uint256 targetHealthFactor) external pure override returns (bytes memory) {
-        // Mock实现：返回空字节
-        // 注意：user和targetHealthFactor参数在此Mock实现中未使用，但保留以符合接口规范
-        user; targetHealthFactor;
-        return "";
     }
     
     /// @notice 获取用户债务数量（兼容性方法）

@@ -27,14 +27,15 @@ import type {
   LoanNFT,
   MockRewardManager,
   FeeRouter,
-  VaultCoreRefactored,
   VaultView,
   VaultBusinessLogic,
   MockPriceOracle,
   MockERC20,
   MockAssetWhitelist,
   MockGuaranteeFundManager,
-  MockEarlyRepaymentGuaranteeManager
+  MockEarlyRepaymentGuaranteeManager,
+  MockLiquidationRiskManager,
+  MockHealthView
 } from '../../types';
 
 // 测试常量定义
@@ -80,6 +81,8 @@ const MODULE_KEYS = {
   KEY_GUARANTEE_FUND: ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER')),
   KEY_EARLY_REPAYMENT_GUARANTEE: ethers.keccak256(ethers.toUtf8Bytes('EARLY_REPAYMENT_GUARANTEE_MANAGER')),
   KEY_ACCESS_CONTROL: ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')),
+  KEY_LIQUIDATION_RISK_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_RISK_MANAGER')),
+  KEY_HEALTH_VIEW: ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW')),
 } as const;
 
 // 权限角色定义
@@ -89,6 +92,7 @@ const ROLES = {
   REPAY: ethers.keccak256(ethers.toUtf8Bytes('REPAY')),
   WITHDRAW: ethers.keccak256(ethers.toUtf8Bytes('WITHDRAW')),
   SET_PARAMETER: ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')),
+  ADMIN: ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN')),
   UPGRADE_MODULE: ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE')),
   PAUSE_SYSTEM: ethers.keccak256(ethers.toUtf8Bytes('PAUSE_SYSTEM')),
   UNPAUSE_SYSTEM: ethers.keccak256(ethers.toUtf8Bytes('UNPAUSE_SYSTEM')),
@@ -178,7 +182,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
   let loanNft: LoanNFT;
   let rewardManager: MockRewardManager;
   let feeRouter: FeeRouter;
-  let vaultCore: VaultCoreRefactored;
+  let vaultCore: any; // SettlementBorrowCoreMock
   let vaultView: VaultView;
   let vaultBusinessLogic: VaultBusinessLogic;
   let priceOracle: MockPriceOracle;
@@ -187,6 +191,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
   let assetWhitelist: MockAssetWhitelist;
   let guaranteeFundManager: MockGuaranteeFundManager;
   let earlyRepaymentGuaranteeManager: MockEarlyRepaymentGuaranteeManager;
+  let liquidationRiskManager: MockLiquidationRiskManager;
+  let healthView: MockHealthView;
 
   /**
    * 部署测试环境的 fixture 函数
@@ -203,6 +209,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     const ACMFactory = await ethers.getContractFactory('AccessControlManager');
     acm = await ACMFactory.deploy(await governance.getAddress()) as AccessControlManager;
     await acm.waitForDeployment();
+    await acm.grantRole(ROLES.ADMIN, await governance.getAddress());
 
     // 3. 部署 Mock 代币
     const ERC20Factory = await ethers.getContractFactory('MockERC20');
@@ -243,7 +250,16 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     earlyRepaymentGuaranteeManager = await EarlyRepaymentGuaranteeManagerFactory.deploy() as unknown as MockEarlyRepaymentGuaranteeManager;
     await earlyRepaymentGuaranteeManager.waitForDeployment();
 
-    // 8. 部署业务模块
+    // 8. 部署风控/健康视图
+    const LrmFactory = await ethers.getContractFactory('MockLiquidationRiskManager');
+    liquidationRiskManager = await LrmFactory.deploy() as unknown as MockLiquidationRiskManager;
+    await liquidationRiskManager.waitForDeployment();
+
+    const HealthViewFactory = await ethers.getContractFactory('MockHealthView');
+    healthView = await HealthViewFactory.deploy() as unknown as MockHealthView;
+    await healthView.waitForDeployment();
+
+    // 9. 部署业务模块
     cm = await deployProxyContract<CollateralManager>('CollateralManager', [
       await registry.getAddress()
     ]);
@@ -254,7 +270,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       await registry.getAddress()
     ]);
 
-    orderEngine = await deployProxyContract<LendingEngine>('LendingEngine', [await registry.getAddress()]);
+    orderEngine = await deployProxyContract<LendingEngine>('src/core/LendingEngine.sol:LendingEngine', [await registry.getAddress()]);
 
     loanNft = await deployProxyContract<LoanNFT>('LoanNFT', [
       'Loan NFT',
@@ -263,14 +279,21 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       await registry.getAddress(),
     ]);
 
-    feeRouter = await deployProxyContract<FeeRouter>('FeeRouter', []);
+    const governanceAddr = await governance.getAddress();
+    feeRouter = await deployProxyContract<FeeRouter>('src/core/FeeRouter.sol:FeeRouter', [
+      await registry.getAddress(),
+      governanceAddr,
+      governanceAddr,
+      100, // platform fee bps (1%)
+      1    // eco fee bps (0.01%)
+    ]);
 
-    // 9. 部署 Mock RewardManager
+    // 10. 部署 Mock RewardManager
     const RewardManagerFactory = await ethers.getContractFactory('MockRewardManager');
     rewardManager = await RewardManagerFactory.deploy() as unknown as MockRewardManager;
     await rewardManager.waitForDeployment();
 
-    // 10. Registry 模块注册
+    // 11. Registry 模块注册
     await registry.setModule(MODULE_KEYS.KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_CM, await cm.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_LE, await leBasic.getAddress());
@@ -282,39 +305,40 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     await registry.setModule(MODULE_KEYS.KEY_ASSET_WHITELIST, await assetWhitelist.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_GUARANTEE_FUND, await guaranteeFundManager.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_EARLY_REPAYMENT_GUARANTEE, await earlyRepaymentGuaranteeManager.getAddress());
+    await registry.setModule(MODULE_KEYS.KEY_LIQUIDATION_RISK_MANAGER, await liquidationRiskManager.getAddress());
+    await registry.setModule(MODULE_KEYS.KEY_HEALTH_VIEW, await healthView.getAddress());
 
-    // 11. 部署 VaultView
-    vaultView = await deployProxyContract<VaultView>('contracts/Vault/VaultView.sol:VaultView', [
+    // 12. 部署 VaultView
+    vaultView = await deployProxyContract<VaultView>('src/Vault/VaultView.sol:VaultView', [
       await registry.getAddress()
     ]);
 
-    // 12. 部署 VaultBusinessLogic
+    // 13. 部署 VaultBusinessLogic
     vaultBusinessLogic = await deployProxyContract<VaultBusinessLogic>('VaultBusinessLogic', [
       await registry.getAddress(),
       await usdt.getAddress()
     ]);
 
-    // 13. 部署 VaultCoreRefactored（按架构：提供 registry、vaultStorage、businessLogicModule、viewAddr）
-    vaultCore = await deployProxyContract<VaultCoreRefactored>('VaultCoreRefactored', [
-      await registry.getAddress(),
-      await registry.getAddress(),
-      await vaultBusinessLogic.getAddress(),
-      await vaultView.getAddress()
-    ]);
+    // 14. 部署 SettlementBorrowCoreMock，提供 borrowFor 入口（测试替身）
+    const BorrowCoreFactory = await ethers.getContractFactory('SettlementBorrowCoreMock');
+    vaultCore = await BorrowCoreFactory.deploy(await registry.getAddress());
+    await vaultCore.waitForDeployment();
 
-    // 14. 配置模块到 Registry
+    // 15. 配置模块到 Registry
     await registry.setModule(MODULE_KEYS.KEY_VAULT_CORE, await vaultCore.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_VAULT_VIEW, await vaultView.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_VAULT_BUSINESS_LOGIC, await vaultBusinessLogic.getAddress());
+    await vaultView.connect(governance).refreshModuleCache();
 
     // 15. 设置权限
-    const governanceAddr = await governance.getAddress();
+    
     const vblAddr = await vaultBusinessLogic.getAddress();
     const vaultCoreAddr = await vaultCore.getAddress();
     
     // 给 governance 授予权限
     const governanceRoles = [
       ROLES.SET_PARAMETER,
+      ROLES.ADMIN,
       ROLES.UPGRADE_MODULE,
       ROLES.PAUSE_SYSTEM,
       ROLES.DEPOSIT,
@@ -329,6 +353,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
         await acm.grantRole(role, governanceAddr);
       }
     }
+    // FeeRouter 需要 SET_PARAMETER 角色
+    await feeRouter.connect(governance).addSupportedToken(await usdt.getAddress());
     
     // 给 VaultBusinessLogic 授予权限
     const vblRoles = [
@@ -337,6 +363,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       ROLES.WITHDRAW,
       ROLES.BORROW,
       ROLES.REPAY,
+      ROLES.SET_PARAMETER,
+      ROLES.UPGRADE_MODULE,
     ];
     
     for (const role of vblRoles) {
@@ -357,6 +385,12 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       if (!(await acm.hasRole(role, vaultCoreAddr))) {
         await acm.grantRole(role, vaultCoreAddr);
       }
+    }
+
+    // 给 LendingEngine 授予借款铸证权限（ACTION_BORROW）
+    const leAddr = await orderEngine.getAddress();
+    if (!(await acm.hasRole(ROLES.BORROW, leAddr))) {
+      await acm.grantRole(ROLES.BORROW, leAddr);
     }
 
     // 16. 给用户授权
@@ -383,7 +417,9 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       rwa,
       assetWhitelist,
       guaranteeFundManager,
-      earlyRepaymentGuaranteeManager
+      earlyRepaymentGuaranteeManager,
+      liquidationRiskManager,
+      healthView
     };
   }
 
@@ -411,6 +447,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     assetWhitelist = fixture.assetWhitelist;
     guaranteeFundManager = fixture.guaranteeFundManager;
     earlyRepaymentGuaranteeManager = fixture.earlyRepaymentGuaranteeManager;
+    liquidationRiskManager = fixture.liquidationRiskManager;
+    healthView = fixture.healthView;
   });
 
   describe('双架构撮合流程测试', function () {
@@ -420,7 +458,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       const usdtAddr = await usdt.getAddress();
       const rwaAddr = await rwa.getAddress();
 
-      // 1. 借款人存入抵押物 - 通过 VaultCore 统一入口
+      // 1. 借款人存入抵押物 - 通过 VaultCore 入口（转发到 VaultView -> CollateralManager）
       await vaultCore.connect(borrower).deposit(rwaAddr, ethers.parseEther('100'));
       
       // 验证抵押物已存入
@@ -487,7 +525,10 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
 
       // 7. 验证撮合结果
       const borrowerUsdtAfter = await usdt.balanceOf(borrowerAddr);
-      expect(borrowerUsdtAfter - borrowerUsdtBefore).to.equal(borrowAmount);
+      const platformFee = (borrowAmount * BigInt(100)) / BigInt(10_000); // 1%
+      const ecoFee = (borrowAmount * BigInt(1)) / BigInt(10_000); // 0.01%
+      const expectedNet = borrowAmount - platformFee - ecoFee;
+      expect(borrowerUsdtAfter - borrowerUsdtBefore).to.equal(expectedNet);
       
       const debt = await leBasic.getDebt(borrowerAddr, usdtAddr);
       expect(debt).to.equal(borrowAmount);

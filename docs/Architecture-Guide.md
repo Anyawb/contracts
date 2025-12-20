@@ -38,6 +38,14 @@
 - **系统级缓存快照 (ViewCache.sol)**：集中存储按资产聚合的系统总量数据，减少冗余映射，支持批量查询
 - **查询接口**：前端通过view函数免费查询缓存数据
 
+### 缓存推送失败与手动重试（新增要求 & 已实施）
+- 推送失败不做链上自动重试，避免 gas 暴涨/重复失败；采用“事件告警 + 链下人工重放”。
+- 在推送 try/catch 中发事件 `CacheUpdateFailed(address user, address asset, address view, uint256 collateral, uint256 debt, bytes reason)`；当 view 地址解析为零也要触发，payload 建议携带期望写入的数值。
+- 健康推送失败补充事件：`HealthPushFailed(address user, address healthView, uint256 totalCollateral, uint256 totalDebt, bytes reason)`（最佳努力不回滚，用于链下重试/告警）。
+- 链下监听事件写入重试队列（含 tx hash、block time、payload）；人工核查原因后重放：先重新读取最新账本，数据一致或可接受才推送，可设置最小间隔/去重，同一 (user, asset, view) 避免并发轰击。
+- 链下重试同一 (user, asset, view) 连续多次失败时，将该条目标记为“死亡信箱”并告警，链上不再尝试；重试成功后清理队列/提示。
+- 可选治理/运维入口：提供只读脚本或工具函数 `retryPush(user, asset)` 单次读取最新账本再推送，不做链上循环；注意权限与调用成本。
+
 ### **所有核心功能分层职责（写入不经 View）**
 - **用户状态管理**：UserView.sol（双架构支持）
 - **系统状态管理**：SystemView.sol（双架构支持）
@@ -63,52 +71,101 @@ function _resolveVaultViewAddr() internal view returns (address) {
 
 ### **1. VaultCore - 极简入口合约 ✅ 已完成**
 
-#### **实际实现（142行，完全符合标准）**
+#### **实际实现（已对齐最新落账路径与 Getter）**
 ```solidity
 contract VaultCore is Initializable, UUPSUpgradeable {
-    address public registryAddrVar;
-    address public viewContractAddrVar;
+    address private _registryAddrVar;
+    address private _viewContractAddr;
+
+    /// @notice 显式暴露 Registry 地址
+    function registryAddrVar() external view returns (address) {
+        return _registryAddrVar;
+    }
+
+    /// @notice 获取 View 层合约地址
+    /// @dev 供各业务/清算模块解析 VaultView 地址使用
+    function viewContractAddrVar() external view returns (address) {
+        return _viewContractAddr;
+    }
     
-    // ============ 用户操作（传送数据至 View 层）============ ✅ 已完成
+    // ============ 用户操作（传送数据至 View 层）============ 
+    /// @notice 存款操作 - 传送数据至View层
+    /// @param asset 资产地址
+    /// @param amount 存款金额
+    /// @dev 极简实现：只验证基础参数，传送数据至View层
     function deposit(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultView(viewContractAddrVar).processUserOperation(msg.sender, "DEPOSIT", asset, amount, block.timestamp);
+        IVaultView(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.timestamp);
     }
     
+    /// @notice 借款操作 - 传送数据至View层
+    /// @param asset 资产地址
+    /// @param amount 借款金额
+    /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
     function borrow(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultView(viewContractAddrVar).processUserOperation(msg.sender, "BORROW", asset, amount, block.timestamp);
+        address lendingEngine = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_LE);
+        ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
     }
     
+    /// @notice 还款操作 - 传送数据至View层
+    /// @param asset 资产地址
+    /// @param amount 还款金额
+    /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
     function repay(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultView(viewContractAddrVar).processUserOperation(msg.sender, "REPAY", asset, amount, block.timestamp);
+        address lendingEngine = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_LE);
+        ILendingEngineBasic(lendingEngine).repay(msg.sender, asset, amount);
     }
     
+    /// @notice 提款操作 - 传送数据至View层
+    /// @param asset 资产地址
+    /// @param amount 提款金额
+    /// @dev 极简实现：只验证基础参数，传送数据至View层
     function withdraw(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultView(viewContractAddrVar).processUserOperation(msg.sender, "WITHDRAW", asset, amount, block.timestamp);
+        IVaultView(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_WITHDRAW, asset, amount, block.timestamp);
     }
     
     // ============ Registry 基础升级能力 ============ ✅ 已完成
+    /// @notice 升级模块 - Registry基础升级能力
+    /// @param moduleKey 模块键
+    /// @param newAddress 新模块地址
+    /// @dev 保留Registry升级能力，支持模块动态升级
     function upgradeModule(bytes32 moduleKey, address newAddress) external onlyAdmin {
-        Registry(registryAddrVar).setModuleWithReplaceFlag(moduleKey, newAddress, true);
+        Registry(_registryAddrVar).setModuleWithReplaceFlag(moduleKey, newAddress, true);
     }
     
+    /// @notice 执行模块升级 - Registry基础升级能力
+    /// @param moduleKey 模块键
+    /// @dev 保留Registry升级能力，支持模块升级执行
     function executeModuleUpgrade(bytes32 moduleKey) external onlyAdmin {
-        Registry(registryAddrVar).executeModuleUpgrade(moduleKey);
+        Registry(_registryAddrVar).executeModuleUpgrade(moduleKey);
     }
     
     // ============ 基础传送合约地址的能力 ============ ✅ 已完成
-    function getModule(bytes32 moduleKey) external view returns (address) {
-        return Registry(registryAddrVar).getModuleOrRevert(moduleKey);
+    /// @notice 获取模块地址 - 基础传送合约地址能力
+    /// @param moduleKey 模块键
+    /// @return moduleAddress 模块地址
+    /// @dev 保留基础传送合约地址能力，支持动态模块访问
+    function getModule(bytes32 moduleKey) external view returns (address moduleAddress) {
+        return Registry(_registryAddrVar).getModuleOrRevert(moduleKey);
     }
     
-    function getRegistry() external view returns (address) {
-        return registryAddrVar;
+    /// @notice 获取Registry地址 - 基础传送合约地址能力
+    /// @return registryAddress Registry地址
+    /// @dev 保留基础传送合约地址能力
+    function getRegistry() external view returns (address registryAddress) {
+        return _registryAddrVar;
     }
 }
 ```
+
+#### **命名规范说明**
+- ✅ **ActionKeys 常量**：使用带下划线的 UPPER_SNAKE_CASE 命名，如 `ActionKeys.ACTION_DEPOSIT`、`ActionKeys.ACTION_WITHDRAW`
+- ✅ **私有变量**：使用下划线前缀，如 `_registryAddrVar`、`_viewContractAddr`
+- ✅ **公开函数返回值**：使用命名返回参数，如 `returns (address moduleAddress)`
+- ✅ **类型**：ActionKeys 常量为 `bytes32 constant` 类型，符合 `SmartContractStandard.md` 第131行的命名规范
 
 #### **✅ 已成功移除的功能**
 - ❌ 复杂的权限验证逻辑
@@ -136,6 +193,7 @@ contract VaultView is Initializable, UUPSUpgradeable {
     address private _cachedLendingEngine;
     address private _cachedHealthFactorCalculator;
     address private _cachedPriceOracle;
+    address private _cachedVaultBusinessLogic;
     uint256 private _moduleCacheTimestamp;
     uint256 private constant MODULE_CACHE_DURATION = 3600; // 1小时
     
@@ -219,6 +277,40 @@ contract VaultView is Initializable, UUPSUpgradeable {
     function getCacheStats() external view returns (uint256 totalUsers, uint256 validCaches, uint256 cacheDuration, uint256 moduleCacheTimestamp);
     function isModuleCacheValid() external view returns (bool isValid);
     function refreshModuleCache() external onlyAdmin;
+
+    /// @dev 业务白名单校验：使用 1h 模块缓存，过期或缺失自动刷新后再校验
+    modifier onlyBusinessContract() {
+        _ensureModuleCache();
+        if (
+            msg.sender != _cachedCollateralManager &&
+            msg.sender != _cachedLendingEngine &&
+            msg.sender != _cachedVaultBusinessLogic
+        ) revert VaultView__UnauthorizedAccess();
+        _;
+    }
+
+    function _refreshModuleCache() internal {
+        _cachedCollateralManager   = Registry(registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_CM);
+        _cachedLendingEngine       = Registry(registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_LE);
+        _cachedPriceOracle         = Registry(registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
+        _cachedVaultBusinessLogic  = Registry(registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
+        _moduleCacheTimestamp = block.timestamp;
+    }
+
+    function _isModuleCacheValid() internal view returns (bool) {
+        return (block.timestamp - _moduleCacheTimestamp) <= MODULE_CACHE_DURATION;
+    }
+
+    function _ensureModuleCache() internal {
+        if (
+            !_isModuleCacheValid() ||
+            _cachedCollateralManager == address(0) ||
+            _cachedLendingEngine == address(0) ||
+            _cachedVaultBusinessLogic == address(0)
+        ) {
+            _refreshModuleCache();
+        }
+    }
 }
 ```
 
@@ -516,7 +608,7 @@ contract LendingEngine {
   - 不做代币二次转账（避免与业务层重复）
 - **LendingEngine**：
   - 借/还/清算的账本更新；估值路径内的优雅降级
-  - 账本变更后：`VaultView.pushUserPositionUpdate` + `HealthView.pushRiskStatus`
+  - 账本变更后：`VaultView.pushUserPositionUpdate` + `HealthView.pushRiskStatus` + 最佳努力触发 `RewardManager.onLoanEvent`
   - `onlyVaultCore`：拒绝任何非 Core 的账本写入
 - **View 层**：
   - `VaultView`：仓位缓存与事件/DataPush；聚合查询 0 gas

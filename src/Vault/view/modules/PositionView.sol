@@ -22,6 +22,15 @@ import { ZeroAddress } from "../../../errors/StandardErrors.sol";
 contract PositionView is Initializable, UUPSUpgradeable {
     // ============ Events ============
     event UserPositionCached(address indexed user, address indexed asset, uint256 collateral, uint256 debt, uint256 ts);
+    event CacheUpdateFailed(address indexed user, address indexed asset, address viewAddr, uint256 collateral, uint256 debt, bytes reason);
+    event ModuleCacheRefreshed(uint256 timestamp);
+
+    // ============ Errors ============
+    error PositionView__Unauthorized();
+    error PositionView__InvalidInput();
+    error PositionView__LedgerMismatch();
+    error PositionView__LedgerReadFailed();
+    error PositionView__ModuleCacheExpired();
 
     // ============ Storage ============
     address private _registryAddr;
@@ -31,9 +40,18 @@ contract PositionView is Initializable, UUPSUpgradeable {
     mapping(address => mapping(address => uint256)) private _debtCache;
     mapping(address => uint256)                         private _cacheTimestamps;
 
+    // module cache (fail-closed)
+    address private _cachedCollateralManager;
+    address private _cachedLendingEngine;
+    address private _cachedVaultCore;
+    address private _cachedVBL;
+    address private _cachedAcm;
+    uint256 private _moduleCacheTimestamp;
+
     // constants via ViewConstants
     uint256 private constant CACHE_DURATION  = ViewConstants.CACHE_DURATION;
     uint256 private constant MAX_BATCH_SIZE  = ViewConstants.MAX_BATCH_SIZE;
+    uint256 private constant MODULE_CACHE_DURATION = 1 hours;
 
     // ============ Modifiers ============
     modifier onlyValidRegistry() {
@@ -41,14 +59,27 @@ contract PositionView is Initializable, UUPSUpgradeable {
         _;
     }
 
+    modifier onlyBusinessContract() {
+        _ensureValidModuleCache();
+        if (
+            msg.sender != _cachedCollateralManager &&
+            msg.sender != _cachedLendingEngine &&
+            msg.sender != _cachedVaultCore &&
+            msg.sender != _cachedVBL
+        ) {
+            revert PositionView__Unauthorized();
+        }
+        _;
+    }
+
     function _requireRole(bytes32 actionKey, address user) internal view {
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acm).requireRole(actionKey, user);
+        _ensureValidModuleCache();
+        IAccessControlManager(_cachedAcm).requireRole(actionKey, user);
     }
 
     function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        return IAccessControlManager(acm).hasRole(actionKey, user);
+        _ensureValidModuleCache();
+        return IAccessControlManager(_cachedAcm).hasRole(actionKey, user);
     }
 
     // === Access helpers ===
@@ -62,11 +93,17 @@ contract PositionView is Initializable, UUPSUpgradeable {
         _;
     }
 
+    modifier onlyAdmin() {
+        require(_hasRole(ActionKeys.ACTION_ADMIN, msg.sender), "PositionView: not admin");
+        _;
+    }
+
     // ============ Initializer ============
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
+        _refreshModuleCache();
     }
 
     // ============ Push API (called by business modules) ============
@@ -82,7 +119,46 @@ contract PositionView is Initializable, UUPSUpgradeable {
         address asset,
         uint256 collateral,
         uint256 debt
-    ) external onlyValidRegistry {
+    ) external onlyValidRegistry onlyBusinessContract {
+        _requireRole(ActionKeys.ACTION_VIEW_PUSH, msg.sender);
+        if (user == address(0) || asset == address(0)) revert PositionView__InvalidInput();
+
+        (bool ok, uint256 ledgerCollateral, uint256 ledgerDebt) = _fetchLatestPositionGuarded(
+            user,
+            asset,
+            collateral,
+            debt
+        );
+        if (!ok) {
+            // 账本读取失败：记录事件，链下重试；不写缓存，不中断上层流程
+            return;
+        }
+        if (ledgerCollateral != collateral || ledgerDebt != debt) {
+            revert PositionView__LedgerMismatch();
+        }
+
+        _collateralCache[user][asset] = collateral;
+        _debtCache[user][asset]       = debt;
+        _cacheTimestamps[user]        = block.timestamp;
+
+        emit UserPositionCached(user, asset, collateral, debt, block.timestamp);
+        DataPushLibrary._emitData(keccak256("USER_POSITION_UPDATE"), abi.encode(user, asset, collateral, debt));
+    }
+
+    /**
+     * @notice 链下重试入口：读取最新账本后重推缓存
+     * @dev 仅 admin，可在接到 CacheUpdateFailed 后手动调用，幂等
+     */
+    function retryUserPositionUpdate(address user, address asset) external onlyAdmin {
+        if (user == address(0) || asset == address(0)) revert PositionView__InvalidInput();
+        _refreshModuleCache();
+
+        (bool ok, uint256 collateral, uint256 debt) = _fetchLatestPositionGuarded(user, asset, 0, 0);
+        if (!ok) {
+            // 已在 _fetchLatestPositionGuarded 中 emit CacheUpdateFailed
+            return;
+        }
+
         _collateralCache[user][asset] = collateral;
         _debtCache[user][asset]       = debt;
         _cacheTimestamps[user]        = block.timestamp;
@@ -99,6 +175,17 @@ contract PositionView is Initializable, UUPSUpgradeable {
         returns (uint256 collateral, uint256 debt)
     {
         (collateral, debt) = _getCachedOrLatestPosition(user, asset);
+    }
+
+    /// @notice 查询用户仓位，附带缓存有效性标识
+    /// @dev 缓存失效时自动回退账本数据，并返回 isValid=false
+    function getUserPositionWithValidity(address user, address asset)
+        external
+        view
+        onlyUserOrStrictAdmin(user)
+        returns (uint256 collateral, uint256 debt, bool isValid)
+    {
+        (collateral, debt, isValid) = _getCachedOrLatestPositionWithValidity(user, asset);
     }
 
     function batchGetUserPositions(address[] calldata users, address[] calldata assets)
@@ -134,18 +221,45 @@ contract PositionView is Initializable, UUPSUpgradeable {
     }
 
     function _getCachedOrLatestPosition(address user, address asset) internal view returns (uint256 collateral, uint256 debt) {
+        (collateral, debt, ) = _getCachedOrLatestPositionWithValidity(user, asset);
+    }
+
+    function _getCachedOrLatestPositionWithValidity(address user, address asset) internal view returns (uint256 collateral, uint256 debt, bool isValid) {
         collateral = _collateralCache[user][asset];
         debt       = _debtCache[user][asset];
-        if (!_isValid(_cacheTimestamps[user])) {
+        isValid = _isValid(_cacheTimestamps[user]);
+        if (!isValid) {
             (collateral, debt) = _fetchLatestPosition(user, asset);
+            return (collateral, debt, false);
         }
+        return (collateral, debt, true);
     }
 
     function _fetchLatestPosition(address user, address asset) internal view returns (uint256 collateral, uint256 debt) {
-        address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
-        address le = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        collateral = ICollateralManager(cm).getCollateral(user, asset);
-        debt       = ILendingEngineBasic(le).getDebt(user, asset);
+        _ensureValidModuleCache();
+        collateral = ICollateralManager(_cachedCollateralManager).getCollateral(user, asset);
+        debt       = ILendingEngineBasic(_cachedLendingEngine).getDebt(user, asset);
+    }
+
+    function _fetchLatestPositionGuarded(
+        address user,
+        address asset,
+        uint256 expectedCollateral,
+        uint256 expectedDebt
+    ) internal returns (bool ok, uint256 collateral, uint256 debt) {
+        _ensureValidModuleCache();
+
+        try ICollateralManager(_cachedCollateralManager).getCollateral(user, asset) returns (uint256 ledgerCollateral) {
+            try ILendingEngineBasic(_cachedLendingEngine).getDebt(user, asset) returns (uint256 ledgerDebt) {
+                return (true, ledgerCollateral, ledgerDebt);
+            } catch (bytes memory reason) {
+                emit CacheUpdateFailed(user, asset, address(this), expectedCollateral, expectedDebt, reason);
+                return (false, 0, 0);
+            }
+        } catch (bytes memory reason) {
+            emit CacheUpdateFailed(user, asset, address(this), expectedCollateral, expectedDebt, reason);
+            return (false, 0, 0);
+        }
     }
 
     // ============ UUPS ============
@@ -153,6 +267,29 @@ contract PositionView is Initializable, UUPSUpgradeable {
         address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acm).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
         require(newImplementation != address(0), "PositionView: zero impl");
+    }
+
+    // ============ Module cache ============
+    function _isModuleCacheValid() internal view returns (bool) {
+        return (block.timestamp - _moduleCacheTimestamp) <= MODULE_CACHE_DURATION;
+    }
+
+    function _ensureValidModuleCache() internal view {
+        if (!_isModuleCacheValid()) revert PositionView__ModuleCacheExpired();
+    }
+
+    function _refreshModuleCache() internal {
+        _cachedCollateralManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
+        _cachedLendingEngine     = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
+        _cachedVaultCore         = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
+        _cachedVBL               = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
+        _cachedAcm               = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        _moduleCacheTimestamp    = block.timestamp;
+        emit ModuleCacheRefreshed(block.timestamp);
+    }
+
+    function refreshModuleCache() external onlyAdmin {
+        _refreshModuleCache();
     }
 
     /// @notice 外部只读：获取 Registry 地址（向后兼容）

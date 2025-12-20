@@ -49,6 +49,8 @@ contract MockVaultView is IVaultView {
         uint256 collateral,
         uint256 debt
     ) external override {
+        require(user != address(0), "MockVaultView: user is zero");
+        require(asset != address(0), "MockVaultView: asset is zero");
         _userCollateral[user][asset] = collateral;
         _userDebt[user][asset] = debt;
         

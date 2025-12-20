@@ -11,6 +11,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IAssetWhitelist } from "../../interfaces/IAssetWhitelist.sol";
 import { ICollateralManager } from "../../interfaces/ICollateralManager.sol";
+import { ILendingEngineBasic } from "../../interfaces/ILendingEngineBasic.sol";
 import { ILiquidationRiskManager } from "../../interfaces/ILiquidationRiskManager.sol";
 import { VaultTypes } from "../VaultTypes.sol";
 import { ExternalModuleRevertedRaw, AmountIsZero, AssetNotAllowed, ZeroAddress } from "../../errors/StandardErrors.sol";
@@ -73,6 +74,12 @@ contract VaultBusinessLogic is
         _;
     }
 
+    /// @notice 仅限清算角色
+    modifier onlyLiquidator() {
+        _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
+        _;
+    }
+
     /* ============ Events ============ */
     /// @notice Registry地址更新事件
     /// @param oldRegistry 旧Registry地址
@@ -94,6 +101,7 @@ contract VaultBusinessLogic is
 
     /* ============ Constructor ============ */
     /// @dev 禁用实现合约的初始化器，防止直接调用
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
@@ -192,6 +200,49 @@ contract VaultBusinessLogic is
         // 积分奖励统一以 LendingEngine 落账后触发
         
         VaultBusinessLogicLibrary.emitBusinessEvents("deposit", user, asset, amount, ActionKeys.ACTION_DEPOSIT);
+    }
+
+    /* ============ Liquidation Orchestration (Single Path) ============ */
+    /// @notice 清算入口：扣押 → 减债 → LiquidatorView 单点推送；任一步失败即回滚
+    /// @param targetUser 被清算用户
+    /// @param collateralAsset 抵押资产
+    /// @param debtAsset 债务资产
+    /// @param collateralAmount 扣押数量
+    /// @param debtAmount 减债数量
+    /// @param bonus 清算奖励（如未计算可传 0）
+    function liquidate(
+        address targetUser,
+        address collateralAsset,
+        address debtAsset,
+        uint256 collateralAmount,
+        uint256 debtAmount,
+        uint256 bonus
+    ) external onlyValidRegistry whenNotPaused nonReentrant onlyLiquidator {
+        if (targetUser == address(0) || collateralAsset == address(0) || debtAsset == address(0)) revert ZeroAddress();
+        if (collateralAmount == 0 || debtAmount == 0) revert AmountIsZero();
+
+        address collateralManager = _getModuleAddress(ModuleKeys.KEY_CM);
+        address lendingEngine = _getModuleAddress(ModuleKeys.KEY_LE);
+        // LiquidatorView is registered under KEY_LIQUIDATION_VIEW (single-point events view)
+        address liquidationView = _getModuleAddress(ModuleKeys.KEY_LIQUIDATION_VIEW);
+
+        // 扣押抵押物
+        ICollateralManager(collateralManager).withdrawCollateral(targetUser, collateralAsset, collateralAmount);
+
+        // 减少债务
+        ILendingEngineBasic(lendingEngine).forceReduceDebt(targetUser, debtAsset, debtAmount);
+
+        // 单点推送事件至 LiquidatorView（失败即回滚，避免双发/遗漏）
+        ILiquidationEventsView(liquidationView).pushLiquidationUpdate(
+            targetUser,
+            collateralAsset,
+            debtAsset,
+            collateralAmount,
+            debtAmount,
+            msg.sender,
+            bonus,
+            block.timestamp
+        );
     }
 
     /* ============ Settlement: Reserve & Match ============ */

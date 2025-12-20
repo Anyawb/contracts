@@ -48,7 +48,8 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
     const proxyFactory = await ethers.getContractFactory('ERC1967Proxy');
 
     // 部署 RewardPoints - 使用代理模式
-    const RewardPoints = await ethers.getContractFactory('RewardPoints');
+    // 使用完全限定名避免与 src/Reward/RewardPoints.sol 冲突
+    const RewardPoints = await ethers.getContractFactory('src/Token/RewardPoints.sol:RewardPoints');
     const rewardPointsImpl = await RewardPoints.deploy();
     await rewardPointsImpl.waitForDeployment();
     
@@ -67,11 +68,10 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
       await rewardManagerImpl.getAddress(),
       rewardManagerImpl.interface.encodeFunctionData('initialize', [
         registry.target,
-        acm.target,
-        ethers.parseUnits('100', 18), // 基础分/100 USD
-        10, // 每天积分
-        500, // 5% 健康因子奖励
-        ethers.parseUnits('50', 18) // 基础分/ETH
+        ethers.parseUnits('100', 18), // baseUsd
+        10, // perDay
+        500, // bonus (5% health factor bonus)
+        ethers.parseUnits('50', 18) // baseEth
       ])
     );
     await rewardManagerCoreProxy.waitForDeployment();
@@ -85,21 +85,31 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
     const rewardManagerProxy = await proxyFactory.deploy(
       await rewardManagerImpl2.getAddress(),
       rewardManagerImpl2.interface.encodeFunctionData('initialize', [
-        registry.target,
-        rewardPoints.target,
-        rewardManagerCore.target,
-        acm.target
+        registry.target
       ])
     );
     await rewardManagerProxy.waitForDeployment();
     rewardManager = RewardManager.attach(await rewardManagerProxy.getAddress()) as RewardManager;
 
     // 设置 Registry 模块地址
-    await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER')), await rewardManager.getAddress());
+    const KEY_RM = ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER'));
+    const KEY_RP = ethers.keccak256(ethers.toUtf8Bytes('REWARD_POINTS'));
+    const KEY_RM_CORE = ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER_CORE'));
+    const KEY_ACM = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
+    await registry.setModule(KEY_RM, await rewardManager.getAddress());
+    await registry.setModule(KEY_RP, await rewardPoints.getAddress());
+    await registry.setModule(KEY_RM_CORE, await rewardManagerCore.getAddress());
+    await registry.setModule(KEY_ACM, await acm.getAddress());
 
     // 为ACM授予必要的角色
-    await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')), governance.address);
-    await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('CLAIM_REWARD')), governance.address);
+    const ROLE_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
+    const ROLE_CLAIM_REWARD = ethers.keccak256(ethers.toUtf8Bytes('CLAIM_REWARD'));
+    if (!(await acm.hasRole(ROLE_SET_PARAMETER, governance.address))) {
+      await acm.grantRole(ROLE_SET_PARAMETER, governance.address);
+    }
+    if (!(await acm.hasRole(ROLE_CLAIM_REWARD, governance.address))) {
+      await acm.grantRole(ROLE_CLAIM_REWARD, governance.address);
+    }
   });
 
 

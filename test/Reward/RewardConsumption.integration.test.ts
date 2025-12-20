@@ -52,25 +52,38 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
     )) as unknown as AccessControlManager;
     await acm.waitForDeployment();
 
-    // RewardPoints
-    rewardPoints = (await (await ethers.getContractFactory('RewardPoints')).deploy()) as unknown as RewardPoints;
+    // RewardPoints（使用 Proxy 部署，避免实现合约已锁定初始化）
+    const rpFactory = await ethers.getContractFactory('src/Token/RewardPoints.sol:RewardPoints');
+    rewardPoints = (await upgrades.deployProxy(
+      rpFactory,
+      [await governance.getAddress()],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as RewardPoints;
     await rewardPoints.waitForDeployment();
-    await rewardPoints.initialize(await governance.getAddress());
 
     // RewardCore
-    rewardCore = (await (await ethers.getContractFactory('RewardCore')).deploy()) as unknown as RewardCore;
+    rewardCore = (await upgrades.deployProxy(
+      await ethers.getContractFactory('RewardCore'),
+      [await registry.getAddress()],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as RewardCore;
     await rewardCore.waitForDeployment();
-    await rewardCore.initialize(await registry.getAddress());
 
     // RewardConsumption
-    rewardConsumption = (await (await ethers.getContractFactory('RewardConsumption')).deploy()) as unknown as RewardConsumption;
+    rewardConsumption = (await upgrades.deployProxy(
+      await ethers.getContractFactory('RewardConsumption'),
+      [await rewardCore.getAddress(), await registry.getAddress()],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as RewardConsumption;
     await rewardConsumption.waitForDeployment();
-    await rewardConsumption.initialize(await rewardCore.getAddress(), await registry.getAddress());
 
     // FeatureUnlockConfig（用于 price/冷却期配置）
-    featureUnlock = (await (await ethers.getContractFactory('FeatureUnlockConfig')).deploy()) as unknown as FeatureUnlockConfig;
+    featureUnlock = (await upgrades.deployProxy(
+      await ethers.getContractFactory('FeatureUnlockConfig'),
+      [await registry.getAddress()],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as FeatureUnlockConfig;
     await featureUnlock.waitForDeployment();
-    await featureUnlock.initialize(await registry.getAddress());
 
     // Registry 绑定
     await registry.setModule(KEY.RP(), await rewardPoints.getAddress());
@@ -83,7 +96,9 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
     // 配置服务价格（将 Basic 价格设置为 5e18）
     // FeatureUnlockConfig 默认 Basic=200e18，这里重设为 5e18 以便最小用例
     const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
-    await acm.grantRole(ACTION_SET_PARAMETER, await governance.getAddress());
+    if (!(await acm.hasRole(ACTION_SET_PARAMETER, await governance.getAddress()))) {
+      await acm.grantRole(ACTION_SET_PARAMETER, await governance.getAddress());
+    }
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')), await acm.getAddress());
     await featureUnlock.updateConfig(ServiceLevel.Basic, ethers.parseUnits('5', 18), 30 * 24 * 3600, true);
     // 将 FeatureUnlockConfig 注册到 ModuleKeys.KEY_FEATURE_UNLOCK_CONFIG
@@ -93,7 +108,7 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
   }
 
   it('应通过 RewardConsumption 扣减用户积分（Basic: 5e18）', async () => {
-    const { user: u, rewardPoints: rp, rewardConsumption: rc } = await deployFixture();
+    const { user: u, rewardPoints: rp, rewardCore: rc } = await deployFixture();
 
     // 预置积分：给 user 铸 10e18
     const ten = ethers.parseUnits('10', 18);
@@ -102,7 +117,7 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
     expect(before).to.equal(ten);
 
     // 触发消费：FeatureUnlock Basic（price=5e18）
-    await rc.consumePointsForService(ServiceType.FeatureUnlock, ServiceLevel.Basic);
+    await rc.connect(u).consumePointsForService(ServiceType.FeatureUnlock, ServiceLevel.Basic);
 
     const after = await rp.balanceOf(await u.getAddress());
     expect(after).to.equal(ten - ethers.parseUnits('5', 18));
@@ -113,7 +128,7 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
   });
 
   it('余额不足应 revert', async () => {
-    const { user: u, rewardPoints: rp, rewardConsumption: rc } = await deployFixture();
+    const { user: u, rewardPoints: rp, rewardCore: rc } = await deployFixture();
     // 不给积分，直接尝试消费（Basic: 5e18）
     await expect(
       rc.connect(u).consumePointsForService(ServiceType.FeatureUnlock, ServiceLevel.Basic)

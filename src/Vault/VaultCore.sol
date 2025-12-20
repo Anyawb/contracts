@@ -9,6 +9,7 @@ import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { IVaultView } from "../interfaces/IVaultView.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
+import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
 
 /// @title VaultCore
 /// @notice 双架构设计的极简入口合约 - 事件驱动 + View层缓存
@@ -58,6 +59,12 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     function registryAddrVar() external view returns (address) {
         return _registryAddrVar;
     }
+
+    /// @notice 获取 View 层合约地址
+    /// @dev 供各业务/清算模块解析 VaultView 地址使用
+    function viewContractAddrVar() external view returns (address) {
+        return _viewContractAddr;
+    }
     
     /*━━━━━━━━━━━━━━━ 用户操作（传送数据至 View 层）━━━━━━━━━━━━━━━*/
     
@@ -73,19 +80,21 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @notice 借款操作 - 传送数据至View层
     /// @param asset 资产地址
     /// @param amount 借款金额
-    /// @dev 极简实现：只验证基础参数，传送数据至View层
+    /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
     function borrow(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultView(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_BORROW, asset, amount, block.timestamp);
+        address lendingEngine = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_LE);
+        ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
     }
     
     /// @notice 还款操作 - 传送数据至View层
     /// @param asset 资产地址
     /// @param amount 还款金额
-    /// @dev 极简实现：只验证基础参数，传送数据至View层
+    /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
     function repay(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultView(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_REPAY, asset, amount, block.timestamp);
+        address lendingEngine = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_LE);
+        ILendingEngineBasic(lendingEngine).repay(msg.sender, asset, amount);
     }
     
     /// @notice 提款操作 - 传送数据至View层

@@ -10,9 +10,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ethers } from 'ethers';
 
-interface ModuleKeyMapping {
-  [key: string]: string;
+interface ModuleKeyEntry {
+  key: string;
+  label: string; // the string inside keccak256("...")
 }
+type ModuleKeyMapping = Record<string, string>;
 
 /**
  * 生成 TypeScript 模块键文件
@@ -21,101 +23,31 @@ export async function generateModuleKeysTS(): Promise<void> {
   console.log('🚀 开始生成 ModuleKeys TypeScript 文件...');
   
   try {
-    // 创建测试合约实例来调用函数
-    const moduleKeysContract = {
-      getAllKeyStrings: () => [
-        'KEY_CM',
-        'KEY_LE', 
-        'KEY_HF_CALC',
-        'KEY_STATS',
-        'KEY_VAULT_CONFIG',
-        'KEY_FR',
-        'KEY_RM',
-        'KEY_REWARD_CORE',
-        'KEY_REWARD_CONFIG',
-        'KEY_REWARD_CONSUMPTION',
-        'KEY_VALUATION_ORACLE',
-        'KEY_GUARANTEE_FUND',
-        'KEY_KEEPER_REGISTRY',
-        'KEY_WHITELIST_REGISTRY',
-        'KEY_ACCESS_CONTROL',
-        'KEY_ACCESS_CONTROLLER',
-        'KEY_ASSET_WHITELIST',
-        'KEY_AUTHORITY_WHITELIST',
-        'KEY_CROSS_CHAIN_GOV',
-        'KEY_GOVERNANCE_ROLE',
-        'KEY_REGISTRY',
-        'KEY_LOAN_NFT',
-        'KEY_REWARD_POINTS',
-        'KEY_RWA_TOKEN',
-        'KEY_TOKEN_UTILS',
-        'KEY_REVERT_DECODER',
-        'KEY_VAULT_UTILS',
-        'KEY_PRICE_ORACLE',
-        'KEY_COINGECKO_UPDATER',
-        'KEY_RWA_STRATEGY',
-        'KEY_VAULT_BUSINESS_LOGIC',
-        'KEY_ADVANCED_ANALYTICS_CONFIG',
-        'KEY_PRIORITY_SERVICE_CONFIG',
-        'KEY_FEATURE_UNLOCK_CONFIG',
-        'KEY_GOVERNANCE_ACCESS_CONFIG',
-        'KEY_TESTNET_FEATURES_CONFIG',
-        'KEY_REWARD_MANAGER_V1'
-      ]
-    };
+    // 1) 解析 Solidity 源码，提取 bytes32 constant KEY_* = keccak256("...") 定义
+    const moduleKeysSolPath = path.join(__dirname, '../../src/constants/ModuleKeys.sol');
+    const source = fs.readFileSync(moduleKeysSolPath, 'utf8');
+    const regex = /bytes32\s+constant\s+(KEY_[A-Z0-9_]+)\s*=\s*keccak256\("([^"]+)"\)/g;
+    const entries: ModuleKeyEntry[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(source)) !== null) {
+      entries.push({ key: match[1], label: match[2] });
+    }
 
-    const keyStrings = moduleKeysContract.getAllKeyStrings();
-    
-    // 生成哈希值映射
+    if (entries.length === 0) {
+      throw new Error('未能在 ModuleKeys.sol 中解析到任何 KEY_* 定义，请检查正则或源码格式。');
+    }
+
+    // 保持源码顺序
+    const keyStrings = entries.map((e) => e.key);
+
+    // 生成哈希值映射（与 Solidity 保持一致：keccak256(label)）
     const moduleKeyMapping: ModuleKeyMapping = {};
-    const keyComments: { [key: string]: string } = {
-      'KEY_CM': '抵押物管理模块',
-      'KEY_LE': '借贷引擎模块', 
-      'KEY_HF_CALC': '健康因子计算器模块',
-      'KEY_STATS': '金库统计模块',
-      'KEY_VAULT_CONFIG': '金库配置模块',
-      'KEY_FR': '手续费路由模块',
-      'KEY_RM': '奖励管理模块',
-      'KEY_REWARD_CORE': '奖励核心模块',
-      'KEY_REWARD_CONFIG': '奖励配置模块',
-      'KEY_REWARD_CONSUMPTION': '奖励消费模块',
-      'KEY_VALUATION_ORACLE': '估值预言机适配器模块',
-      'KEY_GUARANTEE_FUND': '保证金基金管理模块',
-      'KEY_KEEPER_REGISTRY': 'Keeper注册表模块',
-      'KEY_WHITELIST_REGISTRY': '白名单注册表模块',
-      'KEY_ACCESS_CONTROL': '访问控制管理器模块',
-      'KEY_ACCESS_CONTROLLER': '访问控制器模块（增强版）',
-      'KEY_ASSET_WHITELIST': '资产白名单模块',
-      'KEY_AUTHORITY_WHITELIST': '权限白名单模块',
-      'KEY_CROSS_CHAIN_GOV': '跨链治理模块',
-      'KEY_GOVERNANCE_ROLE': '治理角色模块',
-      'KEY_REGISTRY': '注册表模块',
-      'KEY_LOAN_NFT': '贷款NFT模块',
-      'KEY_REWARD_POINTS': '奖励积分模块',
-      'KEY_RWA_TOKEN': 'RWA代币模块',
-      'KEY_TOKEN_UTILS': '代币工具模块',
-      'KEY_REVERT_DECODER': '回滚解码器模块',
-      'KEY_VAULT_UTILS': '金库工具模块',
-      'KEY_PRICE_ORACLE': '价格预言机模块',
-      'KEY_COINGECKO_UPDATER': 'CoinGecko价格更新器模块',
-      'KEY_RWA_STRATEGY': 'RWA自动杠杆策略模块',
-      'KEY_VAULT_BUSINESS_LOGIC': '金库业务逻辑模块',
-      'KEY_ADVANCED_ANALYTICS_CONFIG': '高级数据分析配置模块',
-      'KEY_PRIORITY_SERVICE_CONFIG': '优先服务配置模块',
-      'KEY_FEATURE_UNLOCK_CONFIG': '功能解锁配置模块',
-      'KEY_GOVERNANCE_ACCESS_CONFIG': '治理访问配置模块',
-      'KEY_TESTNET_FEATURES_CONFIG': '测试网功能配置模块',
-      'KEY_REWARD_MANAGER_V1': '奖励管理模块V1版本'
-    };
-
-    // 为每个键生成哈希值
-    for (const keyString of keyStrings) {
-      const hashValue = ethers.keccak256(ethers.toUtf8Bytes(keyString));
-      moduleKeyMapping[keyString] = hashValue;
+    for (const { key, label } of entries) {
+      moduleKeyMapping[key] = ethers.keccak256(ethers.toUtf8Bytes(label));
     }
 
     // 生成 TypeScript 文件内容
-    const tsContent = generateTypeScriptContent(moduleKeyMapping, keyComments, keyStrings);
+    const tsContent = generateTypeScriptContent(moduleKeyMapping, keyStrings);
     
     // 确保输出目录存在
     const outputDir = path.join(__dirname, '../../frontend-config');
@@ -143,8 +75,7 @@ export async function generateModuleKeysTS(): Promise<void> {
  * 生成 TypeScript 文件内容
  */
 function generateTypeScriptContent(
-  moduleKeyMapping: ModuleKeyMapping, 
-  keyComments: { [key: string]: string },
+  moduleKeyMapping: ModuleKeyMapping,
   keyStrings: string[]
 ): string {
   const header = `/**
@@ -244,10 +175,7 @@ export default ModuleKeys;
 
   // 生成主体内容
   const body = Object.entries(moduleKeyMapping)
-    .map(([key, hash]) => {
-      const comment = keyComments[key] || '';
-      return `  /** ${comment} */\n  ${key}: '${hash}',`;
-    })
+    .map(([key, hash]) => `  ${key}: '${hash}',`)
     .join('\n\n');
 
   return header + body + '\n' + footer;

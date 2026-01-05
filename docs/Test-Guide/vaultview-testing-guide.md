@@ -1,14 +1,14 @@
-# VaultView 测试指南
+# VaultRouter 测试指南
 
 ## 🎯 概述
 
-本文档提供了 RWA 借贷平台 VaultView 双架构智能协调器测试的完整指南。VaultView 是平台的核心组件，实现了事件驱动架构和 View 层缓存的结合，本文档基于 `test/VaultView.test.ts` 文件，详细说明了如何运行、理解和扩展 VaultView 相关的测试。
+本文档提供了 RWA 借贷平台 VaultRouter 双架构智能协调器测试的完整指南。VaultRouter 是平台的核心组件，实现了事件驱动架构和 View 层缓存的结合，本文档基于 `test/VaultRouter.test.ts` 文件，详细说明了如何运行、理解和扩展 VaultRouter 相关的测试。
 
 ## 📁 测试文件位置
 
 ```
 test/
-└── VaultView.test.ts                    # VaultView 核心测试
+└── VaultRouter.test.ts                    # VaultRouter 核心测试
 ```
 
 ## 🧪 测试分类
@@ -16,7 +16,7 @@ test/
 ### 1. 初始化测试
 
 **测试目标**:
-- 验证 VaultView 合约的正确初始化
+- 验证 VaultRouter 合约的正确初始化
 - 验证 Registry 地址设置
 - 验证零地址和重复初始化的错误处理
 
@@ -24,20 +24,20 @@ test/
 
 ```typescript
 describe('初始化测试', function () {
-  it('应该正确初始化 VaultView 合约', async function () {
+  it('应该正确初始化 VaultRouter 合约', async function () {
     // 验证 Registry 地址正确设置
-    expect(await vaultView.registryAddrVar()).to.equal(registryAddress);
+    expect(await vaultRouter.registryAddrVar()).to.equal(registryAddress);
   });
 
   it('应该拒绝零地址初始化', async function () {
     // 验证零地址初始化会被拒绝
-    await expect(vaultView.initialize(ZERO_ADDRESS))
-      .to.be.revertedWithCustomError(vaultView, 'VaultView__ZeroAddress');
+    await expect(vaultRouter.initialize(ZERO_ADDRESS))
+      .to.be.revertedWithCustomError(vaultRouter, 'VaultRouter__ZeroAddress');
   });
 
   it('应该拒绝重复初始化', async function () {
     // 验证重复初始化会被拒绝
-    await expect(vaultView.initialize(registryAddress))
+    await expect(vaultRouter.initialize(registryAddress))
       .to.be.revertedWith('Initializable: contract is already initialized');
   });
 });
@@ -45,7 +45,7 @@ describe('初始化测试', function () {
 
 **运行命令**:
 ```bash
-npx hardhat test test/VaultView.test.ts --grep "初始化测试"
+npx hardhat test test/VaultRouter.test.ts --grep "初始化测试"
 ```
 
 ### 2. 权限控制测试
@@ -62,22 +62,22 @@ describe('权限控制测试', function () {
   it('应该拒绝未授权合约调用 processUserOperation', async function () {
     // 只有 VaultCore 可以调用
     await expect(
-      vaultView.connect(unauthorized).processUserOperation(...)
-    ).to.be.revertedWithCustomError(vaultView, 'VaultView__UnauthorizedAccess');
+      vaultRouter.connect(unauthorized).processUserOperation(...)
+    ).to.be.revertedWithCustomError(vaultRouter, 'VaultRouter__UnauthorizedAccess');
   });
 
   it('应该拒绝未授权合约调用 pushUserPositionUpdate', async function () {
     // 只有业务模块可以调用
     await expect(
-      vaultView.connect(unauthorized).pushUserPositionUpdate(...)
-    ).to.be.revertedWithCustomError(vaultView, 'VaultView__UnauthorizedAccess');
+      vaultRouter.connect(unauthorized).pushUserPositionUpdate(...)
+    ).to.be.revertedWithCustomError(vaultRouter, 'VaultRouter__UnauthorizedAccess');
   });
 });
 ```
 
 **运行命令**:
 ```bash
-npx hardhat test test/VaultView.test.ts --grep "权限控制测试"
+npx hardhat test test/VaultRouter.test.ts --grep "权限控制测试"
 ```
 
 ### 3. 免费查询接口测试
@@ -93,30 +93,30 @@ npx hardhat test test/VaultView.test.ts --grep "权限控制测试"
 ```typescript
 describe('免费查询接口测试', function () {
   it('应该正确返回用户位置信息', async function () {
-    const [collateral, debt] = await vaultView.getUserPosition(user, asset);
+    const [collateral, debt] = await vaultRouter.getUserPosition(user, asset);
     expect(collateral).to.equal(expectedCollateral);
     expect(debt).to.equal(expectedDebt);
   });
 
   it('应该正确返回用户抵押数量', async function () {
-    const collateral = await vaultView.getUserCollateral(user, asset);
+    const collateral = await vaultRouter.getUserCollateral(user, asset);
     expect(collateral).to.equal(expectedCollateral);
   });
 
   it('应该正确返回用户债务数量', async function () {
-    const debt = await vaultView.getUserDebt(user, asset);
+    const debt = await vaultRouter.getUserDebt(user, asset);
     expect(debt).to.equal(expectedDebt);
   });
 
   it('应该正确检查用户缓存有效性', async function () {
-    const isValid = await vaultView.isUserCacheValid(user);
+    const isValid = await vaultRouter.isUserCacheValid(user);
     expect(isValid).to.be.a('boolean');
   });
 
   it('应该正确批量获取用户位置', async function () {
     const users = [user1, user2];
     const assets = [asset1, asset2];
-    const positions = await vaultView.batchGetUserPositions(users, assets);
+    const positions = await vaultRouter.batchGetUserPositions(users, assets);
     expect(positions.length).to.equal(2);
   });
 
@@ -124,7 +124,7 @@ describe('免费查询接口测试', function () {
     const users = [user1];
     const assets = [asset1, asset2]; // 长度不匹配
     await expect(
-      vaultView.batchGetUserPositions(users, assets)
+      vaultRouter.batchGetUserPositions(users, assets)
     ).to.be.revertedWith('Arrays length mismatch');
   });
 });
@@ -132,7 +132,7 @@ describe('免费查询接口测试', function () {
 
 **运行命令**:
 ```bash
-npx hardhat test test/VaultView.test.ts --grep "免费查询接口测试"
+npx hardhat test test/VaultRouter.test.ts --grep "免费查询接口测试"
 ```
 
 ### 4. 事件测试
@@ -148,22 +148,22 @@ npx hardhat test test/VaultView.test.ts --grep "免费查询接口测试"
 describe('事件测试', function () {
   it('应该正确发出用户操作事件', async function () {
     await expect(
-      vaultView.processUserOperation(user, operationType, asset, amount, timestamp)
-    ).to.emit(vaultView, 'UserOperation')
+      vaultRouter.processUserOperation(user, operationType, asset, amount, timestamp)
+    ).to.emit(vaultRouter, 'UserOperation')
       .withArgs(user, operationType, asset, amount, timestamp);
   });
 
   it('应该正确发出用户位置更新事件', async function () {
     await expect(
-      vaultView.pushUserPositionUpdate(user, asset, collateral, debt)
-    ).to.emit(vaultView, 'UserPositionUpdated')
+      vaultRouter.pushUserPositionUpdate(user, asset, collateral, debt)
+    ).to.emit(vaultRouter, 'UserPositionUpdated')
       .withArgs(user, asset, collateral, debt, anyValue);
   });
 
   it('应该正确发出系统状态更新事件', async function () {
     await expect(
-      vaultView.pushSystemStateUpdate(asset, totalCollateral, totalDebt)
-    ).to.emit(vaultView, 'SystemStateUpdated')
+      vaultRouter.pushSystemStateUpdate(asset, totalCollateral, totalDebt)
+    ).to.emit(vaultRouter, 'SystemStateUpdated')
       .withArgs(asset, totalCollateral, totalDebt, anyValue);
   });
 });
@@ -171,7 +171,7 @@ describe('事件测试', function () {
 
 **运行命令**:
 ```bash
-npx hardhat test test/VaultView.test.ts --grep "事件测试"
+npx hardhat test test/VaultRouter.test.ts --grep "事件测试"
 ```
 
 ### 5. 错误处理测试
@@ -187,22 +187,22 @@ npx hardhat test test/VaultView.test.ts --grep "事件测试"
 describe('错误处理测试', function () {
   it('应该正确处理零地址错误', async function () {
     // 查询函数可能不检查零地址，但写入函数应该检查
-    const result = await vaultView.getUserPosition(ZERO_ADDRESS, asset);
+    const result = await vaultRouter.getUserPosition(ZERO_ADDRESS, asset);
     // 验证返回默认值或正确处理
   });
 
   it('应该正确处理无效金额错误', async function () {
     // 在 processUserOperation 中检查金额
     await expect(
-      vaultView.processUserOperation(user, operationType, asset, 0, timestamp)
-    ).to.be.revertedWithCustomError(vaultView, 'VaultView__InvalidAmount');
+      vaultRouter.processUserOperation(user, operationType, asset, 0, timestamp)
+    ).to.be.revertedWithCustomError(vaultRouter, 'VaultRouter__InvalidAmount');
   });
 });
 ```
 
 **运行命令**:
 ```bash
-npx hardhat test test/VaultView.test.ts --grep "错误处理测试"
+npx hardhat test test/VaultRouter.test.ts --grep "错误处理测试"
 ```
 
 ### 6. 边界条件测试
@@ -219,13 +219,13 @@ describe('边界条件测试', function () {
   it('应该正确处理最大数值', async function () {
     const maxValue = ethers.MaxUint256;
     // 测试最大 uint256 值的处理
-    const [collateral, debt] = await vaultView.getUserPosition(user, asset);
+    const [collateral, debt] = await vaultRouter.getUserPosition(user, asset);
     // 验证不会溢出
   });
 
   it('应该正确处理零金额', async function () {
     // 测试零金额的处理
-    const [collateral, debt] = await vaultView.getUserPosition(user, asset);
+    const [collateral, debt] = await vaultRouter.getUserPosition(user, asset);
     expect(collateral).to.equal(0);
     expect(debt).to.equal(0);
   });
@@ -234,7 +234,7 @@ describe('边界条件测试', function () {
 
 **运行命令**:
 ```bash
-npx hardhat test test/VaultView.test.ts --grep "边界条件测试"
+npx hardhat test test/VaultRouter.test.ts --grep "边界条件测试"
 ```
 
 ### 7. 缓存机制测试
@@ -250,13 +250,13 @@ npx hardhat test test/VaultView.test.ts --grep "边界条件测试"
 describe('缓存机制测试', function () {
   it('应该正确管理缓存时间戳', async function () {
     const user = user1.address;
-    const isValid = await vaultView.isUserCacheValid(user);
+    const isValid = await vaultRouter.isUserCacheValid(user);
     // 初始状态缓存应该无效
     expect(isValid).to.be.false;
     
     // 更新缓存后应该有效
-    await vaultView.pushUserPositionUpdate(user, asset, collateral, debt);
-    const isValidAfter = await vaultView.isUserCacheValid(user);
+    await vaultRouter.pushUserPositionUpdate(user, asset, collateral, debt);
+    const isValidAfter = await vaultRouter.isUserCacheValid(user);
     expect(isValidAfter).to.be.true;
   });
 });
@@ -264,43 +264,43 @@ describe('缓存机制测试', function () {
 
 **运行命令**:
 ```bash
-npx hardhat test test/VaultView.test.ts --grep "缓存机制测试"
+npx hardhat test test/VaultRouter.test.ts --grep "缓存机制测试"
 ```
 
 ## 🚀 运行测试
 
-### 运行所有 VaultView 测试
+### 运行所有 VaultRouter 测试
 
 ```bash
-# 运行所有 VaultView 测试
-npx hardhat test test/VaultView.test.ts
+# 运行所有 VaultRouter 测试
+npx hardhat test test/VaultRouter.test.ts
 ```
 
 ### 运行特定测试套件
 
 ```bash
 # 运行初始化测试
-npx hardhat test test/VaultView.test.ts --grep "初始化测试"
+npx hardhat test test/VaultRouter.test.ts --grep "初始化测试"
 
 # 运行权限控制测试
-npx hardhat test test/VaultView.test.ts --grep "权限控制测试"
+npx hardhat test test/VaultRouter.test.ts --grep "权限控制测试"
 
 # 运行查询接口测试
-npx hardhat test test/VaultView.test.ts --grep "免费查询接口测试"
+npx hardhat test test/VaultRouter.test.ts --grep "免费查询接口测试"
 ```
 
 ### 运行特定测试用例
 
 ```bash
 # 运行特定 it 测试
-npx hardhat test test/VaultView.test.ts --grep "应该正确初始化 VaultView 合约"
+npx hardhat test test/VaultRouter.test.ts --grep "应该正确初始化 VaultRouter 合约"
 ```
 
 ### 带 Gas 报告的测试
 
 ```bash
 # 运行测试并生成 Gas 报告
-REPORT_GAS=true npx hardhat test test/VaultView.test.ts
+REPORT_GAS=true npx hardhat test test/VaultRouter.test.ts
 ```
 
 ## 📊 测试覆盖范围
@@ -309,26 +309,26 @@ REPORT_GAS=true npx hardhat test test/VaultView.test.ts
 
 | 功能模块 | 测试文件 | 覆盖度 |
 |---------|---------|--------|
-| **初始化** | `VaultView.test.ts` | ✅ 完整 |
-| **权限控制** | `VaultView.test.ts` | ✅ 完整 |
-| **查询接口** | `VaultView.test.ts` | ✅ 完整 |
-| **事件发出** | `VaultView.test.ts` | ✅ 完整 |
-| **错误处理** | `VaultView.test.ts` | ✅ 完整 |
-| **边界条件** | `VaultView.test.ts` | ✅ 完整 |
-| **缓存机制** | `VaultView.test.ts` | ✅ 完整 |
+| **初始化** | `VaultRouter.test.ts` | ✅ 完整 |
+| **权限控制** | `VaultRouter.test.ts` | ✅ 完整 |
+| **查询接口** | `VaultRouter.test.ts` | ✅ 完整 |
+| **事件发出** | `VaultRouter.test.ts` | ✅ 完整 |
+| **错误处理** | `VaultRouter.test.ts` | ✅ 完整 |
+| **边界条件** | `VaultRouter.test.ts` | ✅ 完整 |
+| **缓存机制** | `VaultRouter.test.ts` | ✅ 完整 |
 
 ### 测试场景覆盖
 
 | 测试场景 | 测试文件 | 状态 |
 |---------|---------|------|
-| **初始化流程** | `VaultView.test.ts` | ✅ |
-| **权限验证** | `VaultView.test.ts` | ✅ |
-| **查询功能** | `VaultView.test.ts` | ✅ |
-| **批量查询** | `VaultView.test.ts` | ✅ |
-| **事件验证** | `VaultView.test.ts` | ✅ |
-| **错误处理** | `VaultView.test.ts` | ✅ |
-| **边界条件** | `VaultView.test.ts` | ✅ |
-| **缓存管理** | `VaultView.test.ts` | ✅ |
+| **初始化流程** | `VaultRouter.test.ts` | ✅ |
+| **权限验证** | `VaultRouter.test.ts` | ✅ |
+| **查询功能** | `VaultRouter.test.ts` | ✅ |
+| **批量查询** | `VaultRouter.test.ts` | ✅ |
+| **事件验证** | `VaultRouter.test.ts` | ✅ |
+| **错误处理** | `VaultRouter.test.ts` | ✅ |
+| **边界条件** | `VaultRouter.test.ts` | ✅ |
+| **缓存管理** | `VaultRouter.test.ts` | ✅ |
 
 ## 🔧 测试环境设置
 
@@ -369,9 +369,9 @@ async function deployFixture() {
   const mockCollateralManager = await deployMockCollateralManager();
   const mockLendingEngine = await deployMockLendingEngine();
   
-  // 3. 部署 VaultView
-  const vaultView = await deployVaultView();
-  await vaultView.initialize(registry.address);
+  // 3. 部署 VaultRouter
+  const vaultRouter = await deployVaultRouter();
+  await vaultRouter.initialize(registry.address);
   
   // 4. 注册模块到 Registry
   await registry.setModule(KEY_VAULT_CORE, vaultCore.address);
@@ -379,7 +379,7 @@ async function deployFixture() {
   await registry.setModule(KEY_LE, mockLendingEngine.address);
   
   // 5. 准备测试数据
-  return { vaultView, registry, mocks, signers };
+  return { vaultRouter, registry, mocks, signers };
 }
 ```
 
@@ -394,13 +394,13 @@ const { ethers } = hardhat;
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 
-describe('VaultView – 新功能测试', function () {
+describe('VaultRouter – 新功能测试', function () {
   // 测试常量
   const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
   const ONE_ETH = ethers.parseUnits('1', 18);
   
   // 测试变量
-  let vaultView: VaultView;
+  let vaultRouter: VaultRouter;
   let owner: SignerWithAddress;
   let user: SignerWithAddress;
 
@@ -411,25 +411,25 @@ describe('VaultView – 新功能测试', function () {
     user = userSigner;
 
     // 部署合约
-    const VaultViewFactory = await ethers.getContractFactory('VaultView');
-    vaultView = await VaultViewFactory.deploy();
-    await vaultView.waitForDeployment();
-    await vaultView.initialize(registryAddress);
+    const VaultRouterFactory = await ethers.getContractFactory('VaultRouter');
+    vaultRouter = await VaultRouterFactory.deploy();
+    await vaultRouter.waitForDeployment();
+    await vaultRouter.initialize(registryAddress);
 
-    return { vaultView, owner, user };
+    return { vaultRouter, owner, user };
   }
 
   // 测试用例
   describe('新功能测试', function () {
     it('应该正确执行新功能', async function () {
-      const { vaultView, owner, user } = await loadFixture(deployFixture);
+      const { vaultRouter, owner, user } = await loadFixture(deployFixture);
       
       // 执行操作
-      const tx = await vaultView.connect(owner).newFunction();
+      const tx = await vaultRouter.connect(owner).newFunction();
       await tx.wait();
       
       // 验证结果
-      expect(await vaultView.someValue()).to.equal(expectedValue);
+      expect(await vaultRouter.someValue()).to.equal(expectedValue);
     });
   });
 });
@@ -455,7 +455,7 @@ describe('VaultView – 新功能测试', function () {
 **解决方案**:
 ```typescript
 // 确保使用正确的调用者
-await vaultView.connect(vaultCore).processUserOperation(...);
+await vaultRouter.connect(vaultCore).processUserOperation(...);
 ```
 
 #### 2. 测试失败 - "ZeroAddress"
@@ -482,7 +482,7 @@ await registry.setModule(KEY_VAULT_CORE, vaultCore.address);
 
 1. **使用 console.log**:
 ```typescript
-console.log('Debug value:', await vaultView.getValue());
+console.log('Debug value:', await vaultRouter.getValue());
 ```
 
 2. **使用 hardhat console**:
@@ -492,7 +492,7 @@ npx hardhat console
 
 3. **使用 --verbose 标志**:
 ```bash
-npx hardhat test --verbose test/VaultView.test.ts
+npx hardhat test --verbose test/VaultRouter.test.ts
 ```
 
 4. **使用 --grep 过滤**:
@@ -506,7 +506,7 @@ npx hardhat test --grep "特定测试"
 
 | 测试文件 | 执行时间 | 测试用例数 |
 |---------|---------|-----------|
-| `VaultView.test.ts` | ~3-5s | 20+ |
+| `VaultRouter.test.ts` | ~3-5s | 20+ |
 
 ### 优化建议
 
@@ -542,7 +542,7 @@ open coverage/index.html
 
 ## 🎯 总结
 
-VaultView 测试覆盖了以下关键方面：
+VaultRouter 测试覆盖了以下关键方面：
 
 1. ✅ **初始化流程** - 正确的合约初始化
 2. ✅ **权限控制** - 细粒度的权限验证

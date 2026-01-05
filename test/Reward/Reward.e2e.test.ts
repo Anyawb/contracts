@@ -190,13 +190,6 @@ describe('Reward E2E – 落账后触发 → RM/Core → RewardView → DataPush
     expect(summary[1]).to.equal(0n);
   });
 
-  it('旧入口（int,int）非白名单调用应被拒绝', async function () {
-    const { rewardManager, user } = await deployFixture();
-    await expect(
-      rewardManager['onLoanEvent(address,int256,int256)'](user.address, 100n, 0n)
-    ).to.be.reverted; // MissingRole 或 ValidRegistry 限制，具体错误按实现而定
-  });
-
   it('直接调用 RMCore.onLoanEvent 应被拒绝并触发 DEPRECATED 提示错误', async function () {
     const { rewardManagerCore, user } = await deployFixture();
     await expect(
@@ -268,11 +261,11 @@ describe('Reward E2E – 落账后触发 → RM/Core → RewardView → DataPush
     it('短期限借款（duration < 5）应正确计算', async function () {
       const { rewardManager, rewardPoints, leCaller, user } = await deployFixture();
 
-      // duration=3, 3/5=0（整数除法），期望：500 * 0 = 0
+      // 当前链上基线为“固定 1 积分锁定-释放模型”，与 duration 大小无关（只要 duration>0 即锁定 1）
       await borrowAndRepay(rewardManager, leCaller, user, BIG_AMOUNT, 3n, true);
       
       const bal = await rewardPoints.balanceOf(user.address);
-      expect(bal).to.equal(0n); // (50000/100) * (3/5) = 500 * 0 = 0
+      expect(bal).to.equal(1_000_000_000_000_000_000n);
     });
   });
 
@@ -337,14 +330,14 @@ describe('Reward E2E – 落账后触发 → RM/Core → RewardView → DataPush
       await borrowAndRepay(rewardManager, leCaller, user, 99900n, 5n, true);
       
       const bal = await rewardPoints.balanceOf(user.address);
-      // 低于阈值应可能为 0 或仅记录活跃度
-      expect(bal).to.equal(0n);
+      // 基线：按期释放固定 1 积分（动态奖励阈值在基线路径下不生效）
+      expect(bal).to.equal(1_000_000_000_000_000_000n);
     });
   });
 
   describe('用户等级自动升级测试', function () {
     it('用户应通过借款活动自动升级等级', async function () {
-      const { rewardManager, rewardManagerCore, leCaller, user } = await deployFixture();
+      const { rewardManager, rewardView, leCaller, user } = await deployFixture();
 
       // 模拟用户达到升级条件：总借款量 >= 1000e18 且借款次数 >= 10
       for (let i = 0; i < 10; i++) {
@@ -354,7 +347,7 @@ describe('Reward E2E – 落账后触发 → RM/Core → RewardView → DataPush
       // 检查用户等级是否自动升级到2
       // 升级条件：总借款量 >= 1000e18 且借款次数 >= 10
       // 每次借款100000，10次 = 1000000，未达到1000e18 = 1000000000000000000000
-      const userLevel = await rewardManagerCore.getUserLevel(user.address);
+      const userLevel = await rewardView.connect(user).getUserLevel(user.address);
       expect(userLevel).to.be.gte(0); // 默认等级可能为 0/1，验证不低于初始值
     });
 
@@ -486,7 +479,7 @@ describe('Reward E2E – 落账后触发 → RM/Core → RewardView → DataPush
       const durations = [5n, 10n, 15n];
       const hfHighEnoughs = [true, true, true];
 
-      // 执行批量操作
+      // 1) 执行批量借款（仅锁定，不铸币）
       await (await rewardManager.connect(leCaller).onBatchLoanEvents(
         users,
         amounts,
@@ -494,14 +487,24 @@ describe('Reward E2E – 落账后触发 → RM/Core → RewardView → DataPush
         hfHighEnoughs
       )).wait();
 
-      // 验证每个用户都获得了正确的积分
+      // 2) 执行批量还款（释放锁定并铸币）
+      const repayDurations = [0n, 0n, 0n];
+      const repayFlags = [true, true, true];
+      await (await rewardManager.connect(leCaller).onBatchLoanEvents(
+        users,
+        amounts,
+        repayDurations,
+        repayFlags
+      )).wait();
+
+      // 验证每个用户都获得了 1 积分（1e18）
       const bal1 = await rewardPoints.balanceOf(user1.address);
       const bal2 = await rewardPoints.balanceOf(user2.address);
       const bal3 = await rewardPoints.balanceOf(user3.address);
 
-      expect(bal1).to.be.gt(0n);
-      expect(bal2).to.be.gt(0n);
-      expect(bal3).to.be.gt(0n);
+      expect(bal1).to.equal(1_000_000_000_000_000_000n);
+      expect(bal2).to.equal(1_000_000_000_000_000_000n);
+      expect(bal3).to.equal(1_000_000_000_000_000_000n);
     });
   });
 });

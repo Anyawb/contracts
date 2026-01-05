@@ -5,13 +5,13 @@ import {VaultTypes} from "../../VaultTypes.sol";
 import {VaultMath} from "../../VaultMath.sol";
 
 library LiquidationRiskLib {
-    function calculateHealthFactor(uint256 collateral, uint256 debt) public pure returns (uint256) {
+    function calculateHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256) {
         if (debt == 0) return type(uint256).max;
         if (collateral == 0) return 0;
         return (collateral * VaultTypes.HUNDRED_PERCENT) / debt;
     }
 
-    function calculateLiquidationRiskScore(uint256 collateral, uint256 debt) public pure returns (uint256) {
+    function calculateLiquidationRiskScore(uint256 collateral, uint256 debt) internal pure returns (uint256) {
         if (debt == 0) return 0;
         if (collateral == 0) return 100;
         uint256 ltv = VaultMath.calculateLTV(debt, collateral);

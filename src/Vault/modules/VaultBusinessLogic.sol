@@ -23,11 +23,10 @@ import { SettlementReserveLib } from "../../libraries/SettlementReserveLib.sol";
 import { SettlementIntentLib } from "../../libraries/SettlementIntentLib.sol";
 import { SettlementMatchLib } from "../../libraries/SettlementMatchLib.sol";
 import { Registry } from "../../registry/Registry.sol";
-import { ILiquidationEventsView } from "../../interfaces/ILiquidationEventsView.sol";
-import { IVaultView } from "../../interfaces/IVaultView.sol";
+import { IVaultRouter } from "../../interfaces/IVaultRouter.sol";
 
 /// @title VaultBusinessLogic
-/// @notice 业务逻辑模块（纯业务 + 基础 Registry 能力）；数据推送与事件聚合由 VaultView 统一负责
+/// @notice 业务逻辑模块（纯业务 + 基础 Registry 能力）；数据推送与事件聚合由 VaultRouter 统一负责
 /// @dev 使用 VaultBusinessLogicLibrary 提取重复逻辑，提升可读性与复用性
 /// @dev 支持 UUPS 升级模式；集成 ReentrancyGuardUpgradeable、PausableUpgradeable
 /// @dev 与 ActionKeys/ModuleKeys 集成；权限由 AccessControlManager 校验
@@ -115,8 +114,8 @@ contract VaultBusinessLogic is
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
-    /// @notice 解析 View 地址：仅通过 KEY_VAULT_CORE → viewContractAddrVar（去除 KEY_STATS 回退）
-    function _resolveVaultViewAddr() internal view returns (address) {
+    /// @notice 解析 Router 地址：仅通过 KEY_VAULT_CORE → viewContractAddrVar（去除 KEY_STATS 回退）
+    function _resolveVaultRouterAddr() internal view returns (address) {
         address vaultCore = _getModuleAddress(ModuleKeys.KEY_VAULT_CORE);
         if (vaultCore == address(0)) return address(0);
         try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
@@ -176,73 +175,29 @@ contract VaultBusinessLogic is
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @param amount 存入金额
-    function deposit(address user, address asset, uint256 amount) external onlyValidRegistry whenNotPaused nonReentrant {
-        if (amount == 0) revert AmountIsZero();
-        if (asset == address(0)) revert ZeroAddress();
-        
-        // 检查资产是否在白名单中
-        _checkAssetWhitelist(asset);
-        
-        // Gas优化：获取模块地址（使用缓存）
-		address collateralManager = _getModuleAddress(ModuleKeys.KEY_CM);
-		address guaranteeManager = _getModuleAddress(ModuleKeys.KEY_GUARANTEE_FUND);
-		_getModuleAddress(ModuleKeys.KEY_RM);
-        
-        // 转移代币到合约
-        IERC20(asset).safeTransferFrom(user, address(this), amount);
-        
-        // 存入抵押物
-        VaultBusinessLogicLibrary.safeDepositCollateral(collateralManager, user, asset, amount);
-        
-        // 锁定保证金（如果需要）
-        VaultBusinessLogicLibrary.safeLockGuarantee(guaranteeManager, user, asset, amount);
-        
-        // 积分奖励统一以 LendingEngine 落账后触发
-        
-        VaultBusinessLogicLibrary.emitBusinessEvents("deposit", user, asset, amount, ActionKeys.ACTION_DEPOSIT);
+    function deposit(address user, address asset, uint256 amount) external pure {
+        // 收敛：deposit 统一入口为 VaultCore.deposit → VaultRouter → CollateralManager（CM 托管 ERC20）
+        // 为避免业务层“托管抵押 token”的旧假设回流，此入口永久下线。
+        user; asset; amount; // silence
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /* ============ Liquidation Orchestration (Single Path) ============ */
-    /// @notice 清算入口：扣押 → 减债 → LiquidatorView 单点推送；任一步失败即回滚
-    /// @param targetUser 被清算用户
-    /// @param collateralAsset 抵押资产
-    /// @param debtAsset 债务资产
-    /// @param collateralAmount 扣押数量
-    /// @param debtAmount 减债数量
-    /// @param bonus 清算奖励（如未计算可传 0）
+    /// @notice DEPRECATED: 清算入口已收敛到 LiquidationManager（方案A 唯一入口）
+    /// @dev 为避免“双入口/双语义/资金托管假设冲突”，此函数永久下线。
+    error VaultBusinessLogic__UseLiquidationManagerEntry();
+    /// @notice DEPRECATED: 存取抵押入口已收敛到 VaultCore（用户入口）+ VaultRouter（路由）+ CollateralManager（托管）
+    error VaultBusinessLogic__UseVaultCoreEntry();
+
     function liquidate(
-        address targetUser,
-        address collateralAsset,
-        address debtAsset,
-        uint256 collateralAmount,
-        uint256 debtAmount,
-        uint256 bonus
-    ) external onlyValidRegistry whenNotPaused nonReentrant onlyLiquidator {
-        if (targetUser == address(0) || collateralAsset == address(0) || debtAsset == address(0)) revert ZeroAddress();
-        if (collateralAmount == 0 || debtAmount == 0) revert AmountIsZero();
-
-        address collateralManager = _getModuleAddress(ModuleKeys.KEY_CM);
-        address lendingEngine = _getModuleAddress(ModuleKeys.KEY_LE);
-        // LiquidatorView is registered under KEY_LIQUIDATION_VIEW (single-point events view)
-        address liquidationView = _getModuleAddress(ModuleKeys.KEY_LIQUIDATION_VIEW);
-
-        // 扣押抵押物
-        ICollateralManager(collateralManager).withdrawCollateral(targetUser, collateralAsset, collateralAmount);
-
-        // 减少债务
-        ILendingEngineBasic(lendingEngine).forceReduceDebt(targetUser, debtAsset, debtAmount);
-
-        // 单点推送事件至 LiquidatorView（失败即回滚，避免双发/遗漏）
-        ILiquidationEventsView(liquidationView).pushLiquidationUpdate(
-            targetUser,
-            collateralAsset,
-            debtAsset,
-            collateralAmount,
-            debtAmount,
-            msg.sender,
-            bonus,
-            block.timestamp
-        );
+        address /*targetUser*/,
+        address /*collateralAsset*/,
+        address /*debtAsset*/,
+        uint256 /*collateralAmount*/,
+        uint256 /*debtAmount*/,
+        uint256 /*bonus*/
+    ) external pure {
+        revert VaultBusinessLogic__UseLiquidationManagerEntry();
     }
 
     /* ============ Settlement: Reserve & Match ============ */
@@ -326,12 +281,14 @@ contract VaultBusinessLogic is
         }
 
         // 原子落地：账本 → 订单 → 手续费 → 净额发放（库内部不发业务事件）
+        // 注意：CollateralManager 仅允许 VaultRouter 调用；撮合编排合约不应直接调用 depositCollateral。
+        // 因此这里不在撮合落地时“补充抵押”，抵押应由借款人提前通过 VaultCore/VaultRouter 路径完成。
         SettlementMatchLib.finalizeAtomicFull(
             _registryAddr,
             borrowIntent.borrower,
             lendIntents[0].lender,
-            borrowIntent.collateralAsset,
-            borrowIntent.collateralAmount,
+            address(0),
+            0,
             borrowIntent.borrowAsset,
             borrowIntent.amount,
             borrowIntent.termDays,
@@ -360,6 +317,8 @@ contract VaultBusinessLogic is
         
         // Gas优化：获取模块地址（使用缓存）
         _getModuleAddress(ModuleKeys.KEY_RM);
+        // 统计视图（可选）
+        address statsView = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
         
         // 不再在业务层直接调用 LE 计算利息与记账；如需锁保，请使用 borrowWithRate 提供利率
 
@@ -368,6 +327,11 @@ contract VaultBusinessLogic is
         
         // 积分奖励统一以 LendingEngine 落账后触发
         
+        // 推送统计视图
+        if (statsView != address(0)) {
+            VaultBusinessLogicLibrary.safeUpdateStats(statsView, user, 0, 0, amount, 0);
+        }
+
         VaultBusinessLogicLibrary.emitBusinessEvents("borrow", user, asset, amount, ActionKeys.ACTION_BORROW);
     }
 
@@ -413,12 +377,19 @@ contract VaultBusinessLogic is
         
         // Gas优化：获取模块地址（使用缓存）
         _getModuleAddress(ModuleKeys.KEY_RM);
+        // 统计视图（可选）
+        address statsView = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
         
         // 转移代币到合约
         IERC20(asset).safeTransferFrom(user, address(this), amount);
         
         // 积分奖励统一以 LendingEngine 落账后触发
         
+        // 推送统计视图
+        if (statsView != address(0)) {
+            VaultBusinessLogicLibrary.safeUpdateStats(statsView, user, 0, 0, 0, amount);
+        }
+
         // 早偿结算触发应由上游/LE 路径统一协调；业务层不再依据账本状态自行判断
 
         VaultBusinessLogicLibrary.emitBusinessEvents("repay", user, asset, amount, ActionKeys.ACTION_REPAY);
@@ -460,27 +431,10 @@ contract VaultBusinessLogic is
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @param amount 提取金额
-    function withdraw(address user, address asset, uint256 amount) external onlyValidRegistry whenNotPaused nonReentrant {
-        if (amount == 0) revert AmountIsZero();
-        if (asset == address(0)) revert ZeroAddress();
-        
-        // Gas优化：获取模块地址（使用缓存）
-        address collateralManager = _getModuleAddress(ModuleKeys.KEY_CM);
-        address guaranteeManager = _getModuleAddress(ModuleKeys.KEY_GUARANTEE_FUND);
-        _getModuleAddress(ModuleKeys.KEY_RM);
-        
-        // 提取抵押物
-        VaultBusinessLogicLibrary.safeWithdrawCollateral(collateralManager, user, asset, amount);
-        
-        // 释放保证金（如果需要）
-        VaultBusinessLogicLibrary.safeReleaseGuarantee(guaranteeManager, user, asset, amount);
-        
-        // 转移代币给用户
-        IERC20(asset).safeTransfer(user, amount);
-        
-        // 积分奖励统一以 LendingEngine 落账后触发
-        
-        VaultBusinessLogicLibrary.emitBusinessEvents("withdraw", user, asset, amount, ActionKeys.ACTION_WITHDRAW);
+    function withdraw(address user, address asset, uint256 amount) external pure {
+        // 收敛：withdraw 统一入口为 VaultCore.withdraw → VaultRouter → CollateralManager（CM 托管 ERC20）
+        user; asset; amount; // silence
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /* ============ Batch Operations ============ */
@@ -489,34 +443,10 @@ contract VaultBusinessLogic is
     /// @param user 用户地址
     /// @param assets 资产地址数组
     /// @param amounts 金额数组
-    function batchDeposit(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused nonReentrant {
-        VaultBusinessLogicLibrary.validateBatchParams(assets, amounts);
-        
-        // 模块地址
-        address collateralManager = _getModuleAddress(ModuleKeys.KEY_CM);
-        address guaranteeManager = _getModuleAddress(ModuleKeys.KEY_GUARANTEE_FUND);
-        _getModuleAddress(ModuleKeys.KEY_RM);
-        
-        unchecked {
-            for (uint256 i = 0; i < assets.length; i++) {
-                address asset = assets[i];
-                uint256 amount = amounts[i];
-                if (amount == 0) continue;
-                if (asset == address(0)) revert ZeroAddress();
-                
-                IERC20(asset).safeTransferFrom(user, address(this), amount);
-                VaultBusinessLogicLibrary.safeDepositCollateral(collateralManager, user, asset, amount);
-                VaultBusinessLogicLibrary.safeLockGuarantee(guaranteeManager, user, asset, amount);
-                // 积分奖励统一以 LendingEngine 落账后触发
-            }
-        }
-        
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_BATCH_DEPOSIT,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_DEPOSIT),
-            msg.sender,
-            block.timestamp
-        );
+    function batchDeposit(address user, address[] calldata assets, uint256[] calldata amounts) external pure {
+        // 收敛：批量存取抵押应由 BatchView/前端拆分为多次 VaultCore.deposit 调用（或后续新增 VaultCore.batchDeposit）
+        user; assets; amounts; // silence
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /// @notice 批量借款
@@ -588,33 +518,10 @@ contract VaultBusinessLogic is
     /// @param user 用户地址
     /// @param assets 资产地址数组
     /// @param amounts 金额数组
-    function batchWithdraw(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused nonReentrant {
-        VaultBusinessLogicLibrary.validateBatchParams(assets, amounts);
-        
-        address collateralManager = _getModuleAddress(ModuleKeys.KEY_CM);
-        address guaranteeManager = _getModuleAddress(ModuleKeys.KEY_GUARANTEE_FUND);
-        _getModuleAddress(ModuleKeys.KEY_RM);
-        
-        unchecked {
-            for (uint256 i = 0; i < assets.length; i++) {
-                address asset = assets[i];
-                uint256 amount = amounts[i];
-                if (amount == 0) continue;
-                if (asset == address(0)) revert ZeroAddress();
-                
-                VaultBusinessLogicLibrary.safeWithdrawCollateral(collateralManager, user, asset, amount);
-                VaultBusinessLogicLibrary.safeReleaseGuarantee(guaranteeManager, user, asset, amount);
-                IERC20(asset).safeTransfer(user, amount);
-                // 积分奖励统一以 LendingEngine 落账后触发
-            }
-        }
-        
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_BATCH_WITHDRAW,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_WITHDRAW),
-            msg.sender,
-            block.timestamp
-        );
+    function batchWithdraw(address user, address[] calldata assets, uint256[] calldata amounts) external pure {
+        // 收敛：批量存取抵押应由 BatchView/前端拆分为多次 VaultCore.withdraw 调用（或后续新增 VaultCore.batchWithdraw）
+        user; assets; amounts; // silence
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /* ============ Upgrade Auth ============ */

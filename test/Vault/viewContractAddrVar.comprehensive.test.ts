@@ -2,8 +2,8 @@
  * viewContractAddrVar 功能全面测试
  * 
  * 验证文档 Architecture-Analysis.md 问题19中描述的所有影响场景：
- * 1. 模块间通信：所有模块都能正确通过 VaultCore.viewContractAddrVar() 解析 VaultView 地址
- * 2. _pushUserPositionToView 功能：VaultLendingEngine 调用 _resolveVaultViewAddr() 正常工作
+ * 1. 模块间通信：所有模块都能正确通过 VaultCore.viewContractAddrVar() 解析 VaultRouter 地址
+ * 2. _pushUserPositionToView 功能：VaultLendingEngine 调用 _resolveVaultRouterAddr() 正常工作
  * 3. 仓位推送完整性：所有模块的仓位推送功能都能正常工作
  * 
  * 覆盖模块：
@@ -25,7 +25,7 @@ import type {
   VaultBusinessLogic,
   MockRegistry,
   MockAccessControlManager,
-  MockVaultView,
+  MockVaultRouter,
   MockHealthView,
   MockPriceOracle,
   MockERC20,
@@ -60,9 +60,9 @@ describe('viewContractAddrVar - 全面功能测试', function () {
     const ACM = await ethers.getContractFactory('MockAccessControlManager');
     const acm = (await ACM.deploy()) as MockAccessControlManager;
 
-    // Deploy VaultView
-    const VaultView = await ethers.getContractFactory('MockVaultView');
-    const vaultView = (await VaultView.deploy()) as MockVaultView;
+    // Deploy VaultRouter
+    const VaultRouter = await ethers.getContractFactory('MockVaultRouter');
+    const vaultRouter = (await VaultRouter.deploy()) as MockVaultRouter;
 
     // Deploy HealthView
     const HealthView = await ethers.getContractFactory('MockHealthView');
@@ -90,9 +90,9 @@ describe('viewContractAddrVar - 全面功能测试', function () {
     // Deploy VaultCore
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
     const vaultCore = (await VaultCoreFactory.deploy()) as VaultCore;
-    await vaultCore.initialize(await registry.getAddress(), await vaultView.getAddress());
+    await vaultCore.initialize(await registry.getAddress(), await vaultRouter.getAddress());
 
-    // Deploy MockCollateralManager (no onlyVaultView guard)
+    // Deploy MockCollateralManager (no onlyVaultRouter guard)
     const CM = await ethers.getContractFactory('MockCollateralManager');
     const collateralManager = (await CM.deploy()) as MockCollateralManager;
 
@@ -121,15 +121,15 @@ describe('viewContractAddrVar - 全面功能测试', function () {
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, await lrm.getAddress());
     // await registry.setModule(ModuleKeys.KEY_VBL, await vaultBusinessLogic.getAddress());
 
-    // Configure VaultView to accept calls from modules (if method exists)
-    // Note: MockVaultView may not have setBusinessContract, so we skip this if it fails
+    // Configure VaultRouter to accept calls from modules (if method exists)
+    // Note: MockVaultRouter may not have setBusinessContract, so we skip this if it fails
     try {
-      if (typeof (vaultView as any).setBusinessContract === 'function') {
-        await (vaultView as any).setBusinessContract(await lendingEngine.getAddress(), true);
-        await (vaultView as any).setBusinessContract(await collateralManager.getAddress(), true);
+      if (typeof (vaultRouter as any).setBusinessContract === 'function') {
+        await (vaultRouter as any).setBusinessContract(await lendingEngine.getAddress(), true);
+        await (vaultRouter as any).setBusinessContract(await collateralManager.getAddress(), true);
       }
     } catch (e) {
-      // MockVaultView may not need this configuration
+      // MockVaultRouter may not need this configuration
     }
 
     return {
@@ -139,7 +139,7 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       registry,
       acm,
       vaultCore,
-      vaultView,
+      vaultRouter,
       healthView,
       collateralManager,
       lendingEngine,
@@ -155,48 +155,48 @@ describe('viewContractAddrVar - 全面功能测试', function () {
   });
 
   describe('1. 模块间通信测试 - viewContractAddrVar 解析', function () {
-    it('VaultCore.viewContractAddrVar() 应返回正确的 VaultView 地址', async function () {
-      const { vaultCore, vaultView } = fixture;
+    it('VaultCore.viewContractAddrVar() 应返回正确的 VaultRouter 地址', async function () {
+      const { vaultCore, vaultRouter } = fixture;
       
       const viewAddr = await vaultCore.viewContractAddrVar();
-      expect(viewAddr).to.equal(await vaultView.getAddress());
+      expect(viewAddr).to.equal(await vaultRouter.getAddress());
       expect(viewAddr).to.not.equal(ethers.ZeroAddress);
     });
 
-    it('VaultLendingEngine._resolveVaultViewAddr() 应能正确解析 View 地址', async function () {
-      const { vaultCore, lendingEngine, vaultView, user, testAsset, collateralManager, registry } = fixture;
+    it('VaultLendingEngine._resolveVaultRouterAddr() 应能正确解析 View 地址', async function () {
+      const { vaultCore, lendingEngine, vaultRouter, user, testAsset, collateralManager, registry } = fixture;
       
       // 创建 MockVaultCoreView 用于转发调用
       const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
       const vaultCoreModule = await VaultCoreView.deploy();
-      await vaultCoreModule.setViewContractAddr(await vaultView.getAddress());
+      await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
       await vaultCoreModule.setLendingEngine(await lendingEngine.getAddress());
       await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await vaultCoreModule.getAddress());
       
       // 设置抵押物
       await collateralManager.depositCollateral(user.address, testAsset, 100);
       
-      // borrow 操作会调用 _pushUserPositionToView，从而验证 _resolveVaultViewAddr
+      // borrow 操作会调用 _pushUserPositionToView，从而验证 _resolveVaultRouterAddr
       await expect(vaultCoreModule.borrow(user.address, testAsset, 10, 0, 0)).to.not.be.reverted;
       
-      // 验证 VaultView 收到了更新
-      const debt = await vaultView.getUserDebt(user.address, testAsset);
+      // 验证 VaultRouter 收到了更新
+      const debt = await vaultRouter.getUserDebt(user.address, testAsset);
       expect(debt).to.equal(10);
     });
 
-    it('CollateralManager._resolveVaultViewAddr() 应能正确解析 View 地址', async function () {
-      const { collateralManager, vaultView, user, testAsset } = fixture;
+    it('CollateralManager._resolveVaultRouterAddr() 应能正确解析 View 地址', async function () {
+      const { collateralManager, vaultRouter, user, testAsset } = fixture;
       
-      // CollateralManager 在推送仓位更新时会调用 _resolveVaultViewAddr
+      // CollateralManager 在推送仓位更新时会调用 _resolveVaultRouterAddr
       // 通过 depositCollateral 操作验证
       await collateralManager.depositCollateral(user.address, testAsset, 100);
       
-      // 验证操作成功（如果 _resolveVaultViewAddr 失败，相关操作会失败）
+      // 验证操作成功（如果 _resolveVaultRouterAddr 失败，相关操作会失败）
       const collateral = await collateralManager.getCollateral(user.address, testAsset);
       expect(collateral).to.equal(100);
     });
 
-    it('VaultBusinessLogic._resolveVaultViewAddr() 应能正确解析 View 地址', async function () {
+    it('VaultBusinessLogic._resolveVaultRouterAddr() 应能正确解析 View 地址', async function () {
       const { vaultCore } = fixture;
       
       // 验证 VaultCore 的 viewContractAddrVar 可访问
@@ -212,12 +212,12 @@ describe('viewContractAddrVar - 全面功能测试', function () {
 
   describe('2. _pushUserPositionToView 功能测试', function () {
     it('VaultLendingEngine._pushUserPositionToView 应在 borrow 时正常工作', async function () {
-      const { vaultCore, lendingEngine, vaultView, user, testAsset, collateralManager, registry } = fixture;
+      const { vaultCore, lendingEngine, vaultRouter, user, testAsset, collateralManager, registry } = fixture;
       
       // 创建 MockVaultCoreView 用于转发调用
       const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
       const vaultCoreModule = await VaultCoreView.deploy();
-      await vaultCoreModule.setViewContractAddr(await vaultView.getAddress());
+      await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
       await vaultCoreModule.setLendingEngine(await lendingEngine.getAddress());
       await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await vaultCoreModule.getAddress());
       
@@ -231,21 +231,21 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       const ledgerDebt = await lendingEngine.getDebt(user.address, testAsset);
       expect(ledgerDebt).to.equal(50);
       
-      // 验证 VaultView 缓存已更新（通过 _pushUserPositionToView）
-      const viewDebt = await vaultView.getUserDebt(user.address, testAsset);
+      // 验证 VaultRouter 缓存已更新（通过 _pushUserPositionToView）
+      const viewDebt = await vaultRouter.getUserDebt(user.address, testAsset);
       expect(viewDebt).to.equal(50);
       
-      const viewCollateral = await vaultView.getUserCollateral(user.address, testAsset);
+      const viewCollateral = await vaultRouter.getUserCollateral(user.address, testAsset);
       expect(viewCollateral).to.equal(100);
     });
 
     it('VaultLendingEngine._pushUserPositionToView 应在 repay 时正常工作', async function () {
-      const { vaultCore, lendingEngine, vaultView, user, testAsset, collateralManager, registry } = fixture;
+      const { vaultCore, lendingEngine, vaultRouter, user, testAsset, collateralManager, registry } = fixture;
       
       // 创建 MockVaultCoreView 用于转发调用
       const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
       const vaultCoreModule = await VaultCoreView.deploy();
-      await vaultCoreModule.setViewContractAddr(await vaultView.getAddress());
+      await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
       await vaultCoreModule.setLendingEngine(await lendingEngine.getAddress());
       await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await vaultCoreModule.getAddress());
       
@@ -260,13 +260,13 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       const ledgerDebt = await lendingEngine.getDebt(user.address, testAsset);
       expect(ledgerDebt).to.equal(30);
       
-      // 验证 VaultView 缓存已更新
-      const viewDebt = await vaultView.getUserDebt(user.address, testAsset);
+      // 验证 VaultRouter 缓存已更新
+      const viewDebt = await vaultRouter.getUserDebt(user.address, testAsset);
       expect(viewDebt).to.equal(30);
     });
 
-    it('_pushUserPositionToView 在 viewContractAddrVar 为空时应直接 revert（符合实现）', async function () {
-      const { registry, lendingEngine, user, testAsset, collateralManager } = fixture;
+    it('_pushUserPositionToView 在 viewContractAddrVar 为空时应 best-effort 跳过推送但不回滚账本', async function () {
+      const { registry, lendingEngine, user, testAsset, collateralManager, vaultRouter } = fixture;
       
       // 创建返回零地址的 MockVaultCoreView
       const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
@@ -280,21 +280,28 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       // 设置抵押物
       await collateralManager.depositCollateral(user.address, testAsset, 100);
       
-      // 当前实现：viewContractAddrVar 返回零会在 _resolveVaultViewAddr 中直接 revert
+      // 现在应不回滚账本，仍完成借款记账
       await expect(
         emptyVaultCore.borrow(user.address, testAsset, 10, 0, 0)
-      ).to.be.revertedWith('viewContractAddrVar returned zero');
+      ).to.not.be.reverted;
+      
+      // 账本侧更新
+      const ledgerDebt = await lendingEngine.getDebt(user.address, testAsset);
+      expect(ledgerDebt).to.equal(10);
+      // 视图侧未推送（view 地址为空）
+      const viewDebt = await vaultRouter.getUserDebt(user.address, testAsset);
+      expect(viewDebt).to.equal(0);
     });
   });
 
   describe('3. 仓位推送完整性测试', function () {
     it('所有模块的仓位推送功能应能正常工作', async function () {
-      const { vaultCore, lendingEngine, vaultView, user, testAsset, collateralManager, registry } = fixture;
+      const { vaultCore, lendingEngine, vaultRouter, user, testAsset, collateralManager, registry } = fixture;
       
       // 创建 MockVaultCoreView 用于转发调用
       const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
       const vaultCoreModule = await VaultCoreView.deploy();
-      await vaultCoreModule.setViewContractAddr(await vaultView.getAddress());
+      await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
       await vaultCoreModule.setLendingEngine(await lendingEngine.getAddress());
       await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await vaultCoreModule.getAddress());
       
@@ -305,8 +312,8 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       await vaultCoreModule.borrow(user.address, testAsset, 50, 0, 0);
       
       // 验证仓位已正确推送
-      const viewDebt = await vaultView.getUserDebt(user.address, testAsset);
-      const updatedCollateral = await vaultView.getUserCollateral(user.address, testAsset);
+      const viewDebt = await vaultRouter.getUserDebt(user.address, testAsset);
+      const updatedCollateral = await vaultRouter.getUserCollateral(user.address, testAsset);
       expect(viewDebt).to.equal(50);
       expect(updatedCollateral).to.equal(200);
       
@@ -314,17 +321,17 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       await vaultCoreModule.repay(user.address, testAsset, 20);
       
       // 验证仓位已更新
-      const finalDebt = await vaultView.getUserDebt(user.address, testAsset);
+      const finalDebt = await vaultRouter.getUserDebt(user.address, testAsset);
       expect(finalDebt).to.equal(30);
     });
 
     it('多资产场景下仓位推送应正常工作', async function () {
-      const { vaultCore, lendingEngine, vaultView, user, collateralManager, registry, priceOracle, admin } = fixture;
+      const { vaultCore, lendingEngine, vaultRouter, user, collateralManager, registry, priceOracle, admin } = fixture;
       
       // 创建 MockVaultCoreView 用于转发调用
       const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
       const vaultCoreModule = await VaultCoreView.deploy();
-      await vaultCoreModule.setViewContractAddr(await vaultView.getAddress());
+      await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
       await vaultCoreModule.setLendingEngine(await lendingEngine.getAddress());
       await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await vaultCoreModule.getAddress());
       
@@ -346,10 +353,10 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       await vaultCoreModule.borrow(user.address, asset2, 40, 0, 0);
       
       // 验证两个资产的仓位都已正确推送
-      const debt1 = await vaultView.getUserDebt(user.address, asset1);
-      const debt2 = await vaultView.getUserDebt(user.address, asset2);
-      const collateral1 = await vaultView.getUserCollateral(user.address, asset1);
-      const collateral2 = await vaultView.getUserCollateral(user.address, asset2);
+      const debt1 = await vaultRouter.getUserDebt(user.address, asset1);
+      const debt2 = await vaultRouter.getUserDebt(user.address, asset2);
+      const collateral1 = await vaultRouter.getUserCollateral(user.address, asset1);
+      const collateral2 = await vaultRouter.getUserCollateral(user.address, asset2);
       
       expect(debt1).to.equal(30);
       expect(debt2).to.equal(40);
@@ -360,7 +367,7 @@ describe('viewContractAddrVar - 全面功能测试', function () {
 
   describe('4. 模块间通信完整性验证', function () {
     it('所有模块应能通过 IVaultCoreMinimal 接口访问 viewContractAddrVar', async function () {
-      const { vaultCore, vaultView } = fixture;
+      const { vaultCore, vaultRouter } = fixture;
       
       // 创建 IVaultCoreMinimal 接口合约
       const IVaultCoreMinimal = new ethers.Interface([
@@ -374,17 +381,17 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       });
       
       const decoded = IVaultCoreMinimal.decodeFunctionResult('viewContractAddrVar', viewAddr);
-      expect(decoded[0]).to.equal(await vaultView.getAddress());
+      expect(decoded[0]).to.equal(await vaultRouter.getAddress());
     });
 
     it('VaultCore.viewContractAddrVar 变更后，所有模块应能获取新地址', async function () {
       // 注意：VaultCore 的 viewContractAddr 在初始化后不能直接修改
       // 这个测试验证的是如果重新部署并注册新的 VaultCore，模块应能获取新地址
-      const { registry, vaultView } = fixture;
+      const { registry, vaultRouter } = fixture;
       
       // 部署新的 VaultCore 并设置新的 View 地址
-      const newVaultView = await ethers.getContractFactory('MockVaultView');
-      const newView = await newVaultView.deploy();
+      const newVaultRouter = await ethers.getContractFactory('MockVaultRouter');
+      const newView = await newVaultRouter.deploy();
       
       const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
       const newVaultCore = await VaultCoreFactory.deploy();
@@ -410,20 +417,18 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       // 临时移除 VaultCore 注册
       await registry.setModule(ModuleKeys.KEY_VAULT_CORE, ethers.ZeroAddress);
       
-      // 尝试 borrow（应该失败，因为 _resolveVaultViewAddr 会失败）
+      // 尝试 borrow（应该失败，因为 _resolveVaultRouterAddr 会失败）
       await collateralManager.depositCollateral(user.address, testAsset, 100);
       
-      // 由于 _resolveVaultViewAddr 使用 require，应该 revert
+      // 由于 _resolveVaultRouterAddr 使用 require，应该 revert
       await expect(
         lendingEngine.connect(admin).borrow(user.address, testAsset, 10, 0, 0)
       ).to.be.reverted;
     });
 
-    it('当 viewContractAddrVar 返回零地址时，_pushUserPositionToView 应发出事件但不回滚', async function () {
-      // 这个测试已经在前面覆盖了，但这里再次明确验证
-      const { registry, lendingEngine, user, testAsset, collateralManager } = fixture;
+    it('当 viewContractAddrVar 返回零地址时，_pushUserPositionToView 应 best-effort 跳过推送但账本仍更新', async function () {
+      const { registry, lendingEngine, user, testAsset, collateralManager, vaultRouter } = fixture;
       
-      // 创建返回零地址的 MockVaultCoreView（VaultCore 不允许零地址初始化）
       const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
       const vaultCoreModule = await VaultCoreView.deploy();
       await vaultCoreModule.setViewContractAddr(ethers.ZeroAddress);
@@ -432,10 +437,14 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       
       await collateralManager.depositCollateral(user.address, testAsset, 100);
       
-      // 由于 _resolveVaultViewAddr 中 require(viewAddr != 0)，此处应直接 revert
       await expect(
         vaultCoreModule.borrow(user.address, testAsset, 10, 0, 0)
-      ).to.be.revertedWith('viewContractAddrVar returned zero');
+      ).to.not.be.reverted;
+      
+      const ledgerDebt = await lendingEngine.getDebt(user.address, testAsset);
+      expect(ledgerDebt).to.equal(10);
+      const viewDebt = await vaultRouter.getUserDebt(user.address, testAsset);
+      expect(viewDebt).to.equal(0);
     });
   });
 });

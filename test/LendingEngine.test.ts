@@ -58,8 +58,7 @@ describe.skip('LendingEngine – 贷款引擎测试 (已跳过，待代理模式
       'Loan NFT',
       'LOAN',
       'https://api.example.com/token/',
-      await registry.getAddress(),
-      await governance.getAddress()
+      await registry.getAddress()
     );
 
     // 部署 FeeRouter

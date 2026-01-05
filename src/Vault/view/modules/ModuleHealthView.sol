@@ -2,12 +2,14 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { ViewConstants } from "../ViewConstants.sol";
+import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import { ZeroAddress, MissingRole } from "../../../errors/StandardErrors.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
  * @title ModuleHealthView
@@ -31,7 +33,7 @@ import { ViewConstants } from "../ViewConstants.sol";
  *      - 统一推送：将结果推送到HealthView进行集中管理
  *      - 向后兼容：保持与旧版ModuleHealthMonitor的接口兼容
  */
-contract ModuleHealthView is Initializable {
+contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ============ Storage ============
     /// @notice Registry合约地址，用于模块解析和权限验证
     address private _registryAddr;
@@ -40,8 +42,6 @@ contract ModuleHealthView is Initializable {
     /// @notice 预定义的健康详情哈希（与DegradationStorage保持同步）
     bytes32 private constant DETAILS_HEALTHY_HASH       = keccak256("Module is healthy");
     bytes32 private constant DETAILS_NO_CODE_HASH       = keccak256("Module has no code");
-    bytes32 private constant DETAILS_ZERO_ADDRESS_HASH  = keccak256("Module address is zero");
-    bytes32 private constant DETAILS_UNKNOWN_HASH       = keccak256("Module health unknown");
 
     // ============ Legacy-compatible data structs ============
     /**
@@ -69,11 +69,7 @@ contract ModuleHealthView is Initializable {
     mapping(address => ModuleHealthStatus) private _moduleHealth;
 
     // ============ Initialization ============
-    /**
-     * @notice 构造函数，禁用初始化器
-     * @dev 防止合约被直接部署，必须通过代理模式使用
-     * @custom:oz-upgrades-unsafe-allow constructor
-     */
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
@@ -85,7 +81,8 @@ contract ModuleHealthView is Initializable {
      * @custom:security 确保Registry地址不为零地址
      */
     function initialize(address initialRegistryAddr) external initializer {
-        require(initialRegistryAddr != address(0), "ModuleHealthView: zero registry");
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
 
@@ -95,7 +92,7 @@ contract ModuleHealthView is Initializable {
      * @dev 确保Registry地址不为零地址，防止无效调用
      */
     modifier onlyValidRegistry() {
-        require(_registryAddr != address(0), "ModuleHealthView: registry not set");
+        if (_registryAddr == address(0)) revert ZeroAddress();
         _;
     }
 
@@ -105,12 +102,10 @@ contract ModuleHealthView is Initializable {
      *      遵循双架构设计中的权限分层原则
      */
     modifier onlySystemHealthViewer() {
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        require(
-            IAccessControlManager(acm).hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender) ||
-            IAccessControlManager(acm).hasRole(ActionKeys.ACTION_ADMIN, msg.sender),
-            "ModuleHealthView: no permission"
-        );
+        if (
+            !_hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender) &&
+            !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
+        ) revert MissingRole();
         _;
     }
 
@@ -139,34 +134,29 @@ contract ModuleHealthView is Initializable {
      *      5. 发出事件（事件驱动架构）
      */
     function checkAndPushModuleHealth(address module) external onlyValidRegistry onlySystemHealthViewer returns (bool isHealthy) {
-        require(module != address(0), "ModuleHealthView: zero addr");
+        if (module == address(0)) revert ZeroAddress();
 
         bytes32 details;
 
-        if (module == address(0)) {
+        // 基础检查：合约地址 & 代码大小
+        uint256 size;
+        assembly { 
+            size := extcodesize(module) 
+        }
+        if (size == 0) {
             isHealthy = false;
-            details   = DETAILS_ZERO_ADDRESS_HASH;
+            details   = DETAILS_NO_CODE_HASH;
         } else {
-            // 基础检查：合约地址 & 代码大小
-            uint256 size;
-            assembly { 
-                size := extcodesize(module) 
-            }
-            if (size == 0) {
-                isHealthy = false;
-                details   = DETAILS_NO_CODE_HASH;
-            } else {
-                // Future: add interface ping / custom checks here
-                isHealthy = true;
-                details   = DETAILS_HEALTHY_HASH;
-            }
+            // Future: add interface ping / custom checks here
+            isHealthy = true;
+            details   = DETAILS_HEALTHY_HASH;
         }
 
         // 连续失败计数示例：健康=0，异常=1，可根据业务逻辑扩展
         uint32 failures = isHealthy ? 0 : 1;
 
         // 将结构化详情哈希推送至 HealthView
-        address hvAddr = Registry(_registryAddr).getModuleOrRevert(bytes32(keccak256("HEALTH_VIEW")));
+        address hvAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
         IHealthViewPush(hvAddr).pushModuleHealth(module, isHealthy, details, failures);
 
         emit ModuleHealthChecked(module, isHealthy, failures);
@@ -188,6 +178,11 @@ contract ModuleHealthView is Initializable {
      */
     function registryAddr() external view returns(address){ 
         return _registryAddr; 
+    }
+
+    /// @notice 推荐的新 getter
+    function getRegistry() external view returns (address) {
+        return _registryAddr;
     }
 
     // ============ Legacy-compatible getters ============
@@ -242,6 +237,28 @@ contract ModuleHealthView is Initializable {
 
         return (true, "Module is healthy");
     }
+
+    // ============ Internal helpers ============
+    function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
+        return ViewAccessLib.hasRole(_registryAddr, actionKey, user);
+    }
+
+    // ============ UUPS ============
+    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (newImplementation == address(0)) revert ZeroAddress();
+    }
+
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    uint256[50] private __gap;
 }
 
 /**

@@ -170,7 +170,7 @@ npm run script checks all
 - **VaultStorage**（需要前面所有模块的地址，建议用代理部署）
 - **VaultBusinessLogic**（如有）
 - **VaultCore**（需要 VaultStorage 和业务逻辑模块地址，建议用代理部署）
-- **VaultView**、**VaultAdmin**（如有）
+- **VaultRouter**、**VaultAdmin**（如有）
 
 #### 第六批：其他模块
 - **LoanNFT**、**RWAToken**、**Mock 合约**等
@@ -197,7 +197,7 @@ npm run script checks all
 - 部署 VaultStorage 时，需要传入上述所有模块的地址，以及 RWA Token、结算Token地址。
 - 部署 VaultBusinessLogic（如有）。
 - 部署 VaultCore 时，需要 VaultStorage 和业务逻辑模块的地址。
-- VaultView、VaultAdmin 依赖 VaultStorage。
+- VaultRouter、VaultAdmin 依赖 VaultStorage。
 
 #### 6. 其他
 - LoanNFT、RWAToken 等可在主业务部署后部署。
@@ -269,7 +269,7 @@ graph TD
   Registry --> VaultStorage
   Registry --> VaultCore
   Registry --> VaultBusinessLogic
-  Registry --> VaultView
+  Registry --> VaultRouter
   Registry --> VaultAdmin
   PriceOracle --> CoinGeckoPriceUpdater
   VaultStorage --> CollateralManager
@@ -326,7 +326,7 @@ cat scripts/deployments/vault-system.json
   "VaultCore": "0x...",
   "VaultBusinessLogic": "0x...",
   "VaultAdmin": "0x...",
-  "VaultView": "0x...",
+  "VaultRouter": "0x...",
   "VaultModules": "0x...",
   "StatisticsView": "0x...",
   "VaultAccess": "0x..."
@@ -1194,12 +1194,12 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
 3. 开发前端界面并集成合约调用
 4. 进行充分测试后部署到主网 
 
-## 🔄 VaultView 协调器接口（简化版 2025-08）
+## 🔄 VaultRouter 协调器接口（简化版 2025-08）
 
-> ⚠️ 重要说明：根据 `docs/Architecture-Guide.md` 及视图模块拆分方案，从 2025-08 起 `VaultView` 不再承担任何读操作，也不再缓存业务数据。所有查询均由 `UserView`、`SystemView`、`AccessControlView`、`ViewCache` 等子模块提供。前端集成应遵循以下约定：
+> ⚠️ 重要说明：根据 `docs/Architecture-Guide.md` 及视图模块拆分方案，从 2025-08 起 `VaultRouter` 不再承担任何读操作，也不再缓存业务数据。所有查询均由 `UserView`、`SystemView`、`AccessControlView`、`ViewCache` 等子模块提供。前端集成应遵循以下约定：
 
 ### 1. 只写不读
-- `VaultView` 仅对外暴露 **4 个写入/路由函数**，全部为 `non-view` 调用：
+- `VaultRouter` 仅对外暴露 **4 个写入/路由函数**，全部为 `non-view` 调用：
   | 函数 | 调用方(合约) | 说明 |
   | --- | --- | --- |
   | `processUserOperation(user, operationType, asset, amount, timestamp)` | 前端 → 业务合约（转发） | 用户发起的 DEPOSIT / BORROW / REPAY / WITHDRAW 操作由前端直接调用业务模块；同时业务模块应调用本函数写链上事件，供离线索引与监听。 |
@@ -1215,7 +1215,7 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
   - `StatisticsView` ⇒ 全局统计聚合
   - `BatchView` ⇒ `batchGetAssetPrices/batchGetModuleHealth` 等批量查询
   - `RegistryView` ⇒ 模块键枚举/反查/分页
-  - 说明：`SystemView` 已废弃，不再作为前端查询入口
+  - `SystemView` ⇒ **系统级只读聚合门面（推荐可选）**：用于“一次性系统总览查询/兼容旧调用”。对性能敏感或需要更细粒度数据时，仍建议直接调用上述专属 View。
 - **清算数据（更新）**：`LiquidatorView` ⇒ `getLiquidatorProfitView`, `getGlobalLiquidationView`, `batchGetLiquidatorProfitViews`, `getLiquidatorLeaderboard`, `getLiquidatorTempDebt`, `getLiquidatorProfitRate`。
 - **权限数据**：`AccessControlView` ⇒ `getUserPermission`, `getUserPermissionLevel` 等。
 - **系统级快照(可选)**：`ViewCache` ⇒ `getSystemStatus` / `batchGetSystemStatus`。
@@ -1224,14 +1224,14 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
 ### 3. 实现示例（TypeScript / Ethers v6）
 ```ts
 import { ethers } from 'ethers';
-import { VaultView__factory } from '@/types/factories';
+import { VaultRouter__factory } from '@/types/factories';
 
 const signer = provider.getSigner();
-const vaultView = VaultView__factory.connect(addresses.VaultView, signer);
+const vaultRouter = VaultRouter__factory.connect(addresses.VaultRouter, signer);
 
 // 用户存款操作
 export async function deposit(asset: string, amount: bigint) {
-  const tx = await vaultView.processUserOperation(
+  const tx = await vaultRouter.processUserOperation(
     await signer.getAddress(),
     utils.id('DEPOSIT'),  // bytes32("DEPOSIT")
     asset,
@@ -1243,15 +1243,15 @@ export async function deposit(asset: string, amount: bigint) {
 ```
 
 ### 4. 过渡期兼容
-- 若后端或脚本仍依赖旧版 `IVaultView` 的只读接口，请 **迁移到对应子模块** 并删除旧调用。
-- `VaultView` 合约已瘦身，但 ABI 变更会导致旧前端编译失败；务必同步更新 `@/types` 代码生成与合约地址配置。
+- 若后端或脚本仍依赖旧版 `IVaultRouter` 的只读接口，请 **迁移到对应子模块** 并删除旧调用。
+- `VaultRouter` 合约已瘦身，但 ABI 变更会导致旧前端编译失败；务必同步更新 `@/types` 代码生成与合约地址配置。
 
 ---
-以上即为最新 `VaultView` 协调器的前端集成规范，后续业务查询请直接面向子视图模块。 
+以上即为最新 `VaultRouter` 协调器的前端集成规范，后续业务查询请直接面向子视图模块。 
 
 ## 🔁 接口变更与迁移指南（2025-09）
 
-### 1) 清算只读接口统一到 LiquidatorView（SystemView 不再承载实现）
+### 1) 清算只读接口统一到 LiquidatorView（SystemView 不作为权威入口）
 - 从本版本起，清算相关只读查询的权威入口为 `LiquidatorView`：
   - `getLiquidatorProfitView(liquidator)`
   - `getGlobalLiquidationView()`
@@ -1259,7 +1259,7 @@ export async function deposit(asset: string, amount: bigint) {
   - `getLiquidatorLeaderboard(limit)`
   - `getLiquidatorTempDebt(liquidator, asset)`
   - `getLiquidatorProfitRate()`
-- `SystemView` 中对应函数现阶段为“硬代理”调用（兼容期）；后续主版本将彻底移除。前端请尽快切换至 `LiquidatorView`。
+- `SystemView` 作为系统级聚合门面，可能会聚合/转发部分清算指标以便兼容旧调用，但**权威入口仍是 `LiquidatorView`**；前端请优先切换到 `LiquidatorView`。
 
 示例（ethers v6）：
 ```ts
@@ -1304,7 +1304,7 @@ const registryAddr2 = await batchView.registryAddrVar(); // 推荐
 ### 4) UUPS _authorizeUpgrade 与前端
 - `_authorizeUpgrade` 为合约内部升级授权逻辑，不面向前端调用，无需在前端做任何适配。
 
-- SystemView 已废弃：请改为直接调用对应专属 View；清算用 `LiquidatorView`，健康用 `HealthView`，价格用 `ValuationOracleView`，注册表用 `RegistryView`，统计用 `StatisticsView`，批量用 `BatchView`。
+- SystemView 为系统级聚合门面（可选）：可用于统一入口/兼容旧调用；但清算仍以 `LiquidatorView` 为权威入口，健康用 `HealthView`，价格用 `ValuationOracleView`，注册表用 `RegistryView`，统计用 `StatisticsView`，批量用 `BatchView`。
 - 本文档示例基于 ethers v6 与自动生成的 TypeChain 工厂类（`@/types/factories`）。
 
 ## 📦 监控相关新模块 (2025-08 升级)
@@ -1402,7 +1402,7 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
 - 若后端提供重试 API，则提供“请求重试”按钮（前端不直接持有 admin）
 
 #### 11.3 后端协同（调用约定）
-- 后端监听事件 → 写 `cache_retry_jobs` 队列 → 值班/自动策略调用链上 `PositionView.retryUserPositionUpdate(user, asset)`（仅 admin）。若推送因模块缓存过期被拒，可要求运维调用 `PositionView.refreshModuleCache()` 或 `VaultView.refreshModuleCache()` 后再重试。
+- 后端监听事件 → 写 `cache_retry_jobs` 队列 → 值班/自动策略调用链上 `PositionView.retryUserPositionUpdate(user, asset)`（仅 admin）。若推送因模块缓存过期被拒，可要求运维调用 `PositionView.refreshModuleCache()` 或 `VaultRouter.refreshModuleCache()` 后再重试。
 - 前端调用后端 API：
   - `POST /cache-retry/request` `{ user, asset, viewAddr, blockNumber, logIndex }`
   - `GET /cache-retry/status?user=&asset=` 返回队列状态、最近重试时间、尝试次数

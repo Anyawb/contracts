@@ -137,7 +137,7 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 16. **LiquidationRiskManager** - 清算风险管理器（需要链接库）
 17. **VaultStorage** - Vault 存储
 18. **VaultBusinessLogic** - Vault 业务逻辑
-19. **VaultView** - Vault 视图（临时部署用于初始化）
+19. **VaultRouter** - Vault 视图（临时部署用于初始化）
 20. **VaultCore** - Vault 核心
 21. **VaultLendingEngine** - Vault 借贷引擎
 22. **EarlyRepaymentGuaranteeManager** - 提前还款保证金管理器

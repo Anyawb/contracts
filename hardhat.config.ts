@@ -11,6 +11,9 @@ import './scripts/tasks/registry-check';
 import './scripts/tasks/registry-set';
 import './scripts/tasks/registry-sync';
 import './scripts/tasks/utils-tasks';
+import './scripts/tasks/e2e-batch-advanced';
+import './scripts/tasks/e2e-batch-10-users';
+import './scripts/tasks/e2e-reward-edgecases';
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -61,7 +64,9 @@ const config: HardhatUserConfig = {
     },
   },
   mocha: {
-    timeout: 40000,
+    // 部署脚本可能需要较长时间，设置较长的timeout（30分钟）
+    // Deployment scripts may take a long time, set a longer timeout (30 minutes)
+    timeout: 1800000, // 30 minutes in milliseconds
   },
   typechain: {
     outDir: 'types',

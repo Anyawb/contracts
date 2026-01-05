@@ -32,7 +32,7 @@
 
 ## 治理/维护入口（已实现 & 建议）
 - 链上：`PositionView.retryUserPositionUpdate(user, asset)`（admin），刷新模块缓存→读取 CM/LE 最新账本→写缓存→ emit `UserPositionCached`；失败再 emit `CacheUpdateFailed`，幂等。
-- 链上：`VaultView.refreshModuleCache()`（admin）/`PositionView.refreshModuleCache()`（admin）在模块地址变更后手动刷新 1h 模块缓存；否则推送入口遇到缓存过期或未初始化会 `ModuleCacheExpired` 直接拒绝，避免误用旧地址。推送入口自身也会在缓存失效时自动刷新一次，但建议变更后主动刷新以减少首次调用失败。
+- 链上：`VaultRouter.refreshModuleCache()`（admin）/`PositionView.refreshModuleCache()`（admin）在模块地址变更后手动刷新 1h 模块缓存；否则推送入口遇到缓存过期或未初始化会 `ModuleCacheExpired` 直接拒绝，避免误用旧地址。推送入口自身也会在缓存失效时自动刷新一次，但建议变更后主动刷新以减少首次调用失败。
 - 链下：提供脚本/API 封装上述入口，鉴权与审计（操作者、输入、输出、理由），避免循环重试。
 
 ## 修改方案更改为

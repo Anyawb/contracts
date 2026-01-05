@@ -2,6 +2,7 @@
   "extends": "./tsconfig.json",
   "include": [
     "scripts/**/*",
+    "frontend-config/**/*",
     "types/**/*",
     ".eslintrc.js",
     "Frontend/**/*",

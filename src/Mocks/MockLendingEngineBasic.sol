@@ -81,6 +81,11 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         return _totalByAsset[asset];
     }
     
+    /// @notice 测试辅助：直接设置资产总债务
+    function setTotalDebtByAsset(address asset, uint256 amount) external {
+        _totalByAsset[asset] = amount;
+    }
+    
     /// @notice 获取用户总债务价值
     /// @param user 用户地址
     /// @return 总债务价值

@@ -20,7 +20,7 @@ import type {
   MockRegistry,
   MockAccessControlManager,
   MockCollateralManager,
-  MockVaultView,
+  MockVaultRouter,
   MockHealthView,
   MockRewardManager,
   MockPriceOracle,
@@ -55,8 +55,8 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     const CM = await ethers.getContractFactory('MockCollateralManager');
     const cm = (await CM.deploy()) as MockCollateralManager;
 
-    const VaultView = await ethers.getContractFactory('MockVaultView');
-    const vaultView = (await VaultView.deploy()) as MockVaultView;
+    const VaultRouter = await ethers.getContractFactory('MockVaultRouter');
+    const vaultRouter = (await VaultRouter.deploy()) as MockVaultRouter;
 
     const HealthView = await ethers.getContractFactory('MockHealthView');
     const healthView = (await HealthView.deploy()) as MockHealthView;
@@ -88,7 +88,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     // VaultCore mock (resolves view + forwards borrow/repay)
     const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
     const vaultCoreModule = await VaultCoreView.deploy();
-    await vaultCoreModule.setViewContractAddr(await vaultView.getAddress());
+    await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
     await vaultCoreModule.setLendingEngine(await lending.getAddress());
 
     // Registry wiring
@@ -118,7 +118,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       lending,
       registry,
       cm,
-      vaultView,
+      vaultRouter,
       healthView,
       debtAsset,
       acm,
@@ -145,11 +145,11 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     });
 
     it('borrow/repay via VaultCore updates ledger and View/Health caches', async function () {
-      const { vaultCoreModule, user, debtAsset, lending, vaultView, healthView } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, user, debtAsset, lending, vaultRouter, healthView } = await loadFixture(deployDualEntryFixture);
 
       await expect(
         vaultCoreModule.borrow(user.address, debtAsset, 50, 0, 0)
-      ).to.emit(vaultView, 'UserPositionUpdated').withArgs(user.address, debtAsset, 200, 50);
+      ).to.emit(vaultRouter, 'UserPositionUpdated').withArgs(user.address, debtAsset, 200, 50);
 
       const hfAfterBorrow = await healthView.getUserHealthFactor(user.address);
       expect(hfAfterBorrow).to.be.gt(0);
@@ -157,16 +157,16 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
       await expect(
         vaultCoreModule.repay(user.address, debtAsset, 20)
-      ).to.emit(vaultView, 'UserPositionUpdated').withArgs(user.address, debtAsset, 200, 30);
+      ).to.emit(vaultRouter, 'UserPositionUpdated').withArgs(user.address, debtAsset, 200, 30);
 
       const hfAfterRepay = await healthView.getUserHealthFactor(user.address);
       expect(hfAfterRepay).to.be.gt(0);
       expect(await lending.getDebt(user.address, debtAsset)).to.equal(30);
     });
 
-    it('borrow should emit CacheUpdateFailed when VaultView push fails (best effort, no revert)', async function () {
+    it('borrow should emit CacheUpdateFailed when VaultRouter push fails (best effort, no revert)', async function () {
       const { vaultCoreModule, lending, user, debtAsset, cm } = await loadFixture(deployDualEntryFixture);
-      const RevertingView = await ethers.getContractFactory('RevertingVaultView');
+      const RevertingView = await ethers.getContractFactory('RevertingVaultRouter');
       const revertingView = await RevertingView.deploy();
 
       await vaultCoreModule.setViewContractAddr(await revertingView.getAddress());
@@ -320,25 +320,25 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     });
 
     it('should reduce debt directly with ACTION_LIQUIDATE and push View/Health', async function () {
-      const { vaultCoreModule, liquidationManager, lending, debtAsset, vaultView, healthView } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, liquidationManager, lending, debtAsset, vaultRouter, healthView } = await loadFixture(deployDualEntryFixture);
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset, 40, 0, 0);
 
       await expect(
         lending.connect(liquidationManager).forceReduceDebt(liquidationManager.address, debtAsset, 15)
-      ).to.emit(vaultView, 'UserPositionUpdated').withArgs(liquidationManager.address, debtAsset, 150, 25)
+      ).to.emit(vaultRouter, 'UserPositionUpdated').withArgs(liquidationManager.address, debtAsset, 150, 25)
         .and.to.emit(healthView, 'HealthFactorCached');
 
       expect(await lending.getDebt(liquidationManager.address, debtAsset)).to.equal(25);
     });
 
     it('should not underflow debt when reducing more than outstanding', async function () {
-      const { vaultCoreModule, liquidator, lending, debtAsset, vaultView } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, liquidator, lending, debtAsset, vaultRouter } = await loadFixture(deployDualEntryFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 30, 0, 0);
 
       await expect(
         lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 80)
       ).to.emit(lending, 'DebtRecorded').withArgs(liquidator.address, debtAsset, 30, false)
-        .and.to.emit(vaultView, 'UserPositionUpdated').withArgs(liquidator.address, debtAsset, 0, 0);
+        .and.to.emit(vaultRouter, 'UserPositionUpdated').withArgs(liquidator.address, debtAsset, 0, 0);
 
       expect(await lending.getDebt(liquidator.address, debtAsset)).to.equal(0);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(0);
@@ -512,28 +512,28 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
   describe('ledger vs cache consistency across paths', function () {
     it('VaultCore borrow followed by direct liquidation keeps View in sync', async function () {
-      const { vaultCoreModule, liquidationManager, lending, debtAsset, vaultView } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, liquidationManager, lending, debtAsset, vaultRouter } = await loadFixture(deployDualEntryFixture);
 
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset, 60, 0, 0);
       expect(await lending.getDebt(liquidationManager.address, debtAsset)).to.equal(60);
 
       await lending.connect(liquidationManager).forceReduceDebt(liquidationManager.address, debtAsset, 20);
 
-      expect(await vaultView.getUserDebt(liquidationManager.address, debtAsset)).to.equal(40);
+      expect(await vaultRouter.getUserDebt(liquidationManager.address, debtAsset)).to.equal(40);
       expect(await lending.getDebt(liquidationManager.address, debtAsset)).to.equal(40);
     });
   });
 
   describe('additional liquidation coverage', function () {
     it('KEY_LIQUIDATION_MANAGER with ACTION_LIQUIDATE can liquidate other users', async function () {
-      const { vaultCoreModule, liquidationManager, lending, user, debtAsset, vaultView } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, liquidationManager, lending, user, debtAsset, vaultRouter } = await loadFixture(deployDualEntryFixture);
 
       await vaultCoreModule.borrow(user.address, debtAsset, 70, 0, 0);
 
       await lending.connect(liquidationManager).forceReduceDebt(user.address, debtAsset, 30);
 
       expect(await lending.getDebt(user.address, debtAsset)).to.equal(40);
-      expect(await vaultView.getUserDebt(user.address, debtAsset)).to.equal(40);
+      expect(await vaultRouter.getUserDebt(user.address, debtAsset)).to.equal(40);
     });
 
     it('should emit health cache update with timestamp on liquidation', async function () {
@@ -560,7 +560,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     });
 
     it('borrow -> liquidation -> borrow keeps totals in sync', async function () {
-      const { vaultCoreModule, liquidationManager, lending, debtAsset, vaultView } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, liquidationManager, lending, debtAsset, vaultRouter } = await loadFixture(deployDualEntryFixture);
 
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset, 40, 0, 0);
       await lending.connect(liquidationManager).forceReduceDebt(liquidationManager.address, debtAsset, 15);
@@ -568,11 +568,11 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
       expect(await lending.getDebt(liquidationManager.address, debtAsset)).to.equal(50);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(50);
-      expect(await vaultView.getUserDebt(liquidationManager.address, debtAsset)).to.equal(50);
+      expect(await vaultRouter.getUserDebt(liquidationManager.address, debtAsset)).to.equal(50);
     });
 
     it('forceReduceDebt on never-borrowed asset keeps state unchanged (idempotent)', async function () {
-      const { lending, liquidationManager, debtAsset, vaultView, healthView } = await loadFixture(deployDualEntryFixture);
+      const { lending, liquidationManager, debtAsset, vaultRouter, healthView } = await loadFixture(deployDualEntryFixture);
       const unusedAsset = ethers.Wallet.createRandom().address;
 
       const beforeTotal = await lending.getTotalDebtValue();
@@ -580,18 +580,18 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       await expect(
         lending.connect(liquidationManager).forceReduceDebt(liquidationManager.address, unusedAsset, 20)
       ).to.emit(lending, 'DebtRecorded').withArgs(liquidationManager.address, unusedAsset, 0, false)
-        .and.to.emit(vaultView, 'UserPositionUpdated').withArgs(liquidationManager.address, unusedAsset, 0, 0);
+        .and.to.emit(vaultRouter, 'UserPositionUpdated').withArgs(liquidationManager.address, unusedAsset, 0, 0);
 
       expect(await lending.getDebt(liquidationManager.address, unusedAsset)).to.equal(0);
       expect(await lending.getTotalDebtByAsset(unusedAsset)).to.equal(0);
       expect(await lending.getTotalDebtValue()).to.equal(beforeTotal);
-      expect(await vaultView.getUserDebt(liquidationManager.address, unusedAsset)).to.equal(0);
+      expect(await vaultRouter.getUserDebt(liquidationManager.address, unusedAsset)).to.equal(0);
       // NOTE: forceReduceDebt always pushes HealthView cache. With zero debt, health factor should be "infinite" (MaxUint256).
       expect(await healthView.getUserHealthFactor(liquidationManager.address)).to.equal(ethers.MaxUint256);
     });
 
     it('multi-asset liquidation only affects targeted asset and totals', async function () {
-      const { vaultCoreModule, liquidationManager, lending, vaultView, healthView, debtAsset, priceOracle, vaultCore } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, liquidationManager, lending, vaultRouter, healthView, debtAsset, priceOracle, vaultCore } = await loadFixture(deployDualEntryFixture);
       const debtAsset2 = ethers.Wallet.createRandom().address;
       const nowTs = Math.floor(Date.now() / 1000);
       await priceOracle.connect(vaultCore).setPrice(debtAsset2, ethers.parseEther('1'), nowTs, 18);
@@ -605,8 +605,8 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
       expect(await lending.getDebt(liquidationManager.address, debtAsset)).to.equal(15);
       expect(await lending.getDebt(liquidationManager.address, debtAsset2)).to.equal(60);
-      expect(await vaultView.getUserDebt(liquidationManager.address, debtAsset)).to.equal(15);
-      expect(await vaultView.getUserDebt(liquidationManager.address, debtAsset2)).to.equal(60);
+      expect(await vaultRouter.getUserDebt(liquidationManager.address, debtAsset)).to.equal(15);
+      expect(await vaultRouter.getUserDebt(liquidationManager.address, debtAsset2)).to.equal(60);
 
       const totalAfter = await lending.getTotalDebtValue();
       expect(totalAfter).to.be.lt(totalBefore);
@@ -614,7 +614,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     });
 
     it('liquidating user A does not affect user B view/health', async function () {
-      const { vaultCoreModule, liquidationManager, lending, vaultView, healthView, debtAsset, cm } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, liquidationManager, lending, vaultRouter, healthView, debtAsset, cm } = await loadFixture(deployDualEntryFixture);
       const userB = ethers.Wallet.createRandom().address;
 
       await cm.depositCollateral(userB, debtAsset, 300);
@@ -622,13 +622,13 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       await vaultCoreModule.borrow(userB, debtAsset, 40, 0, 0);
 
       const bDebtBefore = await lending.getDebt(userB, debtAsset);
-      const bViewBefore = await vaultView.getUserDebt(userB, debtAsset);
+      const bViewBefore = await vaultRouter.getUserDebt(userB, debtAsset);
       const bHFBefore = await healthView.getUserHealthFactor(userB);
 
       await lending.connect(liquidationManager).forceReduceDebt(liquidationManager.address, debtAsset, 30);
 
       expect(await lending.getDebt(userB, debtAsset)).to.equal(bDebtBefore);
-      expect(await vaultView.getUserDebt(userB, debtAsset)).to.equal(bViewBefore);
+      expect(await vaultRouter.getUserDebt(userB, debtAsset)).to.equal(bViewBefore);
       expect(await healthView.getUserHealthFactor(userB)).to.equal(bHFBefore);
     });
 
@@ -643,8 +643,8 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     });
   });
 
-  describe('registry missing module reverts', function () {
-    it('borrow should revert when KEY_HEALTH_VIEW missing', async function () {
+  describe('registry missing module (best effort push, no revert)', function () {
+    it('borrow should NOT revert when KEY_HEALTH_VIEW missing (emit HealthPushFailed)', async function () {
       const { registry, vaultCoreModule, user, debtAsset, lending, cm, acm, lrm, rewardManager } = await loadFixture(deployDualEntryFixture);
       await registry.setModule(ModuleKeys.KEY_HEALTH_VIEW, ethers.ZeroAddress);
       // re-wire essentials to avoid accidental zeroing
@@ -653,19 +653,55 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       await registry.setModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, await lrm.getAddress());
       await registry.setModule(ModuleKeys.KEY_REWARD_MANAGER_V1, await rewardManager.getAddress());
 
-      await expect(
-        vaultCoreModule.borrow(user.address, debtAsset, 10, 0, 0)
-      ).to.be.revertedWith('MockRegistry: module not found');
+      const tx = await vaultCoreModule.borrow(user.address, debtAsset, 10, 0, 0);
+
+      // ledger still updates
+      expect(await lending.getDebt(user.address, debtAsset)).to.equal(10);
+
+      // best effort: health push fails but does not revert
+      await expect(tx)
+        .to.emit(lending, 'HealthPushFailed')
+        .withArgs(
+          user.address,
+          ethers.ZeroAddress, // healthView missing
+          anyValue, // totalCollateral (fallback)
+          anyValue, // totalDebt
+          anyValue  // reason
+        );
     });
 
-    it('repay should revert when KEY_CM missing', async function () {
+    it('repay should NOT revert when KEY_CM missing (emit CacheUpdateFailed + HealthPushFailed)', async function () {
       const { registry, vaultCoreModule, user, debtAsset, lending } = await loadFixture(deployDualEntryFixture);
       await vaultCoreModule.borrow(user.address, debtAsset, 10, 0, 0);
       await registry.setModule(ModuleKeys.KEY_CM, ethers.ZeroAddress);
 
-      await expect(
-        vaultCoreModule.repay(user.address, debtAsset, 5)
-      ).to.be.revertedWith('MockRegistry: module not found');
+      const tx = await vaultCoreModule.repay(user.address, debtAsset, 5);
+
+      // ledger still updates
+      expect(await lending.getDebt(user.address, debtAsset)).to.equal(5);
+
+      // best effort: position snapshot push fails due to missing CM
+      await expect(tx)
+        .to.emit(lending, 'CacheUpdateFailed')
+        .withArgs(
+          user.address,
+          debtAsset,
+          ethers.ZeroAddress, // viewAddr unknown when CM missing in snapshot computation
+          0n,                 // collateral fallback
+          5n,                 // expected debt after repay
+          anyValue
+        );
+
+      // best effort: health push also fails due to missing deps
+      await expect(tx)
+        .to.emit(lending, 'HealthPushFailed')
+        .withArgs(
+          user.address,
+          anyValue, // healthView (could be zero or address depending on registry config)
+          anyValue,
+          anyValue,
+          anyValue
+        );
     });
 
     it('forceReduceDebt should revert when KEY_ACCESS_CONTROL missing', async function () {

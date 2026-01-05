@@ -25,8 +25,8 @@ abstract contract BaseServiceConfig is
     RewardModuleBase,
     IRegistryUpgradeEvents
 {
-    
     /// @notice Registry 合约地址（内部存储，供子模块使用）
+    /// @dev 存储布局已上线，字段名保持兼容；外部读入口推荐统一从 RewardView 走（或透传）。
     address internal registryAddr;
 
     // ============ 缓存优化 ============
@@ -231,4 +231,7 @@ abstract contract BaseServiceConfig is
             block.timestamp
         );
     }
+
+    // ============ UUPS storage gap ============
+    uint256[50] private __gap;
 } 

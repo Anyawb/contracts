@@ -19,15 +19,33 @@ import { VaultTypes } from "../Vault/VaultTypes.sol";
 import { VaultMath } from "../Vault/VaultMath.sol";
 import { 
     AmountIsZero, 
-    FeeRouter__ZeroAddress,
-    MissingRole
+    FeeRouter__ZeroAddress
 } from "../errors/StandardErrors.sol";
+
+/// @notice Minimal VaultCore interface for resolving View (VaultRouter) address
+interface IVaultCoreMinimal {
+    function viewContractAddrVar() external view returns (address);
+}
+
+/// @notice Minimal interface for FeeRouterView push functions (best-effort)
+interface IFeeRouterViewMinimal {
+    function pushUserFeeUpdate(address user, bytes32 feeType, uint256 feeAmount, uint256 personalFeeBps) external;
+    function pushGlobalStatsUpdate(uint256 totalDistributions, uint256 totalAmountDistributed) external;
+    function pushSystemConfigUpdate(
+        address platformTreasury,
+        address ecosystemVault,
+        uint256 platformFeeBps,
+        uint256 ecosystemFeeBps,
+        address[] calldata supportedTokens
+    ) external;
+    function pushGlobalFeeStatistic(address token, bytes32 feeType, uint256 amount) external;
+}
 
 /**
  * @title FeeRouter
  * @notice 管理平台手续费分配，把撮合费/清算费按比例分发到金库地址。
- * @dev 重构后：简化架构，直接返回本地数据，View合约通过VaultView统一访问
- * @dev 统一传参架构：复杂查询通过VaultView协调器，简单查询直接返回本地数据
+ * @dev 重构后：简化架构，直接返回本地数据，View合约通过VaultRouter统一访问
+ * @dev 统一传参架构：复杂查询通过VaultRouter协调器，简单查询直接返回本地数据
  * @custom:security-contact security@example.com
  */
 contract FeeRouter is 
@@ -82,14 +100,6 @@ contract FeeRouter is
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
     // All events are imported from IFeeRouter interface
     
-    // Custom events specific to FeeRouter implementation
-    event DynamicFeeUpdated(
-        address indexed token, 
-        bytes32 indexed feeType, 
-        uint256 oldFee, 
-        uint256 newFee
-    );
-
     // 新增安全化事件
     event PlatformTreasuryUpdated(address indexed oldAddr, address indexed newAddr);
     event EcosystemVaultUpdated(address indexed oldAddr, address indexed newAddr);
@@ -107,9 +117,6 @@ contract FeeRouter is
     /// @notice 无效费用类型错误
     error FeeRouter__InvalidFeeType();
 
-    /// @notice 权限不足错误
-    error FeeRouter__InsufficientPermission();
-
     /// @notice 批量操作大小错误
     error FeeRouter__InvalidBatchSize();
 
@@ -119,7 +126,7 @@ contract FeeRouter is
     
     /// @notice 验证 Registry 地址
     modifier onlyValidRegistry() {
-        if (_registryAddr == address(0)) revert FeeRouter__ZeroAddress();
+        if (_registryAddr == address(0) || _registryAddr.code.length == 0) revert FeeRouter__ZeroAddress();
         _;
     }
 
@@ -164,6 +171,7 @@ contract FeeRouter is
         _ecosystemFeeBps = ecoBps_;
         
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -241,17 +249,6 @@ contract FeeRouter is
 
     // ============ 基础查询功能（保留在主文件）============
     
-    /// @notice 查询是否为授权 Caller
-    function isCaller(address addr) external view returns (bool) {
-        if (_registryAddr == address(0)) return false;
-        
-        try IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL) returns (address acmAddr) {
-            return IAccessControlManager(acmAddr).hasRole(ActionKeys.ACTION_DEPOSIT, addr);
-        } catch {
-            return false;
-        }
-    }
-
     /// @notice 查询代币是否支持
     function isTokenSupported(address token) external view returns (bool) {
         return _isSupportedToken[token];
@@ -351,36 +348,6 @@ contract FeeRouter is
         return (_totalDistributions, _totalAmountDistributed);
     }
 
-    // ============ 通过Registry调用的查询功能 ============
-    
-    /// @notice 检查用户权限级别（通过Registry调用）
-    /**
-     * @notice DEPRECATED: 请改从 AccessControlView 查询用户权限级别
-     * @dev 保留兼容性，后续可能移除
-     */
-    function getUserPermissionLevel(address user) external view returns (IAccessControlManager.PermissionLevel) {
-        address acmAddr = _getAcmModule(false);
-        if (acmAddr == address(0)) {
-            return IAccessControlManager.PermissionLevel.NONE;
-        }
-        
-        return IAccessControlManager(acmAddr).getUserPermission(user);
-    }
-
-    /// @notice 验证用户是否有指定权限（通过Registry调用）
-    /**
-     * @notice DEPRECATED: 请改从 AccessControlView 查询权限校验结果
-     * @dev 保留兼容性，后续可能移除
-     */
-    function hasUserPermission(address user, IAccessControlManager.PermissionLevel level) external view returns (bool) {
-        address acmAddr = _getAcmModule(false);
-        if (acmAddr == address(0)) return false;
-        
-        return IAccessControlManager(acmAddr).getUserPermission(user) >= level;
-    }
-
-    /*━━━━━━━━━━━━━━━ ADMIN CONFIG ━━━━━━━━━━━━━━━*/
-
     /**
      * @notice 设置费用配置
      * @param platformBps 平台手续费比例（基点）
@@ -394,6 +361,7 @@ contract FeeRouter is
         
         emit FeeConfigUpdated(platformBps, ecoBps);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
 		// 统一数据推送
 		DataPushLibrary._emitData(
@@ -419,6 +387,7 @@ contract FeeRouter is
         emit PlatformTreasuryUpdated(oldPlatformTreasury, platformTreasury_);
         emit EcosystemVaultUpdated(oldEcosystemVault, ecosystemVault_);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
 		// 统一数据推送
 		DataPushLibrary._emitData(
@@ -436,12 +405,15 @@ contract FeeRouter is
     function setDynamicFee(address token, bytes32 feeType, uint256 feeBps) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (token == address(0)) revert FeeRouter__ZeroAddress();
         if (feeBps >= 1e4) revert FeeRouter__InvalidConfig();
+        // 动态费率与生态分成（50%）叠加后不得超过100%
+        if (feeBps + (feeBps / 2) >= 1e4) revert FeeRouter__InvalidConfig();
         
         uint256 oldFee = _dynamicFees[token][feeType];
         _dynamicFees[token][feeType] = feeBps;
         
         emit DynamicFeeUpdated(token, feeType, oldFee, feeBps);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
 		// 统一数据推送
 		DataPushLibrary._emitData(
@@ -463,6 +435,7 @@ contract FeeRouter is
         
         emit TokenSupported(token, true);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
 		// 统一数据推送
 		DataPushLibrary._emitData(
@@ -491,6 +464,7 @@ contract FeeRouter is
         
         emit TokenSupported(token, false);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
 		// 统一数据推送
 		DataPushLibrary._emitData(
@@ -562,11 +536,11 @@ contract FeeRouter is
 			DataPushTypes.DATA_TYPE_REGISTRY_UPDATED,
 			abi.encode(oldRegistry, newRegistryAddr, msg.sender, block.timestamp)
 		);
+
+        // 同步新视图（最佳努力，避免新 View 落后）
+        _pushSystemConfigToView();
+        _pushGlobalStatsToView();
     }
-    
-    /*━━━━━━━━━━━━━━━ INTERNALS ━━━━━━━━━━━━━━━*/
-
-
 
     // ============ 公共逻辑函数（消除重复）============
     
@@ -591,8 +565,7 @@ contract FeeRouter is
     function _updateStats(uint256 distributions, uint256 amount) internal {
         _totalDistributions += distributions;
         _totalAmountDistributed += amount;
-        
-        // 统计数据更新完成
+        _pushGlobalStatsToView();
     }
 
     /**
@@ -622,8 +595,10 @@ contract FeeRouter is
      * @param feeType 费用类型
      */
     function _distribute(address token, uint256 amount, bytes32 feeType) internal whenNotPaused {
-        (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) = _calculateDistribution(amount, _platformFeeBps, _ecosystemFeeBps);
-        _executeFeeDistribution(token, platformAmt, ecoAmt, remaining, feeType, amount);
+        uint256 platformBps = _platformFeeBps;
+        uint256 ecoBps = _ecosystemFeeBps;
+        (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) = _calculateDistribution(amount, platformBps, ecoBps);
+        _executeFeeDistribution(token, platformAmt, ecoAmt, remaining, feeType, amount, msg.sender, platformBps + ecoBps);
     }
 
     /**
@@ -637,7 +612,7 @@ contract FeeRouter is
         uint256 halfDynamicFee = dynamicFeeBps / 2; // 生态费用为动态费用的一半
         
         (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) = _calculateDistribution(amount, dynamicFeeBps, halfDynamicFee);
-        _executeFeeDistribution(token, platformAmt, ecoAmt, remaining, feeType, amount);
+        _executeFeeDistribution(token, platformAmt, ecoAmt, remaining, feeType, amount, msg.sender, dynamicFeeBps + halfDynamicFee);
     }
 
     /**
@@ -660,6 +635,102 @@ contract FeeRouter is
     }
 
     /**
+     * @notice 获取 FeeRouterView 地址（最佳努力，不回滚主流程）
+     */
+    function _resolveFeeRouterViewAddr() internal view returns (address) {
+        address registryAddr = _registryAddr;
+        if (registryAddr == address(0) || registryAddr.code.length == 0) return address(0);
+
+        // 主路径：Registry -> VaultCore -> viewContractAddrVar()（统一视图解析策略）
+        try IRegistry(registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE) returns (address vaultCore) {
+            if (vaultCore != address(0)) {
+                try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address viewAddr) {
+                    if (viewAddr != address(0)) return viewAddr;
+                } catch { }
+            }
+        } catch { }
+
+        // 回退：直接读取 FeeRouterView（兼容部署/过渡阶段）
+        try IRegistry(registryAddr).getModule(ModuleKeys.KEY_FRV) returns (address frv) {
+            return frv;
+        } catch { }
+
+        return address(0);
+    }
+
+    /**
+     * @notice 推送系统配置到 FeeRouterView（最佳努力）
+     */
+    function _pushSystemConfigToView() internal {
+        address viewAddr = _resolveFeeRouterViewAddr();
+        if (viewAddr == address(0) || viewAddr.code.length == 0) return;
+
+        address[] memory tokens = _copySupportedTokens();
+        try IFeeRouterViewMinimal(viewAddr).pushSystemConfigUpdate(
+            _platformTreasury,
+            _ecosystemVault,
+            _platformFeeBps,
+            _ecosystemFeeBps,
+            tokens
+        ) {
+            // success
+        } catch {
+            // best-effort: 不阻断主流程
+        }
+    }
+
+    /**
+     * @notice 推送全局统计到 FeeRouterView（最佳努力）
+     */
+    function _pushGlobalStatsToView() internal {
+        address viewAddr = _resolveFeeRouterViewAddr();
+        if (viewAddr == address(0) || viewAddr.code.length == 0) return;
+
+        try IFeeRouterViewMinimal(viewAddr).pushGlobalStatsUpdate(_totalDistributions, _totalAmountDistributed) {
+            // success
+        } catch {
+            // best-effort
+        }
+    }
+
+    /**
+     * @notice 分发后推送用户与全局费用统计到 FeeRouterView（最佳努力）
+     */
+    function _pushFeeRouterViewAfterDistribution(
+        address payer,
+        address token,
+        bytes32 feeType,
+        uint256 totalAmount,
+        uint256 appliedFeeBps
+    ) internal {
+        address viewAddr = _resolveFeeRouterViewAddr();
+        if (viewAddr == address(0) || viewAddr.code.length == 0) return;
+
+        try IFeeRouterViewMinimal(viewAddr).pushUserFeeUpdate(payer, feeType, totalAmount, appliedFeeBps) {
+            // success
+        } catch {
+            // best-effort
+        }
+
+        try IFeeRouterViewMinimal(viewAddr).pushGlobalFeeStatistic(token, feeType, _feeStatistics[token][feeType]) {
+            // success
+        } catch {
+            // best-effort
+        }
+    }
+
+    /**
+     * @notice 复制当前支持的代币列表到内存
+     */
+    function _copySupportedTokens() internal view returns (address[] memory tokens) {
+        uint256 len = _supportedTokens.length;
+        tokens = new address[](len);
+        for (uint256 i = 0; i < len; i++) {
+            tokens[i] = _supportedTokens[i];
+        }
+    }
+
+    /**
      * @notice 执行费用分发和统计更新
      * @param token 代币地址
      * @param platformAmt 平台费用
@@ -674,7 +745,9 @@ contract FeeRouter is
         uint256 ecoAmt,
         uint256 remaining,
         bytes32 feeType,
-        uint256 totalAmount
+        uint256 totalAmount,
+        address payer,
+        uint256 appliedFeeBps
     ) internal {
         // 先从调用者地址拉取全部费用金额（需要调用者预先 approve 给本合约）
         if (totalAmount > 0) {
@@ -696,8 +769,7 @@ contract FeeRouter is
         // 更新统计和缓存
         _feeStatistics[token][feeType] += totalAmount;
         _feeCache[token][feeType] += totalAmount;
-
-        // 数据更新完成
+        _pushFeeRouterViewAfterDistribution(payer, token, feeType, totalAmount, appliedFeeBps);
 
         emit FeeDistributed(token, platformAmt, ecoAmt);
         emit FeeStatisticsUpdated(token, feeType, _feeStatistics[token][feeType]);
@@ -718,30 +790,6 @@ contract FeeRouter is
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         _emitActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE);
         newImpl; // silence unused parameter
-    }
-
-	// ============ Gas优化内部函数（消除重复）============
-
-    /// @notice 通过Registry获取模块地址（Gas优化）
-    function _getModule(bytes32 moduleKey) internal view returns (address) {
-        try IRegistry(_registryAddr).getModule(moduleKey) returns (address moduleAddr) {
-            return moduleAddr;
-        } catch {
-            return address(0);
-        }
-    }
-
-    /// @notice 获取AccessControlManager模块地址
-    function _getAcmModule(bool useRevert) internal view returns (address) {
-        if (useRevert) {
-            return IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        } else {
-            try IRegistry(_registryAddr).getModule(ModuleKeys.KEY_ACCESS_CONTROL) returns (address acmAddr) {
-                return acmAddr;
-            } catch {
-                return address(0);
-            }
-        }
     }
 
     /*━━━━━━━━━━━━━━━ GAP ━━━━━━━━━━━━━━━*/

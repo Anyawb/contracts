@@ -3,183 +3,215 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
-import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
-import { IRewardManager } from "../../../interfaces/IRewardManager.sol";
-import { PositionView } from "./PositionView.sol";
-import { HealthView }   from "./HealthView.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { RiskUtils }    from "../../utils/RiskUtils.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import { ViewConstants } from "../ViewConstants.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
+
+interface IHealthViewLite {
+    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid);
+}
+
+interface IPositionViewLite {
+    function getUserPosition(address user, address asset) external view returns (uint256 collateral, uint256 debt);
+}
+
+interface IStatisticsViewLite {
+    struct GlobalStatistics {
+        uint256 totalUsers;
+        uint256 activeUsers;
+        uint256 totalCollateral;
+        uint256 totalDebt;
+        uint256 lastUpdateTime;
+    }
+
+    function getGlobalStatistics() external view returns (GlobalStatistics memory);
+}
+
+interface IPriceOracleLite {
+    function getPrice(address asset) external view returns (uint256 price, uint256, uint256);
+}
 
 /// @title DashboardView
-/// @notice 综合仪表盘查询：聚合 Position/Health/奖励等只读数据，供前端 0 gas 查询
-/// @dev 本合约仅做只读聚合，不写入业务状态；健康因子/仓位等来源于各自 View 模块
-/// @custom:security-contact security@example.com
-contract DashboardView is Initializable, UUPSUpgradeable {
-    // ============ Structures (不可减少字段) ============
-    struct UserStats {
+/// @notice Front-end friendly aggregator that stitches data from PositionView / HealthView / StatisticsView.
+/// @dev This contract stores no business state; every query delegates to authoritative view modules.
+contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
+    struct UserAssetOverview {
+        address asset;
         uint256 collateral;
         uint256 debt;
-        uint256 ltv; // bps
-        uint256 hf;  // bps
+        uint256 price; // raw oracle price
     }
-    struct UserFullView {
-        uint256 collateral;
-        uint256 debt;
-        uint256 ltv;
-        uint256 hf;
-        uint256 maxBorrowable;
+
+    struct UserOverview {
+        uint256 totalCollateral;
+        uint256 totalDebt;
+        uint256 healthFactor;
+        bool healthFactorValid;
         bool isRisky;
     }
-    struct UserDashboardView {
-        // Position
-        uint256 collateral;
-        uint256 debt;
-        uint256 collateralValue;
-        uint256 debtValue;
-        uint256 assetPrice;
-        uint256 utilization; // bps
-        // Risk
-        uint256 ltv;
-        uint256 hf;
-        uint256 liquidationThreshold;
-        uint256 maxBorrowable;
-        bool    isRisky;
-        uint256 healthFactorAfterWithdraw;
-        uint256 daysToLiquidation;
-        // Reward / Activity
-        uint256 rewardPoints;
-        uint8   userLevel;
-        uint256 lastActiveTime;
-        uint256 pendingGuarantee;
-        // Cache meta
-        uint256 cacheTimestamp;
-        bool    cacheValid;
+
+    struct SystemOverview {
+        uint256 totalUsers;
+        uint256 activeUsers;
+        uint256 totalCollateral;
+        uint256 totalDebt;
+        uint256 lastUpdateTime;
     }
 
-    // ============ State ============
-    /// @notice Registry 合约地址 (私有，仅内部使用)
-    address private _registryAddr;
-    uint256 private constant BASIS_POINTS = 10000;
+    uint256 private constant DEFAULT_RISK_THRESHOLD = 11_000; // 110% in bps
+    uint256 private constant MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
 
-    // ============ Modifiers & ACL ============
+    address private _registryAddr;
+
+    error DashboardView__BatchTooLarge(uint256 length, uint256 max);
+    error DashboardView__ZeroImplementation();
+
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         _;
     }
-    modifier onlyUserOrStrictAdmin(address user) {
-        require(
-            msg.sender == user || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender),
-            "DashboardView: unauthorized"
-        );
-        _;
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
     }
 
-    // ============ Init ============
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
 
-    // ============ Public APIs ============
-    /// @notice 返回用户简要统计（抵押/债务/LTV/HF）
-    function getUserStats(address user, address asset) external view onlyUserOrStrictAdmin(user) returns (UserStats memory stats) {
-        (uint256 collateral, uint256 debt) = _positionV().getUserPosition(user, asset);
-        (uint256 hf, ) = _healthV().getUserHealthFactor(user);
-        uint256 ltv = RiskUtils.calculateLTV(debt, collateral);
-        stats = UserStats({ collateral: collateral, debt: debt, ltv: ltv, hf: hf });
+    function registryAddr() external view returns (address) {
+        return _registryAddr;
     }
 
-    /// @notice 返回用户完整视图（包含最大可借与风险标识）
-    function getUserFullView(address user, address asset) external view onlyUserOrStrictAdmin(user) returns (UserFullView memory fv) {
-        (uint256 collateral, uint256 debt) = _positionV().getUserPosition(user, asset);
-        (uint256 hf, ) = _healthV().getUserHealthFactor(user);
-        uint256 ltv = RiskUtils.calculateLTV(debt, collateral);
-        uint256 maxBorrowable = RiskUtils.calculateMaxBorrowable(collateral, debt, 8000); // 80% 默认阈值
-        bool isRisky = hf < 11000; // 110% 默认阈值
-        fv = UserFullView({ collateral: collateral, debt: debt, ltv: ltv, hf: hf, maxBorrowable: maxBorrowable, isRisky: isRisky });
-    }
+    /* -------------------------------------------------------------------------- */
+    /*                               User Queries                                */
+    /* -------------------------------------------------------------------------- */
 
-    /// @notice 返回仪表盘聚合视图
-    function getUserDashboardView(address user, address asset) external view onlyUserOrStrictAdmin(user) returns (UserDashboardView memory dv) {
-        PositionView pv = _positionV();
-        HealthView   hv = _healthV();
+    function getUserOverview(address user, address[] calldata trackedAssets)
+        external
+        view
+        onlyValidRegistry
+        returns (UserOverview memory overview)
+    {
+        _requireRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
 
-        (uint256 collateral, uint256 debt) = pv.getUserPosition(user, asset);
-        (uint256 hf, bool cacheValid)     = hv.getUserHealthFactor(user);
-
-        // price
-        uint256 price;
-        address oracle = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
-        if (oracle != address(0)) {
-            try IPriceOracle(oracle).getPrice(asset) returns (uint256 p, uint256, uint256) { price = p; } catch {}
+        IPositionViewLite pv = _positionView();
+        if (trackedAssets.length > MAX_BATCH_SIZE) revert DashboardView__BatchTooLarge(trackedAssets.length, MAX_BATCH_SIZE);
+        uint256 totalColl;
+        uint256 totalDebt;
+        for (uint256 i; i < trackedAssets.length; ++i) {
+            (uint256 c, uint256 d) = pv.getUserPosition(user, trackedAssets[i]);
+            totalColl += c;
+            totalDebt += d;
         }
 
-        uint256 collateralValue = collateral * price / 1e18;
-        uint256 debtValue       = debt * price / 1e18;
-        uint256 ltv            = RiskUtils.calculateLTV(debt, collateral);
-        uint256 maxBorrowable  = RiskUtils.calculateMaxBorrowable(collateral, debt, 8000);
-        bool isRisky           = hf < 11000;
+        (uint256 hf, bool valid) = _healthView().getUserHealthFactor(user);
 
-        // liquidation threshold
-        uint256 liqThreshold;
-        address riskMgr = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        if (riskMgr != address(0)) {
-            try ILiquidationRiskManager(riskMgr).getLiquidationThreshold() returns (uint256 th) { liqThreshold = th; } catch {}
-        }
-        if (liqThreshold == 0) liqThreshold = 8000;
-
-        // reward info（占位：积分与等级来源于 Reward 模块）
-        uint256 rewardPoints; uint8 level;
-        address rm = Registry(_registryAddr).getModule(ModuleKeys.KEY_RM);
-        if (rm != address(0)) {
-            try IRewardManager(rm).getUserReward(user) returns (uint256 pts) { rewardPoints = pts; } catch {}
-        }
-
-        dv = UserDashboardView({
-            collateral: collateral,
-            debt: debt,
-            collateralValue: collateralValue,
-            debtValue: debtValue,
-            assetPrice: price,
-            utilization: collateralValue == 0 ? 0 : (debtValue * BASIS_POINTS) / collateralValue,
-            ltv: ltv,
-            hf: hf,
-            liquidationThreshold: liqThreshold,
-            maxBorrowable: maxBorrowable,
-            isRisky: isRisky,
-            healthFactorAfterWithdraw: debt == 0 ? type(uint256).max : 0,
-            daysToLiquidation: 0,
-            rewardPoints: rewardPoints,
-            userLevel: level,
-            lastActiveTime: pv.isUserCacheValid(user) ? block.timestamp : 0,
-            pendingGuarantee: 0,
-            cacheTimestamp: block.timestamp,
-            cacheValid: cacheValid
+        overview = UserOverview({
+            totalCollateral: totalColl,
+            totalDebt: totalDebt,
+            healthFactor: hf,
+            healthFactorValid: valid,
+            isRisky: valid ? hf < DEFAULT_RISK_THRESHOLD : false
         });
-
-        // 说明：链下刷新触发由业务合约统一发出（DataPush），View 层不主动发事件
     }
 
-    // ============ Internal views ============
-    function _positionV() internal view returns (PositionView) {
-        return PositionView(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW));
-    }
-    function _healthV() internal view returns (HealthView) {
-        return HealthView(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW));
+    function getUserAssetBreakdown(address user, address[] calldata assets)
+        external
+        view
+        onlyValidRegistry
+        returns (UserAssetOverview[] memory items)
+    {
+        _requireRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
+        uint256 len = assets.length;
+        if (len > MAX_BATCH_SIZE) revert DashboardView__BatchTooLarge(len, MAX_BATCH_SIZE);
+        items = new UserAssetOverview[](len);
+        IPositionViewLite pv = _positionView();
+        IPriceOracleLite oracle = _priceOracle();
+
+        for (uint256 i; i < len; ++i) {
+            (uint256 collateral, uint256 debt) = pv.getUserPosition(user, assets[i]);
+            uint256 price;
+            if (address(oracle) != address(0)) {
+                try oracle.getPrice(assets[i]) returns (uint256 p, uint256, uint256) { price = p; } catch {}
+            }
+            items[i] = UserAssetOverview({ asset: assets[i], collateral: collateral, debt: debt, price: price });
+        }
     }
 
-    // ============ UUPS ============
+    /* -------------------------------------------------------------------------- */
+    /*                               System Queries                              */
+    /* -------------------------------------------------------------------------- */
+
+    function getSystemOverview()
+        external
+        view
+        onlyValidRegistry
+        returns (SystemOverview memory overview)
+    {
+        _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        IStatisticsViewLite.GlobalStatistics memory g = _statisticsView().getGlobalStatistics();
+        overview = SystemOverview({
+            totalUsers: g.totalUsers,
+            activeUsers: g.activeUsers,
+            totalCollateral: g.totalCollateral,
+            totalDebt: g.totalDebt,
+            lastUpdateTime: g.lastUpdateTime
+        });
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                               Internal Helpers                            */
+    /* -------------------------------------------------------------------------- */
+
+    function _healthView() internal view returns (IHealthViewLite) {
+        return IHealthViewLite(_getModule(ModuleKeys.KEY_HEALTH_VIEW));
+    }
+
+    function _positionView() internal view returns (IPositionViewLite) {
+        return IPositionViewLite(_getModule(ModuleKeys.KEY_POSITION_VIEW));
+    }
+
+    function _statisticsView() internal view returns (IStatisticsViewLite) {
+        return IStatisticsViewLite(_getModule(ModuleKeys.KEY_STATS));
+    }
+
+    function _priceOracle() internal view returns (IPriceOracleLite) {
+        address oracle = Registry(_registryAddr).getModule(ModuleKeys.KEY_PRICE_ORACLE);
+        return IPriceOracleLite(oracle);
+    }
+
+    function _getModule(bytes32 key) internal view returns (address) {
+        return Registry(_registryAddr).getModuleOrRevert(key);
+    }
+
+    function _requireRole(bytes32 actionKey, address user) internal view {
+        address acmAddr = _getModule(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(actionKey, user);
+    }
+
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
-        require(newImplementation != address(0), "DashboardView: zero impl");
+        _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        if (newImplementation == address(0)) revert DashboardView__ZeroImplementation();
+    }
+
+    /// @notice Storage gap for future upgrades
+    uint256[50] private __gap;
+
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
     }
 }

@@ -25,10 +25,10 @@ async function main() {
   const VaultCoreView = await hre.ethers.getContractFactory("MockVaultCoreView");
   const vaultCoreModule = await VaultCoreView.deploy();
   
-  const VaultView = await hre.ethers.getContractFactory("MockVaultView");
-  const vaultView = await VaultView.deploy();
+  const VaultRouter = await hre.ethers.getContractFactory("MockVaultRouter");
+  const vaultRouter = await VaultRouter.deploy();
   
-  await vaultCoreModule.setViewContractAddr(await vaultView.getAddress());
+  await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
   await vaultCoreModule.setLendingEngine(await lending.getAddress());
   
   const KEY_VAULT_CORE = hre.ethers.keccak256(hre.ethers.toUtf8Bytes("VAULT_CORE"));

@@ -17,7 +17,7 @@ library LiquidationRiskBatchLib {
         address manager,
         address[] calldata users,
         uint256 threshold
-    ) public view returns (bool[] memory liquidatable) {
+    ) internal view returns (bool[] memory liquidatable) {
         uint256 length = users.length;
         liquidatable = new bool[](length);
         for (uint256 i = 0; i < length;) {
@@ -33,7 +33,7 @@ library LiquidationRiskBatchLib {
     function batchGetUserHealthFactors(
         address manager,
         address[] calldata users
-    ) public view returns (uint256[] memory healthFactors) {
+    ) internal view returns (uint256[] memory healthFactors) {
         uint256 length = users.length;
         healthFactors = new uint256[](length);
         for (uint256 i = 0; i < length;) {

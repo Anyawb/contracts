@@ -7,12 +7,11 @@ import { Registry } from "../registry/Registry.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { ViewConstants } from "../Vault/view/ViewConstants.sol";
 import {
     ZeroAddress,
-    NotGovernance,
     MissingRole,
     InvalidCaller,
-    InsufficientBalance,
     ExternalModuleRevertedRaw
 } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -27,12 +26,32 @@ import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 /// @dev 使用 ModuleKeys 进行模块地址管理
 /// @dev 使用 VaultTypes 进行标准化事件记录
 /// @dev 通过 Registry 进行模块地址获取，确保架构一致性
-/// @dev 积分计算公式：
-/// @dev BasePoints = 金额_USDT ÷ 100 × 期限_天 ÷ 5
-/// @dev Bonus = BasePoints × 5%（当且仅当借款全过程 HealthFactor ≥ 1.5）
-/// @dev Total = BasePoints + Bonus
+/// @dev 现行链上基线（见 docs/Usage-Guide/Reward-System-Usage-Guide.md）：
+/// @dev - borrow(duration>0)：锁定 1 积分（不铸币）
+/// @dev - repay(duration==0 且 hfHighEnough==true)：释放锁定积分并铸币
+/// @dev - repay(hfHighEnough==false)：不释放，并按参数走扣罚/欠分账本
 
 contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, RewardModuleBase {
+    // ========== Read-gate (privacy hardening) ==========
+    /// @notice 读取权限被拒绝（read-gate 开启时，只有白名单 reader 可读取 RMCore 的 get* 查询）
+    error RewardManagerCore__UnauthorizedReader(address caller);
+
+    /// @notice 是否开启 read-gate（默认开启：true）
+    bool private _readGateEnabled;
+
+    /// @notice 额外 reader 白名单（可选：例如运维/风控模块）
+    mapping(address => bool) private _extraReaders;
+
+    modifier onlyAllowedReader() {
+        if (_readGateEnabled) {
+            // B 策略：默认仅允许 RewardView 读取（统一只读入口）
+            address rewardView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_VIEW);
+            if (msg.sender != rewardView && !_extraReaders[msg.sender]) {
+                revert RewardManagerCore__UnauthorizedReader(msg.sender);
+            }
+        }
+        _;
+    }
     /// @notice 入口收紧引导错误（用于提示外部调用者应通过 RewardManager 调用）
     error RewardManagerCore__UseRewardManagerEntry();
     /// @notice DEPRECATED：检测到直接调用核心入口，将被拒绝
@@ -85,12 +104,22 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     mapping(address => uint256) private _userLastActivity;
     mapping(address => uint256) private _userTotalLoans;
     mapping(address => uint256) private _userTotalVolume;
+    /// @notice 最低计分本金：1000 USDC（6 decimals），低于该值不计分/不锁定
+    uint256 private constant MIN_ELIGIBLE_PRINCIPAL = 1_000e6;
 
     // ========== 锁定-释放 与 扣罚参数 ==========
     /// @notice 用户锁定积分余额（按用户汇总，最小化改动）
     mapping(address => uint256) private _lockedPoints;
     /// @notice 用户当前锁定的目标到期时间（以最近一次借款为准，最小化改动）
     mapping(address => uint256) private _lockedMaturity;
+
+    // ========== V2：按订单锁定（解决多订单错判） ==========
+    /// @dev 每个 orderId 对应的锁定积分（默认 1e18），0 表示未锁定/已处理
+    mapping(uint256 => uint256) private _lockedPointsByOrderId;
+    /// @dev 每个 orderId 对应的 borrower（用于一致性校验）
+    mapping(uint256 => address) private _lockedUserByOrderId;
+    /// @dev 每个 orderId 的 maturity（用于提前/逾期判定与审计）
+    mapping(uint256 => uint256) private _lockedMaturityByOrderId;
     /// @notice 按期窗口（秒），默认 24 小时
     uint256 private _onTimeWindow;
     /// @notice 提前还款扣罚（BPS）默认 3% = 300
@@ -198,16 +227,14 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         _cacheExpirationTime = 1 hours;
         // 锁定/扣罚默认参数
         _onTimeWindow = 1 days;
-        _earlyPenaltyBps = 300;
+        // 与 Reward-System-Usage-Guide 对齐：提前还款不处罚；逾期默认 5%
+        _earlyPenaltyBps = 0;
         _latePenaltyBps = 500;
 
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
+        // 隐私强化：默认开启 read-gate（仅 RewardView/白名单可读取 RMCore 的 get* 查询）
+        _readGateEnabled = true;
+
+        // RMCore 不发 ActionExecuted，避免与业务入口/治理入口产生重复语义；参数变更以专用事件为准。
     }
 
     // ========== 修饰符 ==========
@@ -238,25 +265,25 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             revert RewardManagerCore__UseRewardManagerEntry();
         }
         
-        // 合格借款门槛：< 1000 USDT/USDC 的本金不计分（仍统计活跃度）
-        // 注意：amount 采用 6 位精度的稳定币最小单位；1000 USDT = 1000 * 1e6
-        if (duration > 0 && amount < 1000 * 1e6) {
-            // 仅更新活跃度，直接返回
-            _updateUserActivity(user, amount);
-            return;
-        }
-        // 新规则：借款（duration>0）仅锁定积分，不立即发放；还款（duration=0）释放或作废并扣罚
-        uint256 points = _calculatePointsWithCache(user, amount, duration, hfHighEnough);
+        // 业务设定（本地/测试基线）：只要成功借贷（借款事件），即可获得 1 积分。
+        // - 借款（duration>0）：锁定 1 积分
+        // - 还款（duration=0 且 hfHighEnough=true）：释放锁定的 1 积分（mint）
+        //
+        // 说明：此处保持“借款锁定、还款释放”的架构语义不变，但将积分计算简化为固定 1。
+        //      amount/duration 仍用于活动统计、到期判断（惩罚路径）等。
         _updateUserActivity(user, amount);
 
+        // 本金不足 1000 USDC 不计分（不锁定、不计合格借款）
+        if (duration > 0 && amount < MIN_ELIGIBLE_PRINCIPAL) {
+            return;
+        }
+
         if (duration > 0) {
-            // 借款：增加合格借款计数与锁定积分（若 points>0）
-            if (amount >= 1000 * 1e6 && points > 0) {
-                _eligibleLoanCount[user] += 1;
-                _lockedPoints[user] += points;
-                // 借款时以 duration 推导 maturity：取“最近一次”即可
-                _lockedMaturity[user] = block.timestamp + duration;
-            }
+            uint256 points = 1e18; // 1 point with RewardPoints.decimals() == 18
+            _eligibleLoanCount[user] += 1;
+            _lockedPoints[user] += points;
+            // 借款时以 duration 推导 maturity：取“最近一次”即可
+            _lockedMaturity[user] = block.timestamp + duration;
             return;
         }
 
@@ -295,12 +322,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
 
                 if (toMint > 0) {
                     try _getRewardToken().mintPoints(user, toMint) {
-                        emit VaultTypes.ActionExecuted(
-                            ActionKeys.ACTION_CLAIM_REWARD,
-                            ActionKeys.getActionKeyString(ActionKeys.ACTION_CLAIM_REWARD),
-                            user,
-                            block.timestamp
-                        );
                         emit VaultTypes.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
                         _tryPushRewardEarned(user, toMint, "OnTimeRelease");
                     } catch {
@@ -327,17 +348,12 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             // 判定提前/逾期：按当前时间与 maturity 比较（容忍窗口）
             uint256 nowTs = block.timestamp;
             bool isEarly = (nowTs + _onTimeWindow < m);
-            uint256 bps = isEarly ? _earlyPenaltyBps : _latePenaltyBps;
+            // 与使用指南对齐：提前还款不处罚（bps=0）；仅逾期按 latePenaltyBps 扣罚
+            uint256 bps = isEarly ? 0 : _latePenaltyBps;
             if (bps > 0) {
                 uint256 penalty = (lockedPoints * bps) / 10000;
                 // 尝试直接烧分；不足则记入欠分账本
                 try _getRewardToken().burnPoints(user, penalty) {
-                    emit VaultTypes.ActionExecuted(
-                        ActionKeys.ACTION_LIQUIDATE,
-                        ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
-                        user,
-                        block.timestamp
-                    );
                     _tryPushPointsBurned(user, penalty, isEarly ? "EarlyPenalty" : "LatePenalty");
                 } catch {
                     // 记录欠分
@@ -354,6 +370,142 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                 }
             }
         }
+    }
+
+    /// @notice LendingEngine 在 borrow/repay(足额) 后调用（V2：按订单）
+    /// @dev
+    /// - outcome: 0=Borrow,1=RepayOnTimeFull,2=RepayEarlyFull,3=RepayLateFull
+    /// - 仅 RewardManager 可调用（统一入口：LE -> RM -> RMCore）
+    function onLoanEventV2(
+        address user,
+        uint256 orderId,
+        uint256 amount,
+        uint256 maturity,
+        uint8 outcome
+    ) external nonReentrant onlyValidRegistry {
+        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
+        if (msg.sender != rewardManager) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            revert RewardManagerCore__UseRewardManagerEntry();
+        }
+
+        // 复用统计口径：记录活跃与总量（amount 精度为“最小单位”，仅用于展示/统计，不参与发分主逻辑）
+        _updateUserActivity(user, amount);
+
+        // Borrow：为该订单锁定 1 积分（按订单维度）
+        if (outcome == 0) {
+            if (orderId == 0 && _lockedPointsByOrderId[orderId] != 0) {
+                // orderId=0 在本地测试可能存在；不做特殊处理，仅保证幂等
+            }
+            if (_lockedPointsByOrderId[orderId] != 0) {
+                // 幂等：同一订单重复回调忽略
+                return;
+            }
+            // 本金不足 1000 USDC 不计分/不锁定
+            if (amount < MIN_ELIGIBLE_PRINCIPAL) {
+                return;
+            }
+            uint256 points = 1e18;
+            _eligibleLoanCount[user] += 1;
+            _lockedPoints[user] += points;
+
+            _lockedPointsByOrderId[orderId] = points;
+            _lockedUserByOrderId[orderId] = user;
+            _lockedMaturityByOrderId[orderId] = maturity;
+            return;
+        }
+
+        // Repay：必须能找到该 orderId 的锁定记录；若已处理/未锁定则幂等忽略
+        uint256 locked = _lockedPointsByOrderId[orderId];
+        if (locked == 0) return;
+        address lockedUser = _lockedUserByOrderId[orderId];
+        if (lockedUser != user) revert InvalidCaller();
+
+        // 清除订单锁定（防重放）
+        delete _lockedPointsByOrderId[orderId];
+        delete _lockedUserByOrderId[orderId];
+        delete _lockedMaturityByOrderId[orderId];
+
+        // 同步扣减用户聚合锁定（与旧实现字段兼容）
+        if (_lockedPoints[user] >= locked) {
+            _lockedPoints[user] -= locked;
+        } else {
+            _lockedPoints[user] = 0;
+        }
+
+        // outcome == 1：按期足额 → 释放并铸币（先抵扣欠分）
+        if (outcome == 1) {
+            uint256 debt = _penaltyLedger[user];
+            uint256 toMint = locked;
+            if (debt > 0) {
+                if (toMint >= debt) {
+                    toMint -= debt;
+                    _penaltyLedger[user] = 0;
+                    emit PenaltyPointsDeducted(
+                        ActionKeys.ACTION_CLAIM_REWARD,
+                        user,
+                        debt,
+                        0,
+                        msg.sender,
+                        block.timestamp
+                    );
+                    _tryPushPenaltyLedger(user, 0);
+                } else {
+                    _penaltyLedger[user] = debt - toMint;
+                    emit PenaltyPointsDeducted(
+                        ActionKeys.ACTION_CLAIM_REWARD,
+                        user,
+                        toMint,
+                        _penaltyLedger[user],
+                        msg.sender,
+                        block.timestamp
+                    );
+                    _tryPushPenaltyLedger(user, _penaltyLedger[user]);
+                    toMint = 0;
+                }
+            }
+
+            if (toMint > 0) {
+                try _getRewardToken().mintPoints(user, toMint) {
+                    emit VaultTypes.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
+                    _tryPushRewardEarned(user, toMint, "OnTimeRelease");
+                } catch {
+                    revert ExternalModuleRevertedRaw("RewardPoints", "");
+                }
+            }
+            _onTimeRepayCount[user] += 1;
+            return;
+        }
+
+        // outcome == 2：提前足额 → 不发放、不处罚（锁定作废）
+        if (outcome == 2) {
+            return;
+        }
+
+        // outcome == 3：逾期足额 → 不发放，按 latePenaltyBps 扣罚（不足则记入欠分账本）
+        if (outcome == 3) {
+            uint256 bps = _latePenaltyBps;
+            if (bps == 0) return;
+            uint256 penalty = (locked * bps) / 10000;
+            if (penalty == 0) return;
+            try _getRewardToken().burnPoints(user, penalty) {
+                _tryPushPointsBurned(user, penalty, "LatePenalty");
+            } catch {
+                _penaltyLedger[user] += penalty;
+                emit PenaltyPointsDeducted(
+                    ActionKeys.ACTION_LIQUIDATE,
+                    user,
+                    0,
+                    _penaltyLedger[user],
+                    msg.sender,
+                    block.timestamp
+                );
+                _tryPushPenaltyLedger(user, _penaltyLedger[user]);
+            }
+            return;
+        }
+
+        // 未知 outcome：忽略（保持向后兼容，避免硬 revert 导致主流程失败）
     }
 
     /// @notice 批量处理借贷事件
@@ -375,66 +527,117 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             revert RewardManagerCore__UseRewardManagerEntry();
         }
         
-        if (users.length == 0 || users.length > 100) revert InvalidCaller();
+        if (users.length == 0 || users.length > ViewConstants.MAX_BATCH_SIZE) revert InvalidCaller();
         if (users.length != amounts.length || users.length != durations.length || users.length != hfHighEnoughs.length) {
             revert InvalidCaller();
         }
         
-        uint256 totalPoints = 0;
-        uint256[] memory pointAmounts = new uint256[](users.length);
-        
+        // 与单笔 onLoanEvent 对齐：batch 也必须遵循“borrow 锁定、repay 才释放/mint”的语义。
+        // 允许同一批次中混合 borrow(duration>0) 与 repay(duration==0) 事件。
+        uint256 totalPoints = 0; // 统计口径：本批次处理的“点数变更规模”（borrow=锁定，repay=释放/扣罚涉及的点数）
+
         for (uint256 i = 0; i < users.length; i++) {
-            uint256 points = _calculatePointsWithCache(users[i], amounts[i], durations[i], hfHighEnoughs[i]);
-            pointAmounts[i] = points;
-            totalPoints += points;
-            _updateUserActivity(users[i], amounts[i]);
-        }
-        
-        for (uint256 i = 0; i < users.length; i++) {
-            if (pointAmounts[i] > 0) {
-                uint256 debt = _penaltyLedger[users[i]];
+            address user = users[i];
+            uint256 amount = amounts[i];
+            uint256 duration = durations[i];
+            bool flag = hfHighEnoughs[i]; // 当前语义：按期且足额还清（由 LendingEngine 计算并传入）
+
+            _updateUserActivity(user, amount);
+
+            // borrow：锁定 1 积分（不铸币）
+            if (duration > 0) {
+                // 本金不足 1000 USDC 不计分/不锁定
+                if (amount < MIN_ELIGIBLE_PRINCIPAL) {
+                    continue;
+                }
+                uint256 points = 1e18;
+                _eligibleLoanCount[user] += 1;
+                _lockedPoints[user] += points;
+                _lockedMaturity[user] = block.timestamp + duration;
+                totalPoints += points;
+                continue;
+            }
+
+            // repay：按 flag 释放/扣罚（与单笔逻辑一致）
+            if (flag) {
+                uint256 locked = _lockedPoints[user];
+                if (locked == 0) continue;
+
+                // 先抵扣欠分
+                uint256 debt = _penaltyLedger[user];
+                uint256 toMint = locked;
                 if (debt > 0) {
-                    if (pointAmounts[i] >= debt) {
-                        pointAmounts[i] -= debt;
-                        _penaltyLedger[users[i]] = 0;
+                    if (toMint >= debt) {
+                        toMint -= debt;
+                        _penaltyLedger[user] = 0;
                         emit PenaltyPointsDeducted(
                             ActionKeys.ACTION_CLAIM_REWARD,
-                            users[i],
+                            user,
                             debt,
                             0,
                             msg.sender,
                             block.timestamp
                         );
-                        _tryPushPenaltyLedger(users[i], 0);
+                        _tryPushPenaltyLedger(user, 0);
                     } else {
-                        _penaltyLedger[users[i]] = debt - pointAmounts[i];
+                        _penaltyLedger[user] = debt - toMint;
                         emit PenaltyPointsDeducted(
                             ActionKeys.ACTION_CLAIM_REWARD,
-                            users[i],
-                            pointAmounts[i],
-                            _penaltyLedger[users[i]],
+                            user,
+                            toMint,
+                            _penaltyLedger[user],
                             msg.sender,
                             block.timestamp
                         );
-                        _tryPushPenaltyLedger(users[i], _penaltyLedger[users[i]]);
-                        pointAmounts[i] = 0;
+                        _tryPushPenaltyLedger(user, _penaltyLedger[user]);
+                        toMint = 0;
                     }
                 }
-                
-                if (pointAmounts[i] > 0) {
-                    try _getRewardToken().mintPoints(users[i], pointAmounts[i]) {
-                        emit VaultTypes.ActionExecuted(
-                            ActionKeys.ACTION_CLAIM_REWARD,
-                            ActionKeys.getActionKeyString(ActionKeys.ACTION_CLAIM_REWARD),
-                            users[i],
-                            block.timestamp
-                        );
-                        emit VaultTypes.RewardEarned(users[i], pointAmounts[i], "Batch Loan Event", block.timestamp);
-                        _tryPushRewardEarned(users[i], pointAmounts[i], "Batch Loan Event");
+
+                if (toMint > 0) {
+                    try _getRewardToken().mintPoints(user, toMint) {
+                        emit VaultTypes.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
+                        _tryPushRewardEarned(user, toMint, "OnTimeRelease");
                     } catch {
                         revert ExternalModuleRevertedRaw("RewardPoints", "");
                     }
                 }
+
+                // 清空锁定并增加履约计数
+                _lockedPoints[user] = 0;
+                _lockedMaturity[user] = 0;
+                _onTimeRepayCount[user] += 1;
+                totalPoints += locked;
+                continue;
+            }
+
+            // 非按期足额：作废锁定并扣罚（提前或逾期）
+            uint256 lockedPoints = _lockedPoints[user];
+            if (lockedPoints == 0) continue;
+            _lockedPoints[user] = 0;
+            uint256 m = _lockedMaturity[user];
+            _lockedMaturity[user] = 0;
+
+            uint256 nowTs = block.timestamp;
+            bool isEarly = (nowTs + _onTimeWindow < m);
+            uint256 bps = isEarly ? 0 : _latePenaltyBps;
+            if (bps > 0) {
+                uint256 penalty = (lockedPoints * bps) / 10000;
+                try _getRewardToken().burnPoints(user, penalty) {
+                    _tryPushPointsBurned(user, penalty, isEarly ? "EarlyPenalty" : "LatePenalty");
+                } catch {
+                    _penaltyLedger[user] += penalty;
+                    emit PenaltyPointsDeducted(
+                        ActionKeys.ACTION_LIQUIDATE,
+                        user,
+                        0,
+                        _penaltyLedger[user],
+                        msg.sender,
+                        block.timestamp
+                    );
+                    _tryPushPenaltyLedger(user, _penaltyLedger[user]);
+                }
+                totalPoints += penalty;
             }
         }
         
@@ -447,6 +650,17 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             block.timestamp
         );
         _tryPushSystemStats(_totalBatchOperations, _totalCachedRewards);
+    }
+
+    /// @notice 积分销毁代理（消费侧调用），保持 MINTER_ROLE 仅授予 RMCore
+    /// @dev 仅允许 RewardConsumption 调用；用于消费/升级时扣减积分
+    function burnPointsFor(address user, uint256 points) external onlyValidRegistry nonReentrant {
+        if (user == address(0)) revert ZeroAddress();
+        address rewardConsumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
+        if (msg.sender != rewardConsumption) {
+            revert RewardManagerCore__UseRewardManagerEntry();
+        }
+        _getRewardToken().burnPoints(user, points);
     }
 
     /// @notice 扣除用户积分（仅清算/惩罚模块可调用）
@@ -463,12 +677,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         if (points == 0) revert InvalidCaller();
         
         try _getRewardToken().burnPoints(user, points) {
-            emit VaultTypes.ActionExecuted(
-                ActionKeys.ACTION_LIQUIDATE,
-                ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
-                user,
-                block.timestamp
-            );
             _tryPushPointsBurned(user, points, "Penalty Burn");
         } catch {
             // 如果积分不足，记录到惩罚账本
@@ -518,14 +726,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             msg.sender,
             block.timestamp
         );
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 设置按期窗口（秒）
@@ -533,12 +733,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) revert MissingRole();
         _onTimeWindow = newWindow;
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 设置提前/逾期扣罚（BPS）
@@ -547,12 +741,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         if (msg.sender != rewardManager) revert MissingRole();
         _earlyPenaltyBps = earlyBps;
         _latePenaltyBps = lateBps;
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 更新用户等级
@@ -578,14 +766,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             msg.sender,
             block.timestamp
         );
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 更新等级倍数
@@ -602,14 +782,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         if (newMultiplier == 0) revert InvalidCaller();
         
         _levelMultipliers[level] = newMultiplier;
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 更新动态奖励参数
@@ -632,14 +804,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             msg.sender,
             block.timestamp
         );
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 更新缓存过期时间
@@ -659,14 +823,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             msg.sender,
             block.timestamp
         );
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 清除用户积分缓存
@@ -679,14 +835,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         }
         
         delete _pointCache[user];
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 重置动态奖励时间
@@ -698,14 +846,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         }
         
         _lastRewardResetTime = block.timestamp;
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     /// @notice 设置健康因子奖励
@@ -718,84 +858,116 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         }
         
         _earlyRepayBonus = newBonus;
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     // ========== 查询接口 ==========
+    // NOTE: 外部只读查询请统一走 RewardView（docs/Architecture-Guide.md）。
+    // 这里保留最小查询接口用于：
+    // - 协议内其它模块（如 LendingEngine）进行链上校验（例如长周期借款等级门槛）
+    // - RewardView 透传/兼容老脚本（逐步迁移中）
+    // 因此这些接口应视为“DEPRECATED for external consumers”。
 
     /// @notice 查询用户等级
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserLevel(user) 查询。
     /// @param user 用户地址
     /// @return level 用户等级
-    function getUserLevel(address user) external view returns (uint8 level) {
+    function getUserLevel(address user) external view onlyAllowedReader returns (uint8 level) {
         return _userLevels[user];
     }
 
     /// @notice 查询等级倍数
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getLevelMultiplier(level) 查询。
     /// @param level 等级
     /// @return multiplier 倍数
-    function getLevelMultiplier(uint8 level) external view returns (uint256 multiplier) {
+    function getLevelMultiplier(uint8 level) external view onlyAllowedReader returns (uint256 multiplier) {
         return _levelMultipliers[level];
     }
 
     /// @notice 查询用户活跃度信息
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserActivity(user) 查询。
     /// @param user 用户地址
     /// @return lastActivity 最后活跃时间
     /// @return totalLoans 总借款次数
     /// @return totalVolume 总借款金额
-    function getUserActivity(address user) external view returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume) {
+    function getUserActivity(address user) external view onlyAllowedReader returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume) {
         return (_userLastActivity[user], _userTotalLoans[user], _userTotalVolume[user]);
     }
 
     /// @notice 查询用户积分缓存
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserCache(user) 查询。
     /// @param user 用户地址
     /// @return points 缓存积分
     /// @return timestamp 缓存时间戳
     /// @return isValid 是否有效
-    function getUserCache(address user) external view returns (uint256 points, uint256 timestamp, bool isValid) {
+    function getUserCache(address user) external view onlyAllowedReader returns (uint256 points, uint256 timestamp, bool isValid) {
         PointCache storage cache = _pointCache[user];
         return (cache.points, cache.timestamp, cache.isValid);
     }
 
     /// @notice 查询积分计算参数
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getRewardParameters() 查询。
     /// @return baseUsd 基础分/100 USD
     /// @return perDay 每天积分
     /// @return bonus 健康因子奖励 (BPS)
     /// @return baseEth 基础分/ETH
-    function getRewardParameters() external view returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth) {
+    function getRewardParameters() external view onlyAllowedReader returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth) {
         return (_basePointPerHundredUsd, _durationPointPerDay, _earlyRepayBonus, _basePointPerEth);
     }
 
     /// @notice 查询用户欠分
-    function getUserPenaltyDebt(address user) external view returns (uint256) {
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserPenaltyDebt(user) 查询。
+    function getUserPenaltyDebt(address user) external view onlyAllowedReader returns (uint256) {
         return _penaltyLedger[user];
     }
 
     /// @notice 查询缓存过期时间
-    function getCacheExpirationTime() external view returns (uint256) {
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getCacheExpirationTime() 查询。
+    function getCacheExpirationTime() external view onlyAllowedReader returns (uint256) {
         return _cacheExpirationTime;
     }
 
     /// @notice 查询系统统计（批量操作与缓存命中次数）
-    function getTotalBatchOperations() external view returns (uint256) {
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getTotalBatchOperations() 查询。
+    function getTotalBatchOperations() external view onlyAllowedReader returns (uint256) {
         return _totalBatchOperations;
     }
 
-    function getTotalCachedRewards() external view returns (uint256) {
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getTotalCachedRewards() 查询。
+    function getTotalCachedRewards() external view onlyAllowedReader returns (uint256) {
         return _totalCachedRewards;
     }
 
     /// @notice 查询最后重置时间
-    function getLastRewardResetTime() external view returns (uint256) {
+    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getLastRewardResetTime() 查询。
+    function getLastRewardResetTime() external view onlyAllowedReader returns (uint256) {
         return _lastRewardResetTime;
     }
 
+    // ========== Read-gate admin (via RewardManager governance) ==========
+    /// @notice 查询：read-gate 是否开启
+    function isReadGateEnabled() external view returns (bool) {
+        return _readGateEnabled;
+    }
+
+    /// @notice 设置 read-gate（仅 RewardManager 可调用，治理通过 RewardManager 入口转发）
+    function setReadGateEnabled(bool enabled) external onlyValidRegistry {
+        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
+        if (msg.sender != rewardManager) revert MissingRole();
+        _readGateEnabled = enabled;
+    }
+
+    /// @notice 设置额外 reader 白名单（仅 RewardManager 可调用）
+    function setExtraReader(address reader, bool allowed) external onlyValidRegistry {
+        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
+        if (msg.sender != rewardManager) revert MissingRole();
+        if (reader == address(0)) revert ZeroAddress();
+        _extraReaders[reader] = allowed;
+    }
+
+    /// @notice 查询额外 reader 是否允许
+    function isExtraReaderAllowed(address reader) external view returns (bool) {
+        return _extraReaders[reader];
+    }
     /// @notice 计算示例积分（用于测试和验证）
     /// @param amount 借款金额 (USDT, 6位小数)
     /// @param duration 借款期限 (秒)
@@ -803,23 +975,11 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     /// @return basePoints 基础积分
     /// @return bonus 奖励积分
     /// @return totalPoints 总积分
-    function calculateExamplePoints(uint256 amount, uint256 duration, bool hfHighEnough) external view returns (uint256 basePoints, uint256 bonus, uint256 totalPoints) {
-        if (amount == 0) return (0, 0, 0);
-        
-        // BasePoints = 金额_USDT ÷ 100 × 期限_天 ÷ 5
-        basePoints = (amount / 100) * (duration / 5);
-        
-        // 应用基础积分权重
-        basePoints = (basePoints * _basePointPerHundredUsd) / 1e18;
-        
-        // Bonus = BasePoints × 5%（当且仅当借款全过程 HealthFactor ≥ 1.5）
-        totalPoints = basePoints;
-        if (hfHighEnough && _earlyRepayBonus > 0) {
-            bonus = (basePoints * _earlyRepayBonus) / 10000;
-            totalPoints += bonus;
-        }
-        
-        return (basePoints, bonus, totalPoints);
+    function calculateExamplePoints(uint256 amount, uint256 duration, bool hfHighEnough) external pure returns (uint256 basePoints, uint256 bonus, uint256 totalPoints) {
+        // 本地/测试设定：borrow(duration>0) 固定 1 积分；repay(duration==0) 不计算（释放逻辑使用 lockedPoints）。
+        amount; hfHighEnough; // keep signature stable
+        if (duration > 0) return (1e18, 0, 1e18);
+        return (0, 0, 0);
     }
 
     /// @notice 获取Registry地址
@@ -932,18 +1092,18 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     }
 
     /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
-    function _authorizeUpgrade(address) internal view override {
-        // 检查调用者权限 - 只允许 RewardManager 调用
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            revert MissingRole();
-        }
+    /// @dev 升级权限遵循双轨治理：由 ACM(ActionKeys.ACTION_UPGRADE_MODULE) 控制
+    /// @dev 若后续接入 Timelock/Multisig，应在 ACM 层或此处增加“仅 Timelock/Multisig 执行”的约束
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
+        if (newImplementation == address(0)) revert ZeroAddress();
     }
 
     // ========== 基类抽象实现 ==========
     function _getRegistryAddr() internal view override returns (address) {
         return _registryAddr;
     }
+
+    // ============ UUPS storage gap ============
+    uint256[50] private __gap;
 } 

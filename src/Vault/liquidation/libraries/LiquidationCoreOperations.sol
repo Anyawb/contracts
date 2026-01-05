@@ -14,7 +14,6 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { VaultMath } from "../../VaultMath.sol";
-import { ILiquidationDebtManager } from "../../../interfaces/ILiquidationDebtManager.sol";
 import { ILiquidationGuaranteeManager } from "../../../interfaces/ILiquidationGuaranteeManager.sol";
 import { ILiquidationCollateralManager } from "../../../interfaces/ILiquidationCollateralManager.sol";
 import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
@@ -319,14 +318,11 @@ library LiquidationCoreOperations {
         LiquidationValidationLibrary.validateAddress(liquidatorAddr);
         LiquidationValidationLibrary.validateAmount(reduceAmount);
 
-        address debtManagerAddr = ModuleCache.get(moduleCache, ModuleKeys.KEY_LIQUIDATION_DEBT_MANAGER, DEFAULT_CACHE_MAX_AGE);
-        if (debtManagerAddr != address(0)) {
-            reducedAmount = ILiquidationDebtManager(debtManagerAddr).reduceDebt(
-                targetUserAddr,
-                debtAssetAddr,
-                reduceAmount,
-                liquidatorAddr
-            );
+        address lendingEngine = ModuleCache.get(moduleCache, ModuleKeys.KEY_LE, DEFAULT_CACHE_MAX_AGE);
+        if (lendingEngine != address(0)) {
+            // ILendingEngineBasic.forceReduceDebt 在当前接口中不返回值
+            ILendingEngineBasic(lendingEngine).forceReduceDebt(targetUserAddr, debtAssetAddr, reduceAmount);
+            reducedAmount = reduceAmount;
         }
     }
 

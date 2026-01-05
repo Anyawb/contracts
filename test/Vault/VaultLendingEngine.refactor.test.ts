@@ -4,7 +4,7 @@
  * 覆盖点（对应 Architecture-Analysis-Refactor-Summary）：
  * - 统一入口：borrow/repay 仅允许 KEY_VAULT_CORE 调用（onlyVaultCore）
  * - 清算直达入口：forceReduceDebt 需 ACTION_LIQUIDATE，且会同步 View/Health
- * - 账本写入与视图推送：借/还/清算后 VaultView 缓存更新
+ * - 账本写入与视图推送：借/还/清算后 VaultRouter 缓存更新
  * - 健康推送：借/清算后 HealthView 收到 pushRiskStatus
  *
  * 规范：参考 docs/test-file-standards.md（权限、断言、导入方式）
@@ -20,7 +20,7 @@ import type {
   MockRegistry,
   MockAccessControlManager,
   MockCollateralManager,
-  MockVaultView,
+  MockVaultRouter,
   MockHealthView,
   MockRewardManager,
   MockPriceOracle,
@@ -56,8 +56,8 @@ describe('VaultLendingEngine – refactor regression', function () {
     const CM = await ethers.getContractFactory('MockCollateralManager');
     const cm = (await CM.deploy()) as MockCollateralManager;
 
-    const VaultView = await ethers.getContractFactory('MockVaultView');
-    const vaultView = (await VaultView.deploy()) as MockVaultView;
+    const VaultRouter = await ethers.getContractFactory('MockVaultRouter');
+    const vaultRouter = (await VaultRouter.deploy()) as MockVaultRouter;
 
     const HealthView = await ethers.getContractFactory('MockHealthView');
     const healthView = (await HealthView.deploy()) as MockHealthView;
@@ -92,7 +92,7 @@ describe('VaultLendingEngine – refactor regression', function () {
     // IMPORTANT: Deploy, configure, THEN register to Registry
     const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
     const vaultCoreModule = await VaultCoreView.deploy();
-    await vaultCoreModule.setViewContractAddr(await vaultView.getAddress());
+    await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
     await vaultCoreModule.setLendingEngine(await lending.getAddress());
 
     // Registry wiring - ensure ALL required modules are registered
@@ -103,20 +103,20 @@ describe('VaultLendingEngine – refactor regression', function () {
     const lrmAddr = await lrm.getAddress();
     const vaultCoreModuleAddr = await vaultCoreModule.getAddress();
     const rewardManagerAddr = await rewardManager.getAddress();
-    const vaultViewAddr = await vaultView.getAddress();
+    const vaultRouterAddr = await vaultRouter.getAddress();
 
     // Verify addresses are non-zero
     if (acmAddr === ethers.ZeroAddress || cmAddr === ethers.ZeroAddress || 
         healthViewAddr === ethers.ZeroAddress || lrmAddr === ethers.ZeroAddress ||
         vaultCoreModuleAddr === ethers.ZeroAddress || rewardManagerAddr === ethers.ZeroAddress ||
-        vaultViewAddr === ethers.ZeroAddress) {
+        vaultRouterAddr === ethers.ZeroAddress) {
       throw new Error('One or more module addresses are zero');
     }
 
     // Verify viewContractAddr is set
     const viewContractAddr = await vaultCoreModule.viewContractAddrVar();
-    if (viewContractAddr === ethers.ZeroAddress || viewContractAddr !== vaultViewAddr) {
-      throw new Error(`viewContractAddr not set correctly: ${viewContractAddr} != ${vaultViewAddr}`);
+    if (viewContractAddr === ethers.ZeroAddress || viewContractAddr !== vaultRouterAddr) {
+      throw new Error(`viewContractAddr not set correctly: ${viewContractAddr} != ${vaultRouterAddr}`);
     }
 
     await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, acmAddr);
@@ -132,7 +132,7 @@ describe('VaultLendingEngine – refactor regression', function () {
     // Seed collateral to get meaningful health factor
     await cm.depositCollateral(user.address, debtAsset, 200);
 
-    return { vaultCoreModule, vaultCore, liquidator, user, lending, registry, cm, vaultView, healthView, debtAsset, acm, priceOracle, settlementToken, lrm };
+    return { vaultCoreModule, vaultCore, liquidator, user, lending, registry, cm, vaultRouter, healthView, debtAsset, acm, priceOracle, settlementToken, lrm };
   }
 
   describe('onlyVaultCore guard', function () {
@@ -176,7 +176,7 @@ describe('VaultLendingEngine – refactor regression', function () {
 
   describe('borrow / repay happy path', function () {
     it('should update ledger, push view, and push health on borrow', async function () {
-      const { vaultCoreModule, user, lending, cm, debtAsset, healthView, vaultView, priceOracle, registry } = await loadFixture(deployFixture);
+      const { vaultCoreModule, user, lending, cm, debtAsset, healthView, vaultRouter, priceOracle, registry } = await loadFixture(deployFixture);
 
       // Debug: Check all module addresses and code sizes
       console.log('\n=== Module Address and Code Size Check ===');
@@ -525,14 +525,14 @@ describe('VaultLendingEngine – refactor regression', function () {
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(50);
       // HealthView should receive an update (health factor > 0)
       expect(await healthView.getUserHealthFactor(user.address)).to.be.gt(0);
-      // VaultView updated via pushUserPositionUpdate
-      expect(await vaultView.getUserDebt(user.address, debtAsset)).to.equal(50);
+      // VaultRouter updated via pushUserPositionUpdate
+      expect(await vaultRouter.getUserDebt(user.address, debtAsset)).to.equal(50);
       // Collateral unchanged in cm, debt recorded in ledger
       expect(await cm.getUserTotalCollateralValue(user.address)).to.equal(200);
     });
 
     it('repay should reduce debt and push view/health', async function () {
-      const { vaultCoreModule, user, lending, cm, healthView, vaultView, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, user, lending, cm, healthView, vaultRouter, debtAsset } = await loadFixture(deployFixture);
       try {
         await vaultCoreModule.borrow(user.address, debtAsset, 30, 0, 0);
       } catch (error: any) {
@@ -553,7 +553,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       expect(await lending.getDebt(user.address, debtAsset)).to.equal(20);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(20);
       expect(await healthView.getUserHealthFactor(user.address)).to.be.gt(0);
-      expect(await vaultView.getUserDebt(user.address, debtAsset)).to.equal(20);
+      expect(await vaultRouter.getUserDebt(user.address, debtAsset)).to.equal(20);
       expect(await cm.getUserTotalCollateralValue(user.address)).to.equal(200);
     });
 
@@ -622,14 +622,14 @@ describe('VaultLendingEngine – refactor regression', function () {
     });
 
     it('should reduce debt, push view/health with proper role', async function () {
-      const { vaultCoreModule, liquidator, lending, cm, healthView, vaultView, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, liquidator, lending, cm, healthView, vaultRouter, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 40, 0, 0);
 
       await lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 25);
 
       expect(await lending.getDebt(liquidator.address, debtAsset)).to.equal(15);
       expect(await cm.getUserTotalCollateralValue(liquidator.address)).to.equal(0); // liquidator had no collateral seeded
-      expect(await vaultView.getUserDebt(liquidator.address, debtAsset)).to.equal(15);
+      expect(await vaultRouter.getUserDebt(liquidator.address, debtAsset)).to.equal(15);
       expect(await healthView.getUserHealthFactor(liquidator.address)).to.be.gte(0);
     });
 
@@ -717,22 +717,22 @@ describe('VaultLendingEngine – refactor regression', function () {
   });
 
   describe('view and health status updates', function () {
-    it('should push position update to VaultView on borrow', async function () {
-      const { vaultCoreModule, user, vaultView, debtAsset, cm } = await loadFixture(deployFixture);
+    it('should push position update to VaultRouter on borrow', async function () {
+      const { vaultCoreModule, user, vaultRouter, debtAsset, cm } = await loadFixture(deployFixture);
       
       await expect(
         vaultCoreModule.borrow(user.address, debtAsset, 50, 0, 0)
-      ).to.emit(vaultView, 'UserPositionUpdated')
+      ).to.emit(vaultRouter, 'UserPositionUpdated')
         .withArgs(user.address, debtAsset, 200, 50); // collateral: 200, debt: 50
     });
 
-    it('should push position update to VaultView on repay', async function () {
-      const { vaultCoreModule, user, vaultView, debtAsset } = await loadFixture(deployFixture);
+    it('should push position update to VaultRouter on repay', async function () {
+      const { vaultCoreModule, user, vaultRouter, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(user.address, debtAsset, 50, 0, 0);
       
       await expect(
         vaultCoreModule.repay(user.address, debtAsset, 20)
-      ).to.emit(vaultView, 'UserPositionUpdated')
+      ).to.emit(vaultRouter, 'UserPositionUpdated')
         .withArgs(user.address, debtAsset, 200, 30); // collateral: 200, debt: 30
     });
 

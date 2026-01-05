@@ -42,7 +42,7 @@ export class AddressManager {
   private readonly network: string;
   private readonly networkInfo: NetworkInfo;
   private addresses: AddressConfig = {};
-  private deploymentRecord: DeploymentRecord;
+  private deploymentRecord?: DeploymentRecord;
 
   constructor(network: string, networkInfo: NetworkInfo, baseDir: string = 'scripts/deployments') {
     this.network = network;

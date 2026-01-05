@@ -63,6 +63,7 @@ contract RegistryUpgradeManager is
     error TimestampOverflow(uint256 current, uint256 delay);
 
     // ============ Constructor ============
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

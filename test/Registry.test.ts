@@ -60,7 +60,10 @@ describe('Registry – 核心功能测试', function () {
 
     // 部署代理合约
     const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
-    const initData = registryImplementation.interface.encodeFunctionData('initialize', [TEST_MIN_DELAY]);
+    const initData = registryImplementation.interface.encodeFunctionData(
+      'initialize',
+      [TEST_MIN_DELAY, owner.address, owner.address]
+    );
     registryProxy = await ProxyFactory.deploy(
       registryImplementation.target,
       initData
@@ -122,7 +125,7 @@ describe('Registry – 核心功能测试', function () {
 
     it('Registry – 应该拒绝重复初始化', async function () {
       await expect(
-        registry.initialize(TEST_MIN_DELAY)
+        registry.initialize(TEST_MIN_DELAY, owner.address, owner.address)
       ).to.be.revertedWith('Initializable: contract is already initialized');
     });
 
@@ -132,7 +135,10 @@ describe('Registry – 核心功能测试', function () {
       await newImplementation.waitForDeployment();
 
       const newProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
-      const initData = newImplementation.interface.encodeFunctionData('initialize', [ethers.MaxUint256]);
+      const initData = newImplementation.interface.encodeFunctionData(
+        'initialize',
+        [ethers.MaxUint256, owner.address, owner.address]
+      );
       
       await expect(
         newProxyFactory.deploy(

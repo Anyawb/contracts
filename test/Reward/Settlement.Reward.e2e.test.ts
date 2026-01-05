@@ -76,7 +76,7 @@ describe('Settlement + Reward end-to-end (借款→落账→锁定→按期释�
 
     // 5) 部署 FeeRouter 并初始化
     feeRouter = (await upgrades.deployProxy(
-      await ethers.getContractFactory('src/core/FeeRouter.sol:FeeRouter'),
+      await ethers.getContractFactory('src/Vault/FeeRouter.sol:FeeRouter'),
       [
         await registry.getAddress(),
         await governance.getAddress(),

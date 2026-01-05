@@ -14,6 +14,14 @@ contract RevertingCollateralTotals is ICollateralManager {
         // no-op
     }
 
+    function withdrawCollateralTo(address, address, uint256, address) external pure override {
+        // no-op
+    }
+
+    function seizeCollateralForLiquidation(address, address, uint256, address) external pure override {
+        // no-op
+    }
+
     function getCollateral(address, address) external pure override returns (uint256) {
         return 0;
     }
@@ -38,6 +46,7 @@ contract RevertingCollateralTotals is ICollateralManager {
         return amount;
     }
 }
+
 
 
 

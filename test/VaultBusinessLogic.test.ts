@@ -33,7 +33,7 @@ import type { MockERC20 } from '../../types/contracts/Mocks/MockERC20';
 import type { MockRegistry } from '../../types/contracts/Mocks/MockRegistry';
 import type { MockVaultCore } from '../../types/contracts/Mocks/MockVaultCore';
 import type { MockLiquidationEventsView } from '../../types/contracts/Mocks/MockLiquidationEventsView';
-import type { MockVaultView } from '../../types/contracts/Mocks/MockVaultView';
+import type { MockVaultRouter } from '../../types/contracts/Mocks/MockVaultRouter';
 import type { MockEarlyRepaymentGuaranteeManager } from '../../types/contracts/Mocks/MockEarlyRepaymentGuaranteeManager';
 import type { MockLiquidationManager } from '../../types/contracts/Mocks/MockLiquidationManager';
 
@@ -81,7 +81,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
   let registry: MockRegistry;
   let mockVaultCore: MockVaultCore;
   let mockLiquidationEventsView: MockLiquidationEventsView;
-  let mockVaultView: MockVaultView;
+  let mockVaultRouter: MockVaultRouter;
   let mockEarlyRepaymentGuaranteeManager: MockEarlyRepaymentGuaranteeManager;
   let mockLiquidationManager: MockLiquidationManager;
 
@@ -105,7 +105,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
   let mockPriceOracleFactory: ContractFactory;
   let mockERC20Factory: ContractFactory;
   let mockLiquidationEventsViewFactory: ContractFactory;
-  let mockVaultViewFactory: ContractFactory;
+  let mockVaultRouterFactory: ContractFactory;
   let mockEarlyRepaymentGuaranteeManagerFactory: ContractFactory;
   let mockLiquidationManagerFactory: ContractFactory;
 
@@ -213,9 +213,9 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     mockLiquidationEventsView = await mockLiquidationEventsViewFactory.deploy() as MockLiquidationEventsView;
     await mockLiquidationEventsView.waitForDeployment();
 
-    mockVaultViewFactory = await ethers.getContractFactory('MockVaultView');
-    mockVaultView = await mockVaultViewFactory.deploy() as MockVaultView;
-    await mockVaultView.waitForDeployment();
+    mockVaultRouterFactory = await ethers.getContractFactory('MockVaultRouter');
+    mockVaultRouter = await mockVaultRouterFactory.deploy() as MockVaultRouter;
+    await mockVaultRouter.waitForDeployment();
 
     mockEarlyRepaymentGuaranteeManagerFactory = await ethers.getContractFactory('MockEarlyRepaymentGuaranteeManager');
     mockEarlyRepaymentGuaranteeManager = await mockEarlyRepaymentGuaranteeManagerFactory.deploy() as MockEarlyRepaymentGuaranteeManager;
@@ -260,7 +260,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     await registry.setModule(MODULE_KEYS.LENDING_ENGINE, mockLendingEngine.target);
     await registry.setModule(MODULE_KEYS.STATISTICS_VIEW, mockStatisticsView.target);
     await registry.setModule(MODULE_KEYS.VAULT_CONFIG, mockVaultCore.target);
-    await mockVaultCore.setViewContractAddr(mockVaultView.target);
+    await mockVaultCore.setViewContractAddr(mockVaultRouter.target);
     await registry.setModule(MODULE_KEYS.GUARANTEE_FUND, mockGuaranteeFundManager.target);
     await registry.setModule(MODULE_KEYS.REWARD_MANAGER, mockRewardManager.target);
     await registry.setModule(MODULE_KEYS.ASSET_WHITELIST, mockAssetWhitelist.target);
@@ -361,7 +361,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       mockSettlementToken,
       registry,
       mockLiquidationEventsView,
-      mockVaultView,
+      mockVaultRouter,
       mockEarlyRepaymentGuaranteeManager,
       mockLiquidationManager,
       owner,
@@ -643,7 +643,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             TEST_ASSET,
             TEST_ASSET2,
             TEST_AMOUNT,
-            TEST_AMOUNT
+            TEST_AMOUNT,
+            0n
           )
         ).to.not.be.reverted;
       });
@@ -655,7 +656,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             TEST_ASSET,
             TEST_ASSET2,
             TEST_AMOUNT,
-            TEST_AMOUNT
+            TEST_AMOUNT,
+            0n
           )
         ).to.be.revertedWith('Invalid user address');
         
@@ -665,7 +667,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             ZERO_ADDRESS,
             TEST_ASSET2,
             TEST_AMOUNT,
-            TEST_AMOUNT
+            TEST_AMOUNT,
+            0n
           )
         ).to.be.revertedWith('Invalid collateral asset');
         
@@ -675,7 +678,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             TEST_ASSET,
             ZERO_ADDRESS,
             TEST_AMOUNT,
-            TEST_AMOUNT
+            TEST_AMOUNT,
+            0n
           )
         ).to.be.revertedWith('Invalid debt asset');
       });
@@ -687,7 +691,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             TEST_ASSET,
             TEST_ASSET2,
             0n,
-            TEST_AMOUNT
+            TEST_AMOUNT,
+            0n
           )
         ).to.be.revertedWith('Invalid collateral amount');
         
@@ -697,6 +702,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             TEST_ASSET,
             TEST_ASSET2,
             TEST_AMOUNT,
+            0n,
             0n
           )
         ).to.be.revertedWith('Invalid debt amount');
@@ -710,6 +716,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
         const debtAssets = [TEST_ASSET2, TEST_ASSET];
         const collateralAmounts = [TEST_AMOUNT, TEST_AMOUNT];
         const debtAmounts = [TEST_AMOUNT, TEST_AMOUNT];
+        const bonuses = [0n, 0n];
         
         await expect(
           mockLiquidationManager.batchLiquidate(
@@ -717,7 +724,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             collateralAssets,
             debtAssets,
             collateralAmounts,
-            debtAmounts
+            debtAmounts,
+            bonuses
           )
         ).to.not.be.reverted;
       });
@@ -728,6 +736,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
         const debtAssets = [TEST_ASSET2];
         const collateralAmounts = [TEST_AMOUNT];
         const debtAmounts = [TEST_AMOUNT];
+        const bonuses = [0n];
         
         await expect(
           mockLiquidationManager.batchLiquidate(
@@ -735,7 +744,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             collateralAssets,
             debtAssets,
             collateralAmounts,
-            debtAmounts
+            debtAmounts,
+            bonuses
           )
         ).to.be.revertedWith('Length mismatch');
       });
@@ -746,6 +756,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
         const debtAssets = [TEST_ASSET2, TEST_ASSET];
         const collateralAmounts = [TEST_AMOUNT, TEST_AMOUNT];
         const debtAmounts = [TEST_AMOUNT, TEST_AMOUNT];
+        const bonuses = [0n, 0n];
         
         await expect(
           mockLiquidationManager.batchLiquidate(
@@ -753,9 +764,10 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             collateralAssets,
             debtAssets,
             collateralAmounts,
-            debtAmounts
+            debtAmounts,
+            bonuses
           )
-        ).to.not.be.reverted; // Mock 内部逐项校验，零地址由单笔时校验
+        ).to.be.revertedWith('Invalid user address');
       });
     });
 
@@ -1165,7 +1177,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       
       // 注意：由于模块键问题，这个测试可能会失败
       // 这里只是测试事件过滤器存在
-      expect(mockVaultView.filters.CollateralSeized).to.not.be.undefined;
+      expect(mockVaultRouter.filters.CollateralSeized).to.not.be.undefined;
     });
 
     it('应该发出债务减少事件', async function () {
@@ -1173,7 +1185,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       
       // 注意：由于模块键问题，这个测试可能会失败
       // 这里只是测试事件过滤器存在
-      expect(mockVaultView.filters.DebtReduced).to.not.be.undefined;
+      expect(mockVaultRouter.filters.DebtReduced).to.not.be.undefined;
     });
   });
 

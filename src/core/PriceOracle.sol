@@ -18,6 +18,7 @@ error PriceOracle__AssetAlreadySupported();
 error PriceOracle__AssetNotSupported();
 error PriceOracle__StalePrice();
 error PriceOracle__InvalidPrice();
+error PriceOracle__InvalidTimestamp();
 error PriceOracle__Unauthorized();
 
 /// @title PriceOracle 价格预言机实现
@@ -38,11 +39,6 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
     
     /// @notice 默认最大价格年龄（1 小时）
     uint256 internal constant DEFAULT_MAX_PRICE_AGE_VALUE = 3600;
-    /// @notice 兼容：原 public 常量 PRICE_DECIMALS 的显式 getter
-    function PRICE_DECIMALS() external pure returns (uint256) { return PRICE_DECIMALS_VALUE; }
-
-    /// @notice 兼容：原 public 常量 DEFAULT_MAX_PRICE_AGE 的显式 getter
-    function DEFAULT_MAX_PRICE_AGE() external pure returns (uint256) { return DEFAULT_MAX_PRICE_AGE_VALUE; }
 
     /* ============ Storage ============ */
     
@@ -84,9 +80,6 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         
         _registryAddr = initialRegistryAddr;
         
-        // 设置默认资产配置
-        _setupDefaultAssets();
-        
         // 记录标准化动作事件
         emit VaultTypes.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -105,6 +98,8 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         
         PriceData memory priceData = _prices[asset];
         if (!priceData.isValid) revert PriceOracle__InvalidPrice();
+        // Defensive: prevent underflow panic if a (malicious/buggy) updater wrote a future timestamp.
+        if (priceData.timestamp > block.timestamp) revert PriceOracle__InvalidTimestamp();
         if (block.timestamp - priceData.timestamp > _assetConfigs[asset].maxPriceAge) {
             revert PriceOracle__StalePrice();
         }
@@ -132,13 +127,6 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         return _supportedAssets;
     }
 
-    /// @notice 检查资产是否被支持
-    /// @param asset 资产地址
-    /// @return 是否支持该资产
-    function isAssetSupported(address asset) external view returns (bool) {
-        return _assetConfigs[asset].isActive;
-    }
-
     /// @inheritdoc IPriceOracle
     function getPrices(address[] calldata assets) external view override returns (
         uint256[] memory prices,
@@ -156,6 +144,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
             
             PriceData memory priceData = _prices[assets[i]];
             if (!priceData.isValid) revert PriceOracle__InvalidPrice();
+            if (priceData.timestamp > block.timestamp) revert PriceOracle__InvalidTimestamp();
             if (block.timestamp - priceData.timestamp > _assetConfigs[assets[i]].maxPriceAge) {
                 revert PriceOracle__StalePrice();
             }
@@ -172,8 +161,10 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         if (!_assetConfigs[asset].isActive) return false;
         
         PriceData memory priceData = _prices[asset];
-        return priceData.isValid && 
-               (block.timestamp - priceData.timestamp <= _assetConfigs[asset].maxPriceAge);
+        // Defensive: if timestamp is in the future, treat as invalid (avoid underflow panic).
+        if (!priceData.isValid) return false;
+        if (priceData.timestamp > block.timestamp) return false;
+        return (block.timestamp - priceData.timestamp <= _assetConfigs[asset].maxPriceAge);
     }
 
     /// @inheritdoc IPriceOracle
@@ -186,22 +177,6 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
     /// @inheritdoc IPriceOracle
     function getAssetCount() external view override returns (uint256 count) {
         return _supportedAssets.length;
-    }
-
-    /* ============ Optional Helper (Phase 2) ============ */
-    /// @notice 统一价格信息查询（不revert，返回有效性标记）
-    function getPriceInfo(address asset) external view returns (
-        uint256 price,
-        uint256 timestamp,
-        uint256 decimals,
-        bool isValid
-    ) {
-        if (asset == address(0)) return (0, 0, 0, false);
-        AssetConfig memory cfg = _assetConfigs[asset];
-        if (!cfg.isActive) return (0, 0, 0, false);
-        PriceData memory pd = _prices[asset];
-        bool valid = pd.isValid && (block.timestamp - pd.timestamp <= cfg.maxPriceAge);
-        return (pd.price, pd.timestamp, pd.decimals, valid);
     }
 
     /// @inheritdoc IPriceOracle
@@ -256,6 +231,8 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         if (asset == address(0)) revert ZeroAddress();
         if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
         if (price == 0) revert PriceOracle__InvalidPrice();
+        // Reject future timestamps to prevent read-path DoS via underflow.
+        if (timestamp > block.timestamp) revert PriceOracle__InvalidTimestamp();
         
         _prices[asset] = PriceData({
             price: price,
@@ -291,6 +268,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
             if (assets[i] == address(0)) revert ZeroAddress();
             if (!_assetConfigs[assets[i]].isActive) revert PriceOracle__AssetNotSupported();
             if (prices[i] == 0) revert PriceOracle__InvalidPrice();
+            if (timestamps[i] > block.timestamp) revert PriceOracle__InvalidTimestamp();
             
             _prices[assets[i]] = PriceData({
                 price: prices[i],
@@ -306,82 +284,6 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         emit VaultTypes.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
-            msg.sender,
-            block.timestamp
-        );
-    }
-
-    /// @notice 添加支持的资产
-    /// @param asset 资产地址
-    /// @param maxPriceAge 最大价格年龄
-    /// @dev 仅治理角色可调用
-    function addAsset(address asset, uint256 maxPriceAge) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
-        if (asset == address(0)) revert ZeroAddress();
-        if (_assetConfigs[asset].isActive) revert PriceOracle__AssetAlreadySupported();
-        _configureAssetInternal(asset, "", PRICE_DECIMALS_VALUE, maxPriceAge, true, false);
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_ADD_WHITELIST,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
-            msg.sender,
-            block.timestamp
-        );
-        
-        // emit AssetAdded(asset, msg.sender, block.timestamp); // 需要定义相应事件
-    }
-
-    /// @notice 移除支持的资产
-    /// @param asset 资产地址
-    /// @dev 仅治理角色可调用
-    function removeAsset(address asset) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_REMOVE_WHITELIST, msg.sender);
-        if (asset == address(0)) revert ZeroAddress();
-        if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
-        
-        _assetConfigs[asset].isActive = false;
-        
-        // 从支持列表中 O(1) 移除
-        uint256 idxPlus1 = _assetIndexPlus1[asset];
-        if (idxPlus1 != 0) {
-            uint256 idx = idxPlus1 - 1;
-            uint256 lastIdx = _supportedAssets.length - 1;
-            if (idx != lastIdx) {
-                address lastAsset = _supportedAssets[lastIdx];
-                _supportedAssets[idx] = lastAsset;
-                _assetIndexPlus1[lastAsset] = idx + 1;
-            }
-            _supportedAssets.pop();
-            _assetIndexPlus1[asset] = 0;
-        }
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_REMOVE_WHITELIST,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
-            msg.sender,
-            block.timestamp
-        );
-        
-        // emit AssetRemoved(asset, msg.sender, block.timestamp); // 需要定义相应事件
-    }
-
-    /// @notice 更新资产配置
-    /// @param asset 资产地址
-    /// @param maxPriceAge 新的最大价格年龄
-    /// @dev 仅治理角色可调用
-    function updateAssetConfig(address asset, uint256 maxPriceAge) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        if (asset == address(0)) revert ZeroAddress();
-        if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
-        
-        _assetConfigs[asset].maxPriceAge = maxPriceAge;
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
             block.timestamp
         );
@@ -419,42 +321,6 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         }
     }
 
-    /// @notice 更新 Registry 地址
-    /// @param newRegistryAddr 新的 Registry 地址
-    /// @dev 需要 ACTION_UPGRADE_MODULE 权限
-    function updateRegistry(address newRegistryAddr) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
-        if (newRegistryAddr == address(0)) revert ZeroAddress();
-        
-        address oldRegistry = _registryAddr;
-        _registryAddr = newRegistryAddr;
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_UPGRADE_MODULE,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
-            msg.sender,
-            block.timestamp
-        );
-        
-        // 发出模块地址更新事件
-        emit VaultTypes.ModuleAddressUpdated(
-            ModuleKeys.getModuleKeyString(ModuleKeys.KEY_PRICE_ORACLE),
-            oldRegistry,
-            newRegistryAddr,
-            block.timestamp
-        );
-
-    }
-
-    /* ============ View Functions ============ */
-    
-    /// @notice 获取 Registry 地址
-    /// @return registry 当前 Registry 地址
-    function getRegistry() external view returns (address registry) {
-        return _registryAddr;
-    }
-
     /* ============ Internal Functions ============ */
     
     /// @notice 验证用户权限
@@ -467,12 +333,6 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
     
-    /// @dev 设置默认资产配置
-    function _setupDefaultAssets() internal {
-        // 这里可以设置一些默认支持的资产
-        // 例如：USDC, USDT, WETH等
-    }
-
     /* ============ Upgrade Functions ============ */
     
     /// @notice 升级授权函数

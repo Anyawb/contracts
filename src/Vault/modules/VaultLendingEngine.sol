@@ -11,9 +11,8 @@ import { AmountIsZero, Overpay, ZeroAddress, MissingRole } from "../../errors/St
 import { IPriceOracle } from "../../interfaces/IPriceOracle.sol";
 import { ILendingEngineBasic } from "../../interfaces/ILendingEngineBasic.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
-import { IRewardManager } from "../../interfaces/IRewardManager.sol";
 import { ICollateralManager } from "../../interfaces/ICollateralManager.sol";
-import { IVaultView } from "../../interfaces/IVaultView.sol";
+import { IVaultRouter } from "../../interfaces/IVaultRouter.sol";
 import { ViewConstants } from "../view/ViewConstants.sol";
 import { Registry } from "../../registry/Registry.sol";
 import { HealthFactorLib } from "../../libraries/HealthFactorLib.sol";
@@ -149,12 +148,6 @@ contract VaultLendingEngine is
         return LendingEngineCore._getModuleAddress(_s(), moduleKey);
     }
 
-    /// @notice 奖励通知（最佳努力，不影响主流程）
-    /// @dev 若 RewardManager 未配置或调用失败，直接忽略
-    function _notifyRewardManager(address user, uint256 amount) internal {
-        LendingEngineCore._notifyRewardManager(_s(), user, amount);
-    }
-   
     /// @notice 权限校验内部函数
     /// @param actionKey 动作键
     /// @param user 用户地址
@@ -402,8 +395,8 @@ contract VaultLendingEngine is
         uint256 collateralAdded, 
         uint16 termDays
     ) external override onlyValidRegistry nonReentrant onlyVaultCore {
-        collateralAdded; termDays; // silence unused parameters
-        _s().borrow(user, asset, amount);
+        collateralAdded; // silence unused parameter
+        _s().borrow(user, asset, amount, termDays);
     }
 
     /// @notice 记录一次还款操作
@@ -591,8 +584,8 @@ contract VaultLendingEngine is
         LendingEngineCore._pushUserPositionToView(_s(), user, asset);
     }
 
-    /// @notice 解析当前有效的 VaultView 地址（通过 Registry -> VaultCore）
-    function _resolveVaultViewAddr() internal view returns (address) {
+    /// @notice 解析当前有效的 VaultRouter 地址（通过 Registry -> VaultCore）
+    function _resolveVaultRouterAddr() internal view returns (address) {
         address vaultCore = _getModuleAddress(ModuleKeys.KEY_VAULT_CORE);
         return IVaultCoreMinimal(vaultCore).viewContractAddrVar();
     }

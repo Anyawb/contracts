@@ -139,7 +139,7 @@ npx hardhat registry:sync \
 
 **支持的模块键**：
 - `VAULT_CORE` → 从部署文件读取 `VaultCore`
-- `VAULT_VIEW` → 从部署文件读取 `VaultView`
+- `VAULT_VIEW` → 从部署文件读取 `VaultRouter`
 - `REWARD_VIEW` → 从部署文件读取 `RewardView`
 - `LENDING_ENGINE` → 从部署文件读取 `LendingEngine`
 
@@ -148,7 +148,7 @@ npx hardhat registry:sync \
 # 同步所有模块到本地网络
 npx hardhat registry:sync --networkName localhost
 
-# 只同步 VaultCore 和 VaultView
+# 只同步 VaultCore 和 VaultRouter
 npx hardhat registry:sync \
   --networkName localhost \
   --only VAULT_CORE,VAULT_VIEW

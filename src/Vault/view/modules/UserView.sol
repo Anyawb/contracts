@@ -3,29 +3,33 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { HealthView } from "./HealthView.sol";
-import { PositionView } from "./PositionView.sol";
-import { DashboardView } from "./DashboardView.sol";
 import { RiskUtils } from "../../utils/RiskUtils.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
+import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
+import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
 
 /// @title UserView
 /// @notice 用户视图模块 - 轻量级外观（Facade）模式，委托调用到专业子模块
-/// @dev 采用外观（Facade）模式重构，委托调用到 HealthView、PositionView 和 DashboardView
+/// @dev 采用外观（Facade）模式重构，委托调用到 HealthView、PositionView 等专业视图
 /// @dev 遵循双架构设计标准，提供0-gas查询接口
 /// @dev 保留原有API兼容性，确保其他模块引用不受影响
 /// @custom:security-contact security@example.com
-contract UserView is Initializable, UUPSUpgradeable {
+contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
+    /// @notice 批量过大错误
+    error UserView__BatchTooLarge(uint256 size);
+
+    /// @notice 输入数组长度不匹配
+    error UserView__LengthMismatch();
     
     /// @notice Registry 合约地址 (私有)
     address private _registryAddr;
-    
+
     /// @notice 用户统计信息结构体
     struct UserStats {
         uint256 collateral; // 抵押数量
@@ -65,53 +69,10 @@ contract UserView is Initializable, UUPSUpgradeable {
         if (_registryAddr == address(0)) revert ZeroAddress();
         _;
     }
-    
-    /// @notice 权限验证内部函数
-    /// @param actionKey 动作键
-    /// @param user 用户地址
-    function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acmAddr).requireRole(actionKey, user);
-    }
-    
-    /// @notice 角色检查内部函数
-    /// @param actionKey 动作键
-    /// @param user 用户地址
-    /// @return 是否具有角色
-    function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        return IAccessControlManager(acmAddr).hasRole(actionKey, user);
-    }
-    
-    /// @notice 用户数据访问验证修饰符 - 严格模式
-    modifier onlyUserOrStrictAdmin(address user) {
-        require(
-            msg.sender == user || 
-            _hasRole(ActionKeys.ACTION_ADMIN, msg.sender),
-            "UserView: unauthorized access"
-        );
-        _;
-    }
-    
-    /// @notice 用户数据访问验证修饰符 - 宽松模式（包含前端服务）
-    modifier onlyUserOrServiceAdmin(address user) {
-        require(
-            msg.sender == user || 
-            _hasRole(ActionKeys.ACTION_ADMIN, msg.sender) ||
-            _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender),
-            "UserView: unauthorized access"
-        );
-        _;
-    }
-    
-    /// @notice 批量操作权限验证修饰符
-    modifier onlyBatchOperator() {
-        require(
-            _hasRole(ActionKeys.ACTION_ADMIN, msg.sender) ||
-            _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender),
-            "UserView: unauthorized batch operation"
-        );
-        _;
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
     }
     
     /// @notice 初始化用户视图模块
@@ -124,27 +85,31 @@ contract UserView is Initializable, UUPSUpgradeable {
         _registryAddr = initialRegistryAddr;
         
         // 发出数据推送事件
-        DataPushLibrary._emitData(keccak256("USER_VIEW_INITIALIZED"), abi.encode(initialRegistryAddr, block.timestamp));
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_USER_VIEW_INITIALIZED, abi.encode(initialRegistryAddr, block.timestamp));
     }
     
     /* ============ 内部辅助函数：获取子模块 ============ */
     
+    /// @notice 获取指定模块地址，失败时返回零地址
+    function _getModule(bytes32 key) internal view returns (address module) {
+        if (_registryAddr == address(0)) return address(0);
+        try Registry(_registryAddr).getModule(key) returns (address m) {
+            return m;
+        } catch {
+            return address(0);
+        }
+    }
+    
     /// @notice 获取HealthView模块
-    /// @return HealthView模块实例
-    function _healthView() internal view returns (HealthView) {
-        return HealthView(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW));
+    /// @return HealthView模块地址
+    function _healthView() internal view returns (address) {
+        return _getModule(ModuleKeys.KEY_HEALTH_VIEW);
     }
     
     /// @notice 获取PositionView模块
-    /// @return PositionView模块实例
-    function _positionView() internal view returns (PositionView) {
-        return PositionView(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW));
-    }
-    
-    /// @notice 获取DashboardView模块
-    /// @return DashboardView模块实例
-    function _dashboardView() internal view returns (DashboardView) {
-        return DashboardView(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_DASHBOARD_VIEW));
+    /// @return PositionView模块地址
+    function _positionView() internal view returns (address) {
+        return _getModule(ModuleKeys.KEY_POSITION_VIEW);
     }
     
     /* ============ 用户状态查询 - 委托到PositionView ============ */
@@ -154,8 +119,12 @@ contract UserView is Initializable, UUPSUpgradeable {
     /// @param asset 资产地址
     /// @return collateral 抵押数量
     /// @return debt 债务数量
-    function getUserPosition(address user, address asset) external view onlyUserOrStrictAdmin(user) returns (uint256 collateral, uint256 debt) {
-        return _positionView().getUserPosition(user, asset);
+    function getUserPosition(address user, address asset) external view onlyValidRegistry returns (uint256 collateral, uint256 debt) {
+        address pv = _positionView();
+        if (pv == address(0)) return (0, 0);
+        (bool ok, bytes memory data) = pv.staticcall(abi.encodeWithSignature("getUserPosition(address,address)", user, asset));
+        if (!ok || data.length < 64) return (0, 0);
+        return abi.decode(data, (uint256, uint256));
     }
     
     /// @notice 查询指定用户指定资产的抵押和借款余额（服务权限）
@@ -163,61 +132,61 @@ contract UserView is Initializable, UUPSUpgradeable {
     /// @param asset 资产地址
     /// @return collateral 抵押数量
     /// @return debt 债务数量
-    function getUserPositionService(address user, address asset) external view onlyUserOrServiceAdmin(user) returns (uint256 collateral, uint256 debt) {
-        return _positionView().getUserPosition(user, asset);
+    function getUserPositionService(address user, address asset) external view onlyValidRegistry returns (uint256 collateral, uint256 debt) {
+        return this.getUserPosition(user, asset);
     }
     
     /// @notice 查询用户持有的指定代币余额
     /// @param user 用户地址
     /// @param token 代币地址
     /// @return balance 代币余额
-    function getUserTokenBalance(address user, address token) external view onlyUserOrStrictAdmin(user) returns (uint256 balance) {
+    function getUserTokenBalance(address user, address token) external view onlyValidRegistry returns (uint256 balance) {
         // 直接调用ERC20合约，无需委托
         (bool success, bytes memory data) = token.staticcall(
             abi.encodeWithSignature("balanceOf(address)", user)
         );
-        require(success, "UserView: token balance query failed");
+        if (!success || data.length < 32) return 0;
         return abi.decode(data, (uint256));
     }
     
-    /// @notice 查询用户持有的结算代币余额
+    /// @notice 查询用户持有的结算代币余额（占位接口）
+    /// @dev 暂时返回 0；后续可从 Registry 获取结算代币地址后实现真正查询
     /// @param user 用户地址
     /// @return balance 结算代币余额
-    function getUserSettlementBalance(address user) external view onlyUserOrStrictAdmin(user) returns (uint256 balance) {
-        // 暂时返回0，后续可从Registry系统获取结算代币地址
+    function getUserSettlementBalance(address user) external pure returns (uint256 balance) {
+        // silence unused param warning in a placeholder implementation
+        user;
         return 0;
     }
     
     /// @notice 查询用户总抵押价值（以结算币计价）
     /// @param user 用户地址
     /// @return totalValue 用户总抵押价值
-    function getUserTotalCollateral(address user) external view onlyUserOrStrictAdmin(user) returns (uint256 totalValue) {
-        DashboardView.UserDashboardView memory dashView = _dashboardView().getUserDashboardView(user, address(0));
-        return dashView.collateralValue;
+    function getUserTotalCollateral(address user) external view onlyValidRegistry returns (uint256 totalValue) {
+        (totalValue, ) = this.getUserPosition(user, address(0));
     }
     
     /// @notice 查询用户总债务价值（以结算币计价）
     /// @param user 用户地址
     /// @return totalValue 用户总债务价值
-    function getUserTotalDebt(address user) external view onlyUserOrStrictAdmin(user) returns (uint256 totalValue) {
-        DashboardView.UserDashboardView memory dashView = _dashboardView().getUserDashboardView(user, address(0));
-        return dashView.debtValue;
+    function getUserTotalDebt(address user) external view onlyValidRegistry returns (uint256 totalValue) {
+        (, totalValue) = this.getUserPosition(user, address(0));
     }
     
     /// @notice 查询指定用户指定资产的抵押数量
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @return collateral 抵押数量
-    function getUserCollateral(address user, address asset) external view onlyUserOrStrictAdmin(user) returns (uint256 collateral) {
-        (collateral, ) = _positionView().getUserPosition(user, asset);
+    function getUserCollateral(address user, address asset) external view onlyValidRegistry returns (uint256 collateral) {
+        (collateral, ) = this.getUserPosition(user, asset);
     }
     
     /// @notice 查询指定用户指定资产的债务数量
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @return debt 债务数量
-    function getUserDebt(address user, address asset) external view onlyUserOrStrictAdmin(user) returns (uint256 debt) {
-        (, debt) = _positionView().getUserPosition(user, asset);
+    function getUserDebt(address user, address asset) external view onlyValidRegistry returns (uint256 debt) {
+        (, debt) = this.getUserPosition(user, asset);
     }
     
     /* ============ 健康因子查询 - 委托到HealthView ============ */
@@ -225,14 +194,18 @@ contract UserView is Initializable, UUPSUpgradeable {
     /// @notice 查询指定用户当前健康因子（bps）
     /// @param user 用户地址
     /// @return hf 健康因子
-    function getHealthFactor(address user) external view onlyUserOrStrictAdmin(user) returns (uint256 hf) {
-        (hf, ) = _healthView().getUserHealthFactor(user);
+    function getHealthFactor(address user) external view onlyValidRegistry returns (uint256 hf) {
+        address hv = _healthView();
+        if (hv == address(0)) return 0;
+        (bool ok, bytes memory data) = hv.staticcall(abi.encodeWithSignature("getUserHealthFactor(address)", user));
+        if (!ok || data.length < 64) return 0;
+        (hf, ) = abi.decode(data, (uint256, bool));
     }
     
     /// @notice 查询用户健康因子（简化版本，不指定资产）
     /// @param user 用户地址
     /// @return hf 健康因子
-    function getUserHealthFactor(address user) external view onlyUserOrStrictAdmin(user) returns (uint256 hf) {
+    function getUserHealthFactor(address user) external view onlyValidRegistry returns (uint256 hf) {
         return this.getHealthFactor(user);
     }
     
@@ -240,9 +213,9 @@ contract UserView is Initializable, UUPSUpgradeable {
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @return stats 用户统计信息
-    function getUserStats(address user, address asset) external view onlyUserOrStrictAdmin(user) returns (UserStats memory stats) {
-        (uint256 collateral, uint256 debt) = _positionView().getUserPosition(user, asset);
-        (uint256 hf, ) = _healthView().getUserHealthFactor(user);
+    function getUserStats(address user, address asset) external view onlyValidRegistry returns (UserStats memory stats) {
+        (uint256 collateral, uint256 debt) = this.getUserPosition(user, asset);
+        uint256 hf = this.getHealthFactor(user);
         
         // 计算 LTV (Loan-to-Value ratio)
         uint256 ltv = RiskUtils.calculateLTV(debt, collateral);
@@ -272,15 +245,16 @@ contract UserView is Initializable, UUPSUpgradeable {
         uint256 collateralIn,
         uint256 collateralAdded,
         uint256 borrowAmount
-    ) external view onlyUserOrStrictAdmin(user) returns (uint256 newHF, uint256 newLTV, uint256 maxBorrowable) {
-        address previewViewAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PREVIEW_VIEW);
+    ) external view onlyValidRegistry returns (uint256 newHF, uint256 newLTV, uint256 maxBorrowable) {
+        address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
+        if (previewViewAddr == address(0)) return (0, 0, 0);
         (bool success, bytes memory data) = previewViewAddr.staticcall(
             abi.encodeWithSignature(
                 "previewBorrow(address,address,uint256,uint256,uint256)",
                 user, asset, collateralIn, collateralAdded, borrowAmount
             )
         );
-        require(success, "UserView: previewBorrow call failed");
+        if (!success || data.length < 96) return (0, 0, 0);
         return abi.decode(data, (uint256, uint256, uint256));
     }
     
@@ -290,15 +264,16 @@ contract UserView is Initializable, UUPSUpgradeable {
     /// @param amount 抵押数量
     /// @return hfAfter 抵押后健康因子
     /// @return ok 是否满足最小健康因子要求
-    function previewDeposit(address user, address asset, uint256 amount) external view onlyUserOrStrictAdmin(user) returns (uint256 hfAfter, bool ok) {
-        address previewViewAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PREVIEW_VIEW);
+    function previewDeposit(address user, address asset, uint256 amount) external view onlyValidRegistry returns (uint256 hfAfter, bool ok) {
+        address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
+        if (previewViewAddr == address(0)) return (0, false);
         (bool success, bytes memory data) = previewViewAddr.staticcall(
             abi.encodeWithSignature(
                 "previewDeposit(address,address,uint256)",
                 user, asset, amount
             )
         );
-        require(success, "UserView: previewDeposit call failed");
+        if (!success || data.length < 64) return (0, false);
         return abi.decode(data, (uint256, bool));
     }
     
@@ -308,15 +283,16 @@ contract UserView is Initializable, UUPSUpgradeable {
     /// @param amount 还款数量
     /// @return newHF 还款后健康因子
     /// @return newLTV 还款后贷款价值比
-    function previewRepay(address user, address asset, uint256 amount) external view onlyUserOrStrictAdmin(user) returns (uint256 newHF, uint256 newLTV) {
-        address previewViewAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PREVIEW_VIEW);
+    function previewRepay(address user, address asset, uint256 amount) external view onlyValidRegistry returns (uint256 newHF, uint256 newLTV) {
+        address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
+        if (previewViewAddr == address(0)) return (0, 0);
         (bool success, bytes memory data) = previewViewAddr.staticcall(
             abi.encodeWithSignature(
                 "previewRepay(address,address,uint256)",
                 user, asset, amount
             )
         );
-        require(success, "UserView: previewRepay call failed");
+        if (!success || data.length < 64) return (0, 0);
         return abi.decode(data, (uint256, uint256));
     }
     
@@ -326,15 +302,16 @@ contract UserView is Initializable, UUPSUpgradeable {
     /// @param amount 提取数量
     /// @return newHF 提取后健康因子
     /// @return ok 是否安全
-    function previewWithdraw(address user, address asset, uint256 amount) external view onlyUserOrStrictAdmin(user) returns (uint256 newHF, bool ok) {
-        address previewViewAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PREVIEW_VIEW);
+    function previewWithdraw(address user, address asset, uint256 amount) external view onlyValidRegistry returns (uint256 newHF, bool ok) {
+        address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
+        if (previewViewAddr == address(0)) return (0, false);
         (bool success, bytes memory data) = previewViewAddr.staticcall(
             abi.encodeWithSignature(
                 "previewWithdraw(address,address,uint256)",
                 user, asset, amount
             )
         );
-        require(success, "UserView: previewWithdraw call failed");
+        if (!success || data.length < 64) return (0, false);
         return abi.decode(data, (uint256, bool));
     }
     
@@ -348,8 +325,23 @@ contract UserView is Initializable, UUPSUpgradeable {
     function batchGetUserPositions(
         address[] calldata users,
         address[] calldata assets
-    ) external view onlyBatchOperator returns (uint256[] memory collaterals, uint256[] memory debts) {
-        return _positionView().batchGetUserPositions(users, assets);
+    ) external view onlyValidRegistry returns (uint256[] memory collaterals, uint256[] memory debts) {
+        uint256 len = users.length;
+        if (len != assets.length) revert UserView__LengthMismatch();
+        if (len > MAX_BATCH_SIZE) revert UserView__BatchTooLarge(len);
+        address pv = _positionView();
+        if (pv == address(0)) {
+            collaterals = new uint256[](len);
+            debts = new uint256[](len);
+            return (collaterals, debts);
+        }
+        (bool ok, bytes memory data) = pv.staticcall(abi.encodeWithSignature("batchGetUserPositions(address[],address[])", users, assets));
+        if (!ok || data.length < 64) {
+            collaterals = new uint256[](len);
+            debts = new uint256[](len);
+            return (collaterals, debts);
+        }
+        return abi.decode(data, (uint256[], uint256[]));
     }
     
     /// @notice 批量查询用户健康因子
@@ -357,15 +349,26 @@ contract UserView is Initializable, UUPSUpgradeable {
     /// @return healthFactors 健康因子数组
     function batchGetUserHealthFactors(
         address[] calldata users
-    ) external view onlyBatchOperator returns (uint256[] memory healthFactors) {
-        (healthFactors, ) = _healthView().batchGetHealthFactors(users);
+    ) external view onlyValidRegistry returns (uint256[] memory healthFactors) {
+        uint256 len = users.length;
+        if (len > MAX_BATCH_SIZE) revert UserView__BatchTooLarge(len);
+        address hv = _healthView();
+        if (hv == address(0)) {
+            return new uint256[](len);
+        }
+        (bool ok, bytes memory data) = hv.staticcall(abi.encodeWithSignature("batchGetHealthFactors(address[])", users));
+        if (!ok || data.length < 64) {
+            return new uint256[](len);
+        }
+        (healthFactors, ) = abi.decode(data, (uint256[], bool[]));
         return healthFactors;
     }
     
     /* ============ 升级控制 ============ */
     
-    function _authorizeUpgrade(address) internal view override {
-        _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
+    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (newImplementation == address(0)) revert ZeroAddress();
     }
 
     /// @notice 外部只读：获取 Registry 地址（向后兼容）
@@ -377,4 +380,16 @@ contract UserView is Initializable, UUPSUpgradeable {
     function registryAddr() external view returns (address) {
         return _registryAddr;
     }
+
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    /// @dev UUPS 升级预留插槽，避免存储冲突
+    uint256[50] private __gap;
 }

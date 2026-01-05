@@ -5,6 +5,7 @@ const { ethers } = hardhat;
 import type { RewardManagerCore } from '../../types/contracts/Reward';
 import type { RewardManager } from '../../types/contracts/Reward';
 import type { RewardPoints } from '../../types/contracts/Token/RewardPoints';
+import type { RewardView } from '../../types/src/Vault/view/modules/RewardView.sol/RewardView';
 import type { AccessControlManager } from '../../types/contracts/access';
 import type { MockRegistry } from '../../types/contracts/Mocks/MockRegistry';
 
@@ -24,6 +25,7 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
   let rewardManagerCore!: RewardManagerCore;
   let rewardManager!: RewardManager;
   let rewardPoints!: RewardPoints;
+  let rewardView!: RewardView;
   let acm!: AccessControlManager;
   let registry!: MockRegistry;
   let governance!: SignerWithAddress;
@@ -91,24 +93,44 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
     await rewardManagerProxy.waitForDeployment();
     rewardManager = RewardManager.attach(await rewardManagerProxy.getAddress()) as RewardManager;
 
+    // 部署 RewardView - 使用代理模式（统一只读入口）
+    const RewardView = await ethers.getContractFactory('RewardView');
+    const rewardViewImpl = await RewardView.deploy();
+    await rewardViewImpl.waitForDeployment();
+    const rewardViewProxy = await proxyFactory.deploy(
+      await rewardViewImpl.getAddress(),
+      rewardViewImpl.interface.encodeFunctionData('initialize', [registry.target])
+    );
+    await rewardViewProxy.waitForDeployment();
+    rewardView = RewardView.attach(await rewardViewProxy.getAddress()) as RewardView;
+
     // 设置 Registry 模块地址
     const KEY_RM = ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER'));
     const KEY_RP = ethers.keccak256(ethers.toUtf8Bytes('REWARD_POINTS'));
     const KEY_RM_CORE = ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER_CORE'));
     const KEY_ACM = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
+    const KEY_RV = ethers.keccak256(ethers.toUtf8Bytes('REWARD_VIEW'));
+    const KEY_RC = ethers.keccak256(ethers.toUtf8Bytes('REWARD_CONSUMPTION'));
     await registry.setModule(KEY_RM, await rewardManager.getAddress());
     await registry.setModule(KEY_RP, await rewardPoints.getAddress());
     await registry.setModule(KEY_RM_CORE, await rewardManagerCore.getAddress());
     await registry.setModule(KEY_ACM, await acm.getAddress());
+    await registry.setModule(KEY_RV, await rewardView.getAddress());
+    // 确保 RewardView.onlyWriter 中解析 KEY_REWARD_CONSUMPTION 不会为 0（本文件不测试消费写入，填充一个非零地址即可）
+    await registry.setModule(KEY_RC, governance.address);
 
     // 为ACM授予必要的角色
     const ROLE_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
     const ROLE_CLAIM_REWARD = ethers.keccak256(ethers.toUtf8Bytes('CLAIM_REWARD'));
+    const ROLE_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
     if (!(await acm.hasRole(ROLE_SET_PARAMETER, governance.address))) {
       await acm.grantRole(ROLE_SET_PARAMETER, governance.address);
     }
     if (!(await acm.hasRole(ROLE_CLAIM_REWARD, governance.address))) {
       await acm.grantRole(ROLE_CLAIM_REWARD, governance.address);
+    }
+    if (!(await acm.hasRole(ROLE_VIEW_USER_DATA, governance.address))) {
+      await acm.grantRole(ROLE_VIEW_USER_DATA, governance.address);
     }
   });
 
@@ -131,12 +153,10 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
         false // 健康因子不足
       );
 
-      // 验证计算：
-      // BasePoints = (1000 * 1e6) / 100 * (30 * 24 * 3600) / 5 = 518400000000000
-      // 应用权重：518400000000000 * 100e18 / 1e18 = 518400000000000
-      expect(basePoints).to.equal(518400000000000n);
-      expect(bonus).to.equal(0); // 健康因子不足，无奖励
-      expect(totalPoints).to.equal(518400000000000n);
+      // 当前链上基线：borrow(duration>0) 固定 1 积分（用于锁定-释放模型）；calculateExamplePoints 保持与基线一致
+      expect(basePoints).to.equal(1_000_000_000_000_000_000n);
+      expect(bonus).to.equal(0n);
+      expect(totalPoints).to.equal(1_000_000_000_000_000_000n);
     });
 
     it('应正确计算健康因子奖励', async function () {
@@ -150,13 +170,10 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
         true // 健康因子足够
       );
 
-      // 验证计算：
-      // BasePoints = (1000 * 1e6) / 100 * (30 * 24 * 3600) / 5 = 518400000000000
-      // Bonus = 518400000000000 × 5% = 25920000000000
-      // Total = 518400000000000 + 25920000000000 = 544320000000000
-      expect(basePoints).to.equal(518400000000000n);
-      expect(bonus).to.equal(25920000000000n);
-      expect(totalPoints).to.equal(544320000000000n);
+      // 当前链上基线：固定 1 积分；bonus 在示例函数中不生效
+      expect(basePoints).to.equal(1_000_000_000_000_000_000n);
+      expect(bonus).to.equal(0n);
+      expect(totalPoints).to.equal(1_000_000_000_000_000_000n);
     });
 
     it('应处理零金额', async function () {
@@ -166,9 +183,10 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
         true
       );
 
-      expect(basePoints).to.equal(0);
-      expect(bonus).to.equal(0);
-      expect(totalPoints).to.equal(0);
+      // 基线：duration>0 固定 1 积分（amount 不参与示例函数）
+      expect(basePoints).to.equal(1_000_000_000_000_000_000n);
+      expect(bonus).to.equal(0n);
+      expect(totalPoints).to.equal(1_000_000_000_000_000_000n);
     });
 
     it('应处理零期限', async function () {
@@ -198,11 +216,10 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
         true
       );
 
-      // 基础积分：518400000000000
-      // 注意：calculateExamplePoints 不包含等级倍数，所以这里只测试基础计算
-      expect(basePoints).to.equal(518400000000000n);
-      expect(bonus).to.equal(25920000000000n);
-      expect(totalPoints).to.equal(544320000000000n);
+      // 注意：calculateExamplePoints 为“基线示例”，不包含等级倍数；当前返回固定 1 积分
+      expect(basePoints).to.equal(1_000_000_000_000_000_000n);
+      expect(bonus).to.equal(0n);
+      expect(totalPoints).to.equal(1_000_000_000_000_000_000n);
     });
 
     it('应正确处理不同借款金额', async function () {
@@ -219,7 +236,8 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
           false
         );
 
-        expect(basePoints).to.equal(testCase.expected);
+        // 基线：duration>0 固定 1 积分
+        expect(basePoints).to.equal(1_000_000_000_000_000_000n);
       }
     });
   });
@@ -242,7 +260,7 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
         newBaseUsd
       );
 
-      const [baseUsd, perDay, bonus, baseEth] = await rewardManagerCore.getRewardParameters();
+      const [baseUsd, perDay, bonus, baseEth] = await rewardView.getRewardParameters();
       expect(baseUsd).to.equal(newBaseUsd);
       expect(perDay).to.equal(newPerDay);
       expect(bonus).to.equal(newBonus);
@@ -253,7 +271,7 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
       const newBonus = 1000; // 10%
       await rewardManager.setHealthFactorBonus(newBonus);
 
-      const [, , bonus] = await rewardManagerCore.getRewardParameters();
+      const [, , bonus] = await rewardView.getRewardParameters();
       expect(bonus).to.equal(newBonus);
     });
 
@@ -261,7 +279,7 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
       const newLevel = 3;
       await rewardManager.updateUserLevel(alice.address, newLevel);
 
-      const userLevel = await rewardManagerCore.getUserLevel(alice.address);
+      const userLevel = await rewardView.connect(alice).getUserLevel(alice.address);
       expect(userLevel).to.equal(newLevel);
     });
 
@@ -270,7 +288,7 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
       const newMultiplier = 12000; // 1.2x
       await rewardManager.setLevelMultiplier(level, newMultiplier);
 
-      const multiplier = await rewardManagerCore.getLevelMultiplier(level);
+      const multiplier = await rewardView.getLevelMultiplier(level);
       expect(multiplier).to.equal(newMultiplier);
     });
   });
@@ -337,8 +355,8 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
         false
       );
 
-      // 1 USDT, 1天 = 1e6 / 100 * (1 * 24 * 3600) / 5 = 17280000000
-      expect(basePoints).to.equal(17280000000n);
+      // 基线：duration>0 固定 1 积分
+      expect(basePoints).to.equal(1_000_000_000_000_000_000n);
     });
   });
 

@@ -46,15 +46,53 @@
 - 链下重试同一 (user, asset, view) 连续多次失败时，将该条目标记为“死亡信箱”并告警，链上不再尝试；重试成功后清理队列/提示。
 - 可选治理/运维入口：提供只读脚本或工具函数 `retryPush(user, asset)` 单次读取最新账本再推送，不做链上循环；注意权限与调用成本。
 
+### 并发与幂等：`nextVersion`（严格）+ `requestId/seq`（可选，推荐）
+- **背景**：View 层缓存是“事件驱动 + 最佳努力推送”的加速层，同一 `(user, asset)` 可能在同一高度或短时间内被不同入口/模块并发推送；必须通过乐观并发与幂等避免“覆盖/乱序/重复写”。
+- **版本字段**：`PositionView`/`StatisticsView` 等维护单调递增的 `version`（按 key 维度，如 `(user, asset)` 或 `user`）。
+- **`nextVersion` 定义**：本次推送“期望写入的下一版本号”。
+  - 上游推荐做法：先调用 `getPositionVersion(user, asset)` 读取 `currentVersion`，再计算 `nextVersion = currentVersion + 1` 后透传。
+  - 兼容模式：若上游无法读取版本（或不希望做并发控制），可传 `nextVersion = 0`，由合约侧自增（但并发冲突检测会弱一些）。
+- **严格乐观并发（推荐默认）**：当 `nextVersion != 0` 时，合约会要求 `nextVersion == currentVersion + 1`，否则 revert（上游应重读版本后重试）。
+- **幂等键（推荐：版本绑定 O(1)）**：`requestId` 用作链上幂等键，但不做全量“已处理 mapping”累积；合约内仅为每个 `(user, asset)` 记录 `lastAppliedRequestId`（O(1) 存储）。当 `nextVersion!=0` 且发生重放时，若 `nextVersion == currentVersion` 且 `requestId == lastAppliedRequestId`，则幂等忽略（不重复写缓存）。`seq` 可作为可选的“严格递增序列”约束，辅助链下排序与链上拒绝乱序；对同一 `requestId` 的重放应优先按幂等忽略处理。`nextVersion==0`（自增模式）下不提供强幂等保证；如确有需求可再引入 ring buffer（仅缓存最近 N 个 requestId）作为增强。
+- **链下重试建议**：重放同一条推送时复用同一个 `requestId`；若遇到版本冲突（revert），应先重读最新版本与账本，再生成新的 `nextVersion` 发起重试（避免盲目重放导致持续失败）。
+
 ### **所有核心功能分层职责（写入不经 View）**
 - **用户状态管理**：UserView.sol（双架构支持）
-- **系统状态管理**：SystemView.sol（双架构支持）
+- **系统状态管理**：SystemView.sol（双架构支持，作为统一入口/元信息路由；资产、价格、奖励、清算等查询均提示前端跳转到对应专属 View）
 - **统计聚合（迁移完成）**：StatisticsView.sol（承接活跃用户、全局抵押/债务、保证金聚合；业务入口统一推送）
 - **系统级缓存快照**：ViewCache.sol（仅系统级数据缓存）
 - **权限控制**：AccessControlView.sol（双架构支持）
 - **清算只读/风控**：LiquidationRiskManager + LiquidationView（仅只读与风控聚合，写入直达账本，不经 View）
 - **积分管理（Reward）**：通过 RewardManager 集成（双架构支持，落账后触发）
 - **批量操作**：BatchView.sol（双架构支持）
+
+### **View 模块清单（按职责分组，补全 `src/Vault/view/modules/` 现状）**
+> 说明：以下为“查询/缓存/事件聚合”视图层模块。**写入账本不经 View**；业务模块写入成功后，以“推送快照/发事件”为主更新 View 层缓存。
+
+#### **A) 核心 View（建议部署，前端/机器人常用）**
+- **PositionView.sol**：用户仓位查询 + 缓存（`getUserPosition/isUserCacheValid/batchGetUserPositions` 等）
+- **UserView.sol**：用户维度只读聚合与便捷查询（与 Position/Health/Reward 等模块协作）
+- **HealthView.sol**：健康因子/风险状态缓存与批量读取（写路径由风控/账本模块推送）
+- **StatisticsView.sol**：系统级统计聚合缓存（活跃用户/全局抵押债务/保证金聚合/降级统计等）
+- **ViewCache.sol**：系统级快照缓存（按资产聚合的系统状态，支持批量读取）
+- **AccessControlView.sol**：权限只读查询（权限缓存、权限级别等）
+- **BatchView.sol**：批量查询聚合（价格/健康/模块健康等批量接口）
+- **RegistryView.sol**：Registry 模块键枚举/反查/分页（便于前端发现模块地址）
+- **SystemView.sol**：统一入口/元信息路由（保留 registry/getModule 等少量 helper，遇到资产/价格/奖励/清算等请求时提示前端跳转到对应专属 View）
+
+#### **B) 专属/扩展 View（可选部署，用于提升前端体验或运维能力）**
+- **DashboardView.sol**：前端仪表盘聚合视图（聚合 Position/Health/奖励/活跃度等，减少 RPC 次数）
+- **PreviewView.sol**：预览类查询门面（deposit/withdraw/borrow/repay 的预估接口；可作为前端入口，但权威实现以 UserView/PositionView 为准）
+- **RiskView.sol**：风险评估视图（基于 HealthView 缓存与派生计算，提供 liquidatable/warningLevel 等）
+- **ValuationOracleView.sol**：价格/预言机查询视图（封装 PriceOracle，提供批量价格、健康检查、审计事件）
+- **FeeRouterView.sol**：费用数据只读镜像（由 FeeRouter 推送更新，支持低成本查询）
+- **LendingEngineView.sol**：借贷引擎只读查询适配层（订单/重试/访问控制等运维与前端查询）
+- **ModuleHealthView.sol**：模块健康检查与缓存（轻量检查 + 结果集中推送到 HealthView/供链下监控）
+- **EventHistoryManager.sol**：事件历史“轻量桩件”（不持久化，仅发事件/DataPush，供链下归档与兼容旧模块）
+
+#### **C) 清算风险相关的只读补充**
+- **LiquidatorView.sol**：清算数据权威只读入口（清算相关指标、榜单、DataPush 单点推送）
+- **LiquidationRiskView.sol**：清算风险只读视图（批量计算/缓存读取等接口；与 LiquidationRiskManager/HealthView/RiskView 能力存在重叠，主要用于兼容/扩展）
 
 ---
 
@@ -63,7 +101,7 @@
 ### 统一的 View 地址解析策略（重要）
 - 使用 KEY_VAULT_CORE 动态解析 View 地址，理由：单一真实来源、与现有权限和分发一致、避免新增 Key 并保持体系内聚。
 ```solidity
-function _resolveVaultViewAddr() internal view returns (address) {
+function _resolveVaultRouterAddr() internal view returns (address) {
     address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
     return IVaultCoreMinimal(vaultCore).viewContractAddrVar();
 }
@@ -74,16 +112,16 @@ function _resolveVaultViewAddr() internal view returns (address) {
 #### **实际实现（已对齐最新落账路径与 Getter）**
 ```solidity
 contract VaultCore is Initializable, UUPSUpgradeable {
-    address private _registryAddrVar;
+    address private _registryAddr;
     address private _viewContractAddr;
 
     /// @notice 显式暴露 Registry 地址
     function registryAddrVar() external view returns (address) {
-        return _registryAddrVar;
+        return _registryAddr;
     }
 
     /// @notice 获取 View 层合约地址
-    /// @dev 供各业务/清算模块解析 VaultView 地址使用
+    /// @dev 供各业务/清算模块解析 VaultRouter 地址使用
     function viewContractAddrVar() external view returns (address) {
         return _viewContractAddr;
     }
@@ -95,7 +133,7 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @dev 极简实现：只验证基础参数，传送数据至View层
     function deposit(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultView(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.timestamp);
+        IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.timestamp);
     }
     
     /// @notice 借款操作 - 传送数据至View层
@@ -104,7 +142,7 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
     function borrow(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        address lendingEngine = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_LE);
+        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
         ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
     }
     
@@ -114,7 +152,7 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
     function repay(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        address lendingEngine = Registry(_registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_LE);
+        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
         ILendingEngineBasic(lendingEngine).repay(msg.sender, asset, amount);
     }
     
@@ -124,7 +162,7 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @dev 极简实现：只验证基础参数，传送数据至View层
     function withdraw(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultView(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_WITHDRAW, asset, amount, block.timestamp);
+        IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_WITHDRAW, asset, amount, block.timestamp);
     }
     
     // ============ Registry 基础升级能力 ============ ✅ 已完成
@@ -133,14 +171,14 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @param newAddress 新模块地址
     /// @dev 保留Registry升级能力，支持模块动态升级
     function upgradeModule(bytes32 moduleKey, address newAddress) external onlyAdmin {
-        Registry(_registryAddrVar).setModuleWithReplaceFlag(moduleKey, newAddress, true);
+        Registry(_registryAddr).setModuleWithReplaceFlag(moduleKey, newAddress, true);
     }
     
     /// @notice 执行模块升级 - Registry基础升级能力
     /// @param moduleKey 模块键
     /// @dev 保留Registry升级能力，支持模块升级执行
     function executeModuleUpgrade(bytes32 moduleKey) external onlyAdmin {
-        Registry(_registryAddrVar).executeModuleUpgrade(moduleKey);
+        Registry(_registryAddr).executeModuleUpgrade(moduleKey);
     }
     
     // ============ 基础传送合约地址的能力 ============ ✅ 已完成
@@ -149,21 +187,21 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @return moduleAddress 模块地址
     /// @dev 保留基础传送合约地址能力，支持动态模块访问
     function getModule(bytes32 moduleKey) external view returns (address moduleAddress) {
-        return Registry(_registryAddrVar).getModuleOrRevert(moduleKey);
+        return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
     
     /// @notice 获取Registry地址 - 基础传送合约地址能力
     /// @return registryAddress Registry地址
     /// @dev 保留基础传送合约地址能力
     function getRegistry() external view returns (address registryAddress) {
-        return _registryAddrVar;
+        return _registryAddr;
     }
 }
 ```
 
 #### **命名规范说明**
 - ✅ **ActionKeys 常量**：使用带下划线的 UPPER_SNAKE_CASE 命名，如 `ActionKeys.ACTION_DEPOSIT`、`ActionKeys.ACTION_WITHDRAW`
-- ✅ **私有变量**：使用下划线前缀，如 `_registryAddrVar`、`_viewContractAddr`
+- ✅ **私有变量**：使用下划线前缀，如 `_registryAddr`、`_viewContractAddr`
 - ✅ **公开函数返回值**：使用命名返回参数，如 `returns (address moduleAddress)`
 - ✅ **类型**：ActionKeys 常量为 `bytes32 constant` 类型，符合 `SmartContractStandard.md` 第131行的命名规范
 
@@ -181,150 +219,92 @@ contract VaultCore is Initializable, UUPSUpgradeable {
 - ✅ 基础传送合约地址能力
 - ✅ 必要的管理员权限验证
 
-### **2. VaultView - 双架构智能协调器 ✅ 完全完成**
+### **2. VaultRouter - 路由协调器 ✅ 已完成**
 
-#### **当前状态（约500行，完全符合标准）**
+> ⚠️ **架构演进说明**：从 2025-08 起，根据"写入不经 View"和职责分离原则，`VaultRouter` 不再承担任何读操作，也不再缓存业务数据。所有查询功能已迁移到独立的 View 模块（`PositionView`、`UserView`、`HealthView` 等）。详见[架构演进历史](#架构演进历史)。
+
+#### **当前状态（符合架构原则）**
 ```solidity
-contract VaultView is Initializable, UUPSUpgradeable {
-    address public registryAddrVar;
+contract VaultRouter is ReentrancyGuard, Pausable {
+    address private immutable _registryAddr;
+    address private immutable _assetWhitelistAddr;
+    address private immutable _priceOracleAddr;
+    address private immutable _settlementTokenAddr;
     
-    // ============ 模块地址缓存 ============ ✅ 已实现
-    address private _cachedCollateralManager;
-    address private _cachedLendingEngine;
-    address private _cachedHealthFactorCalculator;
-    address private _cachedPriceOracle;
-    address private _cachedVaultBusinessLogic;
-    uint256 private _moduleCacheTimestamp;
-    uint256 private constant MODULE_CACHE_DURATION = 3600; // 1小时
+    // ============ 模块地址缓存（仅用于路由）========== ✅ 已实现
+    address private _cachedCMAddr;
+    address private _cachedLEAddr;
+    uint256 private _lastCacheUpdate;
+    uint256 private constant CACHE_EXPIRY_TIME = 1 hours;
     
-    // ============ View层缓存数据 ============ ✅ 已实现
-    mapping(address => mapping(address => uint256)) private _userCollateral;
-    mapping(address => mapping(address => uint256)) private _userDebt;
-    mapping(address => uint256) private _cacheTimestamps;
-    uint256 private constant CACHE_DURATION = 300; // 5分钟
-    uint256 private _totalCachedUsers;
-    uint256 private _validCachedUsers;
-    
-    // ============ 用户操作处理 ============ ✅ 已实现
+    // ============ 用户操作路由 ============ ✅ 已实现
     function processUserOperation(
         address user,
         bytes32 operationType,
         address asset,
         uint256 amount,
         uint256 timestamp
-    ) external onlyAuthorizedContract {
-        // 1. 验证操作
-        _validateOperation(user, operationType, asset, amount);
-        
-        // 2. 分发到相应模块（优化版本）
-        _distributeToModule(user, operationType, asset, amount);
-        
-        // 3. 更新View层缓存
-        _updateLocalState(user, operationType, asset, amount);
-        
-        // 4. 发出事件（事件驱动架构）
-        emit UserOperation(user, operationType, asset, amount, timestamp);
-        
-        // 5. 数据推送（统一数据推送接口）
-        DataPushLibrary._emitData(
-            keccak256("USER_OPERATION"),
-            abi.encode(user, operationType, asset, amount, timestamp)
-        );
+    ) external override nonReentrant whenNotPaused onlyValidRegistry onlyVaultCore {
+        // 仅路由 deposit/withdraw 到 CollateralManager
+        // borrow/repay 由 VaultCore 直接调用 LendingEngine（符合"写入不经 View"原则）
+        if (operationType == ActionKeys.ACTION_DEPOSIT) {
+            ICollateralManager(cm).depositCollateral(user, asset, amount);
+        } else if (operationType == ActionKeys.ACTION_WITHDRAW) {
+            ICollateralManager(cm).withdrawCollateral(user, asset, amount);
+        } else {
+            revert VaultRouter__UnsupportedOperation(operationType);
+        }
+        emit VaultAction(operationType, user, amount, 0, asset, timestamp);
     }
     
     // ============ 数据推送接口（事件驱动架构）========== ✅ 已实现
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt
-    ) external onlyBusinessContract {
-        // 更新View层缓存
-        _userCollateral[user][asset] = collateral;
-        _userDebt[user][asset] = debt;
-        _cacheTimestamps[user] = block.timestamp;
-        
-        // 发出事件（事件驱动架构）
-        emit UserPositionUpdated(user, asset, collateral, debt, block.timestamp);
-        
-        // 数据推送（统一数据推送接口）
-        DataPushLibrary._emitData(
-            keccak256("USER_POSITION_UPDATED"),
-            abi.encode(user, asset, collateral, debt, block.timestamp)
-        );
+    function pushUserPositionUpdate(address user, address asset, uint256 collateral, uint256 debt)
+        external override onlyValidRegistry onlyBusinessModule
+    {
+        // 轻量实现：仅发出事件，不维护缓存
+        emit UserPositionPushed(user, asset, collateral, debt, block.timestamp);
     }
     
-    // ============ 查询接口（免费查询）========== ✅ 已实现
-    function getUserPosition(address user, address asset) external view 
-        returns (uint256 collateral, uint256 debt) {
-        return (_userCollateral[user][asset], _userDebt[user][asset]);
+    function pushAssetStatsUpdate(address asset, uint256 totalCollateral, uint256 totalDebt, uint256 price)
+        external override onlyValidRegistry onlyBusinessModule
+    {
+        // 轻量实现：仅发出事件，不维护缓存
+        emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, block.timestamp);
     }
     
-    function isUserCacheValid(address user) external view returns (bool isValid) {
-        return (block.timestamp - _cacheTimestamps[user]) < CACHE_DURATION;
-    }
-    
-    // ============ 批量查询功能 ============ ✅ 已实现
-    function batchGetUserPositions(address[] calldata users, address[] calldata assets) 
-        external view returns (UserPosition[] memory positions);
-    function batchGetUserHealthFactors(address[] calldata users) 
-        external view returns (uint256[] memory healthFactors);
-    function batchGetAssetPrices(address[] calldata assets) 
-        external view returns (uint256[] memory prices);
-    
-    // ============ 缓存管理功能 ============ ✅ 已实现
-    function clearExpiredCache(address user) external onlyAdmin;
-    function getCacheStats() external view returns (uint256 totalUsers, uint256 validCaches, uint256 cacheDuration, uint256 moduleCacheTimestamp);
-    function isModuleCacheValid() external view returns (bool isValid);
-    function refreshModuleCache() external onlyAdmin;
-
-    /// @dev 业务白名单校验：使用 1h 模块缓存，过期或缺失自动刷新后再校验
-    modifier onlyBusinessContract() {
-        _ensureModuleCache();
-        if (
-            msg.sender != _cachedCollateralManager &&
-            msg.sender != _cachedLendingEngine &&
-            msg.sender != _cachedVaultBusinessLogic
-        ) revert VaultView__UnauthorizedAccess();
-        _;
-    }
-
-    function _refreshModuleCache() internal {
-        _cachedCollateralManager   = Registry(registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_CM);
-        _cachedLendingEngine       = Registry(registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_LE);
-        _cachedPriceOracle         = Registry(registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
-        _cachedVaultBusinessLogic  = Registry(registryAddrVar).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
-        _moduleCacheTimestamp = block.timestamp;
-    }
-
-    function _isModuleCacheValid() internal view returns (bool) {
-        return (block.timestamp - _moduleCacheTimestamp) <= MODULE_CACHE_DURATION;
-    }
-
-    function _ensureModuleCache() internal {
-        if (
-            !_isModuleCacheValid() ||
-            _cachedCollateralManager == address(0) ||
-            _cachedLendingEngine == address(0) ||
-            _cachedVaultBusinessLogic == address(0)
-        ) {
-            _refreshModuleCache();
-        }
+    // ============ 向后兼容查询（直接查询账本，无缓存）========== ✅ 已实现
+    function getUserCollateral(address user, address asset) external view onlyValidRegistry returns (uint256) {
+        // 直接查询 CollateralManager，不维护缓存
+        address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
+        return ICollateralManager(cm).getCollateral(user, asset);
     }
 }
 ```
 
 #### **✅ 已完全实现的功能**
-- [x] 用户操作处理（完整的5步处理流程）
-- [x] View层缓存（完整的缓存数据结构）
-- [x] 数据推送接口（支持用户位置和系统状态更新）
-- [x] 免费查询接口（12个view函数，0 gas）
-- [x] 事件驱动架构（3个事件 + 统一数据推送）
-- [x] 模块地址缓存（1小时有效期，性能优化）
-- [x] 批量查询功能（用户位置、健康因子、价格批量查询）
-- [x] 缓存管理功能（缓存统计、过期缓存清理）
-- [x] 统一事件库使用（DataPushLibrary）
-- [x] 命名规范（完全符合标准）
+- [x] 用户操作路由（deposit/withdraw 路由到 CollateralManager）
+- [x] 数据推送接口（接收业务模块推送，发出事件）
+- [x] 事件驱动架构（发出标准化事件，支持数据库收集）
+- [x] 模块地址缓存（仅用于路由，1小时有效期）
+- [x] 权限控制（onlyVaultCore、onlyBusinessModule）
+- [x] 安全保护（ReentrancyGuard、Pausable）
+- [x] 向后兼容查询（getUserCollateral，直接查询账本）
+
+#### **❌ 已移除的功能（已迁移到独立 View 模块）**
+- [x] ~~View层业务数据缓存~~ → 已迁移到 `PositionView.sol`
+- [x] ~~getUserPosition~~ → 已迁移到 `PositionView.sol`
+- [x] ~~getUserDebt~~ → 已迁移到 `PositionView.sol`
+- [x] ~~isUserCacheValid~~ → 已迁移到 `PositionView.sol`
+- [x] ~~batchGetUserPositions~~ → 已迁移到 `PositionView.sol` / `CacheOptimizedView.sol`
+- [x] ~~缓存管理功能~~ → 已迁移到 `PositionView.sol`
+
+#### **📝 查询功能位置**
+所有查询功能现在由独立的 View 模块提供：
+- **用户仓位查询**：`PositionView.getUserPosition()` / `UserView.getUserPosition()`
+- **缓存有效性**：`PositionView.isUserCacheValid()`
+- **批量查询**：`PositionView.batchGetUserPositions()` / `CacheOptimizedView.batchGetUserPositions()`
+- **健康因子查询**：`HealthView.getUserHealthFactor()`
+- **统计聚合查询**：`StatisticsView.*`
 
 ### **3. AccessControlView - 双架构权限控制 ✅ 完全实现**
 
@@ -414,7 +394,7 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
 - 升级授权与权限校验统一采用自定义错误，避免字符串 `require`。
 ```solidity
 // 关键片段：统一的 View 地址解析策略（重要）
-function _resolveVaultViewAddr() internal view returns (address) {
+function _resolveVaultRouterAddr() internal view returns (address) {
     address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
     return IVaultCoreMinimal(vaultCore).viewContractAddrVar();
 }
@@ -436,12 +416,12 @@ function getCollateral(address user, address asset) external view returns (uint2
 contract LendingEngine {
     address public registryAddrVar;
     
-    function processBorrow(address user, address asset, uint256 amount) external onlyVaultView {
+    function processBorrow(address user, address asset, uint256 amount) external onlyVaultRouter {
         // 纯业务逻辑：处理借贷
         _processBorrow(user, asset, amount);
         
         // 更新 View 层缓存
-        IVaultView(viewContractAddrVar).pushUserPositionUpdate(user, asset, currentCollateral, newDebt);
+        IVaultRouter(viewContractAddrVar).pushUserPositionUpdate(user, asset, currentCollateral, newDebt);
         
         // 发出事件
         emit BorrowProcessed(user, asset, amount, block.timestamp);
@@ -487,7 +467,7 @@ contract LendingEngine {
 - [x] 保留基础传送合约地址能力
 - [x] 保留传送数据至 View 层能力
 
-### **Phase 2: VaultView 双架构增强 ✅ 完全完成**
+### **Phase 2: VaultRouter 双架构增强 ✅ 完全完成**
 - [x] 实现用户操作处理函数
 - [x] 实现模块分发逻辑
 - [x] 实现View层缓存数据存储
@@ -525,6 +505,12 @@ contract LendingEngine {
 - 推送与缓存
   - 统一由风险相关模块（如 `LendingEngine`、`LiquidationRiskManager` 等）在账本/风控计算后调用 `HealthView.pushRiskStatus(user, hfBps, minHFBps, under, ts)` 推送。
   - 可批量推送：`HealthView.pushRiskStatusBatch(...)`；前端读取 `getUserHealthFactor` 或 `batchGetHealthFactors`，0 gas 查询。
+  - 读权限策略（默认公开，推荐暂不加 Role Gate）：
+    - **默认（当前推荐 & 与本指南主线一致）**：`HealthView.getUserHealthFactor/batchGetHealthFactors` 保持公开只读（不强制 `ACTION_VIEW_RISK_DATA`），便于任意前端/机器人直接 `eth_call` 免费查询缓存。
+    - **可选增强（暂不实施）**：若出于隐私/商业策略，希望“风险数据仅授权调用者可读”，可在上述只读接口上增加 `ACM.requireRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender)` 或等效 gate。
+    - **影响说明（启用可选增强前必须评估）**：
+      - 前端/机器人将必须使用“已授予 `VIEW_RISK_DATA` 的地址”发起 `eth_call`，否则查询会 revert；这会改变既有集成假设与可用性（尤其是公开页面/无需登录的钱包）。
+      - 需要同步更新：前端权限提示、服务端代理/签名查询方案、以及相关测试用例（例如批量查询与风控机器人）。
 - 计算口径
   - 使用 `libraries/HealthFactorLib.sol`：
     - `isUnderCollateralized(totalCollateral, totalDebt, minHFBps)` 进行阈值判定（推荐主路径，避免除法）；
@@ -544,7 +530,7 @@ contract LendingEngine {
   - 失败/过期/精度异常/价格不合理/稳定币脱锚时，返回 `PriceResult{ usedFallback=true, reason=..., value=... }`；上层（LE）可据此发事件或写系统统计（`DegradationCore` 提供系统级统计/事件）。
 
 ### 3) 端到端数据流（简述）
-- 用户操作 → `VaultCore` → 业务编排 `VaultBusinessLogic`（转入/转出、抵押/保证金、奖励） → `VaultCore` 统一转调 `LendingEngine` 更新账本（借/还） → `LendingEngine` 在账本变更后推送 `VaultView.pushUserPositionUpdate`（抵押来自 CM，债务来自 LE） → 风控/LE 根据需要计算并推送 `HealthView.pushRiskStatus` → 前端/机器人 0 gas 查询 View 层缓存。
+- 用户操作 → `VaultCore` → 业务编排 `VaultBusinessLogic`（转入/转出、抵押/保证金、奖励） → `VaultCore` 统一转调 `LendingEngine` 更新账本（借/还） → `LendingEngine` 在账本变更后推送 `VaultRouter.pushUserPositionUpdate`（抵押来自 CM，债务来自 LE） → 风控/LE 根据需要计算并推送 `HealthView.pushRiskStatus` → 前端/机器人 0 gas 查询 View 层缓存。
 
 ### 4) 关键约束与最佳实践
 - 健康因子与风险推送统一在 LE + View 层；业务层不再保留。
@@ -556,8 +542,8 @@ contract LendingEngine {
 ### 清算模块实际实施（修订：直达账本 + 风控只读/聚合 + 单点推送）
 
 - 写入直达账本：
-  - 编排入口由 `VaultBusinessLogic`/`LiquidationManager` 触发（Registry 绑定 `KEY_LIQUIDATION_MANAGER`）。
-  - 扣押抵押：直接调用 `KEY_CM → ICollateralManager.withdrawCollateral(user, asset, amount)`。
+  - 编排入口由 `LiquidationManager` 触发（Registry 绑定 `KEY_LIQUIDATION_MANAGER`，唯一入口）。
+  - 扣押抵押：直接调用 `KEY_CM → ICollateralManager.withdrawCollateralTo(user, collateralAsset, collateralAmount, liquidatorOrReceiver)`（扣减账本 + 真实转账）。
   - 减少债务：直接调用 `KEY_LE → ILendingEngineBasic.forceReduceDebt(user, asset, amount)`（或 `VaultLendingEngine.forceReduceDebt`）。
   - 事件单点推送：账本变更成功后，调用 `KEY_LIQUIDATION_VIEW → LiquidatorView.pushLiquidationUpdate/Batch`，链下统一消费。
 
@@ -593,25 +579,24 @@ contract LendingEngine {
 ```
 用户操作 → VaultCoreRefactored → VaultBusinessLogic（资金/抵押/保证金/奖励）
          → VaultCoreRefactored 统一调用 LendingEngine（borrow/repay）写账本
-         → LendingEngine 推送 VaultView.pushUserPositionUpdate（仓位缓存）
+         → LendingEngine 推送 VaultRouter.pushUserPositionUpdate（仓位缓存）
          → LendingEngine 计算并推送 HealthView.pushRiskStatus（健康缓存）
          → 前端/机器人从 View 层免费查询
 ```
 
 ### 职责边界
-- **VaultBusinessLogic（兼任清算编排入口）**：
+- **VaultBusinessLogic（不再作为清算编排入口）**：
   - 代币转入/转出；抵押与保证金联动；唯一奖励触发；批量编排
-  - 清算执行：通过 `KEY_VAULT_CORE → VaultView` 发起 `forwardSeizeCollateral/forwardReduceDebt`，自身不直接改账本
-  - 事件：调用 `LiquidatorView.pushLiquidationUpdate/Batch` 单点推送
+  - 清算入口已收敛到 `KEY_LIQUIDATION_MANAGER → LiquidationManager`；`VaultBusinessLogic.liquidate` 为 DEPRECATED 并永久下线（revert），避免双入口与语义分叉
 - **VaultCoreRefactored**：
   - 作为唯一账本入口的转调者，统一调用 `ILendingEngineBasic.borrow/repay`
   - 不做代币二次转账（避免与业务层重复）
 - **LendingEngine**：
   - 借/还/清算的账本更新；估值路径内的优雅降级
-  - 账本变更后：`VaultView.pushUserPositionUpdate` + `HealthView.pushRiskStatus` + 最佳努力触发 `RewardManager.onLoanEvent`
+  - 账本变更后：`VaultRouter.pushUserPositionUpdate` + `HealthView.pushRiskStatus` + 最佳努力触发 `RewardManager.onLoanEvent`
   - `onlyVaultCore`：拒绝任何非 Core 的账本写入
 - **View 层**：
-  - `VaultView`：仓位缓存与事件/DataPush；聚合查询 0 gas
+  - `VaultRouter`：仓位缓存与事件/DataPush；聚合查询 0 gas
   - `HealthView`：健康因子/风险状态缓存与事件/DataPush
 
 ### 配置要点
@@ -627,9 +612,9 @@ contract LendingEngine {
 - 将清算写入（扣押抵押物、减少债务）统一直达账本层（`CollateralManager`/`LendingEngine`），由账本模块内部进行权限校验与状态更新；View 仅承担只读/缓存/聚合与事件/DataPush。
 
 ### 设计
-- 入口方：`Registry.KEY_LIQUIDATION_MANAGER` 指向的清算编排入口（可由 `VaultBusinessLogic`/`LiquidationManager` 充当）。
+- 入口方：`Registry.KEY_LIQUIDATION_MANAGER` 指向的清算编排入口（**当前实现：仅 `LiquidationManager`，唯一入口**）。
 - 路由：
-  - 扣押抵押：`KEY_CM → ICollateralManager.withdrawCollateral(user, asset, amount)`。
+  - 扣押抵押：`KEY_CM → ICollateralManager.withdrawCollateralTo(user, collateralAsset, collateralAmount, liquidatorOrReceiver)`。
   - 减少债务：`KEY_LE → ILendingEngineBasic.forceReduceDebt(user, asset, amount)` 或 `VaultLendingEngine.forceReduceDebt`。
 - 权限：由被调账本模块在内部进行 `ACM.requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender)` 等校验；不通过 View 放行写入。
 - 事件与 DataPush：清算完成后，由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点推送；View 层不承载写入转发。
@@ -660,7 +645,7 @@ contract LendingEngine {
 ### 单测断言更新（最小改动）
 - 去除：业务层健康相关事件或健康推送的断言（业务层已不再负责）
 - 增加：
-  - `LendingEngine.borrow/repay/forceReduceDebt` 后，`VaultView.pushUserPositionUpdate` 被调用（可断言事件或 View 缓存）
+  - `LendingEngine.borrow/repay/forceReduceDebt` 后，`VaultRouter.pushUserPositionUpdate` 被调用（可断言事件或 View 缓存）
   - `HealthView.pushRiskStatus` 被调用（断言 `HealthFactorCached` 或 DataPush 中的 `RISK_STATUS_UPDATE` 负载）
   - 优雅降级路径：当价格过期/失败时，账本估值仍成功，且降级事件/统计可见（如 `VaultLendingEngineGracefulDegradation` 或系统级统计）
 
@@ -712,7 +697,7 @@ jobs:
 | 功能 | 当前行数 | 双架构行数 | 变化比例 | 状态 |
 |------|----------|------------|----------|------|
 | **VaultCore** | 299 行 | **142 行** | **52%** | ✅ 已完成 |
-| **VaultView** | 200+ 行 | **442 行** | **+121%** | 🔄 进行中 |
+| **VaultRouter** | 200+ 行 | **442 行** | **+121%** | 🔄 进行中 |
 | **AccessControlView** | 407 行 | ~350 行 | **14%** | 🔄 待实现 |
 
 ### **Gas 消耗对比**
@@ -791,28 +776,59 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 1. 为所有 push* 函数增加 `DataPushLibrary._emitData(...)` 调用；旧事件保留并加注 `// DEPRECATED`。  
 2. 前端 / Off-chain 服务仅订阅 `DataPushed`。
 
+### View 层实现一致性（整体描述）
+- **目标**：确保所有 View 模块在“只读/缓存/聚合 + 统一 DataPush + 可升级”三个维度与本指南一致，便于前端/机器人统一接入、链下统一订阅、以及后续安全升级。
+- **最小实现基线（必须）**：
+  - **UUPS 安全基线**：实现合约包含 `constructor { _disableInitializers(); }`，并保留 `uint256[50] __gap;`；`_authorizeUpgrade` 做权限校验与零地址检查。
+  - **版本化基线（C+B）**：所有 `src/Vault/view/modules/*.sol` 必须暴露统一版本信息入口：
+    - `getVersionInfo() -> (apiVersion, schemaVersion, implementation)`
+    - `apiVersion` 表达对外 API 语义版本；`schemaVersion` 表达缓存/输出结构版本（字段/编码/解释变化时递增）
+    - `implementation` 用于链下定位当前实现地址（代理场景下可直接识别实现）
+    - **关键模块可采用 A 策略**：保留旧事件/旧入口并新增 `*V2/*V3` 事件或接口以平滑迁移（例如 `PositionView` 的 `UserPositionCachedV2`）
+  - **统一 DataPush**：所有 `push*` 写路径必须调用 `DataPushLibrary._emitData(...)`；`dataTypeHash` 使用 **集中常量**（`DataPushTypes` / `keccak256("UPPER_SNAKE_CASE")`），避免散落重复定义。
+  - **批量限制**：所有批量查询/批量推送统一使用 `ViewConstants.MAX_BATCH_SIZE` 并在入口校验长度，避免 RPC/执行失败。
+  - **错误风格**：优先使用自定义 error（例如 `ContractName__Xxx`）或 `StandardErrors`，避免字符串 `require/revert`（更省 gas、链下更易解码）。
+- **读权限策略（原则）**：
+  - **默认推荐**：关键查询接口保持 0 gas 可读以服务前端/机器人。
+  - **可选增强**：出于隐私/商业策略可对部分只读接口加 role gate，但应在实施前评估对前端/机器人 `eth_call` 的影响（详见“健康因子”章节中的读权限策略说明）。
+
 ## Reward 模块架构与路径
 
 ### 目标
 - 严格以“落账后触发”为准：仅当账本在 `LendingEngine` 成功更新后，才触发积分计算/发放。
 - 只读与写入分层：`RewardManager/RewardManagerCore` 负责计算、发放与扣减；`RewardView` 负责只读缓存与统一 DataPush。
 
+### 职责分工（建议统一口径）
+- **RewardManager（Earn gateway）**：借贷触发的奖励写入口门面 + 参数治理入口（仅 `KEY_LE` 可调用写入口；治理权限走 ACM）。
+- **RewardManagerCore（Earn core）**：发放与惩罚核心（锁定/释放/欠分账本/等级统计；向 `RewardView` 推送）。
+- **RewardConsumption（Spend gateway）**：用户消费对外入口（对外入口 + 批量入口；转发到 `RewardCore`；在 `RewardView.onlyWriter` 白名单内，负责消费侧推送）。
+- **RewardCore（Spend core）**：消费核心（服务购买/升级、消费记录、特权状态；业务逻辑核心，不推荐作为对外统一入口）。
+- **RewardView**：统一只读 + 统一 DataPush（链下订阅与前端查询入口；writer 白名单严格限制）。
+
 ### 唯一路径（强约束）
 1. 业务编排：`VaultBusinessLogic` 完成业务流程（不触发奖励）。
 2. 账本落账：`LendingEngine` 在 borrow/repay 成功后触发：
-   - `IRewardManager.onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough)`
+   - `IRewardManager.onLoanEvent(address user, uint256 amount, uint256 duration, bool flag)`
+   - **现行语义**：`flag` 在 `LendingEngine` 内部计算为 `isOnTimeAndFullyRepaid`（按期且足额还清）。历史上该参数名为 `hfHighEnough`，请以当前调用方语义为准。
 3. 积分计算/发放：`RewardManager` → `RewardManagerCore`：
-   - 依据参数计算应得积分；
-   - 先用积分抵扣欠分账本 `penaltyLedger`（若存在）；
-   - 剩余部分通过 `RewardPoints.mintPoints` 发放。
-4. 只读与 DataPush：`RewardManagerCore`/`RewardCore` 成功后调用 `RewardView.push*`，由 `RewardView` 内部统一 `DataPushLibrary._emitData(...)`：
-   - `REWARD_EARNED` / `REWARD_BURNED` / `REWARD_LEVEL_UPDATED` / `REWARD_PRIVILEGE_UPDATED` / `REWARD_STATS_UPDATED`。
+   - **当前链上基线**：borrow（`duration>0`）锁定 1 积分；repay（`duration=0 && flag=true`）释放锁定积分并铸币；否则走提前/逾期扣罚（不足则记入 `penaltyLedger`）。
+   - **可配置/可演进部分**：`RewardManagerCore.calculateExamplePoints(...)` 保留公式/参数（等级倍数、动态奖励、bonusBps 等）用于模拟与后续升级，但当前 `onLoanEvent` 主路径采用固定 1 积分的锁定-释放模型。
+   - 先用积分抵扣欠分账本 `penaltyLedger`（若存在），剩余部分通过 `RewardPoints.mintPoints` 发放。
+4. 只读与 DataPush：由 `RewardView` 内部统一 `DataPushLibrary._emitData(...)`：
+   - **发放（Earn）侧**：`RewardManagerCore` 调用 `RewardView.push*`（writer 白名单）
+   - **消费（Spend）侧**：`RewardConsumption` 调用 `RewardView.push*`（writer 白名单）
+   - 说明：历史表述曾写为“`RewardManagerCore/RewardCore` 成功后调用 `RewardView.push*`”；现已按 `RewardView.onlyWriter` 白名单修正为：**消费侧由 `RewardConsumption` 推送**，避免读者误解。
+  - `REWARD_EARNED` / `REWARD_BURNED` / `REWARD_LEVEL_UPDATED` / `REWARD_PRIVILEGE_UPDATED` / `REWARD_STATS_UPDATED` / `REWARD_PENALTY_LEDGER_UPDATED`。
 
 ### 权限与边界
-- `RewardManager.onLoanEvent(address,int256,int256)`：仅允许 `KEY_LE` 或 `KEY_VAULT_BUSINESS_LOGIC` 调用；若来源为 VBL，直接返回不发放（兼容老入口，避免未落账先发）。
+- `RewardManager.onLoanEvent(address,int256,int256)`：**已移除**（统一入口，避免语义不确定）。
 - `RewardManager.onLoanEvent(address,uint256,uint256,bool)`：仅允许 `KEY_LE` 调用（标准入口）。
 - `RewardView` 写入白名单：仅 `RewardManagerCore` 与 `RewardConsumption`。查询对外 0 gas。
 - `RewardPoints` 的 mint/burn 仅授予 `RewardManagerCore`，外部消费通过 `RewardCore/RewardConsumption` 路径进行。
+
+### 按期窗口（实现口径）
+- “按期且足额还清”的权威判断发生在 `LendingEngine`，当前固定 `ON_TIME_WINDOW = 24 hours`。
+- `RewardManager.setOnTimeWindow(...)` 当前用于惩罚路径中“提前/逾期”的窗口判定，并不改变 `LendingEngine` 的按期判断。
 
 ### 模块键（ModuleKeys）
 - `KEY_RM`：RewardManager
@@ -821,12 +837,14 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 - `KEY_REWARD_VIEW`：RewardView（新增，只读视图 + 统一 DataPush）
 
 ### 前端/链下对接
-- 订阅 `DataPushed` 事件，过滤上述 5 类 `DATA_TYPE_REWARD_*`。
+- 订阅 `DataPushed` 事件，过滤上述 `DATA_TYPE_REWARD_*`（含 `REWARD_PENALTY_LEDGER_UPDATED`）。
+- 说明：`penaltyLedger`（欠分账本）更新使用独立 `REWARD_PENALTY_LEDGER_UPDATED`，避免与 `REWARD_STATS_UPDATED`（系统统计）复用导致 payload 冲突。
 - 仅访问 `RewardView` 只读接口：
   - `getUserRewardSummary(user)`
   - `getUserRecentActivities(user, fromTs, toTs, limit)`（分页/窗口）
   - `getSystemRewardStats()`
   - `getTopEarners()`
+  - **禁止/不要**在前端/链下直接调用 `RewardManagerCore` 的 `getUserLevel/getRewardParameters/getUserCache/...` 等查询接口：这些接口仅为协议内硬约束（例如 `LendingEngine` 的长周期期限门槛）与 `RewardView` 透传保留，视为 **DEPRECATED for external consumers**。
 
 ### 重要差异
 - 不再从 `VaultBusinessLogic` 触发奖励；批量库（`VaultBusinessLogicLibrary`）完全移除奖励相关逻辑。
@@ -834,10 +852,12 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 
 ### 入口收紧（强制规范，必须遵守）
 - 唯一路径：`LendingEngine` 成功落账后调用 `RewardManager.onLoanEvent(address,uint256,uint256,bool)`，再由 RM 调用 `RewardManagerCore`。
+- **V2 按订单路径**：若上游已对接订单级回调，可调用 `RewardManager.onLoanEventV2(user, orderId, amount, maturity, outcome)`（outcome: 0=Borrow,1=RepayOnTimeFull,2=RepayEarlyFull,3=RepayLateFull），RM 再转发至 `RewardManagerCore.onLoanEventV2` 实现“多订单独立锁定/结算”。
+- 本金门槛：`RewardManagerCore` 已在 `onLoanEvent / onLoanEventV2` 强制 `amount < 1000 USDC` 不计分/不锁定；如需调整，请同步修改合约与测试并更新说明。
 - `RewardManagerCore.onLoanEvent` 与 `onBatchLoanEvents` 不再接受外部直接调用：
   - 调用白名单仅限 `RewardManager`；否则将触发自定义错误 `RewardManagerCore__UseRewardManagerEntry`；
   - 同时发出 `DeprecatedDirectEntryAttempt(caller,timestamp)` 事件用于链下审计迁移；
-  - 旧入口 `RewardManager.onLoanEvent(address,int256,int256)` 仅允许 `KEY_LE`/`KEY_VAULT_BUSINESS_LOGIC`：如来自 VBL 则直接返回不发放，作为过渡兼容。
+  - 旧入口 `RewardManager.onLoanEvent(address,int256,int256)`：**已移除**，全局入口统一为 `RewardManager.onLoanEvent(address,uint256,uint256,bool)`。
 
 ### 迁移说明（对脚本/测试的影响）
 - 任何直接调用 `RewardManagerCore.onLoanEvent` 的脚本或测试都会失败。请统一改为：`LendingEngine → RewardManager → RewardManagerCore` 路径。
@@ -860,7 +880,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 - [x] 无重入风险（VaultCore）
 - [x] 数据来源验证（VaultCore）
 - [x] 升级机制安全（VaultCore）
-- [ ] 缓存数据一致性（VaultView）
+- [ ] 缓存数据一致性（VaultRouter）
 
 ### **性能验证**
 ```bash
@@ -904,7 +924,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 
 ### **5. 当前进度**
 - ✅ **VaultCore 简化完成** - 142行，完全符合双架构标准
-- ✅ **VaultView 双架构完全完成** - 优化后约500行，100%完成度，包含所有优化功能
+- ✅ **VaultRouter 双架构完全完成** - 优化后约500行，100%完成度，包含所有优化功能
 - ✅ **AccessControlView 权限控制完成** - 150行，100%完成度，完整的双架构权限控制
 - ✅ **CollateralManager 重构完成** - 450行，从1005行简化55%，实现纯业务逻辑
 - 🔄 **业务模块重构进行中** - 继续重构其他模块
@@ -977,7 +997,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
    - 变更存储字段时，递增 `storageVersion`，并提供回放/备份脚本。
  
  2) View / 业务模块（独立状态，本地存储 + UUPS）
- - **适用**：`VaultView`、`AccessControlView`、`StatisticsView`、`RewardView`、`LiquidatorView` 等 View；以及 `CollateralManager`、`LendingEngine`、`FeeRouter` 等业务模块与周边组件。
+ - **适用**：`VaultRouter`、`AccessControlView`、`StatisticsView`、`RewardView`、`LiquidatorView` 等 View；以及 `CollateralManager`、`LendingEngine`、`FeeRouter` 等业务模块与周边组件。
  - **技术要点**：
    - 本地私有状态变量（命名 `_camelCase`），公开变量以 `camelCaseVar` 命名，保留 `__gap`。
    - 统一通过 `Registry.getModuleOrRevert(KEY_VAULT_CORE)` → `IVaultCoreMinimal.viewContractAddrVar()` 解析 View 地址。
@@ -990,7 +1010,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
  ### 模块映射建议
  - **库式统一存储（共享状态）**：Registry 家族（上文列举）。
  - **本地存储 + UUPS（独立状态）**：
-   - View 层：`VaultView`、`AccessControlView`、`StatisticsView`、`RewardView`、`LiquidatorView`、`HealthView`、`BatchView`、`RegistryView` 等。
+   - View 层：`VaultRouter`、`PositionView`、`UserView`、`HealthView`、`StatisticsView`、`ViewCache`、`AccessControlView`、`BatchView`、`RegistryView`、`SystemView`、`CacheOptimizedView`、`RewardView`、`LiquidatorView`，以及可选的 `DashboardView`、`PreviewView`、`RiskView`、`ValuationOracleView`、`FeeRouterView`、`LendingEngineView`、`ModuleHealthView`、`EventHistoryManager`、`LiquidationRiskView` 等。
    - 业务层：`CollateralManager`、`LendingEngine`、`FeeRouter`、`PriceOracle`、清算各模块等。
    - 动态键：`RegistryDynamicModuleKey`（其状态与 Registry 家族解耦，独立升级）。
  
@@ -1011,8 +1031,57 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
    - 只读查询：全部 `view`；写入后推送事件 + 调用 View 刷新缓存。
    - 升级：UUPS + `uint256[__] __gap;`，不与 Registry 共槽位。
  
- ### 升级与安全基线
- - 保持 `STORAGE_SLOT` 稳定；仅在需要“重置一切”时考虑改变。
- - 严格的 `storageVersion` 递增与迁移脚本流程（含回滚预案与数据备份）。
- - 在治理/关键写路径加入 `validateStorageLayout()` 与参数上界检查（如 `minDelay`）。
- - 所有实现合约保留足量 `__gap`，避免未来变量插入破坏布局。
+### 升级与安全基线
+- 保持 `STORAGE_SLOT` 稳定；仅在需要"重置一切"时考虑改变。
+- 严格的 `storageVersion` 递增与迁移脚本流程（含回滚预案与数据备份）。
+- 在治理/关键写路径加入 `validateStorageLayout()` 与参数上界检查（如 `minDelay`）。
+- 所有实现合约保留足量 `__gap`，避免未来变量插入破坏布局。
+
+---
+
+## 📜 架构演进历史
+
+### VaultRouter 职责演进（2025-08）
+
+#### 阶段 1：初始设计（2025-08 之前）
+**设计目标**：VaultRouter 作为"双架构智能协调器"，包含所有功能：
+- ✅ 用户操作路由
+- ✅ View 层业务数据缓存（`_userCollateral`, `_userDebt`, `_cacheTimestamps`）
+- ✅ 查询接口（`getUserPosition`, `isUserCacheValid`, `batchGetUserPositions` 等）
+- ✅ 数据推送接口
+
+**问题**：
+- ❌ 违反了"写入不经 View"原则（`processUserOperation` 会触发业务模块写入）
+- ❌ 职责混合（路由 + 查询 + 缓存），违反单一职责原则
+- ❌ 合约复杂度高，难以维护和扩展
+
+#### 阶段 2：架构演进（2025-08 起）
+**设计目标**：职责分离，符合"写入不经 View"原则：
+- ✅ VaultRouter：只写不读（路由 + 数据推送）
+- ✅ View 模块：只读不写（查询 + 缓存）
+
+**迁移内容**：
+- ✅ 查询功能迁移到独立 View 模块：
+  - `getUserPosition` → `PositionView.getUserPosition()`
+  - `getUserDebt` → `PositionView.getUserPosition()` (返回 debt)
+  - `isUserCacheValid` → `PositionView.isUserCacheValid()`
+  - `batchGetUserPositions` → `PositionView.batchGetUserPositions()` / `CacheOptimizedView.batchGetUserPositions()`
+- ✅ 业务数据缓存迁移到 `PositionView.sol`
+- ✅ VaultRouter 仅保留路由和数据推送功能
+
+**优势**：
+- ✅ 符合"写入不经 View"原则（账本写入直达账本模块）
+- ✅ 职责清晰分离（路由 vs 查询）
+- ✅ 模块化设计，便于维护和扩展
+- ✅ 查询功能独立，可独立升级和优化
+
+**当前状态**：
+- ✅ VaultRouter：路由协调器（`processUserOperation`, `pushUserPositionUpdate`, `pushAssetStatsUpdate`）
+- ✅ PositionView：用户仓位查询 + 缓存
+- ✅ UserView：用户数据查询
+- ✅ HealthView：健康因子查询
+- ✅ StatisticsView：统计聚合查询
+
+**参考文档**：
+- `docs/FRONTEND_CONTRACTS_INTEGRATION.md`（2025-08版本）- 准确描述当前架构
+- `docs/Architecture-Analysis.md`（第702-704行）- 验证架构一致性

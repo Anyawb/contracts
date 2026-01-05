@@ -8,6 +8,7 @@ import { Registry } from "../../../registry/Registry.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
 
 // 与核心引擎的最小接口适配，提供仅 View 所需方法（顶层定义，避免在合约内定义接口）
 interface ILendingEngineViewAdapter {
@@ -35,7 +36,7 @@ interface ILendingEngineViewAdapter {
 /// @title LendingEngineView
 /// @notice 仅负责借贷引擎相关的数据查询（0 gas），不承载任何业务写操作
 /// @dev 与核心 LendingEngine 解耦，通过 Registry 获取模块地址
-contract LendingEngineView is Initializable, UUPSUpgradeable {
+contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 	// =========================  Errors  =========================
 
 	error LendingEngineView__ZeroAddress();
@@ -53,6 +54,11 @@ contract LendingEngineView is Initializable, UUPSUpgradeable {
 	}
 
 	// =========================  Initialiser  =========================
+
+	/// @custom:oz-upgrades-unsafe-allow constructor
+	constructor() {
+		_disableInitializers();
+	}
 
 	function initialize(address initialRegistryAddr) external initializer {
 		if (initialRegistryAddr == address(0)) revert LendingEngineView__ZeroAddress();
@@ -98,6 +104,11 @@ contract LendingEngineView is Initializable, UUPSUpgradeable {
 		return _engine()._getRegistryForView();
 	}
 
+	/// @notice 获取 Registry 地址（首选接口）
+	function getRegistry() external view returns (address) {
+		return _registryAddr;
+	}
+
 	// =========================  Internal helpers  =========================
 
 	function _engine() internal view returns (ILendingEngineViewAdapter) {
@@ -114,4 +125,16 @@ contract LendingEngineView is Initializable, UUPSUpgradeable {
 
 	/// @notice 兼容旧版 getter
 	function registryAddr() external view returns(address){ return _registryAddr; }
+
+	// ============ Versioning (C+B baseline) ============
+	function apiVersion() public pure override returns (uint256) {
+		return 1;
+	}
+
+	function schemaVersion() public pure override returns (uint256) {
+		return 1;
+	}
+
+	// =========================  Storage gap for upgrade safety  =========================
+	uint256[50] private __gap;
 }

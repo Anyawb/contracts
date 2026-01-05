@@ -63,7 +63,17 @@ library DataPushTypes {
     bytes32 constant DATA_TYPE_SYSTEM_STATUS            = keccak256("SYSTEM_STATUS_CACHE");
     bytes32 constant DATA_TYPE_USER_FEE                 = keccak256("USER_FEE");
     bytes32 constant DATA_TYPE_GLOBAL_FEE_STATS         = keccak256("GLOBAL_FEE_STATS");
+    bytes32 constant DATA_TYPE_FEE_ROUTER_SYSTEM_CONFIG_UPDATED = keccak256("FEE_ROUTER_SYSTEM_CONFIG_UPDATED");
+    bytes32 constant DATA_TYPE_FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED = keccak256("FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED");
+    bytes32 constant DATA_TYPE_USER_POSITION_UPDATE     = keccak256("USER_POSITION_UPDATE");
+    bytes32 constant DATA_TYPE_LIQUIDATION_UPDATE       = keccak256("LIQUIDATION_UPDATE");
+    bytes32 constant DATA_TYPE_LIQUIDATION_BATCH_UPDATE = keccak256("LIQUIDATION_BATCH_UPDATE");
+    bytes32 constant DATA_TYPE_USER_VIEW_INITIALIZED    = keccak256("USER_VIEW_INITIALIZED");
+    bytes32 constant DATA_TYPE_DEGRADATION_STATS_UPDATE = keccak256("DEGRADATION_STATS_UPDATE");
     bytes32 constant DATA_TYPE_HISTORY                  = keccak256("EVENT_HISTORY");
+    bytes32 constant DATA_TYPE_HEALTH_FACTOR            = keccak256("HEALTH_FACTOR_UPDATE");
+    bytes32 constant DATA_TYPE_RISK_STATUS              = keccak256("RISK_STATUS_UPDATE");
+    bytes32 constant DATA_TYPE_RISK_STATUS_BATCH        = keccak256("RISK_STATUS_UPDATE_BATCH");
 
     // ===== Reward / 积分相关（新增） =====
     bytes32 constant DATA_TYPE_REWARD_EARNED            = keccak256("REWARD_EARNED");
@@ -71,6 +81,9 @@ library DataPushTypes {
     bytes32 constant DATA_TYPE_REWARD_LEVEL_UPDATED     = keccak256("REWARD_LEVEL_UPDATED");
     bytes32 constant DATA_TYPE_REWARD_PRIVILEGE_UPDATED = keccak256("REWARD_PRIVILEGE_UPDATED");
     bytes32 constant DATA_TYPE_REWARD_STATS_UPDATED     = keccak256("REWARD_STATS_UPDATED");
+    /// @notice 用户欠分账本更新（penaltyLedger）
+    /// @dev payload = abi.encode(address user, uint256 pendingDebt, uint256 ts)
+    bytes32 constant DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED = keccak256("REWARD_PENALTY_LEDGER_UPDATED");
 }
 
 

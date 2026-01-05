@@ -221,9 +221,8 @@ interface ILiquidationCollateralManager {
     // ============ Dynamic Module Key Functions ============
     
     /// @notice 注册动态模块键
-    /// @param moduleKey 模块键
-    /// @param name 模块名称
-    function registerDynamicModuleKey(bytes32 moduleKey, string memory name) external;
+    /// @param name 模块名称（模块键由 RegistryDynamicModuleKey 内部生成）
+    function registerDynamicModuleKey(string memory name) external;
     
     /// @notice 注销动态模块键
     /// @param moduleKey 模块键

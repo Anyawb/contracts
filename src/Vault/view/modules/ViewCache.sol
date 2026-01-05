@@ -9,6 +9,7 @@ import { AccessControlLibrary } from "../../../libraries/AccessControlLibrary.so
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
 
 // 常量迁移至 DataPushTypes
 
@@ -17,7 +18,7 @@ import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
  * @notice 视图缓存模块（系统级快照）
  * @dev 用户维度缓存已迁移至 `UserView`；本合约仅负责系统级批量缓存，所有写操作触发 `CacheUpdated` 事件。
  */
-contract ViewCache is Initializable, UUPSUpgradeable {
+contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     // =========================  Events  =========================
 
     /// @notice Emitted whenever a system snapshot is successfully written.
@@ -27,6 +28,9 @@ contract ViewCache is Initializable, UUPSUpgradeable {
 
     error ViewCache__ZeroAddress();
     error ViewCache__InvalidCacheData();
+    error ViewCache__EmptyArray();
+    error ViewCache__BatchTooLarge(uint256 length, uint256 max);
+    error ViewCache__ZeroImplementation();
 
     // =========================  Structs  =========================
 
@@ -64,6 +68,11 @@ contract ViewCache is Initializable, UUPSUpgradeable {
 
     // =========================  Initialiser  =========================
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     /// @param initialRegistryAddr 协议 Registry 合约地址
     ///
     /// @notice 初始化合约
@@ -73,6 +82,16 @@ contract ViewCache is Initializable, UUPSUpgradeable {
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
+    }
+
+    /// @notice Registry 地址（推荐）
+    function registryAddrVar() external view returns (address) {
+        return _registryAddr;
+    }
+
+    /// @notice Registry 地址（兼容旧命名）
+    function registryAddr() external view returns (address) {
+        return _registryAddr;
     }
 
     // =========================  Write APIs  =========================
@@ -89,7 +108,6 @@ contract ViewCache is Initializable, UUPSUpgradeable {
         uint256 totalDebt,
         uint256 utilizationRate
     ) external onlyValidRegistry {
-        // --- permission check -------------------------------------------------
         AccessControlLibrary.requireRole(
             _registryAddr,
             ActionKeys.ACTION_VIEW_SYSTEM_DATA,
@@ -99,7 +117,6 @@ contract ViewCache is Initializable, UUPSUpgradeable {
 
         if (asset == address(0)) revert ViewCache__InvalidCacheData();
 
-        // --- write cache ------------------------------------------------------
         _systemStatusCache[asset] = SystemStatusCache({
             totalCollateral: totalCollateral,
             totalDebt: totalDebt,
@@ -110,7 +127,10 @@ contract ViewCache is Initializable, UUPSUpgradeable {
         _systemCacheTimestamps[asset] = block.timestamp;
 
         emit CacheUpdated(asset, msg.sender, block.timestamp);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_SYSTEM_STATUS, abi.encode(asset, totalCollateral, totalDebt, utilizationRate, block.timestamp));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
+            abi.encode(asset, totalCollateral, totalDebt, utilizationRate, block.timestamp)
+        );
     }
 
     /// @notice 清理指定资产的缓存
@@ -123,7 +143,10 @@ contract ViewCache is Initializable, UUPSUpgradeable {
         delete _systemCacheTimestamps[asset];
 
         emit CacheUpdated(asset, msg.sender, block.timestamp);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_SYSTEM_STATUS, abi.encode(asset, uint256(0), uint256(0), uint256(0), block.timestamp));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
+            abi.encode(asset, uint256(0), uint256(0), uint256(0), block.timestamp)
+        );
     }
 
     // =========================  Read APIs  =========================
@@ -148,7 +171,8 @@ contract ViewCache is Initializable, UUPSUpgradeable {
         address[] calldata assets
     ) external view returns (SystemStatusCache[] memory statuses, bool[] memory validFlags) {
         uint256 length = assets.length;
-        require(length <= MAX_BATCH_SIZE, "ViewCache: batch too large");
+        if (length == 0) revert ViewCache__EmptyArray();
+        if (length > MAX_BATCH_SIZE) revert ViewCache__BatchTooLarge(length, MAX_BATCH_SIZE);
 
         statuses   = new SystemStatusCache[](length);
         validFlags = new bool[](length);
@@ -170,7 +194,20 @@ contract ViewCache is Initializable, UUPSUpgradeable {
 
     /// @notice 升级授权（UUPS）
     /// @dev 仅管理员 (ACTION_ADMIN) 可通过。
-    function _authorizeUpgrade(address /* newImplementation */) internal override onlyValidRegistry {
+    function _authorizeUpgrade(address newImplementation) internal override onlyValidRegistry {
         AccessControlLibrary.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender, msg.sender);
+        if (newImplementation == address(0)) revert ViewCache__ZeroImplementation();
+    }
+
+    /// @notice Storage gap for future upgrades
+    uint256[50] private __gap;
+
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
     }
 } 

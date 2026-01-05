@@ -156,7 +156,7 @@ describe('集成测试', function () {
     await lendingEngine.connect(vaultCore).borrow(user, asset, amount);
     
     // 验证 View 层缓存更新
-    const [collateral, debt] = await vaultView.getUserPosition(user, asset);
+    const [collateral, debt] = await vaultRouter.getUserPosition(user, asset);
     expect(debt).to.equal(amount);
   });
 });

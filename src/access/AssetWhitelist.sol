@@ -130,6 +130,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
 
     /* ============ Constructor ============ */
     /// @dev 禁用实现合约的初始化器
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

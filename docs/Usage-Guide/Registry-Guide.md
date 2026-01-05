@@ -698,6 +698,7 @@ Registry 不提供直接查询所有模块的接口（为了节省 gas）。如�
 - [Architecture-Guide.md](../docs/Architecture-Guide.md) - 架构设计文档
 - [Registry-Split-Summary.md](../docs/Registry-Split-Summary.md) - Registry 拆分说明
 - [RegistryUpgradeFlow.md](../docs/RegistryUpgradeFlow.md) - 升级流程文档
+- [Storage-Migration-Guide.md](./Storage-Migration-Guide.md) - 存储迁移指南（存储布局升级）
 
 ---
 

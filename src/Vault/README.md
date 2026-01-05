@@ -41,8 +41,8 @@ function batchRepay(address[] calldata assets, uint256[] calldata amounts) exter
 function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external
 ```
 
-### 2. VaultView.sol - 查询接口
-**文件路径**: `contracts/Vault/VaultView.sol`
+### 2. VaultRouter.sol - 查询接口
+**文件路径**: `contracts/Vault/VaultRouter.sol`
 
 **主要功能**: 提供所有查询功能，包括用户状态、健康因子、价格等
 
@@ -215,7 +215,7 @@ function getTotalDebtByAsset(address asset) external view returns (uint256)
 ### 主要合约地址
 前端需要获取以下合约地址：
 1. `VaultCore` - 用户操作入口
-2. `VaultView` - 查询操作入口
+2. `VaultRouter` - 查询操作入口
 3. `VaultStorage` - 系统配置查询
 
 ### 常用操作流程

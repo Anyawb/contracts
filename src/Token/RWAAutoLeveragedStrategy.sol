@@ -12,7 +12,7 @@ import {IVaultStorage} from "../interfaces/IVaultStorage.sol";
 import {ILendingEngineBasic} from "../interfaces/ILendingEngineBasic.sol";
 import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
 import {AmountIsZero} from "../errors/StandardErrors.sol";
-import {IVaultView} from "../interfaces/IVaultView.sol";
+import {IVaultRouter} from "../interfaces/IVaultRouter.sol";
 // 临时最小接口（项目未提供 IPositionView.sol）
 interface IPositionView {
     function getUserPosition(address user, address asset) external view returns (uint256 collateral, uint256 debt);

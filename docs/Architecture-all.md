@@ -7,10 +7,10 @@
 ## 一、总体架构概览（文本图）
 
 ```
-用户（Web/Mobile） ⇄ 前端（React/Next.js + Wallet adapters） ⇄ API Gateway ⇄ 后端服务群（Go 微服务 + Rust 账务引擎）
+用户（Web/Mobile） ⇄ 前端（Rust + Wallet adapters @ Vercel） ⇄ API Gateway（Vercel Edge/Functions） ⇄ 后端服务群（Rust 服务 @ Vercel + Rust 账务引擎）
 后端与链交互：Chain Indexer（solana / arbitrum） + On-chain Relayer / Tx Submitter → 智能合约（Solana programs / Arbitrum L2 contracts）
-AI 层：向量库（Milvus）、RAG 层（memory_records）、Agent Orchestrator（Python/Go）、仿真服务（Rust/Go）
-存储：Postgres（主账/bf_*）、Timescale/ClickHouse（时序/分析）、S3（trace/archives）
+AI 层：向量库（Milvus/Pinecone）、RAG 层（memory_records）、Agent Orchestrator（Python/Rust）、仿真服务（Rust）（独立部署，AI 使用 PostgreSQL 主库 + Redis + 向量库）
+存储：Supabase Postgres（主账/bf_*，Timescale 扩展用于时序）+ Supabase Storage（archives）；AI 数据存储：PostgreSQL（AI 主库）+ Redis（缓存/队列）+ 向量库（Milvus/Pinecone）
 消息总线：Kafka（事件流）；观察：OpenTelemetry / Prometheus / Grafana
 ```
 
@@ -24,15 +24,16 @@ AI 层：向量库（Milvus）、RAG 层（memory_records）、Agent Orchestrato
 
 ### 2. 技术栈 / 语言
 
-- **框架**：React + Next.js（App Router SSR/CSR 混合）
-- **类型**：TypeScript
-- **UI**：Tailwind CSS + shadcn/ui；设计系统（tokens）
+- **框架**：Rust（Yew / Leptos / Dioxus，支持 SSR/CSR 混合）
+- **类型**：Rust（强类型系统）
+- **UI**：Rust UI 框架（如 Yew 组件库、Leptos UI）或 WebAssembly + 现代 CSS；设计系统（tokens）
 - **钱包 / 链适配**：
-  - Solana：`@solana/wallet-adapter`（Phantom, Solflare 等）
-  - Arbitrum（EVM）：web3modal / wagmi + ethers.js
-- **通信**：GraphQL (Apollo) + REST fallbacks + WebSocket（实时推送）
-- **测试**：Jest + React Testing Library + Playwright（E2E）
-- **国际化(i18n)**：react-intl 或 next-i18next（中文/英文）
+  - Solana：Rust Solana SDK（`solana-sdk`、`solana-client`）与钱包适配器（Rust 实现）
+  - Arbitrum（EVM）：Rust Web3 库（`ethers-rs`、`alloy-rs`）与钱包连接
+- **通信**：Rust HTTP 客户端（`reqwest`、`ureq`）+ GraphQL 客户端（`graphql_client`）+ WebSocket（`tokio-tungstenite`，实时推送）
+- **测试**：Rust 测试框架（`cargo test`）+ 集成测试 + Playwright（E2E）
+- **部署/托管**：Vercel（Edge/SSR，静态资源 CDN；环境变量托管）
+- **国际化(i18n)**：Rust i18n 库（`fluent`、`i18n-embed` 等，支持中文/英文）
 
 ### 3. 主要组件与结构
 
@@ -75,27 +76,27 @@ AI 层：向量库（Milvus）、RAG 层（memory_records）、Agent Orchestrato
 
 ### 1. 技术栈 / 语言（按职能划分）
 
-- **API 层、业务逻辑**：Go（Golang） — 易部署、并发好、生态成熟
+- **API 层、业务逻辑**：Rust — 易部署、并发好、生态成熟、内存安全
 - **账务核心**（强一致性、数值安全）：Rust — deterministic decimal math (no float), high performance
-- **链 Indexer / Relayer**：Rust/Go（Indexer 推荐 Rust for Solana high perf；Arbitrum indexer 可用 Go）
-- **DB**：Postgres (主 OLTP + `bf_*` 表), Timescale / ClickHouse（时序/分析）
+- **链 Indexer / Relayer**：Rust（Indexer 推荐 Rust for Solana high perf；Arbitrum indexer 同样使用 Rust）
+- **DB**：Supabase Postgres（`bf_*` 主库，Timescale 扩展做时序/分析）；AI 侧使用 PostgreSQL（AI 主库）+ Redis + 向量库（Milvus/Pinecone）
 - **消息**：Kafka（事件流）
 - **缓存**：Redis Cluster
-- **向量**：Milvus/Pinecone（AI embeddings）
-- **容器/部署**：Kubernetes, Istio, Vault
+- **向量**：Milvus（AI embeddings）
+- **运行/托管**：Vercel（Serverless/Edge Functions + Cron/Queues）；必要的长跑链节点与 worker 可自托管（Rust）
 
 ### 2. 服务划分（微服务）
 
 - **api-gateway**（Auth、速率限制、`request_id` 注入）
 - **user-service**（用户、KYC、权限）
 - **ledger-service**（Rust）：双边账写入、幂等检查、逆向 entry 生成、CHECK constraints enforcement（交易级事务）
-- **reward-service**（积分域，Go）：积分发放/消耗镜像写入 `platform_ledger` 链接
-- **bf-service**（行为金融层，Go）：模型管理、仿真触发、`bf_events` 管理
+- **reward-service**（积分域，Rust）：积分发放/消耗镜像写入 `platform_ledger` 链接
+- **bf-service**（行为金融层，Rust）：模型管理、仿真触发、`bf_events` 管理
 - **chain-indexer-solana**（Rust）：监听 Solana program logs, parse events, write to `chain_events` 表 + Kafka
-- **chain-indexer-arbitrum**（Go）：监听 Arbitrum L2 transactions / logs via archive node or indexer, write events
-- **relayer-service**（Go，安全）：接受签名或未签名 txs，提交给对应链 RPC（带防重放/nonce manager）
-- **reconciliation-service**（Go）：三维配对对账（`request_id` + `tenant_id` + `user_id`），生成差错 report 与修复建议
-- **admin-tools**（Node/Go CLI）：回填脚本、archive、migration helpers
+- **chain-indexer-arbitrum**（Rust）：监听 Arbitrum L2 transactions / logs via archive node or indexer, write events
+- **relayer-service**（Rust，安全）：接受签名或未签名 txs，提交给对应链 RPC（带防重放/nonce manager）
+- **reconciliation-service**（Rust）：三维配对对账（`request_id` + `tenant_id` + `user_id`），生成差错 report 与修复建议
+- **admin-tools**（Rust CLI）：回填脚本、archive、migration helpers
 - **cache-retry tooling**（运维脚本/小服务，可与 admin-tools 并列）：监听 `CacheUpdateFailed` 事件入队、人工触发重试、死信导出/重放、审计记录；与链上事件携带的 `request_id`/`block_number`/`log_index` 对齐，重试前必读最新账本，保证幂等与不覆盖新状态。
 
 ### 3. 链上/链下一致性模式
@@ -116,11 +117,11 @@ AI 层：向量库（Milvus）、RAG 层（memory_records）、Agent Orchestrato
 ### 5. Chain Indexer 具体功能
 
 - **Solana Indexer (Rust)**：订阅 RPC 升级（或使用 Solana blockstream），解析 program logs（Anchor/Sealevel 格式），抽取 events（借入、还款、liquidation、reward），写入 `chain_events` 表并 push 到 Kafka。解析要能读出 tx 内的 `request_id`（建议在 tx instruction data 或 memo program 中携带 `request_id`）
-- **Arbitrum Indexer (Go)**：订阅 L2 blocks / logs，通过 archive node 或者使用 TheGraph-like indexer，解析 events（ERC20 transfers, custom events）并同样写 `chain_events`
+- **Arbitrum Indexer (Rust)**：订阅 L2 blocks / logs，通过 archive node 或者使用 TheGraph-like indexer，解析 events（ERC20 transfers, custom events）并同样写 `chain_events`
 
 ### 6. Reconciliation / 回填 / 修复
 
-- 定期 job（cron 或 k8s CronJob）运行对账：按 (`request_id`, `tenant_id`, `user_id`) 聚合 `chain_events` 与 `ledger_entries`
+- 定期 job（Vercel Cron / Queue 触发，或自托管 Rust worker）运行对账：按 (`request_id`, `tenant_id`, `user_id`) 聚合 `chain_events` 与 `ledger_entries`
 - **差错类别**：`missing_ledger` (chain 有事件但 ledger 无), `missing_chain` (ledger 有但 chain 无 — 可能平台内部记账), `mismatch_amount`, `duplicate_entries`
 - **修复策略**：自动生成 compensating ledger entry（逆向 entry）并写 `bf_events`(recording repair)；对于链上无法撤销的行为，生成补偿支付或人工工单
 - 回填工具需支持 dry-run、preview、批量 limit、并行并 log 每次操作 `request_id`
@@ -133,7 +134,7 @@ AI 层：向量库（Milvus）、RAG 层（memory_records）、Agent Orchestrato
 
 ### 8. 测试
 
-- Unit tests（Go/Rust） + Integration tests （local chain nodes: Solana localnet、Arbitrum Goerli）
+- Unit tests（Rust） + Integration tests （local chain nodes: Solana localnet、Arbitrum Goerli）
 - Property-based tests for ledger invariants（debit+credit=0 always）
 - Chaos tests：模拟 indexer 延迟、chain reorg（对 Arbitrum）、fork handling（Solana 根变更）
 
@@ -145,9 +146,10 @@ AI 层：向量库（Milvus）、RAG 层（memory_records）、Agent Orchestrato
 
 ### 2. 技术栈 / 语言
 
-- **Orchestrator / Service**：Python（FastAPI）或 Go（若需高并发）
+- **Orchestrator / Service**：Python（FastAPI）或 Rust（若需高并发）
+- **数据存储**：PostgreSQL（AI 主库）+ Redis（缓存/任务队列）+ 向量库（Milvus 或 Pinecone）
 - **大模型接入**：使用外部 LLM（或内部私有模型）via OpenAI-like API / local LLM（如果离线需）
-- **向量搜索**：Milvus / Pinecone / Weaviate（根据你已有选型）
+- **向量搜索**：Milvus 或 Pinecone（根据你已有选型）
 - **Embedding jobs**：Python（Celery/Kafka workers）进行批量嵌入
 - **仿真核心**：Rust（高性能数值、保证 deterministic）或 Python（便捷但慢，可作控制面）
 - **数据科学 / 回测**：Jupyter + Python (pandas, numpy, statsmodels) for offline calibration
@@ -184,7 +186,7 @@ AI 层：向量库（Milvus）、RAG 层（memory_records）、Agent Orchestrato
 
 ### 1. API 网关责任
 
-鉴权（OAuth2 / JWT）、速率限制、`request_id` 注入、多租户路由（根据 tenant id 路由到对应 DB 分片或限流），OpenAPI 规范发布
+鉴权（OAuth2 / JWT）、速率限制、`request_id` 注入、多租户路由（Vercel Edge/Functions，按 tenant 路由到 Supabase Postgres 分片或限流），OpenAPI 规范发布
 
 ### 2. 主要 REST / GraphQL 端点（示意，OpenAPI 可扩展）
 
@@ -301,13 +303,13 @@ AI 层：向量库（Milvus）、RAG 层（memory_records）、Agent Orchestrato
 ### 准备期（Week 0）
 
 - 完成详细 RFC（含本设计），确认技术栈、人员分配、SLA
-- 建立 k8s dev/staging/prod 环境，数据库 baseline（Postgres）、Kafka、Milvus、Timescale
+- 建立 Vercel 项目环境（dev/staging/prod）与 Supabase 项目（Postgres + Timescale 扩展），配置 Kafka（托管，如 Confluent Cloud）、Redis（托管），启动 Milvus 或接通 Pinecone，准备 Supabase Storage bucket
 - 准备 localchain 工具（Solana localnet, Arbitrum testnet / local node）
 
 ### Phase 1：基础设施与 schema（Week 1–2）
 
-- **后端**：创建 `bf_*` 表、ledger schema、`chain_events` 表（提供 migration scripts）
-- **DevOps**：部署 Kafka、Redis、Milvus、Timescale、ClickHouse
+- **后端**：创建 `bf_*` 表、ledger schema、`chain_events` 表（提供 migration scripts；运行在 Supabase Postgres/Timescale）
+- **DevOps**：配置 Kafka（托管）、Redis（托管）、Milvus 或 Pinecone；完成 Supabase migration pipeline；Vercel 环境变量/密钥注入
 - **Chain team**：部署智能合约到 testnet（Solana devnet, Arbitrum Goerli），设计事件格式（必须包含 `request_id`，可选 `user_id`/address，`tenant_id` 如适用）
 - **API**：实现基础 auth + gateway，定义 OpenAPI 初版
 - **三键基线**：迁移脚本与初版 API 约定所有写请求必须携带 `request_id` / `tenant_id` / `user_id`（或 address+映射）；幂等唯一索引方案在此阶段确定。

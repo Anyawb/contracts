@@ -13,6 +13,7 @@ import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
 import { VaultTypes } from "../../VaultTypes.sol";
 import { ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
 
 /// @dev 本地最小接口：仅用于健康检查，避免接口不匹配导致的编译错误
 interface IPriceOracleHealth {
@@ -25,33 +26,16 @@ interface IPriceOracleHealth {
 /// @dev 已迁移到Registry系统，使用标准化的模块管理方式
 /// @dev 增强权限隔离：细粒度权限控制、数据访问审计
 /// @custom:security-contact security@example.com
-contract ValuationOracleView is Initializable, UUPSUpgradeable {
-    
+contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
+    uint256 private constant MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
+    string private constant ORACLE_CALL_FAILED = "oracle call failed";
+
     /// @notice Registry 合约地址
     address private _registryAddr;
-    
-    /// @notice 价格数据访问审计事件
-    event PriceDataAccess(
-        address indexed caller,
-        address indexed asset,
-        string operation,
-        uint256 timestamp
-    );
-    
-    /// @notice 预言机健康检查事件
-    event OracleHealthCheck(
-        address indexed asset,
-        bool isHealthy,
-        string details,
-        uint256 timestamp
-    );
-    
-    /// @notice 批量价格查询事件
-    event BatchPriceQuery(
-        address indexed caller,
-        uint256 assetCount,
-        uint256 timestamp
-    );
+
+    error ValuationOracleView__EmptyAssets();
+    error ValuationOracleView__BatchTooLarge(uint256 length, uint256 max);
+    error ValuationOracleView__ZeroImplementation();
     
     /// @notice Registry 有效性验证修饰符
     modifier onlyValidRegistry() {
@@ -66,13 +50,29 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable {
         _;
     }
 
+    /// @notice 防止逻辑合约被直接初始化
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     /// @notice 初始化 ValuationOracleView 模块
     /// @param initialRegistryAddr Registry合约地址
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        
+
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
+    }
+
+    /// @notice Registry 地址（推荐 getter）
+    function registryAddrVar() external view returns (address) {
+        return _registryAddr;
+    }
+
+    /// @notice Registry 地址（兼容旧命名）
+    function registryAddr() external view returns (address) {
+        return _registryAddr;
     }
 
     /* ============ 价格查询功能 ============ */
@@ -81,38 +81,48 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable {
     /// @param asset 资产地址
     /// @return price 价格
     /// @return timestamp 时间戳
-    function getAssetPrice(address asset) external onlyValidRegistry onlyPriceViewer 
-        returns (uint256 price, uint256 timestamp) {
-        address priceOracle = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
-        
-        (price, timestamp, ) = IPriceOracle(priceOracle).getPrice(asset);
-        
-        emit PriceDataAccess(msg.sender, asset, "getAssetPrice", block.timestamp);
+    function getAssetPrice(address asset) external view onlyValidRegistry onlyPriceViewer returns (uint256 price, uint256 timestamp) {
+        address priceOracle = _priceOracle();
+
+        try IPriceOracle(priceOracle).getPrice(asset) returns (uint256 p, uint256 ts, uint256) {
+            return (p, ts);
+        } catch {
+            return (0, 0);
+        }
     }
 
     /// @notice 批量获取资产价格
     /// @param assets 资产地址数组
     /// @return prices 价格数组
     /// @return timestamps 时间戳数组
-    function getAssetPrices(address[] calldata assets) external onlyValidRegistry onlyPriceViewer 
-        returns (uint256[] memory prices, uint256[] memory timestamps) {
-        address priceOracle = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
-        
-        (prices, timestamps, ) = IPriceOracle(priceOracle).getPrices(assets);
-        
-        emit BatchPriceQuery(msg.sender, assets.length, block.timestamp);
+    function getAssetPrices(address[] calldata assets) external view onlyValidRegistry onlyPriceViewer returns (uint256[] memory prices, uint256[] memory timestamps) {
+        uint256 length = assets.length;
+        if (length == 0) revert ValuationOracleView__EmptyAssets();
+        if (length > MAX_BATCH_SIZE) revert ValuationOracleView__BatchTooLarge(length, MAX_BATCH_SIZE);
+
+        prices = new uint256[](length);
+        timestamps = new uint256[](length);
+
+        address priceOracle = _priceOracle();
+        try IPriceOracle(priceOracle).getPrices(assets) returns (uint256[] memory p, uint256[] memory ts, uint256[] memory) {
+            prices = p;
+            timestamps = ts;
+        } catch {
+            // best-effort fallback：保持默认零值
+        }
     }
 
     /// @notice 检查价格是否有效
     /// @param asset 资产地址
     /// @return isValid 价格是否有效
-    function isPriceValid(address asset) external onlyValidRegistry onlyPriceViewer 
-        returns (bool isValid) {
-        address priceOracle = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
-        
-        isValid = IPriceOracle(priceOracle).isPriceValid(asset);
-        
-        emit PriceDataAccess(msg.sender, asset, "isPriceValid", block.timestamp);
+    function isPriceValid(address asset) external view onlyValidRegistry onlyPriceViewer returns (bool isValid) {
+        address priceOracle = _priceOracle();
+
+        try IPriceOracle(priceOracle).isPriceValid(asset) returns (bool ok) {
+            return ok;
+        } catch {
+            return false;
+        }
     }
 
     /* ============ 预言机状态查询 ============ */
@@ -126,13 +136,14 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable {
     /// @param asset 资产地址
     /// @return isHealthy 是否健康
     /// @return details 详细信息
-    function checkPriceOracleHealth(address asset) external onlyValidRegistry onlyPriceViewer 
-        returns (bool isHealthy, string memory details) {
-        address priceOracle = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
-        
-        (isHealthy, details) = IPriceOracleHealth(priceOracle).checkPriceOracleHealth(asset);
-        
-        emit OracleHealthCheck(asset, isHealthy, details, block.timestamp);
+    function checkPriceOracleHealth(address asset) external view onlyValidRegistry onlyPriceViewer returns (bool isHealthy, string memory details) {
+        address priceOracle = _priceOracle();
+
+        try IPriceOracleHealth(priceOracle).checkPriceOracleHealth(asset) returns (bool healthy, string memory info) {
+            return (healthy, info);
+        } catch {
+            return (false, ORACLE_CALL_FAILED);
+        }
     }
 
     /// @notice 获取默认预言机地址
@@ -151,28 +162,25 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable {
     /// @return details 详细信息数组
     function batchCheckPriceOracleHealth(
         address[] calldata assets
-    ) external onlyValidRegistry onlyPriceViewer returns (
-        bool[] memory healthStatuses,
-        string[] memory details
-    ) {
-        require(assets.length > 0, "ValuationOracleView: empty assets array");
-        require(assets.length <= ViewConstants.MAX_BATCH_SIZE, "ValuationOracleView: batch too large");
-        
+    ) external view onlyValidRegistry onlyPriceViewer returns (bool[] memory healthStatuses, string[] memory details) {
         uint256 length = assets.length;
+        if (length == 0) revert ValuationOracleView__EmptyAssets();
+        if (length > MAX_BATCH_SIZE) revert ValuationOracleView__BatchTooLarge(length, MAX_BATCH_SIZE);
+
         healthStatuses = new bool[](length);
         details = new string[](length);
-        
-        address priceOracle = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
-        
+
+        address priceOracle = _priceOracle();
+
         for (uint256 i = 0; i < length; ++i) {
-            (bool isHealthy, string memory detail) = 
-                IPriceOracleHealth(priceOracle).checkPriceOracleHealth(assets[i]);
-            
-            healthStatuses[i] = isHealthy;
-            details[i] = detail;
+            try IPriceOracleHealth(priceOracle).checkPriceOracleHealth(assets[i]) returns (bool healthy, string memory info) {
+                healthStatuses[i] = healthy;
+                details[i] = info;
+            } catch {
+                healthStatuses[i] = false;
+                details[i] = ORACLE_CALL_FAILED;
+            }
         }
-        
-        emit BatchPriceQuery(msg.sender, assets.length, block.timestamp);
     }
 
     /* ============ 管理功能 ============ */
@@ -189,11 +197,10 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable {
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
-        
+
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
-        
-        // 发出Registry地址更新事件
+
         emit VaultTypes.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
@@ -202,14 +209,13 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable {
         );
     }
 
-    /// @notice 获取当前合约版本信息
-    /// @return version 版本号
-    /// @return implementation 当前实现地址
-    function getVersionInfo() external view onlyValidRegistry returns (uint256 version, address implementation) {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
-        // 这里可以返回合约版本信息，暂时返回默认值
-        version = 1;
-        implementation = address(this);
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
     }
 
     /// @notice 检查升级权限
@@ -221,83 +227,20 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable {
         return IAccessControlManager(acmAddr).hasRole(ActionKeys.ACTION_UPGRADE_MODULE, user);
     }
 
-    /* ============ Registry升级管理 ============ */
-
-    /// @notice 安排模块升级
-    /// @param targetModuleKey 目标模块键
-    /// @param newModuleAddress 新模块地址
-    /// @dev 需要升级权限
-    function scheduleModuleUpgrade(bytes32 targetModuleKey, address newModuleAddress) external onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
-        Registry(_registryAddr).scheduleModuleUpgrade(targetModuleKey, newModuleAddress);
-    }
-
-    /// @notice 执行模块升级
-    /// @param targetModuleKey 目标模块键
-    /// @dev 需要升级权限
-    function executeModuleUpgrade(bytes32 targetModuleKey) external onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
-        Registry(_registryAddr).executeModuleUpgrade(targetModuleKey);
-    }
-
-    /// @notice 取消模块升级
-    /// @param targetModuleKey 目标模块键
-    /// @dev 需要升级权限
-    function cancelModuleUpgrade(bytes32 targetModuleKey) external onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
-        Registry(_registryAddr).cancelModuleUpgrade(targetModuleKey);
-    }
-
-    /// @notice 获取待升级信息
-    /// @param targetModuleKey 目标模块键
-    /// @return newAddress 新地址
-    /// @return executeAfter 执行时间
-    /// @return hasPending 是否有待升级
-    function getPendingUpgrade(bytes32 targetModuleKey) external view onlyValidRegistry returns (
-        address newAddress, 
-        uint256 executeAfter, 
-        bool hasPending
-    ) {
-        return Registry(_registryAddr).getPendingUpgrade(targetModuleKey);
-    }
-
-    /// @notice 检查升级是否准备就绪
-    /// @param targetModuleKey 目标模块键
-    /// @return 是否准备就绪
-    function isUpgradeReady(bytes32 targetModuleKey) external view onlyValidRegistry returns (bool) {
-        return Registry(_registryAddr).isUpgradeReady(targetModuleKey);
-    }
-
-    /// @notice 获取模块的升级历史数量
-    /// @param targetModuleKey 目标模块键
-    /// @return 升级历史数量
-    function getUpgradeHistoryCount(bytes32 targetModuleKey) external view onlyValidRegistry returns (uint256) {
-        return Registry(_registryAddr).getUpgradeHistoryCount(targetModuleKey);
-    }
-
-    /// @notice 获取模块的升级历史记录
-    /// @param targetModuleKey 目标模块键
-    /// @param historyIndex 历史记录索引
-    /// @return oldAddress 旧地址
-    /// @return newAddress 新地址
-    /// @return timestamp 时间戳
-    /// @return executor 执行者
-    function getUpgradeHistory(bytes32 targetModuleKey, uint256 historyIndex) external view onlyValidRegistry returns (
-        address oldAddress,
-        address newAddress,
-        uint256 timestamp,
-        address executor
-    ) {
-        return Registry(_registryAddr).getUpgradeHistory(targetModuleKey, historyIndex);
+    /* ============ Internal helpers ============ */
+    function _priceOracle() internal view returns (address) {
+        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
     }
 
     /* ============ UUPS Upgradeable ============ */
     /// @notice 升级授权函数
     /// @dev 只有具有升级权限的用户可以升级
-    function _authorizeUpgrade(address newImplementation) internal view override {
+    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
-        
-        // 验证新实现地址不为零
-        if (newImplementation == address(0)) revert ZeroAddress();
+
+        if (newImplementation == address(0)) revert ValuationOracleView__ZeroImplementation();
     }
+
+    /// @notice Storage gap for future upgrades
+    uint256[50] private __gap;
 }

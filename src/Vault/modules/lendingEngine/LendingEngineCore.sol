@@ -4,18 +4,27 @@ pragma solidity ^0.8.20;
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { IRewardManager } from "../../../interfaces/IRewardManager.sol";
 import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
-import { IVaultView } from "../../../interfaces/IVaultView.sol";
 import { HealthFactorLib } from "../../../libraries/HealthFactorLib.sol";
 import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
+import { IPositionView } from "../../../interfaces/IPositionView.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { LendingEngineStorage } from "./LendingEngineStorage.sol";
 import { LendingEngineAccounting } from "./LendingEngineAccounting.sol";
 
-/// @notice Minimal interface to resolve VaultView through VaultCore
+/// @notice Minimal interface to resolve VaultRouter through VaultCore
+/// @dev 架构指南：统一通过 KEY_VAULT_CORE -> viewContractAddrVar() 解析 View 地址
 interface IVaultCoreMinimal {
     function viewContractAddrVar() external view returns (address);
+    function pushUserPositionUpdate(
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external;
 }
 
 /// @notice Minimal interface for HealthView
@@ -34,11 +43,21 @@ library LendingEngineCore {
     event HealthPushFailed(address indexed user, address indexed healthView, uint256 totalCollateral, uint256 totalDebt, bytes reason);
 
     /// @notice 借款主流程（账本落账 + View/Health 推送 + 奖励）
-    function borrow(LendingEngineStorage.Layout storage s, address user, address asset, uint256 amount) internal {
+    /// @param termDays 借款期限（天），用于 Reward 模块的 duration 计算；0 表示未知/不计分
+    function borrow(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset,
+        uint256 amount,
+        uint16 termDays
+    ) internal {
+        termDays; // silence unused (Reward is handled by ORDER_ENGINE only)
         s.recordBorrow(user, asset, amount);
         _pushUserPositionToView(s, user, asset);
         _pushHealthStatus(s, user);
-        _notifyRewardManager(s, user, amount);
+        // Reward:
+        // - VaultLendingEngine 不具备 “按期/足额还清” 的订单语义（maturity/outcome），不能安全地触发积分释放/扣罚。
+        // - 积分系统唯一路径以 ORDER_ENGINE(core/LendingEngine) 落账后的回调为准（见 Architecture-Guide）。
     }
 
     /// @notice 还款主流程
@@ -46,7 +65,7 @@ library LendingEngineCore {
         s.recordRepay(user, asset, amount);
         _pushUserPositionToView(s, user, asset);
         _pushHealthStatus(s, user);
-        _notifyRewardManager(s, user, amount);
+        // Reward: 同上（VaultLendingEngine 不触发 RewardManager）。
     }
 
     /// @notice 清算减债主流程
@@ -57,9 +76,23 @@ library LendingEngineCore {
         _pushHealthStatus(s, user);
     }
 
-    /// @notice 获取模块地址（带缓存）
+    /// @notice 获取模块地址（严格模式：缺失则 revert）
     function _getModuleAddress(LendingEngineStorage.Layout storage s, bytes32 moduleKey) internal view returns (address) {
         return Registry(s._registryAddr).getModuleOrRevert(moduleKey);
+    }
+
+    /// @notice 获取模块地址（宽松模式：缺失/registry 异常则返回 0）
+    /// @dev 用于 View/Cache 推送链路，遵循“best effort，不阻断账本”
+    function _getModuleAddressOrZero(LendingEngineStorage.Layout storage s, bytes32 moduleKey) internal view returns (address) {
+        // registryAddr 未配置或不是合约时，直接返回 0
+        if (s._registryAddr == address(0) || s._registryAddr.code.length == 0) return address(0);
+        // 架构指南要求：统一通过 Registry.getModuleOrRevert(KEY_VAULT_CORE) 解析 View 地址；
+        // 但在“推送链路”中必须 best-effort：因此用 try/catch 吃掉 revert 并返回 0。
+        try Registry(s._registryAddr).getModuleOrRevert(moduleKey) returns (address addr) {
+            return addr;
+        } catch {
+            return address(0);
+        }
     }
 
     /// @notice 权限校验内部函数
@@ -68,84 +101,87 @@ library LendingEngineCore {
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
-    /// @notice 奖励通知（最佳努力，不影响主流程）
-    function _notifyRewardManager(LendingEngineStorage.Layout storage s, address user, uint256 amount) internal {
-        address rewardManager;
-        try Registry(s._registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_MANAGER_V1) returns (address addr) {
-            rewardManager = addr;
-        } catch {
-            return;
-        }
+    // NOTE: _notifyRewardManager 已移除。Reward 仅由 ORDER_ENGINE(core/LendingEngine) 触发。
 
-        try IRewardManager(rewardManager).onLoanEvent(user, amount, 0, true) {
-            // ignore
-        } catch {
-            // ignore reward failure
-        }
-    }
-
-    /// @notice 推送用户仓位到 View 缓存
-    function _pushUserPositionToView(LendingEngineStorage.Layout storage s, address user, address asset) internal {
-        address cm = _getModuleAddress(s, ModuleKeys.KEY_CM);
-        address viewAddr = _resolveVaultViewAddr(s);
-
-        uint256 collateral;
+    /// @notice 推送当前用户仓位快照到 View 缓存
+    /// @dev 关键：不要直接调用 VaultRouter.pushUserPositionUpdate（VaultRouter 仅允许 VaultCore 调用）。
+    ///      这里通过 VaultCore.pushUserPositionUpdate 进行转发（VaultCore 会再调用 VaultRouter），以符合权限与架构约束。
+    function _pushUserPositionToView(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset
+    ) internal {
+        // 1) 先计算“期望写入的快照值”，用于成功推送或失败事件载荷（便于链下重试）
         uint256 debt = s._userDebt[user][asset];
-
-        // 依赖缺失时直接记录事件并返回，留给链下重试
-        if (cm == address(0) || viewAddr == address(0)) {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, bytes("view or cm unavailable"));
-            return;
-        }
-        if (cm.code.length == 0 || viewAddr.code.length == 0) {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, bytes("view or cm no code"));
-            return;
-        }
-
-        // 尝试读取账本，失败则发事件并返回
-        try ICollateralManager(cm).getCollateral(user, asset) returns (uint256 c) {
-            collateral = c;
-        } catch (bytes memory reason) {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
+        uint256 collateral = 0;
+        address cm = _getModuleAddressOrZero(s, ModuleKeys.KEY_CM);
+        if (cm != address(0) && cm.code.length != 0) {
+            try ICollateralManager(cm).getCollateral(user, asset) returns (uint256 v) {
+                collateral = v;
+            } catch (bytes memory reason) {
+                // collateral 保持 0，但把“期望写入的 debt”带上，链下可重读账本后重试
+                emit CacheUpdateFailed(user, asset, address(0), collateral, debt, reason);
+                return;
+            }
+        } else {
+            emit CacheUpdateFailed(user, asset, address(0), collateral, debt, bytes("cm unavailable"));
             return;
         }
 
-        // 尝试推送到 View，失败记录事件，不阻断主流程
-        try IVaultView(viewAddr).pushUserPositionUpdate(user, asset, collateral, debt) {
+        // 2) 解析 VaultCore 地址（best-effort，不阻断账本）
+        address vaultCore = _getModuleAddressOrZero(s, ModuleKeys.KEY_VAULT_CORE);
+        if (vaultCore == address(0) || vaultCore.code.length == 0) {
+            emit CacheUpdateFailed(user, asset, vaultCore, collateral, debt, bytes("vaultCore unavailable"));
+            return;
+        }
+
+        // 3) 并发控制 nextVersion：优先从 PositionView 读取版本；读不到则退化为 0（由 View 侧自增）
+        uint64 nextVersion = _getNextVersion(s, user, asset);
+        try IVaultCoreMinimal(vaultCore).pushUserPositionUpdate(user, asset, collateral, debt, bytes32(0), 0, nextVersion) {
             // success
         } catch (bytes memory reason) {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
+            emit CacheUpdateFailed(user, asset, vaultCore, collateral, debt, reason);
         }
     }
 
-    /// @notice 解析当前有效的 VaultView 地址（通过 Registry -> VaultCore）
-    function _resolveVaultViewAddr(LendingEngineStorage.Layout storage s) internal view returns (address) {
-        address vaultCore = _getModuleAddress(s, ModuleKeys.KEY_VAULT_CORE);
-        require(vaultCore != address(0), "vaultCore zero in resolveView");
-        address viewAddr = IVaultCoreMinimal(vaultCore).viewContractAddrVar();
-        require(viewAddr != address(0), "viewContractAddrVar returned zero");
-        return viewAddr;
+    function _getNextVersion(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset
+    ) internal view returns (uint64) {
+        // View 推送链路：PositionView 缺失时不回滚（best effort）
+        address positionView = _getModuleAddressOrZero(s, ModuleKeys.KEY_POSITION_VIEW);
+        if (positionView == address(0) || positionView.code.length == 0) return 0;
+        try IPositionView(positionView).getPositionVersion(user, asset) returns (uint64 version) {
+            unchecked {
+                return version + 1;
+            }
+        } catch {
+            return 0;
+        }
+    }
+
+    function _toInt(uint256 value) internal pure returns (int256) {
+        if (value > uint256(type(int256).max)) revert("amount overflow int256");
+        return int256(value);
     }
 
     /// @notice 汇总用户总抵押与总债务，并推送健康状态到 HealthView
     function _pushHealthStatus(LendingEngineStorage.Layout storage s, address user) internal {
-        address cm = _getModuleAddress(s, ModuleKeys.KEY_CM);
-        address lrm = _getModuleAddress(s, ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        address hv = _getModuleAddress(s, ModuleKeys.KEY_HEALTH_VIEW);
-
-        // 缺失依赖时发事件并返回（最佳努力，不阻断账本）
-        if (cm == address(0) || lrm == address(0) || hv == address(0)) {
-            emit CacheUpdateFailed(user, address(0), hv, 0, s._userTotalDebtValue[user], bytes("health push deps missing"));
-            emit HealthPushFailed(user, hv, 0, s._userTotalDebtValue[user], bytes("health push deps missing"));
-            return;
-        }
-        if (cm.code.length == 0 || hv.code.length == 0 || lrm.code.length == 0) {
-            emit CacheUpdateFailed(user, address(0), hv, 0, s._userTotalDebtValue[user], bytes("health push code missing"));
-            emit HealthPushFailed(user, hv, 0, s._userTotalDebtValue[user], bytes("health push code missing"));
-            return;
-        }
+        // 健康推送属于 View/缓存链路：必须 best-effort，不阻断账本
+        address cm = _getModuleAddressOrZero(s, ModuleKeys.KEY_CM);
+        address lrm = _getModuleAddressOrZero(s, ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
+        address hv = _getModuleAddressOrZero(s, ModuleKeys.KEY_HEALTH_VIEW);
 
         uint256 totalDebt = s._userTotalDebtValue[user];
+
+        // 缺失依赖时发事件并返回（最佳努力）
+        if (cm == address(0) || lrm == address(0) || hv == address(0) || cm.code.length == 0 || hv.code.length == 0 || lrm.code.length == 0) {
+            emit CacheUpdateFailed(user, address(0), hv, 0, totalDebt, bytes("health push deps missing"));
+            emit HealthPushFailed(user, hv, 0, totalDebt, bytes("health push deps missing"));
+            return;
+        }
+
         uint256 totalCollateral = 0;
         try ICollateralManager(cm).getUserTotalCollateralValue(user) returns (uint256 v) {
             totalCollateral = v;
@@ -161,7 +197,15 @@ library LendingEngineCore {
             return;
         }
 
-        uint256 minHFBps = ILiquidationRiskManager(lrm).getMinHealthFactor();
+        uint256 minHFBps;
+        try ILiquidationRiskManager(lrm).getMinHealthFactor() returns (uint256 v) {
+            minHFBps = v;
+        } catch (bytes memory reason) {
+            emit CacheUpdateFailed(user, address(0), hv, totalCollateral, totalDebt, reason);
+            emit HealthPushFailed(user, hv, totalCollateral, totalDebt, reason);
+            return;
+        }
+
         bool under = HealthFactorLib.isUnderCollateralized(totalCollateral, totalDebt, minHFBps);
         uint256 hfBps = HealthFactorLib.calcHealthFactor(totalCollateral, totalDebt);
 

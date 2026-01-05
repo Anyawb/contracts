@@ -25,7 +25,7 @@ import {
 import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
 import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../constants/DataPushTypes.sol";
-import { IRewardManager } from "../interfaces/IRewardManager.sol";
+import { IRewardManager, IRewardManagerV2 } from "../interfaces/IRewardManager.sol";
 // 移除对已删除库文件的引用
 
 /**
@@ -282,8 +282,8 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
         if (!_isAllowedDuration(order.term)) revert LendingEngine__InvalidTerm();
         // 长期限（≥90天）需要等级≥4
         if (_isLongDuration(order.term)) {
-            address rewardManager = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-            uint8 level = IRewardManager(rewardManager).getUserLevel(order.borrower);
+            address rewardView = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_VIEW);
+            uint8 level = IRewardViewBorrowCheck(rewardView).getUserLevelForBorrowCheck(order.borrower);
             if (level < 4) revert LendingEngine__LevelTooLow();
         }
 
@@ -336,9 +336,18 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
         );
 
         // 落账后触发奖励（借款）：按“已落账”为准
-        // duration 使用订单 term；借款通常 hfHighEnough=true 作为起始；
+        // - V2：按订单锁定（带 orderId/maturity/outcome）
+        // - 回退：若目标实现不支持 V2，则回退到 V1（duration=order.term）
         address rewardManagerBorrow = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        try IRewardManager(rewardManagerBorrow).onLoanEvent(order.borrower, order.principal, order.term, true) { } catch { }
+        try IRewardManagerV2(rewardManagerBorrow).onLoanEventV2(
+            order.borrower,
+            orderId,
+            order.principal,
+            maturity,
+            IRewardManagerV2.LoanEventOutcome.Borrow
+        ) { } catch {
+            try IRewardManager(rewardManagerBorrow).onLoanEvent(order.borrower, order.principal, order.term, true) { } catch { }
+        }
 
         // 记录借款动作
         emit VaultTypes.ActionExecuted(
@@ -419,9 +428,27 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
             _loanNft.updateLoanStatus(tokenId, ILoanNFT.LoanStatus.Repaid);
         }
 
-        // 落账后触发奖励（还款）：amount 取实际还款金额，duration=0，hfHighEnough 传按期且足额布尔
-        address rewardManagerRepay = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        try IRewardManager(rewardManagerRepay).onLoanEvent(ord.borrower, _repayAmount, 0, isOnTimeAndFullyRepaid) { } catch { }
+        // 落账后触发奖励（还款）：
+        // - 仅在“足额还清”时触发（避免 partial repay 导致锁定被提前清空/误判扣罚）
+        // - amount 取实际还款金额（最小单位），duration=0，hfHighEnough 传按期且足额布尔
+        if (isFullyRepaid) {
+            address rewardManagerRepay = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
+
+            // V2 outcome（按订单）
+            IRewardManagerV2.LoanEventOutcome outcome;
+            if (isOnTimeAndFullyRepaid) {
+                outcome = IRewardManagerV2.LoanEventOutcome.RepayOnTimeFull;
+            } else {
+                // early: now + window < maturity
+                bool isEarly = (block.timestamp + ON_TIME_WINDOW < ord.maturity);
+                outcome = isEarly ? IRewardManagerV2.LoanEventOutcome.RepayEarlyFull : IRewardManagerV2.LoanEventOutcome.RepayLateFull;
+            }
+
+            // 优先 V2，失败回退 V1
+            try IRewardManagerV2(rewardManagerRepay).onLoanEventV2(ord.borrower, orderId, _repayAmount, ord.maturity, outcome) { } catch {
+                try IRewardManager(rewardManagerRepay).onLoanEvent(ord.borrower, _repayAmount, 0, isOnTimeAndFullyRepaid) { } catch { }
+            }
+        }
     }
 
     /*━━━━━━━━━━━━━━━ 专用于 LendingEngineView 的内部查询函数 ━━━━━━━━━━━━━━━*/
@@ -682,3 +709,8 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
 
     uint256[44] private __gap;
 } 
+
+/// @dev RewardManagerCore 最小只读接口（仅用于等级门槛校验）
+interface IRewardViewBorrowCheck {
+    function getUserLevelForBorrowCheck(address user) external view returns (uint8);
+}

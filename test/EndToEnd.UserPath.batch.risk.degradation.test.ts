@@ -4,7 +4,7 @@
  * 场景覆盖：
  * - 用户路径：存入抵押 → 借款 → 提前还款（部分/全部） → 正常还款 → 不还款（仅观察）
  * - 批量操作：batchDeposit/batchBorrow/batchRepay/batchWithdraw（通过业务逻辑模块）
- * - 风险视图：每步后断言 VaultView 的用户位置推送与 HealthView 的风险推送（事件或 DataPush）
+ * - 风险视图：每步后断言 VaultRouter 的用户位置推送与 HealthView 的风险推送（事件或 DataPush）
  * - 预言机异常：构造价格为零/过期路径，断言优雅降级触发且业务流程不中断
  * - Gas 观测：记录每步交易 gasUsed，并打印与阈值断言
  *
@@ -59,7 +59,7 @@ import type {
   VaultCoreRefactored,
   VaultBusinessLogic,
   VaultStorage,
-  MockVaultView,
+  MockVaultRouter,
   MockHealthView,
   MockGracefulDegradationMonitor,
   PriceOracle,
@@ -118,7 +118,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
   let le: MockLendingEngineBasic;
   let aw: MockAssetWhitelist;
   let token: MockERC20;
-  let vaultView: MockVaultView;
+  let vaultRouter: MockVaultRouter;
   let healthView: MockHealthView;
   let vaultCore: VaultCoreRefactored;
   let vaultBusinessLogic: VaultBusinessLogic;
@@ -177,9 +177,9 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
     await vaultStorage.waitForDeployment();
 
     // 2) 部署 Mock View 层与 Core
-    const MockVaultViewF = await ethers.getContractFactory('MockVaultView');
-    vaultView = (await MockVaultViewF.deploy()) as MockVaultView;
-    await vaultView.waitForDeployment();
+    const MockVaultRouterF = await ethers.getContractFactory('MockVaultRouter');
+    vaultRouter = (await MockVaultRouterF.deploy()) as MockVaultRouter;
+    await vaultRouter.waitForDeployment();
 
     const MockHealthViewF = await ethers.getContractFactory('MockHealthView');
     healthView = (await MockHealthViewF.deploy()) as MockHealthView;
@@ -304,7 +304,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       le,
       aw,
       token,
-      vaultView,
+      vaultRouter,
       healthView,
       vaultCore,
       vaultBusinessLogic,
@@ -322,7 +322,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
     le = f.le;
     aw = f.aw;
     token = f.token;
-    vaultView = f.vaultView;
+    vaultRouter = f.vaultRouter;
     healthView = f.healthView;
     vaultCore = f.vaultCore;
     vaultBusinessLogic = f.vaultBusinessLogic;
@@ -461,10 +461,10 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       // 模拟业务模块推送：用户位置更新（使用 cm 地址冒充调用者）
       const cmSigner = await impersonate(await cm.getAddress());
       await expect(
-        vaultView
+        vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, ONE_ETH, 0n)
-      ).to.emit(vaultView, 'UserPositionUpdated');
+      ).to.emit(vaultRouter, 'UserPositionUpdated');
 
       // 模拟风险推送：使用 LE 地址冒充调用者
       const leSigner = await impersonate(await le.getAddress());
@@ -480,10 +480,10 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       const rc2 = await tx2.wait();
       recordGas('borrow', rc2?.gasUsed);
       await expect(
-        vaultView
+        vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, ONE_ETH, borrowAmt)
-      ).to.emit(vaultView, 'UserPositionUpdated');
+      ).to.emit(vaultRouter, 'UserPositionUpdated');
       await expect(
         healthView
           .connect(leSigner)
@@ -499,10 +499,10 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       const rc3 = await tx3.wait();
       recordGas('repay-partial', rc3?.gasUsed);
       await expect(
-        vaultView
+        vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, ONE_ETH, borrowAmt - repayPart)
-      ).to.emit(vaultView, 'UserPositionUpdated');
+      ).to.emit(vaultRouter, 'UserPositionUpdated');
       await expect(
         healthView
           .connect(leSigner)
@@ -518,10 +518,10 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       const rc4 = await tx4.wait();
       recordGas('repay-all', rc4?.gasUsed);
       await expect(
-        vaultView
+        vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, ONE_ETH, 0n)
-      ).to.emit(vaultView, 'UserPositionUpdated');
+      ).to.emit(vaultRouter, 'UserPositionUpdated');
       await expect(
         healthView
           .connect(leSigner)
@@ -568,7 +568,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       expect(rc1?.gasUsed ?? 0n).to.be.gt(0n);
 
       // 模拟业务模块推送
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, initialDeposit, 0n);
       
@@ -592,7 +592,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
         expect(rc?.gasUsed ?? 0n).to.be.gt(0n);
         
         totalBorrowed += borrowAmounts[i];
-        await vaultView
+        await vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, initialDeposit, totalBorrowed);
         
@@ -614,7 +614,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       expect(rc2?.gasUsed ?? 0n).to.be.gt(0n);
 
       totalBorrowed -= partialRepay;
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, initialDeposit, totalBorrowed);
       
@@ -625,8 +625,8 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       // 阶段4: 提取部分抵押（需要先确保用户有足够的抵押）
       console.log('阶段4: 提取部分抵押');
       const partialWithdraw = ethers.parseUnits('0.5', 18);
-      // 在MockVaultView中设置用户抵押
-      await vaultView.pushUserPositionUpdate(userAddr, assetAddr, initialDeposit, 0n);
+      // 在MockVaultRouter中设置用户抵押
+      await vaultRouter.pushUserPositionUpdate(userAddr, assetAddr, initialDeposit, 0n);
       // 给VaultBusinessLogic合约转移足够的代币
       await token.transfer(await vaultBusinessLogic.getAddress(), partialWithdraw);
       
@@ -636,7 +636,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       expect(rc3?.gasUsed ?? 0n).to.be.gt(0n);
 
       const remainingCollateral = initialDeposit - partialWithdraw;
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, remainingCollateral, totalBorrowed);
       
@@ -654,7 +654,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       recordGas('lifecycle-full-repay', rc4?.gasUsed);
       expect(rc4?.gasUsed ?? 0n).to.be.gt(0n);
 
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, remainingCollateral, 0n);
       
@@ -664,8 +664,8 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
 
       // 阶段6: 全部提取（需要确保用户有足够的抵押）
       console.log('阶段6: 全部提取');
-      // 在MockVaultView中设置用户抵押
-      await vaultView.pushUserPositionUpdate(userAddr, assetAddr, remainingCollateral, 0n);
+      // 在MockVaultRouter中设置用户抵押
+      await vaultRouter.pushUserPositionUpdate(userAddr, assetAddr, remainingCollateral, 0n);
       // 给VaultBusinessLogic合约转移足够的代币
       await token.transfer(await vaultBusinessLogic.getAddress(), remainingCollateral);
       
@@ -674,7 +674,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       recordGas('lifecycle-full-withdraw', rc5?.gasUsed);
       expect(rc5?.gasUsed ?? 0n).to.be.gt(0n);
 
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, 0n, 0n);
       
@@ -683,8 +683,8 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
         .pushRiskStatus(userAddr, 50000n, 11000n, false, BigInt(Math.floor(Date.now() / 1000)));
 
       // 验证最终状态
-      const finalCollateral = await vaultView.getUserCollateral(userAddr, assetAddr);
-      const finalDebt = await vaultView.getUserDebt(userAddr, assetAddr);
+      const finalCollateral = await vaultRouter.getUserCollateral(userAddr, assetAddr);
+      const finalDebt = await vaultRouter.getUserDebt(userAddr, assetAddr);
       const finalHealthFactor = await healthView.getUserHealthFactor(userAddr);
 
       expect(finalCollateral).to.equal(0n);
@@ -730,10 +730,10 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       const cmSigner = await impersonate(await cm.getAddress());
       const totalDeposited = depositAmounts.reduce((sum, amount) => sum + amount, 0n);
       await expect(
-        vaultView
+        vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, totalDeposited, 0n)
-      ).to.emit(vaultView, 'UserPositionUpdated');
+      ).to.emit(vaultRouter, 'UserPositionUpdated');
 
       // 2) 批量借款 - 通过VaultCore调用
       const tx2 = await vaultCore.connect(user).batchBorrow(assets, borrowAmounts);
@@ -767,10 +767,10 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       // 模拟用户位置更新
       const remainingBorrowed = totalBorrowed - repayAmounts.reduce((sum, amount) => sum + amount, 0n);
       await expect(
-        vaultView
+        vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, totalDeposited, remainingBorrowed)
-      ).to.emit(vaultView, 'UserPositionUpdated');
+      ).to.emit(vaultRouter, 'UserPositionUpdated');
 
       // 4) 批量提取抵押 - 通过VaultCore调用
       const tx4 = await vaultCore.connect(user).batchWithdraw(assets, withdrawAmounts);
@@ -785,10 +785,10 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       // 模拟最终用户位置更新
       const remainingDeposited = totalDeposited - withdrawAmounts.reduce((sum, amount) => sum + amount, 0n);
       await expect(
-        vaultView
+        vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, remainingDeposited, remainingBorrowed)
-      ).to.emit(vaultView, 'UserPositionUpdated');
+      ).to.emit(vaultRouter, 'UserPositionUpdated');
 
       // 模拟最终风险状态
       await expect(
@@ -896,7 +896,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       ).to.not.be.reverted; // 设置正确债务后应该成功
 
       // 测试过度提取（需要先设置足够的抵押）
-      await vaultView.pushUserPositionUpdate(userAddr, assetAddr, ethers.parseUnits('10', 18), 0n);
+      await vaultRouter.pushUserPositionUpdate(userAddr, assetAddr, ethers.parseUnits('10', 18), 0n);
       // 给VaultBusinessLogic合约转移足够的代币
       await token.transfer(await vaultBusinessLogic.getAddress(), ethers.parseUnits('10', 18));
       // 由于Mock合约的限制，这里可能会失败，但这是预期的
@@ -1150,14 +1150,14 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       for (const scenario of positionScenarios) {
         // 推送用户位置更新
         await expect(
-          vaultView
+          vaultRouter
             .connect(cmSigner)
             .pushUserPositionUpdate(userAddr, assetAddr, scenario.collateral, scenario.debt)
-        ).to.emit(vaultView, 'UserPositionUpdated');
+        ).to.emit(vaultRouter, 'UserPositionUpdated');
 
         // 验证位置缓存
-        const cachedCollateral = await vaultView.getUserCollateral(userAddr, assetAddr);
-        const cachedDebt = await vaultView.getUserDebt(userAddr, assetAddr);
+        const cachedCollateral = await vaultRouter.getUserCollateral(userAddr, assetAddr);
+        const cachedDebt = await vaultRouter.getUserDebt(userAddr, assetAddr);
         
         expect(cachedCollateral).to.equal(scenario.collateral);
         expect(cachedDebt).to.equal(scenario.debt);
@@ -1175,12 +1175,12 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
 
       // 模拟完整的风险监控流程
       // 1. 用户存入抵押
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, ONE_ETH, 0n);
 
       // 2. 用户借款
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, ONE_ETH, ethers.parseUnits('0.5', 18));
 
@@ -1190,7 +1190,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
         .pushRiskStatus(userAddr, 12000n, 11000n, false, BigInt(Math.floor(Date.now() / 1000)));
 
       // 4. 用户还款
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, ONE_ETH, ethers.parseUnits('0.2', 18));
 
@@ -1200,8 +1200,8 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
         .pushRiskStatus(userAddr, 15000n, 11000n, false, BigInt(Math.floor(Date.now() / 1000)));
 
       // 验证最终状态
-      const finalCollateral = await vaultView.getUserCollateral(userAddr, assetAddr);
-      const finalDebt = await vaultView.getUserDebt(userAddr, assetAddr);
+      const finalCollateral = await vaultRouter.getUserCollateral(userAddr, assetAddr);
+      const finalDebt = await vaultRouter.getUserDebt(userAddr, assetAddr);
       const finalHealthFactor = await healthView.getUserHealthFactor(userAddr);
 
       expect(finalCollateral).to.equal(ONE_ETH);
@@ -1394,7 +1394,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
         expect(rc4?.gasUsed ?? 0n).to.be.gt(0n);
         
         // 模拟风险监控推送
-        await vaultView
+        await vaultRouter
           .connect(cmSigner)
           .pushUserPositionUpdate(userAddr, assetAddr, amount, 0n);
         
@@ -1488,7 +1488,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       const rc1 = await tx1.wait();
       recordGas('integration-deposit', rc1?.gasUsed);
 
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, depositAmount, 0n);
 
@@ -1502,7 +1502,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       recordGas('integration-batch-borrow', rc2?.gasUsed);
 
       const totalBorrowed = batchAmounts.reduce((sum, amount) => sum + amount, 0n);
-      await vaultView
+      await vaultRouter
         .connect(cmSigner)
         .pushUserPositionUpdate(userAddr, assetAddr, depositAmount, totalBorrowed);
 
@@ -1535,8 +1535,8 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
 
       // 阶段6: 最终验证
       console.log('阶段6: 最终验证');
-      const finalCollateral = await vaultView.getUserCollateral(userAddr, assetAddr);
-      const finalDebt = await vaultView.getUserDebt(userAddr, assetAddr);
+      const finalCollateral = await vaultRouter.getUserCollateral(userAddr, assetAddr);
+      const finalDebt = await vaultRouter.getUserDebt(userAddr, assetAddr);
 
       expect(finalCollateral).to.equal(depositAmount);
       // 由于Mock合约的实现，债务金额可能不准确，这里只验证交易成功

@@ -15,9 +15,9 @@ import "../libraries/ModuleCache.sol";
 import "../libraries/LiquidationTokenLibrary.sol";
 import "../libraries/LiquidationInterfaceLibrary.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { IVaultView } from "../../../interfaces/IVaultView.sol";
 import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
 import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
+import { IPositionView } from "../../../interfaces/IPositionView.sol";
 
 import "../../../interfaces/ILiquidationDebtManager.sol";
 // 移除保证金管理器接口导入，专注于债务管理
@@ -36,8 +36,28 @@ import "../types/LiquidationTypes.sol";
 import "../types/LiquidationBase.sol";
 import "../../VaultTypes.sol";
 
-// 顶层最小接口：仅用于解析 VaultView 地址
-interface IVaultCoreMinimal { function viewContractAddrVar() external view returns (address); }
+// 顶层最小接口：仅用于解析 VaultRouter 地址
+interface IVaultCoreMinimal {
+    function viewContractAddrVar() external view returns (address);
+    function pushUserPositionUpdate(
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external;
+    function pushUserPositionUpdateDelta(
+        address user,
+        address asset,
+        int256 collateralDelta,
+        int256 debtDelta,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external;
+}
 
 /**
  * @title LiquidationDebtManager
@@ -148,7 +168,7 @@ abstract contract LiquidationDebtManager is
     error LiquidationDebtManager__ViewAddressUnavailable();
 
     /* ============ Internal helpers ============ */
-    // 解析 VaultView 地址：通过 Registry 的 KEY_VAULT_CORE 再取 viewContractAddrVar()
+    // 解析 VaultRouter 地址：通过 Registry 的 KEY_VAULT_CORE 再取 viewContractAddrVar()
 
     /// @dev Safe wrapper around module cache that returns zero on cache miss/expired; avoids bubbling ModuleCache errors.
     function _getModuleOrZero(bytes32 moduleKey) internal view returns (address) {
@@ -163,45 +183,44 @@ abstract contract LiquidationDebtManager is
         return abi.decode(data, (address));
     }
 
-    function _resolveVaultViewAddr() internal view returns (address viewAddr) {
-        address vaultCore = _getModuleOrZero(ModuleKeys.KEY_VAULT_CORE);
-        if (vaultCore == address(0)) return address(0);
-        try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
-            return v;
-        } catch { return address(0); }
+    function _resolveVaultCoreAddr() internal view returns (address forwarder) {
+        forwarder = _getModuleOrZero(ModuleKeys.KEY_VAULT_CORE);
     }
 
-    function _pushUserPositionToView(address user, address asset, address lendingEngine, address collateralManager) internal {
-        address viewAddr = _resolveVaultViewAddr();
-        uint256 collateral = 0;
-        uint256 debt = 0;
+    function _toInt(uint256 value) internal pure returns (int256) {
+        require(value <= uint256(type(int256).max), "amount overflow");
+        return int256(value);
+    }
 
-        if (collateralManager != address(0)) {
-            try ICollateralManager(collateralManager).getCollateral(user, asset) returns (uint256 c) { collateral = c; }
-            catch (bytes memory reason) {
-                emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
-                return;
-            }
-        }
-        if (lendingEngine != address(0)) {
-            try ILendingEngineBasic(lendingEngine).getDebt(user, asset) returns (uint256 d) { debt = d; }
-            catch (bytes memory reason) {
-                emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
-                return;
-            }
-        }
-
-        // view 地址缺失或无代码，发事件并交给链下重试
-        if (viewAddr == address(0) || viewAddr.code.length == 0) {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, bytes("view unavailable"));
+    function _pushUserPositionToView(
+        address user,
+        address asset,
+        address /* lendingEngine */,
+        address /* collateralManager */,
+        int256 debtDelta
+    ) internal {
+        address forwarder = _resolveVaultCoreAddr();
+        if (forwarder == address(0) || forwarder.code.length == 0) {
+            emit CacheUpdateFailed(user, asset, forwarder, 0, 0, bytes("view unavailable"));
             return;
         }
 
+        int256 collateralDelta = 0;
+
+        uint64 nextVersion = _getNextVersion(user, asset);
         // 推送失败不再整体回滚，转为事件供链下重试
-        try IVaultView(viewAddr).pushUserPositionUpdate(user, asset, collateral, debt) {
+        try IVaultCoreMinimal(forwarder).pushUserPositionUpdateDelta(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            bytes32(0),
+            0,
+            nextVersion
+        ) {
             // success
         } catch (bytes memory reason) {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
+            emit CacheUpdateFailed(user, asset, forwarder, 0, 0, reason);
         }
     }
 
@@ -334,7 +353,7 @@ abstract contract LiquidationDebtManager is
         // DataPush 迁移至 View 层单点推送（此处仅保留领域事件，避免多点推送）
 
         // 推送至 View 缓存
-        _pushUserPositionToView(user, asset, lendingEngine, collateralManager);
+        _pushUserPositionToView(user, asset, lendingEngine, collateralManager, -_toInt(reducedAmount));
 
         return reducedAmount;
     }
@@ -380,7 +399,7 @@ abstract contract LiquidationDebtManager is
                 // 单点 DataPush 由 View 层负责
 
                 // 推送至 View 缓存
-                _pushUserPositionToView(user, assets[i], lendingEngine, collateralManager);
+                _pushUserPositionToView(user, assets[i], lendingEngine, collateralManager, -_toInt(actual));
 
                 reducedAmounts[i] = actual;
             }
@@ -594,5 +613,20 @@ abstract contract LiquidationDebtManager is
     /// @return hasPending 是否有待升级
     function getPendingUpgrade(bytes32 moduleKey) external view returns (address newAddress, uint256 executeAfter, bool hasPending) {
         return Registry(_registryAddr).getPendingUpgrade(moduleKey);
+    }
+
+    /// @notice 计算 PositionView 的下一个 nextVersion（失败返回 0）
+    function _getNextVersion(address user, address asset) internal view returns (uint64) {
+        address positionView = _getModuleOrZero(ModuleKeys.KEY_POSITION_VIEW);
+        if (positionView == address(0)) {
+            return 0;
+        }
+        try IPositionView(positionView).getPositionVersion(user, asset) returns (uint64 version) {
+            unchecked {
+                return version + 1;
+            }
+        } catch {
+            return 0;
+        }
     }
 } 

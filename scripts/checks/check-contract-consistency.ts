@@ -172,7 +172,7 @@ async function checkInterfaceImplementations(contracts: ContractInfo[], report: 
 async function checkModuleDependencies(contracts: ContractInfo[], report: ConsistencyReport): Promise<void> {
   logger.info('🔍 检查模块依赖...');
   
-  const coreModules = ['VaultCore', 'VaultStorage', 'VaultView', 'VaultAdmin'];
+  const coreModules = ['VaultCore', 'VaultStorage', 'VaultRouter', 'VaultAdmin'];
   const businessModules = ['CollateralManager', 'LendingEngine', 'HealthFactorCalculator', 'StatisticsView'];
   const infrastructureModules = ['AssetWhitelist', 'FeeRouter', 'RewardManager', 'ValuationOracleAdapter'];
   
@@ -217,7 +217,7 @@ async function checkUpgradeableContracts(contracts: ContractInfo[], report: Cons
   logger.info(`发现 ${nonUpgradeableContracts.length} 个不可升级合约`);
   
   // 检查关键合约是否支持升级
-  const criticalContracts = ['VaultCore', 'VaultStorage', 'VaultView', 'VaultAdmin'];
+  const criticalContracts = ['VaultCore', 'VaultStorage', 'VaultRouter', 'VaultAdmin'];
   for (const contractName of criticalContracts) {
     const contract = contracts.find(c => c.name === contractName);
     if (contract && !contract.hasUpgradeable) {

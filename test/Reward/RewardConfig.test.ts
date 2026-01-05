@@ -251,7 +251,7 @@ describe('RewardConfig Modular Architecture', () => {
     it('应该拒绝无效的服务配置模块地址', async () => {
       await expect(
         rewardConfig.setServiceConfigModule(0, ZERO_ADDRESS)
-      ).to.be.revertedWith('Invalid config module address');
+      ).to.be.revertedWithCustomError(rewardConfig, 'RewardConfig__InvalidConfigModuleAddress');
     });
 
     it('应该拒绝查询未配置的服务类型', async () => {

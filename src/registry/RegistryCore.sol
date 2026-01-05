@@ -33,6 +33,7 @@ contract RegistryCore is
     uint256 private constant MAX_BATCH_MODULES = 20;
 
     // ============ Constructor ============
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

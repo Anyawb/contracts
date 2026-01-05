@@ -92,7 +92,7 @@ address vaultCore = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
 
 #### 核心合约
 - `VaultCore.sol` - 核心业务入口，处理用户操作
-- `VaultView.sol` - 查询接口，提供所有 view 函数
+- `VaultRouter.sol` - 查询接口，提供所有 view 函数
 - `VaultStorage.sol` - 存储合约，管理配置和模块地址
 - `VaultRouter.sol` - 路由合约，分发请求到对应模块
 
@@ -258,7 +258,7 @@ bytes32 depositAction = ActionKeys.ACTION_DEPOSIT;
 **主要接口**：
 - `IRegistry.sol` - Registry 接口
 - `IVaultCore.sol` - Vault 核心接口
-- `IVaultView.sol` - Vault 视图接口
+- `IVaultRouter.sol` - Vault 视图接口
 - `IAccessControlManager.sol` - 访问控制接口
 - `IPriceOracle.sol` - 价格预言机接口
 - `ILendingEngine.sol` - 借贷引擎接口
@@ -506,7 +506,7 @@ uint256 ltv = VaultMath.calculateLTV(debt, collateral);
 test/
 ├── Vault/
 │   ├── VaultCore.test.ts
-│   └── VaultView.test.ts
+│   └── VaultRouter.test.ts
 ├── Reward/
 │   └── RewardCore.test.ts
 └── registry/

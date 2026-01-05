@@ -6,14 +6,12 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { IFeeRouter } from "../../../interfaces/IFeeRouter.sol";
-import { VaultTypes } from "../../VaultTypes.sol";
 import { ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
-import { IDataPush } from "../../../interfaces/IDataPush.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
+import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
 
 // 常量迁移至 DataPushTypes
 
@@ -23,7 +21,7 @@ import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 /// @dev 数据通过FeeRouter主动推送更新，确保实时性
 /// @dev 严格权限控制：用户只能查看自己的数据，管理员可查看全部数据
 /// @custom:security-contact security@example.com
-contract FeeRouterView is Initializable, UUPSUpgradeable {
+contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
     
     /// @notice Registry 合约地址
     address private _registryAddr;
@@ -38,9 +36,6 @@ contract FeeRouterView is Initializable, UUPSUpgradeable {
     
     /// @notice 用户动态费用配置 user => feeType => feeBps
     mapping(address => mapping(bytes32 => uint256)) private _userDynamicFees;
-    
-    /// @notice 用户费用缓存 user => feeType => amount
-    mapping(address => mapping(bytes32 => uint256)) private _userFeeCache;
     
     /// @notice 全局费用统计（仅管理员可见）token => feeType => amount
     mapping(address => mapping(bytes32 => uint256)) private _globalFeeStatistics;
@@ -139,52 +134,27 @@ contract FeeRouterView is Initializable, UUPSUpgradeable {
         _;
     }
     
-    /// @notice 权限验证内部函数
-    function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acmAddr).requireRole(actionKey, user);
-    }
-    
-    /// @notice 检查用户权限级别
-    function _getUserPermission(address user) internal view returns (IAccessControlManager.PermissionLevel) {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        return IAccessControlManager(acmAddr).getUserPermission(user);
-    }
-    
     /// @notice 验证用户是否为管理员
     modifier onlyAdmin() {
-        IAccessControlManager.PermissionLevel level = _getUserPermission(msg.sender);
-        if (level < IAccessControlManager.PermissionLevel.ADMIN) {
-            revert FeeRouterView__InsufficientPermission();
-        }
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        _;
+    }
+    
+    /// @notice 仅允许 FeeRouter（注册表 KEY_FR）调用
+    modifier onlyFeeRouter() {
+        if (msg.sender != _getFeeRouter()) revert FeeRouterView__OnlyFeeRouter();
         _;
     }
     
     /// @notice 验证用户权限（用户只能查看自己的数据，管理员可查看所有数据）
     modifier onlyAuthorizedFor(address user) {
-        IAccessControlManager.PermissionLevel level = _getUserPermission(msg.sender);
-        
-        // 管理员可以查看任何数据
-        if (level >= IAccessControlManager.PermissionLevel.ADMIN) {
-            _;
-            return;
-        }
-        
-        // 普通用户只能查看自己的数据
         if (msg.sender != user) {
-            revert FeeRouterView__UnauthorizedAccess();
-        }
-        
-        // 用户必须至少有VIEWER权限
-        if (level < IAccessControlManager.PermissionLevel.VIEWER) {
-            revert FeeRouterView__InsufficientPermission();
+            bool isAdmin = ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+            if (!isAdmin) revert FeeRouterView__UnauthorizedAccess();
+        } else {
+            ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
         }
         _;
-    }
-
-    /// @notice 获取 FeeRouter 地址
-    function _getFeeRouter() internal view returns (address) {
-        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
     }
 
     /*━━━━━━━━━━━━━━━ 构造和初始化 ━━━━━━━━━━━━━━━*/
@@ -208,34 +178,6 @@ contract FeeRouterView is Initializable, UUPSUpgradeable {
     
     /*━━━━━━━━━━━━━━━ 数据同步和推送 ━━━━━━━━━━━━━━━*/
     
-    /// @notice 同步 FeeRouter 数据到内部镜像（仅管理员）
-    function syncFeeRouterData() external onlyValidRegistry onlyAdmin {
-        address feeRouter = _getFeeRouter();
-        
-        // 同步系统配置
-        _systemConfig.platformTreasury = IFeeRouter(feeRouter).getPlatformTreasury();
-        _systemConfig.ecosystemVault = IFeeRouter(feeRouter).getEcosystemVault();
-        _systemConfig.platformFeeBps = IFeeRouter(feeRouter).getPlatformFeeBps();
-        _systemConfig.ecosystemFeeBps = IFeeRouter(feeRouter).getEcosystemFeeBps();
-        
-        // 同步全局统计
-        (_globalStats.totalDistributions, _globalStats.totalAmountDistributed) = 
-            IFeeRouter(feeRouter).getOperationStats();
-        
-        // 同步支持的代币列表
-        address[] memory supportedTokens = IFeeRouter(feeRouter).getSupportedTokens();
-        _systemConfig.supportedTokens = supportedTokens;
-        
-        // 更新代币支持映射
-        for (uint256 i = 0; i < supportedTokens.length; i++) {
-            _supportedTokens[supportedTokens[i]] = true;
-        }
-        
-        _lastSyncTimestamp = block.timestamp;
-        
-        emit DataSynced(msg.sender, block.timestamp);
-    }
-    
     /// @notice FeeRouter 推送用户数据更新
     /// @param user 用户地址
     /// @param feeType 费用类型
@@ -246,8 +188,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable {
         bytes32 feeType,
         uint256 feeAmount,
         uint256 personalFeeBps
-    ) external onlyValidRegistry {
-        if (msg.sender != _getFeeRouter()) revert FeeRouterView__OnlyFeeRouter();
+    ) external onlyValidRegistry onlyFeeRouter {
         
         // 更新用户费用数据
         _userFeeStatistics[user][feeType] += feeAmount;
@@ -268,15 +209,56 @@ contract FeeRouterView is Initializable, UUPSUpgradeable {
     function pushGlobalStatsUpdate(
         uint256 totalDistributions,
         uint256 totalAmountDistributed
-    ) external onlyValidRegistry {
-        if (msg.sender != _getFeeRouter()) revert FeeRouterView__OnlyFeeRouter();
-        
+    ) external onlyValidRegistry onlyFeeRouter {
         _globalStats.totalDistributions = totalDistributions;
         _globalStats.totalAmountDistributed = totalAmountDistributed;
         _lastSyncTimestamp = block.timestamp;
-        
+
         emit SystemDataPushed(msg.sender, "GlobalStatsUpdate", block.timestamp);
         DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_GLOBAL_FEE_STATS, abi.encode(totalDistributions, totalAmountDistributed));
+    }
+
+    /// @notice FeeRouter 推送系统配置更新
+    function pushSystemConfigUpdate(
+        address platformTreasury,
+        address ecosystemVault,
+        uint256 platformFeeBps,
+        uint256 ecosystemFeeBps,
+        address[] calldata supportedTokens
+    ) external onlyValidRegistry onlyFeeRouter {
+        address[] memory previousTokens = _systemConfig.supportedTokens;
+        for (uint256 i; i < previousTokens.length; ++i) {
+            _supportedTokens[previousTokens[i]] = false;
+        }
+
+        _systemConfig.platformTreasury = platformTreasury;
+        _systemConfig.ecosystemVault = ecosystemVault;
+        _systemConfig.platformFeeBps = platformFeeBps;
+        _systemConfig.ecosystemFeeBps = ecosystemFeeBps;
+        _systemConfig.supportedTokens = supportedTokens;
+
+        for (uint256 i; i < supportedTokens.length; ++i) {
+            _supportedTokens[supportedTokens[i]] = true;
+        }
+
+        emit DataSynced(msg.sender, block.timestamp);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_FEE_ROUTER_SYSTEM_CONFIG_UPDATED,
+            abi.encode(platformTreasury, ecosystemVault, platformFeeBps, ecosystemFeeBps, supportedTokens)
+        );
+    }
+
+    /// @notice FeeRouter 推送按资产/费用类型的全局统计
+    function pushGlobalFeeStatistic(
+        address token,
+        bytes32 feeType,
+        uint256 amount
+    ) external onlyValidRegistry onlyFeeRouter {
+        _globalFeeStatistics[token][feeType] = amount;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED,
+            abi.encode(token, feeType, amount)
+        );
     }
     
     /*━━━━━━━━━━━━━━━ 用户查询函数（权限控制）━━━━━━━━━━━━━━━*/
@@ -488,21 +470,6 @@ contract FeeRouterView is Initializable, UUPSUpgradeable {
         return _getFeeRouter();
     }
 
-    /// @notice 更新Registry地址（仅管理员）
-    /// @param newRegistryAddr 新的Registry地址
-    function setRegistry(address newRegistryAddr) external onlyValidRegistry onlyAdmin {
-        if (newRegistryAddr == address(0)) revert ZeroAddress();
-        
-        _registryAddr = newRegistryAddr;
-        
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
-    }
-
     /// @notice 兼容旧版 getter
     function registryAddr() external view returns(address){return _registryAddr;}
 
@@ -510,9 +477,22 @@ contract FeeRouterView is Initializable, UUPSUpgradeable {
     
     /// @notice 授权合约升级
     /// @param newImplementation 新实现地址
-    function _authorizeUpgrade(address newImplementation) internal view override {
-        _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
-        newImplementation; // silence unused parameter warning
+    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (newImplementation == address(0)) revert ZeroAddress();
+    }
+
+    function _getFeeRouter() internal view returns (address) {
+        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
+    }
+
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
     }
 
     /*━━━━━━━━━━━━━━━ 存储槽预留 ━━━━━━━━━━━━━━━*/

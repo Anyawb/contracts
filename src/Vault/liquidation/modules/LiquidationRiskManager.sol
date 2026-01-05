@@ -152,6 +152,7 @@ contract LiquidationRiskManager is
 
     // ============ 构造函数与初始化 ============
     /// @dev 构造函数，禁用初始化器
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

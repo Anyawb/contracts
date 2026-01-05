@@ -9,6 +9,7 @@ import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 
 import { IRegistry } from "../interfaces/IRegistry.sol";
+import { IRegistryStorageMigrator } from "../interfaces/IRegistryStorageMigrator.sol";
 import { IRegistryDynamicModuleKey } from "../interfaces/IRegistryDynamicModuleKey.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { RegistryStorage } from "./RegistryStorageLibrary.sol";
@@ -59,6 +60,14 @@ contract Registry is
     error EmergencyAdminNotAuthorized(address caller, address emergencyAdmin);
     /// @notice 零地址错误
     error ZeroAddress();
+    /// @notice 迁移合约必须为合约地址（不可为 EOA/空代码）
+    error MigratorNotContract(address migrator);
+    /// @notice 存储版本不匹配
+    error StorageVersionMismatch(uint256 expected, uint256 actual);
+    /// @notice 存储迁移目标非法（必须递增）
+    error InvalidMigrationTarget(uint256 fromVersion, uint256 toVersion);
+    /// @notice 迁移合约执行失败
+    error MigratorFailed(address migrator, bytes reason);
 
     // ============ Constants ============
     /// @notice 最大延迟时间（7天）
@@ -82,6 +91,7 @@ contract Registry is
 
     // ============ Constructor ============
     /// @notice 构造函数，禁用初始化器
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
@@ -356,75 +366,82 @@ contract Registry is
         );
     }
 
-    // ============ 模块管理 (委托给RegistryCore) ============
+    // ============ 模块管理（直接写 RegistryStorage） ============
     /// @notice 设置模块地址
-    /// @param key 模块键
-    /// @param moduleAddr 模块地址
-    /// @dev 委托给RegistryCore模块处理
     function setModule(bytes32 key, address moduleAddr) external override onlyOwner whenNotPaused {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        if (moduleAddr == address(0)) revert("Invalid module address: zero address");
-        if (!moduleAddr.isContract()) revert("Module must be a contract");
-        _registryCore.setModule(key, moduleAddr);
+        _setModuleInternal(key, moduleAddr, true, true);
     }
 
     /// @notice 设置模块地址（返回变更状态）
-    /// @param key 模块键
-    /// @param moduleAddr 模块合约地址
-    /// @return changed 是否实际发生了变更
     function setModuleWithStatus(bytes32 key, address moduleAddr) external override onlyOwner whenNotPaused returns (bool changed) {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        if (moduleAddr == address(0)) revert("Invalid module address: zero address");
-        if (!moduleAddr.isContract()) revert("Module must be a contract");
-        return _registryCore.setModuleWithStatus(key, moduleAddr);
+        changed = _setModuleInternal(key, moduleAddr, true, true);
     }
 
-    /// @notice 设置模块地址（支持allowReplace参数）
-    /// @param key 模块键
-    /// @param moduleAddr 模块地址
-    /// @param _allowReplace 是否允许替换现有模块
-    /// @dev 委托给RegistryCore模块处理
+    /// @notice 设置模块地址（支持 allowReplace）
     function setModuleWithReplaceFlag(bytes32 key, address moduleAddr, bool _allowReplace) external override onlyOwner whenNotPaused {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        if (moduleAddr == address(0)) revert ZeroAddress();
-        if (!moduleAddr.isContract()) revert("Module must be a contract");
-        
-        _registryCore.setModuleWithReplaceFlag(key, moduleAddr, _allowReplace);
+        _setModuleInternal(key, moduleAddr, _allowReplace, true);
     }
 
     /// @notice 批量设置模块地址（返回变更状态）
-    /// @param keys 模块键名数组
-    /// @param addresses 模块地址数组
-    /// @return changedCount 实际发生变更的模块数量
-    /// @return changedKeys 发生变更的模块键名数组
     function setModulesWithStatus(bytes32[] calldata keys, address[] calldata addresses) external override onlyOwner whenNotPaused 
         returns (uint256 changedCount, bytes32[] memory changedKeys) {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        return _registryCore.setModulesWithStatus(keys, addresses);
+        if (keys.length != addresses.length) revert("Length mismatch");
+        changedKeys = new bytes32[](keys.length);
+        for (uint256 i = 0; i < keys.length; i++) {
+            bool changed = _setModuleInternal(keys[i], addresses[i], true, true);
+            if (changed) {
+                changedKeys[changedCount] = keys[i];
+                changedCount++;
+            }
+        }
     }
 
     /// @notice 批量设置模块地址（控制事件触发）
-    /// @param keys 模块键名数组
-    /// @param addresses 模块地址数组
-    /// @param emitIndividualEvents 是否同时触发单个模块变更事件
-    function setModulesWithEvents(bytes32[] calldata keys, address[] calldata addresses, bool emitIndividualEvents) external override onlyOwner whenNotPaused {
+    function setModulesWithEvents(bytes32[] calldata keys, address[] calldata addresses, bool /*emitIndividualEvents*/ ) external override onlyOwner whenNotPaused {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        _registryCore.setModulesWithEvents(keys, addresses, emitIndividualEvents);
+        if (keys.length != addresses.length) revert("Length mismatch");
+        for (uint256 i = 0; i < keys.length; i++) {
+            _setModuleInternal(keys[i], addresses[i], true, true);
+        }
     }
 
     /// @notice 批量设置模块地址
-    /// @param keys 模块键数组
-    /// @param addresses 模块地址数组
-    /// @dev 委托给RegistryCore模块处理
     function setModules(bytes32[] calldata keys, address[] calldata addresses) external override onlyOwner whenNotPaused {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        _registryCore.setModules(keys, addresses);
+        if (keys.length != addresses.length) revert("Length mismatch");
+        for (uint256 i = 0; i < keys.length; i++) {
+            _setModuleInternal(keys[i], addresses[i], true, false);
+        }
+    }
+
+    /// @dev 内部写模块，支持是否允许替换、是否发事件
+    function _setModuleInternal(bytes32 key, address moduleAddr, bool allowReplace, bool emitEvent) internal returns (bool changed) {
+        if (moduleAddr == address(0)) revert("Invalid module address: zero address");
+        if (!moduleAddr.isContract()) revert("Module must be a contract");
+
+        RegistryStorage.Layout storage l = RegistryStorage.layout();
+        address old = l.modules[key];
+
+        if (!allowReplace && old != address(0) && old != moduleAddr) {
+            revert("Module already exists");
+        }
+
+        if (old == moduleAddr) {
+            if (emitEvent) {
+                emit RegistryEvents.ModuleNoOp(key, old, msg.sender);
+            }
+            return false;
+        }
+
+        l.modules[key] = moduleAddr;
+        if (emitEvent) {
+            emit RegistryEvents.ModuleChanged(key, old, moduleAddr);
+        }
+        return true;
     }
 
     // ============ 升级管理 (委托给RegistryUpgradeManager) ============
@@ -540,6 +557,41 @@ contract Registry is
         uint256 oldDelay = RegistryStorage.layout().minDelay;
         RegistryStorage.layout().minDelay = uint64(newDelay);
         emit RegistryEvents.MinDelayChanged(oldDelay, newDelay);
+    }
+
+    /// @notice 通过迁移合约执行存储迁移（保持固定 STORAGE_SLOT 不变）
+    /// @param fromVersion 预期的当前存储版本
+    /// @param toVersion 目标存储版本（必须大于当前版本）
+    /// @param migrator 迁移合约地址
+    /// @dev 迁移流程：
+    ///      1) 校验当前版本 == fromVersion 且 toVersion 递增
+    ///      2) 迁移前执行 validateStorageLayout()
+    ///      3) 调用迁移合约执行实际搬迁/初始化（不改槽位）
+    ///      4) bump storageVersion 至 toVersion
+    ///      5) 迁移后再次 validateStorageLayout()
+    /// @custom:oz-upgrades-unsafe-allow delegatecall
+    function migrateStorage(uint256 fromVersion, uint256 toVersion, address migrator) external override onlyOwner {
+        if (migrator == address(0)) revert ZeroAddress();
+        // 安全加固：禁止对 EOA/空代码地址 delegatecall
+        if (migrator.code.length == 0) revert MigratorNotContract(migrator);
+
+        uint256 cur = RegistryStorage.getStorageVersion();
+        if (cur != fromVersion) revert StorageVersionMismatch(fromVersion, cur);
+        if (toVersion <= cur) revert InvalidMigrationTarget(fromVersion, toVersion);
+
+        // 迁移前校验，确保关键字段未被破坏
+        RegistryStorage.validateStorageLayout();
+
+        // 执行迁移逻辑（数据搬迁/初始化），保持 STORAGE_SLOT 不变（delegatecall）
+        bytes memory data = abi.encodeWithSelector(IRegistryStorageMigrator.migrate.selector, fromVersion, toVersion);
+        (bool ok, bytes memory reason) = migrator.delegatecall(data);
+        if (!ok) revert MigratorFailed(migrator, reason);
+
+        // 版本递增并做迁移后校验
+        RegistryStorage.upgradeStorageVersion(toVersion);
+        RegistryStorage.validateStorageLayout();
+
+        emit RegistryEvents.StorageMigrated(fromVersion, toVersion, migrator);
     }
 
     /// @notice 升级存储版本（仅治理地址可调用）

@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import { Contract } from 'ethers';
-import { SignerWithAddress } from '@ethersproject/contracts/node_modules/@nomiclabs/hardhat-ethers/signers';
+import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 
 describe('EarlyRepaymentGuaranteeManager', function () {
   let earlyRepaymentGuaranteeManager: Contract;
@@ -12,8 +12,8 @@ describe('EarlyRepaymentGuaranteeManager', function () {
   let platformFeeReceiver: SignerWithAddress;
   let acm: SignerWithAddress;
 
-  const PRINCIPAL = ethers.utils.parseEther('1000');
-  const PROMISED_INTEREST = ethers.utils.parseEther('100'); // 10% interest
+  const PRINCIPAL = ethers.parseEther('1000');
+  const PROMISED_INTEREST = ethers.parseEther('100'); // 10% interest
   const TERM_DAYS = 30;
   const PLATFORM_FEE_RATE = 100; // 1%
 
@@ -39,8 +39,8 @@ describe('EarlyRepaymentGuaranteeManager', function () {
     );
 
     // 给借款方和贷款方一些代币
-    await mockToken.mint(borrower.address, ethers.utils.parseEther('10000'));
-    await mockToken.mint(lender.address, ethers.utils.parseEther('10000'));
+    await mockToken.mint(borrower.address, ethers.parseEther('10000'));
+    await mockToken.mint(lender.address, ethers.parseEther('10000'));
   });
 
   describe('Initialization', function () {
@@ -57,7 +57,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
       
       await expect(
         newManager.initialize(
-          ethers.constants.AddressZero,
+          ethers.ZeroAddress,
           acm.address,
           platformFeeReceiver.address,
           PLATFORM_FEE_RATE
@@ -143,7 +143,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
       await ethers.provider.send('evm_increaseTime', [10 * 24 * 3600]); // 10 days
       await ethers.provider.send('evm_mine', []);
 
-      const actualRepayAmount = ethers.utils.parseEther('1100'); // 本金 + 部分利息
+      const actualRepayAmount = ethers.parseEther('1100'); // 本金 + 部分利息
 
       const result = await earlyRepaymentGuaranteeManager.connect(vaultCore).processEarlyRepayment(
         borrower.address,
@@ -221,7 +221,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
     });
 
     it('should preview early repayment correctly', async function () {
-      const actualRepayAmount = ethers.utils.parseEther('1100');
+      const actualRepayAmount = ethers.parseEther('1100');
 
       const result = await earlyRepaymentGuaranteeManager.previewEarlyRepayment(
         1, // guaranteeId

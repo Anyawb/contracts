@@ -15,8 +15,9 @@ import "../libraries/ModuleCache.sol";
 import "../libraries/LiquidationTokenLibrary.sol";
 import "../libraries/LiquidationInterfaceLibrary.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { IVaultView } from "../../../interfaces/IVaultView.sol";
 import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
+import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
+import { IPositionView } from "../../../interfaces/IPositionView.sol";
 
 import "../../../interfaces/ILiquidationDebtManager.sol";
 // 移除保证金管理器接口导入，专注于债务管理
@@ -35,8 +36,28 @@ import "../types/LiquidationTypes.sol";
 import "../types/LiquidationBase.sol";
 import "../../VaultTypes.sol";
 
-// 顶层最小接口：仅用于解析 VaultView 地址
-interface IVaultCoreMinimal { function viewContractAddrVar() external view returns (address); }
+// 顶层最小接口：仅用于解析 VaultRouter 地址
+interface IVaultCoreMinimal {
+    function viewContractAddrVar() external view returns (address);
+    function pushUserPositionUpdate(
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external;
+    function pushUserPositionUpdateDelta(
+        address user,
+        address asset,
+        int256 collateralDelta,
+        int256 debtDelta,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external;
+}
 
 /**
  * @title LiquidationDebtManager
@@ -93,6 +114,15 @@ abstract contract LiquidationDebtManager is
     /// @notice 清算人临时债务映射
     mapping(address => mapping(address => uint256)) private _liquidatorDebtTemp;
 
+    /// @notice 缓存推送失败事件（用于链下重试与告警）
+    /// @param user 目标用户
+    /// @param asset 资产
+    /// @param viewAddr 视图合约地址（可能为 0）
+    /// @param collateral 本次尝试推送的抵押数值
+    /// @param debt 本次尝试推送的债务数值
+    /// @param reason 失败原因（原始 revert data，如有）
+    event CacheUpdateFailed(address indexed user, address indexed asset, address viewAddr, uint256 collateral, uint256 debt, bytes reason);
+
     /* ============ Events ============ */
     
     // 事件已在 ILiquidationDebtManager 接口中定义
@@ -138,35 +168,69 @@ abstract contract LiquidationDebtManager is
     error LiquidationDebtManager__ViewAddressUnavailable();
 
     /* ============ Internal helpers ============ */
-    // 解析 VaultView 地址：通过 Registry 的 KEY_VAULT_CORE 再取 viewContractAddrVar()
+    // 解析 VaultRouter 地址：通过 Registry 的 KEY_VAULT_CORE 再取 viewContractAddrVar()
 
-    function _resolveVaultViewAddr() internal view returns (address viewAddr) {
-        address vaultCore = ModuleCache.get(_moduleCache, ModuleKeys.KEY_VAULT_CORE, CACHE_MAX_AGE);
-        if (vaultCore == address(0)) return address(0);
-        try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
-            return v;
-        } catch { return address(0); }
+    /// @dev Safe wrapper around module cache that returns zero on cache miss/expired; avoids bubbling ModuleCache errors.
+    function _getModuleOrZero(bytes32 moduleKey) internal view returns (address) {
+        // Direct internal call; swallow revert by catching any error.
+        // try/catch works only on external calls, so use a low-level staticcall to self with the selector of getModule().
+        (bool ok, bytes memory data) = address(this).staticcall(
+            abi.encodeWithSelector(this.getModule.selector, moduleKey)
+        );
+        if (!ok || data.length < 32) {
+            return address(0);
+        }
+        return abi.decode(data, (address));
     }
 
-    function _pushUserPositionToView(address user, address asset, address lendingEngine, address collateralManager) internal {
-        address viewAddr = _resolveVaultViewAddr();
-        if (viewAddr == address(0)) return; // 静默跳过，避免影响主流程
-        uint256 collateral = 0;
-        uint256 debt = 0;
-        if (collateralManager != address(0)) {
-            try ICollateralManager(collateralManager).getCollateral(user, asset) returns (uint256 c) { collateral = c; } catch {}
+    function _resolveVaultCoreAddr() internal view returns (address forwarder) {
+        forwarder = _getModuleOrZero(ModuleKeys.KEY_VAULT_CORE);
+    }
+
+    function _toInt(uint256 value) internal pure returns (int256) {
+        require(value <= uint256(type(int256).max), "amount overflow");
+        return int256(value);
+    }
+
+    function _pushUserPositionToView(
+        address user,
+        address asset,
+        address /* lendingEngine */,
+        address /* collateralManager */,
+        int256 debtDelta
+    ) internal {
+        address forwarder = _resolveVaultCoreAddr();
+        if (forwarder == address(0) || forwarder.code.length == 0) {
+            emit CacheUpdateFailed(user, asset, forwarder, 0, 0, bytes("view unavailable"));
+            return;
         }
-        if (lendingEngine != address(0)) {
-            try ILendingEngineBasic(lendingEngine).getDebt(user, asset) returns (uint256 d) { debt = d; } catch {}
+
+        int256 collateralDelta = 0;
+
+        uint64 nextVersion = _getNextVersion(user, asset);
+        // 推送失败不再整体回滚，转为事件供链下重试
+        try IVaultCoreMinimal(forwarder).pushUserPositionUpdateDelta(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            bytes32(0),
+            0,
+            nextVersion
+        ) {
+            // success
+        } catch (bytes memory reason) {
+            emit CacheUpdateFailed(user, asset, forwarder, 0, 0, reason);
         }
-        try IVaultView(viewAddr).pushUserPositionUpdate(user, asset, collateral, debt) { } catch { }
     }
 
     /* ============ Modifiers ============ */
     
     /// @notice 仅限管理员权限
     modifier onlyAdmin() {
-        require(LiquidationBase.hasRole(_baseStorage.accessControl, ActionKeys.ACTION_ADMIN, msg.sender), "Insufficient permission");
+        // Admin semantics in liquidation modules are standardized as ACTION_SET_PARAMETER
+        // (see `LiquidationBase.isAdmin`).
+        require(LiquidationBase.isAdmin(_baseStorage.accessControl, msg.sender), "Insufficient permission");
         _;
     }
     
@@ -269,9 +333,9 @@ abstract contract LiquidationDebtManager is
         LiquidationBase.validateAmount(amount, "Amount");
         
         // 获取模块地址
-        address lendingEngine = ModuleCache.get(_moduleCache, ModuleKeys.KEY_LE, CACHE_MAX_AGE);
+        address lendingEngine = _getModuleOrZero(ModuleKeys.KEY_LE);
         if (lendingEngine == address(0)) revert LiquidationDebtManager__LendingEngineUnavailable();
-        address collateralManager = ModuleCache.get(_moduleCache, ModuleKeys.KEY_CM, CACHE_MAX_AGE);
+        address collateralManager = _getModuleOrZero(ModuleKeys.KEY_CM);
 
         // 计算可清算数量并执行强制减少
         uint256 reducible = 0;
@@ -289,7 +353,7 @@ abstract contract LiquidationDebtManager is
         // DataPush 迁移至 View 层单点推送（此处仅保留领域事件，避免多点推送）
 
         // 推送至 View 缓存
-        _pushUserPositionToView(user, asset, lendingEngine, collateralManager);
+        _pushUserPositionToView(user, asset, lendingEngine, collateralManager, -_toInt(reducedAmount));
 
         return reducedAmount;
     }
@@ -312,9 +376,9 @@ abstract contract LiquidationDebtManager is
             revert LiquidationDebtManager__ArrayLengthMismatch(assets.length, amounts.length);
         }
         
-        address lendingEngine = ModuleCache.get(_moduleCache, ModuleKeys.KEY_LE, CACHE_MAX_AGE);
+        address lendingEngine = _getModuleOrZero(ModuleKeys.KEY_LE);
         if (lendingEngine == address(0)) revert LiquidationDebtManager__LendingEngineUnavailable();
-        address collateralManager = ModuleCache.get(_moduleCache, ModuleKeys.KEY_CM, CACHE_MAX_AGE);
+        address collateralManager = _getModuleOrZero(ModuleKeys.KEY_CM);
 
         uint256 length = assets.length;
         reducedAmounts = new uint256[](length);
@@ -335,7 +399,7 @@ abstract contract LiquidationDebtManager is
                 // 单点 DataPush 由 View 层负责
 
                 // 推送至 View 缓存
-                _pushUserPositionToView(user, assets[i], lendingEngine, collateralManager);
+                _pushUserPositionToView(user, assets[i], lendingEngine, collateralManager, -_toInt(actual));
 
                 reducedAmounts[i] = actual;
             }
@@ -549,5 +613,20 @@ abstract contract LiquidationDebtManager is
     /// @return hasPending 是否有待升级
     function getPendingUpgrade(bytes32 moduleKey) external view returns (address newAddress, uint256 executeAfter, bool hasPending) {
         return Registry(_registryAddr).getPendingUpgrade(moduleKey);
+    }
+
+    /// @notice 计算 PositionView 的下一个 nextVersion（失败返回 0）
+    function _getNextVersion(address user, address asset) internal view returns (uint64) {
+        address positionView = _getModuleOrZero(ModuleKeys.KEY_POSITION_VIEW);
+        if (positionView == address(0)) {
+            return 0;
+        }
+        try IPositionView(positionView).getPositionVersion(user, asset) returns (uint64 version) {
+            unchecked {
+                return version + 1;
+            }
+        } catch {
+            return 0;
+        }
     }
 } 

@@ -12,7 +12,7 @@ interface IFeeRouter {
     event FeeDistributed(address indexed token, uint256 platformAmount, uint256 ecoAmount);
     event FeeConfigUpdated(uint256 platformFeeBps, uint256 ecoFeeBps);
     event TreasuryUpdated(address platformTreasury, address ecoVault);
-    event DynamicFeeUpdated(address indexed token, bytes32 indexed feeType, uint256 feeBps);
+    event DynamicFeeUpdated(address indexed token, bytes32 indexed feeType, uint256 oldFee, uint256 newFee);
     event TokenSupported(address indexed token, bool supported);
     event BatchFeeDistributed(address indexed token, uint256 totalAmount, uint256 distribution);
     event FeeStatisticsUpdated(address indexed token, bytes32 indexed feeType, uint256 totalAmount);

@@ -4,11 +4,17 @@ pragma solidity ^0.8.20;
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { MissingRole } from "../errors/StandardErrors.sol";
 
+interface IAccessControlViewHooks {
+    function pushPermissionUpdate(address user, bytes32 actionKey, bool hasPermission) external;
+    function pushPermissionLevelUpdate(address user, IAccessControlManager.PermissionLevel newLevel) external;
+}
+
 /// @title MockAccessControlManager
 /// @notice 仅用于测试环境的轻量级角色管理器，实现 IAccessControlManager 接口。
 /// @dev 不包含访问控制自身的权限控制，任何人都可授予/撤销角色，切勿用于生产。
 contract MockAccessControlManager is IAccessControlManager {
     mapping(bytes32 => mapping(address => bool)) private _roles;
+    mapping(address => PermissionLevel) private _permissionLevels;
 
     /// @notice 当账户被授予角色时触发。
     /// @param role 角色标识符
@@ -77,18 +83,25 @@ contract MockAccessControlManager is IAccessControlManager {
     }
 
     function setUserPermission(address user, IAccessControlManager.PermissionLevel level) external {
-        // Mock实现，不存储权限级别
+        _permissionLevels[user] = level;
     }
 
     function setBatchUserPermissions(
         address[] calldata users,
         IAccessControlManager.PermissionLevel[] calldata levels
     ) external {
-        // Mock实现，不存储权限级别
+        require(users.length == levels.length, "MockACM: length mismatch");
+        for (uint256 i = 0; i < users.length; i++) {
+            _permissionLevels[users[i]] = levels[i];
+        }
     }
 
-    function getUserPermission(address /* user */) external pure override returns (IAccessControlManager.PermissionLevel) {
-        return IAccessControlManager.PermissionLevel.NONE;
+    function getUserPermission(address user) external view override returns (IAccessControlManager.PermissionLevel) {
+        return _permissionLevels[user];
+    }
+
+    function setUserPermissionLevel(address user, PermissionLevel level) external {
+        _permissionLevels[user] = level;
     }
 
     function getUserPermissionWithCache(address /* user */) external pure returns (
@@ -231,4 +244,20 @@ contract MockAccessControlManager is IAccessControlManager {
     function pendingEmergencyKeeper() external pure returns (address) {
         return address(0);
     }
-} 
+    function callPushPermissionUpdate(
+        address accessControlView,
+        address user,
+        bytes32 actionKey,
+        bool hasPermission
+    ) external {
+        IAccessControlViewHooks(accessControlView).pushPermissionUpdate(user, actionKey, hasPermission);
+    }
+
+    function callPushPermissionLevelUpdate(
+        address accessControlView,
+        address user,
+        PermissionLevel newLevel
+    ) external {
+        IAccessControlViewHooks(accessControlView).pushPermissionLevelUpdate(user, newLevel);
+    }
+}

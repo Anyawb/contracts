@@ -8,11 +8,13 @@ import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { IRewardManager } from "../../../interfaces/IRewardManager.sol";
 import { VaultMath } from "../../VaultMath.sol";
 import { DegradationMonitor as GracefulDegradationMonitor } from "../../../monitor/DegradationMonitor.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
+import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
+import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
  * @title StatisticsView 统计视图模块 / Aggregated Statistics View
@@ -30,7 +32,10 @@ import { ZeroAddress } from "../../../errors/StandardErrors.sol";
  *
  * @custom:security-contact security@example.com
  */
-contract StatisticsView is Initializable, UUPSUpgradeable {
+contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
+    // ======== Errors ========
+    error StatisticsView__StaleUserStatsVersion(uint64 currentVersion, uint64 incomingVersion);
+    error StatisticsView__ZeroImplementation();
     // ======== Vault Global Statistics (migrated from VaultStatistics) ========
     /// @notice 用户快照结构体（保持与原 VaultStatistics 一致，便于平滑迁移）
     struct UserSnapshot {
@@ -84,6 +89,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
     mapping(address => bool) private _userActiveStatus;
     /// @notice 用户最后活跃时间
     mapping(address => uint256) private _userLastActiveTime;
+    /// @notice 用户统计版本号（顺序/幂等校验）
+    mapping(address => uint64) private _userStatsVersion;
     /// @notice 用户保证金（user => asset => amount）
     mapping(address => mapping(address => uint256)) private _userGuarantees;
     /// @notice 资产总保证金（asset => totalAmount）
@@ -108,6 +115,18 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
     // Registry contract address (private per §340-348 naming standard)
     address private _registryAddr;
 
+    /// @notice storage gap for upgrade safety
+    uint256[50] private __gap;
+
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
     // ======== Modifiers ========
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
@@ -116,12 +135,16 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
 
     /// @notice 统一权限验证：通过 Registry 解析 ACM 并校验角色
     modifier onlyRole(bytes32 actionKey) {
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acm).requireRole(actionKey, msg.sender);
+        ViewAccessLib.requireRole(_registryAddr, actionKey, msg.sender);
         _;
     }
 
     // ======== Init ========
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
      * @notice 初始化 StatisticsView
      * @dev 只能调用一次（OpenZeppelin Initializable）
@@ -160,12 +183,16 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
 
     /**
      * @notice 获取奖励系统统计信息 / Get reward-system statistics
-     * @return r RewardStats 结构体，包含 rewardRate、totalRewardPoints（可选）
+     * @dev RewardManager 的只读查询入口已移除；奖励只读统一通过 RewardView / RewardPoints 等模块读取。
+     * @return r RewardStats 结构体（当前仅保留 totalRewardPoints 的可选统计；rewardRate 固定为 0）
      */
-    function getRewardStats() external view returns (RewardStats memory r) {
-        address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        try IRewardManager(rm).getRewardRate() returns (uint256 rate) { r.rewardRate = rate; } catch {}
-        // totalRewardPoints optional – ignore if interface missing
+    function getRewardStats() external view onlyValidRegistry returns (RewardStats memory r) {
+        // rewardRate 语义已废弃，保持 0
+        r.rewardRate = 0;
+        // best-effort：统计总积分供应量（RewardPoints.totalSupply），模块缺失则返回 0
+        address rp = _getModule(ModuleKeys.KEY_REWARD_POINTS);
+        if (rp == address(0)) return r;
+        try IRewardPointsSupply(rp).totalSupply() returns (uint256 s) { r.totalRewardPoints = s; } catch {}
     }
 
     // -------- Degradation Stats --------
@@ -176,11 +203,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
      */
     function pushDegradationStats(GracefulDegradationStats calldata s) external onlyValidRegistry {
         // 仅允许通过 Registry 权限控制（ACTION_ADMIN or ACTION_VIEW_SYSTEM_STATUS）
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        bool hasAdmin = IAccessControlManager(acm).hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
-        bool hasView  = IAccessControlManager(acm).hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender);
-        bool isOwner  = msg.sender == IAccessControlManager(acm).owner();
-        require(hasAdmin || hasView || isOwner, "StatsView: no permission");
+        // allow admin; otherwise要求系统状态查看权限
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender);
+        }
 
         _degradationStats = s;
 
@@ -195,7 +221,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
             block.timestamp
         );
         // Push to generic data bus
-        DataPushLibrary._emitData(keccak256("DEGRADATION_STATS_UPDATE"), abi.encode(s));
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_DEGRADATION_STATS_UPDATE, abi.encode(s));
     }
 
     /**
@@ -206,71 +232,6 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
         return _degradationStats;
     }
 
-    // ======== Write APIs: Unified push interfaces from business modules ========
-    /// @notice 转发：清算单条更新（统一从业务层通过 View 写入）
-    /// @dev 写入白名单：仅允许 KEY_LIQUIDATION_MANAGER 调用；内部转发至 KEY_LIQUIDATION_VIEW
-    /// @param user 被清算用户地址
-    /// @param collateralAsset 抵押资产地址
-    /// @param debtAsset 债务资产地址
-    /// @param collateralAmount 扣押抵押物数量
-    /// @param debtAmount 减少债务数量
-    /// @param liquidator 清算人地址
-    /// @param bonus 清算奖励（如有）
-    /// @param ts 业务发生时间戳
-    function forwardPushLiquidationUpdate(
-        address user,
-        address collateralAsset,
-        address debtAsset,
-        uint256 collateralAmount,
-        uint256 debtAmount,
-        address liquidator,
-        uint256 bonus,
-        uint256 ts
-    ) external onlyValidRegistry {
-        address lm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
-        require(msg.sender == lm, "only LM");
-        address eventsView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_VIEW);
-        // 转发到 LiquidatorView（单点推送）
-        (bool ok, ) = eventsView.call(
-            abi.encodeWithSignature(
-                "pushLiquidationUpdate(address,address,address,uint256,uint256,address,uint256,uint256)",
-                user, collateralAsset, debtAsset, collateralAmount, debtAmount, liquidator, bonus, ts
-            )
-        );
-        require(ok, "pushLiquidationUpdate failed");
-    }
-
-    /// @notice 转发：清算批量更新（统一从业务层通过 View 写入）
-    /// @dev 写入白名单：仅允许 KEY_LIQUIDATION_MANAGER 调用；内部转发至 KEY_LIQUIDATION_VIEW
-    /// @param users 被清算用户地址数组
-    /// @param collateralAssets 抵押资产地址数组
-    /// @param debtAssets 债务资产地址数组
-    /// @param collateralAmounts 扣押抵押物数量数组
-    /// @param debtAmounts 减少债务数量数组
-    /// @param liquidator 清算人地址
-    /// @param bonuses 清算奖励数组（与 users 对应，可为空值占位）
-    /// @param ts 业务发生时间戳
-    function forwardPushBatchLiquidationUpdate(
-        address[] calldata users,
-        address[] calldata collateralAssets,
-        address[] calldata debtAssets,
-        uint256[] calldata collateralAmounts,
-        uint256[] calldata debtAmounts,
-        address liquidator,
-        uint256[] calldata bonuses,
-        uint256 ts
-    ) external onlyValidRegistry {
-        address lm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
-        require(msg.sender == lm, "only LM");
-        address eventsView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_VIEW);
-        (bool ok, ) = eventsView.call(
-            abi.encodeWithSignature(
-                "pushBatchLiquidationUpdate(address[],address[],address[],uint256[],uint256[],address,uint256[],uint256)",
-                users, collateralAssets, debtAssets, collateralAmounts, debtAmounts, liquidator, bonuses, ts
-            )
-        );
-        require(ok, "pushBatchLiquidationUpdate failed");
-    }
     /// @notice 业务入口统一推送用户统计变更，保持活跃用户计数一致更新
     /// @dev 与原 updateUserStats 语义保持一致；仅权限角色可调用
     function pushUserStatsUpdate(
@@ -280,7 +241,40 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
         uint256 borrow,
         uint256 repay
     ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        _pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay, 0);
+    }
+
+    /// @notice 业务入口统一推送用户统计变更（携带 nextVersion）
+    function pushUserStatsUpdate(
+        address user,
+        uint256 collateralIn,
+        uint256 collateralOut,
+        uint256 borrow,
+        uint256 repay,
+        uint64 nextVersion
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        _pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay, nextVersion);
+    }
+
+    function _pushUserStatsUpdate(
+        address user,
+        uint256 collateralIn,
+        uint256 collateralOut,
+        uint256 borrow,
+        uint256 repay,
+        uint64 nextVersion
+    ) internal {
         if (user == address(0)) revert ZeroAddress();
+
+        uint64 currentVersion = _userStatsVersion[user];
+        uint64 newVersion = nextVersion;
+        if (nextVersion == 0) {
+            newVersion = currentVersion + 1;
+        } else {
+            // strict: nextVersion must be exactly current+1
+            if (nextVersion != currentVersion + 1) revert StatisticsView__StaleUserStatsVersion(currentVersion, nextVersion);
+        }
+        _userStatsVersion[user] = newVersion;
 
         // 更新用户快照（基于增量）
         UserSnapshot storage snap = _userSnapshots[user];
@@ -396,6 +390,11 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
         return _globalSnapshot;
     }
 
+    /// @notice 当前 Registry 地址
+    function registryAddr() external view returns (address) {
+        return _registryAddr;
+    }
+
     function isUserActive(address user) external view returns (bool) {
         return _userActiveStatus[user];
     }
@@ -421,9 +420,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable {
     }
 
     // ======== UUPS ========
+    function _getModule(bytes32 key) internal view returns (address moduleAddr) {
+        moduleAddr = Registry(_registryAddr).getModule(key);
+    }
+
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acm).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-        require(newImplementation!=address(0),"StatsView: zero impl");
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (newImplementation == address(0)) revert StatisticsView__ZeroImplementation();
     }
 } 
+
+/// @dev RewardPoints 最小只读接口（避免直接依赖完整实现）
+interface IRewardPointsSupply {
+    function totalSupply() external view returns (uint256);
+}

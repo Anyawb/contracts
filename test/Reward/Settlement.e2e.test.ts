@@ -4,7 +4,7 @@
  * 测试目标:
  * - 验证撮合结算的完整流程，严格符合双架构设计
  * - 验证 EIP-712 签名机制的正确性
- * - 验证双架构数据流：VaultCore → VaultView → VaultBusinessLogic → CollateralManager + LendingEngine
+ * - 验证双架构数据流：VaultCore → VaultRouter → VaultBusinessLogic → CollateralManager + LendingEngine
  * - 验证事件驱动架构和数据推送
  * - 验证权限控制和错误处理
  */
@@ -27,14 +27,17 @@ import type {
   LoanNFT,
   MockRewardManager,
   FeeRouter,
-  VaultCoreRefactored,
-  VaultView,
+  VaultRouter,
   VaultBusinessLogic,
   MockPriceOracle,
   MockERC20,
   MockAssetWhitelist,
   MockGuaranteeFundManager,
-  MockEarlyRepaymentGuaranteeManager
+  MockEarlyRepaymentGuaranteeManager,
+  MockLiquidationRiskManager,
+  MockLiquidationManager,
+  MockHealthView,
+  MockPositionView
 } from '../../types';
 
 // 测试常量定义
@@ -70,6 +73,7 @@ const MODULE_KEYS = {
   KEY_LE: ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE')),
   KEY_VAULT_CORE: ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE')),
   KEY_VAULT_VIEW: ethers.keccak256(ethers.toUtf8Bytes('VAULT_VIEW')),
+  KEY_VAULT_ROUTER: ethers.keccak256(ethers.toUtf8Bytes('VAULT_ROUTER')),
   KEY_VAULT_BUSINESS_LOGIC: ethers.keccak256(ethers.toUtf8Bytes('VAULT_BUSINESS_LOGIC')),
   KEY_ORDER_ENGINE: ethers.keccak256(ethers.toUtf8Bytes('ORDER_ENGINE')),
   KEY_LOAN_NFT: ethers.keccak256(ethers.toUtf8Bytes('LOAN_NFT')),
@@ -80,6 +84,14 @@ const MODULE_KEYS = {
   KEY_GUARANTEE_FUND: ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER')),
   KEY_EARLY_REPAYMENT_GUARANTEE: ethers.keccak256(ethers.toUtf8Bytes('EARLY_REPAYMENT_GUARANTEE_MANAGER')),
   KEY_ACCESS_CONTROL: ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')),
+  KEY_LIQUIDATION_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_MANAGER')),
+  KEY_LIQUIDATION_RISK_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_RISK_MANAGER')),
+  KEY_HEALTH_VIEW: ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW')),
+  KEY_POSITION_VIEW: ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW')),
+} as const;
+
+const ActionKeys = {
+  ACTION_DEPOSIT: ethers.keccak256(ethers.toUtf8Bytes('DEPOSIT')),
 } as const;
 
 // 权限角色定义
@@ -89,6 +101,7 @@ const ROLES = {
   REPAY: ethers.keccak256(ethers.toUtf8Bytes('REPAY')),
   WITHDRAW: ethers.keccak256(ethers.toUtf8Bytes('WITHDRAW')),
   SET_PARAMETER: ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')),
+  ADMIN: ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN')),
   UPGRADE_MODULE: ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE')),
   PAUSE_SYSTEM: ethers.keccak256(ethers.toUtf8Bytes('PAUSE_SYSTEM')),
   UNPAUSE_SYSTEM: ethers.keccak256(ethers.toUtf8Bytes('UNPAUSE_SYSTEM')),
@@ -102,31 +115,18 @@ async function deployProxyContract<T extends object>(
   contractName: string,
   initArgs: readonly unknown[] = []
 ): Promise<T> {
-  const ImplementationFactory = await ethers.getContractFactory(contractName);
-  
-  let implementation;
+  // 使用 OZ upgrades helpers 来兼容带构造的 UUPS 实现
+  const Factory = await ethers.getContractFactory(contractName);
   try {
-    implementation = await ImplementationFactory.deploy();
-  } catch (error) {
-    implementation = await ImplementationFactory.deploy(...initArgs);
+    const instance = (await upgrades.deployProxy(Factory, initArgs, {
+      kind: 'uups',
+      unsafeAllow: ['constructor'],
+    })) as unknown as T;
+    return instance;
+  } catch (err) {
+    console.error(`deployProxyContract failed for ${contractName} with args len=${initArgs.length}`, err);
+    throw err;
   }
-  await implementation.waitForDeployment();
-
-  let initData = '0x';
-  if (initArgs.length > 0) {
-    try {
-      initData = implementation.interface.encodeFunctionData('initialize', initArgs);
-    } catch (error) {
-      initData = '0x';
-    }
-  }
-
-  const ProxyFactory = await ethers.getContractFactory('ERC1967ProxyMock');
-  const proxy = await ProxyFactory.deploy(await implementation.getAddress(), initData);
-  await proxy.waitForDeployment();
-
-  const proxyContract = ImplementationFactory.attach(await proxy.getAddress()) as unknown as T;
-  return proxyContract;
 }
 
 /**
@@ -178,8 +178,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
   let loanNft: LoanNFT;
   let rewardManager: MockRewardManager;
   let feeRouter: FeeRouter;
-  let vaultCore: VaultCoreRefactored;
-  let vaultView: VaultView;
+  let vaultCore: any; // SettlementBorrowCoreMock
+  let vaultRouter: VaultRouter;
   let vaultBusinessLogic: VaultBusinessLogic;
   let priceOracle: MockPriceOracle;
   let usdt: MockERC20;
@@ -187,6 +187,10 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
   let assetWhitelist: MockAssetWhitelist;
   let guaranteeFundManager: MockGuaranteeFundManager;
   let earlyRepaymentGuaranteeManager: MockEarlyRepaymentGuaranteeManager;
+  let liquidationManager: MockLiquidationManager;
+  let liquidationRiskManager: MockLiquidationRiskManager;
+  let healthView: MockHealthView;
+  let positionView: MockPositionView;
 
   /**
    * 部署测试环境的 fixture 函数
@@ -203,6 +207,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     const ACMFactory = await ethers.getContractFactory('AccessControlManager');
     acm = await ACMFactory.deploy(await governance.getAddress()) as AccessControlManager;
     await acm.waitForDeployment();
+    await acm.grantRole(ROLES.ADMIN, await governance.getAddress());
 
     // 3. 部署 Mock 代币
     const ERC20Factory = await ethers.getContractFactory('MockERC20');
@@ -243,7 +248,24 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     earlyRepaymentGuaranteeManager = await EarlyRepaymentGuaranteeManagerFactory.deploy() as unknown as MockEarlyRepaymentGuaranteeManager;
     await earlyRepaymentGuaranteeManager.waitForDeployment();
 
-    // 8. 部署业务模块
+    const LmFactory = await ethers.getContractFactory('MockLiquidationManager');
+    liquidationManager = await LmFactory.deploy() as unknown as MockLiquidationManager;
+    await liquidationManager.waitForDeployment();
+
+    // 8. 部署风控/健康视图
+    const LrmFactory = await ethers.getContractFactory('MockLiquidationRiskManager');
+    liquidationRiskManager = await LrmFactory.deploy() as unknown as MockLiquidationRiskManager;
+    await liquidationRiskManager.waitForDeployment();
+
+    const HealthViewFactory = await ethers.getContractFactory('MockHealthView');
+    healthView = await HealthViewFactory.deploy() as unknown as MockHealthView;
+    await healthView.waitForDeployment();
+
+    const PositionViewFactory = await ethers.getContractFactory('MockPositionView');
+    positionView = await PositionViewFactory.deploy() as unknown as MockPositionView;
+    await positionView.waitForDeployment();
+
+    // 9. 部署业务模块
     cm = await deployProxyContract<CollateralManager>('CollateralManager', [
       await registry.getAddress()
     ]);
@@ -254,7 +276,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       await registry.getAddress()
     ]);
 
-    orderEngine = await deployProxyContract<LendingEngine>('LendingEngine', [await registry.getAddress()]);
+    orderEngine = await deployProxyContract<LendingEngine>('src/core/LendingEngine.sol:LendingEngine', [await registry.getAddress()]);
 
     loanNft = await deployProxyContract<LoanNFT>('LoanNFT', [
       'Loan NFT',
@@ -263,14 +285,21 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       await registry.getAddress(),
     ]);
 
-    feeRouter = await deployProxyContract<FeeRouter>('FeeRouter', []);
+    const governanceAddr = await governance.getAddress();
+    feeRouter = await deployProxyContract<FeeRouter>('src/Vault/FeeRouter.sol:FeeRouter', [
+      await registry.getAddress(),
+      governanceAddr,
+      governanceAddr,
+      100, // platform fee bps (1%)
+      1    // eco fee bps (0.01%)
+    ]);
 
-    // 9. 部署 Mock RewardManager
+    // 10. 部署 Mock RewardManager
     const RewardManagerFactory = await ethers.getContractFactory('MockRewardManager');
     rewardManager = await RewardManagerFactory.deploy() as unknown as MockRewardManager;
     await rewardManager.waitForDeployment();
 
-    // 10. Registry 模块注册
+    // 11. Registry 模块注册
     await registry.setModule(MODULE_KEYS.KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_CM, await cm.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_LE, await leBasic.getAddress());
@@ -282,39 +311,54 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     await registry.setModule(MODULE_KEYS.KEY_ASSET_WHITELIST, await assetWhitelist.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_GUARANTEE_FUND, await guaranteeFundManager.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_EARLY_REPAYMENT_GUARANTEE, await earlyRepaymentGuaranteeManager.getAddress());
+    await registry.setModule(MODULE_KEYS.KEY_LIQUIDATION_MANAGER, await liquidationManager.getAddress());
+    await registry.setModule(MODULE_KEYS.KEY_LIQUIDATION_RISK_MANAGER, await liquidationRiskManager.getAddress());
+    await registry.setModule(MODULE_KEYS.KEY_HEALTH_VIEW, await healthView.getAddress());
+    await registry.setModule(MODULE_KEYS.KEY_POSITION_VIEW, await positionView.getAddress());
 
-    // 11. 部署 VaultView
-    vaultView = await deployProxyContract<VaultView>('contracts/Vault/VaultView.sol:VaultView', [
-      await registry.getAddress()
-    ]);
+    // 12. 部署 VaultRouter（非 UUPS，使用构造函数）
+    const VaultRouterFactory = await ethers.getContractFactory('src/Vault/VaultRouter.sol:VaultRouter');
+    vaultRouter = await VaultRouterFactory.deploy(
+      await registry.getAddress(),
+      await assetWhitelist.getAddress(),
+      await priceOracle.getAddress(),
+      await usdt.getAddress()
+    );
+    await vaultRouter.waitForDeployment();
 
-    // 12. 部署 VaultBusinessLogic
+    // 13. 部署 VaultBusinessLogic
     vaultBusinessLogic = await deployProxyContract<VaultBusinessLogic>('VaultBusinessLogic', [
       await registry.getAddress(),
       await usdt.getAddress()
     ]);
 
-    // 13. 部署 VaultCoreRefactored（按架构：提供 registry、vaultStorage、businessLogicModule、viewAddr）
-    vaultCore = await deployProxyContract<VaultCoreRefactored>('VaultCoreRefactored', [
-      await registry.getAddress(),
-      await registry.getAddress(),
-      await vaultBusinessLogic.getAddress(),
-      await vaultView.getAddress()
-    ]);
+    // 14. 部署 SettlementBorrowCoreMock，提供 borrowFor 入口（测试替身）
+    const BorrowCoreFactory = await ethers.getContractFactory('SettlementBorrowCoreMock');
+    vaultCore = await BorrowCoreFactory.deploy(await registry.getAddress(), await vaultRouter.getAddress());
+    await vaultCore.waitForDeployment();
 
-    // 14. 配置模块到 Registry
+    // 15. 配置模块到 Registry
     await registry.setModule(MODULE_KEYS.KEY_VAULT_CORE, await vaultCore.getAddress());
-    await registry.setModule(MODULE_KEYS.KEY_VAULT_VIEW, await vaultView.getAddress());
+    await registry.setModule(MODULE_KEYS.KEY_VAULT_VIEW, await vaultRouter.getAddress());
+    // 对于 SettlementBorrowCoreMock，KEY_VAULT_ROUTER 指向 core 自身，便于 CM 的 onlyVaultRouter 校验通过
+    await registry.setModule(MODULE_KEYS.KEY_VAULT_ROUTER, await vaultCore.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_VAULT_BUSINESS_LOGIC, await vaultBusinessLogic.getAddress());
+    await vaultRouter.connect(governance).refreshModuleCache();
+    await vaultRouter.connect(governance).setTestingMode(true); // 测试模式，避免缺失模块导致写路径中断
+
+    // 15.1 资产白名单：允许 RWA 与 USDT
+    await assetWhitelist.setAssetAllowed(await rwa.getAddress(), true);
+    await assetWhitelist.setAssetAllowed(await usdt.getAddress(), true);
 
     // 15. 设置权限
-    const governanceAddr = await governance.getAddress();
+    
     const vblAddr = await vaultBusinessLogic.getAddress();
     const vaultCoreAddr = await vaultCore.getAddress();
     
     // 给 governance 授予权限
     const governanceRoles = [
       ROLES.SET_PARAMETER,
+      ROLES.ADMIN,
       ROLES.UPGRADE_MODULE,
       ROLES.PAUSE_SYSTEM,
       ROLES.DEPOSIT,
@@ -329,6 +373,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
         await acm.grantRole(role, governanceAddr);
       }
     }
+    // FeeRouter 需要 SET_PARAMETER 角色
+    await feeRouter.connect(governance).addSupportedToken(await usdt.getAddress());
     
     // 给 VaultBusinessLogic 授予权限
     const vblRoles = [
@@ -337,6 +383,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       ROLES.WITHDRAW,
       ROLES.BORROW,
       ROLES.REPAY,
+      ROLES.SET_PARAMETER,
+      ROLES.UPGRADE_MODULE,
     ];
     
     for (const role of vblRoles) {
@@ -359,6 +407,12 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       }
     }
 
+    // 给 LendingEngine 授予借款铸证权限（ACTION_BORROW）
+    const leAddr = await orderEngine.getAddress();
+    if (!(await acm.hasRole(ROLES.BORROW, leAddr))) {
+      await acm.grantRole(ROLES.BORROW, leAddr);
+    }
+
     // 16. 给用户授权
     await rwa.connect(borrower).approve(await vaultCore.getAddress(), ethers.MaxUint256);
     await usdt.connect(lender).approve(await vaultBusinessLogic.getAddress(), ethers.MaxUint256);
@@ -376,14 +430,16 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       rewardManager,
       feeRouter,
       vaultCore,
-      vaultView,
+      vaultRouter,
       vaultBusinessLogic,
       priceOracle,
       usdt,
       rwa,
       assetWhitelist,
       guaranteeFundManager,
-      earlyRepaymentGuaranteeManager
+      earlyRepaymentGuaranteeManager,
+      liquidationRiskManager,
+      healthView
     };
   }
 
@@ -403,7 +459,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     rewardManager = fixture.rewardManager;
     feeRouter = fixture.feeRouter;
     vaultCore = fixture.vaultCore;
-    vaultView = fixture.vaultView;
+    vaultRouter = fixture.vaultRouter;
     vaultBusinessLogic = fixture.vaultBusinessLogic;
     priceOracle = fixture.priceOracle;
     usdt = fixture.usdt;
@@ -411,6 +467,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     assetWhitelist = fixture.assetWhitelist;
     guaranteeFundManager = fixture.guaranteeFundManager;
     earlyRepaymentGuaranteeManager = fixture.earlyRepaymentGuaranteeManager;
+    liquidationRiskManager = fixture.liquidationRiskManager;
+    healthView = fixture.healthView;
   });
 
   describe('双架构撮合流程测试', function () {
@@ -420,12 +478,14 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       const usdtAddr = await usdt.getAddress();
       const rwaAddr = await rwa.getAddress();
 
-      // 1. 借款人存入抵押物 - 通过 VaultCore 统一入口
-      await vaultCore.connect(borrower).deposit(rwaAddr, ethers.parseEther('100'));
+      // 1. 借款人存入抵押物 - 直接通过 VaultRouter 标准入口
+      const depositAmount = ethers.parseEther('100');
+      // 通过 VaultCore（Mock）入口，满足 VaultRouter 的 onlyVaultCore
+      await vaultCore.connect(borrower).deposit(rwaAddr, depositAmount);
       
       // 验证抵押物已存入
       const collateralAfter = await cm.getCollateral(borrowerAddr, rwaAddr);
-      expect(collateralAfter).to.equal(ethers.parseEther('100'));
+      expect(collateralAfter).to.equal(depositAmount);
 
       // 2. 出借人保留资金到池子 via VaultBusinessLogic
       const reserveAmount = ethers.parseUnits('5000', 6);
@@ -487,7 +547,10 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
 
       // 7. 验证撮合结果
       const borrowerUsdtAfter = await usdt.balanceOf(borrowerAddr);
-      expect(borrowerUsdtAfter - borrowerUsdtBefore).to.equal(borrowAmount);
+      const platformFee = (borrowAmount * BigInt(100)) / BigInt(10_000); // 1%
+      const ecoFee = (borrowAmount * BigInt(1)) / BigInt(10_000); // 0.01%
+      const expectedNet = borrowAmount - platformFee - ecoFee;
+      expect(borrowerUsdtAfter - borrowerUsdtBefore).to.equal(expectedNet);
       
       const debt = await leBasic.getDebt(borrowerAddr, usdtAddr);
       expect(debt).to.equal(borrowAmount);

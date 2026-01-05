@@ -46,7 +46,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockStatisticsView: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let mockHealthFactorCalculator: any;
+  // let mockHealthFactorCalculator: any; // HealthFactorCalculator 已废弃
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockFeeRouter: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -90,7 +90,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     mockCollateralManager = await ethers.getContractFactory('MockCollateralManager');
     mockLendingEngine = await ethers.getContractFactory('MockLendingEngineConcrete');
     mockStatisticsView = await ethers.getContractFactory('MockStatisticsView');
-    mockHealthFactorCalculator = await ethers.getContractFactory('MockHealthFactorCalculator');
+    // mockHealthFactorCalculator 已废弃，不再需要
     mockFeeRouter = await ethers.getContractFactory('MockFeeRouter');
     mockRewardManager = await ethers.getContractFactory('MockRewardManager');
     mockAssetWhitelist = await ethers.getContractFactory('MockAssetWhitelist');
@@ -115,8 +115,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     const deployedMockStatisticsView = await mockStatisticsView.deploy();
     await deployedMockStatisticsView.waitForDeployment();
     
-    const deployedMockHealthFactorCalculator = await mockHealthFactorCalculator.deploy();
-    await deployedMockHealthFactorCalculator.waitForDeployment();
+    // HealthFactorCalculator 已废弃，不再部署
     
     const deployedMockFeeRouter = await mockFeeRouter.deploy();
     await deployedMockFeeRouter.waitForDeployment();
@@ -137,7 +136,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     await deployedMockRegistry.setModule(ModuleKeys.KEY_CM, deployedMockCollateralManager.target);
     await deployedMockRegistry.setModule(ModuleKeys.KEY_LE, deployedMockLendingEngine.target);
     await deployedMockRegistry.setModule(ModuleKeys.KEY_STATS, deployedMockStatisticsView.target);
-    await deployedMockRegistry.setModule(ModuleKeys.KEY_HF_CALC, deployedMockHealthFactorCalculator.target);
+    // KEY_HF_CALC 已废弃，不再注册
     await deployedMockRegistry.setModule(ModuleKeys.KEY_FR, deployedMockFeeRouter.target);
     await deployedMockRegistry.setModule(ModuleKeys.KEY_RM, deployedMockRewardManager.target);
     await deployedMockRegistry.setModule(ModuleKeys.KEY_ASSET_WHITELIST, deployedMockAssetWhitelist.target);
@@ -196,7 +195,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       mockCollateralManager: deployedMockCollateralManager,
       mockLendingEngine: deployedMockLendingEngine,
       mockStatisticsView: deployedMockStatisticsView,
-      mockHealthFactorCalculator: deployedMockHealthFactorCalculator,
+      // mockHealthFactorCalculator: deployedMockHealthFactorCalculator, // 已废弃
       mockFeeRouter: deployedMockFeeRouter,
       mockRewardManager: deployedMockRewardManager,
       mockAssetWhitelist: deployedMockAssetWhitelist,
@@ -221,7 +220,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     mockCollateralManager = fixture.mockCollateralManager;
     mockLendingEngine = fixture.mockLendingEngine;
     mockStatisticsView = fixture.mockStatisticsView;
-    mockHealthFactorCalculator = fixture.mockHealthFactorCalculator;
+    // mockHealthFactorCalculator 已废弃
     mockFeeRouter = fixture.mockFeeRouter;
     mockRewardManager = fixture.mockRewardManager;
     mockAssetWhitelist = fixture.mockAssetWhitelist;

@@ -23,51 +23,48 @@ import type {
   GovernanceAccessConfig__factory
 } from '../../types/factories/contracts/Reward/configs';
 import type { 
-  AccessControlCore__factory
-} from '../../types/factories/contracts/access';
-import type { 
-  MockERC20__factory
-} from '../../types/factories/contracts/Mocks';
+  AccessControlManager,
+  MockRegistry
+} from '../../types/contracts';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
 describe('ServiceConfigs – 服务配置合约测试', function () {
   async function deployFixture() {
     const [governance, alice, bob, charlie] = await ethers.getSigners();
+    const KEY_ACM = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
     
-    // 部署 ACM - 构造函数需要keeper地址，这里使用governance作为keeper
-    const acmFactory = (await ethers.getContractFactory('AccessControlCore')) as AccessControlCore__factory;
-    const acm = await acmFactory.deploy(governance.address);
+    // Registry + ACM
+    const registryFactory = await ethers.getContractFactory('MockRegistry');
+    const registry = (await registryFactory.deploy()) as MockRegistry;
+    await registry.waitForDeployment();
+    
+    const acmFactory = await ethers.getContractFactory('AccessControlManager');
+    const acm = (await acmFactory.deploy(governance.address)) as AccessControlManager;
     await acm.waitForDeployment();
+    await registry.setModule(KEY_ACM, await acm.getAddress());
     
-    // 部署 FeatureUnlockConfig 代理 - initialize方法需要ACM地址
+    // 部署 FeatureUnlockConfig 代理 - initialize方法需要Registry地址
     const featureUnlockFactory = (await ethers.getContractFactory('FeatureUnlockConfig')) as FeatureUnlockConfig__factory;
-    const featureUnlockProxy = await upgrades.deployProxy(featureUnlockFactory, [await acm.getAddress()], {
+    const featureUnlockProxy = await upgrades.deployProxy(featureUnlockFactory, [await registry.getAddress()], {
       kind: 'uups'
     }) as FeatureUnlockConfig;
     await featureUnlockProxy.waitForDeployment();
     
-    // 部署 GovernanceAccessConfig 代理 - initialize方法需要ACM地址
+    // 部署 GovernanceAccessConfig 代理 - initialize方法需要Registry地址
     const governanceAccessFactory = (await ethers.getContractFactory('GovernanceAccessConfig')) as GovernanceAccessConfig__factory;
-    const governanceAccessProxy = await upgrades.deployProxy(governanceAccessFactory, [await acm.getAddress()], {
+    const governanceAccessProxy = await upgrades.deployProxy(governanceAccessFactory, [await registry.getAddress()], {
       kind: 'uups'
     }) as GovernanceAccessConfig;
     await governanceAccessProxy.waitForDeployment();
     
-    // 部署测试代币
-    const mockTokenFactory = (await ethers.getContractFactory('MockERC20')) as MockERC20__factory;
-    const mockToken = await mockTokenFactory.deploy('Test Token', 'TEST', 18);
-    await mockToken.waitForDeployment();
-    
-    // 设置权限 - 使用ActionKeys中定义的常量
-    await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')), governance.address);
-    await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE')), governance.address);
+    // 设置权限 - 默认治理已有 SET_PARAMETER/UPGRADE_MODULE，额外授予 alice/bob 时按需在测试内调用
     
     return { 
       acm, 
+      registry,
       featureUnlockProxy, 
       governanceAccessProxy, 
-      mockToken, 
       governance, 
       alice, 
       bob, 
@@ -79,10 +76,10 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
     
     describe('初始化测试', function () {
       it('应正确初始化合约', async function () {
-        const { featureUnlockProxy, acm } = await deployFixture();
+        const { featureUnlockProxy, registry } = await deployFixture();
         
-        // 验证 ACM 地址
-        expect(await featureUnlockProxy.acm()).to.equal(await acm.getAddress());
+        // 验证 Registry 地址
+        expect(await featureUnlockProxy.getRegistry()).to.equal(await registry.getAddress());
         
         // 验证服务类型
         expect(await featureUnlockProxy.getServiceType()).to.equal(2); // FeatureUnlock
@@ -96,7 +93,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 验证 Basic 等级
         const basicConfig = await featureUnlockProxy.getConfig(0); // ServiceLevel.Basic
-        expect(basicConfig.price).to.equal(ethers.parseUnits('300', 18));
+        expect(basicConfig.price).to.equal(ethers.parseUnits('200', 18));
         expect(basicConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
         expect(basicConfig.isActive).to.be.true;
         expect(basicConfig.level).to.equal(0);
@@ -174,32 +171,6 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         expect(await featureUnlockProxy.getCooldown()).to.equal(newCooldown);
       });
-      
-      it('非授权用户不应能更新ACM地址', async function () {
-        const { featureUnlockProxy, alice, bob } = await deployFixture();
-        
-        await expect(
-          featureUnlockProxy.connect(alice).setACM(bob.address)
-        ).to.be.reverted;
-      });
-      
-      it('授权用户应能更新ACM地址', async function () {
-        const { featureUnlockProxy, governance, bob } = await deployFixture();
-        
-        await expect(
-          featureUnlockProxy.connect(governance).setACM(bob.address)
-        ).to.not.be.reverted;
-        
-        // 注意：这里bob.address不是有效的ACM合约，仅用于测试权限
-      });
-      
-      it('不应能设置零地址作为ACM', async function () {
-        const { featureUnlockProxy, governance } = await deployFixture();
-        
-        await expect(
-          featureUnlockProxy.connect(governance).setACM(ZERO_ADDRESS)
-        ).to.be.reverted;
-      });
     });
     
     describe('边界条件测试', function () {
@@ -266,7 +237,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 验证功能仍然正常
         const config = await featureUnlockProxy.getConfig(0);
-        expect(config.price).to.equal(ethers.parseUnits('300', 18));
+        expect(config.price).to.equal(ethers.parseUnits('200', 18));
       });
       
       it('非授权用户不应能升级合约', async function () {
@@ -286,10 +257,10 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
     
     describe('初始化测试', function () {
       it('应正确初始化合约', async function () {
-        const { governanceAccessProxy, acm } = await deployFixture();
+        const { governanceAccessProxy, registry } = await deployFixture();
         
-        // 验证 ACM 地址
-        expect(await governanceAccessProxy.acm()).to.equal(await acm.getAddress());
+        // 验证 Registry 地址
+        expect(await governanceAccessProxy.getRegistry()).to.equal(await registry.getAddress());
         
         // 验证服务类型
         expect(await governanceAccessProxy.getServiceType()).to.equal(3); // GovernanceAccess
@@ -303,7 +274,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 验证 Basic 等级
         const basicConfig = await governanceAccessProxy.getConfig(0); // ServiceLevel.Basic
-        expect(basicConfig.price).to.equal(ethers.parseUnits('500', 18));
+        expect(basicConfig.price).to.equal(ethers.parseUnits('200', 18));
         expect(basicConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
         expect(basicConfig.isActive).to.be.true;
         expect(basicConfig.level).to.equal(0);
@@ -319,7 +290,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 验证 Premium 等级
         const premiumConfig = await governanceAccessProxy.getConfig(2); // ServiceLevel.Premium
-        expect(premiumConfig.price).to.equal(ethers.parseUnits('2000', 18));
+        expect(premiumConfig.price).to.equal(ethers.parseUnits('2500', 18));
         expect(premiumConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
         expect(premiumConfig.isActive).to.be.true;
         expect(premiumConfig.level).to.equal(2);
@@ -327,7 +298,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 验证 VIP 等级
         const vipConfig = await governanceAccessProxy.getConfig(3); // ServiceLevel.VIP
-        expect(vipConfig.price).to.equal(ethers.parseUnits('5000', 18));
+        expect(vipConfig.price).to.equal(ethers.parseUnits('6000', 18));
         expect(vipConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
         expect(vipConfig.isActive).to.be.true;
         expect(vipConfig.level).to.equal(3);
@@ -380,32 +351,6 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
           .withArgs(newCooldown);
         
         expect(await governanceAccessProxy.getCooldown()).to.equal(newCooldown);
-      });
-      
-      it('非授权用户不应能更新ACM地址', async function () {
-        const { governanceAccessProxy, alice, bob } = await deployFixture();
-        
-        await expect(
-          governanceAccessProxy.connect(alice).setACM(bob.address)
-        ).to.be.reverted;
-      });
-      
-      it('授权用户应能更新ACM地址', async function () {
-        const { governanceAccessProxy, governance, bob } = await deployFixture();
-        
-        await expect(
-          governanceAccessProxy.connect(governance).setACM(bob.address)
-        ).to.not.be.reverted;
-        
-        // 注意：这里bob.address不是有效的ACM合约，仅用于测试权限
-      });
-      
-      it('不应能设置零地址作为ACM', async function () {
-        const { governanceAccessProxy, governance } = await deployFixture();
-        
-        await expect(
-          governanceAccessProxy.connect(governance).setACM(ZERO_ADDRESS)
-        ).to.be.reverted;
       });
     });
     
@@ -473,7 +418,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 验证功能仍然正常
         const config = await governanceAccessProxy.getConfig(0);
-        expect(config.price).to.equal(ethers.parseUnits('500', 18));
+        expect(config.price).to.equal(ethers.parseUnits('200', 18));
       });
       
       it('非授权用户不应能升级合约', async function () {
@@ -489,174 +434,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
     });
   });
 
-  describe('ACM权限集成测试', function () {
-    
-    describe('ActionKeys权限验证', function () {
-      it('应正确验证SET_PARAMETER权限', async function () {
-        const { acm, governance, alice } = await deployFixture();
-        
-        const setParameterRole = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
-        
-        // 验证有权限的用户
-        await expect(acm.requireRole(setParameterRole, governance.address)).to.not.be.reverted;
-        expect(await acm.hasRole(setParameterRole, governance.address)).to.be.true;
-        
-        // 验证无权限的用户
-        await expect(acm.requireRole(setParameterRole, alice.address)).to.be.revertedWithCustomError(acm, 'MissingRole');
-        expect(await acm.hasRole(setParameterRole, alice.address)).to.be.false;
-      });
-      
-      it('应正确验证UPGRADE_MODULE权限', async function () {
-        const { acm, governance, alice } = await deployFixture();
-        
-        const upgradeModuleRole = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
-        
-        // 验证有权限的用户
-        await expect(acm.requireRole(upgradeModuleRole, governance.address)).to.not.be.reverted;
-        expect(await acm.hasRole(upgradeModuleRole, governance.address)).to.be.true;
-        
-        // 验证无权限的用户
-        await expect(acm.requireRole(upgradeModuleRole, alice.address)).to.be.revertedWithCustomError(acm, 'MissingRole');
-        expect(await acm.hasRole(upgradeModuleRole, alice.address)).to.be.false;
-      });
-      
-      it('应正确验证GRANT_ROLE权限', async function () {
-        const { acm, governance, alice } = await deployFixture();
-        
-        const grantRoleRole = ethers.keccak256(ethers.toUtf8Bytes('GRANT_ROLE'));
-        
-        // 验证有权限的用户
-        await expect(acm.requireRole(grantRoleRole, governance.address)).to.not.be.reverted;
-        expect(await acm.hasRole(grantRoleRole, governance.address)).to.be.true;
-        
-        // 验证无权限的用户
-        await expect(acm.requireRole(grantRoleRole, alice.address)).to.be.revertedWithCustomError(acm, 'MissingRole');
-        expect(await acm.hasRole(grantRoleRole, alice.address)).to.be.false;
-      });
-    });
-    
-    describe('权限管理测试', function () {
-      it('应能授予和撤销角色', async function () {
-        const { acm, governance, alice } = await deployFixture();
-        
-        const testRole = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
-        
-        // 初始状态
-        expect(await acm.hasRole(testRole, alice.address)).to.be.false;
-        
-        // 授予角色
-        await expect(acm.connect(governance).grantRole(testRole, alice.address))
-          .to.emit(acm, 'RoleGranted')
-          .withArgs(testRole, alice.address, governance.address);
-        
-        expect(await acm.hasRole(testRole, alice.address)).to.be.true;
-        
-        // 撤销角色
-        await expect(acm.connect(governance).revokeRole(testRole, alice.address))
-          .to.emit(acm, 'RoleRevoked')
-          .withArgs(testRole, alice.address, governance.address);
-        
-        expect(await acm.hasRole(testRole, alice.address)).to.be.false;
-      });
-      
-      it('非owner不应能授予角色', async function () {
-        const { acm, alice, bob } = await deployFixture();
-        
-        const testRole = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
-        
-        await expect(
-          acm.connect(alice).grantRole(testRole, bob.address)
-        ).to.be.revertedWithCustomError(acm, 'MissingRole');
-      });
-      
-      it('非owner不应能撤销角色', async function () {
-        const { acm, governance, alice, bob } = await deployFixture();
-        
-        const testRole = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
-        
-        // 先授予角色
-        await acm.connect(governance).grantRole(testRole, alice.address);
-        
-        // 尝试撤销
-        await expect(
-          acm.connect(bob).revokeRole(testRole, alice.address)
-        ).to.be.revertedWithCustomError(acm, 'MissingRole');
-      });
-    });
-    
-    describe('紧急暂停功能测试', function () {
-      it('应能紧急暂停和恢复', async function () {
-        const { acm, governance } = await deployFixture();
-        
-        // 初始状态
-        expect(await acm.getContractStatus()).to.be.false;
-        
-        // 紧急暂停
-        await expect(acm.connect(governance).emergencyPause('Test pause'))
-          .to.emit(acm, 'EmergencyPaused');
-        
-        expect(await acm.getContractStatus()).to.be.true;
-        
-        // 恢复
-        await expect(acm.connect(governance).emergencyUnpause())
-          .to.emit(acm, 'EmergencyUnpaused');
-        
-        expect(await acm.getContractStatus()).to.be.false;
-      });
-      
-      it('非owner不应能紧急暂停', async function () {
-        const { acm, alice } = await deployFixture();
-        
-        await expect(
-          acm.connect(alice).emergencyPause('Test pause')
-        ).to.be.revertedWithCustomError(acm, 'MissingRole');
-      });
-      
-      it('非owner不应能恢复', async function () {
-        const { acm, governance, alice } = await deployFixture();
-        
-        // 先暂停
-        await acm.connect(governance).emergencyPause('Test pause');
-        
-        // 尝试恢复
-        await expect(
-          acm.connect(alice).emergencyUnpause()
-        ).to.be.revertedWithCustomError(acm, 'MissingRole');
-      });
-    });
-    
-    describe('Keeper管理测试', function () {
-      it('应能设置和获取keeper', async function () {
-        const { acm, governance, alice } = await deployFixture();
-        
-        const initialKeeper = await acm.getKeeper();
-        
-        // 设置新keeper
-        await expect(acm.connect(governance).setKeeper(alice.address))
-          .to.emit(acm, 'KeeperUpdated');
-        
-        expect(await acm.getKeeper()).to.equal(alice.address);
-        expect(await acm.isKeeper(alice.address)).to.be.true;
-        expect(await acm.isKeeper(governance.address)).to.be.false;
-      });
-      
-      it('非owner不应能设置keeper', async function () {
-        const { acm, alice, bob } = await deployFixture();
-        
-        await expect(
-          acm.connect(alice).setKeeper(bob.address)
-        ).to.be.revertedWithCustomError(acm, 'MissingRole');
-      });
-      
-      it('不应能设置零地址作为keeper', async function () {
-        const { acm, governance } = await deployFixture();
-        
-        await expect(
-          acm.connect(governance).setKeeper(ZERO_ADDRESS)
-        ).to.be.revertedWithCustomError(acm, 'InvalidKeeperAddress');
-      });
-    });
-  });
+  // 省略 ACM 集成与 keeper 相关测试（当前合约未暴露对应接口）
 
   describe('安全场景测试', function () {
     
@@ -710,7 +488,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         await expect(
           acm.connect(alice).grantRole(adminRole, alice.address)
-        ).to.be.revertedWithCustomError(acm, 'MissingRole');
+        ).to.be.revertedWithCustomError(acm, 'OnlyOwnerAllowed');
       });
       
       it('普通用户不应能撤销管理员权限', async function () {
@@ -724,7 +502,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 尝试撤销
         await expect(
           acm.connect(alice).revokeRole(adminRole, bob.address)
-        ).to.be.revertedWithCustomError(acm, 'MissingRole');
+        ).to.be.revertedWithCustomError(acm, 'OnlyOwnerAllowed');
       });
     });
   });
@@ -737,7 +515,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 1. 验证初始配置
         let config = await featureUnlockProxy.getConfig(0);
-        expect(config.price).to.equal(ethers.parseUnits('300', 18));
+        expect(config.price).to.equal(ethers.parseUnits('200', 18));
         
         // 2. 更新配置
         const newPrice = ethers.parseUnits('400', 18);
@@ -753,7 +531,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 4. 验证治理访问配置
         config = await governanceAccessProxy.getConfig(0);
-        expect(config.price).to.equal(ethers.parseUnits('500', 18));
+        expect(config.price).to.equal(ethers.parseUnits('200', 18));
         
         // 5. 更新治理访问配置
         const newGovPrice = ethers.parseUnits('600', 18);

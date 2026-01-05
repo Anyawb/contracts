@@ -102,7 +102,7 @@ npm run cli registry:set --module <MODULE_KEY> --address <ADDRESS> --networkName
 
 **示例**:
 ```bash
-# 在本地网络设置 VaultView 模块地址
+# 在本地网络设置 VaultRouter 模块地址
 npm run cli registry:set --module VAULT_VIEW --address 0x1234567890123456789012345678901234567890 --networkName localhost
 
 # 在 Arbitrum Sepolia 设置 VaultCore 模块地址

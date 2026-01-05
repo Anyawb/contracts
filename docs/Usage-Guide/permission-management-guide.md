@@ -406,7 +406,7 @@ contract VaultCore is UUPSUpgradeable {
 
 ```solidity
 // 某些敏感查询可能需要 VIEW 权限
-contract VaultView {
+contract VaultRouter {
     function getUserPrivateData(address user) 
         external 
         view 

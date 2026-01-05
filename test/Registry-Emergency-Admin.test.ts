@@ -39,12 +39,11 @@ describe('Registry 紧急管理员测试', function () {
     const ERC1967Proxy = await ethers.getContractFactory('ERC1967Proxy');
     const proxy = await ERC1967Proxy.deploy(
       await implementation.getAddress(),
-      '0x' // Registry 初始化不需要参数
+      implementation.interface.encodeFunctionData('initialize', [BigInt(3600), await owner.getAddress(), await owner.getAddress()])
     );
     await proxy.waitForDeployment();
         
     const registry = implementation.attach(await proxy.getAddress()) as Registry;
-    await registry.initialize(BigInt(3600)); // 1小时延迟
         
     // 设置紧急管理员
     await registry.setEmergencyAdmin(await emergencyAdmin.getAddress());

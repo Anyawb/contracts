@@ -96,9 +96,8 @@ describe('CollateralManager – Registry 调用优化测试', function () {
     // 2. 部署 AccessControlManager
     const { proxyContract: accessControlManager } = await deployProxyContract('MockAccessControlManager');
 
-    // 3. 注册模块到 Registry
-    const ACCESS_CONTROL_KEY = ethers.keccak256(ethers.toUtf8Bytes('KEY_ACCESS_CONTROL'));
-    await registry.setModule(ACCESS_CONTROL_KEY, accessControlManager.target);
+    // 3. 注册模块到 Registry（使用 ModuleKeys 常量，符合架构指南）
+    await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, accessControlManager.target);
 
     // 4. 设置权限
     const SET_PARAMETER_ROLE = ethers.keccak256(ethers.toUtf8Bytes('ACTION_SET_PARAMETER'));
@@ -136,31 +135,20 @@ describe('CollateralManager – Registry 调用优化测试', function () {
     const { proxyContract: liquidationCollateralManager } = await deployProxyContract('MockCollateralManager');
 
     // 3. 注册所有模块到 Registry
-    const moduleKeys = {
-      PRICE_ORACLE: ethers.keccak256(ethers.toUtf8Bytes('KEY_PRICE_ORACLE')),
-      SETTLEMENT_TOKEN: ethers.keccak256(ethers.toUtf8Bytes('KEY_SETTLEMENT_TOKEN')),
-      LE: ethers.keccak256(ethers.toUtf8Bytes('KEY_LE')),
-      VAULT_CONFIG: ethers.keccak256(ethers.toUtf8Bytes('KEY_VAULT_CONFIG')),
-      CM: ethers.keccak256(ethers.toUtf8Bytes('KEY_CM'))
-    };
-
-    await registry.setModule(moduleKeys.PRICE_ORACLE, priceOracle.target);
-    await registry.setModule(moduleKeys.SETTLEMENT_TOKEN, settlementToken.target);
-    await registry.setModule(moduleKeys.LE, lendingEngine.target);
-    await registry.setModule(moduleKeys.VAULT_CONFIG, vaultBusinessLogic.target);
-    await registry.setModule(moduleKeys.CM, liquidationCollateralManager.target);
+    // 使用 ModuleKeys 常量，避免魔法字符串
+    await registry.setModule(ModuleKeys.KEY_PRICE_ORACLE, priceOracle.target);
+    await registry.setModule(ModuleKeys.KEY_SETTLEMENT_TOKEN, settlementToken.target);
+    await registry.setModule(ModuleKeys.KEY_LE, lendingEngine.target);
+    await registry.setModule(ModuleKeys.KEY_VAULT_CONFIG, vaultBusinessLogic.target);
+    await registry.setModule(ModuleKeys.KEY_CM, liquidationCollateralManager.target);
 
     // 4. 部署 CollateralManager
     const { proxyContract: collateralManager } = await deployProxyContract('CollateralManager');
     const collateralManagerTyped = collateralManager as unknown as CollateralManager;
-    await collateralManagerTyped.initialize(
-      priceOracle.target,
-      settlementToken.target,
-      registry.target
-    );
+    await collateralManagerTyped.initialize(await registry.getAddress());
 
     // 5. 注册 CollateralManager 到 Registry
-    await registry.setModule(moduleKeys.CM, collateralManager.target);
+    await registry.setModule(ModuleKeys.KEY_CM, collateralManager.target);
 
     return {
       collateralManager: collateralManagerTyped,

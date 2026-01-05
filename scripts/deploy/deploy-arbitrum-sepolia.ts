@@ -443,14 +443,6 @@ async function main() {
                   console.log('⚠️ RewardManagerCore MINTER_ROLE grant failed:', error); 
                 }
               }
-              if (deployed.RewardCore) {
-                try { 
-                  await (await rp.grantRole(MINTER_ROLE, deployed.RewardCore)).wait(); 
-                  console.log('✅ Granted MINTER_ROLE to RewardCore');
-                } catch (error) { 
-                  console.log('⚠️ RewardCore MINTER_ROLE grant failed:', error); 
-                }
-              }
               console.log('🔐 RewardPoints MINTER_ROLE granted');
             } catch (roleError) {
               console.log('⚠️ Failed to get MINTER_ROLE from contract, using fallback:', roleError);
@@ -458,9 +450,6 @@ async function main() {
               const MINTER_ROLE = ethers.keccak256(ethers.toUtf8Bytes('MINTER_ROLE'));
               if (deployed.RewardManagerCore) {
                 try { await (await rp.grantRole(MINTER_ROLE, deployed.RewardManagerCore)).wait(); } catch (error) { console.log('⚠️ RewardManagerCore MINTER_ROLE grant failed (fallback):', error); }
-              }
-              if (deployed.RewardCore) {
-                try { await (await rp.grantRole(MINTER_ROLE, deployed.RewardCore)).wait(); } catch (error) { console.log('⚠️ RewardCore MINTER_ROLE grant failed (fallback):', error); }
               }
             }
           }
@@ -482,6 +471,17 @@ async function main() {
       deployed.LendingEngine = await deployProxy('LendingEngine', [deployed.Registry]);
       save(deployed);
     }
+
+    // LiquidationManager（轻量清算入口，方案B：直达账本 + View 单点推送）
+    if (!deployed.LiquidationManager) {
+      try {
+        deployed.LiquidationManager = await deployProxy('LiquidationManager', [deployed.Registry]);
+        save(deployed);
+        console.log('✅ LiquidationManager deployed @', deployed.LiquidationManager);
+      } catch (error) {
+        console.log('⚠️ LiquidationManager deployment failed:', error);
+      }
+    }
       
     // LiquidationRiskManager（清算风险管理器）
     if (!deployed.LiquidationRiskManager) {
@@ -489,17 +489,21 @@ async function main() {
         const initialMaxCacheDuration = 300; // 5分钟
         const initialMaxBatchSize = 50;
         // 先部署所需库
-        const riskLibFactory = await ethers.getContractFactory('src/Vault/liquidation/libraries/LiquidationRiskLib.sol:LiquidationRiskLib');
-        const riskLib = await riskLibFactory.deploy();
-        await riskLib.waitForDeployment();
-        const riskLibAddr = await riskLib.getAddress();
-        console.log('📚 LiquidationRiskLib deployed @', riskLibAddr);
+      const riskLibFactory = await ethers.getContractFactory('src/Vault/liquidation/libraries/LiquidationRiskLib.sol:LiquidationRiskLib');
+      const riskLib = await riskLibFactory.deploy();
+      await riskLib.waitForDeployment();
+      const riskLibAddr = await riskLib.getAddress();
+      deployed.LiquidationRiskLib = riskLibAddr;
+      save(deployed);
+      console.log('📚 LiquidationRiskLib deployed @', riskLibAddr);
 
-        const riskBatchLibFactory = await ethers.getContractFactory('src/Vault/liquidation/libraries/LiquidationRiskBatchLib.sol:LiquidationRiskBatchLib');
-        const riskBatchLib = await riskBatchLibFactory.deploy();
-        await riskBatchLib.waitForDeployment();
-        const riskBatchLibAddr = await riskBatchLib.getAddress();
-        console.log('📚 LiquidationRiskBatchLib deployed @', riskBatchLibAddr);
+      const riskBatchLibFactory = await ethers.getContractFactory('src/Vault/liquidation/libraries/LiquidationRiskBatchLib.sol:LiquidationRiskBatchLib');
+      const riskBatchLib = await riskBatchLibFactory.deploy();
+      await riskBatchLib.waitForDeployment();
+      const riskBatchLibAddr = await riskBatchLib.getAddress();
+      deployed.LiquidationRiskBatchLib = riskBatchLibAddr;
+      save(deployed);
+      console.log('📚 LiquidationRiskBatchLib deployed @', riskBatchLibAddr);
 
         // 使用已链接库创建工厂并通过 Proxy 部署
         const lrmFactory = await ethers.getContractFactory(
@@ -563,7 +567,7 @@ async function main() {
       }
     }
 
-    // VaultStorage + VaultBusinessLogic + VaultView + VaultCore
+    // VaultStorage + VaultBusinessLogic + VaultRouter + VaultCore
     if (!deployed.VaultStorage) {
       const assets = loadAssetsConfig(ARBITRUM_SEPOLIA_CONFIG.name, ARBITRUM_SEPOLIA_CONFIG.chainId);
       const usdc = assets.find((a) => a.coingeckoId === 'usd-coin');
@@ -597,17 +601,17 @@ async function main() {
       save(deployed);
     }
 
-    // 先部署一个临时的 VaultView 用于 VaultCore 初始化
-    if (!deployed.VaultView) {
-      console.log('🚀 Deploying temporary VaultView for VaultCore initialization...');
-      deployed.VaultView = await deployProxy('src/Vault/VaultView.sol:VaultView', [deployed.Registry]);
+    // 先部署一个临时的 VaultRouter 用于 VaultCore 初始化
+    if (!deployed.VaultRouter) {
+      console.log('🚀 Deploying temporary VaultRouter for VaultCore initialization...');
+      deployed.VaultRouter = await deployProxy('src/Vault/VaultRouter.sol:VaultRouter', [deployed.Registry]);
       save(deployed);
-      console.log('✅ Temporary VaultView deployed @', deployed.VaultView);
+      console.log('✅ Temporary VaultRouter deployed @', deployed.VaultRouter);
     }
 
     if (!deployed.VaultCore) {
       // VaultCore.initialize(registry, view)
-      deployed.VaultCore = await deployProxy('VaultCore', [deployed.Registry, deployed.VaultView]);
+      deployed.VaultCore = await deployProxy('VaultCore', [deployed.Registry, deployed.VaultRouter]);
       save(deployed);
     }
 
@@ -634,7 +638,21 @@ async function main() {
     }
 
     // SystemView / StatisticsView / PositionView / PreviewView / DashboardView / UserView
-    // SystemView 暂不需要部署，已移除
+    // SystemView：系统级只读聚合门面（与 docs/Architecture-Guide.md 对齐）
+    if (!deployed.SystemView) {
+      try { deployed.SystemView = await deployProxy('SystemView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ SystemView deployment failed:', error); }
+    }
+    // 授予 SystemView 只读权限（SystemView 调用其他模块时 msg.sender 为合约自身）
+    try {
+      if (deployed.SystemView && deployed.AccessControlManager) {
+        const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+        const VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+        await (await acm.grantRole(VIEW_SYSTEM_DATA, deployed.SystemView)).wait();
+        console.log('🔑 Granted VIEW_SYSTEM_DATA to SystemView');
+      }
+    } catch (e) {
+      console.log('⚠️ Grant VIEW_SYSTEM_DATA to SystemView skipped:', e);
+    }
     if (!deployed.RegistryView) {
       try { deployed.RegistryView = await deployProxy('src/Vault/view/modules/RegistryView.sol:RegistryView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RegistryView deployment failed:', error); }
     }
@@ -680,6 +698,24 @@ async function main() {
     // 估值视图（可选）
     if (!deployed.ValuationOracleView) {
       try { deployed.ValuationOracleView = await deployProxy('ValuationOracleView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ ValuationOracleView deployment failed:', error); }
+    }
+
+    // LiquidationRiskView（清算风险只读视图，非可升级：构造函数 + 库）
+    if (!deployed.LiquidationRiskView) {
+      try {
+        const libAddr = deployed.LiquidationRiskLib;
+        if (!libAddr) throw new Error('LiquidationRiskLib address missing (deploy LiquidationRiskManager first)');
+        const factory = await ethers.getContractFactory(
+          'src/Vault/view/modules/LiquidationRiskView.sol:LiquidationRiskView',
+          { libraries: { LiquidationRiskLib: libAddr } }
+        );
+        const view = await factory.deploy(deployed.Registry);
+        await view.waitForDeployment();
+        deployed.LiquidationRiskView = await view.getAddress();
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ LiquidationRiskView deployment failed:', error);
+      }
     }
 
     // ====== 监控模块 ======
@@ -771,7 +807,7 @@ async function main() {
       LendingEngineView: 'LENDING_ENGINE_VIEW',
       VaultBusinessLogic: 'VAULT_BUSINESS_LOGIC',
       VaultCore: 'VAULT_CORE',
-      // VaultView: 'VAULT_VIEW', // 架构建议通过 KEY_VAULT_CORE 解析，不强依赖
+      // VaultRouter: 'VAULT_VIEW', // 架构建议通过 KEY_VAULT_CORE 解析，不强依赖
       VaultStorage: 'VAULT_STORAGE',
       VaultLendingEngine: 'VAULT_LENDING_ENGINE',
       EarlyRepaymentGuaranteeManager: 'EARLY_REPAYMENT_GUARANTEE_MANAGER',
@@ -791,6 +827,7 @@ async function main() {
       EventHistoryManager: 'EVENT_HISTORY_MANAGER',
       ValuationOracleView: 'VALUATION_ORACLE_VIEW',
       LiquidatorView: 'LIQUIDATOR_VIEW',
+      LiquidationManager: 'LIQUIDATION_MANAGER',
       GuaranteeFundManager: 'GUARANTEE_FUND_MANAGER',
       LoanNFT: 'LOAN_NFT',
       // 监控模块
@@ -799,6 +836,7 @@ async function main() {
       DegradationStorage: 'DEGRADATION_STORAGE',
       ModuleHealthView: 'MODULE_HEALTH_VIEW',
       BatchView: 'BATCH_VIEW',
+      LiquidationRiskView: 'LIQUIDATION_RISK_VIEW',
     };
 
       // 实际注册的模块清单（只注册已部署的）
@@ -808,6 +846,7 @@ async function main() {
         'AuthorityWhitelist',
         'PriceOracle',
         'CoinGeckoPriceUpdater',
+        'LiquidationManager',
         'VaultLendingEngine',
         'EarlyRepaymentGuaranteeManager',
         'DegradationCore',
@@ -815,6 +854,7 @@ async function main() {
         'DegradationStorage',
         'ModuleHealthView',
         'BatchView',
+        'LiquidationRiskView',
         'FeeRouter',
         'FeeRouterView',
         'CollateralManager',
@@ -879,19 +919,19 @@ async function main() {
         }
       }
 
-      // 现在部署 VaultView（在模块注册完成后）
-      if (!deployed.VaultView) {
-        console.log('🚀 Deploying VaultView after module registration...');
-        deployed.VaultView = await deployProxy('src/Vault/VaultView.sol:VaultView', [deployed.Registry]);
+      // 现在部署 VaultRouter（在模块注册完成后）
+      if (!deployed.VaultRouter) {
+        console.log('🚀 Deploying VaultRouter after module registration...');
+        deployed.VaultRouter = await deployProxy('src/Vault/VaultRouter.sol:VaultRouter', [deployed.Registry]);
         save(deployed);
-        console.log('✅ VaultView deployed @', deployed.VaultView);
+        console.log('✅ VaultRouter deployed @', deployed.VaultRouter);
       }
 
       // 3.1 附加绑定：将 KEY_LIQUIDATION_MANAGER 绑定到 VaultBusinessLogic（统一清算入口）
       try {
-        if (deployed.VaultBusinessLogic) {
-          await (await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.VaultBusinessLogic)).wait();
-          console.log(`✅ Bound KEY_LIQUIDATION_MANAGER -> ${deployed.VaultBusinessLogic}`);
+        if (deployed.LiquidationManager) {
+          await (await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.LiquidationManager)).wait();
+          console.log(`✅ Bound KEY_LIQUIDATION_MANAGER -> ${deployed.LiquidationManager}`);
         }
         if (deployed.HealthView) {
           try { await (await registry.setModule(keyOf('HEALTH_VIEW'), deployed.HealthView)).wait(); } catch (error) { console.log('⚠️ HealthView binding failed:', error); }
@@ -908,20 +948,20 @@ async function main() {
 
       // 3.2 断言校验（增强容错）：
       // - 优先校验 VaultCore 是否为有效合约；
-      // - 读取 viewContractAddrVar()，若失败则回退：直接将 KEY_VAULT_VIEW 绑定到本次部署的 VaultView；
+      // - 读取 viewContractAddrVar()，若失败则回退：直接将 KEY_VAULT_VIEW 绑定到本次部署的 VaultRouter；
       //   这样前端依旧可以通过 Registry 解析 View 地址使用系统。
       try {
-        if (!deployed.VaultCore || !deployed.VaultView) throw new Error('Missing VaultCore or VaultView address');
+        if (!deployed.VaultCore || !deployed.VaultRouter) throw new Error('Missing VaultCore or VaultRouter address');
 
         const code = await ethers.provider.getCode(deployed.VaultCore);
         console.log('🔎 VaultCore @', deployed.VaultCore, 'codeLen =', code.length);
         if (!code || code === '0x') throw new Error('VaultCore address has no code');
 
-        // 直接确保 KEY_VAULT_VIEW 绑定为本次部署的 VaultView
+        // 直接确保 KEY_VAULT_VIEW 绑定为本次部署的 VaultRouter
         const KEY_VAULT_VIEW = keyOf('VAULT_VIEW');
         try {
-          await (await registry.setModule(KEY_VAULT_VIEW, deployed.VaultView)).wait();
-          console.log('✅ Bound KEY_VAULT_VIEW ->', deployed.VaultView);
+          await (await registry.setModule(KEY_VAULT_VIEW, deployed.VaultRouter)).wait();
+          console.log('✅ Bound KEY_VAULT_VIEW ->', deployed.VaultRouter);
         } catch (bindErr) {
           console.log('⚠️ Binding KEY_VAULT_VIEW failed:', bindErr);
         }

@@ -30,7 +30,16 @@ describe('VaultBusinessLogic – 统计视图联动（最小集）', function ()
     const AssetWhitelistF = await ethers.getContractFactory('MockAssetWhitelist');
     const aw = await AssetWhitelistF.deploy();
     await aw.waitForDeployment();
-    await aw.setAssetAllowed(ethers.Wallet.createRandom().address, true);
+
+    // 使用真实 ERC20 资产，避免非合约地址触发转账失败
+    const TokenF = await ethers.getContractFactory('MockERC20');
+    const token = await TokenF.deploy('Test Token', 'TT', ethers.parseUnits('1000000', 18));
+    await token.waitForDeployment();
+    // 给 user 分配足够余额并授权 VBL
+    await token.transfer(await user.getAddress(), ethers.parseUnits('1000', 18));
+    const LiquidationViewF = await ethers.getContractFactory('MockLiquidationEventsView');
+    const lv = await LiquidationViewF.deploy();
+    await lv.waitForDeployment();
 
     const StatsF = await ethers.getContractFactory('MockStatisticsView');
     const stats = await StatsF.deploy();
@@ -49,7 +58,7 @@ describe('VaultBusinessLogic – 统计视图联动（最小集）', function ()
     const KEY_CM = ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER'));
     const KEY_LE = ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE'));
     const KEY_STATS = ethers.keccak256(ethers.toUtf8Bytes('VAULT_STATISTICS'));
-    const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND'));
+    const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER'));
     const KEY_RM = ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER'));
     const KEY_ASSET_WHITELIST = ethers.keccak256(ethers.toUtf8Bytes('ASSET_WHITELIST'));
 
@@ -59,9 +68,20 @@ describe('VaultBusinessLogic – 统计视图联动（最小集）', function ()
     await registry.setModule(KEY_GUARANTEE_FUND, await gf.getAddress());
     await registry.setModule(KEY_RM, await rm.getAddress());
     await registry.setModule(KEY_ASSET_WHITELIST, await aw.getAddress());
+    await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_VIEW')), await lv.getAddress());
+
+    // 快速 sanity check：确保 Registry 模块已写入
+    expect(await registry.getModule(KEY_CM)).to.equal(await cm.getAddress());
+    expect(await registry.getModule(KEY_LE)).to.equal(await le.getAddress());
+    expect(await registry.getModule(KEY_STATS)).to.equal(await stats.getAddress());
+    expect(await registry.getModule(KEY_GUARANTEE_FUND)).to.equal(await gf.getAddress());
+    expect(await registry.getModule(KEY_RM)).to.equal(await rm.getAddress());
+    expect(await registry.getModule(KEY_ASSET_WHITELIST)).to.equal(await aw.getAddress());
 
     // 资产地址
-    const asset = ethers.Wallet.createRandom().address;
+    const asset = await token.getAddress();
+    await aw.setAssetAllowed(asset, true);
+    await token.connect(user).approve(vbl.target, ethers.parseUnits('1000', 18));
 
     // 初始快照
     let snap = await stats.getGlobalSnapshot();

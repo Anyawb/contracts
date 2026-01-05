@@ -78,8 +78,12 @@ async function main() {
   }
 }
 
-// 执行清理
-main().catch((error) => {
-  console.error('❌ 脚本执行失败:', error);
-  process.exit(1);
-}); 
+// 仅在脚本被直接执行时才运行清理，避免在 hardhat test 时被自动触发
+if (require.main === module) {
+  main().catch((error) => {
+    console.error('❌ 脚本执行失败:', error);
+    process.exit(1);
+  });
+}
+
+export {}; // 避免被识别为测试模块

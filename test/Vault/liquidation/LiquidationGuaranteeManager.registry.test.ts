@@ -26,13 +26,12 @@ describe("LiquidationGuaranteeManager Registry Integration", function () {
     // 部署 Registry
     const Registry = await ethers.getContractFactory("Registry");
     registry = await Registry.deploy();
-    await registry.deployed();
-    await registry.initialize(0); // 测试环境使用0延时
+    await registry.initialize(0, deployer.address, deployer.address); // 测试环境使用0延时
 
     // 部署 AccessControlManager
     const AccessControlManager = await ethers.getContractFactory("AccessControlManager");
-    accessControlManager = await AccessControlManager.deploy(deployer.address, registry.address);
-    await accessControlManager.deployed();
+    accessControlManager = await AccessControlManager.deploy(deployer.address);
+    await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, accessControlManager.address, true);
 
     // 部署 Mock LendingEngine
     const MockLendingEngine = await ethers.getContractFactory("MockLendingEngine");
@@ -42,7 +41,6 @@ describe("LiquidationGuaranteeManager Registry Integration", function () {
     // 部署 LiquidationGuaranteeManager
     const LiquidationGuaranteeManager = await ethers.getContractFactory("LiquidationGuaranteeManager");
     liquidationGuaranteeManager = await LiquidationGuaranteeManager.deploy(registry.address);
-    await liquidationGuaranteeManager.deployed();
     await liquidationGuaranteeManager.initialize(accessControlManager.address);
 
     // 注册模块到 Registry

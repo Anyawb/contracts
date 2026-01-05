@@ -7,18 +7,20 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
+import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { DegradationMonitor as GracefulDegradationMonitor } from "../../../monitor/DegradationMonitor.sol";
 import { DegradationCore as GracefulDegradationCore } from "../../../monitor/DegradationCore.sol";
 import { DegradationStorage as GracefulDegradationStorage } from "../../../monitor/DegradationStorage.sol";
 import { ModuleHealthView } from "./ModuleHealthView.sol";
+import { ZeroAddress, ArrayLengthMismatch } from "../../../errors/StandardErrors.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
 
 /// @title HealthView
 /// @notice Minimal user health-factor view. Provides gas-free helpers for front-end and bots.
-contract HealthView is Initializable, UUPSUpgradeable {
+contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ============ Events ============
     event HealthFactorCached(address indexed user, uint256 healthFactor, uint256 timestamp);
     /// @notice 模块健康缓存事件 - 便于离链监控索引
@@ -30,8 +32,9 @@ contract HealthView is Initializable, UUPSUpgradeable {
     event ModuleHealthCached(address indexed module, bool isHealthy, bytes32 detailsHash, uint32 failures, uint256 timestamp);
 
     // =========================  Errors  =========================
-    error HealthView__RegistryNotSet();
     error HealthView__CallerNotAuthorized();
+    error HealthView__BatchTooLarge();
+    error HealthView__EmptyBatch();
 
     // ============ Storage ============
     address private _registryAddr;
@@ -54,39 +57,51 @@ contract HealthView is Initializable, UUPSUpgradeable {
 
     // ============ Modifiers ============
     modifier onlyValidRegistry() {
-        if (_registryAddr == address(0)) revert HealthView__RegistryNotSet();
+        if (_registryAddr == address(0)) revert ZeroAddress();
         _;
     }
 
-    modifier onlyAuthorizedPusher() {
-        if (!_isAuthorizedPusher(msg.sender)) revert HealthView__CallerNotAuthorized();
+    modifier onlyViewPusher() {
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_PUSH, msg.sender);
         _;
     }
 
-    /// @dev Allow ModuleHealthView or admin to push module health status
     modifier onlyModuleHealthPusher() {
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        if (!IAccessControlManager(acm).hasRole(ActionKeys.ACTION_ADMIN, msg.sender) && msg.sender != IAccessControlManager(acm).owner()) {
-            revert("HealthView: no permission");
-        }
+        if (
+            !_hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender) &&
+            !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
+        ) revert HealthView__CallerNotAuthorized();
         _;
+    }
+
+    modifier onlySystemHealthViewer() {
+        if (
+            !_hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender) &&
+            !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
+        ) revert HealthView__CallerNotAuthorized();
+        _;
+    }
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
     }
 
     // ============ Initializer ============
     function initialize(address initialRegistryAddr) external initializer {
-        require(initialRegistryAddr != address(0), "HealthView: zero registry");
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
 
     // ============ Push API ============
     /// @notice Push latest healthFactor (legacy). 推荐使用 pushRiskStatus。
-    function pushHealthFactor(address user, uint256 healthFactor) external onlyValidRegistry onlyAuthorizedPusher {
+    function pushHealthFactor(address user, uint256 healthFactor) external onlyValidRegistry onlyViewPusher {
         _healthFactorCache[user] = healthFactor;
         _cacheTimestamps[user]   = block.timestamp;
         emit HealthFactorCached(user, healthFactor, block.timestamp);
         // Push to generic data stream
-        DataPushLibrary._emitData(keccak256("HEALTH_FACTOR_UPDATE"), abi.encode(user, healthFactor));
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_HEALTH_FACTOR, abi.encode(user, healthFactor));
     }
 
     /// @notice 推送完整风险状态（推荐）
@@ -101,11 +116,14 @@ contract HealthView is Initializable, UUPSUpgradeable {
         uint256 minHFBps,
         bool undercollateralized,
         uint256 timestamp
-    ) external onlyValidRegistry onlyAuthorizedPusher {
+    ) external onlyValidRegistry onlyViewPusher {
         _healthFactorCache[user] = healthFactorBps;
         _cacheTimestamps[user] = timestamp == 0 ? block.timestamp : timestamp;
         emit HealthFactorCached(user, healthFactorBps, _cacheTimestamps[user]);
-        DataPushLibrary._emitData(keccak256("RISK_STATUS_UPDATE"), abi.encode(user, healthFactorBps, minHFBps, undercollateralized, _cacheTimestamps[user]));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_RISK_STATUS,
+            abi.encode(user, healthFactorBps, minHFBps, undercollateralized, _cacheTimestamps[user])
+        );
     }
 
     /// @notice 批量推送风险状态（推荐 keeper/监控调用）
@@ -115,13 +133,18 @@ contract HealthView is Initializable, UUPSUpgradeable {
         uint256[] calldata minHFsBps,
         bool[] calldata underFlags,
         uint256 timestamp
-    ) external onlyValidRegistry onlyAuthorizedPusher {
-        require(
-            users.length == healthFactorsBps.length &&
-            users.length == minHFsBps.length &&
-            users.length == underFlags.length,
-            "HealthView: array length mismatch"
-        );
+    ) external onlyValidRegistry onlyViewPusher {
+        if (users.length == 0) revert HealthView__EmptyBatch();
+        if (users.length > ViewConstants.MAX_BATCH_SIZE) revert HealthView__BatchTooLarge();
+        if (users.length != healthFactorsBps.length) {
+            revert ArrayLengthMismatch(users.length, healthFactorsBps.length);
+        }
+        if (users.length != minHFsBps.length) {
+            revert ArrayLengthMismatch(users.length, minHFsBps.length);
+        }
+        if (users.length != underFlags.length) {
+            revert ArrayLengthMismatch(users.length, underFlags.length);
+        }
         uint256 len = users.length;
         uint256 ts = timestamp == 0 ? block.timestamp : timestamp;
         for (uint256 i; i < len; ++i) {
@@ -130,7 +153,10 @@ contract HealthView is Initializable, UUPSUpgradeable {
             _cacheTimestamps[u] = ts;
             emit HealthFactorCached(u, healthFactorsBps[i], ts);
         }
-        DataPushLibrary._emitData(keccak256("RISK_STATUS_UPDATE_BATCH"), abi.encode(users, healthFactorsBps, minHFsBps, underFlags, ts));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_RISK_STATUS_BATCH,
+            abi.encode(users, healthFactorsBps, minHFsBps, underFlags, ts)
+        );
     }
 
     /// @notice Push latest module health status
@@ -140,6 +166,7 @@ contract HealthView is Initializable, UUPSUpgradeable {
         bytes32 detailsHash,
         uint32 consecutiveFailures
     ) external onlyValidRegistry onlyModuleHealthPusher {
+        if (module == address(0)) revert ZeroAddress();
         ModuleHealth storage mh = _moduleHealth[module];
         mh.isHealthy = isHealthy;
         mh.detailsHash = detailsHash;
@@ -148,7 +175,10 @@ contract HealthView is Initializable, UUPSUpgradeable {
 
         emit ModuleHealthCached(module, isHealthy, detailsHash, consecutiveFailures, block.timestamp);
         // Push to generic data stream
-        DataPushLibrary._emitData(keccak256("MODULE_HEALTH_UPDATE"), abi.encode(module, isHealthy, detailsHash, consecutiveFailures));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_MODULE_HEALTH,
+            abi.encode(module, isHealthy, detailsHash, consecutiveFailures)
+        );
     }
 
     /// @notice Get cached module health
@@ -165,11 +195,12 @@ contract HealthView is Initializable, UUPSUpgradeable {
     function isUserLiquidatable(address user) external view returns (bool) {
         (uint256 hf, bool valid) = this.getUserHealthFactor(user);
         if (!valid) return false; // fall back to safe
-        return hf < 1e18;
+        return hf < 10_000; // <100% health factor (bps)
     }
 
     function batchGetHealthFactors(address[] calldata users) external view returns (uint256[] memory factors, bool[] memory validFlags) {
-        require(users.length <= ViewConstants.MAX_BATCH_SIZE, "HealthView: batch too large");
+        if (users.length == 0) revert HealthView__EmptyBatch();
+        if (users.length > ViewConstants.MAX_BATCH_SIZE) revert HealthView__BatchTooLarge();
         uint256 len = users.length;
         factors     = new uint256[](len);
         validFlags  = new bool[](len);
@@ -179,40 +210,40 @@ contract HealthView is Initializable, UUPSUpgradeable {
         }
     }
 
+    function getCacheTimestamp(address user) external view returns (uint256) {
+        return _cacheTimestamps[user];
+    }
+
     // ============ Internal helpers ============
     function _isValid(uint256 ts) internal view returns (bool) {
         return ts > 0 && block.timestamp - ts <= ViewConstants.CACHE_DURATION;
     }
 
-    function _isAuthorizedPusher(address caller) internal view returns (bool) {
-        address vbl = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
-        if (caller == vbl) return true;
-        address le = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        if (caller == le) return true;
-        address lrm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        if (caller == lrm) return true;
-        address lm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
-        if (caller == lm) return true;
-        return false;
+    function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
+        return ViewAccessLib.hasRole(_registryAddr, actionKey, user);
     }
 
     // ============ UUPS ============
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acm).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-        require(newImplementation != address(0), "HealthView: zero impl");
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (newImplementation == address(0)) revert ZeroAddress();
     }
 
     /// @notice 兼容旧版 getter
     function registryAddr() external view returns(address){return _registryAddr;}
-
-    // ============ System Health (migrated from SystemHealthView) ============
-    modifier onlySystemHealthViewer() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender);
-        _;
+    /// @notice 推荐的新 getter
+    function getRegistry() external view returns (address) {
+        return _registryAddr;
     }
 
-    function getGracefulDegradationStats() external view returns (GracefulDegradationCore.DegradationStats memory stats) {
+    // ============ System Health (migrated from SystemHealthView) ============
+    function getGracefulDegradationStats()
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (GracefulDegradationCore.DegradationStats memory stats)
+    {
         address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
         if (mon == address(0)) {
             return GracefulDegradationCore.DegradationStats({
@@ -228,7 +259,13 @@ contract HealthView is Initializable, UUPSUpgradeable {
         return GracefulDegradationMonitor(mon).getGracefulDegradationStats();
     }
 
-    function getModuleHealthStatus(address module) external view returns (ModuleHealthView.ModuleHealthStatus memory healthStatus) {
+    function getModuleHealthStatus(address module)
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (ModuleHealthView.ModuleHealthStatus memory healthStatus)
+    {
         address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
         if (mon == address(0)) {
             return ModuleHealthView.ModuleHealthStatus({
@@ -244,7 +281,13 @@ contract HealthView is Initializable, UUPSUpgradeable {
         return GracefulDegradationMonitor(mon).getModuleHealthStatus(module);
     }
 
-    function getSystemDegradationHistory(uint256 limit) external view returns (GracefulDegradationStorage.DegradationEvent[] memory history) {
+    function getSystemDegradationHistory(uint256 limit)
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (GracefulDegradationStorage.DegradationEvent[] memory history)
+    {
         address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
         if (mon == address(0)) {
             return new GracefulDegradationStorage.DegradationEvent[](0);
@@ -252,7 +295,13 @@ contract HealthView is Initializable, UUPSUpgradeable {
         return GracefulDegradationMonitor(mon).getSystemDegradationHistory(limit);
     }
 
-    function checkModuleHealth(address module) external view returns (bool isHealthy, string memory details) {
+    function checkModuleHealth(address module)
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (bool isHealthy, string memory details)
+    {
         address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
         if (mon == address(0)) {
             return (false, "No health monitor available");
@@ -260,7 +309,12 @@ contract HealthView is Initializable, UUPSUpgradeable {
         return GracefulDegradationMonitor(mon).checkModuleHealth(module);
     }
 
-    function getSystemDegradationTrends() external view returns (
+    function getSystemDegradationTrends()
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (
         uint256 totalEvents,
         uint256 recentEvents,
         address mostFrequentModule,
@@ -272,4 +326,16 @@ contract HealthView is Initializable, UUPSUpgradeable {
         }
         return GracefulDegradationMonitor(mon).getSystemDegradationTrends();
     }
+
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    /// @notice Storage gap for future upgrades
+    uint256[50] private __gap;
 } 

@@ -8,17 +8,37 @@ import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.
 import { Registry } from "../../registry/Registry.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
-import { IVaultView } from "../../interfaces/IVaultView.sol";
 import { ICollateralManager } from "../../interfaces/ICollateralManager.sol";
 import { ILendingEngineBasic } from "../../interfaces/ILendingEngineBasic.sol";
 import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../constants/DataPushTypes.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
 import { IPriceOracle } from "../../interfaces/IPriceOracle.sol";
+import { IPositionView } from "../../interfaces/IPositionView.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @notice 最小化 VaultCore 接口（用于解析 View 地址）
 interface IVaultCoreMinimal {
     function viewContractAddrVar() external view returns (address);
+    function pushUserPositionUpdate(
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external;
+    function pushUserPositionUpdateDelta(
+        address user,
+        address asset,
+        int256 collateralDelta,
+        int256 debtDelta,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external;
 }
 
 /// @title CollateralManager
@@ -33,6 +53,7 @@ contract CollateralManager is
     ReentrancyGuardUpgradeable,
     ICollateralManager 
 {
+    using SafeERC20 for IERC20;
     /*━━━━━━━━━━━━━━━ 基础配置 ━━━━━━━━━━━━━━━*/
     
     /// @notice Registry 合约地址（私有存储，遵循命名规范）
@@ -69,9 +90,25 @@ contract CollateralManager is
 
     /*━━━━━━━━━━━━━━━ 权限控制 ━━━━━━━━━━━━━━━*/
 
-    /// @notice 只允许 Registry 中登记的 VaultView 调用
-    modifier onlyVaultView() {
-        if (msg.sender != _resolveVaultViewAddr()) revert CollateralManager__UnauthorizedAccess();
+    /// @notice 只允许 Registry 中登记的 VaultRouter 调用
+    modifier onlyVaultRouter() {
+        if (msg.sender != _resolveVaultRouterAddr()) revert CollateralManager__UnauthorizedAccess();
+        _;
+    }
+
+    /// @notice 允许 VaultRouter 或 LiquidationManager（清算路径）调用
+    modifier onlyVaultRouterOrLiquidationManager() {
+        address viewAddr = _resolveVaultRouterAddr();
+        address liquidationManager = _resolveLiquidationManagerAddr();
+        if (msg.sender != viewAddr && msg.sender != liquidationManager) {
+            revert CollateralManager__UnauthorizedAccess();
+        }
+        _;
+    }
+
+    /// @notice 仅允许 Registry 中登记的 LiquidationManager 调用（清算扣押路径）
+    modifier onlyLiquidationManager() {
+        if (msg.sender != _resolveLiquidationManagerAddr()) revert CollateralManager__UnauthorizedAccess();
         _;
     }
 
@@ -91,21 +128,29 @@ contract CollateralManager is
     }
     
     /*━━━━━━━━━━━━━━━ 核心业务逻辑 ━━━━━━━━━━━━━━━*/
+
+    /// @notice View 层缓存推送失败（不回滚主流程，链下可监听重试）
+    event ViewCachePushFailed(address indexed user, address indexed asset, bytes reason);
     
     /// @notice 处理抵押物存入 - 纯业务逻辑
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @param amount 存入金额
     /// @dev 纯业务逻辑：处理抵押物存入，更新View层缓存
-    function processDeposit(address user, address asset, uint256 amount) public onlyVaultView nonReentrant {
+    function processDeposit(address user, address asset, uint256 amount) public onlyVaultRouter nonReentrant {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (asset == address(0)) revert CollateralManager__ZeroAddress();
         if (amount == 0) revert CollateralManager__InvalidAmount();
+
+        // 0) 真实资金入池：将抵押资产从用户转入本合约（CollateralManager 作为资金池/托管者）
+        // NOTE: 需要用户提前 approve 本合约为 spender
+        uint256 received = _pullTokenIntoPool(user, asset, amount);
+        if (received == 0) revert CollateralManager__InvalidAmount();
         
         // 1. 更新业务数据
         uint256 oldBalance = _userCollateral[user][asset];
-        _userCollateral[user][asset] = oldBalance + amount;
-        _totalCollateralByAsset[asset] = _totalCollateralByAsset[asset] + amount;
+        _userCollateral[user][asset] = oldBalance + received;
+        _totalCollateralByAsset[asset] = _totalCollateralByAsset[asset] + received;
         
         // 2. 如果是新资产，添加到用户资产列表
         if (oldBalance == 0) {
@@ -133,23 +178,29 @@ contract CollateralManager is
         
         // 3. 更新 View 层缓存（携带真实债务）
         {
-            address lendingEngine = _getLendingEngineAddr();
-            uint256 debt = _safeGetDebt(lendingEngine, user, asset);
-            IVaultView(_resolveVaultViewAddr()).pushUserPositionUpdate(
+            uint64 nextVersion = _getNextVersion(user, asset);
+            try IVaultCoreMinimal(_resolveVaultCoreAddr()).pushUserPositionUpdateDelta(
                 user,
                 asset,
-                _userCollateral[user][asset],
-                debt
-            );
+                _toInt(amount),
+                int256(0),
+                bytes32(0),
+                0,
+                nextVersion
+            ) {
+                // ok
+            } catch (bytes memory reason) {
+                emit ViewCachePushFailed(user, asset, reason);
+            }
         }
         
         // 4. 发出业务事件
-        emit DepositProcessed(user, asset, amount, block.timestamp);
+        emit DepositProcessed(user, asset, received, block.timestamp);
         
         // 5. 数据推送（统一数据推送接口）
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_DEPOSIT_PROCESSED,
-            abi.encode(user, asset, amount, block.timestamp)
+            abi.encode(user, asset, received, block.timestamp)
         );
     }
     
@@ -158,61 +209,26 @@ contract CollateralManager is
     /// @param asset 资产地址
     /// @param amount 提取金额
     /// @dev 纯业务逻辑：处理抵押物提取，更新View层缓存
-    function processWithdraw(address user, address asset, uint256 amount) public onlyVaultView nonReentrant {
-        if (user == address(0)) revert CollateralManager__ZeroAddress();
-        if (asset == address(0)) revert CollateralManager__ZeroAddress();
-        if (amount == 0) revert CollateralManager__InvalidAmount();
-        
-        uint256 currentBalance = _userCollateral[user][asset];
-        if (currentBalance < amount) revert CollateralManager__InsufficientCollateral();
-        
-        // 1. 更新业务数据
-        _userCollateral[user][asset] = currentBalance - amount;
-        _totalCollateralByAsset[asset] = _totalCollateralByAsset[asset] - amount;
-        
-        // 2. 如果余额为0，从用户资产列表中移除
-        if (_userCollateral[user][asset] == 0) {
-            _removeUserAsset(user, asset);
+    function processWithdraw(address user, address asset, uint256 amount) public onlyVaultRouter nonReentrant {
+        // 用户提现：receiver 必须为 user
+        _withdrawCollateralTo(user, asset, amount, user);
+    }
+
+    /// @notice 统一的抵押出池入口：可用于用户提现（receiver=user）与清算扣押（receiver=liquidator）
+    /// @dev 写入直达账本：扣减账本 + 真实转账；并 best-effort 推送 View
+    /// @dev 安全约束：当 receiver==user 时，仅允许 VaultRouter 调用，防止清算模块误走“提到用户”的语义
+    function withdrawCollateralTo(
+        address user,
+        address asset,
+        uint256 amount,
+        address receiver
+    ) external onlyVaultRouterOrLiquidationManager nonReentrant {
+        if (receiver == address(0)) revert CollateralManager__ZeroAddress();
+        // 若是“提到用户”的语义，强制只能由 VaultRouter 发起
+        if (receiver == user && msg.sender != _resolveVaultRouterAddr()) {
+            revert CollateralManager__UnauthorizedAccess();
         }
-        
-        // 2.1 价格获取降级检测（示例：价格不可用时，推送用户级降级事件）
-        {
-            address oracle = _getPriceOracleAddr();
-            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /* ts */, uint256 /* decimals */) {
-                if (price == 0) {
-                    DataPushLibrary._emitData(
-                        DataPushTypes.DATA_TYPE_USER_DEGRADATION,
-                        abi.encode(user, address(this), asset, "Price is zero", true, uint256(0), block.timestamp)
-                    );
-                }
-            } catch {
-                DataPushLibrary._emitData(
-                    DataPushTypes.DATA_TYPE_USER_DEGRADATION,
-                    abi.encode(user, address(this), asset, "Price oracle unavailable", true, uint256(0), block.timestamp)
-                );
-            }
-        }
-        
-        // 3. 更新 View 层缓存（携带真实债务）
-        {
-            address lendingEngine = _getLendingEngineAddr();
-            uint256 debt = _safeGetDebt(lendingEngine, user, asset);
-            IVaultView(_resolveVaultViewAddr()).pushUserPositionUpdate(
-                user,
-                asset,
-                _userCollateral[user][asset],
-                debt
-            );
-        }
-        
-        // 4. 发出业务事件
-        emit WithdrawProcessed(user, asset, amount, block.timestamp);
-        
-        // 5. 数据推送（统一数据推送接口）
-        DataPushLibrary._emitData(
-            DataPushTypes.DATA_TYPE_WITHDRAW_PROCESSED,
-            abi.encode(user, asset, amount, block.timestamp)
-        );
+        _withdrawCollateralTo(user, asset, amount, receiver);
     }
     
     /// @notice 批量处理抵押物存入 - 纯业务逻辑
@@ -224,34 +240,42 @@ contract CollateralManager is
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external onlyVaultView nonReentrant {
+    ) external onlyVaultRouter nonReentrant {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (assets.length != amounts.length) revert CollateralManager__LengthMismatch();
         if (assets.length == 0) revert CollateralManager__InvalidAmount();
-        
-        address lendingEngine = _getLendingEngineAddr();
+
         for (uint256 i = 0; i < assets.length; i++) {
             if (assets[i] == address(0)) revert CollateralManager__ZeroAddress();
             if (amounts[i] == 0) continue;
             
+            // 真实资金入池（逐资产）
+            uint256 received = _pullTokenIntoPool(user, assets[i], amounts[i]);
+            if (received == 0) continue;
+
             // 处理单个存入
             uint256 oldBalance = _userCollateral[user][assets[i]];
-            _userCollateral[user][assets[i]] = oldBalance + amounts[i];
-            _totalCollateralByAsset[assets[i]] = _totalCollateralByAsset[assets[i]] + amounts[i];
+            _userCollateral[user][assets[i]] = oldBalance + received;
+            _totalCollateralByAsset[assets[i]] = _totalCollateralByAsset[assets[i]] + received;
             
             if (oldBalance == 0) {
                 _addUserAsset(user, assets[i]);
             }
             
-            // 更新 View 层缓存（携带真实债务）
-            {
-                uint256 debt = _safeGetDebt(lendingEngine, user, assets[i]);
-                IVaultView(_resolveVaultViewAddr()).pushUserPositionUpdate(
-                    user,
-                    assets[i],
-                    _userCollateral[user][assets[i]],
-                    debt
-                );
+            // 更新 View 层缓存（使用增量，减少覆盖风险）
+            uint64 nextVersion = _getNextVersion(user, assets[i]);
+            try IVaultCoreMinimal(_resolveVaultCoreAddr()).pushUserPositionUpdateDelta(
+                user,
+                assets[i],
+                _toInt(received),
+                int256(0),
+                bytes32(0),
+                0,
+                nextVersion
+            ) {
+                // ok
+            } catch (bytes memory reason) {
+                emit ViewCachePushFailed(user, assets[i], reason);
             }
         }
         
@@ -274,37 +298,16 @@ contract CollateralManager is
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external onlyVaultView nonReentrant {
+    ) external onlyVaultRouter nonReentrant {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (assets.length != amounts.length) revert CollateralManager__LengthMismatch();
         if (assets.length == 0) revert CollateralManager__InvalidAmount();
-        
-        address lendingEngine = _getLendingEngineAddr();
+
         for (uint256 i = 0; i < assets.length; i++) {
             if (assets[i] == address(0)) revert CollateralManager__ZeroAddress();
             if (amounts[i] == 0) continue;
-            
-            uint256 currentBalance = _userCollateral[user][assets[i]];
-            if (currentBalance < amounts[i]) revert CollateralManager__InsufficientCollateral();
-            
-            // 处理单个提取
-            _userCollateral[user][assets[i]] = currentBalance - amounts[i];
-            _totalCollateralByAsset[assets[i]] = _totalCollateralByAsset[assets[i]] - amounts[i];
-            
-            if (_userCollateral[user][assets[i]] == 0) {
-                _removeUserAsset(user, assets[i]);
-            }
-            
-            // 更新 View 层缓存（携带真实债务）
-            {
-                uint256 debt = _safeGetDebt(lendingEngine, user, assets[i]);
-                IVaultView(_resolveVaultViewAddr()).pushUserPositionUpdate(
-                    user,
-                    assets[i],
-                    _userCollateral[user][assets[i]],
-                    debt
-                );
-            }
+            // 批量提现：receiver 必须为 user
+            _withdrawCollateralTo(user, assets[i], amounts[i], user);
         }
         
         // 发出批量处理事件
@@ -324,7 +327,7 @@ contract CollateralManager is
      /// @param asset 资产地址
      /// @param amount 存入金额
      /// @dev 双架构设计：重定向到 processDeposit
-     function depositCollateral(address user, address asset, uint256 amount) external onlyVaultView {
+     function depositCollateral(address user, address asset, uint256 amount) external onlyVaultRouter {
          processDeposit(user, asset, amount);
      }
      
@@ -333,9 +336,94 @@ contract CollateralManager is
      /// @param asset 资产地址
      /// @param amount 提取金额
      /// @dev 双架构设计：重定向到 processWithdraw
-     function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultView {
+    function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultRouter {
          processWithdraw(user, asset, amount);
      }
+
+    /*━━━━━━━━━━━━━━━ Liquidation (Scheme A) ━━━━━━━━━━━━━━━*/
+    /// @notice 清算扣押：扣减用户抵押并把真实抵押资产转给清算人
+    function seizeCollateralForLiquidation(
+        address targetUser,
+        address collateralAsset,
+        uint256 collateralAmount,
+        address liquidator
+    ) external onlyLiquidationManager nonReentrant {
+        // Defense-in-depth: 账本模块内部也必须校验 ACTION_LIQUIDATE
+        // NOTE: msg.sender 为 LiquidationManager，因此部署/治理时需授予 LiquidationManager 该角色
+        _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
+
+        if (targetUser == address(0)) revert CollateralManager__ZeroAddress();
+        if (collateralAsset == address(0)) revert CollateralManager__ZeroAddress();
+        if (liquidator == address(0)) revert CollateralManager__ZeroAddress();
+        if (collateralAmount == 0) revert CollateralManager__InvalidAmount();
+
+        // 统一语义：清算扣押 = withdraw to liquidator
+        _withdrawCollateralTo(targetUser, collateralAsset, collateralAmount, liquidator);
+    }
+
+    /// @dev 内部实现：扣减账本 + best-effort 推送 View + 真实转账到 receiver
+    function _withdrawCollateralTo(address user, address asset, uint256 amount, address receiver) internal {
+        if (user == address(0)) revert CollateralManager__ZeroAddress();
+        if (asset == address(0)) revert CollateralManager__ZeroAddress();
+        if (receiver == address(0)) revert CollateralManager__ZeroAddress();
+        if (amount == 0) revert CollateralManager__InvalidAmount();
+
+        uint256 currentBalance = _userCollateral[user][asset];
+        if (currentBalance < amount) revert CollateralManager__InsufficientCollateral();
+
+        // 1) 更新账本
+        _userCollateral[user][asset] = currentBalance - amount;
+        _totalCollateralByAsset[asset] = _totalCollateralByAsset[asset] - amount;
+        if (_userCollateral[user][asset] == 0) {
+            _removeUserAsset(user, asset);
+        }
+
+        // 2) 价格获取降级检测（示例：价格不可用时，推送用户级降级事件）
+        {
+            address oracle = _getPriceOracleAddr();
+            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /* ts */, uint256 /* decimals */) {
+                if (price == 0) {
+                    DataPushLibrary._emitData(
+                        DataPushTypes.DATA_TYPE_USER_DEGRADATION,
+                        abi.encode(user, address(this), asset, "Price is zero", true, uint256(0), block.timestamp)
+                    );
+                }
+            } catch {
+                DataPushLibrary._emitData(
+                    DataPushTypes.DATA_TYPE_USER_DEGRADATION,
+                    abi.encode(user, address(this), asset, "Price oracle unavailable", true, uint256(0), block.timestamp)
+                );
+            }
+        }
+
+        // 3) best-effort 推送 View（增量，减少覆盖风险）
+        {
+            uint64 nextVersion = _getNextVersion(user, asset);
+            try IVaultCoreMinimal(_resolveVaultCoreAddr()).pushUserPositionUpdateDelta(
+                user,
+                asset,
+                -_toInt(amount),
+                int256(0),
+                bytes32(0),
+                0,
+                nextVersion
+            ) {
+                // ok
+            } catch (bytes memory reason) {
+                emit ViewCachePushFailed(user, asset, reason);
+            }
+        }
+
+        // 4) 真实资金出池：资金池直接转给 receiver
+        IERC20(asset).safeTransfer(receiver, amount);
+
+        // 5) 事件与 DataPush（对齐“写入直达账本 + 链下聚合”）
+        emit WithdrawProcessed(user, asset, amount, block.timestamp);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_WITHDRAW_PROCESSED,
+            abi.encode(user, asset, amount, block.timestamp)
+        );
+    }
      
      /*━━━━━━━━━━━━━━━ 查询接口（兼容性）━━━━━━━━━━━━━━━*/
     
@@ -503,10 +591,37 @@ contract CollateralManager is
 
     /*━━━━━━━━━━━━━━━ 内部工具 ━━━━━━━━━━━━━━━*/
     
-    /// @notice 解析当前有效的 VaultView 地址（通过 Registry -> VaultCore）
-    function _resolveVaultViewAddr() internal view returns (address) {
-        address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        return IVaultCoreMinimal(vaultCore).viewContractAddrVar();
+    /// @notice 解析当前有效的 VaultCore 地址
+    function _resolveVaultCoreAddr() internal view returns (address) {
+        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
+    }
+
+    /// @notice 解析当前有效的 VaultRouter 地址（通过 VaultCore 暴露的 viewContractAddrVar）
+    function _resolveVaultRouterAddr() internal view returns (address) {
+        return IVaultCoreMinimal(_resolveVaultCoreAddr()).viewContractAddrVar();
+    }
+
+    /// @notice 解析 PositionView 并返回下一个 nextVersion（失败返回 0，自增模式）
+    function _getNextVersion(address user, address asset) internal view returns (uint64) {
+        address positionView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
+        try IPositionView(positionView).getPositionVersion(user, asset) returns (uint64 version) {
+            unchecked {
+                return version + 1;
+            }
+        } catch {
+            return 0;
+        }
+    }
+
+    /// @notice 解析当前有效的 LiquidationManager 地址（通过 Registry）
+    function _resolveLiquidationManagerAddr() internal view returns (address) {
+        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
+    }
+
+    /// @notice 权限校验内部函数
+    function _requireRole(bytes32 actionKey, address caller) internal view {
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(actionKey, caller);
     }
 
     /// @notice 获取价格预言机地址
@@ -526,6 +641,23 @@ contract CollateralManager is
             return d;
         } catch {
             return 0;
+        }
+    }
+
+    /// @notice 将 uint256 安全转换为 int256，防止溢出
+    function _toInt(uint256 value) internal pure returns (int256) {
+        if (value > uint256(type(int256).max)) revert CollateralManager__InvalidAmount();
+        return int256(value);
+    }
+
+    /// @notice 将 token 从用户拉入资金池，并返回实际到账数量（兼容 fee-on-transfer）
+    function _pullTokenIntoPool(address user, address asset, uint256 amount) internal returns (uint256 received) {
+        IERC20 token = IERC20(asset);
+        uint256 beforeBal = token.balanceOf(address(this));
+        token.safeTransferFrom(user, address(this), amount);
+        uint256 afterBal = token.balanceOf(address(this));
+        unchecked {
+            received = afterBal - beforeBal;
         }
     }
 } 

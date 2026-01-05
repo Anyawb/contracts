@@ -41,6 +41,12 @@ library RegistryEvents {
     /// @param oldVersion 旧版本
     /// @param newVersion 新版本
     event StorageVersionUpgraded(uint256 oldVersion, uint256 newVersion);
+    
+    /// @notice 存储迁移已执行（保持固定 STORAGE_SLOT 的版本迁移）
+    /// @param fromVersion 迁移前版本
+    /// @param toVersion 迁移后版本
+    /// @param migrator 迁移合约地址
+    event StorageMigrated(uint256 fromVersion, uint256 toVersion, address indexed migrator);
 
     // ============ 治理相关事件 ============
     

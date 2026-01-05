@@ -55,12 +55,7 @@ describe('Reward E2E – 落账后触发 → RM/Core → RewardView → DataPush
     expect(summary[0]).to.equal(expected); // totalEarned
   });
 
-  it('旧入口（int,int）非白名单调用应被拒绝', async function () {
-    // 验证旧入口被拒绝
-    await expect(
-      rewardManager['onLoanEvent(address,int256,int256)'](user.address, 100n, 0n)
-    ).to.be.reverted;
-  });
+  // 旧入口 onLoanEvent(address,int256,int256) 已移除：统一使用标准入口（uint 版本）
 
   it('直接调用 RMCore.onLoanEvent 应被拒绝', async function () {
     // 验证直接调用被拒绝

@@ -242,7 +242,7 @@ npx hardhat test test/Vault/liquidation/LiquidationRiskManager.graceful-degradat
 **文件**: `LiquidationViewForward.test.ts`
 
 **测试目标**:
-- LiquidationManager → VaultView 写路径转发
+- LiquidationManager → VaultRouter 写路径转发
 - 权限校验（onlyLiquidationManager）
 - 地址解析和调用参数传递
 - 不变式验证（无直接状态写入在 View）
@@ -250,7 +250,7 @@ npx hardhat test test/Vault/liquidation/LiquidationRiskManager.graceful-degradat
 **主要测试场景**:
 
 ```typescript
-describe('VaultView – Liquidation forward path (skeleton)', function () {
+describe('VaultRouter – Liquidation forward path (skeleton)', function () {
   it('forwardSeizeCollateral: should route to CollateralManager.withdrawCollateral', async function () {
     // 测试抵押物扣押转发
   });

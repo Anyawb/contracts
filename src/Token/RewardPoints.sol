@@ -65,6 +65,7 @@ contract RewardPoints is
     }
 
     /// @dev 禁用实现合约初始化
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

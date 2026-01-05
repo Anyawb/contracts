@@ -30,6 +30,7 @@ contract RewardConsumption is
     RewardModuleBase,
     IRegistryUpgradeEvents
 {
+    uint256 private constant MAX_BATCH_SIZE = 100;
     
     /// @notice 核心业务合约（私有存储）
     RewardCore private _rewardCore;
@@ -81,7 +82,13 @@ contract RewardConsumption is
     /// @param _serviceType 服务类型
     /// @param _level 服务等级
     function consumePointsForService(ServiceType _serviceType, ServiceLevel _level) external nonReentrant onlyValidRegistry {
-        _rewardCore.consumePointsForService(_serviceType, _level);
+        (uint256 pointsBurned, uint256 privilegePacked, uint256 expirationTime) =
+            _rewardCore.consumePointsForServiceFor(msg.sender, _serviceType, _level);
+
+        // Spend 侧统一推送（RewardView.onlyWriter 白名单）
+        _tryPushPointsBurned(msg.sender, pointsBurned, "Service Consumption");
+        _tryPushUserPrivilege(msg.sender, privilegePacked);
+        _tryPushConsumptionRecord(msg.sender, uint8(_serviceType), uint8(_level), pointsBurned, expirationTime, block.timestamp);
     }
 
     /// @notice 批量消费积分
@@ -94,7 +101,17 @@ contract RewardConsumption is
         ServiceLevel[] calldata levels
     ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_BATCH_WITHDRAW, msg.sender);
-        _rewardCore.batchConsumePoints(users, serviceTypes, levels);
+        if (users.length == 0 || users.length > MAX_BATCH_SIZE) revert RewardConsumption__InvalidBatchOperation();
+        if (users.length != serviceTypes.length || users.length != levels.length) revert RewardConsumption__InvalidBatchOperation();
+        (uint256[] memory pointsBurned, uint256[] memory privilegePacked, uint256[] memory expirationTimes) =
+            _rewardCore.batchConsumePointsFor(users, serviceTypes, levels);
+        for (uint256 i = 0; i < users.length; i++) {
+            if (pointsBurned[i] > 0) {
+                _tryPushPointsBurned(users[i], pointsBurned[i], "Service Consumption");
+                _tryPushUserPrivilege(users[i], privilegePacked[i]);
+                _tryPushConsumptionRecord(users[i], uint8(serviceTypes[i]), uint8(levels[i]), pointsBurned[i], expirationTimes[i], block.timestamp);
+            }
+        }
         
         // 记录标准化动作事件
         emit VaultTypes.ActionExecuted(
@@ -109,7 +126,11 @@ contract RewardConsumption is
     /// @param serviceType 服务类型
     /// @param newLevel 新等级
     function upgradeServiceLevel(ServiceType serviceType, ServiceLevel newLevel) external nonReentrant onlyValidRegistry {
-        _rewardCore.upgradeServiceLevel(serviceType, newLevel);
+        (uint256 pointsBurned, uint256 privilegePacked, uint256 expirationTime) =
+            _rewardCore.upgradeServiceLevelFor(msg.sender, serviceType, newLevel);
+        _tryPushPointsBurned(msg.sender, pointsBurned, "Service Upgrade");
+        _tryPushUserPrivilege(msg.sender, privilegePacked);
+        _tryPushConsumptionRecord(msg.sender, uint8(serviceType), uint8(newLevel), pointsBurned, expirationTime, block.timestamp);
     }
 
     // ========== 管理接口 ==========
@@ -256,6 +277,9 @@ contract RewardConsumption is
     function _getRegistryAddr() internal view override returns (address) {
         return _registryAddr;
     }
+
+    // ============ UUPS storage gap ============
+    uint256[50] private __gap;
     
 
 } 

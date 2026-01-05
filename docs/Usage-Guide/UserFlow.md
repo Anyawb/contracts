@@ -57,8 +57,8 @@ flowchart TD
 
 3) **账本写入**：通过 `VaultCore.borrowFor(borrower, asset, amount, termDays)` 完成账本写入
    - ⚠️ **注意**：当前 `VaultCore.sol` 中 `borrowFor` 函数在接口 `IVaultCore` 中定义但尚未实现
-   - 实际账本写入通过 `VaultView.processUserOperation` 处理，更新 View 层缓存
-   - 对于 BORROW 操作，VaultView 更新本地债务缓存 `_userDebt[user][asset]`
+   - 实际账本写入通过 `VaultRouter.processUserOperation` 处理，更新 View 层缓存
+   - 对于 BORROW 操作，VaultRouter 更新本地债务缓存 `_userDebt[user][asset]`
 
 4) **订单创建**：调用订单引擎 `LendingEngine.createLoanOrder(order)` 完成：
    - 订单创建与存储
@@ -85,8 +85,8 @@ flowchart TD
 
 - **账本写入流程**：
   - `SettlementMatchLib.finalizeAtomicFull` 调用 `VaultCore.borrowFor`（当前通过 call 方式，需实现）
-  - `VaultCore` 将操作传送至 `VaultView.processUserOperation`
-  - `VaultView` 验证操作、更新本地缓存（`_userDebt[user][asset] += amount`）、发出事件
+  - `VaultCore` 将操作传送至 `VaultRouter.processUserOperation`
+  - `VaultRouter` 验证操作、更新本地缓存（`_userDebt[user][asset] += amount`）、发出事件
   - 账本写入与风险/视图推送由 LendingEngine + View 路径统一处理；VBL 不直接访问预言机
 
 - **费用处理**：费用在编排中执行：FeeRouter 从 VaultBusinessLogic 拉取费用并分发，借方收到净额
@@ -170,7 +170,7 @@ sequenceDiagram
     participant VBL as VaultBusinessLogic
     participant MatchLib as SettlementMatchLib
     participant VaultCore as VaultCore
-    participant VaultView as VaultView
+    participant VaultRouter as VaultRouter
     participant LE as LendingEngine
     participant Router as FeeRouter
     participant System as 撮合系统
@@ -183,9 +183,9 @@ sequenceDiagram
     MatchLib->>MatchLib: 2. 可选抵押物存入（CollateralManager）
     MatchLib->>VaultCore: 3. borrowFor(borrower, asset, 800, termDays)
     Note over VaultCore: ⚠️ 当前需实现此函数
-    VaultCore->>VaultView: processUserOperation(ACTION_BORROW)
-    VaultView->>VaultView: 更新本地缓存 _userDebt
-    VaultView-->>MatchLib: 账本写入完成
+    VaultCore->>VaultRouter: processUserOperation(ACTION_BORROW)
+    VaultRouter->>VaultRouter: 更新本地缓存 _userDebt
+    VaultRouter-->>MatchLib: 账本写入完成
     MatchLib->>LE: 4. createLoanOrder(order)
     LE->>LE: 创建订单、铸造NFT、触发奖励、DataPush
     MatchLib->>Router: 5. approve & distributeNormal(token, 800)

@@ -1,6 +1,10 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import { ethers, upgrades } from "hardhat";
 import { Contract, Signer } from "ethers";
+import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
+import { ModuleKeys } from "../contracts/constants/ModuleKeys";
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 /**
  * LiquidationRiskManager 优雅降级功能测试
@@ -31,13 +35,31 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
         deployFixture = async () => {
             const [deployer, alice, bob] = await ethers.getSigners();
 
-            // 部署 Registry
+            // 部署 Registry 实现和代理
             const Registry = await ethers.getContractFactory("Registry");
-            const registry = await Registry.deploy();
+            const registryImplementation = await Registry.deploy();
+            await registryImplementation.waitForDeployment();
 
-            // 部署 AccessControl
+            // 部署代理
+            const ERC1967Proxy = await ethers.getContractFactory("ERC1967Proxy");
+            const registryProxy = await ERC1967Proxy.deploy(
+                await registryImplementation.getAddress(),
+                registryImplementation.interface.encodeFunctionData(
+                    "initialize",
+                    [7 * 24 * 60 * 60, deployer.address, deployer.address]
+                )
+            );
+            await registryProxy.waitForDeployment();
+
+            // 通过代理访问 Registry
+            const registry = Registry.attach(await registryProxy.getAddress());
+
+            // 部署 AccessControl（单参数 owner）
             const AccessControlManager = await ethers.getContractFactory("AccessControlManager");
-            const accessControl = await AccessControlManager.deploy(alice.address, registry.address);
+            const accessControl = await AccessControlManager.deploy(alice.address);
+
+            // 将 ACM 写入 Registry，符合架构要求
+            await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, await accessControl.getAddress());
 
             // 部署 PriceOracle Mock
             const MockPriceOracle = await ethers.getContractFactory("MockPriceOracle");
@@ -51,30 +73,51 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
             const MockLendingEngine = await ethers.getContractFactory("MockLendingEngine");
             const lendingEngine = await MockLendingEngine.deploy();
 
-            // 部署 LiquidationRiskManager
-            const LiquidationRiskManager = await ethers.getContractFactory("LiquidationRiskManager");
-            const liquidationRiskManager = await LiquidationRiskManager.deploy();
+            // 先部署依赖库，再使用 UUPS Proxy 部署 LiquidationRiskManager
+            const riskLibFactory = await ethers.getContractFactory("src/Vault/liquidation/libraries/LiquidationRiskLib.sol:LiquidationRiskLib");
+            const riskLib = await riskLibFactory.deploy();
+            await riskLib.waitForDeployment();
+
+            const riskBatchLibFactory = await ethers.getContractFactory("src/Vault/liquidation/libraries/LiquidationRiskBatchLib.sol:LiquidationRiskBatchLib");
+            const riskBatchLib = await riskBatchLibFactory.deploy();
+            await riskBatchLib.waitForDeployment();
+
+            const LiquidationRiskManager = await ethers.getContractFactory(
+                "LiquidationRiskManager",
+                {
+                    libraries: {
+                        LiquidationRiskLib: await riskLib.getAddress(),
+                        LiquidationRiskBatchLib: await riskBatchLib.getAddress(),
+                    },
+                }
+            );
+            const liquidationRiskManager = await upgrades.deployProxy(
+                LiquidationRiskManager,
+                [
+                    await registry.getAddress(),
+                    await accessControl.getAddress(),
+                    300, // maxCacheDuration
+                    50   // maxBatchSize
+                ],
+                {
+                    unsafeAllowLinkedLibraries: true,
+                    kind: "uups",
+                }
+            );
+            await liquidationRiskManager.waitForDeployment();
 
             // 部署测试代币
             const MockERC20 = await ethers.getContractFactory("MockERC20");
             const settlementToken = await MockERC20.deploy("Settlement Token", "SETT", 6);
             const testAsset = await MockERC20.deploy("Test Asset", "TEST", 18);
 
-            // 初始化 LiquidationRiskManager
-            await liquidationRiskManager.initialize(
-                registry.address,
-                accessControl.address,
-                300, // maxCacheDuration
-                50   // maxBatchSize
-            );
-
             // 设置模块地址
-            await registry.setModule("KEY_LE", lendingEngine.address, true);
-            await registry.setModule("KEY_CM", collateralManager.address, true);
+            await registry.setModule(ModuleKeys.KEY_LE, await lendingEngine.getAddress());
+            await registry.setModule(ModuleKeys.KEY_CM, await collateralManager.getAddress());
 
             // 设置基础存储
-            await liquidationRiskManager.setSettlementTokenAddr(settlementToken.address);
-            await liquidationRiskManager.setPriceOracleAddr(priceOracle.address);
+            await liquidationRiskManager.setSettlementTokenAddr(await settlementToken.getAddress());
+            await liquidationRiskManager.setPriceOracleAddr(await priceOracle.getAddress());
 
             return {
                 liquidationRiskManager,
@@ -99,8 +142,9 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 collateralManager,
                 lendingEngine,
                 testAsset,
+                settlementToken,
                 alice
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 设置价格预言机返回正常价格
             await priceOracle.setPrice(testAsset.address, ethers.parseUnits("100", 6), 18);
@@ -127,8 +171,9 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 collateralManager,
                 lendingEngine,
                 testAsset,
+                settlementToken,
                 alice
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 设置价格
             await priceOracle.setPrice(testAsset.address, ethers.parseUnits("100", 6), 18);
@@ -155,8 +200,9 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 collateralManager,
                 lendingEngine,
                 testAsset,
+                settlementToken,
                 alice
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 设置价格预言机返回零价格（模拟失败）
             await priceOracle.setPrice(testAsset.address, 0, 18);
@@ -184,7 +230,7 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 lendingEngine,
                 settlementToken,
                 alice
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 设置价格预言机返回零价格
             await priceOracle.setPrice(settlementToken.address, 0, 6);
@@ -210,7 +256,7 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 liquidationRiskManager,
                 priceOracle,
                 testAsset
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 测试正常价格
             await priceOracle.setPrice(testAsset.address, ethers.parseUnits("100", 6), 18);
@@ -241,9 +287,10 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 collateralManager,
                 lendingEngine,
                 testAsset,
+                settlementToken,
                 alice,
                 bob
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 设置价格
             await priceOracle.setPrice(testAsset.address, ethers.parseUnits("100", 6), 18);
@@ -272,9 +319,10 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 collateralManager,
                 lendingEngine,
                 testAsset,
+                settlementToken,
                 alice,
                 bob
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 设置价格
             await priceOracle.setPrice(testAsset.address, ethers.parseUnits("100", 6), 18);
@@ -301,7 +349,7 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
 
     describe("边界条件测试", function () {
         it("应该正确处理零地址输入", async function () {
-            const { liquidationRiskManager } = await deployFixture();
+            const { liquidationRiskManager } = await loadFixture(deployFixture);
 
             await expect(
                 liquidationRiskManager.getUserHealthFactor(ZERO_ADDRESS)
@@ -319,8 +367,9 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 collateralManager,
                 lendingEngine,
                 testAsset,
+                settlementToken,
                 alice
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 设置价格
             await priceOracle.setPrice(testAsset.address, ethers.parseUnits("100", 6), 18);
@@ -338,7 +387,7 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
         });
 
         it("应该正确处理模块地址无效的情况", async function () {
-            const { liquidationRiskManager, alice } = await deployFixture();
+            const { liquidationRiskManager, alice } = await loadFixture(deployFixture);
 
             // 不设置模块地址，模拟模块无效的情况
             const healthFactor = await liquidationRiskManager.getUserHealthFactor(alice.address);
@@ -356,8 +405,9 @@ describe("LiquidationRiskManager - Graceful Degradation", function () {
                 collateralManager,
                 lendingEngine,
                 testAsset,
+                settlementToken,
                 alice
-            } = await deployFixture();
+            } = await loadFixture(deployFixture);
 
             // 设置价格
             await priceOracle.setPrice(testAsset.address, ethers.parseUnits("100", 6), 18);

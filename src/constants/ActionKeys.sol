@@ -12,7 +12,7 @@ library ActionKeys {
     // ============ 常量定义 ============
     /// @notice 动作Key总数常量
     /// @dev 避免硬编码，便于维护和扩展
-    uint256 internal constant ACTION_KEY_COUNT = 44;
+    uint256 internal constant ACTION_KEY_COUNT = 45;
 
     // ============ 基础业务动作 Key ============
     /// @notice 存入抵押物操作的标识符
@@ -202,6 +202,11 @@ library ActionKeys {
     /// @dev 哈希值：keccak256("VIEW_CACHE_DATA")
     bytes32 public constant ACTION_VIEW_CACHE_DATA = keccak256("VIEW_CACHE_DATA");
     
+    /// @notice 推送缓存更新操作的标识符（专用于 View 推送入口）
+    /// @dev 用于权限验证，限制谁可以向 View 推送缓存数据
+    /// @dev 哈希值：keccak256("ACTION_VIEW_PUSH")
+    bytes32 public constant ACTION_VIEW_PUSH = keccak256("ACTION_VIEW_PUSH");
+    
     /// @notice 管理事件历史操作的标识符
     /// @dev 用于事件记录和权限验证
     /// @dev 哈希值：keccak256("MANAGE_EVENT_HISTORY")
@@ -304,6 +309,7 @@ library ActionKeys {
         if (key == ACTION_VIEW_CACHE_DATA) return "viewCacheData";
         if (key == ACTION_VIEW_PRICE_DATA) return "viewPriceData";
         if (key == ACTION_VIEW_DEGRADATION_DATA) return "viewDegradationData";
+        if (key == ACTION_VIEW_PUSH) return "actionViewPush";
         if (key == ACTION_ADMIN) return "actionAdmin";
         if (key == ACTION_MODIFY_USER_DATA) return "actionModifyUserData";
         if (key == ACTION_SET_UPGRADE_ADMIN) return "setUpgradeAdmin";
@@ -361,6 +367,7 @@ library ActionKeys {
         keys[41] = ACTION_VIEW_SYSTEM_STATUS;
         keys[42] = ACTION_QUERY_MANAGER;
         keys[43] = ACTION_ORDER_CREATE;
+        keys[44] = ACTION_VIEW_PUSH;
         return keys;
     }
 } 

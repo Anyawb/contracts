@@ -50,10 +50,7 @@ describe('FeeRouter – 修复版费率管理测试', function () {
     // 设置权限
     await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('DEPOSIT')), alice.address);
     await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE')), bob.address);
-    await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')), governance.address);
-    await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('PAUSE_SYSTEM')), governance.address);
     await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('UNPAUSE_SYSTEM')), governance.address);
-    await acm.grantRole(ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE')), governance.address);
     
     // 添加支持的代币
     await feeRouter.addSupportedToken(await mockToken.getAddress());

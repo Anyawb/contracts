@@ -666,6 +666,10 @@ contract EarlyRepaymentGuaranteeManager is
         // 计算总天数
         uint256 totalDays = (record.maturityTime - record.startTime) / 1 days;
         if (totalDays == 0) totalDays = 1; // 防止除零
+        // 若超出期限，按到期天数封顶，避免溢出并保持业务语义
+        if (actualDays > totalDays) {
+            actualDays = totalDays;
+        }
         
         // 使用高精度计算实际应付利息（按比例）
         // 使用 1e18 作为精度基数

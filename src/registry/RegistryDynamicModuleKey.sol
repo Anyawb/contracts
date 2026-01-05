@@ -94,6 +94,7 @@ contract RegistryDynamicModuleKey is
     }
 
     // ============ Constructor ============
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

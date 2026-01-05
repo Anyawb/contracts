@@ -46,7 +46,7 @@ graph TB
     end
     
     subgraph "View层（双架构协调器）"
-        VaultView[VaultView<br/>双架构智能协调器]
+        VaultRouter[VaultRouter<br/>双架构智能协调器]
     end
     
     subgraph "业务逻辑层"
@@ -86,8 +86,8 @@ graph TB
     end
     
     User --> VaultCore
-    VaultCore --> VaultView
-    VaultView --> VaultBusinessLogic
+    VaultCore --> VaultRouter
+    VaultRouter --> VaultBusinessLogic
     VaultBusinessLogic --> SettlementMatchLib
     VaultBusinessLogic --> CollateralManager
     VaultBusinessLogic --> LendingEngine
@@ -96,8 +96,8 @@ graph TB
     LendingEngine --> CollateralManager
     LendingEngine --> FeeRouter
     LendingEngine --> RewardManager
-    VaultView --> StatisticsView
-    VaultView --> HealthView
+    VaultRouter --> StatisticsView
+    VaultRouter --> HealthView
     VaultBusinessLogic --> AssetWhitelist
     VaultBusinessLogic --> PriceOracle
     VaultCore --> ACM
@@ -112,7 +112,7 @@ graph TB
 | 模块 | 职责 | 状态 | 特性 |
 |------|------|------|------|
 | **VaultCore** | 极简入口，传送数据至 View 层 | ✅ 已实现 | 双架构设计、极简实现、Registry 升级能力 |
-| **VaultView** | 双架构智能协调器 | ✅ 已实现 | 事件驱动、View 层缓存、模块分发、免费查询 |
+| **VaultRouter** | 双架构智能协调器 | ✅ 已实现 | 事件驱动、View 层缓存、模块分发、免费查询 |
 | **VaultBusinessLogic** | 业务逻辑模块 | ✅ 已实现 | 真实资金流转、撮合结算、SafeERC20、批量操作 |
 | **SettlementMatchLib** | 撮合结算库 | ✅ 已实现 | 原子化操作、订单落地、保证金锁定 |
 | **CollateralManager** | 抵押物管理，记录用户余额 | ✅ 已实现 | 真实 token 转账、事件记录 |
@@ -334,7 +334,7 @@ function getModule(bytes32 moduleKey) external view returns (address)
 - **双架构支持**：遵循双架构设计，只负责传送数据
 - **可升级**：支持 UUPS 升级模式
 
-### 3.2 VaultView（双架构智能协调器）
+### 3.2 VaultRouter（双架构智能协调器）
 
 #### 📋 **核心功能**
 - **双架构协调**：事件驱动 + View 层缓存
@@ -506,17 +506,17 @@ function getRegistryAddr() external view returns (address)
 
 #### 🔧 **主要函数**
 ```solidity
-// 核心业务逻辑（由 VaultView 调用）
-function processDeposit(address user, address asset, uint256 amount) external onlyVaultView
-function processWithdraw(address user, address asset, uint256 amount) external onlyVaultView
+// 核心业务逻辑（由 VaultRouter 调用）
+function processDeposit(address user, address asset, uint256 amount) external onlyVaultRouter
+function processWithdraw(address user, address asset, uint256 amount) external onlyVaultRouter
 
 // 兼容性接口（重定向到核心函数）
-function depositCollateral(address user, address asset, uint256 amount) external onlyVaultView
-function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultView
+function depositCollateral(address user, address asset, uint256 amount) external onlyVaultRouter
+function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultRouter
 
 // 批量操作
-function batchProcessDeposit(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultView
-function batchProcessWithdraw(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultView
+function batchProcessDeposit(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultRouter
+function batchProcessWithdraw(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultRouter
 
 // 查询功能
 function getCollateral(address user, address asset) external view returns (uint256)
@@ -694,7 +694,7 @@ function getActionKeyString(bytes32 key) external pure returns (string memory)
 ### 4.1 双架构数据流
 
 ```
-用户操作 → VaultCore（极简入口）→ VaultView（双架构协调器）
+用户操作 → VaultCore（极简入口）→ VaultRouter（双架构协调器）
          → VaultBusinessLogic（业务逻辑）→ SettlementMatchLib（撮合结算）
          → LendingEngine（账本写入）→ View 层缓存更新 + 事件推送
          → 数据库收集 + 免费查询
@@ -706,7 +706,7 @@ function getActionKeyString(bytes32 key) external pure returns (string memory)
 sequenceDiagram
     participant User as 用户
     participant VaultCore as VaultCore<br/>极简入口
-    participant VaultView as VaultView<br/>双架构协调器
+    participant VaultRouter as VaultRouter<br/>双架构协调器
     participant VaultBL as VaultBusinessLogic<br/>业务逻辑
     participant Settlement as SettlementMatchLib<br/>撮合结算
     participant CM as CollateralManager<br/>抵押物管理
@@ -724,29 +724,29 @@ sequenceDiagram
     LE->>LE: mintLoanNFT(...)
     Settlement->>ERGM: lockGuaranteeRecord(...)
     Settlement->>GFM: lockGuarantee(user, asset, interest)
-    LE->>VaultView: pushUserPositionUpdate(...)
-    VaultView->>VaultView: 更新缓存 + 事件推送
+    LE->>VaultRouter: pushUserPositionUpdate(...)
+    VaultRouter->>VaultRouter: 更新缓存 + 事件推送
     VaultBusinessLogic-->>User: 完成借款
 
     Note over User,Token: 基础借款流程（无利率）
     User->>VaultCore: borrow(asset, amount)
-    VaultCore->>VaultView: processUserOperation("BORROW", ...)
-    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultCore->>VaultRouter: processUserOperation("BORROW", ...)
+    VaultRouter->>VaultBL: 分发到业务逻辑模块
     VaultBL->>Token: safeTransfer(user, amount)
     VaultBL-->>User: 完成借款
 
     Note over User,Token: 还款流程
     User->>VaultCore: repay(asset, amount)
-    VaultCore->>VaultView: processUserOperation("REPAY", ...)
-    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultCore->>VaultRouter: processUserOperation("REPAY", ...)
+    VaultRouter->>VaultBL: 分发到业务逻辑模块
     VaultBL->>Token: safeTransferFrom(user, VaultBL, amount)
     VaultBL->>LE: repay(user, asset, amount)
     VaultBL-->>User: 完成还款
 
     Note over User,Token: 提取抵押物流程
     User->>VaultCore: withdraw(asset, amount)
-    VaultCore->>VaultView: processUserOperation("WITHDRAW", ...)
-    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultCore->>VaultRouter: processUserOperation("WITHDRAW", ...)
+    VaultRouter->>VaultBL: 分发到业务逻辑模块
     VaultBL->>CM: withdrawCollateral(user, asset, amount)
     VaultBL->>Token: safeTransfer(user, amount)
     VaultBL-->>User: 完成提取
@@ -1105,7 +1105,7 @@ function finalizeAtomicFull(
 sequenceDiagram
     participant User as 用户
     participant VaultCore as VaultCore
-    participant VaultView as VaultView
+    participant VaultRouter as VaultRouter
     participant VaultBL as VaultBusinessLogic
     participant Settlement as SettlementMatchLib
     participant CM as CollateralManager
@@ -1127,8 +1127,8 @@ sequenceDiagram
     
     Note over Settlement: 注意：保证金锁定不在 finalizeAtomic 中，<br/>应在业务层单独处理（如需要）
     
-    LE->>VaultView: pushUserPositionUpdate(...)
-    VaultView->>VaultView: 更新缓存 + 事件推送
+    LE->>VaultRouter: pushUserPositionUpdate(...)
+    VaultRouter->>VaultRouter: 更新缓存 + 事件推送
     
     VaultBusinessLogic-->>User: 完成借款
 ```
@@ -1144,8 +1144,8 @@ sequenceDiagram
    - LoanNFT 铸造、Reward 奖励、DataPush 推送（由 LendingEngine 统一完成）
    - **finalizeAtomicFull 额外步骤**：借款手续费分发（FeeRouter.distributeNormal）和净额转账
 3. **保证金锁定**（如需要）：应在业务层单独处理，不在 finalizeAtomic 中
-4. **缓存更新**：LendingEngine 推送仓位更新到 VaultView
-5. **事件推送**：VaultView 更新缓存并发出事件
+4. **缓存更新**：LendingEngine 推送仓位更新到 VaultRouter
+5. **事件推送**：VaultRouter 更新缓存并发出事件
 
 ### 6.3 还款流程（早偿结算）
 
@@ -1155,7 +1155,7 @@ sequenceDiagram
 sequenceDiagram
     participant User as 用户
     participant VaultCore as VaultCore
-    participant VaultView as VaultView
+    participant VaultRouter as VaultRouter
     participant VaultBL as VaultBusinessLogic
     participant LE as LendingEngine
     participant ERGM as EarlyRepaymentGM
@@ -1176,8 +1176,8 @@ sequenceDiagram
         GFM->>Token: safeTransfer(platform, fee)
     end
     
-    LE->>VaultView: pushUserPositionUpdate(...)
-    VaultView->>VaultView: 更新缓存 + 事件推送
+    LE->>VaultRouter: pushUserPositionUpdate(...)
+    VaultRouter->>VaultRouter: 更新缓存 + 事件推送
     
     VaultBusinessLogic-->>User: 完成还款
 ```
@@ -1194,8 +1194,8 @@ sequenceDiagram
      - 返还给借款方（refundToBorrower）
      - 罚金给贷款方（penaltyToLender）
      - 平台手续费给平台（platformFee）
-5. **缓存更新**：LendingEngine 推送仓位更新到 VaultView
-6. **事件推送**：VaultView 更新缓存并发出事件
+5. **缓存更新**：LendingEngine 推送仓位更新到 VaultRouter
+6. **事件推送**：VaultRouter 更新缓存并发出事件
 
 ### 6.4 保证金系统集成
 
@@ -1813,7 +1813,7 @@ registry.executeModuleUpgrade(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
 
 ### 📈 **性能指标**
 - **Gas 优化**：批量操作减少 30% Gas 消耗
-- **查询效率**：VaultView 提供高效查询接口
+- **查询效率**：VaultRouter 提供高效查询接口
 - **权限缓存**：ACM 权限缓存提高查询效率
 - **升级安全**：模块化升级不影响用户资金
 - **错误处理**：统一的错误处理和事件机制

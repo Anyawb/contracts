@@ -39,6 +39,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
     event AuthorityRemoved(string name, address indexed operator);
 
     /// @dev 禁用实现合约的初始化器
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

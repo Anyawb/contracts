@@ -59,7 +59,7 @@ contracts/
 
 ### 2. Vault 系统
 金库系统，管理抵押物、借贷、还款等核心业务逻辑，包括：
-- **核心合约**：VaultCore、VaultView、VaultStorage、VaultRouter
+- **核心合约**：VaultCore、VaultRouter、VaultStorage、VaultRouter
 - **业务模块**：CollateralManager、LendingEngine、GuaranteeFundManager 等
 - **清算模块**：完整的清算系统，包含风险管理、奖励分配等
 - **视图模块**：20+ 个视图模块，提供快速免费查询

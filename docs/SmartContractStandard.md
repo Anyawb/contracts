@@ -26,7 +26,7 @@ src/
 │  └─ DataPushTypes.sol        # 数据推送类型定义
 ├─ Vault/                      # 核心业务 Vault 合约聚合层
 │  ├─ VaultCore.sol            # 极简入口合约（双架构设计）
-│  ├─ VaultView.sol            # 双架构智能协调器（查询接口）
+│  ├─ VaultRouter.sol            # 双架构智能协调器（查询接口）
 │  ├─ VaultStorage.sol         # 存储合约（Registry系统集成）
 │  ├─ VaultRouter.sol          # 路由合约（权限校验与模块分发）
 │  ├─ VaultMath.sol            # 统一数学计算库
@@ -84,7 +84,7 @@ src/
 ├─ interfaces/                  # 接口定义
 │  ├─ IRegistry.sol             # Registry接口
 │  ├─ IVaultCore.sol            # VaultCore接口
-│  ├─ IVaultView.sol            # VaultView接口
+│  ├─ IVaultRouter.sol            # VaultRouter接口
 │  └─ ...                       # 其他接口
 ├─ Mocks/                       # 单元 / 集成测试用 Mock 合约
 │  ├─ MockCollateralManager.sol # 模拟抵押管理
@@ -98,12 +98,12 @@ src/
 
 | 模块 | 主要职责 | 关键交互 |
 |------|----------|----------|
-| **VaultCore** | 1. 极简入口合约，处理用户操作（deposit/withdraw/borrow/repay）<br/>2. 传送数据至 View 层<br/>3. 支持 Registry 升级能力 | • VaultView<br/>• Registry |
-| **VaultView** | 1. 双架构智能协调器：用户操作处理、模块分发<br/>2. View层缓存：提供快速免费查询（0 gas）<br/>3. 事件驱动：统一事件发出，支持数据库收集 | • VaultCore<br/>• CollateralManager<br/>• VaultLendingEngine<br/>• Registry |
+| **VaultCore** | 1. 极简入口合约，处理用户操作（deposit/withdraw/borrow/repay）<br/>2. 传送数据至 View 层<br/>3. 支持 Registry 升级能力 | • VaultRouter<br/>• Registry |
+| **VaultRouter** | 1. 路由协调器：用户操作路由（deposit/withdraw 到 CollateralManager）<br/>2. 数据推送接口：接收业务模块推送，发出事件（轻量实现，不维护缓存）<br/>3. 事件驱动：统一事件发出，支持数据库收集<br/>⚠️ **架构演进（2025-08）**：查询功能已迁移到独立 View 模块（PositionView、UserView 等），VaultRouter 仅负责路由和数据推送 | • VaultCore<br/>• CollateralManager<br/>• Registry |
 | **VaultStorage** | 1. 纯Registry系统存储合约<br/>2. 提供统一的模块管理和状态存储<br/>3. 集成ACM进行权限控制 | • Registry<br/>• AccessControlManager |
 | **VaultRouter** | 1. 路由合约，权限校验与模块分发<br/>2. 提供原子性操作保护<br/>3. 集成优雅降级机制 | • Registry<br/>• AccessControlManager<br/>• CollateralManager<br/>• VaultLendingEngine |
-| **CollateralManager** | 1. 用户存 / 取抵押品<br/>2. 调用 PriceOracle 获取实时价格<br/>3. 计算并上报手续费至 FeeRouter<br/>4. 数据推送到 View 层缓存 | • PriceOracle<br/>• FeeRouter<br/>• VaultView<br/>• Registry |
-| **VaultLendingEngine** | 1. Vault借贷引擎，管理借贷记录和债务计算<br/>2. 账本变更后推送 VaultView<br/>3. 计算并推送健康因子到 HealthView | • VaultView<br/>• HealthView<br/>• Registry |
+| **CollateralManager** | 1. 用户存 / 取抵押品<br/>2. 调用 PriceOracle 获取实时价格<br/>3. 计算并上报手续费至 FeeRouter<br/>4. 数据推送到 View 层缓存 | • PriceOracle<br/>• FeeRouter<br/>• VaultRouter<br/>• Registry |
+| **VaultLendingEngine** | 1. Vault借贷引擎，管理借贷记录和债务计算<br/>2. 账本变更后推送 VaultRouter<br/>3. 计算并推送健康因子到 HealthView | • VaultRouter<br/>• HealthView<br/>• Registry |
 | **VaultBusinessLogic** | 1. 业务逻辑模块：代币转入/转出、抵押与保证金联动<br/>2. 唯一奖励触发<br/>3. 批量编排 | • CollateralManager<br/>• VaultLendingEngine<br/>• RewardManager<br/>• Registry |
 | **LendingEngine** (core/) | 1. 订单引擎：记录并管理贷款订单全生命周期<br/>2. 调用 LoanNFT 铸造/更新贷款凭证<br/>3. 处理还款并计算利息<br/>4. 向 FeeRouter 上报并分配还款手续费 | • LoanNFT<br/>• FeeRouter<br/>• RewardManager<br/>• Registry |
 | **LiquidationManager** | 1. 清算编排入口<br/>2. 协调清算流程<br/>3. 触发清算事件 | • CollateralManager<br/>• VaultLendingEngine<br/>• LiquidationRiskManager<br/>• Registry |
@@ -117,7 +117,7 @@ src/
 | **FeeRouter** | 1. 统一手续费分账<br/>2. 支持平台/生态分账比例配置<br/>3. 费用分发与统计 | • LendingEngine<br/>• CollateralManager<br/>• Registry |
 | **EarlyRepaymentGuaranteeManager** | 1. 提前还款保证金管理<br/>2. 锁定、释放、没收保证金<br/>3. 提前还款结算 | • GuaranteeFundManager<br/>• Registry |
 | **GuaranteeFundManager** | 1. 保证金基金管理<br/>2. 锁定、释放、没收保证金<br/>3. 保证金统计 | • EarlyRepaymentGuaranteeManager<br/>• Registry |
-| **StatisticsView** | 1. 统计视图：活跃用户、全局抵押/债务、保证金聚合<br/>2. 业务入口统一推送<br/>3. 只读查询接口（0 gas） | • VaultView<br/>• 业务模块 |
+| **StatisticsView** | 1. 统计视图：活跃用户、全局抵押/债务、保证金聚合<br/>2. 业务入口统一推送<br/>3. 只读查询接口（0 gas） | • VaultRouter<br/>• 业务模块 |
 | **HealthView** | 1. 健康因子视图：缓存健康因子和风险状态<br/>2. 数据推送接口<br/>3. 只读查询接口（0 gas） | • VaultLendingEngine<br/>• LiquidationRiskManager |
 
 ### 3.2. 模块与动作常量库（ModuleKeys / ActionKeys）

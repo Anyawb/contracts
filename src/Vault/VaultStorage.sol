@@ -48,6 +48,7 @@ contract VaultStorage is
 
     /* ============ Constructor ============ */
     /// @dev 禁用实现合约的初始化器，防止直接调用
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

@@ -25,9 +25,8 @@ contract MockRegistry {
         return _modules[key];
     }
 
-    /// @notice 读取模块地址，如果不存在则回滚
+    /// @notice 读取模块地址，不存在则 revert
     /// @param key 模块键
-    /// @return 模块地址
     function getModuleOrRevert(bytes32 key) external view returns (address) {
         address moduleAddr = _modules[key];
         require(moduleAddr != address(0), "MockRegistry: module not found");

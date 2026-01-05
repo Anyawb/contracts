@@ -308,7 +308,7 @@ abstract contract LiquidationCollateralManager is
     // ============ Registry 调用接口 ============
     
     /// @notice 通过Registry注册动态模块键
-    function registerDynamicModuleKey(string memory name) external onlyAuthorized {
+    function registerDynamicModuleKey(string memory name) external virtual onlyAuthorized {
         address dynamicRegistry = RegistryQuery.getModule(ModuleKeys.KEY_DYNAMIC_MODULE_REGISTRY);
         require(dynamicRegistry != address(0), "Dynamic registry not found");
         

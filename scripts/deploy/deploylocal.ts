@@ -1,7 +1,7 @@
 /**
  * 本地网络一键部署脚本（符合 contracts/docs/Architecture-Guide.md）
  * - 部署 Registry 核心模块（Registry + RegistryCore）
- * - 部署并注册核心业务与视图模块（ACM/白名单/Oracle/Updater/FeeRouter/CM/LE/VaultStorage/VBL/VaultView/VaultCore/HealthView）
+ * - 部署并注册核心业务与视图模块（ACM/白名单/Oracle/Updater/FeeRouter/CM/LE/VaultStorage/VBL/VaultRouter/VaultCore/HealthView）
  * - 写入 scripts/deployments/localhost.json 与 frontend-config/contracts-localhost.ts
  * - 确保前端 `Frontend/src/services/config/network.ts` 读取的地址齐全
  */
@@ -17,8 +17,8 @@ type DeployMap = Record<string, string>;
 
 const DEPLOY_DIR = path.join(__dirname, '..', 'deployments');
 const DEPLOY_FILE = path.join(DEPLOY_DIR, 'localhost.json');
-// 将前端配置输出到仓库根目录的 frontend-config，供前端直接导入使用
-const FRONTEND_DIR = path.join(__dirname, '..', '..', '..', 'frontend-config');
+// 将前端配置输出到 contracts/frontend-config，供前端直接导入使用
+const FRONTEND_DIR = path.join(__dirname, '..', '..', 'frontend-config');
 const FRONTEND_FILE = path.join(FRONTEND_DIR, 'contracts-localhost.ts');
 
 function load(): DeployMap {
@@ -46,9 +46,12 @@ async function deployRegular(name: string, ...args: unknown[]): Promise<string> 
 
 async function deployProxy(name: string, args: unknown[] = [], opts: Record<string, unknown> = {}): Promise<string> {
   const f = await ethers.getContractFactory(name);
-  // 默认添加unsafeAllow配置来处理构造函数问题
-  const defaultOpts = { unsafeAllow: ['constructor'], ...opts };
-  const p = await upgrades.deployProxy(f, args, defaultOpts);
+  // ⚠️ 安全策略：默认严格（不自动 unsafeAllow）。
+  // - 如果合约含 constructor(_disableInitializers)，请在合约里加：
+  //   `/// @custom:oz-upgrades-unsafe-allow constructor`
+  // - 如果确实需要 delegatecall / 外部库链接，请在合约里用对应的
+  //   `@custom:oz-upgrades-unsafe-allow ...` 精准标注并在代码层做权限/输入约束。
+  const p = await upgrades.deployProxy(f, args, opts);
   await p.waitForDeployment();
   const addr = await p.getAddress();
   console.log(`✅ ${name} (proxy) deployed @ ${addr}`);
@@ -180,6 +183,8 @@ async function main() {
 
     const roleNames = [
       'ACTION_ADMIN',
+      // 本地可配置参数（用于 setTestingMode / StatisticsView.pushUserStatsUpdate 等）
+      'SET_PARAMETER',
       // 读权限（全量覆盖）
       'VIEW_SYSTEM_DATA',
       'VIEW_USER_DATA',
@@ -194,11 +199,17 @@ async function main() {
     for (const r of roleNames) {
       const role = ethers.keccak256(ethers.toUtf8Bytes(r));
       try {
+        // 先检查，避免 RoleAlreadyGranted() 回退
+        const already = await acm.hasRole(role, adminAddress);
+        if (already) {
+          console.log(`↪️ Role ${r} already granted to ${adminAddress}, skip`);
+          continue;
+        }
         await (await acm.grantRole(role, adminAddress)).wait();
         console.log(`🔑 Granted ${r} to ${adminAddress}`);
       } catch (e) {
         // 角色已存在会 revert: RoleAlreadyGranted()，忽略
-        console.log(`⚠️ Role ${r} already granted or failed:`, e);
+        console.log(`⚠️ Role ${r} grant skipped/failed:`, e);
       }
     }
     console.log('🔐 AccessControlManager: local admin granted ADMIN + read-only roles');
@@ -228,7 +239,7 @@ async function main() {
 
   if (!deployed.FeeRouter) {
     // platformBps / ecoBps 示例：9 (=0.09%), 1 (=0.01%)
-    deployed.FeeRouter = await deployProxy('FeeRouter', [deployed.Registry, deployer.address, deployer.address, 9, 1]);
+    deployed.FeeRouter = await deployProxy('src/Vault/FeeRouter.sol:FeeRouter', [deployed.Registry, deployer.address, deployer.address, 9, 1]);
     save(deployed);
   }
 
@@ -239,7 +250,7 @@ async function main() {
     save(deployed);
   }
 
-  // VaultStorage + VaultBusinessLogic + VaultView + VaultCore
+  // VaultStorage + VaultBusinessLogic + VaultRouter + VaultCore
   if (!deployed.VaultStorage) {
     // 暂以 MockUSDC 作为 RWA Token 占位，后续如需引入 RWA 再替换
     const rwaTokenForNow = deployed.MockUSDC;
@@ -252,17 +263,44 @@ async function main() {
     save(deployed);
   }
 
-  // 先部署一个临时的 VaultView 用于 VaultCore 初始化
-  if (!deployed.VaultView) {
-    console.log('🚀 Deploying temporary VaultView for VaultCore initialization...');
-    deployed.VaultView = await deployProxy('src/Vault/VaultView.sol:VaultView', [deployed.Registry]);
+  // 先部署一个临时的 VaultRouter 用于 VaultCore 初始化
+  if (!deployed.VaultRouter) {
+    console.log('🚀 Deploying temporary VaultRouter for VaultCore initialization...');
+    deployed.VaultRouter = await deployRegular('src/Vault/VaultRouter.sol:VaultRouter',
+      deployed.Registry,
+      deployed.AssetWhitelist,
+      deployed.PriceOracle,
+      deployed.MockUSDC, // settlement token
+    );
     save(deployed);
-    console.log('✅ Temporary VaultView deployed @', deployed.VaultView);
+    console.log('✅ Temporary VaultRouter deployed @', deployed.VaultRouter);
+  }
+
+  // 给 VaultRouter 授权 SET_PARAMETER：用于在业务路径内 best-effort 推送 StatisticsView（pushUserStatsUpdate）
+  // 以及本地脚本中可能调用的 setTestingMode 等能力。
+  try {
+    const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+    const SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
+    await (await acm.grantRole(SET_PARAMETER, deployed.VaultRouter)).wait();
+    console.log('🔑 Granted SET_PARAMETER to VaultRouter');
+  } catch (e) {
+    console.log('⚠️ Grant SET_PARAMETER to VaultRouter skipped:', e);
+  }
+
+  // 给 VaultRouter 授权 ACTION_VIEW_PUSH：PositionView/HealthView 等 View Push API 需要该角色
+  // （VaultRouter 是 View 推送的统一转发点：VaultCore → VaultRouter → PositionView/…）
+  try {
+    const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+    const ACTION_VIEW_PUSH = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_PUSH'));
+    await (await acm.grantRole(ACTION_VIEW_PUSH, deployed.VaultRouter)).wait();
+    console.log('🔑 Granted ACTION_VIEW_PUSH to VaultRouter');
+  } catch (e) {
+    console.log('⚠️ Grant ACTION_VIEW_PUSH to VaultRouter skipped:', e);
   }
 
   if (!deployed.VaultCore) {
     // VaultCore.initialize(registry, view)
-    deployed.VaultCore = await deployProxy('VaultCore', [deployed.Registry, deployed.VaultView]);
+    deployed.VaultCore = await deployProxy('VaultCore', [deployed.Registry, deployed.VaultRouter]);
     save(deployed);
   }
 
@@ -272,7 +310,7 @@ async function main() {
       const vcoreCode = await ethers.provider.getCode(deployed.VaultCore);
       if (!vcoreCode || vcoreCode === '0x') {
         console.log('⚠️ Detected empty code at VaultCore address, re-deploying VaultCore...');
-        deployed.VaultCore = await deployProxy('VaultCore', [deployed.Registry, deployed.VaultView]);
+        deployed.VaultCore = await deployProxy('VaultCore', [deployed.Registry, deployed.VaultRouter]);
         save(deployed);
         console.log('✅ VaultCore re-deployed @', deployed.VaultCore);
       }
@@ -289,7 +327,7 @@ async function main() {
 
   // LendingEngine（核心账本，使用 core/LendingEngine）
   if (!deployed.LendingEngine) {
-    deployed.LendingEngine = await deployProxy('LendingEngine', [deployed.Registry]);
+    deployed.LendingEngine = await deployProxy('src/core/LendingEngine.sol:LendingEngine', [deployed.Registry]);
     save(deployed);
   }
 
@@ -298,45 +336,17 @@ async function main() {
     try {
       const initialMaxCacheDuration = 300; // 5分钟
       const initialMaxBatchSize = 50;
-      // 先部署所需库
-      const riskLibFactory = await ethers.getContractFactory('src/Vault/liquidation/libraries/LiquidationRiskLib.sol:LiquidationRiskLib');
-      const riskLib = await riskLibFactory.deploy();
-      await riskLib.waitForDeployment();
-      const riskLibAddr = await riskLib.getAddress();
-      console.log('📚 LiquidationRiskLib deployed @', riskLibAddr);
-
-      const riskBatchLibFactory = await ethers.getContractFactory('src/Vault/liquidation/libraries/LiquidationRiskBatchLib.sol:LiquidationRiskBatchLib');
-      const riskBatchLib = await riskBatchLibFactory.deploy();
-      await riskBatchLib.waitForDeployment();
-      const riskBatchLibAddr = await riskBatchLib.getAddress();
-      console.log('📚 LiquidationRiskBatchLib deployed @', riskBatchLibAddr);
-
-      // 使用已链接库创建工厂并通过 Proxy 部署
-      const lrmFactory = await ethers.getContractFactory(
+      // 重要：LiquidationRiskLib / LiquidationRiskBatchLib 已改为纯 internal 库（不再外部链接），
+      // 因此这里不再部署/链接 library，避免 OZ Upgrades error-006。
+      deployed.LiquidationRiskManager = await deployProxy(
         'src/Vault/liquidation/modules/LiquidationRiskManager.sol:LiquidationRiskManager',
-        {
-          libraries: {
-            LiquidationRiskLib: riskLibAddr,
-            LiquidationRiskBatchLib: riskBatchLibAddr,
-          },
-        }
-      );
-      // 通过 UUPS Proxy 部署，并允许链接外部库
-      const lrmProxy = await upgrades.deployProxy(
-        lrmFactory,
         [
           deployed.Registry,
           deployed.AccessControlManager,
           initialMaxCacheDuration,
-          initialMaxBatchSize
-        ],
-        {
-          unsafeAllowLinkedLibraries: true,
-          unsafeAllow: ['constructor'],
-        }
+          initialMaxBatchSize,
+        ]
       );
-      await lrmProxy.waitForDeployment();
-      deployed.LiquidationRiskManager = await lrmProxy.getAddress();
       save(deployed);
       console.log('✅ LiquidationRiskManager deployed @', deployed.LiquidationRiskManager);
     } catch (error) {
@@ -376,7 +386,21 @@ async function main() {
   }
 
   // SystemView / StatisticsView / PositionView / PreviewView / DashboardView / UserView
-  // SystemView 暂不需要部署，已移除
+  // SystemView：系统级只读聚合门面（与 docs/Architecture-Guide.md 对齐）
+  if (!deployed.SystemView) {
+    try { deployed.SystemView = await deployProxy('SystemView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ SystemView deployment failed:', error); }
+  }
+  // 授予 SystemView 只读权限（SystemView 调用其他模块时 msg.sender 为合约自身）
+  try {
+    if (deployed.SystemView && deployed.AccessControlManager) {
+      const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+      const VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+      await (await acm.grantRole(VIEW_SYSTEM_DATA, deployed.SystemView)).wait();
+      console.log('🔑 Granted VIEW_SYSTEM_DATA to SystemView');
+    }
+  } catch (e) {
+    console.log('⚠️ Grant VIEW_SYSTEM_DATA to SystemView skipped:', e);
+  }
   if (!deployed.RegistryView) {
     try { deployed.RegistryView = await deployProxy('src/Vault/view/modules/RegistryView.sol:RegistryView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RegistryView deployment failed:', error); }
   }
@@ -385,7 +409,15 @@ async function main() {
     try { deployed.StatisticsView = await deployProxy('StatisticsView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ StatisticsView deployment failed:', error); }
   }
   if (!deployed.PositionView) {
-    try { deployed.PositionView = await deployProxy('PositionView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ PositionView deployment failed:', error); }
+    try {
+      // 部署但不执行 initialize，避免 Registry 模块尚未注册导致 _refreshModuleCache 失败
+      deployed.PositionView = await deployProxy(
+        'src/Vault/view/modules/PositionView.sol:PositionView',
+        [],
+        { initializer: false }
+      );
+      save(deployed);
+    } catch (error) { console.log('⚠️ PositionView deployment failed:', error); }
   }
   if (!deployed.PreviewView) {
     try { deployed.PreviewView = await deployProxy('PreviewView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ PreviewView deployment failed:', error); }
@@ -422,6 +454,20 @@ async function main() {
   // 估值视图（可选）
   if (!deployed.ValuationOracleView) {
     try { deployed.ValuationOracleView = await deployProxy('ValuationOracleView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ ValuationOracleView deployment failed:', error); }
+  }
+
+  // LiquidationRiskView（清算风险只读视图）
+  if (!deployed.LiquidationRiskView) {
+    try {
+      // 同上：LiquidationRiskLib 已为 internal 库，无需链接
+      deployed.LiquidationRiskView = await deployProxy(
+        'src/Vault/view/modules/LiquidationRiskView.sol:LiquidationRiskView',
+        [deployed.Registry]
+      );
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ LiquidationRiskView deployment failed:', error);
+    }
   }
 
   // ====== 监控模块 ======
@@ -523,7 +569,14 @@ async function main() {
 
   // ====== 奖励系统（完整）======
   if (!deployed.RewardPoints) {
-    try { deployed.RewardPoints = await deployProxy('RewardPoints', [deployer.address], { unsafeAllow: ['constructor'] }); save(deployed); } catch (error) { console.log('⚠️ RewardPoints deployment failed:', error); }
+    try {
+      deployed.RewardPoints = await deployProxy(
+        'src/Token/RewardPoints.sol:RewardPoints',
+        [deployer.address],
+        {}
+      );
+      save(deployed);
+    } catch (error) { console.log('⚠️ RewardPoints deployment failed:', error); }
   }
   // 确认 RewardPoints 地址有效（本地链重启后旧地址可能无代码），无代码则自动重部署
   try {
@@ -531,7 +584,11 @@ async function main() {
       const rpCode = await ethers.provider.getCode(deployed.RewardPoints);
       if (!rpCode || rpCode === '0x') {
         console.log('⚠️ Detected empty code at RewardPoints address, re-deploying RewardPoints...');
-        deployed.RewardPoints = await deployProxy('RewardPoints', [deployer.address], { unsafeAllow: ['constructor'] });
+        deployed.RewardPoints = await deployProxy(
+          'src/Token/RewardPoints.sol:RewardPoints',
+          [deployer.address],
+          {}
+        );
         save(deployed);
         console.log('✅ RewardPoints re-deployed @', deployed.RewardPoints);
       }
@@ -565,7 +622,7 @@ async function main() {
       if (!code || code === '0x') {
         console.log('⚠️ RewardPoints has no code at', deployed.RewardPoints, '- skip MINTER_ROLE grant');
       } else {
-        const rp = await ethers.getContractAt('RewardPoints', deployed.RewardPoints);
+        const rp = await ethers.getContractAt('src/Token/RewardPoints.sol:RewardPoints', deployed.RewardPoints);
         
         // 检查合约是否已初始化
         try {
@@ -594,14 +651,6 @@ async function main() {
               console.log('⚠️ RewardManagerCore MINTER_ROLE grant failed:', error); 
             }
           }
-          if (deployed.RewardCore) {
-            try { 
-              await (await rp.grantRole(MINTER_ROLE, deployed.RewardCore)).wait(); 
-              console.log('✅ Granted MINTER_ROLE to RewardCore');
-            } catch (error) { 
-              console.log('⚠️ RewardCore MINTER_ROLE grant failed:', error); 
-            }
-          }
           console.log('🔐 RewardPoints MINTER_ROLE granted');
         } catch (roleError) {
           console.log('⚠️ Failed to get MINTER_ROLE from contract, using fallback:', roleError);
@@ -610,14 +659,43 @@ async function main() {
           if (deployed.RewardManagerCore) {
             try { await (await rp.grantRole(MINTER_ROLE, deployed.RewardManagerCore)).wait(); } catch (error) { console.log('⚠️ RewardManagerCore MINTER_ROLE grant failed (fallback):', error); }
           }
-          if (deployed.RewardCore) {
-            try { await (await rp.grantRole(MINTER_ROLE, deployed.RewardCore)).wait(); } catch (error) { console.log('⚠️ RewardCore MINTER_ROLE grant failed (fallback):', error); }
-          }
         }
       }
     }
   } catch (error) {
     console.log('⚠️ RewardPoints MINTER_ROLE setup failed:', error);
+  }
+
+  // 2.99) 部署 LiquidationManager（方案A：直达账本 + View 单点推送）
+  // NOTE: 该模块将作为 Registry.KEY_LIQUIDATION_MANAGER 的唯一清算入口；
+  //       VaultBusinessLogic 不再作为清算入口绑定（避免写路径分叉/权限不一致）。
+  if (!deployed.LiquidationManager) {
+    try {
+      deployed.LiquidationManager = await deployProxy('LiquidationManager', [deployed.Registry]);
+      save(deployed);
+      console.log('✅ LiquidationManager deployed @', deployed.LiquidationManager);
+    } catch (error) {
+      console.log('⚠️ LiquidationManager deployment failed:', error);
+    }
+  }
+
+  // 2.99.1) 授权 LiquidationManager 执行清算（ACTION_LIQUIDATE）
+  // - Vault/LendingEngine/CollateralManager 内部会对 msg.sender 做 ACTION_LIQUIDATE 校验；
+  // - 因此必须给 LiquidationManager 授权，否则清算会在 CM/LE 处回滚。
+  try {
+    if (deployed.AccessControlManager && deployed.LiquidationManager) {
+      const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+      const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
+      const already = await acm.hasRole(ACTION_LIQUIDATE, deployed.LiquidationManager);
+      if (!already) {
+        await (await acm.grantRole(ACTION_LIQUIDATE, deployed.LiquidationManager)).wait();
+        console.log('🔑 Granted ACTION_LIQUIDATE to LiquidationManager');
+      } else {
+        console.log('↪️ ACTION_LIQUIDATE already granted to LiquidationManager, skip');
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Grant ACTION_LIQUIDATE to LiquidationManager skipped/failed:', e);
   }
 
   // 3) 注册模块到 Registry（通过 NAME -> UPPER_SNAKE -> bytes32 key）
@@ -628,7 +706,7 @@ async function main() {
     RegistryHistoryManager: 'REGISTRY_HISTORY_MANAGER',
     RegistryBatchManager: 'REGISTRY_BATCH_MANAGER',
     RegistryHelper: 'REGISTRY_HELPER',
-    RegistryDynamicModuleKey: 'REGISTRY_DYNAMIC_MODULE_KEY',
+    RegistryDynamicModuleKey: 'DYNAMIC_MODULE_REGISTRY',
     AccessControlManager: 'ACCESS_CONTROL_MANAGER',
     AssetWhitelist: 'ASSET_WHITELIST',
     AuthorityWhitelist: 'AUTHORITY_WHITELIST',
@@ -636,14 +714,21 @@ async function main() {
     CoinGeckoPriceUpdater: 'COINGECKO_PRICE_UPDATER',
     FeeRouter: 'FEE_ROUTER',
     FeeRouterView: 'FEE_ROUTER_VIEW',
+    RewardPoints: 'REWARD_POINTS',
+    RewardManagerCore: 'REWARD_MANAGER_CORE',
+    RewardCore: 'REWARD_CORE',
+    RewardManager: 'REWARD_MANAGER',
     CollateralManager: 'COLLATERAL_MANAGER',
-    LendingEngine: 'LENDING_ENGINE',
+    // core/LendingEngine 是订单引擎（createLoanOrder/repay order），应绑定到 ORDER_ENGINE（ModuleKeys.KEY_ORDER_ENGINE）
+    LendingEngine: 'ORDER_ENGINE',
     LendingEngineView: 'LENDING_ENGINE_VIEW',
     VaultBusinessLogic: 'VAULT_BUSINESS_LOGIC',
     VaultCore: 'VAULT_CORE',
-    // VaultView: 'VAULT_VIEW', // 架构建议通过 KEY_VAULT_CORE 解析，不强依赖
+    // VaultRouter: 'VAULT_VIEW', // 架构建议通过 KEY_VAULT_CORE 解析，不强依赖
     VaultStorage: 'VAULT_STORAGE',
-    VaultLendingEngine: 'VAULT_LENDING_ENGINE',
+    // VaultLendingEngine 实现 ILendingEngineBasic（供 VaultCore.borrow/repay 使用）
+    // 需要绑定到 LENDING_ENGINE（ModuleKeys.KEY_LE）
+    VaultLendingEngine: 'LENDING_ENGINE',
     EarlyRepaymentGuaranteeManager: 'EARLY_REPAYMENT_GUARANTEE_MANAGER',
     HealthView: 'HEALTH_VIEW',
     // 不注册未部署的 RWA Token
@@ -663,16 +748,37 @@ async function main() {
     RewardConfig: 'REWARD_CONFIG',
     RewardConsumption: 'REWARD_CONSUMPTION',
     ValuationOracleView: 'VALUATION_ORACLE_VIEW',
-    LiquidatorView: 'LIQUIDATOR_VIEW',
+    LiquidatorView: 'LIQUIDATION_VIEW',
+    LiquidationManager: 'LIQUIDATION_MANAGER',
     GuaranteeFundManager: 'GUARANTEE_FUND_MANAGER',
     LoanNFT: 'LOAN_NFT',
+    MockUSDC: 'SETTLEMENT_TOKEN',
     // 监控模块
     DegradationCore: 'DEGRADATION_CORE',
     DegradationMonitor: 'DEGRADATION_MONITOR',
     DegradationStorage: 'DEGRADATION_STORAGE',
     ModuleHealthView: 'MODULE_HEALTH_VIEW',
     BatchView: 'BATCH_VIEW',
+      LiquidationRiskView: 'LIQUIDATION_RISK_VIEW',
   };
+
+  // 确保关键模块键已注册（供 PositionView 初始化使用）
+  const ensureModule = async (keyUpperSnake: string, addr: string | undefined, label: string) => {
+    if (!addr || addr === ethers.ZeroAddress) return;
+    const key = keyOf(keyUpperSnake);
+    try {
+      const existing = await registry.getModule(key);
+      if (existing !== ethers.ZeroAddress && existing.toLowerCase() === addr.toLowerCase()) {
+        console.log(`↪️ ${label} already set`);
+        return;
+      }
+      await (await registry.setModule(key, addr)).wait();
+      console.log(`✅ Bound ${keyUpperSnake} -> ${addr}`);
+    } catch (e) {
+      console.log(`⚠️ Failed to bind ${keyUpperSnake}:`, e);
+    }
+  };
+
 
   // 实际注册的模块清单（只注册已部署的）
   const modules = [
@@ -688,6 +794,7 @@ async function main() {
     'DegradationStorage',
     'ModuleHealthView',
     'BatchView',
+        'LiquidationRiskView',
     'FeeRouter',
     'FeeRouterView',
     'CollateralManager',
@@ -709,6 +816,10 @@ async function main() {
     'RiskView',
     'ViewCache',
     'EventHistoryManager',
+    'RewardPoints',
+    'RewardManagerCore',
+    'RewardCore',
+    'RewardManager',
     'RewardView',
     'RewardConfig',
     'RewardConsumption',
@@ -719,6 +830,17 @@ async function main() {
     'MockUSDC',
     'RegistryDynamicModuleKey', // 添加动态模块键注册表
   ];
+
+  // 先确保核心模块键存在（PositionView 初始化依赖）
+  await ensureModule('COLLATERAL_MANAGER', deployed.CollateralManager, 'CollateralManager');
+  // 关键：VaultCore.borrow/repay 通过 ModuleKeys.KEY_LE(LENDING_ENGINE) 读取 ILendingEngineBasic
+  await ensureModule('LENDING_ENGINE', deployed.VaultLendingEngine, 'VaultLendingEngine (as LENDING_ENGINE)');
+  // 订单引擎单独绑定（供 LoanNFT/LendingEngine 相关路径使用）
+  await ensureModule('ORDER_ENGINE', deployed.LendingEngine, 'LendingEngine (as ORDER_ENGINE)');
+  await ensureModule('VAULT_CORE', deployed.VaultCore, 'VaultCore');
+  await ensureModule('VAULT_BUSINESS_LOGIC', deployed.VaultBusinessLogic, 'VaultBusinessLogic');
+  await ensureModule('ACCESS_CONTROL_MANAGER', deployed.AccessControlManager, 'AccessControlManager');
+  await ensureModule('LIQUIDATION_MANAGER', deployed.LiquidationManager, 'LiquidationManager');
 
   for (const name of modules) {
     const addr = deployed[name];
@@ -753,27 +875,32 @@ async function main() {
     }
   }
 
-  // 现在部署 VaultView（在模块注册完成后）
-  if (!deployed.VaultView) {
-    console.log('🚀 Deploying VaultView after module registration...');
-    deployed.VaultView = await deployProxy('src/Vault/VaultView.sol:VaultView', [deployed.Registry]);
+  // 现在部署 VaultRouter（在模块注册完成后）
+  if (!deployed.VaultRouter) {
+    console.log('🚀 Deploying VaultRouter after module registration...');
+    deployed.VaultRouter = await deployRegular('src/Vault/VaultRouter.sol:VaultRouter',
+      deployed.Registry,
+      deployed.AssetWhitelist,
+      deployed.PriceOracle,
+      deployed.MockUSDC, // settlement token
+    );
     save(deployed);
-    console.log('✅ VaultView deployed @', deployed.VaultView);
+    console.log('✅ VaultRouter deployed @', deployed.VaultRouter);
   }
 
 
 
-  // 3.1 附加绑定：将 KEY_LIQUIDATION_MANAGER 绑定到 VaultBusinessLogic（统一清算入口）
+  // 3.1 附加绑定：将 KEY_LIQUIDATION_MANAGER 绑定到 LiquidationManager（统一清算入口）
   try {
-    if (deployed.VaultBusinessLogic) {
-      await (await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.VaultBusinessLogic)).wait();
-      console.log(`✅ Bound KEY_LIQUIDATION_MANAGER -> ${deployed.VaultBusinessLogic}`);
+    if (deployed.LiquidationManager) {
+      await (await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.LiquidationManager)).wait();
+      console.log(`✅ Bound KEY_LIQUIDATION_MANAGER -> ${deployed.LiquidationManager}`);
     }
     if (deployed.HealthView) {
       try { await (await registry.setModule(keyOf('HEALTH_VIEW'), deployed.HealthView)).wait(); } catch (error) { console.log('⚠️ HealthView binding failed:', error); }
     }
     if (deployed.LiquidatorView) {
-      try { await (await registry.setModule(keyOf('LIQUIDATOR_VIEW'), deployed.LiquidatorView)).wait(); } catch (error) { console.log('⚠️ LiquidatorView binding failed:', error); }
+      try { await (await registry.setModule(keyOf('LIQUIDATION_VIEW'), deployed.LiquidatorView)).wait(); } catch (error) { console.log('⚠️ LiquidatorView binding failed:', error); }
     }
     if (deployed.StatisticsView) {
       try { await (await registry.setModule(keyOf('VAULT_STATISTICS'), deployed.StatisticsView)).wait(); console.log(`✅ Bound KEY_STATS (VAULT_STATISTICS) -> ${deployed.StatisticsView}`); } catch (error) { console.log('⚠️ StatisticsView binding failed:', error); }
@@ -784,10 +911,10 @@ async function main() {
 
   // 3.2 断言校验（增强容错）：
   // - 优先校验 VaultCore 是否为有效合约；
-  // - 读取 viewContractAddrVar()，若失败则回退：直接将 KEY_VAULT_VIEW 绑定到本次部署的 VaultView；
+  // - 读取 viewContractAddrVar()，若失败则回退：直接将 KEY_VAULT_VIEW 绑定到本次部署的 VaultRouter；
   //   这样前端依旧可以通过 Registry 解析 View 地址使用系统。
   try {
-    if (!deployed.VaultCore || !deployed.VaultView) throw new Error('Missing VaultCore or VaultView address');
+    if (!deployed.VaultCore || !deployed.VaultRouter) throw new Error('Missing VaultCore or VaultRouter address');
 
     const code = await ethers.provider.getCode(deployed.VaultCore);
     console.log('🔎 VaultCore @', deployed.VaultCore, 'codeLen =', code.length);
@@ -795,11 +922,11 @@ async function main() {
 
 
 
-    // 直接确保 KEY_VAULT_VIEW 绑定为本次部署的 VaultView
+    // 直接确保 KEY_VAULT_VIEW 绑定为本次部署的 VaultRouter
     const KEY_VAULT_VIEW = keyOf('VAULT_VIEW');
     try {
-      await (await registry.setModule(KEY_VAULT_VIEW, deployed.VaultView)).wait();
-      console.log('✅ Bound KEY_VAULT_VIEW ->', deployed.VaultView);
+      await (await registry.setModule(KEY_VAULT_VIEW, deployed.VaultRouter)).wait();
+      console.log('✅ Bound KEY_VAULT_VIEW ->', deployed.VaultRouter);
     } catch (bindErr) {
       console.log('⚠️ Binding KEY_VAULT_VIEW failed:', bindErr);
     }
@@ -808,6 +935,21 @@ async function main() {
   }
 
   // 4) 生成前端配置
+  // 在生成前端配置前，初始化 PositionView（若尚未初始化）
+  try {
+    if (deployed.PositionView) {
+      const pv = await ethers.getContractAt('PositionView', deployed.PositionView);
+      let regAddr = ethers.ZeroAddress;
+      try { regAddr = await pv.getRegistry(); } catch (_) { /* ignore */ }
+      if (regAddr === ethers.ZeroAddress) {
+        console.log('🔧 Initializing PositionView...');
+        await (await pv.initialize(deployed.Registry)).wait();
+        console.log('✅ PositionView initialized with registry', deployed.Registry);
+      }
+    }
+  } catch (error) {
+    console.log('⚠️ PositionView initialization after module registration failed:', error);
+  }
   fs.mkdirSync(FRONTEND_DIR, { recursive: true });
   const frontendContent = `// 自动生成的合约配置文件 - Localhost
 // Auto-generated contract configuration file - Localhost

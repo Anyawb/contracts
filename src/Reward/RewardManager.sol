@@ -1,28 +1,29 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { RewardPoints } from "../Token/RewardPoints.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { RewardManagerCore } from "./RewardManagerCore.sol";
-import { IRewardManager } from "../interfaces/IRewardManager.sol";
+import { IRewardManager, IRewardManagerV2 } from "../interfaces/IRewardManager.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { VaultTypes } from "../Vault/VaultTypes.sol";
 import { Registry } from "../registry/Registry.sol";
+import { ViewConstants } from "../Vault/view/ViewConstants.sol";
 import {
     ZeroAddress,
-    NotGovernance,
-    MissingRole,
-    RewardManager__ZeroAddress,
-    RewardManager__MissingMinterRole,
-    ExternalModuleRevertedRaw
+    MissingRole
 } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 
+/// @dev RewardManagerCore 的 V2 最小接口（用于让 IDE/静态分析器稳定识别 onLoanEventV2）
+interface IRewardManagerCoreV2 {
+    function onLoanEventV2(address user, uint256 orderId, uint256 amount, uint256 maturity, uint8 outcome) external;
+}
+
 /// @title RewardManager - 积分管理统一入口
-/// @notice 整合积分计算、发放、惩罚和查询功能
+/// @notice 奖励系统的**写入口与治理入口**（只读查询统一走 RewardView）
 /// @dev 遵循 docs/SmartContractStandard.md 注释规范
 /// @dev 使用 ActionKeys 进行标准化动作标识
 /// @dev 使用 ModuleKeys 进行模块地址管理
@@ -30,16 +31,25 @@ import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.
 /// @dev 使用 StandardErrors 进行统一错误处理
 /// @dev 通过 Registry 进行模块地址获取
 contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IRewardManager {
+    // ========== Custom Errors (gas efficient) ==========
+    /// @notice 参数非法：等级不在 1-5
+    error RewardManager__InvalidLevel(uint8 level);
+    /// @notice 参数非法：等级倍数超出允许范围
+    error RewardManager__InvalidLevelMultiplier(uint256 newMultiplier);
+    /// @notice 参数非法：批量输入长度不一致或超过上限
+    error RewardManager__InvalidBatch();
+
+    uint256 private constant MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /// @notice Registry 合约地址（私有存储，提供 getter）
+    /// @notice Registry 合约地址（私有存储；不对外提供只读 getter，避免入口分裂）
     address private _registryAddr;
-    
-    /// @notice 奖励率（基点，10000 = 100%）（私有存储）
-    uint256 private _rewardRate;
+
+    /// @notice 惩罚执行事件（用于审计与监控：明确 executor + user + points）
+    event PenaltyApplied(address indexed executor, address indexed user, uint256 points, uint256 timestamp);
 
     /// @notice 初始化合约
     /// @param initialRegistryAddr Registry 合约地址
@@ -49,15 +59,6 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         _registryAddr = initialRegistryAddr;
-        _rewardRate = 100; // 默认 1%
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
     }
 
     // ========== 修饰符 ==========
@@ -80,11 +81,6 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
 
     // ========== 内部模块获取 ==========
 
-    /// @dev 获取积分代币合约
-    function _getRewardToken() internal view returns (RewardPoints) {
-        return RewardPoints(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_POINTS));
-    }
-
     /// @dev 获取核心业务合约
     function _getRewardManagerCore() internal view returns (RewardManagerCore) {
         return RewardManagerCore(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_MANAGER_CORE));
@@ -92,96 +88,32 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
 
     // ========== 公共接口 ==========
 
-    /// @notice 兼容旧入口：VaultBusinessLogic 的通知入口（不再发放积分）
-    /// @dev 仅允许 KEY_LE 或 KEY_VAULT_BUSINESS_LOGIC 调用；当来源为 VBL 时直接返回
-    /// @param user 操作用户
-    /// @param debtChange 借款变化量（+ 借款，- 还款）
-    /// @param collateralChange 抵押变化量（+ 存，- 取）
-    function onLoanEvent(address user, int256 debtChange, int256 collateralChange) external onlyValidRegistry nonReentrant {
-        // 调用者白名单：LE 或 VBL
-        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        address vbl = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
-        if (msg.sender != lendingEngine && msg.sender != vbl) revert MissingRole();
-
-        // 兼容旧通知：来自 VBL 的调用不触发发放，直接返回，确保“落账后触发”为准
-        if (msg.sender == vbl) {
-            return;
-        }
-
-        // 来自 LE 的调用才允许下沉到统一入口（已在 uint 版本入口再次校验）
-        uint256 amount = debtChange > 0 ? uint256(debtChange) : 0;
-        uint256 duration = 0;
-        bool hfHighEnough = true;
-        collateralChange; // silence unused
-        _getRewardManagerCore().onLoanEvent(user, amount, duration, hfHighEnough);
-
-        // 记录标准化动作事件（来自 LE 且有意义的情况下）
-        if (debtChange > 0) {
-            emit VaultTypes.ActionExecuted(
-                ActionKeys.ACTION_BORROW,
-                ActionKeys.getActionKeyString(ActionKeys.ACTION_BORROW),
-                user,
-                block.timestamp
-            );
-        } else if (debtChange < 0) {
-            emit VaultTypes.ActionExecuted(
-                ActionKeys.ACTION_REPAY,
-                ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY),
-                user,
-                block.timestamp
-            );
-        }
-    }
-
-    /// @notice 实现 IRewardManager 接口的 setRewardRate 函数
-    /// @param newRate 新的奖励率（基点，10000 = 100%）
-    function setRewardRate(uint256 newRate) external onlyValidRegistry nonReentrant {
-        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        if (newRate > 10000) revert(); // 最大 100%
-        
-        _rewardRate = newRate;
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.timestamp
-        );
-    }
-
-    /// @notice 实现 IRewardManager 接口的 getRewardRate 函数
-    /// @return 当前奖励率（基点）
-    function getRewardRate() external view returns (uint256) {
-        return _rewardRate;
-    }
-
-    /// @notice 实现 IRewardManager 接口的 getUserReward 函数
+    /// @notice ORDER_ENGINE(core/LendingEngine) 在 borrow 或 repay 后调用此函数
     /// @param user 用户地址
-    /// @return 用户的奖励数量
-    function getUserReward(address user) external view returns (uint256) {
-        return _getRewardToken().balanceOf(user);
-    }
-
-    /// @notice LendingEngine 在 borrow 或 repay 后调用此函数
-    /// @param user 用户地址
-    /// @param amount 借款金额 (18 位精度)
-    /// @param duration 借款时长（秒），borrow 时可填 0
-    /// @param hfHighEnough 是否提前还款
+    /// @param amount 金额（以最小单位；USDT/USDC 按 6 位，ETH 按 18 位）
+    /// @param duration 借款时长（秒）：borrow 推荐传订单 term（用于锁定/计算奖励）；若上游无法提供期限可传 0（表示未知/不计分/不锁定）；repay 固定传 0
+    /// @param hfHighEnough 历史遗留命名：由 LendingEngine 传入；当前实现中用于“按期且足额还清”的判定 flag（主要在 repay 场景有意义）
     function onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough) external onlyValidRegistry nonReentrant {
-        // 通过 Registry 获取 LendingEngine 地址进行权限验证
-        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        if (msg.sender != lendingEngine) revert MissingRole();
+        // 按 Architecture-Guide：Reward 的唯一路径为 ORDER_ENGINE 落账后触发
+        address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+        if (msg.sender != orderEngine) revert MissingRole();
         
         _getRewardManagerCore().onLoanEvent(user, amount, duration, hfHighEnough);
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_BORROW,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_BORROW),
-            user,
-            block.timestamp
-        );
+    }
+
+    /// @notice ORDER_ENGINE(core/LendingEngine) 在 borrow/repay(足额) 后调用此函数（V2：按订单锁定/释放/扣罚）
+    /// @dev 与 IRewardManagerV2 保持一致；旧版 LendingEngine 可继续调用 onLoanEvent
+    function onLoanEventV2(
+        address user,
+        uint256 orderId,
+        uint256 amount,
+        uint256 maturity,
+        IRewardManagerV2.LoanEventOutcome outcome
+    ) external onlyValidRegistry nonReentrant {
+        address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+        if (msg.sender != orderEngine) revert MissingRole();
+
+        IRewardManagerCoreV2(address(_getRewardManagerCore())).onLoanEventV2(user, orderId, amount, maturity, uint8(outcome));
     }
 
     /// @notice 批量处理借贷事件 - 大幅提升性能
@@ -195,21 +127,13 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         uint256[] calldata durations,
         bool[] calldata hfHighEnoughs
     ) external onlyValidRegistry {
-        // 通过 Registry 获取 LendingEngine 地址进行权限验证
-        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        if (msg.sender != lendingEngine) revert MissingRole();
+        // 通过 Registry 获取 ORDER_ENGINE 地址进行权限验证
+        address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+        if (msg.sender != orderEngine) revert MissingRole();
+        if (users.length == 0 || users.length > MAX_BATCH_SIZE) revert RewardManager__InvalidBatch();
+        if (users.length != amounts.length || users.length != durations.length || users.length != hfHighEnoughs.length) revert RewardManager__InvalidBatch();
         
         _getRewardManagerCore().onBatchLoanEvents(users, amounts, durations, hfHighEnoughs);
-        
-        // 记录批量操作事件
-        for (uint256 i = 0; i < users.length; i++) {
-            emit VaultTypes.ActionExecuted(
-                ActionKeys.ACTION_BATCH_BORROW,
-                ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_BORROW),
-                users[i],
-                block.timestamp
-            );
-        }
     }
 
     /// @notice 惩罚用户积分（清算模块调用）
@@ -223,83 +147,15 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         // 调用核心合约的惩罚功能
         _getRewardManagerCore().deductPoints(user, points);
         
-        // 使用标准化事件记录惩罚
+        emit PenaltyApplied(msg.sender, user, points, block.timestamp);
+
+        // 使用标准化事件记录惩罚（executor 必须为真实执行者：清算模块）
         emit VaultTypes.ActionExecuted(
             ActionKeys.ACTION_LIQUIDATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
-            user,
+            msg.sender,
             block.timestamp
         );
-    }
-
-    // ========== 查询接口 ==========
-
-    /// @notice 获取用户积分缓存
-    /// @param user 用户地址
-    /// @return points 缓存的积分数量
-    function getPointCache(address user) external view returns (uint256 points) {
-        (points, , ) = _getRewardManagerCore().getUserCache(user);
-        return points;
-    }
-
-    /// @notice 获取用户等级
-    /// @param user 用户地址
-    /// @return level 用户等级
-    function getUserLevel(address user) external view returns (uint8 level) {
-        return _getRewardManagerCore().getUserLevel(user);
-    }
-
-    /// @notice 获取用户活跃度信息
-    /// @param user 用户地址
-    /// @return lastActivity 最后活跃时间
-    /// @return totalLoans 总借款次数
-    /// @return totalVolume 总借款金额
-    function getUserActivity(address user) external view returns (
-        uint256 lastActivity,
-        uint256 totalLoans,
-        uint256 totalVolume
-    ) {
-        return _getRewardManagerCore().getUserActivity(user);
-    }
-
-    /// @notice 获取等级倍数
-    /// @param level 等级
-    /// @return multiplier 倍数 (BPS)
-    function getLevelMultiplier(uint8 level) external view returns (uint256 multiplier) {
-        return _getRewardManagerCore().getLevelMultiplier(level);
-    }
-
-    /// @notice 获取用户欠分
-    /// @param user 用户地址
-    /// @return debt 欠分数量
-    function getUserPenaltyDebt(address user) external view returns (uint256 debt) {
-        return _getRewardManagerCore().getUserPenaltyDebt(user);
-    }
-
-    /// @notice 获取系统统计信息
-    /// @return totalBatchOps 总批量操作次数
-    /// @return totalCachedRewards 总缓存奖励次数
-    /// @return dynamicThreshold 动态奖励阈值
-    /// @return dynamicMultiplier 动态奖励倍数
-    function getSystemStats() external view returns (
-        uint256 totalBatchOps,
-        uint256 totalCachedRewards,
-        uint256 dynamicThreshold,
-        uint256 dynamicMultiplier
-    ) {
-        totalBatchOps = _getRewardManagerCore().getTotalBatchOperations();
-        totalCachedRewards = _getRewardManagerCore().getTotalCachedRewards();
-        {
-            RewardManagerCore.DynamicRewardParams memory p = _getRewardManagerCore().getDynamicRewardParameters();
-            dynamicThreshold = p.threshold;
-            dynamicMultiplier = p.multiplier;
-        }
-    }
-
-    /// @notice 获取Registry地址
-    /// @return registry 当前Registry地址
-    function getRegistry() external view returns (address registry) {
-        return _registryAddr;
     }
 
     // ========== 管理接口 ==========
@@ -326,8 +182,8 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
     /// @param newMultiplier 倍数 (BPS)
     function setLevelMultiplier(uint8 level, uint256 newMultiplier) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        if (level == 0 || level > 5) revert();
-        if (newMultiplier < 10000 || newMultiplier > 50000) revert();
+        if (level == 0 || level > 5) revert RewardManager__InvalidLevel(level);
+        if (newMultiplier < 10000 || newMultiplier > 50000) revert RewardManager__InvalidLevelMultiplier(newMultiplier);
         
         // 调用核心合约更新等级倍数
         _getRewardManagerCore().updateLevelMultiplier(level, newMultiplier);
@@ -400,25 +256,28 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         _getRewardManagerCore().setPenaltyBps(earlyBps, lateBps);
     }
 
-    // ========== 计算接口 ==========
+    /// @notice 隐私增强：设置 RMCore read-gate 是否开启（开启后 RMCore 的 get* 仅允许 RewardView/白名单读取）
+    function setReadGateEnabled(bool enabled) external onlyValidRegistry {
+        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        _getRewardManagerCore().setReadGateEnabled(enabled);
+    }
 
-    /// @notice 计算示例积分（用于测试和验证）
-    /// @param amount 借款金额 (USDT, 6位小数)
-    /// @param duration 借款期限 (秒)
-    /// @param hfHighEnough 健康因子是否足够
-    /// @return basePoints 基础积分
-    /// @return bonus 奖励积分
-    /// @return totalPoints 总积分
-    function calculateExamplePoints(uint256 amount, uint256 duration, bool hfHighEnough) external view returns (uint256 basePoints, uint256 bonus, uint256 totalPoints) {
-        return _getRewardManagerCore().calculateExamplePoints(amount, duration, hfHighEnough);
+    /// @notice 隐私增强：设置 RMCore 额外 reader 白名单（可选：运维/风控模块）
+    function setRewardManagerCoreExtraReader(address reader, bool allowed) external onlyValidRegistry {
+        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        _getRewardManagerCore().setExtraReader(reader, allowed);
     }
 
     // ========== 查询接口（与架构一致：仅保留入口职责；只读查询迁移至 RewardView） ==========
 
     /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
-    function _authorizeUpgrade(address) internal view override {
+    /// @dev 通过 ACM(ActionKeys.ACTION_UPGRADE_MODULE) 校验升级权限
+    /// @dev 若后续接入 Timelock/Multisig，应在 ACM 层或此处增加“仅 Timelock/Multisig 执行”的约束
+    function _authorizeUpgrade(address newImplementation) internal view override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
+        if (newImplementation == address(0)) revert ZeroAddress();
     }
+
+    // ============ UUPS storage gap ============
+    uint256[50] private __gap;
 } 

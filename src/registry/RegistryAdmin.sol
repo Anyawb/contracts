@@ -33,6 +33,7 @@ contract RegistryAdmin is
     // （方案A）权限与升级管理员状态统一由 Registry 维护；本模块不再持有副本
 
     // ============ Constructor ============
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }

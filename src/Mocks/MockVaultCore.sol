@@ -13,5 +13,12 @@ contract MockVaultCore is Ownable {
         guaranteeFundManager = _guaranteeFundManager;
     }
 
+    function setViewContractAddr(address _viewContractAddr) external onlyOwner {
+        viewContractAddr = _viewContractAddr;
+    }
+
+    function viewContractAddrVar() external view returns (address) {
+        return viewContractAddr;
+    }
 
 } 

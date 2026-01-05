@@ -70,7 +70,7 @@ library ModuleKeys {
     bytes32 constant KEY_VAULT_CORE = keccak256("VAULT_CORE");
 
     // 注意：根据 Architecture-Guide，View 地址应通过 KEY_VAULT_CORE → viewContractAddrVar() 解析
-    // 因此不新增 KEY_VAULT_VIEW，避免重复来源与配置错误风险。
+    // 因此不新增 KEY_VAULT_ROUTER，避免重复来源与配置错误风险。
 
     // ============ 业务支持模块 Key ============
     /// @notice 手续费路由模块的标识符

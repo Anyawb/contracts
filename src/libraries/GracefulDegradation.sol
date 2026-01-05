@@ -889,7 +889,7 @@ library GracefulDegradation {
         // 验证计算结果
         require(calculatedValue > 0, "Invalid calculation result");
         
-        // 检查上溢和下溢
+        // 检查上溢和下溢（原始逻辑）
         require(calculatedValue >= amountValue || priceValue >= priceMultiplier, "Overflow detected");
         
         return calculatedValue;

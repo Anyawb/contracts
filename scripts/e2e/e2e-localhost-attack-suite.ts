@@ -66,7 +66,7 @@ const typesBorrow = {
 
 const typesLend = {
   LendIntent: [
-    { name: "lender", type: "address" },
+    { name: "lenderSigner", type: "address" },
     { name: "asset", type: "address" },
     { name: "amount", type: "uint256" },
     { name: "minTermDays", type: "uint16" },
@@ -327,6 +327,10 @@ async function main() {
     const snap = await snapshot();
     try {
       const asset = await usdc.getAddress();
+      const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter, deployer)) as any;
+      const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
+      const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr, deployer)) as any;
+      const poolAddr = (await registry.getModuleOrRevert(key("LENDER_POOL_VAULT"))) as string;
       const block = await ethers.provider.getBlock("latest");
       const now = BigInt(block!.timestamp);
 
@@ -339,10 +343,20 @@ async function main() {
       };
       await mustSucceed("role: SET_PARAMETER to deployer", async () => ensureRole("SET_PARAMETER", deployer.address));
       await mustSucceed("role: UPDATE_PRICE to deployer", async () => ensureRole("UPDATE_PRICE", deployer.address));
+      await mustSucceed("role: ADD_WHITELIST to deployer", async () => ensureRole("ADD_WHITELIST", deployer.address));
+      // finalizeMatch creates LoanOrders via ORDER_ENGINE, so VBL must hold ORDER_CREATE.
+      await mustSucceed("role: ORDER_CREATE to VaultBusinessLogic", async () => ensureRole("ORDER_CREATE", await vbl.getAddress()));
+      // SettlementMatchLib.finalizeAtomicFull routes fees through FeeRouter.distributeNormal, which requires ACTION_DEPOSIT on msg.sender (VBL).
+      await mustSucceed("role: DEPOSIT to VaultBusinessLogic (FeeRouter distribute)", async () => ensureRole("DEPOSIT", await vbl.getAddress()));
+      // LendingEngine mints LoanNFT; LoanNFT requires MINTER_ROLE_VALUE == ACTION_BORROW on msg.sender (the ORDER_ENGINE).
+      await mustSucceed("role: BORROW to ORDER_ENGINE (LoanNFT minter)", async () => ensureRole("BORROW", orderEngineAddr));
 
       // Ensure asset is allowed + oracle supported + fresh price.
       if (!(await assetWhitelist.isAssetAllowed(asset))) {
         await (await assetWhitelist.connect(deployer).addAllowedAsset(asset)).wait();
+      }
+      if (!(await feeRouter.isTokenSupported(asset))) {
+        await (await feeRouter.connect(deployer).addSupportedToken(asset)).wait();
       }
       {
         const cfg = await priceOracle.getAssetConfig(asset);
@@ -362,7 +376,7 @@ async function main() {
       const rateBps = 1000n;
 
       // Borrower must pre-deposit collateral via VaultCore.
-      await (await usdc.connect(victim).approve(CONTRACT_ADDRESSES.VaultCore, collateralAmt)).wait();
+      await (await usdc.connect(victim).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt)).wait();
       await (await vaultCore.connect(victim).deposit(asset, collateralAmt)).wait();
 
       const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
@@ -378,7 +392,7 @@ async function main() {
         salt: ethers.keccak256(ethers.toUtf8Bytes("attack-borrow-salt-1")),
       };
       const lendIntent = {
-        lender: attacker.address,
+        lenderSigner: attacker.address,
         asset,
         amount: principal,
         minTermDays: 1,
@@ -388,6 +402,58 @@ async function main() {
         salt: ethers.keccak256(ethers.toUtf8Bytes("attack-lend-salt-1")),
       };
 
+      // Reserve replay attacks (same lendHash) / cancel replay (same lendHash)
+      {
+        const replayAmount = ethers.parseUnits("10", 6);
+        const replayLend = {
+          ...lendIntent,
+          amount: replayAmount,
+          salt: ethers.keccak256(ethers.toUtf8Bytes("attack-reserve-replay-1")),
+        };
+        await (await usdc.connect(attacker).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, replayAmount)).wait();
+        const replayHash = ethers.keccak256(
+          ethers.AbiCoder.defaultAbiCoder().encode(
+            ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
+            [
+              ethers.keccak256(
+                ethers.toUtf8Bytes(
+                  "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                )
+              ),
+              replayLend.lenderSigner,
+              replayLend.asset,
+              replayLend.amount,
+              replayLend.minTermDays,
+              replayLend.maxTermDays,
+              replayLend.minRateBps,
+              replayLend.expireAt,
+              replayLend.salt,
+            ]
+          )
+        );
+
+        await mustSucceed("reserveForLending: initial reserve (replay test)", async () => {
+          await (await vbl.connect(attacker).reserveForLending(attacker.address, asset, replayAmount, replayHash)).wait();
+        });
+        await mustRevert("reserveForLending replay (same lendHash)", async () => {
+          await (await vbl.connect(attacker).reserveForLending(attacker.address, asset, replayAmount, replayHash)).wait();
+        });
+        await mustSucceed("cancelReserve: first cancel", async () => {
+          await (await vbl.connect(attacker).cancelReserve(replayHash)).wait();
+        });
+        await mustRevert("cancelReserve replay (same lendHash)", async () => {
+          await (await vbl.connect(attacker).cancelReserve(replayHash)).wait();
+        });
+        // After cancel, same hash can be reserved again (state cleared).
+        await (await usdc.connect(attacker).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, replayAmount)).wait();
+        await mustSucceed("reserveForLending after cancel (same lendHash)", async () => {
+          await (await vbl.connect(attacker).reserveForLending(attacker.address, asset, replayAmount, replayHash)).wait();
+        });
+        await mustSucceed("cancelReserve after re-reserve", async () => {
+          await (await vbl.connect(attacker).cancelReserve(replayHash)).wait();
+        });
+      }
+
       // Reserve funds
       await (await usdc.connect(attacker).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, principal)).wait();
       const lendHash = ethers.keccak256(
@@ -396,10 +462,10 @@ async function main() {
           [
             ethers.keccak256(
               ethers.toUtf8Bytes(
-                "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
               )
             ),
-            lendIntent.lender,
+            lendIntent.lenderSigner,
             lendIntent.asset,
             lendIntent.amount,
             lendIntent.minTermDays,
@@ -418,7 +484,27 @@ async function main() {
       const sigLenderOk = await attacker.signTypedData(domainOk, typesLend as any, lendIntent as any);
 
       await mustSucceed("finalizeMatch: valid borrower/lender signatures", async () => {
-        await (await vbl.connect(deployer).finalizeMatch(borrowIntent as any, [lendIntent] as any, sigBorrowerOk, [sigLenderOk])).wait();
+        const tx = await vbl.connect(deployer).finalizeMatch(borrowIntent as any, [lendIntent] as any, sigBorrowerOk, [sigLenderOk]);
+        const receipt = await tx.wait();
+        // Invariant: LoanOrder.lender MUST be LenderPoolVault (Option A).
+        let orderId: bigint | null = null;
+        for (const log of receipt!.logs) {
+          try {
+            const parsed = orderEngine.interface.parseLog({ topics: log.topics as string[], data: log.data });
+            if (parsed?.name === "LoanOrderCreated") {
+              orderId = parsed.args.orderId as bigint;
+              break;
+            }
+          } catch {
+            // ignore
+          }
+        }
+        if (orderId === null) throw new Error("LoanOrderCreated not found (invariant check)");
+        const ord = await orderEngine.connect(deployer)._getLoanOrderForView(orderId);
+        const lenderInOrder = (ord.lender as string) ?? "";
+        if (lenderInOrder.toLowerCase() !== poolAddr.toLowerCase()) {
+          throw new Error(`LoanOrder.lender mismatch: got=${lenderInOrder} expectedPool=${poolAddr} orderId=${orderId.toString()}`);
+        }
       });
 
       // Replay (same intents) must revert.
@@ -473,7 +559,7 @@ async function main() {
 
       // Fund + deposit collateral from wallet (via exec).
       await (await usdc.connect(deployer).transfer(await wValid.getAddress(), ethers.parseUnits("20000", 6))).wait();
-      await (await wValid.exec(asset, 0, usdc.interface.encodeFunctionData("approve", [CONTRACT_ADDRESSES.VaultCore, collateralAmt]))).wait();
+      await (await wValid.exec(asset, 0, usdc.interface.encodeFunctionData("approve", [CONTRACT_ADDRESSES.CollateralManager, collateralAmt]))).wait();
       await (await wValid.exec(CONTRACT_ADDRESSES.VaultCore, 0, vaultCore.interface.encodeFunctionData("deposit", [asset, collateralAmt]))).wait();
 
       // Reserve again for a new loan
@@ -486,10 +572,10 @@ async function main() {
           [
             ethers.keccak256(
               ethers.toUtf8Bytes(
-                "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
               )
             ),
-            li5.lender,
+            li5.lenderSigner,
             li5.asset,
             li5.amount,
             li5.minTermDays,
@@ -516,6 +602,119 @@ async function main() {
       await mustRevert("finalizeMatch: ERC-1271 borrower (AlwaysInvalid wallet) rejects", async () => {
         await (await vbl.connect(deployer).finalizeMatch(bi6 as any, [li6] as any, "0x", [sigLender6])).wait();
       });
+
+      // ERC-1271 lenderSigner: contract lender is the signer, but LoanOrder.lender must still be Pool.
+      {
+        const wLender = await Wallet.deploy(3); // ValidOnlyForDigest
+        await wLender.waitForDeployment();
+        const wLenderAddr = await wLender.getAddress();
+
+        // Fund wallet with principal and approve VBL via exec.
+        await (await usdc.connect(deployer).transfer(wLenderAddr, ethers.parseUnits("5000", 6))).wait();
+        await (await wLender.exec(asset, 0, usdc.interface.encodeFunctionData("approve", [CONTRACT_ADDRESSES.VaultBusinessLogic, principal]))).wait();
+
+        const biLender1271 = { ...borrowIntent, salt: ethers.keccak256(ethers.toUtf8Bytes("attack-1271-lender-borrow")) };
+        const liLender1271 = { ...lendIntent, lenderSigner: wLenderAddr, salt: ethers.keccak256(ethers.toUtf8Bytes("attack-1271-lender-lend")) };
+
+        const lendHashL = ethers.keccak256(
+          ethers.AbiCoder.defaultAbiCoder().encode(
+            ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
+            [
+              ethers.keccak256(
+                ethers.toUtf8Bytes(
+                  "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                )
+              ),
+              liLender1271.lenderSigner,
+              liLender1271.asset,
+              liLender1271.amount,
+              liLender1271.minTermDays,
+              liLender1271.maxTermDays,
+              liLender1271.minRateBps,
+              liLender1271.expireAt,
+              liLender1271.salt,
+            ]
+          )
+        );
+
+        // Reserve from wallet address (msg.sender = wallet; transferFrom pulls from wallet).
+        await mustSucceed("reserveForLending: ERC-1271 lenderSigner wallet reserves", async () => {
+          await (
+            await wLender.exec(
+              CONTRACT_ADDRESSES.VaultBusinessLogic,
+              0,
+              vbl.interface.encodeFunctionData("reserveForLending", [wLenderAddr, asset, principal, lendHashL])
+            )
+          ).wait();
+        });
+
+        // Configure digest allowlist in wallet to match the typed-data digest used by VBL for lender verification.
+        const lenderDigest = ethers.TypedDataEncoder.hash(domainOk as any, typesLend as any, liLender1271 as any);
+        await (await wLender.setAllowedDigest(lenderDigest)).wait();
+
+        const sigBorrowL = await victim.signTypedData(domainOk, typesBorrow as any, biLender1271 as any);
+        await mustSucceed("finalizeMatch: ERC-1271 lenderSigner wallet validates digest (signature can be empty)", async () => {
+          const tx = await vbl.connect(deployer).finalizeMatch(biLender1271 as any, [liLender1271] as any, sigBorrowL, ["0x"]);
+          const receipt = await tx.wait();
+          // Invariant: order.lender must be Pool
+          let orderId: bigint | null = null;
+          for (const log of receipt!.logs) {
+            try {
+              const parsed = orderEngine.interface.parseLog({ topics: log.topics as string[], data: log.data });
+              if (parsed?.name === "LoanOrderCreated") {
+                orderId = parsed.args.orderId as bigint;
+                break;
+              }
+            } catch {
+              // ignore
+            }
+          }
+          if (orderId === null) throw new Error("LoanOrderCreated not found (ERC-1271 lenderSigner)");
+          const ord = await orderEngine.connect(deployer)._getLoanOrderForView(orderId);
+          const lenderInOrder = (ord.lender as string) ?? "";
+          if (lenderInOrder.toLowerCase() !== poolAddr.toLowerCase()) {
+            throw new Error(`LoanOrder.lender mismatch: got=${lenderInOrder} expectedPool=${poolAddr} orderId=${orderId.toString()}`);
+          }
+        });
+
+        // Negative: wrong digest should be rejected by wallet policy.
+        await (await wLender.setAllowedDigest(ethers.keccak256(ethers.toUtf8Bytes("wrong-digest")))).wait();
+        const biL2 = { ...biLender1271, salt: ethers.keccak256(ethers.toUtf8Bytes("attack-1271-lender-borrow-2")) };
+        const liL2 = { ...liLender1271, salt: ethers.keccak256(ethers.toUtf8Bytes("attack-1271-lender-lend-2")) };
+        // reserve again for new hash
+        await (await wLender.exec(asset, 0, usdc.interface.encodeFunctionData("approve", [CONTRACT_ADDRESSES.VaultBusinessLogic, principal]))).wait();
+        const lendHashL2 = ethers.keccak256(
+          ethers.AbiCoder.defaultAbiCoder().encode(
+            ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
+            [
+              ethers.keccak256(
+                ethers.toUtf8Bytes(
+                  "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                )
+              ),
+              liL2.lenderSigner,
+              liL2.asset,
+              liL2.amount,
+              liL2.minTermDays,
+              liL2.maxTermDays,
+              liL2.minRateBps,
+              liL2.expireAt,
+              liL2.salt,
+            ]
+          )
+        );
+        await (
+          await wLender.exec(
+            CONTRACT_ADDRESSES.VaultBusinessLogic,
+            0,
+            vbl.interface.encodeFunctionData("reserveForLending", [wLenderAddr, asset, principal, lendHashL2])
+          )
+        ).wait();
+        const sigBorrowL2 = await victim.signTypedData(domainOk, typesBorrow as any, biL2 as any);
+        await mustRevert("finalizeMatch: ERC-1271 lenderSigner wallet rejects when digest not allowed", async () => {
+          await (await vbl.connect(deployer).finalizeMatch(biL2 as any, [liL2] as any, sigBorrowL2, ["0x"])).wait();
+        });
+      }
     } finally {
       await revertTo(snap);
     }

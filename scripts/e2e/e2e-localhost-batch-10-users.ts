@@ -65,7 +65,7 @@ function decodeRevertData(data: string): string {
 function buildLendIntentHash(li: any) {
   const typeHash = ethers.keccak256(
     ethers.toUtf8Bytes(
-      "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+      "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
     )
   );
   const coder = ethers.AbiCoder.defaultAbiCoder();
@@ -74,7 +74,7 @@ function buildLendIntentHash(li: any) {
       ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
       [
         typeHash,
-        li.lender,
+        li.lenderSigner,
         li.asset,
         li.amount,
         li.minTermDays,
@@ -156,12 +156,17 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   const liquidationManagerAddr = await registry.getModuleOrRevert(key("LIQUIDATION_MANAGER"));
   const liquidationManager = (await ethers.getContractAt("LiquidationManager", liquidationManagerAddr)) as any;
 
-  // LiquidationRiskManager (needed for HealthView fallback refresh after time travel)
-  const liquidationRiskManagerAddr = await registry.getModuleOrRevert(key("LIQUIDATION_RISK_MANAGER"));
-  const liquidationRiskManager = (await ethers.getContractAt(
-    "LiquidationRiskManager",
-    liquidationRiskManagerAddr
-  )) as any;
+  // LiquidationRiskManager (optional): used only for HealthView fallback refresh after time travel.
+  // NOTE: deploylocal may skip deploying LiquidationRiskManager (best-effort). Do NOT hard-require it here.
+  let liquidationRiskManager: any = null;
+  try {
+    const liquidationRiskManagerAddr = (await registry.getModule(key("LIQUIDATION_RISK_MANAGER"))) as string;
+    if (liquidationRiskManagerAddr && liquidationRiskManagerAddr !== ethers.ZeroAddress) {
+      liquidationRiskManager = (await ethers.getContractAt("LiquidationRiskManager", liquidationRiskManagerAddr)) as any;
+    }
+  } catch {
+    liquidationRiskManager = null;
+  }
 
   const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
   const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr)) as any;
@@ -548,7 +553,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
 
   const typesLend = {
     LendIntent: [
-      { name: "lender", type: "address" },
+      { name: "lenderSigner", type: "address" },
       { name: "asset", type: "address" },
       { name: "amount", type: "uint256" },
       { name: "minTermDays", type: "uint16" },
@@ -617,6 +622,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   // ============ Step B: finalize 5 matches ============
   console.log("\n=== Step B: Matchflow finalize (5 loans) ===");
   const orderIds: bigint[] = [];
+  const lenderPoolVaultAddr = (await registry.getModuleOrRevert(key("LENDER_POOL_VAULT"))) as string;
 
   for (let i = 0; i < pairs.length; i++) {
     const { borrower, lender } = pairs[i];
@@ -635,7 +641,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     };
 
     const lendIntent = {
-      lender: lender.address,
+      lenderSigner: lender.address,
       asset: assetAddr,
       amount: principal,
       minTermDays: 1,
@@ -715,6 +721,19 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       console.log(`    ⚠️ [HealthPushFailed] ${healthPushFailedEvents.length} failure event(s) detected`);
     }
 
+    // Invariant (Option A): LoanOrder.lender must be the LenderPoolVault address (NOT the lenderSigner EOA).
+    try {
+      const ord = await orderEngine.connect(deployer)._getLoanOrderForView(orderId);
+      const lenderInOrder = (ord.lender as string) ?? "";
+      if (lenderInOrder.toLowerCase() !== lenderPoolVaultAddr.toLowerCase()) {
+        throw new Error(
+          `LoanOrder.lender mismatch: orderId=${orderId.toString()} lenderInOrder=${lenderInOrder} expectedPool=${lenderPoolVaultAddr}`
+        );
+      }
+    } catch (e: any) {
+      throw new Error(`[Invariant] Failed to verify LoanOrder.lender==LenderPoolVault: ${e?.message ?? String(e)}`);
+    }
+
     orderIds.push(orderId);
     await pushStats(borrower.address, 0n, 0n, principal, 0n);
     console.log(`  ✅ Pair ${i + 1}: orderId=${orderId.toString()} borrower=${borrower.address.slice(0, 10)} lender=${lender.address.slice(0, 10)}`);
@@ -741,6 +760,83 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
         console.log(`    ⚠️ [HealthView] Failed to query health factor: ${e?.message ?? String(e)}`);
       }
     }
+  }
+
+  // ============ Extra (Negative) Tests: enforce Option A + signature separation ============
+  console.log("\n=== Extra: Negative tests (Option A lender == LenderPoolVault, signature separation) ===");
+  {
+    // 1) LendingEngine.createLoanOrder MUST reject lender != LenderPoolVault.
+    // We temporarily grant ORDER_CREATE to deployer for this negative test.
+    const ACTION_ORDER_CREATE = ethers.keccak256(ethers.toUtf8Bytes("ORDER_CREATE"));
+    try {
+      const already = await acm.hasRole(ACTION_ORDER_CREATE, deployer.address);
+      if (!already) await (await acm.grantRole(ACTION_ORDER_CREATE, deployer.address)).wait();
+    } catch {
+      // best-effort; if grant fails due to permission, test below may fail loudly.
+    }
+    const badOrder = {
+      principal: principal,
+      rate: rateBps,
+      term: BigInt(termDays) * ONE_DAY,
+      borrower: pairs[0].borrower.address,
+      lender: pairs[0].lender.address, // WRONG on purpose (EOA)
+      asset: assetAddr,
+      startTimestamp: 0,
+      maturity: 0,
+      repaidAmount: 0,
+    };
+    let reverted = false;
+    try {
+      await (await orderEngine.connect(deployer).createLoanOrder(badOrder)).wait();
+    } catch {
+      reverted = true;
+    }
+    if (!reverted) throw new Error("[Negative] createLoanOrder unexpectedly succeeded with lender != LenderPoolVault");
+    console.log("  ✅ Negative: createLoanOrder rejected when lender != LenderPoolVault");
+
+    // 2) finalizeMatch MUST reject when lendIntent.lenderSigner != signature signer (signature separation).
+    const lenderSigner = pairs[0].lender;
+    const wrongSigner = pairs[0].borrower;
+    const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+    const borrowIntent = {
+      borrower: pairs[0].borrower.address,
+      collateralAsset: assetAddr,
+      collateralAmount: collateralAmt,
+      borrowAsset: assetAddr,
+      amount: principal,
+      termDays,
+      rateBps,
+      expireAt,
+      salt: ethers.keccak256(ethers.toUtf8Bytes(`neg-borrow-${Date.now()}`)),
+    };
+    const lendIntent = {
+      lenderSigner: lenderSigner.address,
+      asset: assetAddr,
+      amount: principal,
+      minTermDays: 1,
+      maxTermDays: 30,
+      minRateBps: 0n,
+      expireAt,
+      salt: ethers.keccak256(ethers.toUtf8Bytes(`neg-lend-${Date.now()}`)),
+    };
+    await (await usdc.connect(lenderSigner).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, principal)).wait();
+    const lendHash = buildLendIntentHash(lendIntent);
+    await (await vbl.connect(lenderSigner).reserveForLending(lenderSigner.address, assetAddr, principal, lendHash)).wait();
+
+    const sigBorrower = await pairs[0].borrower.signTypedData(domain, typesBorrow as any, borrowIntent as any);
+    const sigLenderWrong = await wrongSigner.signTypedData(domain, typesLend as any, lendIntent as any); // WRONG signer on purpose
+
+    let revertedSig = false;
+    try {
+      await (await vbl.connect(deployer).finalizeMatch(borrowIntent, [lendIntent], sigBorrower, [sigLenderWrong])).wait();
+    } catch {
+      revertedSig = true;
+    }
+    if (!revertedSig) throw new Error("[Negative] finalizeMatch unexpectedly succeeded with wrong lenderSigner signature");
+    console.log("  ✅ Negative: finalizeMatch rejected wrong lenderSigner signature");
+
+    // cleanup: cancel reserve so lenderSigner gets funds back
+    await (await vbl.connect(lenderSigner).cancelReserve(lendHash)).wait();
   }
 
   // ============ Check totals after match ============
@@ -783,6 +879,10 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   if (statsDebtDelta !== expectedDebtDelta) throw new Error("StatisticsView debt delta mismatch vs expected");
 
   console.log("✅ Checkpoint 1 passed: ledger == statistics == expected");
+  // Track expected StatisticsView collateral delta across subsequent steps.
+  // After Checkpoint 1, we have asserted StatisticsView.totalCollateral delta == expectedCollateralDelta.
+  // In the new SSOT flow, full repay can auto-release collateral (CM.withdrawCollateralTo) which should reduce this delta back to 0.
+  let expectedStatsCollateralDelta = expectedCollateralDelta;
   await logPositionViewVersion("checkpoint 1 (after matches)");
   await refreshViewCache("after matches");
 
@@ -833,11 +933,34 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     const { borrower } = pairs[i];
     const orderId = orderIds[i];
     const totalDue = calcTotalDue(principal, rateBps, termSec);
-    await (await usdc.connect(borrower).approve(orderEngineAddr, totalDue)).wait();
-    const repayTx = await orderEngine.connect(borrower).repay(orderId, totalDue);
+    const colBefore = (await cm.getCollateral(borrower.address, assetAddr)) as bigint;
+
+    // SSOT repay: VaultCore.repay -> SettlementManager.repayAndSettle -> ORDER_ENGINE.repay
+    await (await usdc.connect(borrower).approve(vaultCoreFromRegistryAddr, totalDue)).wait();
+    const repayTx = await vaultCore.connect(borrower).repay(orderId, assetAddr, totalDue);
     const repayReceipt = await repayTx.wait();
-    // StatisticsView 的 debt 口径按「本金」统计；repay 的利息/费用不应作为 debt 减项推送，否则会出现负 delta
-    await pushStats(borrower.address, 0n, 0n, 0n, principal);
+
+    const colAfter = (await cm.getCollateral(borrower.address, assetAddr)) as bigint;
+    const collateralOut = colBefore > colAfter ? colBefore - colAfter : 0n;
+
+    // StatisticsView 的 debt 口径按「本金」统计；repay 的利息/费用不应作为 debt 减项推送，否则会出现负 delta。
+    // Collateral release after full repay may happen automatically; we reconcile StatisticsView based on observed behavior.
+    let collateralOutToPush = collateralOut;
+    try {
+      const statsCur = await statisticsView.getGlobalStatistics();
+      const statsColDeltaCur = toBigInt(statsCur.totalCollateral) - toBigInt(baselineStats.totalCollateral);
+      const expectedAfter = expectedStatsCollateralDelta - collateralOut;
+      // If StatisticsView already reflects the collateral decrease (auto-pushed by some module), don't double-push.
+      if (statsColDeltaCur === expectedAfter) {
+        collateralOutToPush = 0n;
+      }
+      expectedStatsCollateralDelta = expectedAfter;
+    } catch {
+      // If Stats query fails, fall back to manual push to keep it closer to ledger.
+      expectedStatsCollateralDelta = expectedStatsCollateralDelta - collateralOut;
+    }
+
+    await pushStats(borrower.address, 0n, collateralOutToPush, 0n, principal);
     console.log(`  ✅ Pair ${i + 1}: repaid orderId=${orderId.toString()} totalDue=${ethers.formatUnits(totalDue, 6)}`);
 
     // LoanNFT: ensure status updated to Repaid after repay
@@ -863,7 +986,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
             const hfPercent = Number(hfBps) / 100;
             console.log(`    [HealthView] healthFactor=${hfPercent.toFixed(2)}% (${hfBps.toString()} bps) isValid=${isValid}`);
           }
-          // After full repay, health factor should be very high (debt = 0, only collateral remains)
+        // After full repay, health factor should be very high (debt = 0). Note: collateral may be auto-released back to user.
           if (hfBps !== ethers.MaxUint256 && hfBps < 10000n) {
             const hfPercent = Number(hfBps) / 100;
             console.log(`    ⚠️ [HealthView] Warning: health factor below 100% after repay (${hfPercent.toFixed(2)}%)`);
@@ -874,7 +997,10 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
           try {
             const totalCollateral = (await cm.getUserTotalCollateralValue(borrower.address)) as bigint;
             const totalDebt = (await vle.getUserTotalDebtValue(borrower.address)) as bigint;
-            const minHFBps = (await liquidationRiskManager.getMinHealthFactor()) as bigint;
+            const minHFBps =
+              liquidationRiskManager && liquidationRiskManager.getMinHealthFactor
+                ? ((await liquidationRiskManager.getMinHealthFactor()) as bigint)
+                : 10_000n; // fallback: 100%
             const under = totalDebt > 0n && totalCollateral * 10000n < totalDebt * minHFBps;
             const hfBpsNew = totalDebt === 0n ? ethers.MaxUint256 : (totalCollateral * 10000n) / totalDebt;
             await (await healthView.connect(deployer).pushRiskStatus(borrower.address, hfBpsNew, minHFBps, under, 0)).wait();
@@ -928,9 +1054,17 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   console.log("  deltaCollateral:", ethers.formatUnits(statsCollateralDelta2, 6));
   console.log("  deltaDebt:", ethers.formatUnits(statsDebtDelta2, 6));
 
-  if (ledgerCollateralDelta2 !== expectedCollateralDelta) throw new Error("Ledger collateral delta mismatch after repay");
+  // New SSOT: full repay may auto-release collateral to borrower, so CM collateral should return to baseline.
+  const expectedLedgerCollateralDeltaAfterRepay = 0n;
+  if (ledgerCollateralDelta2 !== expectedLedgerCollateralDeltaAfterRepay) {
+    throw new Error("Ledger collateral delta mismatch after repay (expect collateral auto-released back to baseline)");
+  }
   if (ledgerDebtDelta2 !== 0n) throw new Error("Ledger debt delta should be 0 after repay (new loans fully repaid)");
-  if (statsCollateralDelta2 !== expectedCollateralDelta) throw new Error("StatisticsView collateral delta mismatch after repay");
+  if (statsCollateralDelta2 !== expectedStatsCollateralDelta) {
+    throw new Error(
+      `StatisticsView collateral delta mismatch after repay (expected=${expectedStatsCollateralDelta.toString()} got=${statsCollateralDelta2.toString()})`
+    );
+  }
   if (statsDebtDelta2 !== 0n) throw new Error("StatisticsView debt delta should be 0 after repay (new loans fully repaid)");
 
   console.log("✅ Checkpoint 2 passed: ledger == statistics, debt cleared");
@@ -948,7 +1082,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
         console.log(
           `  Borrower ${i + 1} (${borrowerAddrs[i].slice(0, 10)}): healthFactor=${hfPercent.toFixed(2)}% (${hfs[i].toString()} bps) isValid=${validFlags[i]}`
         );
-        // After full repay, health factor should be very high (debt = 0, only collateral)
+        // After full repay, health factor should be very high (debt = 0). Collateral may have been auto-released.
         if (validFlags[i] && hfs[i] < 10000n) {
           console.log(`    ⚠️ Warning: health factor below 100% after full repay`);
         }
@@ -1107,7 +1241,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   };
 
   const smallLendIntent = {
-    lender: smallAmountLender.address,
+    lenderSigner: smallAmountLender.address,
     asset: assetAddr,
     amount: smallPrincipal,
     minTermDays: 1,
@@ -1153,7 +1287,9 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   // Repay
   const smallTotalDue = calcTotalDue(smallPrincipal, rateBps, smallTermSec);
   await (await usdc.connect(smallAmountBorrower).approve(orderEngineAddr, smallTotalDue)).wait();
-  await (await orderEngine.connect(smallAmountBorrower).repay(smallOrderId, smallTotalDue)).wait();
+  // Repay via SettlementManager SSOT (VaultCore.repay -> SettlementManager -> ORDER_ENGINE.repay)
+  await (await usdc.connect(smallAmountBorrower).approve(vaultCoreFromRegistryAddr, smallTotalDue)).wait();
+  await (await vaultCore.connect(smallAmountBorrower).repay(smallOrderId, assetAddr, smallTotalDue)).wait();
   await pushStats(smallAmountBorrower.address, 0n, 0n, 0n, smallPrincipal);
   console.log(`  ✅ Small amount loan repaid: orderId=${smallOrderId.toString()}`);
 
@@ -1224,7 +1360,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   };
 
   const liqLendIntent = {
-    lender: liqLender.address,
+    lenderSigner: liqLender.address,
     asset: assetAddr,
     amount: liqPrincipal,
     minTermDays: 1,
@@ -1245,9 +1381,49 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   console.log("  ✅ Liquidation scenario: new loan created (not repaid)");
 
   // Now execute liquidation (direct ledger)
-  const liquidatorBalBefore = (await usdc.balanceOf(deployer.address)) as bigint;
+  const payoutAddr = await registry.getModuleOrRevert(key("LIQUIDATION_PAYOUT_MANAGER"));
+  const payout = (await ethers.getContractAt("LiquidationPayoutManager", payoutAddr)) as any;
+  const recipients = (await payout.getRecipients()) as {
+    platform: string;
+    reserve: string;
+    lenderCompensation: string;
+  };
+  const shares = (await payout.calculateShares(liqSeize)) as readonly [bigint, bigint, bigint, bigint];
+  const [platformShare, reserveShare, lenderShare, liquidatorShare] = shares;
+
+  // IMPORTANT:
+  // 默认本地部署里 platform/reserve 往往是 deployer.address（同一个地址会混淆余额差值）。
+  // 所以这里选择一个“非 platform/reserve”的 EOA 作为 liquidator，并临时授予 ACTION_LIQUIDATE 权限，
+  // 以便精确断言 liquidatorShare。
+  const liquidatorSigner = pairs[1].borrower;
+  try {
+    const acmAddr = await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"));
+    const acm = (await ethers.getContractAt("AccessControlManager", acmAddr)) as any;
+    // Must match ActionKeys.ACTION_LIQUIDATE = keccak256("LIQUIDATE")
+    const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes("LIQUIDATE"));
+    await (await acm.connect(deployer).grantRole(ACTION_LIQUIDATE, liquidatorSigner.address)).wait();
+  } catch {
+    // best-effort: if already granted / contract differs, liquidation will still succeed or fail loudly below
+  }
+
+  // Recipients 可能重合（例如 platform==reserve==deployer），因此用“按地址聚合”的方式断言更可靠。
+  const expectedByAddr = new Map<string, bigint>();
+  const addExpected = (addr: string, amt: bigint) => {
+    const k = addr.toLowerCase();
+    expectedByAddr.set(k, (expectedByAddr.get(k) ?? 0n) + amt);
+  };
+  addExpected(recipients.platform, platformShare);
+  addExpected(recipients.reserve, reserveShare);
+  addExpected(recipients.lenderCompensation, lenderShare);
+  addExpected(liquidatorSigner.address, liquidatorShare);
+
+  const beforeByAddr = new Map<string, bigint>();
+  for (const k of expectedByAddr.keys()) {
+    beforeByAddr.set(k, (await usdc.balanceOf(k)) as bigint);
+  }
+
   const txLiq = await liquidationManager
-    .connect(deployer)
+    .connect(liquidatorSigner)
     .liquidate(liqBorrower.address, assetAddr, assetAddr, liqSeize, liqReduce, liqBonus);
   const receiptLiq = await txLiq.wait();
   console.log(`  ✅ Liquidation executed: seize=${ethers.formatUnits(liqSeize, 6)} reduceDebt=${ethers.formatUnits(liqReduce, 6)}`);
@@ -1255,7 +1431,14 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   // Assert ledger deltas
   const liqColAfter = (await cm.getCollateral(liqBorrower.address, assetAddr)) as bigint;
   const liqDebtAfter = (await vle.getDebt(liqBorrower.address, assetAddr)) as bigint;
-  const liquidatorBalAfter = (await usdc.balanceOf(deployer.address)) as bigint;
+  for (const [k, expected] of expectedByAddr.entries()) {
+    const before = beforeByAddr.get(k) ?? 0n;
+    const after = (await usdc.balanceOf(k)) as bigint;
+    const delta = after - before;
+    if (delta !== expected) {
+      throw new Error(`[Liquidation] payout mismatch for ${k}: delta=${delta} expected=${expected}`);
+    }
+  }
 
   if (liqColAfter !== liqColBefore + liqCollateralAmt - liqSeize) {
     throw new Error(
@@ -1270,11 +1453,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     );
   }
 
-  if (liquidatorBalAfter - liquidatorBalBefore !== liqSeize) {
-    throw new Error(
-      `[Liquidation] liquidator did not receive seized collateral: delta=${liquidatorBalAfter - liquidatorBalBefore} expected=${liqSeize}`
-    );
-  }
+  // payout assertions completed above (address-aggregated)
 
   // Assert single-point DataPush emitted for liquidation update (LiquidatorView emits DataPushed)
   const dataPushedTopic = ethers.keccak256(ethers.toUtf8Bytes("DataPushed(bytes32,bytes)"));

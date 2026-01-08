@@ -12,7 +12,7 @@
 
 本文档对齐当前代码与 `docs/Architecture-Guide.md`：
 
-- **清算写路径（直达账本）**：`LiquidationManager` 为唯一入口，写入直达 `CollateralManager`（扣押抵押）与 `VaultLendingEngine`（减少债务），不经 View 转发写入。
+- **统一结算/清算写入口（SSOT）**：`SettlementManager` 为唯一对外写入口，统一承接按时还款/提前还款/到期未还/价值过低触发的被动清算；在进入清算分支时，写入直达 `CollateralManager`（扣押抵押）与 `VaultLendingEngine`（减少债务），不经 View 转发写入。
 - **事件/DataPush 单点**：账本写入成功后，统一由 `LiquidatorView.pushLiquidationUpdate/Batch` 触发（best-effort，不回滚账本写入）。
 - **风控只读聚合**：`HealthView` / `LiquidationRiskManager` 提供健康因子与风险聚合；只读查询统一走 View/风险模块，不在写入口做“只读门面”。
 - **预言机与优雅降级**：仅在 `VaultLendingEngine` 的估值路径中访问预言机并执行降级逻辑。
@@ -20,29 +20,31 @@
 ## 🏗️ 系统架构（对齐当前实现）
 
 ```
-清算系统（直达账本 + 单点推送）
+处置系统（统一入口 + 清算分支直达账本 + 单点推送）
 ├── Registry
-│   ├── KEY_LIQUIDATION_MANAGER → LiquidationManager（清算唯一入口）
+│   ├── KEY_SETTLEMENT_MANAGER → SettlementManager（唯一对外写入口：结算/清算）
+│   ├── KEY_LIQUIDATION_MANAGER → LiquidationManager（清算执行器：仅供 SettlementManager 内部调用）
 │   ├── KEY_CM → CollateralManager（扣押抵押：withdrawCollateralTo）
 │   ├── KEY_LE → VaultLendingEngine（减债：forceReduceDebt）
 │   ├── KEY_LIQUIDATION_VIEW → LiquidatorView（只读 + DataPush 单点）
 │   ├── KEY_HEALTH_VIEW → HealthView（风险缓存/推送）
 │   └── KEY_LIQUIDATION_RISK_MANAGER → LiquidationRiskManager（风险聚合只读/缓存）
 └── 写路径
-    └── LiquidationManager → (CM.withdrawCollateralTo, LE.forceReduceDebt) → LiquidatorView.push*
+    └── SettlementManager → (清算分支：CM.withdrawCollateralTo, LE.forceReduceDebt) → LiquidatorView.push*
 ```
 
 ## ✅ 职责边界（当前实现）
 
-- **编排层（LiquidationManager）**：仅做参数检查、权限校验与调用账本写入口；不承担只读聚合。
+- **编排层（SettlementManager）**：唯一对外写入口；内部根据状态机选择“结算（还款/提前还款）”或“清算（被动清算）”分支。
+- **清算执行器（LiquidationManager）**：仅供 SettlementManager 在清算分支内部调用；不作为对外唯一入口使用。
 - **账本层（CollateralManager / VaultLendingEngine）**：执行状态变更并在内部校验权限（例如 `ACTION_LIQUIDATE`）；LE 负责估值与降级。
 - **视图层（LiquidatorView / HealthView / LiquidationRiskManager）**：只读、缓存、推送；不代写账本、不放行写权限。
 
 ## 🔁 清算写路径（与当前实现一致）
 
-1) Keeper/机器人通过只读模块确认可清算，并在链下计算 `collateralAmount/debtAmount/bonus`。  
-2) 调用 `LiquidationManager.liquidate(targetUser, collateralAsset, debtAsset, collateralAmount, debtAmount, bonus)`。  
-3) `LiquidationManager` 直达账本：
+1) Keeper/机器人通过只读模块确认“需要进入清算分支”，并在链下计算 `collateralAmount/debtAmount/bonus`（或等效参数）。  
+2) 调用 `SettlementManager.settleOrLiquidate(...)`（统一入口；内部判定并进入清算分支）。  
+3) 清算分支直达账本（由 SettlementManager 内部直接调用，或经 LiquidationManager 执行器转调）：
    - `KEY_CM → withdrawCollateralTo(targetUser, collateralAsset, collateralAmount, liquidatorOrReceiver)`
    - `KEY_LE → forceReduceDebt(targetUser, debtAsset, debtAmount)`
 4) 成功后 best-effort：`LiquidatorView.pushLiquidationUpdate/Batch` 单点推送。  

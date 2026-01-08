@@ -2,11 +2,11 @@
 
 ## 🎯 概述
 
-本版报告已按 `Architecture-Guide copy.md` 对齐：抵押物管理仅负责账本扣押，不在合约内执行价格获取或优雅降级；估值与降级统一由 `LendingEngine` 估值路径完成，事件/DataPush 由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点触发。
+本版报告已按 `docs/Architecture-Guide.md` 对齐：抵押物管理仅负责账本扣押，不在合约内执行价格获取或优雅降级；估值与降级统一由 `LendingEngine` 估值路径完成；写入口统一由 `SettlementManager` 承接，在进入清算分支时直达账本；事件/DataPush 由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点触发。
 
 ## 🔧 主要改动
 
-- **职责收敛**：`LiquidationCollateralManager` 只做账本写入（`withdrawCollateral`），不挂载 `GracefulDegradation`、不直接调用预言机、不过度缓存。
+- **职责收敛**：抵押扣押/划转仅做账本写入（`withdrawCollateralTo`），不挂载 `GracefulDegradation`、不直接调用预言机、不过度缓存。
 - **估值归口**：价格与降级仅在 `LendingEngine` 估值路径执行（如 `getAssetValueWithFallback*`）；只读/预览由 `LiquidationView` 调用 `LendingEngine` 只读估值接口完成。
 - **事件单点**：清算写入成功后，仅通过 `LiquidatorView.pushLiquidationUpdate/Batch` 推送事件/DataPush，避免在 `CollateralManager` 重复发事件。
 - **权限与命名**：账本层内部做权限校验（如 `ACM.requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender)`）；存储命名遵循统一规范（`s`、`moduleCache` 等）。
@@ -30,7 +30,7 @@ function getCollateralValue(address asset, uint256 amount) external view returns
 ## ✅ 对齐清单
 
 - [x] 移除 CollateralManager 内的优雅降级实现与相关事件
-- [x] 清算写路径：`LiquidationManager` → `CollateralManager.withdrawCollateral` / `LendingEngine.forceReduceDebt`
+- [x] 清算写路径：`SettlementManager`（进入清算分支）→ `CollateralManager.withdrawCollateralTo` / `LendingEngine.forceReduceDebt`
 - [x] 事件/DataPush：仅 `LiquidatorView.pushLiquidationUpdate/Batch`
 - [x] 预言机健康/降级：仅在 `LendingEngine` 估值路径
 - [x] 存储/命名/权限：遵循统一规范，不经 View 放行写权限

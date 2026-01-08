@@ -16,7 +16,7 @@ function calcTotalDue(principal: bigint, rateBps: bigint, termSec: bigint) {
 function buildLendIntentHash(li: any) {
   const typeHash = ethers.keccak256(
     ethers.toUtf8Bytes(
-      "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+      "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
     )
   );
   const coder = ethers.AbiCoder.defaultAbiCoder();
@@ -25,7 +25,7 @@ function buildLendIntentHash(li: any) {
       ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
       [
         typeHash,
-        li.lender,
+        li.lenderSigner,
         li.asset,
         li.amount,
         li.minTermDays,
@@ -132,7 +132,7 @@ async function main() {
   };
 
   const lendIntent = {
-    lender: lender.address,
+    lenderSigner: lender.address,
     asset: usdc.target,
     amount: borrowAmt,
     minTermDays: 1,
@@ -171,7 +171,7 @@ async function main() {
 
   const typesLend = {
     LendIntent: [
-      { name: "lender", type: "address" },
+      { name: "lenderSigner", type: "address" },
       { name: "asset", type: "address" },
       { name: "amount", type: "uint256" },
       { name: "minTermDays", type: "uint16" },
@@ -219,8 +219,9 @@ async function main() {
   if (orderId === null) throw new Error("LoanOrderCreated not found");
   const termSec = BigInt(termDays) * ONE_DAY;
   const totalDue = calcTotalDue(borrowAmt, rateBps, termSec);
-  await usdc.connect(borrower).approve(orderEngineAddr, totalDue);
-  await orderEngine.connect(borrower).repay(orderId, totalDue);
+  // 统一入口：走 VaultCore.repay → SettlementManager（覆盖 SSOT 资金链）
+  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, totalDue);
+  await vaultCore.connect(borrower).repay(orderId, usdc.target, totalDue);
 
   if (newTokenId !== undefined) {
     const meta = await loanNft.getLoanMetadata(newTokenId);

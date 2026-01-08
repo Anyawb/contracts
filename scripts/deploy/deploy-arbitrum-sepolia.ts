@@ -35,6 +35,12 @@ const DEPLOY_FILE = path.join(DEPLOY_DIR, 'arbitrum-sepolia.json');
 // 将前端配置输出到仓库根目录的 frontend-config，供前端直接导入使用
 const FRONTEND_DIR = path.join(__dirname, '..', '..', '..', 'frontend-config');
 const FRONTEND_FILE = path.join(FRONTEND_DIR, 'contracts-arbitrum-sepolia.ts');
+const DEFAULT_PAYOUT_BPS = {
+  platform: 300,
+  reserve: 200,
+  lender: 1700,
+  liquidator: 7800,
+};
 
 function load(): DeployMap {
   if (fs.existsSync(DEPLOY_FILE)) return JSON.parse(fs.readFileSync(DEPLOY_FILE, 'utf8')) as DeployMap;
@@ -230,6 +236,19 @@ async function main() {
       deployed.AccessControlManager = await deployRegular('AccessControlManager', deployer.address);
       save(deployed);
     }
+
+    // Payout recipients（可用占位地址，默认 deployer；若部署了 LenderPoolVault 且未显式指定 PAYOUT_LENDER_ADDR，将自动指向资金池）
+    let payoutRecipients = {
+      platform: process.env.PAYOUT_PLATFORM_ADDR || deployer.address,
+      reserve: process.env.PAYOUT_RESERVE_ADDR || deployer.address,
+      lenderCompensation: process.env.PAYOUT_LENDER_ADDR || deployer.address,
+    };
+    const payoutRates = [
+      DEFAULT_PAYOUT_BPS.platform,
+      DEFAULT_PAYOUT_BPS.reserve,
+      DEFAULT_PAYOUT_BPS.lender,
+      DEFAULT_PAYOUT_BPS.liquidator,
+    ];
 
     // 为部署者赋权：ADMIN + 只读（VIEW_*）权限
     try {
@@ -481,6 +500,72 @@ async function main() {
       } catch (error) {
         console.log('⚠️ LiquidationManager deployment failed:', error);
       }
+    }
+
+    // SettlementManager（统一结算/清算写入口，SSOT）
+    if (!deployed.SettlementManager) {
+      try {
+        deployed.SettlementManager = await deployProxy('SettlementManager', [deployed.Registry]);
+        save(deployed);
+        console.log('✅ SettlementManager deployed @', deployed.SettlementManager);
+      } catch (error) {
+        console.log('⚠️ SettlementManager deployment failed:', error);
+      }
+    }
+
+    // LenderPoolVault（线上流动性资金池，推荐）
+    if (!deployed.LenderPoolVault) {
+      try {
+        deployed.LenderPoolVault = await deployProxy('LenderPoolVault', [deployed.Registry]);
+        save(deployed);
+        console.log('✅ LenderPoolVault deployed @', deployed.LenderPoolVault);
+      } catch (error) {
+        console.log('⚠️ LenderPoolVault deployment failed:', error);
+      }
+    }
+
+    // 若未显式提供 PAYOUT_LENDER_ADDR，则默认将 lenderCompensation 指向 LenderPoolVault（与“lender=资金池地址”语义一致）
+    if (!process.env.PAYOUT_LENDER_ADDR && deployed.LenderPoolVault) {
+      payoutRecipients = { ...payoutRecipients, lenderCompensation: deployed.LenderPoolVault };
+    }
+
+    // 4.99.2) 部署 LiquidationPayoutManager（残值分配）
+    if (!deployed.LiquidationPayoutManager) {
+      try {
+        deployed.LiquidationPayoutManager = await deployProxy('LiquidationPayoutManager', [
+          deployed.Registry,
+          deployed.AccessControlManager,
+          [payoutRecipients.platform, payoutRecipients.reserve, payoutRecipients.lenderCompensation],
+          payoutRates,
+        ]);
+        save(deployed);
+        console.log('✅ LiquidationPayoutManager deployed @', deployed.LiquidationPayoutManager);
+      } catch (error) {
+        console.log('⚠️ LiquidationPayoutManager deployment failed:', error);
+      }
+    }
+
+    // 授权 SettlementManager 执行订单级还款与只读查询（ORDER_ENGINE.repay / _getLoanOrderForView）
+    try {
+      if (deployed.AccessControlManager && deployed.SettlementManager) {
+        const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+        const ACTION_REPAY = ethers.keccak256(ethers.toUtf8Bytes('REPAY'));
+        const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+
+        const hasRepay = await acm.hasRole(ACTION_REPAY, deployed.SettlementManager);
+        if (!hasRepay) {
+          await (await acm.grantRole(ACTION_REPAY, deployed.SettlementManager)).wait();
+          console.log('🔑 Granted ACTION_REPAY to SettlementManager');
+        }
+
+        const hasView = await acm.hasRole(ACTION_VIEW_SYSTEM_DATA, deployed.SettlementManager);
+        if (!hasView) {
+          await (await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, deployed.SettlementManager)).wait();
+          console.log('🔑 Granted ACTION_VIEW_SYSTEM_DATA to SettlementManager');
+        }
+      }
+    } catch (e) {
+      console.log('⚠️ Grant ACTION_REPAY/VIEW_SYSTEM_DATA to SettlementManager skipped/failed:', e);
     }
       
     // LiquidationRiskManager（清算风险管理器）
@@ -828,6 +913,9 @@ async function main() {
       ValuationOracleView: 'VALUATION_ORACLE_VIEW',
       LiquidatorView: 'LIQUIDATOR_VIEW',
       LiquidationManager: 'LIQUIDATION_MANAGER',
+      SettlementManager: 'SETTLEMENT_MANAGER',
+      LiquidationPayoutManager: 'LIQUIDATION_PAYOUT_MANAGER',
+      LenderPoolVault: 'LENDER_POOL_VAULT',
       GuaranteeFundManager: 'GUARANTEE_FUND_MANAGER',
       LoanNFT: 'LOAN_NFT',
       // 监控模块
@@ -847,14 +935,17 @@ async function main() {
         'PriceOracle',
         'CoinGeckoPriceUpdater',
         'LiquidationManager',
+        'SettlementManager',
         'VaultLendingEngine',
         'EarlyRepaymentGuaranteeManager',
         'DegradationCore',
         'DegradationMonitor',
         'DegradationStorage',
         'ModuleHealthView',
-        'BatchView',
-        'LiquidationRiskView',
+      'BatchView',
+      'LiquidationRiskView',
+      'LiquidationPayoutManager',
+      'LenderPoolVault',
         'FeeRouter',
         'FeeRouterView',
         'CollateralManager',
@@ -933,11 +1024,22 @@ async function main() {
           await (await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.LiquidationManager)).wait();
           console.log(`✅ Bound KEY_LIQUIDATION_MANAGER -> ${deployed.LiquidationManager}`);
         }
+        if (deployed.SettlementManager) {
+          try {
+            await (await registry.setModule(keyOf('SETTLEMENT_MANAGER'), deployed.SettlementManager)).wait();
+            console.log(`✅ Bound KEY_SETTLEMENT_MANAGER -> ${deployed.SettlementManager}`);
+          } catch (error) {
+            console.log('⚠️ SettlementManager binding failed:', error);
+          }
+        }
         if (deployed.HealthView) {
           try { await (await registry.setModule(keyOf('HEALTH_VIEW'), deployed.HealthView)).wait(); } catch (error) { console.log('⚠️ HealthView binding failed:', error); }
         }
         if (deployed.LiquidatorView) {
           try { await (await registry.setModule(keyOf('LIQUIDATOR_VIEW'), deployed.LiquidatorView)).wait(); } catch (error) { console.log('⚠️ LiquidatorView binding failed:', error); }
+          if (deployed.LiquidationPayoutManager) {
+            try { await (await registry.setModule(keyOf('LIQUIDATION_PAYOUT_MANAGER'), deployed.LiquidationPayoutManager)).wait(); } catch (error) { console.log('⚠️ LiquidationPayoutManager binding failed:', error); }
+          }
         }
         if (deployed.StatisticsView) {
           try { await (await registry.setModule(keyOf('VAULT_STATISTICS'), deployed.StatisticsView)).wait(); console.log(`✅ Bound KEY_STATS (VAULT_STATISTICS) -> ${deployed.StatisticsView}`); } catch (error) { console.log('⚠️ StatisticsView binding failed:', error); }

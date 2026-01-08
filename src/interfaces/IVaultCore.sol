@@ -29,10 +29,11 @@ interface IVaultCore {
     /// @param amount 借款数量
     function borrow(address asset, uint256 amount) external;
 
-    /// @notice 还款
+    /// @notice 还款（统一结算入口，SSOT）
+    /// @param orderId 仓位主键（SSOT）：LendingEngine 生成的订单 ID（历史旧称/旧口径一律视为该值）
     /// @param asset 还款资产地址
     /// @param amount 还款数量
-    function repay(address asset, uint256 amount) external;
+    function repay(uint256 orderId, address asset, uint256 amount) external;
 
     /// @notice 提取抵押物
     /// @param asset 抵押资产地址
@@ -49,10 +50,8 @@ interface IVaultCore {
     /// @param amounts 数量数组
     function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external;
 
-    /// @notice 批量还款
-    /// @param assets 资产地址数组
-    /// @param amounts 数量数组
-    function batchRepay(address[] calldata assets, uint256[] calldata amounts) external;
+    /// @notice 批量还款（若启用批量接口，需确保每笔还款都携带对应 orderId）
+    function batchRepay(uint256[] calldata orderIds, address[] calldata assets, uint256[] calldata amounts) external;
 
     /// @notice 批量提取抵押物
     /// @param assets 资产地址数组

@@ -15,6 +15,7 @@ contract MockCollateralManager is ICollateralManager {
     mapping(address => uint256) private _totalByAsset;
     mapping(address => uint256) private _userTotalValue;
     uint256 private _totalValue;
+    mapping(address => address[]) private _userAssets;
     
     // 测试控制标志
     bool public shouldFail;
@@ -33,6 +34,7 @@ contract MockCollateralManager is ICollateralManager {
         _totalByAsset[asset] += amount;
         _userTotalValue[user] += amount;
         _totalValue += amount;
+        _addAsset(user, asset);
         emit CollateralDeposited(user, asset, amount);
     }
     
@@ -117,11 +119,8 @@ contract MockCollateralManager is ICollateralManager {
     /// @notice 获取用户抵押物资产列表
     /// @param _user 用户地址
     /// @return 资产地址数组
-    function getUserCollateralAssets(address _user) external pure override returns (address[] memory) {
-        // 触发读取以消除未使用参数告警
-        _user;
-        // 简化实现，返回空数组
-        return new address[](0);
+    function getUserCollateralAssets(address _user) external view override returns (address[] memory) {
+        return _userAssets[_user];
     }
     
     /// @notice 获取资产价值
@@ -186,6 +185,24 @@ contract MockCollateralManager is ICollateralManager {
     /// @return seizableAmount 可扣押数量
     function getSeizableCollateralAmount(address user, address asset) external view returns (uint256 seizableAmount) {
         return _userCollateral[user][asset];
+    }
+
+    /// @notice 测试辅助：直接设置用户抵押
+    function setUserCollateral(address user, address asset, uint256 amount) external {
+        _userCollateral[user][asset] = amount;
+        _totalByAsset[asset] = amount;
+        _userTotalValue[user] = amount;
+        _addAsset(user, asset);
+    }
+
+    function _addAsset(address user, address asset) private {
+        address[] storage assets = _userAssets[user];
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i] == asset) {
+                return;
+            }
+        }
+        assets.push(asset);
     }
 
     // 事件

@@ -1,4 +1,4 @@
-# 完整清算逻辑（与当前实现对齐）
+# 完整清算逻辑（与当前架构口径对齐：SettlementManager 统一入口）
 
 ## 🔗 References（口径来源与关联文档）
 
@@ -10,7 +10,7 @@
 
 ## 📋 **概述**
 
-本文档对齐当前代码与 `docs/Architecture-Guide.md` 的口径：清算写入直达账本（`ICollateralManager.withdrawCollateralTo`、`ILendingEngineBasic.forceReduceDebt`），事件/DataPush 由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点触发；健康与风险缓存由 `HealthView/LiquidationRiskManager` 提供，预言机访问与优雅降级仅在 `VaultLendingEngine` 估值路径中发生。
+本文档对齐 `docs/Architecture-Guide.md` 的口径：**写入口统一收敛到 `SettlementManager`**（按时还款/提前还款/到期未还/抵押价值过低触发的被动清算），其内部在需要时进入清算分支并直达账本（`ICollateralManager.withdrawCollateralTo`、`ILendingEngineBasic.forceReduceDebt`），事件/DataPush 由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点触发；健康与风险缓存由 `HealthView/LiquidationRiskManager` 提供，预言机访问与优雅降级仅在 `VaultLendingEngine` 估值路径中发生。
 
 ## 🔄 **完整清算流程**
 
@@ -22,10 +22,10 @@
          ↓
 5天时间到，借出方没有还款
          ↓
-✅ 触发清算流程（由 Keeper）
+✅ 触发处置流程（由 Keeper 调用统一入口）
 ```
 
-### 2. **清算执行**
+### 2. **清算分支执行（SettlementManager 内部进入）**
 ```
 扣押价值95USDC的RWAToken
          ↓
@@ -36,29 +36,31 @@
 残值分配处理
 ```
 
-### 3. **残值分配**
+### 3. **残值分配（可选：配置 `LiquidationPayoutManager` 后生效）**
 ```
-5USDC残值分配：
+5USDC残值分配（示例）：
 ┌──────────────┬───────────────┬────────────┬────────────┐
 │  平台收入     │ 风险准备金池    │ 出借人补偿    │ 清算人奖励    │
 │    3%        │     2%        │   17%      │   78%      │
 │  0.15USDC    │  0.1USDC      │ 0.85USDC   │ 3.9USDC    │
 └──────────────┴───────────────┴────────────┴────────────┘
+> 说明：当启用 `LiquidationPayoutManager` 时，实际分配由其根据基点配置计算；整数分配后所有余数（除不尽部分）归清算人。
 ```
 
 ## 🏗️ **技术实现**
 
 ### **核心模块（职责对齐）**
 
-1. **LiquidationManager** - 清算唯一写入口：编排并直达账本写入（CM/LE），不经 View 转发写入
-2. **CollateralManager（CM）** - 抵押托管者（真实 ERC20 资金池），提供 `withdrawCollateralTo` 供清算扣押（扣减账本 + 真实转账）
-3. **VaultLendingEngine（LE / ILendingEngineBasic）** - 债务账本写入：`forceReduceDebt`（并在账本变更后推送 VaultRouter/HealthView）
-4. **LiquidatorView** - 事件/DataPush 单点入口 + 清算只读查询
-5. **LiquidationRiskManager / HealthView** - 风险与健康只读聚合/缓存（不参与写入）
+1. **SettlementManager** - **唯一对外写入口（SSOT）**：统一承接还款结算与被动清算（到期未还/价值过低）
+2. **LiquidationManager** - 清算执行器：仅在 `SettlementManager` 进入清算分支时调用（可承接清算参数校验/事件聚合/残值分配路由等）
+3. **CollateralManager（CM）** - 抵押托管者（真实资产池/资金池），提供 `withdrawCollateralTo` 供清算扣押/结算释放（扣减账本 + 真实转账）
+4. **VaultLendingEngine（LE / ILendingEngineBasic）** - 债务账本写入：`repay` / `forceReduceDebt`（并在账本变更后推送 VaultRouter/HealthView）
+5. **LiquidatorView** - 事件/DataPush 单点入口 + 清算只读查询
+6. **LiquidationRiskManager / HealthView** - 风险与健康只读聚合/缓存（不参与写入）
 
 ### **关于“残值/分配/奖励”的实现边界（重要）**
 
-当前链上实现的清算写路径只包含：
+被动清算分支的核心写路径只包含（直达账本）：
 
 - `CM.withdrawCollateralTo(user, collateralAsset, collateralAmount, liquidatorOrReceiver)`
 - `LE.forceReduceDebt(user, debtAsset, debtAmount)`
@@ -66,8 +68,9 @@
 
 因此：
 
-- 不在链上自动计算“抵押价值 - 债务价值”的残值
-- 不在链上自动进行平台/风险池/出借人/清算人分配
+- **残值计算/分配是否发生**取决于是否启用并配置 `LiquidationPayoutManager`
+  - 未启用：仅发生扣押/减债与清算事件推送，不进行平台/准备金/出借人/清算人分配
+  - 已启用：在清算分支内按配置进行平台/准备金/出借人/清算人分配，并由 `LiquidatorView` 进行单点推送（best-effort）
 
 如需残值分配/补偿/清算奖励结算，应作为独立扩展模块另行设计并实现（避免把复杂分润逻辑塞进清算写路径）。
 
@@ -82,7 +85,7 @@
 
 #### **清算触发**
 - 健康因子低于阈值（105%）
-- Keeper触发清算
+- Keeper 触发处置（进入统一入口，内部决定是否走清算分支）
 
 #### **清算执行**
 1. **扣押抵押物**：`CM.withdrawCollateralTo(...)` 扣减抵押并将真实抵押资产转给清算人
@@ -92,7 +95,7 @@
 #### **最终结果**
 - 用户：失去抵押物，债务清零
 - 清算人：收到被扣押的抵押资产（链上真实转账）
-- “残值/分润/补偿”不在当前链上清算路径内自动结算（如需支持应另行扩展）
+- “残值/分润/补偿”仅在启用 `LiquidationPayoutManager` 时发生；否则不自动结算（仅扣押/减债/事件推送）
 
 ## 🔧 **配置参数**
 
@@ -103,12 +106,13 @@ MIN_LIQUIDATION_THRESHOLD = 10_000;     // 100%
 MAX_LIQUIDATION_THRESHOLD = 15_000;     // 150%
 ```
 
-### **残值分配比例**
+### **残值分配比例（由 LiquidationPayoutManager 配置，合计 10_000 bps）**
 ```solidity
-PLATFORM_REVENUE_RATE = 300;        // 3%
-RISK_RESERVE_RATE = 200;            // 2%
-LENDER_COMPENSATION_RATE = 1_700;   // 17%
-LIQUIDATOR_REWARD_RATE = 7_800;     // 78%
+platformBps       = 300;   // 3%
+reserveBps        = 200;   // 2%
+lenderBps         = 1_700; // 17%
+liquidatorBps     = 7_800; // 78%
+// 余数：整数分配后的剩余全部归清算人
 ```
 
 ## 📈 **优势分析**
@@ -138,8 +142,8 @@ LIQUIDATOR_REWARD_RATE = 7_800;     // 78%
 ### **清算人操作**
 ```solidity
 // 只读检查（0 gas）：通过 LiquidationRiskManager/LiquidatorView/HealthView 查询是否可清算、可扣押数量等
-// 写入执行：LiquidationManager 为唯一入口
-liquidationManager.liquidate(user, collateralAsset, debtAsset, collateralAmount, debtAmount, bonus);
+// 写入执行：SettlementManager 为唯一对外入口（其内部进入清算分支）
+// settlementManager.settleOrLiquidate(...);
 ```
 
 ### **管理员配置**
@@ -163,9 +167,9 @@ event LiquidationExecuted(
 );
 ```
 
-### **残值分配事件（当前实现：不适用）**
+### **残值分配事件（可选）**
 
-当前清算写路径不包含“残值计算/分配”的链上结算，因此无对应的 `ResidualAllocated` 事件。若未来引入独立的分润/补偿模块，应在该模块内定义并发出相应事件/DataPush。
+当启用 `LiquidationPayoutManager` 时，清算分支会产生“平台/准备金/出借人/清算人”分配的链上转账，并可通过 `LiquidatorView` 的单点推送事件/DataPush 供链下消费与对账。
 
 ## 🔒 **安全考虑**
 

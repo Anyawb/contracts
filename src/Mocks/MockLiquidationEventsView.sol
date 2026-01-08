@@ -106,6 +106,22 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         );
     }
 
+    function pushLiquidationPayout(
+        address,
+        address,
+        address,
+        address,
+        address,
+        address,
+        uint256,
+        uint256,
+        uint256,
+        uint256,
+        uint256
+    ) external override {
+        // no-op for mock
+    }
+
     // 测试辅助函数
     /// @notice 获取用户清算次数
     /// @param user 用户地址

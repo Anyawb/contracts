@@ -20,7 +20,9 @@ library SettlementIntentLib {
     }
 
     struct LendIntent {
-        address lender;
+        /// @notice 出借意向签名者（EOA / ERC-1271）
+        /// @dev 注意：这是“撮合授权者/资金提供者”，不等于 LoanOrder.lender（后者在 Option A 下固定为 LenderPoolVault）
+        address lenderSigner;
         address asset;
         uint256 amount;
         uint16 minTermDays;
@@ -58,9 +60,9 @@ library SettlementIntentLib {
     function hashLendIntent(LendIntent memory li) internal pure returns (bytes32) {
         return keccak256(abi.encode(
             keccak256(
-                "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
             ),
-            li.lender,
+            li.lenderSigner,
             li.asset,
             li.amount,
             li.minTermDays,

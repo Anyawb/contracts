@@ -277,6 +277,9 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
         _requireRole(ActionKeys.ACTION_ORDER_CREATE, msg.sender);
         if (paused()) revert PausedSystem();
         if (order.principal == 0 || order.borrower == address(0) || order.lender == address(0)) revert LendingEngine__InvalidOrder();
+        // Option A enforcement: LoanOrder.lender must be the funding pool contract address (LenderPoolVault).
+        address pool = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LENDER_POOL_VAULT);
+        if (order.lender != pool) revert LendingEngine__InvalidOrder();
 
         // 校验期限白名单
         if (!_isAllowedDuration(order.term)) revert LendingEngine__InvalidTerm();

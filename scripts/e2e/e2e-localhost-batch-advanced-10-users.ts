@@ -17,7 +17,7 @@ function calcTotalDue(principal: bigint, rateBps: bigint, termSec: bigint) {
 function buildLendIntentHash(li: any) {
   const typeHash = ethers.keccak256(
     ethers.toUtf8Bytes(
-      "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+      "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
     )
   );
   const coder = ethers.AbiCoder.defaultAbiCoder();
@@ -26,7 +26,7 @@ function buildLendIntentHash(li: any) {
       ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
       [
         typeHash,
-        li.lender,
+        li.lenderSigner,
         li.asset,
         li.amount,
         li.minTermDays,
@@ -276,7 +276,7 @@ export async function runAdvancedBatch(opts?: { sampleBorrowerIndex?: number }) 
 
   const typesLend = {
     LendIntent: [
-      { name: "lender", type: "address" },
+      { name: "lenderSigner", type: "address" },
       { name: "asset", type: "address" },
       { name: "amount", type: "uint256" },
       { name: "minTermDays", type: "uint16" },
@@ -370,7 +370,7 @@ export async function runAdvancedBatch(opts?: { sampleBorrowerIndex?: number }) 
     };
 
     const lendIntent = {
-      lender: lenderSigner.address,
+      lenderSigner: lenderSigner.address,
       asset: assetAddr,
       amount,
       minTermDays: 1,

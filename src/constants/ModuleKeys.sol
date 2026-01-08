@@ -155,60 +155,30 @@ library ModuleKeys {
     bytes32 constant KEY_AUTHORITY_WHITELIST = keccak256("AUTHORITY_WHITELIST");
 
     // ============ 清算模块 Key ============
+    /// @notice 统一结算/清算写入口模块的标识符（SettlementManager）
+    /// @dev 用于 Registry 中存储 SettlementManager 合约地址
+    /// @dev 哈希值：keccak256("SETTLEMENT_MANAGER")
+    bytes32 constant KEY_SETTLEMENT_MANAGER = keccak256("SETTLEMENT_MANAGER");
+
+    /// @notice 出借资金池模块的标识符（LenderPoolVault）
+    /// @dev 用于 Registry 中存储 LenderPoolVault 合约地址（线上流动性推荐放置处）
+    /// @dev 哈希值：keccak256("LENDER_POOL_VAULT")
+    bytes32 constant KEY_LENDER_POOL_VAULT = keccak256("LENDER_POOL_VAULT");
+
     /// @notice 清算管理器模块的标识符
     /// @dev 用于Registry中存储LiquidationManager合约地址
     /// @dev 哈希值：keccak256("LIQUIDATION_MANAGER")
     bytes32 constant KEY_LIQUIDATION_MANAGER = keccak256("LIQUIDATION_MANAGER");
-    
-    /// @notice 清算奖励管理器模块的标识符
-    /// @dev 用于Registry中存储LiquidationRewardManager合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_REWARD_MANAGER")
-    bytes32 constant KEY_LIQUIDATION_REWARD_MANAGER = keccak256("LIQUIDATION_REWARD_MANAGER");
-    
-    /// @notice 清算利润统计管理器模块的标识符
-    /// @dev 用于Registry中存储LiquidationProfitStatsManager合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_PROFIT_STATS_MANAGER")
-    bytes32 constant KEY_LIQUIDATION_PROFIT_STATS_MANAGER = keccak256("LIQUIDATION_PROFIT_STATS_MANAGER");
     
     /// @notice 清算风险管理器模块的标识符
     /// @dev 用于Registry中存储LiquidationRiskManager合约地址
     /// @dev 哈希值：keccak256("LIQUIDATION_RISK_MANAGER")
     bytes32 constant KEY_LIQUIDATION_RISK_MANAGER = keccak256("LIQUIDATION_RISK_MANAGER");
     
-    /// @notice 清算奖励分发器模块的标识符
-    /// @dev 用于Registry中存储LiquidationRewardDistributor合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_REWARD_DISTRIBUTOR")
-    bytes32 constant KEY_LIQUIDATION_REWARD_DISTRIBUTOR = keccak256("LIQUIDATION_REWARD_DISTRIBUTOR");
-    
-    /// @notice 清算记录管理器模块的标识符
-    /// @dev 用于Registry中存储LiquidationRecordManager合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_RECORD_MANAGER")
-    bytes32 constant KEY_LIQUIDATION_RECORD_MANAGER = keccak256("LIQUIDATION_RECORD_MANAGER");
-    
-    /// @notice 清算债务管理器模块的标识符
-    /// @dev 用于Registry中存储LiquidationDebtManager合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_DEBT_MANAGER")
-    bytes32 constant KEY_LIQUIDATION_DEBT_MANAGER = keccak256("LIQUIDATION_DEBT_MANAGER");
-    
     /// @notice 清算计算器模块的标识符
     /// @dev 用于Registry中存储LiquidationCalculator合约地址
     /// @dev 哈希值：keccak256("LIQUIDATION_CALCULATOR")
     bytes32 constant KEY_LIQUIDATION_CALCULATOR = keccak256("LIQUIDATION_CALCULATOR");
-    
-    /// @notice 清算保证金管理器模块的标识符
-    /// @dev 用于Registry中存储LiquidationGuaranteeManager合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_GUARANTEE_MANAGER")
-    bytes32 constant KEY_LIQUIDATION_GUARANTEE_MANAGER = keccak256("LIQUIDATION_GUARANTEE_MANAGER");
-    
-    /// @notice 清算抵押物管理器模块的标识符
-    /// @dev 用于Registry中存储LiquidationCollateralManager合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_COLLATERAL_MANAGER")
-    bytes32 constant KEY_LIQUIDATION_COLLATERAL_MANAGER = keccak256("LIQUIDATION_COLLATERAL_MANAGER");
-    
-    /// @notice 清算债务记录管理器模块的标识符
-    /// @dev 用于Registry中存储LiquidationDebtRecordManager合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_DEBT_RECORD_MANAGER")
-    bytes32 constant KEY_LIQUIDATION_DEBT_RECORD_MANAGER = keccak256("LIQUIDATION_DEBT_RECORD_MANAGER");
     
     /// @notice 清算配置管理器模块的标识符
     /// @dev 用于Registry中存储LiquidationConfigManager合约地址
@@ -219,11 +189,6 @@ library ModuleKeys {
     /// @dev 用于Registry中存储LiquidationOrchestrator合约地址
     /// @dev 哈希值：keccak256("LIQUIDATION_ORCHESTRATOR")
     bytes32 constant KEY_LIQUIDATION_ORCHESTRATOR = keccak256("LIQUIDATION_ORCHESTRATOR");
-    
-    /// @notice 清算批量查询管理器模块的标识符
-    /// @dev 用于Registry中存储LiquidationBatchQueryManager合约地址
-    /// @dev 哈希值：keccak256("LIQUIDATION_BATCH_QUERY_MANAGER")
-    bytes32 constant KEY_LIQUIDATION_BATCH_QUERY_MANAGER = keccak256("LIQUIDATION_BATCH_QUERY_MANAGER");
     
     /// @notice 降级管理模块的标识符
     /// @dev 用于Registry中存储DegradationManager合约地址
@@ -388,6 +353,10 @@ library ModuleKeys {
     /// @dev 系统健康/降级只读视图
     /// @dev 哈希值：keccak256("SYSTEM_HEALTH_VIEW")
     bytes32 constant KEY_SYSTEM_HEALTH_VIEW = keccak256("SYSTEM_HEALTH_VIEW");
+    /// @notice 清算分配模块 Key（新增）
+    /// @dev 用于 Registry 中存储 LiquidationPayoutManager 合约地址
+    /// @dev 哈希值：keccak256("LIQUIDATION_PAYOUT_MANAGER")
+    bytes32 constant KEY_LIQUIDATION_PAYOUT_MANAGER = keccak256("LIQUIDATION_PAYOUT_MANAGER");
     
     /// @notice 事件历史管理器模块的标识符
     /// @dev 用于Registry中存储EventHistoryManager合约地址
@@ -432,7 +401,7 @@ library ModuleKeys {
     
     /// @notice 获取所有静态模块 Key 数组（无重复，顺序与常量声明分组一致）
     function getAllKeys() internal pure returns (bytes32[] memory) {
-        bytes32[] memory keys = new bytes32[](72);
+        bytes32[] memory keys = new bytes32[](71);
 
         // ===== 核心业务模块 =====
         keys[0] = KEY_CM;
@@ -511,40 +480,41 @@ library ModuleKeys {
         // ===== 清算模块 =====
         keys[49] = KEY_LIQUIDATION_MANAGER;
         keys[50] = KEY_LIQUIDATION_RISK_MANAGER;
-        keys[51] = KEY_LIQUIDATION_COLLATERAL_MANAGER;
-        keys[52] = KEY_LIQUIDATION_DEBT_MANAGER;
-        keys[53] = KEY_LIQUIDATION_ORCHESTRATOR;
-        keys[54] = KEY_LIQUIDATION_CALCULATOR;
-        keys[55] = KEY_LIQUIDATION_REWARD_DISTRIBUTOR;
-        keys[56] = KEY_LIQUIDATION_RECORD_MANAGER;
-        keys[57] = KEY_LIQUIDATION_CONFIG_MANAGER;
+        keys[51] = KEY_LIQUIDATION_ORCHESTRATOR;
+        keys[52] = KEY_LIQUIDATION_CALCULATOR;
+        keys[53] = KEY_LIQUIDATION_CONFIG_MANAGER;
 
         // ===== 奖励配置子模块 =====
-        keys[58] = KEY_ADVANCED_ANALYTICS_CONFIG;
-        keys[59] = KEY_PRIORITY_SERVICE_CONFIG;
-        keys[60] = KEY_FEATURE_UNLOCK_CONFIG;
-        keys[61] = KEY_GOVERNANCE_ACCESS_CONFIG;
-        keys[62] = KEY_TESTNET_FEATURES_CONFIG;
+        keys[54] = KEY_ADVANCED_ANALYTICS_CONFIG;
+        keys[55] = KEY_PRIORITY_SERVICE_CONFIG;
+        keys[56] = KEY_FEATURE_UNLOCK_CONFIG;
+        keys[57] = KEY_GOVERNANCE_ACCESS_CONFIG;
+        keys[58] = KEY_TESTNET_FEATURES_CONFIG;
 
         // ===== 版本控制 =====
-        keys[63] = KEY_REWARD_MANAGER_V1;
-        keys[64] = KEY_DEGRADATION_MANAGER;
+        keys[59] = KEY_REWARD_MANAGER_V1;
+        keys[60] = KEY_DEGRADATION_MANAGER;
 
         // ===== 新增模块 =====
-        keys[65] = KEY_VAULT_LENDING_ENGINE;
-        keys[66] = KEY_DEGRADATION_STORAGE;
-        keys[67] = KEY_MODULE_HEALTH_VIEW;
-        keys[68] = KEY_BATCH_VIEW;
-        keys[69] = KEY_EARLY_REPAYMENT_GUARANTEE;
-        keys[70] = KEY_REGISTRY_VIEW;
-        keys[71] = KEY_SYSTEM_HEALTH_VIEW;
+        keys[61] = KEY_VAULT_LENDING_ENGINE;
+        keys[62] = KEY_DEGRADATION_STORAGE;
+        keys[63] = KEY_MODULE_HEALTH_VIEW;
+        keys[64] = KEY_BATCH_VIEW;
+        keys[65] = KEY_EARLY_REPAYMENT_GUARANTEE;
+        keys[66] = KEY_REGISTRY_VIEW;
+        keys[67] = KEY_SYSTEM_HEALTH_VIEW;
+        keys[68] = KEY_LIQUIDATION_PAYOUT_MANAGER;
+        // 使用预留扩展位：SettlementManager（统一结算/清算写入口）
+        keys[69] = KEY_SETTLEMENT_MANAGER;
+        // 新增扩展位：LenderPoolVault（线上流动性资金池）
+        keys[70] = KEY_LENDER_POOL_VAULT;
 
         return keys;
     }
     
     /// @notice 获取所有模块 Key 的字符串名称（保持与 getAllKeys 顺序一致）
     function getAllKeyStrings() internal pure returns (string[] memory) {
-        string[] memory names = new string[](72);
+        string[] memory names = new string[](71);
 
         // ===== 核心业务模块 =====
         names[0] = "KEY_CM";
@@ -622,33 +592,32 @@ library ModuleKeys {
         // ===== 清算模块 =====
         names[49] = "KEY_LIQUIDATION_MANAGER";
         names[50] = "KEY_LIQUIDATION_RISK_MANAGER";
-        names[51] = "KEY_LIQUIDATION_COLLATERAL_MANAGER";
-        names[52] = "KEY_LIQUIDATION_DEBT_MANAGER";
-        names[53] = "KEY_LIQUIDATION_ORCHESTRATOR";
-        names[54] = "KEY_LIQUIDATION_CALCULATOR";
-        names[55] = "KEY_LIQUIDATION_REWARD_DISTRIBUTOR";
-        names[56] = "KEY_LIQUIDATION_RECORD_MANAGER";
-        names[57] = "KEY_LIQUIDATION_CONFIG_MANAGER";
+        names[51] = "KEY_LIQUIDATION_ORCHESTRATOR";
+        names[52] = "KEY_LIQUIDATION_CALCULATOR";
+        names[53] = "KEY_LIQUIDATION_CONFIG_MANAGER";
 
         // ===== 奖励配置子模块 =====
-        names[58] = "KEY_ADVANCED_ANALYTICS_CONFIG";
-        names[59] = "KEY_PRIORITY_SERVICE_CONFIG";
-        names[60] = "KEY_FEATURE_UNLOCK_CONFIG";
-        names[61] = "KEY_GOVERNANCE_ACCESS_CONFIG";
-        names[62] = "KEY_TESTNET_FEATURES_CONFIG";
+        names[54] = "KEY_ADVANCED_ANALYTICS_CONFIG";
+        names[55] = "KEY_PRIORITY_SERVICE_CONFIG";
+        names[56] = "KEY_FEATURE_UNLOCK_CONFIG";
+        names[57] = "KEY_GOVERNANCE_ACCESS_CONFIG";
+        names[58] = "KEY_TESTNET_FEATURES_CONFIG";
 
         // ===== 版本控制 =====
-        names[63] = "KEY_REWARD_MANAGER_V1";
-        names[64] = "KEY_DEGRADATION_MANAGER";
+        names[59] = "KEY_REWARD_MANAGER_V1";
+        names[60] = "KEY_DEGRADATION_MANAGER";
 
         // ===== 新增模块 =====
-        names[65] = "KEY_VAULT_LENDING_ENGINE";
-        names[66] = "KEY_DEGRADATION_STORAGE";
-        names[67] = "KEY_MODULE_HEALTH_VIEW";
-        names[68] = "KEY_BATCH_VIEW";
-        names[69] = "KEY_EARLY_REPAYMENT_GUARANTEE";
-        names[70] = "KEY_REGISTRY_VIEW";
-        names[71] = "KEY_SYSTEM_HEALTH_VIEW";
+        names[61] = "KEY_VAULT_LENDING_ENGINE";
+        names[62] = "KEY_DEGRADATION_STORAGE";
+        names[63] = "KEY_MODULE_HEALTH_VIEW";
+        names[64] = "KEY_BATCH_VIEW";
+        names[65] = "KEY_EARLY_REPAYMENT_GUARANTEE";
+        names[66] = "KEY_REGISTRY_VIEW";
+        names[67] = "KEY_SYSTEM_HEALTH_VIEW";
+        names[68] = "KEY_LIQUIDATION_PAYOUT_MANAGER";
+        names[69] = "KEY_SETTLEMENT_MANAGER";
+        names[70] = "KEY_LENDER_POOL_VAULT";
 
         return names;
     }
@@ -714,14 +683,12 @@ library ModuleKeys {
         if (key == KEY_SETTLEMENT_TOKEN) return "settlementToken";
         if (key == KEY_RWA_STRATEGY) return "rwaAutoLeveragedStrategy";
         if (key == KEY_VAULT_BUSINESS_LOGIC) return "vaultBusinessLogic";
+        if (key == KEY_SETTLEMENT_MANAGER) return "settlementManager";
+        if (key == KEY_LENDER_POOL_VAULT) return "lenderPoolVault";
         if (key == KEY_LIQUIDATION_MANAGER) return "liquidationManager";
         if (key == KEY_LIQUIDATION_RISK_MANAGER) return "liquidationRiskManager";
-        if (key == KEY_LIQUIDATION_COLLATERAL_MANAGER) return "liquidationCollateralManager";
-        if (key == KEY_LIQUIDATION_DEBT_MANAGER) return "liquidationDebtManager";
         if (key == KEY_LIQUIDATION_ORCHESTRATOR) return "liquidationOrchestrator";
         if (key == KEY_LIQUIDATION_CALCULATOR) return "liquidationCalculator";
-        if (key == KEY_LIQUIDATION_REWARD_DISTRIBUTOR) return "liquidationRewardDistributor";
-        if (key == KEY_LIQUIDATION_RECORD_MANAGER) return "liquidationRecordManager";
         if (key == KEY_LIQUIDATION_CONFIG_MANAGER) return "liquidationConfigManager";
         if (key == KEY_REWARD_VIEW) return "rewardView";
         if (key == KEY_VAULT_LENDING_ENGINE) return "vaultLendingEngine";
@@ -791,14 +758,12 @@ library ModuleKeys {
         if (key == KEY_SETTLEMENT_TOKEN) return "KEY_SETTLEMENT_TOKEN";
         if (key == KEY_RWA_STRATEGY) return "KEY_RWA_STRATEGY";
         if (key == KEY_VAULT_BUSINESS_LOGIC) return "KEY_VAULT_BUSINESS_LOGIC";
+        if (key == KEY_SETTLEMENT_MANAGER) return "KEY_SETTLEMENT_MANAGER";
+        if (key == KEY_LENDER_POOL_VAULT) return "KEY_LENDER_POOL_VAULT";
         if (key == KEY_LIQUIDATION_MANAGER) return "KEY_LIQUIDATION_MANAGER";
         if (key == KEY_LIQUIDATION_RISK_MANAGER) return "KEY_LIQUIDATION_RISK_MANAGER";
-        if (key == KEY_LIQUIDATION_COLLATERAL_MANAGER) return "KEY_LIQUIDATION_COLLATERAL_MANAGER";
-        if (key == KEY_LIQUIDATION_DEBT_MANAGER) return "KEY_LIQUIDATION_DEBT_MANAGER";
         if (key == KEY_LIQUIDATION_ORCHESTRATOR) return "KEY_LIQUIDATION_ORCHESTRATOR";
         if (key == KEY_LIQUIDATION_CALCULATOR) return "KEY_LIQUIDATION_CALCULATOR";
-        if (key == KEY_LIQUIDATION_REWARD_DISTRIBUTOR) return "KEY_LIQUIDATION_REWARD_DISTRIBUTOR";
-        if (key == KEY_LIQUIDATION_RECORD_MANAGER) return "KEY_LIQUIDATION_RECORD_MANAGER";
         if (key == KEY_LIQUIDATION_CONFIG_MANAGER) return "KEY_LIQUIDATION_CONFIG_MANAGER";
         if (key == KEY_ADVANCED_ANALYTICS_CONFIG) return "KEY_ADVANCED_ANALYTICS_CONFIG";
         if (key == KEY_PRIORITY_SERVICE_CONFIG) return "KEY_PRIORITY_SERVICE_CONFIG";
@@ -866,14 +831,12 @@ library ModuleKeys {
         if (nameHash == keccak256(abi.encodePacked("settlementToken"))) return KEY_SETTLEMENT_TOKEN;
         if (nameHash == keccak256(abi.encodePacked("rwaAutoLeveragedStrategy"))) return KEY_RWA_STRATEGY;
         if (nameHash == keccak256(abi.encodePacked("vaultBusinessLogic"))) return KEY_VAULT_BUSINESS_LOGIC;
+        if (nameHash == keccak256(abi.encodePacked("settlementManager"))) return KEY_SETTLEMENT_MANAGER;
+        if (nameHash == keccak256(abi.encodePacked("lenderPoolVault"))) return KEY_LENDER_POOL_VAULT;
         if (nameHash == keccak256(abi.encodePacked("liquidationManager"))) return KEY_LIQUIDATION_MANAGER;
         if (nameHash == keccak256(abi.encodePacked("liquidationRiskManager"))) return KEY_LIQUIDATION_RISK_MANAGER;
-        if (nameHash == keccak256(abi.encodePacked("liquidationCollateralManager"))) return KEY_LIQUIDATION_COLLATERAL_MANAGER;
-        if (nameHash == keccak256(abi.encodePacked("liquidationDebtManager"))) return KEY_LIQUIDATION_DEBT_MANAGER;
         if (nameHash == keccak256(abi.encodePacked("liquidationOrchestrator"))) return KEY_LIQUIDATION_ORCHESTRATOR;
         if (nameHash == keccak256(abi.encodePacked("liquidationCalculator"))) return KEY_LIQUIDATION_CALCULATOR;
-        if (nameHash == keccak256(abi.encodePacked("liquidationRewardDistributor"))) return KEY_LIQUIDATION_REWARD_DISTRIBUTOR;
-        if (nameHash == keccak256(abi.encodePacked("liquidationRecordManager"))) return KEY_LIQUIDATION_RECORD_MANAGER;
         if (nameHash == keccak256(abi.encodePacked("liquidationConfigManager"))) return KEY_LIQUIDATION_CONFIG_MANAGER;
         if (nameHash == keccak256(abi.encodePacked("advancedAnalyticsConfig"))) return KEY_ADVANCED_ANALYTICS_CONFIG;
         if (nameHash == keccak256(abi.encodePacked("priorityServiceConfig"))) return KEY_PRIORITY_SERVICE_CONFIG;

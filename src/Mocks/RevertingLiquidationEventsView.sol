@@ -33,5 +33,21 @@ contract RevertingLiquidationEventsView is ILiquidationEventsView {
     ) external pure override {
         revert RevertingLiquidationEventsView__ForcedRevert();
     }
+
+    function pushLiquidationPayout(
+        address,
+        address,
+        address,
+        address,
+        address,
+        address,
+        uint256,
+        uint256,
+        uint256,
+        uint256,
+        uint256
+    ) external pure override {
+        revert RevertingLiquidationEventsView__ForcedRevert();
+    }
 }
 

@@ -47,7 +47,7 @@ describe('StatisticsView – 活跃用户统计测试', function () {
     
     // 用户从活跃变为非活跃
     await vaultCore.withdraw(asset, amount);
-    await vaultCore.repay(asset, debt);
+    await vaultCore.repay(orderId, asset, debt);
     const isActiveAfter = await statisticsView.isUserActive(user);
     expect(isActiveAfter).to.be.false;
   });

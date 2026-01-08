@@ -85,7 +85,7 @@ const repayAmount = ethers.parseUnits("500", 6);
 await erc20.approve(VAULT_CORE_ADDRESS, repayAmount);
 
 // 2. 还款
-await vaultCore.repay(usdcAddress, repayAmount);
+await vaultCore.repay(orderId, usdcAddress, repayAmount);
 console.log("✅ 还款成功");
 ```
 
@@ -335,7 +335,7 @@ async function repayDebt(asset: string, amount: bigint = 0n) {
     }
     
     // 4. 执行还款
-    const tx = await vaultCore.repay(asset, repayAmount);
+    const tx = await vaultCore.repay(orderId, asset, repayAmount);
     const receipt = await tx.wait();
     
     // 5. 查询剩余债务
@@ -350,7 +350,7 @@ async function repayDebt(asset: string, amount: bigint = 0n) {
 
 ```typescript
 // 全额还款（传入 0）
-await vaultCore.repay(assetAddress, 0);
+await vaultCore.repay(orderId, assetAddress, 0);
 ```
 
 #### 部分还款
@@ -358,7 +358,7 @@ await vaultCore.repay(assetAddress, 0);
 ```typescript
 // 部分还款
 const partialAmount = ethers.parseUnits("100", 6);
-await vaultCore.repay(assetAddress, partialAmount);
+await vaultCore.repay(orderId, assetAddress, partialAmount);
 ```
 
 ---
@@ -1021,7 +1021,7 @@ export function useVaultOperations() {
             await erc20.approve(vaultCoreAddress, amount);
             
             // 还款
-            const tx = await vaultCore.repay(asset, amount);
+            const tx = await vaultCore.repay(orderId, asset, amount);
             await tx.wait();
             
             return { success: true };

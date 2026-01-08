@@ -96,11 +96,13 @@ contract CollateralManager is
         _;
     }
 
-    /// @notice 允许 VaultRouter 或 LiquidationManager（清算路径）调用
+    /// @notice 允许 VaultRouter / LiquidationManager / SettlementManager 调用
+    /// @dev SettlementManager 用于“还款结算后自动释放抵押到用户”与“统一入口触发清算分支”
     modifier onlyVaultRouterOrLiquidationManager() {
         address viewAddr = _resolveVaultRouterAddr();
         address liquidationManager = _resolveLiquidationManagerAddr();
-        if (msg.sender != viewAddr && msg.sender != liquidationManager) {
+        address settlementManager = _resolveSettlementManagerAddr();
+        if (msg.sender != viewAddr && msg.sender != liquidationManager && msg.sender != settlementManager) {
             revert CollateralManager__UnauthorizedAccess();
         }
         _;
@@ -224,8 +226,12 @@ contract CollateralManager is
         address receiver
     ) external onlyVaultRouterOrLiquidationManager nonReentrant {
         if (receiver == address(0)) revert CollateralManager__ZeroAddress();
-        // 若是“提到用户”的语义，强制只能由 VaultRouter 发起
-        if (receiver == user && msg.sender != _resolveVaultRouterAddr()) {
+        // 若是“提到用户”的语义，强制只能由 VaultRouter 或 SettlementManager 发起
+        // - VaultRouter：用户主动 withdraw
+        // - SettlementManager：用户 repay 后自动释放抵押
+        address vaultRouter = _resolveVaultRouterAddr();
+        address settlementManager = _resolveSettlementManagerAddr();
+        if (receiver == user && msg.sender != vaultRouter && msg.sender != settlementManager) {
             revert CollateralManager__UnauthorizedAccess();
         }
         _withdrawCollateralTo(user, asset, amount, receiver);
@@ -616,6 +622,12 @@ contract CollateralManager is
     /// @notice 解析当前有效的 LiquidationManager 地址（通过 Registry）
     function _resolveLiquidationManagerAddr() internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
+    }
+
+    /// @notice 解析当前有效的 SettlementManager 地址（通过 Registry）
+    /// @dev 使用 getModule（非 revert），避免在未部署 SettlementManager 时影响 VaultRouter 正常路径
+    function _resolveSettlementManagerAddr() internal view returns (address) {
+        return Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
     }
 
     /// @notice 权限校验内部函数

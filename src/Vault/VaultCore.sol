@@ -10,6 +10,9 @@ import { ActionKeys } from "../constants/ActionKeys.sol";
 import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
+import { ISettlementManager } from "../interfaces/ISettlementManager.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title VaultCore
 /// @notice 双架构设计的极简入口合约 - 事件驱动 + View层缓存
@@ -18,6 +21,7 @@ import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
 /// @dev 只保留核心功能：用户操作传送、Registry升级能力、基础传送合约地址能力
 /// @custom:security-contact security@example.com
 contract VaultCore is Initializable, UUPSUpgradeable {
+    using SafeERC20 for IERC20;
     
     /*━━━━━━━━━━━━━━━ 基础配置 ━━━━━━━━━━━━━━━*/
     
@@ -116,14 +120,17 @@ contract VaultCore is Initializable, UUPSUpgradeable {
         ILendingEngineBasic(lendingEngine).repay(user, asset, amount);
     }
     
-    /// @notice 还款操作 - 传送数据至View层
-    /// @param asset 资产地址
+    /// @notice 还款操作 - 统一结算入口（结算/清算二合一）
+    /// @param orderId 仓位主键（SSOT）：LendingEngine 生成的订单 ID（历史旧称/旧口径一律视为该值）
+    /// @param asset 债务资产地址
     /// @param amount 还款金额
-    /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
-    function repay(address asset, uint256 amount) external {
+    /// @dev 统一入口：通过 SettlementManager 承接还款结算（repay + 抵押释放/处置）
+    function repay(uint256 orderId, address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        ILendingEngineBasic(lendingEngine).repay(msg.sender, asset, amount);
+        address settlementManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        // 资金流：由 VaultCore 作为 spender 从调用者拉取还款资金并转给 SettlementManager
+        IERC20(asset).safeTransferFrom(msg.sender, settlementManager, amount);
+        ISettlementManager(settlementManager).repayAndSettle(msg.sender, asset, amount, orderId);
     }
     
     /// @notice 提款操作 - 传送数据至View层

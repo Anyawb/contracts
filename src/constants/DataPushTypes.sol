@@ -68,6 +68,7 @@ library DataPushTypes {
     bytes32 constant DATA_TYPE_USER_POSITION_UPDATE     = keccak256("USER_POSITION_UPDATE");
     bytes32 constant DATA_TYPE_LIQUIDATION_UPDATE       = keccak256("LIQUIDATION_UPDATE");
     bytes32 constant DATA_TYPE_LIQUIDATION_BATCH_UPDATE = keccak256("LIQUIDATION_BATCH_UPDATE");
+    bytes32 constant DATA_TYPE_LIQUIDATION_PAYOUT       = keccak256("LIQUIDATION_PAYOUT");
     bytes32 constant DATA_TYPE_USER_VIEW_INITIALIZED    = keccak256("USER_VIEW_INITIALIZED");
     bytes32 constant DATA_TYPE_DEGRADATION_STATS_UPDATE = keccak256("DEGRADATION_STATS_UPDATE");
     bytes32 constant DATA_TYPE_HISTORY                  = keccak256("EVENT_HISTORY");

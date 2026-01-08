@@ -46,7 +46,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       await vaultCore.borrow(asset, borrowAmount);
       
       // 3. 用户还款
-      await vaultCore.repay(asset, repayAmount);
+      await vaultCore.repay(orderId, asset, repayAmount);
       
       // 4. 用户提款
       await vaultCore.withdraw(asset, withdrawAmount);

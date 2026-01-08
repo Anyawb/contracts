@@ -132,6 +132,17 @@ contract VaultLendingEngine is
         _;
     }
 
+    /// @notice 允许 VaultCore 或 SettlementManager 调用（统一结算入口）
+    modifier onlyVaultCoreOrSettlementManager() {
+        address vaultCore = _getModuleAddress(ModuleKeys.KEY_VAULT_CORE);
+        // best-effort：未注册 SettlementManager 时不应阻断 VaultCore 正常调用
+        address settlementManager = LendingEngineCore._getModuleAddressOrZero(_s(), ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        if (msg.sender != vaultCore && msg.sender != settlementManager) {
+            revert VaultLendingEngine__OnlyVaultCore();
+        }
+        _;
+    }
+
     /* ============ Custom Errors ============ */
     error VaultLendingEngine__OnlyVaultCore();
     error VaultLendingEngine__LengthMismatch();
@@ -404,7 +415,7 @@ contract VaultLendingEngine is
     /// @param user 用户地址
     /// @param asset 债务资产地址
     /// @param amount 还款金额
-    function repay(address user, address asset, uint256 amount) external override onlyValidRegistry nonReentrant onlyVaultCore {
+    function repay(address user, address asset, uint256 amount) external override onlyValidRegistry nonReentrant onlyVaultCoreOrSettlementManager {
         _s().repay(user, asset, amount);
     }
 

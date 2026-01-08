@@ -20,6 +20,12 @@ const DEPLOY_FILE = path.join(DEPLOY_DIR, 'localhost.json');
 // 将前端配置输出到 contracts/frontend-config，供前端直接导入使用
 const FRONTEND_DIR = path.join(__dirname, '..', '..', 'frontend-config');
 const FRONTEND_FILE = path.join(FRONTEND_DIR, 'contracts-localhost.ts');
+const DEFAULT_PAYOUT_BPS = {
+  platform: 300,
+  reserve: 200,
+  lender: 1700,
+  liquidator: 7800,
+};
 
 function load(): DeployMap {
   if (fs.existsSync(DEPLOY_FILE)) return JSON.parse(fs.readFileSync(DEPLOY_FILE, 'utf8')) as DeployMap;
@@ -176,6 +182,19 @@ async function main() {
     save(deployed);
   }
 
+  // Payout recipients（可用占位地址，默认 deployer；若部署了 LenderPoolVault 且未显式指定 PAYOUT_LENDER_ADDR，将自动指向资金池）
+  let payoutRecipients = {
+    platform: process.env.PAYOUT_PLATFORM_ADDR || deployer.address,
+    reserve: process.env.PAYOUT_RESERVE_ADDR || deployer.address,
+    lenderCompensation: process.env.PAYOUT_LENDER_ADDR || deployer.address,
+  };
+  const payoutRates = [
+    DEFAULT_PAYOUT_BPS.platform,
+    DEFAULT_PAYOUT_BPS.reserve,
+    DEFAULT_PAYOUT_BPS.lender,
+    DEFAULT_PAYOUT_BPS.liquidator,
+  ];
+
   // 为本地管理员赋权：ADMIN + 只读（VIEW_*）权限，满足 onlyUserOrStrictAdmin / onlyAuthorizedFor 检查
   try {
     const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
@@ -331,9 +350,34 @@ async function main() {
     save(deployed);
   }
 
+  // VaultLendingEngine（Vault借贷引擎）
+  if (!deployed.VaultLendingEngine) {
+    try {
+      deployed.VaultLendingEngine = await deployProxy('src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine', [deployed.PriceOracle, deployed.MockUSDC, deployed.Registry]);
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ VaultLendingEngine deployment failed:', error);
+    }
+  }
+
   // LiquidationRiskManager（清算风险管理器）
+  // NOTE:
+  // LiquidationRiskManager.initialize() 会在初始化阶段 _primeCoreModules()：
+  //  - KEY_CM
+  //  - KEY_LE
+  //  - KEY_PRICE_ORACLE
+  //  - KEY_SETTLEMENT_TOKEN
+  // 因此必须在部署前先把上述模块键绑定到 Registry，否则会因 MissingModule(KEY_CM/...) 回滚。
   if (!deployed.LiquidationRiskManager) {
     try {
+      const registry = await ethers.getContractAt('Registry', deployed.Registry);
+
+      // 最小前置绑定（不依赖后续“统一注册模块”步骤）
+      await (await registry.setModule(keyOf('COLLATERAL_MANAGER'), deployed.CollateralManager)).wait();
+      await (await registry.setModule(keyOf('LENDING_ENGINE'), deployed.VaultLendingEngine)).wait();
+      await (await registry.setModule(keyOf('PRICE_ORACLE'), deployed.PriceOracle)).wait();
+      await (await registry.setModule(keyOf('SETTLEMENT_TOKEN'), deployed.MockUSDC)).wait();
+
       const initialMaxCacheDuration = 300; // 5分钟
       const initialMaxBatchSize = 50;
       // 重要：LiquidationRiskLib / LiquidationRiskBatchLib 已改为纯 internal 库（不再外部链接），
@@ -351,16 +395,6 @@ async function main() {
       console.log('✅ LiquidationRiskManager deployed @', deployed.LiquidationRiskManager);
     } catch (error) {
       console.log('⚠️ LiquidationRiskManager deployment failed:', error);
-    }
-  }
-
-  // VaultLendingEngine（Vault借贷引擎）
-  if (!deployed.VaultLendingEngine) {
-    try {
-      deployed.VaultLendingEngine = await deployProxy('src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine', [deployed.PriceOracle, deployed.MockUSDC, deployed.Registry]);
-      save(deployed);
-    } catch (error) {
-      console.log('⚠️ VaultLendingEngine deployment failed:', error);
     }
   }
 
@@ -679,6 +713,50 @@ async function main() {
     }
   }
 
+  // 2.99.0) 部署 SettlementManager（统一结算/清算写入口，SSOT）
+  // NOTE: 该模块将作为 Registry.KEY_SETTLEMENT_MANAGER 的唯一对外写入口；
+  if (!deployed.SettlementManager) {
+    try {
+      deployed.SettlementManager = await deployProxy('SettlementManager', [deployed.Registry]);
+      save(deployed);
+      console.log('✅ SettlementManager deployed @', deployed.SettlementManager);
+    } catch (error) {
+      console.log('⚠️ SettlementManager deployment failed:', error);
+    }
+  }
+
+  // 2.99.0.5) 部署 LenderPoolVault（线上流动性资金池，推荐）
+  if (!deployed.LenderPoolVault) {
+    try {
+      deployed.LenderPoolVault = await deployProxy('LenderPoolVault', [deployed.Registry]);
+      save(deployed);
+      console.log('✅ LenderPoolVault deployed @', deployed.LenderPoolVault);
+    } catch (error) {
+      console.log('⚠️ LenderPoolVault deployment failed:', error);
+    }
+  }
+
+  // 若未显式提供 PAYOUT_LENDER_ADDR，则默认将 lenderCompensation 指向 LenderPoolVault（与“lender=资金池地址”语义一致）
+  if (!process.env.PAYOUT_LENDER_ADDR && deployed.LenderPoolVault) {
+    payoutRecipients = { ...payoutRecipients, lenderCompensation: deployed.LenderPoolVault };
+  }
+
+  // 2.99.2) 部署 LiquidationPayoutManager（残值分配）
+  if (!deployed.LiquidationPayoutManager) {
+    try {
+      deployed.LiquidationPayoutManager = await deployProxy('LiquidationPayoutManager', [
+        deployed.Registry,
+        deployed.AccessControlManager,
+        [payoutRecipients.platform, payoutRecipients.reserve, payoutRecipients.lenderCompensation],
+        payoutRates,
+      ]);
+      save(deployed);
+      console.log('✅ LiquidationPayoutManager deployed @', deployed.LiquidationPayoutManager);
+    } catch (error) {
+      console.log('⚠️ LiquidationPayoutManager deployment failed:', error);
+    }
+  }
+
   // 2.99.1) 授权 LiquidationManager 执行清算（ACTION_LIQUIDATE）
   // - Vault/LendingEngine/CollateralManager 内部会对 msg.sender 做 ACTION_LIQUIDATE 校验；
   // - 因此必须给 LiquidationManager 授权，否则清算会在 CM/LE 处回滚。
@@ -696,6 +774,46 @@ async function main() {
     }
   } catch (e) {
     console.log('⚠️ Grant ACTION_LIQUIDATE to LiquidationManager skipped/failed:', e);
+  }
+
+  // 2.99.1.1) 授权 SettlementManager 触发清算执行器（LiquidationManager 会校验 caller 具备 LIQUIDATE）
+  try {
+    if (deployed.AccessControlManager && deployed.SettlementManager) {
+      const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+      const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
+      const already = await acm.hasRole(ACTION_LIQUIDATE, deployed.SettlementManager);
+      if (!already) {
+        await (await acm.grantRole(ACTION_LIQUIDATE, deployed.SettlementManager)).wait();
+        console.log('🔑 Granted ACTION_LIQUIDATE to SettlementManager');
+      } else {
+        console.log('↪️ ACTION_LIQUIDATE already granted to SettlementManager, skip');
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Grant ACTION_LIQUIDATE to SettlementManager skipped/failed:', e);
+  }
+
+  // 2.99.1.2) 授权 SettlementManager 执行订单级还款与只读查询（ORDER_ENGINE.repay / _getLoanOrderForView）
+  try {
+    if (deployed.AccessControlManager && deployed.SettlementManager) {
+      const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+      const ACTION_REPAY = ethers.keccak256(ethers.toUtf8Bytes('REPAY'));
+      const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+
+      const hasRepay = await acm.hasRole(ACTION_REPAY, deployed.SettlementManager);
+      if (!hasRepay) {
+        await (await acm.grantRole(ACTION_REPAY, deployed.SettlementManager)).wait();
+        console.log('🔑 Granted ACTION_REPAY to SettlementManager');
+      }
+
+      const hasView = await acm.hasRole(ACTION_VIEW_SYSTEM_DATA, deployed.SettlementManager);
+      if (!hasView) {
+        await (await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, deployed.SettlementManager)).wait();
+        console.log('🔑 Granted ACTION_VIEW_SYSTEM_DATA to SettlementManager');
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Grant ACTION_REPAY/VIEW_SYSTEM_DATA to SettlementManager skipped/failed:', e);
   }
 
   // 3) 注册模块到 Registry（通过 NAME -> UPPER_SNAKE -> bytes32 key）
@@ -750,6 +868,9 @@ async function main() {
     ValuationOracleView: 'VALUATION_ORACLE_VIEW',
     LiquidatorView: 'LIQUIDATION_VIEW',
     LiquidationManager: 'LIQUIDATION_MANAGER',
+    SettlementManager: 'SETTLEMENT_MANAGER',
+    LiquidationPayoutManager: 'LIQUIDATION_PAYOUT_MANAGER',
+    LenderPoolVault: 'LENDER_POOL_VAULT',
     GuaranteeFundManager: 'GUARANTEE_FUND_MANAGER',
     LoanNFT: 'LOAN_NFT',
     MockUSDC: 'SETTLEMENT_TOKEN',
@@ -794,7 +915,10 @@ async function main() {
     'DegradationStorage',
     'ModuleHealthView',
     'BatchView',
-        'LiquidationRiskView',
+    'LiquidationRiskView',
+    'LiquidationPayoutManager',
+    'SettlementManager',
+    'LenderPoolVault',
     'FeeRouter',
     'FeeRouterView',
     'CollateralManager',
@@ -841,6 +965,7 @@ async function main() {
   await ensureModule('VAULT_BUSINESS_LOGIC', deployed.VaultBusinessLogic, 'VaultBusinessLogic');
   await ensureModule('ACCESS_CONTROL_MANAGER', deployed.AccessControlManager, 'AccessControlManager');
   await ensureModule('LIQUIDATION_MANAGER', deployed.LiquidationManager, 'LiquidationManager');
+  await ensureModule('SETTLEMENT_MANAGER', deployed.SettlementManager, 'SettlementManager');
 
   for (const name of modules) {
     const addr = deployed[name];
@@ -896,11 +1021,22 @@ async function main() {
       await (await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.LiquidationManager)).wait();
       console.log(`✅ Bound KEY_LIQUIDATION_MANAGER -> ${deployed.LiquidationManager}`);
     }
+    if (deployed.SettlementManager) {
+      try {
+        await (await registry.setModule(keyOf('SETTLEMENT_MANAGER'), deployed.SettlementManager)).wait();
+        console.log(`✅ Bound KEY_SETTLEMENT_MANAGER -> ${deployed.SettlementManager}`);
+      } catch (error) {
+        console.log('⚠️ SettlementManager binding failed:', error);
+      }
+    }
     if (deployed.HealthView) {
       try { await (await registry.setModule(keyOf('HEALTH_VIEW'), deployed.HealthView)).wait(); } catch (error) { console.log('⚠️ HealthView binding failed:', error); }
     }
     if (deployed.LiquidatorView) {
       try { await (await registry.setModule(keyOf('LIQUIDATION_VIEW'), deployed.LiquidatorView)).wait(); } catch (error) { console.log('⚠️ LiquidatorView binding failed:', error); }
+    }
+    if (deployed.LiquidationPayoutManager) {
+      try { await (await registry.setModule(keyOf('LIQUIDATION_PAYOUT_MANAGER'), deployed.LiquidationPayoutManager)).wait(); } catch (error) { console.log('⚠️ LiquidationPayoutManager binding failed:', error); }
     }
     if (deployed.StatisticsView) {
       try { await (await registry.setModule(keyOf('VAULT_STATISTICS'), deployed.StatisticsView)).wait(); console.log(`✅ Bound KEY_STATS (VAULT_STATISTICS) -> ${deployed.StatisticsView}`); } catch (error) { console.log('⚠️ StatisticsView binding failed:', error); }

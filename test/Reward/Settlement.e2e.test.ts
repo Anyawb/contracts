@@ -24,6 +24,7 @@ import type {
   CollateralManager,
   VaultLendingEngine,
   LendingEngine,
+  LenderPoolVault,
   LoanNFT,
   MockRewardManager,
   FeeRouter,
@@ -88,6 +89,7 @@ const MODULE_KEYS = {
   KEY_LIQUIDATION_RISK_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_RISK_MANAGER')),
   KEY_HEALTH_VIEW: ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW')),
   KEY_POSITION_VIEW: ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW')),
+  KEY_LENDER_POOL_VAULT: ethers.keccak256(ethers.toUtf8Bytes('LENDER_POOL_VAULT')),
 } as const;
 
 const ActionKeys = {
@@ -133,7 +135,7 @@ async function deployProxyContract<T extends object>(
  * 计算 LendIntent 哈希
  */
 function hashLendIntent(lendIntent: {
-  lender: string;
+  lenderSigner: string;
   asset: string;
   amount: bigint;
   minTermDays: number;
@@ -143,7 +145,7 @@ function hashLendIntent(lendIntent: {
   salt: string;
 }): string {
   const typeHash = ethers.keccak256(ethers.toUtf8Bytes(
-    'LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)'
+    'LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)'
   ));
   
   const coder = ethers.AbiCoder.defaultAbiCoder();
@@ -151,7 +153,7 @@ function hashLendIntent(lendIntent: {
     ['bytes32', 'address', 'address', 'uint256', 'uint16', 'uint16', 'uint256', 'uint256', 'bytes32'],
     [
       typeHash,
-      lendIntent.lender,
+      lendIntent.lenderSigner,
       lendIntent.asset,
       lendIntent.amount,
       lendIntent.minTermDays,
@@ -181,6 +183,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
   let vaultCore: any; // SettlementBorrowCoreMock
   let vaultRouter: VaultRouter;
   let vaultBusinessLogic: VaultBusinessLogic;
+  let lenderPoolVault: LenderPoolVault;
   let priceOracle: MockPriceOracle;
   let usdt: MockERC20;
   let rwa: MockERC20;
@@ -299,6 +302,9 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     rewardManager = await RewardManagerFactory.deploy() as unknown as MockRewardManager;
     await rewardManager.waitForDeployment();
 
+    // 10.1 部署 LenderPoolVault（线上流动性资金池）
+    lenderPoolVault = await deployProxyContract<LenderPoolVault>('LenderPoolVault', [await registry.getAddress()]);
+
     // 11. Registry 模块注册
     await registry.setModule(MODULE_KEYS.KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_CM, await cm.getAddress());
@@ -315,6 +321,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     await registry.setModule(MODULE_KEYS.KEY_LIQUIDATION_RISK_MANAGER, await liquidationRiskManager.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_HEALTH_VIEW, await healthView.getAddress());
     await registry.setModule(MODULE_KEYS.KEY_POSITION_VIEW, await positionView.getAddress());
+    await registry.setModule(MODULE_KEYS.KEY_LENDER_POOL_VAULT, await lenderPoolVault.getAddress());
 
     // 12. 部署 VaultRouter（非 UUPS，使用构造函数）
     const VaultRouterFactory = await ethers.getContractFactory('src/Vault/VaultRouter.sol:VaultRouter');
@@ -432,6 +439,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
       vaultCore,
       vaultRouter,
       vaultBusinessLogic,
+      lenderPoolVault,
       priceOracle,
       usdt,
       rwa,
@@ -461,6 +469,7 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
     vaultCore = fixture.vaultCore;
     vaultRouter = fixture.vaultRouter;
     vaultBusinessLogic = fixture.vaultBusinessLogic;
+    lenderPoolVault = fixture.lenderPoolVault;
     priceOracle = fixture.priceOracle;
     usdt = fixture.usdt;
     rwa = fixture.rwa;
@@ -480,6 +489,8 @@ describe('Settlement E2E Test - 双架构设计版本', function () {
 
       // 1. 借款人存入抵押物 - 直接通过 VaultRouter 标准入口
       const depositAmount = ethers.parseEther('100');
+      // CollateralManager 会从 borrower 拉取抵押 token，因此需要先给 CM 授权
+      await rwa.connect(borrower).approve(await cm.getAddress(), depositAmount);
       // 通过 VaultCore（Mock）入口，满足 VaultRouter 的 onlyVaultCore
       await vaultCore.connect(borrower).deposit(rwaAddr, depositAmount);
       

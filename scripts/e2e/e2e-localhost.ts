@@ -91,8 +91,12 @@ async function main() {
   console.log("Borrow done");
 
   // ====== 3) 还款 ======
+  // 说明：VaultCore.repay 现已收敛为 repay(orderId, asset, amount)。
+  // 该脚本走的是“非订单化的极简 borrow/repay”示例，因此这里用占位 orderId=1。
+  // 若要严格按 SSOT 的订单流，请改用 ORDER_ENGINE（LendingEngine）创建订单并使用真实 orderId。
+  const orderId = 1n;
   await usdc.connect(borrower).approve(vaultCore.target, borrowAmount);
-  await vaultCore.connect(borrower).repay(usdc.target, borrowAmount);
+  await vaultCore.connect(borrower).repay(orderId, usdc.target, borrowAmount);
   console.log("Repay done");
 
   // 验证抵押仍在（未退出）

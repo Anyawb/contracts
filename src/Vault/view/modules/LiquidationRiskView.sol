@@ -14,6 +14,16 @@ import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ArrayLengthMismatch, EmptyArray, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
+/// @dev Minimal HealthView interface (read-only).
+interface IHealthViewLite {
+    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid);
+    function getCacheTimestamp(address user) external view returns (uint256);
+    function batchGetHealthFactors(address[] calldata users)
+        external
+        view
+        returns (uint256[] memory factors, bool[] memory validFlags);
+}
+
 /// @title LiquidationRiskView
 /// @notice 清算风险只读视图：批量风险计算 + 健康因子缓存读取，遵循双架构只读规范
 contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
@@ -77,8 +87,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyRiskViewerFor(user)
         returns (uint256 healthFactor, uint256 timestamp, uint256 blockNumber)
     {
-        (uint256 hf, uint256 ts) = _rm().getHealthFactorCache(user);
-        if (hf == 0) {
+        (uint256 hf, bool valid) = _hv().getUserHealthFactor(user);
+        uint256 ts = _hv().getCacheTimestamp(user);
+        if (hf == 0 || !valid || ts == 0) {
             return (0, 0, 0);
         }
         return (hf, ts, block.number);
@@ -106,7 +117,8 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @notice 获取用户健康因子
     function getUserHealthFactor(address user) external view onlyValidRegistry onlyRiskViewerFor(user) returns (uint256) {
-        return _rm().getUserHealthFactor(user);
+        (uint256 hf, bool valid) = _hv().getUserHealthFactor(user);
+        return valid ? hf : 0;
     }
 
     /// @notice 批量检查是否可清算
@@ -134,7 +146,12 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
         if (len > ViewConstants.MAX_BATCH_SIZE) revert LiquidationRiskView__BatchTooLarge();
-        return _rm().batchGetUserHealthFactors(users);
+        (uint256[] memory factors, bool[] memory flags) = _hv().batchGetHealthFactors(users);
+        uint256[] memory out = new uint256[](len);
+        for (uint256 i; i < len; ++i) {
+            out[i] = flags[i] ? factors[i] : 0;
+        }
+        return out;
     }
 
     /// @notice 批量获取清算风险评分
@@ -169,7 +186,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyRiskViewerFor(user)
         returns (uint256 healthFactor, uint256 timestamp)
     {
-        return _rm().getHealthFactorCache(user);
+        (uint256 hf, ) = _hv().getUserHealthFactor(user);
+        uint256 ts = _hv().getCacheTimestamp(user);
+        return (hf, ts);
     }
 
     /// @notice 返回 Registry 地址（首选接口）
@@ -186,6 +205,11 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _rm() internal view returns (ILiquidationRiskManager) {
         address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
         return ILiquidationRiskManager(rm);
+    }
+
+    function _hv() internal view returns (IHealthViewLite) {
+        address hv = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
+        return IHealthViewLite(hv);
     }
 
     // ============ UUPS ============

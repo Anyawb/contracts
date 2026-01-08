@@ -217,7 +217,8 @@ async function main() {
       rate: rateBps,
       term: termSec,
       borrower: borrower.address,
-      lender: lender.address,
+      // Option A: lender in order is the funding pool contract address (LenderPoolVault), not the signer EOA.
+      lender: CONTRACT_ADDRESSES.LenderPoolVault,
       asset: assetAddr,
       startTimestamp: 0,
       maturity: 0,

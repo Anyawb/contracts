@@ -6,6 +6,7 @@ import { ILendingEngine } from "../interfaces/ILendingEngine.sol";
 /// @title MockLendingEngine
 /// @notice 模拟借贷引擎，用于测试
 contract MockLendingEngine is ILendingEngine {
+    mapping(address => uint256) private _userTotalDebt;
     function recordBorrow(address user, address asset, uint256 amount) external pure {
         user; asset; amount; // silence unused parameters
     }
@@ -36,4 +37,13 @@ contract MockLendingEngine is ILendingEngine {
     function getFailedFeeAmount(uint256) external pure returns (uint256) { return 0; }
     function getNftRetryCount(uint256) external pure returns (uint256) { return 0; }
     function getRegisteredMonitorCount() external pure returns (uint256) { return 0; }
+
+    // ====== Test helpers ======
+    function setUserDebt(address user, address /*asset*/, uint256 amount) external {
+        _userTotalDebt[user] = amount;
+    }
+
+    function getUserTotalDebtValue(address user) external view returns (uint256) {
+        return _userTotalDebt[user];
+    }
 } 

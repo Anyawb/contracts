@@ -10,9 +10,6 @@ contract MockLiquidationRiskManager is ILiquidationRiskManager {
     mapping(address => uint256) private _healthFactor;
     mapping(address => uint256) private _riskLevel;
     mapping(address => uint256) private _safetyMargin;
-    mapping(address => uint256) private _hfTimestamp;
-    mapping(address => uint256) private _hfCache;
-
     uint256 private _liquidationThreshold;
     uint256 private _minHealthFactor;
 
@@ -42,11 +39,6 @@ contract MockLiquidationRiskManager is ILiquidationRiskManager {
         _healthFactor[user] = healthFactor;
         _riskLevel[user] = riskLevel;
         _safetyMargin[user] = safetyMargin;
-    }
-
-    function setHealthFactorCache(address user, uint256 healthFactor, uint256 timestamp) external {
-        _hfCache[user] = healthFactor;
-        _hfTimestamp[user] = timestamp;
     }
 
     function setLiquidationThreshold(uint256 threshold) external {
@@ -85,15 +77,6 @@ contract MockLiquidationRiskManager is ILiquidationRiskManager {
         if (riskScore > 100) riskScore = 100;
     }
 
-    function getUserHealthFactor(address user) external view override returns (uint256 healthFactor) {
-        return _healthFactor[user];
-    }
-
-    function calculateHealthFactor(uint256 collateral, uint256 debt) external pure override returns (uint256 healthFactor) {
-        if (debt == 0) return type(uint256).max;
-        return (collateral * 1e4) / debt;
-    }
-
     function getUserRiskAssessment(address user) external view override returns (
         bool liquidatable,
         uint256 riskScore,
@@ -124,44 +107,11 @@ contract MockLiquidationRiskManager is ILiquidationRiskManager {
         _minHealthFactor = newMinHealthFactor;
     }
 
-    function updateHealthFactorCache(address user, uint256 healthFactor) external override {
-        _hfCache[user] = healthFactor;
-        _hfTimestamp[user] = block.timestamp;
-    }
-
-    function getHealthFactorCache(address user) external view override returns (uint256 healthFactor, uint256 timestamp) {
-        return (_hfCache[user], _hfTimestamp[user]);
-    }
-
-    function clearHealthFactorCache(address user) external override {
-        delete _hfCache[user];
-        delete _hfTimestamp[user];
-    }
-
-    function batchUpdateHealthFactorCache(
-        address[] calldata users,
-        uint256[] calldata healthFactors
-    ) external override {
-        uint256 len = users.length;
-        for (uint256 i; i < len; ++i) {
-            _hfCache[users[i]] = healthFactors[i];
-            _hfTimestamp[users[i]] = block.timestamp;
-        }
-    }
-
     function batchIsLiquidatable(address[] calldata users) external view override returns (bool[] memory liquidatableFlags) {
         uint256 len = users.length;
         liquidatableFlags = new bool[](len);
         for (uint256 i; i < len; ++i) {
             liquidatableFlags[i] = _liquidatable[users[i]];
-        }
-    }
-
-    function batchGetUserHealthFactors(address[] calldata users) external view override returns (uint256[] memory healthFactors) {
-        uint256 len = users.length;
-        healthFactors = new uint256[](len);
-        for (uint256 i; i < len; ++i) {
-            healthFactors[i] = _healthFactor[users[i]];
         }
     }
 

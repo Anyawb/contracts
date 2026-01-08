@@ -58,6 +58,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     // NOTE: Prefer centralized DataPushTypes to avoid duplicated keccak256 constants across modules.
     bytes32 public constant DATA_TYPE_LIQUIDATION_UPDATE = DataPushTypes.DATA_TYPE_LIQUIDATION_UPDATE;
     bytes32 public constant DATA_TYPE_LIQUIDATION_BATCH_UPDATE = DataPushTypes.DATA_TYPE_LIQUIDATION_BATCH_UPDATE;
+    bytes32 public constant DATA_TYPE_LIQUIDATION_PAYOUT = DataPushTypes.DATA_TYPE_LIQUIDATION_PAYOUT;
     
     /// @notice Registry 有效性验证修饰符
     modifier onlyValidRegistry() {
@@ -142,6 +143,38 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         DataPushLibrary._emitData(
             DATA_TYPE_LIQUIDATION_BATCH_UPDATE,
             abi.encode(users, collateralAssets, debtAssets, collateralAmounts, debtAmounts, liquidator, bonuses, timestamp)
+        );
+    }
+
+    /// @notice 清算残值分配推送（可选）
+    function pushLiquidationPayout(
+        address user,
+        address collateralAsset,
+        address platform,
+        address reserve,
+        address lender,
+        address liquidator,
+        uint256 platformShare,
+        uint256 reserveShare,
+        uint256 lenderShare,
+        uint256 liquidatorShare,
+        uint256 timestamp
+    ) external override onlyValidRegistry onlyBusinessModule {
+        DataPushLibrary._emitData(
+            DATA_TYPE_LIQUIDATION_PAYOUT,
+            abi.encode(
+                user,
+                collateralAsset,
+                platform,
+                reserve,
+                lender,
+                liquidator,
+                platformShare,
+                reserveShare,
+                lenderShare,
+                liquidatorShare,
+                timestamp
+            )
         );
     }
 

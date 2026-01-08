@@ -25,7 +25,12 @@ contract MockPriceOracle is Ownable, IPriceOracle {
     }
 
     /// @notice 设置价格（仅测试合约，无权限控制）
+    /// @notice 设置价格（含时间戳）
     function setPrice(address token, uint256 price, uint256 timestamp, uint256 decimals) external onlyOwner {
+        _setPrice(token, price, timestamp, decimals);
+    }
+
+    function _setPrice(address token, uint256 price, uint256 timestamp, uint256 decimals) internal {
         if (shouldFail) revert MockFailure();
         _prices[token] = price;
         _timestamps[token] = timestamp;

@@ -230,21 +230,21 @@ export async function runRewardEdgecases() {
   function buildLendIntentHash(li: any) {
     const typeHash = ethers.keccak256(
       ethers.toUtf8Bytes(
-        "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+        "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
       )
     );
     const coder = ethers.AbiCoder.defaultAbiCoder();
     return ethers.keccak256(
       coder.encode(
         ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
-        [typeHash, li.lender, li.asset, li.amount, li.minTermDays, li.maxTermDays, li.minRateBps, li.expireAt, li.salt]
+        [typeHash, li.lenderSigner, li.asset, li.amount, li.minTermDays, li.maxTermDays, li.minRateBps, li.expireAt, li.salt]
       )
     );
   }
 
   const typesLend = {
     LendIntent: [
-      { name: "lender", type: "address" },
+      { name: "lenderSigner", type: "address" },
       { name: "asset", type: "address" },
       { name: "amount", type: "uint256" },
       { name: "minTermDays", type: "uint16" },
@@ -288,7 +288,7 @@ export async function runRewardEdgecases() {
     };
 
     const lendIntent = {
-      lender: params.lender.address,
+      lenderSigner: params.lender.address,
       asset: assetAddr,
       amount: params.principal,
       minTermDays: 1,
@@ -513,7 +513,7 @@ export async function runRewardEdgecases() {
       salt: ethers.keccak256(ethers.toUtf8Bytes(`borrow-late-insufficient-${Date.now()}`)),
     };
     const lendIntent2 = {
-      lender: lenderB.address,
+      lenderSigner: lenderB.address,
       asset: assetAddr,
       amount: principal,
       minTermDays: 1,

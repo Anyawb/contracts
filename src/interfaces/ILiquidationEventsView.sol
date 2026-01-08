@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ILiquidationEventsView
-/// @notice 仅用于接收业务侧（清算）推送并转发到统一 DataPush 流的 View 接口
-/// @dev 与查询接口 `ILiquidationView` 解耦，避免强制实现大量只读函数
+/**
+ * @title ILiquidationEventsView
+ * @notice View interface for receiving business-side (liquidation) push notifications and forwarding to unified DataPush stream
+ * @dev Decoupled from query interface `ILiquidationView` to avoid forcing implementation of many read-only functions
+ */
 interface ILiquidationEventsView {
-    /// @notice 单笔清算完成后的推送（供链下与缓存消费）
-    /// @param user 被清算用户
-    /// @param collateralAsset 被扣押的抵押资产
-    /// @param debtAsset 被偿还的债务资产
-    /// @param collateralAmount 抵押扣押数量
-    /// @param debtAmount 债务清偿数量
-    /// @param liquidator 清算人
-    /// @param bonus 实得清算奖励
-    /// @param timestamp 区块时间戳
+    /**
+     * @notice Push single liquidation completion update (for off-chain and cache consumption)
+     * @param user Liquidated user address
+     * @param collateralAsset Seized collateral asset address
+     * @param debtAsset Repaid debt asset address
+     * @param collateralAmount Amount of seized collateral
+     * @param debtAmount Amount of repaid debt
+     * @param liquidator Liquidator address
+     * @param bonus Actual liquidation bonus received
+     * @param timestamp Block timestamp (in seconds)
+     */
     function pushLiquidationUpdate(
         address user,
         address collateralAsset,
@@ -25,15 +29,17 @@ interface ILiquidationEventsView {
         uint256 timestamp
     ) external;
 
-    /// @notice 批量清算完成后的推送（批量聚合）
-    /// @param users 被清算用户数组
-    /// @param collateralAssets 抵押资产数组
-    /// @param debtAssets 债务资产数组
-    /// @param collateralAmounts 抵押扣押数量数组
-    /// @param debtAmounts 债务清偿数量数组
-    /// @param liquidator 清算人
-    /// @param bonuses 奖励数组
-    /// @param timestamp 区块时间戳
+    /**
+     * @notice Push batch liquidation completion update (batch aggregation)
+     * @param users Array of liquidated user addresses
+     * @param collateralAssets Array of collateral asset addresses
+     * @param debtAssets Array of debt asset addresses
+     * @param collateralAmounts Array of seized collateral amounts
+     * @param debtAmounts Array of repaid debt amounts
+     * @param liquidator Liquidator address
+     * @param bonuses Array of bonus amounts
+     * @param timestamp Block timestamp (in seconds)
+     */
     function pushBatchLiquidationUpdate(
         address[] calldata users,
         address[] calldata collateralAssets,
@@ -42,6 +48,34 @@ interface ILiquidationEventsView {
         uint256[] calldata debtAmounts,
         address liquidator,
         uint256[] calldata bonuses,
+        uint256 timestamp
+    ) external;
+
+    /**
+     * @notice Push liquidation residual value distribution update (optional extension)
+     * @param user Liquidated user address
+     * @param collateralAsset Seized collateral asset address
+     * @param platform Platform revenue recipient address
+     * @param reserve Risk reserve recipient address
+     * @param lender Lender compensation recipient address
+     * @param liquidator Liquidator address
+     * @param platformShare Platform distribution share
+     * @param reserveShare Reserve distribution share
+     * @param lenderShare Lender compensation distribution share
+     * @param liquidatorShare Liquidator distribution share
+     * @param timestamp Block timestamp (in seconds)
+     */
+    function pushLiquidationPayout(
+        address user,
+        address collateralAsset,
+        address platform,
+        address reserve,
+        address lender,
+        address liquidator,
+        uint256 platformShare,
+        uint256 reserveShare,
+        uint256 lenderShare,
+        uint256 liquidatorShare,
         uint256 timestamp
     ) external;
 }

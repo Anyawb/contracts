@@ -11,6 +11,7 @@ import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
 import { ILendingEngine } from "../interfaces/ILendingEngine.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { IFeeRouter } from "../interfaces/IFeeRouter.sol";
+import { ILenderPoolVault } from "../interfaces/ILenderPoolVault.sol";
 
 /// @title SettlementMatchLib
 /// @notice 资金拨付与账本/订单落地的一体化原子流程（由业务层调用）
@@ -76,7 +77,9 @@ library SettlementMatchLib {
             ICollateralManager(cm).depositCollateral(borrower, collateralAsset, collateralAmount);
         }
 
-        // 3) 资金拨付：从业务层合约余额划转给借款人（出借人资金应已先入池）
+        // 3) 从资金池拨付到本合约，再转给借款人（资金来源：LenderPoolVault）
+        address pool = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_LENDER_POOL_VAULT);
+        ILenderPoolVault(pool).transferOut(borrowAsset, address(this), amount);
         IERC20(borrowAsset).safeTransfer(borrower, amount);
 
         // 4) 债务记账：通过 VaultCore 统一入口写入账本（命中 onlyVaultCore）
@@ -140,7 +143,11 @@ library SettlementMatchLib {
             ICollateralManager(cm).depositCollateral(borrower, collateralAsset, collateralAmount);
         }
 
-        // 3) 账本写入（统一 VaultCore 入口）
+        // 3) 从资金池拨付到本合约（资金来源：LenderPoolVault）
+        address pool = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_LENDER_POOL_VAULT);
+        ILenderPoolVault(pool).transferOut(borrowAsset, address(this), amount);
+
+        // 4) 账本写入（统一 VaultCore 入口）
         address vaultCore = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
         (bool ok, bytes memory ret) = vaultCore.call(abi.encodeWithSignature(
             "borrowFor(address,address,uint256,uint16)",
@@ -153,7 +160,7 @@ library SettlementMatchLib {
             assembly { revert(add(ret, 0x20), mload(ret)) }
         }
 
-        // 4) 创建订单（由 LendingEngine 统一发 LOAN_* + NFT + Reward + DataPush）
+        // 5) 创建订单（由 LendingEngine 统一发 LOAN_* + NFT + Reward + DataPush）
         ILendingEngine.LoanOrder memory order = ILendingEngine.LoanOrder({
             principal: amount,
             rate: rateBps,
@@ -168,13 +175,13 @@ library SettlementMatchLib {
         address orderEngine = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
         orderId = ILendingEngine(orderEngine).createLoanOrder(order);
 
-        // 5) 借款手续费分发（FeeRouter 从 msg.sender 拉取，再返还剩余给 msg.sender）
+        // 6) 借款手续费分发（FeeRouter 从 msg.sender 拉取，再返还剩余给 msg.sender）
         address feeRouter = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_FR);
         // 先授权 FeeRouter 可拉取本次金额
         IERC20(borrowAsset).forceApprove(feeRouter, amount);
         IFeeRouter(feeRouter).distributeNormal(borrowAsset, amount);
 
-        // 6) 将净额转给借方：净额 = amount - platform - eco
+        // 7) 将净额转给借方：净额 = amount - platform - eco
         uint256 platformBps = IFeeRouter(feeRouter).getPlatformFeeBps();
         uint256 ecoBps = IFeeRouter(feeRouter).getEcosystemFeeBps();
         uint256 platformAmt = (amount * platformBps) / 1e4;

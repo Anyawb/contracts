@@ -187,7 +187,7 @@ await vaultCore.deposit(assetAddress, amount);
 await vaultCore.borrow(assetAddress, amount);
 
 // 还款（需要白名单权限，由业务逻辑层检查）
-await vaultCore.repay(assetAddress, amount);
+await vaultCore.repay(orderId, assetAddress, amount);
 
 // 提款（需要白名单权限，由业务逻辑层检查）
 await vaultCore.withdraw(assetAddress, amount);

@@ -261,7 +261,7 @@ const userDebt = await vaultView.getUserDebt(userAddress, assetAddress);
 const userBalance = await tokenContract.balanceOf(userAddress);
 
 // 3. 执行还款
-await vaultCore.repay(assetAddress, amount);
+await vaultCore.repay(orderId, assetAddress, amount);
 
 // 4. 查询还款后的状态
 const remainingDebt = await vaultView.getUserDebt(userAddress, assetAddress);

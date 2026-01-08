@@ -94,7 +94,7 @@ async function main() {
     rate: rateBps,
     term,
     borrower: borrower.address,
-    lender: lender.address,
+    lenderSigner: lender.address,
     asset: usdc.target,
     startTimestamp: 0,
     maturity: 0,

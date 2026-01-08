@@ -67,8 +67,9 @@ contract SettlementBorrowCoreMock {
         ILendingEngineBasic(le).borrow(msg.sender, asset, amount, 0, 0);
     }
 
-    /// @notice 还款（透传到 LendingEngine）
-    function repay(address asset, uint256 amount) external {
+    /// @notice 还款（透传到 LendingEngine；兼容 VaultCore.repay(orderId, asset, amount) 新签名）
+    function repay(uint256 orderId, address asset, uint256 amount) external {
+        orderId; // mock: orderId is not used in this simplified forwarder
         require(amount > 0, "Amount must be positive");
         address le = Registry(registry).getModuleOrRevert(ModuleKeys.KEY_LE);
         ILendingEngineBasic(le).repay(msg.sender, asset, amount);

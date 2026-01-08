@@ -16,7 +16,7 @@ function calcTotalDue(principal: bigint, rateBps: bigint, termSec: bigint) {
 function buildLendIntentHash(li: any) {
   const typeHash = ethers.keccak256(
     ethers.toUtf8Bytes(
-      "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+      "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
     )
   );
   const coder = ethers.AbiCoder.defaultAbiCoder();
@@ -25,7 +25,7 @@ function buildLendIntentHash(li: any) {
       ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
       [
         typeHash,
-        li.lender,
+        li.lenderSigner,
         li.asset,
         li.amount,
         li.minTermDays,
@@ -237,7 +237,8 @@ async function main() {
   // ============ Step 3: Repay Direct Borrow ============
   console.log("\n=== Step 3: Borrower Repays Direct Borrow ===");
   await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, borrowAmt1);
-  await vaultCore.connect(borrower).repay(usdc.target, borrowAmt1);
+  const orderId = 1n; // legacy demo script: placeholder orderId; see e2e-localhost.ts for explanation
+  await vaultCore.connect(borrower).repay(orderId, usdc.target, borrowAmt1);
   console.log("✅ Repay completed.");
   
   await verifyViews("After Repay", borrower.address, usdc.target);
@@ -262,7 +263,7 @@ async function main() {
   };
 
   const lendIntent = {
-    lender: lender.address,
+    lenderSigner: lender.address,
     asset: usdc.target,
     amount: borrowAmt2,
     minTermDays: 1,
@@ -302,7 +303,7 @@ async function main() {
 
   const typesLend = {
     LendIntent: [
-      { name: "lender", type: "address" },
+      { name: "lenderSigner", type: "address" },
       { name: "asset", type: "address" },
       { name: "amount", type: "uint256" },
       { name: "minTermDays", type: "uint16" },
@@ -348,13 +349,14 @@ async function main() {
 
   await verifyViews("After Match", borrower.address, usdc.target);
 
-  // ============ Step 5: Repay Match Loan ============
+  // ============ Step 5: Repay Match Loan (via SettlementManager SSOT) ============
   console.log("\n=== Step 5: Borrower Repays Match Loan ===");
   if (orderId === null) throw new Error("LoanOrderCreated not found");
   const termSec = BigInt(termDays) * ONE_DAY;
   const totalDue = calcTotalDue(borrowAmt2, rateBps, termSec);
-  await usdc.connect(borrower).approve(orderEngineAddr, totalDue);
-  await orderEngine.connect(borrower).repay(orderId, totalDue);
+  // 统一入口：走 VaultCore.repay → SettlementManager
+  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, totalDue);
+  await vaultCore.connect(borrower).repay(orderId, usdc.target, totalDue);
   console.log("✅ Repay completed. totalDue:", ethers.formatUnits(totalDue, 6));
 
   if (newTokenId !== undefined) {

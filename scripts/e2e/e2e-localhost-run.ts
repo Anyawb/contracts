@@ -86,7 +86,8 @@ async function main() {
 
   // 3) Repay
   await usdc.connect(borrower).approve(VC, borrowAmt);
-  await vc.connect(borrower).repay(usdc.target, borrowAmt);
+  const orderId = 1n; // legacy demo script: placeholder orderId
+  await vc.connect(borrower).repay(orderId, usdc.target, borrowAmt);
   console.log("Repay done");
 
   const colAfter = await cm.getCollateral(borrower.address, usdc.target);

@@ -41,8 +41,14 @@ abstract contract AccessControlled {
     /// @notice Registry 合约地址（内部变量）
     address internal _registryAddr;
     
-    /// @notice Registry 合约地址（公共变量）
-    address public registryAddrVar;
+    /// @notice Registry contract address (compat getter via `registryAddrVar()`).
+    /// @dev Stored privately; exposed via explicit getter (no public state variable).
+    address private _registryAddrVar;
+
+    /// @notice Get Registry address.
+    function registryAddrVar() external view returns (address) {
+        return _registryAddrVar;
+    }
     
     /// @notice 动态模块键管理器地址
     address public dynamicModuleKeyManager;
@@ -217,7 +223,7 @@ abstract contract AccessControlled {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         address oldRegistry = _registryAddr;
         _registryAddr = _registry;
-        registryAddrVar = _registry;
+        _registryAddrVar = _registry;
         emit RegistryUpdated(oldRegistry, _registry);
         emit AccessControlUpdated("REGISTRY", _registry, msg.sender);
         

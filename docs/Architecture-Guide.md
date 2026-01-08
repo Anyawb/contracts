@@ -146,14 +146,14 @@ contract VaultCore is Initializable, UUPSUpgradeable {
         ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
     }
     
-    /// @notice 还款操作 - 传送数据至View层
+    /// @notice 还款操作 - 统一结算入口（结算/清算二合一）
     /// @param asset 资产地址
     /// @param amount 还款金额
-    /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
+    /// @dev 目标架构：还款不再直达 LendingEngine，而是统一进入 SettlementManager（包含：按时还款结算、提前还款结算、以及必要时的被动清算/强制处置）
     function repay(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        ILendingEngineBasic(lendingEngine).repay(msg.sender, asset, amount);
+        address settlementManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        ISettlementManager(settlementManager).repayAndSettle(msg.sender, asset, amount);
     }
     
     /// @notice 提款操作 - 传送数据至View层
@@ -530,7 +530,11 @@ contract LendingEngine {
   - 失败/过期/精度异常/价格不合理/稳定币脱锚时，返回 `PriceResult{ usedFallback=true, reason=..., value=... }`；上层（LE）可据此发事件或写系统统计（`DegradationCore` 提供系统级统计/事件）。
 
 ### 3) 端到端数据流（简述）
-- 用户操作 → `VaultCore` → 业务编排 `VaultBusinessLogic`（转入/转出、抵押/保证金、奖励） → `VaultCore` 统一转调 `LendingEngine` 更新账本（借/还） → `LendingEngine` 在账本变更后推送 `VaultRouter.pushUserPositionUpdate`（抵押来自 CM，债务来自 LE） → 风控/LE 根据需要计算并推送 `HealthView.pushRiskStatus` → 前端/机器人 0 gas 查询 View 层缓存。
+- 用户操作 → `VaultCore` → 业务编排 `VaultBusinessLogic`（转入/转出、抵押/保证金、奖励/撮合） → **统一结算/清算入口 `SettlementManager`**（还款/提前还款/到期处置/被动清算） → （内部）`LendingEngine` 更新债务账本 + `CollateralManager` 执行抵押释放/划转 → 写入成功后推送 `VaultRouter.pushUserPositionUpdate`（抵押来自 CM，债务来自 LE）与 `HealthView.pushRiskStatus` → 前端/机器人 0 gas 查询 View 层缓存。
+
+- （撮合放款补充，资金链 SSOT）
+  - 出借意向签名：`LendIntent.lenderSigner` 表示**签名者/资金提供者**（EOA 或 ERC-1271 合约钱包）。
+  - 订单落地口径：`LoanOrder.lender` **固定写入** `LenderPoolVault`（资金池合约地址），**不允许**写入 EOA/多签出借人地址（签名者 ≠ lender 字段）。
 
 ### 4) 关键约束与最佳实践
 - 健康因子与风险推送统一在 LE + View 层；业务层不再保留。
@@ -542,7 +546,7 @@ contract LendingEngine {
 ### 清算模块实际实施（修订：直达账本 + 风控只读/聚合 + 单点推送）
 
 - 写入直达账本：
-  - 编排入口由 `LiquidationManager` 触发（Registry 绑定 `KEY_LIQUIDATION_MANAGER`，唯一入口）。
+  - 编排入口由 **`SettlementManager`** 触发（Registry 绑定 `KEY_SETTLEMENT_MANAGER`，**唯一对外写入口**）；当进入“被动清算/强制处置”分支时，由其内部调用 `LiquidationManager`（清算执行器）或直接直达账本执行扣押/减债。
   - 扣押抵押：直接调用 `KEY_CM → ICollateralManager.withdrawCollateralTo(user, collateralAsset, collateralAmount, liquidatorOrReceiver)`（扣减账本 + 真实转账）。
   - 减少债务：直接调用 `KEY_LE → ILendingEngineBasic.forceReduceDebt(user, asset, amount)`（或 `VaultLendingEngine.forceReduceDebt`）。
   - 事件单点推送：账本变更成功后，调用 `KEY_LIQUIDATION_VIEW → LiquidatorView.pushLiquidationUpdate/Batch`，链下统一消费。
@@ -587,22 +591,105 @@ contract LendingEngine {
 ### 职责边界
 - **VaultBusinessLogic（不再作为清算编排入口）**：
   - 代币转入/转出；抵押与保证金联动；唯一奖励触发；批量编排
-  - 清算入口已收敛到 `KEY_LIQUIDATION_MANAGER → LiquidationManager`；`VaultBusinessLogic.liquidate` 为 DEPRECATED 并永久下线（revert），避免双入口与语义分叉
+  - 写入口必须收敛到“统一结算/清算入口”（见下节 `SettlementManager`），避免 repay/liquidate/settle 分叉
 - **VaultCoreRefactored**：
-  - 作为唯一账本入口的转调者，统一调用 `ILendingEngineBasic.borrow/repay`
+  - 作为用户入口的转调者：借款可直达 `LendingEngine.borrow`；还款/结算必须统一进入 `SettlementManager`（见下节）
   - 不做代币二次转账（避免与业务层重复）
+- **SettlementManager（新增，唯一写入口）**：
+  - **唯一权威写入口（SSOT）**：统一承接 **按时还款结算 / 提前还款结算 / 到期未还处置 / 抵押价值过低触发的被动清算**
+  - 内部根据状态机决定：
+    - 正常结算：调用 `LendingEngine.repay` + 调用 `CollateralManager.withdrawCollateralTo` 将抵押直接返还给 B（borrower）
+    - 被动清算：调用 `LiquidationManager`（或直接走 CM/LE 直达账本）对抵押进行扣押/划转，并在需要时触发残值分配模块
+  - 对外接口建议以 “one entry” 命名：`repayAndSettle(...)` / `settleOrLiquidate(...)` / `executeLiquidation(...)`（其中任意一种对外暴露即可，保持唯一入口）
 - **LendingEngine**：
-  - 借/还/清算的账本更新；估值路径内的优雅降级
+  - 借/还/强制减债的账本更新；估值路径内的优雅降级
   - 账本变更后：`VaultRouter.pushUserPositionUpdate` + `HealthView.pushRiskStatus` + 最佳努力触发 `RewardManager.onLoanEvent`
   - `onlyVaultCore`：拒绝任何非 Core 的账本写入
 - **View 层**：
   - `VaultRouter`：仓位缓存与事件/DataPush；聚合查询 0 gas
   - `HealthView`：健康因子/风险状态缓存与事件/DataPush
 
+### 资金与抵押物去向（权威路径，必须遵守）
+
+> 目的：把“钱/抵押物最终到谁”写成架构级口径（SSOT），避免仅在清算模块内描述而导致整体链路不完整。
+
+- **出借资金托管（线上流动性池，SSOT）**
+  - 线上流动性统一托管于 `LenderPoolVault`（Registry `KEY_LENDER_POOL_VAULT`），而非由 `VaultBusinessLogic` 自持余额，也不是把“真实出借人 EOA/多签”写入 `LoanOrder.lender`。
+  - 出借人准备金（reserve）权威路径：`EOA/1271 lenderSigner` 先 `approve(VaultBusinessLogic)` → `VaultBusinessLogic.reserveForLending(lenderSigner, asset, amount, lendHash)`：
+    - `VaultBusinessLogic` 将资金 `transferFrom(lenderSigner → LenderPoolVault)` 入池；
+    - 同时记录 `lendHash` 的 reserve 状态（仅记录状态，防重放/可撤回）。
+  - 撤回 reserve（未成交前）：`VaultBusinessLogic.cancelReserve(lendHash)` → `LenderPoolVault.transferOut(asset, lenderSigner, amount)` 返还。
+
+- **撮合放款（borrow）与订单落地（SSOT）**
+  - 成交落地权威路径：`VaultBusinessLogic.finalizeMatch(borrowIntent, lendIntents, sigBorrower, sigLenders)`：
+    - 验签：`borrower` 与每个 `lendIntent.lenderSigner`（EOA 或 ERC-1271）；
+    - 消耗 reserve：按 `lendHash` consume，对应 lenderSigner 必须匹配（防篡改/防重放）；
+    - 放款：通过 `SettlementMatchLib.finalizeAtomicFull` 从 `LenderPoolVault.transferOut` 出金；
+    - 手续费：通过 `FeeRouter.distributeNormal` 统一路由；
+    - 订单：调用 `ORDER_ENGINE(LendingEngine).createLoanOrder` 创建 `orderId` 并铸造 `LoanNFT`；
+    - **关键口径**：订单的 `LoanOrder.lender` 必须为 `LenderPoolVault` 地址（资金池），而非 `lenderSigner`。
+  - 权限/配置要点（测试与部署必须满足）：
+    - `VaultBusinessLogic` 需要 `ACTION_ORDER_CREATE`（创建订单）；
+    - `VaultBusinessLogic` 需要 `ACTION_DEPOSIT`（调用 `FeeRouter.distributeNormal`）；
+    - `ORDER_ENGINE` 需要 `ACTION_BORROW`（`LoanNFT` 的 MINTER 权限映射到 `ACTION_BORROW`）；
+    - `FeeRouter` 需要将 `settlementToken` 标记为 supported token（否则 `TokenNotSupported`）。
+
+- **抵押物托管（统一资金池）**
+  - 抵押物（含多品类 RWA）由 `CollateralManager` 作为托管者持有（真实资产池/资金池）。
+  - `deposit/withdraw` 的权威写路径为：`VaultCore/VaultRouter → CollateralManager.depositCollateral/withdrawCollateral`（用户自己提取）。
+- **还款（repay）与“抵押释放/返还”的权威路径（修订：统一结算入口）**
+  - **唯一权威写入口**：`VaultCore.repay(orderId, asset, amount) → SettlementManager.repayAndSettle(user, asset, amount, orderId)`（`orderId` 为仓位主键，SSOT）。
+  - `SettlementManager` 在同一条链路内完成：
+    - `LendingEngine.repay(...)`（更新债务账本）
+    - 基于风控/到期/订单状态机决定：
+      - **按时还款/提前还款**：调用 `CollateralManager.withdrawCollateralTo(user, collateralAsset, amount, user)` 将抵押直接返还到 **B（borrower）** 钱包（无需用户二次 `withdraw`）
+      - **到期未还/价值过低**：转入被动清算分支（见下文“清算（违约）时抵押去向”与 `SettlementManager` 章节）
+- **清算（违约）时抵押去向（修订：统一结算入口）**
+  - 清算不再作为独立对外入口；由 `SettlementManager` 在满足触发条件时进入清算分支。
+  - 清算扣押/划转的权威写路径为（两种实现等价其一即可）：
+    - `SettlementManager → LiquidationManager → CollateralManager.withdrawCollateralTo(...)`（保持 LiquidationManager 作为清算执行器）
+    - 或 `SettlementManager → CollateralManager.withdrawCollateralTo(...)`（直达账本，不经过 LiquidationManager）
+  - 并在需要时由残值分配模块进一步路由到平台/准备金/出借人/清算人等接收方。
+- **平台费/罚金/手续费等“费用类资金”的权威去向**
+  - 费用类资金（如平台费、生态费、罚金中平台份额等）应通过 `FeeRouter` 进行统一路由与分发；前端/链下只读镜像由 `FeeRouterView` 提供。
+  - 为降低“人为变数”，推荐将 `FeeRouter` 的 `platformTreasury` 配置为**合约金库地址**（而非 EOA/多签），并通过治理权限（通常为 `ACTION_SET_PARAMETER` / `ACTION_UPGRADE_MODULE`，建议迁移到 Timelock 轨）进行变更。
+
 ### 配置要点
-- Registry 必须正确指向：`KEY_VAULT_CORE`、`KEY_LE`、`KEY_CM`、`KEY_HEALTH_VIEW`、`KEY_RM`
+- Registry 必须正确指向：`KEY_VAULT_CORE`、`KEY_LE`、`KEY_CM`、`KEY_HEALTH_VIEW`、`KEY_RM`、`KEY_SETTLEMENT_MANAGER`
 - `LendingEngine.onlyVaultCore` 校验的 Core 地址与实际 Core 部署一致
 - `LendingEngine` 配置 `priceOracle`、`settlementToken` 正确，以启用优雅降级
+
+---
+
+## 统一结算/清算写入口（SettlementManager）（新增，SSOT）
+
+### 目标
+- 将 **按时还款、提前还款、到期未还、抵押价值过低导致的被动清算** 统一收敛到一个对外写入口，避免“repay 与 liquidate 分叉、资金去向分叉、权限分叉”。
+
+### 实施总纲（强烈建议先读）
+> 为避免实现与文档口径分叉，`SettlementManager` 的完整整改路径（模块键、接口建议、迁移步骤、测试清单）已整理为 SSOT 总纲文档：
+>
+> - [`docs/Usage-Guide/Liquidation/SettlementManager-Refactor-Plan.md`](../Usage-Guide/Liquidation/SettlementManager-Refactor-Plan.md)
+
+### 统一入口（建议）
+- `repayAndSettle(user, debtAsset, repayAmount, orderId)`：用户 B 发起还款后，**必经 SettlementManager**，由其完成减债与抵押释放/处置（`orderId` 为仓位主键）。
+- `settleOrLiquidate(orderId)`（可选）：keeper/机器人触发的“到期/风控检查后处置”入口（内部自动判定结算或清算，并计算清算参数；`orderId` 为仓位主键）。
+
+### 状态机分支（概念口径）
+- **提前还款/按时还款**：
+  - 记账：`LendingEngine.repay(...)`
+  - 释放抵押：`CollateralManager.withdrawCollateralTo(..., borrowerAddr)`（抵押直接回 B 钱包）
+  - 费用/罚金：走 `FeeRouter` 统一路由到 `platformTreasury`（推荐配置为合约金库地址）
+- **拖欠/价值过低（被动清算）**：
+  - 扣押抵押：`CollateralManager.withdrawCollateralTo(..., receiver)`（receiver 由清算分支决定）
+  - 减少债务：`LendingEngine.forceReduceDebt(...)`（或等效强制减债路径）
+  - 事件单点推送：仍由 `LiquidatorView.pushLiquidationUpdate/Batch` 作为链下消费的单点入口
+  - 残值分配：如启用 `LiquidationPayoutManager`，则按比例路由到平台/准备金/出借人/清算人等
+
+### 与 LiquidationManager 的关系（回答你的问题）
+- **“统一走 LiquidationManager”不太符合语义**：LiquidationManager 更适合作为“违约处置/强制清算执行器”，而不是把正常还款也当作 liquidation。
+- 推荐结构（B）：**SettlementManager 为唯一对外入口**；`LiquidationManager` 作为其内部的“清算执行器模块”（可保留现有直达账本实现与事件推送模式）。
+
 
 ---
 
@@ -612,7 +699,9 @@ contract LendingEngine {
 - 将清算写入（扣押抵押物、减少债务）统一直达账本层（`CollateralManager`/`LendingEngine`），由账本模块内部进行权限校验与状态更新；View 仅承担只读/缓存/聚合与事件/DataPush。
 
 ### 设计
-- 入口方：`Registry.KEY_LIQUIDATION_MANAGER` 指向的清算编排入口（**当前实现：仅 `LiquidationManager`，唯一入口**）。
+- 入口方：**`Registry.KEY_SETTLEMENT_MANAGER` 指向 `SettlementManager`（唯一对外写入口）**。当进入清算分支时：
+  - `SettlementManager` 可调用 `Registry.KEY_LIQUIDATION_MANAGER → LiquidationManager` 作为清算执行器（推荐保留以承接清算参数校验/事件推送的聚合），或
+  - `SettlementManager` 也可直接直达账本调用 `KEY_CM/KEY_LE` 完成扣押/减债（与“直达账本”原则一致）。
 - 路由：
   - 扣押抵押：`KEY_CM → ICollateralManager.withdrawCollateralTo(user, collateralAsset, collateralAmount, liquidatorOrReceiver)`。
   - 减少债务：`KEY_LE → ILendingEngineBasic.forceReduceDebt(user, asset, amount)` 或 `VaultLendingEngine.forceReduceDebt`。
@@ -620,10 +709,10 @@ contract LendingEngine {
 - 事件与 DataPush：清算完成后，由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点推送；View 层不承载写入转发。
 
 ### 与前端/服务的集成
-- 前端查询读取 `LiquidationRiskManager`/`LiquidatorView` 与 `StatisticsView`；写路径由 `LiquidationManager` 直达账本模块。
+- 前端查询读取 `LiquidationRiskManager`/`LiquidatorView` 与 `StatisticsView`；写路径统一由 `SettlementManager` 承接（其内部在清算分支直达账本或调用 `LiquidationManager` 清算执行器）。
 - 地址解析建议：
   - 只读入口：通过 `KEY_VAULT_CORE → viewContractAddrVar()` 解析 View 地址；
-  - 写入入口：通过 Registry 获取 `KEY_CM`/`KEY_LE`/`KEY_LIQUIDATION_MANAGER` 地址。
+  - 写入入口：通过 Registry 获取 `KEY_SETTLEMENT_MANAGER`（唯一对外写入口）；清算执行器与账本模块地址通过 Registry 获取 `KEY_LIQUIDATION_MANAGER`/`KEY_CM`/`KEY_LE`。
 
 ### 测试要求（修订）
 - 用例覆盖：
@@ -633,10 +722,52 @@ contract LendingEngine {
 - 参考：将 `LiquidationViewForward` 测试替换为 `LiquidationDirectLedger.test.ts` 骨架。
 
 ### 迁移与兼容
-- 若历史代码为“经 View 转发写入”，应迁移到“直达账本”：
+- 若历史代码为"经 View 转发写入"，应迁移到"直达账本"：
   - 清算写入改为直接调用 `KEY_CM/KEY_LE`；
   - 事件/DataPush 保持由 `LiquidatorView.push*` 单点触发；
   - 保留只读 Aggregation 在 `LiquidationRiskManager`/`LiquidationView`。
+
+---
+
+## 清算残值分配模块（专章）
+
+### 目标
+- 清算执行后，抵押物残值（抵押物价值 - 债务价值）需要按比例分配给多个角色：平台、风险准备金、出借人补偿、清算人奖励。
+- 通过独立的 `LiquidationPayoutManager` 模块实现可治理的分配配置，符合"清算逻辑内聚、配置可治理"的架构原则。
+
+### 设计
+- **模块定位**：`Registry.KEY_LIQUIDATION_PAYOUT_MANAGER` 指向 `LiquidationPayoutManager`，作为清算残值分配的配置与执行模块。
+- **分配角色与默认比例**：
+  - 平台（platform）：默认 3% (300 bps) 用于运营/手续费
+  - 准备金（reserve）：默认 2% (200 bps) 用于风险准备金/保险金
+  - 出借人补偿（lender compensation）：默认 17% (1700 bps)，应支付给当前实际出借人
+  - 清算人（liquidator）：默认 78% (7800 bps)，并接收整数除不尽的余数
+  - 比例总和需为 10,000 bps，可在部署后由有 `ACTION_SET_PARAMETER` 权限的角色调整
+- **地址配置策略**：
+  - **方案 A（与本仓资金池口径一致，推荐）**：平台/准备金使用固定金库地址；出借人补偿地址设置为 `LenderPoolVault`（按本指南口径 `LoanOrder.lender` 固定为资金池地址），由资金池在协议内再进行份额/记账归属（或作为后续扩展的路由入口）。
+  - **方案 B（出借人前置路由）**：平台/准备金同上；出借人补偿设置为"路由/分发合约"（该合约可根据 `orderId`/仓位关系把补偿再分发给实际出借人/份额持有人）。
+  - **方案 C（仅用于本地/快速演示）**：平台/准备金/出借人补偿都用部署者地址占位，便于本地或测试链快速跑通；上线前必须替换为方案 A/B。
+- **治理与升级**：
+  - 收款地址与比例可通过 `updateRates` / `updateRecipients` 由 `ACTION_SET_PARAMETER` 角色调整
+  - 通过 Registry 解析模块地址，前端读取自动生成的 `frontend-config/contracts-*.ts`
+- **事件与 DataPush**：
+  - 分配事件已通过 `LiquidatorView` 以 DataPush 形式上链，便于前端/离线服务消费
+
+### 与清算流程的集成
+- 清算执行流程：`LiquidationManager` 触发清算 → 扣押抵押物（`CM.withdrawCollateralTo`）→ 减少债务（`LE.forceReduceDebt`）→ 计算残值 → `LiquidationPayoutManager` 执行分配
+- 残值计算：抵押物价值 - 债务价值（由清算流程传入或由 `LiquidationPayoutManager` 内部查询）
+- 分配执行：`LiquidationPayoutManager` 根据配置的比例和地址，将残值按比例转账给各角色
+
+### 部署与配置
+- **环境变量**（三网脚本均可用）：
+  - `PAYOUT_PLATFORM_ADDR`：平台收款地址（建议多签）
+  - `PAYOUT_RESERVE_ADDR`：准备金收款地址（建议多签）
+  - `PAYOUT_LENDER_ADDR`：出借人补偿地址（方案 A 可留空，方案 B 填路由合约地址）
+- **部署脚本**：`deploylocal.ts` / `deploy-arbitrum.ts` / `deploy-arbitrum-sepolia.ts` 会读取上述 env，部署 `LiquidationPayoutManager` 并在 Registry 注册 `KEY_LIQUIDATION_PAYOUT_MANAGER`
+- **默认行为**：若未提供 env，脚本会回退为 deployer 地址（仅适合本地/演示）
+
+### 详细实施指南
+> 📖 **详细配置说明、推荐落地步骤、方案选择建议等，请参考**：[`docs/Usage-Guide/Liquidation/Liquidation-Payout-Address-Guide.md`](../Usage-Guide/Liquidation/Liquidation-Payout-Address-Guide.md)
 
 ---
 
@@ -748,6 +879,68 @@ error AccessControlView__UnauthorizedAccess();
 ```
 
 ---
+
+## 📝 NatSpec 注释规范（必须）
+
+> 目标：让所有对外接口（尤其是写入入口）的“语义、回滚条件、安全属性、参数单位”可被链下与审计工具直接消费，避免口径分叉。
+
+### 适用范围
+- **必须**：所有 `public/external` 的函数与错误/事件（尤其是会写状态、转账、升级、权限校验、跨模块调用的入口）。
+- **建议**：关键 `internal` 逻辑（状态机分支、金额计算、精度/单位转换、外部调用封装）。
+
+### 统一模板（推荐顺序，禁止乱序）
+> 说明：`@dev` 中的 “Reverts if / Security” 采用固定小节标题，便于团队与工具一致解析。
+
+```solidity
+/**
+ * @notice <一句话说明：做什么、对谁/哪条路径生效>
+ * @dev Reverts if:
+ *      - <回滚条件 1>
+ *      - <回滚条件 2>
+ *
+ * Security:
+ * - <安全属性 1：例如 Non-reentrant>
+ * - <安全属性 2：例如 Signature is single-use / onlyVaultCore / role-gated>
+ *
+ * @param <name> <参数语义 + 单位/精度/取值范围（如 6 decimals / bps / seconds）>
+ * @return <name> <返回值语义 + 单位/精度（如有）>
+ */
+```
+
+### 写法要求（强制）
+- **`@notice`**：必须是“可对外公开的业务语义”，避免实现细节；用一句话讲清楚“做什么 + 影响对象/路径”。
+- **`@dev`**
+  - **Reverts if**：列出**所有可预期的回滚原因**（含权限、签名、白名单、状态机不匹配、金额/精度、过期、重复使用等）。  
+    - 每条用 `- ` 开头；条件尽量与代码中的 `error`/`revert` 保持同名或同义，避免“文档写 A、代码回滚 B”。
+  - **Security**：显式标注本函数依赖的安全属性/假设（如 `nonReentrant`、`onlyVaultCore`、`ACM.requireRole(...)`、签名单次使用、nonce/uid 绑定、跨模块调用边界等）。
+- **`@param/@return`**：必须写清楚**单位与精度**（例如 USDT 6 decimals、bps=1e4、时间=seconds、价格精度等）；涉及“内部 ID / 外部地址”的必须区分含义（如 `uid` vs `user`）。
+- **一致性**：注释中的“唯一入口/权威路径/SSOT”描述必须与本指南其它章节一致；不一致时以本指南为准并立即修订注释或章节说明。
+
+### 示例：带签名授权的 USDT 代存（标准样式）
+```solidity
+/**
+ * @notice Deposit USDT on behalf of a user.
+ * @dev Reverts if:
+ *      - token != USDT
+ *      - signature is invalid
+ *      - uid is not bound
+ *
+ * Security:
+ * - Non-reentrant
+ * - Signature is single-use
+ *
+ * @param uid Internal user identifier
+ * @param amount Amount of USDT to deposit (6 decimals)
+ * @param signature Backend-signed authorization
+ */
+function deposit(
+    uint256 uid,
+    uint256 amount,
+    bytes calldata signature
+) external nonReentrant {
+    // ...
+}
+```
 
 ## Unified DataPush Interface
 
@@ -1085,3 +1278,4 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 **参考文档**：
 - `docs/FRONTEND_CONTRACTS_INTEGRATION.md`（2025-08版本）- 准确描述当前架构
 - `docs/Architecture-Analysis.md`（第702-704行）- 验证架构一致性
+- `docs/Usage-Guide/Liquidation/SettlementManager-Refactor-Plan.md` - SettlementManager 全面整改总纲（SSOT：统一写入口、迁移步骤、测试清单）

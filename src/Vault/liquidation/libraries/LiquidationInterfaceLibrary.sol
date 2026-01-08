@@ -396,26 +396,15 @@ library LiquidationInterfaceLibrary {
         address targetUserAddr,
         address assetAddr,
         address feeReceiverAddr,
-        ModuleCache.ModuleCacheStorage storage moduleCache
-    ) internal view returns (uint256 forfeitedAmount) {
+        ModuleCache.ModuleCacheStorage storage /* moduleCache */
+    ) internal pure returns (uint256 forfeitedAmount) {
         // 验证参数
         require(targetUserAddr != address(0), "Invalid user");
         require(assetAddr != address(0), "Invalid asset");
         require(feeReceiverAddr != address(0), "Invalid fee receiver");
         
-        // 获取保证金管理器
-        address guaranteeManagerAddr = ModuleCache.get(moduleCache, ModuleKeys.KEY_GUARANTEE_FUND, DEFAULT_CACHE_MAX_AGE);
-        if (guaranteeManagerAddr != address(0)) {
-            try ILiquidationGuaranteeManager(guaranteeManagerAddr).getUserGuarantee(targetUserAddr, assetAddr) returns (uint256 amount) {
-                forfeitedAmount = amount;
-            } catch {
-                forfeitedAmount = 0;
-            }
-        } else {
-            forfeitedAmount = 0;
-        }
-        
-        return forfeitedAmount;
+        // Guarantee data no longer sourced from liquidation sub-modules; return zero.
+        return 0;
     }
 
     /* ============ Query Interface Functions ============ */

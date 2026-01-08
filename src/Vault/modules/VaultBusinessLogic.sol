@@ -24,6 +24,7 @@ import { SettlementIntentLib } from "../../libraries/SettlementIntentLib.sol";
 import { SettlementMatchLib } from "../../libraries/SettlementMatchLib.sol";
 import { Registry } from "../../registry/Registry.sol";
 import { IVaultRouter } from "../../interfaces/IVaultRouter.sol";
+import { ILenderPoolVault } from "../../interfaces/ILenderPoolVault.sol";
 
 /// @title VaultBusinessLogic
 /// @notice 业务逻辑模块（纯业务 + 基础 Registry 能力）；数据推送与事件聚合由 VaultRouter 统一负责
@@ -202,12 +203,12 @@ contract VaultBusinessLogic is
 
     /* ============ Settlement: Reserve & Match ============ */
     /// @notice 出借资金保留（进入资金池并标记可用于撮合）
-    /// @param lender 出借人
+    /// @param lenderSigner 出借意向签名者（资金提供者）
     /// @param asset 资产
     /// @param amount 金额
     /// @param lendIntentHash 出借意向哈希（链下签名对应的哈希）
     function reserveForLending(
-        address lender,
+        address lenderSigner,
         address asset,
         uint256 amount,
         bytes32 lendIntentHash
@@ -215,18 +216,20 @@ contract VaultBusinessLogic is
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
         _checkAssetWhitelist(asset);
-        // 资金入池：将资金转入本合约托管
-        IERC20(asset).safeTransferFrom(lender, address(this), amount);
+        // 资金入池：将资金转入 LenderPoolVault 托管（线上流动性推荐放置处）
+        address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
+        IERC20(asset).safeTransferFrom(lenderSigner, pool, amount);
         // 标记保留
-        _lendReserves.reserve(lender, asset, amount, lendIntentHash);
-        VaultBusinessLogicLibrary.emitBusinessEvents("reserveForLending", lender, asset, amount, ActionKeys.ACTION_SET_PARAMETER);
+        _lendReserves.reserve(lenderSigner, asset, amount, lendIntentHash);
+        VaultBusinessLogicLibrary.emitBusinessEvents("reserveForLending", lenderSigner, asset, amount, ActionKeys.ACTION_SET_PARAMETER);
     }
 
     /// @notice 取消资金保留（未撮合前可撤回）
     function cancelReserve(bytes32 lendIntentHash) external onlyValidRegistry whenNotPaused nonReentrant {
         (address asset, uint256 amount) = _lendReserves.cancel(lendIntentHash, msg.sender);
         if (amount > 0) {
-            IERC20(asset).safeTransfer(msg.sender, amount);
+            address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
+            ILenderPoolVault(pool).transferOut(asset, msg.sender, amount);
         }
         VaultBusinessLogicLibrary.emitBusinessEvents("cancelReserve", msg.sender, asset, amount, ActionKeys.ACTION_SET_PARAMETER);
     }
@@ -260,12 +263,12 @@ contract VaultBusinessLogic is
             SettlementIntentLib.validateOpen(_matchedIntents, lHash, lendIntents[i].expireAt);
             // 校验 lender 签名
             bytes32 lDigest = SettlementIntentLib.toTypedDataHash(domain, lHash);
-            if (!SettlementIntentLib.verifySignature(lendIntents[i].lender, lDigest, sigLenders[i])) {
+            if (!SettlementIntentLib.verifySignature(lendIntents[i].lenderSigner, lDigest, sigLenders[i])) {
                 revert SettlementIntentLib.Settlement__InvalidSignature();
             }
             // 消耗对应的保留额度并累加
-            (address lender, address asset, uint256 amount) = _lendReserves.consume(lHash, lendIntents[i].lender);
-            lender; // silence
+            (address lenderSigner, address asset, uint256 amount) = _lendReserves.consume(lHash, lendIntents[i].lenderSigner);
+            lenderSigner; // silence
             require(asset == borrowIntent.borrowAsset, "asset mismatch");
             total += amount;
         }
@@ -283,10 +286,12 @@ contract VaultBusinessLogic is
         // 原子落地：账本 → 订单 → 手续费 → 净额发放（库内部不发业务事件）
         // 注意：CollateralManager 仅允许 VaultRouter 调用；撮合编排合约不应直接调用 depositCollateral。
         // 因此这里不在撮合落地时“补充抵押”，抵押应由借款人提前通过 VaultCore/VaultRouter 路径完成。
+        // lender 字段口径：写入“资金池合约地址”（LenderPoolVault），而非 lender EOA
+        address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
         SettlementMatchLib.finalizeAtomicFull(
             _registryAddr,
             borrowIntent.borrower,
-            lendIntents[0].lender,
+            pool,
             address(0),
             0,
             borrowIntent.borrowAsset,
@@ -345,18 +350,20 @@ contract VaultBusinessLogic is
     /// @param termDays 期限天数
     function borrowWithRate(
         address user,
-        address lender,
+        address /*lender*/,
         address asset,
         uint256 amount,
         uint256 annualRateBps,
         uint16 termDays
-    ) external onlyValidRegistry whenNotPaused nonReentrant {
+    ) external onlyValidRegistry whenNotPaused nonReentrant returns (uint256 orderId) {
         // 迁移：改由撮合结算 finalizeMatch 调度，避免业务层直接放款与锁保
         // 保留函数签名以兼容旧脚本；直接转调更安全的结算路径
-        SettlementMatchLib.finalizeAtomic(
+        // lender 字段口径：写入“资金池合约地址”（LenderPoolVault），而非外部传入地址
+        address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
+        orderId = SettlementMatchLib.finalizeAtomic(
             _registryAddr,
             user,
-            lender,
+            pool,
             address(0),
             0,
             asset,
@@ -455,6 +462,7 @@ contract VaultBusinessLogic is
     /// @param amounts 金额数组
     function batchBorrow(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused nonReentrant {
         VaultBusinessLogicLibrary.validateBatchParams(assets, amounts);
+        address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
 
         unchecked {
             for (uint256 i = 0; i < assets.length; i++) {
@@ -466,7 +474,7 @@ contract VaultBusinessLogic is
                 SettlementMatchLib.finalizeAtomic(
                     _registryAddr,
                     user,
-                    msg.sender,
+                    pool,
                     address(0),
                     0,
                     asset,

@@ -14,8 +14,7 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { VaultMath } from "../../VaultMath.sol";
-import { ILiquidationGuaranteeManager } from "../../../interfaces/ILiquidationGuaranteeManager.sol";
-import { ILiquidationCollateralManager } from "../../../interfaces/ILiquidationCollateralManager.sol";
+// Removed deprecated liquidation sub-module interfaces per Architecture-Guide.
 import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
 import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
 import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
@@ -263,11 +262,13 @@ library LiquidationCoreOperations {
         // 获取用户健康因子 - 简化版本
         uint256 collateralValue = 0;
         uint256 debtValue = 0;
-        address debtManagerAddr = ModuleCache.get(moduleCache, ModuleKeys.KEY_LIQUIDATION_DEBT_MANAGER, DEFAULT_CACHE_MAX_AGE);
-        if (debtManagerAddr != address(0)) {
-            // 注意：getUserTotalDebtValue 方法已从接口中移除
-            // 这里返回0，实际实现应该通过其他方式获取
-            debtValue = 0;
+        address lendingEngine = ModuleCache.get(moduleCache, ModuleKeys.KEY_LE, DEFAULT_CACHE_MAX_AGE);
+        if (lendingEngine != address(0)) {
+            try ILendingEngineBasic(lendingEngine).getUserTotalDebtValue(targetUserAddr) returns (uint256 dv) {
+                debtValue = dv;
+            } catch {
+                debtValue = 0;
+            }
         }
         uint256 liquidationThreshold = liquidationConfigStorage[keccak256("LIQUIDATION_THRESHOLD")];
         if (liquidationThreshold == 0) {

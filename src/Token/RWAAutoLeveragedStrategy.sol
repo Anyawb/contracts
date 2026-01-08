@@ -13,6 +13,19 @@ import {ILendingEngineBasic} from "../interfaces/ILendingEngineBasic.sol";
 import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
 import {AmountIsZero} from "../errors/StandardErrors.sol";
 import {IVaultRouter} from "../interfaces/IVaultRouter.sol";
+
+/// @dev VaultBusinessLogic 最小接口：用于订单化 borrowWithRate 返回 orderId
+interface IVaultBusinessLogic {
+    function borrowWithRate(
+        address user,
+        address lender,
+        address asset,
+        uint256 amount,
+        uint256 annualRateBps,
+        uint16 termDays
+    ) external returns (uint256 orderId);
+}
+
 // 临时最小接口（项目未提供 IPositionView.sol）
 interface IPositionView {
     function getUserPosition(address user, address asset) external view returns (uint256 collateral, uint256 debt);
@@ -37,6 +50,9 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     
     /// @notice 用户策略仓位信息
     struct Position {
+        uint256 orderId;               // 绑定的订单ID（SSOT 仓位主键）
+        address collateralAsset;       // 抵押资产
+        address debtAsset;             // 债务资产（通常为 settlementToken）
         uint256 collateralAmount;      // 抵押物数量
         uint256 borrowedAmount;        // 借款数量
         uint256 leverageRatio;         // 杠杆倍数 (100 = 1x)
@@ -64,12 +80,28 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     }
 
     /* ============ STATE VARIABLES ============ */
-    
     IVaultCore public immutable vault;
     IERC20 public immutable rwaToken;
     IERC20 public immutable settlementToken;
     
     StrategyConfig public config;
+
+    /// @notice 订单化借款参数（用于走撮合/订单落地路径生成真实 orderId）
+    address public defaultLenderVar;
+    uint256 public defaultAnnualRateBpsVar;
+    uint16 public defaultTermDaysVar;
+
+    error Strategy__OrderConfigNotSet();
+    error Strategy__LeverageIncreaseNotSupportedInOrderMode();
+    error Strategy__AssetMismatch();
+
+    /// @notice 设置订单化借款参数（仅 owner）
+    function setDefaultOrderConfig(address lender, uint256 annualRateBps, uint16 termDays) external onlyOwner {
+        if (lender == address(0) || termDays == 0) revert Strategy__OrderConfigNotSet();
+        defaultLenderVar = lender;
+        defaultAnnualRateBpsVar = annualRateBps;
+        defaultTermDaysVar = termDays;
+    }
     
     // 用户仓位映射
     mapping(address => Position) public positions;
@@ -207,15 +239,29 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         // 转移抵押代币到合约
         IERC20(asset).safeTransferFrom(msg.sender, address(this), collateralAmount);
         
-        // 存入抵押物到Vault
-        IERC20(asset).safeApprove(address(vault), collateralAmount);
+        // 存入抵押物到Vault（注意：CM 才是 pull 资金的 spender，因此需要 approve CM）
+        address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
+        address cm = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_CM);
+        IERC20(asset).safeApprove(cm, collateralAmount);
         vault.deposit(asset, collateralAmount);
-        
-        // 借入结算代币
-        vault.borrow(address(settlementToken), borrowAmount);
+
+        // 订单化借款：走 VaultBusinessLogic.borrowWithRate → SettlementMatchLib.finalizeAtomic → (账本落地 + 订单创建) 返回 orderId
+        if (defaultLenderVar == address(0) || defaultTermDaysVar == 0) revert Strategy__OrderConfigNotSet();
+        address vbl = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
+        uint256 orderId = IVaultBusinessLogic(vbl).borrowWithRate(
+            address(this),
+            defaultLenderVar,
+            address(settlementToken),
+            borrowAmount,
+            defaultAnnualRateBpsVar,
+            defaultTermDaysVar
+        );
         
         // 记录仓位信息
         positions[msg.sender] = Position({
+            orderId: orderId,
+            collateralAsset: asset,
+            debtAsset: address(settlementToken),
             collateralAmount: collateralAmount,
             borrowedAmount: borrowAmount,
             leverageRatio: leverageRatio,
@@ -245,6 +291,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     ) external whenNotPaused nonReentrant {
         Position storage position = positions[msg.sender];
         if (!position.isActive) revert PositionNotFound();
+        if (asset != position.collateralAsset) revert Strategy__AssetMismatch();
         if (repayAmount == 0) revert AmountIsZero();
         if (block.timestamp < lastOperationTime[msg.sender] + config.cooldownPeriod) {
             revert CooldownNotExpired();
@@ -253,9 +300,9 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         // 转移还款代币到合约
         settlementToken.safeTransferFrom(msg.sender, address(this), repayAmount);
         
-        // 还款到Vault
+        // 还款到Vault（订单化：必须携带 orderId）
         settlementToken.safeApprove(address(vault), repayAmount);
-        vault.repay(address(settlementToken), repayAmount);
+        vault.repay(position.orderId, address(settlementToken), repayAmount);
         
         // 检查是否完全还款：改为通过 PositionView 查询
         address positionView = Registry(IVaultCoreWithRegistry(address(vault)).getRegistry()).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
@@ -264,12 +311,9 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         collateral; // 使用变量避免警告
         
         if (remainingDebt == 0) {
-            // 完全还款，提取所有抵押物
+            // 完全还款：抵押物应已由 SettlementManager 自动释放到本合约（borrower=本合约）
             uint256 collateralToWithdraw = position.collateralAmount;
-            vault.withdraw(asset, collateralToWithdraw);
-            
-            // 转移抵押物给用户
-            IERC20(asset).safeTransfer(msg.sender, collateralToWithdraw);
+            IERC20(position.collateralAsset).safeTransfer(msg.sender, collateralToWithdraw);
             
             // 更新统计信息
             totalPositions--;
@@ -279,14 +323,14 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
             // 清除仓位
             delete positions[msg.sender];
             
-            emit PositionClosed(msg.sender, asset, collateralToWithdraw, position.borrowedAmount);
+            emit PositionClosed(msg.sender, position.collateralAsset, collateralToWithdraw, position.borrowedAmount);
         } else {
             // 部分还款，更新仓位信息
             uint256 repaidAmount = position.borrowedAmount - remainingDebt;
             position.borrowedAmount = remainingDebt;
             totalBorrowedValue -= repaidAmount;
             
-            emit PositionClosed(msg.sender, asset, 0, repaidAmount);
+            emit PositionClosed(msg.sender, position.collateralAsset, 0, repaidAmount);
         }
         
         lastOperationTime[msg.sender] = block.timestamp;
@@ -324,18 +368,15 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         uint256 currentBorrowAmount = position.borrowedAmount;
         
         if (targetBorrowAmount > currentBorrowAmount) {
-            // 需要借更多
-            uint256 additionalBorrow = targetBorrowAmount - currentBorrowAmount;
-            vault.borrow(address(settlementToken), additionalBorrow);
-            position.borrowedAmount = targetBorrowAmount;
-            totalBorrowedValue += additionalBorrow;
-            settlementToken.safeTransfer(msg.sender, additionalBorrow);
+            // 订单化语义下，增借会产生新的订单或需要扩展订单模型；本轮整改先禁止增借型再平衡
+            asset; // silence unused in this branch
+            revert Strategy__LeverageIncreaseNotSupportedInOrderMode();
         } else if (targetBorrowAmount < currentBorrowAmount) {
             // 需要还一些
             uint256 repayAmount = currentBorrowAmount - targetBorrowAmount;
             settlementToken.safeTransferFrom(msg.sender, address(this), repayAmount);
             settlementToken.safeApprove(address(vault), repayAmount);
-            vault.repay(address(settlementToken), repayAmount);
+            vault.repay(position.orderId, address(settlementToken), repayAmount);
             position.borrowedAmount = targetBorrowAmount;
             totalBorrowedValue -= repayAmount;
         }

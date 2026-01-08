@@ -566,6 +566,14 @@ async function repayWithStop(user: string, asset: string, amount: bigint, stop =
   // 调用 VaultBusinessLogic.repayWithStop(user, asset, amount, stop)
   // 合约执行：转入还款 → 记账 → (stop || 债务=0) 触发早偿结算（调用 GFM.settleEarlyRepayment）
 }
+
+// 清算/处置（keeper/机器人入口，SSOT）
+async function settleOrLiquidate(orderId: bigint) {
+  // 1) keeper/机器人调用 SettlementManager.settleOrLiquidate(orderId)
+  // 2) 注意：调用者（keeper 地址）必须具备 ACTION_LIQUIDATE 权限，否则会 revert
+  //   - ActionKey: keccak256("LIQUIDATE")
+  //   - 建议：将该权限仅授予你们的 keeper/机器人地址（或 keeper multisig），并配合链下监控触发
+}
 ```
 
 ### 3. 事件监听

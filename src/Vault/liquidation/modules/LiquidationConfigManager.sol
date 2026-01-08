@@ -11,31 +11,34 @@ import "../libraries/LiquidationEventLibrary.sol";
 import "../libraries/LiquidationAccessControl.sol";
 import "../libraries/ModuleCache.sol";
 import { LiquidationBase } from "../types/LiquidationBase.sol";
+import { LiquidationTypes } from "../types/LiquidationTypes.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { ZeroAddress, ArrayLengthMismatch, EmptyArray } from "../../../errors/StandardErrors.sol";
 import { ILiquidationConfigManager } from "../../../interfaces/ILiquidationConfigManager.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { IRegistryUpgradeEvents } from "../../../interfaces/IRegistryUpgradeEvents.sol";
 
-/**
- * @title LiquidationConfigManager
- * @dev 清算配置管理器 - 负责配置和模块管理
- * @dev Liquidation Config Manager - Responsible for configuration and module management
- * @dev 提供模块地址缓存、配置更新、紧急暂停等功能
- * @dev Provides module address caching, configuration updates, emergency pause and other functions
- * @dev 支持升级功能，可升级实现合约
- * @dev Supports upgrade functionality, upgradeable implementation contract
- * @dev 使用ReentrancyGuard防止重入攻击
- * @dev Uses ReentrancyGuard to prevent reentrancy attacks
- * @dev 支持暂停功能，紧急情况下可暂停所有操作
- * @dev Supports pause functionality, can pause all operations in emergency situations
- * @dev 优化：使用 LiquidationAccessControl 库进行权限管理
- * @dev Optimized: Using LiquidationAccessControl library for permission management
- * @dev 使用Registry系统进行模块管理
- * @dev Uses Registry system for module management
- */
+/// @title LiquidationConfigManager
+/// @notice Base class for liquidation configuration management: provides common functionality for liquidation modules (module caching, access control, emergency pause)
+/// @dev Abstract base class: provides module address caching, Registry integration, access control, emergency pause, and other common capabilities
+/// @dev Module positioning: serves as an abstract base class for other liquidation modules to inherit, providing unified configuration management and module access capabilities
+/// @dev Design principles:
+///     - Module address caching: caches commonly used module addresses through ModuleCache to reduce Registry query overhead
+///     - Unified access control: uses LiquidationAccessControl library, unified permission verification through ACM
+///     - Registry integration: all module addresses are resolved through Registry, hardcoding is prohibited, compliant with architecture guide requirements
+///     - Emergency pause mechanism: provides emergency pause/resume functionality for governance/operations in emergency situations
+///     - UUPS upgrade support: supports secure contract upgrades, upgrade permissions controlled through ACTION_UPGRADE_MODULE
+/// @dev Integration with liquidation flow:
+///     - Subclasses inherit module caching, access control, and other common capabilities
+///     - Module addresses are uniformly resolved through Registry to ensure address consistency
+///     - Permission verification is unified through ACM to avoid scattered permission logic
+/// @dev Naming conventions (following Architecture-Guide.md §852-879):
+///     - Private state variables: _ + camelCase (e.g., _registryAddr, _baseStorage, _moduleCache)
+///     - Public variables: camelCase + Var (e.g., registryAddrVar)
+///     - Constants: UPPER_SNAKE_CASE (e.g., CACHE_MAX_AGE)
+///     - Event names: PascalCase, past tense (e.g., SystemPaused, SystemUnpaused)
 abstract contract LiquidationConfigManager is 
     Initializable,
     UUPSUpgradeable,
@@ -51,56 +54,73 @@ abstract contract LiquidationConfigManager is
 
     /* ============ Constants ============ */
     
-    /**
-     * 缓存过期时间 - 模块缓存的最大有效期（秒）
-     * Cache expiration time - Maximum validity period for module cache (seconds)
-     */
+    /// @notice Maximum cache validity period for module addresses (in seconds)
+    /// @dev Maximum validity period for module address cache, must be refreshed from Registry after this time
     uint256 public constant CACHE_MAX_AGE = 1 days;
 
     /* ============ Storage ============ */
     
-    /// @notice Registry地址 - 用于模块管理
-    /// @notice Registry address - For module management
-    address private _registryAddr;
+    /// @notice Registry address (internal storage, following naming conventions)
+    /// @dev Used for module address resolution and access control, exposed publicly through registryAddrVar()
+    /// @dev Architecture requirement: all business modules resolve dependencies through Registry, hardcoding module addresses is prohibited
+    address internal _registryAddr;
 
-    /**
-     * 基础存储 - 包含权限控制和缓存管理
-     * Base storage - Contains access control and cache management
-     */
-    LiquidationBase.BaseStorage private _baseStorage;
+    /// @notice Base storage (internal storage)
+    /// @dev Contains state required for basic functionality such as access control and cache management
+    LiquidationBase.BaseStorage internal _baseStorage;
 
-    /**
-     * 权限控制存储 - 使用 LiquidationAccessControl 库
-     * Access control storage - Using LiquidationAccessControl library
-     */
+    /// @notice Access control storage
+    /// @dev Uses LiquidationAccessControl library for permission management, supports ACM integration
+    /// @dev Follows architecture guide: access control is unified through ACM
     LiquidationAccessControl.Storage internal accessControlStorage;
 
+    /// @notice Module cache storage (internal storage)
+    /// @dev Used to cache commonly used module addresses, reducing Registry query overhead and improving performance
+    ModuleCache.ModuleCacheStorage internal _moduleCache;
+
+    /// @notice Liquidation bonus rate (in basis points, bps=1e4).
+    /// @dev Governance-managed parameter; calculator and other modules should read this instead of duplicating config.
+    uint256 public liquidationBonusRateVar;
+
+    /// @notice Liquidation threshold (in basis points, bps=1e4).
+    /// @dev Governance-managed parameter; used by calculators/risk modules as a shared reference.
+    uint256 public liquidationThresholdVar;
+
     /**
-     * 模块缓存 - 用于缓存模块地址
-     * Module cache - Used to cache module addresses
+     * @notice Get Registry address (naming follows architecture conventions)
+     * @return registryAddr Registry contract address
      */
-    ModuleCache.ModuleCacheStorage private _moduleCache;
+    function registryAddrVar() external view returns (address registryAddr) {
+        return _registryAddr;
+    }
 
     /* ============ Events ============ */
     
     /**
-     * 系统暂停事件 - 当系统被暂停时触发
-     * System paused event - Triggered when system is paused
-     * @param pauser 暂停者地址 Pauser address
-     * @param timestamp 时间戳 Timestamp
+     * @notice System paused event
+     * @param pauser Address that executed the pause
+     * @param timestamp Pause timestamp (in seconds)
+     * @dev Follows event naming convention: PascalCase, past tense
+     * @dev Emitted when the system is emergency paused, for off-chain monitoring and auditing
      */
     event SystemPaused(address indexed pauser, uint256 timestamp);
 
     /**
-     * 系统恢复事件 - 当系统恢复时触发
-     * System unpaused event - Triggered when system is resumed
-     * @param unpauser 恢复者地址 Unpauser address
-     * @param timestamp 时间戳 Timestamp
+     * @notice System unpaused event
+     * @param unpauser Address that executed the unpause
+     * @param timestamp Unpause timestamp (in seconds)
+     * @dev Follows event naming convention: PascalCase, past tense
+     * @dev Emitted when the system resumes from paused state, for off-chain monitoring and auditing
      */
     event SystemUnpaused(address indexed unpauser, uint256 timestamp);
 
     /* ============ Constructor ============ */
     
+    /**
+     * @notice Constructor (disables initialization)
+     * @dev Prevents direct calls to initialization function, ensures deployment through proxy pattern
+     * @custom:oz-upgrades-unsafe-allow constructor
+     */
     constructor() {
         _disableInitializers();
     }
@@ -108,10 +128,17 @@ abstract contract LiquidationConfigManager is
     /* ============ Initializer ============ */
     
     /**
-     * 初始化函数 - 设置Registry地址和权限控制接口
-     * Initialize function - Set Registry address and access control interface
-     * @param initialRegistryAddr Registry合约地址 Registry contract address
-     * @param initialAccessControl 权限控制接口地址 Access control interface address
+     * @notice Initialize the liquidation configuration manager
+     * @dev Reverts if:
+     *      - initialRegistryAddr is zero address
+     *      - initialAccessControl is zero address
+     *
+     * Security:
+     * - Initializer modifier ensures single initialization
+     * - All addresses are validated to be non-zero
+     *
+     * @param initialRegistryAddr Registry contract address for module management and address resolution
+     * @param initialAccessControl Access control interface address for permission verification
      */
     function initialize(address initialRegistryAddr, address initialAccessControl) external initializer {
         LiquidationValidationLibrary.validateAddress(initialRegistryAddr, "Registry");
@@ -124,199 +151,202 @@ abstract contract LiquidationConfigManager is
         _registryAddr = initialRegistryAddr;
         LiquidationAccessControl.initialize(_baseStorage.accessControl, initialAccessControl, initialAccessControl);
         
-        // 初始化模块缓存
+        // Initialize module cache: disable auto-refresh, cache addresses managed by this contract
         ModuleCache.initialize(_moduleCache, false, address(this));
+
+        // Default liquidation parameters (bps) - can be updated via governance.
+        liquidationBonusRateVar = LiquidationTypes.DEFAULT_LIQUIDATION_BONUS;
+        liquidationThresholdVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
     }
 
-    // ============ 修饰符 ============
-    /// @dev 角色验证修饰符
-    /// @param role 所需角色
+    // ============ Modifiers ============
+    
+    /**
+     * @notice Access control modifier
+     * @param role Required role (ActionKeys constant)
+     * @dev Uses LiquidationAccessControl library for permission verification
+     * @dev Follows architecture guide: access control is unified through ACM
+     */
     modifier onlyRole(bytes32 role) {
         LiquidationAccessControl.requireRole(_baseStorage.accessControl, role, msg.sender);
         _;
     }
 
-    // ============ Registry 模块获取函数 ============
+
+    // ============ Registry Module Getter Functions ============
     
-    /// @notice 从Registry获取模块地址
-    /// @param moduleKey 模块键值
-    /// @return 模块地址
+    /**
+     * @notice Get module address from Registry (internal function)
+     * @param moduleKey Module key (ModuleKeys constant)
+     * @return Module address (reverts if not registered)
+     * @dev Architecture requirement: all module addresses are resolved through Registry, hardcoding is prohibited
+     */
     function getModuleFromRegistry(bytes32 moduleKey) internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
-    /// @notice 检查模块是否在Registry中注册
-    /// @param moduleKey 模块键值
-    /// @return 是否已注册
+    /**
+     * @notice Check if module is registered in Registry (internal function)
+     * @param moduleKey Module key (ModuleKeys constant)
+     * @return Whether the module is registered
+     * @dev Used to check if module exists, avoiding unnecessary reverts
+     */
     function isModuleRegistered(bytes32 moduleKey) internal view returns (bool) {
         return Registry(_registryAddr).isModuleRegistered(moduleKey);
     }
 
-    /// @notice 安排模块升级
-    /// @param moduleKey 模块键值
-    /// @param newAddress 新模块地址
-    function scheduleModuleUpgrade(bytes32 moduleKey, address newAddress) external onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
-        Registry(_registryAddr).scheduleModuleUpgrade(moduleKey, newAddress);
-        
-        // 获取当前模块地址用于事件
-        address currentAddress = Registry(_registryAddr).getModule(moduleKey);
-        (address pendingAddress, uint256 executeAfter, ) = Registry(_registryAddr).getPendingUpgrade(moduleKey);
-        
-        emit RegistryModuleUpgradeScheduled(moduleKey, currentAddress, pendingAddress, executeAfter);
-    }
-
-    /// @notice 执行模块升级
-    /// @param moduleKey 模块键值
-    function executeModuleUpgrade(bytes32 moduleKey) external onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
-        address oldAddress = Registry(_registryAddr).getModule(moduleKey);
-        Registry(_registryAddr).executeModuleUpgrade(moduleKey);
-        address newAddress = Registry(_registryAddr).getModule(moduleKey);
-        
-        emit RegistryModuleUpgradeExecuted(moduleKey, oldAddress, newAddress);
-    }
-
-    /// @notice 取消模块升级
-    /// @param moduleKey 模块键值
-    function cancelModuleUpgrade(bytes32 moduleKey) external onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
-        address oldAddress = Registry(_registryAddr).getModule(moduleKey);
-        (address pendingAddress, , ) = Registry(_registryAddr).getPendingUpgrade(moduleKey);
-        
-        Registry(_registryAddr).cancelModuleUpgrade(moduleKey);
-        
-        emit RegistryModuleUpgradeCancelled(moduleKey, oldAddress, pendingAddress);
-    }
-
-    /// @notice 获取待升级信息
-    /// @param moduleKey 模块键值
-    /// @return newAddress 新地址
-    /// @return executeAfter 执行时间
-    /// @return hasPending 是否有待升级
-    function getPendingUpgrade(bytes32 moduleKey) external view returns (address newAddress, uint256 executeAfter, bool hasPending) {
-        return Registry(_registryAddr).getPendingUpgrade(moduleKey);
-    }
-
     /* ============ Module Management Functions ============ */
-    
+
     /**
-     * 获取模块地址 - 从缓存中获取模块地址
-     * Get module address - Get module address from cache
-     * @param moduleKey 模块键值 Module key
-     * @return 模块地址 Module address
+     * @notice Get module address (from cache).
+     * @param moduleKey Module key (ModuleKeys constant)
+     * @return moduleAddress Cached module address (may be zero if not set)
      */
-    function getModule(bytes32 moduleKey) public view returns (address) {
+    function getModule(bytes32 moduleKey) public view returns (address moduleAddress) {
         return ModuleCache.get(_moduleCache, moduleKey, CACHE_MAX_AGE);
     }
 
     /**
-     * 更新模块 - 更新指定模块的缓存地址
-     * Update module - Update cached address for specified module
-     * @param key 模块键值 Module key
-     * @param addr 模块地址 Module address
+     * @notice Update a module cache entry.
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *      - addr is zero address
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param key Module key (ModuleKeys constant)
+     * @param addr Module address
      */
     function updateModule(bytes32 key, address addr) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        if (addr == address(0)) revert ZeroAddress();
         ModuleCache.set(_moduleCache, key, addr, msg.sender);
     }
 
     /**
-     * 批量更新模块 - 一次性更新多个模块
-     * Batch update modules - Update multiple modules at once
-     * @param keys 模块键值数组 Array of module keys
-     * @param addresses 模块地址数组 Array of module addresses
+     * @notice Batch update module cache entries.
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *      - keys.length == 0
+     *      - keys.length != addresses.length
+     *      - any address is zero address
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param keys Array of module keys
+     * @param addresses Array of module addresses
      */
     function batchUpdateModules(bytes32[] memory keys, address[] memory addresses) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        uint256 length = keys.length;
+        if (length == 0) revert EmptyArray();
+        if (length != addresses.length) revert ArrayLengthMismatch(length, addresses.length);
+
+        for (uint256 i = 0; i < length;) {
+            if (addresses[i] == address(0)) revert ZeroAddress();
+            unchecked { ++i; }
+        }
+
         ModuleCache.batchSet(_moduleCache, keys, addresses, msg.sender);
     }
 
     /**
-     * 移除模块 - 从缓存中移除指定模块
-     * Remove module - Remove specified module from cache
-     * @param key 模块键值 Module key
+     * @notice Remove a module cache entry.
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param key Module key (ModuleKeys constant)
      */
     function removeModule(bytes32 key) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         ModuleCache.remove(_moduleCache, key, msg.sender);
     }
 
+    /* ============ Liquidation Parameter Governance ============ */
+
+    /**
+     * @notice Update liquidation bonus rate.
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param newRate New bonus rate (bps=1e4)
+     */
+    function updateLiquidationBonusRate(uint256 newRate) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        liquidationBonusRateVar = newRate;
+    }
+
+    /**
+     * @notice Update liquidation threshold.
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param newThreshold New threshold (bps=1e4)
+     */
+    function updateLiquidationThreshold(uint256 newThreshold) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        liquidationThresholdVar = newThreshold;
+    }
+
+    /**
+     * @notice Get liquidation bonus rate.
+     * @return bonusRate Bonus rate (bps=1e4)
+     */
+    function getLiquidationBonusRate() external view returns (uint256 bonusRate) {
+        return liquidationBonusRateVar;
+    }
+
+    /**
+     * @notice Get liquidation threshold.
+     * @return threshold Threshold (bps=1e4)
+     */
+    function getLiquidationThreshold() external view returns (uint256 threshold) {
+        return liquidationThresholdVar;
+    }
+
     /* ============ Query Functions ============ */
     
     /**
-     * 获取缓存的协调器地址 - 获取缓存的清算协调器地址
-     * Get cached orchestrator address - Get cached liquidation orchestrator address
-     * @return orchestrator 协调器地址 Orchestrator address
+     * @notice Get cached orchestrator address
+     * @return orchestrator Liquidation orchestrator address
      */
     function getCachedOrchestrator() external view returns (address orchestrator) {
         return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR, CACHE_MAX_AGE);
     }
 
     /**
-     * 获取缓存的计算器地址 - 获取缓存的清算计算器地址
-     * Get cached calculator address - Get cached liquidation calculator address
-     * @return calculator 计算器地址 Calculator address
+     * @notice Get cached calculator address
+     * @return calculator Liquidation calculator address
      */
     function getCachedCalculator() external view returns (address calculator) {
         return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_CALCULATOR, CACHE_MAX_AGE);
     }
 
     /**
-     * 获取缓存的奖励分配器地址 - 获取缓存的清算奖励分配器地址
-     * Get cached reward distributor address - Get cached liquidation reward distributor address
-     * @return rewardDistributor 奖励分配器地址 Reward distributor address
-     */
-    function getCachedRewardDistributor() external view returns (address rewardDistributor) {
-        return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_REWARD_DISTRIBUTOR, CACHE_MAX_AGE);
-    }
-
-    /**
-     * 获取缓存的记录管理器地址 - 获取缓存的清算记录管理器地址
-     * Get cached record manager address - Get cached liquidation record manager address
-     * @return recordManager 记录管理器地址 Record manager address
-     */
-    function getCachedRecordManager() external view returns (address recordManager) {
-        return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_RECORD_MANAGER, CACHE_MAX_AGE);
-    }
-
-    /**
-     * 获取缓存的风险管理器地址 - 获取缓存的清算风险管理器地址
-     * Get cached risk manager address - Get cached liquidation risk manager address
-     * @return riskManager 风险管理器地址 Risk manager address
+     * @notice Get cached risk manager address
+     * @return riskManager Liquidation risk manager address
      */
     function getCachedRiskManager() external view returns (address riskManager) {
         return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, CACHE_MAX_AGE);
     }
 
     /**
-     * 获取缓存的抵押物管理器地址 - 获取缓存的清算抵押物管理器地址
-     * Get cached collateral manager address - Get cached liquidation collateral manager address
-     * @return collateralManager 抵押物管理器地址 Collateral manager address
-     */
-    function getCachedCollateralManager() external view returns (address collateralManager) {
-        return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_COLLATERAL_MANAGER, CACHE_MAX_AGE);
-    }
-
-    /**
-     * 获取缓存的债务管理器地址 - 获取缓存的清算债务管理器地址
-     * Get cached debt manager address - Get cached liquidation debt manager address
-     * @return debtManager 债务管理器地址 Debt manager address
-     */
-    function getCachedDebtManager() external view returns (address debtManager) {
-        return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_DEBT_MANAGER, CACHE_MAX_AGE);
-    }
-
-    /**
-     * 获取所有缓存的模块地址 - 获取所有缓存的清算模块地址
-     * Get all cached module addresses - Get all cached liquidation module addresses
-     * @return orchestrator 协调器地址 Orchestrator address
-     * @return calculator 计算器地址 Calculator address
-     * @return rewardDistributor 奖励分配器地址 Reward distributor address
-     * @return recordManager 记录管理器地址 Record manager address
-     * @return riskManager 风险管理器地址 Risk manager address
-     * @return collateralManager 抵押物管理器地址 Collateral manager address
-     * @return debtManager 债务管理器地址 Debt manager address
+     * @notice Get all cached module addresses
+     * @return orchestrator Orchestrator address
+     * @return calculator Calculator address
+     * @return riskManager Risk manager address
+     * @return collateralManager Collateral manager address (using KEY_CM)
+     * @return debtManager Debt manager address (using KEY_LE)
      */
     function getAllCachedModules() external view returns (
         address orchestrator,
         address calculator,
-        address rewardDistributor,
-        address recordManager,
         address riskManager,
         address collateralManager,
         address debtManager
@@ -324,19 +354,22 @@ abstract contract LiquidationConfigManager is
         return (
             ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR, CACHE_MAX_AGE),
             ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_CALCULATOR, CACHE_MAX_AGE),
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_REWARD_DISTRIBUTOR, CACHE_MAX_AGE),
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_RECORD_MANAGER, CACHE_MAX_AGE),
             ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, CACHE_MAX_AGE),
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_COLLATERAL_MANAGER, CACHE_MAX_AGE),
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_DEBT_MANAGER, CACHE_MAX_AGE)
+            ModuleCache.get(_moduleCache, ModuleKeys.KEY_CM, CACHE_MAX_AGE),
+            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LE, CACHE_MAX_AGE)
         );
     }
 
     /* ============ Emergency Functions ============ */
     
     /**
-     * 紧急暂停 - 暂停所有操作
-     * Emergency pause - Pause all operations
+     * @notice Emergency pause the liquidation system
+     * @dev Reverts if:
+     *      - caller does not have ACTION_LIQUIDATE role
+     *
+     * Security:
+     * - Role-gated (ACTION_LIQUIDATE)
+     * - All liquidation operations will revert after pause, used as emergency safety switch
      */
     function emergencyPause() external onlyRole(ActionKeys.ACTION_LIQUIDATE) {
         _pause();
@@ -344,8 +377,13 @@ abstract contract LiquidationConfigManager is
     }
 
     /**
-     * 紧急恢复 - 恢复所有操作
-     * Emergency unpause - Resume all operations
+     * @notice Emergency unpause the liquidation system
+     * @dev Reverts if:
+     *      - caller does not have ACTION_LIQUIDATE role
+     *
+     * Security:
+     * - Role-gated (ACTION_LIQUIDATE)
+     * - Used in pair with emergencyPause, liquidation operations can execute normally after unpause
      */
     function emergencyUnpause() external onlyRole(ActionKeys.ACTION_LIQUIDATE) {
         _unpause();
@@ -353,9 +391,8 @@ abstract contract LiquidationConfigManager is
     }
 
     /**
-     * 检查是否暂停 - 检查系统是否处于暂停状态
-     * Check if paused - Check if system is in paused state
-     * @return paused 是否暂停 Whether paused
+     * @notice Check if the system is paused
+     * @return paused Whether the system is paused
      */
     function isPaused() external view returns (bool paused) {
         return super.paused();
@@ -364,43 +401,45 @@ abstract contract LiquidationConfigManager is
     /* ============ Utility Functions ============ */
     
     /**
-     * 获取权限控制接口地址 - 返回权限控制接口地址
-     * Get access control interface address - Return access control interface address
-     * @return 权限控制接口地址 Access control interface address
+     * @notice Get access control interface address
+     * @return Access control interface address (returns this contract address)
      */
     function getAccessControl() external view returns (address) {
         return address(this);
     }
 
     /**
-     * 检查缓存是否有效 - 检查指定模块的缓存是否在有效期内
-     * Check if cache is valid - Check if specified module cache is within validity period
-     * @param key 模块键值 Module key
-     * @return 是否有效 Whether valid
+     * @notice Check if cache for specified module is valid
+     * @param key Module key (ModuleKeys constant)
+     * @return Whether the cache is valid (within CACHE_MAX_AGE validity period)
      */
     function isCacheValid(bytes32 key) external view returns (bool) {
         return ModuleCache.isValid(_moduleCache, key, CACHE_MAX_AGE);
     }
 
     /**
-     * 获取Vault存储地址 - 返回Vault存储地址
-     * Get Vault storage address - Return Vault storage address
-     * @return Vault存储地址 Vault storage address
+     * @notice Get Vault storage address
+     * @return Vault storage address (returns Registry address)
      */
     function getVaultStorage() external view returns (address) {
-        return _registryAddr; // Assuming registry address holds the Vault storage address reference
+        return _registryAddr;
     }
 
     /* ============ UUPS Upgradeable ============ */
     
     /**
-     * 授权升级 - 检查调用者是否具有升级权限
-     * Authorize upgrade - Check if caller has upgrade permission
-     * @param newImplementation 新实现地址 New implementation address
+     * @notice UUPS upgrade authorization function
+     * @dev Reverts if:
+     *      - caller does not have ACTION_UPGRADE_MODULE role
+     *      - newImplementation is zero address
+     *
+     * Security:
+     * - Role-gated (ACTION_UPGRADE_MODULE)
+     * - Validates new implementation address is non-zero to prevent upgrading to invalid address
+     * - Follows UUPS upgrade pattern, supports secure contract upgrades
+     *
+     * @param newImplementation New implementation contract address
      */
-    /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
     function _authorizeUpgrade(address newImplementation) internal view override onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
         LiquidationBase.validateAddress(newImplementation, "Implementation");
     }

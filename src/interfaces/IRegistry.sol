@@ -5,6 +5,15 @@ pragma solidity ^0.8.20;
 /// @notice Registry 合约的接口定义
 /// @dev 提供统一的模块注册和访问接口，供所有模块使用
 interface IRegistry {
+
+    /* ============ Structs ============ */
+    /// @notice 模块升级历史记录
+    struct UpgradeHistory {
+        address oldAddress;
+        address newAddress;
+        uint256 timestamp;
+        address executor;
+    }
     
     /* ============ Events ============ */
     /// @notice Registry 已初始化
@@ -31,14 +40,15 @@ interface IRegistry {
     event ModuleNoOp(
         bytes32 indexed key,
         address indexed currentAddress,
-        address indexed executor
+        address executor
     );
 
     /// @notice 批量模块地址已直接变更（无延迟升级）
     event BatchModuleChanged(
         bytes32[] keys,
         address[] oldAddresses,
-        address[] newAddresses
+        address[] newAddresses,
+        address executor
     );
 
     /// @notice 模块升级计划事件
@@ -53,7 +63,8 @@ interface IRegistry {
     /// @notice 紧急操作已执行
     event EmergencyActionExecuted(
         uint8 indexed action, 
-        address indexed executor
+        address indexed executor,
+        uint256 timestamp
     );
 
     /// @notice 延时窗口变更事件
@@ -203,7 +214,7 @@ interface IRegistry {
     /// @notice 获取模块的所有升级历史记录
     /// @param key 模块键
     /// @return 升级历史记录数组
-    function getAllUpgradeHistory(bytes32 key) external view returns (bytes memory);
+    function getAllUpgradeHistory(bytes32 key) external view returns (UpgradeHistory[] memory);
 
     // ============ 新增缺失的接口函数 ============
     

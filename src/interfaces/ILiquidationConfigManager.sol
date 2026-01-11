@@ -16,6 +16,44 @@ interface ILiquidationConfigManager {
      */
     function getModule(bytes32 moduleKey) external view returns (address moduleAddress);
 
+    /* ============ Liquidation Parameter Governance ============ */
+
+    /**
+     * @notice Update liquidation bonus rate.
+     * @param newRate New bonus rate (bps=1e4)
+     */
+    function updateLiquidationBonusRate(uint256 newRate) external;
+
+    /**
+     * @notice Get liquidation bonus rate.
+     * @return bonusRate Bonus rate (bps=1e4)
+     */
+    function getLiquidationBonusRate() external view returns (uint256 bonusRate);
+
+    /**
+     * @notice Update liquidation threshold.
+     * @param newThreshold New threshold (bps=1e4)
+     */
+    function updateLiquidationThreshold(uint256 newThreshold) external;
+
+    /**
+     * @notice Get liquidation threshold.
+     * @return threshold Threshold (bps=1e4)
+     */
+    function getLiquidationThreshold() external view returns (uint256 threshold);
+
+    /**
+     * @notice Update minimum health factor.
+     * @param newMinHealthFactor New minimum health factor (bps=1e4)
+     */
+    function updateMinHealthFactor(uint256 newMinHealthFactor) external;
+
+    /**
+     * @notice Get minimum health factor.
+     * @return minHealthFactor Minimum health factor (bps=1e4)
+     */
+    function getMinHealthFactor() external view returns (uint256 minHealthFactor);
+
     /* ============ Query Functions ============ */
     
     /**

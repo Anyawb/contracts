@@ -5,7 +5,7 @@ import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 const KEY_ACM = ethers.keccak256(ethers.toUtf8Bytes("ACCESS_CONTROL_MANAGER"));
 const KEY_HEALTH_VIEW = ethers.keccak256(ethers.toUtf8Bytes("HEALTH_VIEW"));
 const KEY_LE = ethers.keccak256(ethers.toUtf8Bytes("LENDING_ENGINE"));
-const KEY_CM = ethers.keccak256(ethers.toUtf8Bytes("COLLATERAL_MANAGER"));
+const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes("POSITION_VIEW"));
 const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes("GUARANTEE_FUND_MANAGER"));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes("ACTION_ADMIN"));
 
@@ -22,9 +22,10 @@ describe("RiskView", function () {
     const HealthView = await ethers.getContractFactory("MockHealthViewLite");
     const hv = await HealthView.deploy();
 
-    const Totals = await ethers.getContractFactory("MockTotals");
-    const le = await Totals.deploy(); // debt
-    const cm = await Totals.deploy(); // collateral
+    const DebtTotals = await ethers.getContractFactory("MockDebtTotals");
+    const le = await DebtTotals.deploy(); // debt (getUserTotalDebtValue)
+    const PVTotals = await ethers.getContractFactory("MockPositionViewValuation");
+    const pv = await PVTotals.deploy(); // collateral (PositionView valuation)
 
     const Guarantee = await ethers.getContractFactory("MockGuaranteeFund");
     const gf = await Guarantee.deploy();
@@ -32,7 +33,7 @@ describe("RiskView", function () {
     await registry.setModule(KEY_ACM, await acm.getAddress());
     await registry.setModule(KEY_HEALTH_VIEW, await hv.getAddress());
     await registry.setModule(KEY_LE, await le.getAddress());
-    await registry.setModule(KEY_CM, await cm.getAddress());
+    await registry.setModule(KEY_POSITION_VIEW, await pv.getAddress());
     await registry.setModule(KEY_GUARANTEE_FUND, await gf.getAddress());
 
     await acm.grantRole(ACTION_ADMIN, admin.address);
@@ -40,7 +41,7 @@ describe("RiskView", function () {
     const RiskView = await ethers.getContractFactory("RiskView");
     const rv = await upgrades.deployProxy(RiskView, [await registry.getAddress()], { kind: "uups" });
 
-    return { admin, user, other, registry, acm, hv, le, cm, gf, rv };
+    return { admin, user, other, registry, acm, hv, le, pv, gf, rv };
   }
 
   it("initialize should revert on zero registry", async function () {
@@ -90,9 +91,9 @@ describe("RiskView", function () {
   });
 
   it("calculateHealthFactorExcludingGuarantee uses totals and guarantee", async function () {
-    const { rv, le, cm, gf, user } = await loadFixture(deployFixture);
+    const { rv, le, pv, gf, user } = await loadFixture(deployFixture);
     await le.setTotal(user.address, 100); // debt
-    await cm.setTotal(user.address, 200); // collateral
+    await pv.setTotal(user.address, 200); // collateral
     const asset = ethers.Wallet.createRandom().address;
     await gf.setLocked(user.address, asset, 50); // guarantee
     const hf = await rv.calculateHealthFactorExcludingGuarantee(user.address, asset);

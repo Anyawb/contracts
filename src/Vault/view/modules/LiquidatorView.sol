@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { Registry } from "../../../registry/Registry.sol";
-import { ZeroAddress, EmptyArray, ArrayLengthMismatch, MissingRole, InvalidCaller } from "../../../errors/StandardErrors.sol";
+import {
+    ZeroAddress,
+    EmptyArray,
+    ArrayLengthMismatch,
+    MissingRole,
+    InvalidCaller
+} from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ILiquidationEventsView } from "../../../interfaces/ILiquidationEventsView.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
+import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
@@ -79,6 +86,14 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         _;
     }
 
+    /// @notice 仅允许清算执行器或残值分配模块推送（payout 专用）
+    modifier onlyLiquidationOrPayoutModule() {
+        address lm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_MANAGER);
+        address pm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_PAYOUT_MANAGER);
+        if (msg.sender != lm && msg.sender != pm) revert InvalidCaller();
+        _;
+    }
+
     /// @notice 清算数据访问验证修饰符
     modifier onlyLiquidationViewer() {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_LIQUIDATION_DATA, msg.sender);
@@ -142,11 +157,19 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     ) external override onlyValidRegistry onlyBusinessModule {
         DataPushLibrary._emitData(
             DATA_TYPE_LIQUIDATION_BATCH_UPDATE,
-            abi.encode(users, collateralAssets, debtAssets, collateralAmounts, debtAmounts, liquidator, bonuses, timestamp)
+            abi.encode(
+                users,
+                collateralAssets,
+                debtAssets,
+                collateralAmounts,
+                debtAmounts,
+                liquidator,
+                bonuses,
+                timestamp
+            )
         );
     }
 
-    /// @notice 清算残值分配推送（可选）
     function pushLiquidationPayout(
         address user,
         address collateralAsset,
@@ -159,7 +182,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         uint256 lenderShare,
         uint256 liquidatorShare,
         uint256 timestamp
-    ) external override onlyValidRegistry onlyBusinessModule {
+    ) external override onlyValidRegistry onlyLiquidationOrPayoutModule {
         DataPushLibrary._emitData(
             DATA_TYPE_LIQUIDATION_PAYOUT,
             abi.encode(
@@ -178,19 +201,23 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         );
     }
 
+    function _resolvePositionViewAddr() internal view returns (address) {
+        return Registry(_registryAddr).getModule(ModuleKeys.KEY_POSITION_VIEW);
+    }
+
     // ============ Registry 模块获取函数 ============
     
     /// @notice 从Registry获取模块地址
     /// @param moduleKey 模块键值
     /// @return 模块地址
-    function getModuleFromRegistry(bytes32 moduleKey) internal view returns (address) {
+    function _getModuleFromRegistry(bytes32 moduleKey) internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
     /// @notice 检查模块是否在Registry中注册
     /// @param moduleKey 模块键值
     /// @return 是否已注册
-    function isModuleRegistered(bytes32 moduleKey) internal view returns (bool) {
+    function _isModuleRegistered(bytes32 moduleKey) internal view returns (bool) {
         return Registry(_registryAddr).isModuleRegistered(moduleKey);
     }
 
@@ -199,11 +226,18 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @notice 获取清算人收益统计视图
     /// @param liquidator 清算人地址
     /// @return profitView 清算人收益统计视图
-    function getLiquidatorProfitView(address liquidator) external view onlyValidRegistry onlySystemViewer returns (LiquidatorProfitView memory profitView) {
+    function getLiquidatorProfitView(address liquidator)
+        external
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (LiquidatorProfitView memory profitView)
+    {
         // 方案A：链上不维护清算收益/次数统计；链下通过 DataPushed 事件聚合。
         // 这里返回 0 占位，避免依赖旧模块族（ProfitStatsManager / RecordManager）。
         (uint256 totalProfit, uint256 liquidationCount, uint256 lastTs) = (0, 0, 0);
         uint256 avg = liquidationCount > 0 ? totalProfit / liquidationCount : 0;
+        // solhint-disable-next-line not-rely-on-time
         uint256 daysSince = lastTs > 0 && block.timestamp > lastTs ? (block.timestamp - lastTs) / 1 days : 0;
 
         profitView = LiquidatorProfitView({
@@ -219,7 +253,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
 
     /// @notice 获取全局清算统计视图
     /// @return globalView 全局清算统计视图
-    function getGlobalLiquidationView() external view onlyValidRegistry onlySystemViewer returns (GlobalLiquidationView memory globalView) {
+    function getGlobalLiquidationView()
+        external
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (GlobalLiquidationView memory globalView)
+    {
         // 方案A：全局统计由链下聚合；链上返回 0 占位
         uint256 totalLiquidations = 0;
         uint256 totalProfit = 0;
@@ -241,7 +281,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @notice 批量获取清算人收益统计
     /// @param liquidators 清算人地址数组
     /// @return views 清算人收益统计视图数组
-    function batchGetLiquidatorProfitViews(address[] calldata liquidators) external view onlyValidRegistry onlySystemViewer returns (LiquidatorProfitView[] memory views) {
+    function batchGetLiquidatorProfitViews(address[] calldata liquidators)
+        external
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (LiquidatorProfitView[] memory views)
+    {
         uint256 len = liquidators.length;
         if (len == 0) revert EmptyArray();
         if (len > ViewConstants.MAX_BATCH_SIZE) revert LiquidatorView__BatchTooLarge();
@@ -250,6 +296,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             // 方案A：链下聚合统计；链上返回 0 占位
             (uint256 totalProfit, uint256 count, uint256 lastTs) = (0, 0, 0);
             uint256 avg = count > 0 ? totalProfit / count : 0;
+            // solhint-disable-next-line not-rely-on-time
             uint256 daysSince = lastTs > 0 && block.timestamp > lastTs ? (block.timestamp - lastTs) / 1 days : 0;
             views[i] = LiquidatorProfitView({
                 liquidator: liquidators[i],
@@ -285,7 +332,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @param liquidator 清算人地址
     /// @param asset 资产地址
     /// @return tempDebtAmount 临时债务数量
-    function getLiquidatorTempDebt(address liquidator, address asset) external view onlyValidRegistry onlySystemViewer returns (uint256 tempDebtAmount) {
+    function getLiquidatorTempDebt(address liquidator, address asset)
+        external
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (uint256 tempDebtAmount)
+    {
         // 方案B：不保留链上清算债务统计；链下聚合
         liquidator; asset;
         tempDebtAmount = 0;
@@ -293,7 +346,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
 
     /// @notice 获取清算人收益比例
     /// @return profitRate 收益比例（基点）
-    function getLiquidatorProfitRate() external view onlyValidRegistry onlySystemViewer returns (uint256 profitRate) {
+    function getLiquidatorProfitRate()
+        external
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (uint256 profitRate)
+    {
         // 方案B：利润分配/奖励口径由链下聚合；链上返回 0
         profitRate = 0;
     }
@@ -347,11 +406,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @return riskScore 风险分数
     /// @return riskLevel 风险级别
     /// @return riskFactors 风险因素
-    function getLiquidatorRiskAnalysis(address /* liquidator */) external view onlyValidRegistry onlySystemViewer returns (
-        uint256 riskScore,
-        uint8 riskLevel,
-        string[] memory riskFactors
-    ) {
+    function getLiquidatorRiskAnalysis(address /* liquidator */)
+        external
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (uint256 riskScore, uint8 riskLevel, string[] memory riskFactors)
+    {
         // 这里可以实现清算人风险分析逻辑
         // 暂时返回默认值
         riskScore = 0;
@@ -504,9 +565,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (uint256 value)
     {
         if (asset == address(0) || amount == 0) return 0;
-        address cm = Registry(_registryAddr).getModule(ModuleKeys.KEY_CM);
-        if (cm == address(0)) return 0;
-        try ICollateralManager(cm).getAssetValue(asset, amount) returns (uint256 v) { return v; } catch { return 0; }
+        address pv = _resolvePositionViewAddr();
+        if (pv == address(0)) return 0;
+        try IPositionViewValuation(pv).getAssetValue(asset, amount) returns (uint256 v) {
+            return v;
+        } catch {
+            return 0;
+        }
     }
 
     /// @notice 获取用户总抵押物价值
@@ -518,9 +583,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (uint256 totalValue)
     {
         if (user == address(0)) return 0;
-        address cm = Registry(_registryAddr).getModule(ModuleKeys.KEY_CM);
-        if (cm == address(0)) return 0;
-        try ICollateralManager(cm).getUserTotalCollateralValue(user) returns (uint256 v) { return v; } catch { return 0; }
+        address pv = _resolvePositionViewAddr();
+        if (pv == address(0)) return 0;
+        try IPositionViewValuation(pv).getUserTotalCollateralValue(user) returns (uint256 v) {
+            return v;
+        } catch {
+            return 0;
+        }
     }
 
     /// @notice 批量获取可清算抵押物数量
@@ -558,12 +627,12 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length > ViewConstants.MAX_BATCH_SIZE) revert LiquidatorView__BatchTooLarge();
 
-        address cm = Registry(_registryAddr).getModule(ModuleKeys.KEY_CM);
+        address pv = _resolvePositionViewAddr();
         values = new uint256[](assets.length);
-        if (cm == address(0)) return values;
+        if (pv == address(0)) return values;
         for (uint256 i = 0; i < assets.length; ) {
             if (assets[i] != address(0) && amounts[i] > 0) {
-                try ICollateralManager(cm).getAssetValue(assets[i], amounts[i]) returns (uint256 v) {
+                try IPositionViewValuation(pv).getAssetValue(assets[i], amounts[i]) returns (uint256 v) {
                     values[i] = v;
                 } catch { values[i] = 0; }
             }
@@ -580,12 +649,12 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (uint256[] memory totalValues)
     {
         if (users.length > ViewConstants.MAX_BATCH_SIZE) revert LiquidatorView__BatchTooLarge();
-        address cm = Registry(_registryAddr).getModule(ModuleKeys.KEY_CM);
+        address pv = _resolvePositionViewAddr();
         totalValues = new uint256[](users.length);
-        if (cm == address(0)) return totalValues;
+        if (pv == address(0)) return totalValues;
         for (uint256 i = 0; i < users.length; ) {
             if (users[i] != address(0)) {
-                try ICollateralManager(cm).getUserTotalCollateralValue(users[i]) returns (uint256 v) {
+                try IPositionViewValuation(pv).getUserTotalCollateralValue(users[i]) returns (uint256 v) {
                     totalValues[i] = v;
                 } catch { totalValues[i] = 0; }
             }
@@ -608,10 +677,11 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @param moduleKey 模块键
     /// @param newAddress 新模块地址
     /// @dev 需要管理员权限
-    /// @notice DEPRECATED: Governance/write ops should be performed via Registry/VaultCore governance flow, not via View modules.
-    ///         Kept for backwards compatibility (minimal break). Prefer removing in a future major release.
+    /// @notice DEPRECATED: Governance/write ops should be performed via Registry/VaultCore governance flow,
+    /// not via View modules. Kept for backwards compatibility (minimal break).
+    /// Prefer removing in a future major release.
     function upgradeModule(bytes32 moduleKey, address newAddress) external onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         Registry(_registryAddr).scheduleModuleUpgrade(moduleKey, newAddress);
     }
     
@@ -620,7 +690,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @dev 需要管理员权限
     /// @notice DEPRECATED: see upgradeModule().
     function executeModuleUpgrade(bytes32 moduleKey) external onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         Registry(_registryAddr).executeModuleUpgrade(moduleKey);
     }
     
@@ -629,7 +699,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @dev 需要管理员权限
     /// @notice DEPRECATED: see upgradeModule().
     function cancelModuleUpgrade(bytes32 moduleKey) external onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         Registry(_registryAddr).cancelModuleUpgrade(moduleKey);
     }
 
@@ -639,7 +709,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @dev onlyRole modifier 已经足够验证权限
     /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
     }
 

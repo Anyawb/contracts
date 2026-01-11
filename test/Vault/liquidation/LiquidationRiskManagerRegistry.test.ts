@@ -83,16 +83,16 @@ describe("LiquidationRiskManager Registry Upgrade", function () {
 
     describe("Registry Integration", function () {
         it("should initialize with Registry address", async function () {
-            expect(await liquidationRiskManager.registryAddr()).to.equal(await registry.getAddress());
+            expect(await liquidationRiskManager.registryAddrVar()).to.equal(await registry.getAddress());
         });
 
         it("should get module from Registry", async function () {
-            const lendingEngine = await liquidationRiskManager.getModuleFromRegistry(ModuleKeys.KEY_LE);
+            const lendingEngine = await registry.getModule(ModuleKeys.KEY_LE);
             expect(lendingEngine).to.equal(await mockLendingEngine.getAddress());
         });
 
         it("should check if module is registered", async function () {
-            const isRegistered = await liquidationRiskManager.isModuleRegistered(ModuleKeys.KEY_LE);
+            const isRegistered = await registry.isModuleRegistered(ModuleKeys.KEY_LE);
             expect(isRegistered).to.be.true;
         });
     });
@@ -106,13 +106,7 @@ describe("LiquidationRiskManager Registry Upgrade", function () {
             expect(await liquidationRiskManager.maxBatchSizeVar()).to.be.a("bigint");
         });
 
-        it("should provide compatibility functions", async function () {
-            // 检查兼容性函数
-            expect(await liquidationRiskManager.liquidationThreshold()).to.be.a("bigint");
-            expect(await liquidationRiskManager.minHealthFactor()).to.be.a("bigint");
-            expect(await liquidationRiskManager.maxCacheDuration()).to.be.a("bigint");
-            expect(await liquidationRiskManager.maxBatchSize()).to.be.a("bigint");
-        });
+        // Compatibility getters (legacy names) were intentionally removed from LiquidationRiskManager.
     });
 
     describe("Error Handling", function () {

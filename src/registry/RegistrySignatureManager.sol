@@ -82,6 +82,10 @@ contract RegistrySignatureManager is
         
         // 设置升级管理员
         _upgradeAdmin = upgradeAdmin_;
+
+        // 初始化 RegistryStorage 版本（nonces 等数据也在该存储槽中）
+        // 否则 permit* 会在 requireCompatibleVersion 处永久失败
+        RegistryStorage.initializeStorageVersion();
         
         // 初始化 domain separator 缓存
         _updateDomainSeparatorCache();

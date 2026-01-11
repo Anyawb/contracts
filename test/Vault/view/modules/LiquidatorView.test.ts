@@ -4,6 +4,9 @@ import { ethers, upgrades } from 'hardhat';
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const KEY_LIQUIDATION_MANAGER = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_MANAGER'));
 const KEY_CM = ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER'));
+const KEY_LE = ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE'));
+const KEY_PRICE_ORACLE = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
+const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW'));
 const KEY_LIQUIDATION_PROFIT_STATS_MANAGER = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_PROFIT_STATS_MANAGER'));
 const KEY_LIQUIDATION_RECORD_MANAGER = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_RECORD_MANAGER'));
 
@@ -19,12 +22,19 @@ describe('LiquidatorView', function () {
     const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
     const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
     const collateralMgr = await (await ethers.getContractFactory('MockCollateralManager')).deploy();
+    const lendingEngine = await (await ethers.getContractFactory('MockLendingEngineBasic')).deploy();
+    const priceOracle = await (await ethers.getContractFactory('MockPriceOracle')).connect(admin).deploy();
+    const positionViewFactory = await ethers.getContractFactory('PositionView');
+    const positionView = await upgrades.deployProxy(positionViewFactory, [await registry.getAddress()], { kind: 'uups' });
     const profitStats = await (await ethers.getContractFactory('MockLiquidationProfitStatsManager')).deploy();
     const recordMgr = await (await ethers.getContractFactory('MockLiquidationRecordManager')).deploy();
 
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(KEY_LIQUIDATION_MANAGER, business.address);
     await registry.setModule(KEY_CM, await collateralMgr.getAddress());
+    await registry.setModule(KEY_LE, await lendingEngine.getAddress());
+    await registry.setModule(KEY_PRICE_ORACLE, await priceOracle.getAddress());
+    await registry.setModule(KEY_POSITION_VIEW, await positionView.getAddress());
     await registry.setModule(KEY_LIQUIDATION_PROFIT_STATS_MANAGER, await profitStats.getAddress());
     await registry.setModule(KEY_LIQUIDATION_RECORD_MANAGER, await recordMgr.getAddress());
 
@@ -39,12 +49,18 @@ describe('LiquidatorView', function () {
     const asset = ethers.Wallet.createRandom().address;
     await collateralMgr.depositCollateral(admin.address, asset, 1_000);
     await collateralMgr.depositCollateral(viewer.address, asset, 2_000);
+
+    // Configure oracle for 1:1 valuation (price=1, decimals=8)
+    const nowTs = Math.floor(Date.now() / 1000);
+    await priceOracle.connect(admin).configureAsset(asset, 'test', 8, 3600);
+    await priceOracle.connect(admin).setPrice(asset, ethers.parseUnits('1', 8), nowTs, 8);
+
     const LiquidatorViewFactory = await ethers.getContractFactory('LiquidatorView');
     const view = await upgrades.deployProxy(LiquidatorViewFactory, [await registry.getAddress(), ethers.ZeroAddress], {
       kind: 'uups',
     });
 
-    return { view, registry, acm, admin, viewer, other, business, user2, collateralMgr, profitStats, recordMgr, asset };
+    return { view, registry, acm, admin, viewer, other, business, user2, collateralMgr, lendingEngine, priceOracle, positionView, profitStats, recordMgr, asset };
   }
 
   describe('initialization', function () {
@@ -396,9 +412,14 @@ describe('LiquidatorView', function () {
     });
 
     it('batch calculates multiple collateral values', async function () {
-      const { view, viewer } = await deployFixture();
+      const { view, viewer, priceOracle, admin } = await deployFixture();
       const asset1 = ethers.Wallet.createRandom().address;
       const asset2 = ethers.Wallet.createRandom().address;
+      const nowTs = Math.floor(Date.now() / 1000);
+      await priceOracle.connect(admin).configureAsset(asset1, 'a1', 8, 3600);
+      await priceOracle.connect(admin).setPrice(asset1, ethers.parseUnits('1', 8), nowTs, 8);
+      await priceOracle.connect(admin).configureAsset(asset2, 'a2', 8, 3600);
+      await priceOracle.connect(admin).setPrice(asset2, ethers.parseUnits('1', 8), nowTs, 8);
       const values = await view.connect(viewer).batchCalculateCollateralValues([asset1, asset2], [1_000n, 2_000n]);
       expect(values[0]).to.equal(1_000n);
       expect(values[1]).to.equal(2_000n);
@@ -696,7 +717,11 @@ describe('LiquidatorView', function () {
     });
 
     it('handles batch collateral values with zero addresses', async function () {
-      const { view, viewer, asset } = await deployFixture();
+      const { view, viewer, asset, priceOracle, admin } = await deployFixture();
+      // ensure oracle has price for the asset used
+      const nowTs = Math.floor(Date.now() / 1000);
+      await priceOracle.connect(admin).configureAsset(asset, 'asset', 8, 3600);
+      await priceOracle.connect(admin).setPrice(asset, ethers.parseUnits('1', 8), nowTs, 8);
       const values = await view.connect(viewer).batchCalculateCollateralValues(
         [asset, ethers.ZeroAddress, asset],
         [1_000n, 2_000n, 3_000n],

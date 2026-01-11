@@ -7,6 +7,7 @@ import { ActionKeys } from "../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
+import { IPositionViewValuation } from "../interfaces/IPositionViewValuation.sol";
 import { ILendingEngine } from "../interfaces/ILendingEngine.sol";
 import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
 import { IAssetWhitelist } from "../interfaces/IAssetWhitelist.sol";
@@ -24,6 +25,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuar
 import { Pausable } from "@openzeppelin/contracts/security/Pausable.sol";
 import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
 import { IPositionView } from "../interfaces/IPositionView.sol";
+import { ICacheRefreshable } from "../interfaces/ICacheRefreshable.sol";
 
 interface IStatisticsViewMinimal {
     function pushUserStatsUpdate(
@@ -46,7 +48,7 @@ interface IStatisticsViewMinimal {
 /// @dev 提供模块调用缓存机制，减少gas消耗
 /// @dev 集成优雅降级机制，处理模块调用失败
 /// @custom:security-contact security@example.com
-contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter {
+contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshable {
     using GracefulDegradation for *;
 
     // ----------------- 常量 -----------------
@@ -900,64 +902,15 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter {
         address withdrawAsset,
         uint256 withdrawAmount
     ) external nonReentrant whenNotPaused onlyValidRegistry {
-        // 参数校验
-        _validateOrderId(orderId);
-        _validateAsset(repayAsset);
-        _validateAsset(withdrawAsset);
-        _validateAmount(repayAmount);
-        _validateAmount(withdrawAmount);
-
-        // 业务逻辑校验
-        _validateUserBalance(msg.sender, repayAsset, repayAmount);
-        _validateOrderOwnership(orderId, msg.sender);
-
-        // 获取模块地址
-        (address le, address cm) = _getCachedModules();
-
-        // 创建降级配置
-        GracefulDegradation.DegradationConfig memory config = 
-            GracefulDegradation.createDefaultConfig(_settlementTokenAddr);
-
-        // 先还款，再提取；任一步失败整体回滚
-        bool repaySucceeded = false;
-        try ILendingEngineBasic(le).repay(msg.sender, repayAsset, repayAmount) {
-            repaySucceeded = true;
-        } catch {}
-
-        if (!repaySucceeded) {
-            try ILendingEngine(le).repay(orderId, repayAsset, repayAmount) {
-                repaySucceeded = true;
-            } catch (bytes memory revertData) {
-                _gracefulDegradation(le, "repay failed", config);
-                emit ExternalModuleReverted(le, "LendingEngine", revertData, msg.sender, ActionKeys.ACTION_REPAY);
-                revert VaultRouter__AtomicOperationFailed();
-            }
-        }
-
-        // 提取抵押物
-        try ICollateralManager(cm).withdrawCollateral(msg.sender, withdrawAsset, withdrawAmount) {
-            // ok
-        } catch (bytes memory revertData) {
-            _gracefulDegradation(cm, "withdrawCollateral failed", config);
-            emit ExternalModuleReverted(cm, "CollateralManager", revertData, msg.sender, ActionKeys.ACTION_WITHDRAW);
-            revert VaultRouter__AtomicOperationFailed();
-        }
-
-        // 操作成功，发出事件
-        _emitVaultAction(
-            ActionKeys.ACTION_REPAY, 
-            msg.sender, 
-            repayAmount, 
-            0, 
-            repayAsset
-        );
-        _emitVaultAction(
-            ActionKeys.ACTION_WITHDRAW, 
-            msg.sender, 
-            withdrawAmount, 
-            0, 
-            withdrawAsset
-        );
+        // Architecture alignment:
+        // Repay must go through VaultCore.repay(...) → SettlementManager (SSOT).
+        // VaultRouter is not a write-forwarder for repay/settle paths.
+        orderId;
+        repayAsset;
+        repayAmount;
+        withdrawAsset;
+        withdrawAmount;
+        revert VaultRouter__UnsupportedOperation(ActionKeys.ACTION_REPAY);
     }
 
     /// @notice 执行原子性操作的外部函数（用于try/catch）
@@ -1015,13 +968,12 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter {
     /// @notice 查询用户总抵押物价值
     /// @param user 用户地址
     /// @return totalValue 用户总抵押价值
-    /// @dev 通过CollateralManager模块查询用户总抵押价值
+    /// @dev 通过 PositionView 查询用户总抵押价值
     function getUserTotalCollateralValue(address user) external view onlyValidRegistry returns (uint256) {
         if (user == address(0)) revert ZeroAddress();
         
-        address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
-        
-        try ICollateralManager(cm).getUserTotalCollateralValue(user) returns (uint256 totalValue) {
+        address positionView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
+        try IPositionViewValuation(positionView).getUserTotalCollateralValue(user) returns (uint256 totalValue) {
             return totalValue;
         } catch (bytes memory errorData) {
             // 使用优雅降级而不是直接失败
@@ -1096,16 +1048,6 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter {
         );
     }
 
-    /// @notice 强制更新模块缓存（仅治理角色）
-    /// @dev 强制更新模块地址缓存，用于紧急情况下的模块地址更新
-    function forceUpdateModuleCache() external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
-        _cachedCMAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
-        _cachedLEAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        _lastCacheUpdate = block.timestamp;
-        emit ModuleCacheUpdated(_cachedCMAddr, _cachedLEAddr);
-    }
-
     /// @notice 启用/关闭测试模式（仅参数管理角色）
     /// @dev 仅用于测试辅助路径，生产应保持关闭
     function setTestingMode(bool enabled) external onlyValidRegistry {
@@ -1120,8 +1062,10 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter {
 
     /*━━━━━━━━━━━━━━━ 兼容旧版缓存/模块接口（测试用） ━━━━━━━━━━━━━━━*/
 
-    function refreshModuleCache() external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+    function refreshModuleCache() external override onlyValidRegistry {
+        // Unified entry: only CacheMaintenanceManager can refresh module caches.
+        address maint = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER);
+        if (msg.sender != maint) revert VaultRouter__UnauthorizedAccess();
         _getCachedModules();
         _lastCacheUpdate = block.timestamp;
         emit ModuleCacheRefreshed(_lastCacheUpdate);

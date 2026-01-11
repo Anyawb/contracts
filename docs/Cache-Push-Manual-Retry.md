@@ -10,7 +10,7 @@
   `event CacheUpdateFailed(address indexed user, address indexed asset, address viewAddr, uint256 collateral, uint256 debt, bytes reason);`
 - 健康推送失败补充事件：  
   `event HealthPushFailed(address indexed user, address indexed healthView, uint256 totalCollateral, uint256 totalDebt, bytes reason);`（最佳努力不回滚，用于链下重试/告警）。
-- 触发点：`VaultLendingEngine`/`LiquidationDebtManager` 推送 View 失败（依赖缺失/无代码/revert/账本读取失败）以及 `PositionView` guarded 读取失败。
+- 触发点：`VaultLendingEngine`/`LiquidationManager` 推送 View 失败（依赖缺失/无代码/revert/账本读取失败）以及 `PositionView` guarded 读取失败。
 - 载荷：user、asset、viewAddr（可能为 0）、尝试写入的 collateral/debt、revert reason(bytes)。主流程不回滚。
 
 ## 链下处理流程
@@ -31,14 +31,43 @@
   - 若已重试成功，清除提示或展示“已恢复时间”
 
 ## 治理/维护入口（已实现 & 建议）
-- 链上：`PositionView.retryUserPositionUpdate(user, asset)`（admin），刷新模块缓存→读取 CM/LE 最新账本→写缓存→ emit `UserPositionCached`；失败再 emit `CacheUpdateFailed`，幂等。
-- 链上：`VaultRouter.refreshModuleCache()`（admin）/`PositionView.refreshModuleCache()`（admin）在模块地址变更后手动刷新 1h 模块缓存；否则推送入口遇到缓存过期或未初始化会 `ModuleCacheExpired` 直接拒绝，避免误用旧地址。推送入口自身也会在缓存失效时自动刷新一次，但建议变更后主动刷新以减少首次调用失败。
+- 链上：`PositionView.retryUserPositionUpdate(user, asset)`（**ACTION_ADMIN**），读取 CM/LE 最新账本→写入 PositionView 缓存→ emit `UserPositionCached`；失败再 emit `CacheUpdateFailed`，幂等。
+- 链上：`VaultRouter.refreshModuleCache()`（将收口为**仅统一维护器可调用**）用于刷新 VaultRouter 内部的模块地址缓存（CM/LE）。
+- 建议新增：统一缓存维护器（见下一节）用于批量刷新所有“带模块缓存”的合约，避免各处零散运维入口与权限面扩大。
 - 链下：提供脚本/API 封装上述入口，鉴权与审计（操作者、输入、输出、理由），避免循环重试。
+
+## 模块缓存“保活刷新”（严格治理版，推荐实施方案）
+> 目标：在不引入“公开 refresh 导致垃圾 tx”的情况下，保证长跑网络中各类**模块缓存**不会因为过期而影响只读查询/推送入口的可用性。
+
+### 统一接口：ICacheRefreshable
+- 定义一个统一接口（建议路径：`src/interfaces/ICacheRefreshable.sol`）：
+  - `function refreshModuleCache() external;`
+- 任何“内部维护模块地址缓存”的合约都实现该接口（不要求暴露缓存细节，只负责把缓存更新时间戳刷新到最新）。
+
+### 统一维护器：CacheMaintenanceManager（best-effort + 批量）
+- 新增合约：`CacheMaintenanceManager`（建议归类为 **Registry/治理运维模块**，放到 `src/registry/CacheMaintenanceManager.sol`）
+- 权限：仅允许 `ACTION_SET_PARAMETER`（未来可迁移到 Timelock 轨）
+- 行为：提供批量入口对一组合约执行 `ICacheRefreshable.refreshModuleCache()`，并采用 **best-effort**：
+  - 单个 target 刷新失败时不回滚整笔交易，而是记录失败原因并继续刷新下一个 target。
+  - 维护器自身应发出统一事件，便于链下监控/审计：`CacheRefreshAttempted(target, ok, reason)`。
+
+### 触发时机（运维策略）
+- 模块升级/Registry 变更后：由治理脚本立即调用维护器批量刷新一次（减少首次调用失败）
+- 长跑网络：定时（例如每日/每周）执行一次批量刷新，作为“保活”动作
 
 ## 修改方案更改为
 - **强一致 + 事件打点**：清算/借还路径的视图推送失败会回滚主交易；缓存视图读取失败以 `CacheUpdateFailed` 打点，主流程可继续。
-- **1h 模块缓存 + 自动刷新**：推送白名单基于 1h 模块缓存（CM/LE/VBL），失效时自动刷新；模块升级后应由 admin 主动 `refreshModuleCache`。
+- **1h 模块缓存 + 自动刷新**：推送白名单基于 1h 模块缓存（CM/LE/VBL），失效时自动刷新；模块升级后应由治理通过 `CacheMaintenanceManager` 主动批量 `refreshModuleCache()`。
 - **链下重试**：保持“事件告警 + 人工/脚本重推”模式，重推前重读账本，避免旧值覆盖。
+
+---
+
+## 本次方案落地：需要修改/新增的智能合约清单（供审计）
+- `src/registry/CacheMaintenanceManager.sol`（新增）：统一缓存维护器，治理 gate + best-effort 批量刷新 + 事件审计。
+- `src/interfaces/ICacheRefreshable.sol`（新增）：统一接口 `refreshModuleCache()`。
+- `src/constants/ModuleKeys.sol`（修改）：新增 `KEY_CACHE_MAINTENANCE_MANAGER`，供目标合约侧“仅允许维护器调用 refresh”使用。
+- `src/Vault/VaultRouter.sol`（修改）：`refreshModuleCache()` 权限收口为仅维护器可调用，并对齐 `ICacheRefreshable` 语义。
+- `src/Vault/liquidation/modules/LiquidationRiskManager.sol`（修改）：新增 `refreshModuleCache()`（实现 `ICacheRefreshable`），移除 `refreshCoreModules()`（只保留统一入口）。
 
 ## 观测与审计要点
 - 监控指标：`CacheUpdateFailed` 事件数、按视图合约/资产/用户分布，重试成功率，平均修复时间，队列长度/年龄分布，死信率。
@@ -106,4 +135,18 @@
 - 消费 pending/queued 任务时对 `(user, asset, view)` 申请租约（如 Redis/DB 行锁），租约过期时间 > 单次重试最长耗时。
 - 重试成功或失败均写 `cache_retry_audit`，并释放租约；连续失败超阈值落死信。
 - 对接链上推送时，推送请求携带 `idempotency_key = job_id`，避免重复提交。***
+
+---
+
+## 需要修改/新增的智能合约（基于代码检索）
+> 以下清单用于落地“统一接口 + 统一维护器”方案。后续如引入更多模块缓存合约，可继续补充实现 `ICacheRefreshable`。
+
+- `src/interfaces/ICacheRefreshable.sol`（新增）：统一缓存刷新接口
+- `src/registry/CacheMaintenanceManager.sol`（新增）：治理运维入口，批量调用 `ICacheRefreshable.refreshModuleCache()`（best-effort）
+- `src/Vault/liquidation/modules/LiquidationRiskManager.sol`（修改）：
+  - 实现 `ICacheRefreshable`
+  - 将“核心模块缓存刷新”改为 `refreshModuleCache()`，并使用 `ACTION_SET_PARAMETER` gate（严格治理）
+- `src/Vault/VaultRouter.sol`（修改）：
+  - 实现 `ICacheRefreshable`
+  - `refreshModuleCache()` 权限由 `ACTION_ADMIN` 调整为 `ACTION_SET_PARAMETER`（统一治理口径）
 

@@ -18,7 +18,7 @@ import * as hardhat from 'hardhat';
 const { ethers } = hardhat;
 import { expect } from 'chai';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import type { RegistrySignatureManager } from '../../types/contracts/registry/RegistrySignatureManager';
 import type { Registry } from '../../types/contracts/registry/Registry';
 import type { RegistryCore } from '../../types/contracts/registry/RegistryCore';
@@ -66,7 +66,12 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
 
     // 部署 Registry 代理合约
     const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
-    const registryInitData = registryImplementation.interface.encodeFunctionData('initialize', [TEST_MIN_DELAY]);
+    // Registry.initialize(uint256 minDelay, address upgradeAdmin, address emergencyAdmin)
+    const registryInitData = registryImplementation.interface.encodeFunctionData('initialize', [
+      TEST_MIN_DELAY,
+      await owner.getAddress(),
+      await owner.getAddress()
+    ]);
     registryProxy = await ProxyFactory.deploy(
       registryImplementation.target,
       registryInitData
@@ -105,7 +110,10 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
     await registrySignatureManagerImplementation.waitForDeployment();
 
     // 部署 RegistrySignatureManager 代理合约
-    const signatureManagerInitData = registrySignatureManagerImplementation.interface.encodeFunctionData('initialize');
+    // RegistrySignatureManager.initialize(address upgradeAdmin)
+    const signatureManagerInitData = registrySignatureManagerImplementation.interface.encodeFunctionData('initialize', [
+      await signer.getAddress()
+    ]);
     registrySignatureManagerProxy = await ProxyFactory.deploy(
       registrySignatureManagerImplementation.target,
       signatureManagerInitData
@@ -153,6 +161,14 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       user2,
       attacker
     };
+  }
+
+  /**
+   * 使用链上时间生成 deadline（避免本机时间与 Hardhat 时间线不一致导致 SignatureExpired）
+   */
+  async function getDeadline(offsetSeconds: bigint): Promise<bigint> {
+    const now = BigInt(await time.latest());
+    return now + offsetSeconds;
   }
 
   /**
@@ -250,13 +266,13 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
   describe('初始化测试', function () {
     it('应该正确初始化代理合约', async function () {
       expect(await registrySignatureManager.owner()).to.equal(await owner.getAddress());
-      expect(await registrySignatureManager.getUpgradeAdmin()).to.equal(await owner.getAddress());
+      expect(await registrySignatureManager.getUpgradeAdmin()).to.equal(await signer.getAddress());
       expect(await registrySignatureManager.DOMAIN_SEPARATOR()).to.not.equal(ethers.ZeroHash);
     });
 
     it('应该拒绝重复初始化', async function () {
       await expect(
-        registrySignatureManager.initialize()
+        registrySignatureManager.initialize(await signer.getAddress())
       ).to.be.revertedWith('Initializable: contract is already initialized');
     });
 
@@ -306,7 +322,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1小时后过期
+      const deadline = await getDeadline(3600n); // 1小时后过期
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -340,7 +356,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) - 3600); // 1小时前过期
+      const deadline = await getDeadline(-3600n); // 1小时前过期
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -371,7 +387,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(999); // 错误的 nonce
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -403,7 +419,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -447,7 +463,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       // 使用无效的 v 值
       const { r, s } = await generateSignature(
@@ -479,7 +495,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = false;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -511,7 +527,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = ZERO_ADDRESS;
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -543,7 +559,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await user1.getAddress(); // 用户地址，不是合约
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -576,7 +592,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const firstAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v: v1, r: r1, s: s1 } = await generateSignature(
         signer,
@@ -602,7 +618,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       // 现在尝试用 allowReplace = false 设置同一个模块
       const newAddr = await mockCollateralManager.getAddress();
       const nextNonce = BigInt(1);
-      const nextDeadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const nextDeadline = await getDeadline(3600n);
 
       const { v: v2, r: r2, s: s2 } = await generateSignature(
         signer,
@@ -636,7 +652,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -671,7 +687,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress()]; // 少一个地址
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -703,7 +719,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses: string[] = [];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -735,7 +751,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -767,7 +783,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) - 3600); // 1小时前过期
+      const deadline = await getDeadline(-3600n); // 1小时前过期
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -799,7 +815,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(999); // 错误的 nonce
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -831,7 +847,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -877,7 +893,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       // 使用错误的签名者
       const { r, s } = await generateBatchSignature(
@@ -909,7 +925,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = false;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -951,7 +967,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
 
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -983,7 +999,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt('115792089237316195423570985008687907853269984665640564039457584007913129639935'); // 最大 nonce 值
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -1052,7 +1068,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -1086,7 +1102,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -1121,7 +1137,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -1154,7 +1170,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,
@@ -1190,7 +1206,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       // 测试不同的签名格式
       const { v, r, s } = await generateSignature(
@@ -1233,7 +1249,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const newAddr = await mockLendingEngine.getAddress();
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateSignature(
         signer,
@@ -1266,7 +1282,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
       const addresses = [await mockLendingEngine.getAddress(), await mockCollateralManager.getAddress()];
       const allowReplace = true;
       const nonce = BigInt(0);
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const deadline = await getDeadline(3600n);
 
       const { v, r, s } = await generateBatchSignature(
         signer,

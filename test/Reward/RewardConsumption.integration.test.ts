@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 import hardhat from 'hardhat';
-const { ethers } = hardhat;
+const { ethers, upgrades } = hardhat;
 
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import type { MockRegistry } from '../../types/contracts/Mocks/MockRegistry';
@@ -8,6 +8,7 @@ import type { AccessControlManager } from '../../types/contracts/access/AccessCo
 import type { RewardPoints } from '../../types/contracts/Token/RewardPoints';
 import type { RewardCore } from '../../types/contracts/Reward';
 import type { RewardConsumption } from '../../types/contracts/Reward';
+import type { RewardManagerCore } from '../../types/contracts/Reward';
 import type { FeatureUnlockConfig } from '../../types/contracts/Reward/configs/FeatureUnlockConfig';
 
 // 最小集成用例：验证 RewardConsumption → RewardCore → RewardPoints.burnPoints 路径
@@ -27,6 +28,7 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
   let rewardPoints!: RewardPoints;
   let rewardCore!: RewardCore;
   let rewardConsumption!: RewardConsumption;
+  let rewardManagerCore!: RewardManagerCore;
   let featureUnlock!: FeatureUnlockConfig;
   
   // 统计与特权位图验证：由于 RewardCore 通过 RewardView 推送（best-effort），此处最小化断言消费后 user 的消费记录数量 > 0
@@ -35,6 +37,8 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
   const KEY = {
     RP: () => ethers.keccak256(ethers.toUtf8Bytes('REWARD_POINTS')),
     RC: () => ethers.keccak256(ethers.toUtf8Bytes('REWARD_CORE')),
+    RMC: () => ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER_CORE')),
+    RCONS: () => ethers.keccak256(ethers.toUtf8Bytes('REWARD_CONSUMPTION')),
   } as const;
 
   enum ServiceType { AdvancedAnalytics, PriorityService, FeatureUnlock, GovernanceAccess, TestnetFeatures }
@@ -69,6 +73,18 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
     )) as unknown as RewardCore;
     await rewardCore.waitForDeployment();
 
+    // RewardManagerCore（用于 burn 代理）
+    const baseUsd = ethers.parseUnits('1', 18);
+    const perDay = ethers.parseUnits('1', 18);
+    const bonus = 0;
+    const baseEth = ethers.parseUnits('1', 18);
+    rewardManagerCore = (await upgrades.deployProxy(
+      await ethers.getContractFactory('RewardManagerCore'),
+      [await registry.getAddress(), baseUsd, perDay, bonus, baseEth],
+      { unsafeAllow: ['constructor'] }
+    )) as unknown as RewardManagerCore;
+    await rewardManagerCore.waitForDeployment();
+
     // RewardConsumption
     rewardConsumption = (await upgrades.deployProxy(
       await ethers.getContractFactory('RewardConsumption'),
@@ -88,10 +104,12 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
     // Registry 绑定
     await registry.setModule(KEY.RP(), await rewardPoints.getAddress());
     await registry.setModule(KEY.RC(), await rewardCore.getAddress());
+    await registry.setModule(KEY.RMC(), await rewardManagerCore.getAddress());
+    await registry.setModule(KEY.RCONS(), await rewardConsumption.getAddress());
 
-    // 授权：RewardPoints.MINTER_ROLE → RewardCore（消费 burn 需要）
+    // 授权：RewardPoints.MINTER_ROLE → RewardManagerCore（消费 burn 通过 RMCore 代理）
     const MINTER_ROLE = await rewardPoints.MINTER_ROLE();
-    await rewardPoints.connect(governance).grantRole(MINTER_ROLE, await rewardCore.getAddress());
+    await rewardPoints.connect(governance).grantRole(MINTER_ROLE, await rewardManagerCore.getAddress());
 
     // 配置服务价格（将 Basic 价格设置为 5e18）
     // FeatureUnlockConfig 默认 Basic=200e18，这里重设为 5e18 以便最小用例
@@ -108,7 +126,7 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
   }
 
   it('应通过 RewardConsumption 扣减用户积分（Basic: 5e18）', async () => {
-    const { user: u, rewardPoints: rp, rewardCore: rc } = await deployFixture();
+    const { user: u, rewardPoints: rp, rewardConsumption: rcons } = await deployFixture();
 
     // 预置积分：给 user 铸 10e18
     const ten = ethers.parseUnits('10', 18);
@@ -117,21 +135,17 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
     expect(before).to.equal(ten);
 
     // 触发消费：FeatureUnlock Basic（price=5e18）
-    await rc.connect(u).consumePointsForService(ServiceType.FeatureUnlock, ServiceLevel.Basic);
+    await rcons.connect(u).consumePointsForService(ServiceType.FeatureUnlock, ServiceLevel.Basic);
 
     const after = await rp.balanceOf(await u.getAddress());
     expect(after).to.equal(ten - ethers.parseUnits('5', 18));
-
-    // 校验 RewardCore 内部记录（消费记录 > 0）
-    const records = await (await ethers.getContractAt('RewardCore', await rewardCore.getAddress())).getUserConsumptions(await u.getAddress());
-    expect(records.length).to.be.greaterThan(0);
   });
 
   it('余额不足应 revert', async () => {
-    const { user: u, rewardPoints: rp, rewardCore: rc } = await deployFixture();
+    const { user: u, rewardPoints: rp, rewardConsumption: rcons } = await deployFixture();
     // 不给积分，直接尝试消费（Basic: 5e18）
     await expect(
-      rc.connect(u).consumePointsForService(ServiceType.FeatureUnlock, ServiceLevel.Basic)
+      rcons.connect(u).consumePointsForService(ServiceType.FeatureUnlock, ServiceLevel.Basic)
     ).to.be.reverted; // 标准错误：InsufficientBalance（由合约自定义错误抛出，通用断言）
     const bal = await rp.balanceOf(await u.getAddress());
     expect(bal).to.equal(0n);

@@ -264,10 +264,8 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       ).to.emit(registryDynamicModuleKey, 'ModuleKeyRegistered')
         .withArgs(
           (moduleKey: unknown) => moduleKey !== '0x0000000000000000000000000000000000000000000000000000000000000000',
-          TEST_NAME_1,
           (nameHash: unknown) => nameHash !== '0x0000000000000000000000000000000000000000000000000000000000000000',
-          await registrationAdmin.getAddress(),
-          (timestamp: bigint) => timestamp > BigInt(0)
+          await registrationAdmin.getAddress()
         );
 
       // 验证状态
@@ -291,8 +289,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
         .withArgs(
           moduleKey,
           TEST_NAME_1,
-          await systemAdmin.getAddress(),
-          (timestamp: bigint) => timestamp > BigInt(0)
+          await systemAdmin.getAddress()
         );
 
       // 验证状态
@@ -462,7 +459,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
     it('RegistryDynamicModuleKey – 应该拒绝空数组批量注册', async function () {
       await expect(
         registryDynamicModuleKey.connect(registrationAdmin).batchRegisterModuleKeys([])
-      ).to.be.revertedWith('Empty array');
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'EmptyArray');
     });
   });
 
@@ -537,13 +534,13 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
 
   describe('与 ModuleKeys 交互测试', function () {
     it('RegistryDynamicModuleKey – 应该正确与静态模块键交互', async function () {
-      // 获取静态模块键
-      const staticKeys = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      expect(staticKeys).to.be.gt(0);
+      // 静态模块键存在于 `frontend-config/moduleKeys.ts`（由链上 ModuleKeys 常量生成）
+      const staticKeys = Object.values(ModuleKeys);
+      expect(staticKeys.length).to.be.gt(0);
 
       // 验证静态模块键是有效的
-      for (let i = 0; i < Math.min(Number(staticKeys), 5); i++) {
-        const staticKey = await registryDynamicModuleKey.getStaticModuleKeyAt(i);
+      for (let i = 0; i < Math.min(staticKeys.length, 5); i++) {
+        const staticKey = staticKeys[i];
         expect(await registryDynamicModuleKey.isValidModuleKey(staticKey)).to.be.true;
         expect(await registryDynamicModuleKey.isDynamicModuleKey(staticKey)).to.be.false;
       }
@@ -554,9 +551,11 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_1);
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_2);
 
-      // 获取所有模块键
-      const allKeys = await registryDynamicModuleKey.getAllModuleKeys();
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
+      // 获取所有模块键（静态在 TS 常量中，动态在合约中）
+      const staticKeys = Object.values(ModuleKeys);
+      const dynamicKeys = await registryDynamicModuleKey.getDynamicModuleKeys();
+      const allKeys = [...staticKeys, ...dynamicKeys];
+      const staticCount = BigInt(staticKeys.length);
       const dynamicCount = await registryDynamicModuleKey.getDynamicKeyCount();
 
       expect(allKeys.length).to.equal(staticCount + dynamicCount);
@@ -577,7 +576,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       expect(await registryDynamicModuleKey.getModuleKeyName(moduleKey)).to.equal(TEST_NAME_1);
 
       // 验证静态模块键名称
-      const staticKey = await registryDynamicModuleKey.getStaticModuleKeyAt(0);
+      const staticKey = Object.values(ModuleKeys)[0];
       const staticName = await registryDynamicModuleKey.getModuleKeyName(staticKey);
       expect(staticName).to.not.equal('');
     });
@@ -591,7 +590,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       expect(await registryDynamicModuleKey.isValidModuleKey(dynamicKey)).to.be.true;
 
       // 验证静态模块键
-      const staticKey = await registryDynamicModuleKey.getStaticModuleKeyAt(0);
+      const staticKey = Object.values(ModuleKeys)[0];
       expect(await registryDynamicModuleKey.isValidModuleKey(staticKey)).to.be.true;
 
       // 验证无效模块键
@@ -608,17 +607,15 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
         await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(name);
       }
 
-      // 测试分页查询
-      const [keys, totalCount] = await registryDynamicModuleKey.getModuleKeysPaginated(0, 10);
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      
-      expect(totalCount).to.equal(staticCount + BigInt(3));
-      expect(keys.length).to.be.lte(10);
+      // 合约已移除“静态+动态合并分页”接口：静态键在 ModuleKeys 常量中，动态键可一次性读取后链下分页
+      const allDynamic = await registryDynamicModuleKey.getDynamicModuleKeys();
+      const totalCount = allDynamic.length;
+      const page1 = allDynamic.slice(0, 10);
+      const page2 = allDynamic.slice(10, 20);
 
-      // 测试第二页
-      const [keys2, totalCount2] = await registryDynamicModuleKey.getModuleKeysPaginated(10, 10);
-      expect(totalCount2).to.equal(staticCount + BigInt(3));
-      expect(keys2.length).to.be.lte(10);
+      expect(totalCount).to.equal(3);
+      expect(page1.length).to.be.lte(10);
+      expect(page2.length).to.be.lte(10);
     });
 
     it('RegistryDynamicModuleKey – 应该正确处理静态/动态交界处的分页', async function () {
@@ -626,17 +623,12 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_1);
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_2);
 
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      
-      // 测试在静态模块键末尾的分页
-      const [keys, totalCount] = await registryDynamicModuleKey.getModuleKeysPaginated(Number(staticCount) - 1, 5);
-      expect(totalCount).to.equal(staticCount + BigInt(2));
-      expect(keys.length).to.be.gt(0);
-
-      // 测试在动态模块键开始的分页
-      const [keys2, totalCount2] = await registryDynamicModuleKey.getModuleKeysPaginated(Number(staticCount), 5);
-      expect(totalCount2).to.equal(staticCount + BigInt(2));
-      expect(keys2.length).to.be.gt(0);
+      const allDynamic = await registryDynamicModuleKey.getDynamicModuleKeys();
+      const totalCount = allDynamic.length;
+      // 分页边界：offset=total-1 应返回 1 个元素
+      const lastPage = allDynamic.slice(Math.max(totalCount - 1, 0), totalCount);
+      expect(totalCount).to.equal(2);
+      expect(lastPage.length).to.equal(1);
     });
   });
 
@@ -671,14 +663,14 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await expect(
         registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_INVALID_CHAR)
       ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'RegistryDynamicModuleKey__InvalidCharacterInName')
-        .withArgs(TEST_NAME_INVALID_CHAR, 4); // @ 字符的位置
+        .withArgs(4); // @ 字符的位置（规范化后字符串内索引）
     });
 
     it('RegistryDynamicModuleKey – 应该正确处理中文字符位置', async function () {
       await expect(
         registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_CHINESE)
       ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'RegistryDynamicModuleKey__InvalidCharacterInName')
-        .withArgs(TEST_NAME_CHINESE, 0); // 第一个中文字符的位置
+        .withArgs(0); // 第一个中文字符的位置
     });
 
     it('RegistryDynamicModuleKey – 应该正确处理暂停状态', async function () {
@@ -712,10 +704,8 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       ).to.emit(registryDynamicModuleKey, 'ModuleKeyRegistered')
         .withArgs(
           (moduleKey: unknown) => moduleKey !== '0x0000000000000000000000000000000000000000000000000000000000000000',
-          TEST_NAME_1,
           (nameHash: unknown) => nameHash !== '0x0000000000000000000000000000000000000000000000000000000000000000',
-          await registrationAdmin.getAddress(),
-          (timestamp: bigint) => timestamp > BigInt(0)
+          await registrationAdmin.getAddress()
         );
     });
 
@@ -729,8 +719,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
         .withArgs(
           moduleKey,
           TEST_NAME_1,
-          await systemAdmin.getAddress(),
-          (timestamp: bigint) => timestamp > BigInt(0)
+          await systemAdmin.getAddress()
         );
     });
 
@@ -740,8 +729,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       ).to.emit(registryDynamicModuleKey, 'RegistrationAdminChanged')
         .withArgs(
           await registrationAdmin.getAddress(),
-          await user.getAddress(),
-          (timestamp: bigint) => timestamp > BigInt(0)
+          await user.getAddress()
         );
 
       await expect(
@@ -749,8 +737,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       ).to.emit(registryDynamicModuleKey, 'SystemAdminChanged')
         .withArgs(
           await systemAdmin.getAddress(),
-          await otherUser.getAddress(),
-          (timestamp: bigint) => timestamp > BigInt(0)
+          await otherUser.getAddress()
         );
     });
   });
@@ -877,11 +864,14 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
     });
 
     it('RegistryDynamicModuleKey – 应该正确获取总模块键数', async function () {
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      expect(await registryDynamicModuleKey.getTotalModuleKeyCount()).to.equal(staticCount);
+      // 合约只维护“动态模块键”，静态键来自 ModuleKeys 常量库；总数可在链下合并得到
+      const staticCount = BigInt(Object.values(ModuleKeys).length);
+      const dynamicCount0 = await registryDynamicModuleKey.getDynamicKeyCount();
+      expect(staticCount + dynamicCount0).to.equal(staticCount);
 
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_1);
-      expect(await registryDynamicModuleKey.getTotalModuleKeyCount()).to.equal(staticCount + BigInt(1));
+      const dynamicCount1 = await registryDynamicModuleKey.getDynamicKeyCount();
+      expect(staticCount + dynamicCount1).to.equal(staticCount + 1n);
     });
 
     it('RegistryDynamicModuleKey – 应该正确获取动态模块键名称', async function () {
@@ -906,7 +896,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
     it('RegistryDynamicModuleKey – 应该拒绝超出范围的索引', async function () {
       await expect(
         registryDynamicModuleKey.getDynamicModuleKeyByIndex(0)
-      ).to.be.revertedWith('Index out of bounds');
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'IndexOutOfBounds').withArgs(0, 0);
     });
   });
 
@@ -926,12 +916,12 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
 
     it('RegistryDynamicModuleKey – 应该验证静态模块键的 view 函数特性', async function () {
       // 测试静态模块键的 view 函数特性
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      expect(staticCount).to.be.gt(0);
+      const staticKeys = Object.values(ModuleKeys);
+      expect(staticKeys.length).to.be.gt(0);
       
       // 验证静态模块键是有效的
-      for (let i = 0; i < Math.min(Number(staticCount), 5); i++) {
-        const staticKey = await registryDynamicModuleKey.getStaticModuleKeyAt(i);
+      for (let i = 0; i < Math.min(staticKeys.length, 5); i++) {
+        const staticKey = staticKeys[i];
         expect(await registryDynamicModuleKey.isValidModuleKey(staticKey)).to.be.true;
         expect(await registryDynamicModuleKey.isDynamicModuleKey(staticKey)).to.be.false;
       }
@@ -994,7 +984,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await expect(
         registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(invalidName)
       ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'RegistryDynamicModuleKey__InvalidCharacterInName')
-        .withArgs(invalidName, 4); // @ 字符在第4个位置（0-based）
+        .withArgs(4); // @ 字符在第4个位置（0-based）
     });
 
     it('RegistryDynamicModuleKey – 应该拒绝包含中间空格字符的名称并返回正确位置', async function () {
@@ -1003,7 +993,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await expect(
         registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(invalidName)
       ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'RegistryDynamicModuleKey__InvalidCharacterInName')
-        .withArgs(invalidName, 4); // 空格字符在第4个位置（0-based）
+        .withArgs(4); // 空格字符在第4个位置（0-based）
     });
 
     it('RegistryDynamicModuleKey – 应该拒绝包含中文字符的名称并返回正确位置', async function () {
@@ -1012,7 +1002,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await expect(
         registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(invalidName)
       ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'RegistryDynamicModuleKey__InvalidCharacterInName')
-        .withArgs(invalidName, 0); // 第一个中文字符在第0个位置
+        .withArgs(0); // 第一个中文字符在第0个位置
     });
 
     it('RegistryDynamicModuleKey – 应该拒绝包含其他特殊字符的名称', async function () {
@@ -1122,27 +1112,18 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
 
   describe('分页查询边界测试', function () {
     it('RegistryDynamicModuleKey – 应该正确处理静态/动态交界处的偏移', async function () {
-      // 注册一些动态模块键
+      // 合约仅提供动态键列表；静态键的分页应在链下结合 ModuleKeys 常量处理
+      // 这里测试动态列表的分页边界：靠近末尾的 offset
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_1);
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_2);
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_3);
 
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      
-      // 测试在静态模块键末尾的分页
-      const [keysAtStaticEnd, totalAtStaticEnd] = await registryDynamicModuleKey.getModuleKeysPaginated(Number(staticCount) - 1, 5);
-      expect(totalAtStaticEnd).to.equal(staticCount + BigInt(3));
-      expect(keysAtStaticEnd.length).to.be.gt(0);
+      const allDynamic = await registryDynamicModuleKey.getDynamicModuleKeys();
+      expect(allDynamic.length).to.equal(3);
 
-      // 测试在动态模块键开始的分页
-      const [keysAtDynamicStart, totalAtDynamicStart] = await registryDynamicModuleKey.getModuleKeysPaginated(Number(staticCount), 5);
-      expect(totalAtDynamicStart).to.equal(staticCount + BigInt(3));
-      expect(keysAtDynamicStart.length).to.be.gt(0);
-
-      // 测试跨越静态和动态的分页
-      const [keysCrossing, totalCrossing] = await registryDynamicModuleKey.getModuleKeysPaginated(Number(staticCount) - 2, 5);
-      expect(totalCrossing).to.equal(staticCount + BigInt(3));
-      expect(keysCrossing.length).to.be.gt(0);
+      const offset = allDynamic.length - 1;
+      const page = allDynamic.slice(offset, offset + 5);
+      expect(page.length).to.equal(1);
     });
 
     it('RegistryDynamicModuleKey – 应该正确处理零偏移的分页', async function () {
@@ -1150,11 +1131,10 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_1);
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_2);
 
-      const [keys, total] = await registryDynamicModuleKey.getModuleKeysPaginated(0, 10);
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      
-      expect(total).to.equal(staticCount + BigInt(2));
-      expect(keys.length).to.be.lte(10);
+      const allDynamic = await registryDynamicModuleKey.getDynamicModuleKeys();
+      const page = allDynamic.slice(0, 10);
+      expect(allDynamic.length).to.equal(2);
+      expect(page.length).to.be.lte(10);
     });
 
     it('RegistryDynamicModuleKey – 应该正确处理超出范围的分页', async function () {
@@ -1162,13 +1142,10 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_1);
       await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_2);
 
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      const totalCount = staticCount + BigInt(2);
-      
-      // 测试超出范围的分页
-      const [keysOutOfRange, totalOutOfRange] = await registryDynamicModuleKey.getModuleKeysPaginated(Number(totalCount) + 10, 5);
-      expect(totalOutOfRange).to.equal(totalCount);
-      expect(keysOutOfRange.length).to.equal(0);
+      const allDynamic = await registryDynamicModuleKey.getDynamicModuleKeys();
+      const outOfRange = allDynamic.slice(1000, 1005);
+      expect(allDynamic.length).to.equal(2);
+      expect(outOfRange.length).to.equal(0);
     });
 
     it('RegistryDynamicModuleKey – 应该正确处理不同页面大小的分页', async function () {
@@ -1178,25 +1155,22 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
         await registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(name);
       }
 
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      
       // 测试不同页面大小
+      const allDynamic = await registryDynamicModuleKey.getDynamicModuleKeys();
+      expect(allDynamic.length).to.equal(10);
       const pageSizes = [1, 3, 5, 10, 20];
       for (const pageSize of pageSizes) {
-        const [keys, total] = await registryDynamicModuleKey.getModuleKeysPaginated(0, pageSize);
-        expect(total).to.equal(staticCount + BigInt(10));
-        expect(keys.length).to.be.lte(pageSize);
+        const page = allDynamic.slice(0, pageSize);
+        expect(page.length).to.be.lte(pageSize);
       }
     });
 
     it('RegistryDynamicModuleKey – 应该正确处理空结果的分页', async function () {
       // 不注册任何动态模块键
-      const staticCount = await registryDynamicModuleKey.getStaticModuleKeyCount();
-      
-      // 测试在静态模块键范围内的分页
-      const [keys, total] = await registryDynamicModuleKey.getModuleKeysPaginated(Number(staticCount), 5);
-      expect(total).to.equal(staticCount);
-      expect(keys.length).to.equal(0);
+      const allDynamic = await registryDynamicModuleKey.getDynamicModuleKeys();
+      const page = allDynamic.slice(0, 5);
+      expect(allDynamic.length).to.equal(0);
+      expect(page.length).to.equal(0);
     });
   });
 

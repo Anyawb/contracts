@@ -233,7 +233,10 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 使用较小的价格以避免超过 MAX_REASONABLE_PRICE (1e12)
       // 50000 * 10^8 = 5e12，超过了 1e12，所以使用更小的价格
       const price = ethers.parseUnits('1000', 8); // 1000 USD，在合理范围内
-      const futureTimestamp = Math.floor(Date.now() / 1000) + 3600;
+      // 注意：全量测试运行时可能有其他用例推进链上时间。
+      // 这里必须基于“当前链上时间”构造未来时间戳，才能稳定触发合约的 timestamp > block.timestamp 校验。
+      const latestBlock = await ethers.provider.getBlock('latest');
+      const futureTimestamp = (latestBlock?.timestamp ?? Math.floor(Date.now() / 1000)) + 3600;
 
       await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
 

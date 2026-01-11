@@ -12,6 +12,8 @@ import { HealthFactorLib } from "../../../libraries/HealthFactorLib.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
+import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
 
 /// @dev 轻量接口，读取 HealthView 缓存，避免循环依赖
 interface IHealthViewLite {
@@ -113,14 +115,20 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     function _getUserTotals(address user) internal view returns (uint256 totalCollateral, uint256 totalDebt) {
         address le = _getModule(ModuleKeys.KEY_LE);
-        address cm = _getModule(ModuleKeys.KEY_CM);
+        address pv = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         if (le != address(0)) {
-            (bool dsuccess, bytes memory ddata) = le.staticcall(abi.encodeWithSignature("getUserTotalDebtValue(address)", user));
-            if (dsuccess && ddata.length >= 32) totalDebt = abi.decode(ddata, (uint256));
+            try ILendingEngineBasic(le).getUserTotalDebtValue(user) returns (uint256 v) {
+                totalDebt = v;
+            } catch {
+                totalDebt = 0;
+            }
         }
-        if (cm != address(0)) {
-            (bool csuccess, bytes memory cdata) = cm.staticcall(abi.encodeWithSignature("getUserTotalCollateralValue(address)", user));
-            if (csuccess && cdata.length >= 32) totalCollateral = abi.decode(cdata, (uint256));
+        if (pv != address(0)) {
+            try IPositionViewValuation(pv).getUserTotalCollateralValue(user) returns (uint256 v) {
+                totalCollateral = v;
+            } catch {
+                totalCollateral = 0;
+            }
         }
     }
 

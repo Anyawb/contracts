@@ -1,49 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
-
 /// @title RevertingCollateralTotals
-/// @notice Minimal CM mock that reverts on total collateral reads, used to test health push best-effort paths.
-contract RevertingCollateralTotals is ICollateralManager {
-    function depositCollateral(address, address, uint256) external pure override {
-        // no-op
-    }
-
-    function withdrawCollateral(address, address, uint256) external pure override {
-        // no-op
-    }
-
-    function withdrawCollateralTo(address, address, uint256, address) external pure override {
-        // no-op
-    }
-
-    function seizeCollateralForLiquidation(address, address, uint256, address) external pure override {
-        // no-op
-    }
-
-    function getCollateral(address, address) external pure override returns (uint256) {
-        return 0;
-    }
-
-    function getUserTotalCollateralValue(address) external pure override returns (uint256) {
+/// @notice Test helper used as a "bad valuation source" / "bad CM ledger source".
+/// @dev This mock is intentionally NOT an ICollateralManager implementation.
+///      - When registered as KEY_POSITION_VIEW, it makes `getUserTotalCollateralValue()` revert (HealthPushFailed path).
+///      - When registered as KEY_CM, PositionView's CM reads will revert (best-effort fallback to 0).
+contract RevertingCollateralTotals {
+    // --- PositionView valuation interface ---
+    function getUserTotalCollateralValue(address) external pure returns (uint256) {
         revert("revert-totalCollateral");
     }
 
-    function getTotalCollateralByAsset(address) external pure override returns (uint256) {
-        return 0;
+    function getAssetValue(address, uint256) external pure returns (uint256) {
+        revert("revert-assetValue");
     }
 
-    function getTotalCollateralValue() external pure override returns (uint256) {
-        return 0;
+    // --- CollateralManager ledger reads used by PositionView ---
+    function getUserCollateralAssets(address) external pure returns (address[] memory) {
+        revert("revert-userAssets");
     }
 
-    function getUserCollateralAssets(address) external pure override returns (address[] memory) {
-        return new address[](0);
-    }
-
-    function getAssetValue(address, uint256 amount) external pure override returns (uint256) {
-        return amount;
+    function getCollateral(address, address) external pure returns (uint256) {
+        revert("revert-collateral");
     }
 }
 

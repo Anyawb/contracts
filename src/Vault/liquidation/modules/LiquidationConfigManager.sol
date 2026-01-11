@@ -1,35 +1,35 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 
-import "../libraries/LiquidationValidationLibrary.sol";
-import "../libraries/LiquidationEventLibrary.sol";
-import "../libraries/LiquidationAccessControl.sol";
-import "../libraries/ModuleCache.sol";
-import { LiquidationBase } from "../types/LiquidationBase.sol";
-import { LiquidationTypes } from "../types/LiquidationTypes.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ZeroAddress, ArrayLengthMismatch, EmptyArray } from "../../../errors/StandardErrors.sol";
-import { ILiquidationConfigManager } from "../../../interfaces/ILiquidationConfigManager.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { Registry } from "../../../registry/Registry.sol";
-import { IRegistryUpgradeEvents } from "../../../interfaces/IRegistryUpgradeEvents.sol";
+import {LiquidationAccessControl} from "../libraries/LiquidationAccessControl.sol";
+import {ModuleCache} from "../libraries/ModuleCache.sol";
+import {LiquidationTypes} from "../types/LiquidationTypes.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ArrayLengthMismatch, EmptyArray, ZeroAddress} from "../../../errors/StandardErrors.sol";
+import {ICacheRefreshable} from "../../../interfaces/ICacheRefreshable.sol";
+import {ILiquidationConfigManager} from "../../../interfaces/ILiquidationConfigManager.sol";
+import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {IRegistryUpgradeEvents} from "../../../interfaces/IRegistryUpgradeEvents.sol";
 
 /// @title LiquidationConfigManager
-/// @notice Base class for liquidation configuration management: provides common functionality for liquidation modules (module caching, access control, emergency pause)
-/// @dev Abstract base class: provides module address caching, Registry integration, access control, emergency pause, and other common capabilities
-/// @dev Module positioning: serves as an abstract base class for other liquidation modules to inherit, providing unified configuration management and module access capabilities
+/// @notice Base class for liquidation configuration management.
+/// @dev Provides module address caching, Registry integration, access control, and emergency pause.
+/// @dev Module positioning: abstract base class for other liquidation modules to inherit.
 /// @dev Design principles:
-///     - Module address caching: caches commonly used module addresses through ModuleCache to reduce Registry query overhead
+///     - Module address caching: caches commonly used module addresses through ModuleCache
+///       to reduce Registry query overhead
 ///     - Unified access control: uses LiquidationAccessControl library, unified permission verification through ACM
-///     - Registry integration: all module addresses are resolved through Registry, hardcoding is prohibited, compliant with architecture guide requirements
-///     - Emergency pause mechanism: provides emergency pause/resume functionality for governance/operations in emergency situations
-///     - UUPS upgrade support: supports secure contract upgrades, upgrade permissions controlled through ACTION_UPGRADE_MODULE
+///     - Registry integration: all module addresses are resolved through Registry (no hardcoding)
+///     - Emergency pause mechanism: emergency pause/resume functionality for governance/operations
+///     - UUPS upgrade support: supports secure contract upgrades; upgrade permissions are controlled
+///       through ACTION_UPGRADE_MODULE
 /// @dev Integration with liquidation flow:
 ///     - Subclasses inherit module caching, access control, and other common capabilities
 ///     - Module addresses are uniformly resolved through Registry to ensure address consistency
@@ -44,13 +44,11 @@ abstract contract LiquidationConfigManager is
     UUPSUpgradeable,
     ReentrancyGuardUpgradeable,
     PausableUpgradeable,
+    ICacheRefreshable,
     ILiquidationConfigManager,
     IRegistryUpgradeEvents
 {
-    using LiquidationValidationLibrary for *;
-    using LiquidationEventLibrary for *;
     using LiquidationAccessControl for LiquidationAccessControl.Storage;
-    using LiquidationBase for *;
 
     /* ============ Constants ============ */
     
@@ -62,17 +60,13 @@ abstract contract LiquidationConfigManager is
     
     /// @notice Registry address (internal storage, following naming conventions)
     /// @dev Used for module address resolution and access control, exposed publicly through registryAddrVar()
-    /// @dev Architecture requirement: all business modules resolve dependencies through Registry, hardcoding module addresses is prohibited
+    /// @dev Architecture requirement: resolve dependencies through Registry; hardcoding is prohibited
     address internal _registryAddr;
-
-    /// @notice Base storage (internal storage)
-    /// @dev Contains state required for basic functionality such as access control and cache management
-    LiquidationBase.BaseStorage internal _baseStorage;
 
     /// @notice Access control storage
     /// @dev Uses LiquidationAccessControl library for permission management, supports ACM integration
     /// @dev Follows architecture guide: access control is unified through ACM
-    LiquidationAccessControl.Storage internal accessControlStorage;
+    LiquidationAccessControl.Storage internal _accessControlStorage;
 
     /// @notice Module cache storage (internal storage)
     /// @dev Used to cache commonly used module addresses, reducing Registry query overhead and improving performance
@@ -86,6 +80,10 @@ abstract contract LiquidationConfigManager is
     /// @dev Governance-managed parameter; used by calculators/risk modules as a shared reference.
     uint256 public liquidationThresholdVar;
 
+    /// @notice Minimum health factor (in basis points, bps=1e4).
+    /// @dev Governance-managed parameter; used as a shared safety bound across risk/settlement flows.
+    uint256 public minHealthFactorVar;
+
     /**
      * @notice Get Registry address (naming follows architecture conventions)
      * @return registryAddr Registry contract address
@@ -93,6 +91,13 @@ abstract contract LiquidationConfigManager is
     function registryAddrVar() external view returns (address registryAddr) {
         return _registryAddr;
     }
+
+    /* ============ Errors ============ */
+    /// @notice Invalid minimum health factor (must be >= liquidationThresholdVar and non-zero)
+    error LiquidationConfigManager__InvalidMinHealthFactor();
+
+    /// @notice Unauthorized caller for cache refresh (CacheMaintenanceManager-only).
+    error LiquidationConfigManager__UnauthorizedAccess();
 
     /* ============ Events ============ */
     
@@ -113,6 +118,21 @@ abstract contract LiquidationConfigManager is
      * @dev Emitted when the system resumes from paused state, for off-chain monitoring and auditing
      */
     event SystemUnpaused(address indexed unpauser, uint256 timestamp);
+
+    /**
+     * @notice Minimum health factor updated event
+     * @param oldMinHealthFactor Old minimum health factor (bps=1e4)
+     * @param newMinHealthFactor New minimum health factor (bps=1e4)
+     * @param timestamp Update timestamp (in seconds)
+     */
+    event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 timestamp);
+
+    /**
+     * @notice Emitted when module cache is refreshed via maintenance manager.
+     * @param caller Caller that performed refresh (should be CacheMaintenanceManager)
+     * @param timestamp Refresh timestamp (in seconds)
+     */
+    event ModuleCacheRefreshed(address indexed caller, uint256 timestamp);
 
     /* ============ Constructor ============ */
     
@@ -140,23 +160,40 @@ abstract contract LiquidationConfigManager is
      * @param initialRegistryAddr Registry contract address for module management and address resolution
      * @param initialAccessControl Access control interface address for permission verification
      */
-    function initialize(address initialRegistryAddr, address initialAccessControl) external initializer {
-        LiquidationValidationLibrary.validateAddress(initialRegistryAddr, "Registry");
-        LiquidationValidationLibrary.validateAddress(initialAccessControl, "AccessControl");
-        
+    /// @dev Base initializer. Derived deployable modules may call `_initializeLiquidationConfigManager`.
+    function initialize(address initialRegistryAddr, address initialAccessControl) public virtual initializer {
+        _initializeLiquidationConfigManager(initialRegistryAddr, initialAccessControl);
+    }
+
+    function _initializeLiquidationConfigManager(address initialRegistryAddr, address initialAccessControl)
+        internal
+        onlyInitializing
+    {
+        if (initialRegistryAddr == address(0) || initialAccessControl == address(0)) revert ZeroAddress();
+
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         __Pausable_init();
-        
+
         _registryAddr = initialRegistryAddr;
-        LiquidationAccessControl.initialize(_baseStorage.accessControl, initialAccessControl, initialAccessControl);
-        
-        // Initialize module cache: disable auto-refresh, cache addresses managed by this contract
-        ModuleCache.initialize(_moduleCache, false, address(this));
+        LiquidationAccessControl.initialize(
+            _accessControlStorage,
+            initialAccessControl,
+            initialAccessControl
+        );
+
+        // Initialize module cache:
+        // - allow time rollback tolerance for better availability on dev/test chains
+        // - disable ModuleCache's internal accessController placeholder checks (this contract enforces roles itself)
+        ModuleCache.initialize(_moduleCache, true, address(0));
 
         // Default liquidation parameters (bps) - can be updated via governance.
         liquidationBonusRateVar = LiquidationTypes.DEFAULT_LIQUIDATION_BONUS;
         liquidationThresholdVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
+        minHealthFactorVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
+
+        // Prime commonly-used module cache entries (best-effort).
+        _refreshModuleCacheBestEffort();
     }
 
     // ============ Modifiers ============
@@ -164,11 +201,17 @@ abstract contract LiquidationConfigManager is
     /**
      * @notice Access control modifier
      * @param role Required role (ActionKeys constant)
-     * @dev Uses LiquidationAccessControl library for permission verification
-     * @dev Follows architecture guide: access control is unified through ACM
+     * @dev Reverts if:
+     *      - KEY_ACCESS_CONTROL module is not found in Registry
+     *      - caller does not have the required role (via AccessControlManager.requireRole)
+     *
+     * Security:
+     * - Role-gated via global AccessControlManager (Registry.KEY_ACCESS_CONTROL)
+     * - Aligns with Architecture-Guide: write entrypoints must be gated by ACM
      */
     modifier onlyRole(bytes32 role) {
-        LiquidationAccessControl.requireRole(_baseStorage.accessControl, role, msg.sender);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(role, msg.sender);
         _;
     }
 
@@ -181,7 +224,7 @@ abstract contract LiquidationConfigManager is
      * @return Module address (reverts if not registered)
      * @dev Architecture requirement: all module addresses are resolved through Registry, hardcoding is prohibited
      */
-    function getModuleFromRegistry(bytes32 moduleKey) internal view returns (address) {
+    function _getModuleFromRegistry(bytes32 moduleKey) internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
@@ -191,7 +234,7 @@ abstract contract LiquidationConfigManager is
      * @return Whether the module is registered
      * @dev Used to check if module exists, avoiding unnecessary reverts
      */
-    function isModuleRegistered(bytes32 moduleKey) internal view returns (bool) {
+    function _isModuleRegistered(bytes32 moduleKey) internal view returns (bool) {
         return Registry(_registryAddr).isModuleRegistered(moduleKey);
     }
 
@@ -200,10 +243,30 @@ abstract contract LiquidationConfigManager is
     /**
      * @notice Get module address (from cache).
      * @param moduleKey Module key (ModuleKeys constant)
-     * @return moduleAddress Cached module address (may be zero if not set)
+     * @return moduleAddress Cached module address (best-effort; may be zero if not set)
      */
     function getModule(bytes32 moduleKey) public view returns (address moduleAddress) {
-        return ModuleCache.get(_moduleCache, moduleKey, CACHE_MAX_AGE);
+        return _getModuleViewBestEffort(moduleKey);
+    }
+
+    /**
+     * @notice Refresh internal module cache (unified interface for CacheMaintenanceManager batch calls).
+     * @dev Reverts if:
+     *      - KEY_CACHE_MAINTENANCE_MANAGER module is not found in Registry
+     *      - caller is not the CacheMaintenanceManager address
+     *
+     * Security:
+     * - CacheMaintenanceManager-only
+     * - Best-effort: missing modules are skipped (no revert)
+     */
+    function refreshModuleCache() external override {
+        address maint = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER
+        );
+        if (msg.sender != maint) revert LiquidationConfigManager__UnauthorizedAccess();
+        _refreshModuleCacheBestEffort();
+        // solhint-disable-next-line not-rely-on-time
+        emit ModuleCacheRefreshed(msg.sender, block.timestamp);
     }
 
     /**
@@ -237,7 +300,10 @@ abstract contract LiquidationConfigManager is
      * @param keys Array of module keys
      * @param addresses Array of module addresses
      */
-    function batchUpdateModules(bytes32[] memory keys, address[] memory addresses) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function batchUpdateModules(bytes32[] calldata keys, address[] calldata addresses)
+        external
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
         uint256 length = keys.length;
         if (length == 0) revert EmptyArray();
         if (length != addresses.length) revert ArrayLengthMismatch(length, addresses.length);
@@ -310,6 +376,36 @@ abstract contract LiquidationConfigManager is
         return liquidationThresholdVar;
     }
 
+    /**
+     * @notice Get minimum health factor.
+     * @return minHealthFactor Minimum health factor (bps=1e4)
+     */
+    function getMinHealthFactor() external view returns (uint256 minHealthFactor) {
+        return minHealthFactorVar;
+    }
+
+    /**
+     * @notice Update minimum health factor.
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *      - newMinHealthFactor is zero
+     *      - newMinHealthFactor < liquidationThresholdVar
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param newMinHealthFactor New minimum health factor (bps=1e4)
+     */
+    function updateMinHealthFactor(uint256 newMinHealthFactor) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        if (newMinHealthFactor == 0 || newMinHealthFactor < liquidationThresholdVar) {
+            revert LiquidationConfigManager__InvalidMinHealthFactor();
+        }
+        uint256 old = minHealthFactorVar;
+        minHealthFactorVar = newMinHealthFactor;
+        // solhint-disable-next-line not-rely-on-time
+        emit MinHealthFactorUpdated(old, newMinHealthFactor, block.timestamp);
+    }
+
     /* ============ Query Functions ============ */
     
     /**
@@ -317,7 +413,7 @@ abstract contract LiquidationConfigManager is
      * @return orchestrator Liquidation orchestrator address
      */
     function getCachedOrchestrator() external view returns (address orchestrator) {
-        return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR, CACHE_MAX_AGE);
+        return _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR);
     }
 
     /**
@@ -325,7 +421,7 @@ abstract contract LiquidationConfigManager is
      * @return calculator Liquidation calculator address
      */
     function getCachedCalculator() external view returns (address calculator) {
-        return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_CALCULATOR, CACHE_MAX_AGE);
+        return _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CALCULATOR);
     }
 
     /**
@@ -333,7 +429,7 @@ abstract contract LiquidationConfigManager is
      * @return riskManager Liquidation risk manager address
      */
     function getCachedRiskManager() external view returns (address riskManager) {
-        return ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, CACHE_MAX_AGE);
+        return _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
     }
 
     /**
@@ -352,11 +448,11 @@ abstract contract LiquidationConfigManager is
         address debtManager
     ) {
         return (
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR, CACHE_MAX_AGE),
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_CALCULATOR, CACHE_MAX_AGE),
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, CACHE_MAX_AGE),
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_CM, CACHE_MAX_AGE),
-            ModuleCache.get(_moduleCache, ModuleKeys.KEY_LE, CACHE_MAX_AGE)
+            _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR),
+            _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CALCULATOR),
+            _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER),
+            _getModuleViewBestEffort(ModuleKeys.KEY_CM),
+            _getModuleViewBestEffort(ModuleKeys.KEY_LE)
         );
     }
 
@@ -373,6 +469,7 @@ abstract contract LiquidationConfigManager is
      */
     function emergencyPause() external onlyRole(ActionKeys.ACTION_LIQUIDATE) {
         _pause();
+        // solhint-disable-next-line not-rely-on-time
         emit SystemPaused(msg.sender, block.timestamp);
     }
 
@@ -387,6 +484,7 @@ abstract contract LiquidationConfigManager is
      */
     function emergencyUnpause() external onlyRole(ActionKeys.ACTION_LIQUIDATE) {
         _unpause();
+        // solhint-disable-next-line not-rely-on-time
         emit SystemUnpaused(msg.sender, block.timestamp);
     }
 
@@ -440,7 +538,56 @@ abstract contract LiquidationConfigManager is
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
-        LiquidationBase.validateAddress(newImplementation, "Implementation");
+    function _authorizeUpgrade(address newImplementation)
+        internal
+        view
+        override
+        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
+    {
+        if (newImplementation == address(0)) revert ZeroAddress();
     }
+
+    /* ============ Internal: Cache Refresh & Best-effort Resolution ============ */
+
+    /// @dev Best-effort: refresh commonly-used module cache entries from Registry.
+    function _refreshModuleCacheBestEffort() internal {
+        _tryRefreshModule(ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR);
+        _tryRefreshModule(ModuleKeys.KEY_LIQUIDATION_CALCULATOR);
+        _tryRefreshModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
+        _tryRefreshModule(ModuleKeys.KEY_CM);
+        _tryRefreshModule(ModuleKeys.KEY_LE);
+    }
+
+    /// @dev Best-effort: set cache entry if module exists in Registry; emits ModuleCacheUpdated on address changes.
+    function _tryRefreshModule(bytes32 key) internal {
+        address addr = Registry(_registryAddr).getModule(key);
+        if (addr == address(0)) return;
+
+        address old = _moduleCache.moduleAddresses[key];
+        _moduleCache.moduleAddresses[key] = addr;
+        // solhint-disable-next-line not-rely-on-time
+        _moduleCache.cacheTimestamps[key] = block.timestamp;
+
+        if (old != addr) {
+            emit ModuleCacheUpdated(key, old, addr);
+        }
+    }
+
+    /// @dev Best-effort cache lookup; falls back to Registry without updating cache.
+    function _getModuleViewBestEffort(bytes32 key) internal view returns (address moduleAddr) {
+        moduleAddr = _moduleCache.moduleAddresses[key];
+        uint256 ts = _moduleCache.cacheTimestamps[key];
+        if (moduleAddr != address(0) && ts != 0) {
+            // solhint-disable-next-line not-rely-on-time
+            if (block.timestamp < ts) return moduleAddr;
+            // solhint-disable-next-line not-rely-on-time
+            if (block.timestamp - ts <= CACHE_MAX_AGE) return moduleAddr;
+        }
+
+        address fromReg = Registry(_registryAddr).getModule(key);
+        return fromReg != address(0) ? fromReg : moduleAddr;
+    }
+
+    // ============ Storage Gap ============
+    uint256[50] private __gap;
 } 

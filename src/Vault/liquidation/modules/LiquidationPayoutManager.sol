@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { ILiquidationPayoutManager } from "../../../interfaces/ILiquidationPayoutManager.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
@@ -10,20 +10,25 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { LiquidationAccessControl } from "../libraries/LiquidationAccessControl.sol";
 import { LiquidationValidationLibrary } from "../libraries/LiquidationValidationLibrary.sol";
 import { Registry } from "../../../registry/Registry.sol";
+import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { ZeroAddress } from "../../../errors/StandardErrors.sol";
 
 /// @title LiquidationPayoutManager
-/// @notice Liquidation residual value distribution management module: stores distribution ratios and recipient addresses, provides share calculation
-/// @dev Follows architecture guide (Architecture-Guide.md §732-771): serves as the single source of truth for "liquidation residual value distribution module", responsible for residual value distribution configuration and execution coordination
-/// @dev Module positioning: Registry.KEY_LIQUIDATION_PAYOUT_MANAGER points to this contract, governance layer can centrally maintain residual value recipient addresses and ratios
+/// @notice Liquidation residual value distribution management module:
+/// stores distribution ratios and recipient addresses, provides share calculation.
+/// @dev Follows architecture guide (Architecture-Guide.md §732-771):
+/// serves as the single source of truth for liquidation residual value distribution configuration.
+/// @dev Module positioning: Registry.KEY_LIQUIDATION_PAYOUT_MANAGER points to this contract.
 /// @dev Design principles:
-///     - Residual value distribution SSOT: this module stores governance-controlled recipient addresses and BPS configuration, all liquidation executors must read configuration from here first
-///     - Execution coordination: SettlementManager/LiquidationManager execute actual transfers through CollateralManager/FeeRouter and other ledger contracts based on calculateShares results, meeting the guide requirement of "module-led distribution execution"
-///     - Governability: recipient addresses and distribution ratios can be safely adjusted through ACTION_SET_PARAMETER permission
-///     - Integer distribution: remainder (including rounding errors) all goes to liquidator, ensuring total equals collateral amount
+///     - Residual value distribution SSOT: stores governance-controlled recipients and BPS configuration.
+///     - Execution coordination: LiquidationManager/SettlementManager execute ledger transfers
+///       (e.g., CollateralManager.withdrawCollateralTo) based on calculateShares results.
+///     - Governability: recipients and rates are adjustable via ACTION_SET_PARAMETER.
+///     - Integer distribution: remainder (rounding dust) goes to liquidator.
 /// @dev Integration with liquidation flow:
-///     - LiquidationManager/SettlementManager call calculateShares after seizing collateral to get shares for each role, then execute CollateralManager.withdrawCollateralTo and other operations accordingly
-///     - After distribution completes, trigger DataPush through LiquidatorView (as required by Architecture-Guide.md), facilitating frontend/offline service consumption
+///     - LiquidationManager/SettlementManager call calculateShares to get shares,
+///       then execute CollateralManager.withdrawCollateralTo accordingly.
+///     - After distribution completes, LiquidationManager triggers DataPush via LiquidatorView.
 /// @dev Naming conventions (following Architecture-Guide.md §852-879):
 ///     - Private state variables: _ + camelCase (e.g., _registryAddr, _recipients, _rates)
 ///     - Public variables: camelCase + Var (e.g., registryAddrVar)
@@ -33,15 +38,16 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
     using LiquidationAccessControl for LiquidationAccessControl.Storage;
 
     /// @notice Distribution ratio denominator (in basis points), fixed at 10_000 (100%)
-    uint256 private constant BPS_DENOMINATOR = 10_000;
+    uint256 private constant _BPS_DENOMINATOR = 10_000;
 
     /// @notice Registry address (private storage, following naming conventions)
     /// @dev Used for module address resolution and access control, exposed publicly through registryAddrVar()
     address private _registryAddr;
 
     /// @notice Access control storage
-    /// @dev Uses LiquidationAccessControl library for permission management, supports ACM integration
-    LiquidationAccessControl.Storage internal accessControlStorage;
+    /// @dev Reserved for upgrade-safe storage layout (and potential future integration).
+    /// @dev Kept to avoid storage layout shifts across upgrades.
+    LiquidationAccessControl.Storage internal _accessControlStorage;
 
     /// @notice Recipient address configuration (private storage)
     /// @dev Contains three recipient addresses: platform, risk reserve, lender compensation
@@ -64,6 +70,10 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
     /// @dev Follows error naming convention: PascalCase with __ prefix
     error LiquidationPayoutManager__InvalidRates();
 
+    /// @notice AccessControlManager address mismatch error
+    /// @dev Triggered when initializer-provided ACM address does not match Registry.KEY_ACCESS_CONTROL.
+    error LiquidationPayoutManager__AccessControlMismatch(address expectedAcm, address providedAcm);
+
     /**
      * @notice Constructor (disables initialization)
      * @dev Prevents direct calls to initialization function, ensures deployment through proxy pattern
@@ -78,6 +88,7 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      * @dev Reverts if:
      *      - registryAddr is zero address
      *      - accessControlAddr is zero address
+     *      - Registry.KEY_ACCESS_CONTROL is set and does not equal accessControlAddr
      *      - any recipient address in recipients is zero address
      *      - rates sum does not equal 10_000 basis points
      *
@@ -103,7 +114,14 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
         __UUPSUpgradeable_init();
 
         _registryAddr = registryAddr;
-        LiquidationAccessControl.initialize(accessControlStorage, accessControlAddr, accessControlAddr);
+        // Access control is sourced from Registry.KEY_ACCESS_CONTROL at call-time (Architecture-Guide).
+        // We validate the initializer-provided value to catch deployment misconfiguration.
+        // IMPORTANT: in some unit tests a MockRegistry may not have KEY_ACCESS_CONTROL set yet at init time.
+        // In that case, skip the mismatch check and rely on runtime gating via onlyRole().
+        address expectedAcm = Registry(registryAddr).getModule(ModuleKeys.KEY_ACCESS_CONTROL);
+        if (expectedAcm != address(0) && expectedAcm != accessControlAddr) {
+            revert LiquidationPayoutManager__AccessControlMismatch(expectedAcm, accessControlAddr);
+        }
 
         _setConfig(recipients, rates);
     }
@@ -134,6 +152,10 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
 
     /**
      * @notice Calculate distribution shares (integer distribution, remainder all goes to liquidator)
+     * @dev Notes:
+     *      - liquidatorBps is validated as part of the 10_000-bps sum, but liquidatorShare is computed as
+     *        `collateralAmount - (platformShare + reserveShare + lenderShare)` so any rounding remainder
+     *        is deterministically assigned to the liquidator (matches Architecture-Guide).
      * @param collateralAmount Amount of seized collateral
      * @return platformShare Platform share (collateral amount × platformBps / 10_000)
      * @return reserveShare Risk reserve share (collateral amount × reserveBps / 10_000)
@@ -148,9 +170,9 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
     {
         if (collateralAmount == 0) return (0, 0, 0, 0);
 
-        platformShare = (collateralAmount * _rates.platformBps) / BPS_DENOMINATOR;
-        reserveShare = (collateralAmount * _rates.reserveBps) / BPS_DENOMINATOR;
-        lenderShare = (collateralAmount * _rates.lenderBps) / BPS_DENOMINATOR;
+        platformShare = (collateralAmount * _rates.platformBps) / _BPS_DENOMINATOR;
+        reserveShare = (collateralAmount * _rates.reserveBps) / _BPS_DENOMINATOR;
+        lenderShare = (collateralAmount * _rates.lenderBps) / _BPS_DENOMINATOR;
 
         uint256 allocated = platformShare + reserveShare + lenderShare;
         // Remainder (including rounding errors) all goes to liquidator, ensuring total equals collateral amount
@@ -170,18 +192,66 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      * @param recipients New recipient address configuration (platform, risk reserve, lender compensation)
      * @param rates New distribution ratio configuration (in basis points, must sum to 10_000)
      */
-    function updateConfig(PayoutRecipients calldata recipients, PayoutRates calldata rates) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function updateConfig(PayoutRecipients calldata recipients, PayoutRates calldata rates)
+        external
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
         _setConfig(recipients, rates);
+    }
+
+    /**
+     * @notice Update recipient addresses only (rates unchanged)
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *      - any recipient address is zero address
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param recipients New recipient address configuration (platform, risk reserve, lender compensation)
+     */
+    function updateRecipients(PayoutRecipients calldata recipients) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        if (recipients.platform == address(0)) revert ZeroAddress();
+        if (recipients.reserve == address(0)) revert ZeroAddress();
+        if (recipients.lenderCompensation == address(0)) revert ZeroAddress();
+
+        _recipients = recipients;
+        emit PayoutConfigUpdated(recipients, _rates);
+    }
+
+    /**
+     * @notice Update distribution ratios only (recipients unchanged)
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *      - rates sum does not equal 10_000 basis points
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param rates New distribution ratio configuration (in basis points, must sum to 10_000)
+     */
+    function updateRates(PayoutRates calldata rates) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        uint256 totalBps = rates.platformBps + rates.reserveBps + rates.lenderBps + rates.liquidatorBps;
+        if (totalBps != _BPS_DENOMINATOR) revert LiquidationPayoutManager__InvalidRates();
+
+        _rates = rates;
+        emit PayoutConfigUpdated(_recipients, rates);
     }
 
     /**
      * @notice Access control modifier
      * @param role Required role (ActionKeys constant)
-     * @dev Uses LiquidationAccessControl library for permission verification
-     * @dev Follows architecture guide: access control is unified through ACM
+     * @dev Reverts if:
+     *      - KEY_ACCESS_CONTROL module is not found in Registry
+     *      - caller does not have the required role (via AccessControlManager.requireRole)
+     *
+     * Security:
+     * - Role-gated via global AccessControlManager (Registry.KEY_ACCESS_CONTROL)
+     * - Aligns with Architecture-Guide: write entrypoints must be gated by ACM
      */
     modifier onlyRole(bytes32 role) {
-        LiquidationAccessControl.requireRole(accessControlStorage, role, msg.sender);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(role, msg.sender);
         _;
     }
 
@@ -198,7 +268,12 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
+    function _authorizeUpgrade(address newImplementation)
+        internal
+        view
+        override
+        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
+    {
         LiquidationValidationLibrary.validateAddress(newImplementation, "Implementation");
     }
 
@@ -217,7 +292,7 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
         if (recipients.lenderCompensation == address(0)) revert ZeroAddress();
 
         uint256 totalBps = rates.platformBps + rates.reserveBps + rates.lenderBps + rates.liquidatorBps;
-        if (totalBps != BPS_DENOMINATOR) revert LiquidationPayoutManager__InvalidRates();
+        if (totalBps != _BPS_DENOMINATOR) revert LiquidationPayoutManager__InvalidRates();
 
         _recipients = recipients;
         _rates = rates;

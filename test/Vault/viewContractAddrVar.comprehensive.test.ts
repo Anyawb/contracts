@@ -14,7 +14,7 @@
  */
 
 import { expect } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -55,18 +55,22 @@ describe('viewContractAddrVar - 全面功能测试', function () {
     // Deploy Registry
     const Registry = await ethers.getContractFactory('MockRegistry');
     const registry = (await Registry.deploy()) as MockRegistry;
+    await registry.waitForDeployment();
 
     // Deploy AccessControlManager
     const ACM = await ethers.getContractFactory('MockAccessControlManager');
     const acm = (await ACM.deploy()) as MockAccessControlManager;
+    await acm.waitForDeployment();
 
     // Deploy VaultRouter
     const VaultRouter = await ethers.getContractFactory('MockVaultRouter');
     const vaultRouter = (await VaultRouter.deploy()) as MockVaultRouter;
+    await vaultRouter.waitForDeployment();
 
     // Deploy HealthView
     const HealthView = await ethers.getContractFactory('MockHealthView');
     const healthView = (await HealthView.deploy()) as MockHealthView;
+    await healthView.waitForDeployment();
 
     // Deploy LiquidationRiskManager mock
     const LRM = await ethers.getContractFactory('MockLiquidationRiskManager');
@@ -87,23 +91,32 @@ describe('viewContractAddrVar - 全面功能测试', function () {
     await priceOracle.connect(admin).setPrice(testAsset, priceValue, nowTs, 8);
     await priceOracle.connect(admin).setPrice(await settlementToken.getAddress(), priceValue, nowTs, 8);
 
-    // Deploy VaultCore
+    // Deploy VaultCore（UUPS：必须通过 Proxy 初始化；实现合约 constructor 已禁用 initialize）
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
-    const vaultCore = (await VaultCoreFactory.deploy()) as VaultCore;
-    await vaultCore.initialize(await registry.getAddress(), await vaultRouter.getAddress());
+    const vaultCoreImpl = (await VaultCoreFactory.deploy()) as VaultCore;
+    await vaultCoreImpl.waitForDeployment();
+    const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
+    const initData = vaultCoreImpl.interface.encodeFunctionData('initialize', [
+      await registry.getAddress(),
+      await vaultRouter.getAddress(),
+    ]);
+    const vaultCoreProxy = await ProxyFactory.deploy(vaultCoreImpl.target, initData);
+    await vaultCoreProxy.waitForDeployment();
+    const vaultCore = VaultCoreFactory.attach(vaultCoreProxy.target) as VaultCore;
 
     // Deploy MockCollateralManager (no onlyVaultRouter guard)
     const CM = await ethers.getContractFactory('MockCollateralManager');
     const collateralManager = (await CM.deploy()) as MockCollateralManager;
+    await collateralManager.waitForDeployment();
 
     // Deploy VaultLendingEngine
     const LE = await ethers.getContractFactory('VaultLendingEngine');
-    const lendingEngine = (await LE.deploy()) as VaultLendingEngine;
-    await lendingEngine.initialize(
-      await priceOracle.getAddress(),
-      await settlementToken.getAddress(),
-      await registry.getAddress()
-    );
+    const lendingEngine = (await upgrades.deployProxy(
+      LE,
+      [await priceOracle.getAddress(), await settlementToken.getAddress(), await registry.getAddress()],
+      { kind: 'uups', initializer: 'initialize' }
+    )) as VaultLendingEngine;
+    await lendingEngine.waitForDeployment();
 
     // Deploy VaultBusinessLogic (optional for this test, can be skipped if not needed)
     // const VBL = await ethers.getContractFactory('VaultBusinessLogic');
@@ -394,8 +407,15 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       const newView = await newVaultRouter.deploy();
       
       const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
-      const newVaultCore = await VaultCoreFactory.deploy();
-      await newVaultCore.initialize(await registry.getAddress(), await newView.getAddress());
+      // UUPS：实现合约不能直接 initialize，需通过 Proxy 初始化
+      const newVaultCoreImpl = await VaultCoreFactory.deploy();
+      const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
+      const initData = newVaultCoreImpl.interface.encodeFunctionData('initialize', [
+        await registry.getAddress(),
+        await newView.getAddress(),
+      ]);
+      const newVaultCoreProxy = await ProxyFactory.deploy(newVaultCoreImpl.target, initData);
+      const newVaultCore = VaultCoreFactory.attach(newVaultCoreProxy.target);
       
       // 更新 Registry
       await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await newVaultCore.getAddress());

@@ -145,13 +145,15 @@ library RegistryEvents {
     /// @param keys 模块键名数组
     /// @param oldAddresses 旧模块地址数组
     /// @param newAddresses 新模块地址数组
+    /// @param executor 执行者地址
     /// @dev 批量变更事件仅携带变更数据，移除冗余 executor 以降 gas
     /// @dev 用于批量直接设置模块地址，无需延迟升级流程
     /// @dev 建议在合约逻辑中限制数组长度不超过 20，防止单个交易中传入过大数组
     event BatchModuleChanged(
         bytes32[] keys,
         address[] oldAddresses,
-        address[] newAddresses
+        address[] newAddresses,
+        address executor
     );
 
     // ============ 升级历史记录事件 ============
@@ -208,6 +210,7 @@ library RegistryEvents {
     /// @notice 紧急操作已执行（使用枚举，节省 gas）
     /// @param action 操作类型（EmergencyAction 枚举值）
     /// @param executor 执行者地址
+    /// @param timestamp 时间戳
     /// @dev 使用枚举替代字符串，节省 gas 且更规范
     /// @dev EmergencyAction 枚举值：
     /// - 0: PAUSE - 暂停系统
@@ -217,7 +220,8 @@ library RegistryEvents {
     /// - 4: EMERGENCY_WITHDRAW - 紧急提款
     event EmergencyActionExecuted(
         uint8 indexed action, 
-        address indexed executor
+        address indexed executor,
+        uint256 timestamp
     );
 
     /// @notice 系统已暂停

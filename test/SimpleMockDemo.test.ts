@@ -100,26 +100,25 @@ describe('SimpleMock 类型演示', function () {
 
   describe('事件类型安全', function () {
     it('应该支持类型安全的事件处理', async function () {
-      // ✅ 类型安全的事件监听器
-      let capturedEvent: any;
-      
-      simpleMock.on(simpleMock.filters.CounterIncremented(), (user, newValue) => {
-        // user 和 newValue 有正确的类型
-        capturedEvent = { user, newValue };
+      // ✅ 类型安全的事件监听器（注意：ethers v6 中 `on(filter, ...)` 的回调入参是 EventLog；
+      // 要拿到解码后的 (user, newValue)，使用事件名监听更稳定）
+      let capturedEvent: { user: string; newValue: bigint } | undefined;
+
+      const gotEvent = new Promise<void>((resolve) => {
+        simpleMock.once('CounterIncremented', (user, newValue) => {
+          capturedEvent = { user, newValue };
+          resolve();
+        });
       });
-      
+
       // 触发事件
       await simpleMock.authorizeUser(await alice.getAddress(), true);
-      await simpleMock.connect(alice).increment();
-      
-      // 等待事件处理
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      expect(capturedEvent.user).to.equal(await alice.getAddress());
-      expect(capturedEvent.newValue).to.equal(1n);
-      
-      // 清理监听器
-      simpleMock.removeAllListeners();
+      await (await simpleMock.connect(alice).increment()).wait();
+
+      await gotEvent;
+
+      expect(capturedEvent?.user).to.equal(await alice.getAddress());
+      expect(capturedEvent?.newValue).to.equal(1n);
     });
   });
 }); 

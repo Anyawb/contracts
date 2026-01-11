@@ -200,8 +200,11 @@ describe("RegistryView", function () {
       const Registry2 = await ethers.getContractFactory("MockRegistry");
       const registry2 = await Registry2.deploy();
       const RegistryView2 = await ethers.getContractFactory("RegistryView");
-      const rv2 = await RegistryView2.deploy();
-      await rv2.initialize(await registry2.getAddress());
+      const rv2 = await upgrades.deployProxy(
+        RegistryView2,
+        [await registry2.getAddress()],
+        { kind: "uups" }
+      );
       const staticKeysCount = (await rv2.getAllModuleKeys()).length;
 
       // 现在获取包含动态键的键列表
@@ -223,8 +226,11 @@ describe("RegistryView", function () {
       const registry = await Registry.deploy();
 
       const RegistryView = await ethers.getContractFactory("RegistryView");
-      const rv = await RegistryView.deploy();
-      await rv.initialize(await registry.getAddress());
+      const rv = await upgrades.deployProxy(
+        RegistryView,
+        [await registry.getAddress()],
+        { kind: "uups" }
+      );
 
       // 先获取不包含动态键注册表时的键列表（应该只有静态键）
       const staticKeysOnly = await rv.getAllModuleKeys();
@@ -268,8 +274,11 @@ describe("RegistryView", function () {
       await registry.setModule(dynamicKey1, dynamicModule1);
 
       const RegistryView = await ethers.getContractFactory("RegistryView");
-      const rv = await RegistryView.deploy();
-      await rv.initialize(await registry.getAddress());
+      const rv = await upgrades.deployProxy(
+        RegistryView,
+        [await registry.getAddress()],
+        { kind: "uups" }
+      );
 
       const registeredKeys = await rv.getAllRegisteredModuleKeys();
       
@@ -301,8 +310,11 @@ describe("RegistryView", function () {
       await registry.setModule(dynamicKey1, dynamicModule1);
 
       const RegistryView = await ethers.getContractFactory("RegistryView");
-      const rv = await RegistryView.deploy();
-      await rv.initialize(await registry.getAddress());
+      const rv = await upgrades.deployProxy(
+        RegistryView,
+        [await registry.getAddress()],
+        { kind: "uups" }
+      );
 
       const [keys, addrs] = await rv.getAllRegisteredModules();
       
@@ -333,8 +345,11 @@ describe("RegistryView", function () {
       await registry.setModule(dynamicKey1, dynamicModule1);
 
       const RegistryView = await ethers.getContractFactory("RegistryView");
-      const rv = await RegistryView.deploy();
-      await rv.initialize(await registry.getAddress());
+      const rv = await upgrades.deployProxy(
+        RegistryView,
+        [await registry.getAddress()],
+        { kind: "uups" }
+      );
 
       const [page, total] = await rv.getRegisteredModuleKeysPaginated(0, 10);
       

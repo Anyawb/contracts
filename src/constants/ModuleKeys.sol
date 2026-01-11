@@ -216,6 +216,11 @@ library ModuleKeys {
     /// @dev 哈希值：keccak256("DYNAMIC_MODULE_REGISTRY")
     bytes32 constant KEY_DYNAMIC_MODULE_REGISTRY = keccak256("DYNAMIC_MODULE_REGISTRY");
 
+    /// @notice 统一缓存维护器模块的标识符（治理运维：批量刷新模块缓存）
+    /// @dev 用于 Registry 中存储 CacheMaintenanceManager 合约地址
+    /// @dev 哈希值：keccak256("CACHE_MAINTENANCE_MANAGER")
+    bytes32 constant KEY_CACHE_MAINTENANCE_MANAGER = keccak256("CACHE_MAINTENANCE_MANAGER");
+
     // ============ 治理模块 Key ============
     /// @notice 跨链治理模块的标识符
     /// @dev 用于Registry中存储CrossChainGovernance合约地址
@@ -401,7 +406,7 @@ library ModuleKeys {
     
     /// @notice 获取所有静态模块 Key 数组（无重复，顺序与常量声明分组一致）
     function getAllKeys() internal pure returns (bytes32[] memory) {
-        bytes32[] memory keys = new bytes32[](71);
+        bytes32[] memory keys = new bytes32[](72);
 
         // ===== 核心业务模块 =====
         keys[0] = KEY_CM;
@@ -508,13 +513,15 @@ library ModuleKeys {
         keys[69] = KEY_SETTLEMENT_MANAGER;
         // 新增扩展位：LenderPoolVault（线上流动性资金池）
         keys[70] = KEY_LENDER_POOL_VAULT;
+        // 新增扩展位：统一缓存维护器（治理运维）
+        keys[71] = KEY_CACHE_MAINTENANCE_MANAGER;
 
         return keys;
     }
     
     /// @notice 获取所有模块 Key 的字符串名称（保持与 getAllKeys 顺序一致）
     function getAllKeyStrings() internal pure returns (string[] memory) {
-        string[] memory names = new string[](71);
+        string[] memory names = new string[](72);
 
         // ===== 核心业务模块 =====
         names[0] = "KEY_CM";
@@ -618,6 +625,7 @@ library ModuleKeys {
         names[68] = "KEY_LIQUIDATION_PAYOUT_MANAGER";
         names[69] = "KEY_SETTLEMENT_MANAGER";
         names[70] = "KEY_LENDER_POOL_VAULT";
+        names[71] = "KEY_CACHE_MAINTENANCE_MANAGER";
 
         return names;
     }
@@ -707,6 +715,7 @@ library ModuleKeys {
         if (key == KEY_DASHBOARD_VIEW) return "dashboardView";
         if (key == KEY_PREVIEW_VIEW) return "previewView";
         if (key == KEY_LIQUIDATION_VIEW) return "liquidationView";
+        if (key == KEY_CACHE_MAINTENANCE_MANAGER) return "cacheMaintenanceManager";
         return "";
     }
     
@@ -782,6 +791,7 @@ library ModuleKeys {
         if (key == KEY_MODULE_HEALTH_VIEW) return "KEY_MODULE_HEALTH_VIEW";
         if (key == KEY_BATCH_VIEW) return "KEY_BATCH_VIEW";
         if (key == KEY_EARLY_REPAYMENT_GUARANTEE) return "KEY_EARLY_REPAYMENT_GUARANTEE";
+        if (key == KEY_CACHE_MAINTENANCE_MANAGER) return "KEY_CACHE_MAINTENANCE_MANAGER";
         
         // 对于未知模块键，revert而不是返回空字符串，确保安全性
         revert("Unknown module key");
@@ -855,6 +865,7 @@ library ModuleKeys {
         if (nameHash == keccak256(abi.encodePacked("moduleHealthView"))) return KEY_MODULE_HEALTH_VIEW;
         if (nameHash == keccak256(abi.encodePacked("batchView"))) return KEY_BATCH_VIEW;
         if (nameHash == keccak256(abi.encodePacked("earlyRepaymentGuaranteeManager"))) return KEY_EARLY_REPAYMENT_GUARANTEE;
+        if (nameHash == keccak256(abi.encodePacked("cacheMaintenanceManager"))) return KEY_CACHE_MAINTENANCE_MANAGER;
         
         return bytes32(0);
     }

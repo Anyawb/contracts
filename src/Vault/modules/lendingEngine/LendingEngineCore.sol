@@ -8,6 +8,7 @@ import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
 import { HealthFactorLib } from "../../../libraries/HealthFactorLib.sol";
 import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
 import { IPositionView } from "../../../interfaces/IPositionView.sol";
+import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { LendingEngineStorage } from "./LendingEngineStorage.sol";
 import { LendingEngineAccounting } from "./LendingEngineAccounting.sol";
@@ -111,6 +112,17 @@ library LendingEngineCore {
         address user,
         address asset
     ) internal {
+        // 0) 解析 VaultCore 与 View 地址（best-effort，不阻断账本）
+        address vaultCore = _getModuleAddressOrZero(s, ModuleKeys.KEY_VAULT_CORE);
+        address viewAddr = address(0);
+        if (vaultCore != address(0) && vaultCore.code.length != 0) {
+            try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
+                viewAddr = v;
+            } catch {
+                // best effort: keep 0
+            }
+        }
+
         // 1) 先计算“期望写入的快照值”，用于成功推送或失败事件载荷（便于链下重试）
         uint256 debt = s._userDebt[user][asset];
         uint256 collateral = 0;
@@ -120,18 +132,16 @@ library LendingEngineCore {
                 collateral = v;
             } catch (bytes memory reason) {
                 // collateral 保持 0，但把“期望写入的 debt”带上，链下可重读账本后重试
-                emit CacheUpdateFailed(user, asset, address(0), collateral, debt, reason);
+                emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
                 return;
             }
         } else {
-            emit CacheUpdateFailed(user, asset, address(0), collateral, debt, bytes("cm unavailable"));
+            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, bytes("cm unavailable"));
             return;
         }
 
-        // 2) 解析 VaultCore 地址（best-effort，不阻断账本）
-        address vaultCore = _getModuleAddressOrZero(s, ModuleKeys.KEY_VAULT_CORE);
         if (vaultCore == address(0) || vaultCore.code.length == 0) {
-            emit CacheUpdateFailed(user, asset, vaultCore, collateral, debt, bytes("vaultCore unavailable"));
+            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, bytes("vaultCore unavailable"));
             return;
         }
 
@@ -140,7 +150,7 @@ library LendingEngineCore {
         try IVaultCoreMinimal(vaultCore).pushUserPositionUpdate(user, asset, collateral, debt, bytes32(0), 0, nextVersion) {
             // success
         } catch (bytes memory reason) {
-            emit CacheUpdateFailed(user, asset, vaultCore, collateral, debt, reason);
+            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
         }
     }
 
@@ -169,21 +179,21 @@ library LendingEngineCore {
     /// @notice 汇总用户总抵押与总债务，并推送健康状态到 HealthView
     function _pushHealthStatus(LendingEngineStorage.Layout storage s, address user) internal {
         // 健康推送属于 View/缓存链路：必须 best-effort，不阻断账本
-        address cm = _getModuleAddressOrZero(s, ModuleKeys.KEY_CM);
         address lrm = _getModuleAddressOrZero(s, ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
         address hv = _getModuleAddressOrZero(s, ModuleKeys.KEY_HEALTH_VIEW);
+        address pv = _getModuleAddressOrZero(s, ModuleKeys.KEY_POSITION_VIEW);
 
         uint256 totalDebt = s._userTotalDebtValue[user];
 
         // 缺失依赖时发事件并返回（最佳努力）
-        if (cm == address(0) || lrm == address(0) || hv == address(0) || cm.code.length == 0 || hv.code.length == 0 || lrm.code.length == 0) {
+        if (pv == address(0) || lrm == address(0) || hv == address(0) || pv.code.length == 0 || hv.code.length == 0 || lrm.code.length == 0) {
             emit CacheUpdateFailed(user, address(0), hv, 0, totalDebt, bytes("health push deps missing"));
             emit HealthPushFailed(user, hv, 0, totalDebt, bytes("health push deps missing"));
             return;
         }
 
         uint256 totalCollateral = 0;
-        try ICollateralManager(cm).getUserTotalCollateralValue(user) returns (uint256 v) {
+        try IPositionViewValuation(pv).getUserTotalCollateralValue(user) returns (uint256 v) {
             totalCollateral = v;
         } catch (bytes memory reason) {
             emit CacheUpdateFailed(user, address(0), hv, totalCollateral, totalDebt, reason);

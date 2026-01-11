@@ -84,19 +84,6 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
     /// @notice 监控服务状态映射
     mapping(address => bool) private _monitoringStatus;
     
-    // ============ Gas优化缓存 ============
-    /// @notice 缓存的模块键映射（避免重复计算）
-    mapping(string => bytes32) private _cachedModuleKeys;
-    
-    /// @notice 缓存的AccessControlManager地址
-    address private _cachedAcmAddr;
-    
-    /// @notice 缓存时间戳
-    uint256 private _cacheTimestamp;
-    
-    /// @notice 缓存有效期（5分钟）
-    uint256 private constant CACHE_DURATION = 300;
-    
     /// @dev Storage gap for future upgrades
     uint256[42] private __gap;
 
@@ -392,8 +379,8 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         external onlyValidRegistry validMonitorContract(monitorContract) {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         
-        // 使用缓存的模块键生成（Gas优化）
-        bytes32 monitorKey = _getOrCreateModuleKey("MONITOR", monitorName);
+        // 模块键生成：保持确定性（不做链上缓存，避免额外存储与 stale 语义）
+        bytes32 monitorKey = _makeModuleKey("MONITOR", monitorName);
         _dynamicMonitors[monitorKey] = monitorContract;
         _registeredMonitorKeys.push(monitorKey);
         _monitoringStatus[monitorContract] = true;
@@ -410,8 +397,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (backupSource == address(0)) revert ZeroAddress();
         
-        // 使用缓存的模块键生成（Gas优化）
-        bytes32 backupKey = _getOrCreateModuleKey("BACKUP_SOURCE", sourceName);
+        bytes32 backupKey = _makeModuleKey("BACKUP_SOURCE", sourceName);
         _backupPriceSources[backupKey] = backupSource;
         _registeredBackupKeys.push(backupKey);
         
@@ -752,26 +738,11 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
     /// @dev 普通用户需要至少VIEWER权限，管理员及以上可查看所有信息
     // Removed _requireViewerOrAdmin to reduce size; viewers should use View modules
 
-    // ============ Gas优化内部函数 ============
-    
-    /// @notice 获取或创建缓存的模块键（Gas优化）
-    /// @param prefix 模块键前缀
-    /// @param name 模块名称
-    /// @return 模块键
-    function _getOrCreateModuleKey(string memory prefix, string memory name) internal returns (bytes32) {
-        string memory keyString = string(abi.encodePacked(prefix, "_", name));
-        
-        // 检查缓存
-        bytes32 cachedKey = _cachedModuleKeys[keyString];
-        if (cachedKey != bytes32(0)) {
-            return cachedKey;
-        }
-        
-        // 创建新的模块键
-        bytes32 newKey = keccak256(abi.encodePacked(prefix, name));
-        _cachedModuleKeys[keyString] = newKey;
-        
-        return newKey;
+    // ============ Internal helpers ============
+    /// @notice 生成确定性的模块键
+    /// @dev 注意：历史上 key 使用 `keccak256(abi.encodePacked(prefix, name))`（不含 "_"），保持兼容。
+    function _makeModuleKey(string memory prefix, string memory name) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prefix, name));
     }
     
     

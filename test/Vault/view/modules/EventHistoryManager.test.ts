@@ -41,13 +41,11 @@ describe('EventHistoryManager', function () {
     });
 
     it('rejects zero address registry', async function () {
-      // 直接部署实现合约（不是代理）来测试 initialize 函数的零地址检查
+      // UUPS：实现合约 constructor 已禁用 initialize，必须通过 Proxy 初始化来触发零地址校验
       const EventHistoryManagerFactory = await ethers.getContractFactory('EventHistoryManager');
-      const eventHistory = await EventHistoryManagerFactory.deploy();
-      await expect(eventHistory.initialize(ethers.ZeroAddress)).to.be.revertedWithCustomError(
-        eventHistory,
-        'ZeroAddress',
-      );
+      await expect(
+        upgrades.deployProxy(EventHistoryManagerFactory, [ethers.ZeroAddress], { kind: 'uups' })
+      ).to.be.revertedWithCustomError(EventHistoryManagerFactory, 'ZeroAddress');
     });
 
     it('prevents double initialization', async function () {

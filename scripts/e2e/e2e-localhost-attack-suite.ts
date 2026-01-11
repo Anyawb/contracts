@@ -855,8 +855,11 @@ async function main() {
         await (await liquidationManager.connect(deployer).batchLiquidate(addrs, assets, assets, amts, amts, amts)).wait();
       });
 
-      // 11.3 Cache push failure: LiquidationManager is best-effort (should NOT revert),
-      // while VBL.liquidate is atomic (should revert) — validated with mocks.
+      // 11.3 Cache push failure semantics:
+      // - keeper 主入口应走 SettlementManager.settleOrLiquidate(orderId)（SSOT，自动算参数）
+      // - LiquidationManager.liquidate(...) 是“显式参数执行器入口”（role-gated），这里仅用于验证：
+      //   best-effort View push 不应回滚账本写入；
+      // - 对照：VBL.liquidate(...)（旧入口）是 atomic（View push 失败应回滚），用于验证“旧路径”风险。
       // ActionKeys.ACTION_LIQUIDATE == keccak256("LIQUIDATE")
       const ACTION_LIQUIDATE = key("LIQUIDATE");
       if (!(await acm.hasRole(ACTION_LIQUIDATE, deployer.address))) {
@@ -882,7 +885,7 @@ async function main() {
       await (await registry.setModule(key("LENDING_ENGINE"), await mockLE.getAddress())).wait();
       await (await registry.setModule(key("LIQUIDATION_VIEW"), await revertingView.getAddress())).wait();
 
-      // LiquidationManager should succeed and emit CacheUpdateFailed (best-effort).
+      // LiquidationManager 执行器入口应成功，并 emit CacheUpdateFailed（best-effort）。
       const tx = await liquidationManager.connect(deployer).liquidate(victim.address, asset, asset, cAmt, dAmt, 0n);
       const rc = await tx.wait();
       const colAfter: bigint = await mockCM.getCollateral(victim.address, asset);

@@ -38,6 +38,26 @@
 - **系统级缓存快照 (ViewCache.sol)**：集中存储按资产聚合的系统总量数据，减少冗余映射，支持批量查询
 - **查询接口**：前端通过view函数免费查询缓存数据
 
+### 缓存：分类、统一策略与指南入口（必读）
+
+> 结论：**只统一 A 类（模块地址缓存刷新）**；B/C 类不做“统一刷新入口”，只按事件推送/幂等/有效性标识的规范对齐。
+
+- **缓存分类（A/B/C）**
+  - **A 类：模块地址缓存（Module Address Cache）**  
+    - 典型：`VaultRouter` / `LiquidationRiskManager` 内部缓存从 `Registry` 解析出来的模块地址  
+    - 风险：模块升级/换址后短时间 stale，可能导致调用失败或读到旧地址  
+    - **统一策略（已落地）**：`ICacheRefreshable.refreshModuleCache()` + `CacheMaintenanceManager.batchRefresh()`（单入口 + best-effort + 审计）
+  - **B 类：View 业务快照缓存（Business Snapshot Cache）**  
+    - 典型：`PositionView/HealthView/StatisticsView/AccessControlView/...`  
+    - **策略**：写入成功后由业务模块 best-effort push；失败发事件 + 链下重试；读接口提供 `isValid/timestamp` 等有效性标识
+  - **C 类：业务内部缓存/工具缓存（Internal / Utility Cache）**  
+    - 典型：`RewardManagerCore` 的积分缓存、`GracefulDegradation` 的价格缓存、`RegistrySignatureManager` 的 domain separator 缓存等  
+    - **策略**：不纳入统一刷新入口（语义差异大、权限面扩大、不利于审计）
+
+- **团队快速入口（请把这两个当“缓存总目录”）**
+  - **缓存全量盘点表（A/B/C + 字段/TTL/写入者/权限/失败重试）**：[`docs/Usage-Guide/Cache-Architecture-Guide.md`](Usage-Guide/Cache-Architecture-Guide.md)
+  - **缓存推送失败与人工重试（运维手册）**：[`docs/Cache-Push-Manual-Retry.md`](Cache-Push-Manual-Retry.md)
+
 ### 缓存推送失败与手动重试（新增要求 & 已实施）
 - 推送失败不做链上自动重试，避免 gas 暴涨/重复失败；采用“事件告警 + 链下人工重放”。
 - 在推送 try/catch 中发事件 `CacheUpdateFailed(address user, address asset, address view, uint256 collateral, uint256 debt, bytes reason)`；当 view 地址解析为零也要触发，payload 建议携带期望写入的数值。
@@ -390,7 +410,7 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
 - 通过 Registry + KEY_VAULT_CORE 动态解析 View 地址，避免地址漂移。
 - 统一数据推送常量化：`DEPOSIT_PROCESSED`、`WITHDRAW_PROCESSED`、`BATCH_*`。
 - 存储变量遵循规范：私有 `_camelCase`；对外需查询提供 `view` 兼容接口。
-- 兼容查询接口全部可用：`getCollateral`、`getUserCollateralAssets`、`getUserTotalCollateralValue`、`getTotalCollateralValue`、`getAssetValue`。
+- 兼容查询接口（账本只读）全部可用：`getCollateral`、`getTotalCollateralByAsset`、`getUserCollateralAssets`（**不再**提供任何“估值”接口）。
 - 升级授权与权限校验统一采用自定义错误，避免字符串 `require`。
 ```solidity
 // 关键片段：统一的 View 地址解析策略（重要）
@@ -405,7 +425,7 @@ bytes32 internal constant DATA_TYPE_WITHDRAW_PROCESSED = keccak256("WITHDRAW_PRO
 bytes32 internal constant DATA_TYPE_BATCH_DEPOSIT_PROCESSED = keccak256("BATCH_DEPOSIT_PROCESSED");
 bytes32 internal constant DATA_TYPE_BATCH_WITHDRAW_PROCESSED = keccak256("BATCH_WITHDRAW_PROCESSED");
 
-// 兼容查询接口：保持可用（供向后兼容或系统态统计使用）
+// 账本只读查询接口：保持可用（供向后兼容或系统态统计使用）
 function getCollateral(address user, address asset) external view returns (uint256) {
     return _userCollateral[user][asset];
 }
@@ -500,7 +520,7 @@ contract LendingEngine {
 
 ### 1) 健康因子（Health Factor）实现与业务路径
 - 定位与职责
-  - 健康因子属于账本+视图域的组合能力：抵押值来自 `CollateralManager`，债务值来自 `LendingEngine`；聚合/缓存由 View 层负责，供前端与机器人免费查询。
+  - 健康因子属于账本+视图域的组合能力：**抵押估值来自 `PositionView`（读取 CM 账本 + 预言机）**，债务估值来自 `LendingEngine`；聚合/缓存由 View 层负责，供前端与机器人免费查询。
   - 业务层 `VaultBusinessLogic` 不再计算健康因子或推送健康事件，避免重复与噪音（迁移自业务层 → LE + View 层）。
 - 推送与缓存
   - 统一由风险相关模块（如 `LendingEngine`、`LiquidationRiskManager` 等）在账本/风控计算后调用 `HealthView.pushRiskStatus(user, hfBps, minHFBps, under, ts)` 推送。
@@ -559,8 +579,8 @@ contract LendingEngine {
 
 - 只读与风控合并（去重）：
   - `LiquidationRiskManager` 提供健康因子与风控聚合；
-  - `LiquidationView` 的只读接口直接代理 `KEY_CM/KEY_LE` 的查询能力（不参与写入），包含：
-    - 抵押清算：`getSeizableCollateralAmount`、`getSeizableCollaterals`、`calculateCollateralValue`（代理 `ICollateralManager.getAssetValue`）、`getUserTotalCollateralValue`，及批量版本；
+  - 清算只读查询（由 View/Library 层聚合，不参与写入），包含：
+    - 抵押清算：`getSeizableCollateralAmount`、`getSeizableCollaterals`（读取 `KEY_CM` 账本）；`calculateCollateralValue`/`getUserTotalCollateralValue`（读取 `KEY_POSITION_VIEW → IPositionViewValuation.getAssetValue/getUserTotalCollateralValue`），及批量版本；
     - 清算人/系统统计：`getLiquidatorProfitView`、`getGlobalLiquidationView`、`getLiquidatorLeaderboard`、`getLiquidatorTempDebt`、`getLiquidatorProfitRate`；
     - 分析占位（保留）：`getLiquidatorEfficiencyRanking`、`getLiquidationTrends`（先用全局视图占位）。
 
@@ -645,7 +665,9 @@ contract LendingEngine {
       - **按时还款/提前还款**：调用 `CollateralManager.withdrawCollateralTo(user, collateralAsset, amount, user)` 将抵押直接返还到 **B（borrower）** 钱包（无需用户二次 `withdraw`）
       - **到期未还/价值过低**：转入被动清算分支（见下文“清算（违约）时抵押去向”与 `SettlementManager` 章节）
 - **清算（违约）时抵押去向（修订：统一结算入口）**
-  - 清算不再作为独立对外入口；由 `SettlementManager` 在满足触发条件时进入清算分支。
+  - **默认入口**：keeper/机器人应通过 `SettlementManager.settleOrLiquidate(orderId)` 触发处置，由其在满足触发条件时进入清算分支（避免“参数计算/权限/资金去向”分叉）。
+  - **兼容/执行器入口（可选，role-gated）**：`LiquidationManager.liquidate/batchLiquidate` 仍可作为“显式参数的清算执行器入口”保留，
+    仅供测试/应急/手工清算使用（需要 `ACTION_LIQUIDATE`），不建议作为常态 keeper/前端入口。
   - 清算扣押/划转的权威写路径为（两种实现等价其一即可）：
     - `SettlementManager → LiquidationManager → CollateralManager.withdrawCollateralTo(...)`（保持 LiquidationManager 作为清算执行器）
     - 或 `SettlementManager → CollateralManager.withdrawCollateralTo(...)`（直达账本，不经过 LiquidationManager）
@@ -688,7 +710,8 @@ contract LendingEngine {
 
 ### 与 LiquidationManager 的关系（回答你的问题）
 - **“统一走 LiquidationManager”不太符合语义**：LiquidationManager 更适合作为“违约处置/强制清算执行器”，而不是把正常还款也当作 liquidation。
-- 推荐结构（B）：**SettlementManager 为唯一对外入口**；`LiquidationManager` 作为其内部的“清算执行器模块”（可保留现有直达账本实现与事件推送模式）。
+- 推荐结构（B）：**SettlementManager 为 keeper/用户侧的默认对外入口**；`LiquidationManager` 作为其内部的“清算执行器模块”（直达账本 + 单点事件推送）。
+  - 兼容：在具备 `ACTION_LIQUIDATE` 权限时，仍允许直接调用 `LiquidationManager.liquidate/batchLiquidate` 做“显式参数清算”（测试/应急），但不建议作为常态入口。
 
 
 ---
@@ -754,9 +777,14 @@ contract LendingEngine {
   - 分配事件已通过 `LiquidatorView` 以 DataPush 形式上链，便于前端/离线服务消费
 
 ### 与清算流程的集成
-- 清算执行流程：`LiquidationManager` 触发清算 → 扣押抵押物（`CM.withdrawCollateralTo`）→ 减少债务（`LE.forceReduceDebt`）→ 计算残值 → `LiquidationPayoutManager` 执行分配
-- 残值计算：抵押物价值 - 债务价值（由清算流程传入或由 `LiquidationPayoutManager` 内部查询）
-- 分配执行：`LiquidationPayoutManager` 根据配置的比例和地址，将残值按比例转账给各角色
+- 清算执行流程：`SettlementManager` 进入清算分支 → 调用 `LiquidationManager`（执行器）→
+  直达账本执行：扣押/划转抵押（`CM.withdrawCollateralTo`）与减少债务（`LE.forceReduceDebt`）→
+  使用 `LiquidationPayoutManager`（SSOT）读取 recipients/rates 并计算 shares →
+  由执行器将抵押按份额路由到平台/准备金/出借人补偿接收者/清算人。
+- 残值/份额计算：在当前实现中以“被扣押的抵押数量（collateralAmount）”作为分配基数，
+  份额计算由 `LiquidationPayoutManager.calculateShares` 提供，整数除不尽的余数归清算人。
+- 分配执行：由清算执行器（`LiquidationManager`，或未来可由 `SettlementManager` 直达账本）调用
+  `CollateralManager.withdrawCollateralTo` 完成实际转账；`LiquidationPayoutManager` 作为配置/计算模块不直接转账。
 
 ### 部署与配置
 - **环境变量**（三网脚本均可用）：
@@ -782,7 +810,7 @@ contract LendingEngine {
 
 ### 回归用例清单
 - 借/还/存/取 与批量路径：账本只由 LE 写入；奖励仅一次触发；无重复事件
-- 健康因子：账本变更后 HealthView 缓存更新；阈值来自 `LiquidationRiskManager`
+- 健康因子：账本变更后 HealthView 缓存更新；阈值 **SSOT** 为 `KEY_LIQUIDATION_CONFIG_MANAGER → LiquidationConfigModule`（`LiquidationRiskManager` 对外透传读取）
 - 预言机异常：GD 生效且不阻断业务；估值结果合理（保守或缓存）
 - 权限：`onlyVaultCore`、ACM 角色、Registry 模块解析
 
@@ -915,6 +943,75 @@ error AccessControlView__UnauthorizedAccess();
   - **Security**：显式标注本函数依赖的安全属性/假设（如 `nonReentrant`、`onlyVaultCore`、`ACM.requireRole(...)`、签名单次使用、nonce/uid 绑定、跨模块调用边界等）。
 - **`@param/@return`**：必须写清楚**单位与精度**（例如 USDT 6 decimals、bps=1e4、时间=seconds、价格精度等）；涉及“内部 ID / 外部地址”的必须区分含义（如 `uid` vs `user`）。
 - **一致性**：注释中的“唯一入口/权威路径/SSOT”描述必须与本指南其它章节一致；不一致时以本指南为准并立即修订注释或章节说明。
+
+### 检测方式（强制）
+> 目标：把“注释规范 + 关键风格约束”变成可重复、可自动化的检查步骤，避免靠人工肉眼抽查。
+
+#### 1) 编译级校验（必须）
+- **目的**：确保 NatSpec/代码改动不会引入语法、依赖、类型问题。
+
+```bash
+pnpm -s run compile
+```
+
+#### 2) 单文件/目录级 Solhint（必须）
+- **目的**：强制 `NatSpec` 结构化输出、禁止全局 import、限制行宽、禁止 `require/revert("...")` 等不一致模式。
+- **推荐**：改动某个文件时先跑单文件；合并前对目标目录跑一次。
+
+```bash
+# 单文件检查
+pnpm -s exec solhint "src/Vault/liquidation/modules/LiquidationManager.sol"
+
+# 目录检查（示例：liquidation libraries）
+pnpm -s exec solhint "src/Vault/liquidation/libraries/*.sol"
+```
+
+#### 2.1) Solhint 规则分层（推荐：安全/一致性必过 + Gas 持续优化 + 文档不刷屏）
+> 背景：Solhint 新版本会引入更多“建议型”规则。为避免信噪比过低，本项目将规则分为三档。
+
+- **A. 安全/一致性（必须为 error）**：阻断合并/上线，确保链上安全与一致性。
+  - 示例：`avoid-tx-origin`、`avoid-low-level-calls`、`reentrancy`、`no-inline-assembly`、`not-rely-on-time`、`gas-custom-errors`、`no-global-import`、`max-line-length`、`compiler-version`。
+- **B. Gas 优化（建议为 warn，持续可见）**：不影响功能正确性，但能在现有框架下持续降低 gas。
+  - 示例：`gas-increment-by-one`（循环 `++i`）、`gas-strict-inequalities`（用严格不等）、`gas-indexed-events`（合理增加 indexed）。
+- **C. 文档/可读性（建议按需启用）**：避免大量文档告警淹没真正问题；建议在“文档完善阶段”再启用。
+  - 示例：`use-natspec`、`function-max-lines`。
+
+#### 2.2) “极致 gas/审计模式”（可选）
+> 目标：在不阻塞日常开发的前提下，提供一次性“更严格”的检查入口，用于上线前/审计前集中清理。
+
+- **推荐方式**：在仓库中保留一份更严格的 solhint 配置（例如 `.solhint.perfection.json`），将 **B 类 gas 规则提升为 error**，并按需打开 **C 类文档规则**。
+- **运行示例**：
+
+```bash
+pnpm -s exec solhint --config ".solhint.perfection.json" "src/Vault/liquidation/libraries/*.sol"
+```
+
+#### 3) 关键路径测试（必须，至少选一条“最贴近改动”的用例集）
+- **目的**：验证回滚条件/原子性/权限/事件等行为与 NatSpec 描述一致。
+
+```bash
+# 示例：清算相关 failure & edge scenarios
+pnpm -s exec hardhat test "test/Vault/liquidation/Liquidation.failure-scenarios.test.ts"
+```
+
+#### 4) 允许的“最小范围规则豁免”（仅用于通过工具误报/缓存场景）
+> 原则：**能重构消除就不要 disable**；必须 disable 时，**只对单行**使用 `solhint-disable-next-line`，并说明理由。
+
+- **`not-rely-on-time`**：业务决策不得依赖时间；但“写入/上报时间戳”属于可接受的审计信息记录。
+
+```solidity
+// solhint-disable-next-line not-rely-on-time
+record.timestamp = block.timestamp;
+```
+
+- **`no-inline-assembly`**：默认禁止内联汇编；仅在“无法用 Solidity 等价实现且可审计”的极少数场景允许。
+
+```solidity
+// solhint-disable-next-line no-inline-assembly
+assembly {
+    // ... minimal, well-audited assembly ...
+}
+```
 
 ### 示例：带签名授权的 USDT 代存（标准样式）
 ```solidity
@@ -1101,6 +1198,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 - ✅ **快速响应** - 缓存查询响应速度快
 - ✅ **用户体验好** - 查询响应时间 < 100ms
 - ✅ **数据一致性** - 通过推送机制保持数据同步
+  - 📌 **缓存细节总目录（A/B/C 分类与全量表）**：[`docs/Usage-Guide/Cache-Architecture-Guide.md`](Usage-Guide/Cache-Architecture-Guide.md)
 
 ### **3. 双架构协同优势**
 - ✅ **最佳性能** - 查询免费快速，更新成本可控

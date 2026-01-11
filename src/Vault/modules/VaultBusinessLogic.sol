@@ -381,57 +381,21 @@ contract VaultBusinessLogic is
     function repay(address user, address asset, uint256 amount) external onlyValidRegistry whenNotPaused nonReentrant {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
-        
-        // Gas优化：获取模块地址（使用缓存）
-        _getModuleAddress(ModuleKeys.KEY_RM);
-        // 统计视图（可选）
-        address statsView = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
-        
-        // 转移代币到合约
-        IERC20(asset).safeTransferFrom(user, address(this), amount);
-        
-        // 积分奖励统一以 LendingEngine 落账后触发
-        
-        // 推送统计视图
-        if (statsView != address(0)) {
-            VaultBusinessLogicLibrary.safeUpdateStats(statsView, user, 0, 0, 0, amount);
-        }
 
-        // 早偿结算触发应由上游/LE 路径统一协调；业务层不再依据账本状态自行判断
-
-        VaultBusinessLogicLibrary.emitBusinessEvents("repay", user, asset, amount, ActionKeys.ACTION_REPAY);
+        // 收敛：还款/结算必须走 VaultCore.repay(orderId, asset, amount) → SettlementManager（SSOT）。
+        // 业务层不再托管用户还款资金，避免写路径分叉与资金滞留风险。
+        user;
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /// @notice 显式关单还款：在还款完成后触发早偿结算（或自动条件也成立时）
     function repayWithStop(address user, address asset, uint256 amount, bool stop) external onlyValidRegistry whenNotPaused nonReentrant {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
-
-        // 模块地址
-        address earlyRepayGM = _getModuleAddress(ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE);
-
-        // 执行还款
-        IERC20(asset).safeTransferFrom(user, address(this), amount);
-        // 账本更新由 VaultCore → LE 统一触发；业务层不再直连
-
-        // 若 stop=true 或 债务为0，则触发早偿结算
-        bool shouldClose = stop;
-        if (!shouldClose) {
-            // 不再在业务层读取账本进行判断
-        }
-        if (shouldClose) {
-            (bool ok2, bytes memory data2) = earlyRepayGM.call(
-                abi.encodeWithSignature(
-                    "settleEarlyRepayment(address,address,uint256)",
-                    user,
-                    asset,
-                    amount // 预留参数，不参与分配
-                )
-            );
-            if (!ok2) revert ExternalModuleRevertedRaw("EarlyRepaymentGuaranteeManager", data2);
-        }
-
-        VaultBusinessLogicLibrary.emitBusinessEvents("repayWithStop", user, asset, amount, ActionKeys.ACTION_REPAY);
+        // DEPRECATED: 早偿结算应由 SettlementManager 统一承接（SSOT），避免 repay/settle 分叉。
+        stop;
+        user;
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /// @notice 用户提取抵押物

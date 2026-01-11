@@ -12,10 +12,15 @@
 
 本文档对齐当前实现的两个事实：
 
-1) **清算写路径**（`LiquidationManager → CM.withdrawCollateralTo → LE.forceReduceDebt → LiquidatorView.push*`）目前**不包含**“积分惩罚/清算奖励”的链上结算逻辑。  
+1) **清算写路径（默认入口为 SSOT）**：keeper/机器人通过 `SettlementManager.settleOrLiquidate(orderId)` 触发处置；进入清算分支后执行 `CM.withdrawCollateralTo → LE.forceReduceDebt → LiquidatorView.push*`（内部可选经 `LiquidationManager` 执行器转调）。目前该链路**不包含**“积分惩罚/清算奖励”的链上结算逻辑。  
 2) **积分系统（Reward）**主线写入口由 `ORDER_ENGINE(core/LendingEngine)` 在借/还落账后调用 `RewardManager.onLoanEvent*`；清算默认不触发。
 
 > 口径补充：当前架构下清算不再作为独立对外写入口；**统一由 `SettlementManager` 承接写入口**，当进入清算分支时才执行 `CM.withdrawCollateralTo + LE.forceReduceDebt` 并由 `LiquidatorView.push*` 单点推送。本文在描述“清算写路径”时，默认指该清算分支的直达账本写路径。
+
+为避免误解：本文所称“清算写路径”应理解为：
+- **默认/推荐 keeper 入口（SSOT）**：`SettlementManager.settleOrLiquidate(orderId)`（统一入口，参数内部计算）
+- **清算分支执行**：`SettlementManager → (可选) LiquidationManager.liquidateFromSettlementManager → CM.withdrawCollateralTo → LE.forceReduceDebt → LiquidatorView.push*`
+- **兼容/测试/应急执行器入口（非默认）**：`LiquidationManager.liquidate/batchLiquidate(...)` 仅用于显式参数执行与回归验证
 
 因此：本文档中的“清算积分惩罚”仅为**可选扩展设计/参考实现**，默认未启用，需另行接入权限与写入口。
 
@@ -198,7 +203,7 @@ PENALTY_RATE = 100; // 100 basis points = 1%
 ## 🚀 **使用指南**
 
 ### **清算人操作**
-默认不触发积分惩罚/奖励；清算执行通过统一入口 `SettlementManager.settleOrLiquidate(...)` 进入清算分支（内部可调用清算执行器或直达账本）。若上线惩罚扩展，应在清算完成后由具备权限的模块单独调用惩罚入口。
+默认不触发积分惩罚/奖励；清算执行通过统一入口 `SettlementManager.settleOrLiquidate(orderId)` 进入清算分支（内部可调用清算执行器或直达账本）。若上线惩罚扩展，应在清算完成后由具备权限的模块单独调用惩罚入口。
 
 ### **查询惩罚债务**
 ```solidity

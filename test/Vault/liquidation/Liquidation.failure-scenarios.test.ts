@@ -8,6 +8,7 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
   const KEY_LE = ethers.id("LENDING_ENGINE");
   const KEY_LIQUIDATION_MANAGER = ethers.id("LIQUIDATION_MANAGER");
   const KEY_LIQUIDATION_VIEW = ethers.id("LIQUIDATION_VIEW");
+  const KEY_LIQUIDATION_PAYOUT_MANAGER = ethers.id("LIQUIDATION_PAYOUT_MANAGER");
 
   // Keep consistent with most mocks in this repo
   const ACTION_LIQUIDATE = ethers.id("LIQUIDATE");
@@ -23,6 +24,25 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
 
     const eventsView = await (await ethers.getContractFactory("MockLiquidationEventsView")).deploy();
     const revertingView = await (await ethers.getContractFactory("RevertingLiquidationEventsView")).deploy();
+    const payoutRecipients = {
+      platform: admin.address,
+      reserve: admin.address,
+      lenderCompensation: admin.address,
+    };
+    const payoutRates = {
+      platformBps: 1000,
+      reserveBps: 2000,
+      lenderBps: 2000,
+      liquidatorBps: 5000,
+    };
+
+    const liquidationPayoutManagerFactory = await ethers.getContractFactory("LiquidationPayoutManager");
+    const payoutManager = await upgrades.deployProxy(
+      liquidationPayoutManagerFactory,
+      [await registry.getAddress(), admin.address, payoutRecipients, payoutRates],
+      { kind: "uups" },
+    );
+    await payoutManager.waitForDeployment();
 
     const liquidationManagerFactory = await ethers.getContractFactory("LiquidationManager");
     const liquidationManager = await upgrades.deployProxy(liquidationManagerFactory, [await registry.getAddress()], {
@@ -37,6 +57,7 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
     await registry.setModule(KEY_CM, await collateral.getAddress());
     await registry.setModule(KEY_LE, await lending.getAddress());
     await registry.setModule(KEY_LIQUIDATION_VIEW, await eventsView.getAddress());
+    await registry.setModule(KEY_LIQUIDATION_PAYOUT_MANAGER, await payoutManager.getAddress());
     await registry.setModule(KEY_LIQUIDATION_MANAGER, await liquidationManager.getAddress());
 
     // Roles:

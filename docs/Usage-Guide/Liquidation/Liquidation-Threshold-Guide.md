@@ -2,7 +2,7 @@
 
 ## 📋 **概述**
 
-清算阈值是RWA借贷平台的核心风险控制参数，用于判断用户是否可以被清算。当用户的健康因子低于清算阈值时，系统允许进入“被动清算/强制处置”分支，确保平台资产安全。本文已对齐 `docs/Architecture-Guide.md`：阈值存储与校验在风控/账本侧（如 `LiquidationRiskManager`/`LendingEngine`），只读层仅查询健康因子/阈值；写入口统一由 `SettlementManager` 承接，当进入清算分支时写入直达账本，事件/DataPush 由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点触发。
+清算阈值是RWA借贷平台的核心风险控制参数，用于判断用户是否可以被清算。当用户的健康因子低于清算阈值时，系统允许进入“被动清算/强制处置”分支，确保平台资产安全。本文已对齐 `docs/Architecture-Guide.md`：阈值配置的 **SSOT** 为 `KEY_LIQUIDATION_CONFIG_MANAGER → LiquidationConfigModule`；`LiquidationRiskManager` 对外提供只读聚合（并兼容透传写入口），账本侧（如 `LendingEngine`）在估值/健康计算路径使用阈值；写入口统一由 `SettlementManager` 承接，当进入清算分支时写入直达账本，事件/DataPush 由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点触发。
 
 ## 🎯 **清算阈值概念**
 
@@ -27,7 +27,8 @@ if (用户健康因子 < 清算阈值) {
 ## 🏗️ **技术实现**
 
 ### **相关文件（职责对齐）**
-- **主文件**: `contracts/Vault/liquidation/modules/LiquidationRiskManager.sol`（阈值存储/校验，风控只读）
+- **阈值 SSOT**: `contracts/Vault/liquidation/modules/LiquidationConfigModule.sol`（阈值/最小健康因子配置的权威来源）
+- **只读聚合**: `contracts/Vault/liquidation/modules/LiquidationRiskManager.sol`（风险判断/只读聚合；阈值读取透传到 ConfigModule）
 - **账本侧应用**: `LendingEngine` 在估值/健康计算中使用阈值（同路径执行优雅降级）
 - **只读缓存**: `HealthView`/`LiquidationRiskManager` 提供健康因子/阈值查询，不放行写入
 - **类型定义**: `contracts/Vault/types/LiquidationTypes.sol`
@@ -41,10 +42,11 @@ uint256 internal constant MIN_LIQUIDATION_THRESHOLD = 10_000;     // 100% in bas
 uint256 internal constant MAX_LIQUIDATION_THRESHOLD = 15_000;     // 150% in basis points
 ```
 
-### **存储变量**
+### **存储变量（SSOT）**
 ```solidity
-// LiquidationRiskManager.sol
+// LiquidationConfigManager / LiquidationConfigModule
 uint256 public liquidationThresholdVar;
+uint256 public minHealthFactorVar;
 ```
 
 > 阈值存储/更新在风控/账本侧执行，遵循“清算写入直达账本、只读不放行写”的架构要求。

@@ -42,8 +42,8 @@
 
 ## 🔁 清算写路径（与当前实现一致）
 
-1) Keeper/机器人通过只读模块确认“需要进入清算分支”，并在链下计算 `collateralAmount/debtAmount/bonus`（或等效参数）。  
-2) 调用 `SettlementManager.settleOrLiquidate(...)`（统一入口；内部判定并进入清算分支）。  
+1) Keeper/机器人通过只读模块确认“需要进入清算分支”（到期未还或风险可清算）。  
+2) 调用 `SettlementManager.settleOrLiquidate(orderId)`（**默认/推荐入口（SSOT）**：内部判定并进入清算分支，且基于 `orderId` 自动计算清算参数）。  
 3) 清算分支直达账本（由 SettlementManager 内部直接调用，或经 LiquidationManager 执行器转调）：
    - `KEY_CM → withdrawCollateralTo(targetUser, collateralAsset, collateralAmount, liquidatorOrReceiver)`
    - `KEY_LE → forceReduceDebt(targetUser, debtAsset, debtAmount)`
@@ -53,9 +53,13 @@
 ## ⚙️ 参数与配置说明（当前实现口径）
 
 - **清算阈值/健康因子**：以 `HealthView`/`LiquidationRiskManager` 的只读聚合口径为准（对外 0 gas 查询）。
-- **bonus**：由执行者（keeper/机器人）传入，当前用于事件/链下统计口径；链上不自动结算“奖励”。
+- **bonus**：当前口径为“用于事件/链下统计展示”，默认由合约内部给出（实现可演进）；链上不自动结算“奖励”。
+
+## 🧩 执行器入口（兼容/测试/应急）
+
+- `LiquidationManager.liquidate/batchLiquidate(...)` 保留为 **显式参数执行器入口**（role-gated），用于测试/应急/手工处置；**不应**作为 keeper 常态主入口（避免参数计算/权限/资金去向口径分叉）。
 
 ## 🧭 迁移提示（避免旧路径回流）
 
 - 不再使用 `VaultBusinessLogic` 作为清算编排入口（清算入口已下线并 revert）。
-- 不再依赖 `LiquidationCollateralManager/LiquidationDebtManager/LiquidationRewardDistributor/LiquidationViewLibrary` 等旧模块族（应保持不部署/不注册）。
+- 不再依赖 `LiquidationCollateralManager/LiquidationDebtManager/LiquidationRewardDistributor/LiquidationViewLibrary` 等旧模块族（其中 `LiquidationViewLibrary` 已移除；应保持不部署/不注册）。

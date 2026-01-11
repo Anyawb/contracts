@@ -1,5 +1,9 @@
 # LiquidationCollateralManager 优雅降级实施报告（对齐 Architecture-Guide）
 
+> ⚠️ **归档说明（Legacy）**：`LiquidationCollateralManager` 属于旧清算模块族，已在当前实现中下线/移除。  
+> 当前清算写路径为 `SettlementManager`（SSOT）→ `CollateralManager`/`VaultLendingEngine`（直达账本）→ `LiquidatorView`（DataPush 单点）。  
+> 本文仅保留为历史设计记录，勿作为当前代码实现/测试入口依据。
+
 ## 🎯 概述
 
 本版报告已按 `docs/Architecture-Guide.md` 对齐：抵押物管理仅负责账本扣押，不在合约内执行价格获取或优雅降级；估值与降级统一由 `LendingEngine` 估值路径完成；写入口统一由 `SettlementManager` 承接，在进入清算分支时直达账本；事件/DataPush 由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点触发。

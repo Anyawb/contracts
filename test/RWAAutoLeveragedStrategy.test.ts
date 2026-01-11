@@ -2,15 +2,11 @@ import { expect } from 'chai';
 import hardhat from 'hardhat';
 const { ethers } = hardhat;
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import type { RWAAutoLeveragedStrategy } from '../types/contracts/strategies/RWAAutoLeveragedStrategy';
 import { RWAAutoLeveragedStrategy__factory } from '../types/factories/contracts/strategies/RWAAutoLeveragedStrategy__factory';
 import type { MockERC20 } from '../../types/contracts/Mocks/MockERC20';
 import { MockERC20__factory } from '../../types/factories/contracts/Mocks/MockERC20__factory';
-import type { VaultCore } from '../../types/contracts/Vault/VaultCore';
-import { VaultCore__factory } from '../../types/factories/contracts/Vault/VaultCore__factory';
-import type { VaultBusinessLogic } from '../types/contracts/Vault/modules/VaultBusinessLogic';
-import { VaultBusinessLogic__factory } from '../types/factories/contracts/Vault/modules/VaultBusinessLogic__factory';
 import type { MockCollateralManager } from '../../types/contracts/Mocks/MockCollateralManager';
 import { MockCollateralManager__factory } from '../../types/factories/contracts/Mocks/MockCollateralManager__factory';
 import type { MockLendingEngineBasic } from '../../types/contracts/Mocks/MockLendingEngineBasic';
@@ -19,6 +15,12 @@ import type { MockFeeRouter } from '../../types/contracts/Mocks/MockFeeRouter';
 import { MockFeeRouter__factory } from '../../types/factories/contracts/Mocks/MockFeeRouter__factory';
 import type { MockRewardManager } from '../../types/contracts/Mocks/MockRewardManager';
 import { MockRewardManager__factory } from '../../types/factories/contracts/Mocks/MockRewardManager__factory';
+import type { VaultCore } from '../../types/contracts/Vault/VaultCore';
+import type { MockRegistry } from '../../types/contracts/Mocks/MockRegistry';
+import type { MockSimpleContract } from '../../types/contracts/Mocks/MockSimpleContract';
+import type { MockSettlementManager } from '../../types/contracts/Mocks/MockSettlementManager';
+import type { MockVaultBusinessLogicBorrowWithRate } from '../../types/contracts/Mocks/MockVaultBusinessLogicBorrowWithRate';
+import type { MockHealthView } from '../../types/contracts/Mocks/MockHealthView';
 // HealthFactorCalculator 已被废弃，由 HealthView 取代
 // import type { HealthFactorCalculator } from '../types/contracts/Vault/modules/HealthFactorCalculator';
 // import { HealthFactorCalculator__factory } from '../types/factories/contracts/Vault/modules/HealthFactorCalculator__factory';
@@ -39,6 +41,7 @@ describe('RWAAutoLeveragedStrategy', function () {
   // 状态变量 - 使用描述性名称
   let strategyContract: RWAAutoLeveragedStrategy;
   let vaultContract: VaultCore;
+  let registryContract: MockRegistry;
   let rwaTokenContract: MockERC20;
   let settlementTokenContract: MockERC20;
   let governanceSigner: SignerWithAddress;
@@ -50,12 +53,25 @@ describe('RWAAutoLeveragedStrategy', function () {
   // HealthFactorCalculator 已被废弃，不再需要
   // let healthFactorContract: HealthFactorCalculator;
   let mockVaultStorage: any;
+  let viewDummy: MockSimpleContract;
+  let settlementManager: MockSettlementManager;
+  let mockVbl: MockVaultBusinessLogicBorrowWithRate;
+  let healthView: MockHealthView;
+
+  function KEY(name: string) {
+    return ethers.keccak256(ethers.toUtf8Bytes(name));
+  }
 
   async function deployFixture() {
     signers = await ethers.getSigners();
     governanceSigner = signers[0];
     user1Signer = signers[1];
     user2Signer = signers[2];
+
+    // Registry（策略会通过 VaultCore.getRegistry() 解析模块）
+    const MockRegistryFactory = await ethers.getContractFactory('MockRegistry');
+    registryContract = (await MockRegistryFactory.deploy()) as unknown as MockRegistry;
+    await registryContract.waitForDeployment();
 
     // 部署 MockCollateralManager
     const collateralManagerFactory = (await ethers.getContractFactory('MockCollateralManager')) as unknown as MockCollateralManager__factory;
@@ -77,8 +93,10 @@ describe('RWAAutoLeveragedStrategy', function () {
     const rewardManagerContract = await rewardManagerFactory.deploy();
     await rewardManagerContract.waitForDeployment();
 
-    // HealthFactorCalculator 已被废弃，由 HealthView 取代
-    // 如果策略需要健康因子，应该通过 Registry 访问 HealthView
+    // HealthView（策略 getHealthFactor 会读 KEY_HEALTH_VIEW）
+    const MockHealthViewFactory = await ethers.getContractFactory('MockHealthView');
+    healthView = (await MockHealthViewFactory.deploy()) as unknown as MockHealthView;
+    await healthView.waitForDeployment();
 
     // 部署 MockERC20 代币
     const erc20Factory = (await ethers.getContractFactory('MockERC20')) as unknown as MockERC20__factory;
@@ -95,16 +113,38 @@ describe('RWAAutoLeveragedStrategy', function () {
     // 设置结算币地址
     await mockVaultStorage.setSettlementToken(await settlementTokenContract.getAddress());
 
-    // 部署 VaultCore
-    const vaultFactory = (await ethers.getContractFactory('VaultCore')) as unknown as VaultCore__factory;
-    vaultContract = await vaultFactory.deploy();
-    await vaultContract.waitForDeployment();
+    // VaultCore 需要按升级代理模式部署并 initialize（constructor 禁用 initializer）
+    const VaultCoreImplFactory = await ethers.getContractFactory('VaultCore');
+    const vaultImpl = await VaultCoreImplFactory.deploy();
+    await vaultImpl.waitForDeployment();
 
-    // VaultBusinessLogic 是 UUPS upgradeable，不需要在策略测试中部署
-    // 策略合约只需要 VaultCore 地址
+    const DummyViewFactory = await ethers.getContractFactory('MockSimpleContract');
+    viewDummy = (await DummyViewFactory.deploy()) as unknown as MockSimpleContract;
+    await viewDummy.waitForDeployment();
 
-    // 不在 deployFixture 中初始化 VaultCore，避免重复初始化错误
-    // 初始化将在测试中按需进行
+    const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
+    const initData = VaultCoreImplFactory.interface.encodeFunctionData('initialize', [
+      await registryContract.getAddress(),
+      await viewDummy.getAddress()
+    ]);
+    const proxy = await ProxyFactory.deploy(await vaultImpl.getAddress(), initData);
+    await proxy.waitForDeployment();
+    vaultContract = vaultImpl.attach(await proxy.getAddress()) as unknown as VaultCore;
+
+    // 策略依赖：VAULT_BUSINESS_LOGIC.borrowWithRate 与 SETTLEMENT_MANAGER.repayAndSettle
+    const MockSettlementManagerFactory = await ethers.getContractFactory('MockSettlementManager');
+    settlementManager = (await MockSettlementManagerFactory.deploy()) as unknown as MockSettlementManager;
+    await settlementManager.waitForDeployment();
+
+    const MockVblFactory = await ethers.getContractFactory('MockVaultBusinessLogicBorrowWithRate');
+    mockVbl = (await MockVblFactory.deploy()) as unknown as MockVaultBusinessLogicBorrowWithRate;
+    await mockVbl.waitForDeployment();
+
+    // 注册模块到 Registry（注意：ModuleKeys 里是 keccak256("...") 的值）
+    await registryContract.setModule(KEY('COLLATERAL_MANAGER'), await collateralManagerContract.getAddress());
+    await registryContract.setModule(KEY('VAULT_BUSINESS_LOGIC'), await mockVbl.getAddress());
+    await registryContract.setModule(KEY('SETTLEMENT_MANAGER'), await settlementManager.getAddress());
+    await registryContract.setModule(KEY('HEALTH_VIEW'), await healthView.getAddress());
 
     // 设置 Mock 合约的初始状态（如果 Mock 合约有这些方法）
     // MockCollateralManager 和 MockLendingEngineBasic 可能没有这些方法，跳过
@@ -130,6 +170,9 @@ describe('RWAAutoLeveragedStrategy', function () {
     );
     await strategyContract.waitForDeployment();
 
+    // 订单化参数（否则 openPosition 会 revert Strategy__OrderConfigNotSet）
+    await strategyContract.setDefaultOrderConfig(await governanceSigner.getAddress(), 1000n, 30);
+
     // 设置资产配置
     await strategyContract.updateAssetConfig(await rwaTokenContract.getAddress(), {
       isSupported: true,
@@ -147,12 +190,31 @@ describe('RWAAutoLeveragedStrategy', function () {
     return { 
       strategyContract, 
       vaultContract, 
+      registryContract,
       rwaTokenContract, 
       settlementTokenContract, 
       governanceSigner, 
       user1Signer, 
       user2Signer 
     };
+  }
+
+  async function deployWithOpenedPositionFixtureNoCooldown() {
+    const fx = await deployFixture();
+    await fx.rwaTokenContract.connect(fx.user1Signer).approve(await fx.strategyContract.getAddress(), COLLATERAL_AMOUNT);
+    await fx.strategyContract.connect(fx.user1Signer).openPosition(
+      await fx.rwaTokenContract.getAddress(),
+      COLLATERAL_AMOUNT,
+      LEVERAGE_RATIO
+    );
+    return fx;
+  }
+
+  async function deployWithOpenedPositionFixtureAfterCooldown() {
+    const fx = await deployWithOpenedPositionFixtureNoCooldown();
+    // 合约冷却期为 1h；推进时间后允许 close/rebalance
+    await time.increase(COOLDOWN_PERIOD + 1n);
+    return fx;
   }
 
   describe('部署与初始化', function () {
@@ -334,19 +396,10 @@ describe('RWAAutoLeveragedStrategy', function () {
   });
 
   describe('平仓功能测试', function () {
-    beforeEach(async function () {
-      const { strategyContract, rwaTokenContract, user1Signer } = await loadFixture(deployFixture);
-      
-      await rwaTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), COLLATERAL_AMOUNT);
-      await strategyContract.connect(user1Signer).openPosition(
-        await rwaTokenContract.getAddress(),
-        COLLATERAL_AMOUNT,
-        LEVERAGE_RATIO
-      );
-    });
-
     it('应该成功完全平仓并清除仓位信息', async function () {
-      const { strategyContract, rwaTokenContract, settlementTokenContract, user1Signer } = await loadFixture(deployFixture);
+      const { strategyContract, rwaTokenContract, settlementTokenContract, user1Signer } = await loadFixture(
+        deployWithOpenedPositionFixtureAfterCooldown
+      );
       
       const user1Address = await user1Signer.getAddress();
       const initialCollateralBalance = await rwaTokenContract.balanceOf(user1Address);
@@ -367,7 +420,9 @@ describe('RWAAutoLeveragedStrategy', function () {
     });
 
     it('应该支持部分还款并更新仓位信息', async function () {
-      const { strategyContract, rwaTokenContract, settlementTokenContract, user1Signer } = await loadFixture(deployFixture);
+      const { strategyContract, rwaTokenContract, settlementTokenContract, user1Signer } = await loadFixture(
+        deployWithOpenedPositionFixtureAfterCooldown
+      );
       
       const user1Address = await user1Signer.getAddress();
       const partialRepayAmount = BORROW_AMOUNT / 2n;
@@ -381,7 +436,7 @@ describe('RWAAutoLeveragedStrategy', function () {
       // 验证仓位仍然存在但债务减少
       const position = await strategyContract.getPosition(user1Address);
       expect(position.isActive).to.be.true;
-      expect(position.borrowedAmount).to.equal(partialRepayAmount);
+      expect(position.borrowedAmount).to.equal(BORROW_AMOUNT - partialRepayAmount);
     });
 
     it('应该拒绝没有仓位的平仓操作', async function () {
@@ -404,54 +459,39 @@ describe('RWAAutoLeveragedStrategy', function () {
   });
 
   describe('再平衡功能测试', function () {
-    beforeEach(async function () {
-      const { strategyContract, rwaTokenContract, user1Signer } = await loadFixture(deployFixture);
-      
-      await rwaTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), COLLATERAL_AMOUNT);
-      await strategyContract.connect(user1Signer).openPosition(
-        await rwaTokenContract.getAddress(),
-        COLLATERAL_AMOUNT,
-        LEVERAGE_RATIO
-      );
-    });
-
     it('应该成功增加杠杆并更新仓位信息', async function () {
-      const { strategyContract, settlementTokenContract, user1Signer } = await loadFixture(deployFixture);
+      const { strategyContract, rwaTokenContract, user1Signer } = await loadFixture(deployWithOpenedPositionFixtureAfterCooldown);
       
-      const user1Address = await user1Signer.getAddress();
       const newLeverage = 200n; // 2x
-      const additionalBorrow = COLLATERAL_AMOUNT; // 100 tokens
-      
-      // 授权额外借款
-      await settlementTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), 0n);
-      
-      // 再平衡到更高杠杆
-      await strategyContract.connect(user1Signer).rebalancePosition(await rwaTokenContract.getAddress(), newLeverage);
-      
-      // 验证仓位更新
-      const position = await strategyContract.getPosition(user1Address);
-      expect(position.leverageRatio).to.equal(newLeverage);
-      expect(position.borrowedAmount).to.equal(BORROW_AMOUNT + additionalBorrow);
+
+      // 订单化模式下：增杠杆需要扩展订单模型，本轮整改明确禁止
+      await expect(
+        strategyContract.connect(user1Signer).rebalancePosition(await rwaTokenContract.getAddress(), newLeverage)
+      ).to.be.revertedWithCustomError(strategyContract, 'Strategy__LeverageIncreaseNotSupportedInOrderMode');
     });
 
     it('应该成功减少杠杆并更新仓位信息', async function () {
-      const { strategyContract, settlementTokenContract, user1Signer } = await loadFixture(deployFixture);
+      const { strategyContract, rwaTokenContract, settlementTokenContract, user1Signer } = await loadFixture(
+        deployWithOpenedPositionFixtureAfterCooldown
+      );
       
       const user1Address = await user1Signer.getAddress();
       const newLeverage = 120n; // 1.2x
-      const reducedBorrow = COLLATERAL_AMOUNT * 20n / 100n; // 20 tokens
+      const targetBorrow = ethers.parseEther('20'); // 100 * 0.2
+      const repayAmount = BORROW_AMOUNT - targetBorrow;
       
       // 再平衡到更低杠杆
+      await settlementTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), repayAmount);
       await strategyContract.connect(user1Signer).rebalancePosition(await rwaTokenContract.getAddress(), newLeverage);
       
       // 验证仓位更新
       const position = await strategyContract.getPosition(user1Address);
       expect(position.leverageRatio).to.equal(newLeverage);
-      expect(position.borrowedAmount).to.equal(BORROW_AMOUNT - reducedBorrow);
+      expect(position.borrowedAmount).to.equal(targetBorrow);
     });
 
     it('应该拒绝无效的再平衡杠杆倍数', async function () {
-      const { strategyContract, user1Signer } = await loadFixture(deployFixture);
+      const { strategyContract, rwaTokenContract, user1Signer } = await loadFixture(deployWithOpenedPositionFixtureNoCooldown);
       
       // 测试杠杆倍数过低
       await expect(
@@ -592,6 +632,9 @@ describe('RWAAutoLeveragedStrategy', function () {
       let stats = await strategyContract.getStrategyStats();
       expect(stats.totalPositions_).to.equal(1n);
       
+      // 冷却期后再平仓
+      await time.increase(COOLDOWN_PERIOD + 1n);
+
       // 平仓
       await settlementTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), BORROW_AMOUNT);
       await strategyContract.connect(user1Signer).closePosition(await rwaTokenContract.getAddress(), BORROW_AMOUNT);
@@ -630,7 +673,7 @@ describe('RWAAutoLeveragedStrategy', function () {
           COLLATERAL_AMOUNT,
           LEVERAGE_RATIO
         )
-      ).to.be.revertedWithCustomError(strategyContract, 'Paused');
+      ).to.be.revertedWith('Pausable: paused');
     });
 
     it('应该验证冷却期机制', async function () {
@@ -725,18 +768,18 @@ describe('RWAAutoLeveragedStrategy', function () {
           LEVERAGE_RATIO
         )
       ).to.emit(strategyContract, 'PositionOpened')
-        .withArgs(await user1Signer.getAddress(), await rwaTokenContract.getAddress(), COLLATERAL_AMOUNT, LEVERAGE_RATIO);
+        .withArgs(
+          await user1Signer.getAddress(),
+          await rwaTokenContract.getAddress(),
+          COLLATERAL_AMOUNT,
+          BORROW_AMOUNT,
+          LEVERAGE_RATIO
+        );
     });
 
     it('应该在平仓时发出正确事件', async function () {
-      const { strategyContract, rwaTokenContract, settlementTokenContract, user1Signer } = await loadFixture(deployFixture);
-      
-      // 开仓
-      await rwaTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), COLLATERAL_AMOUNT);
-      await strategyContract.connect(user1Signer).openPosition(
-        await rwaTokenContract.getAddress(),
-        COLLATERAL_AMOUNT,
-        LEVERAGE_RATIO
+      const { strategyContract, rwaTokenContract, settlementTokenContract, user1Signer } = await loadFixture(
+        deployWithOpenedPositionFixtureAfterCooldown
       );
       
       // 平仓
@@ -745,26 +788,29 @@ describe('RWAAutoLeveragedStrategy', function () {
       await expect(
         strategyContract.connect(user1Signer).closePosition(await rwaTokenContract.getAddress(), BORROW_AMOUNT)
       ).to.emit(strategyContract, 'PositionClosed')
-        .withArgs(await user1Signer.getAddress(), await rwaTokenContract.getAddress(), BORROW_AMOUNT);
+        .withArgs(await user1Signer.getAddress(), await rwaTokenContract.getAddress(), COLLATERAL_AMOUNT, BORROW_AMOUNT);
     });
 
     it('应该在再平衡时发出正确事件', async function () {
-      const { strategyContract, rwaTokenContract, user1Signer } = await loadFixture(deployFixture);
-      
-      // 开仓
-      await rwaTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), COLLATERAL_AMOUNT);
-      await strategyContract.connect(user1Signer).openPosition(
-        await rwaTokenContract.getAddress(),
-        COLLATERAL_AMOUNT,
-        LEVERAGE_RATIO
+      const { strategyContract, rwaTokenContract, settlementTokenContract, user1Signer } = await loadFixture(
+        deployWithOpenedPositionFixtureAfterCooldown
       );
       
       // 再平衡
-      const newLeverage = 200n;
-      await expect(
-        strategyContract.connect(user1Signer).rebalancePosition(await rwaTokenContract.getAddress(), newLeverage)
-      ).to.emit(strategyContract, 'PositionRebalanced')
-        .withArgs(await user1Signer.getAddress(), await rwaTokenContract.getAddress(), LEVERAGE_RATIO, newLeverage);
+      const newLeverage = 120n;
+      const targetBorrow = ethers.parseEther('20');
+      const repayAmount = BORROW_AMOUNT - targetBorrow;
+      await settlementTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), repayAmount);
+
+      await expect(strategyContract.connect(user1Signer).rebalancePosition(await rwaTokenContract.getAddress(), newLeverage))
+        .to.emit(strategyContract, 'PositionRebalanced')
+        .withArgs(
+          await user1Signer.getAddress(),
+          await rwaTokenContract.getAddress(),
+          LEVERAGE_RATIO,
+          newLeverage,
+          0
+        );
     });
   });
 }); 

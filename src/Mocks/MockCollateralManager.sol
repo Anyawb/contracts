@@ -13,8 +13,6 @@ contract MockCollateralManager is ICollateralManager {
     // 用户抵押物映射
     mapping(address => mapping(address => uint256)) private _userCollateral;
     mapping(address => uint256) private _totalByAsset;
-    mapping(address => uint256) private _userTotalValue;
-    uint256 private _totalValue;
     mapping(address => address[]) private _userAssets;
     
     // 测试控制标志
@@ -32,8 +30,6 @@ contract MockCollateralManager is ICollateralManager {
         if (shouldFail) revert("MockCollateralManager: deposit failed");
         _userCollateral[user][asset] += amount;
         _totalByAsset[asset] += amount;
-        _userTotalValue[user] += amount;
-        _totalValue += amount;
         _addAsset(user, asset);
         emit CollateralDeposited(user, asset, amount);
     }
@@ -47,8 +43,6 @@ contract MockCollateralManager is ICollateralManager {
         require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
         _userCollateral[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
-        _userTotalValue[user] = _userTotalValue[user] > amount ? _userTotalValue[user] - amount : 0;
-        _totalValue = _totalValue > amount ? _totalValue - amount : 0;
         emit CollateralWithdrawn(user, asset, amount);
     }
 
@@ -58,8 +52,6 @@ contract MockCollateralManager is ICollateralManager {
         require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
         _userCollateral[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
-        _userTotalValue[user] = _userTotalValue[user] > amount ? _userTotalValue[user] - amount : 0;
-        _totalValue = _totalValue > amount ? _totalValue - amount : 0;
         emit CollateralWithdrawn(user, asset, amount);
     }
 
@@ -75,10 +67,6 @@ contract MockCollateralManager is ICollateralManager {
         require(_userCollateral[targetUser][collateralAsset] >= collateralAmount, "Insufficient collateral");
         _userCollateral[targetUser][collateralAsset] -= collateralAmount;
         _totalByAsset[collateralAsset] -= collateralAmount;
-        _userTotalValue[targetUser] = _userTotalValue[targetUser] > collateralAmount
-            ? _userTotalValue[targetUser] - collateralAmount
-            : 0;
-        _totalValue = _totalValue > collateralAmount ? _totalValue - collateralAmount : 0;
         emit CollateralSeized(liquidator, targetUser, collateralAsset, collateralAmount, block.timestamp);
     }
     
@@ -89,13 +77,6 @@ contract MockCollateralManager is ICollateralManager {
     function getCollateral(address user, address asset) external view override returns (uint256) {
         if (shouldFail) revert("MockCollateralManager: getCollateral failed");
         return _userCollateral[user][asset];
-    }
-    
-    /// @notice 获取用户总抵押物价值
-    /// @param user 用户地址
-    /// @return 总抵押物价值
-    function getUserTotalCollateralValue(address user) external view override returns (uint256) {
-        return _userTotalValue[user];
     }
     
     /// @notice 获取资产总抵押物数量
@@ -110,28 +91,11 @@ contract MockCollateralManager is ICollateralManager {
         _totalByAsset[asset] = amount;
     }
     
-    /// @notice 获取总抵押物价值
-    /// @return 总抵押物价值
-    function getTotalCollateralValue() external view override returns (uint256) {
-        return _totalValue;
-    }
-    
     /// @notice 获取用户抵押物资产列表
     /// @param _user 用户地址
     /// @return 资产地址数组
     function getUserCollateralAssets(address _user) external view override returns (address[] memory) {
         return _userAssets[_user];
-    }
-    
-    /// @notice 获取资产价值
-    /// @param _asset 资产地址
-    /// @param amount 数量
-    /// @return 价值
-    function getAssetValue(address _asset, uint256 amount) external pure override returns (uint256) {
-        // 触发读取以消除未使用参数告警
-        _asset;
-        // Mock实现：1:1比例
-        return amount;
     }
     
     /// @notice 获取用户抵押物数量（兼容性方法）
@@ -169,8 +133,6 @@ contract MockCollateralManager is ICollateralManager {
         if (seizedAmount > 0) {
             _userCollateral[user][asset] -= seizedAmount;
             _totalByAsset[asset] -= seizedAmount;
-            _userTotalValue[user] = _userTotalValue[user] > seizedAmount ? _userTotalValue[user] - seizedAmount : 0;
-            _totalValue = _totalValue > seizedAmount ? _totalValue - seizedAmount : 0;
             
             // 发出扣押事件
             emit CollateralSeized(liquidator, user, asset, seizedAmount, block.timestamp);
@@ -191,7 +153,6 @@ contract MockCollateralManager is ICollateralManager {
     function setUserCollateral(address user, address asset, uint256 amount) external {
         _userCollateral[user][asset] = amount;
         _totalByAsset[asset] = amount;
-        _userTotalValue[user] = amount;
         _addAsset(user, asset);
     }
 

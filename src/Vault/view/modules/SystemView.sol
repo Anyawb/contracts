@@ -74,8 +74,10 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     function registryAddr() external view returns (address) { return _registryAddr; }
     function registryAddrVar() external view returns (address) { return _registryAddr; }
     function acm() external view returns (address) { return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL); }
-    function viewCache() external view returns (address) { return _viewCache; }
-    function viewCacheAddrVar() external view returns (address) { return _viewCache; }
+    /// @notice ViewCache 模块地址（动态从 Registry 读取，避免升级后 stale）
+    /// @dev 保留 `_viewCache` 存储字段以保持 UUPS 存储布局兼容，但 getter 不再依赖该字段。
+    function viewCache() external view returns (address) { return Registry(_registryAddr).getModule(ModuleKeys.KEY_VIEW_CACHE); }
+    function viewCacheAddrVar() external view returns (address) { return Registry(_registryAddr).getModule(ModuleKeys.KEY_VIEW_CACHE); }
 
     function getModule(bytes32 key) external view onlyValidRegistry onlyViewRole returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(key);
@@ -97,9 +99,9 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*==================== 资产与债务 ====================*/
     function getVaultParams() external view onlyValidRegistry onlyViewRole returns (uint256, uint256, uint256) {
         // 兼容旧版 VaultRouter 的“系统参数”读取：
-        // - minHealthFactor：来自 LiquidationRiskManager
+        // - minHealthFactor：对外通过 LiquidationRiskManager 暴露（SSOT：KEY_LIQUIDATION_CONFIG_MANAGER → LiquidationConfigModule）
         // - vaultCap：历史上存于 VaultStorage（可能未在 Registry 注册/或读取受限）
-        // - liquidationThreshold：来自 LiquidationRiskManager
+        // - liquidationThreshold：对外通过 LiquidationRiskManager 暴露（SSOT：KEY_LIQUIDATION_CONFIG_MANAGER → LiquidationConfigModule）
         uint256 minHF = _tryGetMinHealthFactor();
         uint256 cap = _tryGetVaultCap();
         uint256 liqTh = _tryGetLiquidationThreshold();

@@ -1037,11 +1037,11 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       // 这里测试暂停状态检查
       
       
-      // 正常操作应该成功
+      // VaultBusinessLogic 的 deposit 入口已永久下线，必须走 VaultCore → VaultRouter → CM
       const userAddress = await user1.getAddress();
       await expect(
         vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
     });
   });
 

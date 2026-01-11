@@ -264,7 +264,7 @@ AI 层：向量库（Milvus/Pinecone）、RAG 层（memory_records）、Agent Or
 ### 6.x 缓存推送失败的手动重试方案（链上事件 + 链下重推）
 
 - **链上事件**：`CacheUpdateFailed(address indexed user, address indexed asset, address viewAddr, uint256 collateral, uint256 debt, bytes reason)`  
-  - 触发点：`VaultLendingEngine`、`LiquidationDebtManager` 在推送 View 失败（模块缺失/无代码/调用 revert/账本读取失败）时 emit，主流程不再回滚。  
+  - 触发点：`VaultLendingEngine`、`LiquidationManager` 在推送 View 失败（模块缺失/无代码/调用 revert/账本读取失败）时 emit，主流程不再回滚。  
   - 载荷：user、asset、viewAddr（可能为 0）、尝试写入的 collateral/debt、revert reason（原始 bytes）。
   - HealthView 推送失败补充事件：`HealthPushFailed(address indexed user, address indexed healthView, uint256 totalCollateral, uint256 totalDebt, bytes reason)`（便于链下重试/告警，最佳努力不回滚）。
 - **链上重试入口**：`PositionView.retryUserPositionUpdate(user, asset)`（仅 admin）  

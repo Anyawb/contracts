@@ -118,7 +118,7 @@
 2. **Registry 增加 `KEY_SETTLEMENT_MANAGER` 并注册**
 3. **改 `VaultCore.repay`**：从直调 `LE.repay` 改为调用 `SettlementManager.repayAndSettle`
 4. **对外“清算入口”收敛**：
-   - keeper/机器人由调用 `LiquidationManager.liquidate` 改为调用 `SettlementManager.settleOrLiquidate`
+   - keeper/机器人由调用 `LiquidationManager.liquidate(...)` 改为调用 `SettlementManager.settleOrLiquidate(orderId)`
 5. （可选）启用 `LiquidationPayoutManager`，并将平台/准备金接收者指向合约金库
 
 ---

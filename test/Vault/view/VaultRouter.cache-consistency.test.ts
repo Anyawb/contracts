@@ -33,6 +33,7 @@ const ModuleKeys = {
   KEY_VAULT_CORE: ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE')),
   KEY_VAULT_BUSINESS_LOGIC: ethers.keccak256(ethers.toUtf8Bytes('VAULT_BUSINESS_LOGIC')),
   KEY_PRICE_ORACLE: ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE')),
+  KEY_CACHE_MAINTENANCE_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('CACHE_MAINTENANCE_MANAGER')),
 };
 
 // 权限常量（只需 ACTION_ADMIN）
@@ -80,6 +81,8 @@ describe('VaultRouter – 缓存一致性与回退路径', function () {
     await registry.setModule(ModuleKeys.KEY_VAULT_CORE, admin.address);
     // VaultBusinessLogic 仅用于业务白名单校验，这里指向 admin
     await registry.setModule(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC, admin.address);
+    // CacheMaintenanceManager 单入口：测试中直接用 admin 充当维护器
+    await registry.setModule(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER, admin.address);
 
     // 赋权 admin 调用 refreshModuleCache / syncUserPositionFromLedger
     await acm.grantRole(ACTION_ADMIN, admin.address);

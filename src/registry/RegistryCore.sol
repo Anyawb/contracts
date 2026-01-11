@@ -69,7 +69,8 @@ contract RegistryCore is
         
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.EMERGENCY_UPGRADE),
-            msg.sender
+            msg.sender,
+            block.timestamp
         );
     }
 
@@ -381,7 +382,8 @@ contract RegistryCore is
             emit RegistryEvents.BatchModuleChanged(
                 changedKeys,
                 oldAddresses,
-                newAddresses
+                newAddresses,
+                msg.sender
             );
         }
     }

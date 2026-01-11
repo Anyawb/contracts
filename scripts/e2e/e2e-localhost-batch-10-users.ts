@@ -153,8 +153,26 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   }
 
   // LiquidationManager (Direct-to-ledger, single entry)
-  const liquidationManagerAddr = await registry.getModuleOrRevert(key("LIQUIDATION_MANAGER"));
+  const liquidationManagerAddr = (await registry.getModule(key("LIQUIDATION_MANAGER"))) as string;
+  if (!liquidationManagerAddr || liquidationManagerAddr === ethers.ZeroAddress) {
+    throw new Error(
+      `[Setup] Registry missing LIQUIDATION_MANAGER. ` +
+        `This localhost deployment is outdated/incomplete. ` +
+        `Run: npx hardhat run scripts/deploy/deploylocal.ts --network localhost`
+    );
+  }
   const liquidationManager = (await ethers.getContractAt("LiquidationManager", liquidationManagerAddr)) as any;
+
+  // SettlementManager (SSOT: unified repay/settle/liquidate write entry)
+  const settlementManagerAddr = (await registry.getModule(key("SETTLEMENT_MANAGER"))) as string;
+  if (!settlementManagerAddr || settlementManagerAddr === ethers.ZeroAddress) {
+    throw new Error(
+      `[Setup] Registry missing SETTLEMENT_MANAGER. ` +
+        `This localhost deployment is outdated/incomplete. ` +
+        `Run: npx hardhat run scripts/deploy/deploylocal.ts --network localhost`
+    );
+  }
+  const settlementManager = (await ethers.getContractAt("SettlementManager", settlementManagerAddr)) as any;
 
   // LiquidationRiskManager (optional): used only for HealthView fallback refresh after time travel.
   // NOTE: deploylocal may skip deploying LiquidationRiskManager (best-effort). Do NOT hard-require it here.
@@ -934,6 +952,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     const orderId = orderIds[i];
     const totalDue = calcTotalDue(principal, rateBps, termSec);
     const colBefore = (await cm.getCollateral(borrower.address, assetAddr)) as bigint;
+    const balBefore = (await usdc.balanceOf(borrower.address)) as bigint;
 
     // SSOT repay: VaultCore.repay -> SettlementManager.repayAndSettle -> ORDER_ENGINE.repay
     await (await usdc.connect(borrower).approve(vaultCoreFromRegistryAddr, totalDue)).wait();
@@ -941,7 +960,19 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     const repayReceipt = await repayTx.wait();
 
     const colAfter = (await cm.getCollateral(borrower.address, assetAddr)) as bigint;
+    const balAfter = (await usdc.balanceOf(borrower.address)) as bigint;
     const collateralOut = colBefore > colAfter ? colBefore - colAfter : 0n;
+    // SSOT settlement invariant: net wallet delta == collateralReturned - repayPaid (same ERC20 in localhost e2e).
+    // (VaultCore transfers `totalDue` out; SettlementManager returns collateral via CM.withdrawCollateralTo to borrower wallet.)
+    const expectedWalletDelta = collateralOut - totalDue;
+    const actualWalletDelta = balAfter - balBefore;
+    if (actualWalletDelta !== expectedWalletDelta) {
+      throw new Error(
+        `[Repay/Settle] wallet delta mismatch: borrower=${borrower.address} orderId=${orderId.toString()} ` +
+          `delta=${actualWalletDelta.toString()} expected=${expectedWalletDelta.toString()} ` +
+          `(collateralOut=${collateralOut.toString()} totalDue=${totalDue.toString()})`
+      );
+    }
 
     // StatisticsView 的 debt 口径按「本金」统计；repay 的利息/费用不应作为 debt 减项推送，否则会出现负 delta。
     // Collateral release after full repay may happen automatically; we reconcile StatisticsView based on observed behavior.
@@ -1286,10 +1317,23 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
 
   // Repay
   const smallTotalDue = calcTotalDue(smallPrincipal, rateBps, smallTermSec);
-  await (await usdc.connect(smallAmountBorrower).approve(orderEngineAddr, smallTotalDue)).wait();
+  const smallColBefore = (await cm.getCollateral(smallAmountBorrower.address, assetAddr)) as bigint;
+  const smallBalBeforeWallet = (await usdc.balanceOf(smallAmountBorrower.address)) as bigint;
   // Repay via SettlementManager SSOT (VaultCore.repay -> SettlementManager -> ORDER_ENGINE.repay)
   await (await usdc.connect(smallAmountBorrower).approve(vaultCoreFromRegistryAddr, smallTotalDue)).wait();
   await (await vaultCore.connect(smallAmountBorrower).repay(smallOrderId, assetAddr, smallTotalDue)).wait();
+  const smallColAfter = (await cm.getCollateral(smallAmountBorrower.address, assetAddr)) as bigint;
+  const smallBalAfterWallet = (await usdc.balanceOf(smallAmountBorrower.address)) as bigint;
+  const smallCollateralOut = smallColBefore > smallColAfter ? smallColBefore - smallColAfter : 0n;
+  const smallExpectedWalletDelta = smallCollateralOut - smallTotalDue;
+  const smallActualWalletDelta = smallBalAfterWallet - smallBalBeforeWallet;
+  if (smallActualWalletDelta !== smallExpectedWalletDelta) {
+    throw new Error(
+      `[SmallAmount/Repay] wallet delta mismatch: borrower=${smallAmountBorrower.address} orderId=${smallOrderId.toString()} ` +
+        `delta=${smallActualWalletDelta.toString()} expected=${smallExpectedWalletDelta.toString()} ` +
+        `(collateralOut=${smallCollateralOut.toString()} totalDue=${smallTotalDue.toString()})`
+    );
+  }
   await pushStats(smallAmountBorrower.address, 0n, 0n, 0n, smallPrincipal);
   console.log(`  ✅ Small amount loan repaid: orderId=${smallOrderId.toString()}`);
 
@@ -1324,14 +1368,14 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   console.log("\n=== Additional Test: Liquidation (Direct ledger + single push) ===");
 
   // Reuse borrower/lender but create a fresh order and liquidate it (do NOT repay this order).
+  // IMPORTANT (SSOT):
+  // - keeper entrypoint MUST be SettlementManager.settleOrLiquidate(orderId)
+  // - LiquidationManager is an internal executor (called by SettlementManager), not the external write entry.
   const liqBorrower = pairs[0].borrower;
   const liqLender = pairs[0].lender;
 
   const liqPrincipal = ethers.parseUnits("300", 6);
   const liqCollateralAmt = ethers.parseUnits("500", 6);
-  const liqSeize = ethers.parseUnits("120", 6);
-  const liqReduce = ethers.parseUnits("120", 6);
-  const liqBonus = 0n;
 
   // Snapshot before
   const liqColBefore = (await cm.getCollateral(liqBorrower.address, assetAddr)) as bigint;
@@ -1378,9 +1422,23 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   const liqSigLender = await liqLender.signTypedData(domain, typesLend as any, liqLendIntent as any);
   const liqTx = await vbl.connect(deployer).finalizeMatch(liqBorrowIntent, [liqLendIntent], liqSigBorrower, [liqSigLender]);
   const liqReceipt = await liqTx.wait();
-  console.log("  ✅ Liquidation scenario: new loan created (not repaid)");
+  let liqOrderId: bigint | null = null;
+  for (const log of liqReceipt!.logs) {
+    try {
+      const parsed = orderEngine.interface.parseLog({ topics: log.topics as string[], data: log.data });
+      if (parsed?.name === "LoanOrderCreated") {
+        liqOrderId = parsed.args.orderId as bigint;
+        break;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (liqOrderId === null) throw new Error("Liquidation scenario: LoanOrderCreated not found");
+  console.log(`  ✅ Liquidation scenario: new loan created (orderId=${liqOrderId.toString()}, not repaid)`);
 
-  // Now execute liquidation (direct ledger)
+  // Now execute liquidation via SSOT (SettlementManager)
+  // 1) Ensure tx sender has ACTION_LIQUIDATE (SettlementManager enforces this on external caller)
   const payoutAddr = await registry.getModuleOrRevert(key("LIQUIDATION_PAYOUT_MANAGER"));
   const payout = (await ethers.getContractAt("LiquidationPayoutManager", payoutAddr)) as any;
   const recipients = (await payout.getRecipients()) as {
@@ -1388,8 +1446,6 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     reserve: string;
     lenderCompensation: string;
   };
-  const shares = (await payout.calculateShares(liqSeize)) as readonly [bigint, bigint, bigint, bigint];
-  const [platformShare, reserveShare, lenderShare, liquidatorShare] = shares;
 
   // IMPORTANT:
   // 默认本地部署里 platform/reserve 往往是 deployer.address（同一个地址会混淆余额差值）。
@@ -1406,7 +1462,74 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     // best-effort: if already granted / contract differs, liquidation will still succeed or fail loudly below
   }
 
-  // Recipients 可能重合（例如 platform==reserve==deployer），因此用“按地址聚合”的方式断言更可靠。
+  // 2) Move time past maturity so SettlementManager triggers overdue liquidation branch deterministically.
+  const liqTermSec = BigInt(smallTermDays) * ONE_DAY;
+  console.log(`  ⏰ Advancing time by ${liqTermSec.toString()} seconds (+term) to make order overdue...`);
+  await ethers.provider.send("evm_increaseTime", [Number(liqTermSec + 1n)]); // +1 sec to be strictly > maturity
+  await ethers.provider.send("evm_mine", []);
+  // PriceOracle maxPriceAge=3600s; refresh timestamp after time travel to avoid stale price reverts in risk/value paths.
+  try {
+    const nowAfterWarp = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const pd = await po.getPriceData(assetAddr);
+    const price = toBigInt((pd as any).price);
+    await (await po.connect(deployer).updatePrice(assetAddr, price, nowAfterWarp)).wait();
+    console.log(`  ✅ Refreshed PriceOracle timestamp for ${assetAddr.slice(0, 10)} (price unchanged)`);
+  } catch (e: any) {
+    console.log(`  ⚠️ [PriceOracle] Failed to refresh price after time travel: ${e?.message ?? String(e)}`);
+  }
+
+  // 3) Snapshot recipients balances (address-aggregated; recipients may overlap)
+  const beforeByAddr = new Map<string, bigint>();
+  const addAddr = (addr: string) => {
+    const k = addr.toLowerCase();
+    if (!beforeByAddr.has(k)) beforeByAddr.set(k, 0n);
+  };
+  addAddr(recipients.platform);
+  addAddr(recipients.reserve);
+  addAddr(recipients.lenderCompensation);
+  addAddr(liquidatorSigner.address);
+  for (const k of beforeByAddr.keys()) {
+    beforeByAddr.set(k, (await usdc.balanceOf(k)) as bigint);
+  }
+
+  // 4) Execute liquidation via SettlementManager SSOT
+  const reducibleBefore = (await vle.getReducibleDebtAmount(liqBorrower.address, assetAddr)) as bigint;
+  const txLiq = await settlementManager.connect(liquidatorSigner).settleOrLiquidate(liqOrderId);
+  const receiptLiq = await txLiq.wait();
+  console.log(`  ✅ settleOrLiquidate executed: orderId=${liqOrderId.toString()} reducibleDebt=${ethers.formatUnits(reducibleBefore, 6)}`);
+
+  // Parse PayoutExecuted to get actual shares (determinstic, emitted by LiquidationManager after distribution).
+  const payoutExecutedTopic = ethers.keccak256(
+    ethers.toUtf8Bytes("PayoutExecuted(address,address,address,address,address,address,uint256,uint256,uint256,uint256)")
+  );
+  const payoutExecutedIface = new ethers.Interface([
+    "event PayoutExecuted(address indexed user,address indexed collateralAsset,address platform,address reserve,address lenderCompensation,address indexed liquidator,uint256 platformShare,uint256 reserveShare,uint256 lenderShare,uint256 liquidatorShare)",
+  ]);
+  const payoutLogs = (receiptLiq!.logs || []).filter((log: any) => log.topics?.[0] === payoutExecutedTopic);
+  if (payoutLogs.length !== 1) {
+    throw new Error(`[Liquidation] expected exactly 1 PayoutExecuted event (got ${payoutLogs.length})`);
+  }
+  const payoutParsed = payoutExecutedIface.parseLog({ topics: payoutLogs[0].topics, data: payoutLogs[0].data });
+  if (!payoutParsed) throw new Error("[Liquidation] failed to parse PayoutExecuted event");
+  const platformShare = toBigInt(payoutParsed.args.platformShare);
+  const reserveShare = toBigInt(payoutParsed.args.reserveShare);
+  const lenderShare = toBigInt(payoutParsed.args.lenderShare);
+  const liquidatorShare = toBigInt(payoutParsed.args.liquidatorShare);
+  const seizedCollateral = platformShare + reserveShare + lenderShare + liquidatorShare;
+  if (seizedCollateral === 0n) throw new Error("[Liquidation] seizedCollateral must be > 0");
+  if (String(payoutParsed.args.user).toLowerCase() !== liqBorrower.address.toLowerCase()) {
+    throw new Error("[Liquidation] PayoutExecuted.user mismatch");
+  }
+  if (String(payoutParsed.args.collateralAsset).toLowerCase() !== assetAddr.toLowerCase()) {
+    throw new Error("[Liquidation] PayoutExecuted.collateralAsset mismatch");
+  }
+  if (String(payoutParsed.args.liquidator).toLowerCase() !== liquidatorSigner.address.toLowerCase()) {
+    throw new Error("[Liquidation] PayoutExecuted.liquidator must equal msg.sender (strongest constraint)");
+  }
+
+  // Assert ledger deltas
+  const liqColAfter = (await cm.getCollateral(liqBorrower.address, assetAddr)) as bigint;
+  const liqDebtAfter = (await vle.getDebt(liqBorrower.address, assetAddr)) as bigint;
   const expectedByAddr = new Map<string, bigint>();
   const addExpected = (addr: string, amt: bigint) => {
     const k = addr.toLowerCase();
@@ -1417,39 +1540,25 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   addExpected(recipients.lenderCompensation, lenderShare);
   addExpected(liquidatorSigner.address, liquidatorShare);
 
-  const beforeByAddr = new Map<string, bigint>();
-  for (const k of expectedByAddr.keys()) {
-    beforeByAddr.set(k, (await usdc.balanceOf(k)) as bigint);
-  }
-
-  const txLiq = await liquidationManager
-    .connect(liquidatorSigner)
-    .liquidate(liqBorrower.address, assetAddr, assetAddr, liqSeize, liqReduce, liqBonus);
-  const receiptLiq = await txLiq.wait();
-  console.log(`  ✅ Liquidation executed: seize=${ethers.formatUnits(liqSeize, 6)} reduceDebt=${ethers.formatUnits(liqReduce, 6)}`);
-
-  // Assert ledger deltas
-  const liqColAfter = (await cm.getCollateral(liqBorrower.address, assetAddr)) as bigint;
-  const liqDebtAfter = (await vle.getDebt(liqBorrower.address, assetAddr)) as bigint;
   for (const [k, expected] of expectedByAddr.entries()) {
     const before = beforeByAddr.get(k) ?? 0n;
     const after = (await usdc.balanceOf(k)) as bigint;
     const delta = after - before;
     if (delta !== expected) {
-      throw new Error(`[Liquidation] payout mismatch for ${k}: delta=${delta} expected=${expected}`);
+      throw new Error(`[Liquidation] payout mismatch for ${k}: delta=${delta.toString()} expected=${expected.toString()}`);
     }
   }
 
-  if (liqColAfter !== liqColBefore + liqCollateralAmt - liqSeize) {
+  if (liqColAfter !== liqColBefore + liqCollateralAmt - seizedCollateral) {
     throw new Error(
-      `[Liquidation] collateral mismatch: before=${liqColBefore} after=${liqColAfter} expected=${liqColBefore + liqCollateralAmt - liqSeize}`
+      `[Liquidation] collateral mismatch: before=${liqColBefore} after=${liqColAfter} expected=${liqColBefore + liqCollateralAmt - seizedCollateral}`
     );
   }
 
-  // debtBefore includes any prior debt + this new liqPrincipal; liquidation reduces by liqReduce
-  if (liqDebtAfter !== liqDebtBefore + liqPrincipal - liqReduce) {
+  // debtBefore includes any prior debt + this new liqPrincipal; SettlementManager reduces by `getReducibleDebtAmount` (captured above).
+  if (liqDebtAfter !== liqDebtBefore + liqPrincipal - reducibleBefore) {
     throw new Error(
-      `[Liquidation] debt mismatch: before=${liqDebtBefore} after=${liqDebtAfter} expected=${liqDebtBefore + liqPrincipal - liqReduce}`
+      `[Liquidation] debt mismatch: before=${liqDebtBefore} after=${liqDebtAfter} expected=${liqDebtBefore + liqPrincipal - reducibleBefore}`
     );
   }
 
@@ -1463,6 +1572,194 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     throw new Error("[Liquidation] expected LIQUIDATION_UPDATE DataPushed from LiquidatorView");
   }
   console.log("  ✅ Liquidation DataPush assertion passed (LIQUIDATION_UPDATE)");
+
+  // ============ Additional Test: settleOrLiquidate permission + not-liquidatable ============
+  console.log("\n=== Additional Test: SettlementManager permissions / NotLiquidatable ===");
+  {
+    // Create a fresh order and try to settleOrLiquidate BEFORE maturity with healthy HF: must revert NotLiquidatable.
+    const u = pairs[2].borrower;
+    const l = pairs[2].lender;
+    const principal2 = ethers.parseUnits("200", 6);
+    const collateral2 = ethers.parseUnits("500", 6);
+    const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+
+    await (await usdc.connect(u).approve(CONTRACT_ADDRESSES.CollateralManager, collateral2)).wait();
+    await (await vaultCore.connect(u).deposit(assetAddr, collateral2)).wait();
+
+    const borrowIntent = {
+      borrower: u.address,
+      collateralAsset: assetAddr,
+      collateralAmount: collateral2,
+      borrowAsset: assetAddr,
+      amount: principal2,
+      termDays: 10,
+      rateBps,
+      expireAt,
+      salt: ethers.keccak256(ethers.toUtf8Bytes(`perm-neg-borrow-${Date.now()}`)),
+    };
+    const lendIntent = {
+      lenderSigner: l.address,
+      asset: assetAddr,
+      amount: principal2,
+      minTermDays: 1,
+      maxTermDays: 30,
+      minRateBps: 0n,
+      expireAt,
+      salt: ethers.keccak256(ethers.toUtf8Bytes(`perm-neg-lend-${Date.now()}`)),
+    };
+    await (await usdc.connect(l).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, principal2)).wait();
+    const lendHash = buildLendIntentHash(lendIntent);
+    await (await vbl.connect(l).reserveForLending(l.address, assetAddr, principal2, lendHash)).wait();
+    const sigBorrower = await u.signTypedData(domain, typesBorrow as any, borrowIntent as any);
+    const sigLender = await l.signTypedData(domain, typesLend as any, lendIntent as any);
+    const tx = await vbl.connect(deployer).finalizeMatch(borrowIntent, [lendIntent], sigBorrower, [sigLender]);
+    const receipt = await tx.wait();
+    let orderId: bigint | null = null;
+    for (const log of receipt!.logs) {
+      try {
+        const parsed = orderEngine.interface.parseLog({ topics: log.topics as string[], data: log.data });
+        if (parsed?.name === "LoanOrderCreated") {
+          orderId = parsed.args.orderId as bigint;
+          break;
+        }
+      } catch {}
+    }
+    if (orderId === null) throw new Error("[perm/notliq] LoanOrderCreated not found");
+
+    // 1) Permission: a user WITHOUT LIQUIDATE role must revert
+    let revertedPerm = false;
+    try {
+      await (await settlementManager.connect(u).settleOrLiquidate(orderId)).wait();
+    } catch {
+      revertedPerm = true;
+    }
+    if (!revertedPerm) throw new Error("[perm] settleOrLiquidate unexpectedly succeeded without LIQUIDATE role");
+    console.log("  ✅ Permission: settleOrLiquidate rejected caller without LIQUIDATE role");
+
+    // 2) NotLiquidatable: keeper WITH role must revert when not overdue and HF healthy
+    let revertedNotLiq = false;
+    try {
+      await (await settlementManager.connect(liquidatorSigner).settleOrLiquidate(orderId)).wait();
+    } catch {
+      revertedNotLiq = true;
+    }
+    if (!revertedNotLiq) throw new Error("[notliq] settleOrLiquidate unexpectedly succeeded on healthy, not-overdue order");
+    console.log("  ✅ NotLiquidatable: settleOrLiquidate rejected healthy, not-overdue order");
+
+    // cleanup: repay to keep ledger clean for later tests
+    const termSec = 10n * ONE_DAY;
+    const totalDue = calcTotalDue(principal2, rateBps, termSec);
+    await (await usdc.connect(u).approve(vaultCoreFromRegistryAddr, totalDue)).wait();
+    await (await vaultCore.connect(u).repay(orderId, assetAddr, totalDue)).wait();
+    console.log("  ✅ Cleanup: repaid the non-liquidated order");
+  }
+
+  // ============ Additional Test: Risk-triggered liquidation (before maturity) ============
+  console.log("\n=== Additional Test: Risk-triggered liquidation (before maturity) ===");
+  {
+    if (!healthView || !liquidationRiskManager) {
+      console.log("  ⚠️ Skipped: HealthView or LiquidationRiskManager not available");
+    } else {
+      const u = pairs[3].borrower;
+      const l = pairs[3].lender;
+      const principal3 = ethers.parseUnits("300", 6);
+      const collateral3 = ethers.parseUnits("500", 6);
+      const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+
+      await (await usdc.connect(u).approve(CONTRACT_ADDRESSES.CollateralManager, collateral3)).wait();
+      await (await vaultCore.connect(u).deposit(assetAddr, collateral3)).wait();
+
+      const borrowIntent = {
+        borrower: u.address,
+        collateralAsset: assetAddr,
+        collateralAmount: collateral3,
+        borrowAsset: assetAddr,
+        amount: principal3,
+        termDays: 10,
+        rateBps,
+        expireAt,
+        salt: ethers.keccak256(ethers.toUtf8Bytes(`risk-liq-borrow-${Date.now()}`)),
+      };
+      const lendIntent = {
+        lenderSigner: l.address,
+        asset: assetAddr,
+        amount: principal3,
+        minTermDays: 1,
+        maxTermDays: 30,
+        minRateBps: 0n,
+        expireAt,
+        salt: ethers.keccak256(ethers.toUtf8Bytes(`risk-liq-lend-${Date.now()}`)),
+      };
+      await (await usdc.connect(l).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, principal3)).wait();
+      const lendHash = buildLendIntentHash(lendIntent);
+      await (await vbl.connect(l).reserveForLending(l.address, assetAddr, principal3, lendHash)).wait();
+      const sigBorrower = await u.signTypedData(domain, typesBorrow as any, borrowIntent as any);
+      const sigLender = await l.signTypedData(domain, typesLend as any, lendIntent as any);
+      const tx = await vbl.connect(deployer).finalizeMatch(borrowIntent, [lendIntent], sigBorrower, [sigLender]);
+      const receipt = await tx.wait();
+      let orderId: bigint | null = null;
+      for (const log of receipt!.logs) {
+        try {
+          const parsed = orderEngine.interface.parseLog({ topics: log.topics as string[], data: log.data });
+          if (parsed?.name === "LoanOrderCreated") {
+            orderId = parsed.args.orderId as bigint;
+            break;
+          }
+        } catch {}
+      }
+      if (orderId === null) throw new Error("[risk-liq] LoanOrderCreated not found");
+
+      // Force HealthView cache to an unhealthy HF < liquidationThreshold so RiskManager says liquidatable.
+      const liqThreshold = (await liquidationRiskManager.getLiquidationThreshold()) as bigint; // bps
+      const minHf = (await liquidationRiskManager.getMinHealthFactor()) as bigint; // bps
+      const forcedHf = liqThreshold > 1n ? liqThreshold - 1n : 0n;
+      const under = forcedHf < minHf;
+      await (await healthView.connect(deployer).pushRiskStatus(u.address, forcedHf, minHf, under, 0)).wait();
+      const [hfNow, validNow] = await healthView.getUserHealthFactor(u.address);
+      if (!validNow || (hfNow as bigint) !== forcedHf) {
+        throw new Error("[risk-liq] failed to force HealthView cache to low health factor");
+      }
+      const canLiq = (await liquidationRiskManager.isLiquidatable(u.address)) as boolean;
+      if (!canLiq) throw new Error("[risk-liq] expected RiskManager.isLiquidatable == true after forcing low HF");
+
+      const debtBefore = (await vle.getDebt(u.address, assetAddr)) as bigint;
+      const reducibleBefore = (await vle.getReducibleDebtAmount(u.address, assetAddr)) as bigint;
+      const txLiq = await settlementManager.connect(liquidatorSigner).settleOrLiquidate(orderId);
+      const receiptLiq = await txLiq.wait();
+      console.log(`  ✅ Risk liquidation executed: orderId=${orderId.toString()} reducibleDebt=${ethers.formatUnits(reducibleBefore, 6)}`);
+
+      // Verify PayoutExecuted records keeper as liquidator (not SettlementManager).
+      const payoutExecutedTopic = ethers.keccak256(
+        ethers.toUtf8Bytes("PayoutExecuted(address,address,address,address,address,address,uint256,uint256,uint256,uint256)")
+      );
+      const payoutExecutedIface = new ethers.Interface([
+        "event PayoutExecuted(address indexed user,address indexed collateralAsset,address platform,address reserve,address lenderCompensation,address indexed liquidator,uint256 platformShare,uint256 reserveShare,uint256 lenderShare,uint256 liquidatorShare)",
+      ]);
+      const payoutLogs = (receiptLiq!.logs || []).filter((log: any) => log.topics?.[0] === payoutExecutedTopic);
+      if (payoutLogs.length !== 1) throw new Error(`[risk-liq] expected 1 PayoutExecuted event (got ${payoutLogs.length})`);
+      const parsed = payoutExecutedIface.parseLog({ topics: payoutLogs[0].topics, data: payoutLogs[0].data });
+      if (!parsed) throw new Error("[risk-liq] failed to parse PayoutExecuted");
+      if (String(parsed.args.liquidator).toLowerCase() !== liquidatorSigner.address.toLowerCase()) {
+        throw new Error("[risk-liq] PayoutExecuted.liquidator mismatch (expected keeper msg.sender)");
+      }
+
+      // Verify debt decreased as expected
+      const debtAfter = (await vle.getDebt(u.address, assetAddr)) as bigint;
+      if (debtAfter > debtBefore) {
+        // If this ever happens, something is very wrong.
+        throw new Error("[risk-liq] debtAfter > debtBefore (unexpected)");
+      }
+      if (debtBefore - debtAfter !== reducibleBefore) {
+        throw new Error(
+          `[risk-liq] debt delta mismatch: before=${debtBefore.toString()} after=${debtAfter.toString()} reducible=${reducibleBefore.toString()}`
+        );
+      }
+
+      const liqDataPushed = (receiptLiq!.logs || []).some((log: any) => log.topics?.[0] === dataPushedTopic && log.topics?.[1] === liqUpdateType);
+      if (!liqDataPushed) throw new Error("[risk-liq] expected LIQUIDATION_UPDATE DataPushed from LiquidatorView");
+      console.log("  ✅ Risk liquidation DataPush assertion passed (LIQUIDATION_UPDATE)");
+    }
+  }
 }
 
 // Keep backward-compatible CLI entrypoint (`npx hardhat run ...`)

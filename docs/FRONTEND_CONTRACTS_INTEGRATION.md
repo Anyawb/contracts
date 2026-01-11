@@ -15,8 +15,10 @@
 7. [生产环境部署](#生产环境部署)
 8. [模块键解码与前端配合](#模块键解码与前端配合)
 9. [错误处理和调试](#错误处理和调试)
-10. [接口变更与迁移指南（2025-09）](#接口变更与迁移指南2025-09)
-11. [缓存推送失败重试（CacheUpdateFailed）前端配合](#缓存推送失败重试cacheupdatefailed前端配合)
+10. [CollateralManager（抵押账本）前端配合要点（2026-01）](#collateralmanager抵押账本前端配合要点2026-01)
+11. [接口变更与迁移指南（2025-09）](#接口变更与迁移指南2025-09)
+12. [缓存推送失败重试（CacheUpdateFailed）前端配合](#缓存推送失败重试cacheupdatefailed前端配合)
+13. [资金链（Funds Flow / SSOT）前端配合（2026-01）](#资金链funds-flow--ssot前端配合2026-01)
 
 ## 🔧 环境准备
 
@@ -544,37 +546,89 @@ async function getDynamicRewardParams(viewAddr: string, provider: ethers.Provide
 
 ### 2. 写入操作
 
+> ⚠️ 抵押类资产的 **approve spender** 通常是 `CollateralManager`（其作为抵押资金池/托管者，会在存款时 `transferFrom(user → CollateralManager)` 拉取代币）。
+> 即使你的入口是 `VaultCore/VaultRouter`，也不要把 spender 错配成 `VaultCore/VaultRouter`；否则存款会因 allowance 不足而 revert。
+
 ```typescript
 // 存款
-async function deposit(amount: bigint) {
+async function deposit(asset: string, amount: bigint) {
   const vaultCore = await contractManager.getVaultCore();
-  const tx = await vaultCore.deposit(amount);
+  const tx = await vaultCore.deposit(asset, amount);
   await tx.wait();
   return tx;
 }
 
-// 借款（低 gas 方案）：borrowWithRate（上游传年化利率bps与期限天数）
-// 重要：调用前先对 GuaranteeFundManager 进行授权（allowance >= 预计利息）
-async function borrowWithRate(user: string, lender: string, asset: string, amount: bigint, annualRateBps: bigint, termDays: number) {
-  // interest = amount * annualRateBps * termDays / (365 * 1e4)
-  // 1) 先授权：ERC20(asset).approve(GuaranteeFundManager, interest)
-  // 2) 调用 VaultBusinessLogic.borrowWithRate(user, lender, asset, amount, annualRateBps, termDays)
+// 取款
+async function withdraw(asset: string, amount: bigint) {
+  const vaultCore = await contractManager.getVaultCore();
+  const tx = await vaultCore.withdraw(asset, amount);
+  await tx.wait();
+  return tx;
 }
 
-// 还款（显式关单触发早偿结算，推荐）
-async function repayWithStop(user: string, asset: string, amount: bigint, stop = true) {
-  // 调用 VaultBusinessLogic.repayWithStop(user, asset, amount, stop)
-  // 合约执行：转入还款 → 记账 → (stop || 债务=0) 触发早偿结算（调用 GFM.settleEarlyRepayment）
+// 借款（直达账本：LendingEngine，权威入口）
+async function borrow(asset: string, amount: bigint) {
+  const vaultCore = await contractManager.getVaultCore();
+  const tx = await vaultCore.borrow(asset, amount);
+  await tx.wait();
+  return tx;
+}
+
+// 还款/结算（唯一入口：SettlementManager 由 VaultCore 代为转入并调用）
+async function repay(orderId: bigint, debtAsset: string, amount: bigint) {
+  // 注意：repay 的 approve spender 是 VaultCore（VaultCore 会 transferFrom(user → SettlementManager)）
+  // await ERC20(debtAsset).approve(vaultCoreAddr, amount)
+  const vaultCore = await contractManager.getVaultCore();
+  const tx = await vaultCore.repay(orderId, debtAsset, amount);
+  await tx.wait();
+  return tx;
 }
 
 // 清算/处置（keeper/机器人入口，SSOT）
 async function settleOrLiquidate(orderId: bigint) {
-  // 1) keeper/机器人调用 SettlementManager.settleOrLiquidate(orderId)
-  // 2) 注意：调用者（keeper 地址）必须具备 ACTION_LIQUIDATE 权限，否则会 revert
-  //   - ActionKey: keccak256("LIQUIDATE")
-  //   - 建议：将该权限仅授予你们的 keeper/机器人地址（或 keeper multisig），并配合链下监控触发
+  // 1) keeper/机器人调用 SettlementManager.settleOrLiquidate(orderId)（SSOT）
+  // 2) 调用者必须具备 ACTION_LIQUIDATE 权限，否则会 revert（常见：MissingRole()）
+  //
+  // ActionKey（与 src/constants/ActionKeys.sol 对齐）：
+  //   bytes32 ACTION_LIQUIDATE = keccak256("LIQUIDATE")
+  //
+  // 推荐做法：先检查 role，再调用入口，避免链上无意义 revert。
+  const provider = contractManager.provider; // 你们的 provider/Signer 管理方式不同的话，请按项目实际改造
+  const keeperSigner = contractManager.signer; // keeper 钱包对应的 signer（机器人/多签执行器）
+
+  const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes("LIQUIDATE"));
+
+  // 通过 Registry 拿 SettlementManager 地址（避免写死地址）
+  const registry = await contractManager.getRegistry();
+  const settlementManagerAddr: string = await registry.getModule(
+    ethers.keccak256(ethers.toUtf8Bytes("SETTLEMENT_MANAGER"))
+  );
+  if (!settlementManagerAddr || settlementManagerAddr === ethers.ZeroAddress) {
+    throw new Error("Registry missing SETTLEMENT_MANAGER");
+  }
+
+  const acm = await contractManager.getAccessControlManager();
+  const has = await acm.hasRole(ACTION_LIQUIDATE, await keeperSigner.getAddress());
+  if (!has) {
+    throw new Error(
+      `MissingRole(): keeper lacks ACTION_LIQUIDATE (${ACTION_LIQUIDATE}). ` +
+        `Ask admin to grant this role to keeper.`
+    );
+  }
+
+  const settlementManager = new ethers.Contract(
+    settlementManagerAddr,
+    ["function settleOrLiquidate(uint256 orderId) external"],
+    keeperSigner
+  );
+  const tx = await settlementManager.settleOrLiquidate(orderId);
+  await tx.wait();
+  return tx;
 }
 ```
+
+> 🧪 本地快速排障（推荐）：见 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 的 “本地一键 Smoke”。
+> 它会检查 Registry 注册/连线，并对 `MissingRole()` / `SettlementManager__NotLiquidatable()` 做精准解码与修复提示。
 
 ### 3. 事件监听
 
@@ -1257,6 +1311,81 @@ export async function deposit(asset: string, amount: bigint) {
 ---
 以上即为最新 `VaultRouter` 协调器的前端集成规范，后续业务查询请直接面向子视图模块。 
 
+## 🧱 CollateralManager（抵押账本）前端配合要点（2026-01）
+
+> 目标：避免前端“误把业务模块当 View 用”，同时保留必要的账本只读兼容能力（供清算/视图/统计/排障/过渡期使用）。
+
+### 1) 查询入口选择（推荐顺序）
+- **正常 UI 查询（推荐）**：优先调用各专属 View（0 gas `view` 查询 + 缓存/聚合能力）
+  - 用户仓位/资产维度：`PositionView` / `UserView`
+  - 系统统计：`StatisticsView`
+  - 价格：`ValuationOracleView` / 批量价格：`BatchView`
+- **账本只读兼容（谨慎使用）**：仅在“排障 / 兜底 / 过渡期兼容 / 枚举资产列表”时使用 `CollateralManager` 的 getter：
+  - `getCollateral(user, asset)`：返回 **抵押账本数量**（不含估值）
+  - `getTotalCollateralByAsset(asset)`：返回 **该资产全局抵押总量**（不含估值）
+  - `getUserCollateralAssets(user)`：返回用户抵押过的资产列表（用于枚举；列表随抵押为 0 会移除）
+- **明确禁止/已移除**：`CollateralManager` **不提供任何“估值/美元价值/抵押价值”接口**；估值请走 `ValuationOracleView` 或 View 层聚合（遵循 `docs/Architecture-Guide.md`）。
+
+### 2) ERC20 授权（approve）协作约定
+- **抵押存入**：前端需要对 **`CollateralManager` 地址**执行 `ERC20(asset).approve(CollateralManager, amount)`（或更高额度）。
+- **抵押提取**：通常不需要 approve（提取由 `CollateralManager` 直接 `transfer` 到 receiver）。
+
+### 3) 事件 / DataPush 订阅（前端/监听服务）
+- `CollateralManager` 会发出业务事件：`DepositProcessed` / `WithdrawProcessed` / `BatchDepositProcessed` / `BatchWithdrawProcessed`（可用于 UI/索引服务同步）。
+- 同时会通过统一入口 `DataPushed(bytes32 dataTypeHash, bytes payload)` 推送同等信息（建议监听服务统一只订阅 `DataPushed`，再按 `dataTypeHash` 解码）。
+- View 推送失败告警（不回滚主流程）：`ViewCachePushFailed(address user, address asset, bytes reason)`  
+  - 含义：抵押账本写入成功，但 **View 层快照推送失败**；UI 侧应优先以 View 查询为主，如发现缓存陈旧可提示“数据可能延迟”，并配合后端重试/告警闭环（另见本文档 `CacheUpdateFailed` 章节）。
+
+## 💸 资金链（Funds Flow / SSOT）前端配合（2026-01）
+
+> 本节是 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 的前端落地版：只写“前端需要做什么”，不重复合约内部实现细节。
+
+### 1) 抵押物资金链（Collateral Flow）
+
+- **approve（必须）**：`ERC20(collateralAsset).approve(KEY_CM(CollateralManager), amount)`
+- **写入口（用户）**：
+  - 存入：`VaultCore.deposit(collateralAsset, amount)`
+  - 取回：`VaultCore.withdraw(collateralAsset, amount)`
+- **UI 查询（推荐）**：`UserView` / `PositionView`（0 gas）
+- **排障兜底（谨慎）**：`CollateralManager.getCollateral/getUserCollateralAssets`（只读账本数量，不含估值）
+
+### 2) 出借资金入池（Reserve Flow）
+
+- **approve（必须）**：`ERC20(asset).approve(VaultBusinessLogic, amount)`（spender 是 VBL，不是资金池）
+- **写入口**：
+  - 入池：`VaultBusinessLogic.reserveForLending(lenderSigner, asset, amount, lendHash)`
+  - 撤回：`VaultBusinessLogic.cancelReserve(lendHash)`
+- **前端职责**：
+  - 负责生成/展示 `lendHash` 与签名信息（幂等键）
+  - 对账口径：资金真实托管在 `KEY_LENDER_POOL_VAULT (LenderPoolVault)`
+
+### 3) 撮合放款（Finalize Match / Borrow Disbursement）
+
+- **典型模式**：由撮合服务/keeper 调 `VaultBusinessLogic.finalizeMatch(...)` 完成原子撮合（前端只负责签名与展示状态）。
+- **前端需要保证**：
+  - borrower 与 lenders 的签名数据可复现（用于追责与排障）
+  - UI 上明确展示：`LoanOrder.lender` 口径是 **资金池地址**（`LenderPoolVault`），不是 `lenderSigner`
+
+### 4) 还款/结算（Repay → Settle）
+
+- **approve（必须）**：`ERC20(debtAsset).approve(VaultCore, amount)`  
+  - 原因：`VaultCore.repay` 会 `transferFrom(user → SettlementManager)`，再调用 `SettlementManager.repayAndSettle(...)`。
+- **写入口（用户）**：`VaultCore.repay(orderId, debtAsset, amount)`
+- **UI 提示**：
+  - 正常结算（按时/提前）会在同一条链路内完成“减债 + 抵押返还”（抵押可能直接回 borrower，无需二次 withdraw）
+
+### 5) 违约清算（Default → Liquidation）
+
+- **默认入口（keeper 推荐，SSOT）**：`SettlementManager.settleOrLiquidate(orderId)`（需要 `ACTION_LIQUIDATE`）
+- **用户侧前端**：
+  - 不应提供“直接清算”按钮给普通用户
+  - 只读展示与事件订阅以 `LiquidatorView`/`LiquidationRiskManager`/`HealthView` 为准
+
+### 6) 费用与分账（Fee Flow）
+
+- **写入侧 SSOT**：费用类资金统一由 `FeeRouter` 路由与分发（前端通常不直接调用写入口）
+- **读侧（推荐）**：`FeeRouterView` + 订阅 `DataPushed`
+
 ## 🔁 接口变更与迁移指南（2025-09）
 
 ### 1) 清算只读接口统一到 LiquidatorView（SystemView 不作为权威入口）
@@ -1347,6 +1476,10 @@ provider.on({ topics: [iface.getEvent("DataPushed").topic] }, (log) => {
 |--------------|----------|-----------------|
 | `USER_FEE` | `FeeRouterView` | `(address user, bytes32 feeType, uint256 amount, uint256 personalFeeBps)` |
 | `GLOBAL_FEE_STATS` | `FeeRouterView` | `(uint256 totalDistributions, uint256 totalAmount)` |
+| `DEPOSIT_PROCESSED` | `CollateralManager` | `(address user, address asset, uint256 amount, uint256 timestamp)` |
+| `WITHDRAW_PROCESSED` | `CollateralManager` | `(address user, address asset, uint256 amount, uint256 timestamp)` |
+| `BATCH_DEPOSIT_PROCESSED` | `CollateralManager` | `(address user, uint256 operationCount, uint256 timestamp)` |
+| `BATCH_WITHDRAW_PROCESSED` | `CollateralManager` | `(address user, uint256 operationCount, uint256 timestamp)` |
 | `USER_DEGRADATION` | `CollateralManager` / `LendingEngine` / `PriceOracle` | `(address user, address module, address asset, string reason, bool usedFallback, uint256 value, uint256 timestamp)` |
 | `MODULE_HEALTH` | `DegradationAdminView` | `(address module, ModuleHealthStatusMirror)` |
 | `SYSTEM_STATUS_CACHE` | `ViewCache` | `(address asset, uint256 collateral, uint256 debt, uint256 util, uint256 ts)` |
@@ -1394,10 +1527,14 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
 
 ### 11. 缓存推送失败重试（CacheUpdateFailed）前端配合
 
-> 说明：当前策略为“强一致 + 事件打点”。清算/借还路径的 View 推送失败会直接 revert（无事件）；仅在 PositionView 等 guarded 读取失败时 emit `CacheUpdateFailed(address indexed user, address indexed asset, address viewAddr, uint256 collateral, uint256 debt, bytes reason)`，主流程不中断，需要链下重试。前端需针对有事件的场景做提示与交互闭环。
+> 说明：推送失败策略是**分层的**（不是“一刀切”）：
+> - **PositionView guarded 读取失败**会 emit `CacheUpdateFailed(...)`（主流程不中断，靠链下重试/告警闭环）。
+> - **部分 best-effort 推送模块**（如 `LendingEngineCore`/`LiquidationManager`）也会 emit 同 ABI 的 `CacheUpdateFailed(...)`；请用 `contract_address` 区分来源。
+> - 其它写路径可能选择“失败即回滚”以维持强一致（以链上实际 revert 原因为准）。
+> 前端需针对“有事件可观测”的场景做提示与交互闭环。
 
 #### 11.1 事件监听
-- 订阅 `CacheUpdateFailed`（主要来自 PositionView guarded 路径；LendingEngine/LiquidationDebtManager 视图推送失败会回滚，不会产出该事件）：
+- 订阅 `CacheUpdateFailed`（主要来自 PositionView guarded 路径；以及部分 best-effort 推送模块如 `LendingEngineCore`/`LiquidationManager` 的推送失败事件；用 `contract_address` 区分来源）：
   - 过滤当前登录用户：`args.user.toLowerCase() === connectedAddress.toLowerCase()`
   - 记录 `asset` / `viewAddr` / `reason` / `blockNumber` / `logIndex`，作为重试幂等键
 - 可选：在同一监听服务中并入 `DataPushed`，便于统一管道

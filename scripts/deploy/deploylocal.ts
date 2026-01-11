@@ -41,6 +41,37 @@ function keyOf(upperSnake: string): string {
   return ethers.keccak256(ethers.toUtf8Bytes(upperSnake));
 }
 
+type BindModuleOptions = {
+  /** If provided, used in logs instead of keyUpperSnake */
+  label?: string;
+  /** Whether to log when binding is already correct */
+  logIfUnchanged?: boolean;
+};
+
+async function bindRegistryModule(
+  registry: any,
+  keyUpperSnake: string,
+  addr: string | undefined,
+  opts: BindModuleOptions = {}
+): Promise<{ changed: boolean }> {
+  if (!addr || addr === ethers.ZeroAddress) return { changed: false };
+  const key = keyOf(keyUpperSnake);
+  const label = opts.label ?? keyUpperSnake;
+  try {
+    const existing: string = await registry.getModule(key);
+    if (existing && existing !== ethers.ZeroAddress && existing.toLowerCase() === addr.toLowerCase()) {
+      if (opts.logIfUnchanged) console.log(`↪️ ${label} already set`);
+      return { changed: false };
+    }
+    await (await registry.setModule(key, addr)).wait();
+    console.log(`✅ Bound ${label} -> ${addr}`);
+    return { changed: true };
+  } catch (e) {
+    console.log(`⚠️ Failed to bind ${label}:`, e);
+    return { changed: false };
+  }
+}
+
 async function deployRegular(name: string, ...args: unknown[]): Promise<string> {
   const f = await ethers.getContractFactory(name);
   const c = await f.deploy(...args);
@@ -182,6 +213,22 @@ async function main() {
     save(deployed);
   }
 
+  // 2.1) 统一缓存维护器（A 类模块地址缓存：统一刷新入口）
+  // - 非升级合约（constructor 接收 Registry 地址）
+  // - Registry 将以 KEY_CACHE_MAINTENANCE_MANAGER 指向该合约
+  // - 目标合约侧 refreshModuleCache() 将严格校验 msg.sender == Registry[KEY_CACHE_MAINTENANCE_MANAGER]
+  if (!deployed.CacheMaintenanceManager) {
+    try {
+      deployed.CacheMaintenanceManager = await deployRegular(
+        'src/registry/CacheMaintenanceManager.sol:CacheMaintenanceManager',
+        deployed.Registry
+      );
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ CacheMaintenanceManager deployment failed:', error);
+    }
+  }
+
   // Payout recipients（可用占位地址，默认 deployer；若部署了 LenderPoolVault 且未显式指定 PAYOUT_LENDER_ADDR，将自动指向资金池）
   let payoutRecipients = {
     platform: process.env.PAYOUT_PLATFORM_ADDR || deployer.address,
@@ -221,7 +268,6 @@ async function main() {
         // 先检查，避免 RoleAlreadyGranted() 回退
         const already = await acm.hasRole(role, adminAddress);
         if (already) {
-          console.log(`↪️ Role ${r} already granted to ${adminAddress}, skip`);
           continue;
         }
         await (await acm.grantRole(role, adminAddress)).wait();
@@ -282,9 +328,10 @@ async function main() {
     save(deployed);
   }
 
-  // 先部署一个临时的 VaultRouter 用于 VaultCore 初始化
+  // 部署 VaultRouter（View / Router 协调器）
+  // 按 Architecture-Guide：View 地址应通过 KEY_VAULT_CORE → viewContractAddrVar() 解析，因此 VaultCore 初始化时必须拿到最终 VaultRouter 地址。
   if (!deployed.VaultRouter) {
-    console.log('🚀 Deploying temporary VaultRouter for VaultCore initialization...');
+    console.log('🚀 Deploying VaultRouter...');
     deployed.VaultRouter = await deployRegular('src/Vault/VaultRouter.sol:VaultRouter',
       deployed.Registry,
       deployed.AssetWhitelist,
@@ -292,7 +339,7 @@ async function main() {
       deployed.MockUSDC, // settlement token
     );
     save(deployed);
-    console.log('✅ Temporary VaultRouter deployed @', deployed.VaultRouter);
+    console.log('✅ VaultRouter deployed @', deployed.VaultRouter);
   }
 
   // 给 VaultRouter 授权 SET_PARAMETER：用于在业务路径内 best-effort 推送 StatisticsView（pushUserStatsUpdate）
@@ -340,7 +387,8 @@ async function main() {
 
   // CollateralManager（CM）
   if (!deployed.CollateralManager) {
-    deployed.CollateralManager = await deployProxy('CollateralManager', [deployed.Registry]);
+    // CollateralManager has legacy overloaded initializer; disambiguate for OZ upgrades.
+    deployed.CollateralManager = await deployProxy('CollateralManager', [deployed.Registry], { initializer: 'initialize(address)' });
     save(deployed);
   }
 
@@ -357,44 +405,6 @@ async function main() {
       save(deployed);
     } catch (error) {
       console.log('⚠️ VaultLendingEngine deployment failed:', error);
-    }
-  }
-
-  // LiquidationRiskManager（清算风险管理器）
-  // NOTE:
-  // LiquidationRiskManager.initialize() 会在初始化阶段 _primeCoreModules()：
-  //  - KEY_CM
-  //  - KEY_LE
-  //  - KEY_PRICE_ORACLE
-  //  - KEY_SETTLEMENT_TOKEN
-  // 因此必须在部署前先把上述模块键绑定到 Registry，否则会因 MissingModule(KEY_CM/...) 回滚。
-  if (!deployed.LiquidationRiskManager) {
-    try {
-      const registry = await ethers.getContractAt('Registry', deployed.Registry);
-
-      // 最小前置绑定（不依赖后续“统一注册模块”步骤）
-      await (await registry.setModule(keyOf('COLLATERAL_MANAGER'), deployed.CollateralManager)).wait();
-      await (await registry.setModule(keyOf('LENDING_ENGINE'), deployed.VaultLendingEngine)).wait();
-      await (await registry.setModule(keyOf('PRICE_ORACLE'), deployed.PriceOracle)).wait();
-      await (await registry.setModule(keyOf('SETTLEMENT_TOKEN'), deployed.MockUSDC)).wait();
-
-      const initialMaxCacheDuration = 300; // 5分钟
-      const initialMaxBatchSize = 50;
-      // 重要：LiquidationRiskLib / LiquidationRiskBatchLib 已改为纯 internal 库（不再外部链接），
-      // 因此这里不再部署/链接 library，避免 OZ Upgrades error-006。
-      deployed.LiquidationRiskManager = await deployProxy(
-        'src/Vault/liquidation/modules/LiquidationRiskManager.sol:LiquidationRiskManager',
-        [
-          deployed.Registry,
-          deployed.AccessControlManager,
-          initialMaxCacheDuration,
-          initialMaxBatchSize,
-        ]
-      );
-      save(deployed);
-      console.log('✅ LiquidationRiskManager deployed @', deployed.LiquidationRiskManager);
-    } catch (error) {
-      console.log('⚠️ LiquidationRiskManager deployment failed:', error);
     }
   }
 
@@ -416,6 +426,62 @@ async function main() {
       save(deployed);
     } catch {
       // 模块缺失不阻断部署
+    }
+  }
+
+  // LiquidationConfigModule（清算配置模块，方案B：阈值/最小健康因子 SSOT）
+  // - 作为 KEY_LIQUIDATION_CONFIG_MANAGER 的权威实现
+  // - RiskManager 会 best-effort 读取该模块作为阈值 SSOT；写路径将通过该模块保留原始 caller 的 role 校验语义
+  if (!deployed.LiquidationConfigModule) {
+    try {
+      deployed.LiquidationConfigModule = await deployProxy(
+        'src/Vault/liquidation/modules/LiquidationConfigModule.sol:LiquidationConfigModule',
+        [deployed.Registry, deployed.AccessControlManager]
+      );
+      save(deployed);
+      console.log('✅ LiquidationConfigModule deployed @', deployed.LiquidationConfigModule);
+    } catch (error) {
+      console.log('⚠️ LiquidationConfigModule deployment failed:', error);
+    }
+  }
+
+  // LiquidationRiskManager（清算风险管理器）
+  // NOTE:
+  // LiquidationRiskManager.initialize() 会在初始化阶段 _primeCoreModules()：
+  //  - KEY_CM
+  //  - KEY_LE
+  //  - (optional) KEY_POSITION_VIEW
+  //  - KEY_HEALTH_VIEW
+  // 因此必须在部署前先把上述模块键绑定到 Registry，否则会因 MissingModule(KEY_*) 回滚。
+  if (!deployed.LiquidationRiskManager) {
+    try {
+      const registry = await ethers.getContractAt('Registry', deployed.Registry);
+
+      // 最小前置绑定（不依赖后续“统一注册模块”步骤）
+      // NOTE: LiquidationRiskManager.initialize() will prime these modules and revert if missing.
+      await bindRegistryModule(registry, 'COLLATERAL_MANAGER', deployed.CollateralManager);
+      await bindRegistryModule(registry, 'LENDING_ENGINE', deployed.VaultLendingEngine);
+      await bindRegistryModule(registry, 'HEALTH_VIEW', deployed.HealthView);
+      // Optional (Option B): ConfigManager SSOT for thresholds
+      await bindRegistryModule(registry, 'LIQUIDATION_CONFIG_MANAGER', deployed.LiquidationConfigModule);
+
+      const initialMaxCacheDuration = 300; // 5分钟
+      const initialMaxBatchSize = 50;
+      // 重要：LiquidationRiskLib / LiquidationRiskBatchLib 已改为纯 internal 库（不再外部链接），
+      // 因此这里不再部署/链接 library，避免 OZ Upgrades error-006。
+      deployed.LiquidationRiskManager = await deployProxy(
+        'src/Vault/liquidation/modules/LiquidationRiskManager.sol:LiquidationRiskManager',
+        [
+          deployed.Registry,
+          deployed.AccessControlManager,
+          initialMaxCacheDuration,
+          initialMaxBatchSize,
+        ]
+      );
+      save(deployed);
+      console.log('✅ LiquidationRiskManager deployed @', deployed.LiquidationRiskManager);
+    } catch (error) {
+      console.log('⚠️ LiquidationRiskManager deployment failed:', error);
     }
   }
 
@@ -768,8 +834,6 @@ async function main() {
       if (!already) {
         await (await acm.grantRole(ACTION_LIQUIDATE, deployed.LiquidationManager)).wait();
         console.log('🔑 Granted ACTION_LIQUIDATE to LiquidationManager');
-      } else {
-        console.log('↪️ ACTION_LIQUIDATE already granted to LiquidationManager, skip');
       }
     }
   } catch (e) {
@@ -785,8 +849,6 @@ async function main() {
       if (!already) {
         await (await acm.grantRole(ACTION_LIQUIDATE, deployed.SettlementManager)).wait();
         console.log('🔑 Granted ACTION_LIQUIDATE to SettlementManager');
-      } else {
-        console.log('↪️ ACTION_LIQUIDATE already granted to SettlementManager, skip');
       }
     }
   } catch (e) {
@@ -826,6 +888,7 @@ async function main() {
     RegistryHelper: 'REGISTRY_HELPER',
     RegistryDynamicModuleKey: 'DYNAMIC_MODULE_REGISTRY',
     AccessControlManager: 'ACCESS_CONTROL_MANAGER',
+    CacheMaintenanceManager: 'CACHE_MAINTENANCE_MANAGER',
     AssetWhitelist: 'ASSET_WHITELIST',
     AuthorityWhitelist: 'AUTHORITY_WHITELIST',
     PriceOracle: 'PRICE_ORACLE',
@@ -867,6 +930,7 @@ async function main() {
     RewardConsumption: 'REWARD_CONSUMPTION',
     ValuationOracleView: 'VALUATION_ORACLE_VIEW',
     LiquidatorView: 'LIQUIDATION_VIEW',
+    LiquidationConfigModule: 'LIQUIDATION_CONFIG_MANAGER',
     LiquidationManager: 'LIQUIDATION_MANAGER',
     SettlementManager: 'SETTLEMENT_MANAGER',
     LiquidationPayoutManager: 'LIQUIDATION_PAYOUT_MANAGER',
@@ -874,6 +938,7 @@ async function main() {
     GuaranteeFundManager: 'GUARANTEE_FUND_MANAGER',
     LoanNFT: 'LOAN_NFT',
     MockUSDC: 'SETTLEMENT_TOKEN',
+    LiquidationRiskManager: 'LIQUIDATION_RISK_MANAGER',
     // 监控模块
     DegradationCore: 'DEGRADATION_CORE',
     DegradationMonitor: 'DEGRADATION_MONITOR',
@@ -883,27 +948,10 @@ async function main() {
       LiquidationRiskView: 'LIQUIDATION_RISK_VIEW',
   };
 
-  // 确保关键模块键已注册（供 PositionView 初始化使用）
-  const ensureModule = async (keyUpperSnake: string, addr: string | undefined, label: string) => {
-    if (!addr || addr === ethers.ZeroAddress) return;
-    const key = keyOf(keyUpperSnake);
-    try {
-      const existing = await registry.getModule(key);
-      if (existing !== ethers.ZeroAddress && existing.toLowerCase() === addr.toLowerCase()) {
-        console.log(`↪️ ${label} already set`);
-        return;
-      }
-      await (await registry.setModule(key, addr)).wait();
-      console.log(`✅ Bound ${keyUpperSnake} -> ${addr}`);
-    } catch (e) {
-      console.log(`⚠️ Failed to bind ${keyUpperSnake}:`, e);
-    }
-  };
-
-
   // 实际注册的模块清单（只注册已部署的）
   const modules = [
     'AccessControlManager',
+    'CacheMaintenanceManager',
     'AssetWhitelist',
     'AuthorityWhitelist',
     'PriceOracle',
@@ -917,6 +965,7 @@ async function main() {
     'BatchView',
     'LiquidationRiskView',
     'LiquidationPayoutManager',
+    'LiquidationManager',
     'SettlementManager',
     'LenderPoolVault',
     'FeeRouter',
@@ -949,46 +998,35 @@ async function main() {
     'RewardConsumption',
     'ValuationOracleView',
     'LiquidatorView',
+    'LiquidationConfigModule',
     'GuaranteeFundManager',
     'LoanNFT',
     'MockUSDC',
     'RegistryDynamicModuleKey', // 添加动态模块键注册表
+    'LiquidationRiskManager',
   ];
 
-  // 先确保核心模块键存在（PositionView 初始化依赖）
-  await ensureModule('COLLATERAL_MANAGER', deployed.CollateralManager, 'CollateralManager');
-  // 关键：VaultCore.borrow/repay 通过 ModuleKeys.KEY_LE(LENDING_ENGINE) 读取 ILendingEngineBasic
-  await ensureModule('LENDING_ENGINE', deployed.VaultLendingEngine, 'VaultLendingEngine (as LENDING_ENGINE)');
-  // 订单引擎单独绑定（供 LoanNFT/LendingEngine 相关路径使用）
-  await ensureModule('ORDER_ENGINE', deployed.LendingEngine, 'LendingEngine (as ORDER_ENGINE)');
-  await ensureModule('VAULT_CORE', deployed.VaultCore, 'VaultCore');
-  await ensureModule('VAULT_BUSINESS_LOGIC', deployed.VaultBusinessLogic, 'VaultBusinessLogic');
-  await ensureModule('ACCESS_CONTROL_MANAGER', deployed.AccessControlManager, 'AccessControlManager');
-  await ensureModule('LIQUIDATION_MANAGER', deployed.LiquidationManager, 'LiquidationManager');
-  await ensureModule('SETTLEMENT_MANAGER', deployed.SettlementManager, 'SettlementManager');
-
+  // SSOT: single pass registry binding (only logs on change)
+  let registryChanged = 0;
+  let registryUnchanged = 0;
   for (const name of modules) {
     const addr = deployed[name];
     if (!addr) continue;
     const upperSnake = NAME_TO_KEY[name];
     if (!upperSnake) continue;
-    try {
-      await (await registry.setModule(keyOf(upperSnake), addr)).wait();
-      console.log(`📌 Registered ${name} -> ${upperSnake}`);
-    } catch (e) {
-      console.log(`⚠️ Skip register ${name}:`, e);
-    }
+    const { changed } = await bindRegistryModule(registry, upperSnake, addr);
+    if (changed) registryChanged += 1;
+    else registryUnchanged += 1;
   }
 
-  // 补充：若存在 LiquidationRiskManager，但未在映射中，则单独注册到 KEY_LIQUIDATION_RISK_MANAGER
-  if (deployed.LiquidationRiskManager) {
-    try {
-      await (await registry.setModule(keyOf('LIQUIDATION_RISK_MANAGER'), deployed.LiquidationRiskManager)).wait();
-      console.log('📌 Registered LiquidationRiskManager -> LIQUIDATION_RISK_MANAGER');
-    } catch (e) {
-      console.log('⚠️ Skip register LiquidationRiskManager:', e);
-    }
-  }
+  // Legacy compatibility: bind KEY_STATS (VAULT_STATISTICS) -> StatisticsView
+  const stats = await bindRegistryModule(registry, 'VAULT_STATISTICS', deployed.StatisticsView, {
+    label: 'KEY_STATS (VAULT_STATISTICS)',
+  });
+  if (stats.changed) registryChanged += 1;
+  else registryUnchanged += 1;
+
+  console.log(`🧾 Registry binding summary: changed=${registryChanged}, unchanged=${registryUnchanged}`);
 
   // 设置动态模块键注册表到Registry
   if (deployed.RegistryDynamicModuleKey) {
@@ -1000,55 +1038,11 @@ async function main() {
     }
   }
 
-  // 现在部署 VaultRouter（在模块注册完成后）
-  if (!deployed.VaultRouter) {
-    console.log('🚀 Deploying VaultRouter after module registration...');
-    deployed.VaultRouter = await deployRegular('src/Vault/VaultRouter.sol:VaultRouter',
-      deployed.Registry,
-      deployed.AssetWhitelist,
-      deployed.PriceOracle,
-      deployed.MockUSDC, // settlement token
-    );
-    save(deployed);
-    console.log('✅ VaultRouter deployed @', deployed.VaultRouter);
-  }
 
 
-
-  // 3.1 附加绑定：将 KEY_LIQUIDATION_MANAGER 绑定到 LiquidationManager（统一清算入口）
-  try {
-    if (deployed.LiquidationManager) {
-      await (await registry.setModule(keyOf('LIQUIDATION_MANAGER'), deployed.LiquidationManager)).wait();
-      console.log(`✅ Bound KEY_LIQUIDATION_MANAGER -> ${deployed.LiquidationManager}`);
-    }
-    if (deployed.SettlementManager) {
-      try {
-        await (await registry.setModule(keyOf('SETTLEMENT_MANAGER'), deployed.SettlementManager)).wait();
-        console.log(`✅ Bound KEY_SETTLEMENT_MANAGER -> ${deployed.SettlementManager}`);
-      } catch (error) {
-        console.log('⚠️ SettlementManager binding failed:', error);
-      }
-    }
-    if (deployed.HealthView) {
-      try { await (await registry.setModule(keyOf('HEALTH_VIEW'), deployed.HealthView)).wait(); } catch (error) { console.log('⚠️ HealthView binding failed:', error); }
-    }
-    if (deployed.LiquidatorView) {
-      try { await (await registry.setModule(keyOf('LIQUIDATION_VIEW'), deployed.LiquidatorView)).wait(); } catch (error) { console.log('⚠️ LiquidatorView binding failed:', error); }
-    }
-    if (deployed.LiquidationPayoutManager) {
-      try { await (await registry.setModule(keyOf('LIQUIDATION_PAYOUT_MANAGER'), deployed.LiquidationPayoutManager)).wait(); } catch (error) { console.log('⚠️ LiquidationPayoutManager binding failed:', error); }
-    }
-    if (deployed.StatisticsView) {
-      try { await (await registry.setModule(keyOf('VAULT_STATISTICS'), deployed.StatisticsView)).wait(); console.log(`✅ Bound KEY_STATS (VAULT_STATISTICS) -> ${deployed.StatisticsView}`); } catch (error) { console.log('⚠️ StatisticsView binding failed:', error); }
-    }
-  } catch (e) {
-    console.log('⚠️ Extra KEY binding failed:', e);
-  }
-
-  // 3.2 断言校验（增强容错）：
-  // - 优先校验 VaultCore 是否为有效合约；
-  // - 读取 viewContractAddrVar()，若失败则回退：直接将 KEY_VAULT_VIEW 绑定到本次部署的 VaultRouter；
-  //   这样前端依旧可以通过 Registry 解析 View 地址使用系统。
+  // 3.2 架构一致性断言（关键）：
+  // - 按 Architecture-Guide：View 地址应通过 KEY_VAULT_CORE → viewContractAddrVar() 解析；
+  // - 不再写入/依赖额外的 Registry key（如 VAULT_VIEW），避免多来源导致地址漂移。
   try {
     if (!deployed.VaultCore || !deployed.VaultRouter) throw new Error('Missing VaultCore or VaultRouter address');
 
@@ -1056,18 +1050,20 @@ async function main() {
     console.log('🔎 VaultCore @', deployed.VaultCore, 'codeLen =', code.length);
     if (!code || code === '0x') throw new Error('VaultCore address has no code');
 
-
-
-    // 直接确保 KEY_VAULT_VIEW 绑定为本次部署的 VaultRouter
-    const KEY_VAULT_VIEW = keyOf('VAULT_VIEW');
-    try {
-      await (await registry.setModule(KEY_VAULT_VIEW, deployed.VaultRouter)).wait();
-      console.log('✅ Bound KEY_VAULT_VIEW ->', deployed.VaultRouter);
-    } catch (bindErr) {
-      console.log('⚠️ Binding KEY_VAULT_VIEW failed:', bindErr);
+    const vaultCore = await ethers.getContractAt('VaultCore', deployed.VaultCore);
+    const viewAddr = await vaultCore.viewContractAddrVar();
+    if (!viewAddr || viewAddr === ethers.ZeroAddress) {
+      throw new Error('VaultCore.viewContractAddrVar() is zero');
     }
+    if (viewAddr.toLowerCase() !== deployed.VaultRouter.toLowerCase()) {
+      throw new Error(
+        `VaultCore.viewContractAddrVar mismatch: core=${viewAddr} expected VaultRouter=${deployed.VaultRouter}`
+      );
+    }
+    console.log('✅ Architecture check: VaultCore.viewContractAddrVar matches deployed VaultRouter');
   } catch (e) {
-    console.log('⚠️ Assertion step encountered error but continued (safe fallback applied when possible):', e);
+    console.log('❌ Architecture check failed:', e);
+    throw e;
   }
 
   // 4) 生成前端配置

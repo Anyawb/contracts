@@ -106,10 +106,18 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       await mockSettlementToken.getAddress()
     );
 
-    // 部署 VaultCore
+    // 部署 VaultCore（UUPS：必须通过 Proxy 初始化；实现合约 constructor 已禁用 initialize）
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
-    vaultCore = await VaultCoreFactory.deploy();
-    await vaultCore.initialize(await mockRegistry.getAddress(), await vaultRouter.getAddress());
+    const vaultCoreImpl = await VaultCoreFactory.deploy();
+    await vaultCoreImpl.waitForDeployment();
+    const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
+    const initData = vaultCoreImpl.interface.encodeFunctionData('initialize', [
+      await mockRegistry.getAddress(),
+      await vaultRouter.getAddress(),
+    ]);
+    const vaultCoreProxy = await ProxyFactory.deploy(vaultCoreImpl.target, initData);
+    await vaultCoreProxy.waitForDeployment();
+    vaultCore = VaultCoreFactory.attach(vaultCoreProxy.target);
 
     // 注册模块到 MockRegistry
     const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE'));

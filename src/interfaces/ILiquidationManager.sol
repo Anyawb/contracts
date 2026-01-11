@@ -22,6 +22,19 @@ interface ILiquidationManager {
         uint256 bonus
     ) external;
 
+    /// @notice Execute liquidation on behalf of a keeper via SettlementManager, preserving the original liquidator address.
+    /// @dev This is used by SettlementManager SSOT to keep `liquidator == keeper msg.sender` semantics.
+    ///      Reverts unless called by the registered SettlementManager.
+    function liquidateFromSettlementManager(
+        address liquidator,
+        address targetUser,
+        address collateralAsset,
+        address debtAsset,
+        uint256 collateralAmount,
+        uint256 debtAmount,
+        uint256 bonus
+    ) external;
+
     /// @notice 批量清算：逐条直达账本，最后由 LiquidatorView.pushBatchLiquidationUpdate 单点推送
     function batchLiquidate(
         address[] calldata targetUsers,

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from
+    "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
@@ -21,7 +22,8 @@ import { ZeroAddress, AmountIsZero, ArrayLengthMismatch, EmptyArray } from "../.
 
 /**
  * @title LiquidationManager
- * @notice Liquidation executor: direct ledger writes (seize collateral, reduce debt) and best-effort single-point View push.
+ * @notice Liquidation executor: direct ledger writes (seize collateral, reduce debt)
+ * and best-effort single-point View push.
  * @dev Reverts if:
  *      - N/A (see each public/external function NatSpec)
  *
@@ -49,7 +51,10 @@ contract LiquidationManager is
      */
     address private _registryAddr;
 
-    /// @notice Get Registry address.
+    /**
+     * @notice Get Registry contract address.
+     * @return Registry contract address
+     */
     function registryAddrVar() external view returns (address) {
         return _registryAddr;
     }
@@ -65,7 +70,14 @@ contract LiquidationManager is
      * @dev Follows event naming: PascalCase, past tense.
      * @dev Emitted when LiquidatorView push fails; does not affect ledger writes.
      */
-    event CacheUpdateFailed(address indexed user, address indexed asset, address viewAddr, uint256 collateral, uint256 debt, bytes reason);
+    event CacheUpdateFailed(
+        address indexed user,
+        address indexed asset,
+        address viewAddr,
+        uint256 collateral,
+        uint256 debt,
+        bytes reason
+    );
 
     /**
      * @notice Emitted when residual value distribution is executed.
@@ -102,6 +114,8 @@ contract LiquidationManager is
      * @dev Follows error naming: PascalCase with __ prefix.
      */
     error LiquidationManager__BatchTooLarge(uint256 provided, uint256 max);
+    /// @notice Reverts when a SettlementManager-only entrypoint is called by others.
+    error LiquidationManager__OnlySettlementManager();
 
     /**
      * @notice Constructor that disables initialization.
@@ -151,6 +165,11 @@ contract LiquidationManager is
      * - Direct ledger writes (bypass View layer)
      * - Best-effort View push (failures do not revert ledger writes)
      *
+     * Notes:
+     * - Preferred keeper entry is `SettlementManager.settleOrLiquidate(orderId)` (SSOT)
+     *   which computes parameters from `orderId`.
+     * - This function is an explicit-parameter executor entry (role-gated) for tests/emergency/manual use.
+     *
      * @param targetUser Address of the user being liquidated
      * @param collateralAsset Address of the collateral token
      * @param debtAsset Address of the debt token
@@ -166,7 +185,9 @@ contract LiquidationManager is
         uint256 debtAmount,
         uint256 bonus
     ) external override whenNotPaused nonReentrant {
-        if (targetUser == address(0) || collateralAsset == address(0) || debtAsset == address(0)) revert ZeroAddress();
+        if (targetUser == address(0) || collateralAsset == address(0) || debtAsset == address(0)) {
+            revert ZeroAddress();
+        }
         if (collateralAmount == 0 || debtAmount == 0) revert AmountIsZero();
 
         _requireLiquidationCaller(msg.sender);
@@ -183,14 +204,85 @@ contract LiquidationManager is
         ILendingEngineBasic(le).forceReduceDebt(targetUser, debtAsset, debtAmount);
 
         // 3) Best-effort View push (failures do not revert; events enable off-chain retries).
-        _pushSingle(targetUser, collateralAsset, debtAsset, collateralAmount, debtAmount, msg.sender, bonus, payout);
+        _pushSingle(
+            targetUser,
+            collateralAsset,
+            debtAsset,
+            collateralAmount,
+            debtAmount,
+            msg.sender,
+            bonus,
+            payout
+        );
     }
 
     /**
-     * @notice Execute batch liquidations: seize collateral, reduce debt, and distribute residual value for multiple users.
+     * @notice Execute liquidation on behalf of a keeper via SettlementManager,
+     * preserving the original liquidator address.
+     * @dev Reverts if:
+     *      - liquidator is zero address
+     *      - msg.sender is not the registered SettlementManager
+     *      - targetUser, collateralAsset, or debtAsset is zero address
+     *      - collateralAmount or debtAmount is zero
+     *      - contract is paused
+     *      - LiquidationPayoutManager is not registered
+     *      - CollateralManager.withdrawCollateralTo fails (permission/balance check in ledger)
+     *      - LendingEngine.forceReduceDebt fails (permission check in ledger)
+     *
+     * Security:
+     * - Non-reentrant
+     * - When-not-paused guard
+     * - Only SettlementManager can call this function
+     * - Direct ledger writes (bypass View layer)
+     * - Best-effort View push (failures do not revert ledger writes)
+     *
+     * @param liquidator Address of the liquidator (preserved from SettlementManager call)
+     * @param targetUser Address of the user being liquidated
+     * @param collateralAsset Address of the collateral token
+     * @param debtAsset Address of the debt token
+     * @param collateralAmount Amount of collateral to seize (token decimals)
+     * @param debtAmount Amount of debt to reduce (token decimals)
+     * @param bonus Liquidation bonus (for View/off-chain display, does not affect ledger)
+     */
+    function liquidateFromSettlementManager(
+        address liquidator,
+        address targetUser,
+        address collateralAsset,
+        address debtAsset,
+        uint256 collateralAmount,
+        uint256 debtAmount,
+        uint256 bonus
+    ) external whenNotPaused nonReentrant {
+        if (liquidator == address(0)) revert ZeroAddress();
+        address settlementManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        if (msg.sender != settlementManager) revert LiquidationManager__OnlySettlementManager();
+
+        if (targetUser == address(0) || collateralAsset == address(0) || debtAsset == address(0)) revert ZeroAddress();
+        if (collateralAmount == 0 || debtAmount == 0) revert AmountIsZero();
+
+        address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
+        address le = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
+        address payout = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_PAYOUT_MANAGER);
+        if (payout == address(0)) revert ZeroAddress();
+
+        // 1) Seize and distribute collateral (SSOT: LiquidationPayoutManager)
+        // to recipients incl. `liquidator`.
+        _distributeCollateral(cm, payout, targetUser, collateralAsset, collateralAmount, liquidator);
+
+        // 2) Reduce debt (LE enforces ACTION_LIQUIDATE internally; caller is this contract).
+        ILendingEngineBasic(le).forceReduceDebt(targetUser, debtAsset, debtAmount);
+
+        // 3) Best-effort View push (use `liquidator` for event payloads).
+        _pushSingle(targetUser, collateralAsset, debtAsset, collateralAmount, debtAmount, liquidator, bonus, payout);
+    }
+
+    /**
+     * @notice Execute batch liquidations: seize collateral, reduce debt,
+     * and distribute residual value for multiple users.
      * @dev Reverts if:
      *      - targetUsers array is empty
-     *      - array lengths mismatch (targetUsers, collateralAssets, debtAssets, collateralAmounts, debtAmounts, bonuses)
+     *      - array lengths mismatch (targetUsers, collateralAssets, debtAssets,
+     *        collateralAmounts, debtAmounts, bonuses)
      *      - batch size exceeds ViewConstants.MAX_BATCH_SIZE
      *      - any targetUser, collateralAsset, or debtAsset is zero address
      *      - any collateralAmount or debtAmount is zero
@@ -207,6 +299,10 @@ contract LiquidationManager is
      * - Direct ledger writes (bypass View layer)
      * - Best-effort batch View push (failures do not revert ledger writes)
      * - Batch size limit enforced to prevent RPC/execution failures
+     *
+     * Notes:
+     * - Preferred keeper entry is `SettlementManager.settleOrLiquidate(orderId)` (SSOT).
+     * - This batch entry exists for explicit-parameter executor runs (tests/emergency/manual).
      *
      * @param targetUsers Array of addresses of users being liquidated
      * @param collateralAssets Array of collateral token addresses (one per liquidation)
@@ -234,7 +330,9 @@ contract LiquidationManager is
         ) {
             revert ArrayLengthMismatch(len, collateralAssets.length);
         }
-        if (len > ViewConstants.MAX_BATCH_SIZE) revert LiquidationManager__BatchTooLarge(len, ViewConstants.MAX_BATCH_SIZE);
+        if (len > ViewConstants.MAX_BATCH_SIZE) {
+            revert LiquidationManager__BatchTooLarge(len, ViewConstants.MAX_BATCH_SIZE);
+        }
 
         _requireLiquidationCaller(msg.sender);
 
@@ -250,7 +348,9 @@ contract LiquidationManager is
             uint256 cAmt = collateralAmounts[i];
             uint256 dAmt = debtAmounts[i];
 
-            if (u == address(0) || cAsset == address(0) || dAsset == address(0)) revert ZeroAddress();
+            if (u == address(0) || cAsset == address(0) || dAsset == address(0)) {
+                revert ZeroAddress();
+            }
             if (cAmt == 0 || dAmt == 0) revert AmountIsZero();
 
             _distributeCollateral(cm, payout, u, cAsset, cAmt, msg.sender);
@@ -280,7 +380,6 @@ contract LiquidationManager is
      *
      * Security:
      * - Role-gated: ACTION_ADMIN required
-     *
      */
     function pause() external {
         _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
@@ -294,7 +393,6 @@ contract LiquidationManager is
      *
      * Security:
      * - Role-gated: ACTION_ADMIN required
-     *
      */
     function unpause() external {
         _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
@@ -322,49 +420,55 @@ contract LiquidationManager is
 
     /* ============ Internal helpers ============ */
 
-    /// @notice Require a role via AccessControlManager (ACM).
-    /// @dev Reverts if:
-    ///      - caller lacks the required role
-    ///
-    /// Security:
-    /// - Role-gated via ACM
-    ///
-    /// @param actionKey Required role (ActionKeys constant)
-    /// @param caller Caller address to validate
+    /**
+     * @notice Require a role via AccessControlManager (ACM).
+     * @dev Reverts if:
+     *      - caller lacks the required role
+     *
+     * Security:
+     * - Role-gated via ACM
+     *
+     * @param actionKey Required role (ActionKeys constant)
+     * @param caller Caller address to validate
+     */
     function _requireRole(bytes32 actionKey, address caller) internal view {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, caller);
     }
 
-    /// @notice Validate liquidation caller.
-    /// @dev Reverts if:
-    ///      - caller is not the registered SettlementManager (if configured) and lacks ACTION_LIQUIDATE
-    ///
-    /// Security:
-    /// - Role-gated: SettlementManager preferred, otherwise ACTION_LIQUIDATE
-    ///
-    /// @param caller Caller address to validate
+    /**
+     * @notice Validate liquidation caller.
+     * @dev Reverts if:
+     *      - caller is not the registered SettlementManager (if configured) and lacks ACTION_LIQUIDATE
+     *
+     * Security:
+     * - Role-gated: SettlementManager preferred, otherwise ACTION_LIQUIDATE
+     *
+     * @param caller Caller address to validate
+     */
     function _requireLiquidationCaller(address caller) internal view {
         address settlementManager = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
         if (settlementManager != address(0) && caller == settlementManager) return;
         _requireRole(ActionKeys.ACTION_LIQUIDATE, caller);
     }
 
-    /// @notice Best-effort single liquidation View push.
-    /// @dev Reverts if:
-    ///      - N/A (all failures are swallowed; emits CacheUpdateFailed)
-    ///
-    /// Security:
-    /// - Best-effort push: never reverts ledger writes
-    ///
-    /// @param user Liquidated user
-    /// @param collateralAsset Collateral asset
-    /// @param debtAsset Debt asset
-    /// @param collateralAmount Collateral seized (token decimals)
-    /// @param debtAmount Debt reduced (token decimals)
-    /// @param liquidator Liquidator address
-    /// @param bonus Liquidation bonus (display only)
-    /// @param payout LiquidationPayoutManager address (for share calculation)
+    /**
+     * @notice Best-effort single liquidation View push.
+     * @dev Reverts if:
+     *      - N/A (all failures are swallowed; emits CacheUpdateFailed)
+     *
+     * Security:
+     * - Best-effort push: never reverts ledger writes
+     *
+     * @param user Liquidated user
+     * @param collateralAsset Collateral asset
+     * @param debtAsset Debt asset
+     * @param collateralAmount Collateral seized (token decimals)
+     * @param debtAmount Debt reduced (token decimals)
+     * @param liquidator Liquidator address
+     * @param bonus Liquidation bonus (display only)
+     * @param payout LiquidationPayoutManager address (for share calculation)
+     */
     function _pushSingle(
         address user,
         address collateralAsset,
@@ -378,10 +482,18 @@ contract LiquidationManager is
         // Note: use getModule (non-revert) so ledger writes do not fail when view is missing.
         address viewAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_VIEW);
         if (viewAddr == address(0) || viewAddr.code.length == 0) {
-            emit CacheUpdateFailed(user, collateralAsset, viewAddr, collateralAmount, debtAmount, bytes("view unavailable"));
+            emit CacheUpdateFailed(
+                user,
+                collateralAsset,
+                viewAddr,
+                collateralAmount,
+                debtAmount,
+                bytes("view unavailable")
+            );
             return;
         }
 
+        bool pushedUpdate = false;
         try ILiquidationEventsView(viewAddr).pushLiquidationUpdate(
             user,
             collateralAsset,
@@ -390,12 +502,14 @@ contract LiquidationManager is
             debtAmount,
             liquidator,
             bonus,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         ) {
-            // ok
+            pushedUpdate = true;
         } catch (bytes memory reason) {
             emit CacheUpdateFailed(user, collateralAsset, viewAddr, collateralAmount, debtAmount, reason);
         }
+        pushedUpdate;
 
         if (payout != address(0)) {
             (
@@ -404,7 +518,9 @@ contract LiquidationManager is
                 uint256 lenderShare,
                 uint256 liquidatorShare
             ) = ILiquidationPayoutManager(payout).calculateShares(collateralAmount);
-            ILiquidationPayoutManager.PayoutRecipients memory recipients = ILiquidationPayoutManager(payout).getRecipients();
+            ILiquidationPayoutManager.PayoutRecipients memory recipients =
+                ILiquidationPayoutManager(payout).getRecipients();
+            bool pushedPayout = false;
             try ILiquidationEventsView(viewAddr).pushLiquidationPayout(
                 user,
                 collateralAsset,
@@ -416,30 +532,34 @@ contract LiquidationManager is
                 reserveShare,
                 lenderShare,
                 liquidatorShare,
+                // solhint-disable-next-line not-rely-on-time
                 block.timestamp
             ) {
-                // ok
-            } catch (bytes memory) {
-                // ignore
+                pushedPayout = true;
+            } catch (bytes memory reason) {
+                reason; // ignore (non-empty for solhint)
             }
+            pushedPayout;
         }
     }
 
-    /// @notice Best-effort batch liquidation View push.
-    /// @dev Reverts if:
-    ///      - N/A (all failures are swallowed; emits CacheUpdateFailed)
-    ///
-    /// Security:
-    /// - Best-effort push: never reverts ledger writes
-    ///
-    /// @param users Liquidated users
-    /// @param collateralAssets Collateral assets
-    /// @param debtAssets Debt assets
-    /// @param collateralAmounts Collateral seized (token decimals)
-    /// @param debtAmounts Debt reduced (token decimals)
-    /// @param liquidator Liquidator address
-    /// @param bonuses Liquidation bonuses (display only)
-    /// @param payout LiquidationPayoutManager address (for share calculation)
+    /**
+     * @notice Best-effort batch liquidation View push.
+     * @dev Reverts if:
+     *      - N/A (all failures are swallowed; emits CacheUpdateFailed)
+     *
+     * Security:
+     * - Best-effort push: never reverts ledger writes
+     *
+     * @param users Liquidated users
+     * @param collateralAssets Collateral assets
+     * @param debtAssets Debt assets
+     * @param collateralAmounts Collateral seized (token decimals)
+     * @param debtAmounts Debt reduced (token decimals)
+     * @param liquidator Liquidator address
+     * @param bonuses Liquidation bonuses (display only)
+     * @param payout LiquidationPayoutManager address (for share calculation)
+     */
     function _pushBatch(
         address[] calldata users,
         address[] calldata collateralAssets,
@@ -464,6 +584,7 @@ contract LiquidationManager is
             return;
         }
 
+        bool pushedBatch = false;
         try ILiquidationEventsView(viewAddr).pushBatchLiquidationUpdate(
             users,
             collateralAssets,
@@ -472,9 +593,10 @@ contract LiquidationManager is
             debtAmounts,
             liquidator,
             bonuses,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         ) {
-            // ok
+            pushedBatch = true;
         } catch (bytes memory reason) {
             emit CacheUpdateFailed(
                 users[0],
@@ -485,6 +607,7 @@ contract LiquidationManager is
                 reason
             );
         }
+        pushedBatch;
 
         if (payout != address(0)) {
             for (uint256 i; i < users.length; ) {
@@ -494,7 +617,9 @@ contract LiquidationManager is
                     uint256 lenderShare,
                     uint256 liquidatorShare
                 ) = ILiquidationPayoutManager(payout).calculateShares(collateralAmounts[i]);
-                ILiquidationPayoutManager.PayoutRecipients memory recipients = ILiquidationPayoutManager(payout).getRecipients();
+                ILiquidationPayoutManager.PayoutRecipients memory recipients =
+                    ILiquidationPayoutManager(payout).getRecipients();
+                bool pushedPayout = false;
                 try ILiquidationEventsView(viewAddr).pushLiquidationPayout(
                     users[i],
                     collateralAssets[i],
@@ -506,30 +631,34 @@ contract LiquidationManager is
                     reserveShare,
                     lenderShare,
                     liquidatorShare,
+                    // solhint-disable-next-line not-rely-on-time
                     block.timestamp
                 ) {
-                    // ok
-                } catch (bytes memory) {
-                    // ignore
+                    pushedPayout = true;
+                } catch (bytes memory reason) {
+                    reason; // ignore (non-empty for solhint)
                 }
+                pushedPayout;
                 unchecked { ++i; }
             }
         }
     }
 
-    /// @notice Distribute seized collateral to recipients (SSOT: LiquidationPayoutManager).
-    /// @dev Reverts if:
-    ///      - any CollateralManager.withdrawCollateralTo call reverts
-    ///
-    /// Security:
-    /// - Direct ledger writes to CollateralManager (no View involvement)
-    ///
-    /// @param cm CollateralManager address
-    /// @param payout LiquidationPayoutManager address
-    /// @param user Liquidated user
-    /// @param collateralAsset Collateral asset
-    /// @param collateralAmount Collateral seized (token decimals)
-    /// @param liquidator Liquidator address
+    /**
+     * @notice Distribute seized collateral to recipients (SSOT: LiquidationPayoutManager).
+     * @dev Reverts if:
+     *      - any CollateralManager.withdrawCollateralTo call reverts
+     *
+     * Security:
+     * - Direct ledger writes to CollateralManager (no View involvement)
+     *
+     * @param cm CollateralManager address
+     * @param payout LiquidationPayoutManager address
+     * @param user Liquidated user
+     * @param collateralAsset Collateral asset
+     * @param collateralAmount Collateral seized (token decimals)
+     * @param liquidator Liquidator address
+     */
     function _distributeCollateral(
         address cm,
         address payout,
@@ -540,7 +669,8 @@ contract LiquidationManager is
     ) internal {
         (uint256 platformShare, uint256 reserveShare, uint256 lenderShare, uint256 liquidatorShare) =
             ILiquidationPayoutManager(payout).calculateShares(collateralAmount);
-        ILiquidationPayoutManager.PayoutRecipients memory recipients = ILiquidationPayoutManager(payout).getRecipients();
+        ILiquidationPayoutManager.PayoutRecipients memory recipients =
+            ILiquidationPayoutManager(payout).getRecipients();
 
         if (platformShare > 0) {
             ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, platformShare, recipients.platform);
@@ -549,7 +679,12 @@ contract LiquidationManager is
             ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, reserveShare, recipients.reserve);
         }
         if (lenderShare > 0) {
-            ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, lenderShare, recipients.lenderCompensation);
+            ICollateralManager(cm).withdrawCollateralTo(
+                user,
+                collateralAsset,
+                lenderShare,
+                recipients.lenderCompensation
+            );
         }
         if (liquidatorShare > 0) {
             ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, liquidatorShare, liquidator);

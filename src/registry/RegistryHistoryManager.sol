@@ -108,7 +108,7 @@ contract RegistryHistoryManager is
         }
         
         // 触发批量历史记录事件
-        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, newAddresses);
+        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, newAddresses, executor);
     }
 
     /// @notice 获取模块的升级历史数量

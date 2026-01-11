@@ -15,6 +15,8 @@ import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ZeroAddress, EmptyArray, ArrayLengthMismatch } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IVaultCoreViewAddr {
     function viewContractAddrVar() external view returns (address);
@@ -432,6 +434,118 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
+    /**
+     * @notice Get user's total collateral value (settlement token units).
+     * @dev Reverts if:
+     *      - oracle call reverts
+     *      - registry not configured
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address
+     * @return totalValue Total collateral value
+     */
+    function getUserTotalCollateralValue(address user) external view onlyValidRegistry returns (uint256 totalValue) {
+        if (user == address(0)) revert ZeroAddress();
+        (address cm,, address oracle) = _resolveCollateralAndOracle();
+
+        address[] memory assets;
+        try ICollateralManager(cm).getUserCollateralAssets(user) returns (address[] memory a) {
+            assets = a;
+        } catch {
+            // best-effort fallback
+            return 0;
+        }
+
+        if (assets.length > MAX_BATCH_SIZE) revert PositionView__BatchTooLarge(assets.length, MAX_BATCH_SIZE);
+
+        for (uint256 i; i < assets.length; ++i) {
+            address asset = assets[i];
+            if (asset == address(0)) continue;
+
+            uint256 amount;
+            try ICollateralManager(cm).getCollateral(user, asset) returns (uint256 a) {
+                amount = a;
+            } catch {
+                continue;
+            }
+            if (amount == 0) continue;
+
+            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*timestamp*/, uint256 decimals) {
+                if (price == 0) continue;
+                // 10**decimals must not overflow uint256
+                if (decimals > 77) continue;
+                uint256 scale = 10 ** decimals;
+                if (scale == 0) continue;
+                totalValue += Math.mulDiv(amount, price, scale);
+            } catch {
+                // best-effort: skip this asset
+                continue;
+            }
+        }
+    }
+
+    /**
+     * @notice Get system total collateral value (settlement token units).
+     * @dev Reverts if oracle call fails.
+     */
+    function getTotalCollateralValue() external view onlyValidRegistry returns (uint256 totalValue) {
+        (address cm,, address oracle) = _resolveCollateralAndOracle();
+
+        address[] memory assets;
+        try IPriceOracle(oracle).getSupportedAssets() returns (address[] memory a) {
+            assets = a;
+        } catch {
+            // best-effort fallback
+            return 0;
+        }
+
+        if (assets.length > MAX_BATCH_SIZE) revert PositionView__BatchTooLarge(assets.length, MAX_BATCH_SIZE);
+
+        for (uint256 i; i < assets.length; ++i) {
+            address asset = assets[i];
+            if (asset == address(0)) continue;
+
+            uint256 totalAmount;
+            try ICollateralManager(cm).getTotalCollateralByAsset(asset) returns (uint256 a) {
+                totalAmount = a;
+            } catch {
+                continue;
+            }
+            if (totalAmount == 0) continue;
+
+            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*timestamp*/, uint256 decimals) {
+                if (price == 0) continue;
+                if (decimals > 77) continue;
+                uint256 scale = 10 ** decimals;
+                if (scale == 0) continue;
+                totalValue += Math.mulDiv(totalAmount, price, scale);
+            } catch {
+                continue;
+            }
+        }
+    }
+
+    /**
+     * @notice Get value of an asset amount (settlement token units).
+     * @dev Reverts if oracle call fails.
+     */
+    function getAssetValue(address asset, uint256 amount) external view onlyValidRegistry returns (uint256 value) {
+        if (asset == address(0) || amount == 0) return 0;
+        (, , address oracle) = _resolveCollateralAndOracle();
+
+        try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*timestamp*/, uint256 decimals) {
+            if (price == 0) return 0;
+            if (decimals > 77) return 0;
+            uint256 scale = 10 ** decimals;
+            if (scale == 0) return 0;
+            return Math.mulDiv(amount, price, scale);
+        } catch {
+            return 0;
+        }
+    }
+
     // ============ Cache helpers ============
     function isUserCacheValid(address user) external view returns (bool) {
         return _isValid(_cacheTimestamps[user]);
@@ -524,6 +638,17 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned {
         vbl       = registry.getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
         // Architecture-Guide: VaultRouter 地址通过 VaultCore.viewContractAddrVar() 解析，避免重复 key
         vaultRouter = IVaultCoreViewAddr(vaultCore).viewContractAddrVar();
+    }
+
+    function _getPriceOracleAddr() internal view returns (address) {
+        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
+    }
+
+    function _resolveCollateralAndOracle() internal view returns (address cm, address le, address oracle) {
+        Registry registry = Registry(_registryAddr);
+        cm = registry.getModuleOrRevert(ModuleKeys.KEY_CM);
+        le = registry.getModuleOrRevert(ModuleKeys.KEY_LE);
+        oracle = registry.getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
     }
 
     function _computeVersionOrRevert(

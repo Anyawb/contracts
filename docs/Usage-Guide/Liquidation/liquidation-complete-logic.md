@@ -143,7 +143,7 @@ liquidatorBps     = 7_800; // 78%
 ```solidity
 // 只读检查（0 gas）：通过 LiquidationRiskManager/LiquidatorView/HealthView 查询是否可清算、可扣押数量等
 // 写入执行：SettlementManager 为唯一对外入口（其内部进入清算分支）
-// settlementManager.settleOrLiquidate(...);
+// settlementManager.settleOrLiquidate(orderId);
 ```
 
 ### **管理员配置**

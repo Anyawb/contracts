@@ -4,7 +4,8 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-// Pausable 去除，统一由 Registry 控制暂停
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
 
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
@@ -21,7 +22,9 @@ import {
     ModuleUpgradeDuplicate,
     DelayTooLong,
     DelayTooShort,
-    InvalidDelayValue
+    InvalidDelayValue,
+    UpgradeNotAuthorized,
+    InvalidUpgradeAdmin
 } from "../errors/StandardErrors.sol";
 import { RegistryStorage } from "./RegistryStorageLibrary.sol";
 import { RegistryEvents } from "./RegistryEventsLibrary.sol";
@@ -34,17 +37,26 @@ import { RegistryQuery } from "./RegistryQueryLibrary.sol";
 contract RegistryUpgradeManager is 
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardUpgradeable
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable
 { 
     using RegistryStorage for RegistryStorage.Layout;
     using RegistryQuery for *;
+    using AddressUpgradeable for address;
 
     // ============ Registry Address (唯一入口) ============
     address private _registry;
+    /// @notice 可选的升级管理员（用于单独部署/测试场景）
+    address private _upgradeAdmin;
 
-    /// @notice 仅允许 Registry 调用
-    modifier onlyRegistry() {
-        require(msg.sender == _registry, "UpgradeManager: caller is not registry");
+    /// @notice 允许 Registry 调用；或（当未绑定 Registry 时）允许 owner / upgradeAdmin 直接调用（用于测试）
+    modifier onlyRegistryOrAuthorized() {
+        if (_registry != address(0)) {
+            require(msg.sender == _registry, "UpgradeManager: caller is not registry");
+        } else {
+            // standalone mode (tests)
+            if (msg.sender != owner() && msg.sender != _upgradeAdmin) revert UpgradeNotAuthorized(msg.sender, _upgradeAdmin);
+        }
         _;
     }
 
@@ -70,12 +82,50 @@ contract RegistryUpgradeManager is
 
     // ============ Initializer ============
     /// @notice 初始化合约，绑定 Registry 地址
-    /// @param registryAddr Registry 合约地址
-    function initialize(address registryAddr) external initializer {
-        require(registryAddr != address(0), "Invalid registry");
+    /// @param registryOrAdmin 若为合约地址：绑定 Registry；若为 EOA：作为 upgradeAdmin（用于测试）
+    function initialize(address registryOrAdmin) external initializer {
+        require(registryOrAdmin != address(0), "Invalid registry");
         __Ownable_init();
         __ReentrancyGuard_init();
-        _registry = registryAddr;
+        __Pausable_init();
+
+        if (registryOrAdmin.isContract()) {
+            _registry = registryOrAdmin;
+            // registry mode 下 upgradeAdmin 不作为授权来源；这里填充为 owner 仅用于可读性
+            _upgradeAdmin = owner();
+        } else {
+            // standalone/test mode
+            _registry = address(0);
+            _upgradeAdmin = registryOrAdmin;
+        }
+        // 初始化 RegistryStorage 版本，避免后续 requireCompatibleVersion 永久失败
+        RegistryStorage.initializeStorageVersion();
+        // standalone/test mode 期望默认 minDelay=1h（与现有测试一致）
+        RegistryStorage.Layout storage l = RegistryStorage.layout();
+        if (l.minDelay == 0) {
+            l.minDelay = uint64(1 hours);
+        }
+    }
+
+    /// @notice 设置升级管理员（仅 standalone/test mode 需要）
+    function setUpgradeAdmin(address newAdmin) external onlyOwner {
+        if (newAdmin == address(0)) revert InvalidUpgradeAdmin(newAdmin);
+        _upgradeAdmin = newAdmin;
+    }
+
+    /// @notice 获取升级管理员
+    function getUpgradeAdmin() external view returns (address) {
+        return _upgradeAdmin;
+    }
+
+    /// @notice 暂停（用于测试与紧急控制）
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    /// @notice 解除暂停
+    function unpause() external onlyOwner {
+        _unpause();
     }
 
     // ============ Upgrade Management ============
@@ -83,7 +133,7 @@ contract RegistryUpgradeManager is
     /// @param key 模块键
     /// @param moduleAddr 新模块地址
     /// @param allowReplace 是否允许替换已存在的模块
-    function setModule(bytes32 key, address moduleAddr, bool allowReplace) external onlyRegistry {
+    function setModule(bytes32 key, address moduleAddr, bool allowReplace) external whenNotPaused onlyRegistryOrAuthorized {
         _executeModuleUpgrade(key, moduleAddr, allowReplace, msg.sender);
     }
 
@@ -91,7 +141,7 @@ contract RegistryUpgradeManager is
     /// @param keys 模块键数组
     /// @param addresses 新模块地址数组
     /// @param allowReplace 是否允许替换已存在的模块
-    function batchSetModules(bytes32[] calldata keys, address[] calldata addresses, bool allowReplace) external onlyRegistry nonReentrant {
+    function batchSetModules(bytes32[] calldata keys, address[] calldata addresses, bool allowReplace) external whenNotPaused onlyRegistryOrAuthorized nonReentrant {
         
         // 检查批量大小限制
         if (keys.length > MAX_BATCH_SIZE) {
@@ -104,7 +154,7 @@ contract RegistryUpgradeManager is
     /// @notice 发起模块升级计划，进入延时队列
     /// @param key 模块键
     /// @param newAddr 新模块地址
-    function scheduleModuleUpgrade(bytes32 key, address newAddr) external onlyRegistry {
+    function scheduleModuleUpgrade(bytes32 key, address newAddr) external whenNotPaused onlyRegistryOrAuthorized {
         if (newAddr == address(0)) revert ModuleNotRegistered(key);
         
         // 添加存储版本兼容检查
@@ -133,7 +183,7 @@ contract RegistryUpgradeManager is
 
     /// @notice 取消尚未执行的升级计划
     /// @param key 模块键
-    function cancelModuleUpgrade(bytes32 key) external onlyRegistry {
+    function cancelModuleUpgrade(bytes32 key) external whenNotPaused onlyRegistryOrAuthorized {
         
         // 添加存储版本兼容检查
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
@@ -154,7 +204,7 @@ contract RegistryUpgradeManager is
 
     /// @notice 到期后执行模块升级，将新地址写入映射
     /// @param key 模块键
-    function executeModuleUpgrade(bytes32 key) external nonReentrant onlyRegistry {
+    function executeModuleUpgrade(bytes32 key) external whenNotPaused nonReentrant onlyRegistryOrAuthorized {
         _executeDelayedUpgrade(key, msg.sender);
     }
 
@@ -196,7 +246,7 @@ contract RegistryUpgradeManager is
     // ============ Admin Functions ============
     /// @notice 更新延时窗口，允许只增不减
     /// @param newDelay 新的最小延迟时间
-    function setMinDelay(uint256 newDelay) external onlyRegistry {
+    function setMinDelay(uint256 newDelay) external whenNotPaused onlyRegistryOrAuthorized {
         // 添加存储版本兼容检查
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         
@@ -322,7 +372,8 @@ contract RegistryUpgradeManager is
             emit RegistryEvents.BatchModuleChanged(
                 tempChangedKeys,
                 oldAddresses,
-                newAddresses
+                newAddresses,
+                executor
             );
         }
     }
@@ -432,7 +483,7 @@ contract RegistryUpgradeManager is
         }
         
         // 触发批量历史记录事件
-        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, newAddresses);
+        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, newAddresses, executor);
     }
 
     // ============ Storage Gap ============

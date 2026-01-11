@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 /**
  * @title ILiquidationEventsView
  * @notice View interface for receiving business-side (liquidation) push notifications and forwarding to unified DataPush stream
- * @dev Decoupled from query interface `ILiquidationView` to avoid forcing implementation of many read-only functions
+ * @dev Query/view read APIs are intentionally kept separate to avoid forcing implementations of many read-only functions.
  */
 interface ILiquidationEventsView {
     /**

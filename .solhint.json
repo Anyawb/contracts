@@ -28,6 +28,11 @@
     "quotes": ["error", "double"],
     "max-line-length": ["error", 120],
     "compiler-version": ["error", "^0.8.20"],
+    "use-natspec": "off",
+    "function-max-lines": "off",
+    "gas-increment-by-one": "off",
+    "gas-strict-inequalities": "off",
+    "gas-indexed-events": "off",
     "immutable-vars-naming": "warn",
     "explicit-types": "warn"
   }

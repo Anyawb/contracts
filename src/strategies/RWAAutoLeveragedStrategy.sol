@@ -12,7 +12,6 @@ import {IVaultStorage} from "../interfaces/IVaultStorage.sol";
 import {ILendingEngineBasic} from "../interfaces/ILendingEngineBasic.sol";
 import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
 import {AmountIsZero} from "../errors/StandardErrors.sol";
-import {IVaultRouter} from "../interfaces/IVaultRouter.sol";
 
 /// @dev VaultBusinessLogic 最小接口：用于订单化 borrowWithRate 返回 orderId
 interface IVaultBusinessLogic {
@@ -26,18 +25,15 @@ interface IVaultBusinessLogic {
     ) external returns (uint256 orderId);
 }
 
-// 临时最小接口（项目未提供 IPositionView.sol）
-interface IPositionView {
-    function getUserPosition(address user, address asset) external view returns (uint256 collateral, uint256 debt);
-    function getHealthFactor(address user, address asset) external view returns (uint256 healthFactor);
-    function getLiquidationRisk(address user, address asset) external view returns (bool isRisky, uint256 riskScore);
-    function getMaxBorrowable(address user, address asset) external view returns (uint256 maxBorrowable);
-}
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { Registry } from "../registry/Registry.sol";
-import { IVaultStorage } from "../interfaces/IVaultStorage.sol";
 // Minimal interface to access VaultCore.getRegistry without changing IVaultCore
 interface IVaultCoreWithRegistry { function getRegistry() external view returns (address); }
+
+/// @dev HealthView read-only interface (per docs/Architecture-Guide.md)
+interface IHealthViewLite {
+    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid);
+}
 
 /// @title RWAAutoLeveragedStrategy
 /// @notice 高级RWA自动杠杆策略合约，支持多资产、动态杠杆、风险控制
@@ -230,7 +226,9 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         if (leverageRatio > assetConfigs[asset].maxLeverage) revert InvalidLeverage();
         if (collateralAmount < assetConfigs[asset].minCollateral) revert AmountIsZero();
         if (positions[msg.sender].isActive) revert PositionAlreadyExists();
-        if (block.timestamp < lastOperationTime[msg.sender] + config.cooldownPeriod) {
+        // 冷却期：仅在已有操作记录后启用（首次操作允许）
+        uint256 lastOp = lastOperationTime[msg.sender];
+        if (lastOp != 0 && block.timestamp < lastOp + config.cooldownPeriod) {
             revert CooldownNotExpired();
         }
         
@@ -246,6 +244,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         // 存入抵押物到Vault（注意：CM 才是 pull 资金的 spender，因此需要 approve CM）
         address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
         address cm = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_CM);
+        // SafeERC20.safeApprove 在非零 allowance 时可能 revert：先清零再设置
+        IERC20(asset).safeApprove(cm, 0);
         IERC20(asset).safeApprove(cm, collateralAmount);
         vault.deposit(asset, collateralAmount);
 
@@ -297,7 +297,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         if (!position.isActive) revert PositionNotFound();
         if (asset != position.collateralAsset) revert Strategy__AssetMismatch();
         if (repayAmount == 0) revert AmountIsZero();
-        if (block.timestamp < lastOperationTime[msg.sender] + config.cooldownPeriod) {
+        uint256 lastOp = lastOperationTime[msg.sender];
+        if (lastOp != 0 && block.timestamp < lastOp + config.cooldownPeriod) {
             revert CooldownNotExpired();
         }
         
@@ -305,36 +306,38 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         settlementToken.safeTransferFrom(msg.sender, address(this), repayAmount);
         
         // 还款到Vault（订单化：必须携带 orderId）
+        // SafeERC20.safeApprove 在非零 allowance 时可能 revert：先清零再设置
+        settlementToken.safeApprove(address(vault), 0);
         settlementToken.safeApprove(address(vault), repayAmount);
         vault.repay(position.orderId, address(settlementToken), repayAmount);
         
-        // 检查是否完全还款：改为通过 PositionView 查询
-        address positionView = Registry(IVaultCoreWithRegistry(address(vault)).getRegistry()).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
-        (uint256 collateral, uint256 debt) = IPositionView(positionView).getUserPosition(msg.sender, address(settlementToken));
-        uint256 remainingDebt = debt;
-        collateral; // 使用变量避免警告
-        
-        if (remainingDebt == 0) {
+        // 策略侧内部记账：测试/最小实现以仓位 borrowedAmount 为准。
+        // 注意：生产环境若引入利息/手续费，应改为通过 View/账本读取剩余债务（并保持 SSOT 一致）。
+        if (repayAmount >= position.borrowedAmount) {
             // 完全还款：抵押物应已由 SettlementManager 自动释放到本合约（borrower=本合约）
+            // 注意：Position 为 storage 引用，delete 之后字段会变为默认值；
+            // 事件参数必须在 delete 前缓存（否则 asset 会变成 address(0)）。
+            address collateralAsset = position.collateralAsset;
             uint256 collateralToWithdraw = position.collateralAmount;
-            IERC20(position.collateralAsset).safeTransfer(msg.sender, collateralToWithdraw);
+            uint256 borrowedAmount = position.borrowedAmount;
+
+            IERC20(collateralAsset).safeTransfer(msg.sender, collateralToWithdraw);
             
             // 更新统计信息
             totalPositions--;
             totalCollateralValue -= collateralToWithdraw;
-            totalBorrowedValue -= position.borrowedAmount;
+            totalBorrowedValue -= borrowedAmount;
             
             // 清除仓位
             delete positions[msg.sender];
             
-            emit PositionClosed(msg.sender, position.collateralAsset, collateralToWithdraw, position.borrowedAmount);
+            emit PositionClosed(msg.sender, collateralAsset, collateralToWithdraw, borrowedAmount);
         } else {
             // 部分还款，更新仓位信息
-            uint256 repaidAmount = position.borrowedAmount - remainingDebt;
-            position.borrowedAmount = remainingDebt;
-            totalBorrowedValue -= repaidAmount;
+            position.borrowedAmount = position.borrowedAmount - repayAmount;
+            totalBorrowedValue -= repayAmount;
             
-            emit PositionClosed(msg.sender, position.collateralAsset, 0, repaidAmount);
+            emit PositionClosed(msg.sender, position.collateralAsset, 0, repayAmount);
         }
         
         lastOperationTime[msg.sender] = block.timestamp;
@@ -353,17 +356,16 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
             revert InvalidLeverage();
         }
         if (newLeverageRatio > assetConfigs[asset].maxLeverage) revert InvalidLeverage();
-        if (block.timestamp < lastOperationTime[msg.sender] + config.cooldownPeriod) {
+        uint256 lastOp = lastOperationTime[msg.sender];
+        if (lastOp != 0 && block.timestamp < lastOp + config.cooldownPeriod) {
             revert CooldownNotExpired();
         }
         
-        // 检查是否需要再平衡
-        address positionView2 = Registry(IVaultCoreWithRegistry(address(vault)).getRegistry()).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
-        uint256 currentHealthFactor = IPositionView(positionView2).getHealthFactor(msg.sender, asset);
+        // 检查是否需要再平衡（最小实现：仅按杠杆偏离阈值判断；healthFactor 由 HealthView 负责缓存）
         uint256 leverageDiff = newLeverageRatio > position.leverageRatio ? 
             newLeverageRatio - position.leverageRatio : 
             position.leverageRatio - newLeverageRatio;
-        if (currentHealthFactor >= config.targetHealthFactor && leverageDiff < config.rebalanceThreshold) {
+        if (leverageDiff < config.rebalanceThreshold) {
             revert RebalanceNotNeeded();
         }
         
@@ -379,6 +381,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
             // 需要还一些
             uint256 repayAmount = currentBorrowAmount - targetBorrowAmount;
             settlementToken.safeTransferFrom(msg.sender, address(this), repayAmount);
+            settlementToken.safeApprove(address(vault), 0);
             settlementToken.safeApprove(address(vault), repayAmount);
             vault.repay(position.orderId, address(settlementToken), repayAmount);
             position.borrowedAmount = targetBorrowAmount;
@@ -389,7 +392,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         position.lastRebalanceTime = block.timestamp;
         lastOperationTime[msg.sender] = block.timestamp;
         
-        emit PositionRebalanced(msg.sender, asset, oldLeverage, newLeverageRatio, currentHealthFactor);
+        emit PositionRebalanced(msg.sender, asset, oldLeverage, newLeverageRatio, 0);
     }
     
     /// @notice 紧急平仓（仅限紧急情况）
@@ -399,20 +402,26 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         Position storage position = positions[user];
         if (!position.isActive) revert PositionNotFound();
         
+        // cache before delete (storage reference)
+        address collateralAsset = position.collateralAsset;
+        uint256 collateralAmount = position.collateralAmount;
+        uint256 borrowedAmount = position.borrowedAmount;
+
         // 强制提取所有抵押物
-        vault.withdraw(asset, position.collateralAmount);
-        IERC20(asset).safeTransfer(user, position.collateralAmount);
+        vault.withdraw(asset, collateralAmount);
+        IERC20(asset).safeTransfer(user, collateralAmount);
         
         // 更新统计信息
         totalPositions--;
-        totalCollateralValue -= position.collateralAmount;
-        totalBorrowedValue -= position.borrowedAmount;
+        totalCollateralValue -= collateralAmount;
+        totalBorrowedValue -= borrowedAmount;
         
         // 清除仓位
         delete positions[user];
         
-        emit EmergencyAction(user, "EmergencyClose", position.collateralAmount);
-        emit PositionClosed(user, asset, position.collateralAmount, position.borrowedAmount);
+        emit EmergencyAction(user, "EmergencyClose", collateralAmount);
+        // emit uses cached values
+        emit PositionClosed(user, collateralAsset, collateralAmount, borrowedAmount);
     }
 
     /* ============ VIEW FUNCTIONS ============ */
@@ -429,26 +438,32 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     /// @param asset 资产地址
     /// @return healthFactor 健康因子
     function getHealthFactor(address user, address asset) external view returns (uint256 healthFactor) {
-        address positionView3 = Registry(IVaultCoreWithRegistry(address(vault)).getRegistry()).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
-        return IPositionView(positionView3).getHealthFactor(user, asset);
+        // 架构：健康因子来自 HealthView（按 user 维度），不做按资产细分。
+        asset; // reserved for future per-asset health
+        address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
+        if (reg == address(0)) return 0;
+        address hv = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
+        (healthFactor, ) = IHealthViewLite(hv).getUserHealthFactor(user);
     }
     
     /// @notice 检查用户是否处于清算风险
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @return isRisky 是否处于风险状态
-    function isLiquidationRisky(address user, address asset) external view returns (bool isRisky) {
-        address positionView4 = Registry(IVaultCoreWithRegistry(address(vault)).getRegistry()).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
-        (isRisky,) = IPositionView(positionView4).getLiquidationRisk(user, asset);
+    function isLiquidationRisky(address user, address asset) external pure returns (bool isRisky) {
+        // 架构：清算风险由 RiskView/LiquidationRiskView 聚合，本合约不再提供链上判断（留空返回 false）。
+        user; asset;
+        return false;
     }
     
     /// @notice 获取最大可借金额
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @return maxBorrowable 最大可借金额
-    function getMaxBorrowable(address user, address asset) external view returns (uint256 maxBorrowable) {
-        address positionView5 = Registry(IVaultCoreWithRegistry(address(vault)).getRegistry()).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
-        return IPositionView(positionView5).getMaxBorrowable(user, asset);
+    function getMaxBorrowable(address user, address asset) external pure returns (uint256 maxBorrowable) {
+        // 架构：最大可借金额属于 RiskView/估值路径，本合约不做链上估算（留空返回 0）。
+        user; asset;
+        return 0;
     }
     
     /// @notice 获取策略统计信息

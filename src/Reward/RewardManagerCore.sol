@@ -653,11 +653,14 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     }
 
     /// @notice 积分销毁代理（消费侧调用），保持 MINTER_ROLE 仅授予 RMCore
-    /// @dev 仅允许 RewardConsumption 调用；用于消费/升级时扣减积分
+    /// @dev 仅允许 RewardConsumption / RewardCore 调用；用于消费/升级时扣减积分
     function burnPointsFor(address user, uint256 points) external onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         address rewardConsumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
-        if (msg.sender != rewardConsumption) {
+        // RewardConsumption 作为外部统一入口；RewardCore 为内部业务模块（仅能被 RewardConsumption 调用）
+        // 允许 RewardCore 触发 burn，保持架构闭环，同时不开放给任意外部调用者
+        address rewardCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CORE);
+        if (msg.sender != rewardConsumption && msg.sender != rewardCore) {
             revert RewardManagerCore__UseRewardManagerEntry();
         }
         _getRewardToken().burnPoints(user, points);

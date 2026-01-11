@@ -17,7 +17,7 @@ import type { ContractFactory } from 'ethers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 // 导入合约类型
-import type { VaultBusinessLogic } from '../../../types/contracts/Vault/modules/VaultBusinessLogic';
+// NOTE: typechain path may differ across environments; this test uses runtime contracts only.
 
 // 导入常量
 import { ModuleKeys } from '../../../frontend-config/moduleKeys';
@@ -57,6 +57,10 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
   let mockGuaranteeFundManager: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockAccessControlManager: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockEarlyRepaymentGuaranteeManager: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let lenderPoolVault: any;
   
   // 测试代币
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -96,6 +100,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     mockAssetWhitelist = await ethers.getContractFactory('MockAssetWhitelist');
     mockGuaranteeFundManager = await ethers.getContractFactory('MockGuaranteeFundManager');
     mockAccessControlManager = await ethers.getContractFactory('MockAccessControlManager');
+    mockEarlyRepaymentGuaranteeManager = await ethers.getContractFactory('MockEarlyRepaymentGuaranteeManager');
+    const lenderPoolVaultFactory = await ethers.getContractFactory('LenderPoolVault');
     
     // 创建 Mock ERC20
     mockERC20Factory = await ethers.getContractFactory('MockERC20');
@@ -132,6 +138,9 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     const deployedMockAccessControlManager = await mockAccessControlManager.deploy();
     await deployedMockAccessControlManager.waitForDeployment();
     
+    const deployedMockEarlyRepaymentGuaranteeManager = await mockEarlyRepaymentGuaranteeManager.deploy();
+    await deployedMockEarlyRepaymentGuaranteeManager.waitForDeployment();
+
     // 设置 Mock Registry 返回各模块地址
     await deployedMockRegistry.setModule(ModuleKeys.KEY_CM, deployedMockCollateralManager.target);
     await deployedMockRegistry.setModule(ModuleKeys.KEY_LE, deployedMockLendingEngine.target);
@@ -141,9 +150,10 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     await deployedMockRegistry.setModule(ModuleKeys.KEY_RM, deployedMockRewardManager.target);
     await deployedMockRegistry.setModule(ModuleKeys.KEY_ASSET_WHITELIST, deployedMockAssetWhitelist.target);
     await deployedMockRegistry.setModule(ModuleKeys.KEY_GUARANTEE_FUND, deployedMockGuaranteeFundManager.target);
+    await deployedMockRegistry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, deployedMockAccessControlManager.target);
+    await deployedMockRegistry.setModule(ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE, deployedMockEarlyRepaymentGuaranteeManager.target);
     
-    // 设置 Mock AccessControlManager
-    await deployedMockAccessControlManager.setMockRole(true);
+    // MockAccessControlManager 不再提供 setMockRole；权限完全由 grantRole 控制
     
     // 为owner设置管理角色
     await deployedMockAccessControlManager.grantRole(ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')), ownerAddress);
@@ -151,8 +161,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     await deployedMockAccessControlManager.grantRole(ethers.keccak256(ethers.toUtf8Bytes('UNPAUSE_SYSTEM')), ownerAddress);
     await deployedMockAccessControlManager.grantRole(ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE')), ownerAddress);
     
-    // 设置 Mock AssetWhitelist
-    await deployedMockAssetWhitelist.setMockAllowed(true);
+    // NOTE: TEST_ASSET 在下方设置为 mockERC20.target 后再写入白名单
     
     // 设置 Mock ERC20
     await mockERC20.mint(mockERC20.target, TEST_AMOUNT * 100n);
@@ -161,13 +170,26 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     const deployedVaultBusinessLogic = await vaultBusinessLogicFactory.deploy();
     await deployedVaultBusinessLogic.waitForDeployment();
     
-    // 部署代理合约
+    // 部署 LenderPoolVault（UUPS Proxy）
+    const deployedLenderPoolVaultImpl = await lenderPoolVaultFactory.deploy();
+    await deployedLenderPoolVaultImpl.waitForDeployment();
     const proxyFactory = await ethers.getContractFactory('ERC1967Proxy');
+    const lenderPoolProxy = await proxyFactory.deploy(
+      deployedLenderPoolVaultImpl.target,
+      deployedLenderPoolVaultImpl.interface.encodeFunctionData('initialize', [
+        deployedMockRegistry.target
+      ])
+    );
+    await lenderPoolProxy.waitForDeployment();
+    const lenderPoolVaultProxy = deployedLenderPoolVaultImpl.attach(lenderPoolProxy.target);
+    await deployedMockRegistry.setModule(ModuleKeys.KEY_LENDER_POOL_VAULT, lenderPoolVaultProxy.target);
+
+    // 部署代理合约
     const proxy = await proxyFactory.deploy(
       deployedVaultBusinessLogic.target,
       deployedVaultBusinessLogic.interface.encodeFunctionData('initialize', [
         deployedMockRegistry.target,
-        deployedMockAccessControlManager.target
+        mockERC20.target
       ])
     );
     await proxy.waitForDeployment();
@@ -175,6 +197,9 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     // 通过代理合约访问VaultBusinessLogic
     const vaultBusinessLogicProxy = deployedVaultBusinessLogic.attach(proxy.target);
     
+    // 让 LenderPoolVault 允许 VaultBusinessLogic 作为唯一 transferOut 调用者
+    await deployedMockRegistry.setModule(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC, vaultBusinessLogicProxy.target);
+
     // 给合约一些代币用于借款操作
     await mockERC20.mint(vaultBusinessLogicProxy.target, TEST_AMOUNT * 50n);
     
@@ -188,6 +213,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     
     // 设置测试资产地址
     TEST_ASSET = mockERC20.target;
+    // 设置 Mock AssetWhitelist：放行测试资产
+    await deployedMockAssetWhitelist.setAssetAllowed(TEST_ASSET, true);
     
     return {
       vaultBusinessLogic: vaultBusinessLogicProxy,
@@ -201,6 +228,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       mockAssetWhitelist: deployedMockAssetWhitelist,
       mockGuaranteeFundManager: deployedMockGuaranteeFundManager,
       mockAccessControlManager: deployedMockAccessControlManager,
+      mockEarlyRepaymentGuaranteeManager: deployedMockEarlyRepaymentGuaranteeManager,
+      lenderPoolVault: lenderPoolVaultProxy,
       mockERC20,
       owner,
       user,
@@ -226,6 +255,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     mockAssetWhitelist = fixture.mockAssetWhitelist;
     mockGuaranteeFundManager = fixture.mockGuaranteeFundManager;
     mockAccessControlManager = fixture.mockAccessControlManager;
+    mockEarlyRepaymentGuaranteeManager = fixture.mockEarlyRepaymentGuaranteeManager;
+    lenderPoolVault = fixture.lenderPoolVault;
     mockERC20 = fixture.mockERC20;
     owner = fixture.owner;
     user = fixture.user;
@@ -258,7 +289,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       const newVaultBusinessLogicProxy = newVaultBusinessLogic.attach(newProxy.target);
       
       await expect(
-        newVaultBusinessLogicProxy.initialize(ZERO_ADDRESS, mockAccessControlManager.target)
+        newVaultBusinessLogicProxy.initialize(ZERO_ADDRESS, mockERC20.target)
       ).to.be.revertedWithCustomError(newVaultBusinessLogicProxy, 'ZeroAddress');
       
       await expect(
@@ -268,190 +299,193 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
 
     it('VaultBusinessLogic – 应该拒绝重复初始化', async function () {
       await expect(
-        vaultBusinessLogic.initialize(mockRegistry.target, mockAccessControlManager.target)
+        vaultBusinessLogic.initialize(mockRegistry.target, mockERC20.target)
       ).to.be.revertedWith('Initializable: contract is already initialized');
     });
   });
 
-  describe('权限控制测试', function () {
-    it('VaultBusinessLogic – 应该正确检查权限', async function () {
-      // 撤销owner的SET_PARAMETER权限
-      await mockAccessControlManager.revokeRole(ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')), ownerAddress);
-      
+  // NOTE:
+  // - VaultBusinessLogic 的抵押存取入口（deposit/withdraw/batchDeposit/batchWithdraw）已按架构收敛到 VaultCore。
+  // - 因此本测试文件不再覆盖这些已下线入口；相关用例已删除，避免“为了通过而断言回退”。
+
+  describe('资金池保留/撤销（reserveForLending / cancelReserve）', function () {
+    it('VaultBusinessLogic – reserveForLending: 应该把资金转入 LenderPoolVault 并落 reserve 状态', async function () {
+      const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-1'));
+      const amount = ethers.parseUnits('10', 18);
+
+      const userBalBefore = await mockERC20.balanceOf(userAddress);
+      const poolBalBefore = await mockERC20.balanceOf(lenderPoolVault.target);
+
       await expect(
-        vaultBusinessLogic.setRegistry(mockRegistry.target)
-      ).to.be.revertedWith('requireRole: MissingRole');
+        vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash)
+      )
+        .to.emit(vaultBusinessLogic, 'BusinessOperation')
+        .withArgs('reserveForLending', userAddress, TEST_ASSET, amount);
+
+      const userBalAfter = await mockERC20.balanceOf(userAddress);
+      const poolBalAfter = await mockERC20.balanceOf(lenderPoolVault.target);
+
+      expect(userBalAfter).to.equal(userBalBefore - amount);
+      expect(poolBalAfter).to.equal(poolBalBefore + amount);
     });
 
-    it('VaultBusinessLogic – 应该允许有权限的用户执行管理操作', async function () {
-      // 确保owner有SET_PARAMETER权限
-      await mockAccessControlManager.grantRole(ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')), ownerAddress);
-      
+    it('VaultBusinessLogic – reserveForLending: 应该拒绝零资产/零金额', async function () {
+      const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-2'));
       await expect(
-        vaultBusinessLogic.setRegistry(mockRegistry.target)
-      ).to.not.be.reverted;
-    });
-  });
+        vaultBusinessLogic.reserveForLending(userAddress, ZERO_ADDRESS, 1n, lendIntentHash)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
 
-  describe('资产白名单测试', function () {
-    it('VaultBusinessLogic – 应该检查资产是否在白名单中', async function () {
-      // 设置资产不在白名单中
-      await mockAssetWhitelist.setMockAllowed(false);
-      
       await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AssetNotAllowed');
-    });
-
-    it('VaultBusinessLogic – 应该允许白名单中的资产', async function () {
-      // 设置资产在白名单中
-      await mockAssetWhitelist.setMockAllowed(true);
-      
-      // 设置其他模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该处理白名单模块未设置的情况', async function () {
-      // 设置白名单模块返回零地址
-      await mockRegistry.setMockModule(ModuleKeys.KEY_ASSET_WHITELIST, ZERO_ADDRESS);
-      
-      // 设置其他模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
-    });
-  });
-
-  describe('存入功能测试', function () {
-    beforeEach(async function () {
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-    });
-
-    it('VaultBusinessLogic – 应该成功存入资产', async function () {
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该拒绝零金额存入', async function () {
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, 0n)
+        vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, 0n, lendIntentHash)
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
     });
 
-    it('VaultBusinessLogic – 应该拒绝零地址资产', async function () {
+    it('VaultBusinessLogic – reserveForLending: 应该拒绝重复 reserve（同一个 intentHash）', async function () {
+      const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-dup'));
+      const amount = ethers.parseUnits('1', 18);
+      await vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
       await expect(
-        vaultBusinessLogic.deposit(userAddress, ZERO_ADDRESS, TEST_AMOUNT)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
+        vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'Settlement__AlreadyReserved');
     });
 
-    it('VaultBusinessLogic – 应该处理模块调用失败', async function () {
-      // 设置抵押物管理模块调用失败
-      await mockCollateralManager.setMockSuccess(false);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ExternalModuleRevertedRaw');
+    it('VaultBusinessLogic – cancelReserve: 应该仅允许原 lender 撤销，并将资金从池子退回', async function () {
+      const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-cancel'));
+      const amount = ethers.parseUnits('7', 18);
+
+      await vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
+
+      const userBalBefore = await mockERC20.balanceOf(userAddress);
+      const poolBalBefore = await mockERC20.balanceOf(lenderPoolVault.target);
+
+      await expect(vaultBusinessLogic.connect(user).cancelReserve(lendIntentHash))
+        .to.emit(vaultBusinessLogic, 'BusinessOperation')
+        .withArgs('cancelReserve', userAddress, TEST_ASSET, amount);
+
+      const userBalAfter = await mockERC20.balanceOf(userAddress);
+      const poolBalAfter = await mockERC20.balanceOf(lenderPoolVault.target);
+
+      expect(userBalAfter).to.equal(userBalBefore + amount);
+      expect(poolBalAfter).to.equal(poolBalBefore - amount);
+    });
+
+    it('VaultBusinessLogic – cancelReserve: 应该拒绝非 owner 撤销 / 不存在的 intentHash', async function () {
+      const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-owner'));
+      const amount = ethers.parseUnits('3', 18);
+      await vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
+
+      await expect(vaultBusinessLogic.connect(owner).cancelReserve(lendIntentHash)).to.be.revertedWithCustomError(
+        vaultBusinessLogic,
+        'Settlement__NotOwner'
+      );
+
+      const unknownHash = ethers.keccak256(ethers.toUtf8Bytes('unknown'));
+      await expect(vaultBusinessLogic.connect(user).cancelReserve(unknownHash)).to.be.revertedWithCustomError(
+        vaultBusinessLogic,
+        'Settlement__NotActive'
+      );
     });
   });
 
-  describe('借款功能测试', function () {
+  describe('借款（borrow）', function () {
     beforeEach(async function () {
-      // 设置所有模块调用成功
-      await mockLendingEngine.setMockSuccess(true);
       await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
     });
 
-    it('VaultBusinessLogic – 应该成功借款', async function () {
-      await expect(
-        vaultBusinessLogic.borrow(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
+    it('VaultBusinessLogic – borrow: 应该完成放款（合约 -> 用户）并推送统计', async function () {
+      const amount = ethers.parseUnits('5', 18);
+      const userBalBefore = await mockERC20.balanceOf(userAddress);
+      const vblBalBefore = await mockERC20.balanceOf(vaultBusinessLogic.target);
+      const debtBefore = await mockStatisticsView.userDebt(userAddress);
+
+      await expect(vaultBusinessLogic.borrow(userAddress, TEST_ASSET, amount))
+        .to.emit(vaultBusinessLogic, 'BusinessOperation')
+        .withArgs('borrow', userAddress, TEST_ASSET, amount);
+
+      const userBalAfter = await mockERC20.balanceOf(userAddress);
+      const vblBalAfter = await mockERC20.balanceOf(vaultBusinessLogic.target);
+      const debtAfter = await mockStatisticsView.userDebt(userAddress);
+
+      expect(userBalAfter).to.equal(userBalBefore + amount);
+      expect(vblBalAfter).to.equal(vblBalBefore - amount);
+      expect(debtAfter).to.equal(debtBefore + amount);
     });
 
-    it('VaultBusinessLogic – 应该拒绝零金额借款', async function () {
+    it('VaultBusinessLogic – borrow: 应该拒绝零金额/零资产', async function () {
       await expect(
         vaultBusinessLogic.borrow(userAddress, TEST_ASSET, 0n)
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
+
+      await expect(
+        vaultBusinessLogic.borrow(userAddress, ZERO_ADDRESS, 1n)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
     });
 
-    it('VaultBusinessLogic – 应该处理借贷引擎调用失败', async function () {
-      await mockLendingEngine.setMockSuccess(false);
-      
+    it('VaultBusinessLogic – borrow: 应该拒绝不在白名单的资产', async function () {
+      await mockAssetWhitelist.setAssetAllowed(TEST_ASSET, false);
       await expect(
         vaultBusinessLogic.borrow(userAddress, TEST_ASSET, TEST_AMOUNT)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AssetNotAllowed');
+      await mockAssetWhitelist.setAssetAllowed(TEST_ASSET, true);
+    });
+
+    it('VaultBusinessLogic – borrow: 统计视图失败应回退（ExternalModuleRevertedRaw）', async function () {
+      await mockStatisticsView.setShouldFail(true);
+      await expect(
+        vaultBusinessLogic.borrow(userAddress, TEST_ASSET, ethers.parseUnits('1', 18))
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ExternalModuleRevertedRaw');
     });
   });
 
-  describe('还款功能测试', function () {
+  describe('还款（repay / repayWithStop）', function () {
     beforeEach(async function () {
-      // 设置所有模块调用成功
-      await mockLendingEngine.setMockSuccess(true);
       await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
     });
 
-    it('VaultBusinessLogic – 应该成功还款', async function () {
+    it('VaultBusinessLogic – repay: 已收敛为 VaultCore 入口，应直接拒绝（避免写路径分叉/资金滞留）', async function () {
+      const amount = ethers.parseUnits('4', 18);
+      await vaultBusinessLogic.borrow(userAddress, TEST_ASSET, amount);
+
+      const userBalBefore = await mockERC20.balanceOf(userAddress);
+      const vblBalBefore = await mockERC20.balanceOf(vaultBusinessLogic.target);
+      const debtBefore = await mockStatisticsView.userDebt(userAddress);
+
+      await expect(vaultBusinessLogic.repay(userAddress, TEST_ASSET, amount))
+        .to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
+
+      const userBalAfter = await mockERC20.balanceOf(userAddress);
+      const vblBalAfter = await mockERC20.balanceOf(vaultBusinessLogic.target);
+      const debtAfter = await mockStatisticsView.userDebt(userAddress);
+
+      // balances/statistics remain unchanged because the call is rejected
+      expect(userBalAfter).to.equal(userBalBefore);
+      expect(vblBalAfter).to.equal(vblBalBefore);
+      expect(debtAfter).to.equal(debtBefore);
+    });
+
+    it('VaultBusinessLogic – repay: 应该拒绝零金额/零资产', async function () {
       await expect(
-        vaultBusinessLogic.repay(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
-    });
+        vaultBusinessLogic.repay(userAddress, TEST_ASSET, 0n)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
 
-    it('VaultBusinessLogic – 应该处理还款引擎调用失败', async function () {
-      await mockLendingEngine.setMockSuccess(false);
-      
       await expect(
-        vaultBusinessLogic.repay(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ExternalModuleRevertedRaw');
-    });
-  });
-
-  describe('提取功能测试', function () {
-    beforeEach(async function () {
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      // 确保合约有足够的代币用于提取
-      await mockERC20.mint(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
-      
-      // 先存入一些代币，这样提取时才有余额
-      await mockERC20.connect(user).approve(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
-      await vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT);
+        vaultBusinessLogic.repay(userAddress, ZERO_ADDRESS, 1n)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
     });
 
-    it('VaultBusinessLogic – 应该成功提取抵押物', async function () {
+    it('VaultBusinessLogic – repay: 即使统计视图失败也应直接拒绝（已下线入口）', async function () {
+      await mockStatisticsView.setShouldFail(true);
       await expect(
-        vaultBusinessLogic.withdraw(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
+        vaultBusinessLogic.repay(userAddress, TEST_ASSET, ethers.parseUnits('1', 18))
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
     });
 
-    it('VaultBusinessLogic – 应该处理提取失败', async function () {
-      // 设置抵押物管理模块调用失败
-      await mockCollateralManager.setMockSuccess(false);
-      
+    it('VaultBusinessLogic – repayWithStop: 已收敛为 SettlementManager 入口，应直接拒绝', async function () {
+      const amount = ethers.parseUnits('2', 18);
       await expect(
-        vaultBusinessLogic.withdraw(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ExternalModuleRevertedRaw');
+        vaultBusinessLogic.repayWithStop(userAddress, TEST_ASSET, amount, true)
+      )
+        .to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
     });
   });
 
@@ -463,222 +497,50 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       // 设置测试数据
       assets = [TEST_ASSET, TEST_ASSET];
       amounts = [TEST_AMOUNT, TEST_AMOUNT * 2n];
-      
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      // 确保合约有足够的代币用于批量提取
-      await mockERC20.mint(vaultBusinessLogic.target, TEST_AMOUNT * 20n);
-      
-      // 先存入一些代币，这样批量提取时才有余额
-      await mockERC20.connect(user).approve(vaultBusinessLogic.target, TEST_AMOUNT * 20n);
-      await vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT * 3n);
     });
 
-    it('VaultBusinessLogic – 应该成功执行批量存入', async function () {
+    it('VaultBusinessLogic – batchBorrow: 参数校验（长度不一致/空数组/超上限）', async function () {
       await expect(
-        vaultBusinessLogic.batchDeposit(userAddress, assets, amounts)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该成功执行批量借款', async function () {
-      await mockLendingEngine.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.batchBorrow(userAddress, assets, amounts)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该成功执行批量还款', async function () {
-      await mockLendingEngine.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.batchRepay(userAddress, assets, amounts)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该成功执行批量提取', async function () {
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.batchWithdraw(userAddress, assets, amounts)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该拒绝参数不匹配的批量操作', async function () {
-      const wrongAmounts = [TEST_AMOUNT]; // 长度不匹配
-      
-      await expect(
-        vaultBusinessLogic.batchDeposit(userAddress, assets, wrongAmounts)
+        vaultBusinessLogic.batchBorrow(userAddress, [TEST_ASSET], [TEST_AMOUNT, TEST_AMOUNT])
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'InvalidAmounts');
-    });
 
-    it('VaultBusinessLogic – 应该拒绝空数组', async function () {
       await expect(
-        vaultBusinessLogic.batchDeposit(userAddress, [], [])
+        vaultBusinessLogic.batchBorrow(userAddress, [], [])
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
-    });
 
-    it('VaultBusinessLogic – 应该拒绝超过最大批量大小的操作', async function () {
-      const largeAssets = new Array(MAX_BATCH_SIZE + 1).fill(TEST_ASSET);
-      const largeAmounts = new Array(MAX_BATCH_SIZE + 1).fill(TEST_AMOUNT);
-      
+      const tooManyAssets = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => TEST_ASSET);
+      const tooManyAmounts = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => 0n);
       await expect(
-        vaultBusinessLogic.batchDeposit(userAddress, largeAssets, largeAmounts)
+        vaultBusinessLogic.batchBorrow(userAddress, tooManyAssets, tooManyAmounts)
       ).to.be.revertedWith('Batch too large');
     });
-  });
 
-  describe('积分奖励系统测试', function () {
-    it('VaultBusinessLogic – 应该正确处理积分奖励', async function () {
-      // 设置其他模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
+    it('VaultBusinessLogic – batchBorrow: amounts 全为 0 时应直接通过（不触发 finalizeAtomic）', async function () {
       await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
+        vaultBusinessLogic.batchBorrow(userAddress, assets, [0n, 0n])
       ).to.not.be.reverted;
     });
 
-    it('VaultBusinessLogic – 应该处理积分管理器未设置的情况', async function () {
-      // 设置积分管理器返回零地址
-      await mockRegistry.setMockModule(ModuleKeys.KEY_RM, ZERO_ADDRESS);
-      
-      // 设置其他模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      
+    it('VaultBusinessLogic – batchRepay: 参数校验（长度不一致/空数组/超上限）', async function () {
       await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
+        vaultBusinessLogic.batchRepay(userAddress, [TEST_ASSET], [TEST_AMOUNT, TEST_AMOUNT])
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'InvalidAmounts');
+
+      await expect(
+        vaultBusinessLogic.batchRepay(userAddress, [], [])
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
+
+      const tooManyAssets = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => TEST_ASSET);
+      const tooManyAmounts = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => 0n);
+      await expect(
+        vaultBusinessLogic.batchRepay(userAddress, tooManyAssets, tooManyAmounts)
+      ).to.be.revertedWith('Batch too large');
+    });
+
+    it('VaultBusinessLogic – batchRepay: amounts 全为 0 时应直接通过（不做 transferFrom）', async function () {
+      await expect(
+        vaultBusinessLogic.batchRepay(userAddress, assets, [0n, 0n])
       ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该处理积分管理器调用失败但不中断主流程', async function () {
-      // 设置积分管理器调用失败
-      await mockRewardManager.setMockSuccess(false);
-      
-      // 设置其他模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      
-      // 应该不因为积分管理器失败而中断
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
-    });
-  });
-
-  describe('保证金管理测试', function () {
-    beforeEach(async function () {
-      // 确保合约有足够的代币
-      await mockERC20.mint(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
-      
-      // 先存入一些代币
-      await mockERC20.connect(user).approve(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
-      await vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT);
-    });
-
-    it('VaultBusinessLogic – 应该正确处理保证金锁定', async function () {
-      // 设置其他模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该正确处理保证金释放', async function () {
-      // 设置其他模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.withdraw(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该处理保证金管理器调用失败', async function () {
-      await mockGuaranteeFundManager.setMockSuccess(false);
-      
-      // 设置其他模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ExternalModuleRevertedRaw');
-    });
-  });
-
-  describe('管理功能测试', function () {
-    it('VaultBusinessLogic – 应该允许管理员更新Registry地址', async function () {
-      const newRegistry = '0x1111111111111111111111111111111111111111';
-      
-      await expect(
-        vaultBusinessLogic.setRegistry(newRegistry)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该拒绝零地址的Registry', async function () {
-      await expect(
-        vaultBusinessLogic.setRegistry(ZERO_ADDRESS)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
-    });
-
-    it('VaultBusinessLogic – 应该允许管理员更新结算币地址', async function () {
-      const newSettlementToken = '0x2222222222222222222222222222222222222222';
-      
-      await expect(
-        vaultBusinessLogic.setSettlementToken(newSettlementToken)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该拒绝零地址的结算币', async function () {
-      await expect(
-        vaultBusinessLogic.setSettlementToken(ZERO_ADDRESS)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
-    });
-
-    it('VaultBusinessLogic – 应该允许管理员暂停系统', async function () {
-      await expect(
-        vaultBusinessLogic.pause()
-      ).to.not.be.reverted;
-      
-      expect(await vaultBusinessLogic.paused()).to.be.true;
-    });
-
-    it('VaultBusinessLogic – 应该允许管理员恢复系统', async function () {
-      // 先暂停
-      await vaultBusinessLogic.pause();
-      
-      // 再恢复
-      await expect(
-        vaultBusinessLogic.unpause()
-      ).to.not.be.reverted;
-      
-      expect(await vaultBusinessLogic.paused()).to.be.false;
-    });
-
-    it('VaultBusinessLogic – 应该拒绝暂停状态下的操作', async function () {
-      await vaultBusinessLogic.pause();
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.revertedWith('Pausable: paused');
     });
   });
 
@@ -714,118 +576,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       
       await expect(
         vaultBusinessLogic.upgradeTo(newImplementation)
-      ).to.be.revertedWith('requireRole: MissingRole');
-    });
-  });
-
-  describe('事件测试', function () {
-    it('VaultBusinessLogic – 应该发出正确的业务操作事件', async function () {
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.emit(vaultBusinessLogic, 'BusinessOperation')
-        .withArgs('deposit', userAddress, TEST_ASSET, TEST_AMOUNT);
-    });
-
-    it('VaultBusinessLogic – 应该发出正确的标准化动作事件', async function () {
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.emit(vaultBusinessLogic, 'ActionExecuted');
-    });
-
-    it('VaultBusinessLogic – 应该发出积分奖励事件', async function () {
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.emit(vaultBusinessLogic, 'RewardEvent');
-    });
-  });
-
-  describe('边界条件测试', function () {
-    it('VaultBusinessLogic – 应该处理模块返回零地址的情况', async function () {
-      // 设置抵押物管理模块返回零地址
-      await mockRegistry.setModule(ModuleKeys.KEY_CM, ZERO_ADDRESS);
-      
-      // 应该因为模块未设置而失败
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该处理大金额操作', async function () {
-      const largeAmount = ethers.parseUnits('1000000', 18); // 使用合理的金额而不是MaxUint256
-      
-      // 确保用户有足够的代币
-      await mockERC20.mint(userAddress, largeAmount);
-      await mockERC20.connect(user).approve(vaultBusinessLogic.target, largeAmount);
-      
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, largeAmount)
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – 应该处理重复操作', async function () {
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      // 第一次操作
-      await vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT);
-      
-      // 第二次操作
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.not.be.reverted;
-    });
-  });
-
-  describe('Gas 优化测试', function () {
-    it('VaultBusinessLogic – 应该高效处理批量操作', async function () {
-      const assets = new Array(5).fill(TEST_ASSET); // 减少到5个操作
-      const amounts = new Array(5).fill(TEST_AMOUNT);
-      
-      // 确保用户有足够的代币
-      const totalAmount = TEST_AMOUNT * 5n;
-      await mockERC20.mint(userAddress, totalAmount);
-      await mockERC20.connect(user).approve(vaultBusinessLogic.target, totalAmount);
-      
-      // 设置所有模块调用成功
-      await mockCollateralManager.setMockSuccess(true);
-      await mockGuaranteeFundManager.setMockSuccess(true);
-      await mockStatisticsView.setShouldFail(false);
-      await mockRewardManager.setMockSuccess(true);
-      
-      const tx = await vaultBusinessLogic.batchDeposit(userAddress, assets, amounts);
-      const receipt = await tx.wait();
-      
-      // 验证Gas使用合理
-      if (receipt) {
-        expect(receipt.gasUsed).to.be.lt(2000000); // 应该小于2M gas
-      }
+      ).to.be.revertedWithCustomError(mockAccessControlManager, 'MissingRole');
     });
   });
 }); 

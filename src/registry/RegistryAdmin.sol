@@ -6,7 +6,6 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { VaultTypes } from "../Vault/VaultTypes.sol";
 import { 
@@ -29,8 +28,7 @@ contract RegistryAdmin is
 
     // ============ Constants ============
     uint256 private constant MAX_DELAY = 7 days;
-
-    // （方案A）权限与升级管理员状态统一由 Registry 维护；本模块不再持有副本
+    // NOTE: 升级/紧急管理员状态由 Registry 统一维护；本模块不持有副本（见 docs/Architecture-Guide.md）
 
     // ============ Constructor ============
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -40,15 +38,16 @@ contract RegistryAdmin is
 
     // ============ Initializer ============
     /// @notice 初始化合约
+    /// @dev Registry 家族统一存储：初始化 storageVersion/admin/minDelay/paused
     function initialize() external initializer {
         __Ownable_init();
         __ReentrancyGuard_init();
         __Pausable_init();
+        // 统一初始化（默认 minDelay=0；如需设定由 Registry 或紧急入口完成）
+        RegistryStorage.initializeRegistryStorage(msg.sender, 0);
     }
 
     // ============ Admin Functions ============
-    // （方案A）升级/紧急管理员的设置与读取由 Registry 统一管理，这里移除重复入口
-
     /// @notice 设置主治理地址
     /// @param newAdmin 新的治理地址
     function setAdmin(address newAdmin) external onlyOwner {
@@ -101,7 +100,8 @@ contract RegistryAdmin is
         
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.PAUSE),
-            msg.sender
+            msg.sender,
+            block.timestamp
         );
     }
 
@@ -115,11 +115,10 @@ contract RegistryAdmin is
         
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.UNPAUSE),
-            msg.sender
+            msg.sender,
+            block.timestamp
         );
     }
-
-    // 这个函数已经在上面定义过了，这里移除重复定义
 
     /// @notice 紧急更新延时窗口（允许减少）
     /// @param newDelay 新延时秒数
@@ -169,25 +168,20 @@ contract RegistryAdmin is
     }
 
     // ============ View Functions ============
-    /// @notice 获取当前延时窗口
+    /// @notice 获取当前延时窗口（秒）
     function minDelay() external view returns (uint256) {
         return RegistryStorage.layout().minDelay;
     }
 
-    /// @notice 获取最大延时窗口
+    /// @notice 获取最大延时窗口（秒）
     function getMaxDelay() external pure returns (uint256) {
         return MAX_DELAY;
     }
 
-    /// @notice 检查是否已暂停
+    /// @notice 查询暂停状态
     function isPaused() external view returns (bool) {
         return paused();
     }
-
-    // （方案A）本模块不承载 UUPS 授权逻辑，移除无效 _authorizeUpgrade
-
-    // ============ Upgrade Admin Management ============
-    // 这些函数已经在上面定义过了，这里移除重复定义
 
     // ============ Storage Gap ============
     uint256[50] private __gap;

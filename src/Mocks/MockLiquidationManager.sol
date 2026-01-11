@@ -66,6 +66,44 @@ contract MockLiquidationManager is ILiquidationManager {
         );
     }
 
+    /// @notice 由 SettlementManager 代调用的清算入口（Mock 实现：记录 liquidator 参数）
+    /// @dev 与主网逻辑一致：用于在 SSOT 编排下保留真实 keeper 地址
+    function liquidateFromSettlementManager(
+        address liquidator,
+        address targetUser,
+        address collateralAsset,
+        address debtAsset,
+        uint256 collateralAmount,
+        uint256 debtAmount,
+        uint256 bonus
+    ) external override {
+        require(liquidator != address(0), "Invalid liquidator");
+        require(targetUser != address(0), "Invalid user address");
+        require(collateralAsset != address(0), "Invalid collateral asset");
+        require(debtAsset != address(0), "Invalid debt asset");
+        require(collateralAmount > 0, "Invalid collateral amount");
+        require(debtAmount > 0, "Invalid debt amount");
+
+        if (bonus == 0) {
+            bonus = (debtAmount * _liquidationBonusRate) / 10000;
+        }
+
+        _userLiquidationCount[targetUser]++;
+        _liquidatorTotalBonus[liquidator] += bonus;
+        _totalLiquidations++;
+
+        emit MockLiquidationExecuted(
+            liquidator,
+            targetUser,
+            collateralAsset,
+            debtAsset,
+            collateralAmount,
+            debtAmount,
+            bonus,
+            block.timestamp
+        );
+    }
+
     /// @notice 批量清算操作
     /// @param targetUsers 被清算用户地址数组
     /// @param collateralAssets 抵押资产地址数组

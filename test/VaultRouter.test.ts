@@ -115,10 +115,18 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       await mockSettlementToken.getAddress()
     );
 
-    // 部署 VaultCore (用于注册到 Registry)
+    // 部署 VaultCore（UUPS：必须通过 Proxy 初始化；实现合约 constructor 已禁用 initialize）
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
-    vaultCoreContract = await VaultCoreFactory.deploy();
-    await vaultCoreContract.initialize(await mockRegistry.getAddress(), await vaultRouter.getAddress());
+    const vaultCoreImpl = await VaultCoreFactory.deploy();
+    await vaultCoreImpl.waitForDeployment();
+    const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
+    const initData = vaultCoreImpl.interface.encodeFunctionData('initialize', [
+      await mockRegistry.getAddress(),
+      await vaultRouter.getAddress(),
+    ]);
+    const vaultCoreProxy = await ProxyFactory.deploy(vaultCoreImpl.target, initData);
+    await vaultCoreProxy.waitForDeployment();
+    vaultCoreContract = VaultCoreFactory.attach(vaultCoreProxy.target);
 
     // 注册模块到 MockRegistry
     const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE'));
@@ -945,7 +953,7 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       expect(debt).to.equal(0);
     });
 
-    it('repayAndWithdraw 应该原子性执行（当前实现会触发优雅降级校验失败）', async function () {
+    it('repayAndWithdraw 已下线（还款必须走 VaultCore → SettlementManager）', async function () {
       const user = await this.user1.getAddress();
       const orderId = 1; // 简化测试，使用固定 orderId
       const repayAsset = this.testAsset1;
@@ -957,7 +965,7 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       await this.mockLendingEngineBasic.setUserDebt(user, repayAsset, repayAmount);
       await this.mockCollateralManager.depositCollateral(user, withdrawAsset, withdrawAmount);
 
-      // 由于优雅降级内部调用 amount=0 会触发库的校验，目前行为为 revert 字符串
+      const ACTION_REPAY = ethers.keccak256(ethers.toUtf8Bytes('REPAY'));
       await expect(
         this.vaultRouter.connect(this.user1).repayAndWithdraw(
           orderId,
@@ -966,10 +974,11 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
           withdrawAsset,
           withdrawAmount
         )
-      ).to.be.revertedWith('Amount must be greater than zero');
+      ).to.be.revertedWithCustomError(this.vaultRouter, 'VaultRouter__UnsupportedOperation')
+        .withArgs(ACTION_REPAY);
     });
 
-    it('repayAndWithdraw 应该在第一个操作失败时回滚（原子性保证）', async function () {
+    it('repayAndWithdraw 已下线：调用应直接拒绝（不进入优雅降级分支）', async function () {
       const user = await this.user1.getAddress();
       const orderId = 1;
       const repayAsset = this.testAsset1;
@@ -984,7 +993,7 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       // 设置 LendingEngine 失败
       await this.mockLendingEngineBasic.setMockSuccess(false);
 
-      // 执行原子性操作应该失败（优雅降级分支）
+      const ACTION_REPAY = ethers.keccak256(ethers.toUtf8Bytes('REPAY'));
       await expect(
         this.vaultRouter.connect(this.user1).repayAndWithdraw(
           orderId,
@@ -993,7 +1002,8 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
           withdrawAsset,
           withdrawAmount
         )
-      ).to.be.revertedWith('Amount must be greater than zero');
+      ).to.be.revertedWithCustomError(this.vaultRouter, 'VaultRouter__UnsupportedOperation')
+        .withArgs(ACTION_REPAY);
 
       // 恢复 Mock 状态后再验证状态未改变
       await this.mockLendingEngineBasic.setMockSuccess(true);
@@ -1003,7 +1013,7 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       expect(collateral).to.equal(withdrawAmount); // 抵押物未提取
     });
 
-    it('repayAndWithdraw 应该在第二个操作失败时回滚（原子性保证）', async function () {
+    it('repayAndWithdraw 已下线：调用应直接拒绝（抵押侧失败不相关）', async function () {
       const user = await this.user1.getAddress();
       const orderId = 1;
       const repayAsset = this.testAsset1;
@@ -1018,7 +1028,7 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       // 设置 CollateralManager 失败
       await this.mockCollateralManager.setShouldFail(true);
 
-      // 执行原子性操作应该失败（优雅降级分支）
+      const ACTION_REPAY = ethers.keccak256(ethers.toUtf8Bytes('REPAY'));
       await expect(
         this.vaultRouter.connect(this.user1).repayAndWithdraw(
           orderId,
@@ -1027,7 +1037,8 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
           withdrawAsset,
           withdrawAmount
         )
-      ).to.be.revertedWith('Amount must be greater than zero');
+      ).to.be.revertedWithCustomError(this.vaultRouter, 'VaultRouter__UnsupportedOperation')
+        .withArgs(ACTION_REPAY);
 
       // 恢复 Mock 状态后再验证状态未改变
       await this.mockLendingEngineBasic.setMockSuccess(true);
@@ -1430,17 +1441,10 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       const collateral = await this.mockCollateralManager.getCollateral(user, this.testAsset1);
       expect(collateral).to.equal(amount);
 
-      // 验证事件发出
+      // 注意：VaultCore.deposit 直达 CollateralManager（不经过 VaultRouter），因此不会触发 VaultRouter.VaultAction
       await expect(tx)
-        .to.emit(this.vaultRouter, 'VaultAction')
-        .withArgs(
-          ethers.keccak256(ethers.toUtf8Bytes('DEPOSIT')),
-          user,
-          amount,
-          0,
-          this.testAsset1,
-          anyValue
-        );
+        .to.emit(this.mockCollateralManager, 'CollateralDeposited')
+        .withArgs(user, this.testAsset1, amount);
     });
 
     it('应该完成完整的提取流程（VaultCore -> VaultRouter -> CollateralManager）', async function () {
@@ -1461,17 +1465,10 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       const collateral = await this.mockCollateralManager.getCollateral(user, this.testAsset1);
       expect(collateral).to.equal(depositAmount - withdrawAmount);
 
-      // 验证事件发出
+      // 同上：VaultCore.withdraw 直达 CollateralManager，不触发 VaultRouter.VaultAction
       await expect(tx)
-        .to.emit(this.vaultRouter, 'VaultAction')
-        .withArgs(
-          ethers.keccak256(ethers.toUtf8Bytes('WITHDRAW')),
-          user,
-          withdrawAmount,
-          0,
-          this.testAsset1,
-          anyValue
-        );
+        .to.emit(this.mockCollateralManager, 'CollateralWithdrawn')
+        .withArgs(user, this.testAsset1, withdrawAmount);
     });
 
     it('应该完成完整的存款-借款-还款-提取流程', async function () {

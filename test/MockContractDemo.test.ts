@@ -158,7 +158,8 @@ describe('Mock 合约演示 - Mock Contract Demo', function () {
       // 权限级别管理（Mock 实现返回默认值）
       await mockAccessControl.setUserPermission(user, 1); // PermissionLevel.VIEWER
       const permission = await mockAccessControl.getUserPermission(user);
-      expect(permission).to.equal(0); // PermissionLevel.NONE (Mock 默认值)
+      // MockAccessControlManager 当前实现会存储并返回设置值
+      expect(permission).to.equal(1); // PermissionLevel.VIEWER
 
       // 缓存管理（Mock 实现为空操作）
       await mockAccessControl.clearPermissionCache(user);

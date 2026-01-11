@@ -262,6 +262,26 @@ contract EarlyRepaymentGuaranteeManager is
         );
     }
 
+    /// @notice 兼容测试：返回当前 VaultCore 地址
+    function vaultCore() external view returns (address) {
+        return _vaultCoreAddr;
+    }
+
+    /// @notice 兼容测试：返回当前 Registry 地址
+    function registry() external view returns (address) {
+        return _registryAddr;
+    }
+
+    /// @notice 返回平台费用接收者地址
+    function platformFeeReceiver() external view returns (address) {
+        return _platformFeeReceiverAddr;
+    }
+
+    /// @notice 返回平台手续费率（基点）
+    function platformFeeRate() external view returns (uint256) {
+        return _platformFeeRate;
+    }
+
     /* ============ Registry 系统集成 ============ */
     /// @notice 获取模块地址（从 Registry）
     /// @param moduleKey 模块键

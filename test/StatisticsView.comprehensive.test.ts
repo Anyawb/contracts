@@ -159,29 +159,37 @@ describe('StatisticsView – 全面测试', function () {
     it('应拒绝过时的版本号', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
+      // 先把版本推进到 2（strict: nextVersion 必须等于 current+1）
       await stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,uint64)'](
-        await user1.getAddress(), 100n, 0n, 0n, 0n, 2n
+        await user1.getAddress(), 100n, 0n, 0n, 0n, 1n
+      );
+      await stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,uint64)'](
+        await user1.getAddress(), 0n, 0n, 0n, 0n, 2n
       );
       
       await expect(
         stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,uint64)'](
           await user1.getAddress(), 50n, 0n, 0n, 0n, 1n
         )
-      ).to.be.revertedWith('StatsView: stale user stats version');
+      ).to.be.revertedWithCustomError(stats, 'StatisticsView__StaleUserStatsVersion').withArgs(2n, 1n);
     });
 
     it('应拒绝相同的版本号', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
+      // 先把版本推进到 2
       await stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,uint64)'](
-        await user1.getAddress(), 100n, 0n, 0n, 0n, 2n
+        await user1.getAddress(), 100n, 0n, 0n, 0n, 1n
+      );
+      await stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,uint64)'](
+        await user1.getAddress(), 0n, 0n, 0n, 0n, 2n
       );
       
       await expect(
         stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,uint64)'](
           await user1.getAddress(), 50n, 0n, 0n, 0n, 2n
         )
-      ).to.be.revertedWith('StatsView: stale user stats version');
+      ).to.be.revertedWithCustomError(stats, 'StatisticsView__StaleUserStatsVersion').withArgs(2n, 2n);
     });
   });
 

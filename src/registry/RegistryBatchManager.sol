@@ -149,7 +149,8 @@ contract RegistryBatchManager is
             emit RegistryEvents.BatchModuleChanged(
                 tempChangedKeys,
                 oldAddresses,
-                newAddresses
+                newAddresses,
+                msg.sender
             );
         }
         
@@ -241,7 +242,8 @@ contract RegistryBatchManager is
             emit RegistryEvents.BatchModuleChanged(
                 tempChangedKeys,
                 oldAddresses,
-                newAddresses
+                newAddresses,
+                msg.sender
             );
         }
         

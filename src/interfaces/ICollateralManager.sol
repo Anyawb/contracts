@@ -62,30 +62,10 @@ interface ICollateralManager {
     function getTotalCollateralByAsset(address asset) external view returns (uint256 total);
 
     /**
-     * @notice 查询用户总抵押物价值（以结算币计价）
-     * @param user 用户地址
-     * @return totalValue 用户总抵押价值
-     */
-    function getUserTotalCollateralValue(address user) external view returns (uint256 totalValue);
-
-    /**
-     * @notice 查询系统总抵押物价值（以结算币计价）
-     * @return totalValue 系统总抵押价值
-     */
-    function getTotalCollateralValue() external view returns (uint256 totalValue);
-
-    /**
      * @notice 查询用户所有抵押资产列表
      * @param user 用户地址
      * @return assets 用户抵押的资产地址数组
      */
     function getUserCollateralAssets(address user) external view returns (address[] memory assets);
 
-    /**
-     * @notice 计算指定数量资产的价值（以结算币计价）
-     * @param asset 资产地址
-     * @param amount 资产数量
-     * @return value 资产价值
-     */
-    function getAssetValue(address asset, uint256 amount) external view returns (uint256 value);
 } 

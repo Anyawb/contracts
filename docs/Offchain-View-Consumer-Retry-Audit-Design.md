@@ -198,11 +198,11 @@
 | `LendingEngineCore`<br/>`src/Vault/modules/lendingEngine/LendingEngineCore.sol` | `CacheUpdateFailed` | `CacheUpdateFailed(address,address,address,uint256,uint256,bytes)` | `user: address`<br/>`asset: address` | `viewAddr: address`<br/>`collateral: uint256`<br/>`debt: uint256`<br/>`reason: bytes` | 失败入队来源之一；与 `PositionView.CacheUpdateFailed` ABI 相同，用 `contract_address` 区分来源。 |
 | `LendingEngineCore` | `HealthPushFailed` | `HealthPushFailed(address,address,uint256,uint256,bytes)` | `user: address`<br/>`healthView: address` | `totalCollateral: uint256`<br/>`totalDebt: uint256`<br/>`reason: bytes` | 健康推送失败监控/重试来源；通常用于告警与运维排查。 |
 
-#### LiquidationDebtManager 事件
+#### LiquidationManager 事件
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `LiquidationDebtManager`<br/>`src/Vault/liquidation/modules/LiquidationDebtManager.sol` | `CacheUpdateFailed` | `CacheUpdateFailed(address,address,address,uint256,uint256,bytes)` | `user: address`<br/>`asset: address` | `viewAddr: address`<br/>`collateral: uint256`<br/>`debt: uint256`<br/>`reason: bytes` | 清算路径失败入队来源之一；同名同 ABI。 |
+| `LiquidationManager`<br/>`src/Vault/liquidation/modules/LiquidationManager.sol` | `CacheUpdateFailed` | `CacheUpdateFailed(address,address,address,uint256,uint256,bytes)` | `user: address`<br/>`asset: address` | `viewAddr: address`<br/>`collateral: uint256`<br/>`debt: uint256`<br/>`reason: bytes` | 清算路径失败入队来源之一；同名同 ABI。 |
 
 #### StatisticsView 事件
 

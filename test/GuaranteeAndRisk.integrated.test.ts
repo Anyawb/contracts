@@ -48,6 +48,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
   let guaranteeFund: GuaranteeFundManager;
   let earlyRepayGM: EarlyRepaymentGuaranteeManager;
   let riskView: RiskView;
+  let healthViewLite: any;
 
   // 账户
   let owner: any;
@@ -114,10 +115,19 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     await riskView.initialize(registry.target);
 
     // 4. 注册业务模块与 View
-    const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('KEY_VAULT_CORE'));
+    const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE'));
+    const KEY_HEALTH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW'));
     await registry.setModule(KEY_VAULT_CORE, vaultCore.target);
     await registry.setModule(KEY_GUARANTEE_FUND, guaranteeFund.target);
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')), acm.target);
+
+    // RiskView 依赖 HealthView 的缓存（getUserHealthFactor(uint256,bool)）
+    // 这里用轻量 Mock 使风险评估测试可控、可复现
+    const MockHealthViewLiteF = await ethers.getContractFactory('MockHealthViewLite');
+    healthViewLite = await MockHealthViewLiteF.deploy();
+    await healthViewLite.waitForDeployment();
+    await registry.setModule(KEY_HEALTH_VIEW, healthViewLite.target);
+
     if ((vaultCore as any).setRegistry) {
       await (vaultCore as any).setRegistry(registry.target);
     }
@@ -784,28 +794,28 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     });
 
     it('健康因子小于1.0时应标记为可清算', async function () {
-      // 注意：这需要设置实际的健康因子数据，在Mock环境下可能返回默认值
+      // RiskView.healthFactor 单位为 bps（10_000 = 100%）
+      await healthViewLite.setHealth(await user.getAddress(), 9_000, true);
       const assessment = await riskView.getUserRiskAssessment(await user.getAddress());
-      if (assessment.healthFactor < 1e18) {
-        expect(assessment.liquidatable).to.equal(true);
-        expect(assessment.warningLevel).to.equal(2); // CRITICAL
-      }
+      expect(assessment.healthFactor).to.equal(9_000n);
+      expect(assessment.liquidatable).to.equal(true);
+      expect(assessment.warningLevel).to.equal(2n); // CRITICAL
     });
 
     it('健康因子在1.0-1.1之间时应标记为警告', async function () {
+      await healthViewLite.setHealth(await user.getAddress(), 10_500, true);
       const assessment = await riskView.getUserRiskAssessment(await user.getAddress());
-      if (assessment.healthFactor >= 1e18 && assessment.healthFactor < 11e17) {
-        expect(assessment.liquidatable).to.equal(false);
-        expect(assessment.warningLevel).to.equal(1); // WARNING
-      }
+      expect(assessment.healthFactor).to.equal(10_500n);
+      expect(assessment.liquidatable).to.equal(false);
+      expect(assessment.warningLevel).to.equal(1n); // WARNING
     });
 
     it('健康因子大于等于1.1时应无警告', async function () {
+      await healthViewLite.setHealth(await user.getAddress(), 12_000, true);
       const assessment = await riskView.getUserRiskAssessment(await user.getAddress());
-      if (assessment.healthFactor >= 11e17) {
-        expect(assessment.liquidatable).to.equal(false);
-        expect(assessment.warningLevel).to.equal(0); // NONE
-      }
+      expect(assessment.healthFactor).to.equal(12_000n);
+      expect(assessment.liquidatable).to.equal(false);
+      expect(assessment.warningLevel).to.equal(0n); // NONE
     });
   });
 

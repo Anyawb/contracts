@@ -4,68 +4,116 @@ pragma solidity ^0.8.20;
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 
 /**
- * @title LiquidationAccessControl - 清算权限控制库
- * @dev 提供清算模块的权限控制功能，优化gas消耗
- * @notice 实现库方式的权限控制，相比接口方式节省约70%的gas
- * @dev 遵循 3.3 命名规范：PascalCase 合约名，camelCase 函数名，PascalCase 事件名
+ * @title LiquidationAccessControl - Liquidation Access Control Library
+ * @notice Implements library-based access control, saving approximately 70% gas compared to interface approach
+ * @dev Provides access control helpers for the liquidation module.
+ *
+ * Security:
+ * - This library does not enforce caller permissions by itself; callers MUST gate role-management writes.
+ * - Uses `msg.sender` as the actor when emitting events from internal calls.
  * @custom:security-contact security@example.com
  */
 library LiquidationAccessControl {
-    /// @dev 自定义错误，替代字符串 revert
+    /**
+     * @notice Thrown when an account does not have the required role.
+     */
     error LiquidationAccessControl__InsufficientPermission();
+    /**
+     * @notice Thrown when a provided account address is the zero address.
+     */
     error LiquidationAccessControl__InvalidAccountAddress();
+    /**
+     * @notice Thrown when attempting to grant a role that is already granted.
+     */
     error LiquidationAccessControl__RoleAlreadyGranted();
+    /**
+     * @notice Thrown when attempting to revoke/renounce a role that is not granted.
+     */
     error LiquidationAccessControl__RoleNotGranted();
+    /**
+     * @notice Thrown when an operation is not authorized for the caller.
+     */
     error LiquidationAccessControl__UnauthorizedOperation();
+    /**
+     * @notice Thrown when a role member index is out of bounds.
+     */
+    error LiquidationAccessControl__MemberNotFound();
+    /**
+     * @notice Thrown when two input arrays must have equal length but do not.
+     */
+    error LiquidationAccessControl__ArrayLengthMismatch();
+    /**
+     * @notice Thrown when an owner address is the zero address during initialization.
+     */
+    error LiquidationAccessControl__InvalidOwnerAddress();
+    /**
+     * @notice Thrown when a keeper address is the zero address during initialization or update.
+     */
+    error LiquidationAccessControl__InvalidKeeperAddress();
     /* ============ Storage Structure ============ */
     
     /**
-     * @notice 权限控制存储结构
-     * @dev 包含角色权限映射、账户角色列表、角色账户列表等
+     * @notice Access control storage structure
+     * @dev Contains role permission mappings, account role lists, role account lists, etc.
      */
     struct Storage {
-        /// @notice 角色权限映射
+        /// @notice Role permission mapping: roleKey => account => hasPermission
         mapping(bytes32 => mapping(address => bool)) roles;
         
-        /// @notice 账户拥有的角色列表
+        /// @notice List of roles owned by each account: account => roles[]
         mapping(address => bytes32[]) accountRoles;
         
-        /// @notice 角色拥有的账户列表
+        /// @notice List of accounts for each role: roleKey => accounts[]
         mapping(bytes32 => address[]) roleAccounts;
         
-        /// @notice 角色账户计数
+        /// @notice Count of accounts for each role: roleKey => count
         mapping(bytes32 => uint256) roleAccountCount;
         
-        /// @notice 角色管理员映射
+        /// @notice Admin role mapping for each role: roleKey => adminRoleKey
         mapping(bytes32 => bytes32) roleAdmins;
         
-        /// @notice 所有者地址
+        /// @notice Owner address
         address owner;
         
-        /// @notice Keeper地址
+        /// @notice Keeper address
         address keeper;
         
-        /// @notice 紧急暂停标志
+        /// @notice Emergency pause flag
         bool emergencyPaused;
     }
 
     /* ============ Events ============ */
     
-    /// @notice 当账户被授予角色时触发
+    /**
+     * @notice Emitted when a role is granted to an account.
+     * @param roleKey Role identifier (bytes32)
+     * @param targetAccount Account address that received the role
+     * @param senderAddr Address that granted the role
+     */
     event RoleGranted(
         bytes32 indexed roleKey, 
         address indexed targetAccount,
         address indexed senderAddr
     );
     
-    /// @notice 当账户角色被撤销时触发
+    /**
+     * @notice Emitted when a role is revoked from an account.
+     * @param roleKey Role identifier (bytes32)
+     * @param targetAccount Account address that lost the role
+     * @param senderAddr Address that revoked the role
+     */
     event RoleRevoked(
         bytes32 indexed roleKey, 
         address indexed targetAccount,
         address indexed senderAddr
     );
     
-    /// @notice 角色管理员变更事件
+    /**
+     * @notice Emitted when the admin role for a role is changed.
+     * @param roleKey Role identifier (bytes32)
+     * @param previousAdminRole Previous admin role identifier (bytes32)
+     * @param newAdminRole New admin role identifier (bytes32)
+     */
     event RoleAdminChanged(
         bytes32 indexed roleKey,
         bytes32 indexed previousAdminRole,
@@ -75,12 +123,17 @@ library LiquidationAccessControl {
     /* ============ Core Permission Functions ============ */
     
     /**
-     * @notice 检查角色权限 - 验证指定账户是否具有指定角色
-     * @notice Check role permission - Verify if specified account has specified role
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @param targetAccount 账户地址 Account address
-     * @return 是否具有权限 Whether has permission
+     * @notice Check if an account has a specific role.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @param targetAccount Account address to check
+     * @return Whether the account has the specified role
      */
     function hasRole(
         Storage storage self,
@@ -91,11 +144,17 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 要求角色权限 - 如果账户不具有指定角色则回滚
-     * @notice Require role permission - Revert if account doesn't have specified role
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @param targetAccount 账户地址 Account address
+     * @notice Require that an account has a specific role, revert otherwise.
+     * @dev Reverts if:
+     *      - targetAccount does not have roleKey (LiquidationAccessControl__InsufficientPermission)
+     *
+     * Security:
+     * - View-only function, no state changes
+     * - Used for access control checks
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @param targetAccount Account address to check
      */
     function requireRole(
         Storage storage self,
@@ -108,11 +167,18 @@ library LiquidationAccessControl {
     /* ============ Role Management Functions ============ */
     
     /**
-     * @notice 授予角色 - 为指定账户授予指定角色
-     * @notice Grant role - Grant specified role to specified account
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @param targetAccount 账户地址 Account address
+     * @notice Grant a role to an account.
+     * @dev Reverts if:
+     *      - targetAccount is zero address (LiquidationAccessControl__InvalidAccountAddress)
+     *      - targetAccount already has roleKey (LiquidationAccessControl__RoleAlreadyGranted)
+     *
+     * Security:
+     * - Internal function, caller must have appropriate permissions
+     * - Emits RoleGranted event
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @param targetAccount Account address to grant role to
      */
     function grantRole(
         Storage storage self,
@@ -128,11 +194,18 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 撤销角色 - 从指定账户撤销指定角色
-     * @notice Revoke role - Revoke specified role from specified account
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @param targetAccount 账户地址 Account address
+     * @notice Revoke a role from an account.
+     * @dev Reverts if:
+     *      - targetAccount is zero address (LiquidationAccessControl__InvalidAccountAddress)
+     *      - targetAccount does not have roleKey (LiquidationAccessControl__RoleNotGranted)
+     *
+     * Security:
+     * - Internal function, caller must have appropriate permissions
+     * - Emits RoleRevoked event
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @param targetAccount Account address to revoke role from
      */
     function revokeRole(
         Storage storage self,
@@ -148,11 +221,18 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 放弃角色 - 账户主动放弃指定角色
-     * @notice Renounce role - Account actively renounces specified role
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @param targetAccount 账户地址 Account address
+     * @notice Allow an account to renounce one of its own roles.
+     * @dev Reverts if:
+     *      - msg.sender != targetAccount (LiquidationAccessControl__UnauthorizedOperation)
+     *      - targetAccount does not have roleKey (LiquidationAccessControl__RoleNotGranted)
+     *
+     * Security:
+     * - Only the account itself can renounce its own role
+     * - Emits RoleRevoked event
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @param targetAccount Account address that will renounce the role
      */
     function renounceRole(
         Storage storage self,
@@ -170,11 +250,16 @@ library LiquidationAccessControl {
     /* ============ Role Hierarchy Functions ============ */
     
     /**
-     * @notice 获取角色管理员 - 获取指定角色的管理员角色
-     * @notice Get role admin - Get admin role for specified role
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @return 管理员角色标识 Admin role identifier
+     * @notice Get the admin role for a specific role.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @return Admin role identifier (bytes32), returns bytes32(0) if not set
      */
     function getRoleAdmin(
         Storage storage self,
@@ -184,11 +269,17 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 设置角色管理员 - 设置指定角色的管理员角色
-     * @notice Set role admin - Set admin role for specified role
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @param newAdminRole 管理员角色标识 Admin role identifier
+     * @notice Set the admin role for a specific role.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Internal function, caller must have appropriate permissions
+     * - Emits RoleAdminChanged event
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @param newAdminRole New admin role identifier (bytes32)
      */
     function setRoleAdmin(
         Storage storage self,
@@ -204,21 +295,31 @@ library LiquidationAccessControl {
     /* ============ Role Information Functions ============ */
     
     /**
-     * @notice 检查角色是否存在 - 检查指定角色是否已定义
-     * @notice Check if role exists - Check if specified role is defined
-     * @param roleKey 角色标识 Role identifier
-     * @return 角色是否存在 Whether role exists
+     * @notice Check if a role key is valid.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Pure function, no state access
+     *
+     * @param roleKey Role identifier (bytes32)
+     * @return Whether the role key is valid according to ActionKeys validation
      */
     function roleExists(bytes32 roleKey) internal pure returns (bool) {
         return ActionKeys.isValidActionKey(roleKey);
     }
 
     /**
-     * @notice 获取角色成员数量 - 获取指定角色的成员数量
-     * @notice Get role member count - Get member count for specified role
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @return 成员数量 Member count
+     * @notice Get the number of accounts that have a specific role.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @return Number of accounts with the specified role (uint256)
      */
     function getRoleMemberCount(
         Storage storage self,
@@ -228,12 +329,17 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 获取角色成员 - 获取指定角色在指定索引位置的成员
-     * @notice Get role member - Get member at specified index for specified role
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKey 角色标识 Role identifier
-     * @param memberIndex 成员索引 Member index
-     * @return 成员地址 Member address
+     * @notice Get the account address at a specific index for a role's member list.
+     * @dev Reverts if:
+     *      - memberIndex >= role member count (LiquidationAccessControl__MemberNotFound)
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param roleKey Role identifier (bytes32)
+     * @param memberIndex Index in the role's member list (0-based, uint256)
+     * @return Account address at the specified index
      */
     function getRoleMember(
         Storage storage self,
@@ -242,7 +348,7 @@ library LiquidationAccessControl {
     ) internal view returns (address) {
         address[] storage members = self.roleAccounts[roleKey];
         if (memberIndex >= members.length) {
-            revert("Member not found");
+            revert LiquidationAccessControl__MemberNotFound();
         }
         return members[memberIndex];
     }
@@ -250,12 +356,17 @@ library LiquidationAccessControl {
     /* ============ Batch Query Functions ============ */
     
     /**
-     * @notice 批量检查角色权限 - 验证多个账户是否具有指定角色
-     * @notice Batch check role permissions - Verify if multiple accounts have specified roles
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKeys 角色标识数组 Role identifiers array
-     * @param targetAccounts 账户地址数组 Account addresses array
-     * @return 权限结果数组 Permission results array
+     * @notice Batch check if multiple accounts have their corresponding roles.
+     * @dev Reverts if:
+     *      - roleKeys.length != targetAccounts.length (LiquidationAccessControl__ArrayLengthMismatch)
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param roleKeys Array of role identifiers (bytes32[])
+     * @param targetAccounts Array of account addresses to check
+     * @return Array of boolean results indicating if each account has its corresponding role
      */
     function batchHasRole(
         Storage storage self,
@@ -264,7 +375,7 @@ library LiquidationAccessControl {
     ) internal view returns (bool[] memory) {
         uint256 length = roleKeys.length;
         if (length != targetAccounts.length) {
-            revert("Array length mismatch");
+            revert LiquidationAccessControl__ArrayLengthMismatch();
         }
         
         bool[] memory results = new bool[](length);
@@ -277,11 +388,16 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 批量获取角色成员数量 - 获取多个角色的成员数量
-     * @notice Batch get role member counts - Get member counts for multiple roles
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKeys 角色标识数组 Role identifiers array
-     * @return 成员数量数组 Member counts array
+     * @notice Batch get member counts for multiple roles.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param roleKeys Array of role identifiers (bytes32[])
+     * @return Array of member counts for each role (uint256[])
      */
     function batchGetRoleMemberCount(
         Storage storage self,
@@ -299,11 +415,16 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 批量获取角色管理员 - 获取多个角色的管理员
-     * @notice Batch get role admins - Get admins for multiple roles
-     * @param self 权限控制存储 Permission control storage
-     * @param roleKeys 角色标识数组 Role identifiers array
-     * @return 管理员角色数组 Admin roles array
+     * @notice Batch get admin roles for multiple roles.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param roleKeys Array of role identifiers (bytes32[])
+     * @return Array of admin role identifiers for each role (bytes32[])
      */
     function batchGetRoleAdmin(
         Storage storage self,
@@ -323,11 +444,18 @@ library LiquidationAccessControl {
     /* ============ Initialization Functions ============ */
     
     /**
-     * @notice 初始化权限控制 - 设置初始配置和默认权限
-     * @notice Initialize access control - Set initial configuration and default permissions
-     * @param self 权限控制存储 Permission control storage
-     * @param initialOwner 初始所有者地址 Initial owner address
-     * @param initialKeeper 初始Keeper地址 Initial keeper address
+     * @notice Initialize access control with owner and keeper addresses.
+     * @dev Reverts if:
+     *      - initialOwner is zero address (LiquidationAccessControl__InvalidOwnerAddress)
+     *      - initialKeeper is zero address (LiquidationAccessControl__InvalidKeeperAddress)
+     *
+     * Security:
+     * - Internal function, should only be called during initialization
+     * - Grants default roles to owner and keeper
+     *
+     * @param self Permission control storage structure
+     * @param initialOwner Initial owner address
+     * @param initialKeeper Initial keeper address
      */
     function initialize(
         Storage storage self,
@@ -335,10 +463,10 @@ library LiquidationAccessControl {
         address initialKeeper
     ) internal {
         if (initialOwner == address(0)) {
-            revert("Invalid owner address");
+            revert LiquidationAccessControl__InvalidOwnerAddress();
         }
         if (initialKeeper == address(0)) {
-            revert("Invalid keeper address");
+            revert LiquidationAccessControl__InvalidKeeperAddress();
         }
         
         self.owner = initialOwner;
@@ -356,11 +484,16 @@ library LiquidationAccessControl {
     /* ============ Utility Functions ============ */
     
     /**
-     * @notice 检查是否为所有者 - 检查指定地址是否为所有者
-     * @notice Check if owner - Check if specified address is owner
-     * @param self 权限控制存储 Permission control storage
-     * @param account 账户地址 Account address
-     * @return 是否为所有者 Whether is owner
+     * @notice Check if an account is the owner.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param account Account address to check
+     * @return Whether the account is the owner
      */
     function isOwner(
         Storage storage self,
@@ -370,11 +503,16 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 检查是否为Keeper - 检查指定地址是否为Keeper
-     * @notice Check if keeper - Check if specified address is keeper
-     * @param self 权限控制存储 Permission control storage
-     * @param account 账户地址 Account address
-     * @return 是否为Keeper Whether is keeper
+     * @notice Check if an account is the keeper.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @param account Account address to check
+     * @return Whether the account is the keeper
      */
     function isKeeper(
         Storage storage self,
@@ -384,37 +522,54 @@ library LiquidationAccessControl {
     }
 
     /**
-     * @notice 检查是否暂停 - 检查合约是否处于暂停状态
-     * @notice Check if paused - Check if contract is paused
-     * @param self 权限控制存储 Permission control storage
-     * @return 是否暂停 Whether paused
+     * @notice Check if the contract is in paused state.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only function, no state changes
+     *
+     * @param self Permission control storage structure
+     * @return Whether the contract is paused
      */
     function isPaused(Storage storage self) internal view returns (bool) {
         return self.emergencyPaused;
     }
 
     /**
-     * @notice 设置暂停状态 - 设置合约的暂停状态
-     * @notice Set pause status - Set contract pause status
-     * @param self 权限控制存储 Permission control storage
-     * @param paused 是否暂停 Whether to pause
+     * @notice Set the pause status of the contract.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Internal function, caller must have appropriate permissions
+     *
+     * @param self Permission control storage structure
+     * @param paused Whether to pause (true) or unpause (false)
      */
     function setPaused(Storage storage self, bool paused) internal {
         self.emergencyPaused = paused;
     }
 
     /**
-     * @notice 设置Keeper - 设置新的Keeper地址
-     * @notice Set keeper - Set new keeper address
-     * @param self 权限控制存储 Permission control storage
-     * @param newKeeper 新的Keeper地址 New keeper address
+     * @notice Set a new keeper address and transfer liquidation permissions.
+     * @dev Reverts if:
+     *      - newKeeper is zero address (LiquidationAccessControl__InvalidKeeperAddress)
+     *
+     * Security:
+     * - Internal function, caller must have appropriate permissions
+     * - Automatically revokes liquidation role from old keeper
+     * - Automatically grants liquidation role to new keeper
+     *
+     * @param self Permission control storage structure
+     * @param newKeeper New keeper address
      */
     function setKeeper(
         Storage storage self,
         address newKeeper
     ) internal {
         if (newKeeper == address(0)) {
-            revert("Invalid keeper address");
+            revert LiquidationAccessControl__InvalidKeeperAddress();
         }
         
         // 撤销旧Keeper的清算权限
@@ -433,11 +588,17 @@ library LiquidationAccessControl {
     /* ============ Internal Helper Functions ============ */
     
     /**
-     * @notice 授予角色的内部实现
-     * @notice Internal implementation of granting role
-     * @param self 权限控制存储 Permission control storage
-     * @param role 角色哈希 Role hash
-     * @param account 目标账户 Target account
+     * @notice Internal implementation of granting a role to an account.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Private function, only called by grantRole
+     * - Updates role mappings and counters
+     *
+     * @param self Permission control storage structure
+     * @param role Role identifier (bytes32)
+     * @param account Account address to grant role to
      */
     function _grantRole(
         Storage storage self,
@@ -451,11 +612,18 @@ library LiquidationAccessControl {
     }
     
     /**
-     * @notice 撤销角色的内部实现
-     * @notice Internal implementation of revoking role
-     * @param self 权限控制存储 Permission control storage
-     * @param role 角色哈希 Role hash
-     * @param account 目标账户 Target account
+     * @notice Internal implementation of revoking a role from an account.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Private function, only called by revokeRole and renounceRole
+     * - Updates role mappings and counters
+     * - Removes role from both account-to-roles and role-to-accounts mappings
+     *
+     * @param self Permission control storage structure
+     * @param role Role identifier (bytes32)
+     * @param account Account address to revoke role from
      */
     function _revokeRole(
         Storage storage self,

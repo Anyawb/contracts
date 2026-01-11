@@ -481,7 +481,7 @@ function calculateExpectedInterest(address user, address asset, uint256 amount)
 ### 3.5 VaultAdmin（极简治理入口）
 
 #### 📋 **核心功能**
-- **参数下发**：最小健康因子路由至 LiquidationRiskManager
+- **参数下发**：阈值/最小健康因子 **SSOT** 下沉至 `KEY_LIQUIDATION_CONFIG_MANAGER → LiquidationConfigModule`；`LiquidationRiskManager` 仅做兼容透传与只读聚合
 - **升级鉴权**：自身 UUPS 升级授权
 - **只读**：Registry 地址查询
 
@@ -522,7 +522,15 @@ function batchProcessWithdraw(address user, address[] calldata assets, uint256[]
 function getCollateral(address user, address asset) external view returns (uint256)
 function getTotalCollateralByAsset(address asset) external view returns (uint256)
 function getUserCollateralAssets(address user) external view returns (address[] memory)
+```
+
+### 3.6.x PositionView（仓位视图 + 抵押估值）
+
+#### 🔧 **主要估值函数（只读，统一口径）**
+```solidity
 function getUserTotalCollateralValue(address user) external view returns (uint256)
+function getTotalCollateralValue() external view returns (uint256)
+function getAssetValue(address asset, uint256 amount) external view returns (uint256)
 ```
 
 ### 3.7 AssetWhitelist（资产白名单）
@@ -1236,26 +1244,14 @@ sequenceDiagram
 健康因子 = (抵押物价值 × 清算阈值) / 债务价值
 ```
 
-#### 🔧 **实现代码**
-```solidity
-// 清算系统中使用 LiquidationViewLibrary 计算健康因子（包含清算阈值）
-function calculateHealthFactor(
-    uint256 totalCollateralValue,
-    uint256 totalDebtValue,
-    uint256 liquidationThreshold
-) internal pure returns (uint256 healthFactor) {
-    if (totalDebtValue == 0) {
-        return 1e20; // MAX_HEALTH_FACTOR
-    }
-    // 健康因子 = (总抵押物价值 * 清算阈值) / 总债务价值
-    healthFactor = (totalCollateralValue * liquidationThreshold) / totalDebtValue;
-}
-```
+#### 🔧 **实现口径（对齐当前代码与架构指南）**
+
+- **健康因子数值口径（bps）**：`healthFactor = collateralValue / debtValue * 10_000`（在代码中由 `LiquidationRiskLib.calculateHealthFactor` 或 `HealthFactorLib.calcHealthFactor` 提供）。
+- **清算判定主路径（避免除法）**：以 `HealthFactorLib.isUnderCollateralized(collateralValue, debtValue, thresholdBps)` 判定是否低于阈值（阈值来自 `LiquidationConfigModule`/`LiquidationRiskManager` 的 SSOT 读取）。
 
 > **注意**：
-> - 清算系统使用 `LiquidationViewLibrary.calculateHealthFactor()`，该函数包含清算阈值参数
-> - `VaultMath.calculateHealthFactor()` 是简化版本，不包含清算阈值，主要用于基础计算
-> - VaultMath 库的详细功能和使用标准请参考 [第17章 VaultMath 数学计算标准](#17-vaultmath-数学计算标准)
+> - `LiquidationViewLibrary` 已移除，避免旧口径（如 1e18）与职责边界分叉。
+> - 预言机与优雅降级只在 `VaultLendingEngine`/`PositionView` 的估值路径内执行，清算域不直接访问预言机。
 
 ### 7.2 清算触发条件
 
@@ -1274,58 +1270,28 @@ function isLiquidatable(address user) external view returns (bool) {
 ### 7.3 清算执行流程（模块化清算系统）
 
 #### 📋 **清算步骤**
-`LiquidationCoreOperations.executeLiquidation()` 执行的核心步骤：
-1. **抵押物扣押**：通过 `LiquidationCollateralManager` 扣押用户抵押物
-2. **债务减少**：通过 `LiquidationDebtManager` 强制减少用户债务
-3. **奖励计算**：计算清算奖励金额
+对齐当前实现与 `docs/Architecture-Guide.md` 的 SSOT 口径：
+
+1. **keeper/机器人入口（推荐/默认，SSOT）**：调用 `SettlementManager.settleOrLiquidate(orderId)`  
+2. **清算分支直达账本写入**（由 `SettlementManager` 内部编排，或转交 `LiquidationManager` 执行器执行）：
+   - **扣押/分配抵押**：`CollateralManager.withdrawCollateralTo(...)`（执行器内部根据 `LiquidationPayoutManager` 的 recipients/rates 分配 shares）
+   - **减少债务**：`VaultLendingEngine.forceReduceDebt(...)`
+3. **单点推送（best-effort）**：`LiquidatorView.pushLiquidationUpdate/Batch`（失败不回滚账本写入；失败事件供链下重试）
 
 **完整的清算流程还包括**：
-- **清算检查**：`LiquidationRiskManager` 验证用户是否可清算（健康因子 < 清算阈值，默认 105%）
-- **风险评估**：计算清算风险和奖励
-- **奖励分配**：`LiquidationRewardDistributor` 分配清算残值（平台 3%，风险储备 2%，贷款方 17%，清算人 78%）
-- **保证金没收**：`LiquidationGuaranteeManager` 处理保证金没收（如果适用）
+- **清算检查（只读）**：`HealthView`/`LiquidationRiskManager`（健康因子 bps + 阈值 bps，风险分数 0-100）
+- **残值分配（SSOT）**：`LiquidationPayoutManager`（recipients/rates 与 shares 计算）
+- **预言机与优雅降级**：仅在 `VaultLendingEngine`/`PositionView` 估值路径内执行
 
 #### 🔧 **清算实现（LiquidationManager）**
-```solidity
-function liquidate(
-    address targetUser,
-    address collateralAsset,
-    address debtAsset,
-    uint256 collateralAmount,
-    uint256 debtAmount
-) external override whenNotPaused nonReentrant onlyLiquidator 
-    returns (uint256 bonus) 
-{
-    // 真实落地清算：扣押 → 减债 → 奖励计算 → 事件
-    bonus = LiquidationCoreOperations.executeLiquidation(
-        targetUser,
-        collateralAsset,
-        debtAsset,
-        collateralAmount,
-        debtAmount,
-        msg.sender,
-        liquidationConfigStorage,
-        _moduleCache,
-        _userCollateralSeizureRecords,
-        _userTotalLiquidationAmount,
-        _liquidatorCollateralStats
-    );
-
-    // 单点推送：仅通过 KEY_LIQUIDATION_VIEW（LiquidatorView）
-    _pushLiquidationEvent(
-        targetUser, collateralAsset, debtAsset, 
-        collateralAmount, debtAmount, msg.sender, bonus
-    );
-}
-```
+当前 `LiquidationManager` 的定位是“**直达账本执行器 + 单点推送**”，并保留显式参数入口用于测试/应急；keeper 常态入口应走 `SettlementManager.settleOrLiquidate(orderId)`。
 
 **清算系统架构**：
-- **LiquidationManager**：清算入口和协调器
-- **LiquidationRiskManager**：风险评估和健康因子检查
-- **LiquidationCollateralManager**：抵押物扣押管理
-- **LiquidationDebtManager**：债务减少管理
-- **LiquidationRewardManager**：奖励计算和分配
-- **LiquidationGuaranteeManager**：保证金没收管理
+- **SettlementManager**：唯一对外写入口（SSOT）
+- **LiquidationManager**：清算执行器（直达账本写入 + best-effort 单点推送）
+- **LiquidationRiskManager / HealthView**：风控只读聚合/缓存（不承载写入口）
+- **LiquidationPayoutManager**：残值分配 SSOT
+- **LiquidatorView**：DataPush 单点（链下消费与重试）
 
 详见 [清算系统集成总结文档](./liquidation-system-integration-summary.md)
 

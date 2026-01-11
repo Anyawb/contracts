@@ -11,7 +11,7 @@
  */
 
 import { expect } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -27,16 +27,20 @@ import type {
   MockERC20,
   MockVaultCoreView,
   MockLiquidationRiskManager,
+  PositionView,
 } from '../../types';
 
 // Module keys（与 ModuleKeys.sol 保持一致）
 const ModuleKeys = {
   KEY_CM: ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER')),
+  KEY_LE: ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE')),
   KEY_HEALTH_VIEW: ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW')),
   KEY_LIQUIDATION_RISK_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_RISK_MANAGER')),
   KEY_VAULT_CORE: ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE')),
   KEY_ACCESS_CONTROL: ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')),
   KEY_REWARD_MANAGER_V1: ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER_V1')),
+  KEY_PRICE_ORACLE: ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE')),
+  KEY_POSITION_VIEW: ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW')),
 };
 
 // Action keys（与 ActionKeys.sol 保持一致）
@@ -49,30 +53,39 @@ describe('VaultLendingEngine – refactor regression', function () {
     // Deploy mocks
     const Registry = await ethers.getContractFactory('MockRegistry');
     const registry = (await Registry.deploy()) as MockRegistry;
+    await registry.waitForDeployment();
 
     const ACM = await ethers.getContractFactory('MockAccessControlManager');
     const acm = (await ACM.deploy()) as MockAccessControlManager;
+    await acm.waitForDeployment();
 
     const CM = await ethers.getContractFactory('MockCollateralManager');
     const cm = (await CM.deploy()) as MockCollateralManager;
+    await cm.waitForDeployment();
 
     const VaultRouter = await ethers.getContractFactory('MockVaultRouter');
     const vaultRouter = (await VaultRouter.deploy()) as MockVaultRouter;
+    await vaultRouter.waitForDeployment();
 
     const HealthView = await ethers.getContractFactory('MockHealthView');
     const healthView = (await HealthView.deploy()) as MockHealthView;
+    await healthView.waitForDeployment();
 
     const RewardManager = await ethers.getContractFactory('MockRewardManager');
     const rewardManager = (await RewardManager.deploy()) as MockRewardManager;
+    await rewardManager.waitForDeployment();
 
     const PriceOracle = await ethers.getContractFactory('MockPriceOracle');
     const priceOracle = (await PriceOracle.deploy()) as MockPriceOracle;
+    await priceOracle.waitForDeployment();
 
     const LRM = await ethers.getContractFactory('MockLiquidationRiskManager');
     const lrm = (await LRM.deploy()) as MockLiquidationRiskManager;
+    await lrm.waitForDeployment();
 
     const ERC20 = await ethers.getContractFactory('MockERC20');
     const settlementToken = (await ERC20.deploy('Settlement', 'ST', ethers.parseEther('1000000'))) as MockERC20;
+    await settlementToken.waitForDeployment();
 
     // Configure oracle price
     // Using 1e8 (100000000) to match DEFAULT_MAX_REASONABLE_PRICE = 1e12
@@ -85,13 +98,27 @@ describe('VaultLendingEngine – refactor regression', function () {
 
     // Deploy LendingEngine
     const LendingEngine = await ethers.getContractFactory('VaultLendingEngine');
-    const lending = (await LendingEngine.deploy()) as VaultLendingEngine;
-    await lending.initialize(await priceOracle.getAddress(), await settlementToken.getAddress(), await registry.getAddress());
+    const lending = (await upgrades.deployProxy(
+      LendingEngine,
+      [await priceOracle.getAddress(), await settlementToken.getAddress(), await registry.getAddress()],
+      { kind: 'uups', initializer: 'initialize' }
+    )) as VaultLendingEngine;
+    await lending.waitForDeployment();
+
+    // Deploy PositionView for collateral valuation used by health push
+    const PositionViewFactory = await ethers.getContractFactory('PositionView');
+    const positionView = (await upgrades.deployProxy(
+      PositionViewFactory,
+      [await registry.getAddress()],
+      { kind: 'uups' }
+    )) as PositionView;
+    await positionView.waitForDeployment();
 
     // VaultCore mock with view resolver + forwarder
     // IMPORTANT: Deploy, configure, THEN register to Registry
     const VaultCoreView = await ethers.getContractFactory('MockVaultCoreView');
     const vaultCoreModule = await VaultCoreView.deploy();
+    await vaultCoreModule.waitForDeployment();
     await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
     await vaultCoreModule.setLendingEngine(await lending.getAddress());
 
@@ -121,10 +148,13 @@ describe('VaultLendingEngine – refactor regression', function () {
 
     await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, acmAddr);
     await registry.setModule(ModuleKeys.KEY_CM, cmAddr);
+    await registry.setModule(ModuleKeys.KEY_LE, await lending.getAddress());
     await registry.setModule(ModuleKeys.KEY_HEALTH_VIEW, healthViewAddr);
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, lrmAddr);
     await registry.setModule(ModuleKeys.KEY_VAULT_CORE, vaultCoreModuleAddr);
     await registry.setModule(ModuleKeys.KEY_REWARD_MANAGER_V1, rewardManagerAddr);
+    await registry.setModule(ModuleKeys.KEY_PRICE_ORACLE, await priceOracle.getAddress());
+    await registry.setModule(ModuleKeys.KEY_POSITION_VIEW, await positionView.getAddress());
 
     // Roles
     await acm.grantRole(ACTION_LIQUIDATE, liquidator.address);
@@ -132,7 +162,7 @@ describe('VaultLendingEngine – refactor regression', function () {
     // Seed collateral to get meaningful health factor
     await cm.depositCollateral(user.address, debtAsset, 200);
 
-    return { vaultCoreModule, vaultCore, liquidator, user, lending, registry, cm, vaultRouter, healthView, debtAsset, acm, priceOracle, settlementToken, lrm };
+    return { vaultCoreModule, vaultCore, liquidator, user, lending, registry, cm, vaultRouter, healthView, debtAsset, acm, priceOracle, settlementToken, lrm, positionView };
   }
 
   describe('onlyVaultCore guard', function () {
@@ -528,7 +558,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       // VaultRouter updated via pushUserPositionUpdate
       expect(await vaultRouter.getUserDebt(user.address, debtAsset)).to.equal(50);
       // Collateral unchanged in cm, debt recorded in ledger
-      expect(await cm.getUserTotalCollateralValue(user.address)).to.equal(200);
+      expect(await cm.getCollateral(user.address, debtAsset)).to.equal(200);
     });
 
     it('repay should reduce debt and push view/health', async function () {
@@ -554,7 +584,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(20);
       expect(await healthView.getUserHealthFactor(user.address)).to.be.gt(0);
       expect(await vaultRouter.getUserDebt(user.address, debtAsset)).to.equal(20);
-      expect(await cm.getUserTotalCollateralValue(user.address)).to.equal(200);
+      expect(await cm.getCollateral(user.address, debtAsset)).to.equal(200);
     });
 
     it('should handle multiple borrows and repays correctly', async function () {
@@ -628,7 +658,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       await lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 25);
 
       expect(await lending.getDebt(liquidator.address, debtAsset)).to.equal(15);
-      expect(await cm.getUserTotalCollateralValue(liquidator.address)).to.equal(0); // liquidator had no collateral seeded
+      expect(await cm.getCollateral(liquidator.address, debtAsset)).to.equal(0); // liquidator had no collateral seeded
       expect(await vaultRouter.getUserDebt(liquidator.address, debtAsset)).to.equal(15);
       expect(await healthView.getUserHealthFactor(liquidator.address)).to.be.gte(0);
     });

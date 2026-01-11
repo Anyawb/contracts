@@ -134,7 +134,7 @@ function deposit(address asset, uint256 amount) external {
    - ✅ `test/Vault/view/VaultRouter.cache-consistency.test.ts` - 20个测试全部通过
    - ✅ `test/VaultBusinessLogic.test.ts` - 73个测试全部通过
    - ✅ `test/Vault/modules/CollateralManager.liquidation-access.test.ts` - 1个测试通过
-   - ✅ `test/Vault/liquidation/LiquidationDebtManager.cache-push.test.ts` - 2个测试通过
+  - ✅ `test/Vault/liquidation/Liquidation.failure-scenarios.test.ts` - 清算失败场景/边界测试通过
 
 3. **测试覆盖范围**：
    - 模块间通信：验证所有模块能正确通过 `VaultCore.viewContractAddrVar()` 解析 `VaultRouter` 地址
@@ -181,7 +181,7 @@ function deposit(address asset, uint256 amount) external {
     - 验证业务推送接口（pushUserPositionUpdate）覆盖缓存并权限校验
     - 验证缓存有效期边界条件
   
-  - `test/Vault/liquidation/LiquidationDebtManager.cache-push.test.ts` - 清算缓存推送测试
+  - `test/Vault/liquidation/Liquidation.failure-scenarios.test.ts` - 清算失败场景/边界测试
     - 验证 View 地址缺失时应直接回滚
     - 验证推送到 View 失败时应回滚（不再静默处理）
 
@@ -191,9 +191,9 @@ function deposit(address asset, uint256 amount) external {
 当前代码中，推送失败时使用 `try-catch` 静默处理：
 
 ```solidity
-// src/Vault/liquidation/modules/LiquidationDebtManager.sol:162
-try IVaultRouter(viewAddr).pushUserPositionUpdate(user, asset, collateral, debt) { } 
-catch { }
+// Legacy note:
+// 旧 `LiquidationDebtManager` 模块族已移除；清算域的 best-effort 推送失败事件目前由 `LiquidationManager.CacheUpdateFailed`
+// 作为链下重试/告警来源之一（同名同 ABI，按 contract_address 区分来源）。
 ```
 #### 影响
 - ❌ 账本更新成功，但缓存未更新
@@ -203,13 +203,13 @@ catch { }
 #### 解决方案与现状
 - ✅ **事件已实现（限 guarded 读取失败）**：`PositionView` 在账本读取失败时 emit `CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason)`；主流程不中断。
 - ✅ **链下重试**：监听事件 → 队列 → admin 账户调用 `PositionView.retryUserPositionUpdate` 重读账本后重推。
-- ✅ **清算/借还强一致**：`LendingEngine/LiquidationDebtManager` 的视图推送失败会回滚，避免账本/缓存分叉。
+- ✅ **清算/借还强一致（当前口径）**：借还主路径推送失败可回滚；清算执行器的 View push 采用 best-effort，并通过 `CacheUpdateFailed` 供链下重试，避免把缓存问题放大为“资金层不可用”。
 
 #### 测试文件：
 
 - **主要测试文件**：
   - `test/Vault/view/PositionView.cache-validity.test.ts` - 验证账本读取失败时发出 `CacheUpdateFailed` 事件
-  - `test/Vault/liquidation/LiquidationDebtManager.cache-push.test.ts` - 验证清算路径推送失败发出事件（不回滚）
+  - `test/Vault/liquidation/Liquidation.failure-scenarios.test.ts` - 验证清算路径失败场景与事件可观测性
 
 ### 3. 并发更新问题 ⚠️ **中风险**
 
@@ -902,7 +902,7 @@ function _pushUserPositionToView(address user, address asset) internal {
 - 覆盖测试：
   - `test/Vault/VaultLendingEngine.dual-entry.test.ts`（通过）：borrow 操作在 VaultRouter revert 时仍成功完成，发出 `CacheUpdateFailed` 事件而不回滚。
   - `test/Vault/view/PositionView.cache-validity.test.ts`（通过）：账本读取失败、债务读取失败时发出 `CacheUpdateFailed`，支持管理员通过 `retryUserPositionUpdate` 手动重试。
-  - `test/Vault/liquidation/LiquidationDebtManager.cache-push.test.ts`（通过）：清算模块的仓位推送也采用相同的最佳努力模式。
+  - `test/Vault/liquidation/Liquidation.failure-scenarios.test.ts`（通过）：清算模块的推送失败可观测（事件）且不阻断主流程的路径被覆盖。
   - 相关 mock：`src/Mocks/RevertingVaultRouter.sol`。
   - 测试结果：相关用例全部通过。
 

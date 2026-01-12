@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { Registry } from "../registry/Registry.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
@@ -29,7 +30,7 @@ import { ZeroAddress } from "../errors/StandardErrors.sol";
  *      - 事件驱动：发出标准化事件，支持数据库收集
  *      - 存储优化：统计存储空间节省情况
  */
-contract DegradationStorage is Initializable {
+contract DegradationStorage is Initializable, UUPSUpgradeable {
     // ============ Registry ==========
     /// @notice Registry合约地址，用于模块解析和权限验证
     address private _registryAddr;
@@ -187,8 +188,17 @@ contract DegradationStorage is Initializable {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if(initialRegistryAddr==address(0)) revert ZeroAddress();
+        __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
         _initializePredefinedHealthDetails();
+    }
+
+    /* ============ UUPS ============ */
+    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry onlyAdmin {
+        if (newImplementation == address(0)) revert ZeroAddress();
+        require(newImplementation.code.length > 0, "DegradationStorage: invalid implementation");
+        IAccessControlManager(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL))
+            .requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
     }
 
     /**

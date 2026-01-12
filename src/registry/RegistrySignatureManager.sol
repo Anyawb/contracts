@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -35,7 +35,7 @@ import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 contract RegistrySignatureManager is 
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
+    ReentrancyGuardUpgradeable,
     PausableUpgradeable,
     EIP712Upgradeable,
     UUPSUpgradeable
@@ -79,9 +79,10 @@ contract RegistrySignatureManager is
         require(upgradeAdmin_ != address(0), "Invalid admin");
         if (initialOwner == address(0)) revert ZeroAddress();
         __Ownable_init(initialOwner);
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __Pausable_init();
         __EIP712_init("Registry", "1");
+        __UUPSUpgradeable_init();
         
         // 设置升级管理员
         _upgradeAdmin = upgradeAdmin_;
@@ -102,8 +103,7 @@ contract RegistrySignatureManager is
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external whenNotPaused {
-        _reentrancyGuardEnter();
+    ) external whenNotPaused nonReentrant {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         if (block.timestamp > deadline) revert SignatureExpired(deadline, block.timestamp);
         
@@ -130,7 +130,6 @@ contract RegistrySignatureManager is
         
         // 发出签名授权事件
         emit RegistryEvents.ModuleUpgradePermitted(key, newAddr, signer, nonce);
-        _reentrancyGuardExit();
     }
 
     /// @notice 通过 EIP-712 签名授权批量模块升级
@@ -143,8 +142,7 @@ contract RegistrySignatureManager is
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external whenNotPaused {
-        _reentrancyGuardEnter();
+    ) external whenNotPaused nonReentrant {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         if (block.timestamp > deadline) revert SignatureExpired(deadline, block.timestamp);
         if (keys.length != addresses.length) revert MismatchedArrayLengths(keys.length, addresses.length);
@@ -172,7 +170,6 @@ contract RegistrySignatureManager is
         
         // 发出批量签名授权事件
         emit RegistryEvents.BatchModuleUpgradePermitted(keys, addresses, signer, nonce);
-        _reentrancyGuardExit();
     }
 
     // ============ View Functions ============
@@ -216,10 +213,14 @@ contract RegistrySignatureManager is
     /// @dev 使用内部升级管理员，避免外部依赖
     /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
     function _authorizeUpgrade(address newImplementation) internal override {
-        // 使用内部升级管理员，避免外部依赖
-        if (msg.sender != _upgradeAdmin) revert UpgradeNotAuthorized(msg.sender, _upgradeAdmin);
+        // Registry 家族：owner 必须具备升级权（docs/Architecture-Guide.md）。
+        // 为兼容历史用法，保留 upgradeAdmin 作为“可选额外升级者”。
+        if (msg.sender != owner() && msg.sender != _upgradeAdmin) {
+            revert UpgradeNotAuthorized(msg.sender, owner());
+        }
         
         // 防御式编程：验证新实现地址是否为合约
+        if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
         
         emit VaultTypes.ActionExecuted(

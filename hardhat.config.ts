@@ -75,7 +75,19 @@ const config: HardhatUserConfig = {
   },
   contractSizer: {
     // 仅关注主合约体积，避免 mock/辅助合约噪音
-    only: ['VaultLendingEngine'],
+    // Registry audit: include Registry family + cache maintainer.
+    only: [
+      'VaultLendingEngine',
+      'Registry',
+      'RegistryCore',
+      'RegistryUpgradeManager',
+      'RegistryAdmin',
+      'RegistryDynamicModuleKey',
+      'RegistrySignatureManager',
+      'RegistryBatchManager',
+      'RegistryHistoryManager',
+      'CacheMaintenanceManager',
+    ],
     runOnCompile: false,
     strict: false,
   },

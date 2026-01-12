@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 // 移除 PausableUpgradeable 以保持单一职责
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -42,7 +42,7 @@ import { IAccessControlManager } from "../../interfaces/IAccessControlManager.so
 contract EarlyRepaymentGuaranteeManager is 
     Initializable, 
     UUPSUpgradeable, 
-    ReentrancyGuardSlimUpgradeable
+    ReentrancyGuardUpgradeable
 {
     using SafeERC20 for IERC20;
 
@@ -242,7 +242,7 @@ contract EarlyRepaymentGuaranteeManager is
         uint256 initialPlatformFeeRate
     ) external initializer {
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         
         if (initialVaultCoreAddr == address(0)) revert ZeroAddress();
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -433,8 +433,7 @@ contract EarlyRepaymentGuaranteeManager is
         uint256 principal,
         uint256 promisedInterest,
         uint256 termDays
-    ) external onlyVaultCore onlyValidRegistry returns (uint256 guaranteeId) {
-        _reentrancyGuardEnter();
+    ) external onlyVaultCore onlyValidRegistry nonReentrant returns (uint256 guaranteeId) {
         // 基础参数验证
         if (borrower == address(0)) revert ZeroAddress();
         if (lender == address(0)) revert ZeroAddress();
@@ -492,8 +491,6 @@ contract EarlyRepaymentGuaranteeManager is
         
         // 发出标准化动作事件
         emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
-
-        _reentrancyGuardExit();
         return guaranteeId;
     }
 
@@ -507,8 +504,7 @@ contract EarlyRepaymentGuaranteeManager is
         address borrower,
         address asset,
         uint256 actualRepayAmount
-    ) external onlyVaultCore onlyValidRegistry returns (EarlyRepaymentResult memory result) {
-        _reentrancyGuardEnter();
+    ) external onlyVaultCore onlyValidRegistry nonReentrant returns (EarlyRepaymentResult memory result) {
         if (borrower == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (actualRepayAmount == 0) revert AmountIsZero();
@@ -557,8 +553,6 @@ contract EarlyRepaymentGuaranteeManager is
         
         // 发出标准化动作事件
         emit VaultTypes.ActionExecuted(ActionKeys.ACTION_REPAY, ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY), msg.sender, block.timestamp);
-
-        _reentrancyGuardExit();
         return result;
     }
 
@@ -570,8 +564,7 @@ contract EarlyRepaymentGuaranteeManager is
     function processDefault(
         address borrower,
         address asset
-    ) external onlyVaultCore onlyValidRegistry returns (uint256 forfeitedAmount) {
-        _reentrancyGuardEnter();
+    ) external onlyVaultCore onlyValidRegistry nonReentrant returns (uint256 forfeitedAmount) {
         if (borrower == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         
@@ -612,8 +605,6 @@ contract EarlyRepaymentGuaranteeManager is
         
         // 发出标准化动作事件
         emit VaultTypes.ActionExecuted(ActionKeys.ACTION_LIQUIDATE, ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE), msg.sender, block.timestamp);
-
-        _reentrancyGuardExit();
         return forfeitedAmount;
     }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ReentrancyGuardSlim } from "../utils/ReentrancyGuardSlim.sol";
+import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -42,7 +42,7 @@ interface IVaultCoreWithRegistry { function getRegistry() external view returns 
 /// @title RWAAutoLeveragedStrategy
 /// @notice 高级RWA自动杠杆策略合约，支持多资产、动态杠杆、风险控制
 /// @dev 集成完整的DeFi协议，提供专业级杠杆交易体验
-contract RWAAutoLeveragedStrategy is ReentrancyGuardSlim, Pausable, Ownable {
+contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     using SafeERC20 for IERC20;
     using Math for uint256;
 
@@ -216,8 +216,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuardSlim, Pausable, Ownable {
         address asset,
         uint256 collateralAmount,
         uint256 leverageRatio
-    ) external whenNotPaused {
-        _reentrancyGuardEnter();
+    ) external whenNotPaused nonReentrant {
         // 验证参数
         if (collateralAmount == 0) revert AmountIsZero();
         if (!assetConfigs[asset].isSupported) revert AssetNotSupported();
@@ -281,7 +280,6 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuardSlim, Pausable, Ownable {
         settlementToken.safeTransfer(msg.sender, borrowAmount);
         
         emit PositionOpened(msg.sender, asset, collateralAmount, borrowAmount, leverageRatio);
-        _reentrancyGuardExit();
     }
     
     /// @notice 关闭杠杆仓位
@@ -290,8 +288,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuardSlim, Pausable, Ownable {
     function closePosition(
         address asset,
         uint256 repayAmount
-    ) external whenNotPaused {
-        _reentrancyGuardEnter();
+    ) external whenNotPaused nonReentrant {
         Position storage position = positions[msg.sender];
         if (!position.isActive) revert PositionNotFound();
         if (asset != position.collateralAsset) revert Strategy__AssetMismatch();
@@ -337,7 +334,6 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuardSlim, Pausable, Ownable {
         }
         
         lastOperationTime[msg.sender] = block.timestamp;
-        _reentrancyGuardExit();
     }
     
     /// @notice 再平衡仓位
@@ -346,8 +342,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuardSlim, Pausable, Ownable {
     function rebalancePosition(
         address asset,
         uint256 newLeverageRatio
-    ) external whenNotPaused {
-        _reentrancyGuardEnter();
+    ) external whenNotPaused nonReentrant {
         Position storage position = positions[msg.sender];
         if (!position.isActive) revert PositionNotFound();
         if (newLeverageRatio < config.minLeverage || newLeverageRatio > config.maxLeverage) {
@@ -391,7 +386,6 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuardSlim, Pausable, Ownable {
         lastOperationTime[msg.sender] = block.timestamp;
         
         emit PositionRebalanced(msg.sender, asset, oldLeverage, newLeverageRatio, currentHealthFactor);
-        _reentrancyGuardExit();
     }
     
     /// @notice 紧急平仓（仅限紧急情况）

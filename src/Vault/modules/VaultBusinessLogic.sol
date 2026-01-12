@@ -5,7 +5,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -29,7 +29,7 @@ import { ILenderPoolVault } from "../../interfaces/ILenderPoolVault.sol";
 /// @title VaultBusinessLogic
 /// @notice 业务逻辑模块（纯业务 + 基础 Registry 能力）；数据推送与事件聚合由 VaultRouter 统一负责
 /// @dev 使用 VaultBusinessLogicLibrary 提取重复逻辑，提升可读性与复用性
-/// @dev 支持 UUPS 升级模式；集成 ReentrancyGuardSlimUpgradeable、PausableUpgradeable
+/// @dev 支持 UUPS 升级模式；集成 ReentrancyGuardUpgradeable、PausableUpgradeable
 /// @dev 与 ActionKeys/ModuleKeys 集成；权限由 AccessControlManager 校验
 /// @dev 通过 Registry 模块化管理按需解析模块地址
 /// @dev 集成 GracefulDegradation 库，提供价格预言机异常时的优雅降级路径
@@ -45,7 +45,7 @@ interface IVaultCoreMinimal {
 contract VaultBusinessLogic is 
     Initializable, 
     UUPSUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
+    ReentrancyGuardUpgradeable,
     PausableUpgradeable 
 {
     using SafeERC20 for IERC20;
@@ -152,7 +152,7 @@ contract VaultBusinessLogic is
     /// @param initialSettlementTokenAddr 结算币地址
     function initialize(address initialRegistryAddr, address initialSettlementTokenAddr) external initializer {
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __Pausable_init();
         
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -212,8 +212,7 @@ contract VaultBusinessLogic is
         address asset,
         uint256 amount,
         bytes32 lendIntentHash
-    ) external onlyValidRegistry whenNotPaused {
-        _reentrancyGuardEnter();
+    ) external onlyValidRegistry whenNotPaused nonReentrant {
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
         _checkAssetWhitelist(asset);
@@ -223,19 +222,16 @@ contract VaultBusinessLogic is
         // 标记保留
         _lendReserves.reserve(lenderSigner, asset, amount, lendIntentHash);
         VaultBusinessLogicLibrary.emitBusinessEvents("reserveForLending", lenderSigner, asset, amount, ActionKeys.ACTION_SET_PARAMETER);
-        _reentrancyGuardExit();
     }
 
     /// @notice 取消资金保留（未撮合前可撤回）
-    function cancelReserve(bytes32 lendIntentHash) external onlyValidRegistry whenNotPaused {
-        _reentrancyGuardEnter();
+    function cancelReserve(bytes32 lendIntentHash) external onlyValidRegistry whenNotPaused nonReentrant {
         (address asset, uint256 amount) = _lendReserves.cancel(lendIntentHash, msg.sender);
         if (amount > 0) {
             address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
             ILenderPoolVault(pool).transferOut(asset, msg.sender, amount);
         }
         VaultBusinessLogicLibrary.emitBusinessEvents("cancelReserve", msg.sender, asset, amount, ActionKeys.ACTION_SET_PARAMETER);
-        _reentrancyGuardExit();
     }
 
     /// @notice 成交落地（先到先得）：校验意向并原子完成拨付/记账/订单创建/费用分发（净额发放）
@@ -244,8 +240,7 @@ contract VaultBusinessLogic is
         SettlementIntentLib.LendIntent[] calldata lendIntents,
         bytes calldata sigBorrower,
         bytes[] calldata sigLenders
-    ) external onlyValidRegistry whenNotPaused {
-        _reentrancyGuardEnter();
+    ) external onlyValidRegistry whenNotPaused nonReentrant {
         // EIP-712 域值
         bytes32 domain = SettlementIntentLib.buildDomainSeparator(
             "RwaLending",
@@ -312,15 +307,13 @@ contract VaultBusinessLogic is
             SettlementIntentLib.markMatched(_matchedIntents, lHash);
         }
         // 事件与数据推送统一由 LendingEngine + LoanNFT 完成；业务层不再发撮合事件
-        _reentrancyGuardExit();
     }
 
     /// @notice 用户借款
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @param amount 借款金额
-    function borrow(address user, address asset, uint256 amount) external onlyValidRegistry whenNotPaused {
-        _reentrancyGuardEnter();
+    function borrow(address user, address asset, uint256 amount) external onlyValidRegistry whenNotPaused nonReentrant {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
         
@@ -345,7 +338,6 @@ contract VaultBusinessLogic is
         }
 
         VaultBusinessLogicLibrary.emitBusinessEvents("borrow", user, asset, amount, ActionKeys.ACTION_BORROW);
-        _reentrancyGuardExit();
     }
 
     /* ============ Liquidation Orchestration removed: use LiquidationManager ============ */
@@ -363,8 +355,7 @@ contract VaultBusinessLogic is
         uint256 amount,
         uint256 annualRateBps,
         uint16 termDays
-    ) external onlyValidRegistry whenNotPaused returns (uint256 orderId) {
-        _reentrancyGuardEnter();
+    ) external onlyValidRegistry whenNotPaused nonReentrant returns (uint256 orderId) {
         // 迁移：改由撮合结算 finalizeMatch 调度，避免业务层直接放款与锁保
         // 保留函数签名以兼容旧脚本；直接转调更安全的结算路径
         // lender 字段口径：写入“资金池合约地址”（LenderPoolVault），而非外部传入地址
@@ -381,7 +372,6 @@ contract VaultBusinessLogic is
             annualRateBps
         );
         VaultBusinessLogicLibrary.emitBusinessEvents("borrowWithRate", user, asset, amount, ActionKeys.ACTION_BORROW);
-        _reentrancyGuardExit();
     }
 
     /// @notice 用户还款
@@ -434,8 +424,7 @@ contract VaultBusinessLogic is
     /// @param user 用户地址
     /// @param assets 资产地址数组
     /// @param amounts 金额数组
-    function batchBorrow(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused {
-        _reentrancyGuardEnter();
+    function batchBorrow(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused nonReentrant {
         VaultBusinessLogicLibrary.validateBatchParams(assets, amounts);
         address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
 
@@ -466,15 +455,13 @@ contract VaultBusinessLogic is
             msg.sender,
             block.timestamp
         );
-        _reentrancyGuardExit();
     }
 
     /// @notice 批量还款
     /// @param user 用户地址
     /// @param assets 资产地址数组
     /// @param amounts 金额数组
-    function batchRepay(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused {
-        _reentrancyGuardEnter();
+    function batchRepay(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused nonReentrant {
         VaultBusinessLogicLibrary.validateBatchParams(assets, amounts);
         
         _getModuleAddress(ModuleKeys.KEY_RM);
@@ -497,7 +484,6 @@ contract VaultBusinessLogic is
             msg.sender,
             block.timestamp
         );
-        _reentrancyGuardExit();
     }
 
     /// @notice 批量提取

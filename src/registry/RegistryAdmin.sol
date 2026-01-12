@@ -3,14 +3,16 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { VaultTypes } from "../Vault/VaultTypes.sol";
 import { 
     ZeroAddress, 
-    InvalidCaller
+    InvalidCaller,
+    NotAContract
 } from "../errors/StandardErrors.sol";
 import { RegistryStorage } from "./RegistryStorageLibrary.sol";
 import { RegistryEvents } from "./RegistryEventsLibrary.sol";
@@ -21,8 +23,9 @@ import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 contract RegistryAdmin is 
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
-    PausableUpgradeable
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable,
+    UUPSUpgradeable
 {
     using RegistryStorage for RegistryStorage.Layout;
 
@@ -42,10 +45,17 @@ contract RegistryAdmin is
     function initialize(address initialOwner) external initializer {
         if (initialOwner == address(0)) revert ZeroAddress();
         __Ownable_init(initialOwner);
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __Pausable_init();
+        __UUPSUpgradeable_init();
         // 统一初始化（默认 minDelay=0；如需设定由 Registry 或紧急入口完成）
         RegistryStorage.initializeRegistryStorage(initialOwner, 0);
+    }
+
+    /* ============ UUPS ============ */
+    function _authorizeUpgrade(address newImplementation) internal view override onlyOwner {
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ Admin Functions ============

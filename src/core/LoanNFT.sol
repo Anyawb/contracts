@@ -6,7 +6,7 @@ import "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721Enumer
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 import "@openzeppelin/contracts/utils/Base64.sol";
 
@@ -57,7 +57,7 @@ contract LoanNFT is
     ERC721Upgradeable,
     ERC721EnumerableUpgradeable,
     PausableUpgradeable,
-    ReentrancyGuardSlimUpgradeable,
+    ReentrancyGuardUpgradeable,
     UUPSUpgradeable,
     ILoanNFT,
     IRegistryUpgradeEvents
@@ -167,7 +167,7 @@ contract LoanNFT is
      *      - ERC721EnumerableUpgradeable: 代币枚举功能（避免冗余存储）
      *      - UUPSUpgradeable: 可升级代理功能
      *      - PausableUpgradeable: 暂停功能
-     *      - ReentrancyGuardSlimUpgradeable: 重入保护
+     *      - ReentrancyGuardUpgradeable: 重入保护
      */
     function initialize(
         string memory name_,
@@ -181,7 +181,7 @@ contract LoanNFT is
         __ERC721Enumerable_init();
         __UUPSUpgradeable_init();
         __Pausable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
 
         _registryAddr = initialRegistryAddr;
         _baseTokenURI = baseTokenURI_;
@@ -323,8 +323,7 @@ contract LoanNFT is
     function mintLoanCertificate(
         address to,
         LoanMetadata calldata data
-    ) external override whenNotPaused onlyValidRegistry returns (uint256 tokenId) {
-        _reentrancyGuardEnter();
+    ) external override whenNotPaused onlyValidRegistry nonReentrant returns (uint256 tokenId) {
         _requireRole(MINTER_ROLE_VALUE, msg.sender);
         if (to == address(0)) revert ZeroAddress();
         if (_loanMinted[data.loanId]) revert LoanNFT__LoanAlreadyMinted(data.loanId);
@@ -354,7 +353,6 @@ contract LoanNFT is
             DataPushTypes.DATA_TYPE_LOAN_NFT_MINTED,
             abi.encode(to, tokenId, data.loanId, data.principal, data.rate, data.term, block.timestamp)
         );
-        _reentrancyGuardExit();
     }
 
     /**

@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
@@ -34,7 +34,7 @@ contract Registry is
     IRegistry,
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
+    ReentrancyGuardUpgradeable,
     UUPSUpgradeable,
     PausableUpgradeable
 {
@@ -117,7 +117,7 @@ contract Registry is
         if (initialOwner == address(0)) revert ZeroAddress();
         
         __Ownable_init(initialOwner);
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
         __Pausable_init();
         
@@ -625,8 +625,7 @@ contract Registry is
 
     /// @notice Execute a scheduled module upgrade.
     /// @param key Module key.
-    function executeModuleUpgrade(bytes32 key) external override onlyOwner whenNotPaused {
-        _reentrancyGuardEnter();
+    function executeModuleUpgrade(bytes32 key) external override onlyOwner whenNotPaused nonReentrant {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[key];
@@ -640,7 +639,6 @@ contract Registry is
         delete layout.pendingUpgrades[key];
         emit RegistryEvents.ModuleUpgraded(key, oldAddress, newAddr, msg.sender);
         _recordUpgradeHistory(key, oldAddress, newAddr, msg.sender);
-        _reentrancyGuardExit();
     }
 
     /// @notice Emergency admin: cancel all pending upgrades.

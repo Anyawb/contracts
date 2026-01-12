@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { 
@@ -21,8 +22,9 @@ import { RegistryHistoryManager } from "./RegistryHistoryManager.sol";
 /// @dev 负责处理Registry的批量操作功能
 contract RegistryBatchManager is 
     OwnableUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
-    PausableUpgradeable
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable,
+    UUPSUpgradeable
 {
     // ============ Constants ============
     uint256 private constant MAX_BATCH_SIZE = 50; // 批量操作上限
@@ -43,10 +45,17 @@ contract RegistryBatchManager is
     function initialize(address _historyManager, address initialOwner) external initializer {
         if (initialOwner == address(0)) revert ZeroAddress();
         __Ownable_init(initialOwner);
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __Pausable_init();
+        __UUPSUpgradeable_init();
         
         historyManager = RegistryHistoryManager(_historyManager);
+    }
+
+    /* ============ UUPS ============ */
+    function _authorizeUpgrade(address newImplementation) internal view override onlyOwner {
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ 模块设置函数 ============

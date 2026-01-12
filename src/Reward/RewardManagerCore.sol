@@ -16,7 +16,7 @@ import {
 } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 
 /// @title RewardManagerCore - 积分管理核心业务逻辑
@@ -31,7 +31,7 @@ import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 /// @dev - repay(duration==0 且 hfHighEnough==true)：释放锁定积分并铸币
 /// @dev - repay(hfHighEnough==false)：不释放，并按参数走扣罚/欠分账本
 
-contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSlimUpgradeable, RewardModuleBase {
+contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, RewardModuleBase {
     // ========== Read-gate (privacy hardening) ==========
     /// @notice 读取权限被拒绝（read-gate 开启时，只有白名单 reader 可读取 RMCore 的 get* 查询）
     error RewardManagerCore__UnauthorizedReader(address caller);
@@ -199,7 +199,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
     function initialize(address initialRegistryAddr, uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         _registryAddr = initialRegistryAddr;
         _basePointPerHundredUsd = baseUsd;
         _durationPointPerDay = perDay;
@@ -256,8 +256,11 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
     /// @param amount 借款金额
     /// @param duration 借款时长
     /// @param hfHighEnough 健康因子是否足够
-    function onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough) external onlyValidRegistry {
-        _reentrancyGuardEnter();
+    function onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough)
+        external
+        onlyValidRegistry
+        nonReentrant
+    {
         // 收紧入口：仅允许 RewardManager 调用，统一路径为 LE -> RM -> RMCore
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) {
@@ -276,7 +279,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
 
         // 本金不足 1000 USDC 不计分（不锁定、不计合格借款）
         if (duration > 0 && amount < MIN_ELIGIBLE_PRINCIPAL) {
-            _reentrancyGuardExit();
             return;
         }
 
@@ -286,7 +288,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
             _lockedPoints[user] += points;
             // 借款时以 duration 推导 maturity：取“最近一次”即可
             _lockedMaturity[user] = block.timestamp + duration;
-            _reentrancyGuardExit();
             return;
         }
 
@@ -337,7 +338,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
                 _lockedMaturity[user] = 0;
                 _onTimeRepayCount[user] += 1;
             }
-            _reentrancyGuardExit();
             return;
         }
 
@@ -374,7 +374,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
                 }
             }
         }
-        _reentrancyGuardExit();
     }
 
     /// @notice LendingEngine 在 borrow/repay(足额) 后调用（V2：按订单）
@@ -387,8 +386,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
         uint256 amount,
         uint256 maturity,
         uint8 outcome
-    ) external onlyValidRegistry {
-        _reentrancyGuardEnter();
+    ) external onlyValidRegistry nonReentrant {
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) {
             emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
@@ -405,12 +403,10 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
             }
             if (_lockedPointsByOrderId[orderId] != 0) {
                 // 幂等：同一订单重复回调忽略
-                _reentrancyGuardExit();
                 return;
             }
             // 本金不足 1000 USDC 不计分/不锁定
             if (amount < MIN_ELIGIBLE_PRINCIPAL) {
-                _reentrancyGuardExit();
                 return;
             }
             uint256 points = 1e18;
@@ -420,14 +416,12 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
             _lockedPointsByOrderId[orderId] = points;
             _lockedUserByOrderId[orderId] = user;
             _lockedMaturityByOrderId[orderId] = maturity;
-            _reentrancyGuardExit();
             return;
         }
 
         // Repay：必须能找到该 orderId 的锁定记录；若已处理/未锁定则幂等忽略
         uint256 locked = _lockedPointsByOrderId[orderId];
         if (locked == 0) {
-            _reentrancyGuardExit();
             return;
         }
         address lockedUser = _lockedUserByOrderId[orderId];
@@ -486,13 +480,11 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
                 }
             }
             _onTimeRepayCount[user] += 1;
-            _reentrancyGuardExit();
             return;
         }
 
         // outcome == 2：提前足额 → 不发放、不处罚（锁定作废）
         if (outcome == 2) {
-            _reentrancyGuardExit();
             return;
         }
 
@@ -500,12 +492,10 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
         if (outcome == 3) {
             uint256 bps = _latePenaltyBps;
             if (bps == 0) {
-                _reentrancyGuardExit();
                 return;
             }
             uint256 penalty = (locked * bps) / 10000;
             if (penalty == 0) {
-                _reentrancyGuardExit();
                 return;
             }
             try _getRewardToken().burnPoints(user, penalty) {
@@ -522,12 +512,10 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
                 );
                 _tryPushPenaltyLedger(user, _penaltyLedger[user]);
             }
-            _reentrancyGuardExit();
             return;
         }
 
         // 未知 outcome：忽略（保持向后兼容，避免硬 revert 导致主流程失败）
-        _reentrancyGuardExit();
     }
 
     /// @notice 批量处理借贷事件
@@ -540,8 +528,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
         uint256[] calldata amounts,
         uint256[] calldata durations,
         bool[] calldata hfHighEnoughs
-    ) external onlyValidRegistry {
-        _reentrancyGuardEnter();
+    ) external onlyValidRegistry nonReentrant {
         // 收紧入口：仅允许 RewardManager 调用，统一路径为 LE -> RM -> RMCore
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) {
@@ -673,13 +660,11 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
             block.timestamp
         );
         _tryPushSystemStats(_totalBatchOperations, _totalCachedRewards);
-        _reentrancyGuardExit();
     }
 
     /// @notice 积分销毁代理（消费侧调用），保持 MINTER_ROLE 仅授予 RMCore
     /// @dev 仅允许 RewardConsumption / RewardCore 调用；用于消费/升级时扣减积分
-    function burnPointsFor(address user, uint256 points) external onlyValidRegistry {
-        _reentrancyGuardEnter();
+    function burnPointsFor(address user, uint256 points) external onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         address rewardConsumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
         // RewardConsumption 作为外部统一入口；RewardCore 为内部业务模块（仅能被 RewardConsumption 调用）
@@ -689,14 +674,12 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
             revert RewardManagerCore__UseRewardManagerEntry();
         }
         _getRewardToken().burnPoints(user, points);
-        _reentrancyGuardExit();
     }
 
     /// @notice 扣除用户积分（仅清算/惩罚模块可调用）
     /// @param user 用户地址
     /// @param points 扣除积分数量
-    function deductPoints(address user, uint256 points) external onlyValidRegistry {
-        _reentrancyGuardEnter();
+    function deductPoints(address user, uint256 points) external onlyValidRegistry nonReentrant {
         // 检查调用者权限 - 只允许清算/惩罚模块或 RewardManager 调用
         address guaranteeFundManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_GUARANTEE_FUND);
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
@@ -721,7 +704,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardSli
             );
             _tryPushPenaltyLedger(user, _penaltyLedger[user]);
         }
-        _reentrancyGuardExit();
     }
 
     // ========== 管理接口 ==========

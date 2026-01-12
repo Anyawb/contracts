@@ -3,8 +3,9 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
@@ -23,7 +24,8 @@ import {
     DelayTooShort,
     InvalidDelayValue,
     UpgradeNotAuthorized,
-    InvalidUpgradeAdmin
+    InvalidUpgradeAdmin,
+    NotAContract
 } from "../errors/StandardErrors.sol";
 import { RegistryStorage } from "./RegistryStorageLibrary.sol";
 import { RegistryEvents } from "./RegistryEventsLibrary.sol";
@@ -36,8 +38,9 @@ import { RegistryQuery } from "./RegistryQueryLibrary.sol";
 contract RegistryUpgradeManager is 
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
-    PausableUpgradeable
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable,
+    UUPSUpgradeable
 { 
     using RegistryStorage for RegistryStorage.Layout;
     using RegistryQuery for *;
@@ -85,8 +88,9 @@ contract RegistryUpgradeManager is
         require(registryOrAdmin != address(0), "Invalid registry");
         if (initialOwner == address(0)) revert ZeroAddress();
         __Ownable_init(initialOwner);
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __Pausable_init();
+        __UUPSUpgradeable_init();
 
         if (registryOrAdmin.code.length > 0) {
             _registry = registryOrAdmin;
@@ -104,6 +108,14 @@ contract RegistryUpgradeManager is
         if (l.minDelay == 0) {
             l.minDelay = uint64(1 hours);
         }
+    }
+
+    /* ============ UUPS ============ */
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        // Registry 家族：升级/紧急治理由 owner 控制（docs/Architecture-Guide.md）
+        if (msg.sender != owner()) revert UpgradeNotAuthorized(msg.sender, owner());
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice 设置升级管理员（仅 standalone/test mode 需要）
@@ -140,16 +152,18 @@ contract RegistryUpgradeManager is
     /// @param keys 模块键数组
     /// @param addresses 新模块地址数组
     /// @param allowReplace 是否允许替换已存在的模块
-    function batchSetModules(bytes32[] calldata keys, address[] calldata addresses, bool allowReplace) external whenNotPaused onlyRegistryOrAuthorized {
-        _reentrancyGuardEnter();
-
+    function batchSetModules(bytes32[] calldata keys, address[] calldata addresses, bool allowReplace)
+        external
+        whenNotPaused
+        onlyRegistryOrAuthorized
+        nonReentrant
+    {
         // 检查批量大小限制
         if (keys.length > MAX_BATCH_SIZE) {
             revert BatchSizeExceeded(keys.length, MAX_BATCH_SIZE);
         }
         
         _executeBatchModuleUpgrade(keys, addresses, allowReplace, msg.sender);
-        _reentrancyGuardExit();
     }
 
     /// @notice 发起模块升级计划，进入延时队列
@@ -205,10 +219,8 @@ contract RegistryUpgradeManager is
 
     /// @notice 到期后执行模块升级，将新地址写入映射
     /// @param key 模块键
-    function executeModuleUpgrade(bytes32 key) external whenNotPaused onlyRegistryOrAuthorized {
-        _reentrancyGuardEnter();
+    function executeModuleUpgrade(bytes32 key) external whenNotPaused onlyRegistryOrAuthorized nonReentrant {
         _executeDelayedUpgrade(key, msg.sender);
-        _reentrancyGuardExit();
     }
 
     // ============ View Functions ============

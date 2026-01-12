@@ -22,20 +22,53 @@ Registry 是平台的**模块地址注册中心**，负责统一管理所有功�
 
 - **模块地址映射**：通过 `bytes32` 键值对存储和查询模块地址
 - **升级管理**：支持延时升级和立即升级两种模式
-- **权限控制**：集成 AccessControlManager 进行权限验证
+- **治理权限**：使用 `Ownable`（以及可选的 `upgradeAdmin / emergencyAdmin`）执行治理级操作（模块变更、暂停、升级）
 - **历史记录**：记录所有模块升级历史（最多保留 100 条）
 
 ### 架构设计
 
-Registry 采用**模块化架构**，将功能委托给专门的子模块：
+Registry 采用**方向 A（最贴合架构指南）**：源码拆分为多个文件/模块，但**运行时只有一个可升级入口（一个 Proxy）**，其它“模块”作为库/内部实现/或同一 Proxy 的不同实现版本来共享 `RegistryStorage`。
 
 ```
-Registry (主入口)
-├── RegistryCore (核心功能：模块注册、查询)
-├── RegistryUpgradeManager (升级管理：延时升级、历史记录)
-├── RegistryAdmin (治理管理：暂停、所有权转移)
-└── RegistrySignatureManager (签名授权：EIP-712 签名升级)
+Registry (UUPS Proxy, 唯一入口/唯一状态)
+└── Registry implementation (源码拆分：RegistryCore/RegistryQuery/RegistryStorage/RegistryEvents/…)
+    ├── Core：模块注册/查询（读写 modules mapping）
+    ├── Upgrade：延时升级队列/执行/历史（写 pendingUpgrades/history）
+    ├── Governance：pause/admin/owner 口径一致化
+    └── (Optional) DynamicModuleKey：动态模块键注册器（独立合约，独立存储）
 ```
+
+#### 为什么必须是“单一 Proxy 入口”
+
+- `docs/Architecture-Guide.md`（“存储模式与布局策略”）对 Registry 家族的要求是：**家族共享状态**（modules/pendingUpgrades/history/admin/minDelay 等必须是同一份状态）。
+- 即使多个合约都使用同一个 `STORAGE_SLOT = keccak256("registry.storage.v1")`，**它们的存储仍然是“各自合约实例”的独立存储**。  
+  只有当这些“模块”代码通过 **同一 Proxy 的 delegatecall 语义**执行（或本身就是 library/internal 代码）时，才会写入同一份 storage（同一份 RegistryStorage）。
+
+因此：**线上部署推荐且默认只部署一个 `Registry`（UUPS Proxy）**；其余 “Registry 家族模块” 仅用于源码组织、内部复用、或升级时的实现版本演进。
+
+#### 关于 “Registry 家族模块” 的定位（重要）
+
+- `src/registry/*.sol` 下的 `RegistryCore/RegistryUpgradeManager/RegistryAdmin/RegistrySignatureManager/...` 在方向 A 中应理解为：
+  - **代码模块（source modules）**：用于拆分职责、复用逻辑、降低单文件复杂度；
+  - **共享存储（shared state）**：通过 `RegistryStorage.layout()` 访问同一份 Layout（同一 Proxy 的 storage）；
+  - **不推荐作为独立 Proxy/独立合约部署**：否则它们写的是“自己的 storage”，不会影响主 `Registry` 的 modules/pendingUpgrades/history。
+
+> 例外：`RegistryDynamicModuleKey` 属于“动态键注册器”，架构指南明确允许它与 Registry 家族解耦、独立存储、独立升级——它可以作为独立 Proxy 部署（按需启用）。
+
+---
+
+## 部署模型（方向 A）
+
+### 必须部署（生产默认）
+- `Registry`：**唯一 Proxy（UUPS）**，持有 `RegistryStorage` 的唯一状态。
+
+### 可选部署（按需启用）
+- `RegistryDynamicModuleKey`：动态模块键注册器（独立合约、独立存储、独立升级）。用于解决静态 `ModuleKeys` 无法覆盖新增模块的问题。
+
+### 兼容/历史模块（不推荐线上单独部署）
+仓库中仍保留若干 “Registry family compat modules” 以兼容旧脚本/测试或做过渡期实验。但在方向 A 下：
+- 它们**不应该作为独立 Proxy 部署去“分担主 Registry 的职责”**（否则不共享 storage，状态会漂移）。
+- 若确需部署（仅测试/兼容），必须明确：这些合约维护的是**它们自己合约实例的状态**，不会自动影响主 `Registry`。
 
 ### 核心优势
 
@@ -58,7 +91,8 @@ import { ModuleKeys } from "../constants/ModuleKeys.sol";
 
 // 核心业务模块
 ModuleKeys.KEY_VAULT_CORE           // VaultCore 模块
-ModuleKeys.KEY_ORDER_ENGINE         // LendingEngine 模块
+ModuleKeys.KEY_LE                   // LendingEngine（账本引擎）模块（常用）
+ModuleKeys.KEY_ORDER_ENGINE         // OrderEngine（订单引擎，按需）模块
 ModuleKeys.KEY_CM                   // CollateralManager 模块
 
 // 权限控制模块
@@ -73,7 +107,12 @@ ModuleKeys.KEY_PRICE_ORACLE         // PriceOracle 模块
 
 ### 2. 升级模式
 
-Registry 支持两种升级模式：
+Registry 同时存在两类“升级/变更”，容易混淆，必须区分：
+
+- **A. Proxy 实现升级（UUPS upgrade）**：升级 `Registry` 的实现合约（逻辑升级），不会改变 `modules` 映射内容本身。  
+- **B. 模块地址变更（moduleKey → address）**：变更模块地址映射（属于治理操作/系统配置变更），可立即或延时执行。
+
+下面的“立即/延时升级”指的是 **B 类（模块地址变更）**。
 
 #### 立即升级（首次部署或紧急情况）
 - **适用场景**：首次注册模块、紧急修复漏洞
@@ -84,6 +123,8 @@ Registry 支持两种升级模式：
 - **适用场景**：常规功能升级、安全更新
 - **特点**：需要等待 `minDelay` 时间后才能执行
 - **流程**：`scheduleModuleUpgrade()` → 等待延时 → `executeModuleUpgrade()`
+
+> 说明：Proxy 实现升级（A 类）走 OpenZeppelin Upgrades（UUPS）流程；模块地址变更（B 类）走 `Registry` 自己的 timelock 队列。
 
 ---
 
@@ -100,8 +141,8 @@ import { ModuleKeys } from "../constants/ModuleKeys.sol";
 // 获取 Registry 实例
 IRegistry registry = IRegistry(registryAddress);
 
-// 注册新模块（首次部署，不允许替换）
-registry.setModule(ModuleKeys.KEY_VAULT_CORE, vaultCoreAddress);
+// 注册新模块（首次部署：建议明确禁止替换，防止误覆盖）
+registry.setModuleWithReplaceFlag(ModuleKeys.KEY_VAULT_CORE, vaultCoreAddress, false);
 
 // 或使用带替换标志的版本
 registry.setModuleWithReplaceFlag(
@@ -378,7 +419,7 @@ address admin = registry.getAdmin();
 address pendingAdmin = registry.getPendingAdmin();
 
 // 检查地址是否为治理地址
-bool isAdmin = registry.isAdmin(address);
+bool isAdmin = registry.isAdmin(someAddress);
 
 // 获取存储版本
 uint256 version = registry.getStorageVersion();
@@ -400,8 +441,8 @@ Registry 的主要操作需要以下权限：
 | `setModule()` | `onlyOwner` | 注册或更新模块地址 |
 | `scheduleModuleUpgrade()` | `onlyOwner` | 计划模块升级 |
 | `executeModuleUpgrade()` | `onlyOwner` | 执行模块升级 |
-| `cancelModuleUpgrade()` | `onlyOwner` | 取消升级计划 |
-| `pause()` | `onlyOwner` | 暂停系统 |
+| `cancelModuleUpgrade()` | `onlyOwner` 或 `emergencyAdmin` | 取消升级计划（紧急通道允许 emergencyAdmin） |
+| `pause()` | `onlyOwner` 或 `emergencyAdmin` | 暂停系统（紧急通道允许 emergencyAdmin） |
 | `unpause()` | `onlyOwner` | 恢复系统 |
 | `setMinDelay()` | `onlyOwner` | 设置延时窗口 |
 | `setPendingAdmin()` | `onlyOwner` | 设置待接管地址 |
@@ -586,6 +627,7 @@ address moduleAddr = registry.getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
 // ❌ 不推荐：需要手动检查零地址
 address moduleAddr = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
 if (moduleAddr == address(0)) {
+    // 建议在生产代码中使用自定义 error（更省 gas / 更易解码），此处仅示例
     revert("Module not registered");
 }
 ```
@@ -676,12 +718,11 @@ if (hasPending) {
 
 ### Q1: 如何获取 Registry 地址？
 
-Registry 地址通常在系统部署时确定，并存储在配置文件中。各模块合约在初始化时接收 Registry 地址。
+Registry 地址通常在系统部署时确定，并存储在部署产物/前端配置文件中。业务模块在初始化时接收 Registry 地址（或在 VaultCore 中作为公开变量/只读函数暴露，供链下读取）。
 
 ```solidity
-// 在部署脚本中
-Registry registry = new Registry();
-registry.initialize(minDelay, upgradeAdmin, emergencyAdmin);
+// 说明：生产环境通常通过 OZ Upgrades 部署 UUPS Proxy 并在同交易初始化。
+// Registry.initialize(minDelaySeconds, upgradeAdmin, emergencyAdmin, initialOwner)
 
 // 在模块初始化时
 VaultCore vaultCore = new VaultCore();
@@ -728,7 +769,9 @@ bool isRegistered = registry.isModuleRegistered(ModuleKeys.KEY_VAULT_CORE);
 
 ### Q8: 系统暂停时可以进行升级吗？
 
-不可以。系统暂停时（`isPaused() == true`），所有模块注册和升级操作都会被阻止。需要先调用 `unpause()` 恢复系统。
+一般不可以。系统暂停时（`isPaused() == true`），`setModule / scheduleModuleUpgrade / executeModuleUpgrade / cancelModuleUpgrade` 等治理入口默认都会被阻止（`whenNotPaused`）。需要先调用 `unpause()` 恢复系统后再执行常规操作。
+
+> 例外：部分**紧急恢复类**入口可能被设计为“允许在 paused 状态下执行”（例如先 pause 再执行紧急撤销/恢复），以降低事故窗口；具体以 `Registry.sol` 实现为准，并建议在部署/运维手册中单独列出。
 
 ### Q9: 如何转移 Registry 所有权？
 
@@ -746,21 +789,23 @@ registry.acceptAdmin();
 
 ### Q10: 如何查询所有已注册的模块？
 
-Registry 不提供直接查询所有模块的接口（为了节省 gas）。如果需要，可以通过事件日志查询，或使用专门的 View 合约。
+生产推荐使用 **专门的 View 合约（如 `RegistryView`）** 或事件日志做枚举/分页查询，避免把“遍历所有 keys”逻辑放到主 `Registry` 的稳定 API 中。
+
+> 说明：主 `Registry` 可能包含少量 **tests/compat** 的辅助查询函数（例如返回已注册 key 列表），但不建议依赖其作为前端/索引器的长期稳定接口。
 
 ---
 
 ## 相关文档
 
-- [PlatformLogic.md](../docs/PlatformLogic.md) - 平台核心逻辑文档
-- [Architecture-Guide.md](../docs/Architecture-Guide.md) - 架构设计文档
-- [Registry-Split-Summary.md](../docs/Registry-Split-Summary.md) - Registry 拆分说明
-- [RegistryUpgradeFlow.md](../docs/RegistryUpgradeFlow.md) - 升级流程文档
+- [PlatformLogic.md](../PlatformLogic.md) - 平台核心逻辑文档
+- [Architecture-Guide.md](../Architecture-Guide.md) - 架构设计文档
+- [Registry-Split-Summary.md](../Registry-Split-Summary.md) - Registry 拆分说明
+- [RegistryUpgradeFlow.md](../RegistryUpgradeFlow.md) - 升级流程文档
 - [Storage-Migration-Guide.md](./Storage-Migration-Guide.md) - 存储迁移指南（存储布局升级）
 
 ---
 
-**文档版本**: v1.0  
-**最后更新**: 2025年1月  
-**维护者**: AI Assistant
+**文档版本**: v1.1  
+**最后更新**: 2026年1月  
+**维护者**: AI Assistant（按 `docs/Architecture-Guide.md` 方向 A 口径修订）
 

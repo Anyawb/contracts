@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
-import { ZeroAddress } from "../errors/StandardErrors.sol";
+import { ZeroAddress, NotAContract } from "../errors/StandardErrors.sol";
 import { RegistryStorage } from "./RegistryStorageLibrary.sol";
 import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 
@@ -14,8 +15,9 @@ import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 /// @dev 负责处理Registry的升级历史记录功能
 contract RegistryHistoryManager is 
     OwnableUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
-    PausableUpgradeable
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable,
+    UUPSUpgradeable
 {
     // ============ Constants ============
     uint256 private constant MAX_UPGRADE_HISTORY = 100; // 升级历史记录上限
@@ -30,8 +32,15 @@ contract RegistryHistoryManager is
     function initialize(address initialOwner) external initializer {
         if (initialOwner == address(0)) revert ZeroAddress();
         __Ownable_init(initialOwner);
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __Pausable_init();
+        __UUPSUpgradeable_init();
+    }
+
+    /* ============ UUPS ============ */
+    function _authorizeUpgrade(address newImplementation) internal view override onlyOwner {
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ 历史记录功能 ============

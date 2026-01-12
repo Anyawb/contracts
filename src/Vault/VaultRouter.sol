@@ -24,7 +24,7 @@ import {
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
 import { IPositionView } from "../interfaces/IPositionView.sol";
 import { ICacheRefreshable } from "../interfaces/ICacheRefreshable.sol";
@@ -53,7 +53,7 @@ interface IStatisticsViewMinimal {
 contract VaultRouter is
     OwnableUpgradeable,
     UUPSUpgradeable,
-    ReentrancyGuardSlimUpgradeable,
+    ReentrancyGuardUpgradeable,
     PausableUpgradeable,
     IVaultRouter,
     ICacheRefreshable
@@ -266,7 +266,7 @@ contract VaultRouter is
 
         __Ownable_init(initialOwner);
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __Pausable_init();
 
         _registryAddr = initialRegistry;
@@ -545,8 +545,7 @@ contract VaultRouter is
         address borrowAsset,
         uint256 borrowAmount,
         uint16 termDays
-    ) external whenNotPaused onlyValidRegistry {
-        _reentrancyGuardEnter();
+    ) external whenNotPaused onlyValidRegistry nonReentrant {
         // 参数校验
         _validateAsset(collateralAsset);
         _validateAsset(borrowAsset);
@@ -605,7 +604,6 @@ contract VaultRouter is
             0, 
             borrowAsset
         );
-        _reentrancyGuardExit();
     }
 
     /// @notice 处理用户操作（供 VaultCore 传递存取操作）
@@ -616,8 +614,7 @@ contract VaultRouter is
         address asset,
         uint256 amount,
         uint256 timestamp
-    ) external override whenNotPaused onlyValidRegistry onlyVaultCore {
-        _reentrancyGuardEnter();
+    ) external override whenNotPaused onlyValidRegistry onlyVaultCore nonReentrant {
         // 基础校验
         _validateAsset(asset);
         _validateAmount(amount);
@@ -638,7 +635,6 @@ contract VaultRouter is
         }
 
         emit VaultAction(operationType, user, amount, 0, asset, timestamp);
-        _reentrancyGuardExit();
     }
 
     /// @notice 业务模块推送用户头寸更新（兼容版本，不带上下文）

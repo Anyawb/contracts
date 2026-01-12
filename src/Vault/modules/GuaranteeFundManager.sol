@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -39,7 +39,7 @@ interface ISystemViewMinimal { function pushGuaranteeStats(address asset, uint25
 contract GuaranteeFundManager is 
     Initializable, 
     UUPSUpgradeable, 
-    ReentrancyGuardSlimUpgradeable
+    ReentrancyGuardUpgradeable
 {
     using SafeERC20 for IERC20;
 
@@ -125,7 +125,7 @@ contract GuaranteeFundManager is
         address /* upgradeAdmin */
     ) external initializer {
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         
         if (initialVaultCoreAddr == address(0)) revert ZeroAddress();
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -274,8 +274,7 @@ contract GuaranteeFundManager is
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @param amount 保证金金额
-    function lockGuarantee(address user, address asset, uint256 amount) external onlyVaultCore onlyValidRegistry {
-        _reentrancyGuardEnter();
+    function lockGuarantee(address user, address asset, uint256 amount) external onlyVaultCore onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
@@ -303,7 +302,6 @@ contract GuaranteeFundManager is
             abi.encode(user, asset, amount, block.timestamp)
         );
         _pushGuaranteeUpdateToView(user, asset, amount, true);
-        _reentrancyGuardExit();
     }
 
     /// @notice 释放用户保证金
@@ -311,8 +309,7 @@ contract GuaranteeFundManager is
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @param amount 释放金额
-    function releaseGuarantee(address user, address asset, uint256 amount) external onlyVaultCore onlyValidRegistry {
-        _reentrancyGuardEnter();
+    function releaseGuarantee(address user, address asset, uint256 amount) external onlyVaultCore onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
@@ -346,7 +343,6 @@ contract GuaranteeFundManager is
             );
             _pushGuaranteeUpdateToView(user, asset, amount, false);
         }
-        _reentrancyGuardExit();
     }
 
     /// @notice 没收用户保证金
@@ -354,8 +350,7 @@ contract GuaranteeFundManager is
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @param feeReceiver 费用接收者地址
-    function forfeitGuarantee(address user, address asset, address feeReceiver) external onlyVaultCore onlyValidRegistry {
-        _reentrancyGuardEnter();
+    function forfeitGuarantee(address user, address asset, address feeReceiver) external onlyVaultCore onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (feeReceiver == address(0)) revert ZeroAddress();
@@ -385,7 +380,6 @@ contract GuaranteeFundManager is
             );
             _pushGuaranteeUpdateToView(user, asset, currentGuarantee, false);
         }
-        _reentrancyGuardExit();
     }
 
     /// @notice 早偿三方结算：一次性完成返还、罚金与平台手续费的分发
@@ -398,8 +392,7 @@ contract GuaranteeFundManager is
         uint256 refundToBorrower,
         uint256 penaltyToLender,
         uint256 platformFee
-    ) external onlyVaultCore onlyValidRegistry {
-        _reentrancyGuardEnter();
+    ) external onlyVaultCore onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         uint256 total = _userGuarantees[user][asset];
@@ -449,7 +442,6 @@ contract GuaranteeFundManager is
             msg.sender,
             block.timestamp
         );
-        _reentrancyGuardExit();
     }
 
     /// @notice 部分没收：将指定金额的保证金没收给某个接收者
@@ -458,8 +450,7 @@ contract GuaranteeFundManager is
         address asset,
         address receiver,
         uint256 amount
-    ) external onlyVaultCore onlyValidRegistry {
-        _reentrancyGuardEnter();
+    ) external onlyVaultCore onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (receiver == address(0)) revert ZeroAddress();
@@ -484,7 +475,6 @@ contract GuaranteeFundManager is
             msg.sender,
             block.timestamp
         );
-        _reentrancyGuardExit();
     }
 
     /// @notice 多接收人没收：按数组一次性分发（默认要求全额分配）
@@ -493,8 +483,7 @@ contract GuaranteeFundManager is
         address asset,
         address[] calldata receivers,
         uint256[] calldata amounts
-    ) external onlyVaultCore onlyValidRegistry {
-        _reentrancyGuardEnter();
+    ) external onlyVaultCore onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         uint256 len = receivers.length;
@@ -534,7 +523,6 @@ contract GuaranteeFundManager is
             msg.sender,
             block.timestamp
         );
-        _reentrancyGuardExit();
     }
 
     /* ============ Batch Operations ============ */
@@ -547,8 +535,7 @@ contract GuaranteeFundManager is
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external onlyVaultCore onlyValidRegistry {
-        _reentrancyGuardEnter();
+    ) external onlyVaultCore onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         uint256 length = assets.length;
         if (length != amounts.length) revert GuaranteeFundManager__LengthMismatch();
@@ -584,7 +571,6 @@ contract GuaranteeFundManager is
             DataPushTypes.DATA_TYPE_BATCH_GUARANTEE_LOCKED,
             abi.encode(user, length, block.timestamp)
         );
-        _reentrancyGuardExit();
     }
 
     /// @notice 批量释放保证金
@@ -596,8 +582,7 @@ contract GuaranteeFundManager is
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external onlyVaultCore onlyValidRegistry {
-        _reentrancyGuardEnter();
+    ) external onlyVaultCore onlyValidRegistry nonReentrant {
         if (user == address(0)) revert ZeroAddress();
         uint256 length = assets.length;
         if (length != amounts.length) revert GuaranteeFundManager__LengthMismatch();
@@ -643,7 +628,6 @@ contract GuaranteeFundManager is
             DataPushTypes.DATA_TYPE_BATCH_GUARANTEE_RELEASED,
             abi.encode(user, length, block.timestamp)
         );
-        _reentrancyGuardExit();
     }
 
     /* ============ Admin Functions ============ */

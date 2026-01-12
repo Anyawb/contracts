@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import { Registry } from "../../registry/Registry.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
@@ -49,7 +49,7 @@ interface IVaultCoreMinimal {
 contract CollateralManager is 
     Initializable, 
     UUPSUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
+    ReentrancyGuardUpgradeable,
     ICollateralManager 
 {
     using SafeERC20 for IERC20;
@@ -180,7 +180,7 @@ contract CollateralManager is
         if (initialRegistryAddr == address(0)) revert CollateralManager__ZeroAddress();
 
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
 
         _registryAddr = initialRegistryAddr;
     }
@@ -204,7 +204,7 @@ contract CollateralManager is
     ) external initializer {
         if (initialRegistryAddr == address(0)) revert CollateralManager__ZeroAddress();
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         _registryAddr = initialRegistryAddr;
     }
     
@@ -228,8 +228,7 @@ contract CollateralManager is
      * @param asset Collateral asset address (non-zero)
      * @param amount Collateral amount (token decimals)
      */
-    function processDeposit(address user, address asset, uint256 amount) public onlyVaultRouterOrCore {
-        _reentrancyGuardEnter();
+    function processDeposit(address user, address asset, uint256 amount) public onlyVaultRouterOrCore nonReentrant {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (asset == address(0)) revert CollateralManager__ZeroAddress();
         if (amount == 0) revert CollateralManager__InvalidAmount();
@@ -275,7 +274,6 @@ contract CollateralManager is
             DataPushTypes.DATA_TYPE_DEPOSIT_PROCESSED,
             abi.encode(user, asset, received, block.timestamp)
         );
-        _reentrancyGuardExit();
     }
     
     /**
@@ -293,11 +291,9 @@ contract CollateralManager is
      * @param asset Collateral asset address (non-zero)
      * @param amount Withdraw amount (token decimals)
      */
-    function processWithdraw(address user, address asset, uint256 amount) public onlyVaultRouterOrCore {
-        _reentrancyGuardEnter();
+    function processWithdraw(address user, address asset, uint256 amount) public onlyVaultRouterOrCore nonReentrant {
         // 用户提现：receiver 必须为 user
         _withdrawCollateralTo(user, asset, amount, user);
-        _reentrancyGuardExit();
     }
 
     /**
@@ -321,8 +317,7 @@ contract CollateralManager is
         address asset,
         uint256 amount,
         address receiver
-    ) external onlyVaultRouterOrLiquidationManager {
-        _reentrancyGuardEnter();
+    ) external onlyVaultRouterOrLiquidationManager nonReentrant {
         if (receiver == address(0)) revert CollateralManager__ZeroAddress();
         // 若是“提到用户”的语义，强制只能由 VaultRouter 或 SettlementManager 发起
         // - VaultRouter：用户主动 withdraw
@@ -333,7 +328,6 @@ contract CollateralManager is
             revert CollateralManager__UnauthorizedAccess();
         }
         _withdrawCollateralTo(user, asset, amount, receiver);
-        _reentrancyGuardExit();
     }
     
     /**
@@ -355,8 +349,7 @@ contract CollateralManager is
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) public onlyVaultRouterOrCore {
-        _reentrancyGuardEnter();
+    ) public onlyVaultRouterOrCore nonReentrant {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (assets.length != amounts.length) revert CollateralManager__LengthMismatch();
         if (assets.length == 0 || assets.length > MAX_BATCH_SIZE) revert CollateralManager__InvalidAmount();
@@ -403,7 +396,6 @@ contract CollateralManager is
             DataPushTypes.DATA_TYPE_BATCH_DEPOSIT_PROCESSED,
             abi.encode(user, assets.length, block.timestamp)
         );
-        _reentrancyGuardExit();
     }
     
     /**
@@ -425,8 +417,7 @@ contract CollateralManager is
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) public onlyVaultRouterOrCore {
-        _reentrancyGuardEnter();
+    ) public onlyVaultRouterOrCore nonReentrant {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (assets.length != amounts.length) revert CollateralManager__LengthMismatch();
         if (assets.length == 0 || assets.length > MAX_BATCH_SIZE) revert CollateralManager__InvalidAmount();
@@ -446,7 +437,6 @@ contract CollateralManager is
             DataPushTypes.DATA_TYPE_BATCH_WITHDRAW_PROCESSED,
             abi.encode(user, assets.length, block.timestamp)
                  );
-        _reentrancyGuardExit();
      }
      
      /*━━━━━━━━━━━━━━━ 兼容性接口 ━━━━━━━━━━━━━━━*/

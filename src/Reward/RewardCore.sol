@@ -23,7 +23,7 @@ import {
 } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 /// @title RewardCore - 积分消费核心业务逻辑
 /// @notice 处理积分消费、升级和批量操作的核心逻辑
@@ -32,7 +32,7 @@ import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgr
 /// @dev 通过 Registry 进行模块地址管理，确保架构一致性
 contract RewardCore is 
     Initializable, 
-    ReentrancyGuardSlimUpgradeable, 
+    ReentrancyGuardUpgradeable, 
     UUPSUpgradeable,
     RewardModuleBase,
     RewardTypes
@@ -82,7 +82,7 @@ contract RewardCore is
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         
         _registryAddr = initialRegistryAddr;
         
@@ -159,9 +159,9 @@ contract RewardCore is
     function consumePointsForServiceFor(address user, ServiceType serviceType, ServiceLevel level)
         external
         onlyValidRegistry
+        nonReentrant
         returns (uint256 pointsBurned, uint256 privilegePacked, uint256 expirationTime)
     {
-        _reentrancyGuardEnter();
         address consumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
         if (msg.sender != consumption) {
             emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
@@ -172,16 +172,15 @@ contract RewardCore is
         expirationTime = block.timestamp + config.duration;
         _consumePointsForService(user, serviceType, level);
         privilegePacked = _packUserPrivilege(user);
-        _reentrancyGuardExit();
     }
 
     /// @notice 升级服务等级（仅 RewardConsumption 调用，显式指定 user）
     function upgradeServiceLevelFor(address user, ServiceType serviceType, ServiceLevel newLevel)
         external
         onlyValidRegistry
+        nonReentrant
         returns (uint256 pointsBurned, uint256 privilegePacked, uint256 expirationTime)
     {
-        _reentrancyGuardEnter();
         address consumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
         if (msg.sender != consumption) {
             emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
@@ -192,7 +191,6 @@ contract RewardCore is
         expirationTime = block.timestamp + config.duration;
         _upgradeServiceLevel(user, serviceType, newLevel);
         privilegePacked = _packUserPrivilege(user);
-        _reentrancyGuardExit();
     }
 
     /// @notice 批量消费（仅 RewardConsumption 调用）；返回每个用户的扣减积分与最新特权 packed

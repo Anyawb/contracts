@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../registry/Registry.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
@@ -32,7 +33,7 @@ import {
  *      - 统计缓存：维护系统级降级统计，支持快速查询
  *      - 权限分层：管理员写入，查看者读取，确保数据安全
  */
-contract DegradationCore is Initializable {
+contract DegradationCore is Initializable, UUPSUpgradeable {
     // ============ Storage ============
     /// @notice Registry合约地址，用于模块解析和权限验证
     address private _registryAddr;
@@ -166,7 +167,21 @@ contract DegradationCore is Initializable {
      */
     function initialize(address initialRegistryAddr) external initializer {
         require(initialRegistryAddr!=address(0),"DegradationCore: zero reg");
+        __UUPSUpgradeable_init();
         _registryAddr=initialRegistryAddr;
+    }
+
+    /* ============ UUPS ============ */
+    /**
+     * @notice Authorize UUPS upgrade to a new implementation.
+     * @dev Role-gated via AccessControlManager.
+     */
+    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry onlyAdmin {
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        // onlyAdmin already ensures ACTION_ADMIN; additionally require upgrade role for stricter control.
+        IAccessControlManager(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL))
+            .requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
     }
 
     // ============ External view ============

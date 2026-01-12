@@ -8,6 +8,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { deployRegistryStack } from './modules/registry';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const hre = require('hardhat');
@@ -151,67 +152,22 @@ async function main() {
   // 建议最小延迟 1 小时（本地可设为 1 分钟方便调试）
   const MIN_DELAY = 60; // seconds (local dev)
 
-  if (!deployed.Registry) {
-    // UUPS 可升级合约，使用 Proxy 部署并初始化
-    deployed.Registry = await deployProxy('Registry', [MIN_DELAY, deployer.address, deployer.address, deployer.address]);
-    save(deployed);
-  }
-
-  if (!deployed.RegistryCore) {
-    // 关键：将 RegistryCore 的 admin 设为 Registry 地址，这样 Registry.sol 调用 _registryCore.setModule(...) 时，
-    // RegistryCore 内的 requireAdmin(msg.sender) 才能通过
-    deployed.RegistryCore = await deployProxy('RegistryCore', [deployed.Registry, MIN_DELAY]);
-    save(deployed);
-    const registry = await ethers.getContractAt('Registry', deployed.Registry);
-    await (await registry.setRegistryCore(deployed.RegistryCore)).wait();
-    console.log('🔗 RegistryCore linked to Registry');
-  }
-
-  // 可选：部署并挂载升级/治理子模块（不影响 setModule 功能）
-  if (!deployed.RegistryUpgradeManager) {
-    // 初始化需要 Registry 地址
-    // NOTE: RegistryUpgradeManager is NOT UUPSUpgradeable (transparent proxy required).
-    deployed.RegistryUpgradeManager = await deployProxy('RegistryUpgradeManager', [deployed.Registry, deployer.address], {
-      kind: 'transparent',
-    });
-    save(deployed);
-    try {
-      const registry = await ethers.getContractAt('Registry', deployed.Registry);
-      await (await registry.setUpgradeManager(deployed.RegistryUpgradeManager)).wait();
-      console.log('🔗 RegistryUpgradeManager linked');
-    } catch (error) {
-      console.log('⚠️ RegistryUpgradeManager linking failed:', error);
-    }
-  }
-
-  if (!deployed.RegistryAdmin) {
-    // 无参数初始化
-    // NOTE: RegistryAdmin is NOT UUPSUpgradeable (transparent proxy required).
-    deployed.RegistryAdmin = await deployProxy('RegistryAdmin', [deployer.address], { kind: 'transparent' });
-    save(deployed);
-    try {
-      const registry = await ethers.getContractAt('Registry', deployed.Registry);
-      await (await registry.setRegistryAdmin(deployed.RegistryAdmin)).wait();
-      console.log('🔗 RegistryAdmin linked');
-    } catch (error) {
-      console.log('⚠️ RegistryAdmin linking failed:', error);
-    }
-  }
-
-  // 部署动态模块键注册表
-  if (!deployed.RegistryDynamicModuleKey) {
-    try {
-      deployed.RegistryDynamicModuleKey = await deployProxy('RegistryDynamicModuleKey', [
-        deployer.address, // registrationAdmin
-        deployer.address, // systemAdmin
-        deployer.address, // owner (OwnableUpgradeable)
-      ]);
-      save(deployed);
-      console.log('✅ RegistryDynamicModuleKey deployed @', deployed.RegistryDynamicModuleKey);
-    } catch (error) {
-      console.log('⚠️ RegistryDynamicModuleKey deployment failed:', error);
-    }
-  }
+  await deployRegistryStack({
+    ethers,
+    deployed,
+    save,
+    deployProxy,
+    config: {
+      minDelaySeconds: MIN_DELAY,
+      initialOwner: deployer.address,
+      upgradeAdmin: deployer.address,
+      emergencyAdmin: deployer.address,
+      deployerAddress: deployer.address,
+      // Local keeps legacy modules for compatibility/testing.
+      deployCompatModules: true,
+      deployDynamicModuleKeyRegistry: true,
+    },
+  });
 
   // 2) 部署核心/视图/账本与支撑模块
   if (!deployed.AccessControlManager) {

@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -25,7 +25,7 @@ import { ZeroAddress, AmountIsZero } from "../../errors/StandardErrors.sol";
 contract LenderPoolVault is
     Initializable,
     UUPSUpgradeable,
-    ReentrancyGuardSlimUpgradeable,
+    ReentrancyGuardUpgradeable,
     PausableUpgradeable,
     ILenderPoolVault
 {
@@ -50,7 +50,7 @@ contract LenderPoolVault is
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         __Pausable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -66,22 +66,18 @@ contract LenderPoolVault is
     }
 
     /// @inheritdoc ILenderPoolVault
-    function deposit(address asset, uint256 amount) external override whenNotPaused {
-        _reentrancyGuardEnter();
+    function deposit(address asset, uint256 amount) external override whenNotPaused nonReentrant {
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
         IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-        _reentrancyGuardExit();
     }
 
     /// @inheritdoc ILenderPoolVault
-    function transferOut(address asset, address to, uint256 amount) external override whenNotPaused {
-        _reentrancyGuardEnter();
+    function transferOut(address asset, address to, uint256 amount) external override whenNotPaused nonReentrant {
         if (asset == address(0) || to == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
         _requireVaultBusinessLogic(msg.sender);
         IERC20(asset).safeTransfer(to, amount);
-        _reentrancyGuardExit();
     }
 
     function _requireVaultBusinessLogic(address caller) internal view {

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { 
@@ -13,7 +14,8 @@ import {
     ArrayLengthMismatch,
     ModuleCapExceeded,
     MinDelayOverflow,
-    NotGovernance
+    NotGovernance,
+    NotAContract
 } from "../errors/StandardErrors.sol";
 import { RegistryStorage } from "./RegistryStorageLibrary.sol";
 import { RegistryEvents } from "./RegistryEventsLibrary.sol";
@@ -24,6 +26,7 @@ import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 /// @dev 使用 RegistryStorage 进行存储管理，支持可升级合约
 contract RegistryCore is 
     Initializable, 
+    OwnableUpgradeable,
     UUPSUpgradeable
 {
     /// @dev 模块已存在但不允许替换
@@ -47,6 +50,8 @@ contract RegistryCore is
         if (admin_ == address(0)) revert ZeroAddress();
         if (minDelay_ > MAX_DELAY) revert MinDelayTooLarge(minDelay_, MAX_DELAY);
         
+        // Registry 家族：owner 仅用于升级/紧急治理；这里将 owner 与 admin 绑定，避免口径分叉。
+        __Ownable_init(admin_);
         __UUPSUpgradeable_init();
         
         // 使用统一的存储初始化函数
@@ -62,10 +67,10 @@ contract RegistryCore is
 
     // ============ UUPS Upgrade Authorization ============
     /// @notice 升级授权函数
-    /// @dev onlyOwner modifier 已经足够验证权限
     /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
-    function _authorizeUpgrade(address /* newImplementation */) internal override {
-        requireAdminMsgSender();
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
         
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.EMERGENCY_UPGRADE),
@@ -136,6 +141,43 @@ contract RegistryCore is
     /// @dev 内部函数，用于权限验证
     function requireAdminMsgSender() internal view {
         if (!RegistryStorage.isAdmin(msg.sender)) revert NotGovernance();
+    }
+
+    // ============ Ownable ↔ RegistryStorage admin 一致性 ============
+    /// @notice Transfer ownership (syncs RegistryStorage.admin/pendingAdmin).
+    /// @dev Keeps RegistryStorage.admin consistent with Ownable owner.
+    function transferOwnership(address newOwner) public override onlyOwner {
+        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        if (newOwner == address(0)) revert ZeroAddress();
+        RegistryStorage.Layout storage l = RegistryStorage.layout();
+        address oldAdmin = owner();
+        address oldPending = l.pendingAdmin;
+
+        super.transferOwnership(newOwner);
+        l.admin = newOwner;
+
+        if (oldPending != address(0)) {
+            l.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
+        emit RegistryEvents.AdminChanged(oldAdmin, newOwner);
+    }
+
+    /// @notice Renounce ownership (syncs RegistryStorage.admin/pendingAdmin).
+    function renounceOwnership() public override onlyOwner {
+        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.Layout storage l = RegistryStorage.layout();
+        address oldAdmin = owner();
+        address oldPending = l.pendingAdmin;
+
+        super.renounceOwnership();
+        l.admin = address(0);
+
+        if (oldPending != address(0)) {
+            l.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
+        emit RegistryEvents.AdminChanged(oldAdmin, address(0));
     }
 
     // ============ 存储管理函数 ============
@@ -213,7 +255,9 @@ contract RegistryCore is
         
         address oldAdmin = l.admin;
         address oldPending = l.pendingAdmin;
-        l.admin = l.pendingAdmin;
+        // 同步 Ownable.owner() 与 storage admin，避免升级权限与治理口径分叉
+        _transferOwnership(msg.sender);
+        l.admin = msg.sender;
         l.pendingAdmin = address(0);
         
         emit RegistryEvents.PendingAdminChanged(oldPending, address(0));

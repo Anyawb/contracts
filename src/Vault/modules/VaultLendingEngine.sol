@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardSlimUpgradeable } from "../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
@@ -48,7 +48,7 @@ interface IVaultCoreMinimal {
 contract VaultLendingEngine is 
     Initializable, 
     UUPSUpgradeable, 
-    ReentrancyGuardSlimUpgradeable,
+    ReentrancyGuardUpgradeable,
     ILendingEngineBasic
 {
     using LendingEngineValuation for LendingEngineStorage.Layout;
@@ -255,7 +255,7 @@ contract VaultLendingEngine is
         address initialRegistry
     ) external initializer {
         __UUPSUpgradeable_init();
-        __ReentrancyGuardSlim_init();
+        __ReentrancyGuard_init();
         // 不再在模块层启用 Pausable
         
         if (initialPriceOracle == address(0)) revert ZeroAddress();
@@ -405,11 +405,9 @@ contract VaultLendingEngine is
         uint256 amount, 
         uint256 collateralAdded, 
         uint16 termDays
-    ) external override onlyValidRegistry onlyVaultCore {
-        _reentrancyGuardEnter();
+    ) external override onlyValidRegistry onlyVaultCore nonReentrant {
         collateralAdded; // silence unused parameter
         _s().borrow(user, asset, amount, termDays);
-        _reentrancyGuardExit();
     }
 
     /// @notice 记录一次还款操作
@@ -417,10 +415,14 @@ contract VaultLendingEngine is
     /// @param user 用户地址
     /// @param asset 债务资产地址
     /// @param amount 还款金额
-    function repay(address user, address asset, uint256 amount) external override onlyValidRegistry onlyVaultCoreOrSettlementManager {
-        _reentrancyGuardEnter();
+    function repay(address user, address asset, uint256 amount)
+        external
+        override
+        onlyValidRegistry
+        onlyVaultCoreOrSettlementManager
+        nonReentrant
+    {
         _s().repay(user, asset, amount);
-        _reentrancyGuardExit();
     }
 
     /// @notice 强制减少用户指定资产的债务（清算场景）
@@ -428,10 +430,8 @@ contract VaultLendingEngine is
     /// @param user 用户地址
     /// @param asset 债务资产地址
     /// @param amount 减少的债务金额
-    function forceReduceDebt(address user, address asset, uint256 amount) external override onlyValidRegistry {
-        _reentrancyGuardEnter();
+    function forceReduceDebt(address user, address asset, uint256 amount) external override onlyValidRegistry nonReentrant {
         _s().forceReduceDebt(user, asset, amount);
-        _reentrancyGuardExit();
     }
 
     /// @notice 更新用户总债务价值（内部函数）- 优化版本

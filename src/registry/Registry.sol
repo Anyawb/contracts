@@ -21,6 +21,7 @@ import {ModuleKeys} from "../constants/ModuleKeys.sol";
 import {RegistryStorage} from "./RegistryStorageLibrary.sol";
 import {RegistryEvents} from "./RegistryEventsLibrary.sol";
 import {RegistryQuery} from "./RegistryQueryLibrary.sol";
+import {RegistryCompatQuery} from "./RegistryCompatQueryLibrary.sol";
 import {RegistryCore} from "./RegistryCore.sol";
 import {RegistryUpgradeManager} from "./RegistryUpgradeManager.sol";
 import {RegistryAdmin} from "./RegistryAdmin.sol";
@@ -706,11 +707,11 @@ contract Registry is
     }
 
     function getAllRegisteredModuleKeys() external view returns (bytes32[] memory) {
-        return _getAllRegisteredModuleKeys();
+        return RegistryCompatQuery.getAllRegisteredModuleKeys();
     }
 
     function getAllRegisteredModules() external view returns (bytes32[] memory keys, address[] memory addresses) {
-        keys = _getAllRegisteredModuleKeys();
+        keys = RegistryCompatQuery.getAllRegisteredModuleKeys();
         addresses = new address[](keys.length);
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         for (uint256 i = 0; i < keys.length; i++) {
@@ -724,36 +725,7 @@ contract Registry is
         view
         returns (bytes32[] memory keys, uint256 totalCount)
     {
-        bytes32[] memory all = _getAllRegisteredModuleKeys();
-        totalCount = all.length;
-        if (offset >= totalCount) {
-            return (new bytes32[](0), totalCount);
-        }
-        uint256 end = offset + limit;
-        if (end > totalCount) end = totalCount;
-        uint256 len = end - offset;
-        keys = new bytes32[](len);
-        for (uint256 i = 0; i < len; i++) {
-            keys[i] = all[offset + i];
-        }
-        return (keys, totalCount);
-    }
-
-    function _getAllRegisteredModuleKeys() internal view returns (bytes32[] memory) {
-        bytes32[] memory allKeys = ModuleKeys.getAllKeys();
-        RegistryStorage.Layout storage layout = RegistryStorage.layout();
-        uint256 count = 0;
-        for (uint256 i = 0; i < allKeys.length; i++) {
-            if (layout.modules[allKeys[i]] != address(0)) count++;
-        }
-        bytes32[] memory keys = new bytes32[](count);
-        uint256 j = 0;
-        for (uint256 i = 0; i < allKeys.length; i++) {
-            if (layout.modules[allKeys[i]] != address(0)) {
-                keys[j++] = allKeys[i];
-            }
-        }
-        return keys;
+        return RegistryCompatQuery.getRegisteredModuleKeysPaginated(offset, limit);
     }
 
     /// @notice Get upgrade history count for a module.

@@ -1,6 +1,6 @@
 /**
  * 本地网络一键部署脚本（符合 contracts/docs/Architecture-Guide.md）
- * - 部署 Registry 核心模块（Registry + RegistryCore）
+ * - 部署 Registry（单一入口 / 单一 Proxy，Scheme A）
  * - 部署并注册核心业务与视图模块（ACM/白名单/Oracle/Updater/FeeRouter/CM/LE/VaultStorage/VBL/VaultRouter/VaultCore/HealthView）
  * - 写入 scripts/deployments/localhost.json 与 frontend-config/contracts-localhost.ts
  * - 确保前端 `Frontend/src/services/config/network.ts` 读取的地址齐全
@@ -163,8 +163,10 @@ async function main() {
       upgradeAdmin: deployer.address,
       emergencyAdmin: deployer.address,
       deployerAddress: deployer.address,
-      // Local keeps legacy modules for compatibility/testing.
-      deployCompatModules: true,
+      // Scheme A default: do NOT deploy legacy "Registry family" modules as separate proxies
+      // (they would not share state with the Registry proxy).
+      // If you need old-script compatibility/testing, set DEPLOY_REGISTRY_COMPAT_MODULES=true.
+      deployCompatModules: process.env.DEPLOY_REGISTRY_COMPAT_MODULES === 'true',
       deployDynamicModuleKeyRegistry: true,
     },
   });

@@ -18,7 +18,10 @@ export type RegistryDeployConfig = {
 
   /**
    * Whether to deploy legacy/compat “Registry family” modules.
-   * NOTE: Current `Registry.sol` contains the core logic; these modules are optional.
+   * NOTE (Scheme A):
+   * - Current `Registry.sol` already contains the core logic and canonical state (RegistryStorage) behind ONE proxy.
+   * - Deploying these legacy modules as separate proxies will NOT share state with the Registry proxy.
+   *   Keep this OFF by default; enable only for old-script compatibility/testing.
    */
   deployCompatModules?: boolean;
   /** Whether to deploy and set dynamic module key registry */

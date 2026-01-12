@@ -70,6 +70,11 @@ Registry (UUPS Proxy, 唯一入口/唯一状态)
 - 它们**不应该作为独立 Proxy 部署去“分担主 Registry 的职责”**（否则不共享 storage，状态会漂移）。
 - 若确需部署（仅测试/兼容），必须明确：这些合约维护的是**它们自己合约实例的状态**，不会自动影响主 `Registry`。
 
+#### 本地部署脚本默认行为（deploylocal）
+- `scripts/deploy/deploylocal.ts` 默认 **不部署**上述 compat modules（符合方向 A）。
+- 如确需本地兼容/测试，可设置：
+  - `DEPLOY_REGISTRY_COMPAT_MODULES=true`
+
 ### 核心优势
 
 - ✅ **统一入口**：所有模块通过 Registry 获取其他模块地址

@@ -3,9 +3,8 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
@@ -37,13 +36,11 @@ import { RegistryQuery } from "./RegistryQueryLibrary.sol";
 contract RegistryUpgradeManager is 
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     PausableUpgradeable
 { 
     using RegistryStorage for RegistryStorage.Layout;
     using RegistryQuery for *;
-    using AddressUpgradeable for address;
-
     // ============ Registry Address (唯一入口) ============
     address private _registry;
     /// @notice 可选的升级管理员（用于单独部署/测试场景）
@@ -83,13 +80,15 @@ contract RegistryUpgradeManager is
     // ============ Initializer ============
     /// @notice 初始化合约，绑定 Registry 地址
     /// @param registryOrAdmin 若为合约地址：绑定 Registry；若为 EOA：作为 upgradeAdmin（用于测试）
-    function initialize(address registryOrAdmin) external initializer {
+    /// @param initialOwner 最终治理 owner（Timelock/Multisig 或 Registry 入口）
+    function initialize(address registryOrAdmin, address initialOwner) external initializer {
         require(registryOrAdmin != address(0), "Invalid registry");
-        __Ownable_init();
-        __ReentrancyGuard_init();
+        if (initialOwner == address(0)) revert ZeroAddress();
+        __Ownable_init(initialOwner);
+        __ReentrancyGuardSlim_init();
         __Pausable_init();
 
-        if (registryOrAdmin.isContract()) {
+        if (registryOrAdmin.code.length > 0) {
             _registry = registryOrAdmin;
             // registry mode 下 upgradeAdmin 不作为授权来源；这里填充为 owner 仅用于可读性
             _upgradeAdmin = owner();
@@ -141,14 +140,16 @@ contract RegistryUpgradeManager is
     /// @param keys 模块键数组
     /// @param addresses 新模块地址数组
     /// @param allowReplace 是否允许替换已存在的模块
-    function batchSetModules(bytes32[] calldata keys, address[] calldata addresses, bool allowReplace) external whenNotPaused onlyRegistryOrAuthorized nonReentrant {
-        
+    function batchSetModules(bytes32[] calldata keys, address[] calldata addresses, bool allowReplace) external whenNotPaused onlyRegistryOrAuthorized {
+        _reentrancyGuardEnter();
+
         // 检查批量大小限制
         if (keys.length > MAX_BATCH_SIZE) {
             revert BatchSizeExceeded(keys.length, MAX_BATCH_SIZE);
         }
         
         _executeBatchModuleUpgrade(keys, addresses, allowReplace, msg.sender);
+        _reentrancyGuardExit();
     }
 
     /// @notice 发起模块升级计划，进入延时队列
@@ -204,8 +205,10 @@ contract RegistryUpgradeManager is
 
     /// @notice 到期后执行模块升级，将新地址写入映射
     /// @param key 模块键
-    function executeModuleUpgrade(bytes32 key) external whenNotPaused nonReentrant onlyRegistryOrAuthorized {
+    function executeModuleUpgrade(bytes32 key) external whenNotPaused onlyRegistryOrAuthorized {
+        _reentrancyGuardEnter();
         _executeDelayedUpgrade(key, msg.sender);
+        _reentrancyGuardExit();
     }
 
     // ============ View Functions ============

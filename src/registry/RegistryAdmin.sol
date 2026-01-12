@@ -3,8 +3,8 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { VaultTypes } from "../Vault/VaultTypes.sol";
@@ -21,7 +21,7 @@ import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 contract RegistryAdmin is 
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     PausableUpgradeable
 {
     using RegistryStorage for RegistryStorage.Layout;
@@ -39,12 +39,13 @@ contract RegistryAdmin is
     // ============ Initializer ============
     /// @notice 初始化合约
     /// @dev Registry 家族统一存储：初始化 storageVersion/admin/minDelay/paused
-    function initialize() external initializer {
-        __Ownable_init();
-        __ReentrancyGuard_init();
+    function initialize(address initialOwner) external initializer {
+        if (initialOwner == address(0)) revert ZeroAddress();
+        __Ownable_init(initialOwner);
+        __ReentrancyGuardSlim_init();
         __Pausable_init();
         // 统一初始化（默认 minDelay=0；如需设定由 Registry 或紧急入口完成）
-        RegistryStorage.initializeRegistryStorage(msg.sender, 0);
+        RegistryStorage.initializeRegistryStorage(initialOwner, 0);
     }
 
     // ============ Admin Functions ============
@@ -81,12 +82,14 @@ contract RegistryAdmin is
         if (l.pendingAdmin == address(0)) revert("Invalid pending admin");
         
         address oldAdmin = owner();
+        address oldPending = l.pendingAdmin;
         _transferOwnership(msg.sender);
         
         // 同步到 storage
         l.admin = msg.sender;
         l.pendingAdmin = address(0);
         
+        emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
         emit RegistryEvents.AdminChanged(oldAdmin, msg.sender);
     }
 
@@ -144,7 +147,18 @@ contract RegistryAdmin is
     /// @param newOwner 新 owner 地址
     function transferOwnership(address newOwner) public override onlyOwner {
         if (newOwner == address(0)) revert ZeroAddress();
+        RegistryStorage.Layout storage l = RegistryStorage.layout();
+        address oldAdmin = owner();
+        address oldPending = l.pendingAdmin;
+
         super.transferOwnership(newOwner);
+        l.admin = newOwner;
+
+        if (oldPending != address(0)) {
+            l.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
+        emit RegistryEvents.AdminChanged(oldAdmin, newOwner);
         
         emit VaultTypes.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -157,7 +171,18 @@ contract RegistryAdmin is
     /// @notice 放弃所有权
     /// @dev 紧急情况下放弃所有权限
     function renounceOwnership() public override onlyOwner {
+        RegistryStorage.Layout storage l = RegistryStorage.layout();
+        address oldAdmin = owner();
+        address oldPending = l.pendingAdmin;
+
         super.renounceOwnership();
+
+        l.admin = address(0);
+        if (oldPending != address(0)) {
+            l.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
+        emit RegistryEvents.AdminChanged(oldAdmin, address(0));
         
         emit VaultTypes.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,

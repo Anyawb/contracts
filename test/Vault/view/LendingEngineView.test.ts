@@ -404,8 +404,9 @@ describe('LendingEngineView', function () {
   describe('prevent double initialization', function () {
     it('reverts on second initialization', async function () {
       const { view, registry } = await deployFixture();
-      await expect(view.initialize(await registry.getAddress())).to.be.revertedWith(
-        'Initializable: contract is already initialized',
+      await expect(view.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        view,
+        'InvalidInitialization',
       );
     });
   });

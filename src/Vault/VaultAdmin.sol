@@ -140,4 +140,7 @@ contract VaultAdmin is
         // 记录标准化动作事件
         _emitActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE);
     }
+
+    /* ============ Storage Gap ============ */
+    uint256[50] private __gap;
 } 

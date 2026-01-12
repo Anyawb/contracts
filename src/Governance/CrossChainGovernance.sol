@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
 
 error CrossChainGovernance__InvalidProposal();
 error CrossChainGovernance__ProposalNotActive();
@@ -17,7 +17,7 @@ error CrossChainGovernance__InvalidExecutor();
 /// @title CrossChainGovernance - 跨链治理投票系统
 /// @notice 支持多链投票、提案管理、跨链执行的治理系统
 /// @dev 遵循 docs/SmartContractStandard.md 注释规范
-contract CrossChainGovernance is Initializable, AccessControlUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
+contract CrossChainGovernance is Initializable, AccessControlUpgradeable, ReentrancyGuardSlimUpgradeable, UUPSUpgradeable {
     
     /// @notice 治理角色
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
@@ -134,7 +134,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @param admin 管理员地址
     function initialize(address admin, address /* governanceToken */) external initializer {
         __AccessControl_init();
-        __ReentrancyGuard_init();
+        __ReentrancyGuardSlim_init();
         __UUPSUpgradeable_init();
         
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -233,7 +233,8 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
 
     /// @notice 执行提案
     /// @param proposalId 提案ID
-    function executeProposal(uint256 proposalId) external onlyRole(EXECUTOR_ROLE) nonReentrant {
+    function executeProposal(uint256 proposalId) external onlyRole(EXECUTOR_ROLE) {
+        _reentrancyGuardEnter();
         Proposal storage proposal = proposals[proposalId];
         
         if (proposal.executed) {
@@ -261,6 +262,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         }
         
         emit ProposalExecuted(proposalId, msg.sender);
+        _reentrancyGuardExit();
     }
 
     /// @notice 接收跨链投票
@@ -280,7 +282,8 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         uint256 totalWeight,
         address validator,
         bytes calldata /* signature */
-    ) external onlyRole(EXECUTOR_ROLE) nonReentrant {
+    ) external onlyRole(EXECUTOR_ROLE) {
+        _reentrancyGuardEnter();
         if (!supportedChains[chainId]) {
             revert CrossChainGovernance__InvalidChainId();
         }
@@ -313,6 +316,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         proposal.abstainVotes += abstainVotes;
         
         emit CrossChainVoteReceived(proposalId, chainId, forVotes, againstVotes, abstainVotes);
+        _reentrancyGuardExit();
     }
 
     /// @notice 跨链执行提案
@@ -325,7 +329,8 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         uint256 targetChainId,
         address targetContract,
         bytes calldata action
-    ) external onlyRole(EXECUTOR_ROLE) nonReentrant {
+    ) external onlyRole(EXECUTOR_ROLE) {
+        _reentrancyGuardEnter();
         if (!supportedChains[targetChainId]) {
             revert CrossChainGovernance__InvalidChainId();
         }
@@ -349,19 +354,23 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         executedCrossChainMessages[crossChainMessageHash] = true;
         
         emit CrossChainExecution(proposalId, targetChainId, crossChainMessageHash);
+        _reentrancyGuardExit();
     }
 
     /// @notice 更新投票权重
     /// @param user 用户地址
     /// @param weight 新权重
-    function updateVotingPower(address user, uint256 weight) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
+    function updateVotingPower(address user, uint256 weight) external onlyRole(GOVERNANCE_ROLE) {
+        _reentrancyGuardEnter();
         votingPower[user] = weight;
+        _reentrancyGuardExit();
     }
 
     /// @notice 批量更新投票权重
     /// @param users 用户地址数组
     /// @param weights 权重数组
-    function batchUpdateVotingPower(address[] calldata users, uint256[] calldata weights) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
+    function batchUpdateVotingPower(address[] calldata users, uint256[] calldata weights) external onlyRole(GOVERNANCE_ROLE) {
+        _reentrancyGuardEnter();
         if (users.length != weights.length) {
             revert CrossChainGovernance__InvalidProposal();
         }
@@ -369,6 +378,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         for (uint256 i = 0; i < users.length; i++) {
             votingPower[users[i]] = weights[i];
         }
+        _reentrancyGuardExit();
     }
 
     /// @notice 更新治理参数
@@ -383,7 +393,8 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         uint256 delay,
         uint256 quorum,
         uint256 threshold
-    ) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
+    ) external onlyRole(GOVERNANCE_ROLE) {
+        _reentrancyGuardEnter();
         minProposalTime = minTime;
         maxProposalTime = maxTime;
         executionDelay = delay;
@@ -391,6 +402,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         voteThresholdBPS = threshold;
         
         emit GovernanceParametersUpdated(minTime, maxTime, delay, quorum, threshold);
+        _reentrancyGuardExit();
     }
 
     /// @notice 添加跨链验证器
@@ -495,5 +507,11 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @notice 升级授权函数
     /// @dev onlyRole modifier 已经足够验证权限
     /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
+    function _authorizeUpgrade(address newImplementation) internal view override onlyRole(DEFAULT_ADMIN_ROLE) {
+        // 防御式校验：避免升级到 EOA/零地址
+        require(newImplementation.code.length > 0, "Invalid implementation");
+    }
+
+    // ============ Storage Gap ============
+    uint256[50] private __gap;
 } 

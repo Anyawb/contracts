@@ -58,8 +58,9 @@ describe('FeeRouterView', function () {
 
     it('prevents double initialization', async function () {
       const { feeRouterView, registry } = await loadFixture(deployFixture);
-      await expect(feeRouterView.initialize(await registry.getAddress())).to.be.revertedWith(
-        'Initializable: contract is already initialized',
+      await expect(feeRouterView.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        feeRouterView,
+        'InvalidInitialization',
       );
     });
   });

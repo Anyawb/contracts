@@ -17,7 +17,8 @@ import './scripts/tasks/e2e-reward-edgecases';
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: '0.8.20',
+    // OpenZeppelin v5 upgradeable contracts require Solidity >=0.8.22
+    version: '0.8.27',
     settings: {
       optimizer: {
         enabled: true,

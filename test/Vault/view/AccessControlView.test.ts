@@ -68,8 +68,9 @@ describe('AccessControlView', function () {
 
     it('重复初始化应失败', async function () {
       const { accessControlView, registry } = await loadFixture(deployAccessControlViewFixture);
-      await expect(accessControlView.initialize(await registry.getAddress())).to.be.revertedWith(
-        'Initializable: contract is already initialized'
+      await expect(accessControlView.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        accessControlView,
+        'InvalidInitialization'
       );
     });
   });

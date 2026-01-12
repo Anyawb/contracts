@@ -4,8 +4,8 @@ pragma solidity ^0.8.20;
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 // solhint-disable-next-line max-line-length
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
@@ -77,7 +77,7 @@ interface ILiquidationManagerFromSettlementManager {
 contract SettlementManager is
     Initializable,
     UUPSUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     PausableUpgradeable,
     ISettlementManager
 {
@@ -142,7 +142,7 @@ contract SettlementManager is
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         __UUPSUpgradeable_init();
-        __ReentrancyGuard_init();
+        __ReentrancyGuardSlim_init();
         __Pausable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -190,9 +190,9 @@ contract SettlementManager is
         external
         override
         whenNotPaused
-        nonReentrant
         onlyVaultCore
     {
+        _reentrancyGuardEnter();
         if (user == address(0) || debtAsset == address(0)) revert ZeroAddress();
         if (repayAmount == 0) revert AmountIsZero();
         // NOTE: orderId can be 0 (current ORDER_ENGINE / LoanNFT minting starts from 0).
@@ -231,6 +231,7 @@ contract SettlementManager is
                 unchecked { ++i; }
             }
         }
+        _reentrancyGuardExit();
     }
 
     // ============ External: Keeper Entry ============
@@ -265,7 +266,8 @@ contract SettlementManager is
      *
      * @param orderId Order ID (position primary key, SSOT)
      */
-    function settleOrLiquidate(uint256 orderId) external override whenNotPaused nonReentrant {
+    function settleOrLiquidate(uint256 orderId) external override whenNotPaused {
+        _reentrancyGuardEnter();
         // NOTE: orderId can be 0 (current ORDER_ENGINE / LoanNFT minting starts from 0).
         // Existence is validated below via ORDER_ENGINE._getLoanOrderForView(orderId).
         _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
@@ -364,6 +366,7 @@ contract SettlementManager is
             debtAmount: debtAmount,
             bonus: bonus
         });
+        _reentrancyGuardExit();
     }
 
     /**
@@ -445,6 +448,10 @@ contract SettlementManager is
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        require(newImplementation.code.length > 0, "Invalid implementation");
     }
+
+    /* ============ Storage Gap ============ */
+    uint256[50] private __gap;
 }
 

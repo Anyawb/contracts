@@ -43,7 +43,8 @@ interface DeploymentFixture {
 async function deployRegistryProxy(
   minDelay: number,
   upgradeAdmin: string,
-  emergencyAdmin: string
+  emergencyAdmin: string,
+  initialOwner: string
 ): Promise<Registry> {
   const RegistryFactory = await ethers.getContractFactory('Registry');
   const registryImpl = await RegistryFactory.deploy();
@@ -54,6 +55,7 @@ async function deployRegistryProxy(
     minDelay,
     upgradeAdmin,
     emergencyAdmin,
+    initialOwner,
   ]);
   const proxy = await ProxyFactory.deploy(registryImpl.target, initData);
   await proxy.waitForDeployment();
@@ -65,7 +67,7 @@ async function deploySystemFixture(): Promise<DeploymentFixture> {
   const [deployer, vaultCore, borrower, lender, platformFeeReceiver, admin] =
     await ethers.getSigners();
 
-  const registry = await deployRegistryProxy(0, deployer.address, deployer.address);
+  const registry = await deployRegistryProxy(0, deployer.address, deployer.address, deployer.address);
 
   const AccessControlFactory = await ethers.getContractFactory('AccessControlManager');
   const accessControl = (await AccessControlFactory.deploy(deployer.address)) as AccessControlManager;

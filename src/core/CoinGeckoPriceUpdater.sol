@@ -477,15 +477,9 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         uint256 lastPrice = _lastValidPrice[asset];
         if (lastPrice == 0) return true; // 首次更新
         
-        // 使用GracefulDegradation库的安全数学运算（完全内联）
-        uint256 deviation;
-        if (price > lastPrice) {
-            uint256 diff = GracefulDegradation.safeSub(price, lastPrice);
-            deviation = GracefulDegradation.safeDiv(GracefulDegradation.safeMul(diff, 10000), lastPrice);
-        } else {
-            uint256 diff = GracefulDegradation.safeSub(lastPrice, price);
-            deviation = GracefulDegradation.safeDiv(GracefulDegradation.safeMul(diff, 10000), lastPrice);
-        }
+        // Solidity 0.8+ 自带溢出/下溢检查：直接使用运算符即可
+        uint256 diff = price > lastPrice ? (price - lastPrice) : (lastPrice - price);
+        uint256 deviation = diff * 10000 / lastPrice;
         
         return deviation <= MAX_PRICE_DEVIATION;
     }

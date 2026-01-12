@@ -15,7 +15,7 @@
  */
 
 import * as hardhat from 'hardhat';
-const { ethers } = hardhat;
+const { ethers, upgrades } = hardhat;
 import { expect } from 'chai';
 import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
@@ -106,14 +106,19 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
     const MockPositionViewFactory = await ethers.getContractFactory('MockPositionView');
     const mockPositionView = await MockPositionViewFactory.deploy();
 
-    // 部署 VaultRouter（先部署，因为 VaultCore 需要它）
+    // 部署 VaultRouter（UUPS proxy；VaultCore 需要它的最终地址）
     const VaultRouterFactory = await ethers.getContractFactory('VaultRouter');
-    vaultRouter = await VaultRouterFactory.deploy(
-      await mockRegistry.getAddress(),
-      await mockAssetWhitelist.getAddress(),
-      await mockPriceOracle.getAddress(),
-      await mockSettlementToken.getAddress()
-    );
+    vaultRouter = (await upgrades.deployProxy(
+      VaultRouterFactory,
+      [
+        await mockRegistry.getAddress(),
+        await mockAssetWhitelist.getAddress(),
+        await mockPriceOracle.getAddress(),
+        await mockSettlementToken.getAddress(),
+        await deployer.getAddress(), // initialOwner
+      ],
+      { kind: 'uups', initializer: 'initialize' }
+    )) as VaultRouter;
 
     // 部署 VaultCore（UUPS：必须通过 Proxy 初始化；实现合约 constructor 已禁用 initialize）
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
@@ -190,11 +195,16 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
       const VaultRouterFactory = await ethers.getContractFactory('VaultRouter');
       
       await expect(
-        VaultRouterFactory.deploy(
-          ZERO_ADDRESS,
-          await mockAssetWhitelist.getAddress(),
-          await this.mockPriceOracle.getAddress(),
-          await mockSettlementToken.getAddress()
+        upgrades.deployProxy(
+          VaultRouterFactory,
+          [
+            ZERO_ADDRESS,
+            await mockAssetWhitelist.getAddress(),
+            await this.mockPriceOracle.getAddress(),
+            await mockSettlementToken.getAddress(),
+            await owner.getAddress(),
+          ],
+          { kind: 'uups', initializer: 'initialize' }
         )
       ).to.be.revertedWithCustomError(VaultRouterFactory, 'ZeroAddress');
     });
@@ -753,7 +763,7 @@ describe('VaultRouter – 双架构智能协调器测试', function () {
           ONE_ETH,
           Math.floor(Date.now() / 1000)
         )
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(this.vaultRouter, 'EnforcedPause');
       
       await ethers.provider.send("hardhat_stopImpersonatingAccount", [vaultCoreAddr]);
     });

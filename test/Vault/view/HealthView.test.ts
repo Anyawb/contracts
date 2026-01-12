@@ -63,7 +63,10 @@ describe('HealthView', function () {
 
     it('prevents double initialization', async function () {
       const { healthView, registry } = await loadFixture(deployFixture);
-      await expect(healthView.initialize(await registry.getAddress())).to.be.revertedWith('Initializable: contract is already initialized');
+      await expect(healthView.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        healthView,
+        'InvalidInitialization'
+      );
     });
   });
 

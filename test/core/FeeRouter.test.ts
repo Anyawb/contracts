@@ -371,7 +371,7 @@ describe('FeeRouter – 费率管理测试', function () {
       // 暂停后应无法分发费用
       await expect(
         feeRouter.connect(alice).distributeNormal(tokenAddress, amount)
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(feeRouter, 'EnforcedPause');
       
       // 恢复合约
       await feeRouter.connect(governance).unpause();

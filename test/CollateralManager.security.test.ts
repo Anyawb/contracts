@@ -182,10 +182,12 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
     const newImpl = await CM.deploy();
     await newImpl.waitForDeployment();
 
-    await expect(collateralManager.connect(admin).upgradeTo(await newImpl.getAddress())).to.be.revertedWithCustomError(acm, 'MissingRole');
+    await expect(
+      collateralManager.connect(admin).upgradeToAndCall(await newImpl.getAddress(), '0x')
+    ).to.be.revertedWithCustomError(acm, 'MissingRole');
 
     await acm.grantRole(ACTION_UPGRADE_MODULE, admin.address);
-    await expect(collateralManager.connect(admin).upgradeTo(await newImpl.getAddress())).to.not.be.reverted;
+    await expect(collateralManager.connect(admin).upgradeToAndCall(await newImpl.getAddress(), '0x')).to.not.be.reverted;
   });
 });
 

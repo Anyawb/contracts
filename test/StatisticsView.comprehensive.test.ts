@@ -65,7 +65,7 @@ describe('StatisticsView – 全面测试', function () {
       const { stats } = await loadFixture(deployFixture);
       await expect(
         stats.initialize(await stats.registryAddr())
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+      ).to.be.revertedWithCustomError(stats, 'InvalidInitialization');
     });
   });
 

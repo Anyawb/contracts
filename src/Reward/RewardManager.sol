@@ -15,7 +15,7 @@ import {
 } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
 
 /// @dev RewardManagerCore 的 V2 最小接口（用于让 IDE/静态分析器稳定识别 onLoanEventV2）
 interface IRewardManagerCoreV2 {
@@ -30,7 +30,7 @@ interface IRewardManagerCoreV2 {
 /// @dev 使用 VaultTypes 进行标准化事件记录
 /// @dev 使用 StandardErrors 进行统一错误处理
 /// @dev 通过 Registry 进行模块地址获取
-contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IRewardManager {
+contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardSlimUpgradeable, IRewardManager {
     // ========== Custom Errors (gas efficient) ==========
     /// @notice 参数非法：等级不在 1-5
     error RewardManager__InvalidLevel(uint8 level);
@@ -57,7 +57,7 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         
         __UUPSUpgradeable_init();
-        __ReentrancyGuard_init();
+        __ReentrancyGuardSlim_init();
         _registryAddr = initialRegistryAddr;
     }
 
@@ -93,12 +93,14 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
     /// @param amount 金额（以最小单位；USDT/USDC 按 6 位，ETH 按 18 位）
     /// @param duration 借款时长（秒）：borrow 推荐传订单 term（用于锁定/计算奖励）；若上游无法提供期限可传 0（表示未知/不计分/不锁定）；repay 固定传 0
     /// @param hfHighEnough 历史遗留命名：由 LendingEngine 传入；当前实现中用于“按期且足额还清”的判定 flag（主要在 repay 场景有意义）
-    function onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough) external onlyValidRegistry nonReentrant {
+    function onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough) external onlyValidRegistry {
+        _reentrancyGuardEnter();
         // 按 Architecture-Guide：Reward 的唯一路径为 ORDER_ENGINE 落账后触发
         address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
         if (msg.sender != orderEngine) revert MissingRole();
         
         _getRewardManagerCore().onLoanEvent(user, amount, duration, hfHighEnough);
+        _reentrancyGuardExit();
     }
 
     /// @notice ORDER_ENGINE(core/LendingEngine) 在 borrow/repay(足额) 后调用此函数（V2：按订单锁定/释放/扣罚）
@@ -109,11 +111,13 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         uint256 amount,
         uint256 maturity,
         IRewardManagerV2.LoanEventOutcome outcome
-    ) external onlyValidRegistry nonReentrant {
+    ) external onlyValidRegistry {
+        _reentrancyGuardEnter();
         address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
         if (msg.sender != orderEngine) revert MissingRole();
 
         IRewardManagerCoreV2(address(_getRewardManagerCore())).onLoanEventV2(user, orderId, amount, maturity, uint8(outcome));
+        _reentrancyGuardExit();
     }
 
     /// @notice 批量处理借贷事件 - 大幅提升性能

@@ -21,8 +21,10 @@ import {
     HealthFactorTooLow,
     PausedSystem
 } from "../errors/StandardErrors.sol";
-import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import { Pausable } from "@openzeppelin/contracts/security/Pausable.sol";
+import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
 import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
 import { IPositionView } from "../interfaces/IPositionView.sol";
 import { ICacheRefreshable } from "../interfaces/ICacheRefreshable.sol";
@@ -48,7 +50,14 @@ interface IStatisticsViewMinimal {
 /// @dev 提供模块调用缓存机制，减少gas消耗
 /// @dev 集成优雅降级机制，处理模块调用失败
 /// @custom:security-contact security@example.com
-contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshable {
+contract VaultRouter is
+    OwnableUpgradeable,
+    UUPSUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
+    PausableUpgradeable,
+    IVaultRouter,
+    ICacheRefreshable
+{
     using GracefulDegradation for *;
 
     // ----------------- 常量 -----------------
@@ -66,20 +75,20 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshab
 
     // ----------------- 状态变量 -----------------
     /// @notice Registry合约地址，用于获取模块地址
-    /// @dev 不可变地址，确保系统稳定性
-    address private immutable _registryAddr;
+    /// @dev Proxy-friendly: NOT immutable
+    address private _registryAddr;
     
     /// @notice 资产白名单合约地址
-    /// @dev 不可变地址，用于资产白名单验证
-    address private immutable _assetWhitelistAddr;
+    /// @dev Proxy-friendly: NOT immutable
+    address private _assetWhitelistAddr;
     
     /// @notice 价格预言机合约地址
-    /// @dev 不可变地址，用于价格获取
-    address private immutable _priceOracleAddr;
+    /// @dev Proxy-friendly: NOT immutable
+    address private _priceOracleAddr;
     
     /// @notice 结算币地址
-    /// @dev 用于优雅降级配置
-    address private immutable _settlementTokenAddr;
+    /// @dev 用于优雅降级配置（Proxy-friendly: NOT immutable）
+    address private _settlementTokenAddr;
     
     // 缓存模块地址以减少Gas消耗
     /// @notice 缓存的CollateralManager地址
@@ -234,37 +243,42 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshab
     /// @notice 不支持的操作类型
     error VaultRouter__UnsupportedOperation(bytes32 operation);
 
-    // ----------------- 构造函数 -----------------
-    /// @notice 初始化 VaultRouter
-    /// @dev 设置Registry、权限管理和资产白名单地址
-    /// @param initialRegistry Registry 合约地址，用于获取模块地址
-    /// @param initialAssetWhitelist 资产白名单合约地址，用于资产验证
-    /// @param initialPriceOracle 价格预言机合约地址，用于价格获取
-    /// @param initialSettlementToken 结算币地址，用于优雅降级配置
-    /// @custom:security 确保所有地址参数不为零地址
-    constructor(
-        address initialRegistry, 
+    // ----------------- Construction & initialization -----------------
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice Initialize VaultRouter (UUPS).
+    /// @dev This replaces the old constructor-based deployment. Do NOT call twice.
+    function initialize(
+        address initialRegistry,
         address initialAssetWhitelist,
         address initialPriceOracle,
-        address initialSettlementToken
-    ) {
+        address initialSettlementToken,
+        address initialOwner
+    ) external initializer {
         if (initialRegistry == address(0)) revert ZeroAddress();
         if (initialAssetWhitelist == address(0)) revert ZeroAddress();
         if (initialPriceOracle == address(0)) revert ZeroAddress();
         if (initialSettlementToken == address(0)) revert ZeroAddress();
-        
+        if (initialOwner == address(0)) revert ZeroAddress();
+
+        __Ownable_init(initialOwner);
+        __UUPSUpgradeable_init();
+        __ReentrancyGuardSlim_init();
+        __Pausable_init();
+
         _registryAddr = initialRegistry;
         _assetWhitelistAddr = initialAssetWhitelist;
         _priceOracleAddr = initialPriceOracle;
         _settlementTokenAddr = initialSettlementToken;
-        
-        emit VaultRouterInitialized(
-            initialRegistry, 
-            initialAssetWhitelist,
-            initialPriceOracle,
-            initialSettlementToken
-        );
+
+        emit VaultRouterInitialized(initialRegistry, initialAssetWhitelist, initialPriceOracle, initialSettlementToken);
     }
+
+    /// @dev UUPS upgrade authorization.
+    function _authorizeUpgrade(address) internal override onlyOwner {}
 
     // ----------------- 修饰符 -----------------
     /// @notice 仅限有效Registry调用
@@ -531,7 +545,8 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshab
         address borrowAsset,
         uint256 borrowAmount,
         uint16 termDays
-    ) external nonReentrant whenNotPaused onlyValidRegistry {
+    ) external whenNotPaused onlyValidRegistry {
+        _reentrancyGuardEnter();
         // 参数校验
         _validateAsset(collateralAsset);
         _validateAsset(borrowAsset);
@@ -590,6 +605,7 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshab
             0, 
             borrowAsset
         );
+        _reentrancyGuardExit();
     }
 
     /// @notice 处理用户操作（供 VaultCore 传递存取操作）
@@ -600,7 +616,8 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshab
         address asset,
         uint256 amount,
         uint256 timestamp
-    ) external override nonReentrant whenNotPaused onlyValidRegistry onlyVaultCore {
+    ) external override whenNotPaused onlyValidRegistry onlyVaultCore {
+        _reentrancyGuardEnter();
         // 基础校验
         _validateAsset(asset);
         _validateAmount(amount);
@@ -621,6 +638,7 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshab
         }
 
         emit VaultAction(operationType, user, amount, 0, asset, timestamp);
+        _reentrancyGuardExit();
     }
 
     /// @notice 业务模块推送用户头寸更新（兼容版本，不带上下文）
@@ -901,7 +919,7 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshab
         uint256 repayAmount,
         address withdrawAsset,
         uint256 withdrawAmount
-    ) external nonReentrant whenNotPaused onlyValidRegistry {
+    ) external view whenNotPaused onlyValidRegistry {
         // Architecture alignment:
         // Repay must go through VaultCore.repay(...) → SettlementManager (SSOT).
         // VaultRouter is not a write-forwarder for repay/settle paths.
@@ -1286,4 +1304,7 @@ contract VaultRouter is ReentrancyGuard, Pausable, IVaultRouter, ICacheRefreshab
             _emitVaultAction(ActionKeys.ACTION_WITHDRAW, msg.sender, withdrawAmount, 0, withdrawAsset);
         }
     }
+
+    // ============ Storage gap ============
+    uint256[50] private __gap;
 } 

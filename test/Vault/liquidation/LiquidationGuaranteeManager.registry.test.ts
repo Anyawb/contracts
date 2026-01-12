@@ -35,7 +35,7 @@ describe.skip("LiquidationGuaranteeManager Registry Integration", function () {
     await registryImpl.waitForDeployment();
     const proxy = await ERC1967Proxy.deploy(
       await registryImpl.getAddress(),
-      registryImpl.interface.encodeFunctionData("initialize", [0, deployer.address, deployer.address])
+      registryImpl.interface.encodeFunctionData("initialize", [0, deployer.address, deployer.address, deployer.address])
     );
     await proxy.waitForDeployment();
     registry = Registry.attach(await proxy.getAddress());

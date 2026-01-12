@@ -212,9 +212,11 @@ contract RegistryCore is
         if (msg.sender != l.pendingAdmin) revert NotPendingAdmin(msg.sender, l.pendingAdmin);
         
         address oldAdmin = l.admin;
+        address oldPending = l.pendingAdmin;
         l.admin = l.pendingAdmin;
         l.pendingAdmin = address(0);
         
+        emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
         emit RegistryEvents.AdminChanged(oldAdmin, l.admin);
     }
 

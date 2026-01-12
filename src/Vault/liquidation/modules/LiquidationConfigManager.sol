@@ -3,8 +3,8 @@ pragma solidity ^0.8.20;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {LiquidationAccessControl} from "../libraries/LiquidationAccessControl.sol";
 import {ModuleCache} from "../libraries/ModuleCache.sol";
@@ -42,7 +42,7 @@ import {IRegistryUpgradeEvents} from "../../../interfaces/IRegistryUpgradeEvents
 abstract contract LiquidationConfigManager is 
     Initializable,
     UUPSUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     PausableUpgradeable,
     ICacheRefreshable,
     ILiquidationConfigManager,
@@ -172,7 +172,7 @@ abstract contract LiquidationConfigManager is
         if (initialRegistryAddr == address(0) || initialAccessControl == address(0)) revert ZeroAddress();
 
         __UUPSUpgradeable_init();
-        __ReentrancyGuard_init();
+        __ReentrancyGuardSlim_init();
         __Pausable_init();
 
         _registryAddr = initialRegistryAddr;

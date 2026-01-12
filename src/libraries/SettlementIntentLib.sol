@@ -1,7 +1,9 @@
-import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
+
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 
 /// @title SettlementIntentLib
 /// @notice 撮合意向（借/贷）EIP-712 结构校验与状态管理的轻量库
@@ -93,7 +95,7 @@ library SettlementIntentLib {
 
     /// @notice 计算 EIP-712 Typed Data 哈希
     function toTypedDataHash(bytes32 domainSeparator, bytes32 structHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        return MessageHashUtils.toTypedDataHash(domainSeparator, structHash);
     }
 
     /// @notice 校验 EOA/合约钱包签名（ERC-1271）并返回是否有效

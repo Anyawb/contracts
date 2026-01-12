@@ -12,7 +12,7 @@
 
 import { expect } from 'chai';
 import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -65,11 +65,16 @@ describe('VaultRouter – 缓存一致性与回退路径', function () {
     const settlementToken = await ERC20Factory.deploy('Settlement Token', 'SETTLE', ethers.parseUnits('1000000', 18));
 
     const VaultRouterFactory = await ethers.getContractFactory('VaultRouter');
-    const vaultRouter = (await VaultRouterFactory.deploy(
-      await registry.getAddress(),
-      await assetWhitelist.getAddress(),
-      await priceOracle.getAddress(),
-      await settlementToken.getAddress()
+    const vaultRouter = (await upgrades.deployProxy(
+      VaultRouterFactory,
+      [
+        await registry.getAddress(),
+        await assetWhitelist.getAddress(),
+        await priceOracle.getAddress(),
+        await settlementToken.getAddress(),
+        admin.address, // initialOwner
+      ],
+      { kind: 'uups', initializer: 'initialize' }
     )) as VaultRouter;
 
     // 配置 Registry 模块

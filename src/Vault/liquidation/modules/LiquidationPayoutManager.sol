@@ -275,7 +275,11 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
         onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
     {
         LiquidationValidationLibrary.validateAddress(newImplementation, "Implementation");
+        require(newImplementation.code.length > 0, "Invalid implementation");
     }
+
+    /* ============ Storage Gap ============ */
+    uint256[50] private __gap;
 
     /**
      * @notice Internal configuration setting function

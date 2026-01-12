@@ -548,7 +548,7 @@ describe.skip('ValuationOracleAdapter – 估值预言机适配器测试 (DEPREC
       
       await expect(
         valuationOracleAdapter.getAssetPrice(TEST_ASSET)
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(valuationOracleAdapter, 'EnforcedPause');
     });
 
     it('应该在暂停状态下拒绝批量价格查询', async function () {
@@ -556,7 +556,7 @@ describe.skip('ValuationOracleAdapter – 估值预言机适配器测试 (DEPREC
       
       await expect(
         valuationOracleAdapter.getAssetPrices([TEST_ASSET])
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(valuationOracleAdapter, 'EnforcedPause');
     });
 
     it('应该在恢复后允许价格查询', async function () {

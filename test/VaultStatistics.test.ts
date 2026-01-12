@@ -47,8 +47,9 @@ describe('StatisticsView (VaultStatistics 替代)', function () {
 
     it('重复初始化应失败', async function () {
       const { stats, registry } = await deployFixture();
-      await expect(stats.initialize(await registry.getAddress())).to.be.revertedWith(
-        'Initializable: contract is already initialized',
+      await expect(stats.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        stats,
+        'InvalidInitialization',
       );
     });
   });

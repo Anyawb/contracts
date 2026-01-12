@@ -38,7 +38,12 @@ describe('Registry History Buffer', function () {
     const ERC1967Proxy = await ethers.getContractFactory('ERC1967Proxy');
     const proxy = await ERC1967Proxy.deploy(
       await implementation.getAddress(),
-      implementation.interface.encodeFunctionData('initialize', [BigInt(3600), await owner.getAddress(), await owner.getAddress()])
+      implementation.interface.encodeFunctionData('initialize', [
+        BigInt(3600),
+        await owner.getAddress(),
+        await owner.getAddress(),
+        await owner.getAddress(),
+      ])
     );
     await proxy.waitForDeployment();
         

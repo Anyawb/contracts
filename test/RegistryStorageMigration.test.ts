@@ -59,6 +59,7 @@ describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', f
       TEST_MIN_DELAY,
       upgradeAdmin.address,
       emergencyAdmin.address,
+      owner.address,
     ]);
     proxy = (await ProxyFactory.deploy(registryImpl.target, initData)) as ERC1967Proxy;
     await proxy.waitForDeployment();
@@ -200,7 +201,7 @@ describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', f
     it('非 owner 调用应失败', async function () {
       await expect(
         registry.connect(other).migrateStorage(1, 2, await migrator.getAddress())
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(registry, 'OwnableUnauthorizedAccount');
     });
 
     it('支持版本跳跃 1 -> 10', async function () {

@@ -103,8 +103,9 @@ describe('DashboardView', function () {
 
     it('prevents double initialization', async function () {
       const { dashboardView, registry } = await loadFixture(deployFixture);
-      await expect(dashboardView.initialize(await registry.getAddress())).to.be.revertedWith(
-        'Initializable: contract is already initialized',
+      await expect(dashboardView.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        dashboardView,
+        'InvalidInitialization',
       );
     });
   });

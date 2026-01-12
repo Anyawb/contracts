@@ -11,7 +11,7 @@
  */
 
 import hardhat from 'hardhat';
-const { ethers } = hardhat;
+const { ethers, upgrades } = hardhat;
 import { expect } from 'chai';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
@@ -78,18 +78,19 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
     await registry.setModule(KEY_ACCESS_CONTROL, mockAccessControlManager.target);
     await registry.setModule(KEY_GUARANTEE_FUND, mockGuaranteeFund.target);
 
-    // 部署 EarlyRepaymentGuaranteeManager
+    // 部署 EarlyRepaymentGuaranteeManager (UUPS proxy)
     const EarlyRepaymentGuaranteeManagerFactory = await ethers.getContractFactory('EarlyRepaymentGuaranteeManager');
-    const earlyRepaymentGuaranteeManager = (await EarlyRepaymentGuaranteeManagerFactory.deploy()) as EarlyRepaymentGuaranteeManager;
+    const earlyRepaymentGuaranteeManager = (await upgrades.deployProxy(
+      EarlyRepaymentGuaranteeManagerFactory,
+      [
+        vaultCoreSigner.address,
+        registry.target,
+        vaultCoreSigner.address, // 平台费用接收者
+        100, // 1% 平台费率
+      ],
+      { kind: 'uups' }
+    )) as EarlyRepaymentGuaranteeManager;
     await earlyRepaymentGuaranteeManager.waitForDeployment();
-
-    // 初始化合约（使用 signer 直接作为 vaultCore）
-    await earlyRepaymentGuaranteeManager.initialize(
-      vaultCoreSigner.address,
-      registry.target,
-      vaultCoreSigner.address, // 平台费用接收者
-      100 // 1% 平台费率
-    );
 
     // 设置权限（仅授予 vaultCore）
     await mockAccessControlManager.grantRole(ACTION_SET_PARAMETER, vaultCoreSigner.address);
@@ -168,8 +169,8 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
         const newImpl = await newImplementation.deploy();
 
         await expect(
-          earlyRepaymentGuaranteeManager.connect(unauthorizedUser).upgradeTo(newImpl.target)
-        ).to.be.revertedWith('Function must be called through delegatecall');
+          earlyRepaymentGuaranteeManager.connect(unauthorizedUser).upgradeToAndCall(newImpl.target, '0x')
+        ).to.be.revertedWithCustomError(mockAccessControlManager, 'MissingRole');
       });
 
       it('EarlyRepaymentGuaranteeManager – 不能设置零地址作为平台费用接收者', async function () {

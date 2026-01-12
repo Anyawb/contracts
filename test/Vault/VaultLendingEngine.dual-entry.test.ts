@@ -85,13 +85,18 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     const assetWhitelist = (await AssetWhitelist.deploy()) as MockAssetWhitelist;
     await assetWhitelist.waitForDeployment();
 
-    // Deploy VaultRouter (real impl) + View modules (PositionView/HealthView)
-    const VaultRouter = await ethers.getContractFactory('VaultRouter');
-    const vaultRouter = (await VaultRouter.deploy(
-      await registry.getAddress(),
-      await assetWhitelist.getAddress(),
-      await priceOracle.getAddress(),
-      await settlementToken.getAddress()
+    // Deploy VaultRouter (UUPS proxy)
+    const VaultRouterF = await ethers.getContractFactory('VaultRouter');
+    const vaultRouter = (await upgrades.deployProxy(
+      VaultRouterF,
+      [
+        await registry.getAddress(),
+        await assetWhitelist.getAddress(),
+        await priceOracle.getAddress(),
+        await settlementToken.getAddress(),
+        vaultCore.address, // initialOwner
+      ],
+      { kind: 'uups', initializer: 'initialize' }
     )) as VaultRouter;
     await vaultRouter.waitForDeployment();
 

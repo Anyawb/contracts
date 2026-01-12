@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { 
@@ -100,11 +100,12 @@ contract RegistryDynamicModuleKey is
     }
 
     // ============ Initializer ============
-    function initialize(address initialRegistrationAdmin, address initialSystemAdmin) external initializer {
+    function initialize(address initialRegistrationAdmin, address initialSystemAdmin, address initialOwner) external initializer {
         if (initialRegistrationAdmin == address(0)) revert ZeroAddress();
         if (initialSystemAdmin == address(0)) revert ZeroAddress();
+        if (initialOwner == address(0)) revert ZeroAddress();
         
-        __Ownable_init();
+        __Ownable_init(initialOwner);
         __UUPSUpgradeable_init();
         __Pausable_init();
         

@@ -11,6 +11,7 @@ const KEY_LIQUIDATION_PROFIT_STATS_MANAGER = ethers.keccak256(ethers.toUtf8Bytes
 const KEY_LIQUIDATION_RECORD_MANAGER = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_RECORD_MANAGER'));
 
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
+const ACTION_UPGRADE_MODULE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
 const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
 const ACTION_VIEW_LIQUIDATION_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_LIQUIDATION_DATA'));
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
@@ -39,6 +40,7 @@ describe('LiquidatorView', function () {
     await registry.setModule(KEY_LIQUIDATION_RECORD_MANAGER, await recordMgr.getAddress());
 
     await acm.grantRole(ACTION_ADMIN, admin.address);
+    await acm.grantRole(ACTION_UPGRADE_MODULE, admin.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, admin.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_LIQUIDATION_DATA, admin.address);
@@ -82,8 +84,9 @@ describe('LiquidatorView', function () {
 
     it('prevents double initialization', async function () {
       const { view, registry } = await deployFixture();
-      await expect(view.initialize(await registry.getAddress(), ethers.ZeroAddress)).to.be.revertedWith(
-        'Initializable: contract is already initialized',
+      await expect(view.initialize(await registry.getAddress(), ethers.ZeroAddress)).to.be.revertedWithCustomError(
+        view,
+        'InvalidInitialization',
       );
     });
   });

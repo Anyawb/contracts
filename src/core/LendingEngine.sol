@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/CountersUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
@@ -39,8 +39,7 @@ import { IRewardManager, IRewardManagerV2 } from "../interfaces/IRewardManager.s
  * @custom:security-contact security@example.com
  */
 contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, IRegistryUpgradeEvents {
-    using SafeERC20Upgradeable for IERC20Upgradeable;
-    using CountersUpgradeable for CountersUpgradeable.Counter;
+    using SafeERC20 for IERC20;
     using GracefulDegradation for *;
 
     /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
@@ -59,7 +58,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
 
     /*━━━━━━━━━━━━━━━ STATE ━━━━━━━━━━━━━━━*/
 
-    CountersUpgradeable.Counter private _orderIdCounter;
+    uint256 private _orderIdCounter;
 
     /// @notice Registry 合约地址，用于获取其他模块
     address private _registryAddr;
@@ -294,8 +293,10 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
         // 获取最新模块地址
         _updateModuleAddresses();
 
-        orderId = _orderIdCounter.current();
-        _orderIdCounter.increment();
+        orderId = _orderIdCounter;
+        unchecked {
+            _orderIdCounter++;
+        }
 
         // 计算开始与到期时间
         uint256 startTs = block.timestamp;
@@ -418,16 +419,16 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
 
         // --- Interactions: 处理外部调用 ---
         if (feeAmount > 0) {
-            IERC20Upgradeable(ord.asset).safeTransferFrom(msg.sender, address(this), feeAmount);
+            IERC20(ord.asset).safeTransferFrom(msg.sender, address(this), feeAmount);
             // slither-disable-next-line unchecked-transfer
-            IERC20Upgradeable(ord.asset).approve(address(_feeRouter), feeAmount);
+            IERC20(ord.asset).approve(address(_feeRouter), feeAmount);
             
             // 尝试分发费用，失败时记录但不中断还款流程
             _distributeFeeWithFallback(orderId, ord.asset, feeAmount);
         }
 
         // 将剩余金额转给贷方
-        IERC20Upgradeable(ord.asset).safeTransferFrom(msg.sender, ord.lender, lenderAmount);
+        IERC20(ord.asset).safeTransferFrom(msg.sender, ord.lender, lenderAmount);
 
         emit LoanRepaid(orderId, msg.sender, _repayAmount);
         // 统一数据推送
@@ -498,7 +499,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
         // 验证调用者具有系统数据查看权限
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
-        uint256 currentOrderId = _orderIdCounter.current();
+        uint256 currentOrderId = _orderIdCounter;
         for (uint256 i = 0; i < currentOrderId; i++) {
             if (_loanOrders[i].borrower == user) {
                 count++;
@@ -722,6 +723,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable, I
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert LendingEngine__ZeroAddress();
+        require(newImplementation.code.length > 0, "Invalid implementation");
         
         // 记录升级动作
         emit VaultTypes.ActionExecuted(

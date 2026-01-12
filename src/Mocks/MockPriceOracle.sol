@@ -20,6 +20,8 @@ contract MockPriceOracle is Ownable, IPriceOracle {
 
     error MockFailure();
 
+    constructor() Ownable(msg.sender) {}
+
     function setShouldFail(bool flag) external {
         shouldFail = flag;
     }

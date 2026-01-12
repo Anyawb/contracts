@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { SafeERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { IERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
@@ -55,7 +55,7 @@ contract FeeRouter is
     IFeeRouter,
     IRegistryUpgradeEvents 
 {
-    using SafeERC20Upgradeable for IERC20Upgradeable;
+    using SafeERC20 for IERC20;
 
     /*━━━━━━━━━━━━━━━ STATE ━━━━━━━━━━━━━━━*/
     /// @notice Registry 合约地址
@@ -751,19 +751,19 @@ contract FeeRouter is
     ) internal {
         // 先从调用者地址拉取全部费用金额（需要调用者预先 approve 给本合约）
         if (totalAmount > 0) {
-            IERC20Upgradeable(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+            IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
         }
 
         // 分发费用
         if (platformAmt > 0) {
-            IERC20Upgradeable(token).safeTransfer(_platformTreasury, platformAmt);
+            IERC20(token).safeTransfer(_platformTreasury, platformAmt);
         }
         if (ecoAmt > 0) {
-            IERC20Upgradeable(token).safeTransfer(_ecosystemVault, ecoAmt);
+            IERC20(token).safeTransfer(_ecosystemVault, ecoAmt);
         }
         if (remaining > 0) {
             // 余量返还给调用者（通常是资金池/编排合约）
-            IERC20Upgradeable(token).safeTransfer(msg.sender, remaining);
+            IERC20(token).safeTransfer(msg.sender, remaining);
         }
 
         // 更新统计和缓存

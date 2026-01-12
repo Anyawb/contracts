@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
 import { IPriceOracleAdapter } from "../interfaces/IPriceOracleAdapter.sol";
 import { VaultTypes } from "../Vault/VaultTypes.sol";
@@ -29,8 +28,6 @@ import { VaultTypes } from "../Vault/VaultTypes.sol";
 /// @dev - 提供安全的数学运算函数
 /// @dev - 防止溢出和下溢错误
 library GracefulDegradation {
-    using SafeMath for uint256;
-
     /* ============ Constants ============ */
     /// @notice 最大价格年龄（1小时）
     uint256 private constant MAX_PRICE_AGE = 3600;
@@ -218,7 +215,7 @@ library GracefulDegradation {
                         result.reason = string(abi.encodePacked("Used cached price after retry failure: ", errorReason));
                         result.usedFallback = true;
                         result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp.sub(cachedPrice.timestamp);
+                        result.priceAge = block.timestamp - cachedPrice.timestamp;
                         return result;
                     }
                 }
@@ -244,7 +241,7 @@ library GracefulDegradation {
         }
 
         // 检查价格是否过期
-        uint256 priceAge = block.timestamp.sub(timestamp);
+        uint256 priceAge = block.timestamp - timestamp;
         if (priceAge > config.priceValidation.maxPriceAge) {
             return _applyFallbackStrategy(assetAddr, amountValue, "Stale price", config);
         }
@@ -322,7 +319,7 @@ library GracefulDegradation {
             }
 
             // 检查价格是否过期
-            uint256 priceAge = block.timestamp.sub(timestamp);
+            uint256 priceAge = block.timestamp - timestamp;
             if (priceAge > config.priceValidation.maxPriceAge) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Stale price", config);
             }
@@ -409,7 +406,7 @@ library GracefulDegradation {
             }
 
             // 检查价格是否过期
-            uint256 priceAge = block.timestamp.sub(timestamp);
+            uint256 priceAge = block.timestamp - timestamp;
             if (priceAge > config.priceValidation.maxPriceAge) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Stale price", config);
             }
@@ -455,7 +452,7 @@ library GracefulDegradation {
                         result.reason = string(abi.encodePacked("Used cached price after error: ", reason));
                         result.usedFallback = true;
                         result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp.sub(cachedPrice.timestamp);
+                        result.priceAge = block.timestamp - cachedPrice.timestamp;
                         return result;
                     }
                 }
@@ -477,7 +474,7 @@ library GracefulDegradation {
                         result.reason = string(abi.encodePacked("Used cached price after low-level error: ", errorMessage));
                         result.usedFallback = true;
                         result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp.sub(cachedPrice.timestamp);
+                        result.priceAge = block.timestamp - cachedPrice.timestamp;
                         return result;
                     }
                 }
@@ -546,7 +543,7 @@ library GracefulDegradation {
             }
 
             // 检查价格是否过期
-            uint256 priceAge = block.timestamp.sub(timestamp);
+            uint256 priceAge = block.timestamp - timestamp;
             if (priceAge > globalConfig.maxPriceAge) {
                 return _applyFallbackStrategyNew(assetAddr, amountValue, "Stale price", globalConfig, effectiveConservativeRatio);
             }
@@ -587,7 +584,7 @@ library GracefulDegradation {
                         result.reason = string(abi.encodePacked("Used cached price after error: ", reason));
                         result.usedFallback = true;
                         result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp.sub(cachedPrice.timestamp);
+                        result.priceAge = block.timestamp - cachedPrice.timestamp;
                         return result;
                     }
                 }
@@ -609,7 +606,7 @@ library GracefulDegradation {
                         result.reason = string(abi.encodePacked("Used cached price after low-level error: ", errorMessage));
                         result.usedFallback = true;
                         result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp.sub(cachedPrice.timestamp);
+                        result.priceAge = block.timestamp - cachedPrice.timestamp;
                         return result;
                     }
                 }
@@ -637,7 +634,7 @@ library GracefulDegradation {
             if (price == 0) {
                 return (false, "Zero price returned");
             }
-            if (block.timestamp.sub(timestamp) > config.maxPriceAge) {
+            if (block.timestamp - timestamp > config.maxPriceAge) {
                 return (false, "Stale price");
             }
             if (!validatePriceReasonableness(price, assetAddr, config, cacheStorage)) {
@@ -676,7 +673,7 @@ library GracefulDegradation {
             if (price == 0) {
                 return (false, "Zero price returned");
             }
-            if (block.timestamp.sub(timestamp) > defaultConfig.maxPriceAge) {
+            if (block.timestamp - timestamp > defaultConfig.maxPriceAge) {
                 return (false, "Stale price");
             }
             if (!validateDecimals(decimals)) {
@@ -756,7 +753,7 @@ library GracefulDegradation {
         return true;
     }
 
-    /// @notice 安全的幂运算（使用 SafeMath）
+    /// @notice 安全的幂运算（Solidity 0.8+ 自带溢出检查）
     /// @param base 底数
     /// @param exponent 指数
     /// @return result 结果
@@ -774,54 +771,14 @@ library GracefulDegradation {
         
         while (currentExponent > 0) {
             if (currentExponent & 1 == 1) {
-                result = result.mul(currentBase);
+                result = result * currentBase;
             }
             currentExponent = currentExponent >> 1;
             if (currentExponent > 0) {
-                currentBase = currentBase.mul(currentBase);
+                currentBase = currentBase * currentBase;
             }
         }
         
-        return result;
-    }
-
-    /// @notice 安全的乘法运算（带溢出检查）
-    /// @param firstValue 第一个操作数
-    /// @param secondValue 第二个操作数
-    /// @return result 结果
-    function safeMul(uint256 firstValue, uint256 secondValue) internal pure returns (uint256 result) {
-        result = firstValue.mul(secondValue);
-        require(result >= firstValue, "SafeMath: multiplication overflow");
-        return result;
-    }
-
-    /// @notice 安全的除法运算（带零除检查）
-    /// @param dividend 被除数
-    /// @param divisor 除数
-    /// @return result 结果
-    function safeDiv(uint256 dividend, uint256 divisor) internal pure returns (uint256 result) {
-        require(divisor > 0, "SafeMath: division by zero");
-        result = dividend.div(divisor);
-        return result;
-    }
-
-    /// @notice 安全的减法运算（带下溢检查）
-    /// @param minuend 被减数
-    /// @param subtrahend 减数
-    /// @return result 结果
-    function safeSub(uint256 minuend, uint256 subtrahend) internal pure returns (uint256 result) {
-        result = minuend.sub(subtrahend);
-        require(result <= minuend, "SafeMath: subtraction overflow");
-        return result;
-    }
-
-    /// @notice 安全的加法运算（带上溢检查）
-    /// @param firstValue 第一个加数
-    /// @param secondValue 第二个加数
-    /// @return result 结果
-    function safeAdd(uint256 firstValue, uint256 secondValue) internal pure returns (uint256 result) {
-        result = firstValue.add(secondValue);
-        require(result >= firstValue, "SafeMath: addition overflow");
         return result;
     }
 
@@ -851,8 +808,8 @@ library GracefulDegradation {
         if (config.enableHistoricalValidation) {
             uint256 historicalPrice = getHistoricalPrice(assetAddr, cacheStorage);
             if (historicalPrice > 0) {
-                uint256 maxPrice = historicalPrice.mul(config.maxPriceMultiplier).div(BASIS_POINT_DIVISOR);
-                uint256 minPrice = historicalPrice.mul(config.minPriceMultiplier).div(BASIS_POINT_DIVISOR);
+                uint256 maxPrice = historicalPrice * config.maxPriceMultiplier / BASIS_POINT_DIVISOR;
+                uint256 minPrice = historicalPrice * config.minPriceMultiplier / BASIS_POINT_DIVISOR;
                 
                 if (currentPriceValue < minPrice || currentPriceValue > maxPrice) {
                     return false;
@@ -884,7 +841,7 @@ library GracefulDegradation {
         require(priceMultiplier > 0, "Invalid decimals");
         
         // 计算价值
-        calculatedValue = amountValue.mul(priceValue).div(priceMultiplier);
+        calculatedValue = amountValue * priceValue / priceMultiplier;
         
         // 验证计算结果
         require(calculatedValue > 0, "Invalid calculation result");
@@ -919,8 +876,8 @@ library GracefulDegradation {
         uint256 actualPrice = getStablecoinPrice(stablecoinAddr);
         
         // 检查价格是否在容忍范围内
-        uint256 minPrice = expectedPriceValue.mul(BASIS_POINT_100_PERCENT - toleranceValue).div(BASIS_POINT_DIVISOR);
-        uint256 maxPrice = expectedPriceValue.mul(BASIS_POINT_100_PERCENT + toleranceValue).div(BASIS_POINT_DIVISOR);
+        uint256 minPrice = expectedPriceValue * (BASIS_POINT_100_PERCENT - toleranceValue) / BASIS_POINT_DIVISOR;
+        uint256 maxPrice = expectedPriceValue * (BASIS_POINT_100_PERCENT + toleranceValue) / BASIS_POINT_DIVISOR;
         
         return actualPrice >= minPrice && actualPrice <= maxPrice;
     }
@@ -969,7 +926,7 @@ library GracefulDegradation {
     /// @param maxAgeValue 最大年龄
     /// @return isExpired 是否过期
     function _isCacheExpired(uint256 timestampValue, uint256 maxAgeValue) internal view returns (bool isExpired) {
-        return block.timestamp.sub(timestampValue) > maxAgeValue;
+        return block.timestamp - timestampValue > maxAgeValue;
     }
 
     /* ============ Internal Functions ============ */
@@ -996,7 +953,7 @@ library GracefulDegradation {
                     fallbackValue = amountValue;
                 } else {
                     // 稳定币脱锚，使用保守估值
-                    fallbackValue = amountValue.mul(config.conservativeRatio).div(BASIS_POINT_DIVISOR);
+                    fallbackValue = amountValue * config.conservativeRatio / BASIS_POINT_DIVISOR;
                 }
             } else {
                 // 不进行脱锚检测，直接使用面值
@@ -1005,7 +962,7 @@ library GracefulDegradation {
         }
         // 策略2：使用保守估值
         else {
-            fallbackValue = amountValue.mul(config.conservativeRatio).div(BASIS_POINT_DIVISOR); // 基点计算
+            fallbackValue = amountValue * config.conservativeRatio / BASIS_POINT_DIVISOR; // 基点计算
         }
 
         result.value = fallbackValue;
@@ -1042,7 +999,7 @@ library GracefulDegradation {
                     fallbackValue = amountValue;
                 } else {
                     // 稳定币脱锚，使用保守估值
-                    fallbackValue = amountValue.mul(conservativeRatio).div(BASIS_POINT_DIVISOR);
+                    fallbackValue = amountValue * conservativeRatio / BASIS_POINT_DIVISOR;
                 }
             } else {
                 // 不进行脱锚检测，直接使用面值
@@ -1051,7 +1008,7 @@ library GracefulDegradation {
         }
         // 策略2：使用保守估值
         else {
-            fallbackValue = amountValue.mul(conservativeRatio).div(BASIS_POINT_DIVISOR); // 基点计算
+            fallbackValue = amountValue * conservativeRatio / BASIS_POINT_DIVISOR; // 基点计算
         }
 
         result.value = fallbackValue;

@@ -5,9 +5,9 @@ import "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721EnumerableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/StringsUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 import "@openzeppelin/contracts/utils/Base64.sol";
 
 import { ActionKeys } from "../constants/ActionKeys.sol";
@@ -57,7 +57,7 @@ contract LoanNFT is
     ERC721Upgradeable,
     ERC721EnumerableUpgradeable,
     PausableUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     UUPSUpgradeable,
     ILoanNFT,
     IRegistryUpgradeEvents
@@ -167,7 +167,7 @@ contract LoanNFT is
      *      - ERC721EnumerableUpgradeable: 代币枚举功能（避免冗余存储）
      *      - UUPSUpgradeable: 可升级代理功能
      *      - PausableUpgradeable: 暂停功能
-     *      - ReentrancyGuardUpgradeable: 重入保护
+     *      - ReentrancyGuardSlimUpgradeable: 重入保护
      */
     function initialize(
         string memory name_,
@@ -181,7 +181,7 @@ contract LoanNFT is
         __ERC721Enumerable_init();
         __UUPSUpgradeable_init();
         __Pausable_init();
-        __ReentrancyGuard_init();
+        __ReentrancyGuardSlim_init();
 
         _registryAddr = initialRegistryAddr;
         _baseTokenURI = baseTokenURI_;
@@ -323,7 +323,8 @@ contract LoanNFT is
     function mintLoanCertificate(
         address to,
         LoanMetadata calldata data
-    ) external override whenNotPaused onlyValidRegistry nonReentrant returns (uint256 tokenId) {
+    ) external override whenNotPaused onlyValidRegistry returns (uint256 tokenId) {
+        _reentrancyGuardEnter();
         _requireRole(MINTER_ROLE_VALUE, msg.sender);
         if (to == address(0)) revert ZeroAddress();
         if (_loanMinted[data.loanId]) revert LoanNFT__LoanAlreadyMinted(data.loanId);
@@ -353,6 +354,7 @@ contract LoanNFT is
             DataPushTypes.DATA_TYPE_LOAN_NFT_MINTED,
             abi.encode(to, tokenId, data.loanId, data.principal, data.rate, data.term, block.timestamp)
         );
+        _reentrancyGuardExit();
     }
 
     /**
@@ -366,7 +368,7 @@ contract LoanNFT is
      */
     function lockAsSBT(uint256 tokenId) external override onlyValidRegistry {
         _requireRole(GOVERNANCE_ROLE_VALUE, msg.sender);
-        if (!_exists(tokenId)) revert LoanNFT__InvalidTokenId();
+        if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         _soulBound[tokenId] = true;
         emit TokenLocked(tokenId);
         
@@ -395,7 +397,7 @@ contract LoanNFT is
      */
     function burn(uint256 tokenId) external override onlyValidRegistry {
         _requireRole(GOVERNANCE_ROLE_VALUE, msg.sender);
-        if (!_exists(tokenId)) revert LoanNFT__InvalidTokenId();
+        if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         _burn(tokenId);
         emit TokenBurned(tokenId);
         
@@ -425,7 +427,7 @@ contract LoanNFT is
      */
     function updateLoanStatus(uint256 tokenId, LoanStatus newStatus) external override onlyValidRegistry {
         _requireRole(MINTER_ROLE_VALUE, msg.sender);
-        if (!_exists(tokenId)) revert LoanNFT__InvalidTokenId();
+        if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         _loanMetadata[tokenId].status = newStatus;
         emit LoanStatusUpdated(tokenId, newStatus);
         
@@ -448,7 +450,7 @@ contract LoanNFT is
      * @dev 链上存储：使用 base64 编码避免依赖外部服务器
      */
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
-        if (!_exists(tokenId)) revert LoanNFT__InvalidTokenId();
+        if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         LoanMetadata memory data = _loanMetadata[tokenId];
 
         // 链上 base64 元数据（无需外部服务器）
@@ -457,12 +459,12 @@ contract LoanNFT is
                 string(
                     abi.encodePacked(
                         '{"name":"Loan #',
-                        StringsUpgradeable.toString(tokenId),
+                        Strings.toString(tokenId),
                         '","description":"Loan Certificate NFT","attributes":[',
-                        '{"trait_type":"LoanId","value":"', StringsUpgradeable.toString(data.loanId), '"},',
-                        '{"trait_type":"Principal","value":"', StringsUpgradeable.toString(data.principal), '"},',
-                        '{"trait_type":"Rate (bps)","value":"', StringsUpgradeable.toString(data.rate), '"},',
-                        '{"trait_type":"Term","value":"', StringsUpgradeable.toString(data.term), '"},',
+                        '{"trait_type":"LoanId","value":"', Strings.toString(data.loanId), '"},',
+                        '{"trait_type":"Principal","value":"', Strings.toString(data.principal), '"},',
+                        '{"trait_type":"Rate (bps)","value":"', Strings.toString(data.rate), '"},',
+                        '{"trait_type":"Term","value":"', Strings.toString(data.term), '"},',
                         '{"trait_type":"Status","value":"', _statusToString(data.status), '"}',
                         ']}'
                     )
@@ -479,7 +481,7 @@ contract LoanNFT is
      * @inheritdoc ILoanNFT
      */
     function getLoanMetadata(uint256 tokenId) external view override returns (LoanMetadata memory) {
-        if (!_exists(tokenId)) revert LoanNFT__InvalidTokenId();
+        if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         return _loanMetadata[tokenId];
     }
 
@@ -556,26 +558,31 @@ contract LoanNFT is
     }
 
     /**
-     * @notice 代币转移前的钩子函数
-     * @param from 转出地址（零地址表示铸造）
-     * @param to 转入地址（零地址表示销毁）
-     * @param tokenId 代币 ID
-     * @param batchSize 批量大小
-     * @dev 灵魂绑定检查：如果代币被锁定为 SBT，禁止用户间转移
-     * @dev 特殊情况：铸造 (from = 0) 和销毁 (to = 0) 不受 SBT 限制
-     * @dev 架构优化：使用 ERC721Enumerable 的 _beforeTokenTransfer，自动维护枚举索引
+     * @notice OZ v5: ERC721 内部状态更新钩子
+     * @dev 用于兼容 ERC721EnumerableUpgradeable 的多继承 override（OZ v5 移除了 _beforeTokenTransfer）
+     * @dev 灵魂绑定检查：如果代币被锁定为 SBT，禁止用户间转移（mint/burn 例外）
      */
-    function _beforeTokenTransfer(
-        address from,
+    function _update(
         address to,
         uint256 tokenId,
-        uint256 batchSize
-    ) internal override(ERC721Upgradeable, ERC721EnumerableUpgradeable) {
-        // SBT：若已锁定，则禁止用户之间转移（mint 和 burn 例外）
+        address auth
+    ) internal override(ERC721Upgradeable, ERC721EnumerableUpgradeable) returns (address) {
+        // mint: from == 0；burn: to == 0；仅禁止用户间转移
+        address from = _ownerOf(tokenId);
         if (from != address(0) && to != address(0) && _soulBound[tokenId]) {
             revert LoanNFT__SoulBound(tokenId);
         }
-        super._beforeTokenTransfer(from, to, tokenId, batchSize);
+        return super._update(to, tokenId, auth);
+    }
+
+    /**
+     * @notice OZ v5: balance 增量钩子（Enumerable 多继承所需）
+     */
+    function _increaseBalance(
+        address account,
+        uint128 value
+    ) internal override(ERC721Upgradeable, ERC721EnumerableUpgradeable) {
+        super._increaseBalance(account, value);
     }
 
     /**
@@ -586,7 +593,7 @@ contract LoanNFT is
      */
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(GOVERNANCE_ROLE_VALUE, msg.sender);
-        newImplementation; // 避免未使用参数警告
+        require(newImplementation.code.length > 0, "Invalid implementation");
         
         // 记录升级动作
         emit VaultTypes.ActionExecuted(

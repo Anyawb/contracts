@@ -66,11 +66,12 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
 
     // 部署 Registry 代理合约
     const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
-    // Registry.initialize(uint256 minDelay, address upgradeAdmin, address emergencyAdmin)
+    // Registry.initialize(uint256 minDelay, address upgradeAdmin, address emergencyAdmin, address initialOwner)
     const registryInitData = registryImplementation.interface.encodeFunctionData('initialize', [
       TEST_MIN_DELAY,
       await owner.getAddress(),
-      await owner.getAddress()
+      await owner.getAddress(),
+      await owner.getAddress(),
     ]);
     registryProxy = await ProxyFactory.deploy(
       registryImplementation.target,
@@ -110,9 +111,10 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
     await registrySignatureManagerImplementation.waitForDeployment();
 
     // 部署 RegistrySignatureManager 代理合约
-    // RegistrySignatureManager.initialize(address upgradeAdmin)
+    // RegistrySignatureManager.initialize(address upgradeAdmin, address initialOwner)
     const signatureManagerInitData = registrySignatureManagerImplementation.interface.encodeFunctionData('initialize', [
-      await signer.getAddress()
+      await signer.getAddress(),
+      await owner.getAddress(),
     ]);
     registrySignatureManagerProxy = await ProxyFactory.deploy(
       registrySignatureManagerImplementation.target,
@@ -272,8 +274,8 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
 
     it('应该拒绝重复初始化', async function () {
       await expect(
-        registrySignatureManager.initialize(await signer.getAddress())
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+        registrySignatureManager.initialize(await signer.getAddress(), await owner.getAddress())
+      ).to.be.revertedWithCustomError(registrySignatureManager, 'InvalidInitialization');
     });
 
     it('应该正确设置升级管理员', async function () {
@@ -311,7 +313,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
     it('应该拒绝非 owner 暂停系统', async function () {
       await expect(
         registrySignatureManager.connect(user1).pause()
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(registrySignatureManager, 'OwnableUnauthorizedAccount');
     });
   });
 
@@ -1092,7 +1094,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
           r,
           s
         )
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registrySignatureManager, 'EnforcedPause');
     });
 
     it('应该拒绝暂停状态下的批量签名操作', async function () {
@@ -1126,7 +1128,7 @@ describe('RegistrySignatureManager – EIP-712 签名管理功能测试', functi
           r,
           s
         )
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registrySignatureManager, 'EnforcedPause');
     });
   });
 

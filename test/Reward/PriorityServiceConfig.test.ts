@@ -113,7 +113,7 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
       
       await expect(
         priorityServiceConfig.initialize(acm.target)
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+      ).to.be.revertedWithCustomError(priorityServiceConfig, 'InvalidInitialization');
     });
   });
 
@@ -436,7 +436,7 @@ describe('PriorityServiceConfig – 优先服务配置测试', function () {
       
       // 验证升级权限
       await expect(
-        priorityServiceConfig.connect(alice).upgradeTo(ZERO_ADDRESS)
+        priorityServiceConfig.connect(alice).upgradeToAndCall(ZERO_ADDRESS, '0x')
       ).to.be.revertedWithCustomError(acm, 'MissingRole');
       
       // 注意：这里只是测试权限，实际升级需要新的实现合约

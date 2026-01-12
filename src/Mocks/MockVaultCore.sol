@@ -18,6 +18,8 @@ contract MockVaultCore is Ownable {
     address public guaranteeFundManager;
     address public viewContractAddr;
 
+    constructor() Ownable(msg.sender) {}
+
     /// @notice LendingEngine.repay 会通过 VaultCore.repayFor 同步账本（测试中只需不 revert）
     event RepayForCalled(address indexed user, address indexed asset, uint256 amount);
 

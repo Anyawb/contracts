@@ -114,7 +114,7 @@ describe('VaultStatistics – 修复版测试（StatisticsView 替代）', funct
 
       await expect(
         vaultStatistics.initialize(await registry.getAddress())
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+      ).to.be.revertedWithCustomError(vaultStatistics, 'InvalidInitialization');
     });
   });
 

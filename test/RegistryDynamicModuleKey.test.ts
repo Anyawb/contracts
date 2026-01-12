@@ -95,7 +95,8 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
     // 初始化合约
     await registryDynamicModuleKey.initialize(
       await registrationAdmin.getAddress(),
-      await systemAdmin.getAddress()
+      await systemAdmin.getAddress(),
+      await owner.getAddress()
     );
 
     return {
@@ -120,7 +121,8 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await expect(
         registry.initialize(
           await registrationAdmin.getAddress(),
-          await systemAdmin.getAddress()
+          await systemAdmin.getAddress(),
+          await owner.getAddress()
         )
       ).to.not.be.reverted;
       
@@ -137,11 +139,11 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       
       // 测试零地址参数
       await expect(
-        registry.initialize(ZERO_ADDRESS, await systemAdmin.getAddress())
+        registry.initialize(ZERO_ADDRESS, await systemAdmin.getAddress(), await owner.getAddress())
       ).to.be.revertedWithCustomError(registry, 'ZeroAddress');
       
       await expect(
-        registry.initialize(await registrationAdmin.getAddress(), ZERO_ADDRESS)
+        registry.initialize(await registrationAdmin.getAddress(), ZERO_ADDRESS, await owner.getAddress())
       ).to.be.revertedWithCustomError(registry, 'ZeroAddress');
     });
 
@@ -151,16 +153,18 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       
       await registry.initialize(
         await registrationAdmin.getAddress(),
-        await systemAdmin.getAddress()
+        await systemAdmin.getAddress(),
+        await owner.getAddress()
       );
       
       // 测试重复初始化
       await expect(
         registry.initialize(
           await registrationAdmin.getAddress(),
-          await systemAdmin.getAddress()
+          await systemAdmin.getAddress(),
+          await owner.getAddress()
         )
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+      ).to.be.revertedWithCustomError(registry, 'InvalidInitialization');
     });
   });
 
@@ -173,13 +177,13 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
 
       // owner 可以升级
       await expect(
-        registryDynamicModuleKey.upgradeTo(newImplementation.target)
+        registryDynamicModuleKey.upgradeToAndCall(newImplementation.target, '0x')
       ).to.not.be.reverted;
 
       // 非 owner 不能升级
       await expect(
-        registryDynamicModuleKey.connect(user).upgradeTo(newImplementation.target)
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+        registryDynamicModuleKey.connect(user).upgradeToAndCall(newImplementation.target, '0x')
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'OwnableUnauthorizedAccount');
     });
 
     it('RegistryDynamicModuleKey – 只有 owner 可设置注册管理员', async function () {
@@ -191,7 +195,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       // 非 owner 不能设置
       await expect(
         registryDynamicModuleKey.connect(user).setRegistrationAdmin(await otherUser.getAddress())
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'OwnableUnauthorizedAccount');
     });
 
     it('RegistryDynamicModuleKey – 只有 owner 可设置系统管理员', async function () {
@@ -203,7 +207,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       // 非 owner 不能设置
       await expect(
         registryDynamicModuleKey.connect(user).setSystemAdmin(await otherUser.getAddress())
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'OwnableUnauthorizedAccount');
     });
 
     it('RegistryDynamicModuleKey – 只有 owner 可暂停/恢复', async function () {
@@ -220,7 +224,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       // 非 owner 不能暂停
       await expect(
         registryDynamicModuleKey.connect(user).pause()
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'OwnableUnauthorizedAccount');
     });
 
     it('RegistryDynamicModuleKey – 只有注册管理员可注册模块键', async function () {
@@ -680,12 +684,12 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       // 验证注册被拒绝
       await expect(
         registryDynamicModuleKey.connect(registrationAdmin).registerModuleKey(TEST_NAME_1)
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'EnforcedPause');
 
       // 验证批量注册被拒绝
       await expect(
         registryDynamicModuleKey.connect(registrationAdmin).batchRegisterModuleKeys([TEST_NAME_1, TEST_NAME_2])
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'EnforcedPause');
 
       // 恢复合约
       await registryDynamicModuleKey.unpause();
@@ -804,7 +808,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
 
       // 升级合约
       await expect(
-        registryDynamicModuleKey.upgradeTo(newImplementation.target)
+        registryDynamicModuleKey.upgradeToAndCall(newImplementation.target, '0x')
       ).to.not.be.reverted;
 
       // 验证数据保持不变
@@ -819,8 +823,8 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       await newImplementation.waitForDeployment();
 
       await expect(
-        registryDynamicModuleKey.connect(user).upgradeTo(newImplementation.target)
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+        registryDynamicModuleKey.connect(user).upgradeToAndCall(newImplementation.target, '0x')
+      ).to.be.revertedWithCustomError(registryDynamicModuleKey, 'OwnableUnauthorizedAccount');
     });
   });
 

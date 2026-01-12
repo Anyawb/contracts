@@ -138,8 +138,9 @@ describe('BatchView', function () {
 
     it('cannot initialize twice', async function () {
       const { batchView, registry } = await loadFixture(deployFixture);
-      await expect(batchView.initialize(await registry.getAddress())).to.be.revertedWith(
-        'Initializable: contract is already initialized',
+      await expect(batchView.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        batchView,
+        'InvalidInitialization',
       );
     });
   });

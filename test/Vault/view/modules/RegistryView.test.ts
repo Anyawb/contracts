@@ -378,7 +378,7 @@ describe("RegistryView", function () {
         await registryImplementation.getAddress(),
         registryImplementation.interface.encodeFunctionData(
           "initialize",
-          [minDelay, upgradeAdmin, emergencyAdmin]
+          [minDelay, upgradeAdmin, emergencyAdmin, admin.address]
         )
       );
       await registryProxy.waitForDeployment();

@@ -195,6 +195,64 @@ contract MyModule {
 
 ## 升级流程
 
+### OpenZeppelin v5 / UUPS 迁移计划（Phase 0c）
+
+> 目标：让 **Registry 家族** 与 **部署脚本** 严格对齐 `docs/Architecture-Guide.md` 的升级范式：  
+> - Registry 家族：**UUPSUpgradeable + 共享存储（RegistryStorage）**  
+> - 部署脚本：`deployProxy(...)` **默认 `kind: "uups"`**，仅在确有需要时单点覆写
+
+#### 1) 部署脚本严格化（默认 UUPS）
+
+- **改动点**：将 `scripts/deploy/deploylocal.ts` / `deploy-arbitrum.ts` / `deploy-arbitrum-sepolia.ts` 的 `deployProxy(...)` helper 默认行为固化为：
+  - `opts.kind ??= "uups"`（或等价：`{ kind: "uups", ...opts }`）
+- **回滚/例外策略**：如果确实存在 **非 UUPS** 的可升级合约，可在单点调用覆盖：
+  - `deployProxy("X", args, { kind: "transparent" })`
+
+#### 2) deploylocal initializer 形式化核对（脚本审计前移）
+
+- **新增脚本**：`scripts/checks/audit-deploylocal-initializers.ts`
+- **检查规则**（逐一形式化核对 `deploylocal.ts` 中所有 `deployProxy(...)` 调用点）：
+  - initializer **必须存在于 ABI**
+    - 若存在重载，必须显式写 signature（例如：`{ initializer: "initialize(address)" }`）
+  - initializer **入参数量必须与 args 数量一致**
+  - 若 `initializer: false`：
+    - `deployProxy` 的 args 必须为 `[]`
+    - 并且脚本后续必须显式调用一次 `initialize(...)`（延迟初始化必须可追踪）
+- **运行方式**：
+  - `pnpm -s hardhat clean && pnpm -s hardhat compile`
+  - `pnpm -s run checks:audit-deploylocal-initializers`
+- **验收标准**：输出报告中 **FAIL = 0**（否则进程以非 0 退出，阻断脚本审计/CI）
+
+#### 3) Registry 家族 “缺少 UUPS” 问题（必须修复）
+
+当部署脚本默认 `kind: "uups"` 后，如果某个 Registry 家族合约 **没有继承 `UUPSUpgradeable`**，OZ Upgrades 会直接报：
+`Implementation is missing a public upgradeTo(...) / upgradeToAndCall(...)`（error-008）。
+
+对照当前仓库实现，`src/registry` 里以下合约 **缺少 `UUPSUpgradeable`**（应按架构指南补齐）：
+
+- `src/registry/RegistryUpgradeManager.sol`
+- `src/registry/RegistryAdmin.sol`
+- `src/registry/RegistryBatchManager.sol`
+- `src/registry/RegistryHistoryManager.sol`
+
+**推荐修复范式（对每个合约一致化）**：
+- `import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";`
+- `contract X is Initializable, OwnableUpgradeable, UUPSUpgradeable, ...`
+- `initialize(...)` 中调用 `__UUPSUpgradeable_init();`
+- 实现 `_authorizeUpgrade(address newImplementation)`：
+  - 按 `docs/Architecture-Guide.md` 的治理口径做权限校验（owner / timelock / multisig / registry 入口策略）
+  - `newImplementation != address(0)` 且 `newImplementation.code.length > 0`
+- 保留 `constructor { _disableInitializers(); }` 与 `uint256[50] __gap;`
+
+> 注意：`CacheMaintenanceManager.sol` 是 **非可升级合约**（constructor + immutable），不应改成 UUPS，也不应走 proxy 部署。
+
+#### 4) 回归验证清单（建议合并前必跑）
+
+- `pnpm -s run compile`
+- `pnpm -s run checks:audit-deploylocal-initializers`
+- `pnpm -s run deploy:localhost`（要求不再出现 error-008；所有“必须模块”都应成功部署）
+- `pnpm -s test test/Registry*.test.ts`（或至少跑 Registry 相关用例集）
+
 ### 延时升级流程（推荐）
 
 延时升级提供了安全缓冲期，防止恶意或错误的升级操作。
@@ -584,7 +642,7 @@ registry.setModules(keys, addresses);
 ```solidity
 // 验证新模块地址
 require(newModuleAddress != address(0), "Invalid address");
-require(newModuleAddress.isContract(), "Not a contract");
+if (newModuleAddress.code.length == 0) revert NotAContract(newModuleAddress);
 
 // 验证接口兼容性（如果可能）
 // ...

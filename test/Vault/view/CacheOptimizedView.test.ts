@@ -100,8 +100,9 @@ describe('CacheOptimizedView (read-only facade)', function () {
 
     it('prevents double initialization', async function () {
       const { cacheOptimizedView, registry } = await loadFixture(deployFixture);
-      await expect(cacheOptimizedView.initialize(await registry.getAddress())).to.be.revertedWith(
-        'Initializable: contract is already initialized',
+      await expect(cacheOptimizedView.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        cacheOptimizedView,
+        'InvalidInitialization',
       );
     });
   });

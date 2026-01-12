@@ -3,9 +3,8 @@ pragma solidity ^0.8.20;
 
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from
-    "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../../../utils/ReentrancyGuardSlimUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
@@ -41,7 +40,7 @@ import { ZeroAddress, AmountIsZero, ArrayLengthMismatch, EmptyArray } from "../.
 contract LiquidationManager is
     Initializable,
     UUPSUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     PausableUpgradeable,
     ILiquidationManager
 {
@@ -140,7 +139,7 @@ contract LiquidationManager is
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         __UUPSUpgradeable_init();
-        __ReentrancyGuard_init();
+        __ReentrancyGuardSlim_init();
         __Pausable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -184,7 +183,8 @@ contract LiquidationManager is
         uint256 collateralAmount,
         uint256 debtAmount,
         uint256 bonus
-    ) external override whenNotPaused nonReentrant {
+    ) external override whenNotPaused {
+        _reentrancyGuardEnter();
         if (targetUser == address(0) || collateralAsset == address(0) || debtAsset == address(0)) {
             revert ZeroAddress();
         }
@@ -214,6 +214,7 @@ contract LiquidationManager is
             bonus,
             payout
         );
+        _reentrancyGuardExit();
     }
 
     /**
@@ -252,7 +253,8 @@ contract LiquidationManager is
         uint256 collateralAmount,
         uint256 debtAmount,
         uint256 bonus
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused {
+        _reentrancyGuardEnter();
         if (liquidator == address(0)) revert ZeroAddress();
         address settlementManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_SETTLEMENT_MANAGER);
         if (msg.sender != settlementManager) revert LiquidationManager__OnlySettlementManager();
@@ -274,6 +276,7 @@ contract LiquidationManager is
 
         // 3) Best-effort View push (use `liquidator` for event payloads).
         _pushSingle(targetUser, collateralAsset, debtAsset, collateralAmount, debtAmount, liquidator, bonus, payout);
+        _reentrancyGuardExit();
     }
 
     /**
@@ -318,7 +321,8 @@ contract LiquidationManager is
         uint256[] calldata collateralAmounts,
         uint256[] calldata debtAmounts,
         uint256[] calldata bonuses
-    ) external override whenNotPaused nonReentrant {
+    ) external override whenNotPaused {
+        _reentrancyGuardEnter();
         uint256 len = targetUsers.length;
         if (len == 0) revert EmptyArray();
         if (
@@ -369,6 +373,7 @@ contract LiquidationManager is
             bonuses,
             payout
         );
+        _reentrancyGuardExit();
     }
 
     /* ============ Admin ============ */
@@ -415,8 +420,12 @@ contract LiquidationManager is
      */
     function _authorizeUpgrade(address newImplementation) internal view override {
         if (newImplementation == address(0)) revert ZeroAddress();
+        require(newImplementation.code.length > 0, "Invalid implementation");
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
     }
+
+    /* ============ Storage Gap ============ */
+    uint256[50] private __gap;
 
     /* ============ Internal helpers ============ */
 

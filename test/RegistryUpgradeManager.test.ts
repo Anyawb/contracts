@@ -76,7 +76,7 @@ describe('RegistryUpgradeManager – 模块升级管理功能测试', function (
     const proxyFactory = await ethers.getContractFactory('ERC1967Proxy');
     const proxy = await proxyFactory.deploy(
       deployedRegistryUpgradeManager.target,
-      '0x' // 空的初始化数据，因为 initialize 没有参数
+      '0x' // init via proxy call below
     );
     await proxy.waitForDeployment();
 
@@ -84,7 +84,8 @@ describe('RegistryUpgradeManager – 模块升级管理功能测试', function (
     registryUpgradeManager = deployedRegistryUpgradeManager.attach(proxy.target) as RegistryUpgradeManager;
 
     // 初始化合约（通过代理调用）
-    await registryUpgradeManager.initialize(await upgradeAdmin.getAddress());
+    // standalone/test mode: registryOrAdmin = upgradeAdmin(EOA), initialOwner = owner
+    await registryUpgradeManager.initialize(await upgradeAdmin.getAddress(), await owner.getAddress());
 
     // 部署 Mock ERC20
     const MockERC20Factory = await ethers.getContractFactory('MockERC20');
@@ -155,8 +156,8 @@ describe('RegistryUpgradeManager – 模块升级管理功能测试', function (
 
     it('RegistryUpgradeManager – 应该拒绝重复初始化', async function () {
       await expect(
-        registryUpgradeManager.initialize(await user1.getAddress())
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+        registryUpgradeManager.initialize(await user1.getAddress(), await owner.getAddress())
+      ).to.be.revertedWithCustomError(registryUpgradeManager, 'InvalidInitialization');
     });
 
     it('RegistryUpgradeManager – 应该拒绝零地址作为升级管理员', async function () {
@@ -171,7 +172,7 @@ describe('RegistryUpgradeManager – 模块升级管理功能测试', function (
       await proxy.waitForDeployment();
       
       const attachedManager = newManager.attach(proxy.target) as RegistryUpgradeManager;
-      await attachedManager.initialize(await user1.getAddress());
+      await attachedManager.initialize(await user1.getAddress(), await owner.getAddress());
       
       await expect(
         attachedManager.setUpgradeAdmin(ZERO_ADDRESS)
@@ -201,7 +202,7 @@ describe('RegistryUpgradeManager – 模块升级管理功能测试', function (
     it('RegistryUpgradeManager – 只有 owner 能够设置升级管理员', async function () {
       await expect(
         registryUpgradeManager.connect(upgradeAdmin).setUpgradeAdmin(await user1.getAddress())
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(registryUpgradeManager, 'OwnableUnauthorizedAccount');
     });
 
     it('RegistryUpgradeManager – 权限转移后 upgradeAdmin 应该仍然有效', async function () {
@@ -522,7 +523,7 @@ describe('RegistryUpgradeManager – 模块升级管理功能测试', function (
         
         await expect(
           registryUpgradeManager.setModule(TEST_KEY_1, testModule1, true)
-        ).to.be.revertedWith('Pausable: paused');
+        ).to.be.revertedWithCustomError(registryUpgradeManager, 'EnforcedPause');
       });
     });
   });

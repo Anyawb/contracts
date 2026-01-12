@@ -300,7 +300,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     it('VaultBusinessLogic – 应该拒绝重复初始化', async function () {
       await expect(
         vaultBusinessLogic.initialize(mockRegistry.target, mockERC20.target)
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'InvalidInitialization');
     });
   });
 
@@ -555,7 +555,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       
       // 使用代理合约的 upgradeTo 方法
       await expect(
-        vaultBusinessLogic.upgradeTo(newImplementation.target)
+        vaultBusinessLogic.upgradeToAndCall(newImplementation.target, '0x')
       ).to.not.be.reverted;
     });
 
@@ -564,7 +564,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       await mockAccessControlManager.grantRole(ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE')), ownerAddress);
       
       await expect(
-        vaultBusinessLogic.upgradeTo(ZERO_ADDRESS)
+        vaultBusinessLogic.upgradeToAndCall(ZERO_ADDRESS, '0x')
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
     });
 
@@ -575,7 +575,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       await mockAccessControlManager.revokeRole(ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE')), ownerAddress);
       
       await expect(
-        vaultBusinessLogic.upgradeTo(newImplementation)
+        vaultBusinessLogic.upgradeToAndCall(newImplementation, '0x')
       ).to.be.revertedWithCustomError(mockAccessControlManager, 'MissingRole');
     });
   });

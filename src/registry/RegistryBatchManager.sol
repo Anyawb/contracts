@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import { 
     ZeroAddress, 
@@ -22,11 +21,9 @@ import { RegistryHistoryManager } from "./RegistryHistoryManager.sol";
 /// @dev 负责处理Registry的批量操作功能
 contract RegistryBatchManager is 
     OwnableUpgradeable, 
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     PausableUpgradeable
 {
-    using Address for address;
-    
     // ============ Constants ============
     uint256 private constant MAX_BATCH_SIZE = 50; // 批量操作上限
 
@@ -42,9 +39,11 @@ contract RegistryBatchManager is
     // ============ Initializer ============
     /// @notice 初始化批量操作管理模块
     /// @param _historyManager 历史记录管理模块地址
-    function initialize(address _historyManager) external initializer {
-        __Ownable_init();
-        __ReentrancyGuard_init();
+    /// @param initialOwner 最终治理 owner（Timelock/Multisig 或 Registry 入口）
+    function initialize(address _historyManager, address initialOwner) external initializer {
+        if (initialOwner == address(0)) revert ZeroAddress();
+        __Ownable_init(initialOwner);
+        __ReentrancyGuardSlim_init();
         __Pausable_init();
         
         historyManager = RegistryHistoryManager(_historyManager);
@@ -277,7 +276,7 @@ contract RegistryBatchManager is
         if (newAddr == address(0)) revert ZeroAddress();
         
         // 验证是否为合约
-        if (!Address.isContract(newAddr)) revert NotAContract(newAddr);
+        if (newAddr.code.length == 0) revert NotAContract(newAddr);
         
         // 检查是否允许替换
         if (!allowReplace && l.modules[key] != address(0)) revert ModuleAlreadyRegistered(key);

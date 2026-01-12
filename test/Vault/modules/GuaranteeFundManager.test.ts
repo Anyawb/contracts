@@ -241,7 +241,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     it('GuaranteeFundManager – 应该拒绝重复初始化', async function () {
       await expect(
         guaranteeFundManager.initialize(mockVaultCore.target, mockRegistry.target, await owner.getAddress())
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+      ).to.be.revertedWithCustomError(guaranteeFundManager, 'InvalidInitialization');
     });
 
     it('GuaranteeFundManager – 应该拒绝零地址初始化', async function () {
@@ -643,7 +643,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await newImplementation.waitForDeployment();
 
       await expect(
-        guaranteeFundManager.upgradeTo(newImplementation.target)
+        guaranteeFundManager.upgradeToAndCall(newImplementation.target, '0x')
       ).to.not.be.reverted;
 
       // 验证升级后功能仍然正常
@@ -653,7 +653,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
 
     it('GuaranteeFundManager – 应该拒绝升级到零地址实现', async function () {
       await expect(
-        guaranteeFundManager.upgradeTo(ZERO_ADDRESS)
+        guaranteeFundManager.upgradeToAndCall(ZERO_ADDRESS, '0x')
       ).to.be.revertedWithCustomError(guaranteeFundManager, 'ZeroAddress');
     });
   });

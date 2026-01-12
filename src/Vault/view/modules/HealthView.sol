@@ -227,6 +227,7 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        require(newImplementation.code.length > 0, "Invalid implementation");
     }
 
     /// @notice 兼容旧版 getter

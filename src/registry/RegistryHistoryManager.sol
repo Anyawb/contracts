@@ -2,9 +2,10 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
+import { ZeroAddress } from "../errors/StandardErrors.sol";
 import { RegistryStorage } from "./RegistryStorageLibrary.sol";
 import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 
@@ -13,7 +14,7 @@ import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 /// @dev 负责处理Registry的升级历史记录功能
 contract RegistryHistoryManager is 
     OwnableUpgradeable, 
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     PausableUpgradeable
 {
     // ============ Constants ============
@@ -26,9 +27,10 @@ contract RegistryHistoryManager is
 
     // ============ Initializer ============
     /// @notice 初始化历史记录管理模块
-    function initialize() external initializer {
-        __Ownable_init();
-        __ReentrancyGuard_init();
+    function initialize(address initialOwner) external initializer {
+        if (initialOwner == address(0)) revert ZeroAddress();
+        __Ownable_init(initialOwner);
+        __ReentrancyGuardSlim_init();
         __Pausable_init();
     }
 

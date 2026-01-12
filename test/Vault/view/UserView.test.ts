@@ -206,13 +206,13 @@ describe('UserView', function () {
     it('requires ACTION_ADMIN role', async function () {
       const { userView, other, acm } = await loadFixture(deployFixture);
       const impl = await (await ethers.getContractFactory('UserView')).deploy();
-      await expect(userView.connect(other).upgradeTo(impl)).to.be.revertedWithCustomError(acm, 'MissingRole');
+      await expect(userView.connect(other).upgradeToAndCall(impl.target, '0x')).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
 
     it('admin can upgrade to a new implementation', async function () {
       const { userView, admin } = await loadFixture(deployFixture);
       const impl = await (await ethers.getContractFactory('UserView')).deploy();
-      await expect(userView.connect(admin).upgradeTo(impl)).to.emit(userView, 'Upgraded');
+      await expect(userView.connect(admin).upgradeToAndCall(impl.target, '0x')).to.emit(userView, 'Upgraded');
     });
   });
 });

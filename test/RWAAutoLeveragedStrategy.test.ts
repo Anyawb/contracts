@@ -294,7 +294,7 @@ describe('RWAAutoLeveragedStrategy', function () {
           minCollateral: ethers.parseEther('20'),
           maxPositionSize: ethers.parseEther('500')
         })
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(strategyContract, 'OwnableUnauthorizedAccount');
     });
   });
 
@@ -575,7 +575,7 @@ describe('RWAAutoLeveragedStrategy', function () {
       
       await expect(
         strategyContract.connect(user1Signer).pause()
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(strategyContract, 'OwnableUnauthorizedAccount');
       
       await expect(
         strategyContract.connect(user1Signer).updateConfig({
@@ -586,7 +586,7 @@ describe('RWAAutoLeveragedStrategy', function () {
           maxPositionSize: ethers.parseEther('800'),
           cooldownPeriod: 7200n
         })
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(strategyContract, 'OwnableUnauthorizedAccount');
     });
   });
 
@@ -673,7 +673,7 @@ describe('RWAAutoLeveragedStrategy', function () {
           COLLATERAL_AMOUNT,
           LEVERAGE_RATIO
         )
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(strategyContract, 'EnforcedPause');
     });
 
     it('应该验证冷却期机制', async function () {

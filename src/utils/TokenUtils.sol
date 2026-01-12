@@ -124,7 +124,7 @@ contract TokenUtils is Ownable {
     event PriceOracleUpdated(address indexed newOracle);
     event TokenRegistryUpdated(address indexed newRegistry);
 
-    constructor(address _priceOracle, address _tokenRegistry) {
+    constructor(address _priceOracle, address _tokenRegistry) Ownable(msg.sender) {
         priceOracle = _priceOracle;
         tokenRegistry = _tokenRegistry;
     }

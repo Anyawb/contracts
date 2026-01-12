@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import { ReentrancyGuardSlim } from "../utils/ReentrancyGuardSlim.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { 
@@ -16,7 +16,7 @@ import {
  * @dev 简化架构，移除复杂的多级权限系统和缓存机制
  * @custom:security-contact security@example.com
  */
-contract AccessControlManager is IAccessControlManager, ReentrancyGuard {
+contract AccessControlManager is IAccessControlManager, ReentrancyGuardSlim {
     // =================== 自定义错误 ===================
     error InvalidKeeperAddress();
     error OnlyKeeperAllowed();

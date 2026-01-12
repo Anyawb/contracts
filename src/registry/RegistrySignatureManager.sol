@@ -3,11 +3,11 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
@@ -35,13 +35,13 @@ import { RegistryEvents } from "./RegistryEventsLibrary.sol";
 contract RegistrySignatureManager is 
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     PausableUpgradeable,
+    EIP712Upgradeable,
     UUPSUpgradeable
 {
     using RegistryStorage for RegistryStorage.Layout;
-    using ECDSAUpgradeable for bytes32;
-    using AddressUpgradeable for address;
+    using ECDSA for bytes32;
 
     // ============ Constants ============
     bytes32 private constant PERMIT_MODULE_UPGRADE_TYPEHASH = keccak256(
@@ -74,11 +74,14 @@ contract RegistrySignatureManager is
     /// @notice 初始化合约
     /// @param upgradeAdmin_ 升级管理员地址
     /// @dev 通过参数传入升级管理员，避免权限集中
-    function initialize(address upgradeAdmin_) external initializer {
+    /// @param initialOwner 最终治理 owner（Timelock/Multisig 或 Registry 入口）
+    function initialize(address upgradeAdmin_, address initialOwner) external initializer {
         require(upgradeAdmin_ != address(0), "Invalid admin");
-        __Ownable_init();
-        __ReentrancyGuard_init();
+        if (initialOwner == address(0)) revert ZeroAddress();
+        __Ownable_init(initialOwner);
+        __ReentrancyGuardSlim_init();
         __Pausable_init();
+        __EIP712_init("Registry", "1");
         
         // 设置升级管理员
         _upgradeAdmin = upgradeAdmin_;
@@ -86,9 +89,6 @@ contract RegistrySignatureManager is
         // 初始化 RegistryStorage 版本（nonces 等数据也在该存储槽中）
         // 否则 permit* 会在 requireCompatibleVersion 处永久失败
         RegistryStorage.initializeStorageVersion();
-        
-        // 初始化 domain separator 缓存
-        _updateDomainSeparatorCache();
     }
 
     // ============ Signature Functions ============
@@ -102,7 +102,8 @@ contract RegistrySignatureManager is
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused {
+        _reentrancyGuardEnter();
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         if (block.timestamp > deadline) revert SignatureExpired(deadline, block.timestamp);
         
@@ -129,6 +130,7 @@ contract RegistrySignatureManager is
         
         // 发出签名授权事件
         emit RegistryEvents.ModuleUpgradePermitted(key, newAddr, signer, nonce);
+        _reentrancyGuardExit();
     }
 
     /// @notice 通过 EIP-712 签名授权批量模块升级
@@ -141,7 +143,8 @@ contract RegistrySignatureManager is
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused {
+        _reentrancyGuardEnter();
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         if (block.timestamp > deadline) revert SignatureExpired(deadline, block.timestamp);
         if (keys.length != addresses.length) revert MismatchedArrayLengths(keys.length, addresses.length);
@@ -169,12 +172,13 @@ contract RegistrySignatureManager is
         
         // 发出批量签名授权事件
         emit RegistryEvents.BatchModuleUpgradePermitted(keys, addresses, signer, nonce);
+        _reentrancyGuardExit();
     }
 
     // ============ View Functions ============
     /// @notice 获取 EIP-712 域名分隔符
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
-        return _getDomainSeparator(address(this));
+        return _domainSeparatorV4();
     }
 
     /// @notice 获取签名者的当前 nonce
@@ -216,7 +220,7 @@ contract RegistrySignatureManager is
         if (msg.sender != _upgradeAdmin) revert UpgradeNotAuthorized(msg.sender, _upgradeAdmin);
         
         // 防御式编程：验证新实现地址是否为合约
-        if (!newImplementation.isContract()) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
         
         emit VaultTypes.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
@@ -321,7 +325,6 @@ contract RegistrySignatureManager is
     /// @param allowReplace 是否允许替换
     /// @param nonce 当前 nonce
     /// @param deadline 签名过期时间
-    /// @param verifyingContract 验证合约地址
     /// @return 签名摘要
     function _getModuleUpgradeDigest(
         bytes32 key,
@@ -329,7 +332,7 @@ contract RegistrySignatureManager is
         bool allowReplace,
         uint256 nonce,
         uint256 deadline,
-        address verifyingContract
+        address /* verifyingContract */
     ) internal view returns (bytes32) {
         bytes32 structHash = keccak256(
             abi.encode(
@@ -341,7 +344,7 @@ contract RegistrySignatureManager is
                 deadline
             )
         );
-        return keccak256(abi.encodePacked("\x19\x01", _getDomainSeparator(verifyingContract), structHash));
+        return _hashTypedDataV4(structHash);
     }
 
     /// @notice 生成批量模块升级的签名摘要
@@ -350,7 +353,6 @@ contract RegistrySignatureManager is
     /// @param allowReplace 是否允许替换
     /// @param nonce 当前 nonce
     /// @param deadline 签名过期时间
-    /// @param verifyingContract 验证合约地址
     /// @return 签名摘要
     function _getBatchModuleUpgradeDigest(
         bytes32[] calldata keys,
@@ -358,7 +360,7 @@ contract RegistrySignatureManager is
         bool allowReplace,
         uint256 nonce,
         uint256 deadline,
-        address verifyingContract
+        address /* verifyingContract */
     ) internal view returns (bytes32) {
         bytes32 structHash = keccak256(
             abi.encode(
@@ -370,7 +372,7 @@ contract RegistrySignatureManager is
                 deadline
             )
         );
-        return keccak256(abi.encodePacked("\x19\x01", _getDomainSeparator(verifyingContract), structHash));
+        return _hashTypedDataV4(structHash);
     }
 
     // ============ Upgrade Functions ============
@@ -386,7 +388,7 @@ contract RegistrySignatureManager is
         address executor
     ) internal {
         if (newAddr == address(0)) revert ZeroAddress();
-        if (!newAddr.isContract()) revert NotAContract(newAddr);
+        if (newAddr.code.length == 0) revert NotAContract(newAddr);
         
         // 获取 storage 指针，避免重复 SLOAD
         RegistryStorage.Layout storage l = RegistryStorage.layout();

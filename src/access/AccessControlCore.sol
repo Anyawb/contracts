@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import { ReentrancyGuardSlim } from "../utils/ReentrancyGuardSlim.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { 
@@ -16,7 +16,7 @@ import {
  * @notice 包含角色管理、紧急暂停和Keeper管理
  * @custom:security-contact security@example.com
  */
-contract AccessControlCore is IAccessControlManager, ReentrancyGuard {
+contract AccessControlCore is IAccessControlManager, ReentrancyGuardSlim {
     // =================== 自定义错误 ===================
     error InvalidKeeperAddress();
     error OnlyKeeperAllowed();

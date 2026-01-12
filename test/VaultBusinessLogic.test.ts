@@ -424,7 +424,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       
       await expect(
         (proxyContract as VaultBusinessLogic).initialize(registry.target, SETTLEMENT_TOKEN)
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+      ).to.be.revertedWithCustomError(proxyContract, 'InvalidInitialization');
     });
 
     it('应该拒绝零地址初始化', async function () {
@@ -814,7 +814,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
             TEST_AMOUNT,
             true
           )
-        ).to.not.be.reverted;
+        ).to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
       });
 
       it('应该拒绝零金额还款', async function () {
@@ -1070,7 +1070,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       await newImplementation.waitForDeployment();
       
       await expect(
-        vaultBusinessLogic.connect(owner).upgradeTo(newImplementation.target)
+        vaultBusinessLogic.connect(owner).upgradeToAndCall(newImplementation.target, '0x')
       ).to.not.be.reverted;
     });
 
@@ -1080,13 +1080,13 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       await newImplementation.waitForDeployment();
       
       await expect(
-        vaultBusinessLogic.connect(unauthorizedUser).upgradeTo(newImplementation.target)
+        vaultBusinessLogic.connect(unauthorizedUser).upgradeToAndCall(newImplementation.target, '0x')
       ).to.be.revertedWithCustomError(mockAccessControlManager, 'MissingRole');
     });
 
     it('应该拒绝零地址升级', async function () {
       await expect(
-        vaultBusinessLogic.connect(owner).upgradeTo(ZERO_ADDRESS)
+        vaultBusinessLogic.connect(owner).upgradeToAndCall(ZERO_ADDRESS, '0x')
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
     });
   });

@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 import hardhat from 'hardhat';
-const { ethers } = hardhat;
+const { ethers, upgrades } = hardhat;
 
 /**
  * 统计快照的更新来源已迁移为 VaultRouter 的 best-effort push（由 VaultCore 推送 position delta 时触发）。
@@ -36,7 +36,17 @@ describe('VaultRouter → StatisticsView – 统计视图联动（最小集）',
     await settlementToken.waitForDeployment();
 
     const RouterF = await ethers.getContractFactory('VaultRouter');
-    const router = await RouterF.deploy(await registry.getAddress(), await aw.getAddress(), await po.getAddress(), await settlementToken.getAddress());
+    const router = await upgrades.deployProxy(
+      RouterF,
+      [
+        await registry.getAddress(),
+        await aw.getAddress(),
+        await po.getAddress(),
+        await settlementToken.getAddress(),
+        await owner.getAddress(), // initialOwner
+      ],
+      { kind: 'uups', initializer: 'initialize' }
+    );
     await router.waitForDeployment();
 
     // Registry wiring（VaultRouter._tryPushUserStatsUpdateFromDelta 只依赖 KEY_STATS；setTestingMode 依赖 KEY_ACCESS_CONTROL）

@@ -62,7 +62,7 @@ describe('Registry – 核心功能测试', function () {
     const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
     const initData = registryImplementation.interface.encodeFunctionData(
       'initialize',
-      [TEST_MIN_DELAY, owner.address, owner.address]
+      [TEST_MIN_DELAY, owner.address, owner.address, owner.address]
     );
     registryProxy = await ProxyFactory.deploy(
       registryImplementation.target,
@@ -125,8 +125,8 @@ describe('Registry – 核心功能测试', function () {
 
     it('Registry – 应该拒绝重复初始化', async function () {
       await expect(
-        registry.initialize(TEST_MIN_DELAY, owner.address, owner.address)
-      ).to.be.revertedWith('Initializable: contract is already initialized');
+        registry.initialize(TEST_MIN_DELAY, owner.address, owner.address, owner.address)
+      ).to.be.revertedWithCustomError(registry, 'InvalidInitialization');
     });
 
     it('Registry – 应该拒绝过大的延迟时间', async function () {
@@ -137,7 +137,7 @@ describe('Registry – 核心功能测试', function () {
       const newProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
       const initData = newImplementation.interface.encodeFunctionData(
         'initialize',
-        [ethers.MaxUint256, owner.address, owner.address]
+        [ethers.MaxUint256, owner.address, owner.address, owner.address]
       );
       
       await expect(
@@ -204,7 +204,7 @@ describe('Registry – 核心功能测试', function () {
     it('Registry – 应该拒绝非管理员设置权限', async function () {
       await expect(
         (registry as unknown as Registry).connect(user1).setAdmin(admin.address)
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(registry, 'OwnableUnauthorizedAccount');
     });
   });
 
@@ -227,7 +227,7 @@ describe('Registry – 核心功能测试', function () {
       
       await expect(
         registry.setModule(KEY_LE, mockLendingEngine.target)
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
     });
 
     it('Registry – 暂停状态下应该阻止批量模块设置', async function () {
@@ -238,7 +238,7 @@ describe('Registry – 核心功能测试', function () {
       
       await expect(
         (registry as unknown as Registry).batchSetModules(keys, addresses, true)
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
     });
 
     it('Registry – 暂停状态下应该阻止升级排期', async function () {
@@ -246,7 +246,7 @@ describe('Registry – 核心功能测试', function () {
       
       await expect(
         (registry as unknown as Registry).scheduleModuleUpgrade(KEY_LE, mockLendingEngine.target)
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
     });
   });
 
@@ -299,8 +299,8 @@ describe('Registry – 核心功能测试', function () {
       
       await expect(
         registry.batchSetModules(keys, addresses, true)
-      ).to.be.revertedWithCustomError(registry, 'InvalidParameter')
-        .withArgs('Batch size too large');
+      ).to.be.revertedWithCustomError(registry, 'ModuleCapExceeded')
+        .withArgs(MAX_BATCH_SIZE + 1, MAX_BATCH_SIZE);
     });
 
     it('Registry – 应该正确查询模块是否存在', async function () {
@@ -477,7 +477,8 @@ describe('Registry – 核心功能测试', function () {
     it('Registry – 应该正确处理历史记录索引越界', async function () {
       await expect(
         registry.getUpgradeHistory(KEY_LE, 0)
-      ).to.be.revertedWith('Index out of bounds');
+      ).to.be.revertedWithCustomError(registry, 'IndexOutOfBounds')
+        .withArgs(0, 0);
     });
   });
 
@@ -492,7 +493,7 @@ describe('Registry – 核心功能测试', function () {
     it('Registry – 应该正确处理权限不足', async function () {
       await expect(
         registry.connect(user1).setModule(KEY_LE, mockLendingEngine.target)
-      ).to.be.revertedWith('Ownable: caller is not the owner');
+      ).to.be.revertedWithCustomError(registry, 'OwnableUnauthorizedAccount');
     });
 
     it('Registry – 应该正确处理紧急恢复升级', async function () {

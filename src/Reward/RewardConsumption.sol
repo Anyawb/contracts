@@ -13,7 +13,7 @@ import { VaultTypes } from "../Vault/VaultTypes.sol";
 import { ZeroAddress } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 
 /// @title RewardConsumption - 积分消费统一管理合约
@@ -24,7 +24,7 @@ contract RewardConsumption is
     IRewardConsumptionErrors, 
     IRewardConsumptionEvents,
     Initializable, 
-    ReentrancyGuardUpgradeable, 
+    ReentrancyGuardSlimUpgradeable, 
     UUPSUpgradeable,
     RewardTypes,
     RewardModuleBase,
@@ -58,7 +58,7 @@ contract RewardConsumption is
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         
         __UUPSUpgradeable_init();
-        __ReentrancyGuard_init();
+        __ReentrancyGuardSlim_init();
         
         _rewardCore = RewardCore(coreAddr);
         _registryAddr = initialRegistryAddr;
@@ -81,7 +81,8 @@ contract RewardConsumption is
     /// @notice 消费积分购买服务
     /// @param _serviceType 服务类型
     /// @param _level 服务等级
-    function consumePointsForService(ServiceType _serviceType, ServiceLevel _level) external nonReentrant onlyValidRegistry {
+    function consumePointsForService(ServiceType _serviceType, ServiceLevel _level) external onlyValidRegistry {
+        _reentrancyGuardEnter();
         (uint256 pointsBurned, uint256 privilegePacked, uint256 expirationTime) =
             _rewardCore.consumePointsForServiceFor(msg.sender, _serviceType, _level);
 
@@ -89,6 +90,7 @@ contract RewardConsumption is
         _tryPushPointsBurned(msg.sender, pointsBurned, "Service Consumption");
         _tryPushUserPrivilege(msg.sender, privilegePacked);
         _tryPushConsumptionRecord(msg.sender, uint8(_serviceType), uint8(_level), pointsBurned, expirationTime, block.timestamp);
+        _reentrancyGuardExit();
     }
 
     /// @notice 批量消费积分
@@ -125,12 +127,14 @@ contract RewardConsumption is
     /// @notice 升级服务等级
     /// @param serviceType 服务类型
     /// @param newLevel 新等级
-    function upgradeServiceLevel(ServiceType serviceType, ServiceLevel newLevel) external nonReentrant onlyValidRegistry {
+    function upgradeServiceLevel(ServiceType serviceType, ServiceLevel newLevel) external onlyValidRegistry {
+        _reentrancyGuardEnter();
         (uint256 pointsBurned, uint256 privilegePacked, uint256 expirationTime) =
             _rewardCore.upgradeServiceLevelFor(msg.sender, serviceType, newLevel);
         _tryPushPointsBurned(msg.sender, pointsBurned, "Service Upgrade");
         _tryPushUserPrivilege(msg.sender, privilegePacked);
         _tryPushConsumptionRecord(msg.sender, uint8(serviceType), uint8(newLevel), pointsBurned, expirationTime, block.timestamp);
+        _reentrancyGuardExit();
     }
 
     // ========== 管理接口 ==========

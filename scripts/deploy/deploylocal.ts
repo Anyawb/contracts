@@ -88,7 +88,9 @@ async function deployProxy(name: string, args: unknown[] = [], opts: Record<stri
   //   `/// @custom:oz-upgrades-unsafe-allow constructor`
   // - 如果确实需要 delegatecall / 外部库链接，请在合约里用对应的
   //   `@custom:oz-upgrades-unsafe-allow ...` 精准标注并在代码层做权限/输入约束。
-  const p = await upgrades.deployProxy(f, args, opts);
+  // Phase 0c (OZ v5 migration): default to UUPS unless explicitly overridden.
+  const defaultOpts = { kind: 'uups', ...opts };
+  const p = await upgrades.deployProxy(f, args, defaultOpts);
   await p.waitForDeployment();
   const addr = await p.getAddress();
   console.log(`✅ ${name} (proxy) deployed @ ${addr}`);
@@ -151,7 +153,7 @@ async function main() {
 
   if (!deployed.Registry) {
     // UUPS 可升级合约，使用 Proxy 部署并初始化
-    deployed.Registry = await deployProxy('Registry', [MIN_DELAY, deployer.address, deployer.address]);
+    deployed.Registry = await deployProxy('Registry', [MIN_DELAY, deployer.address, deployer.address, deployer.address]);
     save(deployed);
   }
 
@@ -168,7 +170,10 @@ async function main() {
   // 可选：部署并挂载升级/治理子模块（不影响 setModule 功能）
   if (!deployed.RegistryUpgradeManager) {
     // 初始化需要 Registry 地址
-    deployed.RegistryUpgradeManager = await deployProxy('RegistryUpgradeManager', [deployed.Registry]);
+    // NOTE: RegistryUpgradeManager is NOT UUPSUpgradeable (transparent proxy required).
+    deployed.RegistryUpgradeManager = await deployProxy('RegistryUpgradeManager', [deployed.Registry, deployer.address], {
+      kind: 'transparent',
+    });
     save(deployed);
     try {
       const registry = await ethers.getContractAt('Registry', deployed.Registry);
@@ -181,7 +186,8 @@ async function main() {
 
   if (!deployed.RegistryAdmin) {
     // 无参数初始化
-    deployed.RegistryAdmin = await deployProxy('RegistryAdmin');
+    // NOTE: RegistryAdmin is NOT UUPSUpgradeable (transparent proxy required).
+    deployed.RegistryAdmin = await deployProxy('RegistryAdmin', [deployer.address], { kind: 'transparent' });
     save(deployed);
     try {
       const registry = await ethers.getContractAt('Registry', deployed.Registry);
@@ -197,7 +203,8 @@ async function main() {
     try {
       deployed.RegistryDynamicModuleKey = await deployProxy('RegistryDynamicModuleKey', [
         deployer.address, // registrationAdmin
-        deployer.address  // systemAdmin
+        deployer.address, // systemAdmin
+        deployer.address, // owner (OwnableUpgradeable)
       ]);
       save(deployed);
       console.log('✅ RegistryDynamicModuleKey deployed @', deployed.RegistryDynamicModuleKey);
@@ -332,11 +339,16 @@ async function main() {
   // 按 Architecture-Guide：View 地址应通过 KEY_VAULT_CORE → viewContractAddrVar() 解析，因此 VaultCore 初始化时必须拿到最终 VaultRouter 地址。
   if (!deployed.VaultRouter) {
     console.log('🚀 Deploying VaultRouter...');
-    deployed.VaultRouter = await deployRegular('src/Vault/VaultRouter.sol:VaultRouter',
-      deployed.Registry,
-      deployed.AssetWhitelist,
-      deployed.PriceOracle,
-      deployed.MockUSDC, // settlement token
+    deployed.VaultRouter = await deployProxy(
+      'src/Vault/VaultRouter.sol:VaultRouter',
+      [
+        deployed.Registry,
+        deployed.AssetWhitelist,
+        deployed.PriceOracle,
+        deployed.MockUSDC, // settlement token
+        deployer.address, // owner (UUPS)
+      ],
+      {}
     );
     save(deployed);
     console.log('✅ VaultRouter deployed @', deployed.VaultRouter);

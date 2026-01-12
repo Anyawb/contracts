@@ -68,7 +68,8 @@ async function deployRegular(name: string, ...args: unknown[]): Promise<string> 
 async function deployProxy(name: string, args: unknown[] = [], opts: Record<string, unknown> = {}): Promise<string> {
   const f = await ethers.getContractFactory(name);
   // 默认添加unsafeAllow配置来处理构造函数问题
-  const defaultOpts = { unsafeAllow: ['constructor'], ...opts };
+  // Phase 0c (OZ v5 migration): default to UUPS unless explicitly overridden.
+  const defaultOpts = { kind: 'uups', unsafeAllow: ['constructor'], ...opts };
   const p = await upgrades.deployProxy(f, args, defaultOpts);
   await p.waitForDeployment();
   const addr = await p.getAddress();
@@ -178,7 +179,7 @@ async function main() {
 
     if (!deployed.Registry) {
       // UUPS 可升级合约，使用 Proxy 部署并初始化
-      deployed.Registry = await deployProxy('Registry', [MIN_DELAY, deployer.address, deployer.address]);
+      deployed.Registry = await deployProxy('Registry', [MIN_DELAY, deployer.address, deployer.address, deployer.address]);
       save(deployed);
     }
 
@@ -193,7 +194,10 @@ async function main() {
 
     // 可选：部署并挂载升级/治理子模块
     if (!deployed.RegistryUpgradeManager) {
-      deployed.RegistryUpgradeManager = await deployProxy('RegistryUpgradeManager', [deployed.Registry]);
+      // NOTE: RegistryUpgradeManager is NOT UUPSUpgradeable (transparent proxy required).
+      deployed.RegistryUpgradeManager = await deployProxy('RegistryUpgradeManager', [deployed.Registry, deployer.address], {
+        kind: 'transparent',
+      });
       save(deployed);
       try {
         const registry = await ethers.getContractAt('Registry', deployed.Registry);
@@ -205,7 +209,8 @@ async function main() {
     }
 
     if (!deployed.RegistryAdmin) {
-      deployed.RegistryAdmin = await deployProxy('RegistryAdmin');
+      // NOTE: RegistryAdmin is NOT UUPSUpgradeable (transparent proxy required).
+      deployed.RegistryAdmin = await deployProxy('RegistryAdmin', [deployer.address], { kind: 'transparent' });
       save(deployed);
       try {
         const registry = await ethers.getContractAt('Registry', deployed.Registry);
@@ -221,7 +226,8 @@ async function main() {
       try {
         deployed.RegistryDynamicModuleKey = await deployProxy('RegistryDynamicModuleKey', [
           deployer.address, // registrationAdmin
-          deployer.address  // systemAdmin
+          deployer.address, // systemAdmin
+          deployer.address, // owner (OwnableUpgradeable)
         ]);
         save(deployed);
         console.log('✅ RegistryDynamicModuleKey deployed @', deployed.RegistryDynamicModuleKey);
@@ -686,12 +692,23 @@ async function main() {
       save(deployed);
     }
 
-    // 先部署一个临时的 VaultRouter 用于 VaultCore 初始化
+    // 部署 VaultRouter（UUPS Proxy，严格对齐 Architecture-Guide：本地存储 + UUPS）
+    // 注意：VaultCore.initialize(registry, viewAddr) 需要最终 VaultRouter 地址，因此必须先部署 VaultRouter。
     if (!deployed.VaultRouter) {
-      console.log('🚀 Deploying temporary VaultRouter for VaultCore initialization...');
-      deployed.VaultRouter = await deployProxy('src/Vault/VaultRouter.sol:VaultRouter', [deployed.Registry]);
+      if (!deployed.SettlementToken) {
+        throw new Error('Missing SettlementToken (required for VaultRouter.initialize)');
+      }
+      deployed.VaultRouter = await deployProxy(
+        'src/Vault/VaultRouter.sol:VaultRouter',
+        [
+          deployed.Registry,
+          deployed.AssetWhitelist,
+          deployed.PriceOracle,
+          deployed.SettlementToken,
+          deployer.address, // owner (testnet: recommend multisig/timelock)
+        ]
+      );
       save(deployed);
-      console.log('✅ Temporary VaultRouter deployed @', deployed.VaultRouter);
     }
 
     if (!deployed.VaultCore) {
@@ -872,7 +889,8 @@ async function main() {
       RegistryHistoryManager: 'REGISTRY_HISTORY_MANAGER',
       RegistryBatchManager: 'REGISTRY_BATCH_MANAGER',
       RegistryHelper: 'REGISTRY_HELPER',
-      RegistryDynamicModuleKey: 'REGISTRY_DYNAMIC_MODULE_KEY',
+      // ModuleKeys.KEY_DYNAMIC_MODULE_REGISTRY = keccak256("DYNAMIC_MODULE_REGISTRY")
+      RegistryDynamicModuleKey: 'DYNAMIC_MODULE_REGISTRY',
       AccessControlManager: 'ACCESS_CONTROL_MANAGER',
       AssetWhitelist: 'ASSET_WHITELIST',
       AuthorityWhitelist: 'AUTHORITY_WHITELIST',
@@ -888,13 +906,15 @@ async function main() {
       RewardConfig: 'REWARD_CONFIG',
       RewardView: 'REWARD_VIEW',
       CollateralManager: 'COLLATERAL_MANAGER',
-      LendingEngine: 'LENDING_ENGINE',
+      // core/LendingEngine is the OrderEngine -> ModuleKeys.KEY_ORDER_ENGINE = keccak256("ORDER_ENGINE")
+      LendingEngine: 'ORDER_ENGINE',
       LendingEngineView: 'LENDING_ENGINE_VIEW',
       VaultBusinessLogic: 'VAULT_BUSINESS_LOGIC',
       VaultCore: 'VAULT_CORE',
       // VaultRouter: 'VAULT_VIEW', // 架构建议通过 KEY_VAULT_CORE 解析，不强依赖
       VaultStorage: 'VAULT_STORAGE',
-      VaultLendingEngine: 'VAULT_LENDING_ENGINE',
+      // VaultLendingEngine is the ledger engine -> ModuleKeys.KEY_LE = keccak256("LENDING_ENGINE")
+      VaultLendingEngine: 'LENDING_ENGINE',
       EarlyRepaymentGuaranteeManager: 'EARLY_REPAYMENT_GUARANTEE_MANAGER',
       HealthView: 'HEALTH_VIEW',
       // 不注册未部署的 RWA Token
@@ -911,7 +931,8 @@ async function main() {
       ViewCache: 'VIEW_CACHE',
       EventHistoryManager: 'EVENT_HISTORY_MANAGER',
       ValuationOracleView: 'VALUATION_ORACLE_VIEW',
-      LiquidatorView: 'LIQUIDATOR_VIEW',
+      // ModuleKeys.KEY_LIQUIDATION_VIEW = keccak256("LIQUIDATION_VIEW")
+      LiquidatorView: 'LIQUIDATION_VIEW',
       LiquidationManager: 'LIQUIDATION_MANAGER',
       SettlementManager: 'SETTLEMENT_MANAGER',
       LiquidationPayoutManager: 'LIQUIDATION_PAYOUT_MANAGER',
@@ -1010,13 +1031,7 @@ async function main() {
         }
       }
 
-      // 现在部署 VaultRouter（在模块注册完成后）
-      if (!deployed.VaultRouter) {
-        console.log('🚀 Deploying VaultRouter after module registration...');
-        deployed.VaultRouter = await deployProxy('src/Vault/VaultRouter.sol:VaultRouter', [deployed.Registry]);
-        save(deployed);
-        console.log('✅ VaultRouter deployed @', deployed.VaultRouter);
-      }
+    // VaultRouter 已在 VaultCore 之前部署（见上），这里不再重复部署
 
       // 3.1 附加绑定：将 KEY_LIQUIDATION_MANAGER 绑定到 VaultBusinessLogic（统一清算入口）
       try {
@@ -1048,10 +1063,8 @@ async function main() {
         console.log('⚠️ Extra KEY binding failed:', e);
       }
 
-      // 3.2 断言校验（增强容错）：
-      // - 优先校验 VaultCore 是否为有效合约；
-      // - 读取 viewContractAddrVar()，若失败则回退：直接将 KEY_VAULT_VIEW 绑定到本次部署的 VaultRouter；
-      //   这样前端依旧可以通过 Registry 解析 View 地址使用系统。
+      // 3.2 断言校验（严格版）：
+      // - 禁止引入 KEY_VAULT_VIEW（多来源）；VaultRouter 的权威来源是 VaultCore.viewContractAddrVar()
       try {
         if (!deployed.VaultCore || !deployed.VaultRouter) throw new Error('Missing VaultCore or VaultRouter address');
 
@@ -1059,16 +1072,16 @@ async function main() {
         console.log('🔎 VaultCore @', deployed.VaultCore, 'codeLen =', code.length);
         if (!code || code === '0x') throw new Error('VaultCore address has no code');
 
-        // 直接确保 KEY_VAULT_VIEW 绑定为本次部署的 VaultRouter
-        const KEY_VAULT_VIEW = keyOf('VAULT_VIEW');
-        try {
-          await (await registry.setModule(KEY_VAULT_VIEW, deployed.VaultRouter)).wait();
-          console.log('✅ Bound KEY_VAULT_VIEW ->', deployed.VaultRouter);
-        } catch (bindErr) {
-          console.log('⚠️ Binding KEY_VAULT_VIEW failed:', bindErr);
+        const vaultCore = await ethers.getContractAt('VaultCore', deployed.VaultCore);
+        const viewAddr = await vaultCore.viewContractAddrVar();
+        if (!viewAddr || viewAddr === ethers.ZeroAddress) throw new Error('VaultCore.viewContractAddrVar() is zero');
+        if (viewAddr.toLowerCase() !== deployed.VaultRouter.toLowerCase()) {
+          throw new Error(`VaultCore.viewContractAddrVar mismatch: core=${viewAddr} expected VaultRouter=${deployed.VaultRouter}`);
         }
+        console.log('✅ Architecture check: VaultCore.viewContractAddrVar matches deployed VaultRouter');
       } catch (e) {
-        console.log('⚠️ Assertion step encountered error but continued (safe fallback applied when possible):', e);
+        // strict: fail fast on testnet deployment
+        throw e;
       }
 
     // 4) 生成前端配置

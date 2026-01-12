@@ -12,7 +12,7 @@
  */
 
 import * as hardhat from 'hardhat';
-const { ethers } = hardhat;
+const { ethers, upgrades } = hardhat;
 import { expect } from 'chai';
 import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
@@ -97,14 +97,19 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
     const MockRegistryFactory = await ethers.getContractFactory('MockRegistry');
     mockRegistry = await MockRegistryFactory.deploy() as unknown as MockRegistry;
 
-    // 部署 VaultRouter
+    // 部署 VaultRouter（UUPS proxy）
     const VaultRouterFactory = await ethers.getContractFactory('VaultRouter');
-    vaultRouter = await VaultRouterFactory.deploy(
-      await mockRegistry.getAddress(),
-      await mockAssetWhitelist.getAddress(),
-      await mockPriceOracle.getAddress(),
-      await mockSettlementToken.getAddress()
-    );
+    vaultRouter = (await upgrades.deployProxy(
+      VaultRouterFactory,
+      [
+        await mockRegistry.getAddress(),
+        await mockAssetWhitelist.getAddress(),
+        await mockPriceOracle.getAddress(),
+        await mockSettlementToken.getAddress(),
+        owner.address, // initialOwner
+      ],
+      { kind: 'uups', initializer: 'initialize' }
+    )) as VaultRouter;
 
     // 部署 VaultCore（UUPS：必须通过 Proxy 初始化；实现合约 constructor 已禁用 initialize）
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');

@@ -369,7 +369,9 @@ describe('LoanNFT – ACM 集成测试', function () {
       if (!receipt) throw new Error('Transaction failed');
       
       // 验证 NFT 已被销毁
-      await expect(loanNFT.ownerOf(tokenId)).to.be.revertedWith('ERC721: invalid token ID');
+      await expect(loanNFT.ownerOf(tokenId))
+        .to.be.revertedWithCustomError(loanNFT, 'ERC721NonexistentToken')
+        .withArgs(tokenId);
       expect(await loanNFT.balanceOf(bob.address)).to.equal(0n);
     });
 
@@ -522,7 +524,7 @@ describe('LoanNFT – ACM 集成测试', function () {
       
       await expect(
         loanNFT.connect(alice).mintLoanCertificate(bob.address, loanMetadata)
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(loanNFT, 'EnforcedPause');
     });
 
     it('治理角色应能更新 Registry 地址', async function () {
@@ -1205,7 +1207,7 @@ describe('LoanNFT – ACM 集成测试', function () {
       // 铸造应失败
       await expect(
         loanNFT.connect(alice).mintLoanCertificate(bob.address, loanMetadata)
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(loanNFT, 'EnforcedPause');
     });
 
     it('暂停后应允许解除暂停', async function () {

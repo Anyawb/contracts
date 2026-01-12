@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
 
 import {Registry} from "../registry/Registry.sol";
 import {ModuleKeys} from "../constants/ModuleKeys.sol";
@@ -25,7 +25,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /// @dev UUPS + ReentrancyGuard baseline: constructor disables initializers; keep __gap.
 /// @dev External write entrypoints are nonReentrant.
 /// @custom:security-contact security@example.com
-contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
+contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardSlimUpgradeable {
     using SafeERC20 for IERC20;
 
     /*━━━━━━━━━━━━━━━ Core config ━━━━━━━━━━━━━━━*/
@@ -64,7 +64,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (initialRegistryAddr == address(0) || initialViewContractAddr == address(0)) revert ZeroAddress();
 
         __UUPSUpgradeable_init();
-        __ReentrancyGuard_init();
+        __ReentrancyGuardSlim_init();
 
         _registryAddr = initialRegistryAddr;
         _viewContractAddr = initialViewContractAddr;
@@ -133,12 +133,14 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param asset Collateral asset address (non-zero)
      * @param amount Collateral amount (token decimals)
      */
-    function deposit(address asset, uint256 amount) external nonReentrant {
+    function deposit(address asset, uint256 amount) external {
+        _reentrancyGuardEnter();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
         address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
         ICollateralManager(cm).depositCollateral(msg.sender, asset, amount);
+        _reentrancyGuardExit();
     }
 
     /**
@@ -154,12 +156,14 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param asset Collateral asset address (non-zero)
      * @param amount Withdraw amount (token decimals)
      */
-    function withdraw(address asset, uint256 amount) external nonReentrant {
+    function withdraw(address asset, uint256 amount) external {
+        _reentrancyGuardEnter();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
         address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
         ICollateralManager(cm).withdrawCollateral(msg.sender, asset, amount);
+        _reentrancyGuardExit();
     }
 
     /**
@@ -175,12 +179,14 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param asset Debt asset address (non-zero)
      * @param amount Borrow amount (token decimals)
      */
-    function borrow(address asset, uint256 amount) external nonReentrant {
+    function borrow(address asset, uint256 amount) external {
+        _reentrancyGuardEnter();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
         address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
         ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
+        _reentrancyGuardExit();
     }
 
     /**
@@ -244,13 +250,15 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param asset Debt asset address (non-zero)
      * @param amount Repay amount (token decimals)
      */
-    function repay(uint256 orderId, address asset, uint256 amount) external nonReentrant {
+    function repay(uint256 orderId, address asset, uint256 amount) external {
+        _reentrancyGuardEnter();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
         address settlementManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_SETTLEMENT_MANAGER);
         IERC20(asset).safeTransferFrom(msg.sender, settlementManager, amount);
         ISettlementManager(settlementManager).repayAndSettle(msg.sender, asset, amount, orderId);
+        _reentrancyGuardExit();
     }
 
     /*━━━━━━━━━━━━━━━ Batch user entrypoints ━━━━━━━━━━━━━━━*/
@@ -270,7 +278,8 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param assets Collateral asset addresses
      * @param amounts Collateral amounts (token decimals)
      */
-    function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external nonReentrant {
+    function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external {
+        _reentrancyGuardEnter();
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
@@ -283,6 +292,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
             if (amount == 0) revert AmountIsZero();
             ICollateralManager(cm).depositCollateral(msg.sender, asset, amount);
         }
+        _reentrancyGuardExit();
     }
 
     /**
@@ -300,7 +310,8 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param assets Debt asset addresses
      * @param amounts Borrow amounts (token decimals)
      */
-    function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external nonReentrant {
+    function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external {
+        _reentrancyGuardEnter();
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
@@ -313,6 +324,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
             if (amount == 0) revert AmountIsZero();
             ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
         }
+        _reentrancyGuardExit();
     }
 
     /**
@@ -337,7 +349,8 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         uint256[] calldata orderIds,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external nonReentrant {
+    ) external {
+        _reentrancyGuardEnter();
         if (orderIds.length != assets.length) revert ArrayLengthMismatch(orderIds.length, assets.length);
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length == 0) revert EmptyArray();
@@ -352,6 +365,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
             IERC20(asset).safeTransferFrom(msg.sender, settlementManager, amount);
             ISettlementManager(settlementManager).repayAndSettle(msg.sender, asset, amount, orderIds[i]);
         }
+        _reentrancyGuardExit();
     }
 
     /**
@@ -369,7 +383,8 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param assets Collateral asset addresses
      * @param amounts Withdraw amounts (token decimals)
      */
-    function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external nonReentrant {
+    function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external {
+        _reentrancyGuardEnter();
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
@@ -382,6 +397,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
             if (amount == 0) revert AmountIsZero();
             ICollateralManager(cm).withdrawCollateral(msg.sender, asset, amount);
         }
+        _reentrancyGuardExit();
     }
 
     /*━━━━━━━━━━━━━━━ Data push entrypoints (business -> View) ━━━━━━━━━━━━━━━*/
@@ -636,6 +652,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        require(newImplementation.code.length > 0, "Invalid implementation");
     }
 
     uint256[50] private __gap;

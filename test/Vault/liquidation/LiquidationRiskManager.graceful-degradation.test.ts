@@ -22,7 +22,7 @@ describe("LiquidationRiskManager - Valuation Centralization", function () {
         const Registry = await ethers.getContractFactory("Registry");
         const registry = await upgrades.deployProxy(
             Registry,
-            [7 * 24 * 60 * 60, deployer.address, deployer.address],
+            [7 * 24 * 60 * 60, deployer.address, deployer.address, deployer.address],
             { kind: "uups" }
         );
         await registry.waitForDeployment();

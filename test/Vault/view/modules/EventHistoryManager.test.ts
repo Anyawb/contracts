@@ -50,8 +50,9 @@ describe('EventHistoryManager', function () {
 
     it('prevents double initialization', async function () {
       const { eventHistory, registry } = await loadFixture(deployFixture);
-      await expect(eventHistory.initialize(await registry.getAddress())).to.be.revertedWith(
-        'Initializable: contract is already initialized',
+      await expect(eventHistory.initialize(await registry.getAddress())).to.be.revertedWithCustomError(
+        eventHistory,
+        'InvalidInitialization',
       );
     });
   });

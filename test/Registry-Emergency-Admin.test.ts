@@ -39,7 +39,12 @@ describe('Registry 紧急管理员测试', function () {
     const ERC1967Proxy = await ethers.getContractFactory('ERC1967Proxy');
     const proxy = await ERC1967Proxy.deploy(
       await implementation.getAddress(),
-      implementation.interface.encodeFunctionData('initialize', [BigInt(3600), await owner.getAddress(), await owner.getAddress()])
+      implementation.interface.encodeFunctionData('initialize', [
+        BigInt(3600),
+        await owner.getAddress(),
+        await owner.getAddress(),
+        await owner.getAddress(),
+      ])
     );
     await proxy.waitForDeployment();
         
@@ -94,7 +99,7 @@ describe('Registry 紧急管理员测试', function () {
       
       // 紧急管理员不能恢复系统
       await expect(registry.connect(emergencyAdmin).unpause())
-        .to.be.revertedWith('Ownable: caller is not the owner');
+        .to.be.revertedWithCustomError(registry, 'OwnableUnauthorizedAccount');
         
       console.log('紧急管理员恢复系统限制测试通过');
     });
@@ -218,12 +223,12 @@ describe('Registry 紧急管理员测试', function () {
       // 尝试设置恶意模块（应该被阻止）
       await expect(
         registry.setModule(KEY_LE, await user1.getAddress())
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
       
       // 尝试排期恶意升级（应该被阻止）
       await expect(
         registry.scheduleModuleUpgrade(KEY_LE, await user1.getAddress())
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
       
       console.log('暂停状态下恶意升级防护测试通过');
     });

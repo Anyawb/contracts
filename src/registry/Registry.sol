@@ -3,10 +3,9 @@ pragma solidity ^0.8.20;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { ReentrancyGuardSlimUpgradeable } from "../utils/ReentrancyGuardSlimUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {IRegistry} from "../interfaces/IRegistry.sol";
 import {IRegistryStorageMigrator} from "../interfaces/IRegistryStorageMigrator.sol";
@@ -35,12 +34,10 @@ contract Registry is
     IRegistry,
     Initializable, 
     OwnableUpgradeable, 
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuardSlimUpgradeable,
     UUPSUpgradeable,
     PausableUpgradeable
 {
-    using Address for address;
-
     // ============ Custom Errors ============
     /// @notice Caller is not authorized to upgrade.
     error NotUpgradeAdmin(address caller);
@@ -110,20 +107,25 @@ contract Registry is
     /// @dev Initializes core state variables and privilege settings.
     /// @param upgradeAdmin_ Upgrade admin address.
     /// @param emergencyAdmin_ Emergency admin address.
-    function initialize(uint256 _minDelay, address upgradeAdmin_, address emergencyAdmin_) external initializer {
+    function initialize(uint256 _minDelay, address upgradeAdmin_, address emergencyAdmin_, address initialOwner)
+        external
+        initializer
+    {
         if (_minDelay > _MAX_DELAY) revert DelayTooLong(_minDelay, _MAX_DELAY);
         if (upgradeAdmin_ == address(0)) revert ZeroAddress();
         if (emergencyAdmin_ == address(0)) revert ZeroAddress();
+        if (initialOwner == address(0)) revert ZeroAddress();
         
-        __Ownable_init();
-        __ReentrancyGuard_init();
+        __Ownable_init(initialOwner);
+        __ReentrancyGuardSlim_init();
         __UUPSUpgradeable_init();
         __Pausable_init();
         
         RegistryStorage.initializeStorageVersion();
         
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
-        layout.admin = msg.sender;
+        // Governance/admin (compat) should follow the explicit initial owner, not the initializer caller.
+        layout.admin = initialOwner;
         layout.pendingAdmin = address(0);
         layout.minDelay = uint64(_minDelay);
         
@@ -143,6 +145,7 @@ contract Registry is
     /// @dev Only upgradeAdmin, emergencyAdmin, or owner can upgrade.
     function _authorizeUpgrade(address newImplementation) internal override {
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
         if (msg.sender == _upgradeAdmin || msg.sender == _emergencyAdmin || msg.sender == owner()) {
             emit RegistryEvents.ModuleUpgradeAuthorized(
                 msg.sender,
@@ -159,7 +162,7 @@ contract Registry is
     /// @dev Only owner can set module addresses.
     function setRegistryCore(address registryCoreAddr) external onlyOwner {
         if (registryCoreAddr == address(0)) revert ZeroAddress();
-        if (!registryCoreAddr.isContract()) revert NotAContract(registryCoreAddr);
+        if (registryCoreAddr.code.length == 0) revert NotAContract(registryCoreAddr);
         
         // Optional: validate required interfaces if needed.
         
@@ -172,7 +175,7 @@ contract Registry is
     /// @dev Only owner can set module addresses.
     function setUpgradeManager(address upgradeManagerAddr) external onlyOwner {
         if (upgradeManagerAddr == address(0)) revert ZeroAddress();
-        if (!upgradeManagerAddr.isContract()) revert NotAContract(upgradeManagerAddr);
+        if (upgradeManagerAddr.code.length == 0) revert NotAContract(upgradeManagerAddr);
         
         // Optional: validate required interfaces if needed.
         
@@ -180,7 +183,7 @@ contract Registry is
         emit RegistryEvents.ModuleChanged(bytes32("RegistryUpgradeManager"), address(0), upgradeManagerAddr);
         // Best-effort init to bind the Registry address (ignore failure/already-initialized).
         bool initialized = false;
-        try _upgradeManager.initialize(address(this)) {
+        try _upgradeManager.initialize(address(this), owner()) {
             initialized = true;
         } catch (bytes memory) {
             initialized = false;
@@ -196,7 +199,7 @@ contract Registry is
     /// @dev Only owner can set module addresses.
     function setRegistryAdmin(address registryAdminAddr) external onlyOwner {
         if (registryAdminAddr == address(0)) revert ZeroAddress();
-        if (!registryAdminAddr.isContract()) revert NotAContract(registryAdminAddr);
+        if (registryAdminAddr.code.length == 0) revert NotAContract(registryAdminAddr);
         
         // Optional: validate required interfaces if needed.
         
@@ -208,7 +211,7 @@ contract Registry is
     /// @param dynamicModuleKeyRegistryAddr Dynamic module key registry address.
     /// @dev Only owner can set module addresses.
     function setDynamicModuleKeyRegistry(address dynamicModuleKeyRegistryAddr) external onlyOwner {
-        if (dynamicModuleKeyRegistryAddr != address(0) && !dynamicModuleKeyRegistryAddr.isContract()) {
+        if (dynamicModuleKeyRegistryAddr != address(0) && dynamicModuleKeyRegistryAddr.code.length == 0) {
             revert NotAContract(dynamicModuleKeyRegistryAddr);
         }
         
@@ -227,7 +230,40 @@ contract Registry is
     /// @notice Transfer ownership (IRegistry override).
     /// @param newOwner New owner address.
     function transferOwnership(address newOwner) public override(IRegistry, OwnableUpgradeable) onlyOwner {
+        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        if (newOwner == address(0)) revert ZeroAddress();
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+
+        address oldAdmin = owner();
+        address oldPending = layout.pendingAdmin;
+
         super.transferOwnership(newOwner);
+        layout.admin = newOwner;
+
+        if (oldPending != address(0)) {
+            layout.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
+        emit RegistryEvents.AdminChanged(oldAdmin, newOwner);
+    }
+
+    /// @notice Renounce ownership (governance admin).
+    /// @dev Keeps RegistryStorage.admin/pendingAdmin consistent with Ownable owner.
+    function renounceOwnership() public override(OwnableUpgradeable) onlyOwner {
+        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+
+        address oldAdmin = owner();
+        address oldPending = layout.pendingAdmin;
+
+        super.renounceOwnership();
+        layout.admin = address(0);
+
+        if (oldPending != address(0)) {
+            layout.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
+        emit RegistryEvents.AdminChanged(oldAdmin, address(0));
     }
 
     // ============ Read-only queries (via RegistryQuery) ============
@@ -324,7 +360,13 @@ contract Registry is
         if (newAdmin == address(0)) revert ZeroAddress();
         address oldAdmin = owner();
         _transferOwnership(newAdmin);
-        RegistryStorage.layout().admin = newAdmin;
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        address oldPending = layout.pendingAdmin;
+        layout.admin = newAdmin;
+        if (oldPending != address(0)) {
+            layout.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
         emit RegistryEvents.AdminChanged(oldAdmin, newAdmin);
     }
 
@@ -348,9 +390,11 @@ contract Registry is
         if (layout.pendingAdmin == address(0)) revert InvalidPendingAdmin(layout.pendingAdmin);
         
         address oldAdmin = owner();
+        address oldPending = layout.pendingAdmin;
         _transferOwnership(msg.sender);
         layout.admin = msg.sender;
         layout.pendingAdmin = address(0);
+        emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
         emit RegistryEvents.AdminChanged(oldAdmin, msg.sender);
     }
 
@@ -581,7 +625,8 @@ contract Registry is
 
     /// @notice Execute a scheduled module upgrade.
     /// @param key Module key.
-    function executeModuleUpgrade(bytes32 key) external override onlyOwner nonReentrant whenNotPaused {
+    function executeModuleUpgrade(bytes32 key) external override onlyOwner whenNotPaused {
+        _reentrancyGuardEnter();
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[key];
@@ -595,6 +640,7 @@ contract Registry is
         delete layout.pendingUpgrades[key];
         emit RegistryEvents.ModuleUpgraded(key, oldAddress, newAddr, msg.sender);
         _recordUpgradeHistory(key, oldAddress, newAddr, msg.sender);
+        _reentrancyGuardExit();
     }
 
     /// @notice Emergency admin: cancel all pending upgrades.

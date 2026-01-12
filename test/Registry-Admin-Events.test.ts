@@ -39,7 +39,12 @@ describe('Registry Admin Events', function () {
     const ERC1967Proxy = await ethers.getContractFactory('ERC1967Proxy');
     const proxy = await ERC1967Proxy.deploy(
       await implementation.getAddress(),
-      implementation.interface.encodeFunctionData('initialize', [3600, await owner.getAddress(), await owner.getAddress()])
+      implementation.interface.encodeFunctionData('initialize', [
+        3600,
+        await owner.getAddress(),
+        await owner.getAddress(),
+        await owner.getAddress(),
+      ])
     );
     await proxy.waitForDeployment();
         
@@ -164,8 +169,7 @@ describe('Registry Admin Events', function () {
     it('Should not emit events for invalid admin changes', async function () {
       // 尝试设置零地址作为管理员
       await expect(registry.setAdmin(ZERO_ADDRESS))
-        .to.be.revertedWithCustomError(registry, 'InvalidParameter')
-        .withArgs('Invalid admin address');
+        .to.be.revertedWithCustomError(registry, 'ZeroAddress');
         
       // 验证没有事件被触发
       const currentAdmin = await registry.getAdmin();

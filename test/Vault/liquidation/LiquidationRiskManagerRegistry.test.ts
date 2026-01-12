@@ -21,7 +21,7 @@ describe("LiquidationRiskManager Registry Upgrade", function () {
         const Registry = await ethers.getContractFactory("Registry");
         registry = await upgrades.deployProxy(
             Registry,
-            [7 * 24 * 60 * 60, owner.address, owner.address], // 7天延时
+            [7 * 24 * 60 * 60, owner.address, owner.address, owner.address], // 7天延时
             { kind: "uups" }
         );
         await registry.waitForDeployment();

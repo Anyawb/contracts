@@ -41,7 +41,7 @@ describe('RegistryAdmin – 安全性测试', function () {
 
     const { proxyContract } = await deployProxyContract('RegistryAdmin');
     const admin = proxyContract as RegistryAdmin;
-    await admin.initialize();
+    await admin.initialize(owner.address);
 
     return { registryAdmin: admin, owner, user1, newOwner };
   }
@@ -61,7 +61,7 @@ describe('RegistryAdmin – 安全性测试', function () {
     });
 
     it('应该拒绝重复初始化', async function () {
-      await expect(registryAdmin.initialize()).to.be.revertedWith('Initializable: contract is already initialized');
+      await expect(registryAdmin.initialize(owner.address)).to.be.revertedWithCustomError(registryAdmin, 'InvalidInitialization');
     });
   });
 
@@ -74,8 +74,9 @@ describe('RegistryAdmin – 安全性测试', function () {
     });
 
     it('应该拒绝非 owner 调用紧急设置', async function () {
-      await expect(registryAdmin.connect(user1).emergencySetMinDelay(TEST_DELAY)).to.be.revertedWith(
-        'Ownable: caller is not the owner'
+      await expect(registryAdmin.connect(user1).emergencySetMinDelay(TEST_DELAY)).to.be.revertedWithCustomError(
+        registryAdmin,
+        'OwnableUnauthorizedAccount'
       );
     });
 
@@ -131,8 +132,14 @@ describe('RegistryAdmin – 安全性测试', function () {
     });
 
     it('应该拒绝非 owner 暂停/恢复', async function () {
-      await expect(registryAdmin.connect(user1).pause()).to.be.revertedWith('Ownable: caller is not the owner');
-      await expect(registryAdmin.connect(user1).unpause()).to.be.revertedWith('Ownable: caller is not the owner');
+      await expect(registryAdmin.connect(user1).pause()).to.be.revertedWithCustomError(
+        registryAdmin,
+        'OwnableUnauthorizedAccount'
+      );
+      await expect(registryAdmin.connect(user1).unpause()).to.be.revertedWithCustomError(
+        registryAdmin,
+        'OwnableUnauthorizedAccount'
+      );
     });
   });
 
@@ -174,11 +181,13 @@ describe('RegistryAdmin – 安全性测试', function () {
     });
 
     it('应该拒绝非 owner 的所有权操作', async function () {
-      await expect(registryAdmin.connect(user1).transferOwnership(await newOwner.getAddress())).to.be.revertedWith(
-        'Ownable: caller is not the owner'
+      await expect(registryAdmin.connect(user1).transferOwnership(await newOwner.getAddress())).to.be.revertedWithCustomError(
+        registryAdmin,
+        'OwnableUnauthorizedAccount'
       );
-      await expect(registryAdmin.connect(user1).renounceOwnership()).to.be.revertedWith(
-        'Ownable: caller is not the owner'
+      await expect(registryAdmin.connect(user1).renounceOwnership()).to.be.revertedWithCustomError(
+        registryAdmin,
+        'OwnableUnauthorizedAccount'
       );
     });
   });

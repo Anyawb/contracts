@@ -1,12 +1,27 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ILoanNFT 贷款凭证 NFT 接口
-/// @notice 在贷款撮合成功后铸造 ERC-721 NFT，可选锁定为 SBT
-/// @dev 实现合约需继承 ERC721 与 AccessControl，并确保与 LendingEngine 状态同步
+/**
+ * @title ILoanNFT
+ * @notice Interface for the loan certificate ERC-721 NFT (optionally lockable as SBT).
+ * @dev Reverts if:
+ *      - implementation-defined access control fails (role-gated / onlyModule)
+ *
+ * Security:
+ * - Role-gated in the implementation (typically via Registry-resolved ACM)
+ * - SBT lock must prevent user-to-user transfers (mint/burn allowed)
+ */
 interface ILoanNFT {
     /*━━━━━━━━━━━━━━━ ENUMS ━━━━━━━━━━━━━━━*/
 
+    /**
+     * @notice Loan lifecycle status reflected by the NFT.
+     * @dev Semantics:
+     * - Active: loan is ongoing
+     * - Repaid: loan is fully repaid
+     * - Liquidated: loan was liquidated
+     * - Defaulted: loan is in default
+     */
     enum LoanStatus {
         Active,
         Repaid,
@@ -17,21 +32,37 @@ interface ILoanNFT {
     /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
 
     /**
-     * @dev 撮合成功后一次性填充全部字段；后续仅 `status` 字段可变动，其他字段视为只读常量。
+     * @notice Immutable loan snapshot at mint time, except `status` which may be updated by an authorized module.
+     * @dev Units / conventions:
+     * - `principal`: token decimals of the underlying debt asset (implementation-defined)
+     * - `rate`: annualized rate in bps (\(1e4 = 100%\))
+     * - `term`: seconds
+     * - `oraclePrice`: implementation-defined oracle precision
      */
     struct LoanMetadata {
         uint256 principal;
-        uint256 rate;          // 年化利率，bps （≤100_000）
-        uint256 term;          // 借款周期（秒）
-        uint256 oraclePrice;   // Oracle 快照价格
-        uint256 loanId;        // LendingEngine 订单 ID
-        bytes32 collateralHash;// 抵押物哈希
-        LoanStatus status;     // 当前状态
+        uint256 rate;
+        uint256 term;
+        uint256 oraclePrice;
+        uint256 loanId;
+        bytes32 collateralHash;
+        LoanStatus status;
     }
 
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
 
-    /// @notice 成功铸造 Loan NFT
+    /**
+     * @notice Emitted when a loan certificate NFT is minted.
+     * @dev Security:
+     * - Event-only; consumers must treat ORDER_ENGINE / LoanNFT implementation as SSOT.
+     *
+     * @param to Recipient address
+     * @param tokenId Minted token id
+     * @param loanId Order/loan id in the lending engine (implementation-defined)
+     * @param principal Principal amount (token decimals)
+     * @param rate Annualized rate (bps)
+     * @param term Term length (seconds)
+     */
     event LoanCertificateMinted(
         address indexed to,
         uint256 indexed tokenId,
@@ -41,67 +72,142 @@ interface ILoanNFT {
         uint256 term
     );
 
-    /// @notice 将已铸 NFT 锁定为不可转的 SBT
+    /**
+     * @notice Emitted when a token is locked as SBT (non-transferable between users).
+     * @dev Security:
+     * - Event-only; transfer restrictions must be enforced in implementation.
+     *
+     * @param tokenId Token id
+     */
     event TokenLocked(uint256 indexed tokenId);
-    /// @notice 已销毁 NFT
+    /**
+     * @notice Emitted when a token is burned.
+     * @dev Security:
+     * - Event-only; burn authorization is enforced in implementation.
+     *
+     * @param tokenId Token id
+     */
     event TokenBurned(uint256 indexed tokenId);
 
-    /// @notice 状态更新
+    /**
+     * @notice Emitted when loan status is updated for a token.
+     * @dev Security:
+     * - Event-only; status authorization is enforced in implementation.
+     *
+     * @param tokenId Token id
+     * @param newStatus New status
+     */
     event LoanStatusUpdated(uint256 indexed tokenId, LoanStatus newStatus);
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
 
+    /**
+     * @notice Caller is not authorized to perform the action.
+     */
     error LoanNFT__NotAuthorized();
+    /**
+     * @notice Token is locked as SBT and cannot be transferred between users.
+     * @param tokenId Token id
+     */
     error LoanNFT__SoulBound(uint256 tokenId);
+    /**
+     * @notice Token id does not exist.
+     */
     error LoanNFT__InvalidTokenId();
+    /**
+     * @notice Loan/order id was already minted.
+     * @param loanId Loan/order id
+     */
     error LoanNFT__LoanAlreadyMinted(uint256 loanId);
 
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 铸造贷款凭证 NFT
-     * @param to NFT 接收方地址（通常为借方）
-     * @param data 贷款元数据结构体
-     * @return tokenId 新铸 NFT 的 ID
+     * @notice Mint a loan certificate NFT.
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - `to` is zero (implementation-defined)
+     *      - `data.loanId` was already minted (`LoanNFT__LoanAlreadyMinted`)
+     *
+     * Security:
+     * - Role-gated in implementation
+     *
+     * @param to Recipient address (typically the borrower)
+     * @param data Loan metadata snapshot (see struct-level units)
+     * @return tokenId Newly minted token id
      */
     function mintLoanCertificate(address to, LoanMetadata calldata data) external returns (uint256 tokenId);
 
     /**
-     * @notice 将 NFT 锁定为 SBT 模式，锁定后无法转移
-     * @param tokenId NFT ID
+     * @notice Permanently lock a token as SBT (non-transferable between users).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - `tokenId` does not exist (`LoanNFT__InvalidTokenId`)
+     *
+     * Security:
+     * - Role-gated in implementation
+     *
+     * @param tokenId Token id
      */
     function lockAsSBT(uint256 tokenId) external;
 
     /**
-     * @notice 销毁 NFT 凭证
-     * @dev 仅 `DEFAULT_ADMIN_ROLE` 或治理合约调用；清算/违约结算后可销毁。
+     * @notice Burn a loan certificate token.
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - `tokenId` does not exist (`LoanNFT__InvalidTokenId`)
+     *
+     * Security:
+     * - Role-gated in implementation
      */
     function burn(uint256 tokenId) external;
 
     /**
-     * @notice 更新贷款状态（如还清、清算等）
-     * @dev 通常由 LendingEngine 或具备 `MINTER_ROLE` 的状态管理模块调用。
+     * @notice Update loan status for a token (e.g. Repaid/Liquidated/Defaulted).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - `tokenId` does not exist (`LoanNFT__InvalidTokenId`)
+     *
+     * Security:
+     * - Role-gated in implementation
      */
     function updateLoanStatus(uint256 tokenId, LoanStatus newStatus) external;
 
     /**
-     * @notice 获取指定用户持有的所有贷款凭证 ID
-     * @param user 用户地址
-     * @return tokenIds 用户持有的 tokenId 数组
+     * @notice Get all token ids owned by `user`.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param user Owner address
+     * @return tokenIds Array of token ids owned by `user`
      */
     function getUserTokens(address user) external view returns (uint256[] memory tokenIds);
 
     /**
-     * @notice 查询贷款元数据详情
-     * @param tokenId NFT ID
-     * @return metadata 贷款元数据
+     * @notice Get loan metadata for a token id.
+     * @dev Reverts if:
+     *      - `tokenId` does not exist (`LoanNFT__InvalidTokenId`)
+     *
+     * Security:
+     * - View only
+     *
+     * @param tokenId Token id
+     * @return metadata Loan metadata snapshot
      */
     function getLoanMetadata(uint256 tokenId) external view returns (LoanMetadata memory metadata);
 
-    // ───────────────────── reserved for future upgrade ─────────────────────
+    /*━━━━━━━━━━━━━━━ RESERVED FOR FUTURE UPGRADE ━━━━━━━━━━━━━━━*/
     // /**
-    //  * @notice 批量铸造贷款 NFT（例如同一组贷款打包发行）
-    //  * @dev 未来用于批量匹配订单后一次性铸造
+    //  * @notice Batch mint loan certificate NFTs (e.g. for bundled issuance).
+    //  * @dev Reverts if:
+    //  *      - caller is not authorized (implementation-defined)
+    //  *      - input arrays are inconsistent (implementation-defined)
+    //  *
+    //  * Security:
+    //  * - Role-gated in implementation
     //  */
     // function batchMintLoanCertificate(address[] calldata to, LoanMetadata[] calldata data) external;
 } 

@@ -169,7 +169,7 @@ describe('Registry Admin Events', function () {
     it('Should not emit events for invalid admin changes', async function () {
       // 尝试设置零地址作为管理员
       await expect(registry.setAdmin(ZERO_ADDRESS))
-        .to.be.revertedWithCustomError(registry, 'ZeroAddress');
+        .to.be.revertedWithCustomError(registry, 'Registry__ZeroAddress');
         
       // 验证没有事件被触发
       const currentAdmin = await registry.getAdmin();
@@ -181,7 +181,7 @@ describe('Registry Admin Events', function () {
     it('Should not emit AdminChanged when acceptAdmin is called by non-pending admin', async function () {
       // 尝试接受管理员权限（非待接管管理员）
       await expect(registry.connect(upgradeAdmin).acceptAdmin())
-        .to.be.revertedWithCustomError(registry, 'NotPendingAdmin')
+        .to.be.revertedWithCustomError(registry, 'Registry__NotPendingAdmin')
         .withArgs(await upgradeAdmin.getAddress(), ZERO_ADDRESS);
         
       console.log('Non-pending admin accept test passed');

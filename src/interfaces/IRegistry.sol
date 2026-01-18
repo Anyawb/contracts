@@ -1,271 +1,585 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IRegistry
-/// @notice Registry 合约的接口定义
-/// @dev 提供统一的模块注册和访问接口，供所有模块使用
+/**
+ * @title IRegistry
+ * @notice External interface for the Registry (canonical module-address registry entrypoint).
+ * @dev Reverts if:
+ *      - (see the implementation for exact revert conditions)
+ *
+ * Security:
+ * - This interface describes a privileged governance module (writes are owner/admin gated).
+ * - Events are emitted via the canonical `RegistryEvents` library (see `RegistryEventsLibrary.sol`).
+ * - Reverts use custom errors and/or `StandardErrors` in the implementation (no string reverts).
+ */
 interface IRegistry {
 
     /* ============ Structs ============ */
-    /// @notice 模块升级历史记录
+    /**
+     * @notice Module upgrade history record.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Returned from view methods; values are for off-chain attribution/auditing.
+     */
     struct UpgradeHistory {
         address oldAddress;
         address newAddress;
         uint256 timestamp;
         address executor;
     }
-    
-    /* ============ Events ============ */
-    /// @notice Registry 已初始化
-    event RegistryInitialized(
-        address indexed admin,
-        uint256 minDelay,
-        address indexed initializer
-    );
-
-    /// @notice 存储版本已升级
-    event StorageVersionUpgraded(uint256 oldVersion, uint256 newVersion);
-
-    /// @notice 待接管地址已变更
-    event PendingAdminChanged(address indexed oldPendingAdmin, address indexed newPendingAdmin);
-
-    /// @notice 模块地址已直接变更（无延迟升级）
-    event ModuleChanged(
-        bytes32 indexed key, 
-        address indexed oldAddress, 
-        address indexed newAddress
-    );
-
-    /// @notice 模块地址无变更（幂等操作）
-    event ModuleNoOp(
-        bytes32 indexed key,
-        address indexed currentAddress,
-        address executor
-    );
-
-    /// @notice 批量模块地址已直接变更（无延迟升级）
-    event BatchModuleChanged(
-        bytes32[] keys,
-        address[] oldAddresses,
-        address[] newAddresses,
-        address executor
-    );
-
-    /// @notice 模块升级计划事件
-    event ModuleUpgradeScheduled(bytes32 indexed key, address indexed oldAddress, address indexed newAddress, uint256 executeAfter);
-    
-    /// @notice 模块升级完成事件
-    event ModuleUpgraded(bytes32 indexed key, address indexed oldAddress, address indexed newAddress, address executor);
-    
-    /// @notice 模块升级取消事件
-    event ModuleUpgradeCancelled(bytes32 indexed key, address indexed oldAddress, address indexed newAddress, address canceller);
-    
-    /// @notice 紧急操作已执行
-    event EmergencyActionExecuted(
-        uint8 indexed action, 
-        address indexed executor,
-        uint256 timestamp
-    );
-
-    /// @notice 延时窗口变更事件
-    event MinDelayChanged(uint256 oldDelay, uint256 newDelay);
-    
-    /// @notice 升级管理员已变更
-    event UpgradeAdminChanged(
-        address indexed oldAdmin, 
-        address indexed newAdmin
-    );
 
     /* ============ View Functions ============ */
     
-    /// @notice 获取模块地址
-    /// @param key 模块键
-    /// @return 模块合约地址
-    function getModule(bytes32 key) external view returns (address);
+    /**
+     * @notice Returns the module address for a module key (zero if unset).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param key Module key (bytes32; see ModuleKeys).
+     * @return moduleAddress Module address (zero if unset).
+     */
+    function getModule(bytes32 key) external view returns (address moduleAddress);
     
-    /// @notice 获取模块地址，若未注册则回滚
-    /// @param key 模块键
-    /// @return 模块合约地址
-    function getModuleOrRevert(bytes32 key) external view returns (address);
+    /**
+     * @notice Returns the module address for a module key, reverting if unset.
+     * @dev Reverts if:
+     *      - module is not registered for key (ModuleNotRegistered)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param key Module key (bytes32; see ModuleKeys).
+     * @return moduleAddress Module address.
+     */
+    function getModuleOrRevert(bytes32 key) external view returns (address moduleAddress);
 
-    /// @notice 检查模块是否已注册
-    /// @param key 模块键名
-    /// @return 是否已注册
-    function isModuleRegistered(bytes32 key) external view returns (bool);
+    /**
+     * @notice Returns whether a module key is registered (non-zero address).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param key Module key (bytes32).
+     * @return registered True if registered.
+     */
+    function isModuleRegistered(bytes32 key) external view returns (bool registered);
     
-    // 轻量化：删除批量与反查相关对外查询接口（迁移至 View 合约）
+    /**
+     * @notice Returns the current minimum timelock delay window.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return minDelaySeconds Delay window (seconds).
+     */
+    function minDelay() external view returns (uint256 minDelaySeconds);
     
-    /// @notice 获取当前延时窗口
-    /// @return 延时窗口（秒）
-    function minDelay() external view returns (uint256);
-    
-    /// @notice 获取最大延时窗口
-    /// @return 最大延时窗口（秒）
-    function MAX_DELAY() external view returns (uint256);
+    /**
+     * @notice Returns the maximum allowed delay window.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only (pure in the implementation).
+     *
+     * @return maxDelaySeconds Maximum delay window (seconds).
+     */
+    function MAX_DELAY() external view returns (uint256 maxDelaySeconds);
 
-    /// @notice 获取主治理地址
-    /// @return 治理地址
-    function getAdmin() external view returns (address);
+    /**
+     * @notice Returns the governance admin address (owner).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return admin Governance admin address.
+     */
+    function getAdmin() external view returns (address admin);
 
-    /// @notice 获取待接管地址
-    /// @return 待接管地址
-    function getPendingAdmin() external view returns (address);
+    /**
+     * @notice Returns the pending admin address (compat governance handover).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return pendingAdmin Pending admin address (zero if none).
+     */
+    function getPendingAdmin() external view returns (address pendingAdmin);
 
-    /// @notice 检查是否已暂停
-    /// @return 是否已暂停
-    function isPaused() external view returns (bool);
+    /**
+     * @notice Returns whether the Registry is paused.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return paused True if paused.
+     */
+    function isPaused() external view returns (bool paused);
 
-    /// @notice 检查调用者是否为治理地址
-    /// @param addr 待检查地址
-    /// @return 是否为治理地址
-    function isAdmin(address addr) external view returns (bool);
+    /**
+     * @notice Returns whether an address is the governance admin (owner) under compat rules.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param addr Address to check.
+     * @return isAdmin_ True if admin.
+     */
+    function isAdmin(address addr) external view returns (bool isAdmin_);
 
-    /// @notice 获取当前存储版本
-    /// @return 存储版本
-    function getStorageVersion() external view returns (uint256);
+    /**
+     * @notice Returns the current Registry storageVersion marker.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return storageVersion Storage version marker.
+     */
+    function getStorageVersion() external view returns (uint256 storageVersion);
 
-    /// @notice 检查是否已初始化
-    /// @return 是否已初始化
-    function isInitialized() external view returns (bool);
+    /**
+     * @notice Returns whether the Registry storage has been initialized.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return initialized True if initialized.
+     */
+    function isInitialized() external view returns (bool initialized);
 
-    /// @notice 获取所有者地址
-    /// @return 所有者地址
-    function owner() external view returns (address);
+    /**
+     * @notice Returns the owner (governance) address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return owner_ Owner address.
+     */
+    function owner() external view returns (address owner_);
 
     /* ============ Admin Functions ============ */
     
-    /// @notice 设置模块地址（兼容旧版本）
-    /// @param key 模块键
-    /// @param moduleAddr 模块合约地址
+    /**
+     * @notice Sets a module address for a module key.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry is paused
+     *      - moduleAddr == address(0)
+     *      - storage layout/version is incompatible (compat gate in implementation)
+     *      - module already exists and replacement is not allowed (implementation-defined)
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param key Module key (bytes32).
+     * @param moduleAddr Module contract address.
+     */
     function setModule(bytes32 key, address moduleAddr) external;
     
-    /// @notice 设置模块地址（返回变更状态）
-    /// @param key 模块键
-    /// @param moduleAddr 模块合约地址
-    /// @return changed 是否实际发生了变更
+    /**
+     * @notice Sets a module address and returns whether it changed.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry is paused
+     *      - moduleAddr == address(0)
+     *      - storage layout/version is incompatible (compat gate in implementation)
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param key Module key (bytes32).
+     * @param moduleAddr Module contract address.
+     * @return changed True if the stored address changed.
+     */
     function setModuleWithStatus(bytes32 key, address moduleAddr) external returns (bool changed);
 
-    /// @notice 批量设置模块地址（默认不触发单个事件以节省 gas）
-    /// @param keys 模块键名数组
-    /// @param addresses 模块地址数组
+    /**
+     * @notice Batch sets module addresses.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry is paused
+     *      - keys.length != addresses.length
+     *      - keys.length exceeds implementation batch cap
+     *      - any module address is zero
+     *      - storage layout/version is incompatible (compat gate in implementation)
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param keys Module keys array.
+     * @param addresses Module addresses array.
+     */
     function setModules(bytes32[] calldata keys, address[] calldata addresses) external;
 
-    /// @notice 批量设置模块地址（返回变更状态）
-    /// @param keys 模块键名数组
-    /// @param addresses 模块地址数组
-    /// @return changedCount 实际发生变更的模块数量
-    /// @return changedKeys 发生变更的模块键名数组
+    /**
+     * @notice Batch sets module addresses and returns which keys changed.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry is paused
+     *      - keys.length != addresses.length
+     *      - keys.length exceeds implementation batch cap
+     *      - any module address is zero
+     *      - storage layout/version is incompatible (compat gate in implementation)
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param keys Module keys array.
+     * @param addresses Module addresses array.
+     * @return changedCount Number of keys that changed.
+     * @return changedKeys Keys that changed (implementation-defined population convention).
+     */
     function setModulesWithStatus(bytes32[] calldata keys, address[] calldata addresses) external 
         returns (uint256 changedCount, bytes32[] memory changedKeys);
 
-    /// @notice 批量设置模块地址（控制事件触发）
-    /// @param keys 模块键名数组
-    /// @param addresses 模块地址数组
-    /// @param emitIndividualEvents 是否同时触发单个模块变更事件
-    function setModulesWithEvents(bytes32[] calldata keys, address[] calldata addresses, bool emitIndividualEvents) external;
+    /**
+     * @notice Batch sets module addresses with event emission controls (compat).
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry is paused
+     *      - keys.length != addresses.length
+     *      - keys.length exceeds implementation batch cap
+     *      - any module address is zero
+     *      - storage layout/version is incompatible (compat gate in implementation)
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param keys Module keys array.
+     * @param addresses Module addresses array.
+     * @param emitIndividualEvents Whether to emit per-key ModuleChanged events in addition to the batch event.
+     */
+    function setModulesWithEvents(
+        bytes32[] calldata keys,
+        address[] calldata addresses,
+        bool emitIndividualEvents
+    ) external;
 
-    /// @notice 升级存储版本（仅治理地址可调用）
-    /// @param newVersion 新的存储版本
+    /**
+     * @notice Upgrades the Registry storageVersion marker (must be strictly increasing).
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry storage is not initialized
+     *      - newVersion <= currentVersion
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newVersion Target storage version.
+     */
     function upgradeStorageVersion(uint256 newVersion) external;
     
-    /// @notice 通过外部迁移合约执行存储迁移（保持固定 STORAGE_SLOT）
-    /// @param fromVersion 预期的当前存储版本
-    /// @param toVersion 目标存储版本
-    /// @param migrator 迁移合约地址
+    /**
+     * @notice Executes a fixed STORAGE_SLOT migration via an external migrator contract.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - migrator == address(0)
+     *      - migrator is not a deployed contract
+     *      - currentVersion != fromVersion
+     *      - toVersion is not strictly increasing vs current
+     *      - migrator execution reverts (wrapped)
+     *
+     * Security:
+     * - onlyOwner
+     * - Delegatecall to migrator is high privilege; migrator MUST be reviewed/audited.
+     *
+     * @param fromVersion Expected current storage version.
+     * @param toVersion Target storage version.
+     * @param migrator Migrator contract address.
+     */
     function migrateStorage(uint256 fromVersion, uint256 toVersion, address migrator) external;
 
-    /// @notice 暂停系统（仅治理地址可调用）
+    /**
+     * @notice Pauses the Registry (disables whenNotPaused write paths).
+     * @dev Reverts if:
+     *      - caller is not authorized (owner or emergencyAdmin in implementation)
+     *      - storage layout/version is incompatible (compat gate in implementation)
+     *
+     * Security:
+     * - Emergency action (owner/emergency admin gated in implementation)
+     */
     function pause() external;
 
-    /// @notice 恢复系统（仅治理地址可调用）
+    /**
+     * @notice Unpauses the Registry (re-enables whenNotPaused write paths).
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner in implementation)
+     *      - storage layout/version is incompatible (compat gate in implementation)
+     *
+     * Security:
+     * - onlyOwner
+     */
     function unpause() external;
 
-    /// @notice 设置待接管地址（仅当前治理地址可调用）
-    /// @param newPendingAdmin 新的待接管地址
+    /**
+     * @notice Sets the pending admin (compat governance handover).
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - storage layout/version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newPendingAdmin Pending admin address (can be zero to clear).
+     */
     function setPendingAdmin(address newPendingAdmin) external;
 
-    /// @notice 接受治理权限（仅待接管地址可调用）
+    /**
+     * @notice Accepts governance admin rights (compat governance handover).
+     * @dev Reverts if:
+     *      - caller is not the pending admin
+     *      - pending admin is invalid (zero)
+     *      - storage layout/version is incompatible (compat gate)
+     *
+     * Security:
+     * - One-step takeover by the configured pending admin.
+     */
     function acceptAdmin() external;
     
-    /// @notice 安排模块升级
-    /// @param key 模块键
-    /// @param newAddr 新模块合约地址
+    /**
+     * @notice Schedules a timelocked module upgrade for a module key.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry is paused
+     *      - newAddr == address(0)
+     *      - storage layout/version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param key Module key.
+     * @param newAddr Proposed new module address.
+     */
     function scheduleModuleUpgrade(bytes32 key, address newAddr) external;
     
-    /// @notice 取消模块升级计划
-    /// @param key 模块键
+    /**
+     * @notice Cancels a scheduled module upgrade.
+     * @dev Reverts if:
+     *      - Registry is paused
+     *      - caller is not authorized (owner or emergencyAdmin in implementation)
+     *      - no pending upgrade exists for key
+     *      - storage layout/version is incompatible (compat gate)
+     *
+     * Security:
+     * - whenNotPaused
+     * - Emergency-capable (owner/emergency admin in implementation)
+     *
+     * @param key Module key.
+     */
     function cancelModuleUpgrade(bytes32 key) external;
     
-    /// @notice 执行模块升级
-    /// @param key 模块键
+    /**
+     * @notice Executes a scheduled module upgrade after the delay window has elapsed.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry is paused
+     *      - no pending upgrade exists for key
+     *      - upgrade is not ready (block.timestamp < executeAfter)
+     *      - storage layout/version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param key Module key.
+     */
     function executeModuleUpgrade(bytes32 key) external;
     
-    /// @notice 设置延时窗口
-    /// @param newDelay 新延时窗口（秒）
+    /**
+     * @notice Sets the minimum timelock delay window.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - newDelay exceeds implementation max delay
+     *      - storage layout/version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newDelay New delay window (seconds).
+     */
     function setMinDelay(uint256 newDelay) external;
     
-    /// @notice 转移所有权
-    /// @param newOwner 新所有者地址
+    /**
+     * @notice Transfers ownership (governance) to a new address.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - newOwner == address(0)
+     *      - storage layout/version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newOwner New owner address.
+     */
     function transferOwnership(address newOwner) external;
 
-    /// @notice 验证存储布局完整性
+    /**
+     * @notice Validates the Registry storage layout integrity.
+     * @dev Reverts if:
+     *      - storage layout is invalid/inconsistent (implementation-defined)
+     *
+     * Security:
+     * - Read-only.
+     */
     function validateStorageLayout() external view;
 
-    /// @notice 获取模块的所有升级历史记录
-    /// @param key 模块键
-    /// @return 升级历史记录数组
-    function getAllUpgradeHistory(bytes32 key) external view returns (UpgradeHistory[] memory);
+    /**
+     * @notice Returns all stored upgrade history entries for a module key.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param key Module key.
+     * @return history Upgrade history array.
+     */
+    function getAllUpgradeHistory(bytes32 key) external view returns (UpgradeHistory[] memory history);
 
-    // ============ 新增缺失的接口函数 ============
+    /* ============ Upgrade authority (UUPS) ============ */
     
-    /// @notice 设置升级管理员
-    /// @param newAdmin 新的升级管理员地址
+    /**
+     * @notice Sets the upgrade admin address (UUPS authority).
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - newAdmin is invalid (e.g., zero address)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newAdmin New upgrade admin address.
+     */
     function setUpgradeAdmin(address newAdmin) external;
     
-    /// @notice 设置紧急管理员
-    /// @param newAdmin 新的紧急管理员地址
+    /**
+     * @notice Sets the emergency admin address.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - newAdmin == address(0)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newAdmin New emergency admin address.
+     */
     function setEmergencyAdmin(address newAdmin) external;
     
-    /// @notice 获取升级管理员地址
-    /// @return 升级管理员地址
-    function getUpgradeAdmin() external view returns (address);
+    /**
+     * @notice Returns the upgrade admin address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return upgradeAdmin Upgrade admin address.
+     */
+    function getUpgradeAdmin() external view returns (address upgradeAdmin);
     
-    /// @notice 获取紧急管理员地址
-    /// @return 紧急管理员地址
-    function getEmergencyAdmin() external view returns (address);
+    /**
+     * @notice Returns the emergency admin address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @return emergencyAdmin Emergency admin address.
+     */
+    function getEmergencyAdmin() external view returns (address emergencyAdmin);
     
-    // 轻量化：删除模块初始化状态对外查询接口（迁移至 View 合约）
-    
-    /// @notice 获取待升级模块信息
-    /// @param key 模块键
-    /// @return newAddr 新模块地址
-    /// @return executeAfter 执行时间
-    /// @return hasPendingUpgrade 是否有待升级
+    /* ============ Upgrade query helpers ============ */
+
+    /**
+     * @notice Returns pending upgrade info for a module key.
+     * @dev Reverts if:
+     *      - (none) (returns hasPendingUpgrade=false if none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param key Module key.
+     * @return newAddr Proposed new module address.
+     * @return executeAfter Earliest execution time (unix timestamp, seconds).
+     * @return hasPendingUpgrade True if a pending upgrade exists.
+     */
     function getPendingUpgrade(bytes32 key) external view returns (
         address newAddr,
         uint256 executeAfter,
         bool hasPendingUpgrade
     );
     
-    /// @notice 检查升级是否准备就绪
-    /// @param key 模块键
-    /// @return 是否准备就绪
-    function isUpgradeReady(bytes32 key) external view returns (bool);
+    /**
+     * @notice Returns whether a pending upgrade is ready to execute for a module key.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     * - Uses block.timestamp for readiness checks by design (timelock mechanism).
+     *
+     * @param key Module key.
+     * @return ready True if ready.
+     */
+    function isUpgradeReady(bytes32 key) external view returns (bool ready);
     
-    // 轻量化：删除模块键列表与分页对外查询接口（迁移至 View 合约）
+    /**
+     * @notice Returns the number of stored upgrade history entries for a module key.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param key Module key.
+     * @return count Upgrade history entry count.
+     */
+    function getUpgradeHistoryCount(bytes32 key) external view returns (uint256 count);
     
-    /// @notice 获取模块的升级历史数量
-    /// @param key 模块键
-    /// @return 升级历史记录数量
-    function getUpgradeHistoryCount(bytes32 key) external view returns (uint256);
-    
-    /// @notice 获取模块的升级历史记录
-    /// @param key 模块键
-    /// @param index 历史记录索引
-    /// @return oldAddress 旧地址
-    /// @return newAddress 新地址
-    /// @return timestamp 升级时间戳
-    /// @return executor 执行者地址
+    /**
+     * @notice Returns an upgrade history record by index.
+     * @dev Reverts if:
+     *      - index is out of bounds
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param key Module key.
+     * @param index History index (0-based).
+     * @return oldAddress Old module address.
+     * @return newAddress New module address.
+     * @return timestamp Upgrade timestamp (unix timestamp, seconds).
+     * @return executor Upgrade executor address.
+     */
     function getUpgradeHistory(bytes32 key, uint256 index) external view returns (
         address oldAddress,
         address newAddress,
@@ -273,9 +587,22 @@ interface IRegistry {
         address executor
     );
     
-    /// @notice 设置模块地址（支持allowReplace参数）
-    /// @param key 模块键
-    /// @param moduleAddr 模块地址
-    /// @param _allowReplace 是否允许替换现有模块
-    function setModuleWithReplaceFlag(bytes32 key, address moduleAddr, bool _allowReplace) external;
+    /**
+     * @notice Sets a module address with an explicit allowReplace flag.
+     * @dev Reverts if:
+     *      - caller is not owner (onlyOwner)
+     *      - Registry is paused
+     *      - moduleAddr == address(0)
+     *      - allowReplace == false and a different module is already set
+     *      - storage layout/version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param key Module key.
+     * @param moduleAddr Module address.
+     * @param allowReplace Whether to allow replacing an existing module address.
+     */
+    function setModuleWithReplaceFlag(bytes32 key, address moduleAddr, bool allowReplace) external;
 } 

@@ -21,7 +21,8 @@ async function main() {
   const vr = (await ethers.getContractAt("VaultRouter", VR)) as any;
   const vc = (await ethers.getContractAt("VaultCore", VC)) as any;
   const cm = (await ethers.getContractAt("CollateralManager", CM)) as any;
-  const le = (await ethers.getContractAt("src/Vault/LendingEngine.sol:LendingEngine", LE)) as any;
+  // ORDER_ENGINE in src/core/LendingEngine.sol (see Architecture-Guide SSOT)
+  const le = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", LE)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", USDC)) as any;
 
   const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT"));

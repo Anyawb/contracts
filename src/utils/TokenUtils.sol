@@ -1,151 +1,148 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import { IERC1155 } from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
-import { IERC165 } from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
-import { AmountIsZero, AmountMismatch, ZeroAddress } from "../errors/StandardErrors.sol";
+import { ZeroAddress } from "../errors/StandardErrors.sol";
 import { RWAAssetNotAllowed } from "../errors/StandardErrors.sol";
 
 import { IRWAPriceOracle } from "../interfaces/IRWAPriceOracle.sol";
 import { IRWATokenRegistry } from "../interfaces/IRWATokenRegistry.sol";
+import { TokenUtilsInternal } from "./TokenUtilsInternal.sol";
 
 /* =====================================================
- *                     Internal 库
+ *              External Facade Contract (Ownable)
  * ===================================================*/
-/// @title TokenUtilsInternal
-/// @notice 提供 ERC20/721/1155 通用拉币、余额差值验证等常用工具函数（仅供内部调用）。
-library TokenUtilsInternal {
-    /* -------------------------- 常量 -------------------------- */
-    bytes4 private constant _ERC721_INTERFACE_ID = 0x80ac58cd;
-    bytes4 private constant _ERC1155_INTERFACE_ID = 0xd9b67a26;
-
-    /* --------------------------------------------------------- */
-    /// @dev 返回指定 ERC20 token 在合约地址上的余额快照
-    function _balanceOf(IERC20 token) internal view returns (uint256) {
-        return token.balanceOf(address(this));
-    }
-
-    /// @notice 在开始转账前调用，确保 `expectedAmount > 0`，否则 revert。
-    /// @return 原样返回以便内联使用
-    function preValidateAmount(uint256 expectedAmount) internal pure returns (uint256) {
-        if (expectedAmount == 0) revert AmountIsZero();
-        return expectedAmount;
-    }
-
-    /// @notice 在转账完成后验证实际收到数量是否与预期一致（仅适用 ERC20）。
-    /// @param beforeBalance 转账前余额
-    /// @param token         ERC20 token 地址
-    /// @param expectedAmount 预期收到的数量
-    function verifyTransferResult(
-        uint256 beforeBalance,
-        IERC20 token,
-        uint256 expectedAmount
-    ) internal view {
-        uint256 afterBalance = token.balanceOf(address(this));
-        uint256 actualAmount = afterBalance - beforeBalance;
-        if (actualAmount != expectedAmount) revert AmountMismatch();
-    }
-
-    /* ==================== 新增功能 ==================== */
-
-    /// @dev 通用拉币（ERC20 / ERC721 / ERC1155）到本合约。
-    function _pullTokenUniversal(
-        address token,
-        address from,
-        uint256 id,
-        uint256 amount
-    ) internal {
-        // 0. 金额校验（对于 ERC721 可传入 1 作为占位）
-        preValidateAmount(amount);
-
-        if (_supportsInterface(token, _ERC721_INTERFACE_ID)) {
-            // ERC721 —— 忽略 amount，默认 1
-            IERC721(token).safeTransferFrom(from, address(this), id);
-        } else if (_supportsInterface(token, _ERC1155_INTERFACE_ID)) {
-            // ERC1155
-            IERC1155(token).safeTransferFrom(from, address(this), id, amount, "");
-        } else {
-            // 默认按 ERC20 处理，兼容非标准实现
-            _safeTransferFromERC20(token, from, address(this), amount);
-        }
-    }
-
-    /// @dev 查询余额差值（目前仅针对 ERC20）
-    function _getBalanceDelta(
-        address token,
-        address account,
-        uint256 beforeBalance
-    ) internal view returns (uint256) {
-        uint256 afterBalance = IERC20(token).balanceOf(account);
-        return afterBalance - beforeBalance;
-    }
-
-    /* ----------------- 内部工具函数 ----------------- */
-
-    function _safeTransferFromERC20(
-        address token,
-        address from,
-        address to,
-        uint256 amount
-    ) private {
-        // 调用 IERC20 的 transferFrom；对返回值宽松处理，以兼容非标准实现
-        try IERC20(token).transferFrom(from, to, amount) returns (bool ok) {
-            require(ok, "ERC20_TRANSFER_FAILED");
-        } catch {
-            // 某些非标准 ERC20 不返回值，若执行成功即认为 OK
-        }
-    }
-
-    /// @dev 尝试通过 ERC165 判断接口支持情况，失败则返回 false
-    function _supportsInterface(address token, bytes4 interfaceId) private view returns (bool) {
-        (bool success, bytes memory result) = token.staticcall(
-            abi.encodeWithSelector(IERC165.supportsInterface.selector, interfaceId)
-        );
-        return (success && result.length >= 32 && abi.decode(result, (bool)));
-    }
-}
-
-/* =====================================================
- *              External Facade 合约 (Ownable)
- * ===================================================*/
-/// @title TokenUtils
-/// @notice 提供托管式的 Token 工具入口，方便其他合约通过 delegate-less 方式复用。
+/**
+ * @title TokenUtils
+ * @notice Convenience facade for token utility operations (delegate-less reuse).
+ * @dev Security:
+ * - This contract performs external token and oracle/registry calls.
+ * - Owner may update dependency addresses; callers should treat these as trusted configuration.
+ */
 contract TokenUtils is Ownable {
-    using TokenUtilsInternal for *;
+    // External dependencies
+    address private _priceOracleAddr;
+    address private _tokenRegistryAddr;
 
-    // --- 外部依赖 ---
-    address public priceOracle;
-    address public tokenRegistry;
+    /// @notice Emitted when the price oracle address is updated.
+    /// @param newOracleAddr New oracle address.
+    event PriceOracleUpdated(address indexed newOracleAddr);
 
-    event PriceOracleUpdated(address indexed newOracle);
-    event TokenRegistryUpdated(address indexed newRegistry);
+    /// @notice Emitted when the token registry address is updated.
+    /// @param newRegistryAddr New registry address.
+    event TokenRegistryUpdated(address indexed newRegistryAddr);
 
     constructor(address _priceOracle, address _tokenRegistry) Ownable(msg.sender) {
-        priceOracle = _priceOracle;
-        tokenRegistry = _tokenRegistry;
+        _priceOracleAddr = _priceOracle;
+        _tokenRegistryAddr = _tokenRegistry;
     }
 
     /* ============ Admin ============ */
 
-    function setPriceOracle(address _newOracle) external onlyOwner {
-        if (_newOracle == address(0)) revert ZeroAddress();
-        priceOracle = _newOracle;
-        emit PriceOracleUpdated(_newOracle);
+    /**
+     * @notice Get the configured price oracle address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return Price oracle address.
+     */
+    function priceOracleAddrVar() external view returns (address) {
+        return _priceOracleAddr;
     }
 
-    function setTokenRegistry(address _newRegistry) external onlyOwner {
-        if (_newRegistry == address(0)) revert ZeroAddress();
-        tokenRegistry = _newRegistry;
-        emit TokenRegistryUpdated(_newRegistry);
+    /**
+     * @notice Backward-compatible getter for the price oracle address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return Price oracle address.
+     */
+    function priceOracle() external view returns (address) {
+        return _priceOracleAddr;
+    }
+
+    /**
+     * @notice Get the configured token registry address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return Token registry address.
+     */
+    function tokenRegistryAddrVar() external view returns (address) {
+        return _tokenRegistryAddr;
+    }
+
+    /**
+     * @notice Backward-compatible getter for the token registry address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return Token registry address.
+     */
+    function tokenRegistry() external view returns (address) {
+        return _tokenRegistryAddr;
+    }
+
+    /**
+     * @notice Update the price oracle address.
+     * @dev Reverts if:
+     *      - newOracleAddr == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - onlyOwner.
+     *
+     * @param newOracleAddr New oracle address.
+     */
+    function setPriceOracle(address newOracleAddr) external onlyOwner {
+        if (newOracleAddr == address(0)) revert ZeroAddress();
+        _priceOracleAddr = newOracleAddr;
+        emit PriceOracleUpdated(newOracleAddr);
+    }
+
+    /**
+     * @notice Update the token registry address.
+     * @dev Reverts if:
+     *      - newRegistryAddr == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - onlyOwner.
+     *
+     * @param newRegistryAddr New registry address.
+     */
+    function setTokenRegistry(address newRegistryAddr) external onlyOwner {
+        if (newRegistryAddr == address(0)) revert ZeroAddress();
+        _tokenRegistryAddr = newRegistryAddr;
+        emit TokenRegistryUpdated(newRegistryAddr);
     }
 
     /* ============ External Callables ============ */
 
-    /// @notice 通用拉币到本合约
+    /**
+     * @notice Pull tokens (ERC20/ERC721/ERC1155) into this contract.
+     * @dev Reverts if:
+     *      - TokenUtilsInternal._pullTokenUniversal reverts
+     *
+     * Security:
+     * - External token calls.
+     *
+     * @param token Token contract address.
+     * @param from Sender address.
+     * @param id Token id (ERC721/ERC1155).
+     * @param amount Amount (ERC20/ERC1155); for ERC721 pass 1.
+     */
     function pullTokenUniversal(
         address token,
         address from,
@@ -155,7 +152,19 @@ contract TokenUtils is Ownable {
         TokenUtilsInternal._pullTokenUniversal(token, from, id, amount);
     }
 
-    /// @notice 余额差值查询（仅支持 ERC20）
+    /**
+     * @notice Return ERC20 balance delta for an account.
+     * @dev Reverts if:
+     *      - TokenUtilsInternal._getBalanceDelta reverts
+     *
+     * Security:
+     * - View-only external call to token.
+     *
+     * @param token ERC20 token address.
+     * @param account Account address.
+     * @param beforeBalance Balance snapshot before (token decimals).
+     * @return delta afterBalance - beforeBalance.
+     */
     function getBalanceDelta(
         address token,
         address account,
@@ -164,16 +173,38 @@ contract TokenUtils is Ownable {
         return TokenUtilsInternal._getBalanceDelta(token, account, beforeBalance);
     }
 
-    /// @notice 查询 USD 价格（透传到 Oracle）
+    /**
+     * @notice Get USD price for a token (pass-through to oracle).
+     * @dev Reverts if:
+     *      - priceOracle == address(0) (ZeroAddress)
+     *      - oracle call reverts (propagates)
+     *
+     * Security:
+     * - View-only external call to oracle.
+     *
+     * @param token Token address.
+     * @return price Price value as returned by oracle.
+     * @return decimals Price decimals as returned by oracle.
+     */
     function getPriceUSD(address token) external view returns (uint256 price, uint8 decimals) {
-        if (priceOracle == address(0)) revert ZeroAddress();
-        return IRWAPriceOracle(priceOracle).getPriceUSD(token);
+        if (_priceOracleAddr == address(0)) revert ZeroAddress();
+        return IRWAPriceOracle(_priceOracleAddr).getPriceUSD(token);
     }
 
-    /// @notice 校验 RWA 资产是否允许
+    /**
+     * @notice Validate whether an RWA token is allowed by the registry.
+     * @dev Reverts if:
+     *      - tokenRegistry == address(0) (ZeroAddress)
+     *      - token is not allowed (RWAAssetNotAllowed)
+     *
+     * Security:
+     * - View-only external call to registry.
+     *
+     * @param token Token address to validate.
+     */
     function validateAllowedRWA(address token) external view {
-        if (tokenRegistry == address(0)) revert ZeroAddress();
-        bool allowed = IRWATokenRegistry(tokenRegistry).isAllowed(token);
+        if (_tokenRegistryAddr == address(0)) revert ZeroAddress();
+        bool allowed = IRWATokenRegistry(_tokenRegistryAddr).isAllowed(token);
         if (!allowed) revert RWAAssetNotAllowed(token);
     }
 } 

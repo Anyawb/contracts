@@ -8,7 +8,7 @@ import { IAuthorityWhitelist } from "./interfaces/IAuthorityWhitelist.sol";
 import { IAccessControlManager } from "./interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "./constants/ActionKeys.sol";
 import { ModuleKeys } from "./constants/ModuleKeys.sol";
-import { VaultTypes } from "./Vault/VaultTypes.sol";
+import { SystemEvents } from "./Vault/SystemEvents.sol";
 import { ZeroAddress } from "./errors/StandardErrors.sol";
 import { Registry } from "./registry/Registry.sol";
 
@@ -62,7 +62,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         _add("Fitch Ratings");
         
         // 记录初始化动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -79,7 +79,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         _add(name);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
@@ -97,7 +97,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         emit AuthorityRemoved(name, msg.sender);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_REMOVE_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
             msg.sender,
@@ -132,7 +132,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         _registryAddr = newRegistryAddr;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -140,7 +140,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         );
         
         // 发出模块地址更新事件
-        emit VaultTypes.ModuleAddressUpdated(
+        emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
@@ -175,7 +175,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         if (newImplementation == address(0)) revert ZeroAddress();
         
         // 记录升级动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,

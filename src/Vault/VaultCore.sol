@@ -12,8 +12,7 @@ import {IVaultRouter} from "../interfaces/IVaultRouter.sol";
 import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
 import {ILendingEngineBasic} from "../interfaces/ILendingEngineBasic.sol";
 import {ISettlementManager} from "../interfaces/ISettlementManager.sol";
-import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
-import {AmountIsZero, ArrayLengthMismatch, EmptyArray, ZeroAddress} from "../errors/StandardErrors.sol";
+import {AmountIsZero, ArrayLengthMismatch, EmptyArray, NotAContract, ZeroAddress} from "../errors/StandardErrors.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -23,7 +22,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /// @dev Architecture-Guide: deposit/withdraw -> CollateralManager; borrow -> LendingEngine.
 /// @dev Architecture-Guide: repay -> SettlementManager (SSOT).
 /// @dev UUPS + ReentrancyGuard baseline: constructor disables initializers; keep __gap.
-/// @dev External write entrypoints are nonReentrant.
+/// @dev User-facing write entrypoints are nonReentrant.
 /// @custom:security-contact security@example.com
 contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
@@ -36,8 +35,41 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     uint256 private constant _MAX_BATCH_SIZE = 50;
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Caller is not a registered business module.
+     * @dev Used by `onlyBusinessModule`.
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Access control enforcement for module-only entrypoints
+     */
     error VaultCore__UnauthorizedModule();
+    /**
+     * @notice Caller is not the ORDER_ENGINE module.
+     * @dev Used by `onlyOrderEngine` (Registry KEY_ORDER_ENGINE).
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents non-SSOT order engine from calling restricted paths
+     */
     error VaultCore__OnlyOrderEngine();
+    /**
+     * @notice Batch size exceeds the configured safety cap.
+     * @dev Used by user-facing batch entrypoints.
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - DoS/gas guard for user-facing batch operations
+     *
+     * @param size Requested batch size
+     * @param maxSize Max allowed batch size
+     */
     error VaultCore__BatchTooLarge(uint256 size, uint256 maxSize);
 
     /*━━━━━━━━━━━━━━━ Construction & initialization ━━━━━━━━━━━━━━━*/
@@ -72,11 +104,13 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
+    /// @dev Restricts callers to registered business/ledger modules (see `_isBusinessModule`).
     modifier onlyBusinessModule() {
         if (!_isBusinessModule(msg.sender)) revert VaultCore__UnauthorizedModule();
         _;
     }
 
+    /// @dev Restricts callers to ORDER_ENGINE (Registry KEY_ORDER_ENGINE).
     modifier onlyOrderEngine() {
         address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
         if (msg.sender != orderEngine) revert VaultCore__OnlyOrderEngine();
@@ -86,8 +120,15 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     /*━━━━━━━━━━━━━━━ Read-only entrypoints ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get Registry address.
+     * @notice Get Registry address (convenience getter).
      * @return registryAddress Registry contract address
+     *
+     * @dev Architecture note:
+     * - Registry is the SSOT for module address resolution.
+     * - On-chain modules SHOULD NOT rely on VaultCore as an address resolver facade.
+     *   Modules already carry `_registryAddr` and should call `Registry(_registryAddr).getModule*` directly.
+     * - This getter is kept mainly for off-chain tooling, scripts, and external integrations that need
+     *   a stable "bridge" to the Registry address.
      */
     function registryAddrVar() external view returns (address registryAddress) {
         return _registryAddr;
@@ -102,16 +143,21 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     }
 
     /**
-     * @notice Resolve module address via Registry.
+     * @notice Resolve module address via Registry (off-chain convenience).
      * @param moduleKey Module key (ModuleKeys.*)
      * @return moduleAddress Resolved address (reverts if not registered)
+     *
+     * @dev Architecture note:
+     * - Prefer `Registry.getModuleOrRevert` as the SSOT for module resolution.
+     * - This helper is intended for external callers (scripts/frontends) that already have VaultCore
+     *   but don't want to also bind the Registry ABI.
      */
     function getModule(bytes32 moduleKey) external view returns (address moduleAddress) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
     /**
-     * @notice Return Registry address (alias to registryAddrVar).
+     * @notice Return Registry address (alias to registryAddrVar; convenience getter).
      * @return registryAddress Registry address
      */
     function getRegistry() external view returns (address registryAddress) {
@@ -121,14 +167,15 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     /*━━━━━━━━━━━━━━━ User entrypoints (authority path) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Deposit collateral into CollateralManager (authority path).
+     * @notice Deposit collateral (authority path) via VaultRouter → CollateralManager.
      * @dev Reverts if:
      *      - asset is zero
      *      - amount is zero
      *
      * Security:
      * - Non-reentrant
-     * - Funds pulled by CollateralManager from msg.sender (user must approve CM)
+     * - Routes through VaultRouter.processUserOperation (Architecture-Guide SSOT for deposit/withdraw routing)
+     * - Funds are pulled by CollateralManager from `msg.sender` (user must approve CollateralManager as spender)
      *
      * @param asset Collateral asset address (non-zero)
      * @param amount Collateral amount (token decimals)
@@ -137,18 +184,27 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
-        address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
-        ICollateralManager(cm).depositCollateral(msg.sender, asset, amount);
+        // Timestamp is passed through for off-chain audit attribution; not used for business decisions.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        IVaultRouter(_viewContractAddr).processUserOperation(
+            msg.sender,
+            ActionKeys.ACTION_DEPOSIT,
+            asset,
+            amount,
+            ts
+        );
     }
 
     /**
-     * @notice Withdraw collateral from CollateralManager (authority path).
+     * @notice Withdraw collateral (authority path) via VaultRouter → CollateralManager.
      * @dev Reverts if:
      *      - asset is zero
      *      - amount is zero
      *
      * Security:
      * - Non-reentrant
+     * - Routes through VaultRouter.processUserOperation (Architecture-Guide SSOT for deposit/withdraw routing)
      * - CollateralManager performs balance checks and real token transfers
      *
      * @param asset Collateral asset address (non-zero)
@@ -158,8 +214,16 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
-        address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
-        ICollateralManager(cm).withdrawCollateral(msg.sender, asset, amount);
+        // Timestamp is passed through for off-chain audit attribution; not used for business decisions.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        IVaultRouter(_viewContractAddr).processUserOperation(
+            msg.sender,
+            ActionKeys.ACTION_WITHDRAW,
+            asset,
+            amount,
+            ts
+        );
     }
 
     /**
@@ -207,7 +271,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     }
 
     /**
-     * @notice Repay bookkeeping callback from OrderEngine (internal settlement path).
+     * @notice Principal-ledger sync callback from OrderEngine (internal, non-user entry).
      * @dev Reverts if:
      *      - user or asset is zero
      *      - amount is zero
@@ -215,11 +279,13 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      *
      * Security:
      * - Only OrderEngine can call (callback entry)
+     * - This function MUST NOT transfer tokens or perform settlement. Token flows, fee splits, and business rules
+     *   are handled by OrderEngine/SettlementManager paths; this entry only updates the VaultLendingEngine debt ledger.
      * - LendingEngine enforces onlyVaultCore and downstream permissions
      *
      * @param user Borrower address (non-zero)
      * @param asset Debt asset (non-zero)
-     * @param amount Repay amount (token decimals)
+     * @param amount Principal repay delta to sync (token decimals)
      */
     function repayFor(address user, address asset, uint256 amount) external onlyOrderEngine {
         if (user == address(0) || asset == address(0)) revert ZeroAddress();
@@ -256,7 +322,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     /*━━━━━━━━━━━━━━━ Batch user entrypoints ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Batch deposit collateral into CollateralManager.
+     * @notice Batch deposit collateral via VaultRouter → CollateralManager.
      * @dev Reverts if:
      *      - assets.length != amounts.length
      *      - assets is empty
@@ -275,13 +341,21 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
 
-        address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
+        // Timestamp is passed through for off-chain audit attribution; not used for business decisions.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i];
             uint256 amount = amounts[i];
             if (asset == address(0)) revert ZeroAddress();
             if (amount == 0) revert AmountIsZero();
-            ICollateralManager(cm).depositCollateral(msg.sender, asset, amount);
+            IVaultRouter(_viewContractAddr).processUserOperation(
+                msg.sender,
+                ActionKeys.ACTION_DEPOSIT,
+                asset,
+                amount,
+                ts
+            );
         }
     }
 
@@ -355,7 +429,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     }
 
     /**
-     * @notice Batch withdraw collateral from CollateralManager.
+     * @notice Batch withdraw collateral via VaultRouter → CollateralManager.
      * @dev Reverts if:
      *      - assets.length != amounts.length
      *      - assets is empty
@@ -374,62 +448,28 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
 
-        address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
+        // Timestamp is passed through for off-chain audit attribution; not used for business decisions.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i];
             uint256 amount = amounts[i];
             if (asset == address(0)) revert ZeroAddress();
             if (amount == 0) revert AmountIsZero();
-            ICollateralManager(cm).withdrawCollateral(msg.sender, asset, amount);
+            IVaultRouter(_viewContractAddr).processUserOperation(
+                msg.sender,
+                ActionKeys.ACTION_WITHDRAW,
+                asset,
+                amount,
+                ts
+            );
         }
     }
 
     /*━━━━━━━━━━━━━━━ Data push entrypoints (business -> View) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Push full user position update to View.
-     * @dev Security: only registered business modules; view address must be set
-     */
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt
-    ) external onlyBusinessModule {
-        _forwardUserPositionUpdate(user, asset, collateral, debt, bytes32(0), 0, 0);
-    }
-
-    /**
-     * @notice Push full user position update with requestId/seq.
-     * @dev Security: only registered business modules; view address must be set
-     */
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt,
-        bytes32 requestId,
-        uint64 seq
-    ) external onlyBusinessModule {
-        _forwardUserPositionUpdate(user, asset, collateral, debt, requestId, seq, 0);
-    }
-
-    /**
-     * @notice Push full user position update with nextVersion.
-     * @dev Security: only registered business modules; view address must be set
-     */
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt,
-        uint64 nextVersion
-    ) external onlyBusinessModule {
-        _forwardUserPositionUpdate(user, asset, collateral, debt, bytes32(0), 0, nextVersion);
-    }
-
-    /**
-     * @notice Push full user position update with requestId/seq and nextVersion.
+     * @notice Push full user position update (versioned + contexted) to View.
      * @dev Security: only registered business modules; view address must be set
      */
     function pushUserPositionUpdate(
@@ -445,49 +485,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     }
 
     /**
-     * @notice Push delta user position update to View.
-     * @dev Security: only registered business modules; view address must be set
-     */
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta
-    ) external onlyBusinessModule {
-        _forwardUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, bytes32(0), 0, 0);
-    }
-
-    /**
-     * @notice Push delta user position update with requestId/seq.
-     * @dev Security: only registered business modules; view address must be set
-     */
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta,
-        bytes32 requestId,
-        uint64 seq
-    ) external onlyBusinessModule {
-        _forwardUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, requestId, seq, 0);
-    }
-
-    /**
-     * @notice Push delta user position update with nextVersion.
-     * @dev Security: only registered business modules; view address must be set
-     */
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta,
-        uint64 nextVersion
-    ) external onlyBusinessModule {
-        _forwardUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, bytes32(0), 0, nextVersion);
-    }
-
-    /**
-     * @notice Push delta user position update with requestId/seq and nextVersion.
+     * @notice Push delta user position update (versioned + contexted) to View.
      * @dev Security: only registered business modules; view address must be set
      */
     function pushUserPositionUpdateDelta(
@@ -503,20 +501,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
     }
 
     /**
-     * @notice Push asset stats update to View (compat path).
-     * @dev Security: only registered business modules; view address must be set
-     */
-    function pushAssetStatsUpdate(
-        address asset,
-        uint256 totalCollateral,
-        uint256 totalDebt,
-        uint256 price
-    ) external onlyBusinessModule {
-        _forwardAssetStatsUpdate(asset, totalCollateral, totalDebt, price, bytes32(0), 0);
-    }
-
-    /**
-     * @notice Push asset stats update with request context.
+     * @notice Push asset stats update (contexted) to View.
      * @dev Security: only registered business modules; view address must be set
      */
     function pushAssetStatsUpdate(
@@ -532,6 +517,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
+    /// @dev Best-effort module allowlist for `onlyBusinessModule`.
     function _isBusinessModule(address caller) internal view returns (bool) {
         if (caller == address(0)) return false;
 
@@ -564,6 +550,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         }
     }
 
+    /// @dev Forward full position update to VaultRouter (View); called by push* entrypoints.
     function _forwardUserPositionUpdate(
         address user,
         address asset,
@@ -585,6 +572,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         );
     }
 
+    /// @dev Forward delta position update to VaultRouter (View); called by push* delta entrypoints.
     function _forwardUserPositionUpdateDelta(
         address user,
         address asset,
@@ -606,6 +594,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         );
     }
 
+    /// @dev Forward asset stats update to VaultRouter (View); called by pushAssetStatsUpdate entrypoints.
     function _forwardAssetStatsUpdate(
         address asset,
         uint256 totalCollateral,
@@ -636,7 +625,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        require(newImplementation.code.length > 0, "Invalid implementation");
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     uint256[50] private __gap;

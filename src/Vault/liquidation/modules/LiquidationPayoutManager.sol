@@ -75,6 +75,11 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
     error LiquidationPayoutManager__AccessControlMismatch(address expectedAcm, address providedAcm);
 
     /**
+     * @notice Invalid upgrade implementation (no code at target).
+     */
+    error LiquidationPayoutManager__InvalidImplementation();
+
+    /**
      * @notice Constructor (disables initialization)
      * @dev Prevents direct calls to initialization function, ensures deployment through proxy pattern
      * @custom:oz-upgrades-unsafe-allow constructor
@@ -275,7 +280,7 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
         onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
     {
         LiquidationValidationLibrary.validateAddress(newImplementation, "Implementation");
-        require(newImplementation.code.length > 0, "Invalid implementation");
+        if (newImplementation.code.length == 0) revert LiquidationPayoutManager__InvalidImplementation();
     }
 
     /* ============ Storage Gap ============ */

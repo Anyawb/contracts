@@ -9,9 +9,9 @@
 ### 核心组件
 
 1. **IWhitelistRegistry.sol** - 白名单接口定义（`src/interfaces/IWhitelistRegistry.sol`）
-2. **VaultAccess.sol** - 提供白名单检查功能的访问控制基类（`src/Vault/VaultAccess.sol`）
+2. **WhitelistRegistry（实现合约）** - 白名单实现合约（项目可按需实现，示例见下文）
 3. **Registry.sol** - 模块注册表，管理所有模块包括白名单（`src/registry/Registry.sol`）
-4. **VaultCore.sol** - 核心金库合约，集成白名单检查（`src/Vault/VaultCore.sol`）
+4. **VaultCore.sol** - 核心金库合约（用户写入口，是否做白名单 gate 取决于对应业务模块实现）
 
 ### 系统架构
 
@@ -117,17 +117,18 @@ await vaultCore.initialize(registryAddress, viewContractAddress);
 
 ### 查询操作
 
-#### 通过 VaultAccess 检查白名单状态
+#### 通过 Registry → WhitelistRegistry 检查白名单状态（推荐）
 
 ```javascript
-// VaultAccess 继承类（如 VaultCore）可以直接调用
-const vaultAccess = await ethers.getContractAt("VaultAccess", vaultAddress);
+// 1) 通过 Registry 解析 WhitelistRegistry 地址（SSOT）
+const registry = await ethers.getContractAt("Registry", registryAddress);
+const { ModuleKeys } = require("./constants/ModuleKeys");
 
-// 检查单个地址
-const isWhitelisted = await vaultAccess.isWhitelisted(userAddress);
+const whitelistRegistryAddr = await registry.getModuleOrRevert(ModuleKeys.KEY_WHITELIST_REGISTRY);
 
-// 获取白名单注册表地址
-const whitelistRegistryAddr = await vaultAccess.getWhitelistRegistry();
+// 2) 调用 WhitelistRegistry（只读）
+const whitelistRegistry = await ethers.getContractAt("IWhitelistRegistry", whitelistRegistryAddr);
+const isWhitelisted = await whitelistRegistry.isWhitelisted(userAddress);
 ```
 
 #### 直接查询 WhitelistRegistry
@@ -195,28 +196,41 @@ await vaultCore.withdraw(assetAddress, amount);
 
 ## 权限控制
 
-### 使用 onlyWhitelisted 修饰符
+### 在合约内手动检查白名单（推荐做法）
 
-如果您的合约继承自 `VaultAccess`，可以使用 `onlyWhitelisted` 修饰符：
+> 说明：当前仓库不再推荐/依赖 `VaultAccess.sol` 这类“继承式访问控制基类”。  
+> 推荐模式是：**在写入口处通过 Registry 解析 `KEY_WHITELIST_REGISTRY`，然后调用 `isWhitelisted(msg.sender)`**。
 
 ```solidity
-import { VaultAccess } from "../Vault/VaultAccess.sol";
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-contract MyContract is VaultAccess {
+import { Registry } from "../registry/Registry.sol";
+import { ModuleKeys } from "../constants/ModuleKeys.sol";
+import { IWhitelistRegistry } from "../interfaces/IWhitelistRegistry.sol";
+import { NotWhitelisted, ZeroAddress } from "../errors/StandardErrors.sol";
+
+contract MyContract {
+    address private _registryAddr;
+
+    constructor(address registryAddr) {
+        if (registryAddr == address(0)) revert ZeroAddress();
+        _registryAddr = registryAddr;
+    }
+
+    modifier onlyWhitelisted() {
+        address whitelistRegistryAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_WHITELIST_REGISTRY);
+        if (!IWhitelistRegistry(whitelistRegistryAddr).isWhitelisted(msg.sender)) revert NotWhitelisted();
+        _;
+    }
+
     function restrictedFunction() external onlyWhitelisted {
         // 只有白名单地址可以调用此函数
     }
-}
-```
 
-### 手动检查白名单
-
-```solidity
-import { VaultAccess } from "../Vault/VaultAccess.sol";
-
-contract MyContract is VaultAccess {
-    function checkUser() external view returns (bool) {
-        return isWhitelisted(msg.sender);
+    function isCallerWhitelisted() external view returns (bool) {
+        address whitelistRegistryAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_WHITELIST_REGISTRY);
+        return IWhitelistRegistry(whitelistRegistryAddr).isWhitelisted(msg.sender);
     }
 }
 ```

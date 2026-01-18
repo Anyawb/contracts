@@ -23,10 +23,7 @@ import { ZeroAddress, AmountIsZero, ArrayLengthMismatch, EmptyArray } from "../.
  * @title LiquidationManager
  * @notice Liquidation executor: direct ledger writes (seize collateral, reduce debt)
  * and best-effort single-point View push.
- * @dev Reverts if:
- *      - N/A (see each public/external function NatSpec)
- *
- * Security:
+ * @dev Security:
  * - UUPSUpgradeable: upgrades are role-gated in `_authorizeUpgrade`
  * - Pausable: `pause/unpause` can halt liquidation entrypoints
  * - Non-reentrant: `liquidate/batchLiquidate` are protected against reentrancy
@@ -115,6 +112,8 @@ contract LiquidationManager is
     error LiquidationManager__BatchTooLarge(uint256 provided, uint256 max);
     /// @notice Reverts when a SettlementManager-only entrypoint is called by others.
     error LiquidationManager__OnlySettlementManager();
+    /// @notice Reverts when attempting to upgrade to an address without contract code.
+    error LiquidationManager__InvalidImplementation();
 
     /**
      * @notice Constructor that disables initialization.
@@ -404,6 +403,7 @@ contract LiquidationManager is
      * @notice Authorize UUPS upgrade to new implementation.
      * @dev Reverts if:
      *      - newImplementation is zero address
+     *      - newImplementation has no contract code (LiquidationManager__InvalidImplementation)
      *      - caller lacks ACTION_UPGRADE_MODULE role
      *
      * Security:
@@ -414,7 +414,7 @@ contract LiquidationManager is
      */
     function _authorizeUpgrade(address newImplementation) internal view override {
         if (newImplementation == address(0)) revert ZeroAddress();
-        require(newImplementation.code.length > 0, "Invalid implementation");
+        if (newImplementation.code.length == 0) revert LiquidationManager__InvalidImplementation();
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
     }
 
@@ -458,7 +458,7 @@ contract LiquidationManager is
     /**
      * @notice Best-effort single liquidation View push.
      * @dev Reverts if:
-     *      - N/A (all failures are swallowed; emits CacheUpdateFailed)
+     *      - (none)
      *
      * Security:
      * - Best-effort push: never reverts ledger writes
@@ -515,41 +515,49 @@ contract LiquidationManager is
         pushedUpdate;
 
         if (payout != address(0)) {
-            (
-                uint256 platformShare,
-                uint256 reserveShare,
-                uint256 lenderShare,
-                uint256 liquidatorShare
-            ) = ILiquidationPayoutManager(payout).calculateShares(collateralAmount);
-            ILiquidationPayoutManager.PayoutRecipients memory recipients =
-                ILiquidationPayoutManager(payout).getRecipients();
-            bool pushedPayout = false;
-            try ILiquidationEventsView(viewAddr).pushLiquidationPayout(
-                user,
-                collateralAsset,
-                recipients.platform,
-                recipients.reserve,
-                recipients.lenderCompensation,
-                liquidator,
-                platformShare,
-                reserveShare,
-                lenderShare,
-                liquidatorShare,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+            // Best-effort: swallow any payout-manager failure as well.
+            try ILiquidationPayoutManager(payout).getRecipients() returns (
+                ILiquidationPayoutManager.PayoutRecipients memory recipients
             ) {
-                pushedPayout = true;
+                try ILiquidationPayoutManager(payout).calculateShares(collateralAmount) returns (
+                    uint256 platformShare,
+                    uint256 reserveShare,
+                    uint256 lenderShare,
+                    uint256 liquidatorShare
+                ) {
+                    bool pushedPayout = false;
+                    try ILiquidationEventsView(viewAddr).pushLiquidationPayout(
+                        user,
+                        collateralAsset,
+                        recipients.platform,
+                        recipients.reserve,
+                        recipients.lenderCompensation,
+                        liquidator,
+                        platformShare,
+                        reserveShare,
+                        lenderShare,
+                        liquidatorShare,
+                        // solhint-disable-next-line not-rely-on-time
+                        block.timestamp
+                    ) {
+                        pushedPayout = true;
+                    } catch (bytes memory reason) {
+                        reason; // ignore (non-empty for solhint)
+                    }
+                    pushedPayout;
+                } catch (bytes memory reason) {
+                    reason; // ignore (non-empty for solhint)
+                }
             } catch (bytes memory reason) {
                 reason; // ignore (non-empty for solhint)
             }
-            pushedPayout;
         }
     }
 
     /**
      * @notice Best-effort batch liquidation View push.
      * @dev Reverts if:
-     *      - N/A (all failures are swallowed; emits CacheUpdateFailed)
+     *      - users.length == 0 (array out of bounds)
      *
      * Security:
      * - Best-effort push: never reverts ledger writes
@@ -613,36 +621,44 @@ contract LiquidationManager is
         pushedBatch;
 
         if (payout != address(0)) {
-            for (uint256 i; i < users.length; ) {
-                (
-                    uint256 platformShare,
-                    uint256 reserveShare,
-                    uint256 lenderShare,
-                    uint256 liquidatorShare
-                ) = ILiquidationPayoutManager(payout).calculateShares(collateralAmounts[i]);
-                ILiquidationPayoutManager.PayoutRecipients memory recipients =
-                    ILiquidationPayoutManager(payout).getRecipients();
-                bool pushedPayout = false;
-                try ILiquidationEventsView(viewAddr).pushLiquidationPayout(
-                    users[i],
-                    collateralAssets[i],
-                    recipients.platform,
-                    recipients.reserve,
-                    recipients.lenderCompensation,
-                    liquidator,
-                    platformShare,
-                    reserveShare,
-                    lenderShare,
-                    liquidatorShare,
-                    // solhint-disable-next-line not-rely-on-time
-                    block.timestamp
-                ) {
-                    pushedPayout = true;
-                } catch (bytes memory reason) {
-                    reason; // ignore (non-empty for solhint)
+            // Best-effort: swallow any payout-manager failure as well.
+            try ILiquidationPayoutManager(payout).getRecipients() returns (
+                ILiquidationPayoutManager.PayoutRecipients memory recipients
+            ) {
+                for (uint256 i; i < users.length; ) {
+                    try ILiquidationPayoutManager(payout).calculateShares(collateralAmounts[i]) returns (
+                        uint256 platformShare,
+                        uint256 reserveShare,
+                        uint256 lenderShare,
+                        uint256 liquidatorShare
+                    ) {
+                        bool pushedPayout = false;
+                        try ILiquidationEventsView(viewAddr).pushLiquidationPayout(
+                            users[i],
+                            collateralAssets[i],
+                            recipients.platform,
+                            recipients.reserve,
+                            recipients.lenderCompensation,
+                            liquidator,
+                            platformShare,
+                            reserveShare,
+                            lenderShare,
+                            liquidatorShare,
+                            // solhint-disable-next-line not-rely-on-time
+                            block.timestamp
+                        ) {
+                            pushedPayout = true;
+                        } catch (bytes memory reason) {
+                            reason; // ignore (non-empty for solhint)
+                        }
+                        pushedPayout;
+                    } catch (bytes memory reason) {
+                        reason; // ignore (non-empty for solhint)
+                    }
+                    unchecked { ++i; }
                 }
-                pushedPayout;
-                unchecked { ++i; }
+            } catch (bytes memory reason) {
+                reason; // ignore (non-empty for solhint)
             }
         }
     }

@@ -1,17 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IVaultAdmin
-/// @notice 治理和管理函数接口定义
-/// @dev 极简治理入口，仅保留必要的参数下发能力
+/**
+ * @title IVaultAdmin
+ * @notice Minimal governance entrypoint for Vault-level parameter dispatch.
+ * @dev Architecture intent:
+ * - VaultAdmin is intentionally small and only exposes narrowly-scoped governance setters.
+ * - Most parameters should be managed by their dedicated SSOT modules (e.g., config managers).
+ */
 interface IVaultAdmin {
-    /* ============ Events ============ */
-    // 事件已在 CollateralVaultStorage 中定义，这里不需要重复定义
-
     /* ============ Governance Functions ============ */
-    /// @notice 设置最小健康因子
-    /// @param hf 新的最小健康因子（基点）
+    /**
+     * @notice Set the minimum health factor (bps).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation enforces ActionKeys.ACTION_SET_PARAMETER)
+     *      - hf is outside the allowed range (implementation-defined)
+     *      - downstream SSOT module reverts (e.g., LiquidationConfigManager)
+     *
+     * Security:
+     * - Governance-only function (role-gated via ACM in the implementation).
+     *
+     * @param hf New minimum health factor in basis points (bps, 10000 = 100%)
+     */
     function setMinHealthFactor(uint256 hf) external;
-
-    // 其余参数写入请调用对应模块（如 VaultStorage、LiquidationRiskManager 等）
 } 

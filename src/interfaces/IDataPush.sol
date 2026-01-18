@@ -9,14 +9,32 @@ pragma solidity ^0.8.20;
 ///      (e.g. "USER_HEALTH", "GLOBAL_STATS").  The `payload` **SHOULD** be ABI-encoded
 ///      as a struct defined in its respective module contract to keep context.
 interface IDataPush {
-    /// @notice 通用数据推送事件 – 任意模块均可使用。
-    /// @param dataTypeHash keccak256("SOME_TYPE") 常量，用于快速过滤。
-    /// @param payload      ABI-encoded bytes payload. Decoding schema由 dataTypeHash 决定。
+    /**
+     * @notice Unified data bus event for off-chain consumers.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - `dataTypeHash` MUST be a stable constant (prefer DataPushTypes).
+     * - `payload` MUST be ABI-encoded; decoding schema is determined by `dataTypeHash`.
+     *
+     * @param dataTypeHash keccak256("SOME_TYPE") constant for filtering
+     * @param payload ABI-encoded bytes payload
+     */
     event DataPushed(bytes32 indexed dataTypeHash, bytes payload);
 
-    /// @notice 推送数据至链下监听服务。
-    /// @dev 仅作约束；实现可选择 internal 函数+emit 事件 或直接 external 调用。
-    /// @param dataTypeHash 哈希常量标识
-    /// @param payload      ABI 编码数据
+    /**
+     * @notice Push structured data to off-chain listeners.
+     * @dev Reverts if:
+     *      - implementation-defined
+     *
+     * Security:
+     * - Most modules in this repo emit `DataPushed` directly (typically via DataPushLibrary) and do not
+     *   implement a stateful pushData endpoint. This function exists as an ABI-level constraint for
+     *   potential adapters/routers.
+     *
+     * @param dataTypeHash keccak256("SOME_TYPE") constant (prefer DataPushTypes)
+     * @param payload ABI-encoded bytes payload
+     */
     function pushData(bytes32 dataTypeHash, bytes calldata payload) external;
 }

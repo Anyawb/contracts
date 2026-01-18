@@ -1,18 +1,40 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ILiquidationManager
-/// @notice 清算编排入口（方案B：直达账本 + View 单点推送）
-/// @dev 本接口刻意保持极简：清算只负责“扣押抵押 + 减少债务 + 事件单点推送”，
-///      不再承载链上清算记录/统计/奖励子模块写入（这些由链下基于事件聚合）。
+/**
+ * @title ILiquidationManager
+ * @notice Liquidation executor interface: direct ledger writes + best-effort single-point View push.
+ * @dev Reverts if:
+ *      - caller is not authorized (implementation-defined; typically role-gated / onlySettlementManager for SM path)
+ *      - input validation fails (implementation-defined; zero addresses/amounts, array mismatch)
+ *
+ * Security:
+ * - Liquidation must write directly to ledger SSOT modules (CollateralManager + KEY_LE)
+ *   and MUST NOT rely on View writes.
+ * - View push is best-effort; failures must not revert ledger writes.
+ */
 interface ILiquidationManager {
-    /// @notice 执行单笔清算：CM.withdrawCollateral + LE.forceReduceDebt + LiquidatorView.pushLiquidationUpdate
-    /// @param targetUser 被清算用户
-    /// @param collateralAsset 抵押资产（被扣押）
-    /// @param debtAsset 债务资产（被减记）
-    /// @param collateralAmount 扣押数量
-    /// @param debtAmount 减债数量
-    /// @param bonus 清算奖励（可选透传；如未计算可传 0）
+    /**
+     * @notice Execute a single liquidation.
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - `targetUser` is zero
+     *      - `collateralAsset` is zero
+     *      - `debtAsset` is zero
+     *      - `collateralAmount` is zero
+     *      - `debtAmount` is zero
+     *
+     * Security:
+     * - Direct ledger writes: CollateralManager.withdrawCollateralTo + KEY_LE.forceReduceDebt
+     * - Best-effort View push (LiquidatorView.pushLiquidationUpdate); must not revert ledger writes
+     *
+     * @param targetUser Liquidated user address
+     * @param collateralAsset Seized collateral asset address
+     * @param debtAsset Debt asset address reduced/settled
+     * @param collateralAmount Collateral amount seized (token decimals of `collateralAsset`)
+     * @param debtAmount Debt amount reduced (token decimals of `debtAsset`)
+     * @param bonus Optional bonus value passed through for reporting (token decimals / implementation-defined)
+     */
     function liquidate(
         address targetUser,
         address collateralAsset,
@@ -22,9 +44,23 @@ interface ILiquidationManager {
         uint256 bonus
     ) external;
 
-    /// @notice Execute liquidation on behalf of a keeper via SettlementManager, preserving the original liquidator address.
-    /// @dev This is used by SettlementManager SSOT to keep `liquidator == keeper msg.sender` semantics.
-    ///      Reverts unless called by the registered SettlementManager.
+    /**
+     * @notice Execute liquidation on behalf of a keeper via SettlementManager, preserving the original liquidator.
+     * @dev Reverts if:
+     *      - caller is not the registered SettlementManager (implementation-defined)
+     *      - inputs are invalid (implementation-defined)
+     *
+     * Security:
+     * - Preserves `liquidator == keeper msg.sender` semantics when SettlementManager routes the liquidation
+     *
+     * @param liquidator Original keeper address to attribute payouts and events to
+     * @param targetUser Liquidated user address
+     * @param collateralAsset Seized collateral asset address
+     * @param debtAsset Debt asset address reduced/settled
+     * @param collateralAmount Collateral amount seized (token decimals of `collateralAsset`)
+     * @param debtAmount Debt amount reduced (token decimals of `debtAsset`)
+     * @param bonus Optional bonus value passed through for reporting (token decimals / implementation-defined)
+     */
     function liquidateFromSettlementManager(
         address liquidator,
         address targetUser,
@@ -35,7 +71,16 @@ interface ILiquidationManager {
         uint256 bonus
     ) external;
 
-    /// @notice 批量清算：逐条直达账本，最后由 LiquidatorView.pushBatchLiquidationUpdate 单点推送
+    /**
+     * @notice Execute batch liquidation (direct ledger writes + single-point batch View push).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - arrays mismatch (implementation-defined)
+     *      - batch size exceeds safety cap (implementation-defined)
+     *
+     * Security:
+     * - Direct ledger writes per item; View push is best-effort and must not revert ledger writes
+     */
     function batchLiquidate(
         address[] calldata targetUsers,
         address[] calldata collateralAssets,

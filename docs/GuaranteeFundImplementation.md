@@ -295,7 +295,6 @@ function calculateHealthFactorExcludingGuarantee(
 | **GuaranteeFundManager.test.ts** | `test/Vault/modules/GuaranteeFundManager.test.ts` | 保证金基金管理器测试 |
 | **GuaranteeAndRisk.integrated.test.ts** | `test/GuaranteeAndRisk.integrated.test.ts` | 保证金与风险模块集成测试 |
 | **StatisticsView.guarantee-aggregation.test.ts** | `test/StatisticsView.guarantee-aggregation.test.ts` | 保证金统计聚合测试 |
-| **LiquidationGuaranteeManager.registry.test.ts** | `test/Vault/liquidation/LiquidationGuaranteeManager.registry.test.ts` | 清算保证金管理器测试 |
 
 ### 测试场景
 

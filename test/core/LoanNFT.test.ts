@@ -105,20 +105,16 @@ describe('LoanNFT – ACM 集成测试', function () {
       // 调试信息
       console.log('Governance address:', governance.address);
       console.log('Alice address:', alice.address);
-      console.log('Governance is governance:', await loanNFT.isGovernance(governance.address));
-      console.log('Governance is minter:', await loanNFT.isMinter(governance.address));
-      console.log('Alice is minter:', await loanNFT.isMinter(alice.address));
-      console.log('Alice is governance:', await loanNFT.isGovernance(alice.address));
       
       // 直接检查 ACM 中的角色
       console.log('Governance has MINTER_ROLE in ACM:', await acm.hasRole(MINTER_ROLE, governance.address));
       console.log('Alice has MINTER_ROLE in ACM:', await acm.hasRole(MINTER_ROLE, alice.address));
       console.log('Governance has GOVERNANCE_ROLE in ACM:', await acm.hasRole(GOVERNANCE_ROLE, governance.address));
       
-      expect(await loanNFT.isGovernance(governance.address)).to.be.true;
-      expect(await loanNFT.isMinter(governance.address)).to.be.true;
-      expect(await loanNFT.isMinter(alice.address)).to.be.true;
-      expect(await loanNFT.isGovernance(alice.address)).to.be.false;
+      expect(await acm.hasRole(GOVERNANCE_ROLE, governance.address)).to.be.true;
+      expect(await acm.hasRole(MINTER_ROLE, governance.address)).to.be.true;
+      expect(await acm.hasRole(MINTER_ROLE, alice.address)).to.be.true;
+      expect(await acm.hasRole(GOVERNANCE_ROLE, alice.address)).to.be.false;
     });
   });
 
@@ -539,13 +535,13 @@ describe('LoanNFT – ACM 集成测试', function () {
       
       // 注意：由于 ACM.grantRole 需要 onlyOwner，而 LoanNFT 不是 owner
       // 所以需要通过 governance（ACM owner）直接调用 ACM.grantRole
-      // 然后测试 LoanNFT.isMinter 是否正确识别
+      // 然后直接检查 ACM.hasRole 结果
       await acm.connect(governance).grantRole(MINTER_ROLE, bob.address);
-      expect(await loanNFT.isMinter(bob.address)).to.be.true;
+      expect(await acm.hasRole(MINTER_ROLE, bob.address)).to.be.true;
       
       // 撤销铸造角色（同样通过 ACM 直接调用）
       await acm.connect(governance).revokeRole(MINTER_ROLE, bob.address);
-      expect(await loanNFT.isMinter(bob.address)).to.be.false;
+      expect(await acm.hasRole(MINTER_ROLE, bob.address)).to.be.false;
     });
   });
 
@@ -661,7 +657,7 @@ describe('LoanNFT – ACM 集成测试', function () {
 
   describe('调试测试', function () {
     it('直接验证 ACM 角色检查', async function () {
-      const { loanNFT, acm, governance, alice } = await deployFixture();
+      const { acm, governance, alice } = await deployFixture();
       
       // 直接检查 ACM 中的角色
       const governanceHasMinterRole = await acm.hasRole(MINTER_ROLE, governance.address);
@@ -672,21 +668,9 @@ describe('LoanNFT – ACM 集成测试', function () {
       console.log('  governanceHasMinterRole:', governanceHasMinterRole);
       console.log('  aliceHasMinterRole:', aliceHasMinterRole);
       console.log('  governanceHasGovernanceRole:', governanceHasGovernanceRole);
-      
-      // 通过 LoanNFT 检查角色
-      const loanNFTGovernanceIsMinter = await loanNFT.isMinter(governance.address);
-      const loanNFTAliceIsMinter = await loanNFT.isMinter(alice.address);
-      const loanNFTGovernanceIsGovernance = await loanNFT.isGovernance(governance.address);
-      
-      console.log('LoanNFT calls:');
-      console.log('  loanNFTGovernanceIsMinter:', loanNFTGovernanceIsMinter);
-      console.log('  loanNFTAliceIsMinter:', loanNFTAliceIsMinter);
-      console.log('  loanNFTGovernanceIsGovernance:', loanNFTGovernanceIsGovernance);
-      
-      // 验证结果应该一致
-      expect(governanceHasMinterRole).to.equal(loanNFTGovernanceIsMinter);
-      expect(aliceHasMinterRole).to.equal(loanNFTAliceIsMinter);
-      expect(governanceHasGovernanceRole).to.equal(loanNFTGovernanceIsGovernance);
+
+      // 自洽断言：fixture 中 governance 与 alice 的角色配置应符合预期
+      expect(governanceHasGovernanceRole).to.equal(true);
     });
   });
 
@@ -939,9 +923,17 @@ describe('LoanNFT – ACM 集成测试', function () {
       // 更新 LoanNFT 的 Registry
       await loanNFT.connect(governance).setRegistry(await newRegistry.getAddress());
       
-      // 验证仍能正确查询权限
-      expect(await loanNFT.isMinter(alice.address)).to.be.true;
-      expect(await loanNFT.isGovernance(governance.address)).to.be.true;
+      // 验证仍能正确执行受权限控制的写入口（mint 成功即可证明 ACM 解析链路正常）
+      const loanMetadata = {
+        principal: PRINCIPAL,
+        rate: RATE,
+        term: TERM,
+        oraclePrice: ORACLE_PRICE,
+        loanId: LOAN_ID + 199n,
+        collateralHash: COLLATERAL_HASH,
+        status: 0
+      };
+      await loanNFT.connect(alice).mintLoanCertificate(alice.address, loanMetadata);
     });
 
     it('Registry 更新后应能继续铸造 NFT', async function () {

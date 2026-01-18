@@ -218,7 +218,9 @@ async function main() {
   // ============ Step 1: Deposit Collateral ============
   console.log("=== Step 1: Borrower Deposits Collateral ===");
   const collateralAmt = ethers.parseUnits("1000", 6);
-  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, collateralAmt);
+  // IMPORTANT (authority path): CollateralManager pulls tokens from user via transferFrom.
+  // Therefore user must approve CollateralManager (not VaultCore).
+  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt);
   await vaultCore.connect(borrower).deposit(usdc.target, collateralAmt);
   
   const colAfterDeposit = await cm.getCollateral(borrower.address, usdc.target);
@@ -226,25 +228,12 @@ async function main() {
   
   await verifyViews("After Deposit", borrower.address, usdc.target);
 
-  // ============ Step 2: Direct Borrow (via VaultCore) ============
-  console.log("\n=== Step 2: Borrower Borrows (Direct Path) ===");
-  const borrowAmt1 = ethers.parseUnits("300", 6);
-  await vaultCore.connect(borrower).borrow(usdc.target, borrowAmt1);
-  console.log("✅ Direct borrow completed. Amount:", ethers.formatUnits(borrowAmt1, 6));
-  
-  await verifyViews("After Direct Borrow", borrower.address, usdc.target);
+  // NOTE (SSOT): orderId is the primary key for repay/settle.
+  // A plain VaultCore.borrow(...) does not necessarily create an ORDER_ENGINE orderId,
+  // so this E2E focuses on the matchflow which deterministically creates orderId.
 
-  // ============ Step 3: Repay Direct Borrow ============
-  console.log("\n=== Step 3: Borrower Repays Direct Borrow ===");
-  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, borrowAmt1);
-  const orderId = 1n; // legacy demo script: placeholder orderId; see e2e-localhost.ts for explanation
-  await vaultCore.connect(borrower).repay(orderId, usdc.target, borrowAmt1);
-  console.log("✅ Repay completed.");
-  
-  await verifyViews("After Repay", borrower.address, usdc.target);
-
-  // ============ Step 4: Matchflow (Reserve + Finalize) ============
-  console.log("\n=== Step 4: Matchflow (Reserve + Finalize Match) ===");
+  // ============ Step 2: Matchflow (Reserve + Finalize) ============
+  console.log("\n=== Step 2: Matchflow (Reserve + Finalize Match) ===");
   const borrowAmt2 = ethers.parseUnits("500", 6);
   const termDays = 5;
   const rateBps = 1000n;
@@ -349,8 +338,8 @@ async function main() {
 
   await verifyViews("After Match", borrower.address, usdc.target);
 
-  // ============ Step 5: Repay Match Loan (via SettlementManager SSOT) ============
-  console.log("\n=== Step 5: Borrower Repays Match Loan ===");
+  // ============ Step 3: Repay Match Loan (via SettlementManager SSOT) ============
+  console.log("\n=== Step 3: Borrower Repays Match Loan ===");
   if (orderId === null) throw new Error("LoanOrderCreated not found");
   const termSec = BigInt(termDays) * ONE_DAY;
   const totalDue = calcTotalDue(borrowAmt2, rateBps, termSec);

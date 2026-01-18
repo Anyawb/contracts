@@ -1,17 +1,37 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IVaultRouter (Slimmed)
-/// @notice 协调器接口，仅负责事件路由与业务模块数据推送
-/// @dev 所有只读查询接口已移至各独立 View 模块（UserView / SystemView / AccessControlView / ViewCache）
+/**
+ * @title IVaultRouter (Strict Slim Router)
+ * @notice Router-only contract surface: routes deposit/withdraw and forwards push* updates.
+ * @dev Architecture SSOT:
+ *      - User write entrypoints live in VaultCore (authority path).
+ *      - VaultRouter only routes deposit/withdraw (VaultCore -> VaultRouter -> CollateralManager).
+ *      - Borrow/repay/settle MUST NOT go through VaultRouter.
+ *      - push* MUST only be callable by VaultCore (single entrypoint for View updates).
+ *      - All read-only queries live in dedicated View modules (PositionView/UserView/SystemView/...).
+ */
 interface IVaultRouter {
     /* ============ Core Routing ============ */
-    /// @notice 处理用户操作（事件驱动 + 路由）
-    /// @param user          用户地址
-    /// @param operationType 操作类型（参见 ActionKeys）
-    /// @param asset         资产地址
-    /// @param amount        操作金额
-    /// @param timestamp     操作时间戳
+    /**
+     * @notice Route a user deposit/withdraw operation from VaultCore to the ledger module.
+     * @dev Reverts if:
+     *      - Registry is not configured / required modules are missing
+     *      - caller is not VaultCore (strict single entrypoint)
+     *      - operationType is not supported by the router (must be deposit/withdraw)
+     *      - asset is invalid or not allowed (router-level allowlist / guardrails)
+     *      - amount is zero
+     *
+     * Security:
+     * - Only VaultCore should be allowed to call (implementation enforces an onlyVaultCore gate).
+     * - Router may be pausable and nonReentrant in the implementation.
+     *
+     * @param user User address (the principal of the operation)
+     * @param operationType Action key (see ActionKeys)
+     * @param asset Asset address
+     * @param amount Amount (token decimals)
+     * @param timestamp Timestamp supplied by VaultCore (seconds); for observability/auditing
+     */
     function processUserOperation(
         address user,
         bytes32 operationType,
@@ -20,33 +40,25 @@ interface IVaultRouter {
         uint256 timestamp
     ) external;
 
-    /* ============ Data Push from Business Modules ============ */
-    /// @notice 业务模块推送用户位置更新（兼容版本，不带上下文）
-    /// @dev 兼容旧接口；requestId/seq 将在路由层填充为 0
-    function pushUserPositionUpdate(address user, address asset, uint256 collateral, uint256 debt) external;
-
-    /// @notice 业务模块推送用户位置更新（携带上下文，用于幂等/排序）
-    /// @param requestId 上游生成的请求ID（可为0表示未提供）
-    /// @param seq       上游生成的序列号（可为0表示未提供）
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt,
-        bytes32 requestId,
-        uint64 seq
-    ) external;
-
-    /// @notice 业务模块推送用户位置更新（携带 nextVersion）
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt,
-        uint64 nextVersion
-    ) external;
-
-    /// @notice 业务模块推送用户位置更新（携带上下文 + nextVersion）
+    /* ============ Push forwarding (VaultCore -> View modules) ============ */
+    /**
+     * @notice Forward a full (absolute) user position update to PositionView.
+     * @dev Reverts if:
+     *      - Registry is not configured / PositionView is missing
+     *      - caller is not VaultCore
+     *      - downstream PositionView reverts
+     *
+     * Security:
+     * - Only VaultCore should be allowed to call (implementation enforces an onlyVaultCore gate).
+     *
+     * @param user User address
+     * @param asset Asset address
+     * @param collateral Collateral amount (token decimals)
+     * @param debt Debt amount (token decimals)
+     * @param requestId Optional idempotency key (may be 0x0)
+     * @param seq Optional monotonic sequence number (may be 0)
+     * @param nextVersion Target version for optimistic concurrency (0 means "auto-increment mode")
+     */
     function pushUserPositionUpdate(
         address user,
         address asset,
@@ -57,34 +69,24 @@ interface IVaultRouter {
         uint64 nextVersion
     ) external;
 
-    /// @notice 业务模块推送用户位置增量更新（兼容版本，不带上下文）
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta
-    ) external;
-
-    /// @notice 业务模块推送用户位置增量更新（携带上下文，用于幂等/排序）
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta,
-        bytes32 requestId,
-        uint64 seq
-    ) external;
-
-    /// @notice 业务模块推送用户位置增量更新（携带 nextVersion）
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta,
-        uint64 nextVersion
-    ) external;
-
-    /// @notice 业务模块推送用户位置增量更新（携带上下文 + nextVersion）
+    /**
+     * @notice Forward a delta user position update to PositionView.
+     * @dev Reverts if:
+     *      - Registry is not configured / PositionView is missing
+     *      - caller is not VaultCore
+     *      - downstream PositionView reverts
+     *
+     * Security:
+     * - Only VaultCore should be allowed to call (implementation enforces an onlyVaultCore gate).
+     *
+     * @param user User address
+     * @param asset Asset address
+     * @param collateralDelta Collateral delta (token decimals; signed)
+     * @param debtDelta Debt delta (token decimals; signed)
+     * @param requestId Optional idempotency key (may be 0x0)
+     * @param seq Optional monotonic sequence number (may be 0)
+     * @param nextVersion Target version for optimistic concurrency (0 means "auto-increment mode")
+     */
     function pushUserPositionUpdateDelta(
         address user,
         address asset,
@@ -95,12 +97,22 @@ interface IVaultRouter {
         uint64 nextVersion
     ) external;
 
-    // 已移除：健康因子推送接口由 HealthView 承担
-
-    /// @notice 统计模块推送资产聚合数据（兼容版本，不带上下文）
-    function pushAssetStatsUpdate(address asset, uint256 totalCollateral, uint256 totalDebt, uint256 price) external;
-
-    /// @notice 统计模块推送资产聚合数据（携带上下文，用于幂等/排序）
+    /**
+     * @notice Emit / forward an aggregated per-asset stats update (for off-chain consumers).
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller is not VaultCore
+     *
+     * Security:
+     * - Only VaultCore should be allowed to call (implementation enforces an onlyVaultCore gate).
+     *
+     * @param asset Asset address
+     * @param totalCollateral Total collateral (token decimals)
+     * @param totalDebt Total debt (token decimals)
+     * @param price Price (precision defined by upstream oracle/view)
+     * @param requestId Optional idempotency key (may be 0x0)
+     * @param seq Optional monotonic sequence number (may be 0)
+     */
     function pushAssetStatsUpdate(
         address asset,
         uint256 totalCollateral,

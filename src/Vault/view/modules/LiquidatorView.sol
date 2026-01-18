@@ -23,22 +23,45 @@ import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuati
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
-/// @title LiquidatorView
-/// @notice 清算人监控模块 - 提供清算人收益和统计查询功能
-/// @dev 专门处理清算人相关的查询操作，监控清算活动
-/// @dev 已完全迁移到Registry系统，使用标准化的模块管理方式
-/// @dev Uses Registry system for module management
-/// @custom:security-contact security@example.com
+/**
+ * @title LiquidatorView
+ * @notice Liquidation single-point view module: forwards liquidation updates/payouts to the unified DataPush stream.
+ * @dev Reverts if:
+ *      - Registry is not configured (see `onlyValidRegistry`)
+ *      - caller lacks required view permissions (see `onlySystemViewer`, `onlyLiquidationViewer`, `onlyUserData`)
+ *      - unauthorized module attempts to push (see `onlyBusinessModule`, `onlyLiquidationOrPayoutModule`)
+ *
+ * Security:
+ * - Role-gated reads via `ViewAccessLib.requireRole(...)`
+ * - Push entrypoints are restricted to liquidation business modules (Registry-resolved)
+ * - Not SSOT for ledger state; it is a view/cache push surface
+ *
+ * @custom:security-contact security@example.com
+ */
 contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsView, ViewVersioned {
     
-    // ============ Errors ============
+    /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Batch size exceeds the maximum supported limit.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - DoS/gas guard for batch view aggregation
+     */
     error LiquidatorView__BatchTooLarge();
+    /**
+     * @notice Invalid `limit` parameter.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     */
     error LiquidatorView__InvalidLimit();
 
-    /// @notice Registry地址 - 用于模块管理
+    /*━━━━━━━━━━━━━━━ STATE ━━━━━━━━━━━━━━━*/
+    /// @notice Registry address (module resolution SSOT).
     address private _registryAddr;
     
-    /// @notice 兼容历史：保留旧 SystemView 地址占位（可选）
+    /// @notice Legacy SystemView placeholder (optional, backwards compatibility).
     address private _legacySystemViewAddr;
 
     // ============ Local Types (formerly LiquidationViewTypes) ============
@@ -61,32 +84,49 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         uint256 liquidationSuccessRate;
     }
     
-    // ============ DataPush Types ============
+    /*━━━━━━━━━━━━━━━ DATA PUSH TYPES ━━━━━━━━━━━━━━━*/
     // NOTE: Prefer centralized DataPushTypes to avoid duplicated keccak256 constants across modules.
     bytes32 public constant DATA_TYPE_LIQUIDATION_UPDATE = DataPushTypes.DATA_TYPE_LIQUIDATION_UPDATE;
     bytes32 public constant DATA_TYPE_LIQUIDATION_BATCH_UPDATE = DataPushTypes.DATA_TYPE_LIQUIDATION_BATCH_UPDATE;
     bytes32 public constant DATA_TYPE_LIQUIDATION_PAYOUT = DataPushTypes.DATA_TYPE_LIQUIDATION_PAYOUT;
     
-    /// @notice Registry 有效性验证修饰符
+    /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Ensure Registry is configured.
+     * @dev Reverts if:
+     *      - `_registryAddr` is zero
+     */
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         _;
     }
     
-    /// @notice 系统数据访问验证修饰符
+    /**
+     * @notice Require system-level view permission.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     */
     modifier onlySystemViewer() {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         _;
     }
 
-    /// @notice 仅允许清算业务模块推送
+    /**
+     * @notice Restrict push entrypoints to the liquidation manager module.
+     * @dev Reverts if:
+     *      - caller is not Registry.KEY_LIQUIDATION_MANAGER
+     */
     modifier onlyBusinessModule() {
         address lm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
         if (msg.sender != lm) revert InvalidCaller();
         _;
     }
 
-    /// @notice 仅允许清算执行器或残值分配模块推送（payout 专用）
+    /**
+     * @notice Restrict payout push entrypoint to liquidation manager or payout manager.
+     * @dev Reverts if:
+     *      - caller is neither Registry.KEY_LIQUIDATION_MANAGER nor Registry.KEY_LIQUIDATION_PAYOUT_MANAGER
+     */
     modifier onlyLiquidationOrPayoutModule() {
         address lm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_MANAGER);
         address pm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_PAYOUT_MANAGER);
@@ -94,13 +134,23 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         _;
     }
 
-    /// @notice 清算数据访问验证修饰符
+    /**
+     * @notice Require liquidation view permission.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_LIQUIDATION_DATA
+     */
     modifier onlyLiquidationViewer() {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_LIQUIDATION_DATA, msg.sender);
         _;
     }
 
-    /// @notice 用户数据访问验证修饰符
+    /**
+     * @notice Require caller to be authorized to view `user` data.
+     * @dev Reverts if:
+     *      - access check fails in `_checkUserAccess`
+     *
+     * @param user Target user address
+     */
     modifier onlyUserData(address user) {
         _checkUserAccess(user);
         _;
@@ -111,9 +161,17 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         _disableInitializers();
     }
 
-    /// @notice 初始化清算人视图模块
-    /// @param initialRegistryAddr Registry合约地址
-    /// @param initialSystemView 兼容历史参数（可为0）
+    /**
+     * @notice Initialize LiquidatorView.
+     * @dev Reverts if:
+     *      - `initialRegistryAddr` is zero
+     *
+     * Security:
+     * - Initializer guarded (initializer modifier)
+     *
+     * @param initialRegistryAddr Registry address (module resolver SSOT)
+     * @param initialSystemView Optional legacy SystemView address (can be zero)
+     */
     function initialize(
         address initialRegistryAddr,
         address initialSystemView
@@ -125,10 +183,26 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         _legacySystemViewAddr = initialSystemView;
     }
 
-    /// @notice 显式暴露系统视图模块地址（兼容外部读取）
+    /**
+     * @notice Get legacy SystemView address (compatibility).
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     */
     function systemViewVar() external view returns (address) { return _legacySystemViewAddr; }
 
-    /* ============ Push from Business (Single Point) ============ */
+    /*━━━━━━━━━━━━━━━ PUSH FROM BUSINESS (SINGLE POINT) ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Push a single liquidation update into the unified DataPush stream.
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller is not the registered liquidation manager (InvalidCaller)
+     *
+     * Security:
+     * - Restricted to liquidation manager module
+     */
     function pushLiquidationUpdate(
         address user,
         address collateralAsset,
@@ -145,6 +219,15 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         );
     }
 
+    /**
+     * @notice Push a batch liquidation update into the unified DataPush stream.
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller is not the registered liquidation manager (InvalidCaller)
+     *
+     * Security:
+     * - Restricted to liquidation manager module
+     */
     function pushBatchLiquidationUpdate(
         address[] calldata users,
         address[] calldata collateralAssets,
@@ -170,6 +253,15 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         );
     }
 
+    /**
+     * @notice Push liquidation payout distribution into the unified DataPush stream.
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller is not liquidation manager or payout manager (InvalidCaller)
+     *
+     * Security:
+     * - Restricted to liquidation/payout modules
+     */
     function pushLiquidationPayout(
         address user,
         address collateralAsset,
@@ -205,27 +297,44 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         return Registry(_registryAddr).getModule(ModuleKeys.KEY_POSITION_VIEW);
     }
 
-    // ============ Registry 模块获取函数 ============
-    
-    /// @notice 从Registry获取模块地址
-    /// @param moduleKey 模块键值
-    /// @return 模块地址
+    /*━━━━━━━━━━━━━━━ REGISTRY HELPERS ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Resolve a module address from Registry.
+     * @dev Reverts if:
+     *      - module is not registered (Registry.getModuleOrRevert)
+     *
+     * @param moduleKey Module key
+     * @return Module address
+     */
     function _getModuleFromRegistry(bytes32 moduleKey) internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
-    /// @notice 检查模块是否在Registry中注册
-    /// @param moduleKey 模块键值
-    /// @return 是否已注册
+    /**
+     * @notice Check whether a module is registered in Registry.
+     * @dev Reverts if:
+     *      - none
+     *
+     * @param moduleKey Module key
+     * @return True if registered
+     */
     function _isModuleRegistered(bytes32 moduleKey) internal view returns (bool) {
         return Registry(_registryAddr).isModuleRegistered(moduleKey);
     }
 
-    /* ============ 清算人收益监控查询函数 ============ */
+    /*━━━━━━━━━━━━━━━ LIQUIDATOR PROFIT / STATS (PLACEHOLDER) ━━━━━━━━━━━━━━━*/
 
-    /// @notice 获取清算人收益统计视图
-    /// @param liquidator 清算人地址
-    /// @return profitView 清算人收益统计视图
+    /**
+     * @notice Get liquidator profit statistics view (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @param liquidator Liquidator address
+     * @return profitView Profit/statistics view (placeholder values)
+     */
     function getLiquidatorProfitView(address liquidator)
         external
         view
@@ -233,8 +342,8 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         onlySystemViewer
         returns (LiquidatorProfitView memory profitView)
     {
-        // 方案A：链上不维护清算收益/次数统计；链下通过 DataPushed 事件聚合。
-        // 这里返回 0 占位，避免依赖旧模块族（ProfitStatsManager / RecordManager）。
+        // This view module does not maintain on-chain profit statistics.
+        // Consumers should aggregate via DataPushed events off-chain.
         (uint256 totalProfit, uint256 liquidationCount, uint256 lastTs) = (0, 0, 0);
         uint256 avg = liquidationCount > 0 ? totalProfit / liquidationCount : 0;
         // solhint-disable-next-line not-rely-on-time
@@ -251,8 +360,16 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         });
     }
 
-    /// @notice 获取全局清算统计视图
-    /// @return globalView 全局清算统计视图
+    /**
+     * @notice Get global liquidation statistics view (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @return globalView Global liquidation view (placeholder values)
+     */
     function getGlobalLiquidationView()
         external
         view
@@ -260,7 +377,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         onlySystemViewer
         returns (GlobalLiquidationView memory globalView)
     {
-        // 方案A：全局统计由链下聚合；链上返回 0 占位
+        // Global stats are aggregated off-chain; return zero placeholders on-chain.
         uint256 totalLiquidations = 0;
         uint256 totalProfit = 0;
         uint256 activeLiquidators = 0;
@@ -278,9 +395,19 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         });
     }
 
-    /// @notice 批量获取清算人收益统计
-    /// @param liquidators 清算人地址数组
-    /// @return views 清算人收益统计视图数组
+    /**
+     * @notice Batch get liquidator profit statistics views (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - `liquidators` is empty (EmptyArray)
+     *      - length exceeds MAX_BATCH_SIZE (LiquidatorView__BatchTooLarge)
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @param liquidators Array of liquidator addresses
+     * @return views Array of views (placeholder values)
+     */
     function batchGetLiquidatorProfitViews(address[] calldata liquidators)
         external
         view
@@ -293,7 +420,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         if (len > ViewConstants.MAX_BATCH_SIZE) revert LiquidatorView__BatchTooLarge();
         views = new LiquidatorProfitView[](len);
         for (uint256 i = 0; i < len; i++) {
-            // 方案A：链下聚合统计；链上返回 0 占位
+            // Aggregated off-chain; return zero placeholders on-chain.
             (uint256 totalProfit, uint256 count, uint256 lastTs) = (0, 0, 0);
             uint256 avg = count > 0 ? totalProfit / count : 0;
             // solhint-disable-next-line not-rely-on-time
@@ -310,11 +437,21 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
 
-    /// @notice 获取清算人排行榜（按收益排序）
-    /// @param limit 返回数量限制
-    /// @return liquidators 清算人地址数组
-    /// @return profits 收益金额数组
-    /// @return liquidations 清算次数数组
+    /**
+     * @notice Get liquidator leaderboard (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - `limit` is zero (LiquidatorView__InvalidLimit)
+     *      - `limit` exceeds MAX_BATCH_SIZE (LiquidatorView__BatchTooLarge)
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @param limit Max number of entries to return
+     * @return liquidators Liquidator address list (currently empty placeholder)
+     * @return profits Profit amounts (currently empty placeholder)
+     * @return liquidations Liquidation counts (currently empty placeholder)
+     */
     function getLiquidatorLeaderboard(uint256 limit) external view onlyValidRegistry onlySystemViewer returns (
         address[] memory liquidators,
         uint256[] memory profits,
@@ -322,16 +459,24 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     ) {
         if (limit == 0) revert LiquidatorView__InvalidLimit();
         if (limit > ViewConstants.MAX_BATCH_SIZE) revert LiquidatorView__BatchTooLarge();
-        // 方案B：链下聚合排行榜；链上返回空数组占位
+        // Aggregated off-chain; return empty placeholders on-chain.
         liquidators = new address[](0);
         profits = new uint256[](0);
         liquidations = new uint256[](0);
     }
 
-    /// @notice 获取清算人临时债务信息
-    /// @param liquidator 清算人地址
-    /// @param asset 资产地址
-    /// @return tempDebtAmount 临时债务数量
+    /**
+     * @notice Get liquidator temporary debt info (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @param liquidator Liquidator address
+     * @param asset Asset address
+     * @return tempDebtAmount Temporary debt amount (placeholder; implementation-defined)
+     */
     function getLiquidatorTempDebt(address liquidator, address asset)
         external
         view
@@ -339,13 +484,21 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         onlySystemViewer
         returns (uint256 tempDebtAmount)
     {
-        // 方案B：不保留链上清算债务统计；链下聚合
+        // Aggregated off-chain; return zero placeholder on-chain.
         liquidator; asset;
         tempDebtAmount = 0;
     }
 
-    /// @notice 获取清算人收益比例
-    /// @return profitRate 收益比例（基点）
+    /**
+     * @notice Get liquidator profit rate (placeholder).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @return profitRate Profit rate (bps; placeholder)
+     */
     function getLiquidatorProfitRate()
         external
         view
@@ -353,18 +506,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         onlySystemViewer
         returns (uint256 profitRate)
     {
-        // 方案B：利润分配/奖励口径由链下聚合；链上返回 0
+        // Aggregated off-chain; return zero placeholder on-chain.
         profitRate = 0;
     }
 
-    /* ============ 清算人分析功能 ============ */
+    /*━━━━━━━━━━━━━━━ LIQUIDATOR ANALYTICS (PLACEHOLDER) ━━━━━━━━━━━━━━━*/
 
-    /// @notice 获取清算人活动统计
-    /// @param liquidator 清算人地址
-    /// @return totalLiquidations 总清算次数
-    /// @return totalProfit 总收益
-    /// @return averageProfit 平均收益
-    /// @return lastActivity 最后活动时间
+    /**
+     * @notice Get liquidator activity stats (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     */
     function getLiquidatorActivityStats(
         address liquidator,
         uint256 /* timeRange */
@@ -375,18 +530,23 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         uint256 lastActivity
     ) {
         liquidator; // silence unused (Scheme A: off-chain aggregation)
-        // 方案A：链下聚合；链上占位
+        // Aggregated off-chain; return placeholders on-chain.
         totalProfit = 0;
         totalLiquidations = 0;
         lastActivity = 0;
         averageProfit = totalLiquidations > 0 ? totalProfit / totalLiquidations : 0;
     }
 
-    /// @notice 获取清算人效率排名
-    /// @param limit 返回数量限制
-    /// @return liquidators 清算人地址数组
-    /// @return efficiencyScores 效率分数数组
-    /// @return avgResponseTime 平均响应时间数组
+    /**
+     * @notice Get liquidator efficiency ranking (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - `limit` is zero (LiquidatorView__InvalidLimit)
+     *      - `limit` exceeds MAX_BATCH_SIZE (LiquidatorView__BatchTooLarge)
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     */
     function getLiquidatorEfficiencyRanking(uint256 limit) external view onlyValidRegistry onlySystemViewer returns (
         address[] memory liquidators,
         uint256[] memory efficiencyScores,
@@ -395,17 +555,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         if (limit == 0) revert LiquidatorView__InvalidLimit();
         if (limit > ViewConstants.MAX_BATCH_SIZE) revert LiquidatorView__BatchTooLarge();
         
-        // 这里可以实现清算人效率排名逻辑
-        // 暂时返回空数组
+        // Placeholder: ranking is aggregated off-chain; return empty arrays on-chain.
         liquidators = new address[](0);
         efficiencyScores = new uint256[](0);
         avgResponseTime = new uint256[](0);
     }
 
-    /// @notice 获取清算人风险分析
-    /// @return riskScore 风险分数
-    /// @return riskLevel 风险级别
-    /// @return riskFactors 风险因素
+    /**
+     * @notice Get liquidator risk analysis (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     */
     function getLiquidatorRiskAnalysis(address /* liquidator */)
         external
         view
@@ -413,20 +576,22 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         onlySystemViewer
         returns (uint256 riskScore, uint8 riskLevel, string[] memory riskFactors)
     {
-        // 这里可以实现清算人风险分析逻辑
-        // 暂时返回默认值
+        // Placeholder: aggregated off-chain; return defaults on-chain.
         riskScore = 0;
         riskLevel = 0;
         riskFactors = new string[](0);
     }
 
-    /* ============ 清算市场分析 ============ */
+    /*━━━━━━━━━━━━━━━ LIQUIDATION MARKET (PLACEHOLDER) ━━━━━━━━━━━━━━━*/
 
-    /// @notice 获取清算市场概况
-    /// @return totalLiquidations 总清算次数
-    /// @return totalVolume 总清算量
-    /// @return activeLiquidators 活跃清算人数
-    /// @return avgLiquidationSize 平均清算规模
+    /**
+     * @notice Get liquidation market overview (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     */
     function getLiquidationMarketOverview() external view onlyValidRegistry onlySystemViewer returns (
         uint256 totalLiquidations,
         uint256 totalVolume,
@@ -439,10 +604,14 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         avgLiquidationSize = 0;
     }
 
-    /// @notice 获取清算趋势分析
-    /// @return liquidationCount 清算次数
-    /// @return liquidationVolume 清算量
-    /// @return avgResponseTime 平均响应时间
+    /**
+     * @notice Get liquidation trends (placeholder; aggregated off-chain).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     */
     function getLiquidationTrends(uint256 /* timeRange */) external view onlyValidRegistry onlySystemViewer returns (
         uint256 liquidationCount,
         uint256 liquidationVolume,
@@ -453,7 +622,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         avgResponseTime = 0;
     }
 
-    /* ============ 统计占位（代理 SystemView） ============ */
+    /*━━━━━━━━━━━━━━━ LEGACY STATS (PLACEHOLDER) ━━━━━━━━━━━━━━━*/
     struct UserLiquidationStats {
         uint256 totalLiquidations;
         uint256 totalSeizedValue;
@@ -467,9 +636,16 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         uint256 lastUpdateTime;
     }
 
-    // 资产/期间统计改由链下聚合与前端展示，不在链上提供接口
+    // Asset/period statistics are aggregated off-chain; do not expose on-chain interfaces here.
 
-    /// @notice 获取用户清算统计（占位：当前从 SystemView 推断）
+    /**
+     * @notice Get user liquidation stats (placeholder).
+     * @dev Reverts if:
+     *      - access check fails in `onlyUserData`
+     *
+     * Security:
+     * - View only
+     */
     function getUserLiquidationStats(address user)
         external
         view
@@ -480,7 +656,15 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         s = _buildUserLiquidationStats(user);
     }
 
-    /// @notice 批量获取用户清算统计（占位）
+    /**
+     * @notice Batch get user liquidation stats (placeholder).
+     * @dev Reverts if:
+     *      - batch size exceeds MAX_BATCH_SIZE (LiquidatorView__BatchTooLarge)
+     *      - caller lacks ACTION_VIEW_LIQUIDATION_DATA (and per-user access checks)
+     *
+     * Security:
+     * - View only
+     */
     function batchGetLiquidationStats(address[] calldata users)
         external
         view
@@ -497,7 +681,14 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
 
-    /// @notice 获取系统清算统计快照（代理 SystemView）
+    /**
+     * @notice Get system liquidation snapshot (placeholder).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *
+     * Security:
+     * - View only
+     */
     function getSystemLiquidationSnapshot()
         external
         view
@@ -515,8 +706,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
 
     
 
-    /* ============ 抵押清算只读查询（并入自 LiquidationCollateralView） ============ */
-    /// @notice 获取用户可清算的抵押物数量
+    /*━━━━━━━━━━━━━━━ COLLATERAL (READ-ONLY, PLACEHOLDER) ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Get seizable collateral amount (best-effort; delegates to CollateralManager).
+     * @dev Reverts if:
+     *      - access check fails in `onlyUserData`
+     *
+     * Security:
+     * - View only
+     * - Best-effort: if CollateralManager call fails or module is unset, returns 0
+     *
+     * @param user User address
+     * @param asset Collateral asset address
+     * @return seizableAmount Seizable amount (token decimals of `asset`)
+     */
     function getSeizableCollateralAmount(address user, address asset)
         external
         view
@@ -533,7 +736,19 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         } catch { return 0; }
     }
 
-    /// @notice 获取用户所有可清算抵押物
+    /**
+     * @notice Get all seizable collaterals for a user (best-effort).
+     * @dev Reverts if:
+     *      - access check fails in `onlyUserData`
+     *
+     * Security:
+     * - View only
+     * - Best-effort: if CollateralManager is unset, returns empty arrays
+     *
+     * @param user User address
+     * @return assets Collateral asset list
+     * @return amounts Collateral amounts (token decimals)
+     */
     function getSeizableCollaterals(address user)
         external
         view
@@ -556,7 +771,19 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         return (assetsList, amountsList);
     }
 
-    /// @notice 计算抵押物价值（简版）
+    /**
+     * @notice Calculate collateral value (best-effort; delegates to PositionView).
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_LIQUIDATION_DATA
+     *
+     * Security:
+     * - View only
+     * - Best-effort: returns 0 if PositionView is unset or call fails
+     *
+     * @param asset Collateral asset address
+     * @param amount Amount (token decimals of `asset`)
+     * @return value Value (PositionView denomination; implementation-defined)
+     */
     function calculateCollateralValue(address asset, uint256 amount)
         external
         view
@@ -574,7 +801,18 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
 
-    /// @notice 获取用户总抵押物价值
+    /**
+     * @notice Get user total collateral value (best-effort; delegates to PositionView).
+     * @dev Reverts if:
+     *      - access check fails in `onlyUserData`
+     *
+     * Security:
+     * - View only
+     * - Best-effort: returns 0 if PositionView is unset or call fails
+     *
+     * @param user User address
+     * @return totalValue Total collateral value (PositionView denomination; implementation-defined)
+     */
     function getUserTotalCollateralValue(address user)
         external
         view
@@ -592,7 +830,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
 
-    /// @notice 批量获取可清算抵押物数量
+    /**
+     * @notice Batch get seizable collateral amounts (best-effort).
+     * @dev Reverts if:
+     *      - array length mismatch (ArrayLengthMismatch)
+     *      - batch size exceeds MAX_BATCH_SIZE (LiquidatorView__BatchTooLarge)
+     *      - caller lacks ACTION_VIEW_LIQUIDATION_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @param users Array of users
+     * @param assets Array of assets (aligned with users)
+     * @return seizableAmounts Array of seizable amounts (token decimals)
+     */
     function batchGetSeizableAmounts(address[] calldata users, address[] calldata assets)
         external
         view
@@ -616,7 +867,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
 
-    /// @notice 批量计算抵押物价值
+    /**
+     * @notice Batch calculate collateral values (best-effort).
+     * @dev Reverts if:
+     *      - array length mismatch (ArrayLengthMismatch)
+     *      - batch size exceeds MAX_BATCH_SIZE (LiquidatorView__BatchTooLarge)
+     *      - caller lacks ACTION_VIEW_LIQUIDATION_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @param assets Array of assets
+     * @param amounts Array of amounts (token decimals; aligned with assets)
+     * @return values Array of values (PositionView denomination; implementation-defined)
+     */
     function batchCalculateCollateralValues(address[] calldata assets, uint256[] calldata amounts)
         external
         view
@@ -640,7 +904,18 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
 
-    /// @notice 批量获取用户总抵押物价值
+    /**
+     * @notice Batch get user total collateral values (best-effort).
+     * @dev Reverts if:
+     *      - batch size exceeds MAX_BATCH_SIZE (LiquidatorView__BatchTooLarge)
+     *      - caller lacks ACTION_VIEW_LIQUIDATION_DATA
+     *
+     * Security:
+     * - View only
+     *
+     * @param users Array of users
+     * @return totalValues Array of total collateral values (PositionView denomination; implementation-defined)
+     */
     function batchGetUserTotalCollateralValues(address[] calldata users)
         external
         view
@@ -662,61 +937,105 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
 
-    /* ============ Registry 管理功能 ============ */
+    /*━━━━━━━━━━━━━━━ REGISTRY ADMIN (DEPRECATED) ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取Registry地址
-    /// @return Registry合约地址
+    /**
+     * @notice Get Registry address.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @return Registry address
+     */
     function getRegistry() external view returns (address) {
         return _registryAddr;
     }
     
-    /// @notice 兼容旧版 getter
-    function registryAddr() external view returns(address){return _registryAddr;}
+    /**
+     * @notice Legacy getter for Registry address (compatibility).
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @return Registry address
+     */
+    function registryAddr() external view returns (address) { return _registryAddr; }
     
-    /// @notice 升级模块
-    /// @param moduleKey 模块键
-    /// @param newAddress 新模块地址
-    /// @dev 需要管理员权限
-    /// @notice DEPRECATED: Governance/write ops should be performed via Registry/VaultCore governance flow,
-    /// not via View modules. Kept for backwards compatibility (minimal break).
-    /// Prefer removing in a future major release.
+    /**
+     * @notice DEPRECATED: schedule module upgrade via Registry (kept for backwards compatibility).
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller lacks ACTION_UPGRADE_MODULE
+     *
+     * Security:
+     * - Role-gated (ACTION_UPGRADE_MODULE)
+     *
+     * @param moduleKey Module key
+     * @param newAddress New module address
+     */
     function upgradeModule(bytes32 moduleKey, address newAddress) external onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         Registry(_registryAddr).scheduleModuleUpgrade(moduleKey, newAddress);
     }
     
-    /// @notice 执行模块升级
-    /// @param moduleKey 模块键
-    /// @dev 需要管理员权限
-    /// @notice DEPRECATED: see upgradeModule().
+    /**
+     * @notice DEPRECATED: execute module upgrade via Registry (kept for backwards compatibility).
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller lacks ACTION_UPGRADE_MODULE
+     *
+     * Security:
+     * - Role-gated (ACTION_UPGRADE_MODULE)
+     *
+     * @param moduleKey Module key
+     */
     function executeModuleUpgrade(bytes32 moduleKey) external onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         Registry(_registryAddr).executeModuleUpgrade(moduleKey);
     }
     
-    /// @notice 取消模块升级
-    /// @param moduleKey 模块键
-    /// @dev 需要管理员权限
-    /// @notice DEPRECATED: see upgradeModule().
+    /**
+     * @notice DEPRECATED: cancel module upgrade via Registry (kept for backwards compatibility).
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller lacks ACTION_UPGRADE_MODULE
+     *
+     * Security:
+     * - Role-gated (ACTION_UPGRADE_MODULE)
+     *
+     * @param moduleKey Module key
+     */
     function cancelModuleUpgrade(bytes32 moduleKey) external onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         Registry(_registryAddr).cancelModuleUpgrade(moduleKey);
     }
 
-    /* ============ 升级控制 ============ */
+    /*━━━━━━━━━━━━━━━ UUPS UPGRADE CONTROL ━━━━━━━━━━━━━━━*/
 
-    /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
+    /**
+     * @notice Authorize UUPS upgrades.
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller lacks ACTION_UPGRADE_MODULE
+     *      - `newImplementation` is zero
+     *
+     * Security:
+     * - Role-gated (ACTION_UPGRADE_MODULE)
+     *
+     * @param newImplementation New implementation address
+     */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
     }
 
-    /* ============ Internal helpers ============ */
+    /*━━━━━━━━━━━━━━━ INTERNAL HELPERS ━━━━━━━━━━━━━━━*/
     function _buildUserLiquidationStats(address /* user */) internal pure returns (UserLiquidationStats memory s) {
-        // 方案A：链上不维护用户清算统计；链下通过 DataPushed 聚合。
-        // 这里返回 0 占位，避免依赖旧模块族。
+        // Aggregated off-chain; return zero placeholders on-chain.
         s = UserLiquidationStats({
             totalLiquidations: 0,
             totalSeizedValue: 0,
@@ -732,9 +1051,8 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
     
-    /* ---------- Storage Gap for Upgradeable Contracts ---------- */
-    /// @dev 为可升级合约预留存储空间，防止存储布局冲突
-    // ============ Versioning (C+B baseline) ============
+    /*━━━━━━━━━━━━━━━ VERSIONING / STORAGE GAP ━━━━━━━━━━━━━━━*/
+    /// @notice Storage gap reserved for future upgrades.
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }

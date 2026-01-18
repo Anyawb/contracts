@@ -1,7 +1,7 @@
 /**
  * 本地网络一键部署脚本（符合 contracts/docs/Architecture-Guide.md）
  * - 部署 Registry（单一入口 / 单一 Proxy，Scheme A）
- * - 部署并注册核心业务与视图模块（ACM/白名单/Oracle/Updater/FeeRouter/CM/LE/VaultStorage/VBL/VaultRouter/VaultCore/HealthView）
+ * - 部署并注册核心业务与视图模块（ACM/白名单/Oracle/Updater/FeeRouter/CM/LE/VBL/VaultRouter/VaultCore/HealthView）
  * - 写入 scripts/deployments/localhost.json 与 frontend-config/contracts-localhost.ts
  * - 确保前端 `Frontend/src/services/config/network.ts` 读取的地址齐全
  */
@@ -9,6 +9,10 @@
 import fs from 'fs';
 import path from 'path';
 import { deployRegistryStack } from './modules/registry';
+import { initStableDeploymentOutput } from './utils/stable-output';
+
+// Must run BEFORE requiring Hardhat to prevent redraw-style output from polluting logs.
+initStableDeploymentOutput();
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const hre = require('hardhat');
@@ -38,6 +42,23 @@ function save(map: DeployMap) {
   fs.writeFileSync(DEPLOY_FILE, JSON.stringify(map, null, 2));
 }
 
+function logDeployed(name: string, addr: string, kind: 'proxy' | 'regular') {
+  // Avoid long single-line logs: some terminal recorders duplicate/truncate long lines.
+  const suffix = kind === 'proxy' ? ' (proxy) deployed' : ' deployed';
+  console.log(`✅ ${name}${suffix}`);
+  console.log(`   ${addr}`);
+}
+
+function logBound(label: string, addr: string) {
+  console.log(`✅ Bound ${label}`);
+  console.log(`   ${addr}`);
+}
+
+function logActionTo(label: string, addr: string) {
+  console.log(label);
+  console.log(`   ${addr}`);
+}
+
 function keyOf(upperSnake: string): string {
   return ethers.keccak256(ethers.toUtf8Bytes(upperSnake));
 }
@@ -65,7 +86,7 @@ async function bindRegistryModule(
       return { changed: false };
     }
     await (await registry.setModule(key, addr)).wait();
-    console.log(`✅ Bound ${label} -> ${addr}`);
+    logBound(label, addr);
     return { changed: true };
   } catch (e) {
     console.log(`⚠️ Failed to bind ${label}:`, e);
@@ -78,7 +99,7 @@ async function deployRegular(name: string, ...args: unknown[]): Promise<string> 
   const c = await f.deploy(...args);
   await c.waitForDeployment();
   const addr = await c.getAddress();
-  console.log(`✅ ${name} deployed @ ${addr}`);
+  logDeployed(name, addr, 'regular');
   return addr;
 }
 
@@ -94,8 +115,21 @@ async function deployProxy(name: string, args: unknown[] = [], opts: Record<stri
   const p = await upgrades.deployProxy(f, args, defaultOpts);
   await p.waitForDeployment();
   const addr = await p.getAddress();
-  console.log(`✅ ${name} (proxy) deployed @ ${addr}`);
+  logDeployed(name, addr, 'proxy');
   return addr;
+}
+
+async function ensureFeeRouterSupportedToken(feeRouterAddr: string, token: string, label: string) {
+  if (!feeRouterAddr || feeRouterAddr === ethers.ZeroAddress) return;
+  if (!token || token === ethers.ZeroAddress) return;
+  const fr = await ethers.getContractAt('src/Vault/FeeRouter.sol:FeeRouter', feeRouterAddr);
+  const supported: boolean = await fr.isTokenSupported(token);
+  if (supported) {
+    logActionTo(`↪️ FeeRouter already supports ${label}`, token);
+    return;
+  }
+  await (await fr.addSupportedToken(token)).wait();
+  logActionTo(`✅ FeeRouter added supported token (${label})`, token);
 }
 
 async function main() {
@@ -148,7 +182,7 @@ async function main() {
     }
   }
 
-  // 1) 部署 Registry + 核心子模块（仅需 RegistryCore 支持 setModule）
+  // 1) 部署 Registry（Scheme A：单一入口，Registry 本身提供 setModule）
   // 建议最小延迟 1 小时（本地可设为 1 分钟方便调试）
   const MIN_DELAY = 60; // seconds (local dev)
 
@@ -163,10 +197,6 @@ async function main() {
       upgradeAdmin: deployer.address,
       emergencyAdmin: deployer.address,
       deployerAddress: deployer.address,
-      // Scheme A default: do NOT deploy legacy "Registry family" modules as separate proxies
-      // (they would not share state with the Registry proxy).
-      // If you need old-script compatibility/testing, set DEPLOY_REGISTRY_COMPAT_MODULES=true.
-      deployCompatModules: process.env.DEPLOY_REGISTRY_COMPAT_MODULES === 'true',
       deployDynamicModuleKeyRegistry: true,
     },
   });
@@ -176,6 +206,14 @@ async function main() {
     // 非升级合约（构造函数接收 owner）
     deployed.AccessControlManager = await deployRegular('AccessControlManager', deployer.address);
     save(deployed);
+  }
+  // IMPORTANT (SSOT): bind AccessControlManager to Registry early.
+  // Many modules (e.g. FeeRouter) resolve permissions via Registry[KEY_ACCESS_CONTROL] and will revert if missing.
+  try {
+    const registry = await ethers.getContractAt('Registry', deployed.Registry);
+    await bindRegistryModule(registry, 'ACCESS_CONTROL_MANAGER', deployed.AccessControlManager, { label: 'KEY_ACCESS_CONTROL' });
+  } catch (e) {
+    console.log('⚠️ Early bind KEY_ACCESS_CONTROL skipped/failed:', e);
   }
 
   // 2.1) 统一缓存维护器（A 类模块地址缓存：统一刷新入口）
@@ -230,15 +268,15 @@ async function main() {
     for (const r of roleNames) {
       const role = ethers.keccak256(ethers.toUtf8Bytes(r));
       try {
-        // 先检查，避免 RoleAlreadyGranted() 回退
+        // 先检查，避免 AccessControlManager__RoleAlreadyGranted() 回退
         const already = await acm.hasRole(role, adminAddress);
         if (already) {
           continue;
         }
         await (await acm.grantRole(role, adminAddress)).wait();
-        console.log(`🔑 Granted ${r} to ${adminAddress}`);
+        logActionTo(`🔑 Granted ${r} to`, adminAddress);
       } catch (e) {
-        // 角色已存在会 revert: RoleAlreadyGranted()，忽略
+        // 角色已存在会 revert: AccessControlManager__RoleAlreadyGranted()，忽略
         console.log(`⚠️ Role ${r} grant skipped/failed:`, e);
       }
     }
@@ -280,13 +318,8 @@ async function main() {
     save(deployed);
   }
 
-  // VaultStorage + VaultBusinessLogic + VaultRouter + VaultCore
-  if (!deployed.VaultStorage) {
-    // 暂以 MockUSDC 作为 RWA Token 占位，后续如需引入 RWA 再替换
-    const rwaTokenForNow = deployed.MockUSDC;
-    deployed.VaultStorage = await deployProxy('VaultStorage', [deployed.Registry, rwaTokenForNow, deployed.MockUSDC]);
-    save(deployed);
-  }
+  // FeeRouter 必须显式支持 settlementToken，否则分发会 TokenNotSupported（Architecture-Guide SSOT）
+  await ensureFeeRouterSupportedToken(deployed.FeeRouter, deployed.MockUSDC, 'MockUSDC/settlementToken');
 
   if (!deployed.VaultBusinessLogic) {
     deployed.VaultBusinessLogic = await deployProxy('VaultBusinessLogic', [deployed.Registry, deployed.MockUSDC]);
@@ -309,7 +342,8 @@ async function main() {
       {}
     );
     save(deployed);
-    console.log('✅ VaultRouter deployed @', deployed.VaultRouter);
+    // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
+    console.log('✅ VaultRouter ready');
   }
 
   // 给 VaultRouter 授权 SET_PARAMETER：用于在业务路径内 best-effort 推送 StatisticsView（pushUserStatsUpdate）
@@ -362,10 +396,21 @@ async function main() {
     save(deployed);
   }
 
-  // LendingEngine（核心账本，使用 core/LendingEngine）
-  if (!deployed.LendingEngine) {
-    deployed.LendingEngine = await deployProxy('src/core/LendingEngine.sol:LendingEngine', [deployed.Registry]);
-    save(deployed);
+  // OrderEngine（订单引擎，SSOT: src/core/LendingEngine.sol, Registry KEY_ORDER_ENGINE）
+  // NOTE: `LendingEngine` is a legacy alias kept for backward compatibility in configs/scripts.
+  {
+    const existingOrderEngine = deployed.OrderEngine ?? deployed.LendingEngine;
+    if (!existingOrderEngine) {
+      const addr = await deployProxy('src/core/LendingEngine.sol:LendingEngine', [deployed.Registry]);
+      deployed.OrderEngine = addr;
+      deployed.LendingEngine = addr; // legacy alias
+      save(deployed);
+    } else {
+      // Normalize: ensure both keys exist and point to the same address.
+      deployed.OrderEngine = existingOrderEngine;
+      deployed.LendingEngine = existingOrderEngine;
+      save(deployed);
+    }
   }
 
   // VaultLendingEngine（Vault借贷引擎）
@@ -409,7 +454,8 @@ async function main() {
         [deployed.Registry, deployed.AccessControlManager]
       );
       save(deployed);
-      console.log('✅ LiquidationConfigModule deployed @', deployed.LiquidationConfigModule);
+      // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
+      console.log('✅ LiquidationConfigModule ready');
     } catch (error) {
       console.log('⚠️ LiquidationConfigModule deployment failed:', error);
     }
@@ -449,7 +495,8 @@ async function main() {
         ]
       );
       save(deployed);
-      console.log('✅ LiquidationRiskManager deployed @', deployed.LiquidationRiskManager);
+      // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
+      console.log('✅ LiquidationRiskManager ready');
     } catch (error) {
       console.log('⚠️ LiquidationRiskManager deployment failed:', error);
     }
@@ -574,7 +621,8 @@ async function main() {
     try {
       deployed.DegradationMonitor = await deployProxy('src/monitor/DegradationMonitor.sol:DegradationMonitor', [deployed.Registry, deployer.address, deployed.DegradationCore, deployed.DegradationStorage, deployed.ModuleHealthView, ethers.ZeroAddress, deployer.address]);
       save(deployed);
-      console.log('✅ DegradationMonitor deployed @ ' + deployed.DegradationMonitor);
+      // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
+      console.log('✅ DegradationMonitor ready');
     } catch (error) {
       console.log('⚠️ DegradationMonitor deployment failed:', error);
     }
@@ -743,7 +791,8 @@ async function main() {
     try {
       deployed.LiquidationManager = await deployProxy('LiquidationManager', [deployed.Registry]);
       save(deployed);
-      console.log('✅ LiquidationManager deployed @', deployed.LiquidationManager);
+      // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
+      console.log('✅ LiquidationManager ready');
     } catch (error) {
       console.log('⚠️ LiquidationManager deployment failed:', error);
     }
@@ -755,7 +804,8 @@ async function main() {
     try {
       deployed.SettlementManager = await deployProxy('SettlementManager', [deployed.Registry]);
       save(deployed);
-      console.log('✅ SettlementManager deployed @', deployed.SettlementManager);
+      // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
+      console.log('✅ SettlementManager ready');
     } catch (error) {
       console.log('⚠️ SettlementManager deployment failed:', error);
     }
@@ -766,7 +816,8 @@ async function main() {
     try {
       deployed.LenderPoolVault = await deployProxy('LenderPoolVault', [deployed.Registry]);
       save(deployed);
-      console.log('✅ LenderPoolVault deployed @', deployed.LenderPoolVault);
+      // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
+      console.log('✅ LenderPoolVault ready');
     } catch (error) {
       console.log('⚠️ LenderPoolVault deployment failed:', error);
     }
@@ -787,7 +838,8 @@ async function main() {
         payoutRates,
       ]);
       save(deployed);
-      console.log('✅ LiquidationPayoutManager deployed @', deployed.LiquidationPayoutManager);
+      // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
+      console.log('✅ LiquidationPayoutManager ready');
     } catch (error) {
       console.log('⚠️ LiquidationPayoutManager deployment failed:', error);
     }
@@ -848,13 +900,24 @@ async function main() {
     console.log('⚠️ Grant ACTION_REPAY/VIEW_SYSTEM_DATA to SettlementManager skipped/failed:', e);
   }
 
+  // 2.99.1.3) 强制本地环境：全额还款必须自动释放抵押
+  try {
+    if (deployed.SettlementManager) {
+      const sm = await ethers.getContractAt('SettlementManager', deployed.SettlementManager);
+      const enabled = await sm.requireFullRepayRelease();
+      if (!enabled) {
+        await (await sm.setRequireFullRepayRelease(true)).wait();
+        console.log('✅ Enabled strict full-repay auto-release on SettlementManager');
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Enable strict full-repay auto-release skipped/failed:', e);
+  }
+
   // 3) 注册模块到 Registry（通过 NAME -> UPPER_SNAKE -> bytes32 key）
   const registry = await ethers.getContractAt('Registry', deployed.Registry);
 
   const NAME_TO_KEY: Record<string, string> = {
-    RegistrySignatureManager: 'REGISTRY_SIGNATURE_MANAGER',
-    RegistryHistoryManager: 'REGISTRY_HISTORY_MANAGER',
-    RegistryBatchManager: 'REGISTRY_BATCH_MANAGER',
     RegistryHelper: 'REGISTRY_HELPER',
     RegistryDynamicModuleKey: 'DYNAMIC_MODULE_REGISTRY',
     AccessControlManager: 'ACCESS_CONTROL_MANAGER',
@@ -876,7 +939,6 @@ async function main() {
     VaultBusinessLogic: 'VAULT_BUSINESS_LOGIC',
     VaultCore: 'VAULT_CORE',
     // VaultRouter: 'VAULT_VIEW', // 架构建议通过 KEY_VAULT_CORE 解析，不强依赖
-    VaultStorage: 'VAULT_STORAGE',
     // VaultLendingEngine 实现 ILendingEngineBasic（供 VaultCore.borrow/repay 使用）
     // 需要绑定到 LENDING_ENGINE（ModuleKeys.KEY_LE）
     VaultLendingEngine: 'LENDING_ENGINE',
@@ -945,7 +1007,6 @@ async function main() {
     'LendingEngineView',
     'VaultBusinessLogic',
     'VaultCore',
-    'VaultStorage',
     'HealthView',
     'SystemView',
     'StatisticsView',
@@ -1017,7 +1078,9 @@ async function main() {
     if (!deployed.VaultCore || !deployed.VaultRouter) throw new Error('Missing VaultCore or VaultRouter address');
 
     const code = await ethers.provider.getCode(deployed.VaultCore);
-    console.log('🔎 VaultCore @', deployed.VaultCore, 'codeLen =', code.length);
+    console.log('🔎 VaultCore code check');
+    logActionTo('   address', deployed.VaultCore);
+    console.log(`   codeLen = ${code.length}`);
     if (!code || code === '0x') throw new Error('VaultCore address has no code');
 
     const vaultCore = await ethers.getContractAt('VaultCore', deployed.VaultCore);
@@ -1046,7 +1109,7 @@ async function main() {
       if (regAddr === ethers.ZeroAddress) {
         console.log('🔧 Initializing PositionView...');
         await (await pv.initialize(deployed.Registry)).wait();
-        console.log('✅ PositionView initialized with registry', deployed.Registry);
+        logActionTo('✅ PositionView initialized with registry', deployed.Registry);
       }
     }
   } catch (error) {
@@ -1056,6 +1119,11 @@ async function main() {
   const frontendContent = `// 自动生成的合约配置文件 - Localhost
 // Auto-generated contract configuration file - Localhost
 // 生成时间 Generated at: ${new Date().toISOString()}
+//
+// Naming:
+// - OrderEngine = core/LendingEngine (Registry KEY_ORDER_ENGINE)
+// - VaultLendingEngine = debt ledger engine (Registry KEY_LE)
+// - LendingEngine is a legacy alias of OrderEngine (kept for backward compatibility)
 
 export const CONTRACT_ADDRESSES = {
   ${Object.entries(deployed).map(([k, v]) => `  ${k}: '${v}'`).join(',\n')}
@@ -1073,7 +1141,7 @@ export const NETWORK_CONFIG = {
 // const vaultCoreAddress = CONTRACT_ADDRESSES.VaultCore;
 `;
   fs.writeFileSync(FRONTEND_FILE, frontendContent);
-  console.log(`📝 Frontend config written: ${FRONTEND_FILE}`);
+  logActionTo('📝 Frontend config written', FRONTEND_FILE);
 
   // 5)（可选）动态模块键功能验证：为避免不同版本 ABI 差异导致的 BAD_DATA，这里省略主动验证
 

@@ -33,7 +33,8 @@ src/
 2. **可升级性**：使用 UUPS 代理模式，支持合约升级
 3. **权限控制**：统一的 AccessControlManager 权限管理
 4. **标准化**：使用 ModuleKeys 和 ActionKeys 进行标准化标识
-5. **事件驱动**：统一的事件系统，支持链下数据收集和分析
+5. **资金链 SSOT**：资金托管者/唯一写入口/费用分发口径以“资金链架构指南”为权威来源，禁止多入口与口径分叉
+6. **事件与 DataPush**：统一的事件系统 + `IDataPush` 单点事件格式，支持链下对账、监控与重放
 
 ### 系统层次
 
@@ -50,6 +51,25 @@ src/
 │  (金库系统)   │ │ (奖励)  │ │ (核心)  │
 └──────────────┘ └─────────┘ └─────────┘
 ```
+
+---
+
+## 💸 资金链（Money Flow）— SSOT（重要）
+
+资金链/托管者/唯一写入口的**权威口径**请以 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 为准（该文档是资金流维度的 SSOT，避免与 `docs/Architecture-Guide.md` 分散段落产生口径漂移）。
+
+### SSOT 快速摘要（与实现对齐）
+
+- **用户写入口（deposit/withdraw/repay）**：`VaultCore`
+  - deposit/withdraw：`VaultCore` → `VaultRouter.processUserOperation` → `CollateralManager`
+  - repay：`VaultCore` → `SettlementManager.repayAndSettle`（还款不再直达 LE）
+- **唯一对外写入口（结算/清算，keeper 推荐）**：`SettlementManager`（`KEY_SETTLEMENT_MANAGER`）
+- **抵押托管者（真实资金持币合约）**：`CollateralManager`（`KEY_CM`）
+- **出借资金托管者（线上流动性池）**：`LenderPoolVault`（`KEY_LENDER_POOL_VAULT`）
+- **债务账本（debt ledger）**：`LendingEngine` / `VaultLendingEngine`（`KEY_LE`）
+- **费用类资金统一路由**：`FeeRouter`（平台费/生态费/手续费等统一从这里分发）
+- **清算残值分配 SSOT**：`LiquidationPayoutManager`（`KEY_LIQUIDATION_PAYOUT_MANAGER`）
+- **清算事件/DataPush 单点（View）**：`LiquidatorView`（`KEY_LIQUIDATION_VIEW`；best-effort push，不阻断账本写入）
 
 ---
 
@@ -92,9 +112,7 @@ address vaultCore = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
 
 #### 核心合约
 - `VaultCore.sol` - 核心业务入口，处理用户操作
-- `VaultRouter.sol` - 查询接口，提供所有 view 函数
-- `VaultStorage.sol` - 存储合约，管理配置和模块地址
-- `VaultRouter.sol` - 路由合约，分发请求到对应模块
+- `VaultRouter.sol` - slim router：仅负责 deposit/withdraw 路由到账本模块，并转发来自 VaultCore 的 push 更新到 View 层（用户不应直接调用）
 
 #### 业务模块 (`modules/`)
 - `CollateralManager.sol` - 抵押物管理
@@ -105,6 +123,8 @@ address vaultCore = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
 
 #### 清算模块 (`liquidation/`)
 - `LiquidationManager.sol` - 清算管理器
+- `SettlementManager.sol` - 结算/清算唯一入口（SSOT，keeper 推荐）
+- `LiquidationPayoutManager.sol` - 清算残值分配 SSOT（recipients/rates/shares）
 - `LiquidationRiskManager.sol` - 清算风险管理
 - `LiquidationCalculator.sol` - 清算计算器
 - `LiquidationRewardManager.sol` - 清算奖励管理
@@ -120,8 +140,8 @@ address vaultCore = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
 
 #### 工具库
 - `VaultMath.sol` - 数学计算库
-- `VaultUtils.sol` - 工具函数库
-- `VaultTypes.sol` - 类型定义
+- `VaultUtils.sol` - 工具函数库（位于 `src/utils/VaultUtils.sol`）
+- `SystemEvents.sol` - 全局标准事件（跨模块共享事件 SSOT，原 `VaultTypes.sol`）
 
 **详细文档**：参见 [Vault/README.md](./Vault/README.md)
 
@@ -194,8 +214,6 @@ address vaultCore = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
   - 统一权限管理
   - 角色和权限映射
   
-- `AccessControlCore.sol` - 访问控制核心逻辑
-- `AccessControlLibrary.sol` - 访问控制库
 - `AssetWhitelist.sol` - 资产白名单
 - `AuthorityWhitelist.sol` - 授权机构白名单
 
@@ -258,10 +276,11 @@ bytes32 depositAction = ActionKeys.ACTION_DEPOSIT;
 **主要接口**：
 - `IRegistry.sol` - Registry 接口
 - `IVaultCore.sol` - Vault 核心接口
-- `IVaultRouter.sol` - Vault 视图接口
+- `IVaultRouter.sol` - Vault 路由接口
 - `IAccessControlManager.sol` - 访问控制接口
 - `IPriceOracle.sol` - 价格预言机接口
-- `ILendingEngine.sol` - 借贷引擎接口
+- `IOrderEngine.sol` - ORDER_ENGINE（订单引擎）最小接口：`LoanOrder` + `createLoanOrder`
+- `IOrderEngineViewAdapter.sol` - ORDER_ENGINE 只读适配接口（供 View/SettlementManager 使用）
 - `IRewardManager.sol` - 奖励管理接口
 - 等 50+ 个接口定义
 
@@ -316,7 +335,7 @@ if (amount == 0) revert AmountIsZero();
 **核心功能**：工具函数库
 
 **主要文件**：
-- `VaultUtils.sol` - Vault 工具函数
+- `VaultUtils.sol` - Vault 工具函数（位于 `src/utils/VaultUtils.sol`）
 - `TokenUtils.sol` - 代币工具函数
 - `RiskUtils.sol` - 风险工具函数
 
@@ -520,8 +539,9 @@ test/
 - [Vault 模块文档](./Vault/README.md)
 - [Registry 系统文档](../docs/registry-deployment.md)
 - [架构指南](../docs/Architecture-Guide.md)
+- [资金链架构指南（SSOT）](../docs/Usage-Guide/Funds-Flow-Architecture-Guide.md)
 - [智能合约标准](../docs/SmartContractStandard.md)
-- [权限系统文档](../Usage-Guide/permission-management-guide.md)
+- [权限系统文档](../docs/Usage-Guide/permission-management-guide.md)
 
 ---
 

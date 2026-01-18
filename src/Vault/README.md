@@ -71,32 +71,12 @@ function previewRepay(address user, address asset, uint256 amount) external view
 function previewWithdraw(address user, address asset, uint256 amount) external view returns (uint256)
 ```
 
-### 3. VaultStorage.sol - 存储合约
-**文件路径**: `contracts/Vault/VaultStorage.sol`
+### 3. （已移除）VaultStorage.sol - 旧版存储合约
+**说明**：按 `docs/Architecture-Guide.md` 的 SSOT 口径，模块地址解析与系统配置不再通过 `VaultStorage` 作为中间层。
 
-**主要功能**: 存储系统配置和模块地址
-
-**暴露接口**:
-```solidity
-// 模块地址查询
-function getNamedModule(string memory name) external view returns (address)
-function getCollateralManager() external view returns (address)
-function getLendingEngine() external view returns (address)
-function getHealthFactorCalculator() external view returns (address)
-function getVaultStatistics() external view returns (address)
-function getFeeRouter() external view returns (address)
-function getRewardManager() external view returns (address)
-function getAssetWhitelist() external view returns (address)
-
-// 代币地址查询
-function getSettlementTokenAddr() external view returns (address)
-function getRwaTokenAddr() external view returns (address)
-
-// 系统配置
-function vaultCap() external view returns (uint256)
-function minHealthFactor() external view returns (uint256)
-function liquidationThreshold() external view returns (uint256)
-```
+- **模块地址 SSOT**：直接使用 `Registry.getModule*`（链上）或通过 `SystemView/RegistryView`（只读门面）
+- **结算币 SSOT**：`Registry[KEY_SETTLEMENT_TOKEN]`
+- **风险阈值 SSOT**：`KEY_LIQUIDATION_CONFIG_MANAGER → LiquidationConfigModule`（由 `LiquidationRiskManager` 对外透传/聚合）
 
 ## 核心库
 
@@ -115,16 +95,12 @@ library VaultMath {
     function calculateLTV(uint256 debt, uint256 collateral) internal pure returns (uint256)
     
     // 百分比计算
-    function percentageMul(uint256 value, uint256 percentage) internal pure returns (uint256)
-    function percentageDiv(uint256 value, uint256 percentage) internal pure returns (uint256)
-    
-    // 债务和抵押计算
-    function calculateMaxDebt(uint256 collateral, uint256 maxLTV) internal pure returns (uint256)
-    function calculateMinCollateral(uint256 debt, uint256 maxLTV) internal pure returns (uint256)
-    
+    function percentageMul(uint256 value, uint256 bps) internal pure returns (uint256)
+    function percentageDiv(uint256 value, uint256 bps) internal pure returns (uint256)
+
     // 奖励和费用计算
-    function calculateBonus(uint256 amount, uint256 bonus) internal pure returns (uint256)
-    function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256)
+    function calculateLiquidationBonus(uint256 amount, uint256 bonusBps) internal pure returns (uint256)
+    function calculateFee(uint256 amount, uint256 feeBps) internal pure returns (uint256)
 }
 ```
 
@@ -141,8 +117,8 @@ function calculateUserLTV(uint256 debt, uint256 collateral) internal pure return
     return VaultMath.calculateLTV(debt, collateral);
 }
 
-function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256) {
-    return VaultMath.calculateFee(amount, feeRate);
+function calculateFee(uint256 amount, uint256 feeBps) internal pure returns (uint256) {
+    return VaultMath.calculateFee(amount, feeBps);
 }
 ```
 

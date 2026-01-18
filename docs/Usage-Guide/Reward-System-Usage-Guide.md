@@ -413,7 +413,7 @@ const checkPrivilegeStatus = async (userAddress: string, serviceType: number) =>
 // 获取积分获取历史
 const getRewardHistory = async (userAddress: string) => {
   // 推荐：监听 RewardView 统一 DataPushed 事件（REWARD_EARNED/REWARD_BURNED/...）
-  // 旧版：直接监听 VaultTypes.RewardEarned 仍可用，但不建议作为长期接入方式。
+  // 旧版：直接监听 RewardEvents.RewardEarned 仍可用，但不建议作为长期接入方式。
   const filter = rewardView.filters.DataPushed(DataPushTypes.DATA_TYPE_REWARD_EARNED);
   const events = await rewardView.queryFilter(filter);
 

@@ -12,7 +12,8 @@ import { IServiceConfig } from "./interfaces/IServiceConfig.sol";
 import { Registry } from "../registry/Registry.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
+import { RewardEvents } from "./RewardEvents.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 import {
     ZeroAddress,
@@ -28,7 +29,7 @@ import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/
 /// @title RewardCore - 积分消费核心业务逻辑
 /// @notice 处理积分消费、升级和批量操作的核心逻辑
 /// @dev 遵循 docs/SmartContractStandard.md 注释规范
-/// @dev 使用 ActionKeys、ModuleKeys、VaultTypes、StandardErrors 进行标准化管理
+/// @dev 使用 ActionKeys、ModuleKeys、SystemEvents、StandardErrors 进行标准化管理
 /// @dev 通过 Registry 进行模块地址管理，确保架构一致性
 contract RewardCore is 
     Initializable, 
@@ -91,7 +92,7 @@ contract RewardCore is
         _isTestnetMode = true;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -241,18 +242,19 @@ contract RewardCore is
     /// @param newMultiplier 新倍数 (BPS)
     function setUpgradeMultiplier(uint256 newMultiplier) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        uint256 oldMultiplier = _upgradeMultiplier;
         _upgradeMultiplier = newMultiplier;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
             block.timestamp
         );
         
-        // 记录参数更新事件
-        emit VaultTypes.VaultParamsUpdated(newMultiplier, 0, block.timestamp);
+        // Reward-domain parameter update event (avoid using Vault-domain events).
+        emit RewardEvents.UpgradeMultiplierUpdated(oldMultiplier, newMultiplier, block.timestamp);
     }
 
     /// @notice 设置测试网模式
@@ -262,7 +264,7 @@ contract RewardCore is
         _isTestnetMode = newIsTestnet;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -426,7 +428,7 @@ contract RewardCore is
         _updateUserPrivilege(user, serviceType, level);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_CONSUME_POINTS,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_CONSUME_POINTS),
             user,
@@ -466,7 +468,7 @@ contract RewardCore is
         _updateUserPrivilege(user, serviceType, newLevel);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_SERVICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_SERVICE),
             user,

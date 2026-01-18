@@ -12,8 +12,10 @@ async function main() {
   const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
   const vaultRouter = (await ethers.getContractAt("VaultRouter", CONTRACT_ADDRESSES.VaultRouter)) as any;
   const cm = (await ethers.getContractAt("CollateralManager", CONTRACT_ADDRESSES.CollateralManager)) as any;
-  // HH701: 使用 fully qualified name 避免重名 (src/core 与 src/Vault)
-  const le = (await ethers.getContractAt("src/Vault/LendingEngine.sol:LendingEngine", CONTRACT_ADDRESSES.LendingEngine)) as any;
+  // HH701: 使用 fully qualified name 避免重名；ORDER_ENGINE 在 src/core/LendingEngine.sol
+  // NOTE: CONTRACT_ADDRESSES.LendingEngine is a legacy alias; prefer OrderEngine when present.
+  const orderEngineAddr = (CONTRACT_ADDRESSES as any).OrderEngine ?? CONTRACT_ADDRESSES.LendingEngine;
+  const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr)) as any;
 
   const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT"));
   const ACTION_BORROW = ethers.keccak256(ethers.toUtf8Bytes("BORROW"));
@@ -75,7 +77,7 @@ async function main() {
   await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("10000", 6));
   await usdc.connect(deployer).transfer(lender.address, ethers.parseUnits("10000", 6));
   await usdc.connect(borrower).approve(vaultCore.target, ethers.MaxUint256);
-  await usdc.connect(lender).approve(le.target, ethers.MaxUint256);
+  await usdc.connect(lender).approve(orderEngine.target, ethers.MaxUint256);
 
   console.log("has VIEW_PUSH (router/core):", await acm.hasRole(ACTION_VIEW_PUSH, vaultRouter.target), await acm.hasRole(ACTION_VIEW_PUSH, vaultCore.target));
 

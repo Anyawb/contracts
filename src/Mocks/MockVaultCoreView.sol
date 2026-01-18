@@ -22,6 +22,21 @@ contract MockVaultCoreView {
     }
 
     /**
+     * @notice Minimal authority-path routing helper for tests.
+     * @dev Calls VaultRouter.processUserOperation so that msg.sender is KEY_VAULT_CORE.
+     */
+    function processUserOperation(
+        address user,
+        bytes32 operationType,
+        address asset,
+        uint256 amount,
+        uint256 timestamp
+    ) external {
+        if (viewContractAddr == address(0)) return;
+        IVaultRouter(viewContractAddr).processUserOperation(user, operationType, asset, amount, timestamp);
+    }
+
+    /**
      * @notice Minimal VaultCore push path used by VaultLendingEngine (best-effort).
      * @dev VaultLendingEngine pushes through VaultCore to satisfy VaultRouter-onlyVaultCore restriction.
      *      This mock forwards the call to the configured view contract.
@@ -53,7 +68,33 @@ contract MockVaultCoreView {
         uint64 nextVersion
     ) external {
         if (viewContractAddr == address(0)) return;
-        IVaultRouter(viewContractAddr).pushUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, nextVersion);
+        IVaultRouter(viewContractAddr).pushUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, bytes32(0), 0, nextVersion);
+    }
+
+    /**
+     * @notice Delta push path used by VaultLendingEngine via IVaultCoreDataPush.
+     * @dev LendingEngineCore calls the 7-arg overload: (user, asset, colDelta, debtDelta, requestId, seq, nextVersion).
+     *      This mock forwards the call to the configured view contract to satisfy best-effort push semantics in tests.
+     */
+    function pushUserPositionUpdateDelta(
+        address user,
+        address asset,
+        int256 collateralDelta,
+        int256 debtDelta,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external {
+        if (viewContractAddr == address(0)) return;
+        IVaultRouter(viewContractAddr).pushUserPositionUpdateDelta(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            requestId,
+            seq,
+            nextVersion
+        );
     }
 
     // Forwarding helpers to satisfy onlyVaultCore guard in tests

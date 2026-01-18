@@ -7,46 +7,80 @@ import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IAssetWhitelist } from "../interfaces/IAssetWhitelist.sol";
-import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
-import { ILendingEngine } from "../interfaces/ILendingEngine.sol";
+import { IOrderEngine } from "../interfaces/IOrderEngine.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { IFeeRouter } from "../interfaces/IFeeRouter.sol";
 import { ILenderPoolVault } from "../interfaces/ILenderPoolVault.sol";
 
-/// @title SettlementMatchLib
-/// @notice 资金拨付与账本/订单落地的一体化原子流程（由业务层调用）
+/**
+ * @dev Minimal VaultCore interface for typed calls.
+ */
+interface IVaultCoreBorrowFor {
+    function borrowFor(address borrower, address asset, uint256 amount, uint16 termDays) external;
+}
+
+/**
+ * @title SettlementMatchLib
+ * @notice Atomic settlement orchestration for funding + accounting + order creation.
+ * @dev This library is intended to be called by a trusted orchestration entrypoint (e.g., VaultBusinessLogic).
+ */
 library SettlementMatchLib {
     using SafeERC20 for IERC20;
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
-    error Settlement__ZeroAddress();
-    error Settlement__InvalidAmount();
-    error Settlement__AssetNotAllowed();
+    /// @notice Thrown when an input address is zero.
+    error SettlementMatchLib__ZeroAddress();
+    /// @notice Thrown when an input amount is zero or otherwise invalid for the operation.
+    error SettlementMatchLib__InvalidAmount();
+    /// @notice Thrown when the provided asset is not allowed by the AssetWhitelist module (when enabled).
+    error SettlementMatchLib__AssetNotAllowed();
+    /// @notice Thrown when a collateral top-up is attempted during matching (forbidden in strict architecture).
+    error SettlementMatchLib__CollateralTopUpNotSupported();
 
     /*━━━━━━━━━━━━━━━ INTERNAL HELPERS ━━━━━━━━━━━━━━━*/
     function _requireRole(address registry, bytes32 actionKey, address user) private view {
-        if (registry == address(0)) revert Settlement__ZeroAddress();
+        if (registry == address(0)) revert SettlementMatchLib__ZeroAddress();
         address acmAddr = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
     function _checkAssetWhitelist(address registry, address asset) private view {
-        address wl = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_ASSET_WHITELIST);
-        if (wl != address(0) && !IAssetWhitelist(wl).isAssetAllowed(asset)) revert Settlement__AssetNotAllowed();
+        address assetWhitelistAddr = IRegistry(registry).getModule(ModuleKeys.KEY_ASSET_WHITELIST);
+        if (assetWhitelistAddr != address(0) && !IAssetWhitelist(assetWhitelistAddr).isAssetAllowed(asset)) {
+            revert SettlementMatchLib__AssetNotAllowed();
+        }
     }
 
     /*━━━━━━━━━━━━━━━ API ━━━━━━━━━━━━━━━*/
-    /// @notice 仅执行账本+订单（保留旧行为：直接将金额拨付给借款人，不扣除借款费）
-    /// @notice 原子完成：抵押（可选）→ 放款拨付 → 债务记账 → 订单落地（LoanNFT+Reward+DataPush）
-    /// @param registry Registry地址
-    /// @param borrower 借款人
-    /// @param lender 出借人
-    /// @param collateralAsset 抵押资产（可为零地址，表示已预先抵押）
-    /// @param collateralAmount 抵押数量
-    /// @param borrowAsset 借款资产（资金池资产）
-    /// @param amount 借款金额
-    /// @param termDays 借款期限（天）
-    /// @param rateBps 利率（bps）
+    /**
+     * @notice Finalize a matched loan atomically (fund borrower + write debt + create the loan order).
+     * @dev Reverts if:
+     *      - registry == address(0) (SettlementMatchLib__ZeroAddress)
+     *      - borrower == address(0) (SettlementMatchLib__ZeroAddress)
+     *      - lender == address(0) (SettlementMatchLib__ZeroAddress)
+     *      - borrowAsset == address(0) (SettlementMatchLib__ZeroAddress)
+     *      - amount == 0 (SettlementMatchLib__InvalidAmount)
+     *      - borrowAsset is not whitelisted (SettlementMatchLib__AssetNotAllowed)
+     *      - caller (the orchestration contract) lacks ACTION_ORDER_CREATE (via ACM.requireRole)
+     *      - collateralAsset != address(0) or collateralAmount != 0 (SettlementMatchLib__CollateralTopUpNotSupported)
+     *      - any downstream module call reverts (Registry/Pool/VaultCore/LendingEngine/ERC20)
+     *
+     * Security:
+     * - Role-gated via AccessControlManager (ACTION_ORDER_CREATE) for the orchestration entrypoint.
+     * - Collateral top-up during matching is forbidden (strict architecture).
+     * - Performs multiple external calls; caller SHOULD enforce reentrancy protection at the entrypoint.
+     *
+     * @param registry Registry address (module resolver).
+     * @param borrower Borrower address.
+     * @param lender Lender address.
+     * @param collateralAsset Collateral asset address (MUST be zero for strict architecture).
+     * @param collateralAmount Collateral amount (MUST be zero for strict architecture).
+     * @param borrowAsset Borrow asset (pool asset; ERC20).
+     * @param amount Borrow principal amount (token decimals).
+     * @param termDays Term length (days).
+     * @param rateBps Interest rate (bps; 1 bps = 1e-4).
+     * @return orderId Created loan order id (from LendingEngine).
+     */
     function finalizeAtomic(
         address registry,
         address borrower,
@@ -59,47 +93,35 @@ library SettlementMatchLib {
         uint256 rateBps
     ) internal returns (uint256 orderId) {
         if (registry == address(0) || borrower == address(0) || lender == address(0) || borrowAsset == address(0)) {
-            revert Settlement__ZeroAddress();
+            revert SettlementMatchLib__ZeroAddress();
         }
-        if (amount == 0) revert Settlement__InvalidAmount();
+        if (amount == 0) revert SettlementMatchLib__InvalidAmount();
 
-        // 1) 白名单与权限（撮合入口需具备订单创建专用权限，用于 createLoanOrder）
+        // 1) Asset whitelist + permissions.
         _checkAssetWhitelist(registry, borrowAsset);
-        // 注意：这里使用 address(this) 确保校验的是撮合/编排入口合约自身（如 VaultBusinessLogic），
-        // 而不是外部发起者 EOA，符合“仅授予撮合入口”的长期权限形态。
+        // NOTE: `address(this)` ensures the role check is enforced for the orchestration entrypoint contract
+        // (e.g., VaultBusinessLogic), not the external EOA caller. This matches the "only grant the
+        // orchestrator long-lived privileges" model.
         _requireRole(registry, ActionKeys.ACTION_ORDER_CREATE, address(this));
 
-        // 2) 可选：补充抵押
-        if (collateralAsset != address(0) && collateralAmount > 0) {
-            address cm = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_CM);
-            // 由业务层确保资产已在本合约持有；这里直接转存到 CollateralManager
-            IERC20(collateralAsset).forceApprove(cm, collateralAmount);
-            ICollateralManager(cm).depositCollateral(borrower, collateralAsset, collateralAmount);
+        // 2) Collateral top-up during match is NOT supported.
+        // Strict architecture: collateral MUST be deposited beforehand via:
+        // VaultCore.deposit -> VaultRouter.processUserOperation -> CollateralManager.depositCollateral
+        if (collateralAsset != address(0) || collateralAmount != 0) {
+            revert SettlementMatchLib__CollateralTopUpNotSupported();
         }
 
-        // 3) 从资金池拨付到本合约，再转给借款人（资金来源：LenderPoolVault）
+        // 3) Pull funds from the lender pool vault to this contract, then forward to the borrower.
         address pool = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_LENDER_POOL_VAULT);
         ILenderPoolVault(pool).transferOut(borrowAsset, address(this), amount);
         IERC20(borrowAsset).safeTransfer(borrower, amount);
 
-        // 4) 债务记账：通过 VaultCore 统一入口写入账本（命中 onlyVaultCore）
+        // 4) Write debt via the canonical VaultCore entrypoint (hits onlyVaultCore in the implementation).
         address vaultCore = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        // 调用 VaultCoreRefactored.borrowFor(borrower, asset, amount, termDays)
-        (bool ok, bytes memory ret) = vaultCore.call(abi.encodeWithSignature(
-            "borrowFor(address,address,uint256,uint16)",
-            borrower,
-            borrowAsset,
-            amount,
-            termDays
-        ));
-        if (!ok) {
-            assembly {
-                revert(add(ret, 0x20), mload(ret))
-            }
-        }
+        IVaultCoreBorrowFor(vaultCore).borrowFor(borrower, borrowAsset, amount, termDays);
 
-        // 5) 订单落地：LoanNFT + Reward + DataPush 由 core/LendingEngine 统一完成
-        ILendingEngine.LoanOrder memory order = ILendingEngine.LoanOrder({
+        // 5) Create the loan order. LoanNFT + Reward + DataPush are handled by LendingEngine.
+        IOrderEngine.LoanOrder memory order = IOrderEngine.LoanOrder({
             principal: amount,
             rate: rateBps,
             term: uint256(termDays) * 1 days,
@@ -111,11 +133,38 @@ library SettlementMatchLib {
             repaidAmount: 0
         });
         address orderEngine = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
-        orderId = ILendingEngine(orderEngine).createLoanOrder(order);
+        orderId = IOrderEngine(orderEngine).createLoanOrder(order);
     }
 
-    /// @notice 完整编排：账本写入 → 创建订单 → 借款手续费分发 → 借方收取净额
-    /// @dev 与 UserFlow 对齐：借方实际收到净额；事件/推送统一由 LendingEngine 负责
+    /**
+     * @notice Finalize a matched loan atomically and distribute borrow fees (borrower receives net amount).
+     * @dev Reverts if:
+     *      - registry == address(0) (SettlementMatchLib__ZeroAddress)
+     *      - borrower == address(0) (SettlementMatchLib__ZeroAddress)
+     *      - lender == address(0) (SettlementMatchLib__ZeroAddress)
+     *      - borrowAsset == address(0) (SettlementMatchLib__ZeroAddress)
+     *      - amount == 0 (SettlementMatchLib__InvalidAmount)
+     *      - borrowAsset is not whitelisted (SettlementMatchLib__AssetNotAllowed)
+     *      - caller (the orchestration contract) lacks ACTION_ORDER_CREATE (via ACM.requireRole)
+     *      - collateralAsset != address(0) or collateralAmount != 0 (SettlementMatchLib__CollateralTopUpNotSupported)
+     *      - FeeRouter distribution reverts / ERC20 transfer/approve fails / any downstream module call reverts
+     *
+     * Security:
+     * - Role-gated via AccessControlManager (ACTION_ORDER_CREATE) for the orchestration entrypoint.
+     * - Collateral top-up during matching is forbidden (strict architecture).
+     * - Performs multiple external calls; caller SHOULD enforce reentrancy protection at the entrypoint.
+     *
+     * @param registry Registry address (module resolver).
+     * @param borrower Borrower address.
+     * @param lender Lender address.
+     * @param collateralAsset Collateral asset address (MUST be zero for strict architecture).
+     * @param collateralAmount Collateral amount (MUST be zero for strict architecture).
+     * @param borrowAsset Borrow asset (pool asset; ERC20).
+     * @param amount Borrow principal amount (token decimals).
+     * @param termDays Term length (days).
+     * @param rateBps Interest rate (bps; 1 bps = 1e-4).
+     * @return orderId Created loan order id (from LendingEngine).
+     */
     function finalizeAtomicFull(
         address registry,
         address borrower,
@@ -128,40 +177,29 @@ library SettlementMatchLib {
         uint256 rateBps
     ) internal returns (uint256 orderId) {
         if (registry == address(0) || borrower == address(0) || lender == address(0) || borrowAsset == address(0)) {
-            revert Settlement__ZeroAddress();
+            revert SettlementMatchLib__ZeroAddress();
         }
-        if (amount == 0) revert Settlement__InvalidAmount();
+        if (amount == 0) revert SettlementMatchLib__InvalidAmount();
 
-        // 1) 白名单与权限
+        // 1) Asset whitelist + permissions.
         _checkAssetWhitelist(registry, borrowAsset);
         _requireRole(registry, ActionKeys.ACTION_ORDER_CREATE, address(this));
 
-        // 2) 可选抵押
-        if (collateralAsset != address(0) && collateralAmount > 0) {
-            address cm = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_CM);
-            IERC20(collateralAsset).forceApprove(cm, collateralAmount);
-            ICollateralManager(cm).depositCollateral(borrower, collateralAsset, collateralAmount);
+        // 2) Collateral top-up during match is NOT supported (strict architecture).
+        if (collateralAsset != address(0) || collateralAmount != 0) {
+            revert SettlementMatchLib__CollateralTopUpNotSupported();
         }
 
-        // 3) 从资金池拨付到本合约（资金来源：LenderPoolVault）
+        // 3) Pull funds from the lender pool vault to this contract.
         address pool = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_LENDER_POOL_VAULT);
         ILenderPoolVault(pool).transferOut(borrowAsset, address(this), amount);
 
-        // 4) 账本写入（统一 VaultCore 入口）
+        // 4) Write debt via the canonical VaultCore entrypoint.
         address vaultCore = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        (bool ok, bytes memory ret) = vaultCore.call(abi.encodeWithSignature(
-            "borrowFor(address,address,uint256,uint16)",
-            borrower,
-            borrowAsset,
-            amount,
-            termDays
-        ));
-        if (!ok) {
-            assembly { revert(add(ret, 0x20), mload(ret)) }
-        }
+        IVaultCoreBorrowFor(vaultCore).borrowFor(borrower, borrowAsset, amount, termDays);
 
-        // 5) 创建订单（由 LendingEngine 统一发 LOAN_* + NFT + Reward + DataPush）
-        ILendingEngine.LoanOrder memory order = ILendingEngine.LoanOrder({
+        // 5) Create the loan order. LoanNFT + Reward + DataPush are handled by LendingEngine.
+        IOrderEngine.LoanOrder memory order = IOrderEngine.LoanOrder({
             principal: amount,
             rate: rateBps,
             term: uint256(termDays) * 1 days,
@@ -173,20 +211,21 @@ library SettlementMatchLib {
             repaidAmount: 0
         });
         address orderEngine = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
-        orderId = ILendingEngine(orderEngine).createLoanOrder(order);
+        orderId = IOrderEngine(orderEngine).createLoanOrder(order);
 
-        // 6) 借款手续费分发（FeeRouter 从 msg.sender 拉取，再返还剩余给 msg.sender）
+        // 6) Distribute borrow fees (FeeRouter pulls from msg.sender and refunds any remaining to msg.sender).
+        // Use balance-delta as the SSOT net amount to avoid rounding drift across fee implementations.
         address feeRouter = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_FR);
-        // 先授权 FeeRouter 可拉取本次金额
+        uint256 balBefore = IERC20(borrowAsset).balanceOf(address(this));
+        // Approve FeeRouter to pull the requested amount for this distribution.
         IERC20(borrowAsset).forceApprove(feeRouter, amount);
         IFeeRouter(feeRouter).distributeNormal(borrowAsset, amount);
 
-        // 7) 将净额转给借方：净额 = amount - platform - eco
-        uint256 platformBps = IFeeRouter(feeRouter).getPlatformFeeBps();
-        uint256 ecoBps = IFeeRouter(feeRouter).getEcosystemFeeBps();
-        uint256 platformAmt = (amount * platformBps) / 1e4;
-        uint256 ecoAmt = (amount * ecoBps) / 1e4;
-        uint256 netAmount = amount - platformAmt - ecoAmt;
+        // 7) Forward the net amount to the borrower: net = refundedRemaining computed via balance-delta.
+        // FeeRouter behavior: transferFrom(msg.sender, amount) then transfer remaining back to msg.sender.
+        // Therefore: balAfter = balBefore - amount + remaining => remaining = balAfter + amount - balBefore.
+        uint256 balAfter = IERC20(borrowAsset).balanceOf(address(this));
+        uint256 netAmount = balAfter + amount - balBefore;
         if (netAmount > 0) {
             IERC20(borrowAsset).safeTransfer(borrower, netAmount);
         }

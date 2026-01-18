@@ -9,24 +9,11 @@ import { HealthFactorLib } from "../../../libraries/HealthFactorLib.sol";
 import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
 import { IPositionView } from "../../../interfaces/IPositionView.sol";
 import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
+import { IVaultCoreDataPush } from "../../../interfaces/IVaultCoreDataPush.sol";
+import { IVaultCoreMinimal } from "../../../interfaces/IVaultCoreMinimal.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { LendingEngineStorage } from "./LendingEngineStorage.sol";
 import { LendingEngineAccounting } from "./LendingEngineAccounting.sol";
-
-/// @notice Minimal interface to resolve VaultRouter through VaultCore
-/// @dev 架构指南：统一通过 KEY_VAULT_CORE -> viewContractAddrVar() 解析 View 地址
-interface IVaultCoreMinimal {
-    function viewContractAddrVar() external view returns (address);
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt,
-        bytes32 requestId,
-        uint64 seq,
-        uint64 nextVersion
-    ) external;
-}
 
 /// @notice Minimal interface for HealthView
 interface IHealthViewMinimal {
@@ -54,7 +41,11 @@ library LendingEngineCore {
     ) internal {
         termDays; // silence unused (Reward is handled by ORDER_ENGINE only)
         s.recordBorrow(user, asset, amount);
-        _pushUserPositionToView(s, user, asset);
+        // IMPORTANT (Architecture-Guide):
+        // - Stats is delta-based (multi-asset compatible) and MUST NOT depend on View cache freshness.
+        // - Time-travel (or long gaps) can expire PositionView cache; relying on absolute snapshots can miss debt deltas.
+        // Therefore we push the debt delta directly (collateral delta is 0 here).
+        _pushDebtDeltaToView(s, user, asset, _toInt(amount));
         _pushHealthStatus(s, user);
         // Reward:
         // - VaultLendingEngine 不具备 “按期/足额还清” 的订单语义（maturity/outcome），不能安全地触发积分释放/扣罚。
@@ -64,7 +55,8 @@ library LendingEngineCore {
     /// @notice 还款主流程
     function repay(LendingEngineStorage.Layout storage s, address user, address asset, uint256 amount) internal {
         s.recordRepay(user, asset, amount);
-        _pushUserPositionToView(s, user, asset);
+        // Push debt delta (repay reduces principal debt).
+        _pushDebtDeltaToView(s, user, asset, -_toInt(amount));
         _pushHealthStatus(s, user);
         // Reward: 同上（VaultLendingEngine 不触发 RewardManager）。
     }
@@ -73,7 +65,7 @@ library LendingEngineCore {
     function forceReduceDebt(LendingEngineStorage.Layout storage s, address user, address asset, uint256 amount) internal {
         _requireRole(s, ActionKeys.ACTION_LIQUIDATE, msg.sender);
         s.recordForceReduceDebt(user, asset, amount);
-        _pushUserPositionToView(s, user, asset);
+        _pushDebtDeltaToView(s, user, asset, -_toInt(amount));
         _pushHealthStatus(s, user);
     }
 
@@ -104,53 +96,36 @@ library LendingEngineCore {
 
     // NOTE: _notifyRewardManager 已移除。Reward 仅由 ORDER_ENGINE(core/LendingEngine) 触发。
 
-    /// @notice 推送当前用户仓位快照到 View 缓存
-    /// @dev 关键：不要直接调用 VaultRouter.pushUserPositionUpdate（VaultRouter 仅允许 VaultCore 调用）。
-    ///      这里通过 VaultCore.pushUserPositionUpdate 进行转发（VaultCore 会再调用 VaultRouter），以符合权限与架构约束。
-    function _pushUserPositionToView(
+    /// @notice Push debt delta to View (via VaultCore -> VaultRouter -> PositionView).
+    /// @dev This keeps both PositionView and StatisticsView consistent in a delta-based (multi-asset) manner,
+    ///      and does NOT depend on PositionView cache freshness (CACHE_DURATION).
+    function _pushDebtDeltaToView(
         LendingEngineStorage.Layout storage s,
         address user,
-        address asset
+        address asset,
+        int256 debtDelta
     ) internal {
-        // 0) 解析 VaultCore 与 View 地址（best-effort，不阻断账本）
         address vaultCore = _getModuleAddressOrZero(s, ModuleKeys.KEY_VAULT_CORE);
         address viewAddr = address(0);
         if (vaultCore != address(0) && vaultCore.code.length != 0) {
             try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
                 viewAddr = v;
             } catch {
-                // best effort: keep 0
+                // best effort
             }
-        }
-
-        // 1) 先计算“期望写入的快照值”，用于成功推送或失败事件载荷（便于链下重试）
-        uint256 debt = s._userDebt[user][asset];
-        uint256 collateral = 0;
-        address cm = _getModuleAddressOrZero(s, ModuleKeys.KEY_CM);
-        if (cm != address(0) && cm.code.length != 0) {
-            try ICollateralManager(cm).getCollateral(user, asset) returns (uint256 v) {
-                collateral = v;
-            } catch (bytes memory reason) {
-                // collateral 保持 0，但把“期望写入的 debt”带上，链下可重读账本后重试
-                emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
-                return;
-            }
-        } else {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, bytes("cm unavailable"));
-            return;
         }
 
         if (vaultCore == address(0) || vaultCore.code.length == 0) {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, bytes("vaultCore unavailable"));
+            emit CacheUpdateFailed(user, asset, viewAddr, 0, s._userDebt[user][asset], bytes("vaultCore unavailable"));
             return;
         }
 
-        // 3) 并发控制 nextVersion：优先从 PositionView 读取版本；读不到则退化为 0（由 View 侧自增）
         uint64 nextVersion = _getNextVersion(s, user, asset);
-        try IVaultCoreMinimal(vaultCore).pushUserPositionUpdate(user, asset, collateral, debt, bytes32(0), 0, nextVersion) {
-            // success
+        try IVaultCoreDataPush(vaultCore).pushUserPositionUpdateDelta(user, asset, int256(0), debtDelta, bytes32(0), 0, nextVersion) {
+            // ok
         } catch (bytes memory reason) {
-            emit CacheUpdateFailed(user, asset, viewAddr, collateral, debt, reason);
+            // Best-effort: never block ledger.
+            emit CacheUpdateFailed(user, asset, viewAddr, 0, s._userDebt[user][asset], reason);
         }
     }
 

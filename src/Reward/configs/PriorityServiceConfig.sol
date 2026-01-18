@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import { BaseServiceConfig } from "../BaseServiceConfig.sol";
 import { RewardTypes } from "../RewardTypes.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
-import { VaultTypes } from "../../Vault/VaultTypes.sol";
+import { SystemEvents } from "../../Vault/SystemEvents.sol";
 import { ZeroAddress } from "../../errors/StandardErrors.sol";
 
 /// @title PriorityServiceConfig - 优先服务配置
@@ -69,7 +69,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         emit PriorityServiceConfigInitialized(registryAddr, block.timestamp);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -170,7 +170,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         emit ConfigUpdated(uint8(level), price, duration, isActive);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -204,7 +204,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         emit CooldownUpdated(_cooldown);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -265,7 +265,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -321,7 +321,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,

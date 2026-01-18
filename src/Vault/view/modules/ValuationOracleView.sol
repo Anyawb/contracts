@@ -10,7 +10,7 @@ import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
-import { VaultTypes } from "../../VaultTypes.sol";
+import { SystemEvents } from "../../SystemEvents.sol";
 import { ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
@@ -201,7 +201,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
 
-        emit VaultTypes.ModuleAddressUpdated(
+        emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,

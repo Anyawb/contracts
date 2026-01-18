@@ -42,57 +42,7 @@ contract MockVaultRouter is IVaultRouter {
         emit UserOperationProcessed(user, operationType, asset, amount, timestamp);
     }
     
-    /// @notice 推送用户位置更新（模拟业务模块调用）
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt
-    ) external override {
-        require(user != address(0), "MockVaultRouter: user is zero");
-        require(asset != address(0), "MockVaultRouter: asset is zero");
-        _userCollateral[user][asset] = collateral;
-        _userDebt[user][asset] = debt;
-        
-        emit UserPositionUpdated(user, asset, collateral, debt);
-    }
-
-    /// @notice 推送用户位置更新（带上下文版本）
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt,
-        bytes32 requestId,
-        uint64 seq
-    ) external override {
-        requestId; seq; // silence warnings
-        require(user != address(0), "MockVaultRouter: user is zero");
-        require(asset != address(0), "MockVaultRouter: asset is zero");
-        _userCollateral[user][asset] = collateral;
-        _userDebt[user][asset] = debt;
-        
-        emit UserPositionUpdated(user, asset, collateral, debt);
-    }
-
-    /// @notice 推送用户位置更新（携带 nextVersion）
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt,
-        uint64 nextVersion
-    ) external override {
-        nextVersion; // silence warnings
-        require(user != address(0), "MockVaultRouter: user is zero");
-        require(asset != address(0), "MockVaultRouter: asset is zero");
-        _userCollateral[user][asset] = collateral;
-        _userDebt[user][asset] = debt;
-
-        emit UserPositionUpdated(user, asset, collateral, debt);
-    }
-
-    /// @notice 推送用户位置更新（携带上下文 + nextVersion）
+    /// @notice 推送用户位置更新（严格版本：携带上下文 + nextVersion）
     function pushUserPositionUpdate(
         address user,
         address asset,
@@ -102,7 +52,7 @@ contract MockVaultRouter is IVaultRouter {
         uint64 seq,
         uint64 nextVersion
     ) external override {
-        requestId; seq; nextVersion;
+        requestId; seq; nextVersion; // mock: ignore context/version
         require(user != address(0), "MockVaultRouter: user is zero");
         require(asset != address(0), "MockVaultRouter: asset is zero");
         _userCollateral[user][asset] = collateral;
@@ -111,44 +61,7 @@ contract MockVaultRouter is IVaultRouter {
         emit UserPositionUpdated(user, asset, collateral, debt);
     }
 
-    /// @notice 推送用户位置增量更新（兼容版本）
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta
-    ) external override {
-        require(user != address(0), "MockVaultRouter: user is zero");
-        require(asset != address(0), "MockVaultRouter: asset is zero");
-        _applyDeltaUpdate(user, asset, collateralDelta, debtDelta);
-    }
-
-    /// @notice 推送用户位置增量更新（带上下文版本）
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta,
-        bytes32 requestId,
-        uint64 seq
-    ) external override {
-        requestId; seq; // silence warnings
-        _applyDeltaUpdate(user, asset, collateralDelta, debtDelta);
-    }
-
-    /// @notice 推送用户位置增量更新（携带 nextVersion）
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta,
-        uint64 nextVersion
-    ) external override {
-        nextVersion;
-        _applyDeltaUpdate(user, asset, collateralDelta, debtDelta);
-    }
-
-    /// @notice 推送用户位置增量更新（携带上下文 + nextVersion）
+    /// @notice 推送用户位置增量更新（严格版本：携带上下文 + nextVersion）
     function pushUserPositionUpdateDelta(
         address user,
         address asset,
@@ -158,7 +71,7 @@ contract MockVaultRouter is IVaultRouter {
         uint64 seq,
         uint64 nextVersion
     ) external override {
-        requestId; seq; nextVersion;
+        requestId; seq; nextVersion; // mock: ignore context/version
         _applyDeltaUpdate(user, asset, collateralDelta, debtDelta);
     }
 
@@ -182,19 +95,7 @@ contract MockVaultRouter is IVaultRouter {
         emit UserPositionUpdated(user, asset, _userCollateral[user][asset], _userDebt[user][asset]);
     }
 
-    /// @notice 推送资产统计更新
-    function pushAssetStatsUpdate(
-        address asset,
-        uint256 totalCollateral,
-        uint256 totalDebt,
-        uint256 price
-    ) external pure override {
-        // Mock实现：记录但不做特殊处理
-        // 注意：asset、totalCollateral、totalDebt、price参数在此Mock实现中未使用，但保留以符合接口规范
-        asset; totalCollateral; totalDebt; price; // 避免未使用变量警告
-    }
-
-    /// @notice 推送资产统计更新（带上下文版本）
+    /// @notice 推送资产统计更新（严格版本：带上下文）
     function pushAssetStatsUpdate(
         address asset,
         uint256 totalCollateral,

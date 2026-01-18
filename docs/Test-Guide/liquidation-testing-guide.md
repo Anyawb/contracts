@@ -22,7 +22,6 @@ test/Vault/liquidation/
 ├── Liquidation.failure-scenarios.test.ts
 ├── LiquidationRiskManagerRegistry.test.ts
 ├── LiquidationRiskManager.graceful-degradation.test.ts
-├── LiquidationGuaranteeManager.registry.test.ts
 └── LegacyLiquidationModules.disabled.test.ts
 ```
 
@@ -46,9 +45,6 @@ pnpm -s exec hardhat test "test/Vault/liquidation/LiquidationRiskManager.gracefu
 
 - **`LiquidationRiskManager.graceful-degradation.test.ts`**
   - **目标**：验证风控只读聚合在依赖模块异常时的 graceful-degradation 行为与一致口径（bps/0-100）。
-
-- **`LiquidationGuaranteeManager.registry.test.ts`**
-  - **目标**：验证与保证金模块的注册/权限联动（按当前实现的 Registry 模块装配为准）。
 
 - **`LegacyLiquidationModules.disabled.test.ts`**
   - **目标**：防止旧模块族被误部署/误注册/误调用（防“旧入口回流”）。

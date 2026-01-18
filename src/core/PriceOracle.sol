@@ -7,10 +7,9 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
-import { IRegistryUpgradeEvents } from "../interfaces/IRegistryUpgradeEvents.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ZeroAddress, AmountMismatch } from "../errors/StandardErrors.sol";
 
 // Error definitions
@@ -30,7 +29,7 @@ error PriceOracle__Unauthorized();
 /// @dev 使用ACM进行权限控制，确保系统安全性
 /// @dev 集成 GracefulDegradation 库进行价格验证和健康检查
 /// @custom:security-contact security@example.com
-contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryUpgradeEvents {
+contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
 
     /* ============ Constants ============ */
     
@@ -81,7 +80,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         _registryAddr = initialRegistryAddr;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -190,7 +189,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         if (asset == address(0)) revert ZeroAddress();
         _configureAssetInternal(asset, coingeckoId, decimals, maxPriceAge, true, true);
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -211,7 +210,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         );
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -244,7 +243,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         emit PriceUpdated(asset, price, timestamp);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
             msg.sender,
@@ -281,7 +280,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
             msg.sender,
@@ -343,7 +342,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle, IRegistryU
         if (newImplementation == address(0)) revert ZeroAddress();
         
         // 记录升级动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,

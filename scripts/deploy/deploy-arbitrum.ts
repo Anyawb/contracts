@@ -1,7 +1,7 @@
 /**
  * Arbitrum 主网部署脚本（符合 contracts/docs/Architecture-Guide.md）
  * Arbitrum Mainnet Deployment Script
- * - 部署 Registry 核心模块（Registry + RegistryCore）
+ * - 部署 Registry（单一入口 / 单一 Proxy，Scheme A）
  * - 部署并注册核心业务与视图模块
  * - 写入 deployments/arbitrum.json 与 frontend-config/contracts-arbitrum.ts
  */
@@ -9,6 +9,10 @@
 import fs from 'fs';
 import path from 'path';
 import { loadAssetsConfig, configureAssets } from '../utils/configure-assets';
+import { initStableDeploymentOutput } from './utils/stable-output';
+
+// Must run BEFORE requiring Hardhat to prevent redraw-style output from polluting logs.
+initStableDeploymentOutput();
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const hre = require('hardhat');
@@ -74,6 +78,19 @@ async function deployProxy(name: string, args: unknown[] = [], opts: Record<stri
   return addr;
 }
 
+async function ensureFeeRouterSupportedToken(feeRouterAddr: string, token: string, label: string) {
+  if (!feeRouterAddr || feeRouterAddr === ethers.ZeroAddress) return;
+  if (!token || token === ethers.ZeroAddress) return;
+  const fr = await ethers.getContractAt('FeeRouter', feeRouterAddr);
+  const supported: boolean = await fr.isTokenSupported(token);
+  if (supported) {
+    console.log(`↪️ FeeRouter already supports ${label}: ${token}`);
+    return;
+  }
+  await (await fr.addSupportedToken(token)).wait();
+  console.log(`✅ FeeRouter added supported token (${label}) -> ${token}`);
+}
+
 /**
  * 检查环境配置
  * Check environment configuration
@@ -132,7 +149,7 @@ async function main() {
     // 1. 环境检查
     await checkEnvironment();
     
-    // 2. 部署 Registry + 核心子模块
+    // 2. 部署 Registry（Scheme A：单一入口）
     // 主网建议最小延迟 7 天（更保守）
     const MIN_DELAY = 7 * 24 * 60 * 60; // 7 days
 
@@ -140,44 +157,6 @@ async function main() {
       // UUPS 可升级合约，使用 Proxy 部署并初始化
       deployed.Registry = await deployProxy('Registry', [MIN_DELAY, deployer.address, deployer.address, deployer.address]);
       save(deployed);
-    }
-
-    if (!deployed.RegistryCore) {
-      // 关键：将 RegistryCore 的 admin 设为 Registry 地址
-      deployed.RegistryCore = await deployProxy('RegistryCore', [deployed.Registry, MIN_DELAY]);
-      save(deployed);
-      const registry = await ethers.getContractAt('Registry', deployed.Registry);
-      await (await registry.setRegistryCore(deployed.RegistryCore)).wait();
-      console.log('🔗 RegistryCore linked to Registry');
-    }
-
-    // 可选：部署并挂载升级/治理子模块
-    if (!deployed.RegistryUpgradeManager) {
-      // NOTE: RegistryUpgradeManager is NOT UUPSUpgradeable (transparent proxy required).
-      deployed.RegistryUpgradeManager = await deployProxy('RegistryUpgradeManager', [deployed.Registry, deployer.address], {
-        kind: 'transparent',
-      });
-      save(deployed);
-      try {
-        const registry = await ethers.getContractAt('Registry', deployed.Registry);
-        await (await registry.setUpgradeManager(deployed.RegistryUpgradeManager)).wait();
-        console.log('🔗 RegistryUpgradeManager linked');
-      } catch (error) {
-        console.log('⚠️ RegistryUpgradeManager linking failed:', error);
-      }
-    }
-
-    if (!deployed.RegistryAdmin) {
-      // NOTE: RegistryAdmin is NOT UUPSUpgradeable (transparent proxy required).
-      deployed.RegistryAdmin = await deployProxy('RegistryAdmin', [deployer.address], { kind: 'transparent' });
-      save(deployed);
-      try {
-        const registry = await ethers.getContractAt('Registry', deployed.Registry);
-        await (await registry.setRegistryAdmin(deployed.RegistryAdmin)).wait();
-        console.log('🔗 RegistryAdmin linked');
-      } catch (error) {
-        console.log('⚠️ RegistryAdmin linking failed:', error);
-      }
     }
 
     // 部署动态模块键注册表
@@ -193,6 +172,17 @@ async function main() {
       } catch (error) {
         console.log('⚠️ RegistryDynamicModuleKey deployment failed:', error);
       }
+    }
+
+    // 绑定 dynamic module key registry 到 Registry（可选）
+    try {
+      if (deployed.Registry && deployed.RegistryDynamicModuleKey) {
+        const registry = await ethers.getContractAt('Registry', deployed.Registry);
+        await (await registry.setDynamicModuleKeyRegistry(deployed.RegistryDynamicModuleKey)).wait();
+        console.log('✅ Dynamic module key registry set in Registry');
+      }
+    } catch (error) {
+      console.log('⚠️ Failed to set dynamic module key registry:', error);
     }
 
     // 3. 部署核心/视图/账本与支撑模块
@@ -239,7 +229,7 @@ async function main() {
           await (await acm.grantRole(role, adminAddress)).wait();
           console.log(`🔑 Granted ${r} to ${adminAddress}`);
         } catch (e) {
-          // 角色已存在会 revert: RoleAlreadyGranted()，忽略
+          // 角色已存在会 revert: AccessControlManager__RoleAlreadyGranted()，忽略
           console.log(`⚠️ Role ${r} already granted or failed:`, e);
         }
       }
@@ -391,6 +381,8 @@ async function main() {
           deployed.SettlementToken = usdc.address;
           save(deployed);
         }
+        // FeeRouter 必须显式支持 settlementToken，否则分发会 TokenNotSupported（Architecture-Guide SSOT）
+        await ensureFeeRouterSupportedToken(deployed.FeeRouter, deployed.SettlementToken, 'SettlementToken');
         deployed.VaultLendingEngine = await deployProxy('src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine', [deployed.PriceOracle, deployed.SettlementToken, deployed.Registry]);
         save(deployed);
       } catch (error) {
@@ -408,28 +400,7 @@ async function main() {
       }
     }
 
-    // VaultStorage + VaultBusinessLogic + VaultRouter + VaultCore
-    if (!deployed.VaultStorage) {
-      const assets = loadAssetsConfig(ARBITRUM_CONFIG.name, ARBITRUM_CONFIG.chainId);
-      const usdc = assets.find((a) => a.coingeckoId === 'usd-coin');
-      if (!usdc || !usdc.address) {
-        throw new Error('缺少 USDC/Settlement Token 配置，请在 assets.arbitrum.json 配置 usd-coin 地址');
-      }
-      // RWA Token：主网必须使用真实 RWA Token 地址
-      if (!deployed.RWAToken) {
-        const rwa = assets.find((a) => a.coingeckoId && a.coingeckoId !== 'usd-coin');
-        if (!rwa || !rwa.address) throw new Error('缺少 RWA Token 配置，请在 assets.arbitrum.json 添加一个 RWA 资产地址');
-        deployed.RWAToken = rwa.address;
-        save(deployed);
-      }
-      if (!deployed.SettlementToken) {
-        deployed.SettlementToken = usdc.address;
-        save(deployed);
-      }
-      deployed.VaultStorage = await deployProxy('VaultStorage', [deployed.Registry, deployed.RWAToken, deployed.SettlementToken]);
-      save(deployed);
-    }
-
+    // VaultBusinessLogic + VaultRouter + VaultCore
     if (!deployed.VaultBusinessLogic) {
       if (!deployed.SettlementToken) {
         const assets = loadAssetsConfig(ARBITRUM_CONFIG.name, ARBITRUM_CONFIG.chainId);
@@ -786,9 +757,6 @@ async function main() {
     const registry = await ethers.getContractAt('Registry', deployed.Registry);
 
     const NAME_TO_KEY: Record<string, string> = {
-      RegistrySignatureManager: 'REGISTRY_SIGNATURE_MANAGER',
-      RegistryHistoryManager: 'REGISTRY_HISTORY_MANAGER',
-      RegistryBatchManager: 'REGISTRY_BATCH_MANAGER',
       RegistryHelper: 'REGISTRY_HELPER',
       // ModuleKeys.KEY_DYNAMIC_MODULE_REGISTRY = keccak256("DYNAMIC_MODULE_REGISTRY")
       RegistryDynamicModuleKey: 'DYNAMIC_MODULE_REGISTRY',
@@ -806,7 +774,6 @@ async function main() {
       VaultBusinessLogic: 'VAULT_BUSINESS_LOGIC',
       VaultCore: 'VAULT_CORE',
       // VaultRouter: 'VAULT_VIEW', // 架构建议通过 KEY_VAULT_CORE 解析，不强依赖
-      VaultStorage: 'VAULT_STORAGE',
       // VaultLendingEngine is the ledger engine -> ModuleKeys.KEY_LE = keccak256("LENDING_ENGINE")
       VaultLendingEngine: 'LENDING_ENGINE',
       EarlyRepaymentGuaranteeManager: 'EARLY_REPAYMENT_GUARANTEE_MANAGER',
@@ -871,7 +838,6 @@ async function main() {
       'LendingEngineView',
       'VaultBusinessLogic',
       'VaultCore',
-      'VaultStorage',
       'HealthView',
       'SystemView',
       'StatisticsView',
@@ -986,6 +952,11 @@ async function main() {
     const frontendContent = `// 自动生成的合约配置文件 - Arbitrum Mainnet
 // Auto-generated contract configuration file - Arbitrum Mainnet
 // 生成时间 Generated at: ${new Date().toISOString()}
+//
+// Naming:
+// - OrderEngine = core/LendingEngine (Registry KEY_ORDER_ENGINE)
+// - VaultLendingEngine = debt ledger engine (Registry KEY_LE)
+// - LendingEngine is a legacy alias of OrderEngine (kept for backward compatibility)
 
 export const CONTRACT_ADDRESSES = {
   ${Object.entries(deployed).map(([k, v]) => `  ${k}: '${v}'`).join(',\n')}

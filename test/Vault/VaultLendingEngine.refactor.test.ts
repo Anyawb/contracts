@@ -753,7 +753,9 @@ describe('VaultLendingEngine – refactor regression', function () {
       await expect(
         vaultCoreModule.borrow(user.address, debtAsset, 50, 0, 0)
       ).to.emit(vaultRouter, 'UserPositionUpdated')
-        .withArgs(user.address, debtAsset, 200, 50); // collateral: 200, debt: 50
+        // NOTE: In this test suite we use MockVaultRouter, and LendingEngine pushes only debt delta (collateralDelta=0).
+        // Collateral is NOT pushed to the mock view here, so the mock's collateral stays 0.
+        .withArgs(user.address, debtAsset, 0, 50); // collateral: 0 (mock), debt: 50
     });
 
     it('should push position update to VaultRouter on repay', async function () {
@@ -763,7 +765,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       await expect(
         vaultCoreModule.repay(user.address, debtAsset, 20)
       ).to.emit(vaultRouter, 'UserPositionUpdated')
-        .withArgs(user.address, debtAsset, 200, 30); // collateral: 200, debt: 30
+        .withArgs(user.address, debtAsset, 0, 30); // collateral: 0 (mock), debt: 30
     });
 
     it('should push health status on borrow', async function () {

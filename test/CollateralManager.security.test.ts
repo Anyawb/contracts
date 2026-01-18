@@ -14,6 +14,7 @@ import { ModuleKeys } from '../frontend-config/moduleKeys';
 
 describe('CollateralManager / PositionView – migration-aligned', function () {
   const ACTION_UPGRADE_MODULE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
+  const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
 
   async function deployFixture() {
     const [admin, routerEOA, user, liquidator] = await ethers.getSigners();
@@ -71,6 +72,9 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
     await registry.setModule(ModuleKeys.KEY_LE, admin.address);
     // Liquidation manager (for withdrawCollateralTo paths)
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, liquidator.address);
+
+    // Strong constraint (Architecture-Guide SSOT): seizure path must be role-gated at ledger layer.
+    await acm.grantRole(ACTION_LIQUIDATE, liquidator.address);
 
     // Configure oracle supported assets + price
     const nowTs = await time.latest();

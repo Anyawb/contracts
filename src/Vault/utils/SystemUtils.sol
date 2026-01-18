@@ -1,28 +1,44 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title SystemUtils
-/// @notice 系统状态计算工具库 - 提供系统级计算相关的函数
-/// @dev 包含系统健康度、统计信息等计算逻辑
-/// @custom:security-contact security@example.com
+import { ArrayLengthMismatch } from "../../errors/StandardErrors.sol";
+
+/**
+ * @title SystemUtils
+ * @notice Stateless system-level helpers for scores, rates, and cache timing.
+ * @dev Security:
+ * - Library functions are pure/view only; no external calls.
+ * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
+ *
+ * @custom:security-contact security@example.com
+ */
 library SystemUtils {
+    uint256 internal constant _BPS_DENOMINATOR = 10_000;
     
-    /// @notice 计算系统健康评分
-    /// @param totalUsers 总用户数
-    /// @param warningUsers 预警用户数
-    /// @param criticalUsers 危险用户数
-    /// @param averageHealthFactor 平均健康因子
-    /// @return healthScore 系统健康评分 (0-100)
+    /**
+     * @notice Compute a system health score in [0..100].
+     * @dev Reverts if:
+     *      - arithmetic overflows (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Pure aggregation only; does not read external state.
+     *
+     * @param totalUsers Total number of users (count).
+     * @param warningUsers Number of users in warning state (count).
+     * @param criticalUsers Number of users in critical state (count).
+     * @param averageHealthFactorBps Average health factor in bps (10_000 = 100%).
+     * @return healthScore System score in [0..100] (higher is healthier).
+     */
     function calculateSystemHealthScore(
         uint256 totalUsers,
         uint256 warningUsers,
         uint256 criticalUsers,
-        uint256 averageHealthFactor
+        uint256 averageHealthFactorBps
     ) internal pure returns (uint256 healthScore) {
-        if (totalUsers == 0) return 100; // 无用户时认为系统健康
+        if (totalUsers == 0) return 100; // No users => treat as healthy.
         
         // 基础分数：基于平均健康因子
-        uint256 baseScore = _calculateBaseHealthScore(averageHealthFactor);
+        uint256 baseScore = _calculateBaseHealthScore(averageHealthFactorBps);
         
         // 风险用户比例扣分
         uint256 riskPenalty = _calculateRiskPenalty(totalUsers, warningUsers, criticalUsers);
@@ -35,57 +51,99 @@ library SystemUtils {
         }
     }
     
-    /// @notice 计算基础健康分数
-    /// @param averageHealthFactor 平均健康因子
-    /// @return baseScore 基础健康分数
-    function _calculateBaseHealthScore(uint256 averageHealthFactor) internal pure returns (uint256 baseScore) {
-        if (averageHealthFactor >= 12000) return 100;      // ≥120%: 100分
-        if (averageHealthFactor >= 11000) return 90;       // ≥110%: 90分
-        if (averageHealthFactor >= 10500) return 80;       // ≥105%: 80分
-        if (averageHealthFactor >= 10000) return 70;       // ≥100%: 70分
-        if (averageHealthFactor >= 9500) return 50;        // ≥95%: 50分
-        return 30;                                         // <95%: 30分
+    /**
+     * @notice Compute a base score from average health factor.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Pure mapping only.
+     *
+     * @param averageHealthFactorBps Average health factor in bps.
+     * @return baseScore Base score in [0..100].
+     */
+    function _calculateBaseHealthScore(uint256 averageHealthFactorBps) internal pure returns (uint256 baseScore) {
+        if (averageHealthFactorBps >= 12000) return 100; // >=120% => 100
+        if (averageHealthFactorBps >= 11000) return 90;  // >=110% => 90
+        if (averageHealthFactorBps >= 10500) return 80;  // >=105% => 80
+        if (averageHealthFactorBps >= 10000) return 70;  // >=100% => 70
+        if (averageHealthFactorBps >= 9500) return 50;   // >=95%  => 50
+        return 30; // <95% => 30
     }
     
-    /// @notice 计算风险用户扣分
-    /// @param totalUsers 总用户数
-    /// @param warningUsers 预警用户数
-    /// @param criticalUsers 危险用户数
-    /// @return riskPenalty 风险扣分
+    /**
+     * @notice Compute the penalty based on risky user ratios.
+     * @dev Reverts if:
+     *      - totalUsers == 0 would divide by zero (caller prevents this)
+     *      - arithmetic overflows (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Pure math only.
+     *
+     * @param totalUsers Total number of users (must be non-zero).
+     * @param warningUsers Number of users in warning state.
+     * @param criticalUsers Number of users in critical state.
+     * @return riskPenalty Penalty points to subtract from base score.
+     */
     function _calculateRiskPenalty(
         uint256 totalUsers,
         uint256 warningUsers,
         uint256 criticalUsers
     ) internal pure returns (uint256 riskPenalty) {
-        uint256 warningPenalty = (warningUsers * 5) / totalUsers;   // 预警用户每个扣5分
-        uint256 criticalPenalty = (criticalUsers * 15) / totalUsers; // 危险用户每个扣15分
+        uint256 warningPenalty = (warningUsers * 5) / totalUsers; // Warning users: -5 each (ratio-based)
+        uint256 criticalPenalty = (criticalUsers * 15) / totalUsers; // Critical users: -15 each (ratio-based)
         
         return warningPenalty + criticalPenalty;
     }
     
-    /// @notice 计算利用率
-    /// @param used 已使用量
-    /// @param total 总量
-    /// @return utilization 利用率（单位：bps）
-    function calculateUtilization(uint256 used, uint256 total) internal pure returns (uint256 utilization) {
+    /**
+     * @notice Compute utilization as bps (used / total).
+     * @dev Reverts if:
+     *      - used * 10_000 overflows (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Pure math only.
+     *
+     * @param used Used amount (any unit).
+     * @param total Total amount (same unit as used).
+     * @return utilizationBps Utilization in bps; returns 0 if total == 0.
+     */
+    function calculateUtilization(uint256 used, uint256 total) internal pure returns (uint256 utilizationBps) {
         if (total == 0) return 0;
-        return (used * 10000) / total;
+        return (used * _BPS_DENOMINATOR) / total;
     }
     
-    /// @notice 计算增长率
-    /// @param current 当前值
-    /// @param previous 之前值
-    /// @return growthRate 增长率（单位：bps）
-    function calculateGrowthRate(uint256 current, uint256 previous) internal pure returns (uint256 growthRate) {
+    /**
+     * @notice Compute growth rate as bps ((current - previous) / previous).
+     * @dev Reverts if:
+     *      - subtraction underflows (Solidity ^0.8.x), though guarded by the comparison
+     *      - multiplication overflows (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Pure math only.
+     *
+     * @param current Current value (any unit).
+     * @param previous Previous value (same unit as current).
+     * @return growthRateBps Growth rate in bps; returns 0 if previous == 0 or current < previous.
+     */
+    function calculateGrowthRate(uint256 current, uint256 previous) internal pure returns (uint256 growthRateBps) {
         if (previous == 0) return 0;
-        if (current < previous) return 0; // 负增长返回0
+        if (current < previous) return 0; // Negative growth => 0 (clamped)
         
-        return ((current - previous) * 10000) / previous;
+        return ((current - previous) * _BPS_DENOMINATOR) / previous;
     }
     
-    /// @notice 计算平均值
-    /// @param values 数值数组
-    /// @return average 平均值
+    /**
+     * @notice Compute the arithmetic mean of an array.
+     * @dev Reverts if:
+     *      - sum overflows (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Pure aggregation only.
+     *
+     * @param values Array of values.
+     * @return average Floor(sum(values) / values.length); returns 0 if empty.
+     */
     function calculateAverage(uint256[] memory values) internal pure returns (uint256 average) {
         if (values.length == 0) return 0;
         
@@ -97,15 +155,25 @@ library SystemUtils {
         return sum / values.length;
     }
     
-    /// @notice 计算加权平均值
-    /// @param values 数值数组
-    /// @param weights 权重数组
-    /// @return weightedAverage 加权平均值
+    /**
+     * @notice Compute a weighted average of values with corresponding weights.
+     * @dev Reverts if:
+     *      - values.length != weights.length (ArrayLengthMismatch)
+     *      - arithmetic overflows (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Pure aggregation only.
+     *
+     * @param values Array of values.
+     * @param weights Array of weights (same length as values).
+     * @return weightedAverage Floor(sum(values[i] * weights[i]) / sum(weights));
+     *         returns 0 if values empty or totalWeight == 0.
+     */
     function calculateWeightedAverage(
         uint256[] memory values,
         uint256[] memory weights
     ) internal pure returns (uint256 weightedAverage) {
-        require(values.length == weights.length, "Arrays length mismatch");
+        if (values.length != weights.length) revert ArrayLengthMismatch(values.length, weights.length);
         if (values.length == 0) return 0;
         
         uint256 weightedSum = 0;
@@ -120,22 +188,45 @@ library SystemUtils {
         return weightedSum / totalWeight;
     }
     
-    /// @notice 检查缓存是否过期
-    /// @param cacheTimestamp 缓存时间戳
-    /// @param maxAge 最大缓存时间
-    /// @return isExpired 是否过期
+    /**
+     * @notice Return whether a cache entry is expired.
+     * @dev Reverts if:
+     *      - cacheTimestamp > block.timestamp would underflow (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Reads block timestamp; do not use for critical security decisions.
+     *
+     * @param cacheTimestamp Cache timestamp (seconds).
+     * @param maxAge Maximum allowed age (seconds).
+     * @return isExpired True if (block.timestamp - cacheTimestamp) > maxAge.
+     */
     function isCacheExpired(uint256 cacheTimestamp, uint256 maxAge) internal view returns (bool isExpired) {
+        // solhint-disable-next-line not-rely-on-time
         return block.timestamp - cacheTimestamp > maxAge;
     }
     
-    /// @notice 计算缓存剩余时间
-    /// @param cacheTimestamp 缓存时间戳
-    /// @param maxAge 最大缓存时间
-    /// @return remainingTime 剩余时间
-    function getCacheRemainingTime(uint256 cacheTimestamp, uint256 maxAge) internal view returns (uint256 remainingTime) {
+    /**
+     * @notice Get the remaining cache time before expiration.
+     * @dev Reverts if:
+     *      - cacheTimestamp > block.timestamp would underflow (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Reads block timestamp; do not use for critical security decisions.
+     *
+     * @param cacheTimestamp Cache timestamp (seconds).
+     * @param maxAge Maximum allowed age (seconds).
+     * @return remainingTime Remaining time in seconds; returns 0 if already expired.
+     */
+    function getCacheRemainingTime(uint256 cacheTimestamp, uint256 maxAge)
+        internal
+        view
+        returns (uint256 remainingTime)
+    {
+        // solhint-disable-next-line not-rely-on-time
         if (block.timestamp - cacheTimestamp >= maxAge) {
             return 0;
         }
+        // solhint-disable-next-line not-rely-on-time
         return maxAge - (block.timestamp - cacheTimestamp);
     }
 } 

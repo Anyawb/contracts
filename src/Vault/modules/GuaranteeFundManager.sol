@@ -10,14 +10,13 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { AmountIsZero, ZeroAddress } from "../../errors/StandardErrors.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { VaultTypes } from "../VaultTypes.sol";
+import { SystemEvents } from "../SystemEvents.sol";
 import { Registry } from "../../registry/Registry.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
 import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../constants/DataPushTypes.sol";
+import { IVaultCoreMinimal } from "../../interfaces/IVaultCoreMinimal.sol";
 
-/// @notice 最小化 VaultCore 接口（用于解析 View/Statistics 地址）
-interface IVaultCoreMinimal { function viewContractAddrVar() external view returns (address); }
 /// @notice 最小化 StatisticsView 接口（用于推送保证金统计）
 interface IStatisticsViewMinimal { function pushGuaranteeUpdate(address user, address asset, uint256 amount, bool isLocked) external; }
 
@@ -137,7 +136,7 @@ contract GuaranteeFundManager is
         // 升级编排相关参数不再在本模块持有
         
         // 发出标准化动作事件（统一数据推送架构）
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -289,7 +288,7 @@ contract GuaranteeFundManager is
         emit GuaranteeLocked(user, asset, amount, block.timestamp);
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_DEPOSIT,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_DEPOSIT),
             msg.sender,
@@ -329,7 +328,7 @@ contract GuaranteeFundManager is
             emit GuaranteeReleased(user, asset, amount, block.timestamp);
             
             // 发出标准化动作事件
-            emit VaultTypes.ActionExecuted(
+            emit SystemEvents.ActionExecuted(
                 ActionKeys.ACTION_WITHDRAW,
                 ActionKeys.getActionKeyString(ActionKeys.ACTION_WITHDRAW),
                 msg.sender,
@@ -366,7 +365,7 @@ contract GuaranteeFundManager is
             emit GuaranteeForfeited(user, asset, currentGuarantee, feeReceiver, block.timestamp);
             
             // 发出标准化动作事件
-            emit VaultTypes.ActionExecuted(
+            emit SystemEvents.ActionExecuted(
                 ActionKeys.ACTION_LIQUIDATE,
                 ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
                 msg.sender,
@@ -436,7 +435,7 @@ contract GuaranteeFundManager is
             _pushGuaranteeUpdateToView(user, asset, platformFee, false);
         }
 
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_REPAY,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY),
             msg.sender,
@@ -469,7 +468,7 @@ contract GuaranteeFundManager is
         );
         _pushGuaranteeUpdateToView(user, asset, amount, false);
 
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_LIQUIDATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
             msg.sender,
@@ -517,7 +516,7 @@ contract GuaranteeFundManager is
             _pushGuaranteeUpdateToView(user, asset, amt, false);
         }
 
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_LIQUIDATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
             msg.sender,
@@ -559,7 +558,7 @@ contract GuaranteeFundManager is
         }
         
         // 发出标准化批量动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_BATCH_DEPOSIT,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_DEPOSIT),
             msg.sender,
@@ -616,7 +615,7 @@ contract GuaranteeFundManager is
         }
         
         // 发出标准化批量动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_BATCH_WITHDRAW,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_WITHDRAW),
             msg.sender,

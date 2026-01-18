@@ -6,10 +6,13 @@ pragma solidity ^0.8.20;
  * @author RWA Lending Platform
  * @notice Provides efficient module address cache management with expiration checking, batch operations,
  *         enumerability, and version control.
- * @dev Supports module address caching, expiration checking, batch operations, enumerability and version control.
- * @dev Includes complete access control and security checks.
- * @dev Architecture alignment: centralizes module address resolution for liquidation modules, supports graceful
- *      degradation via time rollback tolerance, and enforces cache expiration to prevent stale data usage.
+ * @dev Security:
+ * - Library contains internal/view helpers; callers must gate privileged writes at the module level.
+ * - Cache timestamps rely on block.timestamp; this is for freshness checks, not for critical security decisions.
+ *
+ * Architecture alignment:
+ * - Centralizes module address resolution for liquidation modules.
+ * - Supports time-rollback tolerance (optional) and expiration checks to prevent stale cache usage.
  */
 library ModuleCache {
     /* ============ Custom Errors ============ */
@@ -802,7 +805,7 @@ library ModuleCache {
      * @param self Cache storage structure
      * @param callerAddr Caller address (for access control and event emission)
      */
-    function clearCache(ModuleCacheStorage storage self, address callerAddr    ) internal {
+    function clearCache(ModuleCacheStorage storage self, address callerAddr) internal {
         // Access control check
         _checkAccessControl(self, "clearCache", callerAddr);
         

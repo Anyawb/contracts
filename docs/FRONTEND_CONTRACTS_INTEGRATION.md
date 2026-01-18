@@ -19,6 +19,7 @@
 11. [接口变更与迁移指南（2025-09）](#接口变更与迁移指南2025-09)
 12. [缓存推送失败重试（CacheUpdateFailed）前端配合](#缓存推送失败重试cacheupdatefailed前端配合)
 13. [资金链（Funds Flow / SSOT）前端配合（2026-01）](#资金链funds-flow--ssot前端配合2026-01)
+14. [AI Credits 计费规范（按次计费：链上购买 + 链下扣次 + 多租户对账）](#ai-credits-计费规范按次计费链上购买--链下扣次--多租户对账)
 
 ## 🔧 环境准备
 
@@ -330,8 +331,7 @@ cat scripts/deployments/vault-system.json
   "VaultAdmin": "0x...",
   "VaultRouter": "0x...",
   "VaultModules": "0x...",
-  "StatisticsView": "0x...",
-  "VaultAccess": "0x..."
+  "StatisticsView": "0x..."
 }
 ```
 
@@ -588,6 +588,7 @@ async function repay(orderId: bigint, debtAsset: string, amount: bigint) {
 async function settleOrLiquidate(orderId: bigint) {
   // 1) keeper/机器人调用 SettlementManager.settleOrLiquidate(orderId)（SSOT）
   // 2) 调用者必须具备 ACTION_LIQUIDATE 权限，否则会 revert（常见：MissingRole()）
+  // 3) 重要约束：keeper/liquidator 必须与 borrower 不同；否则清算扣押路径会被 CM 拒绝（CollateralManager__UnauthorizedAccess）
   //
   // ActionKey（与 src/constants/ActionKeys.sol 对齐）：
   //   bytes32 ACTION_LIQUIDATE = keccak256("LIQUIDATE")
@@ -1235,6 +1236,7 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
 - [Hardhat 配置文档](https://hardhat.org/docs)
 - [Ethers.js 文档](https://docs.ethers.org/)
 - [Arbitrum 文档](https://developer.arbitrum.io/)
+- [AI Credits 计费规范（按次计费）](./Usage-Guide/AI-Credits-Billing-Guide.md)
 
 ## 🎯 总结
 
@@ -1340,6 +1342,31 @@ export async function deposit(asset: string, amount: bigint) {
 
 > 本节是 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 的前端落地版：只写“前端需要做什么”，不重复合约内部实现细节。
 
+## 🧾 AI Credits 计费规范（按次计费：链上购买 + 链下扣次 + 多租户对账）
+
+如果你的产品包含 AI 能力，并且希望使用“按次计费/次数包（USDC/USDT 购买）+ 链下幂等扣次 + 链上可审计余额（B）”的组合（不牺牲 AI 调用体验），请阅读：
+
+- [AI-Credits-Billing-Guide.md（统一规范）](./Usage-Guide/AI-Credits-Billing-Guide.md)
+
+### 0) 资产列表 / Token List 的 SSOT 口径（非常重要）
+
+前端经常会遇到三类“看起来像 token list”的需求，但它们的**权威来源不同**，也**不保证完全相同**：
+
+- **资产白名单（允许参与抵押/借贷/账本写入的资产集合）**：
+  - SSOT：`AssetWhitelist.getAllowedAssets()`
+  - 用途：前端的“可选抵押资产/可选借贷资产”候选集（写入口前的前置校验）
+- **有价格的资产集合（价格系统支持的资产集合）**：
+  - SSOT：`PriceOracle.getSupportedAssets()`（或走 View：`ValuationOracleView` / `BatchView` 进行批量查询）
+  - 用途：前端的“可估值资产”集合（价格展示、健康因子、清算风险提示等）
+- **会进入费用分发的 token 集合（FeeRouter 支持列表）**：
+  - SSOT：`FeeRouter.getSupportedTokens()`
+  - 用途：任何会走 `FeeRouter.distributeNormal/distributeDynamic/batchDistribute` 的 token 必须在此列表里，否则会 `TokenNotSupported`（见架构指南）
+
+推荐实践（前端展示层）：
+- **展示层 token universe（并集）**：`union(allowedAssets, supportedAssets, feeSupportedTokens)`，用于“系统支持资产总览/多 token 余额对账/调试面板”
+- **写入口选择（交集/过滤）**：例如抵押存入只允许 `allowedAssets`；展示估值必须同时满足“有价格且价格有效”
+- **不要假设三者一致**：部署/治理配置差异、dirty state、增量上新流程都会造成短时间不一致；UI 侧必须容错并清晰提示
+
 ### 1) 抵押物资金链（Collateral Flow）
 
 - **approve（必须）**：`ERC20(collateralAsset).approve(KEY_CM(CollateralManager), amount)`
@@ -1379,12 +1406,148 @@ export async function deposit(asset: string, amount: bigint) {
 - **默认入口（keeper 推荐，SSOT）**：`SettlementManager.settleOrLiquidate(orderId)`（需要 `ACTION_LIQUIDATE`）
 - **用户侧前端**：
   - 不应提供“直接清算”按钮给普通用户
+  - 应校验 `keeper != borrower`，否则提示“清算需由第三方 keeper 执行”
   - 只读展示与事件订阅以 `LiquidatorView`/`LiquidationRiskManager`/`HealthView` 为准
+
+#### 5.1 重要：`SettlementManager__NoCollateral` 不一定代表“用户没抵押”
+
+我们在真实链路测试中观察到（非稳定币抵押 + `COLLATERAL_PRICE_MODE=stale`）：
+
+`PriceOracle.getPrice` stale revert → `PositionView.getAssetValue` catch 返回 0 → `SettlementManager` 选不出 `bestAsset` → `SettlementManager__NoCollateral()`
+
+因此，对前端/keeper UI 来说：
+- `NoCollateral` 可能是 **估值不可用 / 价格过期 / 资产未配置价格**导致抵押价值为 0（而不是账本里没有抵押）
+- 不能直接把 `NoCollateral` 翻译成“你没有抵押物”，否则会误导用户与运营
+
+#### 5.2 前端/keeper UI 的推荐排障与提示（按 SSOT 分层）
+
+当清算失败且错误包含 `SettlementManager__NoCollateral`（或你捕获到相同语义的 revert）时：
+
+- **先查账本是否有抵押（数量口径）**（不依赖价格）：
+  - `CollateralManager.getUserCollateralAssets(user)` + `CollateralManager.getCollateral(user, asset)`
+- **再查价格是否可用（价格口径）**：
+  - 推荐：`ValuationOracleView.isPriceValid(asset)`（或 `BatchView.batchGetAssetPrices` 批量查）
+  - 同时展示 `getAssetPrice` 返回的 timestamp（提示 stale）
+- **最后给出 UI 提示文案**（建议）：
+  - “清算失败：系统无法对抵押资产估值（价格可能过期或未配置）。请刷新价格/检查预言机状态后重试。”
+
+这套提示能在 dirty state / 配置差异下仍准确解释现象。
+
+#### 5.3 前端如何“精准识别” custom error（包括 Hardhat/节点无法解码的情况）
+
+在部分环境里你可能会遇到：
+- 报错信息只包含 `unrecognized custom error (return data: 0x66e24701)`，**没有错误名**
+- 这时仅靠 `error.message.includes("SettlementManager__NoCollateral")` 会失败
+
+推荐做法（ethers v6）：
+- **优先**：用合约的 `Interface` 去 `parseError(revertData)`（需要 ABI/TypeChain 包含 `error ...` 定义）
+- **兜底**：提取 `revertData` 的前 4 字节 selector（如 `0x66e24701`），用 **selector→语义** 的映射表识别
+
+示例（只展示核心逻辑）：
+
+```ts
+import { Interface, id } from "ethers";
+
+// 1) 有 ABI 时：直接解析
+const settlementIface = new Interface([
+  "error SettlementManager__NoCollateral()",
+  "error SettlementManager__NotLiquidatable()",
+  "error SettlementManager__DebtNotCleared()",
+  // ...按需补全
+]);
+
+export function decodeCustomError(e: any) {
+  const msg = String(e?.message ?? e);
+  const revertData: string | undefined =
+    (e?.data as string) ||
+    (e?.error?.data as string) ||
+    (e?.info?.error?.data as string) ||
+    undefined;
+
+  if (revertData?.startsWith("0x")) {
+    try {
+      const parsed = settlementIface.parseError(revertData);
+      return { kind: "named", name: parsed?.name, signature: parsed?.signature };
+    } catch {
+      // 2) 兜底：selector
+      const selector = revertData.slice(0, 10).toLowerCase();
+      const NO_COLLATERAL = id("SettlementManager__NoCollateral()").slice(0, 10).toLowerCase();
+      if (selector === NO_COLLATERAL) return { kind: "selector", name: "SettlementManager__NoCollateral", selector };
+      return { kind: "selector", name: "UnknownCustomError", selector };
+    }
+  }
+
+  // 最差情况：只有 message
+  return { kind: "message", message: msg };
+}
+```
+
+注意：
+- 如果你希望“精准识别”，前端应尽量使用 **TypeChain 生成的工厂/ABI**（让 custom error 进入 ABI）
+- 当无法解析时，至少要保留 selector（例如上报 Sentry/日志），便于后续补全映射
 
 ### 6) 费用与分账（Fee Flow）
 
 - **写入侧 SSOT**：费用类资金统一由 `FeeRouter` 路由与分发（前端通常不直接调用写入口）
 - **读侧（推荐）**：`FeeRouterView` + 订阅 `DataPushed`
+
+#### 6.1 重要：`platformTreasury` 与 `ecosystemVault` 可能相同（dirty state / 部署配置差异）
+
+我们在本地（非清洁/dirty）环境实际跑出：`platformTreasury == ecosystemVault`。这种配置并不违反协议，但会导致一个常见误区：
+
+- 如果你用“分别看两个地址余额变化（balance delta）”来推导 platform/eco 的拆分，
+  - 你会看到 **两个 delta 都等于总额**（因为其实是同一个地址收到两笔转账/同一笔总额）
+  - 从余额 delta 无法区分 platform/eco 的拆分比例
+
+结论（必须写清楚）：
+- **前端展示 platform/eco 拆分时，不要用余额 delta 推导**  
+- **拆分权威口径是 SSOT：`FeeDistributed` 事件 / `FeeRouterView` 推送统计**
+
+#### 6.2 前端如何“正确展示拆分”（推荐两种实现）
+
+**方案 A：基于交易回执解析 `FeeDistributed`（强一致，适合“本次交易详情页”）**
+
+```ts
+import { Interface } from "ethers";
+
+const feeRouterIface = new Interface([
+  "event FeeDistributed(address indexed token, uint256 platformAmount, uint256 ecoAmount)",
+]);
+
+export function parseFeeDistributed(receipt: any, feeRouterAddr: string, tokenAddr: string) {
+  const target = tokenAddr.toLowerCase();
+  const fr = feeRouterAddr.toLowerCase();
+  for (const log of receipt.logs) {
+    if ((log.address ?? "").toLowerCase() !== fr) continue;
+    try {
+      const parsed = feeRouterIface.parseLog(log);
+      if (parsed?.name !== "FeeDistributed") continue;
+      const token = String(parsed.args.token).toLowerCase();
+      if (token !== target) continue;
+      return {
+        platformAmount: BigInt(parsed.args.platformAmount),
+        ecoAmount: BigInt(parsed.args.ecoAmount),
+      };
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+```
+
+**方案 B：基于 `FeeRouterView` / `DataPushed` 推送统计（适合“账户级历史/全局统计”）**
+
+- 订阅 `DataPushed(bytes32 dataTypeHash, bytes payload)`：
+  - `USER_FEE`（用户级费用记录）
+  - `GLOBAL_FEE_STATS`（全局分发次数/分发总额）
+- 或直接调用 `FeeRouterView` 的只读接口（如果你的前端不做链上事件索引）
+
+#### 6.3 多租户/多环境的额外建议（避免 SSOT 漂移）
+
+- 永远以 **Registry 解析出的模块地址**为准（FeeRouter/FeeRouterView/SettlementManager/各 View），不要硬编码“某个合约地址表”作为权威来源
+- 费用拆分展示要容错：
+  - 当 `platformTreasury == ecosystemVault` 时，UI 可以提示“平台与生态金库为同一地址（部署配置）”，但拆分金额仍以事件/统计展示
 
 ## 🔁 接口变更与迁移指南（2025-09）
 
@@ -1487,8 +1650,39 @@ provider.on({ topics: [iface.getEvent("DataPushed").topic] }, (log) => {
 | `POSITION_DATA_UPDATE` | `CacheOptimizedView` | `(address user, address asset, uint256 collateral, uint256 debt)` |
 | `GLOBAL_STATS_UPDATE` | `CacheOptimizedView` | `(bytes32 dataKey, uint256 value)` |
 | `GLOBAL_DEGRADATION` | `DegradationAdminView` | `(GlobalDegradationStatsMirror)` |
+| `ASSET_WHITELIST_ADDED` | `AssetWhitelist` | `(address asset, address actor, uint256 ts)` |
+| `ASSET_WHITELIST_REMOVED` | `AssetWhitelist` | `(address asset, address actor, uint256 ts)` |
+| `ASSET_WHITELIST_BATCH_ADDED` | `AssetWhitelist` | `(address[] assets, address actor, uint256 addedCount, uint256 totalCount, uint256 ts)` |
+| `ASSET_WHITELIST_BATCH_REMOVED` | `AssetWhitelist` | `(address[] assets, address actor, uint256 removedCount, uint256 totalCount, uint256 ts)` |
+| `ASSET_WHITELIST_INFO_UPDATED` | `AssetWhitelist` | `(address asset, address actor, uint256 ts)` |
+| `ASSET_WHITELIST_REGISTRY_UPDATED` | `AssetWhitelist` | `(address oldRegistry, address newRegistry, address actor, uint256 ts)` |
 
 > 前端解析逻辑应**避免**硬编码 ABI，统一通过 Hash → Schema map 自动解码。 
+
+#### 9.1 AssetWhitelist DataPush “schema SSOT”（给 indexer 的最小建模建议）
+
+> 说明：当前仓库尚未引入链下 indexer 的 schema 工程，因此本小节作为临时 SSOT。后续落地 indexer 时请把本节内容迁移为正式 schema/decoder。
+
+- **订阅事件**：统一订阅 `DataPushed(bytes32 indexed dataTypeHash, bytes payload)`（不要同时依赖 `AssetAdded/AssetRemoved/...`，避免重复消费）
+- **类型常量来源（SSOT）**：`src/constants/DataPushTypes.sol`
+- **Producer 合约**：`src/access/AssetWhitelist.sol`
+
+推荐 indexer 表结构（最小）：
+- `asset_whitelist_events`：
+  - `dataTypeHash` (bytes32)
+  - `asset` (address, nullable) — 批量事件可置空，改用数组字段或拆分多行
+  - `assets` (address[], nullable)
+  - `actor` (address)
+  - `addedCount/removedCount/totalCount` (uint256, nullable)
+  - `oldRegistry/newRegistry` (address, nullable)
+  - `ts` (uint256)
+  - `blockNumber` / `txHash` / `logIndex`（用于幂等与回溯）
+
+解码要点：
+- `ASSET_WHITELIST_*` 的 `payload` 均为 `abi.encode(...)`，按上表的 “Decoding Schema” 直接 `AbiCoder.defaultAbiCoder().decode([...], payload)` 即可。
+- 对于批量事件：
+  - **方案 A（推荐）**：indexer 拆分为多行（每个 asset 一行），并共享同一 `(blockNumber, txHash, logIndex)` 作为父关联键。
+  - **方案 B**：保留数组字段（适合 Postgres/BigQuery），查询时再展开。
 
 ### 10. 用户级优雅降级事件订阅（前端）
 

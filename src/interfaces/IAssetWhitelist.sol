@@ -2,31 +2,79 @@
 pragma solidity ^0.8.20;
 
 /// @title IAssetWhitelist
-/// @notice 资产白名单管理接口，用于管理支持的 ERC20 资产
-/// @dev 提供资产白名单的查询和管理功能
+/// @notice Asset whitelist interface for supported collateral/settlement assets.
+/// @dev Implements allowlist reads and governance-gated allowlist writes.
 interface IAssetWhitelist {
-    /// @notice 检查指定资产是否在白名单中
-    /// @param asset 资产地址
-    /// @return allowed 是否允许
+    /**
+     * @notice Check whether an asset is allowed by the whitelist.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @param asset Asset address to query.
+     * @return allowed True if the asset is allowed.
+     */
     function isAssetAllowed(address asset) external view returns (bool allowed);
 
-    /// @notice 获取所有支持的资产列表
-    /// @return assets 支持的资产地址数组
+    /**
+     * @notice Get the full list of allowed assets.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return assets Array of allowed asset addresses.
+     */
     function getAllowedAssets() external view returns (address[] memory assets);
 
-    /// @notice 添加资产到白名单（仅治理可调用）
-    /// @param asset 资产地址
+    /**
+     * @notice Add an asset to the allowlist.
+     * @dev Reverts if:
+     *      - implementation-defined (e.g. caller not authorized, asset is zero, asset already allowed)
+     *
+     * Security:
+     * - Governance/role-gated in the implementation (see ActionKeys + ACM).
+     *
+     * @param asset Asset address to add.
+     */
     function addAllowedAsset(address asset) external;
 
-    /// @notice 从白名单移除资产（仅治理可调用）
-    /// @param asset 资产地址
+    /**
+     * @notice Remove an asset from the allowlist.
+     * @dev Reverts if:
+     *      - implementation-defined (e.g. caller not authorized, asset is zero, asset not allowed)
+     *
+     * Security:
+     * - Governance/role-gated in the implementation (see ActionKeys + ACM).
+     *
+     * @param asset Asset address to remove.
+     */
     function removeAllowedAsset(address asset) external;
 
-    /// @notice 批量添加资产到白名单（仅治理可调用）
-    /// @param assets 资产地址数组
+    /**
+     * @notice Batch add assets to the allowlist.
+     * @dev Reverts if:
+     *      - implementation-defined (e.g. caller not authorized, empty array, any asset is zero)
+     *
+     * Security:
+     * - Governance/role-gated in the implementation (see ActionKeys + ACM).
+     *
+     * @param assets Asset addresses to add.
+     */
     function batchAddAllowedAssets(address[] calldata assets) external;
 
-    /// @notice 批量从白名单移除资产（仅治理可调用）
-    /// @param assets 资产地址数组
+    /**
+     * @notice Batch remove assets from the allowlist.
+     * @dev Reverts if:
+     *      - implementation-defined (e.g. caller not authorized, empty array, any asset is zero)
+     *
+     * Security:
+     * - Governance/role-gated in the implementation (see ActionKeys + ACM).
+     *
+     * @param assets Asset addresses to remove.
+     */
     function batchRemoveAllowedAssets(address[] calldata assets) external;
 } 

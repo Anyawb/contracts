@@ -86,7 +86,7 @@ describe('Registry 紧急管理员测试', function () {
     it('不应该允许非紧急管理员暂停系统', async function () {
       // 非紧急管理员不能暂停系统
       await expect(registry.connect(user1).pause())
-        .to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+        .to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await emergencyAdmin.getAddress());
         
       console.log('非紧急管理员暂停系统限制测试通过');
@@ -139,7 +139,7 @@ describe('Registry 紧急管理员测试', function () {
     it('不应该允许非紧急管理员取消升级', async function () {
       // 非紧急管理员不能取消升级
       await expect(registry.connect(user1).cancelModuleUpgrade(KEY_LE))
-        .to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+        .to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await emergencyAdmin.getAddress());
         
       console.log('非紧急管理员取消升级限制测试通过');
@@ -163,7 +163,7 @@ describe('Registry 紧急管理员测试', function () {
     it('不应该允许非紧急管理员取消所有升级', async function () {
       // 非紧急管理员不能取消所有升级
       await expect(registry.connect(user1).emergencyCancelAllUpgrades())
-        .to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+        .to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await emergencyAdmin.getAddress());
         
       console.log('非紧急管理员取消所有升级限制测试通过');
@@ -185,7 +185,7 @@ describe('Registry 紧急管理员测试', function () {
     it('不应该允许非紧急管理员恢复升级权限', async function () {
       // 非紧急管理员不能恢复升级权限
       await expect(registry.connect(user1).emergencyRecoverUpgrade())
-        .to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+        .to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await emergencyAdmin.getAddress());
         
       console.log('非紧急管理员恢复升级权限限制测试通过');

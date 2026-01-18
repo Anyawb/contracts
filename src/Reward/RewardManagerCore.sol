@@ -6,7 +6,8 @@ import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { Registry } from "../registry/Registry.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
+import { RewardEvents } from "./RewardEvents.sol";
 import { ViewConstants } from "../Vault/view/ViewConstants.sol";
 import {
     ZeroAddress,
@@ -24,7 +25,7 @@ import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 /// @dev 遵循 docs/SmartContractStandard.md 注释规范，标准化所有动作、模块、事件、错误、合约地址获取
 /// @dev 使用 ActionKeys 进行标准化动作标识和权限验证
 /// @dev 使用 ModuleKeys 进行模块地址管理
-/// @dev 使用 VaultTypes 进行标准化事件记录
+/// @dev 使用 SystemEvents 进行标准化事件记录
 /// @dev 通过 Registry 进行模块地址获取，确保架构一致性
 /// @dev 现行链上基线（见 docs/Usage-Guide/Reward-System-Usage-Guide.md）：
 /// @dev - borrow(duration>0)：锁定 1 积分（不铸币）
@@ -326,7 +327,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
 
                 if (toMint > 0) {
                     try _getRewardToken().mintPoints(user, toMint) {
-                        emit VaultTypes.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
+                        emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
                         _tryPushRewardEarned(user, toMint, "OnTimeRelease");
                     } catch {
                         revert ExternalModuleRevertedRaw("RewardPoints", "");
@@ -473,7 +474,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
 
             if (toMint > 0) {
                 try _getRewardToken().mintPoints(user, toMint) {
-                    emit VaultTypes.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
+                    emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
                     _tryPushRewardEarned(user, toMint, "OnTimeRelease");
                 } catch {
                     revert ExternalModuleRevertedRaw("RewardPoints", "");
@@ -606,7 +607,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
 
                 if (toMint > 0) {
                     try _getRewardToken().mintPoints(user, toMint) {
-                        emit VaultTypes.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
+                        emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
                         _tryPushRewardEarned(user, toMint, "OnTimeRelease");
                     } catch {
                         revert ExternalModuleRevertedRaw("RewardPoints", "");
@@ -1014,7 +1015,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         cache.points = points;
         cache.timestamp = block.timestamp;
         cache.isValid = true;
-        emit VaultTypes.PerformanceMonitor("PointCacheUpdated", points, block.timestamp);
+        emit RewardEvents.PerformanceMonitor("PointCacheUpdated", points, block.timestamp);
         return points;
     }
 
@@ -1089,7 +1090,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                 address(this),
                 block.timestamp
             );
-            emit VaultTypes.PerformanceMonitor("UserLevelUpgraded", newLevel, block.timestamp);
+            emit RewardEvents.PerformanceMonitor("UserLevelUpgraded", newLevel, block.timestamp);
             _tryPushUserLevel(user, newLevel);
         }
     }

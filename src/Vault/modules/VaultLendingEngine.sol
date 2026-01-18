@@ -13,19 +13,15 @@ import { ILendingEngineBasic } from "../../interfaces/ILendingEngineBasic.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
 import { ICollateralManager } from "../../interfaces/ICollateralManager.sol";
 import { IVaultRouter } from "../../interfaces/IVaultRouter.sol";
+import { IVaultCoreMinimal } from "../../interfaces/IVaultCoreMinimal.sol";
 import { ViewConstants } from "../view/ViewConstants.sol";
 import { Registry } from "../../registry/Registry.sol";
 import { HealthFactorLib } from "../../libraries/HealthFactorLib.sol";
 import { ILiquidationRiskManager } from "../../interfaces/ILiquidationRiskManager.sol";
-import { VaultTypes } from "../VaultTypes.sol";
+import { SystemEvents } from "../SystemEvents.sol";
 import { LendingEngineStorage } from "./lendingEngine/LendingEngineStorage.sol";
 import { LendingEngineValuation } from "./lendingEngine/LendingEngineValuation.sol";
 import { LendingEngineCore } from "./lendingEngine/LendingEngineCore.sol";
-
-/// @notice 最小化 VaultCore 接口（用于解析 View 地址）
-interface IVaultCoreMinimal {
-    function viewContractAddrVar() external view returns (address);
-}
 
 /// @title VaultLendingEngine
 /// @notice Vault 内部多资产债务记账模块，记录用户借款、还款与清算等操作
@@ -273,7 +269,7 @@ contract VaultLendingEngine is
         s._registryAddr = initialRegistry;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -459,7 +455,7 @@ contract VaultLendingEngine is
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -480,7 +476,7 @@ contract VaultLendingEngine is
         emit PriceOracleUpdated(oldOracle, newPriceOracle);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -501,7 +497,7 @@ contract VaultLendingEngine is
         emit SettlementTokenUpdated(oldToken, newSettlementToken);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -528,7 +524,7 @@ contract VaultLendingEngine is
         emit InterestRateUpdated(asset, oldRate, annualRate);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -562,7 +558,7 @@ contract VaultLendingEngine is
         if (newImplementation.code.length == 0) revert VaultLendingEngine__InvalidImplementation();
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
@@ -594,11 +590,11 @@ contract VaultLendingEngine is
     /// @param isRepayment 是否为还款操作
     // 奖励触发函数移除
 
-    /// @notice 推送用户仓位到 View 缓存
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    function _pushUserPositionToView(address user, address asset) internal {
-        LendingEngineCore._pushUserPositionToView(_s(), user, asset);
+    /// @notice 推送用户仓位到 View 缓存（兼容保留）
+    /// @dev 该逻辑已在 LendingEngineCore.borrow/repay/forceReduceDebt 中改为 delta 推送；
+    ///      此处保留为向后兼容的空实现（避免旧代码链接失败）。
+    function _pushUserPositionToView(address /*user*/, address /*asset*/) internal {
+        // no-op
     }
 
     /// @notice 解析当前有效的 VaultRouter 地址（通过 Registry -> VaultCore）

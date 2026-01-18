@@ -205,14 +205,18 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @notice 获取模块地址 - 基础传送合约地址能力
     /// @param moduleKey 模块键
     /// @return moduleAddress 模块地址
-    /// @dev 保留基础传送合约地址能力，支持动态模块访问
+    /// @dev 保留基础传送合约地址能力，支持动态模块访问（主要供链外/工具侧便利调用）。
+    ///      ⚠️ SSOT 说明：
+    ///      - **模块地址解析的唯一真实来源永远是 Registry**（`Registry.getModule*`）。
+    ///      - **链上模块不应把 VaultCore 当成“地址解析门面”依赖**；模块内部应直接使用其持有的 `_registryAddr`
+    ///        调用 `Registry(_registryAddr).getModuleOrRevert(...)`，避免引入额外依赖层与升级耦合。
     function getModule(bytes32 moduleKey) external view returns (address moduleAddress) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
     
     /// @notice 获取Registry地址 - 基础传送合约地址能力
     /// @return registryAddress Registry地址
-    /// @dev 保留基础传送合约地址能力
+    /// @dev 保留基础传送合约地址能力（主要供链外/工具侧获取 Registry 地址作为“低摩擦桥接”）。
     function getRegistry() external view returns (address registryAddress) {
         return _registryAddr;
     }
@@ -278,18 +282,30 @@ contract VaultRouter is ReentrancyGuard, Pausable {
     }
     
     // ============ 数据推送接口（事件驱动架构）========== ✅ 已实现
-    function pushUserPositionUpdate(address user, address asset, uint256 collateral, uint256 debt)
-        external override onlyValidRegistry onlyBusinessModule
-    {
-        // 轻量实现：仅发出事件，不维护缓存
-        emit UserPositionPushed(user, asset, collateral, debt, block.timestamp);
+    // 严格口径：VaultRouter 只接受来自 VaultCore 的 push*（onlyVaultCore），并转发到 View 模块（如 PositionView）。
+    // 为避免接口漂移，push* 统一使用 “上下文 + version” 的单一签名（requestId/seq/nextVersion）。
+    function pushUserPositionUpdate(
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
+    ) external override onlyValidRegistry onlyVaultCore {
+        IPositionView(pv).pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, nextVersion);
+        emit UserPositionPushed(user, asset, collateral, debt, block.timestamp, requestId, seq);
     }
     
-    function pushAssetStatsUpdate(address asset, uint256 totalCollateral, uint256 totalDebt, uint256 price)
-        external override onlyValidRegistry onlyBusinessModule
-    {
-        // 轻量实现：仅发出事件，不维护缓存
-        emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, block.timestamp);
+    function pushAssetStatsUpdate(
+        address asset,
+        uint256 totalCollateral,
+        uint256 totalDebt,
+        uint256 price,
+        bytes32 requestId,
+        uint64 seq
+    ) external override onlyValidRegistry onlyVaultCore {
+        emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, block.timestamp, requestId, seq);
     }
     
     // ============ 向后兼容查询（直接查询账本，无缓存）========== ✅ 已实现
@@ -477,45 +493,6 @@ contract LendingEngine {
 
 ---
 
-## 🎯 双架构实施指南
-
-### **Phase 1: VaultCore 简化 ✅ 已完成**
-- [x] 移除复杂的权限验证逻辑
-- [x] 移除重复的事件发出
-- [x] 移除业务逻辑委托
-- [x] 保留 Registry 升级能力
-- [x] 保留基础传送合约地址能力
-- [x] 保留传送数据至 View 层能力
-
-### **Phase 2: VaultRouter 双架构增强 ✅ 完全完成**
-- [x] 实现用户操作处理函数
-- [x] 实现模块分发逻辑
-- [x] 实现View层缓存数据存储
-- [x] 实现数据推送接口（事件驱动）
-- [x] 实现免费查询接口（view函数）
-- [x] 实现统一事件发出
-- [x] 基础缓存管理
-- [x] 基础批量查询功能
-- [x] 优化模块分发性能（模块地址缓存）
-- [x] 增强批量查询功能（健康因子、价格批量查询）
-- [x] 添加缓存统计功能（缓存统计、过期缓存清理）
-
-### **Phase 3: 业务模块双架构优化 ✅ 已完成（CollateralManager）**
-- ✅ CollateralManager 重构完成 - 从1005行简化到 ~450行，实现纯业务逻辑
-- ✅ 实现数据推送到 View 层缓存（统一常量化 DataPush）
-- ✅ 简化模块访问逻辑（通过 KEY_VAULT_CORE 动态解析 View 地址）
-- ✅ 统一事件发出格式（DataPushLibrary + 业务事件）
-- ✅ 实现 View 层数据更新（pushUserPositionUpdate）
-
-### **Phase 4: 双架构完善 🔄 待开始**
-- [ ] 统一事件库使用
-- [ ] 数据库实时收集
-- [ ] AI 分析友好格式
-- [ ] 完整事件历史记录
-- [ ] View层缓存优化
-
----
-
 ## 风险与预言机实现路径（健康因子 / 优雅降级 / 预言机）
 
 ### 1) 健康因子（Health Factor）实现与业务路径
@@ -635,15 +612,19 @@ contract LendingEngine {
 
 - **出借资金托管（线上流动性池，SSOT）**
   - 线上流动性统一托管于 `LenderPoolVault`（Registry `KEY_LENDER_POOL_VAULT`），而非由 `VaultBusinessLogic` 自持余额，也不是把“真实出借人 EOA/多签”写入 `LoanOrder.lender`。
-  - 出借人准备金（reserve）权威路径：`EOA/1271 lenderSigner` 先 `approve(VaultBusinessLogic)` → `VaultBusinessLogic.reserveForLending(lenderSigner, asset, amount, lendHash)`：
+  - 出借人准备金（reserve）权威路径：`EOA/1271 lenderSigner` 先 `approve(VaultBusinessLogic)` → `VaultBusinessLogic.reserveForLending(lenderSigner, asset, amount, lendIntentHash)`：
     - `VaultBusinessLogic` 将资金 `transferFrom(lenderSigner → LenderPoolVault)` 入池；
-    - 同时记录 `lendHash` 的 reserve 状态（仅记录状态，防重放/可撤回）。
-  - 撤回 reserve（未成交前）：`VaultBusinessLogic.cancelReserve(lendHash)` → `LenderPoolVault.transferOut(asset, lenderSigner, amount)` 返还。
+    - 同时记录 `lendIntentHash` 的 reserve 状态（仅记录状态，防重放/可撤回）。
+    - **新增约束（已在代码落地）**：
+      - `lendIntentHash != 0`
+      - `msg.sender == lenderSigner`（防第三方利用“已 approve”对他人资金进行恶意锁仓）
+      - reserve/cancel/consume 均发出可观测事件与 `DataPushed`（链下对账/风控/告警/重放）
+  - 撤回 reserve（未成交前）：`VaultBusinessLogic.cancelReserve(lendIntentHash)` → `LenderPoolVault.transferOut(asset, lenderSigner, amount)` 返还。
 
 - **撮合放款（borrow）与订单落地（SSOT）**
   - 成交落地权威路径：`VaultBusinessLogic.finalizeMatch(borrowIntent, lendIntents, sigBorrower, sigLenders)`：
     - 验签：`borrower` 与每个 `lendIntent.lenderSigner`（EOA 或 ERC-1271）；
-    - 消耗 reserve：按 `lendHash` consume，对应 lenderSigner 必须匹配（防篡改/防重放）；
+    - 消耗 reserve：按 `lendIntentHash` consume，对应 lenderSigner 必须匹配（防篡改/防重放）；
     - 放款：通过 `SettlementMatchLib.finalizeAtomicFull` 从 `LenderPoolVault.transferOut` 出金；
     - 手续费：通过 `FeeRouter.distributeNormal` 统一路由；
     - 订单：调用 `ORDER_ENGINE(LendingEngine).createLoanOrder` 创建 `orderId` 并铸造 `LoanNFT`；
@@ -653,6 +634,12 @@ contract LendingEngine {
     - `VaultBusinessLogic` 需要 `ACTION_DEPOSIT`（调用 `FeeRouter.distributeNormal`）；
     - `ORDER_ENGINE` 需要 `ACTION_BORROW`（`LoanNFT` 的 MINTER 权限映射到 `ACTION_BORROW`）；
     - `FeeRouter` 需要将 `settlementToken` 标记为 supported token（否则 `TokenNotSupported`）。
+    - **部署要求（强制）**：部署脚本/治理初始化流程必须在上线前执行一次：
+      - `FeeRouter.addSupportedToken(settlementToken)`
+      -（如撮合/还款/罚金等费用可能使用多种 token）对每个“会进入 FeeRouter 分发”的 token 同样执行 addSupportedToken
+    - **推荐实现（已在脚本落地）**：部署完成后自动检查并补齐（幂等）：
+      - Localhost：`scripts/deploy/deploylocal.ts`（部署 `MockUSDC` 后确保 `FeeRouter` 支持该 token）
+      - Arbitrum / Arbitrum Sepolia：`scripts/deploy/deploy-arbitrum.ts`、`scripts/deploy/deploy-arbitrum-sepolia.ts`（从 assets 配置解析 `SettlementToken` 后确保支持）
 
 - **抵押物托管（统一资金池）**
   - 抵押物（含多品类 RWA）由 `CollateralManager` 作为托管者持有（真实资产池/资金池）。
@@ -668,6 +655,7 @@ contract LendingEngine {
   - **默认入口**：keeper/机器人应通过 `SettlementManager.settleOrLiquidate(orderId)` 触发处置，由其在满足触发条件时进入清算分支（避免“参数计算/权限/资金去向”分叉）。
   - **兼容/执行器入口（可选，role-gated）**：`LiquidationManager.liquidate/batchLiquidate` 仍可作为“显式参数的清算执行器入口”保留，
     仅供测试/应急/手工清算使用（需要 `ACTION_LIQUIDATE`），不建议作为常态 keeper/前端入口。
+  - **重要约束**：清算人（keeper/liquidator）必须与 borrower 不同；`CollateralManager` 在 `receiver == user` 时仅允许 `VaultRouter/SettlementManager` 调用，`LiquidationManager` 路径会被拒绝（`CollateralManager__UnauthorizedAccess()`）。
   - 清算扣押/划转的权威写路径为（两种实现等价其一即可）：
     - `SettlementManager → LiquidationManager → CollateralManager.withdrawCollateralTo(...)`（保持 LiquidationManager 作为清算执行器）
     - 或 `SettlementManager → CollateralManager.withdrawCollateralTo(...)`（直达账本，不经过 LiquidationManager）
@@ -675,6 +663,8 @@ contract LendingEngine {
 - **平台费/罚金/手续费等“费用类资金”的权威去向**
   - 费用类资金（如平台费、生态费、罚金中平台份额等）应通过 `FeeRouter` 进行统一路由与分发；前端/链下只读镜像由 `FeeRouterView` 提供。
   - 为降低“人为变数”，推荐将 `FeeRouter` 的 `platformTreasury` 配置为**合约金库地址**（而非 EOA/多签），并通过治理权限（通常为 `ACTION_SET_PARAMETER` / `ACTION_UPGRADE_MODULE`，建议迁移到 Timelock 轨）进行变更。
+  - **View 解析口径（SSOT，避免多来源漂移）**：链上业务模块如需解析 view 地址，应统一通过
+    `Registry.KEY_VAULT_CORE → VaultCore.viewContractAddrVar()` 获取；不应再引入其它 Registry key 作为“回退来源”。
 
 ### 配置要点
 - Registry 必须正确指向：`KEY_VAULT_CORE`、`KEY_LE`、`KEY_CM`、`KEY_HEALTH_VIEW`、`KEY_RM`、`KEY_SETTLEMENT_MANAGER`
@@ -733,6 +723,7 @@ contract LendingEngine {
 
 ### 与前端/服务的集成
 - 前端查询读取 `LiquidationRiskManager`/`LiquidatorView` 与 `StatisticsView`；写路径统一由 `SettlementManager` 承接（其内部在清算分支直达账本或调用 `LiquidationManager` 清算执行器）。
+- **前端校验**：清算入口调用方（keeper/liquidator）必须与 borrower 不同；前端/服务端需显式拦截 `keeper == borrower`，否则会触发 `CollateralManager__UnauthorizedAccess()`。
 - 地址解析建议：
   - 只读入口：通过 `KEY_VAULT_CORE → viewContractAddrVar()` 解析 View 地址；
   - 写入入口：通过 Registry 获取 `KEY_SETTLEMENT_MANAGER`（唯一对外写入口）；清算执行器与账本模块地址通过 Registry 获取 `KEY_LIQUIDATION_MANAGER`/`KEY_CM`/`KEY_LE`。
@@ -850,33 +841,6 @@ jobs:
 
 ---
 
-## 📊 双架构优化效果
-
-### **代码量对比**
-| 功能 | 当前行数 | 双架构行数 | 变化比例 | 状态 |
-|------|----------|------------|----------|------|
-| **VaultCore** | 299 行 | **142 行** | **52%** | ✅ 已完成 |
-| **VaultRouter** | 200+ 行 | **442 行** | **+121%** | 🔄 进行中 |
-| **AccessControlView** | 407 行 | ~350 行 | **14%** | 🔄 待实现 |
-
-### **Gas 消耗对比**
-| 操作 | 当前 Gas | 双架构 Gas | 节省比例 | 状态 |
-|------|----------|------------|----------|------|
-| **查询操作** | ~2,000 gas | **0 gas** | **100%** | ✅ 已实现 |
-| **权限更新** | ~50,000 gas | ~21,000 gas | **58%** | 🔄 待实现 |
-| **位置更新** | ~50,000 gas | ~25,000 gas | **50%** | 🔄 待实现 |
-| **模块升级** | ~30,000 gas | ~20,000 gas | **33%** | ✅ 已实现 |
-
-### **用户体验对比**
-| 指标 | 双架构方案 | 纯事件驱动 | 传统缓存 | 状态 |
-|------|------------|------------|----------|------|
-| **查询响应时间** | **< 100ms** | ~500ms | **< 100ms** | ✅ 已实现 |
-| **数据实时性** | **实时** | **实时** | 5分钟延迟 | 🔄 进行中 |
-| **查询成本** | **免费** | **免费** | **免费** | ✅ 已实现 |
-| **AI分析支持** | **完整** | **完整** | 部分支持 | 🔄 待实现 |
-
----
-
 ## 🔧 双架构命名规范要求
 
 ### **必须遵循的命名规范（SmartContractStandard.md第127行）**
@@ -918,6 +882,8 @@ error AccessControlView__UnauthorizedAccess();
 
 ### 统一模板（推荐顺序，禁止乱序）
 > 说明：`@dev` 中的 “Reverts if / Security” 采用固定小节标题，便于团队与工具一致解析。
+>
+> **风格基线（SSOT）**：本仓库以 `src/registry/` 目录下的实现作为 NatSpec 书写风格的权威参考（英文、结构化小节、与 `error`/权限语义强一致）。
 
 ```solidity
 /**

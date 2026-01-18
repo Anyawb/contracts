@@ -2,20 +2,41 @@
 
 本目录包含完整的端到端（End-to-End）测试脚本，用于在本地 Hardhat 节点上验证业务逻辑和 View 层功能。
 
+## ✅ Strict 模式（默认开启）
+
+从 2026-01 起，**推荐把 E2E 当作“部署前的最后一道闸”**：只要 View/Stats 与账本（SSOT）出现不一致，就应立即失败，避免把“推送链路未接好/权限缺失/缓存逻辑缺口”带到测试网或 Arbitrum 主网。
+
+- **默认行为**：`strict=true`（即大多数 View/Stats 不一致会直接抛错退出，而不是仅打印 ⚠️）
+- **关闭 strict**：显式设置 `E2E_STRICT_VIEWS=0`
+
+> SSOT 不变：账本仍由 `CollateralManager` / `VaultLendingEngine`（以及 `SettlementManager` 的 repay/settle/liquidation 语义）作为最终真相。  
+> strict 只是把“缓存/视图层是否正确跟随账本更新”变成 **可自动验收** 的硬指标。
+
+### Strict 相关环境变量（统一约定）
+
+- **`E2E_STRICT_VIEWS`**（默认开启）
+  - `E2E_STRICT_VIEWS=0`：关闭严格校验（回退为 best-effort，允许打印 ⚠️ 继续跑）
+  - 其它值/不设置：开启严格校验
+- **`E2E_ALLOW_DIRTY_STATE=1`**（仅在需要时使用）
+  - 允许在“非干净状态”（已有历史仓位/债务）下跑严格 E2E（更贴近 testnet/mainnet）
+- **`E2E_VIEW_STRICT=1`**
+  - 仅用于 **ViewScan**（启动阶段扫描所有 View 模块）强制失败策略；
+  - 说明：部分脚本会把 ViewScan.strict 直接绑定到 `E2E_STRICT_VIEWS`（因此 `E2E_VIEW_STRICT` 只对未显式传 strict 的脚本生效）。
+
 ## 脚本列表
 
 ### 1. `e2e-localhost-run.ts`
 **基础业务流测试**
 - 测试简单的 deposit → borrow → repay 流程
 - 验证核心业务逻辑（VaultCore, CollateralManager, VaultLendingEngine）
-- **不包含 View 层验证**
+- 适合做 SSOT/资金链路 smoke test（**不做严格 View/Stats 断言**）
 
 ### 2. `e2e-localhost-orderflow.ts`
 **订单引擎流程测试**
 - 测试订单创建和还款流程
 - 验证 `core/LendingEngine`（ORDER_ENGINE）的 `createLoanOrder` 和 `repay` 功能
 - 验证 LoanNFT 的铸造和状态更新
-- **不包含 View 层验证**
+- 适合做 ORDER_ENGINE/签名/LoanNFT 的 smoke test（**不做严格 View/Stats 断言**）
 
 ### 3. `e2e-localhost-matchflow.ts`
 **撮合/结算流程测试**
@@ -23,7 +44,7 @@
 - 验证 EIP-712 签名验证
 - 验证 `VaultBusinessLogic` 的撮合编排功能
 - 验证 LoanNFT 的铸造
-- **不包含 View 层验证**
+- 适合做 matchflow 的 smoke test（**不做严格 View/Stats 断言**）
 
 ### 4. `e2e-localhost-full-with-views.ts` ⭐ **推荐**
 **完整业务流 + View 层验证**
@@ -74,12 +95,14 @@
   - **部分还款**：同一笔订单分两次 repay，并断言每次后 `PositionView/UserView` 与账本一致
   - **逾期还款**：`evm_increaseTime` 快进到超过到期日后再 repay
   - **多 lender 拆单**：将 500 拆成两笔 250/250（两笔订单），分别由不同 lender 出借（更贴近真实“拆单”）
-- 每一步都断言：
+- 每一步都断言（strict 模式下为硬失败）：
   - `PositionView.getUserPosition` == `UserView.getUserPosition` == `CollateralManager/VaultLendingEngine`（账本）
   - `RiskView.getUserRiskAssessment` 可正常调用（不对语义做强约束）
 - Phase3 可观测性：在关键 checkpoint 显式输出一个“样本 borrower”的 `PositionView` version（用于观察严格 `nextVersion` 的单调递增写入）
 - 同时在启动阶段输出关键 View 的 `getVersionInfo()`（apiVersion/schemaVersion/implementation），便于定位升级影响
-- ViewScan（新增）：同上（支持 `E2E_VIEW_STRICT=1`）
+- ViewScan（新增）：同上
+  - 默认：随 strict 策略（本脚本中 strict 默认开启）
+  - 关闭 strict：`E2E_STRICT_VIEWS=0`
 - Reward（新增）：同上
 - “样本 borrower”可配置：
   - **env**：`E2E_SAMPLE_BORROWER_INDEX=0..4`（默认 0）
@@ -87,43 +110,85 @@
 
 ## 运行方式
 
+### 快速命令参考（针对批量测试）
+
+#### 完整流程（3 个终端窗口）
+
+**终端 1：启动本地 Hardhat 节点**
+```bash
+pnpm -s run node
+```
+或者使用完整命令：
+```bash
+hardhat node --hostname 127.0.0.1 --port 8545
+```
+
+**终端 2：部署合约到本地节点**
+```bash
+pnpm -s run deploy:localhost
+```
+或者使用完整命令：
+```bash
+hardhat run scripts/deploy/deploylocal.ts --network localhost
+```
+
+**终端 3：运行 E2E 测试**
+
+运行 `e2e-localhost-batch-10-users.ts`：
+```bash
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+```
+
+运行 `e2e-localhost-batch-advanced-10-users.ts`：
+```bash
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+```
+
 ### 前置条件
 
 1. **启动本地 Hardhat 节点**：
 ```bash
-npm run node
+pnpm -s run node
+```
+或者使用完整命令：
+```bash
+hardhat node --hostname 127.0.0.1 --port 8545
 ```
 
 2. **部署合约到本地节点**（在另一个终端）：
 ```bash
-npm run deploy:localhost
+pnpm -s run deploy:localhost
+```
+或者使用完整命令：
+```bash
+hardhat run scripts/deploy/deploylocal.ts --network localhost
 ```
 
 ### 运行测试脚本
 
 #### 基础业务流测试
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-run.ts --network localhost
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-run.ts --network localhost
 ```
 
 #### 订单引擎流程测试
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-orderflow.ts --network localhost
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-orderflow.ts --network localhost
 ```
 
 #### 撮合流程测试
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-matchflow.ts --network localhost
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-matchflow.ts --network localhost
 ```
 
 #### 完整测试（推荐）⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-full-with-views.ts --network localhost
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-full-with-views.ts --network localhost
 ```
 
 #### Reward 隐私 + Read-Gate 专项验收 ⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-reward-privacy.ts --network localhost
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-reward-privacy.ts --network localhost
 ```
 
 #### Reward Edge Cases（多订单/partial repay/提前-按期-逾期/penaltyLedger）⭐
@@ -133,32 +198,52 @@ npx hardhat e2e:reward-edgecases --network localhost
 
 #### 10 用户批量撮合借贷（推荐用于压测/一致性验收）
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
 ```
 
 ##### 可配置：选择一个 “样本 borrower” 打印 PositionView.version（Phase3 可观测性）
 - **env 方式（兼容旧用法）**：
 
 ```bash
-E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+E2E_SAMPLE_BORROWER_INDEX=2 pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
 ```
 
 - **argv/task 方式（推荐）**：
 
 ```bash
-npx hardhat e2e:batch-10-users --network localhost --sample-borrower-index 2
+pnpm -s exec hardhat e2e:batch-10-users --network localhost --sample-borrower-index 2
 ```
 
 #### 高级批量测试（部分还款/逾期/拆单 + 每步 View 断言）⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+```
+
+##### Strict 模式相关（本脚本默认开启）
+
+- **默认（推荐）**：严格校验（任何 View/Stats 与账本不一致会直接失败）
+
+```bash
+pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+```
+
+- **关闭 strict（仅用于临时排障）**：
+
+```bash
+E2E_STRICT_VIEWS=0 pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+```
+
+- **允许 dirty state（更贴近 testnet/mainnet）**：
+
+```bash
+E2E_ALLOW_DIRTY_STATE=1 pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
 ```
 
 ##### 可配置：选择一个 “样本 borrower” 打印 PositionView.version / getPositionVersion（Phase3 可观测性）
 - **env 方式（仍然支持）**：
 
 ```bash
-E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+E2E_SAMPLE_BORROWER_INDEX=2 pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
 ```
 
 - **argv/task 方式（推荐）**：
@@ -166,7 +251,7 @@ E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-adva
   - 已在 `hardhat.config.ts` 引入（只要用 hardhat 运行即可生效）
 
 ```bash
-npx hardhat e2e:batch-advanced --network localhost --sample-borrower-index 2
+pnpm -s exec hardhat e2e:batch-advanced --network localhost --sample-borrower-index 2
 ```
 
 ## 输出说明
@@ -216,9 +301,11 @@ npx hardhat e2e:batch-advanced --network localhost --sample-borrower-index 2
 
 ## 注意事项
 
-1. **StatisticsView 的全局统计**：某些统计数据可能需要特定的触发条件才会更新，因此可能显示为 0。这是正常的。
+1. **StatisticsView 的全局统计（重要）**：在严格模式下，我们把 `StatisticsView.totalCollateral/totalDebt` 作为“推送链路是否正确”的硬指标。  
+   - 如果在 E2E 中出现 `totalDebt/totalCollateral` 长期为 0 或与账本不一致，通常表示：Stats push 权限缺失 / push 路径未覆盖 / 逻辑被 try/catch 吞掉。
 
-2. **HealthView 的健康因子**：健康因子可能需要通过 `pushHealthFactor` 或 `pushRiskStatus` 推送更新。如果显示为 0 或 `isValid=false`，可能是缓存尚未更新。
+2. **缓存过期与 time travel**：`ViewConstants.CACHE_DURATION = 5 minutes`。如果脚本使用 `evm_increaseTime` 快进超过该阈值，PositionView 的缓存会变为 `isValid=false`。  
+   - 严格模式下应确保 Stats/PositionView 的更新路径不会依赖“缓存是否仍然有效”（否则会出现“漏计/残留”的假阴性）。
 
 3. **View 层缓存更新**：View 层的缓存更新是"尽力而为"的，如果缓存更新失败，不会影响主业务逻辑。脚本会捕获并显示这些错误。
 

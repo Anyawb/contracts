@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
@@ -12,42 +12,51 @@ import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+import { IFeeRouterView } from "../../../interfaces/IFeeRouterView.sol";
 
-// 常量迁移至 DataPushTypes
+// Constants migrated to DataPushTypes.
 
-/// @title FeeRouterView
-/// @notice 费用路由查询视图模块 - 超低Gas的费用数据查询
-/// @dev 使用内部数据镜像，实现超低Gas查询（~100 gas）
-/// @dev 数据通过FeeRouter主动推送更新，确保实时性
-/// @dev 严格权限控制：用户只能查看自己的数据，管理员可查看全部数据
-/// @custom:security-contact security@example.com
-contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
+/**
+ * @title FeeRouterView
+ * @notice FeeRouter read-only mirror (view/cache): best-effort, low-gas reads backed by FeeRouter pushes.
+ * @dev Reverts if:
+ *      - Registry is not configured (see `onlyValidRegistry`)
+ *      - caller is not authorized to access the requested user/system data (see modifiers)
+ *      - caller is not FeeRouter for push entrypoints (see `onlyFeeRouter`)
+ *
+ * Security:
+ * - Role-gated via `ViewAccessLib.requireRole(...)`
+ * - Push entrypoints are restricted to FeeRouter (Registry.KEY_FR)
+ *
+ * @custom:security-contact security@example.com
+ */
+contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRouterView {
     
-    /// @notice Registry 合约地址
+    /// @notice Registry address (module resolution SSOT).
     address private _registryAddr;
     
-    /// @notice 最大批量查询大小（统一常量）
+    /// @notice Maximum batch query size (shared constant).
     uint256 public constant MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
     
-    /*━━━━━━━━━━━━━━━ 内部数据镜像（超低 Gas 优化）━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ INTERNAL MIRRORS (LOW-GAS) ━━━━━━━━━━━━━━━*/
     
-    /// @notice 用户费用统计 user => feeType => amount
+    /// @notice User fee statistics: user => feeType => amount.
     mapping(address => mapping(bytes32 => uint256)) private _userFeeStatistics;
     
-    /// @notice 用户动态费用配置 user => feeType => feeBps
+    /// @notice User dynamic fee config: user => feeType => feeBps.
     mapping(address => mapping(bytes32 => uint256)) private _userDynamicFees;
     
-    /// @notice 全局费用统计（仅管理员可见）token => feeType => amount
+    /// @notice Global fee statistics (admin-only): token => feeType => amount.
     mapping(address => mapping(bytes32 => uint256)) private _globalFeeStatistics;
     
-    /// @notice 全局操作统计（仅管理员可见）
+    /// @notice Global operation stats (admin-only).
     struct GlobalStats {
         uint256 totalDistributions;
         uint256 totalAmountDistributed;
     }
     GlobalStats private _globalStats;
     
-    /// @notice 系统配置（仅管理员可见）
+    /// @notice System config (admin-only).
     struct SystemConfig {
         address platformTreasury;
         address ecosystemVault;
@@ -57,10 +66,10 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
     SystemConfig private _systemConfig;
     
-    /// @notice 支持的代币映射（公开可见）
+    /// @notice Supported token flags (publicly readable via view functions).
     mapping(address => bool) private _supportedTokens;
     
-    /// @notice 用户个人统计
+    /// @notice User personal stats (per-user).
     struct UserStats {
         uint256 totalFeePaid;
         uint256 transactionCount;
@@ -68,15 +77,15 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
     mapping(address => UserStats) private _userStats;
     
-    /// @notice 数据同步时间戳
+    /// @notice Last sync timestamp (seconds).
     uint256 private _lastSyncTimestamp;
     
-    /// @notice 同步间隔（秒）
-    uint256 public constant SYNC_INTERVAL = 300; // 5分钟
+    /// @notice Sync interval (seconds).
+    uint256 public constant SYNC_INTERVAL = 300; // 5 minutes
     
-    /*━━━━━━━━━━━━━━━ 结构体定义 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ TYPES ━━━━━━━━━━━━━━━*/
 
-    /// @notice 用户费用配置结构体
+    /// @notice User fee config view.
     struct UserFeeConfig {
         uint256 personalFeeBps;
         uint256 discountLevel;
@@ -85,7 +94,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 transactionCount;
     }
 
-    /// @notice 系统费用分析（仅管理员）
+    /// @notice System fee analytics (admin-only; placeholder).
     struct SystemFeeAnalytics {
         uint256 totalVolume;
         uint256 totalFees;
@@ -95,7 +104,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 distributionCount;
     }
 
-    /// @notice 用户费用分析
+    /// @notice User fee analytics (placeholder).
     struct UserFeeAnalytics {
         uint256 totalPaidFees;
         uint256 averageFeeRate;
@@ -105,48 +114,105 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256[] feeAmounts;
     }
 
-    /*━━━━━━━━━━━━━━━ 事件 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
     
-    /// @notice 数据同步事件
+    /**
+     * @notice Emitted when this view cache is synced by the authorized writer.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * @param caller Writer address that performed the sync (expected: FeeRouter)
+     * @param timestamp Block timestamp (seconds)
+     */
     event DataSynced(address indexed caller, uint256 timestamp);
     
-    /// @notice 用户数据推送事件
+    /**
+     * @notice DEPRECATED: emitted when user-scoped data is pushed.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Prefer off-chain consumers to rely on DataPushLibrary/IDataPush.DataPushed instead.
+     *
+     * @param user User address
+     * @param dataType Human-readable data type label (deprecated)
+     * @param timestamp Block timestamp (seconds)
+     */
+    // solhint-disable-next-line max-line-length
     event UserDataPushed(address indexed user, string dataType, uint256 timestamp); // DEPRECATED – use IDataPush.DataPushed
     
-    /// @notice 系统数据推送事件
+    /**
+     * @notice DEPRECATED: emitted when system-scoped data is pushed.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Prefer off-chain consumers to rely on DataPushLibrary/IDataPush.DataPushed instead.
+     *
+     * @param pusher Writer address
+     * @param dataType Human-readable data type label (deprecated)
+     * @param timestamp Block timestamp (seconds)
+     */
+    // solhint-disable-next-line max-line-length
     event SystemDataPushed(address indexed pusher, string dataType, uint256 timestamp); // DEPRECATED – use IDataPush.DataPushed
 
-    /*━━━━━━━━━━━━━━━ 错误定义 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
     
+    /// @notice Thrown when caller is not authorized to access the requested user-scoped data.
     error FeeRouterView__UnauthorizedAccess();
+    /// @notice Thrown when an input user address is invalid (reserved for future validation).
     error FeeRouterView__InvalidUser();
+    /// @notice Thrown when caller has insufficient permissions (reserved for future use).
     error FeeRouterView__InsufficientPermission();
+    /// @notice Thrown when a push entrypoint is called by a non-FeeRouter address.
     error FeeRouterView__OnlyFeeRouter();
+    /// @notice Thrown when a batch query exceeds MAX_BATCH_SIZE.
     error FeeRouterView__BatchSizeTooLarge();
+    /// @notice Thrown when two batch arrays have mismatched lengths.
     error FeeRouterView__ArrayLengthMismatch();
+    /// @notice Thrown when an empty array is provided where a non-empty array is required.
     error FeeRouterView__EmptyArray();
 
-    /*━━━━━━━━━━━━━━━ 修饰符 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
 
-    /// @notice Registry 有效性验证修饰符
+    /**
+     * @notice Ensure Registry is configured.
+     * @dev Reverts if:
+     *      - `_registryAddr` is zero
+     */
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         _;
     }
     
-    /// @notice 验证用户是否为管理员
+    /**
+     * @notice Require admin role.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_ADMIN
+     */
     modifier onlyAdmin() {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         _;
     }
     
-    /// @notice 仅允许 FeeRouter（注册表 KEY_FR）调用
+    /**
+     * @notice Restrict caller to FeeRouter (Registry.KEY_FR).
+     * @dev Reverts if:
+     *      - caller is not FeeRouter (FeeRouterView__OnlyFeeRouter)
+     */
     modifier onlyFeeRouter() {
         if (msg.sender != _getFeeRouter()) revert FeeRouterView__OnlyFeeRouter();
         _;
     }
     
-    /// @notice 验证用户权限（用户只能查看自己的数据，管理员可查看所有数据）
+    /**
+     * @notice Require caller to be authorized to access `user` data.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_USER_DATA for self access
+     *      - caller is not admin for non-self access
+     *
+     * @param user Target user address
+     */
     modifier onlyAuthorizedFor(address user) {
         if (msg.sender != user) {
             bool isAdmin = ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
@@ -157,75 +223,155 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         _;
     }
 
-    /*━━━━━━━━━━━━━━━ 构造和初始化 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ CONSTRUCTION & INITIALIZATION ━━━━━━━━━━━━━━━*/
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
     
-    /// @notice 初始化费用路由视图模块
-    /// @param initialRegistryAddr Registry合约地址
+    /**
+     * @notice Initialize FeeRouterView.
+     * @dev Reverts if:
+     *      - initialRegistryAddr == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Initializer guarded (initializer modifier)
+     *
+     * @param initialRegistryAddr Registry address (module resolver SSOT)
+     */
     function initialize(address initialRegistryAddr) external initializer {
         // Validate the provided registry address instead of the un-initialised storage slot
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
 
         _registryAddr = initialRegistryAddr;
+        // solhint-disable-next-line not-rely-on-time
         _lastSyncTimestamp = block.timestamp;
         
         __UUPSUpgradeable_init();
     }
     
-    /*━━━━━━━━━━━━━━━ 数据同步和推送 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ PUSH FROM FEEROUTER ━━━━━━━━━━━━━━━*/
     
-    /// @notice FeeRouter 推送用户数据更新
-    /// @param user 用户地址
-    /// @param feeType 费用类型
-    /// @param feeAmount 用户支付的费用金额
-    /// @param personalFeeBps 用户个人费率
+    /**
+     * @notice Push user fee update from FeeRouter.
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller is not FeeRouter (FeeRouterView__OnlyFeeRouter)
+     *
+     * Security:
+     * - Restricted to FeeRouter (SSOT)
+     *
+     * @param user User address
+     * @param feeType Fee type key
+     * @param feeAmount Fee amount paid (token decimals; implementation-defined)
+     * @param personalFeeBps Personal fee bps (\(1e4 = 100%\))
+     */
+    /**
+     * @notice Push a user-scoped fee update into the view cache.
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender != Registry(_registryAddr).getModuleOrRevert(KEY_FR) (FeeRouterView__OnlyFeeRouter)
+     *
+     * Security:
+     * - Writer-gated: only the SSOT FeeRouter may push updates.
+     * - Emits DataPushTypes.DATA_TYPE_USER_FEE for off-chain consumers.
+     *
+     * @param user User address (cache key)
+     * @param feeType Fee type identifier (bytes32)
+     * @param feeAmount Fee amount to accumulate (token decimals; same unit as FeeRouter writer)
+     * @param personalFeeBps Applied personal fee rate in bps (\(1e4 = 100%\))
+     */
     function pushUserFeeUpdate(
         address user,
         bytes32 feeType,
         uint256 feeAmount,
         uint256 personalFeeBps
-    ) external onlyValidRegistry onlyFeeRouter {
+    ) external override onlyValidRegistry onlyFeeRouter {
         
-        // 更新用户费用数据
+        // Update user fee data
         _userFeeStatistics[user][feeType] += feeAmount;
         _userDynamicFees[user][feeType] = personalFeeBps;
         
-        // 更新用户统计
+        // Update user statistics
         _userStats[user].totalFeePaid += feeAmount;
         _userStats[user].transactionCount += 1;
+        // solhint-disable-next-line not-rely-on-time
         _userStats[user].lastActivityTime = block.timestamp;
         
+        // solhint-disable-next-line not-rely-on-time
         emit UserDataPushed(user, "FeeUpdate", block.timestamp);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_USER_FEE, abi.encode(user, feeType, feeAmount, personalFeeBps));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_USER_FEE,
+            abi.encode(user, feeType, feeAmount, personalFeeBps)
+        );
     }
     
-    /// @notice FeeRouter 推送全局统计更新（仅管理员权限的推送）
-    /// @param totalDistributions 总分发次数
-    /// @param totalAmountDistributed 总分发金额
+    /**
+     * @notice Push global stats update from FeeRouter.
+     * @dev Reverts if:
+     *      - Registry is not configured
+     *      - caller is not FeeRouter (FeeRouterView__OnlyFeeRouter)
+     *
+     * Security:
+     * - Restricted to FeeRouter (SSOT)
+     *
+     * @param totalDistributions Total distributions count
+     * @param totalAmountDistributed Total distributed amount (token decimals; implementation-defined)
+     */
+    /**
+     * @notice Push global distribution counters into the view cache.
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender != Registry(_registryAddr).getModuleOrRevert(KEY_FR) (FeeRouterView__OnlyFeeRouter)
+     *
+     * Security:
+     * - Writer-gated: only the SSOT FeeRouter may push updates.
+     * - Emits DataPushTypes.DATA_TYPE_GLOBAL_FEE_STATS for off-chain consumers.
+     *
+     * @param totalDistributions Total distribution count (unitless)
+     * @param totalAmountDistributed Total distributed amount (token decimals aggregated by FeeRouter)
+     */
     function pushGlobalStatsUpdate(
         uint256 totalDistributions,
         uint256 totalAmountDistributed
-    ) external onlyValidRegistry onlyFeeRouter {
+    ) external override onlyValidRegistry onlyFeeRouter {
         _globalStats.totalDistributions = totalDistributions;
         _globalStats.totalAmountDistributed = totalAmountDistributed;
+        // solhint-disable-next-line not-rely-on-time
         _lastSyncTimestamp = block.timestamp;
 
+        // solhint-disable-next-line not-rely-on-time
         emit SystemDataPushed(msg.sender, "GlobalStatsUpdate", block.timestamp);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_GLOBAL_FEE_STATS, abi.encode(totalDistributions, totalAmountDistributed));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_GLOBAL_FEE_STATS,
+            abi.encode(totalDistributions, totalAmountDistributed)
+        );
     }
 
-    /// @notice FeeRouter 推送系统配置更新
+    /**
+     * @notice Push the FeeRouter system config into the view cache.
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender != Registry(_registryAddr).getModuleOrRevert(KEY_FR) (FeeRouterView__OnlyFeeRouter)
+     *
+     * Security:
+     * - Writer-gated: only the SSOT FeeRouter may push updates.
+     * - Emits DataPushTypes.DATA_TYPE_FEE_ROUTER_SYSTEM_CONFIG_UPDATED for off-chain consumers.
+     *
+     * @param platformTreasury Platform treasury address
+     * @param ecosystemVault Ecosystem vault address
+     * @param platformFeeBps Platform fee rate in bps (\(1e4 = 100%\))
+     * @param ecosystemFeeBps Ecosystem fee rate in bps (\(1e4 = 100%\))
+     * @param supportedTokens Supported token list (ERC20 addresses)
+     */
     function pushSystemConfigUpdate(
         address platformTreasury,
         address ecosystemVault,
         uint256 platformFeeBps,
         uint256 ecosystemFeeBps,
         address[] calldata supportedTokens
-    ) external onlyValidRegistry onlyFeeRouter {
+    ) external override onlyValidRegistry onlyFeeRouter {
         address[] memory previousTokens = _systemConfig.supportedTokens;
         for (uint256 i; i < previousTokens.length; ++i) {
             _supportedTokens[previousTokens[i]] = false;
@@ -241,6 +387,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
             _supportedTokens[supportedTokens[i]] = true;
         }
 
+        // solhint-disable-next-line not-rely-on-time
         emit DataSynced(msg.sender, block.timestamp);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_ROUTER_SYSTEM_CONFIG_UPDATED,
@@ -248,12 +395,25 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         );
     }
 
-    /// @notice FeeRouter 推送按资产/费用类型的全局统计
+    /**
+     * @notice Push a single global fee statistic value for (token, feeType).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender != Registry(_registryAddr).getModuleOrRevert(KEY_FR) (FeeRouterView__OnlyFeeRouter)
+     *
+     * Security:
+     * - Writer-gated: only the SSOT FeeRouter may push updates.
+     * - Emits DataPushTypes.DATA_TYPE_FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED for off-chain consumers.
+     *
+     * @param token ERC20 token address (cache key)
+     * @param feeType Fee type identifier (bytes32)
+     * @param amount Total accumulated amount (token decimals)
+     */
     function pushGlobalFeeStatistic(
         address token,
         bytes32 feeType,
         uint256 amount
-    ) external onlyValidRegistry onlyFeeRouter {
+    ) external override onlyValidRegistry onlyFeeRouter {
         _globalFeeStatistics[token][feeType] = amount;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED,
@@ -261,93 +421,185 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         );
     }
     
-    /*━━━━━━━━━━━━━━━ 用户查询函数（权限控制）━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ USER QUERY FUNCTIONS (ACCESS CONTROLLED) ━━━━━━━━━━━━━━━*/
     
-    /// @notice 检查数据是否需要同步
+    /**
+     * @notice Check whether this view cache appears stale based on the last sync timestamp.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Reads block.timestamp (time-based heuristic).
+     *
+     * @return True if `(block.timestamp - _lastSyncTimestamp) > SYNC_INTERVAL`.
+     */
     function needsSync() public view returns (bool) {
+        // solhint-disable-next-line not-rely-on-time
         return (block.timestamp - _lastSyncTimestamp) > SYNC_INTERVAL;
     }
     
-    /// @notice 获取用户费用统计（用户只能查看自己的）
-    /// @param user 用户地址
-    /// @param feeType 费用类型
-    /// @return 用户支付的费用金额
+    /**
+     * @notice Get user fee statistics for a fee type (user-scoped view; access-controlled).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *
+     * Security:
+     * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
+     *
+     * @param user Target user address
+     * @param feeType Fee type identifier (bytes32)
+     * @return amount Accumulated fee amount (token decimals; as pushed by FeeRouter)
+     */
     function getUserFeeStatistics(address user, bytes32 feeType) 
         external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256) {
         return _userFeeStatistics[user][feeType];
     }
 
-    /// @notice 获取用户动态费率（用户只能查看自己的）
-    /// @param user 用户地址
-    /// @param feeType 费用类型
-    /// @return 用户的个人费率
+    /**
+     * @notice Get the last pushed personal fee rate for a user and fee type (user-scoped; access-controlled).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *
+     * Security:
+     * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
+     *
+     * @param user Target user address
+     * @param feeType Fee type identifier (bytes32)
+     * @return feeBps Personal fee rate in bps (\(1e4 = 100%\))
+     */
     function getUserDynamicFee(address user, bytes32 feeType) 
         external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256) {
         return _userDynamicFees[user][feeType];
     }
 
-    /// @notice 获取用户个人统计（用户只能查看自己的）
-    /// @param user 用户地址
-    /// @return stats 用户统计数据
+    /**
+     * @notice Get per-user aggregate stats (user-scoped; access-controlled).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *
+     * Security:
+     * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
+     *
+     * @param user Target user address
+     * @return stats User stats struct (amounts in token decimals, timestamps in seconds)
+     */
     function getUserStats(address user) 
         external view onlyValidRegistry onlyAuthorizedFor(user) returns (UserStats memory stats) {
         return _userStats[user];
     }
 
-    /// @notice 获取用户费用配置（用户只能查看自己的）
-    /// @param user 用户地址
-    /// @return config 用户费用配置
+    /**
+     * @notice Get a derived user fee config view (placeholder analytics; access-controlled).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *
+     * Security:
+     * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
+     *
+     * @param user Target user address
+     * @return config Derived config view (bps in 1e4 scale; counts unitless; amounts in token decimals)
+     */
     function getUserFeeConfig(address user) 
         external view onlyValidRegistry onlyAuthorizedFor(user) returns (UserFeeConfig memory config) {
-        config.personalFeeBps = _userDynamicFees[user][bytes32(0)]; // 默认费率
+        config.personalFeeBps = _userDynamicFees[user][bytes32(0)]; // Default fee rate
         config.totalFeePaid = _userStats[user].totalFeePaid;
         config.transactionCount = _userStats[user].transactionCount;
-        // 根据费用支付情况计算VIP状态和折扣级别
+        // Calculate VIP status and discount level based on fee payments.
         config.vipStatus = _userStats[user].totalFeePaid > 1000 ether;
         config.discountLevel = _calculateDiscountLevel(user);
     }
 
-    /// @notice 检查代币是否支持（公开查询）
-    /// @param token 代币地址
-    /// @return 是否支持
+    /**
+     * @notice Check whether a token is supported (public view).
+     * @dev Reverts if:
+     *      - none
+     *
+     * @param token ERC20 token address
+     * @return supported True if token is currently marked as supported in the cached config.
+     */
     function isTokenSupported(address token) external view returns (bool) {
         return _supportedTokens[token];
     }
 
-    /// @notice 获取支持的代币列表（公开查询）
-    /// @return 支持的代币地址数组
+    /**
+     * @notice Get supported token list (public view).
+     * @dev Reverts if:
+     *      - none
+     *
+     * @return tokens List of supported ERC20 token addresses (cached)
+     */
     function getSupportedTokens() external view returns (address[] memory) {
         return _systemConfig.supportedTokens;
     }
 
-    /*━━━━━━━━━━━━━━━ 管理员查询函数（仅管理员）━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ ADMIN QUERY FUNCTIONS (ONLY ADMIN) ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取全局费用统计（仅管理员）
-    /// @param token 代币地址
-    /// @param feeType 费用类型
-    /// @return 全局费用统计金额
+    /**
+     * @notice Get global fee statistics for (token, feeType) (admin-only).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender lacks ACTION_ADMIN (ACM)
+     *
+     * Security:
+     * - Admin-gated via ACTION_ADMIN.
+     *
+     * @param token ERC20 token address
+     * @param feeType Fee type identifier (bytes32)
+     * @return amount Total accumulated amount (token decimals; as pushed by FeeRouter)
+     */
     function getGlobalFeeStatistics(address token, bytes32 feeType) 
         external view onlyValidRegistry onlyAdmin returns (uint256) {
         return _globalFeeStatistics[token][feeType];
     }
 
-    /// @notice 获取全局操作统计（仅管理员）
-    /// @return distributions 总分发次数
-    /// @return totalAmount 总分发金额
+    /**
+     * @notice Get global operation stats (admin-only).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender lacks ACTION_ADMIN (ACM)
+     *
+     * Security:
+     * - Admin-gated via ACTION_ADMIN.
+     *
+     * @return distributions Total distribution count (unitless)
+     * @return totalAmount Total distributed amount (token decimals aggregated by FeeRouter)
+     */
     function getGlobalOperationStats() 
         external view onlyValidRegistry onlyAdmin returns (uint256 distributions, uint256 totalAmount) {
         return (_globalStats.totalDistributions, _globalStats.totalAmountDistributed);
     }
 
-    /// @notice 获取系统配置（仅管理员）
-    /// @return config 系统配置
+    /**
+     * @notice Get cached system config (admin-only).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender lacks ACTION_ADMIN (ACM)
+     *
+     * Security:
+     * - Admin-gated via ACTION_ADMIN.
+     *
+     * @return config Cached system config (addresses + bps + token list)
+     */
     function getSystemConfig() 
         external view onlyValidRegistry onlyAdmin returns (SystemConfig memory config) {
         return _systemConfig;
     }
 
-    /// @notice 获取系统费用分析（仅管理员）
-    /// @return analytics 系统费用分析数据
+    /**
+     * @notice Get derived system fee analytics (admin-only; placeholder).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender lacks ACTION_ADMIN (ACM)
+     *
+     * Security:
+     * - Admin-gated via ACTION_ADMIN.
+     *
+     * @return analytics Derived analytics values (amounts in token decimals; bps in 1e4 scale)
+     */
     function getSystemFeeAnalytics() 
         external view onlyValidRegistry onlyAdmin returns (SystemFeeAnalytics memory analytics) {
         analytics.distributionCount = _globalStats.totalDistributions;
@@ -362,12 +614,22 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         analytics.averageFeeRate = platformFeeBps + ecosystemFeeBps;
     }
 
-    /*━━━━━━━━━━━━━━━ 批量查询功能 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ BATCH QUERY FUNCTIONS ━━━━━━━━━━━━━━━*/
     
-    /// @notice 批量获取用户费用统计（用户只能查询自己的）
-    /// @param user 用户地址
-    /// @param feeTypes 费用类型数组
-    /// @return feeStatistics 费用统计数组
+    /**
+     * @notice Batch get user fee statistics for multiple fee types (user-scoped; access-controlled).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *      - feeTypes.length > MAX_BATCH_SIZE (FeeRouterView__BatchSizeTooLarge)
+     *
+     * Security:
+     * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
+     *
+     * @param user Target user address
+     * @param feeTypes Fee type identifiers (bytes32[])
+     * @return feeStatistics Per-feeType accumulated amounts (token decimals; as pushed by FeeRouter)
+     */
     function batchGetUserFeeStatistics(
         address user,
         bytes32[] calldata feeTypes
@@ -380,10 +642,21 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
-    /// @notice 批量获取全局费用统计（仅管理员）
-    /// @param tokens 代币地址数组
-    /// @param feeTypes 费用类型数组
-    /// @return feeStatistics 费用统计数组
+    /**
+     * @notice Batch get global fee statistics for multiple (token, feeType) pairs (admin-only).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender lacks ACTION_ADMIN (ACM)
+     *      - tokens.length != feeTypes.length (FeeRouterView__ArrayLengthMismatch)
+     *      - tokens.length > MAX_BATCH_SIZE (FeeRouterView__BatchSizeTooLarge)
+     *
+     * Security:
+     * - Admin-gated via ACTION_ADMIN.
+     *
+     * @param tokens ERC20 token addresses
+     * @param feeTypes Fee type identifiers (bytes32[])
+     * @return feeStatistics Per-pair accumulated amounts (token decimals)
+     */
     function batchGetGlobalFeeStatistics(
         address[] calldata tokens, 
         bytes32[] calldata feeTypes
@@ -397,9 +670,15 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
-    /// @notice 批量检查代币支持状态（公开查询）
-    /// @param tokens 代币地址数组
-    /// @return supported 支持状态数组
+    /**
+     * @notice Batch check token support status (public view).
+     * @dev Reverts if:
+     *      - tokens.length == 0 (FeeRouterView__EmptyArray)
+     *      - tokens.length > MAX_BATCH_SIZE (FeeRouterView__BatchSizeTooLarge)
+     *
+     * @param tokens ERC20 token addresses
+     * @return supported Per-token support flags
+     */
     function batchCheckTokenSupport(address[] calldata tokens) 
         external view returns (bool[] memory supported) {
         if (tokens.length == 0) revert FeeRouterView__EmptyArray();
@@ -411,12 +690,22 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
     
-    /*━━━━━━━━━━━━━━━ 高级分析功能 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ ADVANCED ANALYTICS FUNCTIONS ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取用户费用分析（用户只能查看自己的）
-    /// @param user 用户地址
-    /// @param feeTypes 要分析的费用类型数组
-    /// @return analytics 用户费用分析数据
+    /**
+     * @notice Get derived user fee analytics (placeholder; access-controlled).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *      - feeTypes.length > MAX_BATCH_SIZE (FeeRouterView__BatchSizeTooLarge)
+     *
+     * Security:
+     * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
+     *
+     * @param user Target user address
+     * @param feeTypes Fee type identifiers (bytes32[])
+     * @return analytics Derived analytics (amounts in token decimals; counts unitless; timestamps in seconds)
+     */
     function getUserFeeAnalytics(address user, bytes32[] calldata feeTypes) 
         external view onlyValidRegistry onlyAuthorizedFor(user) returns (UserFeeAnalytics memory analytics) {
         if (feeTypes.length > MAX_BATCH_SIZE) revert FeeRouterView__BatchSizeTooLarge();
@@ -436,47 +725,83 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
             totalFees += feeAmount;
         }
         
-        // 计算平均费率
+        // Compute a simple average fee rate proxy (placeholder).
         if (analytics.transactionCount > 0) {
             analytics.averageFeeRate = (totalFees * 10000) / analytics.transactionCount;
         }
     }
 
-    /*━━━━━━━━━━━━━━━ 内部辅助函数 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ INTERNAL HELPER FUNCTIONS ━━━━━━━━━━━━━━━*/
     
-    /// @notice 计算用户折扣级别
-    /// @param user 用户地址
-    /// @return 折扣级别
+    /**
+     * @notice Compute a derived discount level for a user (placeholder).
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View-only; uses cached aggregates as input.
+     *
+     * @param user Target user address
+     * @return level Discount level (unitless; higher means larger discount)
+     */
     function _calculateDiscountLevel(address user) internal view returns (uint256) {
         UserStats memory userStats = _userStats[user];
         
-        if (userStats.totalFeePaid >= 10000 ether) return 5; // 最高级别
+        if (userStats.totalFeePaid >= 10000 ether) return 5; // highest level
         if (userStats.totalFeePaid >= 5000 ether) return 4;
         if (userStats.totalFeePaid >= 1000 ether) return 3;
         if (userStats.totalFeePaid >= 500 ether) return 2;
         if (userStats.totalFeePaid >= 100 ether) return 1;
-        return 0; // 无折扣
+        return 0; // no discount
     }
     
-    /*━━━━━━━━━━━━━━━ Registry 管理功能 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Registry Management Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取Registry地址
+    /**
+     * @notice Get configured Registry address.
+     * @dev Reverts if:
+     *      - none
+     *
+     * @return registry Registry address (module resolver)
+     */
     function getRegistry() external view returns (address) {
         return _registryAddr;
     }
 
-    /// @notice 获取FeeRouter模块地址
+    /**
+     * @notice Resolve current FeeRouter address from Registry (SSOT writer address).
+     * @dev Reverts if:
+     *      - Registry resolution reverts (Registry.getModuleOrRevert)
+     *
+     * @return feeRouter FeeRouter module address (Registry.KEY_FR)
+     */
     function getFeeRouter() external view returns (address) {
         return _getFeeRouter();
     }
 
-    /// @notice 兼容旧版 getter
+    /**
+     * @notice Legacy getter for registry address (backwards compatibility).
+     * @dev Reverts if:
+     *      - none
+     *
+     * @return registry Registry address
+     */
     function registryAddr() external view returns(address){return _registryAddr;}
 
-    /*━━━━━━━━━━━━━━━ 合约升级 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ CONTRACT UPGRADE ━━━━━━━━━━━━━━━*/
     
-    /// @notice 授权合约升级
-    /// @param newImplementation 新实现地址
+    /**
+     * @notice Authorize UUPS upgrade.
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress)
+     *      - msg.sender lacks ACTION_ADMIN (ACM)
+     *      - newImplementation == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via ACTION_ADMIN.
+     *
+     * @param newImplementation New implementation address
+     */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
@@ -486,17 +811,30 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
     }
 
-    // ============ Versioning (C+B baseline) ============
+    /**
+     * @notice API version of this view module.
+     * @dev Reverts if:
+     *      - none
+     *
+     * @return version Semantic API version (uint256)
+     */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
+    /**
+     * @notice Schema version of this view module.
+     * @dev Reverts if:
+     *      - none
+     *
+     * @return version Schema version (uint256)
+     */
     function schemaVersion() public pure override returns (uint256) {
         return 1;
     }
 
-    /*━━━━━━━━━━━━━━━ 存储槽预留 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ STORAGE GAP FOR UPGRADE-SAFE LAYOUT CHANGES ━━━━━━━━━━━━━━━*/
     
-    /// @notice 为未来升级预留的存储槽
+    /// @notice Reserved storage gap for upgrade-safe layout changes.
     uint256[35] private __gap;
 }

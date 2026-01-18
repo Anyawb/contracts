@@ -26,13 +26,10 @@ src/
 │  └─ DataPushTypes.sol        # 数据推送类型定义
 ├─ Vault/                      # 核心业务 Vault 合约聚合层
 │  ├─ VaultCore.sol            # 极简入口合约（双架构设计）
-│  ├─ VaultRouter.sol            # 双架构智能协调器（查询接口）
+│  ├─ VaultRouter.sol          # 路由协调器（deposit/withdraw 路由 + push 到 View）
 │  ├─ VaultStorage.sol         # 存储合约（Registry系统集成）
-│  ├─ VaultRouter.sol          # 路由合约（权限校验与模块分发）
 │  ├─ VaultMath.sol            # 统一数学计算库
-│  ├─ VaultTypes.sol           # 类型定义（错误、事件、常量）
-│  ├─ VaultBase.sol            # 基础合约（共享功能）
-│  ├─ VaultAccess.sol          # 访问控制基础合约
+│  ├─ SystemEvents.sol         # 全局标准事件（跨模块共享事件 SSOT，原 VaultTypes.sol）
 │  ├─ VaultAdmin.sol           # 管理功能合约
 │  ├─ modules/                 # 具体业务子模块
 │  │  ├─ CollateralManager.sol        # 抵押资产管理
@@ -816,27 +813,12 @@ library VaultMath {
     function calculateLTV(uint256 debt, uint256 collateral) internal pure returns (uint256)
     
     // 百分比计算
-    function percentageMul(uint256 value, uint256 percentage) internal pure returns (uint256)
-    function percentageDiv(uint256 value, uint256 percentage) internal pure returns (uint256)
-    
-    // 债务和抵押计算
-    function calculateMaxBorrowable(uint256 collateral, uint256 currentDebt, uint256 maxLTV) internal pure returns (uint256)
-    function calculateMinCollateral(uint256 debt, uint256 maxLTV) internal pure returns (uint256)
-    
-    // 奖励和费用计算
-    function calculateLiquidationBonus(uint256 amount, uint256 bonus) internal pure returns (uint256)
-    function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256)
-    function calculateAmountAfterFee(uint256 amount, uint256 feeRate) internal pure returns (uint256)
-    
-    // 清算相关计算
-    function calculateLiquidationResidual(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
-    function calculateResidualRatio(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
-    function calculateLiquidationEfficiency(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
-    function calculateLiquidationLoss(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
-    function calculateLiquidationLossRatio(uint256 collateralValue, uint256 debtValue) internal pure returns (uint256)
-    function calculateOptimalLiquidationAmount(uint256 collateralValue, uint256 debtValue, uint256 maxLiquidationRatio) internal pure returns (uint256)
-    function calculateRemainingCollateral(uint256 originalCollateral, uint256 liquidationAmount) internal pure returns (uint256)
-    function calculateRemainingDebt(uint256 originalDebt, uint256 liquidationAmount) internal pure returns (uint256)
+    function percentageMul(uint256 value, uint256 bps) internal pure returns (uint256)
+    function percentageDiv(uint256 value, uint256 bps) internal pure returns (uint256)
+
+    // 清算奖励 & 费用计算
+    function calculateLiquidationBonus(uint256 amount, uint256 bonusBps) internal pure returns (uint256)
+    function calculateFee(uint256 amount, uint256 feeBps) internal pure returns (uint256)
 }
 ```
 
@@ -853,12 +835,8 @@ function calculateUserLTV(uint256 debt, uint256 collateral) internal pure return
     return VaultMath.calculateLTV(debt, collateral);
 }
 
-function calculateFee(uint256 amount, uint256 feeRate) internal pure returns (uint256) {
-    return VaultMath.calculateFee(amount, feeRate);
-}
-
-function calculateMaxBorrowable(uint256 collateral, uint256 currentDebt, uint256 maxLTV) internal pure returns (uint256) {
-    return VaultMath.calculateMaxBorrowable(collateral, currentDebt, maxLTV);
+function calculateFee(uint256 amount, uint256 feeBps) internal pure returns (uint256) {
+    return VaultMath.calculateFee(amount, feeBps);
 }
 ```
 

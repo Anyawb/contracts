@@ -27,7 +27,7 @@ import {
 } from "../../errors/StandardErrors.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { VaultTypes } from "../VaultTypes.sol";
+import { SystemEvents } from "../SystemEvents.sol";
 import { Registry } from "../../registry/Registry.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
 
@@ -254,7 +254,7 @@ contract EarlyRepaymentGuaranteeManager is
         _platformFeeRate = initialPlatformFeeRate;
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -490,7 +490,7 @@ contract EarlyRepaymentGuaranteeManager is
         );
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
+        emit SystemEvents.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
         return guaranteeId;
     }
 
@@ -552,7 +552,7 @@ contract EarlyRepaymentGuaranteeManager is
         );
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_REPAY, ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY), msg.sender, block.timestamp);
+        emit SystemEvents.ActionExecuted(ActionKeys.ACTION_REPAY, ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY), msg.sender, block.timestamp);
         return result;
     }
 
@@ -604,7 +604,7 @@ contract EarlyRepaymentGuaranteeManager is
         );
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_LIQUIDATE, ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE), msg.sender, block.timestamp);
+        emit SystemEvents.ActionExecuted(ActionKeys.ACTION_LIQUIDATE, ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE), msg.sender, block.timestamp);
         return forfeitedAmount;
     }
 
@@ -619,7 +619,7 @@ contract EarlyRepaymentGuaranteeManager is
         emit PlatformFeeReceiverUpdated(oldReceiver, newReceiverAddr, block.timestamp);
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
+        emit SystemEvents.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
     }
 
     /// @notice 更新平台手续费率
@@ -633,7 +633,7 @@ contract EarlyRepaymentGuaranteeManager is
         emit PlatformFeeRateUpdated(oldRate, newRate, block.timestamp);
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
+        emit SystemEvents.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
     }
 
     /// @notice 更新 VaultCore 地址
@@ -643,7 +643,7 @@ contract EarlyRepaymentGuaranteeManager is
         _vaultCoreAddr = newVaultCoreAddr;
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
+        emit SystemEvents.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
     }
 
     /// @notice 更新Registry地址（治理功能）
@@ -657,7 +657,7 @@ contract EarlyRepaymentGuaranteeManager is
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE, ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE), msg.sender, block.timestamp);
+        emit SystemEvents.ActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE, ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE), msg.sender, block.timestamp);
     }
 
     /// @notice 紧急暂停功能

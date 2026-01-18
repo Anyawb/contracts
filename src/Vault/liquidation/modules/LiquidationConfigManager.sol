@@ -16,7 +16,7 @@ import {ICacheRefreshable} from "../../../interfaces/ICacheRefreshable.sol";
 import {ILiquidationConfigManager} from "../../../interfaces/ILiquidationConfigManager.sol";
 import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
 import {Registry} from "../../../registry/Registry.sol";
-import {IRegistryUpgradeEvents} from "../../../interfaces/IRegistryUpgradeEvents.sol";
+import {RegistryEvents} from "../../../registry/RegistryEventsLibrary.sol";
 
 /// @title LiquidationConfigManager
 /// @notice Base class for liquidation configuration management.
@@ -45,8 +45,7 @@ abstract contract LiquidationConfigManager is
     ReentrancyGuardUpgradeable,
     PausableUpgradeable,
     ICacheRefreshable,
-    ILiquidationConfigManager,
-    IRegistryUpgradeEvents
+    ILiquidationConfigManager
 {
     using LiquidationAccessControl for LiquidationAccessControl.Storage;
 
@@ -569,7 +568,7 @@ abstract contract LiquidationConfigManager is
         _moduleCache.cacheTimestamps[key] = block.timestamp;
 
         if (old != addr) {
-            emit ModuleCacheUpdated(key, old, addr);
+            emit RegistryEvents.ModuleCacheUpdated(key, old, addr);
         }
     }
 

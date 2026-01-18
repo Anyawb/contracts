@@ -188,8 +188,8 @@ describe("Registry Gas Optimization", function () {
             const address = await mock.getAddress();
             
             await expect(registry.setModule(key, address))
-                .to.emit(registry, "ModuleUpgraded")
-                .withArgs(key, ethers.ZeroAddress, address, await owner.getAddress());
+                .to.emit(registry, "ModuleChanged")
+                .withArgs(key, ethers.ZeroAddress, address);
                 
             expect(await registry.getModule(key)).to.equal(address);
         });
@@ -252,7 +252,7 @@ describe("Registry Gas Optimization", function () {
             ];
 
             await expect(registry.setModulesWithStatus(keys, addresses))
-                .to.be.revertedWithCustomError(registry, "ZeroAddress");
+                .to.be.revertedWithCustomError(registry, "Registry__ZeroAddress");
         });
 
         it("Should revert for mismatched array lengths", async function () {
@@ -272,7 +272,7 @@ describe("Registry Gas Optimization", function () {
             ];
 
             await expect(registry.setModulesWithStatus(keys, addresses))
-                .to.be.revertedWithCustomError(registry, "MismatchedArrayLengths");
+                .to.be.revertedWithCustomError(registry, "Registry__MismatchedArrayLengths");
         });
     });
 

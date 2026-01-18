@@ -2,7 +2,7 @@ import { expect } from 'chai';
 import { ethers, upgrades } from 'hardhat';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
-const KEY_LENDING_ENGINE = ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE'));
+const KEY_ORDER_ENGINE = ethers.keccak256(ethers.toUtf8Bytes('ORDER_ENGINE'));
 
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 
@@ -16,7 +16,7 @@ describe('LendingEngineView', function () {
 
     await engine.setRegistry(await registry.getAddress());
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
-    await registry.setModule(KEY_LENDING_ENGINE, await engine.getAddress());
+    await registry.setModule(KEY_ORDER_ENGINE, await engine.getAddress());
 
     // grant admin for upgrades
     await acm.grantRole(ACTION_ADMIN, admin.address);
@@ -303,7 +303,7 @@ describe('LendingEngineView', function () {
       const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
 
       await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
-      // Intentionally not setting KEY_LENDING_ENGINE
+      // Intentionally not setting KEY_ORDER_ENGINE
 
       const LendingEngineViewFactory = await ethers.getContractFactory('LendingEngineView');
       const view = await upgrades.deployProxy(LendingEngineViewFactory, [await registry.getAddress()], {
@@ -318,7 +318,7 @@ describe('LendingEngineView', function () {
       const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
       const engine = await (await ethers.getContractFactory('MockLendingEngineViewAdapter')).deploy();
 
-      await registry.setModule(KEY_LENDING_ENGINE, await engine.getAddress());
+      await registry.setModule(KEY_ORDER_ENGINE, await engine.getAddress());
       // Intentionally not setting KEY_ACCESS_CONTROL
 
       const LendingEngineViewFactory = await ethers.getContractFactory('LendingEngineView');

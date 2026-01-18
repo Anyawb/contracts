@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IRegistryUpgradeEvents } from "../interfaces/IRegistryUpgradeEvents.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { RewardTypes } from "./RewardTypes.sol";
 import { IServiceConfig } from "./interfaces/IServiceConfig.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ZeroAddress } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -22,8 +21,7 @@ contract RewardConfig is
     Initializable, 
     UUPSUpgradeable,
     RewardTypes,
-    RewardModuleBase,
-    IRegistryUpgradeEvents
+    RewardModuleBase
 {
     // ============ Errors ============
     error RewardConfig__InvalidServiceType(uint8 serviceType);
@@ -72,7 +70,7 @@ contract RewardConfig is
         _isTestnetMode = true;
         
         // 记录初始化动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -134,7 +132,7 @@ contract RewardConfig is
         configModule.updateConfig(level, price, duration, isActive);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -159,7 +157,7 @@ contract RewardConfig is
         configModule.setCooldown(cooldown);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -178,7 +176,7 @@ contract RewardConfig is
         emit ServiceConfigModuleUpdated(uint8(serviceType), address(configModule));
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -194,7 +192,7 @@ contract RewardConfig is
         emit UpgradeMultiplierUpdated(multiplier);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -210,7 +208,7 @@ contract RewardConfig is
         emit TestnetModeUpdated(isTestnet);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -226,7 +224,7 @@ contract RewardConfig is
         if (newImplementation == address(0)) revert ZeroAddress();
         
         // 记录升级动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
@@ -284,7 +282,7 @@ contract RewardConfig is
         _registryAddr = newRegistryAddr;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -292,7 +290,7 @@ contract RewardConfig is
         );
         
         // 发出模块地址更新事件
-        emit VaultTypes.ModuleAddressUpdated(
+        emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
@@ -316,7 +314,7 @@ contract RewardConfig is
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,

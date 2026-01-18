@@ -2,14 +2,30 @@
 pragma solidity ^0.8.20;
 
 import { IRegistryDynamicModuleKey } from "../interfaces/IRegistryDynamicModuleKey.sol";
+import { IndexOutOfBounds, ZeroAddress } from "../errors/StandardErrors.sol";
+import {RegistryEvents} from "../registry/RegistryEventsLibrary.sol";
 
 /// @title MockRegistryDynamicModuleKey
 /// @notice Mock 动态模块键注册表，用于测试
 /// @dev 仅用于测试环境，不包含完整的权限控制和验证逻辑
 contract MockRegistryDynamicModuleKey is IRegistryDynamicModuleKey {
+    // NOTE:
+    // - `IRegistryDynamicModuleKey` intentionally declares only functions (no events/errors).
+    // - Events are emitted via the canonical RegistryEvents library (Architecture-Guide.md unified event library rule).
+
+    // ============ Custom errors (test-only) ============
+    error RegistryDynamicModuleKey__ModuleKeyAlreadyExists(bytes32 moduleKey);
+    error RegistryDynamicModuleKey__ModuleKeyNotExists(bytes32 moduleKey);
+    error RegistryDynamicModuleKey__ModuleNameNotExists(string name);
+
     bytes32[] private _dynamicKeys;
     mapping(bytes32 => bool) private _keyExists;
     mapping(bytes32 => string) private _keyNames;
+
+    // Minimal admin/pause state to avoid empty-block bodies (solhint no-empty-blocks).
+    address private _registrationAdmin;
+    address private _systemAdmin;
+    bool private _paused;
 
     /// @notice 注册动态模块键（测试用，无权限控制）
     function registerModuleKey(string calldata name) external returns (bytes32 moduleKey) {
@@ -21,7 +37,7 @@ contract MockRegistryDynamicModuleKey is IRegistryDynamicModuleKey {
         _keyExists[moduleKey] = true;
         _keyNames[moduleKey] = name;
         bytes32 nameHash = keccak256(abi.encodePacked(name));
-        emit ModuleKeyRegistered(moduleKey, name, nameHash, msg.sender, block.timestamp);
+        emit RegistryEvents.ModuleKeyRegistered(moduleKey, nameHash, msg.sender);
         return moduleKey;
     }
 
@@ -42,7 +58,7 @@ contract MockRegistryDynamicModuleKey is IRegistryDynamicModuleKey {
         string memory keyName = _keyNames[moduleKey];
         _keyExists[moduleKey] = false;
         // 简化实现：不移除数组元素，只标记为不存在
-        emit ModuleKeyUnregistered(moduleKey, keyName, msg.sender, block.timestamp);
+        emit RegistryEvents.ModuleKeyUnregistered(moduleKey, keyName, msg.sender);
     }
 
     /// @notice 检查是否为动态模块键
@@ -116,30 +132,40 @@ contract MockRegistryDynamicModuleKey is IRegistryDynamicModuleKey {
 
     /// @notice 根据索引获取动态模块键
     function getDynamicModuleKeyByIndex(uint256 index) external view returns (bytes32 moduleKey) {
-        require(index < _dynamicKeys.length, "Index out of bounds");
+        if (index >= _dynamicKeys.length) revert IndexOutOfBounds(index, _dynamicKeys.length);
         return _dynamicKeys[index];
     }
 
-    /// @notice 获取注册管理员（Mock 返回零地址）
-    function getRegistrationAdmin() external pure returns (address) {
-        return address(0);
+    /// @notice 获取注册管理员（Mock 仅返回内部状态）
+    function getRegistrationAdmin() external view returns (address) {
+        return _registrationAdmin;
     }
 
-    /// @notice 获取系统管理员（Mock 返回零地址）
-    function getSystemAdmin() external pure returns (address) {
-        return address(0);
+    /// @notice 获取系统管理员（Mock 仅返回内部状态）
+    function getSystemAdmin() external view returns (address) {
+        return _systemAdmin;
     }
 
     /// @notice 设置注册管理员（Mock 空实现）
-    function setRegistrationAdmin(address) external {}
+    function setRegistrationAdmin(address newRegistrationAdmin) external {
+        if (newRegistrationAdmin == address(0)) revert ZeroAddress();
+        _registrationAdmin = newRegistrationAdmin;
+    }
 
     /// @notice 设置系统管理员（Mock 空实现）
-    function setSystemAdmin(address) external {}
+    function setSystemAdmin(address newSystemAdmin) external {
+        if (newSystemAdmin == address(0)) revert ZeroAddress();
+        _systemAdmin = newSystemAdmin;
+    }
 
     /// @notice 紧急暂停（Mock 空实现）
-    function pause() external {}
+    function pause() external {
+        _paused = true;
+    }
 
     /// @notice 恢复运行（Mock 空实现）
-    function unpause() external {}
+    function unpause() external {
+        _paused = false;
+    }
 }
 

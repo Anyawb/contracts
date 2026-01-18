@@ -2,14 +2,13 @@
 pragma solidity ^0.8.20;
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
-import { IRegistryUpgradeEvents } from "../interfaces/IRegistryUpgradeEvents.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { RewardTypes } from "./RewardTypes.sol";
 import { RewardCore } from "./RewardCore.sol";
 import { IRewardConsumptionErrors } from "../interfaces/IRewardConsumptionErrors.sol";
 import { IRewardConsumptionEvents } from "../interfaces/IRewardConsumptionEvents.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ZeroAddress } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -27,8 +26,7 @@ contract RewardConsumption is
     ReentrancyGuardUpgradeable, 
     UUPSUpgradeable,
     RewardTypes,
-    RewardModuleBase,
-    IRegistryUpgradeEvents
+    RewardModuleBase
 {
     uint256 private constant MAX_BATCH_SIZE = 100;
     
@@ -64,7 +62,7 @@ contract RewardConsumption is
         _registryAddr = initialRegistryAddr;
         
         // 记录初始化动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -114,7 +112,7 @@ contract RewardConsumption is
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_BATCH_WITHDRAW,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_WITHDRAW),
             msg.sender,
@@ -151,7 +149,7 @@ contract RewardConsumption is
         // 暂时保留接口，具体实现需要根据模块化架构调整
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -166,7 +164,7 @@ contract RewardConsumption is
         _rewardCore.setUpgradeMultiplier(multiplier);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -183,7 +181,7 @@ contract RewardConsumption is
         // 暂时保留接口，具体实现需要根据模块化架构调整
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -198,7 +196,7 @@ contract RewardConsumption is
         _rewardCore.setTestnetMode(isTestnet);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -214,7 +212,7 @@ contract RewardConsumption is
         if (newImplementation == address(0)) revert ZeroAddress();
         
         // 记录升级动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
@@ -233,7 +231,7 @@ contract RewardConsumption is
         _registryAddr = newRegistryAddr;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -241,7 +239,7 @@ contract RewardConsumption is
         );
         
         // 发出模块地址更新事件
-        emit VaultTypes.ModuleAddressUpdated(
+        emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
@@ -265,7 +263,7 @@ contract RewardConsumption is
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,

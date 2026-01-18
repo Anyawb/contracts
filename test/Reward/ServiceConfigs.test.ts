@@ -488,7 +488,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         await expect(
           acm.connect(alice).grantRole(adminRole, alice.address)
-        ).to.be.revertedWithCustomError(acm, 'OnlyOwnerAllowed');
+        ).to.be.revertedWithCustomError(acm, 'AccessControlManager__OnlyOwnerAllowed');
       });
       
       it('普通用户不应能撤销管理员权限', async function () {
@@ -502,7 +502,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 尝试撤销
         await expect(
           acm.connect(alice).revokeRole(adminRole, bob.address)
-        ).to.be.revertedWithCustomError(acm, 'OnlyOwnerAllowed');
+        ).to.be.revertedWithCustomError(acm, 'AccessControlManager__OnlyOwnerAllowed');
       });
     });
   });

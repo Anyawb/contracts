@@ -173,27 +173,27 @@ describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', f
     it('应当在迁移器为零地址时 revert', async function () {
       await expect(
         registry.migrateStorage(1, 2, ethers.ZeroAddress)
-      ).to.be.revertedWithCustomError(registry, 'ZeroAddress');
+      ).to.be.revertedWithCustomError(registry, 'Registry__ZeroAddress');
     });
 
     it('应当在当前版本不匹配时 revert', async function () {
       // 当前为 1，故传 2 触发版本不匹配
       await expect(
         registry.migrateStorage(2, 3, await migrator.getAddress())
-      ).to.be.revertedWithCustomError(registry, 'StorageVersionMismatch');
+      ).to.be.revertedWithCustomError(registry, 'Registry__StorageVersionMismatch');
     });
 
     it('应当在目标版本不递增时 revert', async function () {
       const cur = await registry.getStorageVersion(); // 1
       await expect(
         registry.migrateStorage(cur, cur, await migrator.getAddress())
-      ).to.be.revertedWithCustomError(registry, 'InvalidMigrationTarget');
+      ).to.be.revertedWithCustomError(registry, 'Registry__InvalidMigrationTarget');
     });
 
     it('应当在迁移器内部 revert 时包装为 MigratorFailed', async function () {
       await expect(
         registry.migrateStorage(1, 2, await reverter.getAddress())
-      ).to.be.revertedWithCustomError(registry, 'MigratorFailed');
+      ).to.be.revertedWithCustomError(registry, 'Registry__MigratorFailed');
     });
   });
 
@@ -286,8 +286,7 @@ describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', f
     });
 
     it('迁移前预置模块/待升级/历史/nonces，迁移后保持完整性', async function () {
-      // 简化测试：只验证迁移不会破坏现有数据
-      // 由于设置模块需要 RegistryCore，我们跳过模块设置，只验证迁移本身
+      // 简化测试：只验证迁移不会破坏现有数据（不依赖模块注册/变更路径）
       const versionBefore = await registry.getStorageVersion();
       await registry.migrateStorage(1, 2, await migrator.getAddress());
       expect(await registry.getStorageVersion()).to.equal(2n);

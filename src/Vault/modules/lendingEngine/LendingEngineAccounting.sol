@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import { AmountIsZero, Overpay, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { VaultTypes } from "../../VaultTypes.sol";
+import { SystemEvents } from "../../SystemEvents.sol";
 import { LendingEngineStorage } from "./LendingEngineStorage.sol";
 import { LendingEngineValuation } from "./LendingEngineValuation.sol";
 
@@ -30,7 +30,7 @@ library LendingEngineAccounting {
         LendingEngineValuation.updateUserTotalDebtValue(s, user);
 
         emit DebtRecorded(user, asset, amount, true);
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_BORROW,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_BORROW),
             msg.sender,
@@ -57,7 +57,7 @@ library LendingEngineAccounting {
         LendingEngineValuation.updateUserTotalDebtValue(s, user);
 
         emit DebtRecorded(user, asset, amount, false);
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_REPAY,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY),
             msg.sender,
@@ -87,7 +87,7 @@ library LendingEngineAccounting {
         LendingEngineValuation.updateUserTotalDebtValue(s, user);
 
         emit DebtRecorded(user, asset, amount, false);
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_LIQUIDATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
             msg.sender,

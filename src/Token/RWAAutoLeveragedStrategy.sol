@@ -8,7 +8,6 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IVaultCore} from "../interfaces/IVaultCore.sol";
-import {IVaultStorage} from "../interfaces/IVaultStorage.sol";
 import {ILendingEngineBasic} from "../interfaces/ILendingEngineBasic.sol";
 import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
 import {AmountIsZero} from "../errors/StandardErrors.sol";
@@ -35,7 +34,6 @@ interface IPositionView {
 }
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { Registry } from "../registry/Registry.sol";
-import { IVaultStorage } from "../interfaces/IVaultStorage.sol";
 // Minimal interface to access VaultCore.getRegistry without changing IVaultCore
 interface IVaultCoreWithRegistry { function getRegistry() external view returns (address); }
 
@@ -180,13 +178,11 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     
     constructor(
         address _vault,
-        address _vaultStorage,
         address _rwaToken,
         uint256 _minLeverage,
         uint256 _maxLeverage
     ) Ownable(msg.sender) {
         require(_vault != address(0), "Invalid vault address");
-        require(_vaultStorage != address(0), "Invalid vault storage address");
         require(_rwaToken != address(0), "Invalid RWA token address");
         require(_minLeverage >= 100, "Min leverage must be >= 1x");
         require(_maxLeverage <= 500, "Max leverage must be <= 5x");
@@ -194,7 +190,10 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         
         vault = IVaultCore(_vault);
         rwaToken = IERC20(_rwaToken);
-        settlementToken = IERC20(IVaultStorage(_vaultStorage).getSettlementTokenAddr());
+        // Architecture-Guide alignment: settlement token SSOT is Registry[KEY_SETTLEMENT_TOKEN].
+        address reg = IVaultCoreWithRegistry(_vault).getRegistry();
+        address st = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_SETTLEMENT_TOKEN);
+        settlementToken = IERC20(st);
         
         config = StrategyConfig({
             minLeverage: _minLeverage,

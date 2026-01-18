@@ -17,7 +17,7 @@ import type { MockRewardManager } from '../../types/contracts/Mocks/MockRewardMa
 import { MockRewardManager__factory } from '../../types/factories/contracts/Mocks/MockRewardManager__factory';
 import type { VaultCore } from '../../types/contracts/Vault/VaultCore';
 import type { MockRegistry } from '../../types/contracts/Mocks/MockRegistry';
-import type { MockSimpleContract } from '../../types/contracts/Mocks/MockSimpleContract';
+import type { MockVaultRouter } from '../../types/contracts/Mocks/MockVaultRouter';
 import type { MockSettlementManager } from '../../types/contracts/Mocks/MockSettlementManager';
 import type { MockVaultBusinessLogicBorrowWithRate } from '../../types/contracts/Mocks/MockVaultBusinessLogicBorrowWithRate';
 import type { MockHealthView } from '../../types/contracts/Mocks/MockHealthView';
@@ -52,8 +52,7 @@ describe('RWAAutoLeveragedStrategy', function () {
   let lendingEngineContract: MockLendingEngineBasic;
   // HealthFactorCalculator 已被废弃，不再需要
   // let healthFactorContract: HealthFactorCalculator;
-  let mockVaultStorage: any;
-  let viewDummy: MockSimpleContract;
+  let mockVaultRouter: MockVaultRouter;
   let settlementManager: MockSettlementManager;
   let mockVbl: MockVaultBusinessLogicBorrowWithRate;
   let healthView: MockHealthView;
@@ -106,26 +105,22 @@ describe('RWAAutoLeveragedStrategy', function () {
     settlementTokenContract = await erc20Factory.deploy('Settlement Token', 'SETTLE', INITIAL_SUPPLY);
     await settlementTokenContract.waitForDeployment();
 
-    // 部署 MockVaultStorage（策略合约需要）
-    const MockVaultStorageFactory = await ethers.getContractFactory('MockVaultStorage');
-    mockVaultStorage = await MockVaultStorageFactory.deploy();
-    await mockVaultStorage.waitForDeployment();
-    // 设置结算币地址
-    await mockVaultStorage.setSettlementToken(await settlementTokenContract.getAddress());
-
     // VaultCore 需要按升级代理模式部署并 initialize（constructor 禁用 initializer）
     const VaultCoreImplFactory = await ethers.getContractFactory('VaultCore');
     const vaultImpl = await VaultCoreImplFactory.deploy();
     await vaultImpl.waitForDeployment();
 
-    const DummyViewFactory = await ethers.getContractFactory('MockSimpleContract');
-    viewDummy = (await DummyViewFactory.deploy()) as unknown as MockSimpleContract;
-    await viewDummy.waitForDeployment();
+    // VaultRouter (mock) is used as VaultCore.viewContractAddrVar() target.
+    // After aligning VaultCore.deposit/withdraw with the Architecture-Guide (route via VaultRouter),
+    // VaultCore must be initialized with a contract that implements IVaultRouter.processUserOperation.
+    const MockVaultRouterFactory = await ethers.getContractFactory('MockVaultRouter');
+    mockVaultRouter = (await MockVaultRouterFactory.deploy()) as unknown as MockVaultRouter;
+    await mockVaultRouter.waitForDeployment();
 
     const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
     const initData = VaultCoreImplFactory.interface.encodeFunctionData('initialize', [
       await registryContract.getAddress(),
-      await viewDummy.getAddress()
+      await mockVaultRouter.getAddress()
     ]);
     const proxy = await ProxyFactory.deploy(await vaultImpl.getAddress(), initData);
     await proxy.waitForDeployment();
@@ -145,6 +140,7 @@ describe('RWAAutoLeveragedStrategy', function () {
     await registryContract.setModule(KEY('VAULT_BUSINESS_LOGIC'), await mockVbl.getAddress());
     await registryContract.setModule(KEY('SETTLEMENT_MANAGER'), await settlementManager.getAddress());
     await registryContract.setModule(KEY('HEALTH_VIEW'), await healthView.getAddress());
+    await registryContract.setModule(KEY('SETTLEMENT_TOKEN'), await settlementTokenContract.getAddress());
 
     // 设置 Mock 合约的初始状态（如果 Mock 合约有这些方法）
     // MockCollateralManager 和 MockLendingEngineBasic 可能没有这些方法，跳过
@@ -163,7 +159,6 @@ describe('RWAAutoLeveragedStrategy', function () {
     const strategyFactory = (await ethers.getContractFactory('src/strategies/RWAAutoLeveragedStrategy.sol:RWAAutoLeveragedStrategy')) as unknown as RWAAutoLeveragedStrategy__factory;
     strategyContract = await strategyFactory.deploy(
       await vaultContract.getAddress(),
-      await mockVaultStorage.getAddress(), // vaultStorage
       await rwaTokenContract.getAddress(),
       MIN_LEVERAGE_RATIO,
       MAX_LEVERAGE_RATIO
@@ -245,7 +240,6 @@ describe('RWAAutoLeveragedStrategy', function () {
       await expect(
         strategyFactory.deploy(
           await vaultContract.getAddress(),
-          await mockVaultStorage.getAddress(), // vaultStorage
           await rwaTokenContract.getAddress(),
           200n, // minLeverage
           150n  // maxLeverage

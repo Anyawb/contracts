@@ -6,7 +6,10 @@ pragma solidity ^0.8.20;
  * @author RWA Lending Platform
  * @notice Provides common validation functions and error definitions, integrates all repeated validation logic from
  *         liquidation modules.
- * @dev Provides standardized validation functions to ensure consistency and security across all liquidation modules.
+ * @dev Security:
+ * - Pure library: no storage reads/writes, no external calls.
+ * - Validation helpers are intended to be used at module entry points to ensure consistent revert reasons.
+ * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
  */
 library LiquidationValidationLibrary {
     /* ============ Custom Errors ============ */

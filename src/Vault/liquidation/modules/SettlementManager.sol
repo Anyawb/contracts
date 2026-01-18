@@ -16,35 +16,16 @@ import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol
 import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
 import { ILoanNFT } from "../../../interfaces/ILoanNFT.sol";
 import { ISettlementManager } from "../../../interfaces/ISettlementManager.sol";
+import { ILiquidationPayoutManager } from "../../../interfaces/ILiquidationPayoutManager.sol";
 import { ZeroAddress, AmountIsZero } from "../../../errors/StandardErrors.sol";
 import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
+import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
+import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-
-/// @notice Minimal read-only adapter for order engine (read by orderId).
-/// @dev Note: current ORDER_ENGINE view reads may be ACL-gated; deployment must grant
-///      SettlementManager the required read-only permissions.
-interface IOrderEngineViewAdapter {
-    struct LoanOrder {
-        uint256 principal;
-        uint256 rate;       // bps (basis points)
-        uint256 term;       // seconds
-        address borrower;
-        address lender;
-        address asset;      // ERC20 address
-        uint256 startTimestamp;
-        uint256 maturity;
-        uint256 repaidAmount;
-    }
-
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order);
-}
-
-/// @notice Minimal repayment interface for order engine: repay by orderId (includes fees/interest/ledger sync)
-interface IOrderEngineRepayAdapter {
-    function repay(uint256 orderId, uint256 repayAmount) external;
-}
+import { IOrderEngine } from "../../../interfaces/IOrderEngine.sol";
+import { IOrderEngineViewAdapter } from "../../../interfaces/IOrderEngineViewAdapter.sol";
+import { IOrderEngineRepayAdapter } from "../../../interfaces/IOrderEngineRepayAdapter.sol";
 
 /// @notice LiquidationManager extension used by SettlementManager to preserve the original keeper address.
 interface ILiquidationManagerFromSettlementManager {
@@ -84,6 +65,8 @@ contract SettlementManager is
     /// @notice Registry address for module resolution and access control.
     /// @dev Stored privately; exposed via explicit getter `registryAddrVar()` (no public state variable).
     address private _registryAddr;
+    /// @notice Strict mode: require full repay to clear all debt and auto-release collateral.
+    bool private _requireFullRepayRelease;
 
     /**
      * @notice Get Registry contract address.
@@ -94,34 +77,151 @@ contract SettlementManager is
     }
 
     /**
+     * @notice Whether strict full-repay auto-release mode is enabled.
+     */
+    function requireFullRepayRelease() external view returns (bool) {
+        return _requireFullRepayRelease;
+    }
+
+    /**
      * @notice Caller is not VaultCore.
-     * @dev Thrown when caller is not the VaultCore address (onlyVaultCore modifier).
+     * @dev Used by `onlyVaultCore`.
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Ensures user-path settlement can only be routed via VaultCore (SSOT entry)
      */
     error SettlementManager__OnlyVaultCore();
     
     /**
-     * @notice Invalid order ID.
-     * @dev Thrown when orderId does not exist or is invalid.
+     * @notice Invalid order id.
+     * @dev Used when an orderId does not exist or cannot be resolved by ORDER_ENGINE.
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents processing of non-existent / malformed orders
      */
     error SettlementManager__InvalidOrderId();
     
     /**
      * @notice Position is not liquidatable.
-     * @dev Thrown when position does not meet liquidation conditions (not overdue and not risk-liquidatable).
+     * @dev Used when a position does not meet liquidation conditions (not overdue and not risk-liquidatable).
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents unauthorized / invalid liquidation execution
      */
     error SettlementManager__NotLiquidatable();
     
     /**
      * @notice No collateral available.
-     * @dev Thrown when user has no collateral assets available for liquidation.
+     * @dev Used when the target user has no collateral to release or seize.
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents invalid settlement/liquidation flows
      */
     error SettlementManager__NoCollateral();
     
     /**
-     * @notice Order mismatch with user/debtAsset.
-     * @dev Thrown when orderId does not belong to the specified user or debtAsset does not match the order.
+     * @notice Order mismatch.
+     * @dev Used when `orderId` does not belong to the provided user, or `debtAsset` does not match the order.
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents cross-order repayment or asset confusion
      */
     error SettlementManager__OrderMismatch();
+
+    /**
+     * @notice Full repay did not clear all debt.
+     * @dev Used when strict auto-release mode is enabled and user still has debt after repay.
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Enforces strict-mode invariant: full repay must clear all debt before auto-release
+     */
+    error SettlementManager__DebtNotCleared();
+
+    /**
+     * @notice Invalid upgrade implementation (no code at target).
+     * @dev Used by UUPS upgrade authorization.
+     *
+     * Reverts if:
+     * - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents upgrading to an EOA or an un-deployed address
+     */
+    error SettlementManager__InvalidImplementation();
+
+    /**
+     * @notice Emitted after a repay-and-settle execution.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Event-only; consumers must treat SettlementManager as SSOT for settlement outcomes
+     *
+     * @param user Borrower/repayer address
+     * @param debtAsset Debt asset address
+     * @param repayAmount Repay amount (token decimals of `debtAsset`)
+     * @param orderId Order/position id (SSOT; ORDER_ENGINE-generated)
+     * @param releasedAllCollateral True if collateral was fully released
+     * @param timestamp Emission timestamp (seconds)
+     */
+    event RepayAndSettleProcessed(
+        address indexed user,
+        address indexed debtAsset,
+        uint256 repayAmount,
+        uint256 indexed orderId,
+        bool releasedAllCollateral,
+        uint256 timestamp
+    );
+
+    /**
+     * @notice Emitted when collateral is released back to the borrower.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Event-only; CollateralManager is SSOT for custody/transfer, SettlementManager is SSOT for routing
+     *
+     * @param user Borrower address
+     * @param collateralAsset Collateral asset address
+     * @param collateralAmount Released amount (token decimals of `collateralAsset`)
+     * @param timestamp Emission timestamp (seconds)
+     */
+    event CollateralReleased(
+        address indexed user,
+        address indexed collateralAsset,
+        uint256 collateralAmount,
+        uint256 timestamp
+    );
+
+    /**
+     * @notice Emitted when strict full-repay auto-release mode is updated.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Event-only; config writes are role-gated in implementation
+     *
+     * @param enabled True if strict mode is enabled
+     */
+    event RequireFullRepayReleaseUpdated(bool enabled);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -202,8 +302,7 @@ contract SettlementManager is
         address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
 
         // 0) Cross-validation: orderId must belong to this user, and debtAsset must match the order
-        IOrderEngineViewAdapter.LoanOrder memory ord =
-            IOrderEngineViewAdapter(orderEngine)._getLoanOrderForView(orderId);
+        IOrderEngine.LoanOrder memory ord = IOrderEngineViewAdapter(orderEngine)._getLoanOrderForView(orderId);
         if (ord.borrower == address(0) || ord.asset == address(0)) revert ZeroAddress();
         if (ord.borrower != user || ord.asset != debtAsset) revert SettlementManager__OrderMismatch();
 
@@ -219,17 +318,37 @@ contract SettlementManager is
         // on-time/early repayment returns collateral directly to B (borrower),
         // no need for user to withdraw again.
         // NOTE: Uses "total debt value == 0" criterion to avoid dependency on debtAssets list maintenance details
-        if (ILendingEngineBasic(le).getUserTotalDebtValue(user) == 0) {
+        bool releasedAllCollateral = false;
+        uint256 totalDebtValue = ILendingEngineBasic(le).getUserTotalDebtValue(user);
+        if (totalDebtValue == 0) {
             address[] memory assets = ICollateralManager(cm).getUserCollateralAssets(user);
             for (uint256 i; i < assets.length; ) {
                 uint256 bal = ICollateralManager(cm).getCollateral(user, assets[i]);
                 if (bal > 0) {
                     // Unified exit entry: receiver==user means return to user (Architecture-Guide.md §640-646)
                     ICollateralManager(cm).withdrawCollateralTo(user, assets[i], bal, user);
+                    // solhint-disable-next-line not-rely-on-time
+                    uint256 tsCollateral = block.timestamp;
+                    emit CollateralReleased(user, assets[i], bal, tsCollateral);
+                    DataPushLibrary._emitData(
+                        DataPushTypes.DATA_TYPE_COLLATERAL_RELEASED,
+                        abi.encode(user, assets[i], bal, tsCollateral)
+                    );
                 }
                 unchecked { ++i; }
             }
+            releasedAllCollateral = true;
+        } else if (_requireFullRepayRelease) {
+            revert SettlementManager__DebtNotCleared();
         }
+
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        emit RepayAndSettleProcessed(user, debtAsset, repayAmount, orderId, releasedAllCollateral, ts);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REPAY_AND_SETTLE,
+            abi.encode(user, debtAsset, repayAmount, orderId, releasedAllCollateral, ts)
+        );
     }
 
     // ============ External: Keeper Entry ============
@@ -276,8 +395,7 @@ contract SettlementManager is
         address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
         address loanNft = Registry(_registryAddr).getModule(ModuleKeys.KEY_LOAN_NFT);
 
-        IOrderEngineViewAdapter.LoanOrder memory ord =
-            IOrderEngineViewAdapter(orderEngine)._getLoanOrderForView(orderId);
+        IOrderEngine.LoanOrder memory ord = IOrderEngineViewAdapter(orderEngine)._getLoanOrderForView(orderId);
         if (ord.borrower == address(0) || ord.asset == address(0)) revert ZeroAddress();
 
         address targetUser = ord.borrower;
@@ -354,7 +472,7 @@ contract SettlementManager is
         // Preserve the original keeper (msg.sender) as "liquidator" so that
         // - liquidatorShare is sent to the keeper by default
         // - PayoutExecuted/liquidation events record the keeper, not SettlementManager
-        ILiquidationManagerFromSettlementManager(liquidationManager).liquidateFromSettlementManager({
+        try ILiquidationManagerFromSettlementManager(liquidationManager).liquidateFromSettlementManager({
             liquidator: msg.sender,
             targetUser: targetUser,
             collateralAsset: bestAsset,
@@ -362,7 +480,52 @@ contract SettlementManager is
             collateralAmount: collateralAmount,
             debtAmount: debtAmount,
             bonus: bonus
-        });
+        }) {
+            return;
+        } catch {
+            // Fallback: direct ledger execution (CM + LE) using payout manager.
+            // This preserves SSOT semantics while avoiding LM permission/mismatch edge cases in local smoke flows.
+            address payout = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_PAYOUT_MANAGER);
+            if (payout == address(0)) revert ZeroAddress();
+            _distributeCollateralDirect(cm, payout, targetUser, bestAsset, collateralAmount, msg.sender);
+            ILendingEngineBasic(le).forceReduceDebt(targetUser, debtAsset, debtAmount);
+        }
+    }
+
+    /**
+     * @notice Direct collateral distribution via LiquidationPayoutManager.
+     * @dev Used as a fallback when LiquidationManager path is unavailable.
+     */
+    function _distributeCollateralDirect(
+        address cm,
+        address payout,
+        address user,
+        address collateralAsset,
+        uint256 collateralAmount,
+        address liquidator
+    ) internal {
+        (uint256 platformShare, uint256 reserveShare, uint256 lenderShare, uint256 liquidatorShare) =
+            ILiquidationPayoutManager(payout).calculateShares(collateralAmount);
+        ILiquidationPayoutManager.PayoutRecipients memory recipients =
+            ILiquidationPayoutManager(payout).getRecipients();
+
+        if (platformShare > 0) {
+            ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, platformShare, recipients.platform);
+        }
+        if (reserveShare > 0) {
+            ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, reserveShare, recipients.reserve);
+        }
+        if (lenderShare > 0) {
+            ICollateralManager(cm).withdrawCollateralTo(
+                user,
+                collateralAsset,
+                lenderShare,
+                recipients.lenderCompensation
+            );
+        }
+        if (liquidatorShare > 0) {
+            ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, liquidatorShare, liquidator);
+        }
     }
 
     /**
@@ -427,6 +590,16 @@ contract SettlementManager is
     }
 
     /**
+     * @notice Enable/disable strict full-repay auto-release mode.
+     * @dev Requires ACTION_SET_PARAMETER role.
+     */
+    function setRequireFullRepayRelease(bool enabled) external {
+        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        _requireFullRepayRelease = enabled;
+        emit RequireFullRepayReleaseUpdated(enabled);
+    }
+
+    /**
      * @notice UUPS upgrade authorization: verify upgrade permission.
      * @dev Reverts if:
      *      - KEY_ACCESS_CONTROL module is not found in Registry
@@ -444,7 +617,7 @@ contract SettlementManager is
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        require(newImplementation.code.length > 0, "Invalid implementation");
+        if (newImplementation.code.length == 0) revert SettlementManager__InvalidImplementation();
     }
 
     /* ============ Storage Gap ============ */

@@ -31,7 +31,7 @@ Registry 采用**方向 A（最贴合架构指南）**：源码拆分为多个�
 
 ```
 Registry (UUPS Proxy, 唯一入口/唯一状态)
-└── Registry implementation (源码拆分：RegistryCore/RegistryQuery/RegistryStorage/RegistryEvents/…)
+└── Registry implementation (源码拆分：RegistryQuery/RegistryStorage/RegistryEvents/RegistryCompatQuery/…)
     ├── Core：模块注册/查询（读写 modules mapping）
     ├── Upgrade：延时升级队列/执行/历史（写 pendingUpgrades/history）
     ├── Governance：pause/admin/owner 口径一致化
@@ -48,10 +48,9 @@ Registry (UUPS Proxy, 唯一入口/唯一状态)
 
 #### 关于 “Registry 家族模块” 的定位（重要）
 
-- `src/registry/*.sol` 下的 `RegistryCore/RegistryUpgradeManager/RegistryAdmin/RegistrySignatureManager/...` 在方向 A 中应理解为：
-  - **代码模块（source modules）**：用于拆分职责、复用逻辑、降低单文件复杂度；
-  - **共享存储（shared state）**：通过 `RegistryStorage.layout()` 访问同一份 Layout（同一 Proxy 的 storage）；
-  - **不推荐作为独立 Proxy/独立合约部署**：否则它们写的是“自己的 storage”，不会影响主 `Registry` 的 modules/pendingUpgrades/history。
+- 历史上曾存在一些 “Registry family compat modules”（例如 `RegistryCore/RegistryUpgradeManager/RegistryAdmin/...`）用于旧脚本/测试。
+- **路径 B（本仓库当前口径）**：这些 legacy 合约已从 `src/registry/` 删除，避免被误用为“可独立部署的子模块”，从根源上消除“多 Proxy 不共享状态”的混淆。
+- 现在 `src/registry/` 只保留方向 A 的必要构件：`Registry.sol + RegistryStorageLibrary.sol + RegistryEventsLibrary.sol + RegistryQueryLibrary.sol (+ RegistryCompatQueryLibrary.sol) + RegistryDynamicModuleKey.sol`。
 
 > 例外：`RegistryDynamicModuleKey` 属于“动态键注册器”，架构指南明确允许它与 Registry 家族解耦、独立存储、独立升级——它可以作为独立 Proxy 部署（按需启用）。
 
@@ -66,14 +65,10 @@ Registry (UUPS Proxy, 唯一入口/唯一状态)
 - `RegistryDynamicModuleKey`：动态模块键注册器（独立合约、独立存储、独立升级）。用于解决静态 `ModuleKeys` 无法覆盖新增模块的问题。
 
 ### 兼容/历史模块（不推荐线上单独部署）
-仓库中仍保留若干 “Registry family compat modules” 以兼容旧脚本/测试或做过渡期实验。但在方向 A 下：
-- 它们**不应该作为独立 Proxy 部署去“分担主 Registry 的职责”**（否则不共享 storage，状态会漂移）。
-- 若确需部署（仅测试/兼容），必须明确：这些合约维护的是**它们自己合约实例的状态**，不会自动影响主 `Registry`。
+已按路径 B 清理：仓库不再保留可编译/可部署的 “Registry family compat modules”，避免线上/测试误部署造成状态漂移。
 
 #### 本地部署脚本默认行为（deploylocal）
-- `scripts/deploy/deploylocal.ts` 默认 **不部署**上述 compat modules（符合方向 A）。
-- 如确需本地兼容/测试，可设置：
-  - `DEPLOY_REGISTRY_COMPAT_MODULES=true`
+- `scripts/deploy/deploylocal.ts` 已按方向 A 清理：不再包含/部署“Registry family compat modules”。
 
 ### 核心优势
 
@@ -269,26 +264,11 @@ contract MyModule {
   - `pnpm -s run checks:audit-deploylocal-initializers`
 - **验收标准**：输出报告中 **FAIL = 0**（否则进程以非 0 退出，阻断脚本审计/CI）
 
-#### 3) Registry 家族 “缺少 UUPS” 问题（必须修复）
+#### 3) 兼容合约的 “缺少 UUPS” 问题（路径 B：已消除）
 
-当部署脚本默认 `kind: "uups"` 后，如果某个 Registry 家族合约 **没有继承 `UUPSUpgradeable`**，OZ Upgrades 会直接报：
-`Implementation is missing a public upgradeTo(...) / upgradeToAndCall(...)`（error-008）。
+历史上 `src/registry` 曾包含若干 compat 合约（用于旧脚本/测试），其中部分并非 UUPSUpgradeable，容易在脚本默认 `kind: "uups"` 时触发 OZ Upgrades 的 error-008。
 
-对照当前仓库实现，`src/registry` 里以下合约 **缺少 `UUPSUpgradeable`**（应按架构指南补齐）：
-
-- `src/registry/RegistryUpgradeManager.sol`
-- `src/registry/RegistryAdmin.sol`
-- `src/registry/RegistryBatchManager.sol`
-- `src/registry/RegistryHistoryManager.sol`
-
-**推荐修复范式（对每个合约一致化）**：
-- `import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";`
-- `contract X is Initializable, OwnableUpgradeable, UUPSUpgradeable, ...`
-- `initialize(...)` 中调用 `__UUPSUpgradeable_init();`
-- 实现 `_authorizeUpgrade(address newImplementation)`：
-  - 按 `docs/Architecture-Guide.md` 的治理口径做权限校验（owner / timelock / multisig / registry 入口策略）
-  - `newImplementation != address(0)` 且 `newImplementation.code.length > 0`
-- 保留 `constructor { _disableInitializers(); }` 与 `uint256[50] __gap;`
+**路径 B（本仓库当前口径）**：这些 legacy/compat 合约已从 `src/registry/` 删除，因此该类问题不再存在；部署面收敛为 `Registry`（UUPS）+（可选）`RegistryDynamicModuleKey`。
 
 > 注意：`CacheMaintenanceManager.sol` 是 **非可升级合约**（constructor + immutable），不应改成 UUPS，也不应走 proxy 部署。
 

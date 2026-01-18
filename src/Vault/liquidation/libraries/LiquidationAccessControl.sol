@@ -473,7 +473,7 @@ library LiquidationAccessControl {
         self.keeper = initialKeeper;
         self.emergencyPaused = false;
         
-        // 初始化默认权限
+        // Initialize default permissions.
         grantRole(self, ActionKeys.ACTION_GRANT_ROLE, initialOwner);
         grantRole(self, ActionKeys.ACTION_REVOKE_ROLE, initialOwner);
         grantRole(self, ActionKeys.ACTION_LIQUIDATE, initialKeeper);
@@ -572,14 +572,14 @@ library LiquidationAccessControl {
             revert LiquidationAccessControl__InvalidKeeperAddress();
         }
         
-        // 撤销旧Keeper的清算权限
+        // Revoke liquidation permission from the old keeper (if any).
         if (self.roles[ActionKeys.ACTION_LIQUIDATE][self.keeper]) {
             _revokeRole(self, ActionKeys.ACTION_LIQUIDATE, self.keeper);
         }
         
         self.keeper = newKeeper;
         
-        // 授予新Keeper的清算权限
+        // Grant liquidation permission to the new keeper (if not already granted).
         if (!self.roles[ActionKeys.ACTION_LIQUIDATE][newKeeper]) {
             _grantRole(self, ActionKeys.ACTION_LIQUIDATE, newKeeper);
         }
@@ -632,7 +632,7 @@ library LiquidationAccessControl {
     ) private {
         self.roles[role][account] = false;
         
-        // 从账户角色列表中移除
+        // Remove role from the account-to-roles list.
         bytes32[] storage accountRoles = self.accountRoles[account];
         for (uint256 i = 0; i < accountRoles.length; i++) {
             if (accountRoles[i] == role) {
@@ -642,7 +642,7 @@ library LiquidationAccessControl {
             }
         }
         
-        // 从角色账户列表中移除
+        // Remove account from the role-to-accounts list.
         address[] storage roleAccounts = self.roleAccounts[role];
         for (uint256 i = 0; i < roleAccounts.length; i++) {
             if (roleAccounts[i] == account) {

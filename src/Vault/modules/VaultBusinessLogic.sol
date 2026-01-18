@@ -3,18 +3,16 @@ pragma solidity ^0.8.20;
 
 
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IAssetWhitelist } from "../../interfaces/IAssetWhitelist.sol";
 import { ICollateralManager } from "../../interfaces/ICollateralManager.sol";
-import { ILendingEngineBasic } from "../../interfaces/ILendingEngineBasic.sol";
-import { ILiquidationRiskManager } from "../../interfaces/ILiquidationRiskManager.sol";
-import { VaultTypes } from "../VaultTypes.sol";
-import { ExternalModuleRevertedRaw, AmountIsZero, AssetNotAllowed, ZeroAddress } from "../../errors/StandardErrors.sol";
+import { SystemEvents } from "../SystemEvents.sol";
+import { AmountIsZero, AssetNotAllowed, ArrayLengthMismatch, ZeroAddress } from "../../errors/StandardErrors.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
@@ -22,25 +20,28 @@ import { VaultBusinessLogicLibrary } from "../../libraries/VaultBusinessLogicLib
 import { SettlementReserveLib } from "../../libraries/SettlementReserveLib.sol";
 import { SettlementIntentLib } from "../../libraries/SettlementIntentLib.sol";
 import { SettlementMatchLib } from "../../libraries/SettlementMatchLib.sol";
+import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
+import { DataPushTypes } from "../../constants/DataPushTypes.sol";
 import { Registry } from "../../registry/Registry.sol";
-import { IVaultRouter } from "../../interfaces/IVaultRouter.sol";
 import { ILenderPoolVault } from "../../interfaces/ILenderPoolVault.sol";
 
-/// @title VaultBusinessLogic
-/// @notice 业务逻辑模块（纯业务 + 基础 Registry 能力）；数据推送与事件聚合由 VaultRouter 统一负责
-/// @dev 使用 VaultBusinessLogicLibrary 提取重复逻辑，提升可读性与复用性
-/// @dev 支持 UUPS 升级模式；集成 ReentrancyGuardUpgradeable、PausableUpgradeable
-/// @dev 与 ActionKeys/ModuleKeys 集成；权限由 AccessControlManager 校验
-/// @dev 通过 Registry 模块化管理按需解析模块地址
-/// @dev 集成 GracefulDegradation 库，提供价格预言机异常时的优雅降级路径
-/// @dev View 地址解析策略：优先 KEY_VAULT_CORE.viewContractAddrVar()，迁移期回退 KEY_STATS
-/// @dev 不包含 Registry 升级/状态查询等辅助接口（该职责归属 VaultCore/Registry），保持职责单一
-/// @custom:security-contact security@example.com
-
-/// @notice 最小化 VaultCore 接口（用于解析 View 地址）
-interface IVaultCoreMinimal {
-    function viewContractAddrVar() external view returns (address);
-}
+/**
+ * @title VaultBusinessLogic
+ * @notice Business logic module for Vault (legacy entrypoints + settlement orchestration helpers).
+ * @dev Reverts if:
+ *      - (see individual functions)
+ *
+ * Security:
+ * - UUPS upgrade authorization is role-gated via AccessControlManager (ACTION_UPGRADE_MODULE)
+ * - Selected write entrypoints are pause-aware (whenNotPaused) and non-reentrant (nonReentrant)
+ * - Module address resolution is SSOT via Registry (no local cache)
+ *
+ * Note:
+ * - User-facing deposit/withdraw/repay paths are deprecated here and must go through VaultCore/VaultRouter SSOT.
+ * - Offchain data push is emitted via DataPushLibrary for select settlement actions.
+ *
+ * @custom:security-contact security@example.com
+ */
 
 contract VaultBusinessLogic is 
     Initializable, 
@@ -52,55 +53,88 @@ contract VaultBusinessLogic is
     using SettlementReserveLib for mapping(bytes32 => SettlementReserveLib.LendReserve);
 
     /* ============ Storage ============ */
-    /// @notice Registry合约地址，用于获取各模块地址
+    /// @notice Registry contract address used to resolve module addresses.
     address private _registryAddr;
     
-    /// @notice 结算币地址，用于优雅降级配置
+    /// @notice Settlement token address used for graceful-degradation configuration.
     address private _settlementTokenAddr;
 
-    /// @notice 出借资金保留账本：intentHash → 资金保留记录
+    /// @notice Lender reserve ledger: intentHash => reserve record.
     mapping(bytes32 => SettlementReserveLib.LendReserve) private _lendReserves;
 
-    /// @notice 意向撮合状态：intentHash → 是否已匹配
+    /// @notice Intent match status: intentHash => matched flag.
     mapping(bytes32 => bool) private _matchedIntents;
 
     /// @notice Storage gap for upgrade safety
     uint256[48] private __gap;
 
     /* ============ Modifiers ============ */
-    /// @notice 验证Registry地址有效性
+    /// @notice Validates Registry address is set.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         _;
     }
 
-    /// @notice 仅限清算角色
-    modifier onlyLiquidator() {
-        _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
-        _;
-    }
-
     /* ============ Events ============ */
-    /// @notice Registry地址更新事件
-    /// @param oldRegistry 旧Registry地址
-    /// @param newRegistry 新Registry地址
-    event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
-    /// @notice 撮合完成事件（供前端订阅）
-    event OrderMatched(
-        uint256 indexed orderId,
-        address indexed borrower,
-        address indexed lender,
-        address asset,
+    /**
+     * @notice Emitted when a lender reserve is created (funds moved into LenderPoolVault).
+     * @param lendIntentHash Hash of the lend intent (EIP-712 struct hash).
+     * @param lenderSigner Lender signer / fund owner.
+     * @param asset ERC20 asset address.
+     * @param amount Amount reserved (token native decimals).
+     * @param timestamp Block timestamp when created (seconds).
+     */
+    event LendReserveCreated(
+        bytes32 indexed lendIntentHash,
+        address indexed lenderSigner,
+        address indexed asset,
         uint256 amount,
-        uint16 termDays,
-        uint256 rateBps
+        uint256 timestamp
     );
 
-    // 业务层不再发健康相关事件，统一由 LE + View 层处理
+    /**
+     * @notice Emitted when a lender reserve is cancelled (funds returned from LenderPoolVault).
+     * @param lendIntentHash Hash of the lend intent (EIP-712 struct hash).
+     * @param lenderSigner Lender signer / fund owner (canceller).
+     * @param asset ERC20 asset address.
+     * @param amount Amount returned (token native decimals).
+     * @param timestamp Block timestamp when cancelled (seconds).
+     */
+    event LendReserveCancelled(
+        bytes32 indexed lendIntentHash,
+        address indexed lenderSigner,
+        address indexed asset,
+        uint256 amount,
+        uint256 timestamp
+    );
+
+    /**
+     * @notice Emitted when a lender reserve is consumed (used for a match).
+     * @param lendIntentHash Hash of the lend intent (EIP-712 struct hash).
+     * @param lenderSigner Lender signer / fund owner.
+     * @param asset ERC20 asset address.
+     * @param amount Amount consumed (token native decimals).
+     * @param timestamp Block timestamp when consumed (seconds).
+     */
+    event LendReserveConsumed(
+        bytes32 indexed lendIntentHash,
+        address indexed lenderSigner,
+        address indexed asset,
+        uint256 amount,
+        uint256 timestamp
+    );
+
+    // This module no longer emits health-related events; they are handled by LendingEngine (LE) + View layer.
 
     /* ============ Constructor ============ */
-    /// @dev 禁用实现合约的初始化器，防止直接调用
+    /**
+     * @notice Constructs the implementation contract and disables initializers.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Prevents the implementation contract from being initialized directly.
+     */
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
@@ -108,37 +142,38 @@ contract VaultBusinessLogic is
 
     /* ============ Internal Functions ============ */
     
-    /// @notice 获取模块地址（直接从 Registry 获取，保持职责单一）
-    /// @param moduleKey 模块键
-    /// @return 模块地址
+    /**
+     * @notice Resolves a module address from Registry.
+     * @dev Reverts if:
+     *      - Registry(moduleKey) is not registered (Registry.getModuleOrRevert)
+     * @param moduleKey Module key (see ModuleKeys).
+     * @return Module address registered under moduleKey.
+     */
     function _getModuleAddress(bytes32 moduleKey) internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
-    /// @notice 解析 Router 地址：仅通过 KEY_VAULT_CORE → viewContractAddrVar（去除 KEY_STATS 回退）
-    function _resolveVaultRouterAddr() internal view returns (address) {
-        address vaultCore = _getModuleAddress(ModuleKeys.KEY_VAULT_CORE);
-        if (vaultCore == address(0)) return address(0);
-        try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
-            return v;
-        } catch { return address(0); }
-    }
-    
-    // 删除模块地址缓存相关逻辑（迁移至 View 层或由 Registry 统一管理）
-    
-    /// @notice 权限校验内部函数
-    /// @param actionKey 动作键
-    /// @param user 用户地址
+ 
+
+    /**
+     * @notice Enforces AccessControlManager role for an action key.
+     * @dev Reverts if:
+     *      - AccessControlManager.requireRole fails (unauthorized)
+     * @param actionKey Action key (see ActionKeys).
+     * @param user Caller address to validate.
+     */
     function _requireRole(bytes32 actionKey, address user) internal view {
         address acmAddr = _getModuleAddress(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
-    // 业务层不再进行价格预言机健康检查与风控推送，统一由 LE 估值路径与 View 层处理
 
-    /// @notice 检查资产是否在白名单中
-    /// @param asset 资产地址
-    /// @dev 如果资产不在白名单中，会revert
+    /**
+     * @notice Validates the asset is allowed by AssetWhitelist (if configured).
+     * @dev Reverts if:
+     *      - asset is not allowed (AssetNotAllowed)
+     * @param asset ERC20 asset address.
+     */
     function _checkAssetWhitelist(address asset) internal view {
         address assetWhitelist = _getModuleAddress(ModuleKeys.KEY_ASSET_WHITELIST);
         if (assetWhitelist != address(0)) {
@@ -147,9 +182,18 @@ contract VaultBusinessLogic is
     }
 
     /* ============ Initializer ============ */
-    /// @notice 初始化业务逻辑模块
-    /// @param initialRegistryAddr Registry合约地址
-    /// @param initialSettlementTokenAddr 结算币地址
+    /**
+     * @notice Initializes VaultBusinessLogic module.
+     * @dev Reverts if:
+     *      - initialRegistryAddr == address(0) (ZeroAddress)
+     *      - initialSettlementTokenAddr == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Initializer can only be called once (initializer)
+     *
+     * @param initialRegistryAddr Registry contract address.
+     * @param initialSettlementTokenAddr Settlement token address used for graceful degradation config.
+     */
     function initialize(address initialRegistryAddr, address initialSettlementTokenAddr) external initializer {
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
@@ -161,35 +205,119 @@ contract VaultBusinessLogic is
         _registryAddr = initialRegistryAddr;
         _settlementTokenAddr = initialSettlementTokenAddr;
         
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        // Emit a standardized action event for off-chain observability.
+        // solhint-disable-next-line not-rely-on-time
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }
 
     /* ============ Core Business Logic Functions ============ */
     
-    /// @notice 用户存入资产
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 存入金额
+    /**
+     * @notice DEPRECATED: Deposit must go through VaultCore/VaultRouter SSOT.
+     * @dev Reverts if:
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param asset Asset address (unused).
+     * @param amount Amount to deposit (token native decimals; unused).
+     */
     function deposit(address user, address asset, uint256 amount) external pure {
-        // 收敛：deposit 统一入口为 VaultCore.deposit → VaultRouter → CollateralManager（CM 托管 ERC20）
-        // 为避免业务层“托管抵押 token”的旧假设回流，此入口永久下线。
+        // Consolidation: the SSOT deposit entrypoint is VaultCore.deposit -> VaultRouter -> CollateralManager
+        // (CM custody).
+        // This legacy entrypoint is permanently disabled to prevent re-introducing the old
+        // "BusinessLogic custodies collateral" assumption and related fund-retention risks.
         user; asset; amount; // silence
         revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /* ============ Liquidation Orchestration (Single Path) ============ */
-    /// @notice DEPRECATED: 清算入口已收敛到 LiquidationManager（方案A 唯一入口）
-    /// @dev 为避免“双入口/双语义/资金托管假设冲突”，此函数永久下线。
+    /**
+     * @notice DEPRECATED: Liquidation must go through LiquidationManager (SSOT).
+     * @dev Used when:
+     *      - a legacy liquidation entrypoint on this module is called.
+     *
+     * Security:
+     * - This module is not a liquidation SSOT and should not be used for liquidation orchestration.
+     */
     error VaultBusinessLogic__UseLiquidationManagerEntry();
-    /// @notice DEPRECATED: 存取抵押入口已收敛到 VaultCore（用户入口）+ VaultRouter（路由）+ CollateralManager（托管）
+    /**
+     * @notice DEPRECATED: User entrypoints must go through VaultCore/VaultRouter (SSOT).
+     * @dev Used when:
+     *      - a legacy user-facing entrypoint on this module is called (e.g., deposit/withdraw/repay).
+     *
+     * Security:
+     * - Prevents write-path divergence and fund-custody assumptions from re-entering via legacy calls.
+     */
     error VaultBusinessLogic__UseVaultCoreEntry();
+    /**
+     * @notice Thrown when a lend intent hash is zero.
+     * @dev Used when:
+     *      - lendIntentHash == bytes32(0).
+     */
+    error VaultBusinessLogic__InvalidLendIntentHash();
+    /**
+     * @notice Thrown when msg.sender is not the declared lenderSigner.
+     * @dev Used when:
+     *      - a caller attempts to reserve funds for an intent but is not the owner/signer of the funds.
+     *
+     * Security:
+     * - Prevents third parties from locking another user's approved funds.
+     */
+    error VaultBusinessLogic__CallerNotLenderSigner();
+    /**
+     * @notice Thrown when a lend intent hash was already matched/consumed.
+     * @dev Used when:
+     *      - an intent hash is re-used after being marked as matched/consumed.
+     *
+     * Security:
+     * - Intent hashes are single-use to prevent double settlement.
+     */
+    error VaultBusinessLogic__LendIntentAlreadyMatched();
+    /**
+     * @notice Thrown when a consumed reserve asset does not match the borrow asset.
+     * @dev Used when:
+     *      - at least one consumed lender reserve uses an asset != borrowIntent.borrowAsset.
+     *
+     * @param expected Expected borrow asset address.
+     * @param got Actual/consumed reserve asset address.
+     */
+    error VaultBusinessLogic__AssetMismatch(address expected, address got);
+    /**
+     * @notice Thrown when the sum of consumed reserves is insufficient for the borrow amount.
+     * @dev Used when:
+     *      - totalReserved < requiredBorrow.
+     *
+     * @param totalReserved Sum of consumed reserves (token native decimals).
+     * @param requiredBorrow Required borrow amount (token native decimals).
+     */
+    error VaultBusinessLogic__InsufficientReservedSum(uint256 totalReserved, uint256 requiredBorrow);
+    /**
+     * @notice Thrown when borrower's collateral balance is insufficient for the required collateral amount.
+     * @dev Used when:
+     *      - currentCollateral < requiredCollateral.
+     *
+     * @param current Current collateral amount in CollateralManager (token native decimals).
+     * @param required Required collateral amount (token native decimals).
+     */
+    error VaultBusinessLogic__InsufficientCollateral(uint256 current, uint256 required);
 
+    /**
+     * @notice DEPRECATED: Liquidation must go through LiquidationManager SSOT.
+     * @dev Reverts if:
+     *      - always (VaultBusinessLogic__UseLiquidationManagerEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     */
     function liquidate(
         address /*targetUser*/,
         address /*collateralAsset*/,
@@ -202,11 +330,29 @@ contract VaultBusinessLogic is
     }
 
     /* ============ Settlement: Reserve & Match ============ */
-    /// @notice 出借资金保留（进入资金池并标记可用于撮合）
-    /// @param lenderSigner 出借意向签名者（资金提供者）
-    /// @param asset 资产
-    /// @param amount 金额
-    /// @param lendIntentHash 出借意向哈希（链下签名对应的哈希）
+    /**
+     * @notice Reserves lender funds by moving tokens into LenderPoolVault for future matching.
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress) via onlyValidRegistry
+     *      - paused (whenNotPaused)
+     *      - asset == address(0) (ZeroAddress)
+     *      - amount == 0 (AmountIsZero)
+     *      - lendIntentHash == bytes32(0) (VaultBusinessLogic__InvalidLendIntentHash)
+     *      - msg.sender != lenderSigner (VaultBusinessLogic__CallerNotLenderSigner)
+     *      - lendIntentHash already matched/consumed (VaultBusinessLogic__LendIntentAlreadyMatched)
+     *      - asset not allowed (AssetNotAllowed) if AssetWhitelist is configured
+     *      - ERC20 transferFrom fails
+     *
+     * Security:
+     * - Non-reentrant
+     * - Pause-aware
+     * - Caller must be the lenderSigner to prevent third-party locking approved funds
+     *
+     * @param lenderSigner Lender signer / fund owner.
+     * @param asset ERC20 asset address.
+     * @param amount Amount to reserve (token native decimals).
+     * @param lendIntentHash Hash of the lend intent (EIP-712 struct hash).
+     */
     function reserveForLending(
         address lenderSigner,
         address asset,
@@ -215,78 +361,167 @@ contract VaultBusinessLogic is
     ) external onlyValidRegistry whenNotPaused nonReentrant {
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
+        if (lendIntentHash == bytes32(0)) revert VaultBusinessLogic__InvalidLendIntentHash();
+        // SSOT safety: prevent third-parties from locking someone else's approved funds.
+        if (msg.sender != lenderSigner) revert VaultBusinessLogic__CallerNotLenderSigner();
+        // Prevent reuse after a match has marked this intent hash as consumed.
+        if (_matchedIntents[lendIntentHash]) revert VaultBusinessLogic__LendIntentAlreadyMatched();
         _checkAssetWhitelist(asset);
-        // 资金入池：将资金转入 LenderPoolVault 托管（线上流动性推荐放置处）
+        // Move funds into LenderPoolVault custody (recommended location for on-chain liquidity).
         address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
         IERC20(asset).safeTransferFrom(lenderSigner, pool, amount);
-        // 标记保留
+        // Record the reserve in storage.
         _lendReserves.reserve(lenderSigner, asset, amount, lendIntentHash);
-        VaultBusinessLogicLibrary.emitBusinessEvents("reserveForLending", lenderSigner, asset, amount, ActionKeys.ACTION_SET_PARAMETER);
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        emit LendReserveCreated(lendIntentHash, lenderSigner, asset, amount, ts);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_RESERVE_FOR_LENDING,
+            abi.encode(lendIntentHash, lenderSigner, asset, amount, ts)
+        );
+        VaultBusinessLogicLibrary.emitBusinessEvents(
+            "reserveForLending",
+            lenderSigner,
+            asset,
+            amount,
+            ActionKeys.ACTION_RESERVE_FOR_LENDING
+        );
     }
 
-    /// @notice 取消资金保留（未撮合前可撤回）
+    /**
+     * @notice Cancels a lender reserve and returns funds from LenderPoolVault.
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress) via onlyValidRegistry
+     *      - paused (whenNotPaused)
+     *      - lendIntentHash == bytes32(0) (VaultBusinessLogic__InvalidLendIntentHash)
+     *      - reserve cannot be cancelled by caller (SettlementReserveLib internal checks)
+     *
+     * Security:
+     * - Non-reentrant
+     * - Pause-aware
+     *
+     * @param lendIntentHash Hash of the lend intent (EIP-712 struct hash).
+     */
     function cancelReserve(bytes32 lendIntentHash) external onlyValidRegistry whenNotPaused nonReentrant {
+        if (lendIntentHash == bytes32(0)) revert VaultBusinessLogic__InvalidLendIntentHash();
         (address asset, uint256 amount) = _lendReserves.cancel(lendIntentHash, msg.sender);
         if (amount > 0) {
             address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
             ILenderPoolVault(pool).transferOut(asset, msg.sender, amount);
         }
-        VaultBusinessLogicLibrary.emitBusinessEvents("cancelReserve", msg.sender, asset, amount, ActionKeys.ACTION_SET_PARAMETER);
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        emit LendReserveCancelled(lendIntentHash, msg.sender, asset, amount, ts);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_CANCEL_RESERVE,
+            abi.encode(lendIntentHash, msg.sender, asset, amount, ts)
+        );
+        VaultBusinessLogicLibrary.emitBusinessEvents(
+            "cancelReserve",
+            msg.sender,
+            asset,
+            amount,
+            ActionKeys.ACTION_CANCEL_RESERVE
+        );
     }
 
-    /// @notice 成交落地（先到先得）：校验意向并原子完成拨付/记账/订单创建/费用分发（净额发放）
+    /**
+     * @notice Finalizes a match by validating intents and executing atomic settlement.
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress) via onlyValidRegistry
+     *      - paused (whenNotPaused)
+     *      - borrower/lender signatures are invalid (SettlementIntentLib.SettlementIntentLib__InvalidSignature)
+     *      - intents are expired or already matched (SettlementIntentLib.validateOpen / markMatched)
+     *      - any consumed reserve asset mismatches borrowIntent.borrowAsset (VaultBusinessLogic__AssetMismatch)
+     *      - sum of consumed reserves < borrowIntent.amount (VaultBusinessLogic__InsufficientReservedSum)
+     *      - borrower's current collateral < required collateral amount (VaultBusinessLogic__InsufficientCollateral)
+     *      - SettlementReserveLib consume/cancel constraints fail
+     *      - Registry module resolution fails
+     *
+     * Security:
+     * - Non-reentrant
+     * - Pause-aware
+     * - EIP-712 signature verification for borrower and each lender (EOA or ERC-1271)
+     * - Each intent hash is single-use via _matchedIntents
+     *
+     * @param borrowIntent Borrow intent (EIP-712 struct).
+     * @param lendIntents Lend intents (EIP-712 structs) to fund the borrow amount.
+     * @param sigBorrower Borrower signature over borrowIntent typed data.
+     * @param sigLenders Lender signatures over each lendIntent typed data (must align by index).
+     */
     function finalizeMatch(
         SettlementIntentLib.BorrowIntent calldata borrowIntent,
         SettlementIntentLib.LendIntent[] calldata lendIntents,
         bytes calldata sigBorrower,
         bytes[] calldata sigLenders
     ) external onlyValidRegistry whenNotPaused nonReentrant {
-        // EIP-712 域值
+        if (lendIntents.length != sigLenders.length) revert ArrayLengthMismatch(lendIntents.length, sigLenders.length);
+        // EIP-712 domain separator
         bytes32 domain = SettlementIntentLib.buildDomainSeparator(
             "RwaLending",
             "1",
             block.chainid,
             address(this)
         );
-        // 校验借款意向状态（过期/已匹配）
+        // Validate borrow intent state (expired / already matched)
         bytes32 bHash = SettlementIntentLib.hashBorrowIntent(borrowIntent);
         SettlementIntentLib.validateOpen(_matchedIntents, bHash, borrowIntent.expireAt);
-        // 校验 borrower 签名（EOA or ERC-1271）
+        // Verify borrower signature (EOA or ERC-1271)
         bytes32 bDigest = SettlementIntentLib.toTypedDataHash(domain, bHash);
         if (!SettlementIntentLib.verifySignature(borrowIntent.borrower, bDigest, sigBorrower)) {
-            revert SettlementIntentLib.Settlement__InvalidSignature();
+            revert SettlementIntentLib.SettlementIntentLib__InvalidSignature();
         }
 
         uint256 total;
         for (uint256 i = 0; i < lendIntents.length; i++) {
             bytes32 lHash = SettlementIntentLib.hashLendIntent(lendIntents[i]);
             SettlementIntentLib.validateOpen(_matchedIntents, lHash, lendIntents[i].expireAt);
-            // 校验 lender 签名
+            // Verify lender signature
             bytes32 lDigest = SettlementIntentLib.toTypedDataHash(domain, lHash);
             if (!SettlementIntentLib.verifySignature(lendIntents[i].lenderSigner, lDigest, sigLenders[i])) {
-                revert SettlementIntentLib.Settlement__InvalidSignature();
+                revert SettlementIntentLib.SettlementIntentLib__InvalidSignature();
             }
-            // 消耗对应的保留额度并累加
-            (address lenderSigner, address asset, uint256 amount) = _lendReserves.consume(lHash, lendIntents[i].lenderSigner);
+            // Consume the corresponding reserve and add to the running total
+            (address lenderSigner, address asset, uint256 amount) = _lendReserves.consume(
+                lHash,
+                lendIntents[i].lenderSigner
+            );
             lenderSigner; // silence
-            require(asset == borrowIntent.borrowAsset, "asset mismatch");
+            if (asset != borrowIntent.borrowAsset) {
+                revert VaultBusinessLogic__AssetMismatch(borrowIntent.borrowAsset, asset);
+            }
             total += amount;
+
+            // Observe consumption for off-chain accounting and retries.
+            // solhint-disable-next-line not-rely-on-time
+            uint256 ts = block.timestamp;
+            emit LendReserveConsumed(lHash, lendIntents[i].lenderSigner, asset, amount, ts);
+            DataPushLibrary._emitData(
+                DataPushTypes.DATA_TYPE_RESERVE_CONSUMED,
+                abi.encode(lHash, lendIntents[i].lenderSigner, asset, amount, ts)
+            );
         }
 
-        require(total >= borrowIntent.amount, "insufficient reserved sum");
+        if (total < borrowIntent.amount) revert VaultBusinessLogic__InsufficientReservedSum(total, borrowIntent.amount);
 
-        // 抵押充足性校验（不从钱包扣抵押，只校验）
+        // Collateral sufficiency check (does not pull collateral; validation only)
         address cm = _getModuleAddress(ModuleKeys.KEY_CM);
         uint256 currentCollateral = 0;
         if (borrowIntent.collateralAsset != address(0) && borrowIntent.collateralAmount > 0) {
-            currentCollateral = ICollateralManager(cm).getCollateral(borrowIntent.borrower, borrowIntent.collateralAsset);
-            require(currentCollateral >= borrowIntent.collateralAmount, "insufficient collateral");
+            currentCollateral = ICollateralManager(cm).getCollateral(
+                borrowIntent.borrower,
+                borrowIntent.collateralAsset
+            );
+            if (currentCollateral < borrowIntent.collateralAmount) {
+                revert VaultBusinessLogic__InsufficientCollateral(currentCollateral, borrowIntent.collateralAmount);
+            }
         }
 
-        // 原子落地：账本 → 订单 → 手续费 → 净额发放（库内部不发业务事件）
-        // 注意：CollateralManager 仅允许 VaultRouter 调用；撮合编排合约不应直接调用 depositCollateral。
-        // 因此这里不在撮合落地时“补充抵押”，抵押应由借款人提前通过 VaultCore/VaultRouter 路径完成。
-        // lender 字段口径：写入“资金池合约地址”（LenderPoolVault），而非 lender EOA
+        // Atomic finalization: ledger -> order -> fees -> net disbursement (library does not emit business events).
+        // Note: CollateralManager only allows VaultRouter calls; this contract must not call depositCollateral.
+        // Therefore we do not "top up collateral" here; borrower collateral must be deposited beforehand via
+        // VaultCore/VaultRouter.
+        // Lender field convention: use the pool contract address (LenderPoolVault), not the lender EOA.
         address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
         SettlementMatchLib.finalizeAtomicFull(
             _registryAddr,
@@ -300,65 +535,69 @@ contract VaultBusinessLogic is
             borrowIntent.rateBps
         );
 
-        // 标记匹配成功（借/贷意向都置位）
+        // Mark matched (both borrow intent and each lend intent)
         _matchedIntents[bHash] = true;
         for (uint256 i = 0; i < lendIntents.length; i++) {
             bytes32 lHash = SettlementIntentLib.hashLendIntent(lendIntents[i]);
             SettlementIntentLib.markMatched(_matchedIntents, lHash);
         }
-        // 事件与数据推送统一由 LendingEngine + LoanNFT 完成；业务层不再发撮合事件
+        // Events and data pushes are handled by LendingEngine + LoanNFT; this module no longer emits match events.
     }
 
-    /// @notice 用户借款
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 借款金额
+    /**
+     * @notice DEPRECATED: Borrow must go through VaultCore/LendingEngine/Settlement (SSOT).
+     * @dev Reverts if:
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param asset ERC20 asset address (unused).
+     * @param amount Borrow amount (token native decimals; unused).
+     */
     function borrow(address user, address asset, uint256 amount) external onlyValidRegistry whenNotPaused nonReentrant {
-        if (amount == 0) revert AmountIsZero();
-        if (asset == address(0)) revert ZeroAddress();
-        
-        // 检查资产是否在白名单中
-        _checkAssetWhitelist(asset);
-        
-        // Gas优化：获取模块地址（使用缓存）
-        _getModuleAddress(ModuleKeys.KEY_RM);
-        // 统计视图（可选）
-        address statsView = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
-        
-        // 不再在业务层直接调用 LE 计算利息与记账；如需锁保，请使用 borrowWithRate 提供利率
-
-        // 转移代币给用户
-        IERC20(asset).safeTransfer(user, amount);
-        
-        // 积分奖励统一以 LendingEngine 落账后触发
-        
-        // 推送统计视图
-        if (statsView != address(0)) {
-            VaultBusinessLogicLibrary.safeUpdateStats(statsView, user, 0, 0, amount, 0);
-        }
-
-        VaultBusinessLogicLibrary.emitBusinessEvents("borrow", user, asset, amount, ActionKeys.ACTION_BORROW);
+        // Strict SSOT: borrowing must go through VaultCore/LendingEngine/Settlement SSOT paths.
+        // This legacy entrypoint is permanently disabled to prevent parallel accounting and fund-flow paths.
+        user; asset; amount; // silence
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /* ============ Liquidation Orchestration removed: use LiquidationManager ============ */
 
-    /// @notice 用户借款（上游提供年化利率bps与期限天数，避免二次读取，进一步省gas）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 借款金额
-    /// @param annualRateBps 年化利率（bps，1e4=100%）
-    /// @param termDays 期限天数
+    /**
+     * @notice Borrows with provided annual rate and term (compatibility wrapper; uses settlement library).
+     * @dev Reverts if:
+     *      - _registryAddr == address(0) (ZeroAddress) via onlyValidRegistry
+     *      - paused (whenNotPaused)
+     *      - SettlementMatchLib.finalizeAtomic reverts
+     *      - Registry module resolution fails
+     *
+     * Security:
+     * - Non-reentrant
+     * - Pause-aware
+     *
+     * @param user Borrower address.
+     * @param lender Deprecated parameter (unused).
+     * @param asset ERC20 asset address.
+     * @param amount Borrow amount (token native decimals).
+     * @param annualRateBps Annual interest rate in basis points (bps; 1e4 = 100%).
+     * @param termDays Term length in days.
+     * @return orderId Order id created by settlement library.
+     */
     function borrowWithRate(
         address user,
-        address /*lender*/,
+        address lender,
         address asset,
         uint256 amount,
         uint256 annualRateBps,
         uint16 termDays
     ) external onlyValidRegistry whenNotPaused nonReentrant returns (uint256 orderId) {
-        // 迁移：改由撮合结算 finalizeMatch 调度，避免业务层直接放款与锁保
-        // 保留函数签名以兼容旧脚本；直接转调更安全的结算路径
-        // lender 字段口径：写入“资金池合约地址”（LenderPoolVault），而非外部传入地址
+        lender; // silence (deprecated; kept for backwards compatibility)
+        // Migration: route to settlement library to avoid BusinessLogic directly disbursing funds and locking reserves.
+        // Signature is preserved for backwards compatibility with legacy scripts.
+        // Lender field convention: use the pool contract address (LenderPoolVault),
+        // not the deprecated external parameter.
         address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
         orderId = SettlementMatchLib.finalizeAtomic(
             _registryAddr,
@@ -374,141 +613,189 @@ contract VaultBusinessLogic is
         VaultBusinessLogicLibrary.emitBusinessEvents("borrowWithRate", user, asset, amount, ActionKeys.ACTION_BORROW);
     }
 
-    /// @notice 用户还款
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 还款金额
+    /**
+     * @notice DEPRECATED: Repay must go through VaultCore.repay SSOT.
+     * @dev Reverts if:
+     *      - amount == 0 (AmountIsZero)
+     *      - asset == address(0) (ZeroAddress)
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param asset ERC20 asset address (unused).
+     * @param amount Repay amount (token native decimals; unused).
+     */
     function repay(address user, address asset, uint256 amount) external view onlyValidRegistry whenNotPaused {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
 
-        // 收敛：还款/结算必须走 VaultCore.repay(orderId, asset, amount) → SettlementManager（SSOT）。
-        // 业务层不再托管用户还款资金，避免写路径分叉与资金滞留风险。
+        // Consolidation: repay/settlement must go through
+        // VaultCore.repay(orderId, asset, amount) -> SettlementManager (SSOT).
+        // This module no longer custodies repay funds to avoid write-path divergence and fund retention risk.
         user;
         revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
-    /// @notice 显式关单还款：在还款完成后触发早偿结算（或自动条件也成立时）
-    function repayWithStop(address user, address asset, uint256 amount, bool stop) external view onlyValidRegistry whenNotPaused {
+    /**
+     * @notice DEPRECATED: Repay-with-stop must go through SettlementManager/VaultCore SSOT.
+     * @dev Reverts if:
+     *      - amount == 0 (AmountIsZero)
+     *      - asset == address(0) (ZeroAddress)
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param asset ERC20 asset address (unused).
+     * @param amount Repay amount (token native decimals; unused).
+     * @param stop Whether to stop/close the loan (unused).
+     */
+    function repayWithStop(
+        address user,
+        address asset,
+        uint256 amount,
+        bool stop
+    ) external view onlyValidRegistry whenNotPaused {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
-        // DEPRECATED: 早偿结算应由 SettlementManager 统一承接（SSOT），避免 repay/settle 分叉。
+        // DEPRECATED: early-repayment settlement must be handled by SettlementManager (SSOT)
+        // to avoid repay/settle divergence.
         stop;
         user;
         revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
-    /// @notice 用户提取抵押物
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 提取金额
+    /**
+     * @notice DEPRECATED: Withdraw must go through VaultCore/VaultRouter SSOT.
+     * @dev Reverts if:
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param asset Asset address (unused).
+     * @param amount Amount to withdraw (token native decimals; unused).
+     */
     function withdraw(address user, address asset, uint256 amount) external pure {
-        // 收敛：withdraw 统一入口为 VaultCore.withdraw → VaultRouter → CollateralManager（CM 托管 ERC20）
+        // Consolidation: the SSOT withdraw entrypoint is VaultCore.withdraw -> VaultRouter -> CollateralManager
+        // (CM custody).
         user; asset; amount; // silence
         revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /* ============ Batch Operations ============ */
     
-    /// @notice 批量存入
-    /// @param user 用户地址
-    /// @param assets 资产地址数组
-    /// @param amounts 金额数组
+    /**
+     * @notice DEPRECATED: Batch deposit must be done via VaultCore SSOT (or future VaultCore.batchDeposit).
+     * @dev Reverts if:
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param assets Asset address array (unused).
+     * @param amounts Amount array (token native decimals; unused).
+     */
     function batchDeposit(address user, address[] calldata assets, uint256[] calldata amounts) external pure {
-        // 收敛：批量存取抵押应由 BatchView/前端拆分为多次 VaultCore.deposit 调用（或后续新增 VaultCore.batchDeposit）
+        // Consolidation: batch collateral operations should be decomposed into multiple VaultCore.deposit calls
+        // (or a future VaultCore.batchDeposit).
         user; assets; amounts; // silence
         revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
-    /// @notice 批量借款
-    /// @param user 用户地址
-    /// @param assets 资产地址数组
-    /// @param amounts 金额数组
-    function batchBorrow(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused nonReentrant {
-        VaultBusinessLogicLibrary.validateBatchParams(assets, amounts);
-        address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
-
-        unchecked {
-            for (uint256 i = 0; i < assets.length; i++) {
-                address asset = assets[i];
-                uint256 amount = amounts[i];
-                if (amount == 0) continue;
-                if (asset == address(0)) revert ZeroAddress();
-                // 使用原子撮合路径；此处仅演示直接落地（无抵押/无利率），真实场景建议走 finalizeMatch
-                SettlementMatchLib.finalizeAtomic(
-                    _registryAddr,
-                    user,
-                    pool,
-                    address(0),
-                    0,
-                    asset,
-                    amount,
-                    0,
-                    0
-                );
-            }
-        }
-
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_BATCH_BORROW,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_BORROW),
-            msg.sender,
-            block.timestamp
-        );
+    /**
+     * @notice DEPRECATED: Batch borrow must be orchestrated through SSOT modules.
+     * @dev Reverts if:
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param assets Asset address array (unused).
+     * @param amounts Amount array (token native decimals; unused).
+     */
+    function batchBorrow(
+        address user,
+        address[] calldata assets,
+        uint256[] calldata amounts
+    ) external onlyValidRegistry whenNotPaused nonReentrant {
+        // Strict SSOT: batch borrowing must be orchestrated through SSOT modules (VaultCore/LendingEngine/Settlement).
+        // This legacy helper is permanently disabled to avoid parallel settlement/order creation paths.
+        user; assets; amounts; // silence
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
-    /// @notice 批量还款
-    /// @param user 用户地址
-    /// @param assets 资产地址数组
-    /// @param amounts 金额数组
-    function batchRepay(address user, address[] calldata assets, uint256[] calldata amounts) external onlyValidRegistry whenNotPaused nonReentrant {
-        VaultBusinessLogicLibrary.validateBatchParams(assets, amounts);
-        
-        _getModuleAddress(ModuleKeys.KEY_RM);
-        
-        unchecked {
-            for (uint256 i = 0; i < assets.length; i++) {
-                address asset = assets[i];
-                uint256 amount = amounts[i];
-                if (amount == 0) continue;
-                if (asset == address(0)) revert ZeroAddress();
-                
-                IERC20(asset).safeTransferFrom(user, address(this), amount);
-                // 积分奖励统一以 LendingEngine 落账后触发
-            }
-        }
-        
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_BATCH_REPAY,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_REPAY),
-            msg.sender,
-            block.timestamp
-        );
+    /**
+     * @notice DEPRECATED: Batch repay must be orchestrated through SSOT modules.
+     * @dev Reverts if:
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param assets Asset address array (unused).
+     * @param amounts Amount array (token native decimals; unused).
+     */
+    function batchRepay(
+        address user,
+        address[] calldata assets,
+        uint256[] calldata amounts
+    ) external onlyValidRegistry whenNotPaused nonReentrant {
+        // Strict SSOT: repay/settlement must go through VaultCore/SettlementManager (SSOT).
+        // This legacy helper is permanently disabled to avoid fund retention and parallel write paths.
+        user; assets; amounts; // silence
+        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
-    /// @notice 批量提取
-    /// @param user 用户地址
-    /// @param assets 资产地址数组
-    /// @param amounts 金额数组
+    /**
+     * @notice DEPRECATED: Batch withdraw must be done via VaultCore SSOT (or future VaultCore.batchWithdraw).
+     * @dev Reverts if:
+     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
+     *
+     * Security:
+     * - N/A (function is permanently disabled)
+     *
+     * @param user User address (unused).
+     * @param assets Asset address array (unused).
+     * @param amounts Amount array (token native decimals; unused).
+     */
     function batchWithdraw(address user, address[] calldata assets, uint256[] calldata amounts) external pure {
-        // 收敛：批量存取抵押应由 BatchView/前端拆分为多次 VaultCore.withdraw 调用（或后续新增 VaultCore.batchWithdraw）
+        // Consolidation: batch collateral operations should be decomposed into multiple VaultCore.withdraw calls
+        // (or a future VaultCore.batchWithdraw).
         user; assets; amounts; // silence
         revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /* ============ Upgrade Auth ============ */
-    /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
+    /**
+     * @notice Authorizes UUPS upgrade.
+     * @dev Reverts if:
+     *      - msg.sender lacks upgrade role (AccessControlManager.requireRole via _requireRole)
+     *      - newImplementation == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Upgrade is role-gated (ACTION_UPGRADE_MODULE)
+     *
+     * @param newImplementation New implementation address.
+     */
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        // Emit a standardized action event for off-chain observability.
+        // solhint-disable-next-line not-rely-on-time
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }

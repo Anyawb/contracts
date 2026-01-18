@@ -158,7 +158,22 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     /// @param asset 资产地址
     /// @param amount 债务数量
     function setUserDebt(address user, address asset, uint256 amount) external {
+        // Keep derived totals consistent with _userDebt, since production paths
+        // rely on getUserTotalDebtValue() for collateral release decisions.
+        uint256 prev = _userDebt[user][asset];
         _userDebt[user][asset] = amount;
+
+        if (amount >= prev) {
+            uint256 delta = amount - prev;
+            _totalByAsset[asset] += delta;
+            _userTotalValue[user] += delta;
+            _totalValue += delta;
+        } else {
+            uint256 delta = prev - amount;
+            _totalByAsset[asset] = _totalByAsset[asset] >= delta ? _totalByAsset[asset] - delta : 0;
+            _userTotalValue[user] = _userTotalValue[user] >= delta ? _userTotalValue[user] - delta : 0;
+            _totalValue = _totalValue >= delta ? _totalValue - delta : 0;
+        }
     }
 
     /// @notice 强制减少债务（清算时使用）

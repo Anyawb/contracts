@@ -233,14 +233,19 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /// @notice 业务入口统一推送用户统计变更，保持活跃用户计数一致更新
-    /// @dev 与原 updateUserStats 语义保持一致；仅权限角色可调用
+    /// @dev 与原 updateUserStats 语义保持一致。
+    ///      安全口径：写入方应为“系统数据推送者”（ACTION_VIEW_SYSTEM_DATA）或 ADMIN。
     function pushUserStatsUpdate(
         address user,
         uint256 collateralIn,
         uint256 collateralOut,
         uint256 borrow,
         uint256 repay
-    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    ) external onlyValidRegistry {
+        // Allow ADMIN; otherwise require system-data view push permission.
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        }
         _pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay, 0);
     }
 
@@ -252,7 +257,11 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 borrow,
         uint256 repay,
         uint64 nextVersion
-    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    ) external onlyValidRegistry {
+        // Allow ADMIN; otherwise require system-data view push permission.
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        }
         _pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay, nextVersion);
     }
 

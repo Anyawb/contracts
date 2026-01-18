@@ -113,6 +113,10 @@ contract MockPositionView is IPositionView {
         return (collateral[user][asset], debt[user][asset]);
     }
 
+    function getUserPositionWithValidity(address user, address asset) external view returns (uint256, uint256, bool) {
+        return (collateral[user][asset], debt[user][asset], true);
+    }
+
     function _write(address user, address asset, uint256 c, uint256 d, uint64 nextVersion) internal {
         uint64 current = version[user][asset];
         uint64 newVersion = nextVersion == 0 ? current + 1 : nextVersion;

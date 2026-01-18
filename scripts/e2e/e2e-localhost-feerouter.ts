@@ -14,8 +14,13 @@
 
 import { ethers } from "hardhat";
 import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { expect } from "chai";
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+const BPS_DENOM = 10000n;
+function calcFee(amount: bigint, bps: bigint): bigint {
+  return (amount * bps) / BPS_DENOM;
+}
 
 async function main() {
   console.log("=== FeeRouter E2E Test on Localhost ===\n");
@@ -87,6 +92,10 @@ async function main() {
   console.log(`  Total Fee Rate: ${totalFeeRate} bps (${Number(totalFeeRate) / 100}%)`);
   console.log(`  Platform Treasury: ${platformTreasury}`);
   console.log(`  Ecosystem Vault: ${ecosystemVault}`);
+  // NOTE: Do not assume "treasury/ecoVault" signers are the configured recipients.
+  // Always validate against FeeRouter's configured treasury addresses.
+  expect(platformTreasury).to.not.equal(ZERO_ADDRESS);
+  expect(ecosystemVault).to.not.equal(ZERO_ADDRESS);
 
   // 测试费用计算
   const testAmount = ethers.parseUnits("1000", 6);
@@ -94,14 +103,16 @@ async function main() {
   const borrowFee = await feeRouter.chargeBorrowFee(ZERO_ADDRESS, testAmount);
   console.log(`  Deposit Fee for 1000 USDC: ${ethers.formatUnits(depositFee, 6)} USDC`);
   console.log(`  Borrow Fee for 1000 USDC: ${ethers.formatUnits(borrowFee, 6)} USDC`);
+  expect(depositFee).to.equal(borrowFee);
+  expect(depositFee).to.equal(calcFee(testAmount, BigInt(totalFeeRate)));
 
   // ====== 2. 常规费用分发测试 ======
   console.log("\n=== 2. Normal Fee Distribution Test ===");
   const distributeAmount = ethers.parseUnits("1000", 6);
   await usdc.connect(alice).approve(await feeRouter.getAddress(), distributeAmount);
 
-  const treasuryInitialBalance = await usdc.balanceOf(treasury.address);
-  const ecoVaultInitialBalance = await usdc.balanceOf(ecoVault.address);
+  const treasuryInitialBalance = await usdc.balanceOf(platformTreasury);
+  const ecoVaultInitialBalance = await usdc.balanceOf(ecosystemVault);
   const aliceInitialBalance = await usdc.balanceOf(alice.address);
 
   console.log(`  Distributing ${ethers.formatUnits(distributeAmount, 6)} USDC...`);
@@ -110,8 +121,8 @@ async function main() {
   console.log(`  ✅ Transaction hash: ${receipt?.hash}`);
 
   // 验证余额变化
-  const treasuryFinalBalance = await usdc.balanceOf(treasury.address);
-  const ecoVaultFinalBalance = await usdc.balanceOf(ecoVault.address);
+  const treasuryFinalBalance = await usdc.balanceOf(platformTreasury);
+  const ecoVaultFinalBalance = await usdc.balanceOf(ecosystemVault);
   const aliceFinalBalance = await usdc.balanceOf(alice.address);
 
   const treasuryReceived = treasuryFinalBalance - treasuryInitialBalance;
@@ -121,6 +132,13 @@ async function main() {
   console.log(`  Treasury received: ${ethers.formatUnits(treasuryReceived, 6)} USDC`);
   console.log(`  EcoVault received: ${ethers.formatUnits(ecoVaultReceived, 6)} USDC`);
   console.log(`  Alice spent: ${ethers.formatUnits(aliceSpent, 6)} USDC`);
+
+  // Assert distribution math (FeeRouter returns remaining to caller)
+  const expectedPlatform = calcFee(distributeAmount, BigInt(platformFeeBps));
+  const expectedEco = calcFee(distributeAmount, BigInt(ecosystemFeeBps));
+  expect(treasuryReceived).to.equal(expectedPlatform);
+  expect(ecoVaultReceived).to.equal(expectedEco);
+  expect(aliceSpent).to.equal(expectedPlatform + expectedEco);
 
   // 验证事件
   const feeDistributedEvent = receipt?.logs.find((log: any) => {
@@ -231,21 +249,23 @@ async function main() {
   await usdc.connect(deployer).transfer(alice.address, largeAmount);
   await usdc.connect(alice).approve(await feeRouter.getAddress(), largeAmount);
 
-  const treasuryInitialLarge = await usdc.balanceOf(treasury.address);
-  const ecoVaultInitialLarge = await usdc.balanceOf(ecoVault.address);
+  const treasuryInitialLarge = await usdc.balanceOf(platformTreasury);
+  const ecoVaultInitialLarge = await usdc.balanceOf(ecosystemVault);
 
   console.log(`  Distributing large amount: ${ethers.formatUnits(largeAmount, 6)} USDC...`);
   await feeRouter.connect(alice).distributeNormal(await usdc.getAddress(), largeAmount);
   console.log(`  ✅ Large amount distribution completed`);
 
-  const treasuryFinalLarge = await usdc.balanceOf(treasury.address);
-  const ecoVaultFinalLarge = await usdc.balanceOf(ecoVault.address);
+  const treasuryFinalLarge = await usdc.balanceOf(platformTreasury);
+  const ecoVaultFinalLarge = await usdc.balanceOf(ecosystemVault);
 
-  const expectedPlatformFee = largeAmount * 9n / 10000n;
-  const expectedEcoFee = largeAmount * 1n / 10000n;
+  const expectedPlatformFee = calcFee(largeAmount, BigInt(platformFeeBps));
+  const expectedEcoFee = calcFee(largeAmount, BigInt(ecosystemFeeBps));
 
   console.log(`  Treasury received: ${ethers.formatUnits(treasuryFinalLarge - treasuryInitialLarge, 6)} USDC (expected: ${ethers.formatUnits(expectedPlatformFee, 6)})`);
   console.log(`  EcoVault received: ${ethers.formatUnits(ecoVaultFinalLarge - ecoVaultInitialLarge, 6)} USDC (expected: ${ethers.formatUnits(expectedEcoFee, 6)})`);
+  expect(treasuryFinalLarge - treasuryInitialLarge).to.equal(expectedPlatformFee);
+  expect(ecoVaultFinalLarge - ecoVaultInitialLarge).to.equal(expectedEcoFee);
 
   // ====== 7. 费率配置更新测试 ======
   console.log("\n=== 7. Fee Config Update Test ===");

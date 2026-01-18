@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 // SafeMath removed in OZ v5; Solidity 0.8+ enforces overflow checks
 import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
 import { IPriceOracleAdapter } from "../interfaces/IPriceOracleAdapter.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 
 /// @title GracefulDegradation
 /// @notice 优雅降级库，提供通用的价格获取和错误处理功能

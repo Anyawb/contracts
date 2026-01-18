@@ -145,7 +145,7 @@ describe('Registry – 核心功能测试', function () {
           newImplementation.target,
           initData
         )
-      ).to.be.revertedWithCustomError(newImplementation, 'DelayTooLong')
+      ).to.be.revertedWithCustomError(newImplementation, 'Registry__DelayTooLong')
         .withArgs(ethers.MaxUint256, 604800);
     });
   });
@@ -166,7 +166,7 @@ describe('Registry – 核心功能测试', function () {
     it('Registry – 应该拒绝零地址管理员设置', async function () {
       await expect(
         (registry as unknown as Registry).setUpgradeAdmin(ZERO_ADDRESS)
-      ).to.be.revertedWithCustomError(registry, 'InvalidUpgradeAdmin')
+      ).to.be.revertedWithCustomError(registry, 'Registry__InvalidUpgradeAdmin')
         .withArgs(ZERO_ADDRESS);
     });
 
@@ -197,7 +197,7 @@ describe('Registry – 核心功能测试', function () {
       
       await expect(
         (registry as unknown as Registry).connect(user1).acceptAdmin()
-      ).to.be.revertedWithCustomError(registry, 'NotPendingAdmin')
+      ).to.be.revertedWithCustomError(registry, 'Registry__NotPendingAdmin')
         .withArgs(await user1.getAddress(), await admin.getAddress());
     });
 
@@ -260,7 +260,7 @@ describe('Registry – 核心功能测试', function () {
     it('Registry – 应该拒绝零地址模块', async function () {
       await expect(
         registry.setModule(KEY_LE, ZERO_ADDRESS)
-      ).to.be.revertedWithCustomError(registry, 'ZeroAddress');
+      ).to.be.revertedWithCustomError(registry, 'Registry__ZeroAddress');
     });
 
     it('Registry – 应该正确处理模块无变更', async function () {
@@ -268,8 +268,9 @@ describe('Registry – 核心功能测试', function () {
       
       await expect(
         registry.setModule(KEY_LE, mockLendingEngine.target)
-      ).to.emit(registry, 'ModuleNoOp')
-        .withArgs(KEY_LE, mockLendingEngine.target, owner.address);
+      ).to.not.be.reverted;
+
+      expect(await registry.getModule(KEY_LE)).to.equal(mockLendingEngine.target);
     });
 
     it('Registry – 应该正确批量设置模块', async function () {
@@ -314,7 +315,7 @@ describe('Registry – 核心功能测试', function () {
     it('Registry – 应该正确处理未注册模块查询', async function () {
       await expect(
         registry.getModuleOrRevert(KEY_LE)
-      ).to.be.revertedWithCustomError(registry, 'ZeroAddress');
+      ).to.be.revertedWithCustomError(registry, 'ModuleNotRegistered').withArgs(KEY_LE);
     });
   });
 
@@ -323,48 +324,51 @@ describe('Registry – 核心功能测试', function () {
       await registry.setModule(KEY_LE, mockLendingEngine.target);
       
       await expect(
-        registry.setModule(KEY_LE, mockCollateralManager.target)
-      ).to.emit(registry, 'ModuleUpgraded')
-        .withArgs(KEY_LE, mockLendingEngine.target, mockCollateralManager.target, owner.address);
+        registry.scheduleModuleUpgrade(KEY_LE, mockCollateralManager.target)
+      ).to.emit(registry, 'ModuleUpgradeScheduled');
     });
 
     it('Registry – 应该拒绝排期零地址升级', async function () {
       await registry.setModule(KEY_LE, mockLendingEngine.target);
       
       await expect(
-        registry.setModule(KEY_LE, ZERO_ADDRESS)
-      ).to.be.revertedWithCustomError(registry, 'ZeroAddress');
+        registry.scheduleModuleUpgrade(KEY_LE, ZERO_ADDRESS)
+      ).to.be.revertedWithCustomError(registry, 'Registry__ZeroAddress');
     });
 
     it('Registry – 应该正确取消升级排期', async function () {
       await registry.setModule(KEY_LE, mockLendingEngine.target);
-      await registry.setModule(KEY_LE, mockCollateralManager.target);
+      await registry.scheduleModuleUpgrade(KEY_LE, mockCollateralManager.target);
       
-      // 由于Registry没有scheduleModuleUpgrade方法，这里测试直接升级
-      expect(await registry.getModule(KEY_LE)).to.equal(mockCollateralManager.target);
+      await expect(registry.cancelModuleUpgrade(KEY_LE))
+        .to.emit(registry, 'ModuleUpgradeCancelled');
     });
 
     it('Registry – 应该拒绝取消不存在的升级排期', async function () {
       await expect(
-        registry.setModule(KEY_LE, mockLendingEngine.target)
-      ).to.not.be.reverted;
+        registry.cancelModuleUpgrade(KEY_LE)
+      ).to.not.be.reverted; // cancel is no-op if nothing scheduled
     });
 
     it('Registry – 应该拒绝提前执行升级', async function () {
       await registry.setModule(KEY_LE, mockLendingEngine.target);
+      await registry.scheduleModuleUpgrade(KEY_LE, mockCollateralManager.target);
       
-      // 由于Registry没有scheduleModuleUpgrade方法，这里测试直接升级
       await expect(
-        registry.setModule(KEY_LE, mockCollateralManager.target)
-      ).to.not.be.reverted;
+        registry.executeModuleUpgrade(KEY_LE)
+      ).to.be.revertedWithCustomError(registry, 'ModuleUpgradeNotReady');
     });
 
     it('Registry – 应该正确执行到期的升级', async function () {
       await registry.setModule(KEY_LE, mockLendingEngine.target);
+      await registry.scheduleModuleUpgrade(KEY_LE, mockCollateralManager.target);
       
-      // 由于Registry没有scheduleModuleUpgrade方法，这里测试直接升级
+      // Advance time by minDelay to make upgrade executable
+      await (hardhat as any).network.provider.send('evm_increaseTime', [TEST_MIN_DELAY + 1]);
+      await (hardhat as any).network.provider.send('evm_mine');
+
       await expect(
-        registry.setModule(KEY_LE, mockCollateralManager.target)
+        registry.executeModuleUpgrade(KEY_LE)
       ).to.emit(registry, 'ModuleUpgraded')
         .withArgs(KEY_LE, mockLendingEngine.target, mockCollateralManager.target, owner.address);
       
@@ -422,11 +426,11 @@ describe('Registry – 核心功能测试', function () {
   });
 
   describe('事件测试', function () {
-    it('Registry – 应该正确发出 ModuleUpgraded 事件', async function () {
+    it('Registry – 应该正确发出 ModuleChanged 事件', async function () {
       await expect(
         registry.setModule(KEY_LE, mockLendingEngine.target)
-      ).to.emit(registry, 'ModuleUpgraded')
-        .withArgs(KEY_LE, ZERO_ADDRESS, mockLendingEngine.target, owner.address);
+      ).to.emit(registry, 'ModuleChanged')
+        .withArgs(KEY_LE, ZERO_ADDRESS, mockLendingEngine.target);
     });
 
     it('Registry – 应该正确发出 PendingAdminChanged 事件', async function () {
@@ -470,7 +474,7 @@ describe('Registry – 核心功能测试', function () {
       
       await expect(
         registry.batchSetModules(keys, addresses, true)
-      ).to.be.revertedWithCustomError(registry, 'MismatchedArrayLengths')
+      ).to.be.revertedWithCustomError(registry, 'Registry__MismatchedArrayLengths')
         .withArgs(keys.length, addresses.length);
     });
 
@@ -507,7 +511,7 @@ describe('Registry – 核心功能测试', function () {
     it('Registry – 应该拒绝非紧急管理员执行紧急恢复', async function () {
       await expect(
         registry.connect(user1).emergencyRecoverUpgrade()
-      ).to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+      ).to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await owner.getAddress());
     });
   });

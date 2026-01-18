@@ -1,16 +1,52 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ILenderPoolVault
-/// @notice 线上流动性资金池（LenderPoolVault）的最小接口：托管出借资金并允许撮合合约拨付借款
-/// @dev 设计目标（与用户选择对齐）：
-/// - 订单中的 lender 字段语义为“资金池合约地址”（本合约地址）
-/// - 线上流动性集中托管于本合约，撮合/结算合约按规则从本合约拨付
+/**
+ * @title ILenderPoolVault
+ * @notice Minimal interface for `LenderPoolVault`: pooled custody + restricted `transferOut` for settlement.
+ * @dev Architecture SSOT:
+ * - Online liquidity is custodied in `LenderPoolVault` (Registry KEY_LENDER_POOL_VAULT).
+ * - Under the pool-based model, `LoanOrder.lender` MUST be this pool address (not the lender signer).
+ *
+ * Security:
+ * - In the implementation, `transferOut` MUST be restricted to the Registry-configured
+ *   VaultBusinessLogic module (KEY_VAULT_BUSINESS_LOGIC).
+ */
 interface ILenderPoolVault {
-    /// @notice 从调用者拉取资金并存入资金池（供 LP/资金方入金使用）
+    /**
+     * @notice Deposit assets into the pool vault (custody).
+     * @dev Reverts if:
+     *      - implementation-defined (typically: asset is zero / amount is zero / paused / ERC20 transferFrom fails)
+     *
+     * Security:
+     * - In the implementation, this should be nonReentrant and pause-aware.
+     *
+     * @param asset ERC20 asset address
+     * @param amount Amount to deposit (token native decimals)
+     */
     function deposit(address asset, uint256 amount) external;
 
-    /// @notice 由撮合/结算模块调用：将指定资产拨付到目标地址（通常为撮合编排合约自身）
+    /**
+     * @notice Transfer assets out of the pool vault (restricted settlement outflow).
+     * @dev Reverts if:
+     *      - implementation-defined (typically: asset/to is zero / amount is zero / paused / caller not authorized)
+     *
+     * Security:
+     * - MUST be restricted in the implementation to VaultBusinessLogic (Registry KEY_VAULT_BUSINESS_LOGIC).
+     *
+     * @param asset ERC20 asset address
+     * @param to Recipient address
+     * @param amount Amount to transfer (token native decimals)
+     */
     function transferOut(address asset, address to, uint256 amount) external;
+
+    /**
+     * @notice Get configured Registry address.
+     * @dev Reverts if:
+     *      - none
+     *
+     * @return registry Registry address (module resolver)
+     */
+    function registryAddrVar() external view returns (address registry);
 }
 

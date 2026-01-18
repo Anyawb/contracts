@@ -26,6 +26,7 @@ RWA 借贷平台采用基于 **ActionKeys** 的细粒度权限管理系统：
 - **ActionKeys**：标准化的动作标识符（44 个预定义动作）
 - **Registry 集成**：通过 Registry 获取 ACM 地址
 - **Owner 模式**：只有 Owner 可以授予/撤销权限
+- **暂停收敛（SSOT）**：系统暂停/恢复由 `VaultRouter` 负责（`ACTION_PAUSE_SYSTEM` / `ACTION_UNPAUSE_SYSTEM`），ACM 不承担“暂停系统”的状态机
 
 ### 权限级别
 
@@ -49,8 +50,6 @@ RWA 借贷平台采用基于 **ActionKeys** 的细粒度权限管理系统：
 **特性**：
 - 非升级合约（构造函数接收 owner）
 - Owner 模式：只有 owner 可以授予/撤销角色
-- 紧急暂停功能
-- Keeper 管理
 - 权限级别查询
 
 **核心接口**：
@@ -65,9 +64,6 @@ interface IAccessControlManager {
     function grantRole(bytes32 role, address account) external;
     function revokeRole(bytes32 role, address account) external;
     
-    // 查询功能
-    function getAccountRoles(address account) external view returns (bytes32[] memory);
-    function getRoleAccounts(bytes32 role) external view returns (address[] memory);
     function getUserPermission(address account) external view returns (PermissionLevel);
 }
 ```
@@ -205,12 +201,6 @@ await acm.revokeRole(ActionKeys.ACTION_SET_PARAMETER, targetAddress);
 ```solidity
 // 检查是否拥有权限
 bool hasPermission = await acm.hasRole(ActionKeys.ACTION_SET_PARAMETER, userAddress);
-
-// 获取账户的所有权限
-bytes32[] memory roles = await acm.getAccountRoles(userAddress);
-
-// 获取权限的所有账户
-address[] memory accounts = await acm.getRoleAccounts(ActionKeys.ACTION_SET_PARAMETER);
 
 // 获取权限级别
 PermissionLevel level = await acm.getUserPermission(userAddress);
@@ -464,14 +454,18 @@ _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
 定期检查权限配置，撤销不必要的权限：
 
 ```typescript
-// 查询所有权限
-const roles = await acm.getAccountRoles(accountAddress);
-
-// 撤销不需要的权限
-for (const role of roles) {
-    if (!isNeeded(role)) {
-        await acm.revokeRole(role, accountAddress);
-    }
+// 说明：当前 ACM 接口不提供链上“列举某账户所有角色”的枚举方法（避免接口膨胀/高 gas）。
+// 推荐做法：通过事件离线审计 + 生成期望权限清单（desired state）后再逐一校验与撤销。
+//
+// 1) 离线订阅 RoleGranted/RoleRevoked 事件，维护 account -> roles 的本地视图
+// 2) 对照 desiredRoles 列表逐一 hasRole(role, account) 校验
+// 3) 对需要撤销的 role 调用 revokeRole(role, account)
+const desiredRoles: string[] = [
+  // e.g. keccak256("SET_PARAMETER") / ActionKeys.ACTION_SET_PARAMETER ...
+];
+for (const role of desiredRoles) {
+  const has = await acm.hasRole(role, accountAddress);
+  // if (has && !isNeeded(role)) await acm.revokeRole(role, accountAddress);
 }
 ```
 
@@ -523,7 +517,7 @@ await acm.grantRole(ActionKeys.ACTION_SET_PARAMETER, userAddress);
 
 ### 问题 2：无法授予权限
 
-**症状**：调用 `grantRole` 时返回 `OnlyOwnerAllowed` 错误
+**症状**：调用 `grantRole` 时返回 `AccessControlManager__OnlyOwnerAllowed` 错误
 
 **原因**：只有 Owner 可以授予权限
 
@@ -537,9 +531,6 @@ await acm.grantRole(ActionKeys.ACTION_SET_PARAMETER, userAddress);
 
 **排查**：
 ```typescript
-// 检查账户的所有权限
-const roles = await acm.getAccountRoles(userAddress);
-
 // 检查权限级别计算逻辑
 const level = await acm.getUserPermission(userAddress);
 ```
@@ -549,21 +540,6 @@ const level = await acm.getUserPermission(userAddress);
 2. 拥有管理权限（SET_PARAMETER, UPGRADE_MODULE 等）→ OPERATOR
 3. 拥有查看权限（VIEW_*）→ VIEWER
 4. 其他 → NONE
-
-### 问题 4：紧急暂停后无法操作
-
-**症状**：系统暂停后，所有操作都被阻止
-
-**解决方案**：
-```typescript
-// 检查暂停状态
-const isPaused = await acm.getContractStatus();
-
-// 恢复系统（需要 Owner 权限）
-if (isPaused) {
-    await acm.emergencyUnpause();
-}
-```
 
 ---
 

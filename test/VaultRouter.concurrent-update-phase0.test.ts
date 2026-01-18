@@ -179,11 +179,16 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       const vaultCoreSigner = await ethers.getImpersonatedSigner(vaultCoreAddr);
       
       await expect(
-        this.vaultRouter.connect(vaultCoreSigner)['pushUserPositionUpdate(address,address,uint256,uint256)'](
+        this.vaultRouter
+          .connect(vaultCoreSigner)
+          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64,uint64)'](
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(
@@ -208,13 +213,16 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       const seq = 123;
 
       await expect(
-        this.vaultRouter.connect(vaultCoreSigner)['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64)'](
+        this.vaultRouter
+          .connect(vaultCoreSigner)
+          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64,uint64)'](
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
           requestId,
-          seq
+          seq,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(
@@ -236,7 +244,10 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.be.revertedWithCustomError(this.vaultRouter, 'VaultRouter__UnauthorizedAccess');
     });
@@ -248,7 +259,10 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.be.revertedWithCustomError(this.vaultRouter, 'VaultRouter__UnauthorizedAccess');
     });
@@ -263,7 +277,9 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           this.testAsset,
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
-          ethers.parseUnits('100', 6)
+          ethers.parseUnits('100', 6),
+          ethers.ZeroHash,
+          0
         )
       ).to.emit(this.vaultRouter, 'AssetStatsPushed')
         .withArgs(
@@ -316,11 +332,14 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       await expect(
         this.vaultCore
           .connect(this.businessModule1)
-          ['pushUserPositionUpdate(address,address,uint256,uint256)'](
+          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64,uint64)'](
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(
@@ -341,13 +360,14 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       await expect(
         this.vaultCore
           .connect(this.businessModule1)
-          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64)'](
+          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64,uint64)'](
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
           requestId,
-          seq
+          seq,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(
@@ -371,7 +391,10 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed');
       
@@ -388,7 +411,10 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed');
       
@@ -401,7 +427,10 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed');
     });
@@ -412,7 +441,10 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.be.reverted; // VaultCore 的 onlyBusinessModule 修饰符会拒绝
     });
@@ -454,13 +486,14 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       await expect(
         this.vaultCore
           .connect(this.businessModule1)
-          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64)'](
+          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64,uint64)'](
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
           requestId1,
-          seq1
+          seq1,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(
@@ -477,13 +510,14 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       await expect(
         this.vaultCore
           .connect(this.businessModule1)
-          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64)'](
+          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64,uint64)'](
           await this.user1.getAddress(),
           this.testAsset,
           ethers.parseUnits('2', 18),
           ethers.parseUnits('1', 18),
           requestId2,
-          seq2
+          seq2,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(
@@ -501,11 +535,14 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       await expect(
         this.vaultCore
           .connect(this.businessModule1)
-          ['pushUserPositionUpdate(address,address,uint256,uint256)'](
+          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64,uint64)'](
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(
@@ -527,7 +564,10 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           ZERO_ADDRESS,
           this.testAsset,
           ONE_ETH,
-          ethers.parseUnits('0.5', 18)
+          ethers.parseUnits('0.5', 18),
+          ethers.ZeroHash,
+          0,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(
@@ -546,6 +586,9 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
         this.vaultCore.connect(this.businessModule1).pushUserPositionUpdate(
           await this.user1.getAddress(),
           this.testAsset,
+          0,
+          0,
+          ethers.ZeroHash,
           0,
           0
         )
@@ -569,13 +612,14 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
       await expect(
         this.vaultCore
           .connect(this.businessModule1)
-          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64)'](
+          ['pushUserPositionUpdate(address,address,uint256,uint256,bytes32,uint64,uint64)'](
           await this.user1.getAddress(),
           this.testAsset,
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
           maxRequestId,
-          maxSeq
+          maxSeq,
+          0
         )
       ).to.emit(this.vaultRouter, 'UserPositionPushed')
         .withArgs(

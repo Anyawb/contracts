@@ -5,7 +5,12 @@ pragma solidity ^0.8.20;
 /// @notice Helper utilities for emitting IDataPush compliant events.
 /// @dev Reduce code duplication across modules by inlining minimal emit logic.
 library DataPushLibrary {
-    /// @dev Duplicated声明以便任何合约通过library即可emit，无需继承接口
+    /// @notice Unified data bus event (duplicated signature so any module can emit via this library).
+    /// @dev Reverts if:
+    ///      - N/A (event emission only)
+    ///
+    /// Security:
+    /// - Off-chain consumers should decode `payload` based on `dataTypeHash` (see DataPushTypes).
     event DataPushed(bytes32 indexed dataTypeHash, bytes payload);
 
     /// @notice Emit DataPushed event via low-level assembly to save ~200 gas.

@@ -316,9 +316,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       const userBalBefore = await mockERC20.balanceOf(userAddress);
       const poolBalBefore = await mockERC20.balanceOf(lenderPoolVault.target);
 
-      await expect(
-        vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash)
-      )
+      await expect(vaultBusinessLogic.connect(user).reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash))
         .to.emit(vaultBusinessLogic, 'BusinessOperation')
         .withArgs('reserveForLending', userAddress, TEST_ASSET, amount);
 
@@ -332,28 +330,40 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     it('VaultBusinessLogic – reserveForLending: 应该拒绝零资产/零金额', async function () {
       const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-2'));
       await expect(
-        vaultBusinessLogic.reserveForLending(userAddress, ZERO_ADDRESS, 1n, lendIntentHash)
+        vaultBusinessLogic.connect(user).reserveForLending(userAddress, ZERO_ADDRESS, 1n, lendIntentHash)
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
 
       await expect(
-        vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, 0n, lendIntentHash)
+        vaultBusinessLogic.connect(user).reserveForLending(userAddress, TEST_ASSET, 0n, lendIntentHash)
       ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
     });
 
     it('VaultBusinessLogic – reserveForLending: 应该拒绝重复 reserve（同一个 intentHash）', async function () {
       const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-dup'));
       const amount = ethers.parseUnits('1', 18);
-      await vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
+      await vaultBusinessLogic.connect(user).reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
       await expect(
-        vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'Settlement__AlreadyReserved');
+        vaultBusinessLogic.connect(user).reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'SettlementReserveLib__AlreadyReserved');
+    });
+
+    it('VaultBusinessLogic – reserveForLending: 应该拒绝 lendIntentHash=0 / 第三方锁仓（caller != lenderSigner）', async function () {
+      const amount = ethers.parseUnits('2', 18);
+      await expect(
+        vaultBusinessLogic.connect(user).reserveForLending(userAddress, TEST_ASSET, amount, ethers.ZeroHash)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__InvalidLendIntentHash');
+
+      const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-third-party'));
+      await expect(
+        vaultBusinessLogic.connect(owner).reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash)
+      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__CallerNotLenderSigner');
     });
 
     it('VaultBusinessLogic – cancelReserve: 应该仅允许原 lender 撤销，并将资金从池子退回', async function () {
       const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-cancel'));
       const amount = ethers.parseUnits('7', 18);
 
-      await vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
+      await vaultBusinessLogic.connect(user).reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
 
       const userBalBefore = await mockERC20.balanceOf(userAddress);
       const poolBalBefore = await mockERC20.balanceOf(lenderPoolVault.target);
@@ -372,68 +382,35 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     it('VaultBusinessLogic – cancelReserve: 应该拒绝非 owner 撤销 / 不存在的 intentHash', async function () {
       const lendIntentHash = ethers.keccak256(ethers.toUtf8Bytes('lend-intent-owner'));
       const amount = ethers.parseUnits('3', 18);
-      await vaultBusinessLogic.reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
+      await vaultBusinessLogic.connect(user).reserveForLending(userAddress, TEST_ASSET, amount, lendIntentHash);
 
       await expect(vaultBusinessLogic.connect(owner).cancelReserve(lendIntentHash)).to.be.revertedWithCustomError(
         vaultBusinessLogic,
-        'Settlement__NotOwner'
+        'SettlementReserveLib__NotOwner'
       );
 
       const unknownHash = ethers.keccak256(ethers.toUtf8Bytes('unknown'));
       await expect(vaultBusinessLogic.connect(user).cancelReserve(unknownHash)).to.be.revertedWithCustomError(
         vaultBusinessLogic,
-        'Settlement__NotActive'
+        'SettlementReserveLib__NotActive'
+      );
+    });
+
+    it('VaultBusinessLogic – cancelReserve: 应该拒绝 lendIntentHash=0', async function () {
+      await expect(vaultBusinessLogic.connect(user).cancelReserve(ethers.ZeroHash)).to.be.revertedWithCustomError(
+        vaultBusinessLogic,
+        'VaultBusinessLogic__InvalidLendIntentHash'
       );
     });
   });
 
   describe('借款（borrow）', function () {
-    beforeEach(async function () {
-      await mockStatisticsView.setShouldFail(false);
-    });
-
-    it('VaultBusinessLogic – borrow: 应该完成放款（合约 -> 用户）并推送统计', async function () {
+    it('VaultBusinessLogic – borrow: 已按架构收敛（Strict SSOT），应直接拒绝', async function () {
       const amount = ethers.parseUnits('5', 18);
-      const userBalBefore = await mockERC20.balanceOf(userAddress);
-      const vblBalBefore = await mockERC20.balanceOf(vaultBusinessLogic.target);
-      const debtBefore = await mockStatisticsView.userDebt(userAddress);
-
-      await expect(vaultBusinessLogic.borrow(userAddress, TEST_ASSET, amount))
-        .to.emit(vaultBusinessLogic, 'BusinessOperation')
-        .withArgs('borrow', userAddress, TEST_ASSET, amount);
-
-      const userBalAfter = await mockERC20.balanceOf(userAddress);
-      const vblBalAfter = await mockERC20.balanceOf(vaultBusinessLogic.target);
-      const debtAfter = await mockStatisticsView.userDebt(userAddress);
-
-      expect(userBalAfter).to.equal(userBalBefore + amount);
-      expect(vblBalAfter).to.equal(vblBalBefore - amount);
-      expect(debtAfter).to.equal(debtBefore + amount);
-    });
-
-    it('VaultBusinessLogic – borrow: 应该拒绝零金额/零资产', async function () {
-      await expect(
-        vaultBusinessLogic.borrow(userAddress, TEST_ASSET, 0n)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
-
-      await expect(
-        vaultBusinessLogic.borrow(userAddress, ZERO_ADDRESS, 1n)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
-    });
-
-    it('VaultBusinessLogic – borrow: 应该拒绝不在白名单的资产', async function () {
-      await mockAssetWhitelist.setAssetAllowed(TEST_ASSET, false);
-      await expect(
-        vaultBusinessLogic.borrow(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AssetNotAllowed');
-      await mockAssetWhitelist.setAssetAllowed(TEST_ASSET, true);
-    });
-
-    it('VaultBusinessLogic – borrow: 统计视图失败应回退（ExternalModuleRevertedRaw）', async function () {
-      await mockStatisticsView.setShouldFail(true);
-      await expect(
-        vaultBusinessLogic.borrow(userAddress, TEST_ASSET, ethers.parseUnits('1', 18))
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ExternalModuleRevertedRaw');
+      await expect(vaultBusinessLogic.borrow(userAddress, TEST_ASSET, amount)).to.be.revertedWithCustomError(
+        vaultBusinessLogic,
+        'VaultBusinessLogic__UseVaultCoreEntry'
+      );
     });
   });
 
@@ -444,23 +421,8 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
 
     it('VaultBusinessLogic – repay: 已收敛为 VaultCore 入口，应直接拒绝（避免写路径分叉/资金滞留）', async function () {
       const amount = ethers.parseUnits('4', 18);
-      await vaultBusinessLogic.borrow(userAddress, TEST_ASSET, amount);
-
-      const userBalBefore = await mockERC20.balanceOf(userAddress);
-      const vblBalBefore = await mockERC20.balanceOf(vaultBusinessLogic.target);
-      const debtBefore = await mockStatisticsView.userDebt(userAddress);
-
       await expect(vaultBusinessLogic.repay(userAddress, TEST_ASSET, amount))
         .to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
-
-      const userBalAfter = await mockERC20.balanceOf(userAddress);
-      const vblBalAfter = await mockERC20.balanceOf(vaultBusinessLogic.target);
-      const debtAfter = await mockStatisticsView.userDebt(userAddress);
-
-      // balances/statistics remain unchanged because the call is rejected
-      expect(userBalAfter).to.equal(userBalBefore);
-      expect(vblBalAfter).to.equal(vblBalBefore);
-      expect(debtAfter).to.equal(debtBefore);
     });
 
     it('VaultBusinessLogic – repay: 应该拒绝零金额/零资产', async function () {
@@ -499,48 +461,18 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       amounts = [TEST_AMOUNT, TEST_AMOUNT * 2n];
     });
 
-    it('VaultBusinessLogic – batchBorrow: 参数校验（长度不一致/空数组/超上限）', async function () {
-      await expect(
-        vaultBusinessLogic.batchBorrow(userAddress, [TEST_ASSET], [TEST_AMOUNT, TEST_AMOUNT])
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'InvalidAmounts');
-
-      await expect(
-        vaultBusinessLogic.batchBorrow(userAddress, [], [])
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
-
-      const tooManyAssets = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => TEST_ASSET);
-      const tooManyAmounts = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => 0n);
-      await expect(
-        vaultBusinessLogic.batchBorrow(userAddress, tooManyAssets, tooManyAmounts)
-      ).to.be.revertedWith('Batch too large');
+    it('VaultBusinessLogic – batchBorrow: 已按架构收敛（Strict SSOT），应直接拒绝', async function () {
+      await expect(vaultBusinessLogic.batchBorrow(userAddress, assets, amounts)).to.be.revertedWithCustomError(
+        vaultBusinessLogic,
+        'VaultBusinessLogic__UseVaultCoreEntry'
+      );
     });
 
-    it('VaultBusinessLogic – batchBorrow: amounts 全为 0 时应直接通过（不触发 finalizeAtomic）', async function () {
-      await expect(
-        vaultBusinessLogic.batchBorrow(userAddress, assets, [0n, 0n])
-      ).to.not.be.reverted;
-    });
-
-    it('VaultBusinessLogic – batchRepay: 参数校验（长度不一致/空数组/超上限）', async function () {
-      await expect(
-        vaultBusinessLogic.batchRepay(userAddress, [TEST_ASSET], [TEST_AMOUNT, TEST_AMOUNT])
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'InvalidAmounts');
-
-      await expect(
-        vaultBusinessLogic.batchRepay(userAddress, [], [])
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
-
-      const tooManyAssets = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => TEST_ASSET);
-      const tooManyAmounts = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => 0n);
-      await expect(
-        vaultBusinessLogic.batchRepay(userAddress, tooManyAssets, tooManyAmounts)
-      ).to.be.revertedWith('Batch too large');
-    });
-
-    it('VaultBusinessLogic – batchRepay: amounts 全为 0 时应直接通过（不做 transferFrom）', async function () {
-      await expect(
-        vaultBusinessLogic.batchRepay(userAddress, assets, [0n, 0n])
-      ).to.not.be.reverted;
+    it('VaultBusinessLogic – batchRepay: 已按架构收敛（Strict SSOT），应直接拒绝', async function () {
+      await expect(vaultBusinessLogic.batchRepay(userAddress, assets, amounts)).to.be.revertedWithCustomError(
+        vaultBusinessLogic,
+        'VaultBusinessLogic__UseVaultCoreEntry'
+      );
     });
   });
 

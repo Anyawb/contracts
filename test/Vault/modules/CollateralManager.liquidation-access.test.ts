@@ -5,8 +5,10 @@ import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 const KEY_VAULT_CORE = ethers.id("VAULT_CORE");
 const KEY_LE = ethers.id("LENDING_ENGINE");
 const KEY_LIQUIDATION_MANAGER = ethers.id("LIQUIDATION_MANAGER");
+const KEY_ACCESS_CONTROL = ethers.id("ACCESS_CONTROL_MANAGER");
 const KEY_PRICE_ORACLE = ethers.id("PRICE_ORACLE");
 const KEY_POSITION_VIEW = ethers.id("POSITION_VIEW");
+const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes("LIQUIDATE"));
 
 describe("CollateralManager - liquidation caller access", function () {
   async function deployFixture() {
@@ -14,6 +16,9 @@ describe("CollateralManager - liquidation caller access", function () {
 
     const MockRegistry = await ethers.getContractFactory("MockRegistry");
     const registry = await MockRegistry.deploy();
+
+    const MockACM = await ethers.getContractFactory("MockAccessControlManager");
+    const acm = await MockACM.deploy();
 
     const MockVaultCore = await ethers.getContractFactory("MockVaultCoreView");
     const vaultCore = await MockVaultCore.deploy();
@@ -37,8 +42,12 @@ describe("CollateralManager - liquidation caller access", function () {
     await registry.setModule(KEY_VAULT_CORE, await vaultCore.getAddress());
     await registry.setModule(KEY_LE, await lendingEngine.getAddress());
     await registry.setModule(KEY_LIQUIDATION_MANAGER, liquidationManager.address);
+    await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(KEY_PRICE_ORACLE, await priceOracle.getAddress());
     await registry.setModule(KEY_POSITION_VIEW, await positionView.getAddress());
+
+    // Strong constraint: seizure path requires ACTION_LIQUIDATE at ledger layer.
+    await acm.grantRole(ACTION_LIQUIDATE, liquidationManager.address);
 
     const CollateralManager = await ethers.getContractFactory("CollateralManager");
     const cmImpl = await CollateralManager.deploy();

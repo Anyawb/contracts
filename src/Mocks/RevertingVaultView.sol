@@ -20,36 +20,6 @@ contract RevertingVaultRouter is IVaultRouter {
         address,
         address,
         uint256,
-        uint256
-    ) external pure override {
-        revert("revert-pushUserPositionUpdate");
-    }
-
-    function pushUserPositionUpdate(
-        address,
-        address,
-        uint256,
-        uint256,
-        bytes32,
-        uint64
-    ) external pure override {
-        revert("revert-pushUserPositionUpdate");
-    }
-
-    function pushUserPositionUpdate(
-        address,
-        address,
-        uint256,
-        uint256,
-        uint64
-    ) external pure override {
-        revert("revert-pushUserPositionUpdate");
-    }
-
-    function pushUserPositionUpdate(
-        address,
-        address,
-        uint256,
         uint256,
         bytes32,
         uint64,
@@ -62,51 +32,12 @@ contract RevertingVaultRouter is IVaultRouter {
         address,
         address,
         int256,
-        int256
-    ) external pure override {
-        revert("revert-pushUserPositionUpdateDelta");
-    }
-
-    function pushUserPositionUpdateDelta(
-        address,
-        address,
-        int256,
-        int256,
-        bytes32,
-        uint64
-    ) external pure override {
-        revert("revert-pushUserPositionUpdateDelta");
-    }
-
-    function pushUserPositionUpdateDelta(
-        address,
-        address,
-        int256,
-        int256,
-        uint64
-    ) external pure override {
-        revert("revert-pushUserPositionUpdateDelta");
-    }
-
-    function pushUserPositionUpdateDelta(
-        address,
-        address,
-        int256,
         int256,
         bytes32,
         uint64,
         uint64
     ) external pure override {
         revert("revert-pushUserPositionUpdateDelta");
-    }
-
-    function pushAssetStatsUpdate(
-        address,
-        uint256,
-        uint256,
-        uint256
-    ) external pure override {
-        revert("revert-pushAssetStatsUpdate");
     }
 
     function pushAssetStatsUpdate(

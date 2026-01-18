@@ -10,6 +10,7 @@ import './scripts/tasks/registry-verify';
 import './scripts/tasks/registry-check';
 import './scripts/tasks/registry-set';
 import './scripts/tasks/registry-sync';
+import './scripts/tasks/compile-filter-warnings';
 import './scripts/tasks/utils-tasks';
 import './scripts/tasks/e2e-batch-advanced';
 import './scripts/tasks/e2e-batch-10-users';

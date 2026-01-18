@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ActionKeys
-/// @notice 系统标准化动作的 `bytes32` 哈希常量管理合约
-/// @dev 统一管理动作标识符，避免散落硬编码；新增常量需保持向后兼容，勿随意改动已有取值
-/// @dev 这些常量用于事件记录和权限验证，确保系统操作的一致性
-/// @dev 所有常量都通过keccak256哈希生成，确保唯一性和不可变性
-/// @dev 使用bytes32类型确保与权限系统的兼容性
-/// @custom:security-contact security@example.com
+/**
+ * @title ActionKeys
+ * @notice Centralized action key constants (`bytes32`, keccak256 hashes) for permissions and auditing.
+ * @dev Reverts if:
+ *      - N/A (constants-only library)
+ *
+ * Security:
+ * - Keys must remain stable once deployed; do not change existing values.
+ * - Prefer reusing these constants instead of duplicating keccak256 literals across modules.
+ *
+ * @custom:security-contact security@example.com
+ */
 library ActionKeys {
     // ============ 常量定义 ============
     /// @notice 动作Key总数常量
     /// @dev 避免硬编码，便于维护和扩展
-    uint256 internal constant ACTION_KEY_COUNT = 45;
+    uint256 internal constant ACTION_KEY_COUNT = 47;
 
     // ============ 基础业务动作 Key ============
     /// @notice 存入抵押物操作的标识符
@@ -254,6 +259,15 @@ library ActionKeys {
     /// @dev 哈希值：keccak256("QUERY_MANAGER")
     bytes32 public constant ACTION_QUERY_MANAGER = keccak256("QUERY_MANAGER");
 
+    // ============ 出借资金池（Reserve Flow）动作 Key ============
+    /// @notice 出借资金入池/预留（reserveForLending）的标识符
+    /// @dev 哈希值：keccak256("RESERVE_FOR_LENDING")
+    bytes32 public constant ACTION_RESERVE_FOR_LENDING = keccak256("RESERVE_FOR_LENDING");
+
+    /// @notice 出借资金撤回/取消预留（cancelReserve）的标识符
+    /// @dev 哈希值：keccak256("CANCEL_RESERVE")
+    bytes32 public constant ACTION_CANCEL_RESERVE = keccak256("CANCEL_RESERVE");
+
     /// @notice 检查是否为有效的动作Key
     /// @param key 待检查的动作Key
     /// @return 是否为有效动作Key
@@ -316,6 +330,8 @@ library ActionKeys {
         if (key == ACTION_EMERGENCY_SET_PARAMETER) return "emergencySetParameter";
         if (key == ACTION_VIEW_SYSTEM_STATUS) return "actionViewSystemStatus";
         if (key == ACTION_QUERY_MANAGER) return "queryManager";
+        if (key == ACTION_RESERVE_FOR_LENDING) return "reserveForLending";
+        if (key == ACTION_CANCEL_RESERVE) return "cancelReserve";
         return "";
     }
 
@@ -368,6 +384,8 @@ library ActionKeys {
         keys[42] = ACTION_QUERY_MANAGER;
         keys[43] = ACTION_ORDER_CREATE;
         keys[44] = ACTION_VIEW_PUSH;
+        keys[45] = ACTION_RESERVE_FOR_LENDING;
+        keys[46] = ACTION_CANCEL_RESERVE;
         return keys;
     }
 } 

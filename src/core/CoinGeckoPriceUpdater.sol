@@ -7,8 +7,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
-import { IRegistryUpgradeEvents } from "../interfaces/IRegistryUpgradeEvents.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ZeroAddress, ExternalModuleRevertedRaw, EmptyArray, ArrayLengthMismatch } from "../errors/StandardErrors.sol";
@@ -22,11 +21,11 @@ import { DataPushTypes } from "../constants/DataPushTypes.sol";
 /// @dev 与 Registry 系统集成，使用标准化的模块管理
 /// @dev 与 ACM 权限模块集成，使用 ActionKeys 进行标准化权限管理
 /// @dev 与 ActionKeys 和 ModuleKeys 集成，提供标准化的模块管理
-/// @dev 与 VaultTypes 集成，提供标准化的事件记录
+/// @dev 与 SystemEvents 集成，提供标准化的事件记录
 /// @dev 使用 StandardErrors 进行统一的错误处理
 /// @dev 集成 GracefulDegradation 库进行价格验证和健康检查
 /// @custom:security-contact security@example.com
-contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgradeEvents {
+contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
     using GracefulDegradation for *;
 
     /* ============ Constants ============ */
@@ -184,7 +183,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         _priceValidationEnabled = true;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -225,7 +224,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         _updatePriceWithGracefulDegradation(asset, price, timestamp, coingeckoId);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
             msg.sender,
@@ -251,7 +250,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         _batchUpdatePriceWithGracefulDegradation(assets, prices, timestamps);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
             msg.sender,
@@ -274,7 +273,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         emit AssetConfigUpdated(asset, coingeckoId, true);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -299,7 +298,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         emit AssetConfigUpdated(asset, coingeckoId, false);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -321,7 +320,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         );
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -343,7 +342,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         );
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -693,7 +692,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
             );
             return true;
         } catch (bytes memory error) {
-            emit VaultTypes.ExternalModuleReverted("PriceOracle", error, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("PriceOracle", error, block.timestamp);
             _updateFailureCount[asset]++;
             emit PriceUpdateFailed(asset, coingeckoId, REASON_ORACLE_UPDATE_FAILED);
             DataPushLibrary._emitData(
@@ -762,7 +761,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable, IRegistryUpgra
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,

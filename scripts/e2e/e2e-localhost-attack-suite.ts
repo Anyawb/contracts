@@ -112,14 +112,17 @@ async function main() {
   const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry, deployer)) as any;
   const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager, deployer)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC, deployer)) as any;
-  const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore, deployer)) as any;
-  const vbl = (await ethers.getContractAt("VaultBusinessLogic", CONTRACT_ADDRESSES.VaultBusinessLogic, deployer)) as any;
+  // Always derive core addresses from Registry to avoid stale frontend-config values.
+  const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
+  const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreAddr, deployer)) as any;
+  const vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
+  const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddr, deployer)) as any;
   const priceOracle = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle, deployer)) as any;
-  const collateralManager = (await ethers.getContractAt(
-    "CollateralManager",
-    CONTRACT_ADDRESSES.CollateralManager,
-    deployer
-  )) as any;
+  const collateralManagerAddr = (await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"))) as string;
+  const collateralManager = (await ethers.getContractAt("CollateralManager", collateralManagerAddr, deployer)) as any;
+  // View (VaultRouter) must be resolved via VaultCore.viewContractAddrVar() per Architecture-Guide.
+  const vaultRouterAddr = (await vaultCore.viewContractAddrVar()) as string;
+  const vaultRouter = (await ethers.getContractAt("VaultRouter", vaultRouterAddr, deployer)) as any;
   const assetWhitelist = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist, deployer)) as any;
   const dynKeyRegistryAddr = CONTRACT_ADDRESSES.RegistryDynamicModuleKey;
   const dynKeyRegistry = dynKeyRegistryAddr
@@ -146,15 +149,7 @@ async function main() {
     await mustRevert("attacker: Registry.setModule()", async () => {
       await (await regAsAttacker.setModule(key("FEE_ROUTER"), attacker.address)).wait();
     });
-    await mustRevert("attacker: Registry.setRegistryCore()", async () => {
-      await (await regAsAttacker.setRegistryCore(attacker.address)).wait();
-    });
-    await mustRevert("attacker: Registry.setUpgradeManager()", async () => {
-      await (await regAsAttacker.setUpgradeManager(attacker.address)).wait();
-    });
-    await mustRevert("attacker: Registry.setRegistryAdmin()", async () => {
-      await (await regAsAttacker.setRegistryAdmin(attacker.address)).wait();
-    });
+    // Scheme A: Registry is the only entrypoint; legacy wiring functions are removed.
   }
   console.log("");
 
@@ -171,12 +166,25 @@ async function main() {
   console.log("== Section 3: VaultCore / VBL restricted entrypoints ==");
   {
     const vaultCoreAsAttacker = vaultCore.connect(attacker);
+    const vaultRouterAsAttacker = vaultRouter.connect(attacker);
+    const cmAsAttacker = collateralManager.connect(attacker);
 
     await mustRevert("attacker: VaultCore.borrowFor(victim,...)", async () => {
       await (await vaultCoreAsAttacker.borrowFor(victim.address, await usdc.getAddress(), 1n, 5)).wait();
     });
     await mustRevert("attacker: VaultCore.repayFor(victim,...)", async () => {
       await (await vaultCoreAsAttacker.repayFor(victim.address, await usdc.getAddress(), 1n)).wait();
+    });
+
+    // Funds-flow hardening: users MUST NOT call VaultRouter.processUserOperation directly (onlyVaultCore).
+    const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT"));
+    await mustRevert("attacker: VaultRouter.processUserOperation(ACTION_DEPOSIT,...)", async () => {
+      await (await vaultRouterAsAttacker.processUserOperation(attacker.address, ACTION_DEPOSIT, await usdc.getAddress(), 1n, 0)).wait();
+    });
+
+    // Funds-flow hardening: users MUST NOT call CollateralManager.depositCollateral directly (onlyVaultRouterOrCore).
+    await mustRevert("attacker: CollateralManager.depositCollateral(attacker,...)", async () => {
+      await (await cmAsAttacker.depositCollateral(attacker.address, await usdc.getAddress(), 1n)).wait();
     });
 
     // NOTE: attacker might already have collateral from prior E2E runs. So we assert the stronger property:
@@ -234,19 +242,17 @@ async function main() {
     // the attempt will still revert; this section is mainly to ensure "no silent upgrade success".
     const candidates: Array<[string, string | undefined]> = [
       ["Registry", CONTRACT_ADDRESSES.Registry],
-      ["RegistryCore", CONTRACT_ADDRESSES.RegistryCore],
-      ["RegistryUpgradeManager", CONTRACT_ADDRESSES.RegistryUpgradeManager],
-      ["RegistryAdmin", CONTRACT_ADDRESSES.RegistryAdmin],
+      // Scheme A: legacy registry-family compat proxies removed.
       ["AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager],
       ["AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist],
       ["AuthorityWhitelist", CONTRACT_ADDRESSES.AuthorityWhitelist],
       ["PriceOracle", CONTRACT_ADDRESSES.PriceOracle],
       ["FeeRouter", CONTRACT_ADDRESSES.FeeRouter],
-      ["VaultStorage", CONTRACT_ADDRESSES.VaultStorage],
       ["VaultBusinessLogic", CONTRACT_ADDRESSES.VaultBusinessLogic],
       ["VaultCore", CONTRACT_ADDRESSES.VaultCore],
       ["CollateralManager", CONTRACT_ADDRESSES.CollateralManager],
-      ["LendingEngine", CONTRACT_ADDRESSES.LendingEngine],
+      // Naming note: this is the OrderEngine (src/core/LendingEngine.sol), not the debt ledger engine (VaultLendingEngine).
+      ["OrderEngine", (CONTRACT_ADDRESSES as any).OrderEngine ?? CONTRACT_ADDRESSES.LendingEngine],
       ["VaultLendingEngine", CONTRACT_ADDRESSES.VaultLendingEngine],
       ["LiquidationRiskManager", CONTRACT_ADDRESSES.LiquidationRiskManager],
       ["LiquidationManager", liquidationManagerAddr],
@@ -885,6 +891,9 @@ async function main() {
       await (await registry.setModule(key("LENDING_ENGINE"), await mockLE.getAddress())).wait();
       await (await registry.setModule(key("LIQUIDATION_VIEW"), await revertingView.getAddress())).wait();
 
+      if (deployer.address.toLowerCase() === victim.address.toLowerCase()) {
+        throw new Error("[Liquidation] liquidator must differ from borrower (victim)");
+      }
       // LiquidationManager 执行器入口应成功，并 emit CacheUpdateFailed（best-effort）。
       const tx = await liquidationManager.connect(deployer).liquidate(victim.address, asset, asset, cAmt, dAmt, 0n);
       const rc = await tx.wait();

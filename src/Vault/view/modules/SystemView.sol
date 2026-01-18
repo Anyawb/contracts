@@ -222,18 +222,10 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
         try ILiquidationRiskManager(rm).getLiquidationThreshold() returns (uint256 v) { return v; } catch { return 0; }
     }
 
-    function _tryGetVaultCap() internal view returns (uint256) {
-        // VaultStorage 目前未纳入 ModuleKeys 常量；这里按脚本约定尝试用 keccak256("VAULT_STORAGE") 读取
-        address vs = Registry(_registryAddr).getModule(keccak256("VAULT_STORAGE"));
-        if (vs == address(0)) return 0;
-
-        // 兼容多种命名：vaultCap()/getVaultCap()
-        (bool ok1, bytes memory d1) = vs.staticcall(abi.encodeWithSignature("vaultCap()"));
-        if (ok1 && d1.length >= 32) return abi.decode(d1, (uint256));
-
-        (bool ok2, bytes memory d2) = vs.staticcall(abi.encodeWithSignature("getVaultCap()"));
-        if (ok2 && d2.length >= 32) return abi.decode(d2, (uint256));
-
+    function _tryGetVaultCap() internal pure returns (uint256) {
+        // Architecture-Guide alignment:
+        // VaultCap is not an SSOT in the current refactored stack (no dedicated config module).
+        // Keep the getter for backward compatibility, but return 0 until a proper config module is introduced.
         return 0;
     }
 

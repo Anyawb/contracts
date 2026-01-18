@@ -34,8 +34,8 @@ describe("LiquidationRiskView (HealthView-aligned)", function () {
     await rm.setLiquidatable(user.address, true);
     await rm.setLiquidatable(other.address, false);
     await rm.setRiskScore(user.address, 55);
-    await rm.setLiquidationThreshold(11_000);
-    await rm.setMinHealthFactor(10_500);
+    await rm.updateLiquidationThreshold(11_000);
+    await rm.updateMinHealthFactor(10_500);
 
     // Seed HealthView cache (timestamp=0 => use block.timestamp)
     await healthView.connect(admin).pushRiskStatus(user.address, 12_000, 10_500, false, 0);

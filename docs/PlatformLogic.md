@@ -131,7 +131,7 @@ graph TB
 | **VaultAdmin** | 极简治理入口 | ✅ 已实现 | 健康因子下发、升级鉴权 |
 | **ModuleKeys** | 模块常量库 | ✅ 已实现 | 模块标识、字符串映射、类型安全 |
 | **ActionKeys** | 动作常量库 | ✅ 已实现 | **44个**标准化动作、权限分发、事件追踪 |
-| **VaultTypes** | 事件和数据结构 | ✅ 已实现 | 标准化事件、数据结构定义 |
+| **SystemEvents** | 标准化事件 | ✅ 已实现 | 跨模块共享事件 SSOT（原 VaultTypes） |
 | **VaultMath** | 数学计算库 | ✅ 已实现 | 统一数学计算、健康因子、LTV、百分比计算 |
 
 ---
@@ -145,7 +145,7 @@ RWA 借贷平台采用**统一的权限控制中心**架构，所有模块通过
 
 - **统一管理**: 所有权限集中在 ACM 中管理
 - **模块化设计**: 每个模块独立但通过 ACM 协调
-- **标准化接口**: 使用 ActionKeys 和 VaultTypes 提供标准化接口
+- **标准化接口**: 使用 ActionKeys 和 SystemEvents 提供标准化接口
 - **安全审计**: 完整的事件记录和权限追踪
 - **灵活扩展**: 支持多级权限和角色管理
 
@@ -291,7 +291,7 @@ event ActionExecuted(bytes32 indexed actionKey, string actionName, address index
 #### 🔧 **事件使用**
 ```solidity
 // 记录标准化动作
-emit VaultTypes.ActionExecuted(
+emit SystemEvents.ActionExecuted(
     ActionKeys.ACTION_DEPOSIT,
     ActionKeys.getActionKeyString(ActionKeys.ACTION_DEPOSIT),
     msg.sender,
@@ -567,11 +567,10 @@ function getAssetInfo(address asset) external view returns (AssetInfo memory)
 ### 3.8 AccessControlManager（统一权限控制中心）
 
 #### 📋 **核心功能**
-- **多级权限管理**：支持从 NONE 到 OWNER 的 6 级权限
-- **角色管理系统**：基于 ActionKeys 的标准化角色管理
-- **权限缓存机制**：提高权限查询效率
-- **批量操作支持**：支持批量权限设置和查询
-- **事件记录系统**：完整的权限变更审计
+- **权限级别（推断）**：`getUserPermission` 按角色动态推断（NONE / VIEWER / OPERATOR / ADMIN）
+- **角色管理系统（SSOT）**：基于 ActionKeys 的标准化角色管理（`grantRole/revokeRole/hasRole/requireRole`）
+- **事件审计**：`RoleGranted/RoleRevoked` 用于链下审计与权限盘点
+- **职责边界（SSOT）**：系统暂停/恢复由 `VaultRouter` 收敛（`ACTION_PAUSE_SYSTEM` / `ACTION_UNPAUSE_SYSTEM`），ACM 不维护“暂停状态机”
 
 #### 🔧 **主要函数**
 ```solidity
@@ -584,14 +583,6 @@ function grantRole(bytes32 role, address account) external onlyOwner
 function revokeRole(bytes32 role, address account) external onlyOwner
 function hasRole(bytes32 role, address account) external view returns (bool)
 function requireRole(bytes32 role, address caller) external view
-
-// Keeper 管理
-function setKeeper(address newKeeper) external onlyOwner
-function getKeeper() external view returns (address)
-
-// 紧急暂停
-function emergencyPause(string memory reason) external onlyKeeper
-function emergencyUnpause() external onlyKeeper
 ```
 
 ### 3.9 CrossChainGovernance（跨链治理）
@@ -777,7 +768,7 @@ try ICollateralManager(collateralManager).depositCollateral(user, asset, amount)
     // 成功处理
 } catch (bytes memory lowLevelData) {
     // 错误处理
-    emit VaultTypes.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
+    emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
     revert ExternalModuleRevertedRaw("CollateralManager", lowLevelData);
 }
 ```
@@ -828,7 +819,7 @@ function _checkAssetWhitelist(address asset) internal view {
 
 #### 🔧 **实现方式**
 ```solidity
-contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IRegistryUpgradeEvents {
+contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
     /// @notice Registry合约地址
     address private _registryAddr;
     
@@ -880,7 +871,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
         emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, block.timestamp);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
@@ -928,7 +919,7 @@ function batchAddAllowedAssets(address[] calldata assets) external onlyValidRegi
     );
     
     // 记录标准化动作事件
-    emit VaultTypes.ActionExecuted(
+    emit SystemEvents.ActionExecuted(
         ActionKeys.ACTION_ADD_WHITELIST,
         ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
         msg.sender,
@@ -978,7 +969,7 @@ function batchRemoveAllowedAssets(address[] calldata assets) external onlyValidR
     );
     
     // 记录标准化动作事件
-    emit VaultTypes.ActionExecuted(
+    emit SystemEvents.ActionExecuted(
         ActionKeys.ACTION_REMOVE_WHITELIST,
         ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
         msg.sender,
@@ -1041,7 +1032,7 @@ function updateAssetInfo(address asset) external onlyValidRegistry {
 
 #### 🛡️ **安全特性**
 - **Registry 集成**：通过 Registry 获取 ACM 进行权限验证
-- **标准化事件**：所有操作都发出 `VaultTypes.ActionExecuted` 事件
+- **标准化事件**：所有操作都发出 `SystemEvents.ActionExecuted` 事件
 - **错误处理**：使用自定义错误 `ZeroAddress` 和 `AmountIsZero`
 - **UUPS 升级**：支持可升级合约模式
 
@@ -1547,7 +1538,7 @@ contract VaultBusinessLogic is
         _requireRole(ActionKeys.ACTION_PAUSE_SYSTEM, msg.sender);
         _pause();
         
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_PAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_PAUSE_SYSTEM),
             msg.sender,
@@ -1559,7 +1550,7 @@ contract VaultBusinessLogic is
         _requireRole(ActionKeys.ACTION_UNPAUSE_SYSTEM, msg.sender);
         _unpause();
         
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UNPAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UNPAUSE_SYSTEM),
             msg.sender,
@@ -1603,7 +1594,7 @@ contract VaultBusinessLogic is UUPSUpgradeable {
         if (newImplementation == address(0)) revert ZeroAddress();
         
         // 记录升级动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,

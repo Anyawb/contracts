@@ -128,29 +128,7 @@ contract MockAccessControlManager is IAccessControlManager {
         // Mock实现，无缓存
     }
 
-    function updateKeeper(address _keeper) external {
-        // Mock实现，不存储keeper
-    }
-
-    function getKeeper() external pure returns (address) {
-        return address(0);
-    }
-
-    function isKeeper(address /* caller */) external pure returns (bool) {
-        return false;
-    }
-
-    function emergencyPause(string calldata reason) external override {
-        // Mock实现，不暂停
-    }
-
-    function emergencyUnpause() external override {
-        // Mock实现，不恢复
-    }
-
-    function getContractStatus() external pure override returns (bool) {
-        return false;
-    }
+    // Note: Keeper / emergency pause APIs were removed from IAccessControlManager as they are not part of SSOT.
 
     function initiateEmergencyRecovery(address newKeeper) external {
         // Mock实现，不执行紧急恢复
@@ -201,17 +179,7 @@ contract MockAccessControlManager is IAccessControlManager {
         // Mock实现，不设置历史大小
     }
 
-    function getAccountRoles(address /* account */) external pure override returns (bytes32[] memory) {
-        return new bytes32[](0);
-    }
-
-    function getRoleAccounts(bytes32 /* role */) external pure override returns (address[] memory) {
-        return new address[](0);
-    }
-
-    function getRoleAccountCount(bytes32 /* role */) external pure override returns (uint256) {
-        return 0;
-    }
+    // Note: role enumeration APIs were removed from IAccessControlManager; keep any extra helpers here as needed for tests.
 
     function hasRoleByAccount(address account, bytes32 role) external view returns (bool) {
         return _roles[role][account];

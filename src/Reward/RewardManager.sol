@@ -6,7 +6,7 @@ import { RewardManagerCore } from "./RewardManagerCore.sol";
 import { IRewardManager, IRewardManagerV2 } from "../interfaces/IRewardManager.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { Registry } from "../registry/Registry.sol";
 import { ViewConstants } from "../Vault/view/ViewConstants.sol";
 import {
@@ -27,7 +27,7 @@ interface IRewardManagerCoreV2 {
 /// @dev 遵循 docs/SmartContractStandard.md 注释规范
 /// @dev 使用 ActionKeys 进行标准化动作标识
 /// @dev 使用 ModuleKeys 进行模块地址管理
-/// @dev 使用 VaultTypes 进行标准化事件记录
+/// @dev 使用 SystemEvents 进行标准化事件记录
 /// @dev 使用 StandardErrors 进行统一错误处理
 /// @dev 通过 Registry 进行模块地址获取
 contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IRewardManager {
@@ -154,7 +154,7 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         emit PenaltyApplied(msg.sender, user, points, block.timestamp);
 
         // 使用标准化事件记录惩罚（executor 必须为真实执行者：清算模块）
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_LIQUIDATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
             msg.sender,

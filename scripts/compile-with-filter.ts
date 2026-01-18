@@ -7,9 +7,13 @@ type WarningFilterState = {
   skippingSawCaret: boolean;
 };
 
-const OZ_REENTRANCY_SIG = '@openzeppelin/contracts/security/ReentrancyGuard.sol:53:9:';
-const OZ_REENTRANCY_UPG_SIG =
-  '@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol:58:9:';
+// Keep these in sync with OZ v5+ paths. solc warning arrow line may point to either `security/` or `utils/`.
+const OZ_REENTRANCY_SIGS = [
+  '@openzeppelin/contracts/security/ReentrancyGuard.sol:',
+  '@openzeppelin/contracts/utils/ReentrancyGuard.sol:',
+  '@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol:',
+  '@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol:',
+];
 
 function createWarningFilterWriter(writeLine: (lineWithNewline: string) => void) {
   const state: WarningFilterState = {
@@ -56,8 +60,7 @@ function createWarningFilterWriter(writeLine: (lineWithNewline: string) => void)
 
       if (state.pendingWarningLines.length === 2) {
         const arrowLine = state.pendingWarningLines[1];
-        const isKnown =
-          arrowLine.includes(OZ_REENTRANCY_SIG) || arrowLine.includes(OZ_REENTRANCY_UPG_SIG);
+        const isKnown = OZ_REENTRANCY_SIGS.some((sig) => arrowLine.includes(sig));
 
         if (isKnown) {
           // Drop the warning header + arrow line, then skip the rest of this warning block.

@@ -11,9 +11,13 @@ import { Registry } from "../../../registry/Registry.sol";
  * @title Liquidation Risk Query Library
  * @author RWA Lending Platform
  * @notice Provides module resolution and user value aggregation functions for liquidation risk assessment.
- * @dev View-only library for querying user collateral/debt values from ledger modules (LendingEngine + PositionView).
- * @dev Architecture alignment: intentionally does NOT access oracle or implement graceful degradation;
- *      valuation (incl. GD) must be centralized in LendingEngine/PositionView.
+ * @dev Security:
+ * - View-only library for querying ledger modules (LendingEngine + PositionView).
+ * - Uses try/catch to avoid reverting the caller on downstream module failures.
+ *
+ * Architecture (SSOT):
+ * - This library intentionally does NOT access oracles nor implement graceful degradation logic.
+ * - Valuation (including graceful degradation) must be centralized in LendingEngine/PositionView.
  */
 library LiquidationRiskQueryLib {
     using ModuleCache for ModuleCache.ModuleCacheStorage;
@@ -21,12 +25,12 @@ library LiquidationRiskQueryLib {
     /**
      * @notice Get module address from cache or Registry (view-only, graceful fallback).
      * @dev Reverts if:
-     *      - None (view function, returns address(0) if module not found or registry is zero)
+     *      - none (returns address(0) on missing modules)
      *
      * Security:
-     * - View function (read-only)
-     * - Graceful degradation: falls back to Registry if cache is stale or missing
-     * - Safe time rollback handling: treats cache as valid if block.timestamp < cached timestamp
+     * - View function (read-only).
+     * - Best-effort: falls back to Registry if cache is stale or missing.
+     * - Time rollback tolerant: treats cache as valid if block.timestamp < cached timestamp.
      *
      * @param registryAddr Registry contract address (for fallback resolution)
      * @param moduleCache Module cache storage reference
@@ -61,14 +65,13 @@ library LiquidationRiskQueryLib {
     /**
      * @notice Get user's aggregated collateral and debt values from ledger modules.
      * @dev Reverts if:
-     *      - None (view function, gracefully handles module failures by returning zeros)
+     *      - none (returns zeros on missing modules or call failures)
      *
      * Security:
-     * - View function (read-only)
-     * - Graceful degradation: returns (0, 0) if modules are not registered or calls fail
-     * - Architecture alignment: does NOT access oracle or implement graceful degradation;
-     *   valuation (incl. GD) must be centralized in LendingEngine/PositionView
-     * - Uses try-catch to handle external call failures gracefully
+     * - View function (read-only).
+     * - Best-effort: returns (0, 0) if modules are not registered or calls fail.
+     * - Architecture alignment: does NOT access oracles nor implement graceful degradation logic.
+     * - Uses try/catch to handle external call failures gracefully.
      *
      * @param user User address to query
      * @param registryAddr Registry contract address for module resolution

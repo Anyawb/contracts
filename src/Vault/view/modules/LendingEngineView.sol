@@ -9,29 +9,8 @@ import { IAccessControlManager } from "../../../interfaces/IAccessControlManager
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
-
-// 与核心引擎的最小接口适配，提供仅 View 所需方法（顶层定义，避免在合约内定义接口）
-interface ILendingEngineViewAdapter {
-	struct LoanOrder {
-		uint256 principal;
-		uint256 rate;
-		uint256 term;
-		address borrower;
-		address lender;
-		address asset;
-		uint256 startTimestamp;
-		uint256 maturity;
-		uint256 repaidAmount;
-	}
-
-	function _getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order);
-	function _getUserLoanCountForView(address user) external view returns (uint256 count);
-	function _getFailedFeeAmountForView(uint256 orderId) external view returns (uint256 feeAmount);
-	function _getNftRetryCountForView(uint256 orderId) external view returns (uint256 retryCount);
-	function _canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess);
-	function _isMatchEngineForView(address account) external view returns (bool isMatch);
-	function _getRegistryForView() external view returns (address registry);
-}
+import { IOrderEngine } from "../../../interfaces/IOrderEngine.sol";
+import { IOrderEngineViewAdapter } from "../../../interfaces/IOrderEngineViewAdapter.sol";
 
 /// @title LendingEngineView
 /// @notice 仅负责借贷引擎相关的数据查询（0 gas），不承载任何业务写操作
@@ -70,7 +49,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 	// =========================  Read APIs  =========================
 
 	/// @notice 查询贷款订单详情
-	function getLoanOrder(uint256 orderId) external view onlyValidRegistry returns (ILendingEngineViewAdapter.LoanOrder memory order) {
+	function getLoanOrder(uint256 orderId) external view onlyValidRegistry returns (IOrderEngine.LoanOrder memory order) {
 		return _engine()._getLoanOrderForView(orderId);
 	}
 
@@ -111,9 +90,9 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 
 	// =========================  Internal helpers  =========================
 
-	function _engine() internal view returns (ILendingEngineViewAdapter) {
-		address engineAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-		return ILendingEngineViewAdapter(engineAddr);
+	function _engine() internal view returns (IOrderEngineViewAdapter) {
+		address engineAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+		return IOrderEngineViewAdapter(engineAddr);
 	}
 
 	function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {

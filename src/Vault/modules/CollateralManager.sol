@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import { Registry } from "../../registry/Registry.sol";
@@ -13,38 +13,19 @@ import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../constants/DataPushTypes.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
 import { IPositionView } from "../../interfaces/IPositionView.sol";
+import { IVaultCoreDataPush } from "../../interfaces/IVaultCoreDataPush.sol";
+import { IVaultCoreMinimal } from "../../interfaces/IVaultCoreMinimal.sol";
 import { ViewConstants } from "../view/ViewConstants.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @notice 最小化 VaultCore 接口（用于解析 View 地址）
-interface IVaultCoreMinimal {
-    function viewContractAddrVar() external view returns (address);
-    function pushUserPositionUpdate(
-        address user,
-        address asset,
-        uint256 collateral,
-        uint256 debt,
-        bytes32 requestId,
-        uint64 seq,
-        uint64 nextVersion
-    ) external;
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta,
-        bytes32 requestId,
-        uint64 seq,
-        uint64 nextVersion
-    ) external;
-}
-
 /// @title CollateralManager
-/// @notice 纯业务逻辑模块 - 抵押物管理
-/// @dev 双架构设计：纯业务逻辑，通过数据推送接口更新View层缓存
-/// @dev 移除复杂逻辑：权限验证、重复事件发出、缓存管理
-/// @dev 专注核心功能：抵押物存取、价值计算、业务验证
+/// @notice Collateral ledger + custody module (direct-to-ledger writes).
+/// @dev Architecture-Guide SSOT:
+///      - Custody: this contract holds real ERC20 collateral.
+///      - User-path writes: VaultCore -> VaultRouter -> CollateralManager (onlyVaultRouter enforced here).
+///      - Seizure path: withdrawCollateralTo(receiver!=user) is role-gated by ACTION_LIQUIDATE at the ledger layer.
+///      - View/cache push is best-effort (never blocks ledger writes).
 /// @custom:security-contact security@example.com
 contract CollateralManager is 
     Initializable, 
@@ -54,38 +35,46 @@ contract CollateralManager is
 {
     using SafeERC20 for IERC20;
 
-    uint256 private constant MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
-    /*━━━━━━━━━━━━━━━ 基础配置 ━━━━━━━━━━━━━━━*/
+    uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
+    /*━━━━━━━━━━━━━━━ Configuration ━━━━━━━━━━━━━━━*/
     
-    /// @notice Registry 合约地址（私有存储，遵循命名规范）
+    /// @notice Registry address (private storage).
     address private _registryAddr;
 
-    /// @notice 统一数据推送类型常量已迁移至 DataPushTypes
+    /// @notice DataPush type constants live in DataPushTypes.
 
-    /*━━━━━━━━━━━━━━━ 业务数据存储 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Ledger storage ━━━━━━━━━━━━━━━*/
     
-    /// @notice 用户多资产抵押物余额映射：user → asset → amount
+    /// @notice User collateral ledger: user => asset => amount (token decimals).
     mapping(address => mapping(address => uint256)) private _userCollateral;
     
-    /// @notice 各资产抵押物总量：asset → totalAmount
+    /// @notice Total collateral by asset: asset => totalAmount (token decimals).
     mapping(address => uint256) private _totalCollateralByAsset;
     
-    /// @notice 用户资产列表：user → asset[]
+    /// @notice User asset list: user => asset[].
     mapping(address => address[]) private _userAssets;
     
-    /// @notice 用户资产索引：user → asset → index
+    /// @notice 1-based index into user asset list: user => asset => indexPlusOne.
     mapping(address => mapping(address => uint256)) private _userAssetIndex;
     
-    /// @notice 用户资产数量：user → count
+    /// @notice Cached user asset count.
     mapping(address => uint256) private _userAssetCount;
 
-    /*━━━━━━━━━━━━━━━ 事件定义 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     
-    /// @notice 抵押物存入处理完成事件
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 存入金额
-    /// @param timestamp 时间戳
+    /**
+     * @notice Emitted after a deposit is processed.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Event-only; CollateralManager is SSOT for custody and the collateral ledger
+     *
+     * @param user User address
+     * @param asset Collateral asset address
+     * @param amount Amount deposited (token decimals)
+     * @param timestamp Emission timestamp (seconds)
+     */
     event DepositProcessed(
         address indexed user,
         address indexed asset,
@@ -93,11 +82,19 @@ contract CollateralManager is
         uint256 timestamp
     );
     
-    /// @notice 抵押物提取处理完成事件
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 提取金额
-    /// @param timestamp 时间戳
+    /**
+     * @notice Emitted after a withdraw is processed.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Event-only; CollateralManager is SSOT for custody and the collateral ledger
+     *
+     * @param user User address
+     * @param asset Collateral asset address
+     * @param amount Amount withdrawn (token decimals)
+     * @param timestamp Emission timestamp (seconds)
+     */
     event WithdrawProcessed(
         address indexed user,
         address indexed asset,
@@ -105,60 +102,142 @@ contract CollateralManager is
         uint256 timestamp
     );
     
-    /// @notice 批量抵押物存入处理完成事件
-    /// @param user 用户地址
-    /// @param operationCount 操作数量
-    /// @param timestamp 时间戳
+    /**
+     * @notice Emitted after a batch deposit is processed.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Event-only; batch operations are bounded by MAX_BATCH_SIZE in implementation
+     *
+     * @param user User address
+     * @param operationCount Number of attempted operations
+     * @param timestamp Emission timestamp (seconds)
+     */
     event BatchDepositProcessed(
         address indexed user,
         uint256 operationCount,
         uint256 timestamp
     );
     
-    /// @notice 批量抵押物提取处理完成事件
-    /// @param user 用户地址
-    /// @param operationCount 操作数量
-    /// @param timestamp 时间戳
+    /**
+     * @notice Emitted after a batch withdraw is processed.
+     * @dev Reverts if:
+     *      - N/A (event emission only)
+     *
+     * Security:
+     * - Event-only; batch operations are bounded by MAX_BATCH_SIZE in implementation
+     *
+     * @param user User address
+     * @param operationCount Number of attempted operations
+     * @param timestamp Emission timestamp (seconds)
+     */
     event BatchWithdrawProcessed(
         address indexed user,
         uint256 operationCount,
         uint256 timestamp
     );
 
-    /*━━━━━━━━━━━━━━━ 错误定义 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
     
+    /**
+     * @notice Address parameter is the zero address.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Input validation guard
+     */
     error CollateralManager__ZeroAddress();
+    /**
+     * @notice Amount is zero or invalid for the operation.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Input validation guard
+     */
     error CollateralManager__InvalidAmount();
+    /**
+     * @notice Input arrays have different lengths.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents mismatched batch operations
+     */
     error CollateralManager__LengthMismatch();
+    /**
+     * @notice Insufficient collateral balance.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Ledger invariant guard
+     */
     error CollateralManager__InsufficientCollateral();
+    /**
+     * @notice Caller is not authorized.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Enforces role/routing restrictions (onlyVaultRouter / onlyAuthorizedCollateralExitCaller / ACM)
+     */
     error CollateralManager__UnauthorizedAccess();
-    // 保留：如需强制引导到 View 模块时可使用
+    // Reserved: can be used to force callers to use View modules if needed.
+    /**
+     * @notice Deprecated/disabled entrypoint: caller must use the new SSOT path.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents bypassing intended routing via View modules
+     */
     error CollateralManager__UseViewModule();
 
-    /*━━━━━━━━━━━━━━━ 权限控制 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Access control ━━━━━━━━━━━━━━━*/
 
-    /// @notice 只允许 Registry 中登记的 VaultRouter 调用
-    /// @notice 允许 VaultRouter 或 VaultCore 调用（兼容旧测试）
-    modifier onlyVaultRouterOrCore() {
+    /// @notice Allow VaultRouter as the sole user-path writer.
+    /// @dev Architecture-Guide SSOT: user deposit/withdraw routes via VaultCore -> VaultRouter -> CollateralManager.
+    ///      CollateralManager does not accept direct user-path writes from VaultCore to avoid bypassing routing guards.
+    modifier onlyVaultRouter() {
         address router = _resolveVaultRouterAddr();
-        address core = _resolveVaultCoreAddr();
-        if (msg.sender != router && msg.sender != core) revert CollateralManager__UnauthorizedAccess();
+        if (msg.sender != router) revert CollateralManager__UnauthorizedAccess();
         _;
     }
 
-    /// @notice 允许 VaultRouter / LiquidationManager / SettlementManager 调用
-    /// @dev SettlementManager 用于“还款结算后自动释放抵押到用户”与“统一入口触发清算分支”
-    modifier onlyVaultRouterOrLiquidationManager() {
-        address viewAddr = _resolveVaultRouterAddr();
+    /// @notice Allow VaultRouter, LiquidationManager, or SettlementManager to perform collateral exits.
+    /// @dev SettlementManager is allowed to return collateral to the borrower after settle/repay,
+    ///      and to drive liquidation branches as the SSOT entry.
+    modifier onlyAuthorizedCollateralExitCaller() {
+        address vaultRouter = _resolveVaultRouterAddr();
         address liquidationManager = _resolveLiquidationManagerAddr();
         address settlementManager = _resolveSettlementManagerAddr();
-        if (msg.sender != viewAddr && msg.sender != liquidationManager && msg.sender != settlementManager) {
+        if (msg.sender != vaultRouter && msg.sender != liquidationManager && msg.sender != settlementManager) {
             revert CollateralManager__UnauthorizedAccess();
         }
         _;
     }
 
-    /*━━━━━━━━━━━━━━━ 构造和初始化 ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Require AccessControlManager role.
+     * @dev Reverts if:
+     *      - KEY_ACCESS_CONTROL is not registered in Registry
+     *      - caller does not have the required role
+     *
+     * Security:
+     * - Delegates authorization to ACM.requireRole
+     *
+     * @param actionKey Action key (bytes32, see ActionKeys)
+     * @param caller Caller address to validate
+     */
+    function _requireRole(bytes32 actionKey, address caller) internal view {
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acmAddr).requireRole(actionKey, caller);
+    }
+
+    /*━━━━━━━━━━━━━━━ Construction & initialization ━━━━━━━━━━━━━━━*/
     
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -168,11 +247,12 @@ contract CollateralManager is
     /**
      * @notice Initialize CollateralManager with Registry address.
      * @dev Reverts if:
-     *      - initialRegistryAddr is zero
+     *      - initialRegistryAddr is zero (CollateralManager__ZeroAddress)
      *
      * Security:
-     * - initializer protected (single run)
-     * - sets UUPS + ReentrancyGuard baselines
+     * - Initializer: callable only once
+     * - UUPSUpgradeable: upgrade authorization is role-gated in `_authorizeUpgrade`
+     * - ReentrancyGuard: external state-changing entrypoints are nonReentrant
      *
      * @param initialRegistryAddr Registry address (non-zero)
      */
@@ -186,13 +266,13 @@ contract CollateralManager is
     }
 
     /**
-     * @notice Legacy initializer overload (kept for backward compatibility in tests).
+     * @notice Legacy initializer overload (deprecated; kept for backward compatibility).
      * @dev Reverts if:
-     *      - initialRegistryAddr is zero
+     *      - initialRegistryAddr is zero (CollateralManager__ZeroAddress)
      *
      * Security:
-     * - initializer protected (single run)
-     * - sets UUPS + ReentrancyGuard baselines
+     * - Initializer: callable only once
+     * - UUPSUpgradeable / ReentrancyGuard baselines
      *
      * @param initialRegistryAddr Registry address (non-zero)
      */
@@ -208,9 +288,20 @@ contract CollateralManager is
         _registryAddr = initialRegistryAddr;
     }
     
-    /*━━━━━━━━━━━━━━━ 核心业务逻辑 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Core business logic ━━━━━━━━━━━━━━━*/
 
-    /// @notice View 层缓存推送失败（不回滚主流程，链下可监听重试）
+    /**
+     * @notice Emitted when the best-effort View/cache push fails.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Best-effort observability: emitted from a catch block; never blocks ledger writes.
+     *
+     * @param user Target user address.
+     * @param asset Collateral asset address.
+     * @param reason Raw revert data.
+     */
     event ViewCachePushFailed(address indexed user, address indexed asset, bytes reason);
     
     /**
@@ -228,30 +319,31 @@ contract CollateralManager is
      * @param asset Collateral asset address (non-zero)
      * @param amount Collateral amount (token decimals)
      */
-    function processDeposit(address user, address asset, uint256 amount) public onlyVaultRouterOrCore nonReentrant {
+    function _processDeposit(address user, address asset, uint256 amount) internal {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (asset == address(0)) revert CollateralManager__ZeroAddress();
         if (amount == 0) revert CollateralManager__InvalidAmount();
 
-        // 0) 真实资金入池：将抵押资产从用户转入本合约（CollateralManager 作为资金池/托管者）
-        // NOTE: 需要用户提前 approve 本合约为 spender
+        // 0) Pull collateral into the pool (requires prior ERC20 approve to this contract).
         uint256 received = _pullTokenIntoPool(user, asset, amount);
         if (received == 0) revert CollateralManager__InvalidAmount();
         
-        // 1. 更新业务数据
+        // 1) Update ledger.
         uint256 oldBalance = _userCollateral[user][asset];
         _userCollateral[user][asset] = oldBalance + received;
         _totalCollateralByAsset[asset] = _totalCollateralByAsset[asset] + received;
         
-        // 2. 如果是新资产，添加到用户资产列表
+        // 2) Update user asset list.
         if (oldBalance == 0) {
             _addUserAsset(user, asset);
         }
         
-        // 2. 更新 View 层缓存（携带真实债务）
+        // 3) Best-effort View/cache push (delta-based).
         {
             uint64 nextVersion = _getNextVersion(user, asset);
-            try IVaultCoreMinimal(_resolveVaultCoreAddr()).pushUserPositionUpdateDelta(
+            address vaultCore = _resolveVaultCoreAddr();
+            bool pushedOk = false;
+            try IVaultCoreDataPush(vaultCore).pushUserPositionUpdateDelta(
                 user,
                 asset,
                 _toInt(received),
@@ -260,18 +352,21 @@ contract CollateralManager is
                 0,
                 nextVersion
             ) {
-                // ok
+                pushedOk = true;
             } catch (bytes memory reason) {
                 emit ViewCachePushFailed(user, asset, reason);
             }
+            pushedOk;
         }
         
-        // 3. 发出业务事件
+        // 4) Emit business event.
+        // solhint-disable-next-line not-rely-on-time
         emit DepositProcessed(user, asset, received, block.timestamp);
         
-        // 4. 数据推送（统一数据推送接口）
+        // 5) Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_DEPOSIT_PROCESSED,
+            // solhint-disable-next-line not-rely-on-time
             abi.encode(user, asset, received, block.timestamp)
         );
     }
@@ -291,41 +386,49 @@ contract CollateralManager is
      * @param asset Collateral asset address (non-zero)
      * @param amount Withdraw amount (token decimals)
      */
-    function processWithdraw(address user, address asset, uint256 amount) public onlyVaultRouterOrCore nonReentrant {
-        // 用户提现：receiver 必须为 user
+    function _processWithdraw(address user, address asset, uint256 amount) internal {
+        // User withdraw: receiver is always user.
         _withdrawCollateralTo(user, asset, amount, user);
     }
 
     /**
-     * @notice Unified collateral exit (withdraw to user or liquidation to receiver).
+     * @notice Unified collateral exit (withdraw to user, or seize to receiver).
      * @dev Reverts if:
-     *      - receiver is zero
-     *      - (receiver==user) and caller not VaultRouter/SettlementManager
+     *      - receiver is zero (CollateralManager__ZeroAddress)
+     *      - caller is not an authorized exit caller (CollateralManager__UnauthorizedAccess)
+     *      - receiver == user and caller is not VaultRouter/SettlementManager (CollateralManager__UnauthorizedAccess)
+     *      - receiver != user and caller lacks ACTION_LIQUIDATE (MissingRole via ACM)
+     *      - user/asset/amount is invalid or ledger balance is insufficient (see `_withdrawCollateralTo`)
      *
      * Security:
      * - Non-reentrant
-     * - Only VaultRouter/LiquidationManager/SettlementManager may call
-     * - Receiver==user constrained to VaultRouter/SettlementManager
+     * - Caller-gated: onlyAuthorizedCollateralExitCaller
+     * - Role-gated: ACTION_LIQUIDATE required for seizure path (receiver != user)
+     * - Funds custody: transfers ERC20 from this contract (pool) to receiver
      *
-     * @param user Collateral owner
-     * @param asset Collateral asset
+     * @param user Collateral owner address (non-zero)
+     * @param asset Collateral asset address (non-zero)
      * @param amount Amount to withdraw (token decimals)
-     * @param receiver Recipient of real tokens (user or liquidator)
+     * @param receiver Recipient of real tokens (user for withdraw; liquidator/recipient for seizure)
      */
     function withdrawCollateralTo(
         address user,
         address asset,
         uint256 amount,
         address receiver
-    ) external onlyVaultRouterOrLiquidationManager nonReentrant {
+    ) external onlyAuthorizedCollateralExitCaller nonReentrant {
         if (receiver == address(0)) revert CollateralManager__ZeroAddress();
-        // 若是“提到用户”的语义，强制只能由 VaultRouter 或 SettlementManager 发起
-        // - VaultRouter：用户主动 withdraw
-        // - SettlementManager：用户 repay 后自动释放抵押
+        // If receiver == user, only VaultRouter or SettlementManager may call:
+        // - VaultRouter: user-initiated withdraw
+        // - SettlementManager: automatic collateral release after settle/repay
         address vaultRouter = _resolveVaultRouterAddr();
         address settlementManager = _resolveSettlementManagerAddr();
         if (receiver == user && msg.sender != vaultRouter && msg.sender != settlementManager) {
             revert CollateralManager__UnauthorizedAccess();
+        }
+        // Seizure path must be role-gated at the ledger layer (Architecture-Guide SSOT).
+        if (receiver != user) {
+            _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
         }
         _withdrawCollateralTo(user, asset, amount, receiver);
     }
@@ -345,24 +448,24 @@ contract CollateralManager is
      * @param assets Collateral asset list (non-zero, len<=MAX_BATCH_SIZE)
      * @param amounts Amount list (token decimals)
      */
-    function batchProcessDeposit(
+    function _batchProcessDeposit(
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) public onlyVaultRouterOrCore nonReentrant {
+    ) internal {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (assets.length != amounts.length) revert CollateralManager__LengthMismatch();
-        if (assets.length == 0 || assets.length > MAX_BATCH_SIZE) revert CollateralManager__InvalidAmount();
+        if (assets.length == 0 || assets.length > _MAX_BATCH_SIZE) revert CollateralManager__InvalidAmount();
 
         for (uint256 i = 0; i < assets.length; i++) {
             if (assets[i] == address(0)) revert CollateralManager__ZeroAddress();
-            if (amounts[i] == 0) continue;
+            if (amounts[i] == 0) revert CollateralManager__InvalidAmount();
             
-            // 真实资金入池（逐资产）
+            // Pull collateral per asset.
             uint256 received = _pullTokenIntoPool(user, assets[i], amounts[i]);
             if (received == 0) continue;
 
-            // 处理单个存入
+            // Update ledger per asset.
             uint256 oldBalance = _userCollateral[user][assets[i]];
             _userCollateral[user][assets[i]] = oldBalance + received;
             _totalCollateralByAsset[assets[i]] = _totalCollateralByAsset[assets[i]] + received;
@@ -371,9 +474,11 @@ contract CollateralManager is
                 _addUserAsset(user, assets[i]);
             }
             
-            // 更新 View 层缓存（使用增量，减少覆盖风险）
+            // Best-effort View/cache push (delta-based).
             uint64 nextVersion = _getNextVersion(user, assets[i]);
-            try IVaultCoreMinimal(_resolveVaultCoreAddr()).pushUserPositionUpdateDelta(
+            address vaultCore = _resolveVaultCoreAddr();
+            bool pushedOk = false;
+            try IVaultCoreDataPush(vaultCore).pushUserPositionUpdateDelta(
                 user,
                 assets[i],
                 _toInt(received),
@@ -382,18 +487,21 @@ contract CollateralManager is
                 0,
                 nextVersion
             ) {
-                // ok
+                pushedOk = true;
             } catch (bytes memory reason) {
                 emit ViewCachePushFailed(user, assets[i], reason);
             }
+            pushedOk;
         }
         
-        // 发出批量处理事件
+        // Emit batch business event.
+        // solhint-disable-next-line not-rely-on-time
         emit BatchDepositProcessed(user, assets.length, block.timestamp);
         
-        // 数据推送
+        // Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_DEPOSIT_PROCESSED,
+            // solhint-disable-next-line not-rely-on-time
             abi.encode(user, assets.length, block.timestamp)
         );
     }
@@ -413,120 +521,166 @@ contract CollateralManager is
      * @param assets Collateral asset list (non-zero, len<=MAX_BATCH_SIZE)
      * @param amounts Amount list (token decimals)
      */
-    function batchProcessWithdraw(
+    function _batchProcessWithdraw(
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) public onlyVaultRouterOrCore nonReentrant {
+    ) internal {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (assets.length != amounts.length) revert CollateralManager__LengthMismatch();
-        if (assets.length == 0 || assets.length > MAX_BATCH_SIZE) revert CollateralManager__InvalidAmount();
+        if (assets.length == 0 || assets.length > _MAX_BATCH_SIZE) revert CollateralManager__InvalidAmount();
 
         for (uint256 i = 0; i < assets.length; i++) {
             if (assets[i] == address(0)) revert CollateralManager__ZeroAddress();
-            if (amounts[i] == 0) continue;
-            // 批量提现：receiver 必须为 user
+            if (amounts[i] == 0) revert CollateralManager__InvalidAmount();
+            // Batch user withdraw: receiver is always user.
             _withdrawCollateralTo(user, assets[i], amounts[i], user);
         }
         
-        // 发出批量处理事件
+        // Emit batch business event.
+        // solhint-disable-next-line not-rely-on-time
         emit BatchWithdrawProcessed(user, assets.length, block.timestamp);
         
-        // 数据推送
+        // Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_WITHDRAW_PROCESSED,
+            // solhint-disable-next-line not-rely-on-time
             abi.encode(user, assets.length, block.timestamp)
-                 );
-     }
+        );
+    }
      
-     /*━━━━━━━━━━━━━━━ 兼容性接口 ━━━━━━━━━━━━━━━*/
+     /*━━━━━━━━━━━━━━━ Compatibility (legacy ABI) ━━━━━━━━━━━━━━━*/
      
     /**
-     * @notice Compatibility deposit entry (legacy interface).
+     * @notice Deposit collateral (authority path, routed by VaultRouter).
      * @dev Reverts if:
-     *      - user/asset is zero
-     *      - amount is zero
+     *      - caller is not VaultRouter (CollateralManager__UnauthorizedAccess)
+     *      - user/asset is zero (CollateralManager__ZeroAddress)
+     *      - amount is zero (CollateralManager__InvalidAmount)
+     *      - token transferFrom fails / received==0 (CollateralManager__InvalidAmount or ERC20 revert)
      *
      * Security:
-     * - Only VaultRouter/VaultCore
-     * - Non-reentrant (in callee)
+     * - Non-reentrant
+     * - Caller-gated: onlyVaultRouter (prevents bypassing VaultRouter routing guards)
+     * - Funds custody: pulls ERC20 from user into this contract (pool)
      *
-     * @param user User address
-     * @param asset Asset address
-     * @param amount Amount to deposit
+     * @param user User address (non-zero)
+     * @param asset Collateral asset address (non-zero)
+     * @param amount Amount to deposit (token decimals)
      */
-    function depositCollateral(address user, address asset, uint256 amount) external onlyVaultRouterOrCore {
-        processDeposit(user, asset, amount);
+    function depositCollateral(address user, address asset, uint256 amount) external onlyVaultRouter nonReentrant {
+        _processDeposit(user, asset, amount);
     }
      
     /**
-     * @notice Compatibility withdraw entry (legacy interface).
+     * @notice Withdraw collateral to user (authority path, routed by VaultRouter).
      * @dev Reverts if:
-     *      - user/asset is zero
-     *      - amount is zero
+     *      - caller is not VaultRouter (CollateralManager__UnauthorizedAccess)
+     *      - user/asset/amount is invalid or balance is insufficient (see `_withdrawCollateralTo`)
      *
      * Security:
-     * - Only VaultRouter/VaultCore
-     * - Non-reentrant (in callee)
+     * - Non-reentrant
+     * - Caller-gated: onlyVaultRouter
+     * - Funds custody: transfers ERC20 from this contract (pool) to user
      *
-     * @param user User address
-     * @param asset Asset address
-     * @param amount Amount to withdraw
+     * @param user User address (non-zero)
+     * @param asset Collateral asset address (non-zero)
+     * @param amount Amount to withdraw (token decimals)
      */
-    function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultRouterOrCore {
-        processWithdraw(user, asset, amount);
+    function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultRouter nonReentrant {
+        _processWithdraw(user, asset, amount);
     }
 
     /**
-     * @notice Compatibility batch deposit (testing).
+     * @notice Batch deposit collateral (authority path, routed by VaultRouter).
      * @dev Reverts if:
-     *      - user is zero
-     *      - length mismatch or size 0/over MAX_BATCH_SIZE
+     *      - caller is not VaultRouter (CollateralManager__UnauthorizedAccess)
+     *      - user is zero (CollateralManager__ZeroAddress)
+     *      - assets/amounts length mismatch (CollateralManager__LengthMismatch)
+     *      - batch size is zero or exceeds _MAX_BATCH_SIZE (CollateralManager__InvalidAmount)
+     *      - any asset is zero (CollateralManager__ZeroAddress)
+     *      - any amount is zero (CollateralManager__InvalidAmount)
      *
      * Security:
-     * - Only VaultRouter/VaultCore
-     * - Non-reentrant (in callee)
+     * - Non-reentrant
+     * - Caller-gated: onlyVaultRouter
+     * - Funds custody: pulls ERC20 into this contract (pool) per asset
      */
     function batchDepositCollateral(
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external onlyVaultRouterOrCore {
-        batchProcessDeposit(user, assets, amounts);
+    ) external onlyVaultRouter nonReentrant {
+        _batchProcessDeposit(user, assets, amounts);
     }
 
     /**
-     * @notice Compatibility batch withdraw (testing).
+     * @notice Batch withdraw collateral to user (authority path, routed by VaultRouter).
      * @dev Reverts if:
-     *      - user is zero
-     *      - length mismatch or size 0/over MAX_BATCH_SIZE
+     *      - caller is not VaultRouter (CollateralManager__UnauthorizedAccess)
+     *      - user is zero (CollateralManager__ZeroAddress)
+     *      - assets/amounts length mismatch (CollateralManager__LengthMismatch)
+     *      - batch size is zero or exceeds _MAX_BATCH_SIZE (CollateralManager__InvalidAmount)
+     *      - any asset is zero (CollateralManager__ZeroAddress)
+     *      - any amount is zero (CollateralManager__InvalidAmount)
      *
      * Security:
-     * - Only VaultRouter/VaultCore
-     * - Non-reentrant (in callee)
+     * - Non-reentrant
+     * - Caller-gated: onlyVaultRouter
+     * - Funds custody: transfers ERC20 from this contract (pool) to user per asset
+     *
+     * @param user User address (non-zero)
+     * @param assets Collateral asset list (non-zero, len<=MAX_BATCH_SIZE)
+     * @param amounts Amount list (token decimals)
      */
     function batchWithdrawCollateral(
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external onlyVaultRouterOrCore {
-        batchProcessWithdraw(user, assets, amounts);
+    ) external onlyVaultRouter nonReentrant {
+        _batchProcessWithdraw(user, assets, amounts);
     }
 
     /**
      * @notice Compatibility liquidation entry (deprecated).
-     * @dev Reverts to enforce unified liquidation via SettlementManager/LiquidationManager using withdrawCollateralTo.
+     * @dev Reverts if:
+     *      - always (CollateralManager__UseViewModule)
+     *
+     * Security:
+     * - Deprecated entrypoint: kept only for legacy ABI compatibility; should not be called.
+     *
+     * @param user Collateral owner (unused).
+     * @param asset Collateral asset (unused).
+     * @param amount Amount (unused).
+     * @param receiver Receiver address (unused).
      */
     function seizeCollateralForLiquidation(
-        address,
-        address,
-        uint256,
-        address
+        address user,
+        address asset,
+        uint256 amount,
+        address receiver
     ) external pure override {
+        user; asset; amount; receiver; // explicitly unused
         revert CollateralManager__UseViewModule();
     }
 
-    /// @dev 内部实现：扣减账本 + best-effort 推送 View + 真实转账到 receiver
+    /**
+     * @notice Execute collateral exit: update ledger, best-effort push, then transfer tokens.
+     * @dev Reverts if:
+     *      - user/asset/receiver is zero (CollateralManager__ZeroAddress)
+     *      - amount is zero (CollateralManager__InvalidAmount)
+     *      - user collateral balance < amount (CollateralManager__InsufficientCollateral)
+     *      - ERC20 transfer fails (ERC20 revert)
+     *
+     * Security:
+     * - Checks-effects-interactions: updates ledger before external ERC20 transfer
+     * - Best-effort View push: failures emit ViewCachePushFailed but do not revert
+     *
+     * @param user Collateral owner
+     * @param asset Collateral asset
+     * @param amount Amount (token decimals)
+     * @param receiver Recipient of real tokens
+     */
     function _withdrawCollateralTo(address user, address asset, uint256 amount, address receiver) internal {
         if (user == address(0)) revert CollateralManager__ZeroAddress();
         if (asset == address(0)) revert CollateralManager__ZeroAddress();
@@ -536,17 +690,19 @@ contract CollateralManager is
         uint256 currentBalance = _userCollateral[user][asset];
         if (currentBalance < amount) revert CollateralManager__InsufficientCollateral();
 
-        // 1) 更新账本
+        // 1) Update ledger.
         _userCollateral[user][asset] = currentBalance - amount;
         _totalCollateralByAsset[asset] = _totalCollateralByAsset[asset] - amount;
         if (_userCollateral[user][asset] == 0) {
             _removeUserAsset(user, asset);
         }
 
-        // 2) best-effort 推送 View（增量，减少覆盖风险）
+        // 2) Best-effort View/cache push (delta-based).
         {
             uint64 nextVersion = _getNextVersion(user, asset);
-            try IVaultCoreMinimal(_resolveVaultCoreAddr()).pushUserPositionUpdateDelta(
+            address vaultCore = _resolveVaultCoreAddr();
+            bool pushedOk = false;
+            try IVaultCoreDataPush(vaultCore).pushUserPositionUpdateDelta(
                 user,
                 asset,
                 -_toInt(amount),
@@ -555,36 +711,39 @@ contract CollateralManager is
                 0,
                 nextVersion
             ) {
-                // ok
+                pushedOk = true;
             } catch (bytes memory reason) {
                 emit ViewCachePushFailed(user, asset, reason);
             }
+            pushedOk;
         }
 
-        // 3) 真实资金出池：资金池直接转给 receiver
+        // 3) Transfer real tokens from the pool to receiver.
         IERC20(asset).safeTransfer(receiver, amount);
 
-        // 4) 事件与 DataPush（对齐“写入直达账本 + 链下聚合”）
+        // 4) Emit business event + generic data bus event.
+        // solhint-disable-next-line not-rely-on-time
         emit WithdrawProcessed(user, asset, amount, block.timestamp);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_WITHDRAW_PROCESSED,
+            // solhint-disable-next-line not-rely-on-time
             abi.encode(user, asset, amount, block.timestamp)
         );
     }
      
-     /*━━━━━━━━━━━━━━━ 查询接口（兼容性）━━━━━━━━━━━━━━━*/
+     /*━━━━━━━━━━━━━━━ Read-only (compat) ━━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Get user collateral balance.
      * @dev Reverts if:
-     *      - none (view)
+     *      - (none)
      *
      * Security:
-     * - View only
+     * - View-only
      *
-     * @param user User address
-     * @param asset Asset address
-     * @return amount Collateral amount
+     * @param user User address.
+     * @param asset Collateral asset address.
+     * @return amount Collateral amount (token decimals).
      */
     function getCollateral(address user, address asset) external view returns (uint256 amount) {
         return _userCollateral[user][asset];
@@ -593,28 +752,28 @@ contract CollateralManager is
     /**
      * @notice Get total collateral for an asset.
      * @dev Reverts if:
-     *      - none (view)
+     *      - (none)
      *
      * Security:
-     * - View only
+     * - View-only
      *
-     * @param _asset Asset address
-     * @return totalCollateral Total collateral amount
+     * @param asset Collateral asset address.
+     * @return totalCollateral Total collateral amount (token decimals).
      */
-    function getTotalCollateralByAsset(address _asset) external view returns (uint256 totalCollateral) {
-        return _totalCollateralByAsset[_asset];
+    function getTotalCollateralByAsset(address asset) external view returns (uint256 totalCollateral) {
+        return _totalCollateralByAsset[asset];
     }
     
     /**
      * @notice Get all collateral assets for a user.
      * @dev Reverts if:
-     *      - none (view)
+     *      - (none)
      *
      * Security:
-     * - View only
+     * - View-only
      *
-     * @param user User address
-     * @return assets Asset list
+     * @param user User address.
+     * @return assets Collateral asset list.
      */
     function getUserCollateralAssets(address user) external view returns (address[] memory assets) {
         uint256 count = _userAssetCount[user];
@@ -624,11 +783,11 @@ contract CollateralManager is
         }
     }
     
-    /*━━━━━━━━━━━━━━━ 内部辅助函数 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
     
-    /// @notice 添加用户资产到列表
-    /// @param user 用户地址
-    /// @param asset 资产地址
+    /// @notice Add an asset to a user's asset list (idempotent).
+    /// @param user User address
+    /// @param asset Asset address
     function _addUserAsset(address user, address asset) internal {
         uint256 index = _userAssetIndex[user][asset];
         if (index == 0) {
@@ -638,9 +797,9 @@ contract CollateralManager is
         }
     }
     
-    /// @notice 从用户资产列表中移除资产
-    /// @param user 用户地址
-    /// @param asset 资产地址
+    /// @notice Remove an asset from a user's asset list (swap-and-pop).
+    /// @param user User address
+    /// @param asset Asset address
     function _removeUserAsset(address user, address asset) internal {
         uint256 index = _userAssetIndex[user][asset];
         if (index > 0) {
@@ -656,13 +815,14 @@ contract CollateralManager is
         }
     }
     
-    /*━━━━━━━━━━━━━━━ 合约升级 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Upgrade authorization ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice UUPS upgrade authorization.
      * @dev Reverts if:
-     *      - caller missing ACTION_UPGRADE_MODULE
-     *      - newImplementation is zero
+     *      - newImplementation is zero (CollateralManager__ZeroAddress)
+     *      - caller missing ACTION_UPGRADE_MODULE (MissingRole via ACM)
+     *      - KEY_ACCESS_CONTROL is not registered in Registry
      *
      * Security:
      * - Delegates to ACM.requireRole
@@ -677,21 +837,23 @@ contract CollateralManager is
 
     uint256[50] private __gap;
 
-    /*━━━━━━━━━━━━━━━ 内部工具 ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Internal utilities ━━━━━━━━━━━━━━━*/
     
-    /// @notice 解析当前有效的 VaultCore 地址
+    /// @notice Resolve VaultCore address (Registry KEY_VAULT_CORE).
     function _resolveVaultCoreAddr() internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
     }
 
-    /// @notice 解析当前有效的 VaultRouter 地址（通过 VaultCore 暴露的 viewContractAddrVar）
+    /// @notice Resolve VaultRouter address via VaultCore.viewContractAddrVar().
     function _resolveVaultRouterAddr() internal view returns (address) {
         return IVaultCoreMinimal(_resolveVaultCoreAddr()).viewContractAddrVar();
     }
 
-    /// @notice 解析 PositionView 并返回下一个 nextVersion（失败返回 0，自增模式）
+    /// @notice Resolve PositionView and return nextVersion (best-effort; returns 0 on failure).
     function _getNextVersion(address user, address asset) internal view returns (uint64) {
-        address positionView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
+        // Best-effort: missing/failed PositionView must not block ledger writes.
+        address positionView = Registry(_registryAddr).getModule(ModuleKeys.KEY_POSITION_VIEW);
+        if (positionView == address(0) || positionView.code.length == 0) return 0;
         try IPositionView(positionView).getPositionVersion(user, asset) returns (uint64 version) {
             unchecked {
                 return version + 1;
@@ -701,24 +863,24 @@ contract CollateralManager is
         }
     }
 
-    /// @notice 解析当前有效的 LiquidationManager 地址（通过 Registry）
+    /// @notice Resolve LiquidationManager address (Registry KEY_LIQUIDATION_MANAGER).
     function _resolveLiquidationManagerAddr() internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
     }
 
-    /// @notice 解析当前有效的 SettlementManager 地址（通过 Registry）
-    /// @dev 使用 getModule（非 revert），避免在未部署 SettlementManager 时影响 VaultRouter 正常路径
+    /// @notice Resolve SettlementManager address (Registry KEY_SETTLEMENT_MANAGER).
+    /// @dev Uses getModule (non-revert) to keep user-path writes functional when SettlementManager is not deployed.
     function _resolveSettlementManagerAddr() internal view returns (address) {
         return Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
     }
 
-    /// @notice 将 uint256 安全转换为 int256，防止溢出
+    /// @notice Convert uint256 to int256 with overflow check.
     function _toInt(uint256 value) internal pure returns (int256) {
         if (value > uint256(type(int256).max)) revert CollateralManager__InvalidAmount();
         return int256(value);
     }
 
-    /// @notice 将 token 从用户拉入资金池，并返回实际到账数量（兼容 fee-on-transfer）
+    /// @notice Pull tokens into the pool and return actual received amount (fee-on-transfer compatible).
     function _pullTokenIntoPool(address user, address asset, uint256 amount) internal returns (uint256 received) {
         IERC20 token = IERC20(asset);
         uint256 beforeBal = token.balanceOf(address(this));

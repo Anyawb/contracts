@@ -18,6 +18,29 @@ type Finding = {
   message: string;
 };
 
+function normalizeMessage(msg: string): string {
+  return msg.trim().replace(/\s+/g, " ");
+}
+
+function dedupeAndSort(findings: Finding[]): Finding[] {
+  const map = new Map<string, Finding>();
+  for (const f of findings) {
+    const normalized: Finding = {
+      file: f.file,
+      line: f.line,
+      message: normalizeMessage(f.message),
+    };
+    const key = `${normalized.file}:${normalized.line}:${normalized.message}`;
+    if (!map.has(key)) map.set(key, normalized);
+  }
+  return [...map.values()].sort((a, b) => {
+    const fc = a.file.localeCompare(b.file);
+    if (fc !== 0) return fc;
+    if (a.line !== b.line) return a.line - b.line;
+    return a.message.localeCompare(b.message);
+  });
+}
+
 function walk(dir: string, out: string[] = []): string[] {
   for (const ent of readdirSync(dir)) {
     const p = path.join(dir, ent);
@@ -133,12 +156,16 @@ function main() {
     }
   }
 
+  // De-dupe and sort for stable, readable output
+  const errorsOut = dedupeAndSort(errors);
+  const infosOut = dedupeAndSort(infos);
+
   // Print report
   const pad = (n: number) => String(n).padStart(4, " ");
   console.log("\n=== Cache Gate Audit (static) ===\n");
 
   console.log("## refreshModuleCache() implementations\n");
-  const refreshInfos = infos.filter((x) => x.message.startsWith("refreshModuleCache"));
+  const refreshInfos = infosOut.filter((x) => x.message.startsWith("refreshModuleCache"));
   if (refreshInfos.length === 0) {
     console.log("(none found)\n");
   } else {
@@ -149,7 +176,7 @@ function main() {
   }
 
   console.log("## ModuleCache write callsites (set/batchSet/remove)\n");
-  const mcInfos = infos.filter((x) => x.message.startsWith("ModuleCache."));
+  const mcInfos = infosOut.filter((x) => x.message.startsWith("ModuleCache."));
   if (mcInfos.length === 0) {
     console.log("(none found)\n");
   } else {
@@ -159,9 +186,9 @@ function main() {
     console.log("");
   }
 
-  if (errors.length) {
+  if (errorsOut.length) {
     console.log("## FAILURES\n");
-    for (const e of errors) {
+    for (const e of errorsOut) {
       console.log(`- ${e.file}:${pad(e.line)}  ${e.message}`);
     }
     console.log("");

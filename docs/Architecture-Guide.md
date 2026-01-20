@@ -54,9 +54,10 @@
     - 典型：`RewardManagerCore` 的积分缓存、`GracefulDegradation` 的价格缓存、`RegistrySignatureManager` 的 domain separator 缓存等  
     - **策略**：不纳入统一刷新入口（语义差异大、权限面扩大、不利于审计）
 
-- **团队快速入口（请把这两个当“缓存总目录”）**
+- **团队快速入口（请把这些当“缓存/推送/入口安全总目录”）**
   - **缓存全量盘点表（A/B/C + 字段/TTL/写入者/权限/失败重试）**：[`docs/Usage-Guide/Cache-Architecture-Guide.md`](Usage-Guide/Cache-Architecture-Guide.md)
   - **缓存推送失败与人工重试（运维手册）**：[`docs/Cache-Push-Manual-Retry.md`](Cache-Push-Manual-Retry.md)
+  - **资金链安全收口（Registry Guard + Entrypoint 收敛 + best-effort 边界）**：[`docs/Usage-Guide/Security-Guards-Registry-and-Entrypoints.md`](Usage-Guide/Security-Guards-Registry-and-Entrypoints.md)
 
 ### 缓存推送失败与手动重试（新增要求 & 已实施）
 - 推送失败不做链上自动重试，避免 gas 暴涨/重复失败；采用“事件告警 + 链下人工重放”。
@@ -663,6 +664,7 @@ contract LendingEngine {
 - **平台费/罚金/手续费等“费用类资金”的权威去向**
   - 费用类资金（如平台费、生态费、罚金中平台份额等）应通过 `FeeRouter` 进行统一路由与分发；前端/链下只读镜像由 `FeeRouterView` 提供。
   - 为降低“人为变数”，推荐将 `FeeRouter` 的 `platformTreasury` 配置为**合约金库地址**（而非 EOA/多签），并通过治理权限（通常为 `ACTION_SET_PARAMETER` / `ACTION_UPGRADE_MODULE`，建议迁移到 Timelock 轨）进行变更。
+  - **提前还款保证金（Extension Flow）**：作为主资金链的扩展（不改变 `VaultCore → SettlementManager` 的还款 SSOT），其实现级 SSOT（模块键、事件/DataPush、代码落点）请参考 [`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`](Usage-Guide/Funds-Flow-Architecture-Guide.md) 的 **第 5 节**，避免在总纲中重复细节导致口径漂移。
   - **View 解析口径（SSOT，避免多来源漂移）**：链上业务模块如需解析 view 地址，应统一通过
     `Registry.KEY_VAULT_CORE → VaultCore.viewContractAddrVar()` 获取；不应再引入其它 Registry key 作为“回退来源”。
 
@@ -909,6 +911,9 @@ error AccessControlView__UnauthorizedAccess();
   - **Security**：显式标注本函数依赖的安全属性/假设（如 `nonReentrant`、`onlyVaultCore`、`ACM.requireRole(...)`、签名单次使用、nonce/uid 绑定、跨模块调用边界等）。
 - **`@param/@return`**：必须写清楚**单位与精度**（例如 USDT 6 decimals、bps=1e4、时间=seconds、价格精度等）；涉及“内部 ID / 外部地址”的必须区分含义（如 `uid` vs `user`）。
 - **一致性**：注释中的“唯一入口/权威路径/SSOT”描述必须与本指南其它章节一致；不一致时以本指南为准并立即修订注释或章节说明。
+- **分区标题分隔符（强制统一样式）**：对合约内主要分区（Storage/Errors/Modifiers/Initializer/View/Core/Upgrade 等）的块注释分隔符，**必须**使用本仓库 SSOT 风格：
+  - ✅ `/*━━━━━━━━━━━━━━━ <Section> ━━━━━━━━━━━━━━━*/`（参考 `src/Vault/modules/EarlyRepaymentGuaranteeManager.sol` 的 `Storage gap`）
+  - ❌ 禁止使用 `/* ============ <Section> ============ */` 或任何 `=` 分隔风格，避免团队口径分叉与审计噪声
 
 ### 检测方式（强制）
 > 目标：把“注释规范 + 关键风格约束”变成可重复、可自动化的检查步骤，避免靠人工肉眼抽查。

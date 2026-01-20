@@ -298,6 +298,7 @@
 - **结算入口（SSOT）**：`src/Vault/liquidation/modules/SettlementManager.sol`（`repayAndSettle` / `settleOrLiquidate`）
 - **订单引擎（orderId SSOT）**：`src/core/LendingEngine.sol`（`repay` / `_getLoanOrderForView` / ON_TIME_WINDOW 判定）
 - **债务账本（用户总债务价值）**：`src/interfaces/ILendingEngineBasic.sol`（`getUserTotalDebtValue` 等；实现为 Registry `KEY_LE` 指向的引擎；注意这是“价值口径”，通常以 settlement token 计价）
+- **当前默认实现（截至 commit `ec7a417`）**：`KEY_LE` → `src/Vault/modules/VaultLendingEngine.sol`（contract: `VaultLendingEngine`）
 - **抵押返还（真实转账）**：`src/Vault/modules/CollateralManager.sol`（`withdrawCollateralTo`）
 - **费用路由（如有）**：`src/Vault/FeeRouter.sol`
 - **模块键**：`src/constants/ModuleKeys.sol`（`KEY_SETTLEMENT_MANAGER` / `KEY_ORDER_ENGINE` / `KEY_LE` / `KEY_CM`）
@@ -309,15 +310,85 @@
 
 ---
 
-## 5) 违约清算资金链（Default → Liquidation）
+## 5) 提前还款保证金资金链（Extension Flow）
 
-### 5.1 默认入口（keeper 推荐）
+> 本节为“资金链的扩展路径（Extension Flow）”，用于提前还款保证金机制的对账与口径统一。  
+> 该机制不应改变主资金链 SSOT（`repay` 仍必须走 `VaultCore → SettlementManager`），但会引入额外的“保证金托管/分配”资金流。
+
+> 分层声明（与 `docs/Architecture-Guide.md` 对齐）：本节属于 **实现级 SSOT/对账口径**（模块键、事件/DataPush、代码落点），用于把“保证金如何托管/如何分配/如何观测”讲清楚；**不修改** 架构指南中对“主资金链唯一入口/职责边界”的定义。
+
+### 5.1 触发条件 / 开关（何时启用）
+
+- **启用条件（建议）**：按产品/资产/功能开关启用（例如仅某些借款资产或某类订单启用）。
+- **模块前置（必须）**：
+  - Registry 必须注册：`KEY_GUARANTEE_FUND`（`GuaranteeFundManager`）与 `KEY_EARLY_REPAYMENT_GUARANTEE`（`EarlyRepaymentGuaranteeManager`）
+  - **平台费路由（与架构指南一致，推荐）**：保证金相关的 `platformFee` 视为“费用类资金”，建议统一走 `FeeRouter` 的分发口径（平台金库/下游地址由 `FeeRouter` 治理配置）。
+    - **兼容现状（若当前实现仍为直转）**：`EarlyRepaymentGuaranteeManager` 仍需配置 `platformFeeReceiver` 与 `platformFeeRate`；此时建议将 `platformFeeReceiver` 配置为 `FeeRouter` 的 `platformTreasury`（或其下游金库/路由地址），避免费用体系口径分叉。
+- **注意（SSOT 边界）**：
+  - “提前/按时/逾期”等**订单语义判定的 SSOT** 以 `ORDER_ENGINE(LendingEngine)` 为准（当前在 `ORDER_ENGINE.repay(...)` 过程中完成判定，用于奖励 outcome / NFT 更新等）。
+  - `SettlementManager` 作为 **主资金链唯一对外写入口（SSOT）**，在 `repayAndSettle` 中以订单状态/判定结果为依据触发保证金处理。
+  - 保证金模块只负责**托管与分账执行**，不参与订单语义判定，避免 SSOT 分叉。
+
+### 5.2 托管者 SSOT（保证金由谁持币）
+
+- **保证金真实托管者（SSOT）**：`GuaranteeFundManager`  
+  - 保证金余额账本：`user → asset → amount`（链上托管余额与对账事件均以该合约为准）
+- **保证金记录/规则（非托管，语义层）**：`EarlyRepaymentGuaranteeManager`  
+  - 维护 `guaranteeId` 与 `principal/promisedInterest/maturity/penaltyDays/lender/asset` 等语义信息
+  - **不执行真实转账**（真实转账由 `GuaranteeFundManager` 统一执行）
+
+### 5.3 入口 SSOT（谁能触发锁定 / 分配 / 没收）
+
+- **锁定（借款发生时，权威路径 / 与架构指南一致）**：由 `VaultBusinessLogic` 作为“资金/抵押/保证金联动”的业务编排者完成两步（缺一不可）（**当前代码实现：借款时的保证金锁定编排由 `VaultBusinessLogic` 执行，而非 `VaultCore`**）：
+  - **(A) 托管入金（真实资金移动）**：`GuaranteeFundManager.lockGuarantee(borrower, asset, promisedInterest)`  
+    将保证金从 borrower 转入 `GuaranteeFundManager` 托管
+  - **(B) 语义记账（语义层记录）**：`EarlyRepaymentGuaranteeManager.lockGuaranteeRecord(borrower, lender, asset, principal, promisedInterest, termDays)`  
+    写入 guarantee record（用于后续提前还款/违约的分配依据）
+  - **入口收敛（重要）**：链上不应允许任意模块/EOA 直接触发保证金锁定；应收敛到业务编排层（`VaultBusinessLogic`）以避免入口分叉与对账口径漂移。
+- **提前还款结算（分配，权威入口）**：`VaultCore` 发起还款后，必须进入 `SettlementManager` 的统一结算入口；当该笔还款被判定为“提前还款（early）”（判定 SSOT 以 `ORDER_ENGINE(LendingEngine)` 为准）且满足开关时触发保证金分账：  
+  - `VaultCore → SettlementManager.repayAndSettle(...) → EarlyRepaymentGuaranteeManager.settleEarlyRepayment(borrower, asset, actualRepayAmount)`  
+  - `EarlyRepaymentGuaranteeManager` 内部调用 `GuaranteeFundManager.settleEarlyRepayment(...)` 执行真实“三路分发”
+- **违约处理（没收，权威入口）**：同样由 `SettlementManager` 在其“到期未还/违约处置/被动清算”等分支中触发保证金处理：  
+  - `SettlementManager → EarlyRepaymentGuaranteeManager.processDefault(borrower, asset)`  
+  - 当前实现：`EarlyRepaymentGuaranteeManager` 调用 `GuaranteeFundManager.forfeitPartial(...)`  
+  - 若未来需要“多接收人分配（平台/准备金/补偿池等）”，应改为走 `GuaranteeFundManager.settleDefault(...)`（数组分配）。
+
+### 5.4 资金去向（提前还款三方分配 / 违约没收）
+
+- **提前还款（Early Repay）**：保证金（通常为 `promisedInterest` 口径）按结果拆分为：
+  - **refundToBorrower**：返还 borrower
+  - **penaltyToLender**：支付 lender 的罚金/补偿
+  - **platformFee**：平台手续费（**推荐**：按费用体系口径走 `FeeRouter`；**兼容**：若仍直转，则转给 `platformFeeReceiver`，且建议该地址配置为 `FeeRouter` 平台金库或其下游金库/路由地址）
+  - **一致性约束（SSOT）**：三项之和必须等于 `GuaranteeFundManager` 中该用户该资产的托管余额，否则应回滚（避免对账漂移）。
+- **违约（Default）**：
+  - 当前实现：没收金额为 `promisedInterest`，并转给 lender（可按产品规则调整）。
+
+### 5.5 对账事件 / DataPush（唯一来源）
+
+- **真实资金移动（托管/释放/没收）的唯一来源**：`GuaranteeFundManager`
+  - events：`GuaranteeLocked` / `GuaranteeReleased` / `GuaranteeForfeited`
+  - DataPush：`GUARANTEE_LOCKED` / `GUARANTEE_RELEASED` / `GUARANTEE_FORFEITED`（以及 batch 版本）
+- **语义层“保证金记录/提前还款处理结果”的来源**：`EarlyRepaymentGuaranteeManager`
+  - events：`GuaranteeLocked(guaranteeId, ...)` / `EarlyRepaymentProcessed(...)` / `GuaranteeForfeited(guaranteeId, ...)`
+
+### 5.6 代码落点（相关合约 / 接口路径）
+
+- **托管者 SSOT（真实资金移动）**：`src/Vault/modules/GuaranteeFundManager.sol`（`lockGuarantee` / `settleEarlyRepayment` / `forfeitPartial` / `settleDefault`）
+- **语义层（guarantee record + 分配规则）**：`src/Vault/modules/EarlyRepaymentGuaranteeManager.sol`（`lockGuaranteeRecord` / `settleEarlyRepayment` / `processDefault`）
+- **接口**：`src/interfaces/IEarlyRepaymentGuaranteeManager.sol`
+- **模块键**：`src/constants/ModuleKeys.sol`（`KEY_GUARANTEE_FUND` / `KEY_EARLY_REPAYMENT_GUARANTEE`）
+
+---
+
+## 6) 违约清算资金链（Default → Liquidation）
+
+### 6.1 默认入口（keeper 推荐）
 
 - **入口（默认/推荐，SSOT）**：`SettlementManager.settleOrLiquidate(orderId)`
 - **权限**：调用者必须具备 `ActionKeys.ACTION_LIQUIDATE`（keeper/机器人）
 - **备注**：`LiquidationManager.liquidate/batchLiquidate` 仅保留为 role-gated 的“显式参数执行器入口”（测试/应急），不应作为常态入口。
 
-### 5.2 清算写入（直达账本）
+### 6.2 清算写入（直达账本）
 
 - **推荐/当前实现（SSOT）**：
   - `SettlementManager.settleOrLiquidate(orderId)` 计算清算参数
@@ -326,7 +397,7 @@
   - → `LendingEngine.forceReduceDebt(user, debtAsset, debtAmount)`（直写账本）
 - **保留入口**：`LiquidationManager.liquidate/batchLiquidate` 仅作为“显式参数执行器”（测试/应急），不建议作为常态 keeper 入口。
 
-### 5.3 残值分配（SSOT）
+### 6.3 残值分配（SSOT）
 
 - **SSOT 配置**：`LiquidationPayoutManager`（recipients/rates/shares 计算；整数分配，舍入余量归 liquidator）
 - **执行（真实转账）**：`LiquidationManager` 调用 `CollateralManager.withdrawCollateralTo` 按份额转给：
@@ -335,7 +406,7 @@
   - `recipients.lenderCompensation`（出借人补偿池/地址）
   - `liquidator`（keeper；默认也承接舍入余量）
 
-### 5.4 事件/DataPush 单点（链下对账/重试）
+### 6.4 事件/DataPush 单点（链下对账/重试）
 
 - **单点推送（DataPush）**：`LiquidationManager` → `LiquidatorView`
   - `pushLiquidationUpdate(...)` / `pushBatchLiquidationUpdate(...)`
@@ -359,13 +430,13 @@
 
 ---
 
-## 6) 费用与分账资金链（Fee Flow）
+## 7) 费用与分账资金链（Fee Flow）
 
 - **范围**：平台费/生态费/撮合费/手续费/（可选）罚金中的“平台/生态份额”等一切 **费用类资金**
 - **SSOT**：所有费用类资金 **必须** 通过 `FeeRouter` 统一路由与分发（避免不同模块各自转账导致口径漂移）
 - **建议**：`FeeRouter.platformTreasury` 优先配置为**合约金库地址**（降低人为变数；参数变更仅走治理权限）
 
-### 6.1 费用分发（权威口径）
+### 7.1 费用分发（权威口径）
 
 - **入口**（由业务模块触发，不对用户开放）：
   - 常规费率：`FeeRouter.distributeNormal(token, amount)`
@@ -377,7 +448,7 @@
   - `remaining`（即 `amount - platformAmt - ecoAmt`）**返还给调用者**（通常是资金池/编排合约）
 - **token 白名单**：只有 `supportedTokens` 内的 token 才允许分发，否则 `TokenNotSupported`（上线前必须把 settlementToken 等加入支持列表）
 
-### 6.2 配置（recipients / rates）与权限边界
+### 7.2 配置（recipients / rates）与权限边界
 
 - **配置入口（治理 SSOT）**：均为 `onlyRole(ActionKeys.ACTION_SET_PARAMETER)`
   - `setFeeConfig(platformBps, ecoBps)`：设置平台/生态费率（`platformBps + ecoBps < 10_000`）
@@ -390,7 +461,7 @@
 - **暂停边界**：
   - `pause/unpause`：`onlyRole(ActionKeys.ACTION_PAUSE_SYSTEM / ACTION_UNPAUSE_SYSTEM)`；分发逻辑内部受 `whenNotPaused` 保护
 
-### 6.3 观测（事件 / DataPush / 只读镜像）
+### 7.3 观测（事件 / DataPush / 只读镜像）
 
 - **链上事件（FeeRouter）**：`FeeDistributed`、`FeeConfigUpdated`、`PlatformTreasuryUpdated`、`EcosystemVaultUpdated`、`TreasuryUpdated`（聚合兼容事件）、`TokenSupported`、`FeeStatisticsUpdated`、`BatchFeeDistributed` 等
 - **DataPush（标准化 payload）**：`FEE_DISTRIBUTED`、`BATCH_FEE_DISTRIBUTED`、`FEE_CONFIG_UPDATED`、`TREASURY_UPDATED`、`TOKEN_SUPPORTED`、`DYNAMIC_FEE_UPDATED`、`FEE_CACHE_CLEARED`、`PAUSE_STATUS_UPDATED`
@@ -411,7 +482,7 @@
 
 ---
 
-## 7) 最小验收清单（你逐段完善时建议每段都过一遍）
+## 8) 最小验收清单（你逐段完善时建议每段都过一遍）
 
 - **入口唯一性**
   - repay：只允许 `VaultCore → SettlementManager.repayAndSettle`
@@ -428,11 +499,11 @@
 
 ---
 
-## 8) 本地一键 Smoke（部署连线/入口/权限/精准报错）
+## 9) 本地一键 Smoke（部署连线/入口/权限/精准报错）
 
 > 目的：在“还未跑完整撮合/借款”的情况下，也能快速验证 **Registry 注册、入口地址解析、keeper 权限门槛**，并把常见的 `unrecognized custom error` 解码成可操作的修复建议。
 
-### 8.1 前置条件
+### 9.1 前置条件
 
 ```bash
 # A) 启动本地链（单独终端）
@@ -442,7 +513,7 @@ pnpm -s run node
 pnpm -s run deploy:localhost
 ```
 
-### 8.2 一条命令运行（推荐）
+### 9.2 一条命令运行（推荐）
 
 ```bash
 pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-local.ts" --network localhost
@@ -458,7 +529,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-local.ts" --network loc
 ORDER_ID=1 pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-local.ts" --network localhost
 ```
 
-### 8.2.1 生成最小订单（让 smoke 可通过）
+### 9.2.1 生成最小订单（让 smoke 可通过）
 
 如果当前链上没有有效 `orderId`，可先运行最小订单脚本创建一笔可清算订单（自动快进到逾期）：
 
@@ -468,7 +539,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-create-order.ts" --netw
 
 脚本会输出可直接用于 smoke 的 `ORDER_ID` 命令。
 
-### 8.3 你会得到什么输出
+### 9.3 你会得到什么输出
 
 - **部署检查（DeployCheck）**：
   - Registry / VaultCore / SettlementManager / ACM 是否有 code

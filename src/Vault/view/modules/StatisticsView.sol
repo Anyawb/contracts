@@ -13,7 +13,7 @@ import { DegradationMonitor as GracefulDegradationMonitor } from "../../../monit
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
@@ -130,6 +130,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ======== Modifiers ========
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -152,6 +153,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
 
@@ -436,6 +438,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert StatisticsView__ZeroImplementation();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 } 
 

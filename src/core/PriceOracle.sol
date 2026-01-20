@@ -10,7 +10,7 @@ import { IRegistry } from "../interfaces/IRegistry.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { ZeroAddress, AmountMismatch } from "../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress, AmountMismatch } from "../errors/StandardErrors.sol";
 
 // Error definitions
 error PriceOracle__AssetAlreadySupported();
@@ -64,6 +64,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
     /// @notice 验证 Registry 地址
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 

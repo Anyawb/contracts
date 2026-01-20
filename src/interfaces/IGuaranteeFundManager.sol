@@ -30,6 +30,59 @@ interface IGuaranteeFundManager {
     function forfeitGuarantee(address user, address asset, address feeReceiver) external;
 
     /**
+     * @notice Early repayment settlement (3-way distribution).
+     * @dev Distributes the entire locked guarantee balance into:
+     *      - refundToBorrower (to user)
+     *      - penaltyToLender (to lender)
+     *      - platformFee (to platform)
+     *
+     * Reverts if:
+     * - sum(refundToBorrower, penaltyToLender, platformFee) does not match the user's locked guarantee balance
+     *
+     * @param user Borrower address.
+     * @param asset ERC20 guarantee asset address.
+     * @param lender Lender address that receives penaltyToLender.
+     * @param platform Platform fee receiver address.
+     * @param refundToBorrower Amount refunded to borrower.
+     * @param penaltyToLender Amount paid to lender as penalty.
+     * @param platformFee Amount paid to platform as fee.
+     */
+    function settleEarlyRepayment(
+        address user,
+        address asset,
+        address lender,
+        address platform,
+        uint256 refundToBorrower,
+        uint256 penaltyToLender,
+        uint256 platformFee
+    ) external;
+
+    /**
+     * @notice Forfeit a partial amount of user's guarantee to a receiver.
+     * @dev Typically used for default / penalty settlement paths.
+     * @param user Borrower address.
+     * @param asset ERC20 guarantee asset address.
+     * @param receiver Receiver of the forfeited amount.
+     * @param amount Amount to forfeit.
+     */
+    function forfeitPartial(address user, address asset, address receiver, uint256 amount) external;
+
+    /**
+     * @notice Forfeit to multiple receivers in one call.
+     * @dev Implementations may require the forfeited sum equals the full locked balance.
+     * @param user Borrower address.
+     * @param asset ERC20 guarantee asset address.
+     * @param receivers Receiver addresses.
+     * @param amounts Amounts for each receiver.
+     */
+    function settleDefault(
+        address user,
+        address asset,
+        address[] calldata receivers,
+        uint256[] calldata amounts
+    ) external;
+
+    /**
      * @notice 查询用户指定资产的锁定保证金
      * @param user 用户地址
      * @param asset 资产地址

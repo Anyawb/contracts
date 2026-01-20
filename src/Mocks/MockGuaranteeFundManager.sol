@@ -2,21 +2,17 @@
 pragma solidity ^0.8.20;
 
 import { IGuaranteeFundManager } from "../interfaces/IGuaranteeFundManager.sol";
+import { LoanEvents } from "../core/LoanEvents.sol";
 
 /// @title MockGuaranteeFundManager
 /// @notice 保证金管理器的Mock实现，用于测试
-contract MockGuaranteeFundManager is IGuaranteeFundManager {
+contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
     // 用户保证金映射
     mapping(address => mapping(address => uint256)) private _userGuarantees;
     mapping(address => uint256) private _totalByAsset;
     
     // 测试控制标志
     bool public mockSuccess = true;
-    
-    // 事件
-    event GuaranteeLocked(address indexed user, address indexed asset, uint256 amount);
-    event GuaranteeReleased(address indexed user, address indexed asset, uint256 amount);
-    event GuaranteeForfeited(address indexed user, address indexed asset, uint256 amount, address indexed feeReceiver);
     
     /// @notice 锁定保证金
     /// @param user 用户地址
@@ -26,7 +22,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager {
         if (!mockSuccess) revert("MockGuaranteeFundManager: lock failed");
         _userGuarantees[user][asset] += amount;
         _totalByAsset[asset] += amount;
-        emit GuaranteeLocked(user, asset, amount);
+        emit GuaranteeLocked(user, asset, amount, block.timestamp);
     }
     
     /// @notice 释放保证金
@@ -38,7 +34,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager {
         require(_userGuarantees[user][asset] >= amount, "Insufficient guarantee");
         _userGuarantees[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
-        emit GuaranteeReleased(user, asset, amount);
+        emit GuaranteeReleased(user, asset, amount, block.timestamp);
     }
     
     /// @notice 没收保证金
@@ -50,7 +46,63 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager {
         if (amount > 0) {
             _userGuarantees[user][asset] = 0;
             _totalByAsset[asset] -= amount;
-            emit GuaranteeForfeited(user, asset, amount, feeReceiver);
+            emit GuaranteeForfeited(user, asset, amount, feeReceiver, block.timestamp);
+        }
+    }
+
+    /// @notice Early repayment settlement (mock).
+    function settleEarlyRepayment(
+        address user,
+        address asset,
+        address lender,
+        address platform,
+        uint256 refundToBorrower,
+        uint256 penaltyToLender,
+        uint256 platformFee
+    ) external override {
+        if (!mockSuccess) revert("MockGuaranteeFundManager: settleEarlyRepayment failed");
+        uint256 total = _userGuarantees[user][asset];
+        uint256 sum = refundToBorrower + penaltyToLender + platformFee;
+        require(sum == total, "Sum mismatch");
+
+        _userGuarantees[user][asset] = 0;
+        _totalByAsset[asset] -= total;
+
+        if (refundToBorrower > 0) emit GuaranteeReleased(user, asset, refundToBorrower, block.timestamp);
+        if (penaltyToLender > 0) emit GuaranteeForfeited(user, asset, penaltyToLender, lender, block.timestamp);
+        if (platformFee > 0) emit GuaranteeForfeited(user, asset, platformFee, platform, block.timestamp);
+    }
+
+    /// @notice Partial forfeiture (mock).
+    function forfeitPartial(address user, address asset, address receiver, uint256 amount) external override {
+        if (!mockSuccess) revert("MockGuaranteeFundManager: forfeitPartial failed");
+        require(_userGuarantees[user][asset] >= amount, "Insufficient guarantee");
+        _userGuarantees[user][asset] -= amount;
+        _totalByAsset[asset] -= amount;
+        emit GuaranteeForfeited(user, asset, amount, receiver, block.timestamp);
+    }
+
+    /// @notice Multi-receiver default settlement (mock).
+    function settleDefault(
+        address user,
+        address asset,
+        address[] calldata receivers,
+        uint256[] calldata amounts
+    ) external override {
+        if (!mockSuccess) revert("MockGuaranteeFundManager: settleDefault failed");
+        require(receivers.length == amounts.length, "Array length mismatch");
+        uint256 total = _userGuarantees[user][asset];
+        uint256 sum;
+        for (uint256 i = 0; i < amounts.length; i++) {
+            sum += amounts[i];
+        }
+        require(sum == total, "Sum mismatch");
+
+        _userGuarantees[user][asset] = 0;
+        _totalByAsset[asset] -= total;
+        for (uint256 i = 0; i < receivers.length; i++) {
+            if (amounts[i] == 0) continue;
+            emit GuaranteeForfeited(user, asset, amounts[i], receivers[i], block.timestamp);
         }
     }
     
@@ -98,7 +150,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager {
         for (uint256 i = 0; i < assets.length; i++) {
             _userGuarantees[user][assets[i]] += amounts[i];
             _totalByAsset[assets[i]] += amounts[i];
-            emit GuaranteeLocked(user, assets[i], amounts[i]);
+            emit GuaranteeLocked(user, assets[i], amounts[i], block.timestamp);
         }
     }
     
@@ -116,7 +168,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager {
             require(_userGuarantees[user][assets[i]] >= amounts[i], "Insufficient guarantee");
             _userGuarantees[user][assets[i]] -= amounts[i];
             _totalByAsset[assets[i]] -= amounts[i];
-            emit GuaranteeReleased(user, assets[i], amounts[i]);
+            emit GuaranteeReleased(user, assets[i], amounts[i], block.timestamp);
         }
     }
     

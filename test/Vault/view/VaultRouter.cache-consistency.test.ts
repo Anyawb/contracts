@@ -23,6 +23,8 @@ import type {
   VaultRouter,
 } from '../../../types';
 
+import type { CacheMaintenanceManager } from '../../../types';
+
 const ModuleKeys = {
   KEY_CM: ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER')),
   KEY_LE: ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE')),
@@ -35,6 +37,7 @@ const ModuleKeys = {
 };
 
 const ACTION_VIEW_PUSH = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_PUSH'));
+const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
 
 describe('PositionView – cache consistency and ledger fallback (strict)', function () {
   async function deployFixture() {
@@ -75,6 +78,11 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
       { kind: 'uups', initializer: 'initialize' }
     )) as VaultRouter;
 
+    // Deploy CacheMaintenanceManager (A-class cache SSOT entrypoint)
+    const CacheMaintF = await ethers.getContractFactory('CacheMaintenanceManager');
+    const cacheMaint = (await CacheMaintF.deploy(await registry.getAddress())) as CacheMaintenanceManager;
+    await cacheMaint.waitForDeployment();
+
     // Deploy PositionView
     const PositionViewFactory = await ethers.getContractFactory('PositionView');
     const positionView = (await upgrades.deployProxy(PositionViewFactory, [await registry.getAddress()], {
@@ -97,15 +105,18 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
     await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await vaultCoreModule.getAddress());
     // Required by PositionView module resolution (can be any address in this test)
     await registry.setModule(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC, admin.address);
-    await registry.setModule(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER, maint.address);
+    await registry.setModule(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER, await cacheMaint.getAddress());
 
     // Allow VaultRouter (caller) to push into PositionView
     await acm.grantRole(ACTION_VIEW_PUSH, await vaultRouter.getAddress());
 
-    // Seed module cache once (A-class cache)
-    await vaultRouter.connect(maint).refreshModuleCache();
+    // Allow maint to run A-class cache refresh batches
+    await acm.grantRole(ACTION_SET_PARAMETER, maint.address);
 
-    return { admin, user, maint, registry, acm, cm, le, priceOracle, vaultRouter, positionView, vaultCoreModule };
+    // Seed module cache once via SSOT entrypoint (A-class cache)
+    await cacheMaint.connect(maint).batchRefresh([await vaultRouter.getAddress()]);
+
+    return { admin, user, maint, registry, acm, cm, le, priceOracle, vaultRouter, positionView, vaultCoreModule, cacheMaint };
   }
 
   it('push via VaultCore -> VaultRouter forwards to PositionView and marks cache valid', async function () {
@@ -168,12 +179,19 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
   });
 
   it('VaultRouter.refreshModuleCache should be restricted to CacheMaintenanceManager', async function () {
-    const { maint, user, vaultRouter } = await loadFixture(deployFixture);
+    const { maint, user, vaultRouter, cacheMaint } = await loadFixture(deployFixture);
 
-    await expect(vaultRouter.connect(maint).refreshModuleCache()).to.emit(vaultRouter, 'ModuleCacheRefreshed');
+    await expect(vaultRouter.connect(maint).refreshModuleCache()).to.be.revertedWithCustomError(
+      vaultRouter,
+      'VaultRouter__UnauthorizedAccess'
+    );
     await expect(vaultRouter.connect(user).refreshModuleCache()).to.be.revertedWithCustomError(
       vaultRouter,
       'VaultRouter__UnauthorizedAccess'
+    );
+    await expect(cacheMaint.connect(maint).batchRefresh([await vaultRouter.getAddress()])).to.emit(
+      vaultRouter,
+      'ModuleCacheRefreshed'
     );
   });
 });

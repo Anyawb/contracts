@@ -11,7 +11,7 @@ import { LiquidationAccessControl } from "../libraries/LiquidationAccessControl.
 import { LiquidationValidationLibrary } from "../libraries/LiquidationValidationLibrary.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 
 /// @title LiquidationPayoutManager
 /// @notice Liquidation residual value distribution management module:
@@ -79,6 +79,14 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      */
     error LiquidationPayoutManager__InvalidImplementation();
 
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+    /// @notice Ensure Registry is configured and is a contract.
+    modifier onlyValidRegistry() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
+        _;
+    }
+
     /**
      * @notice Constructor (disables initialization)
      * @dev Prevents direct calls to initialization function, ensures deployment through proxy pattern
@@ -115,6 +123,7 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
     ) external initializer {
         if (registryAddr == address(0)) revert ZeroAddress();
         if (accessControlAddr == address(0)) revert ZeroAddress();
+        if (registryAddr.code.length == 0) revert NotAContract(registryAddr);
 
         __UUPSUpgradeable_init();
 
@@ -255,6 +264,8 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      * - Aligns with Architecture-Guide: write entrypoints must be gated by ACM
      */
     modifier onlyRole(bytes32 role) {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(role, msg.sender);
         _;

@@ -35,6 +35,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
   const ACTION_UPGRADE_MODULE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
   const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
   const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER'));
+  const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE'));
 
   // 合约实例
   let earlyRepaymentGuaranteeManager: EarlyRepaymentGuaranteeManager;
@@ -77,13 +78,13 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
     // 注册模块
     await registry.setModule(KEY_ACCESS_CONTROL, mockAccessControlManager.target);
     await registry.setModule(KEY_GUARANTEE_FUND, mockGuaranteeFund.target);
+    await registry.setModule(KEY_VAULT_CORE, vaultCoreSigner.address);
 
     // 部署 EarlyRepaymentGuaranteeManager (UUPS proxy)
     const EarlyRepaymentGuaranteeManagerFactory = await ethers.getContractFactory('EarlyRepaymentGuaranteeManager');
     const earlyRepaymentGuaranteeManager = (await upgrades.deployProxy(
       EarlyRepaymentGuaranteeManagerFactory,
       [
-        vaultCoreSigner.address,
         registry.target,
         vaultCoreSigner.address, // 平台费用接收者
         100, // 1% 平台费率

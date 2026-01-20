@@ -6,7 +6,7 @@ import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
@@ -182,6 +182,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      */
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
     
@@ -243,6 +244,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     function initialize(address initialRegistryAddr) external initializer {
         // Validate the provided registry address instead of the un-initialised storage slot
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         _registryAddr = initialRegistryAddr;
         // solhint-disable-next-line not-rely-on-time
@@ -805,6 +807,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     function _getFeeRouter() internal view returns (address) {

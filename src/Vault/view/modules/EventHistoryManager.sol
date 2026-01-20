@@ -8,7 +8,7 @@ import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
 /// @title EventHistoryManager（轻量级桩件）
@@ -28,6 +28,7 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
 
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -50,6 +51,7 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -80,6 +82,7 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice 兼容旧版 getter

@@ -9,6 +9,7 @@ import { Registry } from "../../registry/Registry.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { ICollateralManager } from "../../interfaces/ICollateralManager.sol";
+import { CacheEvents } from "../CacheEvents.sol";
 import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../constants/DataPushTypes.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
@@ -18,6 +19,7 @@ import { IVaultCoreMinimal } from "../../interfaces/IVaultCoreMinimal.sol";
 import { ViewConstants } from "../view/ViewConstants.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { NotAContract } from "../../errors/StandardErrors.sol";
 
 /// @title CollateralManager
 /// @notice Collateral ledger + custody module (direct-to-ledger writes).
@@ -31,7 +33,8 @@ contract CollateralManager is
     Initializable, 
     UUPSUpgradeable, 
     ReentrancyGuardUpgradeable,
-    ICollateralManager 
+    ICollateralManager,
+    CacheEvents
 {
     using SafeERC20 for IERC20;
 
@@ -198,10 +201,20 @@ contract CollateralManager is
 
     /*━━━━━━━━━━━━━━━ Access control ━━━━━━━━━━━━━━━*/
 
+    /// @notice Ensures Registry is configured and is a contract.
+    modifier onlyValidRegistry() {
+        if (_registryAddr == address(0)) revert CollateralManager__ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
+        _;
+    }
+
     /// @notice Allow VaultRouter as the sole user-path writer.
     /// @dev Architecture-Guide SSOT: user deposit/withdraw routes via VaultCore -> VaultRouter -> CollateralManager.
     ///      CollateralManager does not accept direct user-path writes from VaultCore to avoid bypassing routing guards.
     modifier onlyVaultRouter() {
+        // Strict guard: CollateralManager is a custody/ledger SSOT and must not run with an invalid Registry.
+        if (_registryAddr == address(0)) revert CollateralManager__ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address router = _resolveVaultRouterAddr();
         if (msg.sender != router) revert CollateralManager__UnauthorizedAccess();
         _;
@@ -211,6 +224,8 @@ contract CollateralManager is
     /// @dev SettlementManager is allowed to return collateral to the borrower after settle/repay,
     ///      and to drive liquidation branches as the SSOT entry.
     modifier onlyAuthorizedCollateralExitCaller() {
+        if (_registryAddr == address(0)) revert CollateralManager__ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address vaultRouter = _resolveVaultRouterAddr();
         address liquidationManager = _resolveLiquidationManagerAddr();
         address settlementManager = _resolveSettlementManagerAddr();
@@ -354,6 +369,14 @@ contract CollateralManager is
             ) {
                 pushedOk = true;
             } catch (bytes memory reason) {
+                // Best-effort observability: emit canonical CacheUpdateFailed for off-chain alerting/retry.
+                address viewAddr = address(0);
+                try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
+                    viewAddr = v;
+                } catch {
+                    viewAddr = address(0);
+                }
+                emit CacheUpdateFailed(user, asset, viewAddr, _userCollateral[user][asset], 0, reason);
                 emit ViewCachePushFailed(user, asset, reason);
             }
             pushedOk;
@@ -489,6 +512,13 @@ contract CollateralManager is
             ) {
                 pushedOk = true;
             } catch (bytes memory reason) {
+                address viewAddr = address(0);
+                try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
+                    viewAddr = v;
+                } catch {
+                    viewAddr = address(0);
+                }
+                emit CacheUpdateFailed(user, assets[i], viewAddr, _userCollateral[user][assets[i]], 0, reason);
                 emit ViewCachePushFailed(user, assets[i], reason);
             }
             pushedOk;
@@ -713,6 +743,13 @@ contract CollateralManager is
             ) {
                 pushedOk = true;
             } catch (bytes memory reason) {
+                address viewAddr = address(0);
+                try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
+                    viewAddr = v;
+                } catch {
+                    viewAddr = address(0);
+                }
+                emit CacheUpdateFailed(user, asset, viewAddr, _userCollateral[user][asset], 0, reason);
                 emit ViewCachePushFailed(user, asset, reason);
             }
             pushedOk;
@@ -745,7 +782,7 @@ contract CollateralManager is
      * @param asset Collateral asset address.
      * @return amount Collateral amount (token decimals).
      */
-    function getCollateral(address user, address asset) external view returns (uint256 amount) {
+    function getCollateral(address user, address asset) external view onlyValidRegistry returns (uint256 amount) {
         return _userCollateral[user][asset];
     }
     
@@ -760,7 +797,7 @@ contract CollateralManager is
      * @param asset Collateral asset address.
      * @return totalCollateral Total collateral amount (token decimals).
      */
-    function getTotalCollateralByAsset(address asset) external view returns (uint256 totalCollateral) {
+    function getTotalCollateralByAsset(address asset) external view onlyValidRegistry returns (uint256 totalCollateral) {
         return _totalCollateralByAsset[asset];
     }
     
@@ -775,7 +812,7 @@ contract CollateralManager is
      * @param user User address.
      * @return assets Collateral asset list.
      */
-    function getUserCollateralAssets(address user) external view returns (address[] memory assets) {
+    function getUserCollateralAssets(address user) external view onlyValidRegistry returns (address[] memory assets) {
         uint256 count = _userAssetCount[user];
         assets = new address[](count);
         for (uint256 i = 0; i < count; i++) {

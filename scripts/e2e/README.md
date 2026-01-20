@@ -95,6 +95,7 @@
   - **部分还款**：同一笔订单分两次 repay，并断言每次后 `PositionView/UserView` 与账本一致
   - **逾期还款**：`evm_increaseTime` 快进到超过到期日后再 repay
   - **多 lender 拆单**：将 500 拆成两笔 250/250（两笔订单），分别由不同 lender 出借（更贴近真实“拆单”）
+  - **EarlyRepaymentGuarantee（保证金：lock → early settle）**：覆盖 `EarlyRepaymentGuaranteeManager` + `GuaranteeFundManager` 的联动路径（锁定 → 提前结算分配）
 - 每一步都断言（strict 模式下为硬失败）：
   - `PositionView.getUserPosition` == `UserView.getUserPosition` == `CollateralManager/VaultLendingEngine`（账本）
   - `RiskView.getUserRiskAssessment` 可正常调用（不对语义做强约束）
@@ -134,14 +135,19 @@ hardhat run scripts/deploy/deploylocal.ts --network localhost
 
 **终端 3：运行 E2E 测试**
 
+> 推荐说明（避免“静默失败”）：
+> - 本仓库当前没有 `e2e:localhost:batch-advanced-10-users` 这类 `package.json scripts`。
+> - 如果你误用 `pnpm -s e2e:...`，可能出现 **exit code=254 且几乎无输出**。
+> - 正确方式：用 `npx hardhat run ... --network localhost`（或等价的 `pnpm exec hardhat run ...`）。
+
 运行 `e2e-localhost-batch-10-users.ts`：
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
 ```
 
 运行 `e2e-localhost-batch-advanced-10-users.ts`：
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
 ```
 
 ### 前置条件
@@ -168,27 +174,27 @@ hardhat run scripts/deploy/deploylocal.ts --network localhost
 
 #### 基础业务流测试
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-run.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-run.ts --network localhost
 ```
 
 #### 订单引擎流程测试
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-orderflow.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-orderflow.ts --network localhost
 ```
 
 #### 撮合流程测试
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-matchflow.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-matchflow.ts --network localhost
 ```
 
 #### 完整测试（推荐）⭐
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-full-with-views.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-full-with-views.ts --network localhost
 ```
 
 #### Reward 隐私 + Read-Gate 专项验收 ⭐
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-reward-privacy.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-reward-privacy.ts --network localhost
 ```
 
 #### Reward Edge Cases（多订单/partial repay/提前-按期-逾期/penaltyLedger）⭐
@@ -198,14 +204,14 @@ npx hardhat e2e:reward-edgecases --network localhost
 
 #### 10 用户批量撮合借贷（推荐用于压测/一致性验收）
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
 ```
 
 ##### 可配置：选择一个 “样本 borrower” 打印 PositionView.version（Phase3 可观测性）
 - **env 方式（兼容旧用法）**：
 
 ```bash
-E2E_SAMPLE_BORROWER_INDEX=2 pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
 ```
 
 - **argv/task 方式（推荐）**：
@@ -216,7 +222,7 @@ pnpm -s exec hardhat e2e:batch-10-users --network localhost --sample-borrower-in
 
 #### 高级批量测试（部分还款/逾期/拆单 + 每步 View 断言）⭐
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
 ```
 
 ##### Strict 模式相关（本脚本默认开启）
@@ -224,26 +230,26 @@ pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --
 - **默认（推荐）**：严格校验（任何 View/Stats 与账本不一致会直接失败）
 
 ```bash
-pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
 ```
 
 - **关闭 strict（仅用于临时排障）**：
 
 ```bash
-E2E_STRICT_VIEWS=0 pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+E2E_STRICT_VIEWS=0 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
 ```
 
 - **允许 dirty state（更贴近 testnet/mainnet）**：
 
 ```bash
-E2E_ALLOW_DIRTY_STATE=1 pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+E2E_ALLOW_DIRTY_STATE=1 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
 ```
 
 ##### 可配置：选择一个 “样本 borrower” 打印 PositionView.version / getPositionVersion（Phase3 可观测性）
 - **env 方式（仍然支持）**：
 
 ```bash
-E2E_SAMPLE_BORROWER_INDEX=2 pnpm -s exec hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
 ```
 
 - **argv/task 方式（推荐）**：
@@ -289,6 +295,7 @@ pnpm -s exec hardhat e2e:batch-advanced --network localhost --sample-borrower-in
 - ✅ 撮合流程（资金保留 → 撮合落地 → 还款）
 - ✅ LoanNFT 的铸造和状态更新
 - ✅ 订单引擎的订单创建和还款
+- ✅ EarlyRepaymentGuarantee（保证金 lock → 提前结算）联动路径（ERGM + GFM）
 
 ### View 层验证
 - ✅ **PositionView**: 验证抵押物和债务数据是否正确缓存
@@ -335,7 +342,7 @@ pnpm -s exec hardhat e2e:batch-advanced --network localhost --sample-borrower-in
 1. **添加更多业务场景**：
    - 多资产操作
    - 清算流程
-   - 早偿流程
+   - （已覆盖）早偿保证金流程：`EarlyRepaymentGuarantee (lock → early settle)`
 
 2. **添加更多 View 层验证**：
    - 批量查询验证

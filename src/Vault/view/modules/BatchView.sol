@@ -12,7 +12,7 @@ import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
 import { DegradationStorage } from "../../../monitor/DegradationStorage.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
 interface IHealthViewBatch {
@@ -68,6 +68,7 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ======== Modifiers ========
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -80,6 +81,7 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ======== Init ========
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -252,6 +254,7 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert BatchView__ZeroImplementation();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice 兼容旧版 getter

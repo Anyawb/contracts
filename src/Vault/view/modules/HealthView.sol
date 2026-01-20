@@ -15,7 +15,7 @@ import { DegradationMonitor as GracefulDegradationMonitor } from "../../../monit
 import { DegradationCore as GracefulDegradationCore } from "../../../monitor/DegradationCore.sol";
 import { DegradationStorage as GracefulDegradationStorage } from "../../../monitor/DegradationStorage.sol";
 import { ModuleHealthView } from "./ModuleHealthView.sol";
-import { ZeroAddress, ArrayLengthMismatch } from "../../../errors/StandardErrors.sol";
+import { ArrayLengthMismatch, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
 /// @title HealthView
@@ -58,6 +58,7 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ============ Modifiers ============
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -90,6 +91,7 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ============ Initializer ============
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -227,7 +229,7 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        require(newImplementation.code.length > 0, "Invalid implementation");
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice 兼容旧版 getter

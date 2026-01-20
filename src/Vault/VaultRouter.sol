@@ -8,7 +8,7 @@ import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
 import { IAssetWhitelist } from "../interfaces/IAssetWhitelist.sol";
-import { ZeroAddress, AmountIsZero, AssetNotAllowed } from "../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress, AmountIsZero, AssetNotAllowed } from "../errors/StandardErrors.sol";
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
@@ -135,6 +135,20 @@ contract VaultRouter is
     );
 
     /**
+     * @notice Emitted when a best-effort user stats push to StatisticsView fails.
+     * @dev Must not revert core flows; used for off-chain alerting / retry.
+     */
+    event UserStatsPushFailed(
+        address indexed user,
+        address indexed statsView,
+        uint256 collateralIn,
+        uint256 collateralOut,
+        uint256 borrow,
+        uint256 repay,
+        bytes reason
+    );
+
+    /**
      * @notice Emitted when aggregated asset stats are pushed (for off-chain consumers).
      * @param asset Asset address
      * @param totalCollateral Total collateral (token decimals)
@@ -165,6 +179,11 @@ contract VaultRouter is
     error VaultRouter__UnauthorizedAccess();
     /// @notice Thrown when operationType is not deposit/withdraw.
     error VaultRouter__UnsupportedOperation(bytes32 operation);
+    /// @notice Thrown when an A-class cached module address is stale compared to Registry.
+    /// @dev Prevents silent wrong route after module upgrades; governance must refresh via CacheMaintenanceManager.
+    /// @param cached Cached module address stored in VaultRouter.
+    /// @param current Current module address resolved from Registry.
+    error VaultRouter__StaleModuleCache(address cached, address current);
 
     /*━━━━━━━━━━━━━━━ Construction & initialization ━━━━━━━━━━━━━━━*/
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -227,6 +246,7 @@ contract VaultRouter is
      */
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -294,11 +314,19 @@ contract VaultRouter is
      * @return cm CollateralManager address
      */
     function _getCachedCollateralManager() internal returns (address cm) {
+        // A-class cache hardening (Architecture-Guide / Security-Guards SSOT):
+        // If the Registry module address changed since our last refresh, we MUST NOT continue routing to the old
+        // cached address (silent wrong route). Governance must refresh A-class caches via CacheMaintenanceManager.
+        address current = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
         uint256 nowTs = _now();
-        if (nowTs > _lastCacheUpdate + _CACHE_EXPIRY_TIME) {
-            _cachedCmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
+        // Uninitialized or expired cache: refresh to current.
+        if (_cachedCmAddr == address(0) || nowTs > _lastCacheUpdate + _CACHE_EXPIRY_TIME) {
+            _cachedCmAddr = current;
             _lastCacheUpdate = nowTs;
+            return current;
         }
+        // Cache is within expiry: reject if Registry changed to avoid silent wrong route.
+        if (_cachedCmAddr != current) revert VaultRouter__StaleModuleCache(_cachedCmAddr, current);
         return _cachedCmAddr;
     }
 
@@ -456,6 +484,10 @@ contract VaultRouter is
         // StatisticsView is push-based; keep best-effort and never block core flows.
         address stats = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
         if (stats == address(0)) return;
+        if (stats.code.length == 0) {
+            emit UserStatsPushFailed(user, stats, 0, 0, 0, 0, abi.encodeWithSelector(NotAContract.selector, stats));
+            return;
+        }
 
         uint256 collateralIn = 0;
         uint256 collateralOut = 0;
@@ -479,8 +511,8 @@ contract VaultRouter is
         // Best-effort: ignore failures (e.g., missing permissions on StatisticsView).
         try IStatisticsViewMinimal(stats).pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay) {
             _noop();
-        } catch {
-            _noop();
+        } catch (bytes memory reason) {
+            emit UserStatsPushFailed(user, stats, collateralIn, collateralOut, borrow, repay, reason);
         }
     }
 

@@ -28,6 +28,8 @@ import type {
   VaultRouter,
 } from '../../types';
 
+import type { CacheMaintenanceManager } from '../../types';
+
 const ModuleKeys = {
   KEY_CM: ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER')),
   KEY_LE: ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE')),
@@ -44,6 +46,7 @@ const ActionKeys = {
   ACTION_WITHDRAW: ethers.keccak256(ethers.toUtf8Bytes('WITHDRAW')),
   ACTION_BORROW: ethers.keccak256(ethers.toUtf8Bytes('BORROW')),
   ACTION_VIEW_PUSH: ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_PUSH')),
+  ACTION_SET_PARAMETER: ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')),
 };
 
 describe('VaultRouter – strict (slim) behavior', function () {
@@ -78,6 +81,11 @@ describe('VaultRouter – strict (slim) behavior', function () {
       { kind: 'uups', initializer: 'initialize' }
     )) as VaultRouter;
 
+    // Deploy CacheMaintenanceManager (A-class cache SSOT entrypoint)
+    const CacheMaintF = await ethers.getContractFactory('CacheMaintenanceManager');
+    const cacheMaint = (await CacheMaintF.deploy(await registry.getAddress())) as CacheMaintenanceManager;
+    await cacheMaint.waitForDeployment();
+
     const PositionViewF = await ethers.getContractFactory('PositionView');
     const positionView = (await upgrades.deployProxy(PositionViewF, [await registry.getAddress()], {
       kind: 'uups',
@@ -102,15 +110,18 @@ describe('VaultRouter – strict (slim) behavior', function () {
     await registry.setModule(ModuleKeys.KEY_POSITION_VIEW, await positionView.getAddress());
     await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await vaultCoreModule.getAddress());
     await registry.setModule(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC, owner.address);
-    await registry.setModule(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER, maint.address);
+    await registry.setModule(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER, await cacheMaint.getAddress());
 
     // Allow VaultRouter to write PositionView cache
     await acm.grantRole(ActionKeys.ACTION_VIEW_PUSH, await vaultRouter.getAddress());
 
-    // Seed module cache
-    await vaultRouter.connect(maint).refreshModuleCache();
+    // Allow maint to run A-class cache refresh batches
+    await acm.grantRole(ActionKeys.ACTION_SET_PARAMETER, maint.address);
 
-    return { owner, user, maint, registry, acm, cm, le, po, aw, settlementToken, vaultRouter, positionView, vaultCoreModule, testAsset };
+    // Seed module cache via SSOT entrypoint (CacheMaintenanceManager.batchRefresh)
+    await cacheMaint.connect(maint).batchRefresh([await vaultRouter.getAddress()]);
+
+    return { owner, user, maint, registry, acm, cm, le, po, aw, settlementToken, vaultRouter, positionView, vaultCoreModule, testAsset, cacheMaint };
   }
 
   describe('processUserOperation routing', function () {
@@ -167,13 +178,52 @@ describe('VaultRouter – strict (slim) behavior', function () {
   });
 
   describe('refreshModuleCache restriction', function () {
-    it('only CacheMaintenanceManager can refresh', async function () {
-      const { maint, user, vaultRouter } = await loadFixture(deployFixture);
-      await expect(vaultRouter.connect(maint).refreshModuleCache()).to.emit(vaultRouter, 'ModuleCacheRefreshed');
+    it('VaultRouter.refreshModuleCache should only allow the configured CacheMaintenanceManager', async function () {
+      const { maint, user, vaultRouter, cacheMaint } = await loadFixture(deployFixture);
+      // Direct call by non-maintainer should revert
+      await expect(vaultRouter.connect(maint).refreshModuleCache()).to.be.revertedWithCustomError(
+        vaultRouter,
+        'VaultRouter__UnauthorizedAccess'
+      );
       await expect(vaultRouter.connect(user).refreshModuleCache()).to.be.revertedWithCustomError(
         vaultRouter,
         'VaultRouter__UnauthorizedAccess'
       );
+      // Refresh via SSOT entrypoint should succeed (and emit ModuleCacheRefreshed from VaultRouter)
+      await expect(cacheMaint.connect(maint).batchRefresh([await vaultRouter.getAddress()])).to.emit(
+        vaultRouter,
+        'ModuleCacheRefreshed'
+      );
+    });
+  });
+
+  describe('A-class cache upgrade safety (no silent wrong route)', function () {
+    it('should revert when Registry CM changes within cache window until refreshed', async function () {
+      const { user, registry, vaultCoreModule, vaultRouter, cm, maint, cacheMaint, testAsset } =
+        await loadFixture(deployFixture);
+
+      // Swap CollateralManager module to a new contract (simulates module upgrade/replace).
+      const CMF = await ethers.getContractFactory('MockCollateralManager');
+      const cm2 = (await CMF.deploy()) as MockCollateralManager;
+      await cm2.waitForDeployment();
+      await registry.setModule(ModuleKeys.KEY_CM, await cm2.getAddress());
+
+      // Without refresh, VaultRouter must NOT silently route to old cached CM.
+      await expect(
+        vaultCoreModule.processUserOperation(user.address, ActionKeys.ACTION_DEPOSIT, testAsset, 10, 100)
+      ).to.be.revertedWithCustomError(vaultRouter, 'VaultRouter__StaleModuleCache');
+
+      // After refresh via CacheMaintenanceManager, routing should work and hit the new CM.
+      await cacheMaint.connect(maint).batchRefresh([await vaultRouter.getAddress()]);
+      await expect(
+        vaultCoreModule.processUserOperation(user.address, ActionKeys.ACTION_DEPOSIT, testAsset, 10, 101)
+      )
+        .to.emit(cm2, 'CollateralDeposited')
+        .withArgs(user.address, testAsset, 10);
+
+      // Old CM must not have been mutated by the post-upgrade call.
+      expect(await cm.getCollateral(user.address, testAsset)).to.equal(0);
+      expect(await cm2.getCollateral(user.address, testAsset)).to.equal(10);
     });
   });
 });

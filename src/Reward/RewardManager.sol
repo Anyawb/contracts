@@ -11,6 +11,7 @@ import { Registry } from "../registry/Registry.sol";
 import { ViewConstants } from "../Vault/view/ViewConstants.sol";
 import {
     ZeroAddress,
+    NotAContract,
     MissingRole
 } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -66,6 +67,7 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
     /// @dev 验证Registry地址有效性
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 

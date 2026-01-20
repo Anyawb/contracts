@@ -9,7 +9,7 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { IRegistryDynamicModuleKey } from "../../../interfaces/IRegistryDynamicModuleKey.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
@@ -28,6 +28,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -38,6 +39,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -201,6 +203,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ Versioning (C+B baseline) ============

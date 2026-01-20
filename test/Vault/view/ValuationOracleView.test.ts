@@ -308,12 +308,16 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
 
   describe('Registry 管理', function () {
     it('非管理员不可更新 registry', async function () {
-      const newRegistryAddr = ethers.Wallet.createRandom().address;
+      const MockRegistryF = await ethers.getContractFactory('MockRegistry');
+      const newRegistry = await MockRegistryF.deploy();
+      const newRegistryAddr = await newRegistry.getAddress();
       await expect(valuationOracleView.connect(alice).setRegistry(newRegistryAddr)).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
 
     it('管理员可以更新 registry', async function () {
-      const newRegistryAddr = ethers.Wallet.createRandom().address;
+      const MockRegistryF = await ethers.getContractFactory('MockRegistry');
+      const newRegistry = await MockRegistryF.deploy();
+      const newRegistryAddr = await newRegistry.getAddress();
       await valuationOracleView.connect(owner).setRegistry(newRegistryAddr);
       expect(await valuationOracleView.registryAddrVar()).to.equal(newRegistryAddr);
     });
@@ -335,7 +339,9 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
     });
 
     it('更新 registry 应发出事件', async function () {
-      const newRegistryAddr = ethers.Wallet.createRandom().address;
+      const MockRegistryF = await ethers.getContractFactory('MockRegistry');
+      const newRegistry = await MockRegistryF.deploy();
+      const newRegistryAddr = await newRegistry.getAddress();
       const oldRegistryAddr = await registry.getAddress();
       // 验证事件被发出（不验证所有参数细节）
       await expect(valuationOracleView.connect(owner).setRegistry(newRegistryAddr))

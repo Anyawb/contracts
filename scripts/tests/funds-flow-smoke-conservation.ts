@@ -260,6 +260,9 @@ async function createOrder(opts: {
   const orderEngineAddr = (await registry.getModuleOrRevert(key("ORDER_ENGINE"))) as string;
   const collateralManagerAddr = (await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"))) as string;
   const loanNftAddr = (await registry.getModuleOrRevert(key("LOAN_NFT"))) as string;
+  // Extension Flow modules (best-effort; older deployments may not have them)
+  const gfmAddr = (await registry.getModule(key("GUARANTEE_FUND_MANAGER"))) as string;
+  const ergmAddr = (await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE_MANAGER"))) as string;
 
   const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreAddr)) as any;
   const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddr)) as any;
@@ -435,6 +438,24 @@ async function createOrder(opts: {
 
   const sigBorrower = await borrower.signTypedData(domain, typesBorrow as any, borrowIntent as any);
   const sigLender = await lender.signTypedData(domain, typesLend as any, lendIntent as any);
+
+  // Extension Flow: if guarantee is enabled for borrow asset, borrower must approve GFM for promisedInterest
+  // before finalizeMatch (VBL will pull it via GFM.lockGuarantee).
+  if (ergmAddr && ergmAddr !== ethers.ZeroAddress && gfmAddr && gfmAddr !== ethers.ZeroAddress) {
+    try {
+      const ergm = await ethers.getContractAt(["function isGuaranteeEnabled(address) view returns (bool)"], ergmAddr);
+      const enabled = (await ergm.isGuaranteeEnabled(usdc.target)) as boolean;
+      if (enabled) {
+        const termSec = BigInt(termDays) * ONE_DAY;
+        const promisedInterest = calcInterest(borrowAmt, rateBps, termSec);
+        if (promisedInterest > 0n) {
+          await usdc.connect(borrower).approve(gfmAddr, promisedInterest);
+        }
+      }
+    } catch (e) {
+      console.log("  ⚠️  ExtensionFlow pre-approve skipped (could not read ERGM/isGuaranteeEnabled):", e);
+    }
+  }
 
   // ===== (C) Fee distribution: assert exact destination + proportion =====
   // SettlementMatchLib.finalizeAtomicFull uses FeeRouter.distributeNormal(borrowAsset, amount) where amount == borrowAmt.

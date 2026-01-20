@@ -393,7 +393,12 @@ async function main() {
     // EarlyRepaymentGuaranteeManager（提前还款保证金管理器）
     if (!deployed.EarlyRepaymentGuaranteeManager) {
       try {
-        deployed.EarlyRepaymentGuaranteeManager = await deployProxy('src/Vault/modules/EarlyRepaymentGuaranteeManager.sol:EarlyRepaymentGuaranteeManager', [deployed.VaultCore || ethers.ZeroAddress, deployed.Registry, deployer.address, 500]); // 5% 平台费率
+        // NOTE: ERGM initializer signature (SSOT-aligned) is:
+        //   initialize(registryAddr, platformFeeReceiverAddr, platformFeeRateBps)
+        deployed.EarlyRepaymentGuaranteeManager = await deployProxy(
+          'src/Vault/modules/EarlyRepaymentGuaranteeManager.sol:EarlyRepaymentGuaranteeManager',
+          [deployed.Registry, deployer.address, 500]
+        ); // 5% 平台费率
         save(deployed);
       } catch (error) {
         console.log('⚠️ EarlyRepaymentGuaranteeManager deployment failed:', error);

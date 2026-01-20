@@ -138,6 +138,9 @@ export async function discoverTrackedAddresses(opts: {
     "COLLATERAL_MANAGER",
     "ORDER_ENGINE",
     "SETTLEMENT_MANAGER",
+    // Extension Flow modules (guarantee custody + semantic record)
+    "GUARANTEE_FUND_MANAGER",
+    "EARLY_REPAYMENT_GUARANTEE_MANAGER",
     "LENDER_POOL_VAULT",
     "LIQUIDATION_MANAGER",
     "LIQUIDATION_PAYOUT_MANAGER",
@@ -148,6 +151,22 @@ export async function discoverTrackedAddresses(opts: {
   for (const k of keysToFetch) {
     try {
       modules[k] = (await registry.getModuleOrRevert(key(k))) as string;
+    } catch {
+      // skip
+    }
+  }
+
+  // Extension Flow sink/source: ERGM.platformFeeReceiver (best-effort).
+  // If platformFee is routed via FeeRouter, this will likely be platformTreasury already,
+  // but we include it explicitly to avoid tracked-set drift.
+  let ergmPlatformFeeReceiver = ethers.ZeroAddress;
+  if (modules["EARLY_REPAYMENT_GUARANTEE_MANAGER"]) {
+    try {
+      const ergm = await ethers.getContractAt(
+        ["function platformFeeReceiver() view returns (address)"],
+        modules["EARLY_REPAYMENT_GUARANTEE_MANAGER"]
+      );
+      ergmPlatformFeeReceiver = (await ergm.platformFeeReceiver()) as string;
     } catch {
       // skip
     }
@@ -187,6 +206,7 @@ export async function discoverTrackedAddresses(opts: {
     feeRouterAddr,
     platformTreasury,
     ecosystemVault,
+    ergmPlatformFeeReceiver,
     viewAddr,
     ...Object.values(modules),
     ...lpmRecipients,

@@ -7,7 +7,7 @@ import { Registry } from "../registry/Registry.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { ZeroAddress } from "../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
 
 /**
  * @title DegradationStorage
@@ -137,7 +137,8 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @dev 确保Registry地址不为零地址，防止无效调用
      */
     modifier onlyValidRegistry() { 
-        if (_registryAddr==address(0)) revert ZeroAddress(); 
+        if (_registryAddr==address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _; 
     }
     
@@ -188,6 +189,7 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if(initialRegistryAddr==address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
         _initializePredefinedHealthDetails();
@@ -196,7 +198,7 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
     /* ============ UUPS ============ */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry onlyAdmin {
         if (newImplementation == address(0)) revert ZeroAddress();
-        require(newImplementation.code.length > 0, "DegradationStorage: invalid implementation");
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
         IAccessControlManager(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL))
             .requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
     }

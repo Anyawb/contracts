@@ -50,7 +50,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       const ViewCacheF = await ethers.getContractFactory('ViewCache');
       await expect(upgrades.deployProxy(ViewCacheF, [ethers.ZeroAddress], { kind: 'uups' })).to.be.revertedWithCustomError(
         ViewCacheF,
-        'ViewCache__ZeroAddress'
+        'ZeroAddress'
       );
     });
 

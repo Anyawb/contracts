@@ -63,7 +63,7 @@ describe('AccessControlView', function () {
     it('零地址初始化应被拒绝', async function () {
       const AccessControlViewFactory = await ethers.getContractFactory('AccessControlView');
       await expect(upgrades.deployProxy(AccessControlViewFactory, [ZERO_ADDRESS], { kind: 'uups' })).to.be
-        .revertedWithCustomError(AccessControlViewFactory, 'AccessControlView__ZeroAddress');
+        .revertedWithCustomError(AccessControlViewFactory, 'ZeroAddress');
     });
 
     it('重复初始化应失败', async function () {

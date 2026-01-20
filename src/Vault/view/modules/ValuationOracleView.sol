@@ -11,7 +11,7 @@ import { IAccessControlManager } from "../../../interfaces/IAccessControlManager
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
 import { SystemEvents } from "../../SystemEvents.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
@@ -40,6 +40,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @notice Registry 有效性验证修饰符
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
     
@@ -60,6 +61,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @param initialRegistryAddr Registry合约地址
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -197,6 +199,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
 
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
@@ -239,6 +242,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
 
         if (newImplementation == address(0)) revert ValuationOracleView__ZeroImplementation();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice Storage gap for future upgrades

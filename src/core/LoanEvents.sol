@@ -4,14 +4,13 @@ pragma solidity ^0.8.20;
 /**
  * @title LoanEvents
  * @notice Canonical guarantee/loan-related events shared across Vault modules.
- * @dev Reverts if:
- *      - (none)
+ * @dev This is an event-only interface (SSOT for event signatures).
  *
- * Security:
- * - This is an event-only library; it does not read or write state
- * - Events are emitted by guarantee/settlement modules after successful state updates
+ * Rationale:
+ * - Contracts can `is LoanEvents` to include event ABIs without re-declaring them.
+ * - Offchain indexers can rely on stable signatures across modules.
  */
-library LoanEvents {
+interface LoanEvents {
     /**
      * @notice Emitted when a guarantee amount is locked.
      * @dev Reverts if:

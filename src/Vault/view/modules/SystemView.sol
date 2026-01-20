@@ -12,7 +12,7 @@ import { IGuaranteeFundManager } from "../../../interfaces/IGuaranteeFundManager
 import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ViewConstants } from "../ViewConstants.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
@@ -48,6 +48,7 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -63,6 +64,7 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
         // 尝试解析 ViewCache，如果未配置则保持为零地址（仅存储，不写缓存）
@@ -184,6 +186,7 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert SystemView__ZeroImplementation();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /*==================== Internal helpers (best-effort) ====================*/

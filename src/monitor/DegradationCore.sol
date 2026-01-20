@@ -121,7 +121,8 @@ contract DegradationCore is Initializable, UUPSUpgradeable {
      * @dev 确保Registry地址不为零地址，防止无效调用
      */
     modifier onlyValidRegistry() { 
-        if (_registryAddr==address(0)) revert ZeroAddress(); 
+        if (_registryAddr==address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _; 
     }
     
@@ -166,7 +167,8 @@ contract DegradationCore is Initializable, UUPSUpgradeable {
      * @custom:security 确保Registry地址不为零地址
      */
     function initialize(address initialRegistryAddr) external initializer {
-        require(initialRegistryAddr!=address(0),"DegradationCore: zero reg");
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr=initialRegistryAddr;
     }

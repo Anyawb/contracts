@@ -41,6 +41,7 @@ const ModuleKeys = {
   KEY_REWARD_MANAGER_V1: ethers.keccak256(ethers.toUtf8Bytes('REWARD_MANAGER_V1')),
   KEY_PRICE_ORACLE: ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE')),
   KEY_POSITION_VIEW: ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW')),
+  KEY_LIQUIDATION_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_MANAGER')),
 };
 
 // Action keys（与 ActionKeys.sol 保持一致）
@@ -48,7 +49,7 @@ const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
 
 describe('VaultLendingEngine – refactor regression', function () {
   async function deployFixture() {
-    const [vaultCore, liquidator, user] = await ethers.getSigners();
+    const [vaultCore, liquidator, liquidationManager, user] = await ethers.getSigners();
 
     // Deploy mocks
     const Registry = await ethers.getContractFactory('MockRegistry');
@@ -155,14 +156,16 @@ describe('VaultLendingEngine – refactor regression', function () {
     await registry.setModule(ModuleKeys.KEY_REWARD_MANAGER_V1, rewardManagerAddr);
     await registry.setModule(ModuleKeys.KEY_PRICE_ORACLE, await priceOracle.getAddress());
     await registry.setModule(ModuleKeys.KEY_POSITION_VIEW, await positionView.getAddress());
+    await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, liquidationManager.address);
 
     // Roles
     await acm.grantRole(ACTION_LIQUIDATE, liquidator.address);
+    await acm.grantRole(ACTION_LIQUIDATE, liquidationManager.address);
 
     // Seed collateral to get meaningful health factor
     await cm.depositCollateral(user.address, debtAsset, 200);
 
-    return { vaultCoreModule, vaultCore, liquidator, user, lending, registry, cm, vaultRouter, healthView, debtAsset, acm, priceOracle, settlementToken, lrm, positionView };
+    return { vaultCoreModule, vaultCore, liquidator, liquidationManager, user, lending, registry, cm, vaultRouter, healthView, debtAsset, acm, priceOracle, settlementToken, lrm, positionView };
   }
 
   describe('onlyVaultCore guard', function () {
@@ -646,16 +649,23 @@ describe('VaultLendingEngine – refactor regression', function () {
     it('should revert without ACTION_LIQUIDATE role', async function () {
       const { vaultCoreModule, user, lending, debtAsset, acm } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(user.address, debtAsset, 15, 0, 0);
+      // Use the liquidation executor address, but revoke role by not granting it for this caller.
+      // (In fixture we grant role to liquidationManager; here we simulate missing role by using `user` as executor.)
+      // First, set KEY_LIQUIDATION_MANAGER to `user` (who lacks ACTION_LIQUIDATE).
+      // This ensures the executor guard passes and the role gate is actually tested.
+      const registryAddr = await lending.registryAddr();
+      const registry = await ethers.getContractAt('MockRegistry', registryAddr);
+      await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, user.address);
       await expect(
-        lending.forceReduceDebt(user.address, debtAsset, 5)
+        lending.connect(user).forceReduceDebt(user.address, debtAsset, 5)
       ).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
 
     it('should reduce debt, push view/health with proper role', async function () {
-      const { vaultCoreModule, liquidator, lending, cm, healthView, vaultRouter, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, liquidator, liquidationManager, lending, cm, healthView, vaultRouter, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 40, 0, 0);
 
-      await lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 25);
+      await lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 25);
 
       expect(await lending.getDebt(liquidator.address, debtAsset)).to.equal(15);
       expect(await cm.getCollateral(liquidator.address, debtAsset)).to.equal(0); // liquidator had no collateral seeded
@@ -664,11 +674,11 @@ describe('VaultLendingEngine – refactor regression', function () {
     });
 
     it('should cap reduction to current debt amount', async function () {
-      const { vaultCoreModule, liquidator, lending, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, liquidator, liquidationManager, lending, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 40, 0, 0);
 
       // Try to reduce more than debt
-      await lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 100);
+      await lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 100);
 
       // Should only reduce to 0, not go negative
       expect(await lending.getDebt(liquidator.address, debtAsset)).to.equal(0);
@@ -676,11 +686,11 @@ describe('VaultLendingEngine – refactor regression', function () {
     });
 
     it('should update total debt by asset on liquidation', async function () {
-      const { vaultCoreModule, liquidator, lending, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, liquidator, liquidationManager, lending, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 50, 0, 0);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(50);
 
-      await lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 30);
+      await lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 30);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(20);
     });
   });
@@ -710,10 +720,10 @@ describe('VaultLendingEngine – refactor regression', function () {
     });
 
     it('should revert forceReduceDebt with zero amount', async function () {
-      const { vaultCoreModule, liquidator, lending, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, liquidator, liquidationManager, lending, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 30, 0, 0);
       await expect(
-        lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 0)
+        lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 0)
       ).to.be.revertedWithCustomError(lending, 'AmountIsZero');
     });
 
@@ -732,10 +742,10 @@ describe('VaultLendingEngine – refactor regression', function () {
     });
 
     it('should handle full liquidation correctly', async function () {
-      const { vaultCoreModule, liquidator, lending, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, liquidator, liquidationManager, lending, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 30, 0, 0);
       
-      await lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 30);
+      await lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 30);
       
       expect(await lending.getDebt(liquidator.address, debtAsset)).to.equal(0);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(0);
@@ -791,14 +801,14 @@ describe('VaultLendingEngine – refactor regression', function () {
     });
 
     it('should push health status on liquidation', async function () {
-      const { vaultCoreModule, liquidator, lending, healthView, cm, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, liquidator, liquidationManager, lending, healthView, cm, debtAsset } = await loadFixture(deployFixture);
       // Add collateral to liquidator so health factor is meaningful
       await cm.depositCollateral(liquidator.address, debtAsset, 200);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 50, 0, 0);
       
       const beforeHF = await healthView.getUserHealthFactor(liquidator.address);
       
-      await lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 30);
+      await lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 30);
       
       const afterHF = await healthView.getUserHealthFactor(liquidator.address);
       expect(afterHF).to.not.equal(beforeHF);
@@ -826,11 +836,11 @@ describe('VaultLendingEngine – refactor regression', function () {
     });
 
     it('should emit DebtRecorded on liquidation', async function () {
-      const { vaultCoreModule, liquidator, lending, debtAsset } = await loadFixture(deployFixture);
+      const { vaultCoreModule, liquidator, liquidationManager, lending, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 50, 0, 0);
       
       await expect(
-        lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 30)
+        lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 30)
       ).to.emit(lending, 'DebtRecorded')
         .withArgs(liquidator.address, debtAsset, 30, false);
     });

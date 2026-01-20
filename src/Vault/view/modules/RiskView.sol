@@ -10,7 +10,7 @@ import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { HealthFactorLib } from "../../../libraries/HealthFactorLib.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
 import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
@@ -46,6 +46,7 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ============ Modifiers ============
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -59,6 +60,7 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @param initialRegistryAddr Registry 地址
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -148,6 +150,7 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ Versioning (C+B baseline) ============

@@ -10,6 +10,7 @@ import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 
 // 常量迁移至 DataPushTypes
 
@@ -62,7 +63,8 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     // =========================  Modifiers  =========================
 
     modifier onlyValidRegistry() {
-        if (_registryAddr == address(0)) revert ViewCache__ZeroAddress();
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -78,7 +80,8 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @notice 初始化合约
     /// @dev 仅在首次部署时调用，一旦初始化后不可再次执行。
     function initialize(address initialRegistryAddr) external initializer {
-        if (initialRegistryAddr == address(0)) revert ViewCache__ZeroAddress();
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -197,6 +200,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal override onlyValidRegistry {
         AccessControlLibrary.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender, msg.sender);
         if (newImplementation == address(0)) revert ViewCache__ZeroImplementation();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice Storage gap for future upgrades

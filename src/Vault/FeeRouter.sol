@@ -20,7 +20,8 @@ import { IVaultCoreMinimal } from "../interfaces/IVaultCoreMinimal.sol";
 import { IFeeRouterView } from "../interfaces/IFeeRouterView.sol";
 import { 
     AmountIsZero, 
-    FeeRouter__ZeroAddress
+    FeeRouter__ZeroAddress,
+    NotAContract
 } from "../errors/StandardErrors.sol";
 
 /**
@@ -116,11 +117,34 @@ contract FeeRouter is
      */
     error FeeRouter__InvalidBatchSize();
 
+    /*━━━━━━━━━━━━━━━ Best-effort View Push Observability ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when a best-effort FeeRouterView push fails (must not revert main flow).
+    /// @param kind Push kind identifier.
+    /// @param payer User address when applicable; address(0) for system/global-only pushes.
+    /// @param token Token address when applicable; address(0) for system config pushes.
+    /// @param feeType Fee type when applicable; bytes32(0) otherwise.
+    /// @param viewAddr Target view address (may be zero if unresolved/misconfigured).
+    /// @param reason Raw revert data or an encoded failure reason.
+    event FeeRouterViewPushFailed(
+        bytes32 indexed kind,
+        address indexed payer,
+        address indexed token,
+        bytes32 feeType,
+        address viewAddr,
+        bytes reason
+    );
+
+    bytes32 private constant _PUSH_KIND_SYSTEM_CONFIG = keccak256("FEE_ROUTER_VIEW_PUSH_SYSTEM_CONFIG");
+    bytes32 private constant _PUSH_KIND_GLOBAL_STATS  = keccak256("FEE_ROUTER_VIEW_PUSH_GLOBAL_STATS");
+    bytes32 private constant _PUSH_KIND_USER_FEE       = keccak256("FEE_ROUTER_VIEW_PUSH_USER_FEE");
+    bytes32 private constant _PUSH_KIND_GLOBAL_FEE     = keccak256("FEE_ROUTER_VIEW_PUSH_GLOBAL_FEE_STAT");
+
     /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
     
     /// @notice Ensures the registry address is non-zero and contains code.
     modifier onlyValidRegistry() {
-        if (_registryAddr == address(0) || _registryAddr.code.length == 0) revert FeeRouter__ZeroAddress();
+        if (_registryAddr == address(0)) revert FeeRouter__ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -894,7 +918,17 @@ contract FeeRouter is
      */
     function _pushSystemConfigToView() internal {
         address viewAddr = _resolveFeeRouterViewAddr();
-        if (viewAddr == address(0) || viewAddr.code.length == 0) return;
+        if (viewAddr == address(0) || viewAddr.code.length == 0) {
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_SYSTEM_CONFIG,
+                address(0),
+                address(0),
+                bytes32(0),
+                viewAddr,
+                bytes("view unavailable")
+            );
+            return;
+        }
 
         address[] memory tokens = _copySupportedTokens();
         try IFeeRouterView(viewAddr).pushSystemConfigUpdate(
@@ -905,8 +939,15 @@ contract FeeRouter is
             tokens
         ) {
             _noop();
-        } catch {
-            _noop(); // best-effort: do not revert main flow
+        } catch (bytes memory reason) {
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_SYSTEM_CONFIG,
+                address(0),
+                address(0),
+                bytes32(0),
+                viewAddr,
+                reason
+            );
         }
     }
 
@@ -915,12 +956,29 @@ contract FeeRouter is
      */
     function _pushGlobalStatsToView() internal {
         address viewAddr = _resolveFeeRouterViewAddr();
-        if (viewAddr == address(0) || viewAddr.code.length == 0) return;
+        if (viewAddr == address(0) || viewAddr.code.length == 0) {
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_GLOBAL_STATS,
+                address(0),
+                address(0),
+                bytes32(0),
+                viewAddr,
+                bytes("view unavailable")
+            );
+            return;
+        }
 
         try IFeeRouterView(viewAddr).pushGlobalStatsUpdate(_totalDistributions, _totalAmountDistributed) {
             _noop();
-        } catch {
-            _noop(); // best-effort
+        } catch (bytes memory reason) {
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_GLOBAL_STATS,
+                address(0),
+                address(0),
+                bytes32(0),
+                viewAddr,
+                reason
+            );
         }
     }
 
@@ -935,18 +993,21 @@ contract FeeRouter is
         uint256 appliedFeeBps
     ) internal {
         address viewAddr = _resolveFeeRouterViewAddr();
-        if (viewAddr == address(0) || viewAddr.code.length == 0) return;
+        if (viewAddr == address(0) || viewAddr.code.length == 0) {
+            emit FeeRouterViewPushFailed(_PUSH_KIND_USER_FEE, payer, token, feeType, viewAddr, bytes("view unavailable"));
+            return;
+        }
 
         try IFeeRouterView(viewAddr).pushUserFeeUpdate(payer, feeType, totalAmount, appliedFeeBps) {
             _noop();
-        } catch {
-            _noop(); // best-effort
+        } catch (bytes memory reason) {
+            emit FeeRouterViewPushFailed(_PUSH_KIND_USER_FEE, payer, token, feeType, viewAddr, reason);
         }
 
         try IFeeRouterView(viewAddr).pushGlobalFeeStatistic(token, feeType, _feeStatistics[token][feeType]) {
             _noop();
-        } catch {
-            _noop(); // best-effort
+        } catch (bytes memory reason) {
+            emit FeeRouterViewPushFailed(_PUSH_KIND_GLOBAL_FEE, payer, token, feeType, viewAddr, reason);
         }
     }
 

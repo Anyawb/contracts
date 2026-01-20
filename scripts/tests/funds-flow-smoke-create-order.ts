@@ -49,6 +49,8 @@ async function main() {
 
   const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
   const collateralManagerAddr = await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"));
+  const gfmAddr = await registry.getModule(key("GUARANTEE_FUND_MANAGER"));
+  const ergmAddr = await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE_MANAGER"));
   const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr)) as any;
   const loanNftAddr = await registry.getModuleOrRevert(key("LOAN_NFT"));
   const loanNft = await ethers.getContractAt("LoanNFT", loanNftAddr);
@@ -57,6 +59,8 @@ async function main() {
   console.log("ORDER_ENGINE", orderEngineAddr);
   console.log("COLLATERAL_MANAGER", collateralManagerAddr);
   console.log("LOAN_NFT", loanNftAddr);
+  if (gfmAddr && gfmAddr !== ethers.ZeroAddress) console.log("GUARANTEE_FUND_MANAGER", gfmAddr);
+  if (ergmAddr && ergmAddr !== ethers.ZeroAddress) console.log("EARLY_REPAYMENT_GUARANTEE_MANAGER", ergmAddr);
 
   const ACTION_ADD_WHITELIST = key("ADD_WHITELIST");
   const ACTION_UPDATE_PRICE = key("UPDATE_PRICE");
@@ -202,6 +206,25 @@ async function main() {
   const sigBorrower = await borrower.signTypedData(domain, typesBorrow as any, borrowIntent as any);
   const sigLender = await lender.signTypedData(domain, typesLend as any, lendIntent as any);
 
+  // Extension Flow: if guarantee is enabled for this asset, borrower must approve GFM for promisedInterest
+  // before finalizeMatch (VBL will pull it via GFM.lockGuarantee).
+  if (ergmAddr && ergmAddr !== ethers.ZeroAddress && gfmAddr && gfmAddr !== ethers.ZeroAddress) {
+    try {
+      const ergm = await ethers.getContractAt(["function isGuaranteeEnabled(address) view returns (bool)"], ergmAddr);
+      const enabled = (await ergm.isGuaranteeEnabled(usdc.target)) as boolean;
+      if (enabled) {
+        const YEAR = 365n * ONE_DAY;
+        const termSec = BigInt(termDays) * ONE_DAY;
+        const promisedInterest = (borrowAmt * rateBps * termSec) / (10_000n * YEAR);
+        if (promisedInterest > 0n) {
+          await usdc.connect(borrower).approve(gfmAddr, promisedInterest);
+        }
+      }
+    } catch (e) {
+      console.log("  ⚠️  ExtensionFlow pre-approve skipped (could not read ERGM/isGuaranteeEnabled):", e);
+    }
+  }
+
   const borrowerTokensBefore = await loanNft.getUserTokens(borrower.address);
   const tx = await vbl.connect(deployer).finalizeMatch(
     borrowIntent,
@@ -231,6 +254,27 @@ async function main() {
   console.log("LoanNFT tokenId", newTokenId?.toString());
   console.log("borrower", borrower.address);
   console.log("keeper", keeper.address);
+
+  // Best-effort Extension Flow sanity: if guarantee was enabled, ensure custody+record exist.
+  if (ergmAddr && ergmAddr !== ethers.ZeroAddress && gfmAddr && gfmAddr !== ethers.ZeroAddress) {
+    try {
+      const ergm = await ethers.getContractAt(
+        ["function isGuaranteeEnabled(address) view returns (bool)", "function hasActiveGuarantee(address,address) view returns (bool)"],
+        ergmAddr
+      );
+      const enabled = (await ergm.isGuaranteeEnabled(usdc.target)) as boolean;
+      if (enabled) {
+        const gfm = await ethers.getContractAt(["function getLockedGuarantee(address,address) view returns (uint256)"], gfmAddr);
+        const locked = (await gfm.getLockedGuarantee(borrower.address, usdc.target)) as bigint;
+        const active = (await ergm.hasActiveGuarantee(borrower.address, usdc.target)) as boolean;
+        console.log(`ExtensionFlow: guarantee enabled => locked=${locked.toString()} active=${active}`);
+        if (!active) throw new Error("ExtensionFlow: expected ERGM.hasActiveGuarantee=true after finalizeMatch");
+        if (locked === 0n) throw new Error("ExtensionFlow: expected GFM.getLockedGuarantee > 0 after finalizeMatch");
+      }
+    } catch (e) {
+      console.log("  ⚠️  ExtensionFlow post-check skipped:", e);
+    }
+  }
 
   const termSec = BigInt(termDays) * ONE_DAY;
   const createdBlock = await ethers.provider.getBlock(receipt!.blockNumber);

@@ -7,7 +7,7 @@ import { IRegistry } from "../interfaces/IRegistry.sol";
 import { SystemEvents } from "./SystemEvents.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
-import { InvalidHealthFactor, ZeroAddress } from "../errors/StandardErrors.sol";
+import { InvalidHealthFactor, NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 
 /* -------------------------------------------------------------------------- */
@@ -49,6 +49,7 @@ contract VaultAdmin is
     /// @notice Ensure Registry is configured.
     modifier onlyValidRegistry() {
         if (_adminRegistryAddr == address(0)) revert ZeroAddress();
+        if (_adminRegistryAddr.code.length == 0) revert NotAContract(_adminRegistryAddr);
         _;
     }
 
@@ -76,6 +77,7 @@ contract VaultAdmin is
         address initialRegistryAddr
     ) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         
         __UUPSUpgradeable_init();
         

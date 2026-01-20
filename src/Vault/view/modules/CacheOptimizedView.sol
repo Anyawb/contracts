@@ -8,7 +8,7 @@ import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { ZeroAddress, EmptyArray, ArrayLengthMismatch } from "../../../errors/StandardErrors.sol";
+import { ArrayLengthMismatch, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
@@ -67,6 +67,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -77,6 +78,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -218,6 +220,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert CacheOptimizedView__ZeroImplementation();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ Versioning (C+B baseline) ============

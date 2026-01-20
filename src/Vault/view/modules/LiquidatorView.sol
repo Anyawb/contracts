@@ -12,6 +12,7 @@ import {
     EmptyArray,
     ArrayLengthMismatch,
     MissingRole,
+    NotAContract,
     InvalidCaller
 } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
@@ -98,6 +99,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      */
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
     
@@ -177,6 +179,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         address initialSystemView
     ) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -1031,6 +1034,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ INTERNAL HELPERS ━━━━━━━━━━━━━━━*/

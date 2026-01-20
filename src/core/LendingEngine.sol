@@ -15,7 +15,7 @@ import { IRegistry } from "../interfaces/IRegistry.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IRegistryDynamicModuleKey } from "../interfaces/IRegistryDynamicModuleKey.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { PausedSystem } from "../errors/StandardErrors.sol";
+import { NotAContract, PausedSystem } from "../errors/StandardErrors.sol";
 import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
 import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../constants/DataPushTypes.sol";
@@ -287,6 +287,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     /// @notice Validate Registry address is set.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert LendingEngine__ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 

@@ -18,6 +18,7 @@ import { ILiquidationEventsView } from "../../../interfaces/ILiquidationEventsVi
 import { ILiquidationManager } from "../../../interfaces/ILiquidationManager.sol";
 import { ILiquidationPayoutManager } from "../../../interfaces/ILiquidationPayoutManager.sol";
 import { ZeroAddress, AmountIsZero, ArrayLengthMismatch, EmptyArray } from "../../../errors/StandardErrors.sol";
+import { CacheEvents } from "../../CacheEvents.sol";
 
 /**
  * @title LiquidationManager
@@ -39,7 +40,8 @@ contract LiquidationManager is
     UUPSUpgradeable,
     ReentrancyGuardUpgradeable,
     PausableUpgradeable,
-    ILiquidationManager
+    ILiquidationManager,
+    CacheEvents
 {
     /**
      * @notice Registry contract address for module resolution and access control.
@@ -55,25 +57,7 @@ contract LiquidationManager is
         return _registryAddr;
     }
 
-    /**
-     * @notice Emitted when View push fails (for off-chain retry/alerting).
-     * @param user Target user address
-     * @param asset Collateral asset address (used as indexed asset)
-     * @param viewAddr View contract address (may be zero if view not configured)
-     * @param collateral Collateral amount in this push (token decimals)
-     * @param debt Debt amount in this push (token decimals)
-     * @param reason Failure reason (revert data, if available)
-     * @dev Follows event naming: PascalCase, past tense.
-     * @dev Emitted when LiquidatorView push fails; does not affect ledger writes.
-     */
-    event CacheUpdateFailed(
-        address indexed user,
-        address indexed asset,
-        address viewAddr,
-        uint256 collateral,
-        uint256 debt,
-        bytes reason
-    );
+    // NOTE: CacheUpdateFailed is declared in CacheEvents (SSOT) and is inherited here.
 
     /**
      * @notice Emitted when residual value distribution is executed.
@@ -542,14 +526,36 @@ contract LiquidationManager is
                     ) {
                         pushedPayout = true;
                     } catch (bytes memory reason) {
-                        reason; // ignore (non-empty for solhint)
+                        // Best-effort observability: emit failure event for off-chain alerting/retry.
+                        emit CacheUpdateFailed(
+                            user,
+                            collateralAsset,
+                            viewAddr,
+                            collateralAmount,
+                            debtAmount,
+                            abi.encode("pushLiquidationPayout failed", reason)
+                        );
                     }
                     pushedPayout;
                 } catch (bytes memory reason) {
-                    reason; // ignore (non-empty for solhint)
+                    emit CacheUpdateFailed(
+                        user,
+                        collateralAsset,
+                        viewAddr,
+                        collateralAmount,
+                        debtAmount,
+                        abi.encode("calculateShares failed", reason)
+                    );
                 }
             } catch (bytes memory reason) {
-                reason; // ignore (non-empty for solhint)
+                emit CacheUpdateFailed(
+                    user,
+                    collateralAsset,
+                    viewAddr,
+                    collateralAmount,
+                    debtAmount,
+                    abi.encode("getRecipients failed", reason)
+                );
             }
         }
     }
@@ -649,16 +655,38 @@ contract LiquidationManager is
                         ) {
                             pushedPayout = true;
                         } catch (bytes memory reason) {
-                            reason; // ignore (non-empty for solhint)
+                            emit CacheUpdateFailed(
+                                users[i],
+                                collateralAssets[i],
+                                viewAddr,
+                                collateralAmounts[i],
+                                debtAmounts[i],
+                                abi.encode("pushLiquidationPayout failed", reason)
+                            );
                         }
                         pushedPayout;
                     } catch (bytes memory reason) {
-                        reason; // ignore (non-empty for solhint)
+                        emit CacheUpdateFailed(
+                            users[i],
+                            collateralAssets[i],
+                            viewAddr,
+                            collateralAmounts[i],
+                            debtAmounts[i],
+                            abi.encode("calculateShares failed", reason)
+                        );
                     }
                     unchecked { ++i; }
                 }
             } catch (bytes memory reason) {
-                reason; // ignore (non-empty for solhint)
+                // If recipients cannot be resolved, emit a representative failure (first item).
+                emit CacheUpdateFailed(
+                    users[0],
+                    collateralAssets[0],
+                    viewAddr,
+                    collateralAmounts[0],
+                    debtAmounts[0],
+                    abi.encode("getRecipients failed", reason)
+                );
             }
         }
     }

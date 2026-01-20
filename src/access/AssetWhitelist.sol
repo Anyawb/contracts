@@ -11,7 +11,7 @@ import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../constants/DataPushTypes.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { ZeroAddress } from "../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
 import { Registry } from "../registry/Registry.sol";
 
 /**
@@ -44,6 +44,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
     /// @notice Ensures the stored Registry address is set (non-zero).
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
     
@@ -166,6 +167,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         __UUPSUpgradeable_init();
         
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         
         _registryAddr = initialRegistryAddr;
         
@@ -538,6 +540,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
 
         // solhint-disable-next-line not-rely-on-time
         uint256 ts = block.timestamp;

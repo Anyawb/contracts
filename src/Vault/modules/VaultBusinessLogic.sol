@@ -12,7 +12,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IAssetWhitelist } from "../../interfaces/IAssetWhitelist.sol";
 import { ICollateralManager } from "../../interfaces/ICollateralManager.sol";
 import { SystemEvents } from "../SystemEvents.sol";
-import { AmountIsZero, AssetNotAllowed, ArrayLengthMismatch, ZeroAddress } from "../../errors/StandardErrors.sol";
+import { AmountIsZero, AssetNotAllowed, ArrayLengthMismatch, NotAContract, ZeroAddress } from "../../errors/StandardErrors.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
@@ -24,6 +24,8 @@ import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../constants/DataPushTypes.sol";
 import { Registry } from "../../registry/Registry.sol";
 import { ILenderPoolVault } from "../../interfaces/ILenderPoolVault.sol";
+import { IGuaranteeFundManager } from "../../interfaces/IGuaranteeFundManager.sol";
+import { IEarlyRepaymentGuaranteeManager } from "../../interfaces/IEarlyRepaymentGuaranteeManager.sol";
 
 /**
  * @title VaultBusinessLogic
@@ -72,6 +74,7 @@ contract VaultBusinessLogic is
     /// @notice Validates Registry address is set.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -151,6 +154,44 @@ contract VaultBusinessLogic is
      */
     function _getModuleAddress(bytes32 moduleKey) internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
+    }
+
+    /**
+     * @notice Best-effort lock + record the early-repayment guarantee on borrow-time (Extension Flow).
+     * @dev Notes:
+     * - This is an optional extension path controlled by ERGM's per-asset toggle.
+     * - If the feature is disabled or modules are not registered, this function is a no-op.
+     * - If enabled and configured, failures revert to avoid SSOT/accounting drift (资金链对账一致性).
+     */
+    function _maybeLockEarlyRepaymentGuarantee(
+        address borrower,
+        address lender,
+        address asset,
+        uint256 principal,
+        uint16 termDays,
+        uint256 annualRateBps
+    ) internal {
+        address ergm = Registry(_registryAddr).getModule(ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE);
+        if (ergm == address(0)) return;
+        if (!IEarlyRepaymentGuaranteeManager(ergm).isGuaranteeEnabled(asset)) return;
+
+        uint256 promisedInterest = VaultBusinessLogicLibrary.calculateExpectedInterest(principal, annualRateBps, termDays);
+        if (promisedInterest == 0) return;
+
+        address gfm = _getModuleAddress(ModuleKeys.KEY_GUARANTEE_FUND);
+
+        // (A) Custody in: pull guarantee from borrower into GuaranteeFundManager (SSOT).
+        IGuaranteeFundManager(gfm).lockGuarantee(borrower, asset, promisedInterest);
+
+        // (B) Semantic record: store guarantee record (no transfers in ERGM).
+        IEarlyRepaymentGuaranteeManager(ergm).lockGuaranteeRecord(
+            borrower,
+            lender,
+            asset,
+            principal,
+            promisedInterest,
+            termDays
+        );
     }
 
  
@@ -523,12 +564,23 @@ contract VaultBusinessLogic is
         // VaultCore/VaultRouter.
         // Lender field convention: use the pool contract address (LenderPoolVault), not the lender EOA.
         address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
-        SettlementMatchLib.finalizeAtomicFull(
+        uint256 orderId = SettlementMatchLib.finalizeAtomicFull(
             _registryAddr,
             borrowIntent.borrower,
             pool,
             address(0),
             0,
+            borrowIntent.borrowAsset,
+            borrowIntent.amount,
+            borrowIntent.termDays,
+            borrowIntent.rateBps
+        );
+        orderId; // silence (for now; orderId SSOT is in ORDER_ENGINE/NFT events)
+
+        // Extension Flow: lock + record early-repayment guarantee (if enabled for this asset).
+        _maybeLockEarlyRepaymentGuarantee(
+            borrowIntent.borrower,
+            pool,
             borrowIntent.borrowAsset,
             borrowIntent.amount,
             borrowIntent.termDays,
@@ -610,6 +662,8 @@ contract VaultBusinessLogic is
             termDays,
             annualRateBps
         );
+        // Extension Flow: lock + record early-repayment guarantee (if enabled for this asset).
+        _maybeLockEarlyRepaymentGuarantee(user, pool, asset, amount, termDays, annualRateBps);
         VaultBusinessLogicLibrary.emitBusinessEvents("borrowWithRate", user, asset, amount, ActionKeys.ACTION_BORROW);
     }
 

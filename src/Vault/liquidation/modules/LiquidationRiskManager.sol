@@ -10,7 +10,7 @@ import {LiquidationRiskLib} from "../libraries/LiquidationRiskLib.sol";
 import {HealthFactorLib} from "../../../libraries/HealthFactorLib.sol";
 import {ActionKeys} from "../../../constants/ActionKeys.sol";
 import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
-import {ZeroAddress} from "../../../errors/StandardErrors.sol";
+import {NotAContract, ZeroAddress} from "../../../errors/StandardErrors.sol";
 
 
 import {ModuleCache} from "../libraries/ModuleCache.sol";
@@ -172,6 +172,7 @@ contract LiquidationRiskManager is
         uint256 initialMaxBatchSize
     ) public initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
 
@@ -217,6 +218,8 @@ contract LiquidationRiskManager is
      *      - caller is not the CacheMaintenanceManager address
      */
     function _requireCacheMaintainer() internal view {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address maint = Registry(_registryAddr).getModuleOrRevert(
             ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER
         );
@@ -255,6 +258,7 @@ contract LiquidationRiskManager is
         onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
     {
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ Core Module Resolution (Registry + Cache) ============

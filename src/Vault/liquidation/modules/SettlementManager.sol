@@ -17,7 +17,7 @@ import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskMan
 import { ILoanNFT } from "../../../interfaces/ILoanNFT.sol";
 import { ISettlementManager } from "../../../interfaces/ISettlementManager.sol";
 import { ILiquidationPayoutManager } from "../../../interfaces/ILiquidationPayoutManager.sol";
-import { ZeroAddress, AmountIsZero } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress, AmountIsZero } from "../../../errors/StandardErrors.sol";
 import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
@@ -26,6 +26,7 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { IOrderEngine } from "../../../interfaces/IOrderEngine.sol";
 import { IOrderEngineViewAdapter } from "../../../interfaces/IOrderEngineViewAdapter.sol";
 import { IOrderEngineRepayAdapter } from "../../../interfaces/IOrderEngineRepayAdapter.sol";
+import { IEarlyRepaymentGuaranteeManager } from "../../../interfaces/IEarlyRepaymentGuaranteeManager.sol";
 
 /// @notice LiquidationManager extension used by SettlementManager to preserve the original keeper address.
 interface ILiquidationManagerFromSettlementManager {
@@ -62,6 +63,8 @@ contract SettlementManager is
     ISettlementManager
 {
     using SafeERC20 for IERC20;
+    /// @dev Keep in sync with ORDER_ENGINE's ON_TIME_WINDOW baseline (currently 24 hours).
+    uint256 private constant _ON_TIME_WINDOW = 24 hours;
     /// @notice Registry address for module resolution and access control.
     /// @dev Stored privately; exposed via explicit getter `registryAddrVar()` (no public state variable).
     address private _registryAddr;
@@ -248,6 +251,13 @@ contract SettlementManager is
 
     // ============ Modifiers ============
 
+    /// @notice Ensure Registry is configured and is a contract.
+    modifier onlyValidRegistry() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
+        _;
+    }
+
     /**
      * @notice Require that caller is VaultCore.
      * @dev Reverts if:
@@ -255,6 +265,8 @@ contract SettlementManager is
      *      - caller is not the VaultCore address
      */
     modifier onlyVaultCore() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
         if (msg.sender != vaultCore) revert SettlementManager__OnlyVaultCore();
         _;
@@ -288,6 +300,7 @@ contract SettlementManager is
     function repayAndSettle(address user, address debtAsset, uint256 repayAmount, uint256 orderId)
         external
         override
+        onlyValidRegistry
         whenNotPaused
         onlyVaultCore
         nonReentrant
@@ -342,6 +355,28 @@ contract SettlementManager is
             revert SettlementManager__DebtNotCleared();
         }
 
+        // 3) Extension Flow (Early-repayment guarantee):
+        // If the order is fully repaid AND classified as "early" (OrderEngine SSOT window),
+        // trigger ERGM -> GFM custodial settlement.
+        //
+        // NOTE: ERGM enforces its own per-asset enable switch; if not enabled, this is a no-op.
+        if (releasedAllCollateral) {
+            // solhint-disable-next-line not-rely-on-time
+            bool isEarly = (block.timestamp + _ON_TIME_WINDOW < ord.maturity);
+            if (isEarly) {
+                address ergm = Registry(_registryAddr).getModule(ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE);
+                if (ergm != address(0)) {
+                    // Only settle if a guarantee is active for this (user, asset).
+                    if (
+                        IEarlyRepaymentGuaranteeManager(ergm).isGuaranteeEnabled(debtAsset) &&
+                        IEarlyRepaymentGuaranteeManager(ergm).hasActiveGuarantee(user, debtAsset)
+                    ) {
+                        IEarlyRepaymentGuaranteeManager(ergm).settleEarlyRepayment(user, debtAsset, repayAmount);
+                    }
+                }
+            }
+        }
+
         // solhint-disable-next-line not-rely-on-time
         uint256 ts = block.timestamp;
         emit RepayAndSettleProcessed(user, debtAsset, repayAmount, orderId, releasedAllCollateral, ts);
@@ -383,7 +418,7 @@ contract SettlementManager is
      *
      * @param orderId Order ID (position primary key, SSOT)
      */
-    function settleOrLiquidate(uint256 orderId) external override whenNotPaused nonReentrant {
+    function settleOrLiquidate(uint256 orderId) external override onlyValidRegistry whenNotPaused nonReentrant {
         // NOTE: orderId can be 0 (current ORDER_ENGINE / LoanNFT minting starts from 0).
         // Existence is validated below via ORDER_ENGINE._getLoanOrderForView(orderId).
         _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
@@ -415,6 +450,21 @@ contract SettlementManager is
         bool overdue = (block.timestamp > ord.maturity) && (ILendingEngineBasic(le).getDebt(targetUser, debtAsset) > 0);
         bool riskLiquidatable = ILiquidationRiskManager(risk).isLiquidatable(targetUser);
         if (!overdue && !riskLiquidatable) revert SettlementManager__NotLiquidatable();
+
+        // Extension Flow (Default guarantee processing):
+        // When entering default/passive-liquidation branch, process guarantee forfeiture if active.
+        // NOTE: ERGM enforces its own per-asset enable switch; if not enabled, this is a no-op.
+        {
+            address ergm = Registry(_registryAddr).getModule(ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE);
+            if (ergm != address(0)) {
+                if (
+                    IEarlyRepaymentGuaranteeManager(ergm).isGuaranteeEnabled(debtAsset) &&
+                    IEarlyRepaymentGuaranteeManager(ergm).hasActiveGuarantee(targetUser, debtAsset)
+                ) {
+                    IEarlyRepaymentGuaranteeManager(ergm).processDefault(targetUser, debtAsset);
+                }
+            }
+        }
 
         uint256 totalDebt = ILendingEngineBasic(le).getDebt(targetUser, debtAsset);
         uint256 debtAmount = ILendingEngineBasic(le).getReducibleDebtAmount(targetUser, debtAsset);
@@ -593,7 +643,7 @@ contract SettlementManager is
      * @notice Enable/disable strict full-repay auto-release mode.
      * @dev Requires ACTION_SET_PARAMETER role.
      */
-    function setRequireFullRepayRelease(bool enabled) external {
+    function setRequireFullRepayRelease(bool enabled) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         _requireFullRepayRelease = enabled;
         emit RequireFullRepayReleaseUpdated(enabled);

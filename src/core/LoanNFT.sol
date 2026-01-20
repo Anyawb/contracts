@@ -17,7 +17,7 @@ import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ILoanNFT } from "../interfaces/ILoanNFT.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { ZeroAddress } from "../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
 import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../constants/DataPushTypes.sol";
 
@@ -120,6 +120,7 @@ contract LoanNFT is
      */
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 

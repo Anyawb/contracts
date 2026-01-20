@@ -381,11 +381,22 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
   describe('forceReduceDebt liquidation entry', function () {
     it('should revert when caller lacks ACTION_LIQUIDATE', async function () {
-      const { vaultCoreModule, lending, debtAsset, randomCaller, acm } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, lending, debtAsset, randomCaller, acm, registry } = await loadFixture(deployDualEntryFixture);
       await vaultCoreModule.borrow(randomCaller.address, debtAsset, 25, 0, 0);
+      // Make the caller be the liquidation executor, but do NOT grant ACTION_LIQUIDATE.
+      await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, randomCaller.address);
       await expect(
         lending.connect(randomCaller).forceReduceDebt(randomCaller.address, debtAsset, 10)
       ).to.be.revertedWithCustomError(acm, 'MissingRole');
+    });
+
+    it('should revert when caller is not an authorized executor even if caller has ACTION_LIQUIDATE', async function () {
+      const { vaultCoreModule, lending, debtAsset, liquidator } = await loadFixture(deployDualEntryFixture);
+      // liquidator has ACTION_LIQUIDATE in fixture, but is NOT registered as KEY_LIQUIDATION_MANAGER (executor).
+      await vaultCoreModule.borrow(liquidator.address, debtAsset, 25, 0, 0);
+      await expect(
+        lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 10)
+      ).to.be.revertedWithCustomError(lending, 'VaultLendingEngine__OnlyLiquidationExecutor');
     });
 
     it('should reduce debt directly with ACTION_LIQUIDATE and push View/Health', async function () {
@@ -404,14 +415,14 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     });
 
     it('should not underflow debt when reducing more than outstanding', async function () {
-      const { vaultCoreModule, liquidator, lending, debtAsset, vaultRouter } = await loadFixture(deployDualEntryFixture);
+      const { vaultCoreModule, liquidator, liquidationManager, lending, debtAsset, vaultRouter } = await loadFixture(deployDualEntryFixture);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 30, 0, 0);
 
       // NOTE: Current implementation pushes debtDelta = -amount (requested), not the capped delta.
       // This can make the downstream View delta push revert; per Architecture-Guide this path is best-effort
       // and should emit CacheUpdateFailed instead of reverting the ledger update.
       await expect(
-        lending.connect(liquidator).forceReduceDebt(liquidator.address, debtAsset, 80)
+        lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 80)
       )
         .to.emit(lending, 'DebtRecorded')
         .withArgs(liquidator.address, debtAsset, 30, false)

@@ -13,10 +13,11 @@ import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ZeroAddress, EmptyArray, ArrayLengthMismatch } from "../../../errors/StandardErrors.sol";
+import { ArrayLengthMismatch, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+import { CacheEvents } from "../../CacheEvents.sol";
 
 interface IVaultCoreViewAddr {
     function viewContractAddrVar() external view returns (address);
@@ -26,7 +27,7 @@ interface IVaultCoreViewAddr {
 /// @notice 用户抵押/债务视图模块 – 负责维护位置缓存并提供 0-gas 查询接口
 /// @dev 拆分自原 UserView；不保存复杂业务状态，仅存轻量缓存
 /// @custom:security-contact security@example.com
-contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned {
+contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEvents {
     // ============ Events ============
     event UserPositionCached(address indexed user, address indexed asset, uint256 collateral, uint256 debt, uint256 ts);
     /// @notice 附带版本的缓存事件（向后兼容：保留旧事件）
@@ -38,7 +39,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint64 version,
         uint256 ts
     );
-    event CacheUpdateFailed(address indexed user, address indexed asset, address viewAddr, uint256 collateral, uint256 debt, bytes reason);
+    // NOTE: CacheUpdateFailed is declared in CacheEvents (SSOT) and is inherited here.
     /// @notice 幂等重复请求被忽略（不重复写缓存）
     event IdempotentRequestIgnored(address indexed user, address indexed asset, bytes32 indexed requestId, uint64 seq);
 
@@ -78,6 +79,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ============ Modifiers ============
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -116,6 +118,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -617,6 +620,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert PositionView__ZeroImplementation();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ Module resolution ============

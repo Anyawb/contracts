@@ -11,6 +11,7 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 import { IOrderEngine } from "../../../interfaces/IOrderEngine.sol";
 import { IOrderEngineViewAdapter } from "../../../interfaces/IOrderEngineViewAdapter.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 
 /// @title LendingEngineView
 /// @notice 仅负责借贷引擎相关的数据查询（0 gas），不承载任何业务写操作
@@ -28,7 +29,8 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 	// =========================  Modifiers  =========================
 
 	modifier onlyValidRegistry() {
-		if (_registryAddr == address(0)) revert LendingEngineView__ZeroAddress();
+		if (_registryAddr == address(0)) revert ZeroAddress();
+		if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
 		_;
 	}
 
@@ -40,7 +42,8 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 	}
 
 	function initialize(address initialRegistryAddr) external initializer {
-		if (initialRegistryAddr == address(0)) revert LendingEngineView__ZeroAddress();
+		if (initialRegistryAddr == address(0)) revert ZeroAddress();
+		if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
 		__UUPSUpgradeable_init();
 		_registryAddr = initialRegistryAddr;
@@ -99,7 +102,8 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 		// 仅管理员可升级
 		address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
 		IAccessControlManager(acm).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-		if (newImplementation == address(0)) revert LendingEngineView__ZeroAddress();
+		if (newImplementation == address(0)) revert ZeroAddress();
+		if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
 	}
 
 	/// @notice 兼容旧版 getter

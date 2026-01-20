@@ -17,7 +17,7 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
   const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
 
   async function deployFixture() {
-    const [admin, routerEOA, user, liquidator] = await ethers.getSigners();
+    const [admin, routerEOA, routerEOA2, user, liquidator] = await ethers.getSigners();
 
     // Registry + ACM
     const Registry = await ethers.getContractFactory('MockRegistry');
@@ -91,6 +91,7 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
     return {
       admin,
       routerEOA,
+      routerEOA2,
       user,
       liquidator,
       registry,
@@ -127,6 +128,34 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
 
     expect(await asset.balanceOf(user.address)).to.equal(beforeUser - depositAmount);
     expect(await asset.balanceOf(cmAddr)).to.equal(beforeCM + depositAmount);
+  });
+
+  it('CollateralManager: View address SSOT — changing VaultCore.viewContractAddrVar switches authorized router immediately', async function () {
+    const { collateralManager, routerEOA, routerEOA2, user, asset, assetAddr, depositAmount, registry } =
+      await loadFixture(deployFixture);
+
+    // Initial routerEOA is authorized (MockVaultCoreView.viewContractAddrVar == routerEOA).
+    await collateralManager.connect(routerEOA).depositCollateral(user.address, assetAddr, 10n);
+
+    // Switch the authoritative "view/router" address in VaultCore mock.
+    const vaultCoreAddr = await registry.getModule(ModuleKeys.KEY_VAULT_CORE);
+    const vaultCore = await ethers.getContractAt('MockVaultCoreView', vaultCoreAddr);
+    await vaultCore.setViewContractAddr(routerEOA2.address);
+
+    // Old router must no longer be authorized (no stale/branching sources).
+    await expect(
+      collateralManager.connect(routerEOA).depositCollateral(user.address, assetAddr, 10n)
+    ).to.be.revertedWithCustomError(collateralManager, 'CollateralManager__UnauthorizedAccess');
+
+    // New router becomes authorized immediately.
+    await collateralManager.connect(routerEOA2).depositCollateral(user.address, assetAddr, 10n);
+
+    expect(await collateralManager.getCollateral(user.address, assetAddr)).to.equal(20n);
+
+    // sanity: user balance decreased by the two successful deposits
+    // (we don't assert full token balances here because other tests may change mint/approve assumptions).
+    expect(depositAmount).to.be.greaterThanOrEqual(20n);
+    expect(await asset.balanceOf(user.address)).to.equal(depositAmount - 20n);
   });
 
   it('PositionView: getUserTotalCollateralValue uses oracle and returns value', async function () {

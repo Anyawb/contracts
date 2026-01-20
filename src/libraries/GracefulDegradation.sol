@@ -5,6 +5,7 @@ pragma solidity ^0.8.20;
 import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
 import { IPriceOracleAdapter } from "../interfaces/IPriceOracleAdapter.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title GracefulDegradation
 /// @notice 优雅降级库，提供通用的价格获取和错误处理功能
@@ -183,11 +184,6 @@ library GracefulDegradation {
         DegradationConfig memory config,
         CacheStorage storage cacheStorage
     ) internal view returns (PriceResult memory result) {
-        // 验证输入参数
-        require(priceOracleAddr != address(0), "Invalid price oracle address");
-        require(assetAddr != address(0), "Invalid asset address");
-        require(amountValue > 0, "Amount must be greater than zero");
-        
         if (amountValue == 0) {
             result.value = 0;
             result.isValid = true;
@@ -196,6 +192,14 @@ library GracefulDegradation {
             result.timestamp = block.timestamp;
             result.priceAge = 0;
             return result;
+        }
+        
+        // Best-effort input guards (never revert).
+        if (priceOracleAddr == address(0)) {
+            return _applyFallbackStrategy(assetAddr, amountValue, "Invalid price oracle address", config);
+        }
+        if (assetAddr == address(0)) {
+            return _applyFallbackStrategy(assetAddr, amountValue, "Invalid asset address", config);
         }
 
         // 使用重试机制获取价格
@@ -263,6 +267,17 @@ library GracefulDegradation {
 
         // 计算价值（修复：使用 SafeMath 的完整检查）
         uint256 calculatedValue = calculateAssetValue(amountValue, price, decimals);
+        if (calculatedValue == 0) {
+            // Best-effort: allow 0 value (rounding) without reverting; mark as valid.
+            // Downstream callers may treat 0 as acceptable for tiny amounts.
+            result.value = 0;
+            result.isValid = true;
+            result.reason = "Price calculation successful (rounded to zero)";
+            result.usedFallback = false;
+            result.timestamp = timestamp;
+            result.priceAge = priceAge;
+            return result;
+        }
 
         // 注意：缓存写入功能已移至单独的 non-view 函数
         // 当前 view 函数只进行缓存读取，不进行写入操作
@@ -288,11 +303,6 @@ library GracefulDegradation {
         uint256 amountValue,
         DegradationConfig memory config
     ) internal view returns (PriceResult memory result) {
-        // 验证输入参数
-        require(priceOracleAddr != address(0), "Invalid price oracle address");
-        require(assetAddr != address(0), "Invalid asset address");
-        require(amountValue > 0, "Amount must be greater than zero");
-        
         if (amountValue == 0) {
             result.value = 0;
             result.isValid = true;
@@ -301,6 +311,14 @@ library GracefulDegradation {
             result.timestamp = block.timestamp;
             result.priceAge = 0;
             return result;
+        }
+        
+        // Best-effort input guards (never revert).
+        if (priceOracleAddr == address(0)) {
+            return _applyFallbackStrategy(assetAddr, amountValue, "Invalid price oracle address", config);
+        }
+        if (assetAddr == address(0)) {
+            return _applyFallbackStrategy(assetAddr, amountValue, "Invalid asset address", config);
         }
 
         // 尝试从价格预言机适配器获取价格
@@ -565,6 +583,16 @@ library GracefulDegradation {
 
             // 计算价值
             uint256 calculatedValue = calculateAssetValue(amountValue, price, decimals);
+            if (calculatedValue == 0) {
+                // Best-effort: allow 0 value (rounding) without reverting.
+                result.value = 0;
+                result.isValid = true;
+                result.reason = "Price calculation successful (rounded to zero)";
+                result.usedFallback = false;
+                result.timestamp = timestamp;
+                result.priceAge = priceAge;
+                return result;
+            }
 
             // 成功获取价格
             result.value = calculatedValue;
@@ -832,25 +860,12 @@ library GracefulDegradation {
         uint256 priceValue,
         uint256 decimalsValue
     ) internal pure returns (uint256 calculatedValue) {
-        // 验证精度参数（使用增强的精度验证）
-        require(validateDecimals(decimalsValue), "Invalid decimals value");
-        
-        // 使用 SafeMath 进行安全计算
-        // 使用安全的幂运算，防止溢出
+        // Best-effort: never revert in valuation helpers.
+        if (!validateDecimals(decimalsValue)) return 0;
         uint256 priceMultiplier = safePow(10, decimalsValue);
-        
-        // 检查精度是否合理
-        require(priceMultiplier > 0, "Invalid decimals");
-        
-        // 计算价值
-        calculatedValue = amountValue * priceValue / priceMultiplier;
-        
-        // 验证计算结果
-        require(calculatedValue > 0, "Invalid calculation result");
-        
-        // 检查上溢和下溢（原始逻辑）
-        require(calculatedValue >= amountValue || priceValue >= priceMultiplier, "Overflow detected");
-        
+        if (priceMultiplier == 0) return 0;
+        // Use mulDiv to avoid overflow in amountValue * priceValue.
+        calculatedValue = Math.mulDiv(amountValue, priceValue, priceMultiplier);
         return calculatedValue;
     }
 

@@ -17,7 +17,7 @@ library ActionKeys {
     // ============ 常量定义 ============
     /// @notice 动作Key总数常量
     /// @dev 避免硬编码，便于维护和扩展
-    uint256 internal constant ACTION_KEY_COUNT = 47;
+    uint256 internal constant ACTION_KEY_COUNT = 49;
 
     // ============ 基础业务动作 Key ============
     /// @notice 存入抵押物操作的标识符
@@ -59,6 +59,18 @@ library ActionKeys {
     /// @dev 用于事件记录和权限验证
     /// @dev 哈希值：keccak256("LIQUIDATE_GUARANTEE")
     bytes32 public constant ACTION_LIQUIDATE_GUARANTEE = keccak256("LIQUIDATE_GUARANTEE");
+
+    /// @notice 锁定“提前还款保证金记录”的标识符
+    /// @dev 用于 EarlyRepaymentGuaranteeManager.lockGuaranteeRecord 的审计与权限语义
+    /// @dev 哈希值：keccak256("LOCK_EARLY_REPAYMENT_GUARANTEE")
+    bytes32 public constant ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE =
+        keccak256("LOCK_EARLY_REPAYMENT_GUARANTEE");
+
+    /// @notice 结算“提前还款保证金（提前还款）”的标识符
+    /// @dev 用于 EarlyRepaymentGuaranteeManager.settleEarlyRepayment 的审计与权限语义
+    /// @dev 哈希值：keccak256("SETTLE_EARLY_REPAYMENT_GUARANTEE")
+    bytes32 public constant ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE =
+        keccak256("SETTLE_EARLY_REPAYMENT_GUARANTEE");
 
     // ============ 奖励相关动作 Key ============
     /// @notice 领取奖励操作的标识符
@@ -293,6 +305,8 @@ library ActionKeys {
         if (key == ACTION_LIQUIDATE) return "liquidate";
         if (key == ACTION_LIQUIDATE_PARTIAL) return "liquidatePartial";
         if (key == ACTION_LIQUIDATE_GUARANTEE) return "liquidateGuarantee";
+        if (key == ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE) return "lockEarlyRepaymentGuarantee";
+        if (key == ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE) return "settleEarlyRepaymentGuarantee";
         if (key == ACTION_CLAIM_REWARD) return "claimReward";
         if (key == ACTION_CONSUME_POINTS) return "consumePoints";
         if (key == ACTION_UPGRADE_SERVICE) return "upgradeService";
@@ -386,6 +400,8 @@ library ActionKeys {
         keys[44] = ACTION_VIEW_PUSH;
         keys[45] = ACTION_RESERVE_FOR_LENDING;
         keys[46] = ACTION_CANCEL_RESERVE;
+        keys[47] = ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE;
+        keys[48] = ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE;
         return keys;
     }
 } 

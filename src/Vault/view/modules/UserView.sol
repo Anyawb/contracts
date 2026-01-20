@@ -6,7 +6,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { Registry } from "../../../registry/Registry.sol";
-import { ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { RiskUtils } from "../../utils/RiskUtils.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
@@ -67,6 +67,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @notice Registry 有效性验证修饰符
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -80,6 +81,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @custom:security 确保所有地址参数不为零地址
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -369,6 +371,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice 外部只读：获取 Registry 地址（向后兼容）

@@ -94,6 +94,8 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      */
     function initialize(address initialRegistryAddr, address initialViewContractAddr) external initializer {
         if (initialRegistryAddr == address(0) || initialViewContractAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialViewContractAddr.code.length == 0) revert NotAContract(initialViewContractAddr);
 
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
@@ -104,14 +106,32 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
+    /// @notice Ensure Registry is configured and is a contract.
+    modifier onlyValidRegistry() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
+        _;
+    }
+
+    /// @notice Ensure View/VaultRouter address is configured and is a contract.
+    modifier onlyValidViewContract() {
+        if (_viewContractAddr == address(0)) revert ZeroAddress();
+        if (_viewContractAddr.code.length == 0) revert NotAContract(_viewContractAddr);
+        _;
+    }
+
     /// @dev Restricts callers to registered business/ledger modules (see `_isBusinessModule`).
     modifier onlyBusinessModule() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         if (!_isBusinessModule(msg.sender)) revert VaultCore__UnauthorizedModule();
         _;
     }
 
     /// @dev Restricts callers to ORDER_ENGINE (Registry KEY_ORDER_ENGINE).
     modifier onlyOrderEngine() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
         if (msg.sender != orderEngine) revert VaultCore__OnlyOrderEngine();
         _;
@@ -152,7 +172,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * - This helper is intended for external callers (scripts/frontends) that already have VaultCore
      *   but don't want to also bind the Registry ABI.
      */
-    function getModule(bytes32 moduleKey) external view returns (address moduleAddress) {
+    function getModule(bytes32 moduleKey) external view onlyValidRegistry returns (address moduleAddress) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
@@ -180,7 +200,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param asset Collateral asset address (non-zero)
      * @param amount Collateral amount (token decimals)
      */
-    function deposit(address asset, uint256 amount) external nonReentrant {
+    function deposit(address asset, uint256 amount) external nonReentrant onlyValidViewContract {
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
@@ -210,7 +230,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param asset Collateral asset address (non-zero)
      * @param amount Withdraw amount (token decimals)
      */
-    function withdraw(address asset, uint256 amount) external nonReentrant {
+    function withdraw(address asset, uint256 amount) external nonReentrant onlyValidViewContract {
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
@@ -239,7 +259,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param asset Debt asset address (non-zero)
      * @param amount Borrow amount (token decimals)
      */
-    function borrow(address asset, uint256 amount) external nonReentrant {
+    function borrow(address asset, uint256 amount) external nonReentrant onlyValidRegistry {
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
@@ -310,7 +330,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param asset Debt asset address (non-zero)
      * @param amount Repay amount (token decimals)
      */
-    function repay(uint256 orderId, address asset, uint256 amount) external nonReentrant {
+    function repay(uint256 orderId, address asset, uint256 amount) external nonReentrant onlyValidRegistry {
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
@@ -336,7 +356,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param assets Collateral asset addresses
      * @param amounts Collateral amounts (token decimals)
      */
-    function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external nonReentrant {
+    function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external nonReentrant onlyValidViewContract {
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
@@ -374,7 +394,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param assets Debt asset addresses
      * @param amounts Borrow amounts (token decimals)
      */
-    function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external nonReentrant {
+    function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external nonReentrant onlyValidRegistry {
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
@@ -411,7 +431,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         uint256[] calldata orderIds,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external nonReentrant {
+    ) external nonReentrant onlyValidRegistry {
         if (orderIds.length != assets.length) revert ArrayLengthMismatch(orderIds.length, assets.length);
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length == 0) revert EmptyArray();
@@ -443,7 +463,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param assets Collateral asset addresses
      * @param amounts Withdraw amounts (token decimals)
      */
-    function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external nonReentrant {
+    function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external nonReentrant onlyValidViewContract {
         if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
@@ -561,6 +581,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         uint64 nextVersion
     ) internal {
         if (_viewContractAddr == address(0)) revert ZeroAddress();
+        if (_viewContractAddr.code.length == 0) revert NotAContract(_viewContractAddr);
         IVaultRouter(_viewContractAddr).pushUserPositionUpdate(
             user,
             asset,
@@ -583,6 +604,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         uint64 nextVersion
     ) internal {
         if (_viewContractAddr == address(0)) revert ZeroAddress();
+        if (_viewContractAddr.code.length == 0) revert NotAContract(_viewContractAddr);
         IVaultRouter(_viewContractAddr).pushUserPositionUpdateDelta(
             user,
             asset,
@@ -604,6 +626,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         uint64 seq
     ) internal {
         if (_viewContractAddr == address(0)) revert ZeroAddress();
+        if (_viewContractAddr.code.length == 0) revert NotAContract(_viewContractAddr);
         IVaultRouter(_viewContractAddr).pushAssetStatsUpdate(
             asset,
             totalCollateral,
@@ -622,6 +645,8 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
      * @param newImplementation New implementation address (non-zero)
      */
     function _authorizeUpgrade(address newImplementation) internal view override {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();

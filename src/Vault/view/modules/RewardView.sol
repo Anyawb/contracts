@@ -9,7 +9,7 @@ import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { RewardTypes } from "../../../Reward/RewardTypes.sol";
 import { IServiceConfig } from "../../../Reward/interfaces/IServiceConfig.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ZeroAddress, MissingRole } from "../../../errors/StandardErrors.sol";
+import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
@@ -68,11 +68,13 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ============ Modifiers ============
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
     modifier onlyWriter() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address rmc = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         address rc = _getModule(ModuleKeys.KEY_REWARD_CONSUMPTION);
         if (rmc == address(0) || rc == address(0)) revert ZeroAddress();
@@ -113,6 +115,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @param initialRegistryAddr Registry 地址
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -123,6 +126,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     function setRegistry(address newRegistry) external onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newRegistry == address(0)) revert ZeroAddress();
+        if (newRegistry.code.length == 0) revert NotAContract(newRegistry);
         _registryAddr = newRegistry;
     }
 
@@ -629,6 +633,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
     
     // ============ Versioning (C+B baseline) ============

@@ -14,7 +14,7 @@ import { ModuleKeys } from "../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
 import { ILenderPoolVault } from "../../interfaces/ILenderPoolVault.sol";
-import { ZeroAddress, AmountIsZero } from "../../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress, AmountIsZero } from "../../errors/StandardErrors.sol";
 
 /**
  * @title LenderPoolVault
@@ -51,6 +51,14 @@ contract LenderPoolVault is
     /// @notice Thrown when an upgrade target is not a deployed contract.
     error LenderPoolVault__InvalidImplementation();
 
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+    /// @notice Ensure Registry is configured and is a contract.
+    modifier onlyValidRegistry() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
+        _;
+    }
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
@@ -83,7 +91,7 @@ contract LenderPoolVault is
      * - Role-gated via AccessControlManager (ACTION_ADMIN)
      * - whenPaused / whenNotPaused is enforced on write entrypoints
      */
-    function pause() external {
+    function pause() external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
         _pause();
     }
@@ -96,7 +104,7 @@ contract LenderPoolVault is
      * Security:
      * - Role-gated via AccessControlManager (ACTION_ADMIN)
      */
-    function unpause() external {
+    function unpause() external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
         _unpause();
     }
@@ -138,19 +146,19 @@ contract LenderPoolVault is
      * @param to Recipient address.
      * @param amount Amount to transfer (token native decimals).
      */
-    function transferOut(address asset, address to, uint256 amount) external override whenNotPaused nonReentrant {
+    function transferOut(address asset, address to, uint256 amount) external override onlyValidRegistry whenNotPaused nonReentrant {
         if (asset == address(0) || to == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
         _requireVaultBusinessLogic(msg.sender);
         IERC20(asset).safeTransfer(to, amount);
     }
 
-    function _requireVaultBusinessLogic(address caller) internal view {
+    function _requireVaultBusinessLogic(address caller) internal view onlyValidRegistry {
         address vbl = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
         if (caller != vbl) revert LenderPoolVault__OnlyVaultBusinessLogic();
     }
 
-    function _requireRole(bytes32 role, address caller) internal view {
+    function _requireRole(bytes32 role, address caller) internal view onlyValidRegistry {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(role, caller);
     }

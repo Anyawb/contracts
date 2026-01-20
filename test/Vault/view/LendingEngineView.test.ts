@@ -60,7 +60,7 @@ describe('LendingEngineView', function () {
       await impl.waitForDeployment();
       await expect(
         upgrades.deployProxy(LendingEngineViewFactory, [ethers.ZeroAddress], { kind: 'uups' }),
-      ).to.be.revertedWithCustomError(impl, 'LendingEngineView__ZeroAddress');
+      ).to.be.revertedWithCustomError(impl, 'ZeroAddress');
     });
   });
 

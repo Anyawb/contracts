@@ -2,6 +2,52 @@
 
 This README lists the exact CLI steps to prepare and run the strict smoke test.
 
+## Recommended “production-like” smoke recipe (closest to real ops)
+
+If your goal is **最贴近真实上线/运维**（dirty state + 权限最小化 + 升级/刷新/观测链路都覆盖），建议按下面顺序跑：
+
+### A) Fresh-state (CI style, deterministic)
+
+In one terminal:
+
+```bash
+pnpm -s exec hardhat node
+```
+
+In another terminal:
+
+```bash
+pnpm -s exec hardhat run "scripts/deploy/deploylocal.ts" --network localhost
+pnpm -s exec hardhat run "scripts/tests/grant-required-roles-local.ts" --network localhost
+pnpm -s exec hardhat run "scripts/tests/preconfig-strict-smoke-local.ts" --network localhost
+pnpm -s exec hardhat run "scripts/tests/cache-refresh-local.ts" --network localhost
+pnpm -s exec hardhat run "scripts/tests/verify-config-ssot-local.ts" --network localhost
+pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --network localhost
+pnpm -s exec hardhat run "scripts/e2e/e2e-localhost-attack-suite.ts" --network localhost
+```
+
+### B) Dirty-state (closest to testnet/mainnet reality)
+
+This mode assumes the node has existing state (prior deploys / upgrades / user balances).
+It’s the best way to surface:
+- stale A-class cache routes after upgrades
+- role drift / missing roles
+- view/cache push best-effort observability issues
+
+```bash
+pnpm -s exec hardhat run "scripts/tests/cache-refresh-local.ts" --network localhost
+pnpm -s exec hardhat run "scripts/tests/verify-config-ssot-local.ts" --network localhost
+E2E_ALLOW_DIRTY_STATE=1 pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --network localhost
+pnpm -s exec hardhat run "scripts/e2e/e2e-localhost-attack-suite.ts" --network localhost
+```
+
+### Why this is more “real”
+
+- **No hidden auto-grant** in the smoke itself (roles must exist, like production).
+- **SSOT sanity checks** run before funds-flow (detect mis-binding early).
+- **Cache refresh entry** is exercised via the unified maintainer path (A-class cache correctness).
+- **Attack suite** broad-scans entrypoints + UUPS + registry module set + view deployment guards.
+
 ## 0) (Production-like) Pre-grant required roles (no auto-grant inside smoke)
 
 The smoke scripts are intentionally **production-like**: they do **not** auto-grant roles when missing.

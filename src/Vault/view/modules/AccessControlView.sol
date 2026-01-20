@@ -11,6 +11,7 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 
 /// @title AccessControlView
 /// @notice 权限视图缓存模块：缓存用户权限位和权限级别，供前端 0 gas 查询
@@ -68,7 +69,8 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     // =========================  Modifiers  =========================
 
     modifier onlyValidRegistry() {
-        if (_registryAddr == address(0)) revert AccessControlView__ZeroAddress();
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -86,7 +88,8 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     function initialize(address initialRegistryAddr) external initializer {
-        if (initialRegistryAddr == address(0)) revert AccessControlView__ZeroAddress();
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -152,7 +155,8 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         // 仅 ADMIN 允许升级
         IAccessControlManager(_getACM()).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-        if (newImplementation == address(0)) revert AccessControlView__ZeroAddress();
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice 兼容旧版 getter

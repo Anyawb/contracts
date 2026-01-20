@@ -11,7 +11,7 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ArrayLengthMismatch, EmptyArray, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { ArrayLengthMismatch, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
 /// @dev Minimal HealthView interface (read-only).
@@ -36,6 +36,7 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     // ============ Modifiers ============
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -59,6 +60,7 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -216,6 +218,7 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     // ============ Versioning (C+B baseline) ============

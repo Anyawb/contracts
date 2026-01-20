@@ -108,7 +108,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
 
     const { instance: ergmProxy } = await deployProxyContract('EarlyRepaymentGuaranteeManager');
     earlyRepayGM = ergmProxy as unknown as EarlyRepaymentGuaranteeManager;
-    await earlyRepayGM.initialize(vaultCore.target, registry.target, await platform.getAddress(), 100); // 1%
+    await earlyRepayGM.initialize(registry.target, await platform.getAddress(), 100); // 1%
 
     const { instance: riskViewProxy } = await deployProxyContract('RiskView');
     riskView = riskViewProxy as unknown as RiskView;
@@ -435,7 +435,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
           ONE_ETH,
           ONE_ETH
         )
-      ).to.be.revertedWithCustomError(guaranteeFund, 'AmountIsZero');
+      ).to.be.revertedWithCustomError(guaranteeFund, 'AmountMismatch');
     });
 
     it('应拒绝零地址参数', async function () {

@@ -1,51 +1,46 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { AmountIsZero, Overpay, ZeroAddress, MissingRole } from "../../errors/StandardErrors.sol";
-import { IPriceOracle } from "../../interfaces/IPriceOracle.sol";
+import { NotAContract, ZeroAddress } from "../../errors/StandardErrors.sol";
 import { ILendingEngineBasic } from "../../interfaces/ILendingEngineBasic.sol";
-import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
-import { ICollateralManager } from "../../interfaces/ICollateralManager.sol";
-import { IVaultRouter } from "../../interfaces/IVaultRouter.sol";
 import { IVaultCoreMinimal } from "../../interfaces/IVaultCoreMinimal.sol";
 import { ViewConstants } from "../view/ViewConstants.sol";
-import { Registry } from "../../registry/Registry.sol";
-import { HealthFactorLib } from "../../libraries/HealthFactorLib.sol";
-import { ILiquidationRiskManager } from "../../interfaces/ILiquidationRiskManager.sol";
 import { SystemEvents } from "../SystemEvents.sol";
+import { CacheEvents } from "../CacheEvents.sol";
+import { HealthEvents } from "../HealthEvents.sol";
 import { LendingEngineStorage } from "./lendingEngine/LendingEngineStorage.sol";
 import { LendingEngineValuation } from "./lendingEngine/LendingEngineValuation.sol";
 import { LendingEngineCore } from "./lendingEngine/LendingEngineCore.sol";
 
-/// @title VaultLendingEngine
-/// @notice Vault 内部多资产债务记账模块，记录用户借款、还款与清算等操作
-/// @dev 支持多种结算币的债务管理，每种资产独立记账，集成价格预言机
-/// @dev 这是Vault系统的核心借贷引擎，负责所有债务相关的记账和查询
-/// @dev 支持多资产借贷，每个用户可以同时借入多种不同的ERC20代币
-/// @dev 集成价格预言机，实时计算债务的价值（以结算币计价）
-/// @dev 提供优化的数据结构，支持快速查询用户债务列表和总价值
-/// @dev 支持利率管理，不同资产可以设置不同的年利率
-/// @dev 继承GovernanceRole提供治理权限控制
-/// @dev 支持升级功能，可升级实现合约
-/// @dev 使用ReentrancyGuard防止重入攻击
-/// @dev 支持暂停功能，紧急情况下可暂停所有借贷操作
-/// @dev 与ActionKeys和ModuleKeys集成，提供标准化的动作和模块管理
-/// @dev 与Registry系统集成，支持模块地址的动态管理
-/// @dev 集成AccessControlManager权限控制，支持细粒度权限管理
-/// @dev 使用Registry系统进行权限控制和模块管理，确保系统安全性
-/// @dev 集成RegistryUpgradeLibrary和RegistryDynamicLibrary，支持基础升级管理功能
-/// @custom:security-contact security@example.com
+/**
+ * @title VaultLendingEngine
+ * @notice Debt ledger SSOT (multi-asset) for the Vault: records borrow/repay/liquidation debt changes.
+ * @dev SSOT / boundary (Architecture-Guide):
+ *      - Debt ledger writes happen here (Registry KEY_LE). Callers should depend on `ILendingEngineBasic`.
+ *      - Write entrypoints are restricted to VaultCore (and SettlementManager for repay paths).
+ *      - Module address resolution SSOT is `Registry.getModuleOrRevert(...)` (no bespoke address facade).
+ *      - View/Health updates are best-effort: push failures emit `CacheUpdateFailed` / `HealthPushFailed`
+ *        and DO NOT revert.
+ *
+ * Security:
+ * - UUPSUpgradeable: upgrades are role-gated via ACM ActionKeys in `_authorizeUpgrade`
+ * - ReentrancyGuard: external state-changing entrypoints are nonReentrant
+ *
+ * @custom:security-contact security@example.com
+ */
 contract VaultLendingEngine is 
     Initializable, 
     UUPSUpgradeable, 
     ReentrancyGuardUpgradeable,
-    ILendingEngineBasic
+    ILendingEngineBasic,
+    CacheEvents,
+    HealthEvents
 {
     using LendingEngineValuation for LendingEngineStorage.Layout;
     using LendingEngineCore for LendingEngineStorage.Layout;
@@ -55,72 +50,71 @@ contract VaultLendingEngine is
         return LendingEngineStorage.layout();
     }
 
-    /* ============ Storage ============ */
-    /// @notice 用户多资产债务映射：user → asset → debtAmount
-    /// @dev 记录每个用户每种资产的债务数量
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
+    /// @notice Multi-asset per-user debt mapping: user -> asset -> debtAmount.
+    /// @dev Stores each user's outstanding debt amount per asset in token base units (token decimals).
     mapping(address => mapping(address => uint256)) private _userDebt;
     
-    /// @notice 各资产总债务：asset → totalDebtAmount
-    /// @dev 记录每种资产在系统中的总债务量
+    /// @notice System total debt per asset: asset -> totalDebtAmount.
+    /// @dev Aggregate outstanding debt per asset in token base units (token decimals).
     mapping(address => uint256) private _totalDebtByAsset;
     
-    /// @notice 用户总债务价值（以结算币计价）
-    /// @dev 缓存用户所有债务的总价值，避免重复计算
+    /// @notice Cached total debt value per user (valuation-denominated).
+    /// @dev Best-effort cached value to avoid repeated valuation work; see `LendingEngineValuation`.
     mapping(address => uint256) private _userTotalDebtValue;
     
-    /// @notice 系统总债务价值（以结算币计价）
-    /// @dev 记录整个系统的总债务价值
+    /// @notice Cached system total debt value (valuation-denominated).
+    /// @dev Aggregate of per-user cached total debt values; maintained by valuation updates.
     uint256 private _totalDebtValue;
 
-    /// @notice 价格预言机地址（私有存储）
-    /// @dev 用于获取各种资产的价格，计算债务价值
+    /// @notice Price oracle adapter address (legacy contract slot mirror).
+    /// @dev Used for valuation of debt; SSOT for internal logic is `_s()._priceOracleAddr`.
     address private _priceOracleAddr;
 
-    /// @notice 结算币地址（用于价值计算，私有存储）
-    /// @dev 所有价值计算都以结算币为基准
+    /// @notice Settlement token address (legacy contract slot mirror).
+    /// @dev All valuation is denominated relative to this token; SSOT is `_s()._settlementTokenAddr`.
     address private _settlementTokenAddr;
 
-    /// @notice Registry合约地址（私有存储）
-    /// @dev 用于获取其他模块地址和记录标准化事件
+    /// @notice Registry address (legacy contract slot mirror).
+    /// @dev Used for module discovery and standardized events; SSOT is `_s()._registryAddr`.
     address private _registryAddr;
 
-    /// @notice 用户债务资产列表缓存：user → asset[] - 优化查询性能
-    /// @dev 记录每个用户借入的所有资产列表，便于快速遍历
+    /// @notice Cached list of debt assets per user: user -> asset[].
+    /// @dev Maintained for efficient traversal of a user's debt assets.
     mapping(address => address[]) private _userDebtAssets;
 
-    /// @notice 用户债务资产索引映射：user → asset → index - 快速查找
-    /// @dev 记录每个用户每种资产在_userDebtAssets数组中的索引位置
+    /// @notice Index mapping for `_userDebtAssets`: user -> asset -> (index+1).
+    /// @dev Uses 1-based indexing to allow 0 to mean "not present".
     mapping(address => mapping(address => uint256)) private _userDebtAssetIndex;
 
-    /// @notice 用户债务资产数量：user → count - 优化遍历
-    /// @dev 记录每个用户借入的资产种类数量
+    /// @notice Number of debt assets per user: user -> count.
+    /// @dev Mirrors `_userDebtAssets[user].length` as a cached count.
     mapping(address => uint256) private _userDebtAssetCount;
 
-    // 移除价格预言机调用超时常量：统一由预言机/监控层处理
+    /// @notice Maximum batch size limit (SSOT: ViewConstants).
+    /// @dev Kept consistent with the View layer to avoid constant drift.
+    uint256 internal constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
 
-    /// @notice 最大批量操作数量限制（统一引用 ViewConstants）
-    /// @dev 与 View 层保持一致，避免常量分叉
-    uint256 internal constant MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
-
-    /// @notice 各资产年利率映射：asset → annualInterestRate (以 1e18 为基数)
-    /// @dev 记录每种资产的年利率，用于计算利息
+    /// @notice Annual interest rate per asset: asset -> annualInterestRate (1e18 fixed-point).
+    /// @dev 1e18 = 100% APR; used for view-only interest estimations in this module.
     mapping(address => uint256) private _interestRatePerYear;
 
-    // 移除未使用的费用接收者治理项
+    /// @notice Storage gap for upgrade safety.
+    /// @dev Legacy storage gap kept for storage layout compatibility (do not use).
+    uint256[45] private _legacyGap;
 
-    /// @notice Storage gap for upgrade safety
-    /// @dev 存储间隙，为未来升级预留空间
-    uint256[45] private _gap__;
-
-    /* ============ Modifiers ============ */
-    /// @notice 验证Registry地址有效性
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+    /// @notice Ensure the Registry address is configured and is a contract.
     modifier onlyValidRegistry() {
-        if (_registryAddr == address(0)) revert ZeroAddress();
+        // IMPORTANT: use the registry address that all internal logic depends on (library storage layout).
+        address registryAddress = _s()._registryAddr;
+        if (registryAddress == address(0)) revert ZeroAddress();
+        if (registryAddress.code.length == 0) revert NotAContract(registryAddress);
         _;
     }
 
-    /// @notice 仅限 VaultCore 调用
-    /// @dev msg.sender 必须等于 Registry(KEY_VAULT_CORE)
+    /// @notice Restrict to VaultCore.
+    /// @dev `msg.sender` must equal `Registry.getModuleOrRevert(KEY_VAULT_CORE)`.
     modifier onlyVaultCore() {
         if (msg.sender != _getModuleAddress(ModuleKeys.KEY_VAULT_CORE)) {
             revert VaultLendingEngine__OnlyVaultCore();
@@ -128,10 +122,10 @@ contract VaultLendingEngine is
         _;
     }
 
-    /// @notice 允许 VaultCore 或 SettlementManager 调用（统一结算入口）
+    /// @notice Restrict to VaultCore or SettlementManager (repay settlement path).
     modifier onlyVaultCoreOrSettlementManager() {
         address vaultCore = _getModuleAddress(ModuleKeys.KEY_VAULT_CORE);
-        // best-effort：未注册 SettlementManager 时不应阻断 VaultCore 正常调用
+        // Best-effort: if SettlementManager is not registered, do not block VaultCore.
         address settlementManager = LendingEngineCore._getModuleAddressOrZero(_s(), ModuleKeys.KEY_SETTLEMENT_MANAGER);
         if (msg.sender != vaultCore && msg.sender != settlementManager) {
             revert VaultLendingEngine__OnlyVaultCore();
@@ -139,112 +133,187 @@ contract VaultLendingEngine is
         _;
     }
 
-    /* ============ Custom Errors ============ */
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @notice Thrown when an entrypoint is called by an address other than VaultCore (or permitted equivalents).
     error VaultLendingEngine__OnlyVaultCore();
+    /// @notice Thrown when a liquidation debt write is attempted by a non-authorized liquidation executor.
+    error VaultLendingEngine__OnlyLiquidationExecutor();
+    /// @notice Thrown when two array parameters are expected to have the same length but do not.
     error VaultLendingEngine__LengthMismatch();
+    /// @notice Thrown when an array parameter is unexpectedly empty.
     error VaultLendingEngine__EmptyArray();
+    /// @notice Thrown when a batch operation exceeds the configured maximum size.
     error VaultLendingEngine__BatchTooLarge();
+    /// @notice Thrown when an upgrade target is not a valid implementation contract.
     error VaultLendingEngine__InvalidImplementation();
+    /// @notice Thrown when the configured Registry address is missing or not a contract.
+    error VaultLendingEngine__InvalidRegistry();
 
-    /* ============ Internal Functions ============ */
+    /*━━━━━━━━━━━━━━━ Liquidation Entry Guards ━━━━━━━━━━━━━━━*/
+    /// @notice Restricts liquidation debt writes to the liquidation executors (SSOT).
+    /// @dev Allows:
+    ///      - Registry(KEY_LIQUIDATION_MANAGER)
+    ///      - Registry(KEY_SETTLEMENT_MANAGER) (optional; if missing, only liquidation manager is allowed)
+    modifier onlyLiquidationExecutor() {
+        address liquidationManager = _getModuleAddress(ModuleKeys.KEY_LIQUIDATION_MANAGER);
+        address settlementManager = LendingEngineCore._getModuleAddressOrZero(_s(), ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        if (msg.sender != liquidationManager && (settlementManager == address(0) || msg.sender != settlementManager)) {
+            revert VaultLendingEngine__OnlyLiquidationExecutor();
+        }
+        _;
+    }
+
+    /*━━━━━━━━━━━━━━━ Internal Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取模块地址（带缓存）
-    /// @param moduleKey 模块键
-    /// @return 模块地址
+    /// @notice Resolve a module address via Registry (strict).
+    /// @param moduleKey Registry module key.
+    /// @return Resolved module address.
     function _getModuleAddress(bytes32 moduleKey) internal view returns (address) {
         return LendingEngineCore._getModuleAddress(_s(), moduleKey);
     }
 
-    /// @notice 权限校验内部函数
-    /// @param actionKey 动作键
-    /// @param user 用户地址
+    /// @notice Require an ACM role (strict).
+    /// @param actionKey Action key / role hash (see ActionKeys).
+    /// @param user Address to validate.
     function _requireRole(bytes32 actionKey, address user) internal view {
         LendingEngineCore._requireRole(_s(), actionKey, user);
     }
 
-    /* ============ 基础升级管理功能 ============ */
-    
-    /// @notice Getter: Registry地址（向后兼容）
+    /*━━━━━━━━━━━━━━━ Construction & initialization ━━━━━━━━━━━━━━━*/
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /*━━━━━━━━━━━━━━━ Basic getters (compat) ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Return the legacy Registry address mirror (compat getter).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - SSOT for runtime dependencies is the library storage layout (`_s()._registryAddr`).
+     * - This getter is kept for backward compatibility with older integrations.
+     *
+     * @return Legacy Registry address value stored in the contract slot.
+     */
     function registryAddr() external view returns (address) {
         return _registryAddr;
     }
 
-    /// @notice Getter: 价格预言机地址
+    /**
+     * @notice Return the legacy PriceOracle address mirror (compat getter).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - SSOT for valuation paths is the library storage layout (`_s()._priceOracleAddr`).
+     *
+     * @return Legacy price oracle address value stored in the contract slot.
+     */
     function priceOracleAddr() external view returns (address) {
         return _priceOracleAddr;
     }
 
-    /// @notice Getter: 结算币地址
+    /**
+     * @notice Return the legacy settlement token address mirror (compat getter).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - SSOT for valuation paths is the library storage layout (`_s()._settlementTokenAddr`).
+     *
+     * @return Legacy settlement token address value stored in the contract slot.
+     */
     function settlementTokenAddr() external view returns (address) {
         return _settlementTokenAddr;
     }
 
-    // 费用接收者 getter 移除
-
-    /* ============ Events ============ */
-    /// @notice 债务记录事件
-    /// @param user 用户地址
-    /// @param asset 债务资产地址
-    /// @param amount 债务金额
-    /// @param isBorrow 是否为借款操作
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when a user's debt for an asset is recorded (borrow/repay/liquidation debt change).
+    /// @param user Borrower address.
+    /// @param asset Debt asset address.
+    /// @param amount Debt delta amount in `asset` token base units (token decimals).
+    /// @param isBorrow True for borrow (increase debt), false for repay / debt reduction.
     event DebtRecorded(address indexed user, address indexed asset, uint256 amount, bool isBorrow);
 
-    /// @notice 用户总债务价值更新事件
-    /// @param user 用户地址
-    /// @param oldValue 旧总价值
-    /// @param newValue 新总价值
+    /// @notice Emitted when the cached total debt value for a user is updated.
+    /// @dev Value is computed by summing per-asset valuations produced by
+    ///      `GracefulDegradation.getAssetValueWithFallback`.
+    /// @param user Borrower address.
+    /// @param oldValue Previous cached total debt value (see @dev for valuation semantics).
+    /// @param newValue New cached total debt value (see @dev for valuation semantics).
     event UserTotalDebtValueUpdated(address indexed user, uint256 oldValue, uint256 newValue);
 
-    /// @notice 价格预言机更新事件
-    /// @param oldOracle 旧预言机地址
-    /// @param newOracle 新预言机地址
+    /// @notice Emitted when the configured price oracle address is updated by governance.
+    /// @param oldOracle Previous oracle address.
+    /// @param newOracle New oracle address.
     event PriceOracleUpdated(address indexed oldOracle, address indexed newOracle);
 
-    /// @notice 结算币更新事件
-    /// @param oldToken 旧结算币地址
-    /// @param newToken 新结算币地址
+    /// @notice Emitted when the configured settlement token address is updated by governance.
+    /// @param oldToken Previous settlement token address.
+    /// @param newToken New settlement token address.
     event SettlementTokenUpdated(address indexed oldToken, address indexed newToken);
 
-    /// @notice Registry更新事件
-    /// @param oldRegistry 旧Registry地址
-    /// @param newRegistry 新Registry地址
+    /// @notice Emitted when the configured Registry address is updated.
+    /// @dev This contract currently does not expose a governance setter for Registry.
+    ///      The event is kept for ABI compatibility.
+    /// @param oldRegistry Previous Registry address.
+    /// @param newRegistry New Registry address.
     event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
-    /// @notice 批量操作事件
-    /// @param user 用户地址
-    /// @param operations 操作数量
+    /// @notice Emitted after a batch debt-related operation completes.
+    /// @param user User address the batch operation is associated with (if applicable).
+    /// @param operations Number of operations processed in the batch.
     event BatchDebtOperationsCompleted(address indexed user, uint256 operations);
 
-    /// @notice 利率更新事件
-    /// @param asset 资产地址
-    /// @param oldRate 旧利率
-    /// @param newRate 新利率
+    /// @notice Emitted when an asset's annual interest rate is updated.
+    /// @param asset Asset address.
+    /// @param oldRate Previous annual rate in 1e18 fixed-point (1e18 = 100%).
+    /// @param newRate New annual rate in 1e18 fixed-point (1e18 = 100%).
     event InterestRateUpdated(address indexed asset, uint256 oldRate, uint256 newRate);
-
-    // 费用接收者相关事件移除
     
-    /// @notice 优雅降级事件 - 价格获取失败时使用备用策略
-    /// @param asset 资产地址
-    /// @param reason 降级原因
-    /// @param fallbackPrice 备用价格
-    /// @param usedFallback 是否使用了降级策略
-    event VaultLendingEngineGracefulDegradation(address indexed asset, string reason, uint256 fallbackPrice, bool usedFallback);
+    /// @notice Emitted when valuation falls back to a degraded pricing path.
+    /// @dev `fallbackPrice` is the computed value output from `GracefulDegradation`, where value is derived as:
+    ///      `amount * price / 10**oracleDecimals`
+    ///      (see `IPriceOracleAdapter.getPrice` for `price` and `decimals` semantics).
+    /// @param asset Asset being valued.
+    /// @param reason Human-readable reason for degradation.
+    /// @param fallbackPrice Fallback value produced by the degradation strategy (see @dev).
+    /// @param usedFallback True if a fallback strategy was used; false if the primary path was healthy.
+    event VaultLendingEngineGracefulDegradation(
+        address indexed asset,
+        string reason,
+        uint256 fallbackPrice,
+        bool usedFallback
+    );
     
-    /// @notice 价格预言机健康状态事件
-    /// @param asset 资产地址
-    /// @param isHealthy 是否健康
-    /// @param details 详细信息
+    /// @notice Emitted when a price oracle health check is performed for an asset.
+    /// @param asset Asset being checked.
+    /// @param isHealthy True if the oracle path is considered healthy.
+    /// @param details Human-readable details for observability.
     event VaultLendingEnginePriceOracleHealthCheck(address indexed asset, bool isHealthy, string details);
 
-    // UpgradeManagementEvent 移除以减小字节码，升级事件可由外层治理记录
-
-    /* ============ Initializer ============ */
-    /// @notice 初始化 VaultLendingEngine 模块
-    /// @dev 设置价格预言机、结算币和Registry地址
-    /// @param initialPriceOracle 价格预言机地址，用于获取资产价格
-    /// @param initialSettlementToken 结算币地址，用于价值计算
-    /// @param initialRegistry Registry合约地址，用于模块管理
-    /// @custom:security 确保priceOracle_、settlementToken_和registry_不为零地址
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Initialize the VaultLendingEngine module.
+     * @dev Reverts if:
+     *      - called more than once (initializer)
+     *      - initialPriceOracle == address(0) (ZeroAddress)
+     *      - initialSettlementToken == address(0) (ZeroAddress)
+     *      - initialRegistry == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Initializer: single-use initialization (OpenZeppelin Initializable).
+     * - Stores addresses in BOTH legacy contract slots and the library storage layout
+     *   to preserve storage layout compatibility.
+     *
+     * @param initialPriceOracle Price oracle adapter address used for valuation.
+     * @param initialSettlementToken Settlement token address used as the valuation denomination reference.
+     * @param initialRegistry Registry address used for module discovery and standardized event emission.
+     */
     function initialize(
         address initialPriceOracle, 
         address initialSettlementToken,
@@ -252,7 +321,7 @@ contract VaultLendingEngine is
     ) external initializer {
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
-        // 不再在模块层启用 Pausable
+        // NOTE: this module does not enable Pausable at the module layer.
         
         if (initialPriceOracle == address(0)) revert ZeroAddress();
         if (initialSettlementToken == address(0)) revert ZeroAddress();
@@ -262,63 +331,110 @@ contract VaultLendingEngine is
         _settlementTokenAddr = initialSettlementToken;
         _registryAddr = initialRegistry;
         
-        // 同时初始化 library storage layout 中的地址
+        // Keep library storage layout in sync (SSOT for internal logic).
         LendingEngineStorage.Layout storage s = _s();
         s._priceOracleAddr = initialPriceOracle;
         s._settlementTokenAddr = initialSettlementToken;
         s._registryAddr = initialRegistry;
         
-        // 记录标准化动作事件
+        // Emit standardized action event (observability).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }
 
-    /* ============ View Functions ============ */
-    /// @notice 查询指定用户指定资产的债务
-    /// @param user 用户地址
-    /// @param asset 债务资产地址
-    /// @return debt 当前债务金额
-    /// @dev 如果用户或资产地址为零，会revert ZeroAddress
+    /*━━━━━━━━━━━━━━━ View Functions ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Return a user's current debt balance for an asset.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - user == address(0) (ZeroAddress)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; reads the ledger SSOT from the library storage layout.
+     *
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @return debt Current debt amount in `asset` token base units (token decimals).
+     */
     function getDebt(address user, address asset) external view onlyValidRegistry returns (uint256 debt) {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         return _s()._userDebt[user][asset];
     }
 
-    /// @notice 查询指定资产的总债务
-    /// @param asset 债务资产地址
-    /// @return totalDebt 总债务金额
-    /// @dev 如果资产地址为零，会revert ZeroAddress
+    /**
+     * @notice Return the system total debt for an asset.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; reads the ledger SSOT from the library storage layout.
+     *
+     * @param asset Debt asset address.
+     * @return totalDebt Total outstanding debt for `asset` in token base units (token decimals).
+     */
     function getTotalDebtByAsset(address asset) external view onlyValidRegistry returns (uint256 totalDebt) {
         if (asset == address(0)) revert ZeroAddress();
         return _s()._totalDebtByAsset[asset];
     }
 
-    /// @notice 查询用户总债务价值（以结算币计价）
-    /// @param user 用户地址
-    /// @return totalValue 用户总债务价值
-    /// @dev 如果用户地址为零，会revert ZeroAddress
+    /**
+     * @notice Return the cached total debt value for a user (valuation-denominated).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - user == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; returns the cached value maintained by debt write paths.
+     * - Valuation is best-effort; missing price config does not revert debt writes
+     *   (see LendingEngineValuation).
+     *
+     * @param user Borrower address.
+     * @return totalValue Cached total debt value (see `UserTotalDebtValueUpdated` @dev for valuation semantics).
+     */
     function getUserTotalDebtValue(address user) external view onlyValidRegistry returns (uint256 totalValue) {
         if (user == address(0)) revert ZeroAddress();
         return _s()._userTotalDebtValue[user];
     }
 
-    /// @notice 查询系统总债务价值（以结算币计价）
-    /// @return totalValue 系统总债务价值
-    /// @dev 返回整个系统的总债务价值
+    /**
+     * @notice Return the cached system total debt value (valuation-denominated).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *
+     * Security:
+     * - View-only; returns the cached system total maintained by per-user debt valuation updates.
+     *
+     * @return totalValue Cached system total debt value (see LendingEngineValuation for update semantics).
+     */
     function getTotalDebtValue() external view onlyValidRegistry returns (uint256 totalValue) {
         return _s()._totalDebtValue;
     }
 
-    /// @notice 查询用户所有债务资产列表
-    /// @param user 用户地址
-    /// @return assets 用户债务的资产地址数组
-    /// @dev 如果用户地址为零，会revert ZeroAddress
-    /// @dev 返回用户当前借入的所有资产地址
+    /**
+     * @notice Return the list of assets a user currently has debt in.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - user == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; returns the ledger-maintained asset list for efficient traversal.
+     *
+     * @param user Borrower address.
+     * @return assets Array of asset addresses with non-zero debt for the user.
+     */
     function getUserDebtAssets(address user) external view onlyValidRegistry returns (address[] memory assets) {
         if (user == address(0)) revert ZeroAddress();
         LendingEngineStorage.Layout storage s = _s();
@@ -330,12 +446,28 @@ contract VaultLendingEngine is
         }
     }
 
-    /// @notice 计算用户借款一定数量资产时应该产生的利息
-    /// @param user 用户地址
-    /// @param asset 债务资产地址
-    /// @param amount 借款金额
-    /// @return interest 预估利息金额
-    function calculateExpectedInterest(address user, address asset, uint256 amount) external view onlyValidRegistry returns (uint256 interest) {
+    /**
+     * @notice Estimate expected interest for borrowing a given amount of an asset (simple annualized model).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; uses the governance-configured `annualInterestRate` mapping.
+     * - This is a simplified estimation helper and is NOT used as the canonical settlement computation.
+     *
+     * @param user Borrower address (unused; reserved for future per-user rate models).
+     * @param asset Debt asset address.
+     * @param amount Principal amount in `asset` token base units (token decimals).
+     * @return interest Estimated interest amount in `asset` token base units (token decimals).
+     */
+    function calculateExpectedInterest(address user, address asset, uint256 amount)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 interest)
+    {
         user; // silence unused parameter
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) return 0;
@@ -343,12 +475,23 @@ contract VaultLendingEngine is
         uint256 rate = _interestRatePerYear[asset];
         if (rate == 0) return 0;
         
-        // 计算利息：amount * rate / 1e18
+        // interest = amount * rate / 1e18
         interest = (amount * rate) / 1e18;
     }
 
-    /// @notice 估算资产的年化利率（bps，1e4=100%）
-    /// @dev 将内部 1e18 精度的年化利率转换为 bps 输出
+    /**
+     * @notice Return the annual interest rate for an asset in basis points.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; converts stored 1e18 fixed-point to bps (1e4 = 100%).
+     *
+     * @param asset Asset address.
+     * @return annualRateBps Annual interest rate in bps (1e4 = 100%).
+     */
     function estimateAnnualRateBps(address asset) external view onlyValidRegistry returns (uint256 annualRateBps) {
         if (asset == address(0)) revert ZeroAddress();
         uint256 rate1e18 = _interestRatePerYear[asset];
@@ -357,18 +500,34 @@ contract VaultLendingEngine is
         unchecked { annualRateBps = (rate1e18 * 10000) / 1e18; }
     }
 
-    /// @notice 按天计算预计利息（termDays=0 时按全年计算）
-    /// @param asset 债务资产地址
-    /// @param principal 借款本金
-    /// @param termDays 期限天数（0 表示按全年利息）
-    function estimateInterest(address asset, uint256 principal, uint16 termDays) external view onlyValidRegistry returns (uint256 interest) {
+    /**
+     * @notice Estimate interest for a principal over a term (day-based; simple pro-rata model).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; uses a simplified pro-rata model: `principal * rate * termDays / 365`.
+     *
+     * @param asset Debt asset address.
+     * @param principal Principal amount in `asset` token base units (token decimals).
+     * @param termDays Loan term in days. If 0, returns full-year interest.
+     * @return interest Estimated interest amount in `asset` token base units (token decimals).
+     */
+    function estimateInterest(address asset, uint256 principal, uint16 termDays)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 interest)
+    {
         if (asset == address(0)) revert ZeroAddress();
         if (principal == 0) return 0;
         uint256 rate = _interestRatePerYear[asset];
         if (rate == 0) return 0;
         unchecked {
             if (termDays == 0) {
-                // 全年利息
+                // Full-year interest.
                 return (principal * rate) / 1e18;
             }
             // principal * rate(1e18) * termDays / (365 * 1e18)
@@ -376,25 +535,55 @@ contract VaultLendingEngine is
         }
     }
 
-    /* ============ Internal Functions ============ */
+    /*━━━━━━━━━━━━━━━ Internal Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 检查价格预言机健康状态
-    /// @param oracle 预言机地址
-    /// @param asset 资产地址
-    /// @return isHealthy 是否健康
-    /// @return details 详细信息
-    function _checkPriceOracleHealth(address oracle, address asset) internal view returns (bool isHealthy, string memory details) {
+    /**
+     * @notice Check whether the price oracle path is healthy for an asset (best-effort helper).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only; used for observability and diagnostics.
+     *
+     * @param oracle Price oracle adapter address.
+     * @param asset Asset address.
+     * @return isHealthy True if considered healthy.
+     * @return details Human-readable details.
+     */
+    function _checkPriceOracleHealth(address oracle, address asset)
+        internal
+        view
+        returns (bool isHealthy, string memory details)
+    {
         return LendingEngineValuation.checkPriceOracleHealth(oracle, asset);
     }
     
-    /* ============ Business Logic ============ */
-    /// @notice 记录一次借款操作
-    /// @dev 仅由 CollateralVault 主合约调用
-    /// @param user 借款人地址
-    /// @param asset 债务资产地址
-    /// @param amount 借款金额
-    /// @param collateralAdded 本次伴随的新增抵押物价值（占位参数）
-    /// @param termDays 借款期限（天，预留参数）
+    /*━━━━━━━━━━━━━━━ Business Logic ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Record a borrow: increases the user's debt for an asset (ledger write SSOT).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - msg.sender != VaultCore (VaultLendingEngine__OnlyVaultCore) (via onlyVaultCore)
+     *      - amount == 0 (AmountIsZero) (via LendingEngineAccounting)
+     *      - user == address(0) (ZeroAddress) (via LendingEngineAccounting)
+     *      - asset == address(0) (ZeroAddress) (via LendingEngineAccounting)
+     *      - amount cannot be represented as int256
+     *        (LendingEngineCore__AmountOverflowInt256) (via LendingEngineCore)
+     *      - valuation delta underflows system total
+     *        (LendingEngineValuation__TotalDebtValueUnderflow) (via LendingEngineValuation)
+     *
+     * Security:
+     * - Non-reentrant (ReentrancyGuardUpgradeable).
+     * - Ledger SSOT: debt is recorded first; View/Health pushes are best-effort and do NOT revert the ledger.
+     * - Only VaultCore may write borrow debt changes.
+     *
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @param amount Borrow amount in `asset` token base units (token decimals).
+     * @param collateralAdded Reserved parameter (unused in this module; supplied by higher-level flows).
+     * @param termDays Loan term in days (0 = unspecified).
+     */
     function borrow(
         address user, 
         address asset, 
@@ -406,11 +595,31 @@ contract VaultLendingEngine is
         _s().borrow(user, asset, amount, termDays);
     }
 
-    /// @notice 记录一次还款操作
-    /// @dev 仅由 CollateralVault 主合约调用
-    /// @param user 用户地址
-    /// @param asset 债务资产地址
-    /// @param amount 还款金额
+    /**
+     * @notice Record a repay: decreases the user's debt for an asset (ledger write SSOT).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - msg.sender is not VaultCore nor SettlementManager
+     *        (VaultLendingEngine__OnlyVaultCore) (via onlyVaultCoreOrSettlementManager)
+     *      - amount == 0 (AmountIsZero) (via LendingEngineAccounting)
+     *      - user == address(0) (ZeroAddress) (via LendingEngineAccounting)
+     *      - asset == address(0) (ZeroAddress) (via LendingEngineAccounting)
+     *      - amount > current debt (Overpay) (via LendingEngineAccounting)
+     *      - amount cannot be represented as int256
+     *        (LendingEngineCore__AmountOverflowInt256) (via LendingEngineCore)
+     *      - valuation delta underflows system total
+     *        (LendingEngineValuation__TotalDebtValueUnderflow) (via LendingEngineValuation)
+     *
+     * Security:
+     * - Non-reentrant (ReentrancyGuardUpgradeable).
+     * - Ledger SSOT: repayment is recorded first; View/Health pushes are best-effort and do NOT revert the ledger.
+     * - Caller-gated: VaultCore (primary) and SettlementManager (repay settlement path).
+     *
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @param amount Repay amount in `asset` token base units (token decimals).
+     */
     function repay(address user, address asset, uint256 amount)
         external
         override
@@ -421,32 +630,75 @@ contract VaultLendingEngine is
         _s().repay(user, asset, amount);
     }
 
-    /// @notice 强制减少用户指定资产的债务（清算场景）
-    /// @dev 仅由清算模块调用，用于清算时的债务减少
-    /// @param user 用户地址
-    /// @param asset 债务资产地址
-    /// @param amount 减少的债务金额
-    function forceReduceDebt(address user, address asset, uint256 amount) external override onlyValidRegistry nonReentrant {
+    /**
+     * @notice Force-reduce a user's debt for an asset (liquidation path).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - msg.sender is not an authorized liquidation executor
+     *        (VaultLendingEngine__OnlyLiquidationExecutor) (via onlyLiquidationExecutor)
+     *      - caller lacks ACTION_LIQUIDATE role (MissingRole) (via LendingEngineCore -> ACM.requireRole)
+     *      - amount == 0 (AmountIsZero) (via LendingEngineAccounting)
+     *      - user == address(0) (ZeroAddress) (via LendingEngineAccounting)
+     *      - asset == address(0) (ZeroAddress) (via LendingEngineAccounting)
+     *      - amount cannot be represented as int256
+     *        (LendingEngineCore__AmountOverflowInt256) (via LendingEngineCore)
+     *      - valuation delta underflows system total
+     *        (LendingEngineValuation__TotalDebtValueUnderflow) (via LendingEngineValuation)
+     *
+     * Security:
+     * - Non-reentrant (ReentrancyGuardUpgradeable).
+     * - Dual gating: (1) executor address allowlist via Registry keys; (2) role check ACTION_LIQUIDATE via ACM.
+     * - Ledger SSOT: debt is recorded first; View/Health pushes are best-effort and do NOT revert the ledger.
+     *
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @param amount Requested debt reduction amount in `asset` token base units (token decimals).
+     *              If amount > debt, full debt is reduced.
+     */
+    function forceReduceDebt(address user, address asset, uint256 amount)
+        external
+        override
+        onlyValidRegistry
+        onlyLiquidationExecutor
+        nonReentrant
+    {
         _s().forceReduceDebt(user, asset, amount);
     }
 
-    /// @notice 更新用户总债务价值（内部函数）- 优化版本
-    /// @dev 使用价格预言机计算用户所有债务资产的总价值
-    /// @param user 用户地址
+    /// @notice Update the cached total debt value for a user (internal helper).
+    /// @dev Best-effort valuation; see `LendingEngineValuation.updateUserTotalDebtValue`.
+    /// @param user Borrower address.
     function _updateUserTotalDebtValue(address user) internal {
         _s().updateUserTotalDebtValue(user);
     }
 
-    /* ============ Admin Functions ============ */
-    /// @notice 批量更新用户债务价值（治理功能）
-    /// @dev 仅治理可调用，用于批量更新用户债务价值
-    /// @param users 用户地址数组
+    /*━━━━━━━━━━━━━━━ Admin Functions ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Batch recompute cached debt values for a set of users (governance operation).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - caller lacks ACTION_SET_PARAMETER (MissingRole) (via ACM.requireRole)
+     *      - users.length == 0 (VaultLendingEngine__EmptyArray)
+     *      - users.length > _MAX_BATCH_SIZE (VaultLendingEngine__BatchTooLarge)
+     *      - any users[i] == address(0) (ZeroAddress)
+     *      - valuation delta underflows system total
+     *        (LendingEngineValuation__TotalDebtValueUnderflow) (via LendingEngineValuation)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     * - Best-effort valuation: missing oracle/settlement config will emit observability events and keep previous
+     *   cached values.
+     *
+     * @param users Array of user addresses to recompute cached debt values for.
+     */
     function batchUpdateUserDebtValues(address[] calldata users) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (users.length == 0) revert VaultLendingEngine__EmptyArray();
-        if (users.length > MAX_BATCH_SIZE) revert VaultLendingEngine__BatchTooLarge();
+        if (users.length > _MAX_BATCH_SIZE) revert VaultLendingEngine__BatchTooLarge();
         
-        // Gas优化：使用unchecked减少Gas消耗
+        // Gas optimization: use unchecked increment in the loop.
         unchecked {
             for (uint256 i = 0; i < users.length; i++) {
                 if (users[i] == address(0)) revert ZeroAddress();
@@ -454,66 +706,100 @@ contract VaultLendingEngine is
             }
         }
         
-        // 记录标准化动作事件
+        // Emit standardized action event (observability).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }
 
-    /// @notice 更新价格预言机地址（治理功能）
-    /// @dev 仅治理可调用
-    /// @param newPriceOracle 新的价格预言机地址
+    /**
+     * @notice Set the price oracle address used for debt valuation (governance operation).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - caller lacks ACTION_SET_PARAMETER (MissingRole) (via ACM.requireRole)
+     *      - newPriceOracle == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     * - Updates BOTH legacy contract slots and library storage layout to preserve storage layout compatibility.
+     *
+     * @param newPriceOracle New price oracle adapter address.
+     */
     function setPriceOracle(address newPriceOracle) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
+        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (newPriceOracle == address(0)) revert ZeroAddress();
         
         address oldOracle = _priceOracleAddr;
         _priceOracleAddr = newPriceOracle;
+        // Keep library storage in sync (SSOT for internal logic is the library layout).
+        _s()._priceOracleAddr = newPriceOracle;
         
         emit PriceOracleUpdated(oldOracle, newPriceOracle);
         
-        // 记录标准化动作事件
+        // Emit standardized action event (observability).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }
 
-    /// @notice 更新结算币地址（治理功能）
-    /// @dev 仅治理可调用
-    /// @param newSettlementToken 新的结算币地址
+    /**
+     * @notice Set the settlement token address used as the valuation denomination reference (governance operation).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - caller lacks ACTION_SET_PARAMETER (MissingRole) (via ACM.requireRole)
+     *      - newSettlementToken == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     * - Updates BOTH legacy contract slots and library storage layout to preserve storage layout compatibility.
+     *
+     * @param newSettlementToken New settlement token address.
+     */
     function setSettlementToken(address newSettlementToken) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (newSettlementToken == address(0)) revert ZeroAddress();
         
         address oldToken = _settlementTokenAddr;
         _settlementTokenAddr = newSettlementToken;
+        // Keep library storage in sync (SSOT for internal logic is the library layout).
+        _s()._settlementTokenAddr = newSettlementToken;
         
         emit SettlementTokenUpdated(oldToken, newSettlementToken);
         
-        // 记录标准化动作事件
+        // Emit standardized action event (observability).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }
 
-    /// @notice 更新Registry地址（治理功能）
-    /// @dev 仅治理可调用
-    /// @param newRegistry 新的Registry地址
-    // Registry 直改入口移除：改由 VaultCore/Registry 管理
-
-    /// @notice 设置资产年利率（治理功能）
-    /// @dev 仅治理可调用，利率以 1e18 为基数
-    /// @param asset 资产地址
-    /// @param annualRate 年利率（以 1e18 为基数）
+    /**
+     * @notice Set the annual interest rate for an asset (governance operation).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - caller lacks ACTION_SET_PARAMETER (MissingRole) (via ACM.requireRole)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     *
+     * @param asset Asset address.
+     * @param annualRate Annual rate in 1e18 fixed-point (1e18 = 100%).
+     */
     function setInterestRate(address asset, uint256 annualRate) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (asset == address(0)) revert ZeroAddress();
@@ -523,91 +809,143 @@ contract VaultLendingEngine is
         
         emit InterestRateUpdated(asset, oldRate, annualRate);
         
-        // 记录标准化动作事件
+        // Emit standardized action event (observability).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }
 
-    /// @notice Getter: 读取资产年利率（向后兼容）
+    /**
+     * @notice Return the configured annual interest rate for an asset.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @param asset Asset address.
+     * @return Annual rate in 1e18 fixed-point (1e18 = 100%).
+     */
     function interestRatePerYear(address asset) external view returns (uint256) {
         return _interestRatePerYear[asset];
     }
 
-    /// @notice 设置费用接收者地址（治理功能）
-    /// @dev 仅治理可调用
-    /// @param newFeeReceiver 新的费用接收者地址
-    // 未使用的 feeReceiver 治理移除
-
-    /// @notice 紧急暂停功能
-    /// @dev 仅治理可调用
-    // 移除本地暂停/恢复，由系统层统一控制
-
-    /* ============ Upgrade Auth ============ */
-    /// @notice 升级授权函数
-    /// @dev 使用RegistryUpgradeLibrary进行权限验证
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
+    /*━━━━━━━━━━━━━━━ Upgrade Auth ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Authorize a UUPS upgrade.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_UPGRADE_MODULE (MissingRole) (via ACM.requireRole)
+     *      - newImplementation == address(0) (ZeroAddress)
+     *      - newImplementation has no code (VaultLendingEngine__InvalidImplementation)
+     *
+     * Security:
+     * - UUPSUpgradeable: upgrade authorization is SSOT here.
+     * - Role-gated via ACM.requireRole(ACTION_UPGRADE_MODULE).
+     *
+     * @param newImplementation New implementation contract address.
+     */
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         
-        // 验证新实现合约
+        // Validate new implementation contract.
         if (newImplementation.code.length == 0) revert VaultLendingEngine__InvalidImplementation();
         
-        // 记录标准化动作事件
+        // Emit standardized action event (observability).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }
 
-    /* ============ ILendingEngineBasic: Minimal Ledger Implementations ============ */
-    /// @notice 获取可清算的债务数量（账本域最小实现：返回当前债务余额）
-    function getReducibleDebtAmount(address user, address asset) external view onlyValidRegistry returns (uint256 reducibleAmount) {
+    /*━━━━━━━━━━━━━━━ ILendingEngineBasic: Minimal Ledger Implementations ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Return the current reducible debt amount for a user and asset (liquidation helper).
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - user == address(0) (ZeroAddress)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; returns current debt balance from the ledger SSOT.
+     *
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @return reducibleAmount Current debt amount in `asset` token base units (token decimals).
+     */
+    function getReducibleDebtAmount(address user, address asset)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 reducibleAmount)
+    {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         return _s()._userDebt[user][asset];
     }
 
-    /// @notice 兼容接口：视图/聚合能力已下沉至 View/风险模块，这里返回默认值
-    // 视图/聚合能力已下沉至 View/风险模块，上述接口不再在账本层实现
-
-    /// @notice 计算单资产债务价值（以结算币计价）
+    /**
+     * @notice Compute the valuation-denominated debt value for a user's single asset position.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - user == address(0) (ZeroAddress)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - View-only; this calls into `GracefulDegradation` helpers and is intended for UI/analytics.
+     * - The valuation semantics follow `GracefulDegradation.getAssetValueWithFallback`.
+     *
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @return value Debt value output from the valuation helper
+     *              (see `VaultLendingEngineGracefulDegradation` @dev for formula).
+     */
     function calculateDebtValue(address user, address asset) external view onlyValidRegistry returns (uint256 value) {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         return LendingEngineValuation.calculateDebtValue(_s(), user, asset);
     }
 
-    /// @notice 通知RewardManager处理积分奖励
-    /// @param user 用户地址
-    /// @param amount 操作金额
-    /// @param isRepayment 是否为还款操作
-    // 奖励触发函数移除
+    // Reward hooks were intentionally removed from this module.
+    // Reward SSOT is handled by the ORDER_ENGINE / RewardManager flow, not the debt ledger.
 
-    /// @notice 推送用户仓位到 View 缓存（兼容保留）
-    /// @dev 该逻辑已在 LendingEngineCore.borrow/repay/forceReduceDebt 中改为 delta 推送；
-    ///      此处保留为向后兼容的空实现（避免旧代码链接失败）。
-    function _pushUserPositionToView(address /*user*/, address /*asset*/) internal {
-        // no-op
+    /**
+     * @notice Legacy no-op: previously pushed full user position to View cache (compat shim).
+     * @dev The SSOT is now delta-based pushes implemented in `LendingEngineCore.borrow/repay/forceReduceDebt`.
+     *      This function remains as a no-op to preserve backward compatibility for older linkages.
+     */
+    function _pushUserPositionToView(address user, address asset) internal pure {
+        // Legacy no-op (compat shim).
+        user;
+        asset;
     }
 
-    /// @notice 解析当前有效的 VaultRouter 地址（通过 Registry -> VaultCore）
+    /// @notice Resolve the current VaultRouter address (via Registry -> VaultCore).
     function _resolveVaultRouterAddr() internal view returns (address) {
-        address vaultCore = _getModuleAddress(ModuleKeys.KEY_VAULT_CORE);
-        return IVaultCoreMinimal(vaultCore).viewContractAddrVar();
+        // Best-effort helper: must not revert (used for observability / cache push paths).
+        address vaultCore = LendingEngineCore._getModuleAddressOrZero(_s(), ModuleKeys.KEY_VAULT_CORE);
+        if (vaultCore == address(0) || vaultCore.code.length == 0) return address(0);
+        try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
+            return v;
+        } catch {
+            return address(0);
+        }
     }
 
-    /// @notice 汇总用户总抵押与总债务，并推送健康状态到 HealthView
+    /// @notice Aggregate collateral/debt and best-effort push health status to HealthView.
     function _pushHealthStatus(address user) internal {
         LendingEngineCore._pushHealthStatus(_s(), user);
     }
 
-    /* ============ Storage Gap ============ */
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     uint256[50] private __gap;
 } 

@@ -18,6 +18,7 @@ import type { Registry } from '../types/src/registry/Registry';
 const MODULE_KEYS = {
   ACCESS_CONTROL: ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')),
   GUARANTEE_FUND: ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER')),
+  VAULT_CORE: ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE')),
 } as const;
 
 const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
@@ -73,6 +74,7 @@ async function deploySystemFixture(): Promise<DeploymentFixture> {
   const accessControl = (await AccessControlFactory.deploy(deployer.address)) as AccessControlManager;
   await accessControl.waitForDeployment();
   await registry.setModule(MODULE_KEYS.ACCESS_CONTROL, await accessControl.getAddress());
+  await registry.setModule(MODULE_KEYS.VAULT_CORE, vaultCore.address);
 
   const GuaranteeFundFactory = await ethers.getContractFactory('MockGuaranteeFundForEarlyRepayment');
   const guaranteeFund = (await GuaranteeFundFactory.deploy()) as MockGuaranteeFundForEarlyRepayment;
@@ -82,7 +84,7 @@ async function deploySystemFixture(): Promise<DeploymentFixture> {
   const ERGMFactory = await ethers.getContractFactory('EarlyRepaymentGuaranteeManager');
   const ergm = (await upgrades.deployProxy(
     ERGMFactory,
-    [vaultCore.address, await registry.getAddress(), platformFeeReceiver.address, PLATFORM_FEE_RATE],
+    [await registry.getAddress(), platformFeeReceiver.address, PLATFORM_FEE_RATE],
     { kind: 'uups', initializer: 'initialize' }
   )) as EarlyRepaymentGuaranteeManager;
   await ergm.waitForDeployment();
@@ -133,7 +135,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
       await expect(
         upgrades.deployProxy(
           Factory,
-          [ethers.ZeroAddress, ethers.ZeroAddress, ethers.ZeroAddress, PLATFORM_FEE_RATE],
+          [ethers.ZeroAddress, ethers.ZeroAddress, PLATFORM_FEE_RATE],
           { kind: 'uups', initializer: 'initialize' }
         )
       ).to.be.revertedWithCustomError(Factory, 'ZeroAddress');

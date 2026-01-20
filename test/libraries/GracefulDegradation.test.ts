@@ -139,9 +139,9 @@ describe("GracefulDegradation Library", function () {
                 const price = 0; // 零价格
                 const decimals = 18;
 
-                await expect(
-                    gracefulDegradation.calculateAssetValue(amount, price, decimals)
-                ).to.be.revertedWith("Invalid calculation result");
+                // Best-effort valuation: should not revert; returns 0 on invalid/zero price (rounding-safe).
+                const calculatedValue = await gracefulDegradation.calculateAssetValue(amount, price, decimals);
+                expect(calculatedValue).to.equal(0n);
             });
         });
 

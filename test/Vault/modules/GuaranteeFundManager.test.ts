@@ -443,7 +443,15 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
 
   describe('批量操作测试', function () {
     it('GuaranteeFundManager – 应该正确批量锁定保证金', async function () {
-      const assets = [mockERC20.target, ethers.Wallet.createRandom().address];
+      // 第二个资产必须是 ERC20 合约地址（批量锁定会执行真实 transferFrom）
+      const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
+      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', ethers.parseUnits('1000000', 18));
+      await erc20_2.waitForDeployment();
+      const erc20_2Typed = erc20_2 as unknown as MockERC20;
+      await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
+      await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
+
+      const assets = [mockERC20.target, erc20_2.target];
       const amounts = [TEST_AMOUNT, TEST_AMOUNT * 2n];
       
       await expect(
@@ -460,7 +468,15 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     });
 
     it('GuaranteeFundManager – 应该正确处理批量锁定中的零金额', async function () {
-      const assets = [mockERC20.target, ethers.Wallet.createRandom().address];
+      // 第二个资产必须是 ERC20 合约地址（即使 amount=0，保持测试语义一致）
+      const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
+      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', ethers.parseUnits('1000000', 18));
+      await erc20_2.waitForDeployment();
+      const erc20_2Typed = erc20_2 as unknown as MockERC20;
+      await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
+      await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
+
+      const assets = [mockERC20.target, erc20_2.target];
       const amounts = [TEST_AMOUNT, 0n]; // 第二个金额为0
       
       await expect(
@@ -526,6 +542,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       const erc20_2Typed = erc20_2 as unknown as MockERC20;
       await erc20_2Typed.mint(guaranteeFundManager.target, TEST_AMOUNT * 10n);
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
+      await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
       
       // 先批量锁定保证金
       const assets = [mockERC20.target, erc20_2.target]; // 使用不同的 ERC20 合约
@@ -561,6 +578,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       const erc20_2Typed = erc20_2 as unknown as MockERC20;
       await erc20_2Typed.mint(guaranteeFundManager.target, TEST_AMOUNT * 10n);
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
+      await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
       
       // 先批量锁定保证金
       const assets = [mockERC20.target, erc20_2.target]; // 使用不同的 ERC20 合约

@@ -7,7 +7,7 @@ import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
 import { IRegistry } from "../../interfaces/IRegistry.sol";
-import { VaultTypes } from "../../Vault/VaultTypes.sol";
+import { SystemEvents } from "../../Vault/SystemEvents.sol";
 
 /// @title TestnetFeaturesConfig - 测试网功能配置
 /// @notice 管理测试网功能的配置和价格，提供测试网环境下的特殊功能权限
@@ -108,7 +108,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         emit TestnetFeaturesConfigInitialized(registryAddr, block.timestamp);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
@@ -166,7 +166,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         emit ConfigUpdated(uint8(level), price, duration, isActive);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
@@ -205,7 +205,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         emit CooldownUpdated(_cooldown);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
@@ -272,7 +272,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         lastConfigUpdater = msg.sender;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
@@ -450,7 +450,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_TESTNET_PAUSE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_PAUSE),
             msg.sender,
@@ -484,7 +484,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_TESTNET_ACTIVATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_ACTIVATE),
             msg.sender,
@@ -508,7 +508,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,

@@ -3,48 +3,57 @@ pragma solidity ^0.8.20;
 
 /**
  * @title LoanEvents
- * @dev 定义借贷平台的保证金相关事件
- * @notice 包含保证金锁定、释放和没收等事件
- * @dev 这些事件被 VaultLendingEngine 和 GuaranteeFundManager 使用
- * @custom:security-contact security@example.com
+ * @notice Canonical guarantee/loan-related events shared across Vault modules.
+ * @dev This is an event-only interface (SSOT for event signatures).
+ *
+ * Rationale:
+ * - Contracts can `is LoanEvents` to include event ABIs without re-declaring them.
+ * - Offchain indexers can rely on stable signatures across modules.
  */
-contract LoanEvents {
-    // =================== 保证金相关事件 ===================
+interface LoanEvents {
     /**
-     * @dev 保证金锁定事件
-     * @param user 用户地址
-     * @param asset 资产地址
-     * @param amount 保证金金额
-     * @param timestamp 时间戳
+     * @notice Emitted when a guarantee amount is locked.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the guarantee ledger/manager after it updates state
+     *
+     * @param user User address
+     * @param asset Guarantee asset address
+     * @param amount Locked amount (token decimals)
+     * @param timestamp Emission timestamp (seconds)
      */
-    event GuaranteeLocked(
-        address indexed user,
-        address indexed asset,
-        uint256 amount,
-        uint256 timestamp
-    );
+    event GuaranteeLocked(address indexed user, address indexed asset, uint256 amount, uint256 timestamp);
 
     /**
-     * @dev 保证金释放事件
-     * @param user 用户地址
-     * @param asset 资产地址
-     * @param amount 保证金金额
-     * @param timestamp 时间戳
+     * @notice Emitted when a guarantee amount is released.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the guarantee ledger/manager after it updates state
+     *
+     * @param user User address
+     * @param asset Guarantee asset address
+     * @param amount Released amount (token decimals)
+     * @param timestamp Emission timestamp (seconds)
      */
-    event GuaranteeReleased(
-        address indexed user,
-        address indexed asset,
-        uint256 amount,
-        uint256 timestamp
-    );
+    event GuaranteeReleased(address indexed user, address indexed asset, uint256 amount, uint256 timestamp);
 
     /**
-     * @dev 保证金没收事件
-     * @param user 用户地址
-     * @param asset 资产地址
-     * @param amount 保证金金额
-     * @param feeReceiver 费用接收者地址
-     * @param timestamp 时间戳
+     * @notice Emitted when a guarantee amount is forfeited (e.g., penalty/fee distribution).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the guarantee ledger/manager after it updates state
+     *
+     * @param user User address
+     * @param asset Guarantee asset address
+     * @param amount Forfeited amount (token decimals)
+     * @param feeReceiver Receiver of the forfeited funds
+     * @param timestamp Emission timestamp (seconds)
      */
     event GuaranteeForfeited(
         address indexed user,
@@ -53,4 +62,4 @@ contract LoanEvents {
         address indexed feeReceiver,
         uint256 timestamp
     );
-} 
+}

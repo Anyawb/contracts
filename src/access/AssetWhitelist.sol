@@ -1,60 +1,77 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { IAssetWhitelist } from "../interfaces/IAssetWhitelist.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { IRegistryUpgradeEvents } from "../interfaces/IRegistryUpgradeEvents.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
+import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
+import { DataPushTypes } from "../constants/DataPushTypes.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
-import { ZeroAddress, AmountIsZero } from "../errors/StandardErrors.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
+import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
 import { Registry } from "../registry/Registry.sol";
 
-/// @title AssetWhitelist
-/// @notice 资产白名单管理合约，用于管理支持的 ERC20 资产
-/// @dev 提供资产白名单的查询和管理功能，仅治理地址可修改白名单
-/// @dev 使用标准化的 ActionKeys 和 ModuleKeys 进行权限管理
-/// @dev 支持批量操作和详细的事件记录
-/// @dev 使用ACM进行权限控制，确保系统安全性
-/// @dev 支持Registry升级事件监听，实现模块化架构
-/// @custom:security-contact security@example.com
-contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IRegistryUpgradeEvents {
+/**
+ * @title AssetWhitelist
+ * @notice Governance-managed allowlist of supported assets (collateral / settlement).
+ * @dev This module is consumed by core flows (e.g. VaultRouter / matching libraries) to validate
+ *      whether an ERC20 asset is allowed. View functions are intentionally non-reverting in normal
+ *      operation and do not depend on Registry being set.
+ *
+ * Security:
+ * - Writes are role-gated via ACM (resolved from Registry).
+ * - Upgrade is role-gated (ACTION_UPGRADE_MODULE).
+ */
+contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
+    /* ============ Errors ============ */
+    /// @notice Reverted when attempting to add an already-allowed asset.
+    error AssetWhitelist__AssetAlreadyAllowed(address asset);
+    /// @notice Reverted when attempting to remove/update an asset that is not allowed.
+    error AssetWhitelist__AssetNotAllowed(address asset);
+    /// @notice Reverted when a batch operation receives an empty array.
+    error AssetWhitelist__EmptyAssetsArray();
+    /// @notice Reverted when an index is out of bounds for the internal asset list.
+    error AssetWhitelist__IndexOutOfBounds(uint256 index, uint256 length);
+
     /* ============ Storage ============ */
-    /// @notice Registry合约地址
+    /// @notice Registry contract address (SSOT for module address resolution).
     address private _registryAddr;
 
     /* ============ Modifiers ============ */
-    /// @notice 验证Registry地址有效性
+    /// @notice Ensures the stored Registry address is set (non-zero).
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
     
-    /// @notice 资产白名单映射
+    /// @notice Allowlist mapping: asset => allowed.
     mapping(address => bool) private _allowedAssets;
     
-    /// @notice 支持的资产地址列表
+    /// @notice List of currently allowed assets.
     address[] private _assetList;
     
-    /// @notice 资产索引映射：asset → index - 优化数组操作
+    /// @notice Index mapping for O(1) removal: asset => index in `_assetList`.
     mapping(address => uint256) private _assetIndex;
     
-    /// @notice 资产数量计数器
+    /// @notice Number of allowed assets (mirrors `_assetList.length`).
     uint256 private _assetCount;
     
-    /// @notice 资产详细信息映射：asset → AssetInfo
+    /// @notice Bookkeeping info per asset.
     mapping(address => AssetInfo) private _assetInfo;
 
     /* ============ Structs ============ */
-    /// @notice 资产详细信息结构
-    /// @param isActive 是否激活
-    /// @param addedAt 添加时间戳
-    /// @param addedBy 添加者地址
-    /// @param lastUpdated 最后更新时间戳
-    /// @param updateCount 更新次数
+    /// @notice Bookkeeping info for an asset (not used for allowlist validation).
+    /// @param isActive Whether the asset is currently allowed.
+    /// @param addedAt Timestamp when the asset was first added.
+    /// @param addedBy Address that added the asset.
+    /// @param lastUpdated Timestamp of the last bookkeeping update.
+    /// @param updateCount Number of bookkeeping updates (including add/remove/info updates).
+    // NOTE: Keep field order stable for upgrade-safe storage layout. Do not reorder for packing.
+    // solhint-disable-next-line gas-struct-packing
     struct AssetInfo {
         bool isActive;
         uint256 addedAt;
@@ -64,11 +81,11 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
     }
 
     /* ============ Events ============ */
-    /// @notice 资产添加到白名单事件
-    /// @param actionKey 动作标识符
-    /// @param asset 资产地址
-    /// @param addedBy 添加者地址
-    /// @param timestamp 添加时间戳
+    /// @notice Emitted when an asset is added to the allowlist.
+    /// @param actionKey Action key used for authorization (ActionKeys.ACTION_ADD_WHITELIST).
+    /// @param asset Asset address.
+    /// @param addedBy Caller who performed the action.
+    /// @param timestamp Block timestamp when the event was emitted.
     event AssetAdded(
         bytes32 indexed actionKey,
         address indexed asset, 
@@ -76,11 +93,11 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
         uint256 timestamp
     );
 
-    /// @notice 资产从白名单移除事件
-    /// @param actionKey 动作标识符
-    /// @param asset 资产地址
-    /// @param removedBy 移除者地址
-    /// @param timestamp 移除时间戳
+    /// @notice Emitted when an asset is removed from the allowlist.
+    /// @param actionKey Action key used for authorization (ActionKeys.ACTION_REMOVE_WHITELIST).
+    /// @param asset Asset address.
+    /// @param removedBy Caller who performed the action.
+    /// @param timestamp Block timestamp when the event was emitted.
     event AssetRemoved(
         bytes32 indexed actionKey,
         address indexed asset, 
@@ -88,12 +105,12 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
         uint256 timestamp
     );
 
-    /// @notice 批量资产添加事件
-    /// @param actionKey 动作标识符
-    /// @param assets 资产地址数组
-    /// @param addedBy 添加者地址
-    /// @param addedCount 成功添加数量
-    /// @param totalCount 总操作数量
+    /// @notice Emitted after a batch add operation.
+    /// @param actionKey Action key used for authorization (ActionKeys.ACTION_ADD_WHITELIST).
+    /// @param assets Input assets array (may include already-allowed assets).
+    /// @param addedBy Caller who performed the action.
+    /// @param addedCount Number of newly-added assets.
+    /// @param totalCount Total number of assets provided in the input array.
     event AssetsBatchAdded(
         bytes32 indexed actionKey,
         address[] assets, 
@@ -102,12 +119,12 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
         uint256 totalCount
     );
 
-    /// @notice 批量资产移除事件
-    /// @param actionKey 动作标识符
-    /// @param assets 资产地址数组
-    /// @param removedBy 移除者地址
-    /// @param removedCount 成功移除数量
-    /// @param totalCount 总操作数量
+    /// @notice Emitted after a batch remove operation.
+    /// @param actionKey Action key used for authorization (ActionKeys.ACTION_REMOVE_WHITELIST).
+    /// @param assets Input assets array (may include already-removed assets).
+    /// @param removedBy Caller who performed the action.
+    /// @param removedCount Number of assets removed during this call.
+    /// @param totalCount Total number of assets provided in the input array.
     event AssetsBatchRemoved(
         bytes32 indexed actionKey,
         address[] assets, 
@@ -116,11 +133,11 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
         uint256 totalCount
     );
 
-    /// @notice 资产信息更新事件
-    /// @param actionKey 动作标识符
-    /// @param asset 资产地址
-    /// @param updatedBy 更新者地址
-    /// @param timestamp 更新时间戳
+    /// @notice Emitted when bookkeeping info is updated for an allowed asset.
+    /// @param actionKey Action key used for authorization (ActionKeys.ACTION_SET_PARAMETER).
+    /// @param asset Asset address.
+    /// @param updatedBy Caller who performed the action.
+    /// @param timestamp Block timestamp when the event was emitted.
     event AssetInfoUpdated(
         bytes32 indexed actionKey,
         address indexed asset, 
@@ -129,73 +146,122 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
     );
 
     /* ============ Constructor ============ */
-    /// @dev 禁用实现合约的初始化器
+    /// @dev Disable initializers on the implementation contract.
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
     /* ============ Initializer ============ */
-    /// @notice 初始化资产白名单合约
-    /// @param initialRegistryAddr Registry合约地址
-    /// @dev 使用 StandardErrors 进行错误处理
+    /**
+     * @notice Initialize the AssetWhitelist module.
+     * @dev Reverts if:
+     *      - initialRegistryAddr == address(0)
+     *
+     * Security:
+     * - Initializer (callable once via proxy).
+     *
+     * @param initialRegistryAddr Registry contract address.
+     */
     function initialize(address initialRegistryAddr) external initializer {
         __UUPSUpgradeable_init();
         
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         
         _registryAddr = initialRegistryAddr;
         
-        // 记录初始化动作
-        emit VaultTypes.ActionExecuted(
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        // Record initialization (governance/audit trail).
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
 
     /* ============ External View Functions ============ */
     
     /// @inheritdoc IAssetWhitelist
-    function isAssetAllowed(address asset) external view override onlyValidRegistry returns (bool) {
+    function isAssetAllowed(address asset) external view override returns (bool) {
         return _allowedAssets[asset];
     }
 
     /// @inheritdoc IAssetWhitelist
-    function getAllowedAssets() external view override onlyValidRegistry returns (address[] memory) {
+    function getAllowedAssets() external view override returns (address[] memory) {
         return _assetList;
     }
 
-    /// @notice 获取支持的资产数量
-    /// @return 支持的资产数量
-    function getAssetCount() external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Get the number of allowed assets.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return count Number of allowed assets.
+     */
+    function getAssetCount() external view returns (uint256 count) {
         return _assetCount;
     }
 
-    /// @notice 获取资产详细信息
-    /// @param asset 资产地址
-    /// @return 资产详细信息
-    function getAssetInfo(address asset) external view onlyValidRegistry returns (AssetInfo memory) {
+    /**
+     * @notice Get bookkeeping info for an asset.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @param asset Asset address.
+     * @return info Asset bookkeeping info (may be zeroed if never added).
+     */
+    function getAssetInfo(address asset) external view returns (AssetInfo memory info) {
         return _assetInfo[asset];
     }
 
-    /// @notice 根据索引获取资产地址
-    /// @param index 索引
-    /// @return 资产地址
-    function getAssetAtIndex(uint256 index) external view onlyValidRegistry returns (address) {
-        if (index >= _assetList.length) revert("Index out of bounds");
+    /**
+     * @notice Get an allowed asset address by its index in the internal list.
+     * @dev Reverts if:
+     *      - index >= _assetList.length
+     *
+     * Security:
+     * - View-only.
+     *
+     * @param index Index into the internal asset list.
+     * @return asset Asset address at the given index.
+     */
+    function getAssetAtIndex(uint256 index) external view returns (address asset) {
+        uint256 length = _assetList.length;
+        if (index >= length) revert AssetWhitelist__IndexOutOfBounds(index, length);
         return _assetList[index];
     }
 
     /* ============ External Admin Functions ============ */
     
-    /// @notice 添加资产到白名单
-    /// @param asset 资产地址
-    /// @dev 仅治理角色可调用
+    /**
+     * @notice Add an asset to the allowlist.
+     * @dev Reverts if:
+     *      - Registry address is not set
+     *      - caller lacks ActionKeys.ACTION_ADD_WHITELIST
+     *      - asset == address(0)
+     *      - asset is already allowed
+     *
+     * Security:
+     * - Role-gated via ACM.
+     *
+     * @param asset Asset address to add.
+     */
     function addAllowedAsset(address asset) external override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
         if (asset == address(0)) revert ZeroAddress();
-        if (_allowedAssets[asset]) revert AmountIsZero(); // 已存在
+        if (_allowedAssets[asset]) revert AssetWhitelist__AssetAlreadyAllowed(asset);
+
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         
         _allowedAssets[asset] = true;
         _assetList.push(asset);
@@ -204,40 +270,57 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
         
         _assetInfo[asset] = AssetInfo({
             isActive: true,
-            addedAt: block.timestamp,
+            addedAt: ts,
             addedBy: msg.sender,
-            lastUpdated: block.timestamp,
+            lastUpdated: ts,
             updateCount: 1
         });
         
-        emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, block.timestamp);
+        emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, ts);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_ASSET_WHITELIST_ADDED,
+            abi.encode(asset, msg.sender, ts)
+        );
         
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        // Record standardized action event.
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
 
-    /// @notice 从白名单移除资产
-    /// @param asset 资产地址
-    /// @dev 仅治理角色可调用
+    /**
+     * @notice Remove an asset from the allowlist.
+     * @dev Reverts if:
+     *      - Registry address is not set
+     *      - caller lacks ActionKeys.ACTION_REMOVE_WHITELIST
+     *      - asset == address(0)
+     *      - asset is not allowed
+     *
+     * Security:
+     * - Role-gated via ACM.
+     *
+     * @param asset Asset address to remove.
+     */
     function removeAllowedAsset(address asset) external override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_REMOVE_WHITELIST, msg.sender);
         if (asset == address(0)) revert ZeroAddress();
-        if (!_allowedAssets[asset]) revert AmountIsZero(); // 不存在
+        if (!_allowedAssets[asset]) revert AssetWhitelist__AssetNotAllowed(asset);
+
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         
         _allowedAssets[asset] = false;
         _assetCount--;
         
-        // 更新资产信息
+        // Update bookkeeping info.
         _assetInfo[asset].isActive = false;
-        _assetInfo[asset].lastUpdated = block.timestamp;
+        _assetInfo[asset].lastUpdated = ts;
         _assetInfo[asset].updateCount++;
         
-        // 从数组中移除（优化实现）
+        // Remove from list in O(1) by swapping with the last element.
         uint256 index = _assetIndex[asset];
         if (index < _assetList.length - 1) {
             address lastAsset = _assetList[_assetList.length - 1];
@@ -251,29 +334,47 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
             ActionKeys.ACTION_REMOVE_WHITELIST,
             asset, 
             msg.sender,
-            block.timestamp
+            ts
+        );
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_ASSET_WHITELIST_REMOVED,
+            abi.encode(asset, msg.sender, ts)
         );
         
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        // Record standardized action event.
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_REMOVE_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
 
-    /// @notice 批量添加资产到白名单
-    /// @param assets 资产地址数组
-    /// @dev 仅治理角色可调用
+    /**
+     * @notice Batch add assets to the allowlist (idempotent for already-allowed assets).
+     * @dev Reverts if:
+     *      - Registry address is not set
+     *      - caller lacks ActionKeys.ACTION_ADD_WHITELIST
+     *      - assets.length == 0
+     *      - any asset == address(0)
+     *
+     * Security:
+     * - Role-gated via ACM.
+     *
+     * @param assets Asset addresses to add.
+     */
     function batchAddAllowedAssets(address[] calldata assets) external override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
-        if (assets.length == 0) revert AmountIsZero();
+        if (assets.length == 0) revert AssetWhitelist__EmptyAssetsArray();
+
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         
         uint256 addedCount = 0;
-        for (uint256 i = 0; i < assets.length; i++) {
+        for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i];
-            if (asset != address(0) && !_allowedAssets[asset]) {
+            if (asset == address(0)) revert ZeroAddress();
+            if (!_allowedAssets[asset]) {
                 _allowedAssets[asset] = true;
                 _assetList.push(asset);
                 _assetIndex[asset] = _assetList.length - 1;
@@ -281,9 +382,9 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
                 
                 _assetInfo[asset] = AssetInfo({
                     isActive: true,
-                    addedAt: block.timestamp,
+                    addedAt: ts,
                     addedBy: msg.sender,
-                    lastUpdated: block.timestamp,
+                    lastUpdated: ts,
                     updateCount: 1
                 });
                 
@@ -298,36 +399,54 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
             addedCount,
             assets.length
         );
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_ASSET_WHITELIST_BATCH_ADDED,
+            abi.encode(assets, msg.sender, addedCount, assets.length, ts)
+        );
         
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        // Record standardized action event.
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
 
-    /// @notice 批量从白名单移除资产
-    /// @param assets 资产地址数组
-    /// @dev 仅治理角色可调用
+    /**
+     * @notice Batch remove assets from the allowlist (idempotent for already-removed assets).
+     * @dev Reverts if:
+     *      - Registry address is not set
+     *      - caller lacks ActionKeys.ACTION_REMOVE_WHITELIST
+     *      - assets.length == 0
+     *      - any asset == address(0)
+     *
+     * Security:
+     * - Role-gated via ACM.
+     *
+     * @param assets Asset addresses to remove.
+     */
     function batchRemoveAllowedAssets(address[] calldata assets) external override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_REMOVE_WHITELIST, msg.sender);
-        if (assets.length == 0) revert AmountIsZero();
+        if (assets.length == 0) revert AssetWhitelist__EmptyAssetsArray();
+
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         
         uint256 removedCount = 0;
-        for (uint256 i = 0; i < assets.length; i++) {
+        for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i];
-            if (asset != address(0) && _allowedAssets[asset]) {
+            if (asset == address(0)) revert ZeroAddress();
+            if (_allowedAssets[asset]) {
                 _allowedAssets[asset] = false;
                 _assetCount--;
                 
-                // 更新资产信息
+                // Update bookkeeping info.
                 _assetInfo[asset].isActive = false;
-                _assetInfo[asset].lastUpdated = block.timestamp;
+                _assetInfo[asset].lastUpdated = ts;
                 _assetInfo[asset].updateCount++;
                 
-                // 从数组中移除（优化实现）
+                // Remove from list in O(1) by swapping with the last element.
                 uint256 index = _assetIndex[asset];
                 if (index < _assetList.length - 1) {
                     address lastAsset = _assetList[_assetList.length - 1];
@@ -348,81 +467,127 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
             removedCount,
             assets.length
         );
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_ASSET_WHITELIST_BATCH_REMOVED,
+            abi.encode(assets, msg.sender, removedCount, assets.length, ts)
+        );
         
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        // Record standardized action event.
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_REMOVE_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
 
-    /// @notice 更新资产信息
-    /// @param asset 资产地址
-    /// @dev 仅治理角色可调用
+    /**
+     * @notice Update bookkeeping fields for an allowed asset (does not change allowlist status).
+     * @dev Reverts if:
+     *      - Registry address is not set
+     *      - caller lacks ActionKeys.ACTION_SET_PARAMETER
+     *      - asset == address(0)
+     *      - asset is not allowed
+     *
+     * Security:
+     * - Role-gated via ACM.
+     *
+     * @param asset Asset address.
+     */
     function updateAssetInfo(address asset) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (asset == address(0)) revert ZeroAddress();
-        if (!_allowedAssets[asset]) revert AmountIsZero();
+        if (!_allowedAssets[asset]) revert AssetWhitelist__AssetNotAllowed(asset);
+
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         
-        _assetInfo[asset].lastUpdated = block.timestamp;
+        _assetInfo[asset].lastUpdated = ts;
         _assetInfo[asset].updateCount++;
         
         emit AssetInfoUpdated(
             ActionKeys.ACTION_SET_PARAMETER,
             asset, 
             msg.sender,
-            block.timestamp
+            ts
+        );
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_ASSET_WHITELIST_INFO_UPDATED,
+            abi.encode(asset, msg.sender, ts)
         );
         
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        // Record standardized action event.
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
 
-    /// @notice 更新Registry地址
-    /// @param newRegistryAddr 新的Registry地址
-    /// @dev Registry地址不能为零地址
+    /**
+     * @notice Update the stored Registry address.
+     * @dev Reverts if:
+     *      - Registry address is not set
+     *      - caller lacks ActionKeys.ACTION_SET_PARAMETER
+     *      - newRegistryAddr == address(0)
+     *
+     * Security:
+     * - Role-gated via ACM.
+     *
+     * @param newRegistryAddr New Registry address.
+     */
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
+
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_ASSET_WHITELIST_REGISTRY_UPDATED,
+            abi.encode(oldRegistry, newRegistryAddr, msg.sender, ts)
+        );
         
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        // Record standardized action event.
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            ts
         );
         
-        // 发出模块地址更新事件
-        emit VaultTypes.ModuleAddressUpdated(
+        // Emit module address update event for observers.
+        emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
-            block.timestamp
+            ts
         );
     }
 
     /* ============ Internal Functions ============ */
     
-    /// @notice 获取Registry地址
-    /// @return Registry合约地址
-    function getRegistry() external view returns (address) {
+    /**
+     * @notice Get the stored Registry address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return registryAddr Registry address.
+     */
+    function getRegistry() external view returns (address registryAddr) {
         return _registryAddr;
     }
     
-    /// @notice 内部权限验证函数
-    /// @param actionKey 动作标识符
-    /// @param user 用户地址
+    /// @notice Require that `user` has `actionKey` permission in the system AccessControlManager.
+    /// @param actionKey Action key to validate.
+    /// @param user Address to validate.
     function _requireRole(bytes32 actionKey, address user) internal view {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
@@ -430,24 +595,32 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
 
     /* ============ Upgrade Functions ============ */
     
-    /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
+    /**
+     * @notice UUPS upgrade authorization hook.
+     * @dev Reverts if:
+     *      - caller lacks ActionKeys.ACTION_UPGRADE_MODULE
+     *      - newImplementation == address(0)
+     *
+     * Security:
+     * - Role-gated via ACM (resolved from Registry).
+     */
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        
-        // 记录升级动作
-        emit VaultTypes.ActionExecuted(
+
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        // Record upgrade authorization (governance/audit trail).
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
 
     /* ============ Storage Gap ============ */
     
-    /// @dev 为可升级合约预留存储空间
+    /// @dev Reserved storage space to allow layout changes in the future.
     uint256[50] private __gap;
 } 

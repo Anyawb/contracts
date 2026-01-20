@@ -49,8 +49,12 @@ async function main() {
   }
 }
 
-// 执行测试
-main().catch((error) => {
-  console.error('❌ 脚本执行失败:', error);
-  process.exit(1);
-}); 
+// 仅在脚本被直接执行时才运行，避免 hardhat test 时触发清理/重编译
+if (require.main === module) {
+  main().catch((error) => {
+    console.error('❌ 脚本执行失败:', error);
+    process.exit(1);
+  });
+}
+
+export {}; // 避免被识别为测试模块

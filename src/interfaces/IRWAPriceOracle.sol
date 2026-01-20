@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 
 /// @title IRWAPriceOracle
 /// @notice 提供 RWA 资产的美元价格查询接口
 /// @dev 与 ActionKeys 和 ModuleKeys 集成，提供标准化的模块管理
-/// @dev 与 VaultTypes 集成，提供标准化的事件记录
+/// @dev 与 SystemEvents 集成，提供标准化的事件记录
 /// @dev 使用 StandardErrors 进行统一的错误处理
 /// @custom:security-contact security@example.com
 interface IRWAPriceOracle {

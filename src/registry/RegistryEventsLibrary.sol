@@ -1,108 +1,182 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title RegistryEvents
-/// @notice Registry 合约的事件定义库
-/// @dev 这是一个库文件，用于分离事件定义，减少主合约大小
-/// @dev 所有 Registry 相关的事件都在这里统一定义，便于维护和复用
-/// @dev 使用 emit RegistryEvents.Xxx 语法在其他合约中发出事件
+/**
+ * @title RegistryEvents
+ * @notice Canonical event definitions for the Registry system.
+ * @dev Reverts if:
+ *      - (none)
+ *
+ * Security:
+ * - This is an event-only library; it does not read or write state
+ * - Events are emitted by Registry entrypoints and related modules
+ */
 library RegistryEvents {
-    // ============ 行为开关（常量） ============
-    /// @notice 是否发出 ModuleNoOp 事件（默认关闭节省 gas）
-    bool public constant EMIT_MODULE_NOOP = false;
-    // ============ 枚举定义 ============
+    // ============ Enums ============
     
-    /// @notice 紧急操作类型枚举
-    /// @dev 使用枚举替代字符串，节省 gas 且更规范
-    /// @dev 注意：如果添加新的操作类型，需要同时更新事件定义
+    /**
+     * @notice Emergency action type enum.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Off-chain consumers should treat this as an enum-to-uint8 mapping.
+     * - If adding a new action, update all related event docs/consumers.
+     */
     enum EmergencyAction {
-        PAUSE,              // 0: 暂停系统
-        UNPAUSE,            // 1: 恢复系统
-        EMERGENCY_UPGRADE,  // 2: 紧急升级
-        EMERGENCY_RECOVERY, // 3: 紧急恢复
-        EMERGENCY_WITHDRAW  // 4: 紧急提款
+        PAUSE,              // 0: Pause the system
+        UNPAUSE,            // 1: Unpause the system
+        EMERGENCY_UPGRADE,  // 2: Emergency upgrade action
+        EMERGENCY_RECOVERY, // 3: Emergency recovery action
+        EMERGENCY_WITHDRAW  // 4: Emergency withdraw action
     }
 
-    // ============ 初始化相关事件 ============
+    // ============ Initialization events ============
     
-    /// @notice Registry 已初始化
-    /// @param admin 治理地址
-    /// @param minDelay 最小延迟时间
-    /// @param initializer 初始化者地址
+    /**
+     * @notice Emitted when the Registry is initialized.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the Registry initializer path.
+     *
+     * @param admin Governance/admin address configured at initialization.
+     * @param minDelay Minimum upgrade delay window (seconds).
+     * @param initializer Initializer caller address (e.g., deployer/EOA/contract).
+     */
     event RegistryInitialized(
         address indexed admin,
         uint256 minDelay,
         address indexed initializer
     );
 
-    // ============ 存储管理相关事件 ============
+    // ============ Storage management events ============
     
-    /// @notice 存储版本已升级
-    /// @param oldVersion 旧版本
-    /// @param newVersion 新版本
+    /**
+     * @notice Emitted when the Registry storage version is upgraded.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by storage layout/version management logic.
+     *
+     * @param oldVersion Previous storage version identifier.
+     * @param newVersion New storage version identifier.
+     */
     event StorageVersionUpgraded(uint256 oldVersion, uint256 newVersion);
-
-    // ============ 治理相关事件 ============
     
-    /// @notice 主治理地址已变更
-    /// @param oldAdmin 旧治理地址
-    /// @param newAdmin 新治理地址
+    /**
+     * @notice Emitted when a storage migration is executed (fixed STORAGE_SLOT layout migration).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by migration logic after successful migrator execution.
+     *
+     * @param fromVersion Source storage version identifier.
+     * @param toVersion Target storage version identifier.
+     * @param migrator Migrator contract address used for the migration.
+     */
+    event StorageMigrated(uint256 fromVersion, uint256 toVersion, address indexed migrator);
+
+    // ============ Governance events ============
+    
+    /**
+     * @notice Emitted when the governance admin address changes.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by governance ownership/admin update logic.
+     *
+     * @param oldAdmin Previous governance admin address.
+     * @param newAdmin New governance admin address.
+     */
     event AdminChanged(
         address indexed oldAdmin, 
         address indexed newAdmin
     );
 
-    /// @notice 待接管地址已变更
-    /// @param oldPendingAdmin 旧待接管地址
-    /// @param newPendingAdmin 新待接管地址
+    /**
+     * @notice Emitted when the pending admin address changes.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by governance/pending-admin management logic.
+     *
+     * @param oldPendingAdmin Previous pending admin address.
+     * @param newPendingAdmin New pending admin address.
+     */
     event PendingAdminChanged(address indexed oldPendingAdmin, address indexed newPendingAdmin);
 
-    /// @notice 升级管理员已变更
-    /// @param oldAdmin 旧升级管理员地址
-    /// @param newAdmin 新升级管理员地址
+    /**
+     * @notice Emitted when the upgrade admin address changes.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by upgrade-authority management logic.
+     *
+     * @param oldAdmin Previous upgrade admin address.
+     * @param newAdmin New upgrade admin address.
+     */
     event UpgradeAdminChanged(
         address indexed oldAdmin, 
         address indexed newAdmin
     );
 
-    /// @notice 紧急管理员已变更
-    /// @param oldAdmin 旧紧急管理员地址
-    /// @param newAdmin 新紧急管理员地址
+    /**
+     * @notice Emitted when the emergency admin address changes.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by emergency-authority management logic.
+     *
+     * @param oldAdmin Previous emergency admin address.
+     * @param newAdmin New emergency admin address.
+     */
     event EmergencyAdminChanged(
         address indexed oldAdmin, 
         address indexed newAdmin
     );
 
-    // ============ 模块管理相关事件 ============
+    // ============ Module management events ============
     
-    /// @notice 模块地址已直接变更（无延迟升级）
-    /// @param key 模块键名
-    /// @param oldAddress 旧模块地址
-    /// @param newAddress 新模块地址
-    /// @dev 用于直接设置模块地址，无需延迟升级流程
+    /**
+     * @notice Emitted when a module address is set directly (no timelock upgrade flow).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by direct module write entrypoints (e.g., governance write).
+     *
+     * @param key Module key (bytes32; see ModuleKeys).
+     * @param oldAddress Previous module address (may be zero if unset).
+     * @param newAddress New module address (non-zero).
+     */
     event ModuleChanged(
         bytes32 indexed key, 
         address indexed oldAddress, 
         address indexed newAddress
     );
 
-    /// @notice 模块地址无变更（幂等操作）
-    /// @param key 模块键名
-    /// @param currentAddress 当前模块地址
-    /// @param executor 执行者地址
-    /// @dev 用于前端追踪无变更的操作
-    event ModuleNoOp(
-        bytes32 indexed key,
-        address indexed currentAddress,
-        address executor
-    );
-
-    /// @notice 模块升级已排期（延迟升级流程）
-    /// @param key 模块键名
-    /// @param oldAddress 旧模块地址
-    /// @param newAddress 新模块地址
-    /// @param executeAfter 执行时间戳
-    /// @param proposer 提议者地址
+    /**
+     * @notice Emitted when a module upgrade is scheduled (timelocked upgrade flow).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Scheduling relies on block.timestamp by design (timelock mechanism).
+     *
+     * @param key Module key (bytes32; see ModuleKeys).
+     * @param oldAddress Current module address at scheduling time.
+     * @param newAddress Proposed new module address.
+     * @param executeAfter Earliest execution time (unix timestamp, seconds).
+     * @param proposer Proposal submitter address.
+     */
     event ModuleUpgradeScheduled(
         bytes32 indexed key, 
         address indexed oldAddress, 
@@ -111,11 +185,19 @@ library RegistryEvents {
         address proposer
     );
 
-    /// @notice 模块升级已执行（延迟升级流程完成）
-    /// @param key 模块键名
-    /// @param oldAddress 旧模块地址
-    /// @param newAddress 新模块地址
-    /// @param executor 执行者地址
+    /**
+     * @notice Emitted when a scheduled module upgrade is executed.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the timelocked execution path after delay requirements are met.
+     *
+     * @param key Module key (bytes32; see ModuleKeys).
+     * @param oldAddress Previous module address (pre-upgrade).
+     * @param newAddress New module address (post-upgrade).
+     * @param executor Caller/executor address.
+     */
     event ModuleUpgraded(
         bytes32 indexed key, 
         address indexed oldAddress, 
@@ -123,11 +205,19 @@ library RegistryEvents {
         address executor
     );
 
-    /// @notice 模块升级已取消（延迟升级流程）
-    /// @param key 模块键名
-    /// @param oldAddress 旧模块地址
-    /// @param newAddress 新模块地址
-    /// @param canceller 取消者地址
+    /**
+     * @notice Emitted when a scheduled module upgrade is cancelled.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by cancellation logic (e.g., governance/emergency paths).
+     *
+     * @param key Module key (bytes32; see ModuleKeys).
+     * @param oldAddress Module address at scheduling time.
+     * @param newAddress Proposed module address at scheduling time.
+     * @param canceller Caller/canceller address.
+     */
     event ModuleUpgradeCancelled(
         bytes32 indexed key, 
         address indexed oldAddress, 
@@ -135,170 +225,161 @@ library RegistryEvents {
         address canceller
     );
 
-    /// @notice 批量模块地址已直接变更（无延迟升级）
-    /// @param keys 模块键名数组
-    /// @param oldAddresses 旧模块地址数组
-    /// @param newAddresses 新模块地址数组
-    /// @dev 批量变更事件仅携带变更数据，移除冗余 executor 以降 gas
-    /// @dev 用于批量直接设置模块地址，无需延迟升级流程
-    /// @dev 建议在合约逻辑中限制数组长度不超过 20，防止单个交易中传入过大数组
+    /**
+     * @notice Emitted when module addresses are changed in batch (no timelock upgrade flow).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Large arrays increase gas and may approach block gas limits; callers should cap sizes.
+     *
+     * @param keys Module keys array (bytes32[]; see ModuleKeys).
+     * @param oldAddresses Previous module addresses array (same length as keys).
+     * @param newAddresses New module addresses array (same length as keys).
+     * @param executor Caller/executor address (for off-chain attribution).
+     */
     event BatchModuleChanged(
         bytes32[] keys,
         address[] oldAddresses,
-        address[] newAddresses
+        address[] newAddresses,
+        address executor
     );
 
-    // ============ 升级历史记录事件 ============
+    /**
+     * @notice Emitted when a module-address cache entry is refreshed/updated.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by cache-refresh logic (typically CacheMaintenanceManager-gated).
+     *
+     * @param key Module key (bytes32; see ModuleKeys).
+     * @param oldAddress Previous cached module address (may be zero).
+     * @param newAddress New cached module address (may be zero if cleared/disabled).
+     */
+    event ModuleCacheUpdated(
+        bytes32 indexed key,
+        address indexed oldAddress,
+        address indexed newAddress
+    );
+
+    // ============ Emergency action events ============
     
-    /// @notice 升级历史已记录
-    /// @param key 模块键名
-    /// @param oldAddress 旧模块地址
-    /// @param newAddress 新模块地址
-    /// @param timestamp 升级时间戳
-    /// @param executor 执行者地址
-    /// @param txHash 交易哈希（可选，用于链上链下联动审计）
-    /// @dev txHash 参数保留用于外部索引器填充，合约内无法获取当前交易哈希
-    /// @dev 外部索引器可以通过事件日志关联实际的交易哈希
-    event UpgradeHistoryRecorded(
-        bytes32 indexed key, 
-        address indexed oldAddress, 
-        address indexed newAddress, 
-        uint256 timestamp, 
-        address executor,
-        bytes32 txHash
-    );
-
-    // ============ 权限验证相关事件 ============
-    
-    /// @notice 单个模块升级权限已验证
-    /// @param key 模块键名
-    /// @param newAddress 新模块地址
-    /// @param signer 签名者地址
-    /// @param nonce 使用的 nonce
-    event ModuleUpgradePermitted(
-        bytes32 indexed key, 
-        address indexed newAddress, 
-        address indexed signer, 
-        uint256 nonce
-    );
-
-    /// @notice 批量模块升级权限已验证
-    /// @param keys 模块键名数组
-    /// @param addresses 新模块地址数组
-    /// @param signer 签名者地址
-    /// @param nonce 使用的 nonce
-    /// @dev 建议在合约逻辑中限制数组长度不超过 20，防止单个交易中传入过大数组造成 gas 问题
-    /// @dev 建议分批处理大量升级，每批不超过 10-20 个模块
-    /// @dev 推荐在接口层或文档中明确限制，避免恶意传入超长数组
-    event BatchModuleUpgradePermitted(
-        bytes32[] keys, 
-        address[] addresses, 
-        address indexed signer, 
-        uint256 nonce
-    );
-
-    // ============ 紧急操作相关事件 ============
-    
-    /// @notice 紧急操作已执行（使用枚举，节省 gas）
-    /// @param action 操作类型（EmergencyAction 枚举值）
-    /// @param executor 执行者地址
-    /// @dev 使用枚举替代字符串，节省 gas 且更规范
-    /// @dev EmergencyAction 枚举值：
-    /// - 0: PAUSE - 暂停系统
-    /// - 1: UNPAUSE - 恢复系统
-    /// - 2: EMERGENCY_UPGRADE - 紧急升级
-    /// - 3: EMERGENCY_RECOVERY - 紧急恢复
-    /// - 4: EMERGENCY_WITHDRAW - 紧急提款
+    /**
+     * @notice Emitted when an emergency action is executed.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emergency actions must be authority-gated by the emitting contract.
+     *
+     * @param action Emergency action enum value encoded as uint8:
+     *        - 0: PAUSE
+     *        - 1: UNPAUSE
+     *        - 2: EMERGENCY_UPGRADE
+     *        - 3: EMERGENCY_RECOVERY
+     *        - 4: EMERGENCY_WITHDRAW
+     * @param executor Caller/executor address.
+     * @param timestamp Action timestamp (unix timestamp, seconds).
+     */
     event EmergencyActionExecuted(
         uint8 indexed action, 
-        address indexed executor
+        address indexed executor,
+        uint256 timestamp
     );
 
-    /// @notice 系统已暂停
-    /// @param executor 执行者地址
-    event Paused(
-        address indexed executor
-    );
-
-    /// @notice 系统已恢复
-    /// @param executor 执行者地址
-    event Unpaused(
-        address indexed executor
-    );
-
-    // ============ 配置变更相关事件 ============
+    // ============ Configuration change events ============
     
-    /// @notice 最小延迟已变更
-    /// @param oldDelay 旧延迟时间
-    /// @param newDelay 新延迟时间
+    /**
+     * @notice Emitted when the minimum delay window changes.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Delay window changes should be governance-gated by the emitting contract.
+     *
+     * @param oldDelay Previous delay window (seconds).
+     * @param newDelay New delay window (seconds).
+     */
     event MinDelayChanged(
         uint256 oldDelay, 
         uint256 newDelay
     );
 
-    // ============ 系统恢复相关事件 ============
-    
-    /// @notice Registry 恢复已执行
-    /// @param oldRegistry 旧 Registry 地址
-    /// @param newRegistry 新 Registry 地址
-    /// @param executor 执行者地址
-    event RegistryRecoveryExecuted(
-        address indexed oldRegistry, 
-        address indexed newRegistry, 
-        address indexed executor
+    // ============ Optional integrations events ============
+
+    /**
+     * @notice Emitted when the dynamic module key registry integration address changes.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by governance-only config setter (Registry.setDynamicModuleKeyRegistry)
+     *
+     * @param oldAddress Previous integration address (may be zero).
+     * @param newAddress New integration address (may be zero to disable).
+     * @param executor Caller/executor address.
+     */
+    event DynamicModuleKeyRegistryChanged(
+        address indexed oldAddress,
+        address indexed newAddress,
+        address executor
     );
 
-    // ============ 升级授权相关事件 ============
-    
-    /// @notice 模块升级已授权
-    /// @param authorizer 授权者地址
-    /// @param newImplementation 新实现合约地址
-    event ModuleUpgradeAuthorized(
-        address indexed authorizer,
-        address indexed newImplementation
-    );
+    // ============ Dynamic module key registry events ============
 
-    // ============ ETH 接收相关事件 ============
-    
-    /// @notice 接收到 ETH
-    /// @param sender 发送者地址
-    /// @param amount ETH 数量
-    event EthReceived(
-        address indexed sender,
-        uint256 amount
-    );
+    /**
+     * @notice Emitted when a new dynamic module key is registered.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the dynamic module key registry (RegistryDynamicModuleKey).
+     *
+     * @param moduleKey The registered module key.
+     * @param nameHash The keccak256 hash of the normalized name.
+     * @param registrant The caller that performed the registration.
+     */
+    event ModuleKeyRegistered(bytes32 indexed moduleKey, bytes32 indexed nameHash, address indexed registrant);
 
-    /// @notice 未知函数被调用
-    /// @param sender 调用者地址
-    /// @param value 发送的 ETH 数量
-    event UnknownFunctionCalled(
-        address indexed sender,
-        uint256 value
-    );
+    /**
+     * @notice Emitted when a dynamic module key is unregistered.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the dynamic module key registry (RegistryDynamicModuleKey).
+     *
+     * @param moduleKey The unregistered module key.
+     * @param name The normalized name associated with the key.
+     * @param unregistrant The caller that performed the unregistration.
+     */
+    event ModuleKeyUnregistered(bytes32 indexed moduleKey, string name, address indexed unregistrant);
 
-    // ============ 事件使用场景说明 ============
-    /// @dev 模块相关事件使用场景区分：
-    /// 
-    /// ModuleChanged vs ModuleUpgraded:
-    /// - ModuleChanged: 直接设置模块地址，无需延迟升级流程
-    ///   - 使用场景：setModule(), setModules() 等直接操作
-    ///   - 特点：立即生效，无延迟期
-    /// 
-    /// - ModuleUpgraded: 延迟升级流程完成后的最终执行
-    ///   - 使用场景：延迟升级流程中的最终执行步骤
-    ///   - 特点：经过延迟期后执行，有完整的升级流程
-    /// 
-    /// - ModuleUpgradeScheduled: 延迟升级流程的开始
-    ///   - 使用场景：提议模块升级，进入延迟期
-    ///   - 特点：需要等待延迟期后才能执行
-    /// 
-    /// - ModuleUpgradeCancelled: 延迟升级流程的取消
-    ///   - 使用场景：在延迟期内取消已排期的升级
-    ///   - 特点：取消尚未执行的升级提议
+    /**
+     * @notice Emitted when the registration admin is updated.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the dynamic module key registry (RegistryDynamicModuleKey).
+     *
+     * @param oldAdmin Previous registration admin address.
+     * @param newAdmin New registration admin address.
+     */
+    event RegistrationAdminChanged(address indexed oldAdmin, address indexed newAdmin);
 
-    // ============ 事件参数命名规范说明 ============
-    /// @dev 事件参数命名规范：
-    /// - 地址参数使用描述性名称：executor（执行者）、proposer（提议者）、signer（签名者）
-    /// - 保持命名一致性，便于阅读和维护
-    /// - 新事件应遵循此命名规范
-} 
+    /**
+     * @notice Emitted when the system admin is updated.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Emitted by the dynamic module key registry (RegistryDynamicModuleKey).
+     *
+     * @param oldAdmin Previous system admin address.
+     * @param newAdmin New system admin address.
+     */
+    event SystemAdminChanged(address indexed oldAdmin, address indexed newAdmin);
+
+}

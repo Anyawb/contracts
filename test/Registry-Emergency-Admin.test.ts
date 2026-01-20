@@ -39,12 +39,16 @@ describe('Registry 紧急管理员测试', function () {
     const ERC1967Proxy = await ethers.getContractFactory('ERC1967Proxy');
     const proxy = await ERC1967Proxy.deploy(
       await implementation.getAddress(),
-      '0x' // Registry 初始化不需要参数
+      implementation.interface.encodeFunctionData('initialize', [
+        BigInt(3600),
+        await owner.getAddress(),
+        await owner.getAddress(),
+        await owner.getAddress(),
+      ])
     );
     await proxy.waitForDeployment();
         
     const registry = implementation.attach(await proxy.getAddress()) as Registry;
-    await registry.initialize(BigInt(3600)); // 1小时延迟
         
     // 设置紧急管理员
     await registry.setEmergencyAdmin(await emergencyAdmin.getAddress());
@@ -82,7 +86,7 @@ describe('Registry 紧急管理员测试', function () {
     it('不应该允许非紧急管理员暂停系统', async function () {
       // 非紧急管理员不能暂停系统
       await expect(registry.connect(user1).pause())
-        .to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+        .to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await emergencyAdmin.getAddress());
         
       console.log('非紧急管理员暂停系统限制测试通过');
@@ -95,7 +99,7 @@ describe('Registry 紧急管理员测试', function () {
       
       // 紧急管理员不能恢复系统
       await expect(registry.connect(emergencyAdmin).unpause())
-        .to.be.revertedWith('Ownable: caller is not the owner');
+        .to.be.revertedWithCustomError(registry, 'OwnableUnauthorizedAccount');
         
       console.log('紧急管理员恢复系统限制测试通过');
     });
@@ -135,7 +139,7 @@ describe('Registry 紧急管理员测试', function () {
     it('不应该允许非紧急管理员取消升级', async function () {
       // 非紧急管理员不能取消升级
       await expect(registry.connect(user1).cancelModuleUpgrade(KEY_LE))
-        .to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+        .to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await emergencyAdmin.getAddress());
         
       console.log('非紧急管理员取消升级限制测试通过');
@@ -159,7 +163,7 @@ describe('Registry 紧急管理员测试', function () {
     it('不应该允许非紧急管理员取消所有升级', async function () {
       // 非紧急管理员不能取消所有升级
       await expect(registry.connect(user1).emergencyCancelAllUpgrades())
-        .to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+        .to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await emergencyAdmin.getAddress());
         
       console.log('非紧急管理员取消所有升级限制测试通过');
@@ -181,7 +185,7 @@ describe('Registry 紧急管理员测试', function () {
     it('不应该允许非紧急管理员恢复升级权限', async function () {
       // 非紧急管理员不能恢复升级权限
       await expect(registry.connect(user1).emergencyRecoverUpgrade())
-        .to.be.revertedWithCustomError(registry, 'EmergencyAdminNotAuthorized')
+        .to.be.revertedWithCustomError(registry, 'Registry__EmergencyAdminNotAuthorized')
         .withArgs(await user1.getAddress(), await emergencyAdmin.getAddress());
         
       console.log('非紧急管理员恢复升级权限限制测试通过');
@@ -219,12 +223,12 @@ describe('Registry 紧急管理员测试', function () {
       // 尝试设置恶意模块（应该被阻止）
       await expect(
         registry.setModule(KEY_LE, await user1.getAddress())
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
       
       // 尝试排期恶意升级（应该被阻止）
       await expect(
         registry.scheduleModuleUpgrade(KEY_LE, await user1.getAddress())
-      ).to.be.revertedWith('Pausable: paused');
+      ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
       
       console.log('暂停状态下恶意升级防护测试通过');
     });

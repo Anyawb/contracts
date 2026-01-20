@@ -1,0 +1,78 @@
+// 自动生成的合约配置文件 - Localhost
+// Auto-generated contract configuration file - Localhost
+// 生成时间 Generated at: 2026-01-20T10:28:02.442Z
+//
+// Naming:
+// - OrderEngine = core/LendingEngine (Registry KEY_ORDER_ENGINE)
+// - VaultLendingEngine = debt ledger engine (Registry KEY_LE)
+// - LendingEngine is a legacy alias of OrderEngine (kept for backward compatibility)
+
+export const CONTRACT_ADDRESSES = {
+    Registry: '0x359570B3a0437805D0a71457D61AD26a28cAC9A2',
+  RegistryDynamicModuleKey: '0xc9952Fc93Fa9bE383ccB39008c786b9f94eAc95d',
+  AccessControlManager: '0xD5724171C2b7f0AA717a324626050BD05767e2C6',
+  CacheMaintenanceManager: '0x8B190573374637f144AC8D37375d97fd84cBD3a0',
+  AssetWhitelist: '0x8D81A3DCd17030cD5F23Ac7370e4Efb10D2b3cA4',
+  AuthorityWhitelist: '0xcC4c41415fc68B2fBf70102742A83cDe435e0Ca7',
+  PriceOracle: '0xa722bdA6968F50778B973Ae2701e90200C564B49',
+  CoinGeckoPriceUpdater: '0xc7cDb7A2E5dDa1B7A0E792Fe1ef08ED20A6F56D4',
+  FeeRouter: '0x967AB65ef14c58bD4DcfFeaAA1ADb40a022140E5',
+  MockUSDC: '0xe1708FA6bb2844D5384613ef0846F9Bc1e8eC55E',
+  VaultBusinessLogic: '0x871ACbEabBaf8Bed65c22ba7132beCFaBf8c27B5',
+  VaultRouter: '0x6A59CC73e334b018C9922793d96Df84B538E6fD5',
+  VaultCore: '0x1c9fD50dF7a4f066884b58A05D91e4b55005876A',
+  CollateralManager: '0x0fe4223AD99dF788A6Dcad148eB4086E6389cEB6',
+  OrderEngine: '0x71a0b8A2245A9770A4D887cE1E4eCc6C1d4FF28c',
+  LendingEngine: '0x71a0b8A2245A9770A4D887cE1E4eCc6C1d4FF28c',
+  VaultLendingEngine: '0xb185E9f6531BA9877741022C92CE858cDCc5760E',
+  EarlyRepaymentGuaranteeManager: '0x193521C8934bCF3473453AF4321911E7A89E0E12',
+  HealthView: '0x9Fcca440F19c62CDF7f973eB6DDF218B15d4C71D',
+  LiquidationConfigModule: '0x01E21d7B8c39dc4C764c19b308Bd8b14B1ba139E',
+  LiquidationRiskManager: '0x7C8BaafA542c57fF9B2B90612bf8aB9E86e22C09',
+  SystemView: '0x0a17FabeA4633ce714F1Fa4a2dcA62C3bAc4758d',
+  RegistryView: '0x79E8AB29Ff79805025c9462a2f2F12e9A496f81d',
+  StatisticsView: '0x0Dd99d9f56A14E9D53b2DdC62D9f0bAbe806647A',
+  PositionView: '0xeAd789bd8Ce8b9E94F5D0FCa99F8787c7e758817',
+  PreviewView: '0x95775fD3Afb1F4072794CA4ddA27F2444BCf8Ac3',
+  DashboardView: '0xd9fEc8238711935D6c8d79Bef2B9546ef23FC046',
+  UserView: '0xd3FFD73C53F139cEBB80b6A524bE280955b3f4db',
+  AccessControlView: '0x512F7469BcC83089497506b5df64c6E246B39925',
+  CacheOptimizedView: '0x9fD16eA9E31233279975D99D5e8Fc91dd214c7Da',
+  LendingEngineView: '0xCBBe2A5c3A22BE749D5DDF24e9534f98951983e2',
+  FeeRouterView: '0x987e855776C03A4682639eEb14e65b3089EE6310',
+  RiskView: '0xb932C8342106776E73E39D695F3FFC3A9624eCE0',
+  ViewCache: '0xE8F7d98bE6722d42F29b50500B0E318EF2be4fc8',
+  EventHistoryManager: '0xe38b6847E611e942E6c80eD89aE867F522402e80',
+  ValuationOracleView: '0x2c8ED11fd7A058096F2e5828799c68BE88744E2F',
+  LiquidationRiskView: '0x7580708993de7CA120E957A62f26A5dDD4b3D8aC',
+  DegradationCore: '0x75c68e69775fA3E9DD38eA32E554f6BF259C1135',
+  DegradationStorage: '0x572316aC11CB4bc5daf6BDae68f43EA3CCE3aE0e',
+  ModuleHealthView: '0x975Ab64F4901Af5f0C96636deA0b9de3419D0c2F',
+  DegradationMonitor: '0x4593ed9CbE6003e687e5e77368534bb04b162503',
+  BatchView: '0xCd7c00Ac6dc51e8dCc773971Ac9221cC582F3b1b',
+  LiquidatorView: '0x8ac87219a0F5639BC01b470F87BA2b26356CB2B9',
+  LoanNFT: '0x94fFA1C7330845646CE9128450F8e6c3B5e44F86',
+  GuaranteeFundManager: '0xdF46e54aAadC1d55198A4a8b4674D7a4c927097A',
+  RewardPoints: '0xf5c4a909455C00B99A90d93b48736F3196DB5621',
+  RewardManagerCore: '0xFD2Cf3b56a73c75A7535fFe44EBABe7723c64719',
+  RewardCore: '0xB22C255250d74B0ADD1bfB936676D2a299BF48Bd',
+  RewardConsumption: '0x666D0c3da3dBc946D5128D06115bb4eed4595580',
+  RewardManager: '0x742489F22807ebB4C36ca6cD95c3e1C044B7B6c8',
+  RewardConfig: '0x1D8D70AD07C8E7E442AD78E4AC0A16f958Eba7F0',
+  RewardView: '0xA9e6Bfa2BF53dE88FEb19761D9b2eE2e821bF1Bf',
+  LiquidationManager: '0x3fdc08D815cc4ED3B7F69Ee246716f2C8bCD6b07',
+  SettlementManager: '0xb868Cc77A95a65F42611724AF05Aa2d3B6Ec05F2',
+  LenderPoolVault: '0x70E5370b8981Abc6e14C91F4AcE823954EFC8eA3',
+  LiquidationPayoutManager: '0x4000F8820522AC96C4221b299876e3e53bCc8525'
+};
+
+export const NETWORK_CONFIG = {
+  chainId: 1337,
+  rpcUrl: 'http://127.0.0.1:8545',
+  explorer: 'http://127.0.0.1:8545',
+  name: 'localhost'
+};
+
+// 使用示例 Usage example:
+// import { CONTRACT_ADDRESSES, NETWORK_CONFIG } from './contracts-localhost';
+// const vaultCoreAddress = CONTRACT_ADDRESSES.VaultCore;

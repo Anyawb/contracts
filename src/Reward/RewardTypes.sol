@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
-
 /// @title RewardTypes - 积分系统共享数据类型
 /// @notice 定义积分消费系统的枚举和结构体
 /// @dev 遵循 docs/SmartContractStandard.md 注释规范
-/// @dev 与 ActionKeys、ModuleKeys、VaultTypes 集成，确保架构一致性
-/// @dev 这些类型定义与标准化动作和模块标识保持一致
-contract RewardTypes {
+/// @dev Types-only：用于被 Reward 子系统合约继承/引用，不应单独部署
+/// @dev 重要：`ServiceType` 与 `ServiceLevel` 的枚举顺序是对外 ABI 的一部分（前端/脚本依赖），禁止调整/插入/重排
+abstract contract RewardTypes {
     
     /// @notice 服务类型枚举
-    /// @dev 对应 ModuleKeys 中的配置模块：
+    /// @dev 对应 Reward 子系统的配置模块：
     ///      - AdvancedAnalytics -> KEY_ADVANCED_ANALYTICS_CONFIG
     ///      - PriorityService -> KEY_PRIORITY_SERVICE_CONFIG  
     ///      - FeatureUnlock -> KEY_FEATURE_UNLOCK_CONFIG
@@ -28,9 +24,6 @@ contract RewardTypes {
     }
     
     /// @notice 服务等级枚举
-    /// @dev 对应 ActionKeys 中的动作：
-    ///      - 消费积分 -> ACTION_CONSUME_POINTS
-    ///      - 升级服务 -> ACTION_UPGRADE_SERVICE
     enum ServiceLevel {
         Basic,      // 基础
         Standard,   // 标准
@@ -39,8 +32,7 @@ contract RewardTypes {
     }
     
     /// @notice 消费记录结构
-    /// @dev 用于记录用户积分消费历史，与 VaultTypes.ActionExecuted 事件配合使用
-    /// @dev 对应 ActionKeys.ACTION_CONSUME_POINTS 和 ActionKeys.ACTION_UPGRADE_SERVICE
+    /// @dev 用于记录用户积分消费历史（Spend 侧），供 RewardCore/RewardView 缓存与只读查询
     struct ConsumptionRecord {
         uint256 points;           // 消费积分数量
         uint256 timestamp;        // 消费时间戳
@@ -51,8 +43,7 @@ contract RewardTypes {
     }
     
     /// @notice 服务配置结构
-    /// @dev 由各配置模块（ModuleKeys 中定义）提供，通过 Registry 获取
-    /// @dev 与 VaultTypes 中的参数更新事件配合使用
+    /// @dev 由各服务配置子模块提供（实现 IServiceConfig），通过 Registry 动态解析
     struct ServiceConfig {
         uint256 price;           // 服务价格（积分）
         uint256 duration;        // 服务时长（秒）
@@ -62,8 +53,8 @@ contract RewardTypes {
     }
     
     /// @notice 用户特权状态
-    /// @dev 记录用户在各服务类型中的特权状态
-    /// @dev 与 VaultTypes.ActionExecuted 事件配合，记录权限变更
+    /// @dev 记录用户在各服务类型中的特权状态（链上存储结构，RewardCore 内部使用）
+    /// @dev 注意：RewardView 对外推荐读取的是 packed 位图（privilegesPacked），以降低 RPC 成本
     struct UserPrivilege {
         bool hasAdvancedAnalytics;    // 是否有高级数据分析权限
         bool hasPriorityService;      // 是否有优先服务权限

@@ -27,6 +27,7 @@
     "types/**/*", 
     "hardhat.config.ts", 
     "scripts/**/*", 
+    "frontend-config/**/*",
     "contracts/test/core", 
     "contracts/test/fixed-tests", 
     "contracts/test/libraries", 
@@ -63,7 +64,7 @@
     "contracts/test/VaultBusinessLogic.test.ts", 
     "contracts/test/VaultCap.test.ts", 
     "contracts/test/VaultStatistics.test.ts", 
-    "contracts/test/VaultView.test.ts", 
+    "contracts/test/VaultRouter.test.ts", 
     "Frontend/scripts/deploy/nondeploy/fix-reward-points.ts"
 , "ai-services/src/collectors/collect-alpha-vantage.ts", "ai-services/src/collectors/collect-coingecko.ts", "ai-services/src/collectors/collect-coinmarketcap.ts", "ai-services/src/collectors/collect-cryptopanic.ts", "ai-services/src/collectors/collect-defillama.ts", "ai-services/src/collectors/collect-token-terminal.ts", "ai-services/src/collectors/ingest-alpha-vantage-to-vector.ts", "ai-services/src/collectors/ingest-api-ai-routes-to-vector.ts", "ai-services/src/collectors/ingest-coingecko-to-vector.ts", "ai-services/src/collectors/ingest-cryptopanic-to-vector.ts", "ai-services/src/collectors/ingest-defillama-to-vector.ts", "ai-services/src/collectors/ingest-messari-to-vector.ts", "ai-services/src/collectors/ingest-token-terminal-to-vector.ts", "ai-services/src/collectors/messari-ask-deepseek.ts", "ai-services/src/collectors/quick-messari-collect.ts"  ],
   "exclude": ["node_modules"]

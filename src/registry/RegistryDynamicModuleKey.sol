@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { 
-    ZeroAddress, 
-    EmptyArray, 
-    IndexOutOfBounds 
-} from "../errors/StandardErrors.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {ZeroAddress, EmptyArray, IndexOutOfBounds} from "../errors/StandardErrors.sol";
+import {RegistryEvents} from "./RegistryEventsLibrary.sol";
 
-/// @title RegistryDynamicModuleKey
-/// @notice 动态模块键注册管理器
-/// @dev 支持链上动态注册新的模块键，但要限制权限
-/// @dev 解决ModuleKeys.getAllKeys()硬编码问题，避免升级时必须动逻辑合约
-/// @dev 专注于动态注册功能，查询功能委托给RegistryQueryLibrary
+/**
+ * @title RegistryDynamicModuleKey
+ * @notice Dynamic module key registry for registering new module keys on-chain.
+ * @dev Reverts if:
+ *      - (see individual functions)
+ *
+ * Security:
+ * - UUPS upgrade authorization is owner-gated (onlyOwner)
+ * - Module key registration is role-gated (registrationAdmin / systemAdmin) and pause-aware (whenNotPaused)
+ * - Names are normalized/validated before deriving keys to prevent ambiguity
+ */
 contract RegistryDynamicModuleKey is 
     Initializable, 
     OwnableUpgradeable, 
@@ -25,118 +28,186 @@ contract RegistryDynamicModuleKey is
     PausableUpgradeable
 {
     // ============ Custom Errors ============
-    /// @notice 模块键已存在错误
+    /**
+     * @notice The derived module key already exists.
+     * @param moduleKey The existing module key.
+     */
     error RegistryDynamicModuleKey__ModuleKeyAlreadyExists(bytes32 moduleKey);
-    /// @notice 模块键不存在错误
+    /**
+     * @notice The module key does not exist.
+     * @param moduleKey The missing module key.
+     */
     error RegistryDynamicModuleKey__ModuleKeyNotExists(bytes32 moduleKey);
-    /// @notice 模块名称不存在错误
+    /**
+     * @notice The module name does not exist.
+     * @param nameHash The keccak256 hash of the normalized name.
+     */
     error RegistryDynamicModuleKey__ModuleNameNotExists(bytes32 nameHash);
-    /// @notice 无效的模块键名称错误
+    /**
+     * @notice The module key name is invalid (e.g., length constraints).
+     */
     error RegistryDynamicModuleKey__InvalidModuleKeyName();
-    /// @notice 模块键数量超限错误
+    /**
+     * @notice The dynamic module key limit would be exceeded.
+     * @param current Current number of registered dynamic keys.
+     * @param limit Maximum allowed number of dynamic keys.
+     */
     error RegistryDynamicModuleKey__ModuleKeyLimitExceeded(uint256 current, uint256 limit);
-    /// @notice 批量注册数量超限错误
+    /**
+     * @notice The batch size limit would be exceeded.
+     * @param batchSize Provided batch size.
+     * @param limit Maximum allowed batch size.
+     */
     error RegistryDynamicModuleKey__BatchSizeLimitExceeded(uint256 batchSize, uint256 limit);
-    /// @notice 只有注册管理员可以操作错误
+    /**
+     * @notice Caller is not the registration admin.
+     */
     error RegistryDynamicModuleKey__OnlyRegistrationAdmin();
-    /// @notice 只有系统管理员可以操作错误
+    /**
+     * @notice Caller is not the system admin.
+     */
     error RegistryDynamicModuleKey__OnlySystemAdmin();
-    /// @notice 名称包含无效字符错误
+    /**
+     * @notice The name contains an invalid character.
+     * @param position The 0-based byte position of the first invalid character.
+     */
     error RegistryDynamicModuleKey__InvalidCharacterInName(uint256 position);
 
-    // ============ Events ============
-    /// @notice 模块键注册事件（移除冗余 timestamp，同时精简 name 以节省日志开销）
-    event ModuleKeyRegistered(bytes32 indexed moduleKey, bytes32 indexed nameHash, address indexed registrant);
-    /// @notice 模块键注销事件（保留 name 便于链下快速消费）
-    event ModuleKeyUnregistered(bytes32 indexed moduleKey, string name, address indexed unregistrant);
-    /// @notice 注册管理员变更事件
-    event RegistrationAdminChanged(address indexed oldAdmin, address indexed newAdmin);
-    /// @notice 系统管理员变更事件
-    event SystemAdminChanged(address indexed oldAdmin, address indexed newAdmin);
-
     // ============ Constants ============
-    uint256 private constant MAX_DYNAMIC_KEYS = 100; // 动态模块键最大数量
-    uint256 private constant MIN_NAME_LENGTH = 3; // 模块键名称最小长度（字节）
-    uint256 private constant MAX_NAME_LENGTH = 50; // 模块键名称最大长度（字节）
-    uint256 private constant MAX_BATCH_SIZE = 20; // 批量注册最大数量
-    /// @notice 生成模块键的盐（固定前缀，防止拼接歧义，节省 gas）
-    bytes32 private constant MODULE_KEY_SALT = keccak256("rwa.registry.dynamic.module.key.v1");
+    uint256 private constant _MAX_DYNAMIC_KEYS = 100; // Max dynamic module keys.
+    uint256 private constant _MIN_NAME_LENGTH = 3; // Min module key name length (bytes).
+    uint256 private constant _MAX_NAME_LENGTH = 50; // Max module key name length (bytes).
+    uint256 private constant _MAX_BATCH_SIZE = 20; // Max batch registration size.
+    /// @notice Salt used to derive dynamic module keys.
+    // NOTE: Keep this exact string for backwards-compatible key derivation.
+    // solhint-disable-next-line gas-small-strings
+    bytes32 private constant _MODULE_KEY_SALT = keccak256("rwa.registry.dynamic.module.key.v1");
 
     // ============ State Variables ============
-    /// @notice 注册管理员地址
+    /// @notice Registration admin address.
     address private _registrationAdminAddr;
-    /// @notice 系统管理员地址
+    /// @notice System admin address.
     address private _systemAdminAddr;
     
-    /// @notice 动态模块键集合
+    /// @notice Dynamic module key membership.
     mapping(bytes32 => bool) private _dynamicModuleKeys;
-    /// @notice 模块键名称映射
+    /// @notice Module key => normalized name.
     mapping(bytes32 => string) private _moduleKeyNames;
-    /// @notice 规范化名称哈希到模块键的映射
+    /// @notice nameHash (keccak256(normalizedName)) => moduleKey.
     mapping(bytes32 => bytes32) private _nameHashToModuleKey;
     
-    /// @notice 动态模块键列表
+    /// @notice Dynamic module key list.
     bytes32[] private _dynamicModuleKeyList;
-    /// @notice 列表索引映射（index + 1，0 表示不存在）
+    /// @notice Index mapping (index + 1; 0 means not present).
     mapping(bytes32 => uint256) private _keyIndexPlus1;
 
     // ============ Modifiers ============
-    /// @notice 只有注册管理员可以操作
+    /// @notice Only registration admin can call.
     modifier onlyRegistrationAdmin() {
         if (msg.sender != _registrationAdminAddr) revert RegistryDynamicModuleKey__OnlyRegistrationAdmin();
         _;
     }
 
-    /// @notice 只有系统管理员可以操作
+    /// @notice Only system admin can call.
     modifier onlySystemAdmin() {
         if (msg.sender != _systemAdminAddr) revert RegistryDynamicModuleKey__OnlySystemAdmin();
         _;
     }
 
     // ============ Constructor ============
+    /**
+     * @notice Constructs the implementation contract and disables initializers.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Disables Initializable initializers on the implementation instance
+     *
+     * @custom:oz-upgrades-unsafe-allow constructor
+     */
     constructor() {
         _disableInitializers();
     }
 
     // ============ Initializer ============
-    function initialize(address initialRegistrationAdmin, address initialSystemAdmin) external initializer {
+    /**
+     * @notice Initializes the dynamic module key registry and configures admin roles.
+     * @dev Reverts if:
+     *      - initialRegistrationAdmin == address(0)
+     *      - initialSystemAdmin == address(0)
+     *      - initialOwner == address(0)
+     *
+     * Security:
+     * - Single-use initializer (Initializable)
+     * - Sets owner/admin roles explicitly (not msg.sender)
+     *
+     * @param initialRegistrationAdmin Registration admin address (registerModuleKey/batchRegisterModuleKeys).
+     * @param initialSystemAdmin System admin address (unregisterModuleKey).
+     * @param initialOwner Contract owner address (UUPS upgrades and admin role updates).
+     */
+    function initialize(
+        address initialRegistrationAdmin,
+        address initialSystemAdmin,
+        address initialOwner
+    ) external initializer {
         if (initialRegistrationAdmin == address(0)) revert ZeroAddress();
         if (initialSystemAdmin == address(0)) revert ZeroAddress();
+        if (initialOwner == address(0)) revert ZeroAddress();
         
-        __Ownable_init();
+        __Ownable_init(initialOwner);
         __UUPSUpgradeable_init();
         __Pausable_init();
         
         _registrationAdminAddr = initialRegistrationAdmin;
         _systemAdminAddr = initialSystemAdmin;
         
-        emit RegistrationAdminChanged(address(0), initialRegistrationAdmin);
-        emit SystemAdminChanged(address(0), initialSystemAdmin);
+        emit RegistryEvents.RegistrationAdminChanged(address(0), initialRegistrationAdmin);
+        emit RegistryEvents.SystemAdminChanged(address(0), initialSystemAdmin);
     }
 
     // ============ UUPS Upgrade Authorization ============
-    /// @notice 升级授权函数
-    /// @dev onlyOwner modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
-    function _authorizeUpgrade(address) internal override onlyOwner {
-        // onlyOwner modifier 已经足够验证权限
+    /**
+     * @notice Authorizes a UUPS upgrade to a new implementation.
+     * @dev Reverts if:
+     *      - msg.sender is not owner
+     *      - newImplementation == address(0)
+     *
+     * Security:
+     * - UUPS upgrade gate (UUPSUpgradeable)
+     * - onlyOwner
+     *
+     * @param newImplementation The new implementation address.
+     */
+    function _authorizeUpgrade(address newImplementation) internal view override onlyOwner {
+        if (newImplementation == address(0)) revert ZeroAddress();
     }
 
     // ============ Internal Helper Functions ============
     
-    /// @notice 规范化并校验模块键名称（单次遍历）
-    /// @param name 原始名称
-    /// @return normalizedName 规范化后的名称
-    /// @return nameHash 名称哈希
-    /// @dev 去除首尾空格、将 A-Z 转小写，并校验仅包含 [a-z0-9_-]
-    function _normalizeAndValidate(string memory name) internal pure returns (string memory normalizedName, bytes32 nameHash) {
+    /**
+     * @notice Normalizes and validates a module key name.
+     * @dev Reverts if:
+     *      - normalized length is < _MIN_NAME_LENGTH or > _MAX_NAME_LENGTH
+     *      - name contains characters outside [a-z0-9_-] after normalization
+     *
+     * Security:
+     * - Pure helper; input validation only
+     *
+     * @param name Raw input name.
+     * @return normalizedName Normalized name (trimmed, lowercased).
+     * @return nameHash keccak256 hash of normalizedName.
+     */
+    function _normalizeAndValidate(string memory name)
+        internal
+        pure
+        returns (string memory normalizedName, bytes32 nameHash)
+    {
         bytes memory nameBytes = bytes(name);
         uint256 start = 0;
         uint256 end = nameBytes.length;
         while (start < end && nameBytes[start] == 0x20) { start++; }
         while (end > start && nameBytes[end - 1] == 0x20) { end--; }
         uint256 length = end - start;
-        if (length < MIN_NAME_LENGTH || length > MAX_NAME_LENGTH) {
+        if (length < _MIN_NAME_LENGTH || length > _MAX_NAME_LENGTH) {
             revert RegistryDynamicModuleKey__InvalidModuleKeyName();
         }
         bytes memory normalizedBytes = new bytes(length);
@@ -156,75 +227,127 @@ contract RegistryDynamicModuleKey is
         nameHash = keccak256(abi.encodePacked(normalizedName));
     }
 
-    /// @notice 生成模块键
-    /// @param name 模块键名称
-    /// @return moduleKey 生成的模块键
+    /**
+     * @notice Generates a module key for a normalized name.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Pure helper
+     *
+     * @param name Normalized module key name.
+     * @return moduleKey Derived module key.
+     */
     function _generateModuleKey(string memory name) internal pure returns (bytes32 moduleKey) {
-        // 使用固定盐 + encodePacked，避免拼接歧义并节省 gas
-        moduleKey = keccak256(abi.encodePacked(MODULE_KEY_SALT, name));
+        // Use fixed salt + encodePacked to avoid concatenation ambiguity and save gas.
+        moduleKey = keccak256(abi.encodePacked(_MODULE_KEY_SALT, name));
     }
 
     // ============ Module Key Registration ============
     
-    /// @notice 注册新的动态模块键
-    /// @param name 模块键名称
-    /// @return moduleKey 生成的模块键
-    function registerModuleKey(string calldata name) external onlyRegistrationAdmin whenNotPaused returns (bytes32 moduleKey) {
+    /**
+     * @notice Registers a new dynamic module key from a human-readable name.
+     * @dev Reverts if:
+     *      - msg.sender is not registrationAdmin
+     *      - RegistryDynamicModuleKey is paused
+     *      - name is invalid (length/charset; see _normalizeAndValidate)
+     *      - normalized name already exists
+     *      - derived moduleKey already exists
+     *      - _MAX_DYNAMIC_KEYS would be exceeded
+     *
+     * Security:
+     * - onlyRegistrationAdmin
+     * - whenNotPaused
+     *
+     * @param name Module key name (will be normalized; ASCII [a-z0-9_-] after normalization).
+     * @return moduleKey The newly registered module key.
+     */
+    function registerModuleKey(string calldata name)
+        external
+        onlyRegistrationAdmin
+        whenNotPaused
+        returns (bytes32 moduleKey)
+    {
         return _registerModuleKeyCalldata(name);
     }
 
-    /// @notice 内部注册新的动态模块键（calldata版本，节省gas）
-    /// @param name 模块键名称
-    /// @return moduleKey 生成的模块键
+    /**
+     * @notice Internal calldata-based registration helper.
+     * @dev Reverts if:
+     *      - normalized name already exists
+     *      - derived moduleKey already exists
+     *      - name is invalid (length/charset; see _normalizeAndValidate)
+     *      - _MAX_DYNAMIC_KEYS would be exceeded
+     *
+     * Security:
+     * - Must be called from a role-gated external entrypoint
+     *
+     * @param name Module key name (calldata).
+     * @return moduleKey The newly registered module key.
+     */
     function _registerModuleKeyCalldata(string calldata name) internal returns (bytes32 moduleKey) {
-        // 规范化名称并校验（单次遍历）
+        // Normalize and validate name (single pass).
         (string memory normalizedName, bytes32 nameHash) = _normalizeAndValidate(name);
         
-        // 检查规范化后的名称是否已存在
+        // Ensure normalized name isn't already registered.
         bytes32 existingKey = _nameHashToModuleKey[nameHash];
         if (existingKey != bytes32(0)) {
             revert RegistryDynamicModuleKey__ModuleKeyAlreadyExists(existingKey);
         }
         
-        // 检查是否超过限制
-        if (_dynamicModuleKeyList.length >= MAX_DYNAMIC_KEYS) {
-            revert RegistryDynamicModuleKey__ModuleKeyLimitExceeded(_dynamicModuleKeyList.length, MAX_DYNAMIC_KEYS);
+        // Enforce registry cap.
+        if (_dynamicModuleKeyList.length >= _MAX_DYNAMIC_KEYS) {
+            revert RegistryDynamicModuleKey__ModuleKeyLimitExceeded(_dynamicModuleKeyList.length, _MAX_DYNAMIC_KEYS);
         }
         
-        // 生成模块键
+        // Derive module key.
         moduleKey = _generateModuleKey(normalizedName);
         
-        // 检查模块键是否已存在
+        // Ensure derived key isn't already registered.
         if (_dynamicModuleKeys[moduleKey]) {
             revert RegistryDynamicModuleKey__ModuleKeyAlreadyExists(moduleKey);
         }
         
-        // 注册模块键
+        // Register.
         _dynamicModuleKeys[moduleKey] = true;
         _moduleKeyNames[moduleKey] = normalizedName;
         _nameHashToModuleKey[nameHash] = moduleKey;
         _dynamicModuleKeyList.push(moduleKey);
-        _keyIndexPlus1[moduleKey] = _dynamicModuleKeyList.length; // 记录位置（index+1）
+        _keyIndexPlus1[moduleKey] = _dynamicModuleKeyList.length; // Record position (index+1).
         
-        emit ModuleKeyRegistered(moduleKey, nameHash, msg.sender);
+        emit RegistryEvents.ModuleKeyRegistered(moduleKey, nameHash, msg.sender);
     }
 
-    // 删除未使用的 memory 版本注册函数以减小字节码
-
-    /// @notice 批量注册动态模块键
-    /// @param names 模块键名称数组
-    /// @return moduleKeys 生成的模块键数组
-    /// @dev ⚠️ 注意：如果数组中任何一个名称不符合规范，整个交易将回滚
-    /// @dev 建议在调用前验证所有名称的合法性，或使用 tryRegister 版本
-    function batchRegisterModuleKeys(string[] calldata names) external onlyRegistrationAdmin whenNotPaused returns (bytes32[] memory moduleKeys) {
+    /**
+     * @notice Batch registers dynamic module keys.
+     * @dev Reverts if:
+     *      - msg.sender is not registrationAdmin
+     *      - RegistryDynamicModuleKey is paused
+     *      - names.length == 0
+     *      - names.length > _MAX_BATCH_SIZE
+     *      - _MAX_DYNAMIC_KEYS would be exceeded
+     *      - any name is invalid or already registered (the entire call reverts)
+     *
+     * Security:
+     * - onlyRegistrationAdmin
+     * - whenNotPaused
+     *
+     * @param names Module key names to register.
+     * @return moduleKeys Derived module keys (aligned with names).
+     */
+    function batchRegisterModuleKeys(string[] calldata names)
+        external
+        onlyRegistrationAdmin
+        whenNotPaused
+        returns (bytes32[] memory moduleKeys)
+    {
         uint256 len = names.length;
         if (len == 0) revert EmptyArray();
-        if (len > MAX_BATCH_SIZE) {
-            revert RegistryDynamicModuleKey__BatchSizeLimitExceeded(len, MAX_BATCH_SIZE);
+        if (len > _MAX_BATCH_SIZE) {
+            revert RegistryDynamicModuleKey__BatchSizeLimitExceeded(len, _MAX_BATCH_SIZE);
         }
         uint256 current = _dynamicModuleKeyList.length;
-        if (len + current > MAX_DYNAMIC_KEYS) {
-            revert RegistryDynamicModuleKey__ModuleKeyLimitExceeded(len + current, MAX_DYNAMIC_KEYS);
+        if (len + current > _MAX_DYNAMIC_KEYS) {
+            revert RegistryDynamicModuleKey__ModuleKeyLimitExceeded(len + current, _MAX_DYNAMIC_KEYS);
         }
         moduleKeys = new bytes32[](len);
         for (uint256 i = 0; i < len; ) {
@@ -233,9 +356,17 @@ contract RegistryDynamicModuleKey is
         }
     }
 
-    /// @notice 从列表中移除模块键
-    /// @param moduleKey 要移除的模块键
-    /// @return found 是否找到并移除
+    /**
+     * @notice Removes a module key from the internal list (swap-and-pop).
+     * @dev Reverts if:
+     *      - (none) (returns false if key not found)
+     *
+     * Security:
+     * - Private helper; mutates storage
+     *
+     * @param moduleKey The module key to remove.
+     * @return found True if the key was found and removed.
+     */
     function _removeFromList(bytes32 moduleKey) private returns (bool found) {
         uint256 idxPlus1 = _keyIndexPlus1[moduleKey];
         if (idxPlus1 == 0) {
@@ -253,8 +384,19 @@ contract RegistryDynamicModuleKey is
         return true;
     }
 
-    /// @notice 注销动态模块键
-    /// @param moduleKey 要注销的模块键
+    /**
+     * @notice Unregisters an existing dynamic module key.
+     * @dev Reverts if:
+     *      - msg.sender is not systemAdmin
+     *      - RegistryDynamicModuleKey is paused
+     *      - moduleKey does not exist
+     *
+     * Security:
+     * - onlySystemAdmin
+     * - whenNotPaused
+     *
+     * @param moduleKey The module key to unregister.
+     */
     function unregisterModuleKey(bytes32 moduleKey) external onlySystemAdmin whenNotPaused {
         if (!_dynamicModuleKeys[moduleKey]) {
             revert RegistryDynamicModuleKey__ModuleKeyNotExists(moduleKey);
@@ -263,50 +405,81 @@ contract RegistryDynamicModuleKey is
         string memory name = _moduleKeyNames[moduleKey];
         bytes32 nameHash = keccak256(abi.encodePacked(name));
         
-        // 清理映射
+        // Clear mappings.
         delete _dynamicModuleKeys[moduleKey];
         delete _moduleKeyNames[moduleKey];
         delete _nameHashToModuleKey[nameHash];
         
-        // 从列表中移除，使用统一的 _removeFromList 函数
+        // Remove from list using swap-and-pop helper.
         if (!_removeFromList(moduleKey)) {
             revert RegistryDynamicModuleKey__ModuleKeyNotExists(moduleKey);
         }
         
-        emit ModuleKeyUnregistered(moduleKey, name, msg.sender);
+        emit RegistryEvents.ModuleKeyUnregistered(moduleKey, name, msg.sender);
     }
 
     // ============ Core Dynamic Module Key Functions ============
     
-    /// @notice 检查模块键是否为动态模块键
-    /// @param moduleKey 要检查的模块键
-    /// @return 是否为动态模块键
+    /**
+     * @notice Returns whether a module key is registered as a dynamic module key.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param moduleKey The module key to check.
+     * @return True if the key is a registered dynamic module key.
+     */
     function isDynamicModuleKey(bytes32 moduleKey) external view returns (bool) {
         return _dynamicModuleKeys[moduleKey];
     }
 
-    /// @notice 检查模块键是否有效（包括静态和动态）
-    /// @param moduleKey 要检查的模块键
-    /// @return 是否为有效模块键
+    /**
+     * @notice Returns whether a module key is valid (static or registered dynamic).
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param moduleKey The module key to check.
+     * @return True if the key is a known static key or a registered dynamic key.
+     */
     function isValidModuleKey(bytes32 moduleKey) external view returns (bool) {
         return ModuleKeys.isValidModuleKey(moduleKey) || _dynamicModuleKeys[moduleKey];
     }
 
-    /// @notice 根据名称获取模块键
-    /// @param name 模块键名称
-    /// @return moduleKey 对应的模块键
+    /**
+     * @notice Returns the module key associated with a given name.
+     * @dev Reverts if:
+     *      - name is invalid (length/charset; see _normalizeAndValidate)
+     *      - name is not registered
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param name Module key name (will be normalized).
+     * @return moduleKey The registered module key.
+     */
     function getModuleKeyByName(string calldata name) external view returns (bytes32 moduleKey) {
         (, bytes32 nameHash) = _normalizeAndValidate(name);
         moduleKey = _nameHashToModuleKey[nameHash];
         if (moduleKey == bytes32(0)) {
-            // 使用更明确的错误信息（返回名称哈希）
+            // Return the normalized name hash for off-chain correlation.
             revert RegistryDynamicModuleKey__ModuleNameNotExists(nameHash);
         }
     }
 
-    /// @notice 根据模块键获取名称
-    /// @param moduleKey 模块键
-    /// @return name 对应的名称
+    /**
+     * @notice Returns the human-readable name for a module key.
+     * @dev Reverts if:
+     *      - moduleKey is neither a known static key nor a registered dynamic key
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param moduleKey Module key (static or dynamic).
+     * @return name Name string (static key string or normalized dynamic name).
+     */
     function getModuleKeyName(bytes32 moduleKey) external view returns (string memory name) {
         if (ModuleKeys.isValidModuleKey(moduleKey)) {
             return ModuleKeys.getModuleKeyString(moduleKey);
@@ -319,8 +492,15 @@ contract RegistryDynamicModuleKey is
 
     // ============ Dynamic Module Key Management Functions ============
     
-    /// @notice 获取所有动态模块键
-    /// @return keys 动态模块键数组
+    /**
+     * @notice Returns all registered dynamic module keys.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return keys Dynamic module keys.
+     */
     function getDynamicModuleKeys() external view returns (bytes32[] memory keys) {
         uint256 len = _dynamicModuleKeyList.length;
         keys = new bytes32[](len);
@@ -330,14 +510,30 @@ contract RegistryDynamicModuleKey is
         }
     }
 
-    /// @notice 获取动态模块键总数
+    /**
+     * @notice Returns the total count of registered dynamic module keys.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return The dynamic module key count.
+     */
     function getDynamicKeyCount() external view returns (uint256) {
         return _dynamicModuleKeyList.length;
     }
 
-    /// @notice 获取动态模块键名称（原始数据）
-    /// @param moduleKey 模块键
-    /// @return name 模块键名称
+    /**
+     * @notice Returns the stored normalized name for a dynamic module key.
+     * @dev Reverts if:
+     *      - moduleKey is not a registered dynamic module key
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param moduleKey Dynamic module key.
+     * @return name Normalized name.
+     */
     function getDynamicModuleKeyName(bytes32 moduleKey) external view returns (string memory name) {
         if (!_dynamicModuleKeys[moduleKey]) {
             revert RegistryDynamicModuleKey__ModuleKeyNotExists(moduleKey);
@@ -345,16 +541,31 @@ contract RegistryDynamicModuleKey is
         return _moduleKeyNames[moduleKey];
     }
 
-    /// @notice 根据名称哈希获取模块键
-    /// @param nameHash 名称哈希
-    /// @return moduleKey 对应的模块键
+    /**
+     * @notice Returns the module key mapped from a normalized name hash.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param nameHash keccak256 hash of the normalized name.
+     * @return moduleKey Registered module key (zero if not registered).
+     */
     function getNameHashToModuleKey(bytes32 nameHash) external view returns (bytes32 moduleKey) {
         return _nameHashToModuleKey[nameHash];
     }
 
-    /// @notice 获取动态模块键列表中的指定索引
-    /// @param index 索引
-    /// @return moduleKey 模块键
+    /**
+     * @notice Returns the dynamic module key at a given index in the internal list.
+     * @dev Reverts if:
+     *      - index is out of bounds
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param index 0-based index.
+     * @return moduleKey Dynamic module key at index.
+     */
     function getDynamicModuleKeyByIndex(uint256 index) external view returns (bytes32 moduleKey) {
         if (index >= _dynamicModuleKeyList.length) revert IndexOutOfBounds(index, _dynamicModuleKeyList.length);
         return _dynamicModuleKeyList[index];
@@ -362,50 +573,98 @@ contract RegistryDynamicModuleKey is
 
     // ============ Admin Functions ============
     
-    /// @notice 获取注册管理员地址
+    /**
+     * @notice Returns the registration admin address.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return Registration admin address.
+     */
     function getRegistrationAdmin() external view returns (address) {
         return _registrationAdminAddr;
     }
 
-    /// @notice 获取系统管理员地址
+    /**
+     * @notice Returns the system admin address.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return System admin address.
+     */
     function getSystemAdmin() external view returns (address) {
         return _systemAdminAddr;
     }
 
-    /// @notice 设置注册管理员
-    /// @param newRegistrationAdmin 新的注册管理员地址
+    /**
+     * @notice Sets a new registration admin.
+     * @dev Reverts if:
+     *      - msg.sender is not owner
+     *      - newRegistrationAdmin == address(0)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newRegistrationAdmin New registration admin address.
+     */
     function setRegistrationAdmin(address newRegistrationAdmin) external onlyOwner {
         if (newRegistrationAdmin == address(0)) revert ZeroAddress();
         
         address oldAdmin = _registrationAdminAddr;
         _registrationAdminAddr = newRegistrationAdmin;
         
-        emit RegistrationAdminChanged(oldAdmin, newRegistrationAdmin);
+        emit RegistryEvents.RegistrationAdminChanged(oldAdmin, newRegistrationAdmin);
     }
 
-    /// @notice 设置系统管理员
-    /// @param newSystemAdmin 新的系统管理员地址
+    /**
+     * @notice Sets a new system admin.
+     * @dev Reverts if:
+     *      - msg.sender is not owner
+     *      - newSystemAdmin == address(0)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newSystemAdmin New system admin address.
+     */
     function setSystemAdmin(address newSystemAdmin) external onlyOwner {
         if (newSystemAdmin == address(0)) revert ZeroAddress();
         
         address oldAdmin = _systemAdminAddr;
         _systemAdminAddr = newSystemAdmin;
         
-        emit SystemAdminChanged(oldAdmin, newSystemAdmin);
+        emit RegistryEvents.SystemAdminChanged(oldAdmin, newSystemAdmin);
     }
 
-    /// @notice 紧急暂停
+    /**
+     * @notice Pauses the contract (disables whenNotPaused entrypoints).
+     * @dev Reverts if:
+     *      - msg.sender is not owner
+     *
+     * Security:
+     * - onlyOwner
+     */
     function pause() external onlyOwner {
         _pause();
     }
 
-    /// @notice 恢复运行
+    /**
+     * @notice Unpauses the contract (re-enables whenNotPaused entrypoints).
+     * @dev Reverts if:
+     *      - msg.sender is not owner
+     *
+     * Security:
+     * - onlyOwner
+     */
     function unpause() external onlyOwner {
         _unpause();
     }
 
     // ============ Internal Functions ============
     
-    /// @dev 为可升级合约保留存储槽，防止存储布局冲突
+    /// @dev Storage gap for upgrade safety (prevents storage layout collisions).
     uint256[49] private __gap;
 } 

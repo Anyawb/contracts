@@ -12,6 +12,7 @@ import type {
 } from '../../types';
 
 const ONE_ETH = ethers.parseUnits('1', 18);
+const KEY_ACM = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 
 // 定义ActionKeys常量，与合约中保持一致
 const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
@@ -30,10 +31,15 @@ describe('AdvancedAnalyticsConfig – 高级数据分析服务配置', function 
 
   // 部署合约和代理并进行初始化的函数
   async function deployConfigWithProxy() {
-    // 部署 ACM 权限管理合约
+    // 部署 Registry + ACM
+    const RegistryFactory = await ethers.getContractFactory('MockRegistry');
+    const registry = await RegistryFactory.deploy();
+    await registry.waitForDeployment();
+
     const ACMFactory = await ethers.getContractFactory('AccessControlManager');
     const acm = await ACMFactory.deploy(governance.address) as AccessControlManager;
     await acm.waitForDeployment();
+    await registry.setModule(KEY_ACM, await acm.getAddress());
     
     // 为测试账户授予权限
     await acm.grantRole(ACTION_SET_PARAMETER, alice.address);
@@ -49,7 +55,7 @@ describe('AdvancedAnalyticsConfig – 高级数据分析服务配置', function 
     const configProxy = await ProxyFactory.deploy(
       await configImpl.getAddress(),
       configImpl.interface.encodeFunctionData('initialize', [
-        await acm.getAddress()
+        await registry.getAddress()
       ])
     );
     await configProxy.waitForDeployment();
@@ -66,7 +72,7 @@ describe('AdvancedAnalyticsConfig – 高级数据分析服务配置', function 
       
       // 验证基础等级配置
       const basicConfig = await config.getConfig(0);
-      expect(basicConfig.price).to.equal(ethers.parseUnits('100', 18));
+      expect(basicConfig.price).to.equal(ethers.parseUnits('200', 18));
       expect(basicConfig.duration).to.equal(30 * 24 * 3600);
       expect(basicConfig.isActive).to.be.true;
       expect(basicConfig.level).to.equal(0);

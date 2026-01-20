@@ -1,113 +1,185 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { LiquidationTypes } from "../liquidation/types/LiquidationTypes.sol";
-
-/// @title RiskUtils
-/// @notice 风险评估工具库 - 提供风险评估相关的纯函数
-/// @dev 所有函数都是 pure，不依赖外部状态
-/// @custom:security-contact security@example.com
+/**
+ * @title RiskUtils
+ * @notice Stateless risk-scoring and risk-derivation helpers (pure functions).
+ * @dev Security:
+ * - Pure library: no storage reads/writes, no external calls.
+ * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
+ *
+ * @custom:security-contact security@example.com
+ */
 library RiskUtils {
     
-    // ====== 风险评分阈值常量 ======
-    /// @notice 获取风险评分阈值数组（健康因子阈值，单位：bps）
-    /// @return arr 阈值数组 [120%, 110%, 105%, 100%, 95%]
-    /// @dev 阈值按降序排列，用于风险等级判断
+    // ====== Risk scoring lookup tables ======
+    /**
+     * @notice Get health-factor thresholds used for risk scoring.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Pure math only.
+     *
+     * @return arr Thresholds in bps, sorted descending: [12000, 11000, 10500, 10000, 9500].
+     */
     function getRiskScoreThresholds() internal pure returns (uint256[] memory arr) {
         arr = new uint256[](5);
-        arr[0] = 12000; // 120% - 极低风险阈值
-        arr[1] = 11000; // 110% - 低风险阈值
-        arr[2] = 10500; // 105% - 中等风险阈值
-        arr[3] = 10000; // 100% - 高风险阈值
-        arr[4] = 9500;  // 95%  - 极高风险阈值
+        arr[0] = 12000; // 120% - lowest risk threshold
+        arr[1] = 11000; // 110% - low risk threshold
+        arr[2] = 10500; // 105% - medium risk threshold
+        arr[3] = 10000; // 100% - high risk threshold
+        arr[4] = 9500;  // 95%  - critical risk threshold
     }
     
-    /// @notice 获取风险评分值数组（风险评分，范围：0-100）
-    /// @return arr 评分数组 [0, 20, 40, 60, 80, 100]
-    /// @dev 评分按升序排列，对应不同风险等级
+    /**
+     * @notice Get risk-score values mapped to the thresholds.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Pure math only.
+     *
+     * @return arr Scores, ascending: [0, 20, 40, 60, 80, 100].
+     */
     function getRiskScoreValues() internal pure returns (uint256[] memory arr) {
         arr = new uint256[](6);
-        arr[0] = 0;   // 120%+ - 极低风险
-        arr[1] = 20;  // 110-120% - 低风险
-        arr[2] = 40;  // 105-110% - 中等风险
-        arr[3] = 60;  // 100-105% - 高风险
-        arr[4] = 80;  // 95-100%  - 极高风险
-        arr[5] = 100; // <95%     - 清算风险
+        arr[0] = 0;   // 120%+    - lowest risk
+        arr[1] = 20;  // 110-120% - low risk
+        arr[2] = 40;  // 105-110% - medium risk
+        arr[3] = 60;  // 100-105% - high risk
+        arr[4] = 80;  // 95-100%  - critical risk
+        arr[5] = 100; // <95%     - liquidation risk
     }
 
-    /// @notice 计算简化风险评分
-    /// @param healthFactor 健康因子（单位：bps，如 12000 表示 120%）
-    /// @return riskScore 风险评分 (0-100，0 表示极低风险，100 表示极高风险)
-    /// @dev 基于健康因子阈值计算风险评分，使用预定义的阈值和评分映射
-    function calculateSimpleRiskScore(uint256 healthFactor) internal pure returns (uint256 riskScore) {
+    /**
+     * @notice Compute a simplified risk score from a health factor.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Pure logic only; relies on fixed threshold tables.
+     *
+     * @param healthFactorBps Health factor in bps (e.g., 12000 = 120%).
+     * @return riskScore Risk score in [0..100], where 0 = lowest risk, 100 = highest risk.
+     */
+    function calculateSimpleRiskScore(uint256 healthFactorBps) internal pure returns (uint256 riskScore) {
         uint256[] memory thresholds = getRiskScoreThresholds();
         uint256[] memory values = getRiskScoreValues();
         for (uint256 i = 0; i < thresholds.length; i++) {
-            if (healthFactor >= thresholds[i]) {
+            if (healthFactorBps >= thresholds[i]) {
                 return values[i];
             }
         }
         return values[values.length - 1];
     }
 
-    /// @notice 计算安全边际
-    /// @param healthFactor 健康因子
-    /// @param threshold 阈值
-    /// @return safetyMargin 安全边际
-    function calculateSafetyMargin(uint256 healthFactor, uint256 threshold) internal pure returns (uint256 safetyMargin) {
-        if (healthFactor <= threshold) return 0;
-        return healthFactor - threshold;
+    /**
+     * @notice Compute the safety margin above a threshold, in bps.
+     * @dev Reverts if:
+     *      - subtraction underflows (Solidity ^0.8.x), though guarded by the comparison.
+     *
+     * Security:
+     * - Pure math only.
+     *
+     * @param healthFactorBps Health factor in bps.
+     * @param thresholdBps Threshold in bps.
+     * @return safetyMarginBps max(healthFactorBps - thresholdBps, 0).
+     */
+    function calculateSafetyMargin(uint256 healthFactorBps, uint256 thresholdBps)
+        internal
+        pure
+        returns (uint256 safetyMarginBps)
+    {
+        if (healthFactorBps <= thresholdBps) return 0;
+        return healthFactorBps - thresholdBps;
     }
 
-    /// @notice 计算贷款价值比 (LTV)
-    /// @param debt 债务价值
-    /// @param collateral 抵押价值
-    /// @return ltv 贷款价值比（单位：bps）
-    function calculateLTV(uint256 debt, uint256 collateral) internal pure returns (uint256 ltv) {
+    /**
+     * @notice Compute LTV as bps (debt / collateral).
+     * @dev Reverts if:
+     *      - debt * 10_000 overflows (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Pure math only.
+     *
+     * @param debt Total debt value (any unit; must match collateral unit).
+     * @param collateral Total collateral value (same unit as debt).
+     * @return ltvBps Basis points where 10_000 = 100%; returns 0 if collateral == 0.
+     */
+    function calculateLTV(uint256 debt, uint256 collateral) internal pure returns (uint256 ltvBps) {
         if (collateral == 0) return 0;
-        return (debt * 10000) / collateral;
+        return (debt * 10_000) / collateral;
     }
 
-    /// @notice 判断是否处于清算风险
-    /// @param healthFactor 健康因子
-    /// @param liquidationThreshold 清算阈值
-    /// @return isRisky 是否处于清算风险
-    function isLiquidationRisky(uint256 healthFactor, uint256 liquidationThreshold) internal pure returns (bool isRisky) {
-        return healthFactor < liquidationThreshold;
+    /**
+     * @notice Return whether a position is below the liquidation threshold.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Pure comparison only.
+     *
+     * @param healthFactorBps Health factor in bps.
+     * @param liquidationThresholdBps Liquidation threshold in bps.
+     * @return isRisky True if healthFactorBps < liquidationThresholdBps.
+     */
+    function isLiquidationRisky(uint256 healthFactorBps, uint256 liquidationThresholdBps)
+        internal
+        pure
+        returns (bool isRisky)
+    {
+        return healthFactorBps < liquidationThresholdBps;
     }
 
-    /// @notice 获取预警级别
-    /// @param healthFactor 健康因子
-    /// @param warningThreshold 预警阈值
-    /// @param liquidationThreshold 清算阈值
-    /// @return warningLevel 预警级别 (0: 无预警, 1: 一般预警, 2: 紧急预警)
+    /**
+     * @notice Derive warning level from health factor and thresholds.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Pure comparison only.
+     *
+     * @param healthFactorBps Health factor in bps.
+     * @param warningThresholdBps Warning threshold in bps.
+     * @param liquidationThresholdBps Liquidation threshold in bps.
+     * @return warningLevel 0 = NONE, 1 = WARNING, 2 = CRITICAL.
+     */
     function getWarningLevel(
-        uint256 healthFactor, 
-        uint256 warningThreshold, 
-        uint256 liquidationThreshold
+        uint256 healthFactorBps,
+        uint256 warningThresholdBps,
+        uint256 liquidationThresholdBps
     ) internal pure returns (uint8 warningLevel) {
-        if (healthFactor >= warningThreshold) {
+        if (healthFactorBps >= warningThresholdBps) {
             return 0; // NONE
-        } else if (healthFactor >= liquidationThreshold) {
+        } else if (healthFactorBps >= liquidationThresholdBps) {
             return 1; // WARNING
         } else {
             return 2; // CRITICAL
         }
     }
 
-    /// @notice 计算最大可借额度（简化版本）
-    /// @param collateral 抵押价值
-    /// @param currentDebt 当前债务
-    /// @param maxLTV 最大贷款价值比（单位：bps）
-    /// @return maxBorrowable 最大可借额度
+    /**
+     * @notice Compute max additional borrowable amount given collateral and current debt.
+     * @dev Reverts if:
+     *      - collateral * maxLtvBps overflows (Solidity ^0.8.x)
+     *
+     * Security:
+     * - Pure math only.
+     *
+     * @param collateral Total collateral value (any unit; must match currentDebt unit).
+     * @param currentDebt Current debt value (same unit as collateral).
+     * @param maxLtvBps Maximum LTV in bps (10_000 = 100%).
+     * @return maxBorrowable Max additional debt allowed (same unit as collateral/currentDebt).
+     */
     function calculateMaxBorrowable(
-        uint256 collateral, 
-        uint256 currentDebt, 
-        uint256 maxLTV
+        uint256 collateral,
+        uint256 currentDebt,
+        uint256 maxLtvBps
     ) internal pure returns (uint256 maxBorrowable) {
         if (collateral == 0) return 0;
         
-        uint256 maxDebt = (collateral * maxLTV) / 10000;
+        uint256 maxDebt = (collateral * maxLtvBps) / 10_000;
         if (currentDebt >= maxDebt) return 0;
         
         return maxDebt - currentDebt;

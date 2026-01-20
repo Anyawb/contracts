@@ -19,6 +19,7 @@ contract MockHealthView {
         bool /* _isLiquidatable */,
         uint256 timestamp
     ) external {
+        require(user != address(0), "MockHealthView: user is zero");
         _userHealthFactors[user] = healthFactor;
         _cacheTimestamps[user] = timestamp;
         emit HealthFactorCached(user, healthFactor, timestamp);

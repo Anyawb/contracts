@@ -15,6 +15,20 @@ contract BadCollateralManager is ICollateralManager {
         user; asset; amount; // silence unused parameters
     }
 
+    function withdrawCollateralTo(address user, address asset, uint256 amount, address receiver) external pure {
+        user; asset; amount; receiver; // silence unused parameters
+    }
+
+    function seizeCollateralForLiquidation(
+        address targetUser,
+        address collateralAsset,
+        uint256 collateralAmount,
+        address liquidator
+    ) external pure {
+        targetUser; collateralAsset; collateralAmount; liquidator; // silence unused parameters
+        revert("Mock fail");
+    }
+
     function forceWithdrawCollateral(address user, address asset, uint256 amount, address to) external pure {
         user; asset; amount; to; // silence unused parameters
     }
@@ -29,22 +43,8 @@ contract BadCollateralManager is ICollateralManager {
         return 0;
     }
 
-    function getUserTotalCollateralValue(address user) external pure returns (uint256 totalValue) {
-        user; // silence unused parameter
-        return 0;
-    }
-
-    function getTotalCollateralValue() external pure returns (uint256 totalValue) {
-        return 0;
-    }
-
     function getUserCollateralAssets(address user) external pure returns (address[] memory assets) {
         user; // silence unused parameter
         return new address[](0);
-    }
-
-    function getAssetValue(address asset, uint256 amount) external pure returns (uint256 value) {
-        asset; amount; // silence unused parameters
-        return 0;
     }
 } 

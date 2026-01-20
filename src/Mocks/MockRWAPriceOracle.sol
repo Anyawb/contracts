@@ -16,7 +16,7 @@ contract MockRWAPriceOracle is Ownable, IRWAPriceOracle {
     mapping(address => RWAAssetConfig) private _assetConfigs;
     address[] private _supportedAssets;
 
-    constructor(uint8 _decimals) {
+    constructor(uint8 _decimals) Ownable(msg.sender) {
         decimalsVar = _decimals;
     }
 

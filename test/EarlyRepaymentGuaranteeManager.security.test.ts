@@ -11,7 +11,7 @@
  */
 
 import hardhat from 'hardhat';
-const { ethers } = hardhat;
+const { ethers, upgrades } = hardhat;
 import { expect } from 'chai';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
@@ -19,6 +19,9 @@ import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 // 导入合约类型
 import type { EarlyRepaymentGuaranteeManager } from '../../types/contracts/Vault/modules/EarlyRepaymentGuaranteeManager';
 import type { MockERC20 } from '../../types/contracts/Mocks/MockERC20';
+import type { MockRegistry } from '../../types/contracts/Mocks/MockRegistry';
+import type { MockAccessControlManager } from '../../types/contracts/Mocks/MockAccessControlManager';
+import type { MockGuaranteeFundForEarlyRepayment } from '../../types/contracts/Mocks/MockGuaranteeFundForEarlyRepayment';
 
 describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
   // 测试常量定义
@@ -27,14 +30,20 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
   const TEST_INTEREST = ethers.parseUnits('100', 18);
   const TEST_TERM_DAYS = 30;
   const LARGE_AMOUNT = ethers.parseUnits('1000000', 18);
+  const LARGE_SUPPLY = LARGE_AMOUNT * 50n;
+  const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
+  const ACTION_UPGRADE_MODULE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
+  const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
+  const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER'));
+  const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE'));
 
   // 合约实例
   let earlyRepaymentGuaranteeManager: EarlyRepaymentGuaranteeManager;
   let mockToken: MockERC20;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars
-  let mockAccessControlManager: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let mockVaultCore: any;
+  let registry: MockRegistry;
+  let mockAccessControlManager: MockAccessControlManager;
+  let mockGuaranteeFund: MockGuaranteeFundForEarlyRepayment;
+  let vaultCore: SignerWithAddress;
 
   // 签名者
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -47,63 +56,59 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
   // 测试夹具
   async function deployFixture() {
     const signers = await ethers.getSigners();
-    const [owner, borrower, lender, unauthorizedUser, attacker] = signers;
+    const [vaultCoreSigner, borrower, lender, unauthorizedUser, attacker] = signers;
 
     // 部署 Mock 合约
     const MockERC20Factory = await ethers.getContractFactory('MockERC20');
-    const mockToken = await MockERC20Factory.deploy('Mock Token', 'MTK', LARGE_AMOUNT);
+    const mockToken = (await MockERC20Factory.deploy('Mock Token', 'MTK', LARGE_SUPPLY)) as MockERC20;
     await mockToken.waitForDeployment();
 
+    const MockRegistryFactory = await ethers.getContractFactory('MockRegistry');
+    const registry = (await MockRegistryFactory.deploy()) as MockRegistry;
+    await registry.waitForDeployment();
+
     const MockAccessControlManagerFactory = await ethers.getContractFactory('MockAccessControlManager');
-    const mockAccessControlManager = await MockAccessControlManagerFactory.deploy();
+    const mockAccessControlManager = (await MockAccessControlManagerFactory.deploy()) as MockAccessControlManager;
     await mockAccessControlManager.waitForDeployment();
 
-    const MockVaultCoreFactory = await ethers.getContractFactory('MockVaultCore');
-    const mockVaultCore = await MockVaultCoreFactory.deploy();
-    await mockVaultCore.waitForDeployment();
+    const MockGuaranteeFundFactory = await ethers.getContractFactory('MockGuaranteeFundForEarlyRepayment');
+    const mockGuaranteeFund = (await MockGuaranteeFundFactory.deploy()) as MockGuaranteeFundForEarlyRepayment;
+    await mockGuaranteeFund.waitForDeployment();
 
-    // 部署 EarlyRepaymentGuaranteeManager
+    // 注册模块
+    await registry.setModule(KEY_ACCESS_CONTROL, mockAccessControlManager.target);
+    await registry.setModule(KEY_GUARANTEE_FUND, mockGuaranteeFund.target);
+    await registry.setModule(KEY_VAULT_CORE, vaultCoreSigner.address);
+
+    // 部署 EarlyRepaymentGuaranteeManager (UUPS proxy)
     const EarlyRepaymentGuaranteeManagerFactory = await ethers.getContractFactory('EarlyRepaymentGuaranteeManager');
-    const earlyRepaymentGuaranteeManager = await EarlyRepaymentGuaranteeManagerFactory.deploy();
+    const earlyRepaymentGuaranteeManager = (await upgrades.deployProxy(
+      EarlyRepaymentGuaranteeManagerFactory,
+      [
+        registry.target,
+        vaultCoreSigner.address, // 平台费用接收者
+        100, // 1% 平台费率
+      ],
+      { kind: 'uups' }
+    )) as EarlyRepaymentGuaranteeManager;
     await earlyRepaymentGuaranteeManager.waitForDeployment();
 
-    // 初始化合约
-    await earlyRepaymentGuaranteeManager.initialize(
-      mockVaultCore.target,
-      mockAccessControlManager.target,
-      owner.address, // 平台费用接收者
-      100 // 1% 平台费率
-    );
-
-    // 设置权限
-    await mockAccessControlManager.grantRole(
-      ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER')), 
-      owner.address
-    );
-    await mockAccessControlManager.grantRole(
-      ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE')), 
-      owner.address
-    );
-    await mockAccessControlManager.grantRole(
-      ethers.keccak256(ethers.toUtf8Bytes('PAUSE_SYSTEM')), 
-      owner.address
-    );
-    await mockAccessControlManager.grantRole(
-      ethers.keccak256(ethers.toUtf8Bytes('UNPAUSE_SYSTEM')), 
-      owner.address
-    );
+    // 设置权限（仅授予 vaultCore）
+    await mockAccessControlManager.grantRole(ACTION_SET_PARAMETER, vaultCoreSigner.address);
+    await mockAccessControlManager.grantRole(ACTION_UPGRADE_MODULE, vaultCoreSigner.address);
 
     // 给用户分配代币
-    await mockToken.mint(borrower.address, LARGE_AMOUNT);
-    await mockToken.mint(lender.address, LARGE_AMOUNT);
-    await mockToken.mint(owner.address, LARGE_AMOUNT);
+    await mockToken.transfer(borrower.address, LARGE_AMOUNT);
+    await mockToken.transfer(lender.address, LARGE_AMOUNT);
+    await mockToken.transfer(earlyRepaymentGuaranteeManager.target, LARGE_AMOUNT);
 
     return {
       earlyRepaymentGuaranteeManager,
       mockToken,
+      registry,
       mockAccessControlManager,
-      mockVaultCore,
-      owner,
+      mockGuaranteeFund,
+      vaultCore: vaultCoreSigner,
       borrower,
       lender,
       unauthorizedUser,
@@ -115,23 +120,25 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
     const fixture = await loadFixture(deployFixture);
     earlyRepaymentGuaranteeManager = fixture.earlyRepaymentGuaranteeManager;
     mockToken = fixture.mockToken;
+    registry = fixture.registry;
     mockAccessControlManager = fixture.mockAccessControlManager;
-    mockVaultCore = fixture.mockVaultCore;
-    owner = fixture.owner;
+    mockGuaranteeFund = fixture.mockGuaranteeFund;
+    vaultCore = fixture.vaultCore;
+    owner = vaultCore;
     borrower = fixture.borrower;
     lender = fixture.lender;
     unauthorizedUser = fixture.unauthorizedUser;
     attacker = fixture.attacker;
 
     // 确保合约有足够的代币
-    await mockToken.mint(earlyRepaymentGuaranteeManager.target, LARGE_AMOUNT);
+    await mockToken.connect(vaultCore).transfer(earlyRepaymentGuaranteeManager.target, LARGE_AMOUNT);
   });
 
   describe('🔴 严重安全漏洞测试', function () {
     describe('重入攻击风险', function () {
       it('EarlyRepaymentGuaranteeManager – 应该防止重入攻击', async function () {
         // 锁定保证金
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -142,7 +149,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
         // 尝试重入攻击 - 应该被 ReentrancyGuard 阻止
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).processEarlyRepayment(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).settleEarlyRepayment(
             borrower.address,
             mockToken.target,
             TEST_AMOUNT
@@ -155,7 +162,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
       it('EarlyRepaymentGuaranteeManager – 未授权用户不能设置平台费用接收者', async function () {
         await expect(
           earlyRepaymentGuaranteeManager.connect(unauthorizedUser).setPlatformFeeReceiver(attacker.address)
-        ).to.be.revertedWith('requireRole: MissingRole');
+        ).to.be.revertedWithCustomError(mockAccessControlManager, 'MissingRole');
       });
 
       it('EarlyRepaymentGuaranteeManager – 未授权用户不能升级合约', async function () {
@@ -163,8 +170,8 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
         const newImpl = await newImplementation.deploy();
 
         await expect(
-          earlyRepaymentGuaranteeManager.connect(unauthorizedUser).upgradeTo(newImpl.target)
-        ).to.be.revertedWith('requireRole: MissingRole');
+          earlyRepaymentGuaranteeManager.connect(unauthorizedUser).upgradeToAndCall(newImpl.target, '0x')
+        ).to.be.revertedWithCustomError(mockAccessControlManager, 'MissingRole');
       });
 
       it('EarlyRepaymentGuaranteeManager – 不能设置零地址作为平台费用接收者', async function () {
@@ -177,7 +184,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
     describe('计算精度问题', function () {
       it('EarlyRepaymentGuaranteeManager – 应该正确处理小数计算', async function () {
         // 锁定保证金
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -206,7 +213,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
     describe('参数验证', function () {
       it('EarlyRepaymentGuaranteeManager – 不能锁定零地址借款人的保证金', async function () {
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
             ZERO_ADDRESS,
             lender.address,
             mockToken.target,
@@ -219,7 +226,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
       it('EarlyRepaymentGuaranteeManager – 不能锁定零地址贷款人的保证金', async function () {
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
             borrower.address,
             ZERO_ADDRESS,
             mockToken.target,
@@ -232,7 +239,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
       it('EarlyRepaymentGuaranteeManager – 不能锁定零金额的保证金', async function () {
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
             borrower.address,
             lender.address,
             mockToken.target,
@@ -246,14 +253,14 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
       it('EarlyRepaymentGuaranteeManager – 不能设置过高的平台费率', async function () {
         await expect(
           earlyRepaymentGuaranteeManager.setPlatformFeeRate(1001) // 超过10%
-        ).to.be.revertedWith('Rate too high');
+        ).to.be.revertedWithCustomError(earlyRepaymentGuaranteeManager, 'EarlyRepaymentGuaranteeManager__RateTooHigh');
       });
     });
 
     describe('业务逻辑验证', function () {
       it('EarlyRepaymentGuaranteeManager – 不能为同一用户在同一资产上创建多个活跃保证金', async function () {
         // 创建第一个保证金
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -264,7 +271,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
         // 尝试创建第二个保证金
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
             borrower.address,
             lender.address,
             mockToken.target,
@@ -272,23 +279,23 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
             TEST_INTEREST,
             TEST_TERM_DAYS
           )
-        ).to.be.revertedWith('Active guarantee already exists');
+        ).to.be.revertedWithCustomError(earlyRepaymentGuaranteeManager, 'GuaranteeAlreadyProcessed');
       });
 
       it('EarlyRepaymentGuaranteeManager – 不能处理不存在的保证金', async function () {
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).processEarlyRepayment(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).settleEarlyRepayment(
             borrower.address,
             mockToken.target,
             TEST_AMOUNT
           )
-        ).to.be.revertedWith('No guarantee found');
+        ).to.be.revertedWithCustomError(earlyRepaymentGuaranteeManager, 'GuaranteeRecordNotFound');
       });
     });
 
     describe('边界条件测试', function () {
       it('EarlyRepaymentGuaranteeManager – 应该正确处理极短期限的借款', async function () {
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -299,7 +306,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
         // 立即尝试提前还款
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).processEarlyRepayment(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).settleEarlyRepayment(
             borrower.address,
             mockToken.target,
             TEST_AMOUNT
@@ -312,7 +319,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
         const largeInterest = ethers.MaxUint256 / 4n;
 
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
             borrower.address,
             lender.address,
             mockToken.target,
@@ -328,7 +335,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
   describe('🟢 低等安全漏洞测试', function () {
     describe('事件验证', function () {
       it('EarlyRepaymentGuaranteeManager – 应该正确发出保证金锁定事件', async function () {
-        const tx = await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        const tx = await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -342,7 +349,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
       it('EarlyRepaymentGuaranteeManager – 应该正确发出提前还款事件', async function () {
         // 先锁定保证金
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -352,7 +359,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
         );
 
         // 处理提前还款
-        const tx = await earlyRepaymentGuaranteeManager.connect(mockVaultCore).processEarlyRepayment(
+        const tx = await earlyRepaymentGuaranteeManager.connect(vaultCore).settleEarlyRepayment(
           borrower.address,
           mockToken.target,
           TEST_AMOUNT
@@ -365,7 +372,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
     describe('状态一致性', function () {
       it('EarlyRepaymentGuaranteeManager – 保证金状态应该正确更新', async function () {
         // 锁定保证金
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -385,7 +392,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
         expect(record.isActive).to.be.true;
 
         // 处理提前还款
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).processEarlyRepayment(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).settleEarlyRepayment(
           borrower.address,
           mockToken.target,
           TEST_AMOUNT
@@ -408,7 +415,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
     describe('CEI模式验证', function () {
       it('EarlyRepaymentGuaranteeManager – 应该先更新状态再进行外部调用', async function () {
         // 锁定保证金
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -419,7 +426,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
         // 处理提前还款（应该遵循CEI模式）
         await expect(
-          earlyRepaymentGuaranteeManager.connect(mockVaultCore).processEarlyRepayment(
+          earlyRepaymentGuaranteeManager.connect(vaultCore).settleEarlyRepayment(
             borrower.address,
             mockToken.target,
             TEST_AMOUNT
@@ -431,7 +438,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
     describe('精度计算验证', function () {
       it('EarlyRepaymentGuaranteeManager – 应该使用高精度计算', async function () {
         // 锁定保证金
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           borrower.address,
           lender.address,
           mockToken.target,
@@ -459,12 +466,12 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
         const newBorrower = ethers.Wallet.createRandom().connect(ethers.provider);
         const newLender = ethers.Wallet.createRandom().connect(ethers.provider);
         
-        // 给新用户分配代币
-        await mockToken.mint(newBorrower.address, LARGE_AMOUNT);
-        await mockToken.mint(newLender.address, LARGE_AMOUNT);
+        // 给新用户分配代币（从初始持有人划转）
+        await mockToken.connect(vaultCore).transfer(newBorrower.address, LARGE_AMOUNT);
+        await mockToken.connect(vaultCore).transfer(newLender.address, LARGE_AMOUNT);
         
         // 直接执行操作，不使用数组
-        await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+        await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
           newBorrower.address,
           newLender.address,
           mockToken.target,
@@ -477,7 +484,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
     it('EarlyRepaymentGuaranteeManager – 应该处理极端时间条件', async function () {
       // 锁定保证金
-      await earlyRepaymentGuaranteeManager.connect(mockVaultCore).lockGuarantee(
+      await earlyRepaymentGuaranteeManager.connect(vaultCore).lockGuaranteeRecord(
         borrower.address,
         lender.address,
         mockToken.target,
@@ -492,7 +499,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
       // 应该仍然能正常处理
       await expect(
-        earlyRepaymentGuaranteeManager.connect(mockVaultCore).processEarlyRepayment(
+        earlyRepaymentGuaranteeManager.connect(vaultCore).settleEarlyRepayment(
           borrower.address,
           mockToken.target,
           TEST_AMOUNT

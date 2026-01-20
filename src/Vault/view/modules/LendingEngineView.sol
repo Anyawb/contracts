@@ -8,34 +8,15 @@ import { Registry } from "../../../registry/Registry.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-
-// 与核心引擎的最小接口适配，提供仅 View 所需方法（顶层定义，避免在合约内定义接口）
-interface ILendingEngineViewAdapter {
-	struct LoanOrder {
-		uint256 principal;
-		uint256 rate;
-		uint256 term;
-		address borrower;
-		address lender;
-		address asset;
-		uint256 startTimestamp;
-		uint256 maturity;
-		uint256 repaidAmount;
-	}
-
-	function _getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order);
-	function _getUserLoanCountForView(address user) external view returns (uint256 count);
-	function _getFailedFeeAmountForView(uint256 orderId) external view returns (uint256 feeAmount);
-	function _getNftRetryCountForView(uint256 orderId) external view returns (uint256 retryCount);
-	function _canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess);
-	function _isMatchEngineForView(address account) external view returns (bool isMatch);
-	function _getRegistryForView() external view returns (address registry);
-}
+import { ViewVersioned } from "../ViewVersioned.sol";
+import { IOrderEngine } from "../../../interfaces/IOrderEngine.sol";
+import { IOrderEngineViewAdapter } from "../../../interfaces/IOrderEngineViewAdapter.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 
 /// @title LendingEngineView
 /// @notice 仅负责借贷引擎相关的数据查询（0 gas），不承载任何业务写操作
 /// @dev 与核心 LendingEngine 解耦，通过 Registry 获取模块地址
-contract LendingEngineView is Initializable, UUPSUpgradeable {
+contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 	// =========================  Errors  =========================
 
 	error LendingEngineView__ZeroAddress();
@@ -48,14 +29,21 @@ contract LendingEngineView is Initializable, UUPSUpgradeable {
 	// =========================  Modifiers  =========================
 
 	modifier onlyValidRegistry() {
-		if (_registryAddr == address(0)) revert LendingEngineView__ZeroAddress();
+		if (_registryAddr == address(0)) revert ZeroAddress();
+		if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
 		_;
 	}
 
 	// =========================  Initialiser  =========================
 
+	/// @custom:oz-upgrades-unsafe-allow constructor
+	constructor() {
+		_disableInitializers();
+	}
+
 	function initialize(address initialRegistryAddr) external initializer {
-		if (initialRegistryAddr == address(0)) revert LendingEngineView__ZeroAddress();
+		if (initialRegistryAddr == address(0)) revert ZeroAddress();
+		if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
 		__UUPSUpgradeable_init();
 		_registryAddr = initialRegistryAddr;
@@ -64,7 +52,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable {
 	// =========================  Read APIs  =========================
 
 	/// @notice 查询贷款订单详情
-	function getLoanOrder(uint256 orderId) external view onlyValidRegistry returns (ILendingEngineViewAdapter.LoanOrder memory order) {
+	function getLoanOrder(uint256 orderId) external view onlyValidRegistry returns (IOrderEngine.LoanOrder memory order) {
 		return _engine()._getLoanOrderForView(orderId);
 	}
 
@@ -98,20 +86,38 @@ contract LendingEngineView is Initializable, UUPSUpgradeable {
 		return _engine()._getRegistryForView();
 	}
 
+	/// @notice 获取 Registry 地址（首选接口）
+	function getRegistry() external view returns (address) {
+		return _registryAddr;
+	}
+
 	// =========================  Internal helpers  =========================
 
-	function _engine() internal view returns (ILendingEngineViewAdapter) {
-		address engineAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-		return ILendingEngineViewAdapter(engineAddr);
+	function _engine() internal view returns (IOrderEngineViewAdapter) {
+		address engineAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+		return IOrderEngineViewAdapter(engineAddr);
 	}
 
 	function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
 		// 仅管理员可升级
 		address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
 		IAccessControlManager(acm).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-		if (newImplementation == address(0)) revert LendingEngineView__ZeroAddress();
+		if (newImplementation == address(0)) revert ZeroAddress();
+		if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
 	}
 
 	/// @notice 兼容旧版 getter
 	function registryAddr() external view returns(address){ return _registryAddr; }
+
+	// ============ Versioning (C+B baseline) ============
+	function apiVersion() public pure override returns (uint256) {
+		return 1;
+	}
+
+	function schemaVersion() public pure override returns (uint256) {
+		return 1;
+	}
+
+	// =========================  Storage gap for upgrade safety  =========================
+	uint256[50] private __gap;
 }

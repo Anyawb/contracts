@@ -37,6 +37,7 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 promisedInterest,
         uint256 startTime,
         uint256 maturityTime,
+        uint256 earlyRepayPenaltyDays,
         uint256 timestamp
     );
 
@@ -127,4 +128,10 @@ interface IEarlyRepaymentGuaranteeManager {
         address borrower,
         address asset
     ) external returns (uint256 forfeitedAmount);
+
+    /* ============ Feature toggle (recommended) ============ */
+    /// @notice Whether early-repayment guarantee is enabled for a given asset.
+    /// @param asset Guarantee asset address.
+    /// @return enabled True if enabled, otherwise false.
+    function isGuaranteeEnabled(address asset) external view returns (bool enabled);
 } 

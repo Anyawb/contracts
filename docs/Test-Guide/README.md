@@ -8,8 +8,8 @@
 
 ### 核心架构测试
 
-1. **[VaultView 测试指南](./vaultview-testing-guide.md)**
-   - VaultView 双架构智能协调器测试
+1. **[VaultRouter 测试指南](./vaultview-testing-guide.md)**
+   - VaultRouter 双架构智能协调器测试
    - 事件驱动和 View 层缓存测试
    - 用户操作处理和模块分发测试
 
@@ -67,7 +67,7 @@
 
 ```
 test/
-├── VaultView.test.ts                    # VaultView 核心测试
+├── VaultRouter.test.ts                    # VaultRouter 核心测试
 ├── Registry*.test.ts                    # Registry 相关测试
 ├── Vault/
 │   ├── liquidation/                     # 清算模块测试
@@ -104,7 +104,7 @@ npx hardhat test test/core/
 
 ```bash
 # 运行单个测试文件
-npx hardhat test test/VaultView.test.ts
+npx hardhat test test/VaultRouter.test.ts
 npx hardhat test test/Registry.test.ts
 ```
 
@@ -113,7 +113,7 @@ npx hardhat test test/Registry.test.ts
 ```bash
 # 使用 --grep 过滤测试
 npx hardhat test --grep "应该正确初始化"
-npx hardhat test test/VaultView.test.ts --grep "权限控制测试"
+npx hardhat test test/VaultRouter.test.ts --grep "权限控制测试"
 ```
 
 ### 生成测试覆盖率

@@ -39,12 +39,16 @@ describe('Registry Admin Events', function () {
     const ERC1967Proxy = await ethers.getContractFactory('ERC1967Proxy');
     const proxy = await ERC1967Proxy.deploy(
       await implementation.getAddress(),
-      '0x' // Registry 初始化不需要参数
+      implementation.interface.encodeFunctionData('initialize', [
+        3600,
+        await owner.getAddress(),
+        await owner.getAddress(),
+        await owner.getAddress(),
+      ])
     );
     await proxy.waitForDeployment();
         
     const registry = implementation.attach(await proxy.getAddress()) as Registry;
-    await registry.initialize(3600); // 1小时延迟
         
     return { registry, owner, admin, pendingAdmin, emergencyAdmin, upgradeAdmin };
   }
@@ -165,8 +169,7 @@ describe('Registry Admin Events', function () {
     it('Should not emit events for invalid admin changes', async function () {
       // 尝试设置零地址作为管理员
       await expect(registry.setAdmin(ZERO_ADDRESS))
-        .to.be.revertedWithCustomError(registry, 'InvalidParameter')
-        .withArgs('Invalid admin address');
+        .to.be.revertedWithCustomError(registry, 'Registry__ZeroAddress');
         
       // 验证没有事件被触发
       const currentAdmin = await registry.getAdmin();
@@ -178,7 +181,7 @@ describe('Registry Admin Events', function () {
     it('Should not emit AdminChanged when acceptAdmin is called by non-pending admin', async function () {
       // 尝试接受管理员权限（非待接管管理员）
       await expect(registry.connect(upgradeAdmin).acceptAdmin())
-        .to.be.revertedWithCustomError(registry, 'NotPendingAdmin')
+        .to.be.revertedWithCustomError(registry, 'Registry__NotPendingAdmin')
         .withArgs(await upgradeAdmin.getAddress(), ZERO_ADDRESS);
         
       console.log('Non-pending admin accept test passed');

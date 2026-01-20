@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
-import { IRegistryUpgradeEvents } from "../interfaces/IRegistryUpgradeEvents.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { RewardTypes } from "./RewardTypes.sol";
 import { IServiceConfig } from "./interfaces/IServiceConfig.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ZeroAddress } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -23,9 +21,13 @@ contract RewardConfig is
     Initializable, 
     UUPSUpgradeable,
     RewardTypes,
-    RewardModuleBase,
-    IRegistryUpgradeEvents
+    RewardModuleBase
 {
+    // ============ Errors ============
+    error RewardConfig__InvalidServiceType(uint8 serviceType);
+    error RewardConfig__InvalidServiceLevel(uint8 level);
+    error RewardConfig__ServiceConfigModuleNotFound(uint8 serviceType);
+    error RewardConfig__InvalidConfigModuleAddress();
     
     /// @notice Registry 合约地址（私有存储）
     address private _registryAddr;
@@ -68,7 +70,7 @@ contract RewardConfig is
         _isTestnetMode = true;
         
         // 记录初始化动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -108,8 +110,7 @@ contract RewardConfig is
     /// @param level 服务等级
     /// @return config 服务配置
     function getServiceConfig(ServiceType serviceType, ServiceLevel level) external view onlyValidRegistry returns (ServiceConfig memory config) {
-        IServiceConfig configModule = _serviceConfigModules[serviceType];
-        require(address(configModule) != address(0), "Service config module not found");
+        IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
         return configModule.getConfig(level);
     }
 
@@ -127,12 +128,11 @@ contract RewardConfig is
         bool isActive
     ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        IServiceConfig configModule = _serviceConfigModules[serviceType];
-        require(address(configModule) != address(0), "Service config module not found");
+        IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
         configModule.updateConfig(level, price, duration, isActive);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -144,8 +144,7 @@ contract RewardConfig is
     /// @param serviceType 服务类型
     /// @return cooldown 冷却期 (秒)
     function serviceCooldowns(ServiceType serviceType) external view onlyValidRegistry returns (uint256 cooldown) {
-        IServiceConfig configModule = _serviceConfigModules[serviceType];
-        require(address(configModule) != address(0), "Service config module not found");
+        IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
         return configModule.getCooldown();
     }
 
@@ -154,12 +153,11 @@ contract RewardConfig is
     /// @param cooldown 冷却期 (秒)
     function setServiceCooldown(ServiceType serviceType, uint256 cooldown) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        IServiceConfig configModule = _serviceConfigModules[serviceType];
-        require(address(configModule) != address(0), "Service config module not found");
+        IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
         configModule.setCooldown(cooldown);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -172,12 +170,13 @@ contract RewardConfig is
     /// @param configModule 配置模块地址
     function setServiceConfigModule(ServiceType serviceType, IServiceConfig configModule) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        require(address(configModule) != address(0), "Invalid config module address");
+        if (uint8(serviceType) > uint8(ServiceType.TestnetFeatures)) revert RewardConfig__InvalidServiceType(uint8(serviceType));
+        if (address(configModule) == address(0)) revert RewardConfig__InvalidConfigModuleAddress();
         _serviceConfigModules[serviceType] = configModule;
         emit ServiceConfigModuleUpdated(uint8(serviceType), address(configModule));
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -193,7 +192,7 @@ contract RewardConfig is
         emit UpgradeMultiplierUpdated(multiplier);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -209,7 +208,7 @@ contract RewardConfig is
         emit TestnetModeUpdated(isTestnet);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -225,7 +224,7 @@ contract RewardConfig is
         if (newImplementation == address(0)) revert ZeroAddress();
         
         // 记录升级动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
@@ -238,6 +237,40 @@ contract RewardConfig is
         return _registryAddr;
     }
 
+    // ============ Internals ============
+    /// @dev 解析服务配置模块：优先使用 RewardConfig 内部映射（用于“可选聚合入口”），否则回退到 Registry 的 ModuleKeys（避免地址漂移）
+    function _getServiceConfigModuleOrRevert(ServiceType serviceType) internal view returns (IServiceConfig configModule) {
+        if (uint8(serviceType) > uint8(ServiceType.TestnetFeatures)) revert RewardConfig__InvalidServiceType(uint8(serviceType));
+
+        // 1) 优先读取 RewardConfig 内部映射（向后兼容：RewardConfig.test.ts & 既有部署脚本）
+        configModule = _serviceConfigModules[serviceType];
+        if (address(configModule) != address(0)) return configModule;
+
+        // 2) 回退到 Registry（架构一致性：Registry 为唯一真实来源）
+        bytes32 moduleKey;
+        if (serviceType == ServiceType.AdvancedAnalytics) {
+            moduleKey = ModuleKeys.KEY_ADVANCED_ANALYTICS_CONFIG;
+        } else if (serviceType == ServiceType.PriorityService) {
+            moduleKey = ModuleKeys.KEY_PRIORITY_SERVICE_CONFIG;
+        } else if (serviceType == ServiceType.FeatureUnlock) {
+            moduleKey = ModuleKeys.KEY_FEATURE_UNLOCK_CONFIG;
+        } else if (serviceType == ServiceType.GovernanceAccess) {
+            moduleKey = ModuleKeys.KEY_GOVERNANCE_ACCESS_CONFIG;
+        } else if (serviceType == ServiceType.TestnetFeatures) {
+            moduleKey = ModuleKeys.KEY_TESTNET_FEATURES_CONFIG;
+        } else {
+            // defensive, should be unreachable due to first check
+            revert RewardConfig__InvalidServiceType(uint8(serviceType));
+        }
+
+        address cfg = IRegistry(_registryAddr).getModuleOrRevert(moduleKey);
+        if (cfg == address(0)) revert RewardConfig__ServiceConfigModuleNotFound(uint8(serviceType));
+        return IServiceConfig(cfg);
+    }
+
+    // ============ UUPS storage gap ============
+    uint256[50] private __gap;
+
     /// @notice 更新Registry地址
     /// @param newRegistryAddr 新的Registry地址
     /// @dev Registry地址不能为零地址
@@ -249,7 +282,7 @@ contract RewardConfig is
         _registryAddr = newRegistryAddr;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -257,7 +290,7 @@ contract RewardConfig is
         );
         
         // 发出模块地址更新事件
-        emit VaultTypes.ModuleAddressUpdated(
+        emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
@@ -281,7 +314,7 @@ contract RewardConfig is
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,

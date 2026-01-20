@@ -1,68 +1,189 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IVaultCore
-/// @notice 核心业务流程接口定义
-/// @dev 包含 deposit、borrow、repay、withdraw 等核心业务函数
+/**
+ * @title IVaultCore
+ * @notice VaultCore user-facing write entrypoints (authority path).
+ * @dev Architecture SSOT:
+ * - User write entrypoints live in VaultCore.
+ * - deposit/withdraw route through VaultRouter -> CollateralManager.
+ * - borrow writes the debt ledger via LendingEngine (onlyVaultCore enforced downstream).
+ * - repay MUST go through SettlementManager.repayAndSettle(orderId,...) (SSOT for repay/settle).
+ *
+ * Security:
+ * - VaultCore is a privileged entrypoint: it routes writes to modules resolved via Registry.
+ * - This interface intentionally excludes cache-push entrypoints; see IVaultCoreDataPush.
+ *
+ * Observability:
+ * - Prefer module-level events and `DataPushed` for off-chain consumption.
+ */
 interface IVaultCore {
-    /* ============ Events ============ */
-    /// @notice 抵押事件
-    event CollateralDeposited(address indexed user, address indexed asset, uint256 amount);
-    
-    /// @notice 借款事件
-    event Borrowed(address indexed user, address indexed asset, uint256 amount);
-    
-    /// @notice 还款事件
-    event Repaid(address indexed user, address indexed asset, uint256 amount);
-    
-    /// @notice 提取抵押物事件
-    event CollateralWithdrawn(address indexed user, address indexed asset, uint256 amount);
-
     /* ============ Core Business Functions ============ */
-    /// @notice 存入抵押物
-    /// @param asset 抵押资产地址
-    /// @param amount 存入数量
+    /**
+     * @notice Deposit collateral (authority path).
+     * @dev Reverts if:
+     *      - asset == address(0)
+     *      - amount == 0
+     *      - downstream routing (VaultRouter / CollateralManager) reverts
+     *
+     * Security:
+     * - User entrypoint.
+     * - Non-reentrant in implementation.
+     *
+     * @param asset Collateral asset address
+     * @param amount Collateral amount (token decimals)
+     */
     function deposit(address asset, uint256 amount) external;
 
-    /// @notice 借款
-    /// @param asset 借款资产地址
-    /// @param amount 借款数量
+    /**
+     * @notice Borrow (authority path) via the LendingEngine module.
+     * @dev Reverts if:
+     *      - asset == address(0)
+     *      - amount == 0
+     *      - Registry module resolution fails (e.g., LendingEngine missing)
+     *      - LendingEngine reverts (e.g., onlyVaultCore / risk checks / limits)
+     *
+     * Security:
+     * - User entrypoint.
+     * - Non-reentrant in implementation.
+     *
+     * @param asset Debt asset address
+     * @param amount Borrow amount (token decimals)
+     */
     function borrow(address asset, uint256 amount) external;
 
-    /// @notice 还款
-    /// @param asset 还款资产地址
-    /// @param amount 还款数量
-    function repay(address asset, uint256 amount) external;
+    /**
+     * @notice Repay and settle (SSOT via SettlementManager).
+     * @dev Reverts if:
+     *      - asset == address(0)
+     *      - amount == 0
+     *      - Registry module resolution fails (e.g., SettlementManager missing)
+     *      - ERC20 transferFrom fails
+     *      - SettlementManager reverts (orderId/state validation, etc.)
+     *
+     * Security:
+     * - User entrypoint.
+     * - Non-reentrant in implementation.
+     *
+     * @param orderId Loan/order identifier (SSOT)
+     * @param asset Debt asset address
+     * @param amount Repay amount (token decimals)
+     */
+    function repay(uint256 orderId, address asset, uint256 amount) external;
 
-    /// @notice 提取抵押物
-    /// @param asset 抵押资产地址
-    /// @param amount 提取数量
+    /**
+     * @notice Withdraw collateral (authority path).
+     * @dev Reverts if:
+     *      - asset == address(0)
+     *      - amount == 0
+     *      - downstream routing (VaultRouter / CollateralManager) reverts
+     *
+     * Security:
+     * - User entrypoint.
+     * - Non-reentrant in implementation.
+     *
+     * @param asset Collateral asset address
+     * @param amount Withdraw amount (token decimals)
+     */
     function withdraw(address asset, uint256 amount) external;
 
-    /// @notice 批量存入抵押物
-    /// @param assets 资产地址数组
-    /// @param amounts 数量数组
+    /**
+     * @notice Batch deposit collateral.
+     * @dev Reverts if:
+     *      - assets.length != amounts.length
+     *      - assets.length == 0
+     *      - assets.length exceeds the implementation batch cap
+     *      - any asset == address(0)
+     *      - any amount == 0
+     *      - downstream routing (VaultRouter / CollateralManager) reverts
+     *
+     * Security:
+     * - User entrypoint.
+     * - Non-reentrant in implementation.
+     *
+     * @param assets Collateral asset addresses
+     * @param amounts Collateral amounts (token decimals)
+     */
     function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external;
 
-    /// @notice 批量借款
-    /// @param assets 资产地址数组
-    /// @param amounts 数量数组
+    /**
+     * @notice Batch borrow.
+     * @dev Reverts if:
+     *      - assets.length != amounts.length
+     *      - assets.length == 0
+     *      - assets.length exceeds the implementation batch cap
+     *      - any asset == address(0)
+     *      - any amount == 0
+     *      - Registry module resolution fails (e.g., LendingEngine missing)
+     *      - LendingEngine reverts for any item
+     *
+     * Security:
+     * - User entrypoint.
+     * - Non-reentrant in implementation.
+     *
+     * @param assets Debt asset addresses
+     * @param amounts Borrow amounts (token decimals)
+     */
     function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external;
 
-    /// @notice 批量还款
-    /// @param assets 资产地址数组
-    /// @param amounts 数量数组
-    function batchRepay(address[] calldata assets, uint256[] calldata amounts) external;
+    /**
+     * @notice Batch repay and settle.
+     * @dev Reverts if:
+     *      - orderIds.length != assets.length
+     *      - assets.length != amounts.length
+     *      - assets.length == 0
+     *      - assets.length exceeds the implementation batch cap
+     *      - any asset == address(0)
+     *      - any amount == 0
+     *      - Registry module resolution fails (e.g., SettlementManager missing)
+     *      - ERC20 transferFrom fails for any item
+     *      - SettlementManager reverts for any item
+     *
+     * Security:
+     * - User entrypoint.
+     * - Non-reentrant in implementation.
+     *
+     * @param orderIds Loan/order identifiers (SSOT)
+     * @param assets Debt asset addresses
+     * @param amounts Repay amounts (token decimals)
+     */
+    function batchRepay(uint256[] calldata orderIds, address[] calldata assets, uint256[] calldata amounts) external;
 
-    /// @notice 批量提取抵押物
-    /// @param assets 资产地址数组
-    /// @param amounts 数量数组
+    /**
+     * @notice Batch withdraw collateral.
+     * @dev Reverts if:
+     *      - assets.length != amounts.length
+     *      - assets.length == 0
+     *      - assets.length exceeds the implementation batch cap
+     *      - any asset == address(0)
+     *      - any amount == 0
+     *      - downstream routing (VaultRouter / CollateralManager) reverts for any item
+     *
+     * Security:
+     * - User entrypoint.
+     * - Non-reentrant in implementation.
+     *
+     * @param assets Collateral asset addresses
+     * @param amounts Withdraw amounts (token decimals)
+     */
     function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external;
 
-    /// @notice 业务编排专用：代表指定 borrower 记账（撮合/结算路径）
-    /// @param borrower 借款人地址
-    /// @param asset 借款资产地址
-    /// @param amount 借款金额
-    /// @param termDays 借款期限（天）
+    /**
+     * @notice Borrow on behalf of a borrower (orchestrated module path).
+     * @dev Reverts if:
+     *      - caller is not an authorized business module (implementation-defined allowlist)
+     *      - borrower == address(0) or asset == address(0)
+     *      - amount == 0
+     *      - Registry module resolution fails (e.g., LendingEngine missing)
+     *      - LendingEngine reverts
+     *
+     * Security:
+     * - Non-user entrypoint; implementation restricts callers to registered business modules.
+     *
+     * @param borrower Borrower address
+     * @param asset Debt asset address
+     * @param amount Borrow amount (token decimals)
+     * @param termDays Loan term (days)
+     */
     function borrowFor(address borrower, address asset, uint256 amount, uint16 termDays) external;
 } 

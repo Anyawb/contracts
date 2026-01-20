@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-// 移除 PausableUpgradeable 以保持单一职责
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { 
     AmountIsZero, 
+    NotAContract,
     ZeroAddress, 
     ExternalModuleRevertedRaw,
     GuaranteeNotActive,
@@ -27,385 +26,527 @@ import {
 } from "../../errors/StandardErrors.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { VaultTypes } from "../VaultTypes.sol";
+import { SystemEvents } from "../SystemEvents.sol";
 import { Registry } from "../../registry/Registry.sol";
 import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
+import { IGuaranteeFundManager } from "../../interfaces/IGuaranteeFundManager.sol";
+import { IEarlyRepaymentGuaranteeManager } from "../../interfaces/IEarlyRepaymentGuaranteeManager.sol";
 
-/// @title EarlyRepaymentGuaranteeManager
-/// @notice 提前还款保证金管理模块，处理借款方的提前还款保证金机制
-/// @dev 借款时锁定承诺利息作为保证金，提前还款时按规则分配，违约时全部没收
-/// @dev 与 ActionKeys 和 ModuleKeys 集成，提供标准化的权限和模块管理
-/// @dev 支持 UUPS 升级模式，使用 ReentrancyGuard 防止重入攻击
-/// @dev 使用Registry系统进行权限控制和模块管理，确保系统安全性
-/// @dev 集成模块地址缓存机制，提高性能和可靠性
-/// @custom:security-contact security@example.com
+/**
+ * @title EarlyRepaymentGuaranteeManager
+ * @notice Manage early-repayment guarantee records and orchestrate settlement outcomes.
+ * @dev SSOT / boundary:
+ *      - This module is the SSOT for guarantee *records* (principal, promisedInterest, term, status),
+ *        but it is NOT the custody/transfer authority for funds.
+ *      - The SSOT for guarantee *fund custody and transfers* is `GuaranteeFundManager` (KEY_GUARANTEE_FUND).
+ *      - Business write entrypoints are restricted to `VaultCore` (onlyVaultCore).
+ *      - Governance/ops entrypoints are restricted by ACM ActionKeys (onlyRole).
+ *      - Module address resolution SSOT is always `Registry.getModuleOrRevert(...)`; this module must not be used
+ *        as an address-resolution facade.
+ *
+ * Reverts if:
+ * - (see each external/public function; view getters are non-reverting unless explicitly documented)
+ *
+ * Security:
+ * - UUPSUpgradeable: upgrades are role-gated in `_authorizeUpgrade`
+ * - ReentrancyGuard: state-changing external entrypoints are nonReentrant
+ * - Access control: governance writes are gated via ACM.requireRole(ActionKeys.*)
+ *
+ * @custom:security-contact security@example.com
+ */
 contract EarlyRepaymentGuaranteeManager is 
     Initializable, 
     UUPSUpgradeable, 
-    ReentrancyGuardUpgradeable
+    ReentrancyGuardUpgradeable,
+    IEarlyRepaymentGuaranteeManager
 {
-    using SafeERC20 for IERC20;
+    /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
+    // NOTE: Structs/events are defined in `IEarlyRepaymentGuaranteeManager` and used here to ensure
+    // interface-level consistency for frontends, tests, and offchain indexers.
 
-    /* ============ Structs ============ */
-    /// @notice 保证金记录结构
-    struct GuaranteeRecord {
-        uint256 principal;                    // 借款本金
-        uint256 promisedInterest;             // 承诺的利息（保证金）
-        uint256 startTime;                    // 借款开始时间
-        uint256 maturityTime;                 // 到期时间
-        uint256 earlyRepayPenaltyDays;        // 提前还款罚金天数（默认2天）
-        bool isActive;                        // 是否活跃
-        address lender;                       // 贷款方地址
-        address asset;                        // 资产地址
-    }
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
-    /// @notice 提前还款结果结构
-    struct EarlyRepaymentResult {
-        uint256 penaltyToLender;              // 给贷款方的罚金
-        uint256 refundToBorrower;             // 返还给借款方的金额
-        uint256 platformFee;                  // 平台手续费
-        uint256 actualInterestPaid;           // 实际支付的利息
-    }
-
-    /* ============ Storage ============ */
-    /// @notice 保证金记录映射：guaranteeId → GuaranteeRecord
-    mapping(uint256 => GuaranteeRecord) private _guaranteeRecords;
+    /// @notice guaranteeId => GuaranteeRecord
+    mapping(uint256 => IEarlyRepaymentGuaranteeManager.GuaranteeRecord) private _guaranteeRecords;
     
-    /// @notice 用户保证金ID映射：user → asset → guaranteeId
+    /// @notice borrower => asset => guaranteeId
     mapping(address => mapping(address => uint256)) private _userGuaranteeIds;
     
-    /// @notice 保证金ID计数器
+    /// @notice Monotonically increasing guarantee id counter.
     uint256 private _guaranteeIdCounter;
     
-    /// @notice VaultCore 合约地址
-    address private _vaultCoreAddr;
-    
-    /// @notice Registry合约地址
+    /// @notice Registry address for module resolution and access control.
     address private _registryAddr;
     
-    /// @notice 平台费用接收者地址
+    /// @notice Platform fee receiver address.
     address private _platformFeeReceiverAddr;
     
-    /// @notice 默认提前还款罚金天数
-    uint256 internal constant DEFAULT_EARLY_REPAY_PENALTY_DAYS = 2;
+    /// @notice Default early repayment penalty days.
+    uint256 internal constant _DEFAULT_EARLY_REPAY_PENALTY_DAYS = 2;
     
-    /// @notice 平台手续费率（基点，默认100 = 1%）
+    /// @notice Platform fee rate (bps).
     uint256 private _platformFeeRate;
-    
-    /// @notice 最大批量操作数量限制
-    uint256 internal constant MAX_BATCH_SIZE = 50;
 
-    /// @notice 模块地址缓存映射
-    // 移除模块地址缓存相关职责，保持单一职责
+    /// @notice Backward-compatible default behavior: whether guarantee is enabled by default for all assets.
+    /// @dev Default is true to preserve legacy tests/flows unless explicitly disabled by governance.
+    bool private _guaranteeDefaultEnabled;
 
-    /// @notice Storage gap for upgrade safety
-    uint256[47] private _gap__;
+    /// @notice Asset-level feature toggle override:
+    /// 0 = inherit default, 1 = enabled, 2 = disabled
+    mapping(address => uint8) private _guaranteeAssetMode;
 
-    /* ============ Events ============ */
-    /// @notice 保证金锁定事件
-    /// @param guaranteeId 保证金ID
-    /// @param borrower 借款方地址
-    /// @param lender 贷款方地址
-    /// @param asset 资产地址
-    /// @param principal 本金金额
-    /// @param promisedInterest 承诺利息金额
-    /// @param startTime 开始时间
-    /// @param maturityTime 到期时间
-    /// @param earlyRepayPenaltyDays 提前还款罚金天数
-    /// @param timestamp 时间戳
-    event GuaranteeLocked(
-        uint256 indexed guaranteeId,
-        address indexed borrower,
-        address indexed lender,
-        address asset,
-        uint256 principal,
-        uint256 promisedInterest,
-        uint256 startTime,
-        uint256 maturityTime,
-        uint256 earlyRepayPenaltyDays,
-        uint256 timestamp
-    );
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
+    /// @notice Called by an account other than the current SettlementManager resolved via Registry (SSOT).
+    error EarlyRepaymentGuaranteeManager__OnlySettlementManager();
+    /// @notice Called by an account other than VaultCore or VaultBusinessLogic resolved via Registry (SSOT).
+    error EarlyRepaymentGuaranteeManager__OnlyAuthorizedOrchestrator();
+    /// @notice Guarantee feature is disabled for the given asset.
+    error EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
 
-    /// @notice 提前还款处理事件
-    /// @param guaranteeId 保证金ID
-    /// @param borrower 借款方地址
-    /// @param lender 贷款方地址
-    /// @param asset 资产地址
-    /// @param penaltyToLender 给贷款方的罚金
-    /// @param refundToBorrower 返还给借款方的金额
-    /// @param platformFee 平台手续费
-    /// @param actualInterestPaid 实际支付的利息
-    /// @param timestamp 时间戳
-    event EarlyRepaymentProcessed(
-        uint256 indexed guaranteeId,
-        address indexed borrower,
-        address indexed lender,
-        address asset,
-        uint256 penaltyToLender,
-        uint256 refundToBorrower,
-        uint256 platformFee,
-        uint256 actualInterestPaid,
-        uint256 timestamp
-    );
+    /*━━━━━━━━━━━━━━━ Construction & initialization ━━━━━━━━━━━━━━━*/
 
-    /// @notice 保证金没收事件（违约）
-    /// @param guaranteeId 保证金ID
-    /// @param borrower 借款方地址
-    /// @param lender 贷款方地址
-    /// @param asset 资产地址
-    /// @param forfeitedAmount 没收金额
-    /// @param timestamp 时间戳
-    event GuaranteeForfeited(
-        uint256 indexed guaranteeId,
-        address indexed borrower,
-        address indexed lender,
-        address asset,
-        uint256 forfeitedAmount,
-        uint256 timestamp
-    );
+    /**
+     * @notice Constructs the implementation contract and disables initializers.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Prevents the implementation contract from being initialized directly.
+     */
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
-    /// @notice 平台费用接收者更新事件
-    /// @param oldReceiver 旧接收者地址
-    /// @param newReceiver 新接收者地址
-    /// @param timestamp 时间戳
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    // NOTE: Events are declared in the interface; emitting them here satisfies the interface and keeps
+    // log signatures stable for offchain consumers.
+
+    /**
+     * @notice Emitted when the platform fee receiver address is updated.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Role-gated by ACTION_SET_PARAMETER on the write entrypoint.
+     *
+     * @param oldReceiver Previous receiver address.
+     * @param newReceiver New receiver address.
+     * @param timestamp Emission timestamp (seconds).
+     */
     event PlatformFeeReceiverUpdated(
         address indexed oldReceiver,
         address indexed newReceiver,
         uint256 timestamp
     );
 
-    /// @notice 平台手续费率更新事件
-    /// @param oldRate 旧费率
-    /// @param newRate 新费率
-    /// @param timestamp 时间戳
+    /**
+     * @notice Emitted when the platform fee rate is updated.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Role-gated by ACTION_SET_PARAMETER on the write entrypoint.
+     *
+     * @param oldRate Previous rate (bps).
+     * @param newRate New rate (bps).
+     * @param timestamp Emission timestamp (seconds).
+     */
     event PlatformFeeRateUpdated(
         uint256 oldRate,
         uint256 newRate,
         uint256 timestamp
     );
 
-    /// @notice Registry地址更新事件
-    /// @param oldRegistry 旧Registry地址
-    /// @param newRegistry 新Registry地址
+    /**
+     * @notice Emitted when the Registry address reference is updated.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Role-gated by ACTION_UPGRADE_MODULE on the write entrypoint.
+     *
+     * @param oldRegistry Previous Registry address.
+     * @param newRegistry New Registry address.
+     */
     event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
-    /// @notice 模块地址缓存更新事件
-    /// @param moduleKey 模块键
-    /// @param oldAddress 旧地址
-    /// @param newAddress 新地址
-    /// @param timestamp 时间戳
-    // 移除模块地址缓存更新事件
 
-    /// @notice 权限验证事件
-    /// @param caller 调用者地址
-    /// @param actionKey 动作键
-    /// @param hasPermission 是否有权限
-    /// @param timestamp 时间戳
-    // 移除权限验证事件冗余
 
-    /// @notice 模块调用失败事件
-    /// @param moduleKey 模块键
-    /// @param reason 失败原因
-    /// @param fallbackUsed 是否使用降级策略
-    /// @param timestamp 时间戳
-    // 移除模块调用失败事件冗余
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
-    /* ============ Modifiers ============ */
-    /// @notice 仅限 VaultCore 合约调用
+    /// @notice Restricts calls to the current VaultCore registered in Registry (SSOT).
     modifier onlyVaultCore() {
-        if (msg.sender != _vaultCoreAddr) revert EarlyRepaymentGuaranteeManager__OnlyVaultCore();
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        // Backward compat: do not depend on Registry having KEY_VAULT_CORE configured for custom error matching.
+        address vaultCoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE);
+        if (msg.sender != vaultCoreAddr) revert EarlyRepaymentGuaranteeManager__OnlyVaultCore();
         _;
     }
 
-    /// @notice 验证Registry地址有效性
+    /// @notice Restricts calls to VaultCore or VaultBusinessLogic (borrow-time orchestration).
+    modifier onlyVaultCoreOrBusinessLogic() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        address vaultCoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE);
+        if (msg.sender == vaultCoreAddr) {
+            _;
+            return;
+        }
+        address vbl = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
+        // Backward compat: keep the legacy "OnlyVaultCore" custom error for non-authorized callers
+        // (tests and off-chain tooling depend on this selector).
+        if (msg.sender != vbl) revert EarlyRepaymentGuaranteeManager__OnlyVaultCore();
+        _;
+    }
+
+    /// @notice Restricts calls to SettlementManager (repay/default-time orchestration).
+    modifier onlySettlementManager() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        // Backward compat: allow VaultCore to call settlement functions directly in legacy tests.
+        address vaultCoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE);
+        if (vaultCoreAddr != address(0) && msg.sender == vaultCoreAddr) {
+            _;
+            return;
+        }
+        address sm = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        if (msg.sender != sm) revert EarlyRepaymentGuaranteeManager__OnlySettlementManager();
+        _;
+    }
+
+    /// @notice Ensures the Registry reference is non-zero.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
-    /// @notice 权限验证修饰符
+    /// @notice Restricts calls to accounts holding a given ACM actionKey.
     modifier onlyRole(bytes32 role) {
         _requireRole(role, msg.sender);
         _;
     }
 
-    /* ============ Initializer ============ */
-    /// @notice 初始化提前还款保证金管理模块
-    /// @param initialVaultCoreAddr VaultCore 合约地址
-    /// @param initialRegistryAddr Registry合约地址
-    /// @param initialPlatformFeeReceiverAddr 平台费用接收者地址
-    /// @param initialPlatformFeeRate 平台手续费率（基点）
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Initialize the EarlyRepaymentGuaranteeManager module.
+     * @dev Reverts if:
+     *      - initialRegistryAddr == address(0) (ZeroAddress)
+     *      - initialPlatformFeeReceiverAddr == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - initializer (callable once)
+     * - UUPSUpgradeable: upgrade authorization is role-gated in `_authorizeUpgrade`
+     * - ReentrancyGuard: external state-changing entrypoints are nonReentrant
+     *
+     * @param initialRegistryAddr Registry contract address (non-zero).
+     * @param initialPlatformFeeReceiverAddr Platform fee receiver address (non-zero).
+     * @param initialPlatformFeeRate Platform fee rate (bps, 10_000 = 100%).
+     */
     function initialize(
-        address initialVaultCoreAddr,
         address initialRegistryAddr,
         address initialPlatformFeeReceiverAddr,
         uint256 initialPlatformFeeRate
     ) external initializer {
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         
-        if (initialVaultCoreAddr == address(0)) revert ZeroAddress();
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         if (initialPlatformFeeReceiverAddr == address(0)) revert ZeroAddress();
         
-        _vaultCoreAddr = initialVaultCoreAddr;
         _registryAddr = initialRegistryAddr;
         _platformFeeReceiverAddr = initialPlatformFeeReceiverAddr;
         _platformFeeRate = initialPlatformFeeRate;
+        _guaranteeDefaultEnabled = true;
         
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
+        // Emit standardized action event for observability.
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_UPGRADE_MODULE,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
 
-    /* ============ Registry 系统集成 ============ */
-    /// @notice 获取模块地址（从 Registry）
-    /// @param moduleKey 模块键
-    /// @return 模块地址
-    function getModule(bytes32 moduleKey) external view onlyValidRegistry returns (address) {
-        return Registry(_registryAddr).getModule(moduleKey);
+    /**
+     * @notice Get current VaultCore address (legacy getter kept for tests/backward-compat).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @return vaultCoreAddr VaultCore address.
+     */
+    function vaultCore() external view returns (address vaultCoreAddr) {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
     }
 
-    /// @notice 获取模块地址或回滚（从 Registry）
-    /// @param moduleKey 模块键
-    /// @return 模块地址
-    function getModuleOrRevert(bytes32 moduleKey) external view onlyValidRegistry returns (address) {
-        return Registry(_registryAddr).getModuleOrRevert(moduleKey);
+    /**
+     * @notice Get current Registry address (legacy getter kept for tests/backward-compat).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @return registryAddr Registry address.
+     */
+    function registry() external view returns (address registryAddr) {
+        return _registryAddr;
     }
 
-    /// @notice 检查模块是否已注册
-    /// @param moduleKey 模块键
-    /// @return 是否已注册
-    function isModuleRegistered(bytes32 moduleKey) external view onlyValidRegistry returns (bool) {
-        return Registry(_registryAddr).isModuleRegistered(moduleKey);
+    /**
+     * @notice Get current VaultCore address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @return vaultCoreAddr VaultCore address.
+     */
+    function vaultCoreAddrVar() external view returns (address vaultCoreAddr) {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
     }
 
-    /// @notice 获取待升级模块信息
-    /// @param moduleKey 模块键
-    /// @return newAddr 新模块地址
-    /// @return executeAfter 执行时间
-    /// @return hasPendingUpgrade 是否有待升级
-    function getPendingUpgrade(bytes32 moduleKey) external view onlyValidRegistry returns (address newAddr, uint256 executeAfter, bool hasPendingUpgrade) {
-        return Registry(_registryAddr).getPendingUpgrade(moduleKey);
+    /**
+     * @notice Get current Registry address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @return registryAddr Registry address.
+     */
+    function registryAddrVar() external view returns (address registryAddr) {
+        return _registryAddr;
     }
 
-    /// @notice 检查模块升级是否就绪
-    /// @param moduleKey 模块键
-    /// @return 是否就绪
-    function isUpgradeReady(bytes32 moduleKey) external view onlyValidRegistry returns (bool) {
-        (, uint256 executeAfter, bool hasPending) = Registry(_registryAddr).getPendingUpgrade(moduleKey);
-        return hasPending && block.timestamp >= executeAfter;
+    /**
+     * @notice Get current platform fee receiver address.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @return receiverAddr Platform fee receiver address.
+     */
+    function platformFeeReceiver() external view returns (address receiverAddr) {
+        return _platformFeeReceiverAddr;
     }
 
-    /* ============ 模块地址缓存管理 ============ */
-    /// @notice 获取并缓存模块地址 - 用于非view函数
-    /// @param moduleKey 模块键
-    /// @return 模块地址
-    // 移除模块地址缓存相关函数
+    /**
+     * @notice Get current platform fee rate.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @return rateBps Platform fee rate (bps, 10_000 = 100%).
+     */
+    function platformFeeRate() external view returns (uint256 rateBps) {
+        return _platformFeeRate;
+    }
 
-    /// @notice 刷新模块地址缓存
-    /// @param moduleKey 模块键
-    // 移除
+    /**
+     * @notice Whether early-repayment guarantee is enabled for the given asset.
+     * @dev Reverts if: (none)
+     * Security: view-only
+     */
+    function isGuaranteeEnabled(address asset) external view override returns (bool enabled) {
+        uint8 mode = _guaranteeAssetMode[asset];
+        if (mode == 1) return true;
+        if (mode == 2) return false;
+        return _guaranteeDefaultEnabled;
+    }
 
-    /// @notice 批量刷新常用模块地址缓存
-    // 移除
+    /*━━━━━━━━━━━━━━━ Access control helpers ━━━━━━━━━━━━━━━*/
 
-    /// @notice 安全获取模块地址（带异常处理）
-    /// @param moduleKey 模块键
-    /// @return 模块地址
-    // 移除
-
-    /// @notice 处理模块调用失败
-    /// @param moduleKey 模块键
-    /// @param reason 失败原因
-    // 移除
-
-    /* ============ 权限控制增强 ============ */
-    /// @notice 权限校验内部函数
-    /// @param actionKey 动作键
-    /// @param user 用户地址
+    /**
+     * @notice Require AccessControlManager role for an action key.
+     * @dev Reverts if:
+     *      - KEY_ACCESS_CONTROL is not registered in Registry (Registry.getModuleOrRevert)
+     *      - caller does not have the required role (via ACM.requireRole)
+     *
+     * Security:
+     * - Delegates authorization to ACM.requireRole
+     *
+     * @param actionKey Action key (bytes32, see ActionKeys).
+     * @param user Caller address to validate.
+     */
     function _requireRole(bytes32 actionKey, address user) internal view {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
-    /// @notice 角色检查内部函数
-    /// @param actionKey 动作键
-    /// @param user 用户地址
-    /// @return 是否具有角色
+    /**
+     * @notice Best-effort role check helper.
+     * @dev Reverts if:
+     *      - (none) - returns false on external call failure
+     *
+     * Security:
+     * - Best-effort: does not block execution if ACM is unavailable/misconfigured
+     *
+     * @param actionKey Action key (bytes32, see ActionKeys).
+     * @param user Address to check.
+     * @return True if user has role, otherwise false.
+     */
     function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        try IAccessControlManager(acmAddr).hasRole(actionKey, user) returns (bool hasRole) { return hasRole; } catch { return false; }
+        try IAccessControlManager(acmAddr).hasRole(actionKey, user) returns (bool hasRole) {
+            return hasRole;
+        } catch {
+            return false;
+        }
     }
 
-    /// @notice 验证模块地址有效性
-    /// @param moduleAddr 模块地址
+    /**
+     * @notice Validate that an address is non-zero.
+     * @dev Reverts if:
+     *      - moduleAddr == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Pure input validation
+     *
+     * @param moduleAddr Address to validate.
+     */
     function _validateModuleAddress(address moduleAddr) internal pure {
         if (moduleAddr == address(0)) revert ZeroAddress();
     }
 
-    /// @notice 获取Registry地址
-    /// @return Registry合约地址
-    function getRegistry() external view returns (address) {
+    /**
+     * @notice Get the Registry address reference used by this module.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @return registryAddr Registry address.
+     */
+    function getRegistry() external view returns (address registryAddr) {
         return _registryAddr;
     }
 
-    /* ============ View Functions ============ */
-    /// @notice 查询保证金记录
-    /// @param guaranteeId 保证金ID
-    /// @return record 保证金记录
-    function getGuaranteeRecord(uint256 guaranteeId) external view returns (GuaranteeRecord memory record) {
+    /*━━━━━━━━━━━━━━━ View functions ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Get a guarantee record by id.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * Note:
+     * - If guaranteeId was never created, returns a zero-initialized struct.
+     *
+     * @param guaranteeId Guarantee id.
+     * @return record Guarantee record struct.
+     */
+    function getGuaranteeRecord(uint256 guaranteeId)
+        external
+        view
+        override
+        returns (IEarlyRepaymentGuaranteeManager.GuaranteeRecord memory record)
+    {
         return _guaranteeRecords[guaranteeId];
     }
 
-    /// @notice 查询用户的保证金ID
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return guaranteeId 保证金ID
-    function getUserGuaranteeId(address user, address asset) external view returns (uint256 guaranteeId) {
+    /**
+     * @notice Get the active (or last) guarantee id for a (user, asset) pair.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param user Borrower address.
+     * @param asset Guarantee asset address.
+     * @return guaranteeId Guarantee id (0 if none is set).
+     */
+    function getUserGuaranteeId(address user, address asset)
+        external
+        view
+        override
+        returns (uint256 guaranteeId)
+    {
         return _userGuaranteeIds[user][asset];
     }
 
-    /// @notice 查询用户是否有活跃的保证金
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return isActive 是否有活跃保证金
-    function hasActiveGuarantee(address user, address asset) external view returns (bool isActive) {
+    /**
+     * @notice Check whether a user currently has an active guarantee for an asset.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param user Borrower address.
+     * @param asset Guarantee asset address.
+     * @return isActive True if an active guarantee exists, otherwise false.
+     */
+    function hasActiveGuarantee(address user, address asset) external view override returns (bool isActive) {
         uint256 guaranteeId = _userGuaranteeIds[user][asset];
         if (guaranteeId == 0) return false;
         
-        GuaranteeRecord storage record = _guaranteeRecords[guaranteeId];
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[guaranteeId];
         return record.isActive;
     }
 
-    /// @notice 预览提前还款结果
-    /// @param guaranteeId 保证金ID
-    /// @param actualRepayAmount 实际还款金额
-    /// @return result 提前还款结果
+    /**
+     * @notice Preview the early repayment settlement result for a given guarantee id.
+     * @dev Reverts if:
+     *      - guarantee is not active (GuaranteeNotActive)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param guaranteeId Guarantee id.
+     * @param actualRepayAmount Actual repay amount (reserved for future rules).
+     * @return result Previewed settlement amounts.
+     */
     function previewEarlyRepayment(
         uint256 guaranteeId,
         uint256 actualRepayAmount
-    ) external view returns (EarlyRepaymentResult memory result) {
-        GuaranteeRecord storage record = _guaranteeRecords[guaranteeId];
+    ) external view override returns (EarlyRepaymentResult memory result) {
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[guaranteeId];
         if (!record.isActive) revert GuaranteeNotActive();
-        
-        return _calculateEarlyRepaymentResult(record, actualRepayAmount);
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+
+        return _calculateEarlyRepaymentResult(record, actualRepayAmount, ts);
     }
 
-    /* ============ Core Functions ============ */
-    /// @notice 锁定保证金
-    /// @dev 仅 VaultCore 可调用
-    /// @param borrower 借款方地址
-    /// @param lender 贷款方地址
-    /// @param asset 资产地址
-    /// @param principal 本金金额
-    /// @param promisedInterest 承诺利息金额
-    /// @param termDays 借款期限（天）
-    /// @return guaranteeId 保证金ID
+    /*━━━━━━━━━━━━━━━ Core functions ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Lock a new early-repayment guarantee record for (borrower, asset).
+     * @dev Reverts if:
+     *      - borrower/lender/asset is zero (ZeroAddress)
+     *      - principal/promisedInterest/termDays is zero (AmountIsZero)
+     *      - borrower == lender (BorrowerCannotBeLender)
+     *      - termDays is out of range (InvalidGuaranteeTerm)
+     *      - promisedInterest is too high vs principal (GuaranteeInterestTooHigh)
+     *      - an active guarantee already exists for (borrower, asset) (GuaranteeAlreadyProcessed)
+     *      - guarantee id counter overflows (GuaranteeIdOverflow)
+     *
+     * Security:
+     * - onlyVaultCore
+     * - nonReentrant
+     *
+     * @param borrower Borrower address.
+     * @param lender Lender address.
+     * @param asset Guarantee asset address.
+     * @param principal Borrow principal amount.
+     * @param promisedInterest Promised interest amount to be locked as guarantee.
+     * @param termDays Loan term (days).
+     * @return guaranteeId New guarantee id.
+     */
     function lockGuaranteeRecord(
         address borrower,
         address lender,
@@ -413,21 +554,24 @@ contract EarlyRepaymentGuaranteeManager is
         uint256 principal,
         uint256 promisedInterest,
         uint256 termDays
-    ) external onlyVaultCore onlyValidRegistry nonReentrant returns (uint256 guaranteeId) {
-        // 基础参数验证
+    ) external override onlyVaultCoreOrBusinessLogic onlyValidRegistry nonReentrant returns (uint256 guaranteeId) {
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        // Basic parameter validation.
         if (borrower == address(0)) revert ZeroAddress();
         if (lender == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (principal == 0) revert AmountIsZero();
         if (promisedInterest == 0) revert AmountIsZero();
         if (termDays == 0) revert AmountIsZero();
+        if (!_isEnabled(asset)) revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
         
-        // 业务逻辑验证
+        // Business rule validation.
         if (borrower == lender) revert BorrowerCannotBeLender();
-        if (termDays > 365 * 10) revert InvalidGuaranteeTerm(); // 最大10年
-        if (promisedInterest > principal * 2) revert GuaranteeInterestTooHigh(); // 利息不超过本金的2倍
+        if (termDays > 365 * 10) revert InvalidGuaranteeTerm(); // max 10 years
+        if (promisedInterest > principal * 2) revert GuaranteeInterestTooHigh(); // capped at 2x principal
         
-        // 检查用户是否已有活跃保证金
+        // Ensure there is no active guarantee for (borrower, asset).
         if (_userGuaranteeIds[borrower][asset] != 0) {
             uint256 existingId = _userGuaranteeIds[borrower][asset];
             if (_guaranteeRecords[existingId].isActive) {
@@ -435,25 +579,25 @@ contract EarlyRepaymentGuaranteeManager is
             }
         }
         
-        // 检查计数器溢出
+        // Guard against id counter overflow.
         if (_guaranteeIdCounter == type(uint256).max) revert GuaranteeIdOverflow();
         
-        // 生成新的保证金ID
+        // Generate a new guarantee id.
         uint256 newGuaranteeId = ++_guaranteeIdCounter;
         guaranteeId = newGuaranteeId;
         
-        // 创建保证金记录
-        GuaranteeRecord storage record = _guaranteeRecords[newGuaranteeId];
+        // Create the guarantee record (semantic layer; no funds transfer).
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[newGuaranteeId];
         record.principal = principal;
         record.promisedInterest = promisedInterest;
-        record.startTime = block.timestamp;
-        record.maturityTime = block.timestamp + (termDays * 1 days);
-        record.earlyRepayPenaltyDays = DEFAULT_EARLY_REPAY_PENALTY_DAYS;
+        record.startTime = ts;
+        record.maturityTime = ts + (termDays * 1 days);
+        record.earlyRepayPenaltyDays = _DEFAULT_EARLY_REPAY_PENALTY_DAYS;
         record.isActive = true;
         record.lender = lender;
         record.asset = asset;
         
-        // 更新用户保证金ID映射
+        // Update user -> asset -> guaranteeId mapping.
         _userGuaranteeIds[borrower][asset] = newGuaranteeId;
         
         emit GuaranteeLocked(
@@ -466,59 +610,81 @@ contract EarlyRepaymentGuaranteeManager is
             record.startTime,
             record.maturityTime,
             record.earlyRepayPenaltyDays,
-            block.timestamp
+            ts
         );
         
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
-        
+        // Emit standardized action event for observability.
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE),
+            msg.sender,
+            ts
+        );
         return guaranteeId;
     }
 
-    /// @notice 处理提前还款
-    /// @dev 仅 VaultCore 可调用，遵循 CEI 模式防止重入攻击
-    /// @param borrower 借款方地址
-    /// @param asset 资产地址
-    /// @param actualRepayAmount 实际还款金额（当前规则未用作分配依据，预留参数）
-    /// @return result 提前还款结果
+    /**
+     * @notice Settle early repayment for (borrower, asset) by distributing the guarantee via GuaranteeFundManager.
+     * @dev Reverts if:
+     *      - borrower/asset is zero (ZeroAddress)
+     *      - actualRepayAmount is zero (AmountIsZero)
+     *      - no guarantee exists for (borrower, asset) (GuaranteeRecordNotFound)
+     *      - guarantee is not active (GuaranteeNotActive)
+     *      - GuaranteeFundManager settlement reverts (ExternalModuleRevertedRaw)
+     *
+     * Security:
+     * - onlyVaultCore
+     * - nonReentrant
+     * - CEI: state is updated before calling external module
+     *
+     * @param borrower Borrower address.
+     * @param asset Guarantee asset address.
+     * @param actualRepayAmount Actual repay amount (reserved for future rules).
+     * @return result Computed settlement amounts.
+     */
     function settleEarlyRepayment(
         address borrower,
         address asset,
         uint256 actualRepayAmount
-    ) external onlyVaultCore onlyValidRegistry nonReentrant returns (EarlyRepaymentResult memory result) {
+    ) external override onlySettlementManager onlyValidRegistry nonReentrant returns (EarlyRepaymentResult memory result) {
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         if (borrower == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (actualRepayAmount == 0) revert AmountIsZero();
+        if (!_isEnabled(asset)) revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
         
         uint256 currentGuaranteeId = _userGuaranteeIds[borrower][asset];
         if (currentGuaranteeId == 0) revert GuaranteeRecordNotFound();
         
-        GuaranteeRecord storage record = _guaranteeRecords[currentGuaranteeId];
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[currentGuaranteeId];
         if (!record.isActive) revert GuaranteeNotActive();
         
-        // 计算提前还款结果
-        result = _calculateEarlyRepaymentResult(record, actualRepayAmount);
+        // Compute early repayment settlement amounts.
+        result = _calculateEarlyRepaymentResult(record, actualRepayAmount, ts);
         
-        // CEI 模式：先更新状态 (Effects)
+        // CEI: update state first (Effects).
         record.isActive = false;
         delete _userGuaranteeIds[borrower][asset];
         
-        // 真实转账由 GuaranteeFundManager 执行：一次性三路分发
+        // Transfers are executed by GuaranteeFundManager: one-call 3-way distribution.
         address gfm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_GUARANTEE_FUND);
-        // 调用 GFM 进行托管资金结算
-        (bool ok, bytes memory data) = gfm.call(
-            abi.encodeWithSignature(
-                "settleEarlyRepayment(address,address,address,address,uint256,uint256,uint256)",
-                borrower,
-                asset,
-                record.lender,
-                _platformFeeReceiverAddr,
-                result.refundToBorrower,
-                result.penaltyToLender,
-                result.platformFee
-            )
-        );
-        if (!ok) revert ExternalModuleRevertedRaw("GuaranteeFundManager", data);
+        // Call GFM to perform custodial settlement (typed interface + unified revert wrapping).
+        bool gfmCallOk;
+        try IGuaranteeFundManager(gfm).settleEarlyRepayment(
+            borrower,
+            asset,
+            record.lender,
+            _platformFeeReceiverAddr,
+            result.refundToBorrower,
+            result.penaltyToLender,
+            result.platformFee
+        ) {
+            gfmCallOk = true;
+        } catch (bytes memory reason) {
+            revert ExternalModuleRevertedRaw("GuaranteeFundManager", reason);
+        }
+        if (!gfmCallOk) revert ExternalModuleRevertedRaw("GuaranteeFundManager", bytes(""));
         
         emit EarlyRepaymentProcessed(
             currentGuaranteeId,
@@ -529,52 +695,73 @@ contract EarlyRepaymentGuaranteeManager is
             result.refundToBorrower,
             result.platformFee,
             result.actualInterestPaid,
-            block.timestamp
+            ts
         );
         
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_REPAY, ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY), msg.sender, block.timestamp);
-        
+        // Emit standardized action event for observability.
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE),
+            msg.sender,
+            ts
+        );
         return result;
     }
 
-    /// @notice 处理违约（没收保证金）
-    /// @dev 仅 VaultCore 可调用，遵循 CEI 模式防止重入攻击
-    /// @param borrower 借款方地址
-    /// @param asset 资产地址
-    /// @return forfeitedAmount 没收金额
+    /**
+     * @notice Process default for (borrower, asset) by forfeiting the full guarantee to the lender.
+     * @dev Reverts if:
+     *      - borrower/asset is zero (ZeroAddress)
+     *      - no guarantee exists for (borrower, asset) (GuaranteeRecordNotFound)
+     *      - guarantee is not active (GuaranteeNotActive)
+     *      - GuaranteeFundManager forfeiture reverts (ExternalModuleRevertedRaw)
+     *
+     * Security:
+     * - onlyVaultCore
+     * - nonReentrant
+     * - CEI: state is updated before calling external module
+     *
+     * @param borrower Borrower address.
+     * @param asset Guarantee asset address.
+     * @return forfeitedAmount Amount forfeited.
+     */
     function processDefault(
         address borrower,
         address asset
-    ) external onlyVaultCore onlyValidRegistry nonReentrant returns (uint256 forfeitedAmount) {
+    ) external override onlySettlementManager onlyValidRegistry nonReentrant returns (uint256 forfeitedAmount) {
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         if (borrower == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
+        if (!_isEnabled(asset)) revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
         
         uint256 currentGuaranteeId = _userGuaranteeIds[borrower][asset];
         if (currentGuaranteeId == 0) revert GuaranteeRecordNotFound();
         
-        GuaranteeRecord storage record = _guaranteeRecords[currentGuaranteeId];
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[currentGuaranteeId];
         if (!record.isActive) revert GuaranteeNotActive();
         
-        // 计算没收金额（全部保证金）
+        // Forfeit full guarantee (current policy).
         forfeitedAmount = record.promisedInterest;
         
-        // CEI 模式：先更新状态 (Effects)
+        // CEI: update state before external transfer.
         record.isActive = false;
         delete _userGuaranteeIds[borrower][asset];
         
-        // 托管资金由 GFM 统一执行（多接收人没收亦可）
+        // Transfers are executed by GuaranteeFundManager.
         address gfm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_GUARANTEE_FUND);
-        (bool ok, bytes memory data) = gfm.call(
-            abi.encodeWithSignature(
-                "forfeitPartial(address,address,address,uint256)",
-                borrower,
-                asset,
-                record.lender,
-                forfeitedAmount
-            )
-        );
-        if (!ok) revert ExternalModuleRevertedRaw("GuaranteeFundManager", data);
+        bool gfmCallOk;
+        try IGuaranteeFundManager(gfm).forfeitPartial(
+            borrower,
+            asset,
+            record.lender,
+            forfeitedAmount
+        ) {
+            gfmCallOk = true;
+        } catch (bytes memory reason) {
+            revert ExternalModuleRevertedRaw("GuaranteeFundManager", reason);
+        }
+        if (!gfmCallOk) revert ExternalModuleRevertedRaw("GuaranteeFundManager", bytes(""));
         
         emit GuaranteeForfeited(
             currentGuaranteeId,
@@ -582,138 +769,259 @@ contract EarlyRepaymentGuaranteeManager is
             record.lender,
             asset,
             forfeitedAmount,
-            block.timestamp
+            ts
         );
         
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_LIQUIDATE, ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE), msg.sender, block.timestamp);
-        
+        // Emit standardized action event for observability.
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_LIQUIDATE_GUARANTEE,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE_GUARANTEE),
+            msg.sender,
+            ts
+        );
         return forfeitedAmount;
     }
 
-    /* ============ Admin Functions ============ */
-    /// @notice 更新平台费用接收者地址
-    /// @param newReceiverAddr 新的费用接收者地址
-    function setPlatformFeeReceiver(address newReceiverAddr) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    /*━━━━━━━━━━━━━━━ Admin functions ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Update the platform fee receiver address.
+     * @dev Reverts if:
+     *      - registry address is zero (ZeroAddress)
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - newReceiverAddr is zero (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via AccessControlManager (ACTION_SET_PARAMETER)
+     *
+     * @param newReceiverAddr New receiver address.
+     */
+    function setPlatformFeeReceiver(address newReceiverAddr)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         _validateModuleAddress(newReceiverAddr);
         address oldReceiver = _platformFeeReceiverAddr;
         _platformFeeReceiverAddr = newReceiverAddr;
         
-        emit PlatformFeeReceiverUpdated(oldReceiver, newReceiverAddr, block.timestamp);
+        emit PlatformFeeReceiverUpdated(oldReceiver, newReceiverAddr, ts);
         
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
+        // Emit standardized action event for observability.
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_SET_PARAMETER,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
+            msg.sender,
+            ts
+        );
     }
 
-    /// @notice 更新平台手续费率
-    /// @param newRate 新的手续费率（基点）
+    /**
+     * @notice Update the platform fee rate.
+     * @dev Reverts if:
+     *      - registry address is zero (ZeroAddress)
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - newRate is above the allowed maximum (EarlyRepaymentGuaranteeManager__RateTooHigh)
+     *      - newRate equals the current rate (EarlyRepaymentGuaranteeManager__RateUnchanged)
+     *
+     * Security:
+     * - Role-gated via AccessControlManager (ACTION_SET_PARAMETER)
+     *
+     * @param newRate New platform fee rate (bps).
+     */
     function setPlatformFeeRate(uint256 newRate) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         if (newRate > 1000) revert EarlyRepaymentGuaranteeManager__RateTooHigh();
         if (newRate == _platformFeeRate) revert EarlyRepaymentGuaranteeManager__RateUnchanged();
         uint256 oldRate = _platformFeeRate;
         _platformFeeRate = newRate;
         
-        emit PlatformFeeRateUpdated(oldRate, newRate, block.timestamp);
+        emit PlatformFeeRateUpdated(oldRate, newRate, ts);
         
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
+        // Emit standardized action event for observability.
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_SET_PARAMETER,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
+            msg.sender,
+            ts
+        );
     }
 
-    /// @notice 更新 VaultCore 地址
-    /// @param newVaultCoreAddr 新的 VaultCore 地址
-    function setVaultCore(address newVaultCoreAddr) external onlyValidRegistry onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
-        _validateModuleAddress(newVaultCoreAddr);
-        _vaultCoreAddr = newVaultCoreAddr;
-        
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_SET_PARAMETER, ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER), msg.sender, block.timestamp);
+    /**
+     * @notice Enable/disable early-repayment guarantee for a given asset.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - asset == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via AccessControlManager (ACTION_SET_PARAMETER)
+     *
+     * @param asset Guarantee asset address.
+     * @param enabled True to enable, false to disable.
+     */
+    function setGuaranteeEnabled(address asset, bool enabled)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
+        if (asset == address(0)) revert ZeroAddress();
+        _guaranteeAssetMode[asset] = enabled ? 1 : 2;
     }
 
-    /// @notice 更新Registry地址（治理功能）
-    /// @dev 仅治理可调用
-    /// @param newRegistryAddr 新的Registry地址
-    function setRegistry(address newRegistryAddr) external onlyValidRegistry onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
+    function _isEnabled(address asset) internal view returns (bool) {
+        uint8 mode = _guaranteeAssetMode[asset];
+        if (mode == 1) return true;
+        if (mode == 2) return false;
+        return _guaranteeDefaultEnabled;
+    }
+
+    /**
+     * @notice Update the VaultCore address reference.
+     * @dev Reverts if:
+     *      - registry address is zero (ZeroAddress)
+     *      - caller lacks ACTION_UPGRADE_MODULE (via ACM.requireRole)
+     *      - newVaultCoreAddr is zero (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via AccessControlManager (ACTION_UPGRADE_MODULE)
+     *
+     * @param newVaultCoreAddr New VaultCore address.
+     */
+    // NOTE: No setVaultCore() here by design.
+    // VaultCore is always resolved via Registry (SSOT) in `onlyVaultCore()` and `vaultCoreAddrVar()`.
+
+    /**
+     * @notice Update the Registry address reference.
+     * @dev Reverts if:
+     *      - current registry address is zero (ZeroAddress)
+     *      - caller lacks ACTION_UPGRADE_MODULE (via ACM.requireRole)
+     *      - newRegistryAddr is zero (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via AccessControlManager (ACTION_UPGRADE_MODULE)
+     *
+     * @param newRegistryAddr New Registry address.
+     */
+    function setRegistry(address newRegistryAddr)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
+    {
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         _validateModuleAddress(newRegistryAddr);
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
         
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
-        // 发出标准化动作事件
-        emit VaultTypes.ActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE, ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE), msg.sender, block.timestamp);
+        // Emit standardized action event for observability.
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_UPGRADE_MODULE,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
+            msg.sender,
+            ts
+        );
     }
 
-    /// @notice 紧急暂停功能
-    // 移除暂停/恢复，统一由系统层处理
+    /*━━━━━━━━━━━━━━━ Internal functions ━━━━━━━━━━━━━━━*/
 
-    /// @notice 刷新模块缓存
-    // 移除缓存刷新职责
-
-    /* ============ Internal Functions ============ */
-    /// @dev 计算提前还款结果，使用高精度计算
-    /// @param record 保证金记录
-    /// @return result 提前还款结果
+    /**
+     * @notice Compute early repayment settlement amounts for a record.
+     * @dev Reverts if:
+     *      - currentTimestamp < record.startTime (InvalidGuaranteeId)
+     *
+     * Security:
+     * - View-only internal helper (does not mutate state)
+     *
+     * @param record Guarantee record reference.
+     * @param currentTimestamp Current timestamp (seconds) used for the settlement calculation.
+     * @return result Computed settlement amounts.
+     */
     function _calculateEarlyRepaymentResult(
-        GuaranteeRecord storage record,
-        uint256 /* _actualRepayAmount */
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record,
+        uint256 /* _actualRepayAmount */,
+        uint256 currentTimestamp
     ) internal view returns (EarlyRepaymentResult memory result) {
-        // 验证时间参数
-        if (block.timestamp < record.startTime) revert InvalidGuaranteeId();
+        // Validate time bounds.
+        if (currentTimestamp < record.startTime) revert InvalidGuaranteeId();
         
-        // 计算实际借款天数
-        uint256 actualDays = (block.timestamp - record.startTime) / 1 days;
+        // Compute elapsed days.
+        uint256 actualDays = (currentTimestamp - record.startTime) / 1 days;
         
-        // 计算总天数
+        // Compute total days.
         uint256 totalDays = (record.maturityTime - record.startTime) / 1 days;
-        if (totalDays == 0) totalDays = 1; // 防止除零
+        if (totalDays == 0) totalDays = 1; // prevent div-by-zero
+        // Clamp to maturity.
+        if (actualDays > totalDays) {
+            actualDays = totalDays;
+        }
         
-        // 使用高精度计算实际应付利息（按比例）
-        // 使用 1e18 作为精度基数
-        result.actualInterestPaid = (record.promisedInterest * actualDays * 1e18) / (totalDays * 1e18);
+        // Use mulDiv to avoid overflow: promisedInterest * actualDays / totalDays.
+        result.actualInterestPaid = Math.mulDiv(record.promisedInterest, actualDays, totalDays);
         
-        // 计算提前还款罚金（额外2天利息）
+        // Compute penalty (extra N days interest), capped by the remaining guarantee.
         uint256 penaltyDays = record.earlyRepayPenaltyDays;
         uint256 dailyInterest = record.promisedInterest / totalDays;
         uint256 penaltyInterest = dailyInterest * penaltyDays;
         
-        // 确保罚金不超过剩余保证金
+        // Ensure penalty does not exceed remaining guarantee.
         uint256 remainingGuarantee = record.promisedInterest - result.actualInterestPaid;
         if (penaltyInterest > remainingGuarantee) {
             penaltyInterest = remainingGuarantee;
         }
-        
-        result.penaltyToLender = penaltyInterest;
-        
-        // 计算平台手续费
-        result.platformFee = (result.penaltyToLender * _platformFeeRate) / 10000;
-        
-        // 计算返还给借款方的金额
-        uint256 totalDeduction = result.actualInterestPaid + result.penaltyToLender;
-        if (totalDeduction > record.promisedInterest) {
-            totalDeduction = record.promisedInterest;
-        }
-        
-        result.refundToBorrower = record.promisedInterest - totalDeduction;
+        // Platform fee is taken from the penalty component (current policy).
+        uint256 platformFee = (penaltyInterest * _platformFeeRate) / 10000;
+        result.platformFee = platformFee;
+
+        // Consistency constraint (SSOT, see Funds-Flow guide):
+        // refundToBorrower + penaltyToLender + platformFee MUST equal promisedInterest,
+        // otherwise `GuaranteeFundManager.settleEarlyRepayment` will revert.
+        //
+        // We treat `penaltyToLender` as the net amount paid to lender from the guarantee pool:
+        // earnedInterest (actualInterestPaid) + penaltyInterest - platformFee.
+        result.penaltyToLender = result.actualInterestPaid + penaltyInterest - platformFee;
+        result.refundToBorrower = record.promisedInterest - result.actualInterestPaid - penaltyInterest;
         
         return result;
     }
 
-    /// @notice 清除所有模块缓存
-    // 移除模块缓存清理
+    /*━━━━━━━━━━━━━━━ Upgrade auth ━━━━━━━━━━━━━━━*/
 
-    /* ============ Upgrade Auth ============ */
-    /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
-    function _authorizeUpgrade(address newImplementation) internal view override {
+    /**
+     * @notice Authorize UUPS upgrade.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_UPGRADE_MODULE (via ACM.requireRole)
+     *      - newImplementation == address(0) (ZeroAddress)
+     *      - newImplementation has no code (EarlyRepaymentGuaranteeManager__InvalidImplementation)
+     *
+     * Security:
+     * - Role-gated via AccessControlManager (ACTION_UPGRADE_MODULE)
+     * - Additional governance integration (Timelock/Multisig) can be layered here if required
+     *
+     * @param newImplementation New implementation address.
+     */
+    function _authorizeUpgrade(address newImplementation) internal override {
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         
-        // 验证新实现合约
+        // Validate target implementation.
         if (newImplementation.code.length == 0) revert EarlyRepaymentGuaranteeManager__InvalidImplementation();
         
-        // 可以在这里添加更多的实现合约验证逻辑
-        // 例如验证合约是否实现了必要的接口
-        // 或者验证合约的存储布局是否兼容
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_UPGRADE_MODULE,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
+            msg.sender,
+            ts
+        );
+        
+        // Additional validations can be added here (e.g., interface checks, storage layout compatibility).
     }
+
+    /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
+    uint256[50] private __gap;
 } 

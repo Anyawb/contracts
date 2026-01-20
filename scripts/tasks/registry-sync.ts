@@ -20,7 +20,7 @@ function k256(upperSnake: string): string {
 
 const KEYS = {
   VAULT_CORE: 'VaultCore',
-  VAULT_VIEW: 'VaultView',
+  VAULT_VIEW: 'VaultRouter',
   REWARD_VIEW: 'RewardView',
   LENDING_ENGINE: 'LendingEngine',
 } as const;

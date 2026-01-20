@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { MathConstants } from "../constants/MathConstants.sol";
 
 /// @title HealthFactorLib
 /// @notice 健康因子与相关判定的纯函数库（无状态、可内联）
@@ -21,20 +21,20 @@ library HealthFactorLib {
         if (totalDebt == 0) return false;
         unchecked {
             // collateral * 1e4 < debt * minHF 视为不健康
-            return totalCollateral * VaultTypes.HUNDRED_PERCENT < totalDebt * minHealthFactor;
+            return totalCollateral * MathConstants.BPS < totalDebt * minHealthFactor;
         }
     }
 
     /// @notice 计算健康因子（仅在需要展示/缓存具体数值时调用）
     function calcHealthFactor(uint256 totalCollateral, uint256 totalDebt) internal pure returns (uint256) {
         if (totalDebt == 0) return type(uint256).max;
-        return (totalCollateral * VaultTypes.HUNDRED_PERCENT) / totalDebt;
+        return (totalCollateral * MathConstants.BPS) / totalDebt;
     }
 
     /// @notice 计算贷款价值比（LTV）
     function calcLtv(uint256 debt, uint256 collateral) internal pure returns (uint256) {
         if (collateral == 0) return 0;
-        return (debt * VaultTypes.HUNDRED_PERCENT) / collateral;
+        return (debt * MathConstants.BPS) / collateral;
     }
 
     /// @notice 计算排除保证金后的有效抵押

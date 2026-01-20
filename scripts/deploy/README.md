@@ -110,12 +110,9 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 
 所有部署脚本遵循相同的架构模式，部署顺序如下：
 
-### 阶段 1: Registry 核心模块
-1. **Registry** - 主注册表合约（UUPS 可升级）
-2. **RegistryCore** - 核心模块管理
-3. **RegistryUpgradeManager** - 升级管理器（可选）
-4. **RegistryAdmin** - 治理管理员（可选）
-5. **RegistryDynamicModuleKey** - 动态模块键注册表
+### 阶段 1: Registry 核心模块（Scheme A）
+1. **Registry** - 主注册表合约（UUPS 可升级，单一入口/单一 Proxy）
+2. **RegistryDynamicModuleKey** - 动态模块键注册表（可选，独立存储/独立升级）
 
 ### 阶段 2: 访问控制与白名单
 6. **AccessControlManager** - 权限管理（非升级合约）
@@ -135,13 +132,12 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 14. **CollateralManager** - 抵押品管理器
 15. **LendingEngine** - 借贷引擎
 16. **LiquidationRiskManager** - 清算风险管理器（需要链接库）
-17. **VaultStorage** - Vault 存储
-18. **VaultBusinessLogic** - Vault 业务逻辑
-19. **VaultView** - Vault 视图（临时部署用于初始化）
-20. **VaultCore** - Vault 核心
-21. **VaultLendingEngine** - Vault 借贷引擎
-22. **EarlyRepaymentGuaranteeManager** - 提前还款保证金管理器
-23. **GuaranteeFundManager** - 担保基金管理器
+17. **VaultBusinessLogic** - Vault 业务逻辑
+18. **VaultRouter** - Vault 视图（临时部署用于初始化）
+19. **VaultCore** - Vault 核心
+20. **VaultLendingEngine** - Vault 借贷引擎
+21. **EarlyRepaymentGuaranteeManager** - 提前还款保证金管理器
+22. **GuaranteeFundManager** - 担保基金管理器
 
 ### 阶段 6: 视图模块
 24. **HealthView** - 健康度视图
@@ -344,7 +340,7 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 ```json
 {
   "Registry": "0x...",
-  "RegistryCore": "0x...",
+  // "RegistryCore": REMOVED (Scheme A: no compat proxies)
   "AccessControlManager": "0x...",
   ...
 }
@@ -357,7 +353,7 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 ```typescript
 export const CONTRACT_ADDRESSES = {
   Registry: '0x...',
-  RegistryCore: '0x...',
+  // RegistryCore: REMOVED (Scheme A: no compat proxies)
   ...
 };
 

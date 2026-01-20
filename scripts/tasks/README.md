@@ -139,7 +139,7 @@ npx hardhat registry:sync \
 
 **支持的模块键**：
 - `VAULT_CORE` → 从部署文件读取 `VaultCore`
-- `VAULT_VIEW` → 从部署文件读取 `VaultView`
+- `VAULT_VIEW` → 从部署文件读取 `VaultRouter`
 - `REWARD_VIEW` → 从部署文件读取 `RewardView`
 - `LENDING_ENGINE` → 从部署文件读取 `LendingEngine`
 
@@ -148,7 +148,7 @@ npx hardhat registry:sync \
 # 同步所有模块到本地网络
 npx hardhat registry:sync --networkName localhost
 
-# 只同步 VaultCore 和 VaultView
+# 只同步 VaultCore 和 VaultRouter
 npx hardhat registry:sync \
   --networkName localhost \
   --only VAULT_CORE,VAULT_VIEW
@@ -239,9 +239,8 @@ npx hardhat registry:migrate:min \
 **用途**：验证 Registry 家族的存储布局和基本视图
 
 **功能**：
-- 验证 Registry 存储布局
-- 验证 RegistryCore 存储布局
-- 检查可选管理器（UpgradeManager, Admin, BatchManager 等）
+- 验证 Registry（Scheme A：单一入口）存储布局
+- （可选）检查 RegistryDynamicModuleKey 基本状态
 - 显示存储版本信息
 
 **使用方式**：
@@ -266,39 +265,16 @@ npx hardhat registry:verify:family \
    - 存储布局验证
    - 存储版本查询
 
-2. **RegistryCore**
-   - 存储布局验证
-   - 存储版本查询
-
-3. **RegistryUpgradeManager** (如果存在)
-   - `getPendingUpgrade` 测试
-   - `isUpgradeReady` 测试
-
-4. **RegistryAdmin** (如果存在)
-   - `isPaused` 状态
-   - `getMaxDelay` 查询
-
-5. **RegistryBatchManager** (如果存在)
-   - `owner` 查询
-
-6. **RegistryHistoryManager** (如果存在)
-   - `getUpgradeHistoryCount` 测试
-
-7. **RegistrySignatureManager** (如果存在)
-   - `nonces` 查询
+2. **RegistryDynamicModuleKey**（如果存在）
+   - registrationAdmin / systemAdmin 查询
 
 **输出示例**：
 ```
 Verifier: 0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6
 Registry.storageVersion: 1
-RegistryCore.storageVersion: 1
-UpgradeManager.getPendingUpgrade(dummy) [object Object]
-UpgradeManager.isUpgradeReady(dummy) false
-RegistryAdmin.isPaused: false maxDelay: 172800
-RegistryBatchManager.owner: 0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6
-RegistryHistoryManager.getUpgradeHistoryCount(dummy): 0
-RegistrySignatureManager.nonces(signer): 0
-Registry family verification completed.
+RegistryDynamicModuleKey.registrationAdmin: 0x...
+RegistryDynamicModuleKey.systemAdmin: 0x...
+Registry (Scheme A) verification completed.
 ```
 
 ---

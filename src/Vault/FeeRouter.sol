@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { SafeERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { IERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
@@ -13,117 +13,142 @@ import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../constants/DataPushTypes.sol";
-import { IRegistryUpgradeEvents } from "../interfaces/IRegistryUpgradeEvents.sol";
 import { IFeeRouter } from "../interfaces/IFeeRouter.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { VaultMath } from "../Vault/VaultMath.sol";
+import { IVaultCoreMinimal } from "../interfaces/IVaultCoreMinimal.sol";
+import { IFeeRouterView } from "../interfaces/IFeeRouterView.sol";
 import { 
     AmountIsZero, 
     FeeRouter__ZeroAddress,
-    MissingRole
+    NotAContract
 } from "../errors/StandardErrors.sol";
 
 /**
  * @title FeeRouter
- * @notice 管理平台手续费分配，把撮合费/清算费按比例分发到金库地址。
- * @dev 重构后：简化架构，直接返回本地数据，View合约通过VaultView统一访问
- * @dev 统一传参架构：复杂查询通过VaultView协调器，简单查询直接返回本地数据
+ * @notice Routes fee funds and distributes them to the configured treasuries.
+ * @dev The write-side SSOT for fee routing; the view-side mirror is updated best-effort via
+ *      VaultCore.viewContractAddrVar().
  * @custom:security-contact security@example.com
  */
 contract FeeRouter is 
     Initializable, 
     PausableUpgradeable, 
     UUPSUpgradeable,
-    IFeeRouter,
-    IRegistryUpgradeEvents 
+    IFeeRouter
 {
-    using SafeERC20Upgradeable for IERC20Upgradeable;
+    using SafeERC20 for IERC20;
 
     /*━━━━━━━━━━━━━━━ STATE ━━━━━━━━━━━━━━━*/
-    /// @notice Registry 合约地址
+    /// @notice Registry contract address.
     address private _registryAddr;
     
-    /// @notice 平台金库地址
+    /// @notice Platform treasury address.
     address private _platformTreasury;
     
-    /// @notice 生态金库地址
+    /// @notice Ecosystem vault address.
     address private _ecosystemVault;
 
-    /// @notice 平台手续费比例（以万分比计，eg 50 = 0.5%）
+    /// @notice Platform fee rate (bps; 50 = 0.50%).
     uint256 private _platformFeeBps;
     
-    /// @notice 生态手续费比例（以万分比计，eg 20 = 0.2%）
+    /// @notice Ecosystem fee rate (bps; 20 = 0.20%).
     uint256 private _ecosystemFeeBps;
 
-    /// @notice 费用缓存：token → feeType → cachedAmount
+    /// @notice Fee cache: token => feeType => cachedAmount.
     mapping(address => mapping(bytes32 => uint256)) private _feeCache;
     
-    /// @notice 动态费用配置：token → feeType → feeBps
+    /// @notice Dynamic fee config: token => feeType => feeBps.
     mapping(address => mapping(bytes32 => uint256)) private _dynamicFees;
     
-    /// @notice 支持的代币列表
+    /// @notice Supported token list.
     address[] private _supportedTokens;
     
-    /// @notice 代币支持状态映射
+    /// @notice Supported token flags.
     mapping(address => bool) private _isSupportedToken;
     
-    /// @notice 费用统计：token → feeType → totalAmount
+    /// @notice Fee statistics: token => feeType => totalAmount.
     mapping(address => mapping(bytes32 => uint256)) private _feeStatistics;
 
-    /// @notice 操作统计
+    /// @notice Operation statistics.
     uint256 private _totalDistributions;
     uint256 private _totalAmountDistributed;
     
-    // ============ Gas优化缓存 ============
-    // 方案A：移除本地ACM缓存，统一通过Registry读取
-
-
-
-    /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
-    // All events are imported from IFeeRouter interface
-    
-    // Custom events specific to FeeRouter implementation
-    event DynamicFeeUpdated(
-        address indexed token, 
-        bytes32 indexed feeType, 
-        uint256 oldFee, 
-        uint256 newFee
-    );
-
-    // 新增安全化事件
-    event PlatformTreasuryUpdated(address indexed oldAddr, address indexed newAddr);
-    event EcosystemVaultUpdated(address indexed oldAddr, address indexed newAddr);
-
-	/*━━━━━━━━━━━━━━━ DATA PUSH CONSTANTS ━━━━━━━━━━━━━━━*/
-	// 常量统一迁移至 DataPushTypes
+    // NOTE: This contract intentionally avoids caching ACM locally; permissions are resolved via Registry.
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
-    /// @notice 无效配置错误
+    /**
+     * @notice Invalid configuration (e.g., fee bps sum constraints).
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Input/config validation guard
+     */
     error FeeRouter__InvalidConfig();
     
-    /// @notice 代币不支持错误
+    /**
+     * @notice Token is not supported.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents routing/distribution for unconfigured tokens
+     */
     error FeeRouter__TokenNotSupported();
     
-    /// @notice 无效费用类型错误
+    /**
+     * @notice Invalid fee type (no dynamic fee configured).
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - Prevents using unconfigured fee types
+     */
     error FeeRouter__InvalidFeeType();
 
-    /// @notice 权限不足错误
-    error FeeRouter__InsufficientPermission();
-
-    /// @notice 批量操作大小错误
+    /**
+     * @notice Invalid batch size (arrays mismatch or exceed max size).
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * Security:
+     * - DoS/gas guard for batch operations
+     */
     error FeeRouter__InvalidBatchSize();
 
+    /*━━━━━━━━━━━━━━━ Best-effort View Push Observability ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when a best-effort FeeRouterView push fails (must not revert main flow).
+    /// @param kind Push kind identifier.
+    /// @param payer User address when applicable; address(0) for system/global-only pushes.
+    /// @param token Token address when applicable; address(0) for system config pushes.
+    /// @param feeType Fee type when applicable; bytes32(0) otherwise.
+    /// @param viewAddr Target view address (may be zero if unresolved/misconfigured).
+    /// @param reason Raw revert data or an encoded failure reason.
+    event FeeRouterViewPushFailed(
+        bytes32 indexed kind,
+        address indexed payer,
+        address indexed token,
+        bytes32 feeType,
+        address viewAddr,
+        bytes reason
+    );
 
+    bytes32 private constant _PUSH_KIND_SYSTEM_CONFIG = keccak256("FEE_ROUTER_VIEW_PUSH_SYSTEM_CONFIG");
+    bytes32 private constant _PUSH_KIND_GLOBAL_STATS  = keccak256("FEE_ROUTER_VIEW_PUSH_GLOBAL_STATS");
+    bytes32 private constant _PUSH_KIND_USER_FEE       = keccak256("FEE_ROUTER_VIEW_PUSH_USER_FEE");
+    bytes32 private constant _PUSH_KIND_GLOBAL_FEE     = keccak256("FEE_ROUTER_VIEW_PUSH_GLOBAL_FEE_STAT");
 
     /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
     
-    /// @notice 验证 Registry 地址
+    /// @notice Ensures the registry address is non-zero and contains code.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert FeeRouter__ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
-    /// @notice 统一权限验证修饰符
+    /// @notice Resolves permissions via ACM (Registry.KEY_ACCESS_CONTROL) and enforces the given actionKey.
     modifier onlyRole(bytes32 actionKey) {
         _requireRole(actionKey, msg.sender);
         _;
@@ -132,25 +157,34 @@ contract FeeRouter is
     /*━━━━━━━━━━━━━━━ INITIALIZER ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 初始化手续费路由器
-     * @param initialRegistryAddr Registry 合约地址
-     * @param platformTreasury_ 平台金库地址
-     * @param ecosystemVault_ 生态金库地址
-     * @param platformBps_ 平台手续费比例（基点）
-     * @param ecoBps_ 生态手续费比例（基点）
+     * @notice Initialize the FeeRouter.
+     * @dev Reverts if:
+     *      - initialRegistryAddr == address(0)
+     *      - platformTreasury == address(0)
+     *      - ecosystemVault == address(0)
+     *      - platformFeeBps + ecosystemFeeBps >= 10_000
+     *
+     * Security:
+     * - Callable only once (initializer).
+     *
+     * @param initialRegistryAddr Registry contract address.
+     * @param platformTreasury Platform treasury address.
+     * @param ecosystemVault Ecosystem vault address.
+     * @param platformFeeBps Platform fee rate in bps (10_000 = 100%).
+     * @param ecosystemFeeBps Ecosystem fee rate in bps (10_000 = 100%).
      */
     function initialize(
         address initialRegistryAddr,
-        address platformTreasury_,
-        address ecosystemVault_,
-        uint256 platformBps_,
-        uint256 ecoBps_
+        address platformTreasury,
+        address ecosystemVault,
+        uint256 platformFeeBps,
+        uint256 ecosystemFeeBps
     ) external initializer {
-        // 验证参数
-        if (initialRegistryAddr == address(0) || platformTreasury_ == address(0) || ecosystemVault_ == address(0)) {
+        // Validate inputs.
+        if (initialRegistryAddr == address(0) || platformTreasury == address(0) || ecosystemVault == address(0)) {
             revert FeeRouter__ZeroAddress();
         }
-        if (platformBps_ + ecoBps_ >= 1e4) {
+        if (platformFeeBps + ecosystemFeeBps >= 1e4) {
             revert FeeRouter__InvalidConfig();
         }
 
@@ -158,12 +192,13 @@ contract FeeRouter is
         __Pausable_init();
 
         _registryAddr = initialRegistryAddr;
-        _platformTreasury = platformTreasury_;
-        _ecosystemVault = ecosystemVault_;
-        _platformFeeBps = platformBps_;
-        _ecosystemFeeBps = ecoBps_;
+        _platformTreasury = platformTreasury;
+        _ecosystemVault = ecosystemVault;
+        _platformFeeBps = platformFeeBps;
+        _ecosystemFeeBps = ecosystemFeeBps;
         
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -174,11 +209,27 @@ contract FeeRouter is
     /*━━━━━━━━━━━━━━━ EXTERNAL FUNCTIONS ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 撮合成功后的常规手续费分配
-     * @param token 代币地址
-     * @param amount 手续费金额
+     * @notice Distribute fees using the fixed (platform + ecosystem) fee configuration.
+     * @dev Reverts if:
+     *      - amount == 0 (AmountIsZero)
+     *      - token is not supported (FeeRouter__TokenNotSupported)
+     *      - system is paused (Pausable)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_DEPOSIT role (ACM)
+     *      - ERC20 transferFrom/transfer fails
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_DEPOSIT).
+     *
+     * @param token ERC20 token address (must be supported).
+     * @param amount Total amount pulled from msg.sender (token decimals).
      */
-    function distributeNormal(address token, uint256 amount) external override onlyValidRegistry onlyRole(ActionKeys.ACTION_DEPOSIT) {
+    function distributeNormal(address token, uint256 amount)
+        external
+        override
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_DEPOSIT)
+    {
         if (amount == 0) revert AmountIsZero();
         if (!_isSupportedToken[token]) revert FeeRouter__TokenNotSupported();
         
@@ -188,10 +239,22 @@ contract FeeRouter is
     }
 
     /**
-     * @notice 批量费用分配 - Gas优化
-     * @param token 代币地址
-     * @param amounts 金额数组
-     * @param feeTypes 费用类型数组
+     * @notice Distribute multiple fee items in a single transaction (gas-optimized).
+     * @dev Reverts if:
+     *      - token is not supported (FeeRouter__TokenNotSupported)
+     *      - amounts.length != feeTypes.length (FeeRouter__InvalidBatchSize)
+     *      - amounts.length > 50 (FeeRouter__InvalidBatchSize)
+     *      - system is paused (Pausable)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_DEPOSIT role (ACM)
+     *      - ERC20 transferFrom/transfer fails
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_DEPOSIT).
+     *
+     * @param token ERC20 token address (must be supported).
+     * @param amounts Per-item total amounts pulled from msg.sender (token decimals). Zero amounts are skipped.
+     * @param feeTypes Per-item feeType identifiers.
      */
     function batchDistribute(
         address token,
@@ -210,24 +273,43 @@ contract FeeRouter is
             totalAmount += amounts[i];
         }
         
-		_updateStats(length, totalAmount);
-		emit BatchFeeDistributed(token, totalAmount, length);
-		_emitActionExecuted(ActionKeys.ACTION_DEPOSIT);
+        // NOTE: distributions count uses the input length (even if some items are zero and skipped).
+        _updateStats(length, totalAmount);
+        emit BatchFeeDistributed(token, totalAmount, length);
+        _emitActionExecuted(ActionKeys.ACTION_DEPOSIT);
 
-		// 统一数据推送（批量分发摘要）
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_BATCH_FEE_DISTRIBUTED,
-			abi.encode(token, totalAmount, length, msg.sender, block.timestamp)
-		);
+        // Unified data push (batch distribution summary).
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_BATCH_FEE_DISTRIBUTED,
+            abi.encode(token, totalAmount, length, msg.sender, ts)
+        );
     }
 
     /**
-     * @notice 动态费用分配
-     * @param token 代币地址
-     * @param amount 金额
-     * @param feeType 费用类型
+     * @notice Distribute fees using a dynamic fee configuration (token, feeType).
+     * @dev Reverts if:
+     *      - amount == 0 (AmountIsZero)
+     *      - token is not supported (FeeRouter__TokenNotSupported)
+     *      - dynamic fee is not configured for (token, feeType) (FeeRouter__InvalidFeeType)
+     *      - system is paused (Pausable)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_DEPOSIT role (ACM)
+     *      - ERC20 transferFrom/transfer fails
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_DEPOSIT).
+     *
+     * @param token ERC20 token address (must be supported).
+     * @param amount Total amount pulled from msg.sender (token decimals).
+     * @param feeType Fee type identifier.
      */
-    function distributeDynamic(address token, uint256 amount, bytes32 feeType) external onlyValidRegistry onlyRole(ActionKeys.ACTION_DEPOSIT) {
+    function distributeDynamic(address token, uint256 amount, bytes32 feeType)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_DEPOSIT)
+    {
         if (amount == 0) revert AmountIsZero();
         if (!_isSupportedToken[token]) revert FeeRouter__TokenNotSupported();
         if (_dynamicFees[token][feeType] == 0) revert FeeRouter__InvalidFeeType();
@@ -238,221 +320,288 @@ contract FeeRouter is
     }
 
     /*━━━━━━━━━━━━━━━ VIEW FUNCTIONS ━━━━━━━━━━━━━━━*/
-
-    // ============ 基础查询功能（保留在主文件）============
     
-    /// @notice 查询是否为授权 Caller
-    function isCaller(address addr) external view returns (bool) {
-        if (_registryAddr == address(0)) return false;
-        
-        try IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL) returns (address acmAddr) {
-            return IAccessControlManager(acmAddr).hasRole(ActionKeys.ACTION_DEPOSIT, addr);
-        } catch {
-            return false;
-        }
-    }
-
-    /// @notice 查询代币是否支持
+    /**
+     * @notice Return whether a token is supported for fee routing.
+     * @param token ERC20 token address.
+     * @return True if supported.
+     */
     function isTokenSupported(address token) external view returns (bool) {
         return _isSupportedToken[token];
     }
 
     /**
-     * @notice 获取当前手续费率
-     * @return 当前手续费率（基点，10000 = 100%）
+     * @notice Return the total fixed fee rate.
+     * @return Total fee rate in bps (10_000 = 100%).
      */
     function getFeeRate() external view override returns (uint256) {
         return _platformFeeBps + _ecosystemFeeBps;
     }
 
     /**
-     * @notice 向用户收取存款手续费
-     * @param user 用户地址
-     * @param amount 存款金额
-     * @return fee 实际收取的手续费
+     * @notice Quote the deposit fee for an amount under the fixed fee configuration.
+     * @dev This is a pure quote; the contract does not pull funds here.
+     * @param user User address (reserved for future personalization).
+     * @param amount Amount to quote on (token decimals).
+     * @return fee Fee amount (token decimals).
      */
     function chargeDepositFee(address user, uint256 amount) external view override returns (uint256 fee) {
-        user; // silence unused parameter
+        user; // reserved for future personalization
         return _calculateFee(amount);
     }
 
     /**
-     * @notice 向用户收取借款手续费
-     * @param user 用户地址
-     * @param amount 借款金额
-     * @return fee 实际收取的手续费
+     * @notice Quote the borrow fee for an amount under the fixed fee configuration.
+     * @dev This is a pure quote; the contract does not pull funds here.
+     * @param user User address (reserved for future personalization).
+     * @param amount Amount to quote on (token decimals).
+     * @return fee Fee amount (token decimals).
      */
     function chargeBorrowFee(address user, uint256 amount) external view override returns (uint256 fee) {
-        user; // silence unused parameter
+        user; // reserved for future personalization
         return _calculateFee(amount);
     }
 
-    // ============ 只读getter函数（安全化）============
+    /*━━━━━━━━━━━━━━━ Safe getters ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取Registry地址
+    /**
+     * @notice Return the configured Registry address.
+     * @return registry Registry address.
+     */
     function getRegistry() external view returns (address registry) {
         return _registryAddr;
     }
     
-    /// @notice 获取平台金库地址
+    /**
+     * @notice Return the platform treasury address.
+     * @return treasury Platform treasury address.
+     */
     function getPlatformTreasury() external view returns (address treasury) {
         return _platformTreasury;
     }
     
-    /// @notice 获取生态金库地址
+    /**
+     * @notice Return the ecosystem vault address.
+     * @return vault Ecosystem vault address.
+     */
     function getEcosystemVault() external view returns (address vault) {
         return _ecosystemVault;
     }
     
-    /// @notice 获取平台手续费比例
+    /**
+     * @notice Return the platform fee rate.
+     * @return feeBps Platform fee rate in bps.
+     */
     function getPlatformFeeBps() external view returns (uint256 feeBps) {
         return _platformFeeBps;
     }
     
-    /// @notice 获取生态手续费比例
+    /**
+     * @notice Return the ecosystem fee rate.
+     * @return feeBps Ecosystem fee rate in bps.
+     */
     function getEcosystemFeeBps() external view returns (uint256 feeBps) {
         return _ecosystemFeeBps;
     }
     
-    /// @notice 获取总分发次数
+    /**
+     * @notice Return the total number of distributions recorded by this contract.
+     * @return distributions Total distribution count.
+     */
     function getTotalDistributions() external view returns (uint256 distributions) {
         return _totalDistributions;
     }
     
-    /// @notice 获取总分发金额
+    /**
+     * @notice Return the total distributed amount recorded by this contract.
+     * @return amount Total distributed amount (token decimals aggregated by input amounts).
+     */
     function getTotalAmountDistributed() external view returns (uint256 amount) {
         return _totalAmountDistributed;
     }
 
-    // ============ 基础查询功能（直接返回本地数据）============
+    /*━━━━━━━━━━━━━━━ Direct state views ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取支持的代币列表
+    /**
+     * @notice Return the supported token list.
+     * @return Supported ERC20 token addresses.
+     */
     function getSupportedTokens() external view returns (address[] memory) {
         return _supportedTokens;
     }
 
-    /// @notice 获取费用统计
+    /**
+     * @notice Return the accumulated fee statistics for a (token, feeType).
+     * @param token ERC20 token address.
+     * @param feeType Fee type identifier.
+     * @return Total amount recorded for (token, feeType) (token decimals).
+     */
     function getFeeStatistics(address token, bytes32 feeType) external view returns (uint256) {
         return _feeStatistics[token][feeType];
     }
 
-    /// @notice 获取动态费用配置
+    /**
+     * @notice Return the configured dynamic fee bps for (token, feeType).
+     * @param token ERC20 token address.
+     * @param feeType Fee type identifier.
+     * @return Dynamic fee rate in bps.
+     */
     function getDynamicFee(address token, bytes32 feeType) external view returns (uint256) {
         return _dynamicFees[token][feeType];
     }
 
-    /// @notice 获取费用缓存
+    /**
+     * @notice Return the fee cache value for (token, feeType).
+     * @param token ERC20 token address.
+     * @param feeType Fee type identifier.
+     * @return Cached amount (token decimals).
+     */
     function getFeeCache(address token, bytes32 feeType) external view returns (uint256) {
         return _feeCache[token][feeType];
     }
 
-    /// @notice 获取操作统计信息
+    /**
+     * @notice Return operation statistics in a single call.
+     * @return distributions Total distribution count.
+     * @return totalAmount Total distributed amount.
+     */
     function getOperationStats() external view returns (uint256 distributions, uint256 totalAmount) {
         return (_totalDistributions, _totalAmountDistributed);
     }
 
-    // ============ 通过Registry调用的查询功能 ============
-    
-    /// @notice 检查用户权限级别（通过Registry调用）
     /**
-     * @notice DEPRECATED: 请改从 AccessControlView 查询用户权限级别
-     * @dev 保留兼容性，后续可能移除
+     * @notice Set the fixed fee configuration (platform + ecosystem).
+     * @dev Reverts if:
+     *      - platformBps + ecosystemBps >= 10_000 (FeeRouter__InvalidConfig)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_SET_PARAMETER role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     *
+     * @param platformBps Platform fee rate in bps.
+     * @param ecosystemBps Ecosystem fee rate in bps.
      */
-    function getUserPermissionLevel(address user) external view returns (IAccessControlManager.PermissionLevel) {
-        address acmAddr = _getAcmModule(false);
-        if (acmAddr == address(0)) {
-            return IAccessControlManager.PermissionLevel.NONE;
-        }
-        
-        return IAccessControlManager(acmAddr).getUserPermission(user);
-    }
-
-    /// @notice 验证用户是否有指定权限（通过Registry调用）
-    /**
-     * @notice DEPRECATED: 请改从 AccessControlView 查询权限校验结果
-     * @dev 保留兼容性，后续可能移除
-     */
-    function hasUserPermission(address user, IAccessControlManager.PermissionLevel level) external view returns (bool) {
-        address acmAddr = _getAcmModule(false);
-        if (acmAddr == address(0)) return false;
-        
-        return IAccessControlManager(acmAddr).getUserPermission(user) >= level;
-    }
-
-    /*━━━━━━━━━━━━━━━ ADMIN CONFIG ━━━━━━━━━━━━━━━*/
-
-    /**
-     * @notice 设置费用配置
-     * @param platformBps 平台手续费比例（基点）
-     * @param ecoBps 生态手续费比例（基点）
-     */
-    function setFeeConfig(uint256 platformBps, uint256 ecoBps) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
-        if (platformBps + ecoBps >= 1e4) revert FeeRouter__InvalidConfig();
+    function setFeeConfig(uint256 platformBps, uint256 ecosystemBps)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
+        if (platformBps + ecosystemBps >= 1e4) revert FeeRouter__InvalidConfig();
         
         _platformFeeBps = platformBps;
-        _ecosystemFeeBps = ecoBps;
+        _ecosystemFeeBps = ecosystemBps;
         
-        emit FeeConfigUpdated(platformBps, ecoBps);
+        emit FeeConfigUpdated(platformBps, ecosystemBps);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_FEE_CONFIG_UPDATED,
-			abi.encode(platformBps, ecoBps, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_FEE_CONFIG_UPDATED,
+            abi.encode(platformBps, ecosystemBps, msg.sender, ts)
+        );
     }
 
     /**
-     * @notice 设置金库地址
-     * @param platformTreasury_ 平台金库地址
-     * @param ecosystemVault_ 生态金库地址
+     * @notice Set treasury recipient addresses.
+     * @dev Reverts if:
+     *      - platformTreasury == address(0) (FeeRouter__ZeroAddress)
+     *      - ecosystemVault == address(0) (FeeRouter__ZeroAddress)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_SET_PARAMETER role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     *
+     * @param platformTreasury Platform treasury address.
+     * @param ecosystemVault Ecosystem vault address.
      */
-    function setTreasury(address platformTreasury_, address ecosystemVault_) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
-        if (platformTreasury_ == address(0) || ecosystemVault_ == address(0)) revert FeeRouter__ZeroAddress();
+    function setTreasury(address platformTreasury, address ecosystemVault)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
+        if (platformTreasury == address(0) || ecosystemVault == address(0)) revert FeeRouter__ZeroAddress();
         
         address oldPlatformTreasury = _platformTreasury;
         address oldEcosystemVault = _ecosystemVault;
         
-        _platformTreasury = platformTreasury_;
-        _ecosystemVault = ecosystemVault_;
+        _platformTreasury = platformTreasury;
+        _ecosystemVault = ecosystemVault;
         
-        emit PlatformTreasuryUpdated(oldPlatformTreasury, platformTreasury_);
-        emit EcosystemVaultUpdated(oldEcosystemVault, ecosystemVault_);
+        emit PlatformTreasuryUpdated(oldPlatformTreasury, platformTreasury);
+        emit EcosystemVaultUpdated(oldEcosystemVault, ecosystemVault);
+        // Interface/ABI compatibility: aggregated event (in addition to the granular updates above).
+        emit TreasuryUpdated(platformTreasury, ecosystemVault);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_TREASURY_UPDATED,
-			abi.encode(oldPlatformTreasury, platformTreasury_, oldEcosystemVault, ecosystemVault_, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_TREASURY_UPDATED,
+            abi.encode(oldPlatformTreasury, platformTreasury, oldEcosystemVault, ecosystemVault, msg.sender, ts)
+        );
     }
 
     /**
-     * @notice 设置动态费用
-     * @param token 代币地址
-     * @param feeType 费用类型
-     * @param feeBps 费用比例（基点）
+     * @notice Set dynamic fee bps for (token, feeType).
+     * @dev Reverts if:
+     *      - token == address(0) (FeeRouter__ZeroAddress)
+     *      - feeBps >= 10_000 (FeeRouter__InvalidConfig)
+     *      - feeBps + (feeBps / 2) >= 10_000 (FeeRouter__InvalidConfig)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_SET_PARAMETER role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     *
+     * @param token ERC20 token address.
+     * @param feeType Fee type identifier.
+     * @param feeBps Dynamic fee rate in bps.
      */
-    function setDynamicFee(address token, bytes32 feeType, uint256 feeBps) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function setDynamicFee(address token, bytes32 feeType, uint256 feeBps)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
         if (token == address(0)) revert FeeRouter__ZeroAddress();
         if (feeBps >= 1e4) revert FeeRouter__InvalidConfig();
+        // Constraint: dynamic fee + ecosystem share (50% of dynamic) must be < 100%.
+        if (feeBps + (feeBps / 2) >= 1e4) revert FeeRouter__InvalidConfig();
         
         uint256 oldFee = _dynamicFees[token][feeType];
         _dynamicFees[token][feeType] = feeBps;
         
         emit DynamicFeeUpdated(token, feeType, oldFee, feeBps);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_DYNAMIC_FEE_UPDATED,
-			abi.encode(token, feeType, oldFee, feeBps, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_DYNAMIC_FEE_UPDATED,
+            abi.encode(token, feeType, oldFee, feeBps, msg.sender, ts)
+        );
     }
 
     /**
-     * @notice 添加支持的代币
-     * @param token 代币地址
+     * @notice Add a supported token.
+     * @dev Reverts if:
+     *      - token == address(0) (FeeRouter__ZeroAddress)
+     *      - token is already supported (FeeRouter__InvalidConfig)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_SET_PARAMETER role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     *
+     * @param token ERC20 token address.
      */
     function addSupportedToken(address token) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (token == address(0)) revert FeeRouter__ZeroAddress();
@@ -463,24 +612,35 @@ contract FeeRouter is
         
         emit TokenSupported(token, true);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_TOKEN_SUPPORTED,
-			abi.encode(token, true, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_TOKEN_SUPPORTED,
+            abi.encode(token, true, msg.sender, ts)
+        );
     }
 
     /**
-     * @notice 移除支持的代币
-     * @param token 代币地址
+     * @notice Remove a supported token.
+     * @dev Reverts if:
+     *      - token is not supported (FeeRouter__InvalidConfig)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_SET_PARAMETER role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     *
+     * @param token ERC20 token address.
      */
     function removeSupportedToken(address token) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (!_isSupportedToken[token]) revert FeeRouter__InvalidConfig();
         
         _isSupportedToken[token] = false;
         
-        // 从数组中移除
+        // Remove from the list (swap & pop).
         for (uint256 i = 0; i < _supportedTokens.length; i++) {
             if (_supportedTokens[i] == token) {
                 _supportedTokens[i] = _supportedTokens[_supportedTokens.length - 1];
@@ -491,56 +651,101 @@ contract FeeRouter is
         
         emit TokenSupported(token, false);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
+        _pushSystemConfigToView();
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_TOKEN_SUPPORTED,
-			abi.encode(token, false, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_TOKEN_SUPPORTED,
+            abi.encode(token, false, msg.sender, ts)
+        );
     }
 
     /**
-     * @notice 清空费用缓存
-     * @param token 代币地址
-     * @param feeType 费用类型
+     * @notice Clear fee cache for (token, feeType).
+     * @dev Reverts if:
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_SET_PARAMETER role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_SET_PARAMETER).
+     *
+     * @param token ERC20 token address.
+     * @param feeType Fee type identifier.
      */
-    function clearFeeCache(address token, bytes32 feeType) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function clearFeeCache(address token, bytes32 feeType)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
         delete _feeCache[token][feeType];
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_FEE_CACHE_CLEARED,
-			abi.encode(token, feeType, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_FEE_CACHE_CLEARED,
+            abi.encode(token, feeType, msg.sender, ts)
+        );
     }
 
-    /// @notice 暂停所有分发
+    /**
+     * @notice Pause fee distributions.
+     * @dev Reverts if:
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_PAUSE_SYSTEM role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_PAUSE_SYSTEM).
+     */
     function pause() external onlyValidRegistry onlyRole(ActionKeys.ACTION_PAUSE_SYSTEM) {
         _pause();
         _emitActionExecuted(ActionKeys.ACTION_PAUSE_SYSTEM);
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED,
-			abi.encode(true, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(true, msg.sender, ts));
     }
 
-    /// @notice 恢复分发
+    /**
+     * @notice Unpause fee distributions.
+     * @dev Reverts if:
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_UNPAUSE_SYSTEM role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_UNPAUSE_SYSTEM).
+     */
     function unpause() external onlyValidRegistry onlyRole(ActionKeys.ACTION_UNPAUSE_SYSTEM) {
         _unpause();
         _emitActionExecuted(ActionKeys.ACTION_UNPAUSE_SYSTEM);
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED,
-			abi.encode(false, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(false, msg.sender, ts));
     }
     
-    /// @notice 更新 Registry 地址（标准升级）
-    function updateRegistry(address newRegistryAddr) external onlyValidRegistry onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
+    /**
+     * @notice Update the Registry address (upgrade/migration hook).
+     * @dev Reverts if:
+     *      - newRegistryAddr == address(0) (FeeRouter__ZeroAddress)
+     *      - current registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_UPGRADE_MODULE role (ACM)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_UPGRADE_MODULE).
+     *
+     * @param newRegistryAddr New Registry contract address.
+     */
+    function updateRegistry(address newRegistryAddr)
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
+    {
         if (newRegistryAddr == address(0)) revert FeeRouter__ZeroAddress();
         
         address oldRegistry = _registryAddr;
@@ -549,56 +754,59 @@ contract FeeRouter is
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         _emitActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE);
         
-        // 发出模块地址更新事件
-        emit VaultTypes.ModuleAddressUpdated(
+        // Emit module address update event.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_FR),
             oldRegistry,
             newRegistryAddr,
-            block.timestamp
+            ts
         );
 
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_REGISTRY_UPDATED,
-			abi.encode(oldRegistry, newRegistryAddr, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REGISTRY_UPDATED,
+            abi.encode(oldRegistry, newRegistryAddr, msg.sender, ts)
+        );
+
+        // Sync new view (best-effort) to avoid stale view state.
+        _pushSystemConfigToView();
+        _pushGlobalStatsToView();
     }
-    
-    /*━━━━━━━━━━━━━━━ INTERNALS ━━━━━━━━━━━━━━━*/
 
-
-
-    // ============ 公共逻辑函数（消除重复）============
+    /*━━━━━━━━━━━━━━━ Common helpers ━━━━━━━━━━━━━━━*
     
     /**
-     * @notice 记录标准化动作事件（公共函数）
-     * @param actionKey 动作键
+     * @notice Emit a normalized ActionExecuted system event.
+     * @param actionKey Action key.
      */
     function _emitActionExecuted(bytes32 actionKey) internal {
-        emit VaultTypes.ActionExecuted(
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        emit SystemEvents.ActionExecuted(
             actionKey,
             ActionKeys.getActionKeyString(actionKey),
             msg.sender,
-            block.timestamp
+            ts
         );
     }
     
     /**
-     * @notice 更新统计信息（公共函数）
-     * @param distributions 分发次数增量
-     * @param amount 分发金额增量
+     * @notice Update stats and push global stats to view (best-effort).
+     * @param distributions Distribution count delta.
+     * @param amount Amount delta (token decimals).
      */
     function _updateStats(uint256 distributions, uint256 amount) internal {
         _totalDistributions += distributions;
         _totalAmountDistributed += amount;
-        
-        // 统计数据更新完成
+        _pushGlobalStatsToView();
     }
 
     /**
-     * @notice 验证用户权限（使用标准ACM，Gas优化）
-     * @param actionKey 动作键
-     * @param user 用户地址
+     * @notice Enforce role via ACM (resolved from Registry).
+     * @param actionKey Action key.
+     * @param user Caller address.
      */
     function _requireRole(bytes32 actionKey, address user) internal view {
         address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
@@ -606,9 +814,9 @@ contract FeeRouter is
     }
 
     /**
-     * @notice 统一的费用计算函数
-     * @param amount 基础金额
-     * @return fee 费用金额
+     * @notice Compute fee amount for a given base amount using fixed fee bps.
+     * @param amount Base amount (token decimals).
+     * @return fee Fee amount (token decimals).
      */
     function _calculateFee(uint256 amount) internal view returns (uint256 fee) {
         uint256 totalFeeBps = _platformFeeBps + _ecosystemFeeBps;
@@ -616,38 +824,59 @@ contract FeeRouter is
     }
 
     /**
-     * @notice 内部费用分发逻辑（使用固定费率）
-     * @param token 代币地址
-     * @param amount 金额
-     * @param feeType 费用类型
+     * @notice Internal fee distribution using fixed bps.
+     * @param token ERC20 token address.
+     * @param amount Total amount (token decimals).
+     * @param feeType Fee type identifier.
      */
     function _distribute(address token, uint256 amount, bytes32 feeType) internal whenNotPaused {
-        (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) = _calculateDistribution(amount, _platformFeeBps, _ecosystemFeeBps);
-        _executeFeeDistribution(token, platformAmt, ecoAmt, remaining, feeType, amount);
+        uint256 platformBps = _platformFeeBps;
+        uint256 ecoBps = _ecosystemFeeBps;
+        (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) = _calculateDistribution(amount, platformBps, ecoBps);
+        _executeFeeDistribution(
+            token,
+            platformAmt,
+            ecoAmt,
+            remaining,
+            feeType,
+            amount,
+            msg.sender,
+            platformBps + ecoBps
+        );
     }
 
     /**
-     * @notice 内部动态费用分发逻辑
-     * @param token 代币地址
-     * @param amount 金额
-     * @param feeType 费用类型
+     * @notice Internal fee distribution using dynamic bps.
+     * @param token ERC20 token address.
+     * @param amount Total amount (token decimals).
+     * @param feeType Fee type identifier.
      */
     function _distributeDynamic(address token, uint256 amount, bytes32 feeType) internal whenNotPaused {
         uint256 dynamicFeeBps = _dynamicFees[token][feeType];
-        uint256 halfDynamicFee = dynamicFeeBps / 2; // 生态费用为动态费用的一半
+        uint256 halfDynamicFee = dynamicFeeBps / 2; // ecosystem share = half of dynamic fee
         
-        (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) = _calculateDistribution(amount, dynamicFeeBps, halfDynamicFee);
-        _executeFeeDistribution(token, platformAmt, ecoAmt, remaining, feeType, amount);
+        (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) =
+            _calculateDistribution(amount, dynamicFeeBps, halfDynamicFee);
+        _executeFeeDistribution(
+            token,
+            platformAmt,
+            ecoAmt,
+            remaining,
+            feeType,
+            amount,
+            msg.sender,
+            dynamicFeeBps + halfDynamicFee
+        );
     }
 
     /**
-     * @notice 计算费用分配
-     * @param amount 总金额
-     * @param platformBps 平台费率
-     * @param ecoBps 生态费率
-     * @return platformAmt 平台费用
-     * @return ecoAmt 生态费用
-     * @return remaining 剩余金额
+     * @notice Compute distribution amounts (platform, ecosystem, remaining).
+     * @param amount Total amount (token decimals).
+     * @param platformBps Platform fee rate in bps.
+     * @param ecoBps Ecosystem fee rate in bps.
+     * @return platformAmt Platform fee amount.
+     * @return ecoAmt Ecosystem fee amount.
+     * @return remaining Remaining amount refunded to msg.sender.
      */
     function _calculateDistribution(uint256 amount, uint256 platformBps, uint256 ecoBps) 
         internal 
@@ -660,13 +889,154 @@ contract FeeRouter is
     }
 
     /**
-     * @notice 执行费用分发和统计更新
-     * @param token 代币地址
-     * @param platformAmt 平台费用
-     * @param ecoAmt 生态费用
-     * @param remaining 剩余金额
-     * @param feeType 费用类型
-     * @param totalAmount 总金额（用于统计）
+     * @notice Resolve the current view contract address (best-effort).
+     * @dev SSOT: resolved via VaultCore.viewContractAddrVar(). No registry-key fallbacks to avoid drift.
+     */
+    function _resolveFeeRouterViewAddr() internal view returns (address) {
+        address registryAddr = _registryAddr;
+        if (registryAddr == address(0) || registryAddr.code.length == 0) return address(0);
+
+        // SSOT (Architecture-Guide): view address is resolved via VaultCore.viewContractAddrVar().
+        // NOTE: Do NOT add alternative Registry keys as fallbacks here, to avoid multi-source drift.
+        try IRegistry(registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE) returns (address vaultCore) {
+            if (vaultCore != address(0)) {
+                try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address viewAddr) {
+                    if (viewAddr != address(0)) return viewAddr;
+                } catch {
+                    _noop();
+                }
+            }
+        } catch {
+            _noop();
+        }
+
+        return address(0);
+    }
+
+    /**
+     * @notice Push system config to the view (best-effort).
+     */
+    function _pushSystemConfigToView() internal {
+        address viewAddr = _resolveFeeRouterViewAddr();
+        if (viewAddr == address(0) || viewAddr.code.length == 0) {
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_SYSTEM_CONFIG,
+                address(0),
+                address(0),
+                bytes32(0),
+                viewAddr,
+                bytes("view unavailable")
+            );
+            return;
+        }
+
+        address[] memory tokens = _copySupportedTokens();
+        try IFeeRouterView(viewAddr).pushSystemConfigUpdate(
+            _platformTreasury,
+            _ecosystemVault,
+            _platformFeeBps,
+            _ecosystemFeeBps,
+            tokens
+        ) {
+            _noop();
+        } catch (bytes memory reason) {
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_SYSTEM_CONFIG,
+                address(0),
+                address(0),
+                bytes32(0),
+                viewAddr,
+                reason
+            );
+        }
+    }
+
+    /**
+     * @notice Push global stats to the view (best-effort).
+     */
+    function _pushGlobalStatsToView() internal {
+        address viewAddr = _resolveFeeRouterViewAddr();
+        if (viewAddr == address(0) || viewAddr.code.length == 0) {
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_GLOBAL_STATS,
+                address(0),
+                address(0),
+                bytes32(0),
+                viewAddr,
+                bytes("view unavailable")
+            );
+            return;
+        }
+
+        try IFeeRouterView(viewAddr).pushGlobalStatsUpdate(_totalDistributions, _totalAmountDistributed) {
+            _noop();
+        } catch (bytes memory reason) {
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_GLOBAL_STATS,
+                address(0),
+                address(0),
+                bytes32(0),
+                viewAddr,
+                reason
+            );
+        }
+    }
+
+    /**
+     * @notice After distribution, push user/global fee stats to the view (best-effort).
+     */
+    function _pushFeeRouterViewAfterDistribution(
+        address payer,
+        address token,
+        bytes32 feeType,
+        uint256 totalAmount,
+        uint256 appliedFeeBps
+    ) internal {
+        address viewAddr = _resolveFeeRouterViewAddr();
+        if (viewAddr == address(0) || viewAddr.code.length == 0) {
+            emit FeeRouterViewPushFailed(_PUSH_KIND_USER_FEE, payer, token, feeType, viewAddr, bytes("view unavailable"));
+            return;
+        }
+
+        try IFeeRouterView(viewAddr).pushUserFeeUpdate(payer, feeType, totalAmount, appliedFeeBps) {
+            _noop();
+        } catch (bytes memory reason) {
+            emit FeeRouterViewPushFailed(_PUSH_KIND_USER_FEE, payer, token, feeType, viewAddr, reason);
+        }
+
+        try IFeeRouterView(viewAddr).pushGlobalFeeStatistic(token, feeType, _feeStatistics[token][feeType]) {
+            _noop();
+        } catch (bytes memory reason) {
+            emit FeeRouterViewPushFailed(_PUSH_KIND_GLOBAL_FEE, payer, token, feeType, viewAddr, reason);
+        }
+    }
+
+    /**
+     * @notice No-op helper used to satisfy solhint's no-empty-blocks rule for try/catch blocks.
+     */
+    function _noop() private pure {
+        return;
+    }
+
+    /**
+     * @notice Copy supported token list into memory.
+     */
+    function _copySupportedTokens() internal view returns (address[] memory tokens) {
+        uint256 len = _supportedTokens.length;
+        tokens = new address[](len);
+        for (uint256 i = 0; i < len; i++) {
+            tokens[i] = _supportedTokens[i];
+        }
+    }
+
+    /**
+     * @notice Execute fee distribution (pull funds, pay recipients, refund remainder) and update stats/cache.
+     * @param token ERC20 token address.
+     * @param platformAmt Platform amount.
+     * @param ecoAmt Ecosystem amount.
+     * @param remaining Amount refunded to msg.sender.
+     * @param feeType Fee type identifier.
+     * @param totalAmount Total amount pulled (for stats).
      */
     function _executeFeeDistribution(
         address token,
@@ -674,45 +1044,49 @@ contract FeeRouter is
         uint256 ecoAmt,
         uint256 remaining,
         bytes32 feeType,
-        uint256 totalAmount
+        uint256 totalAmount,
+        address payer,
+        uint256 appliedFeeBps
     ) internal {
-        // 先从调用者地址拉取全部费用金额（需要调用者预先 approve 给本合约）
+        // Pull total amount from msg.sender (caller must approve this contract).
         if (totalAmount > 0) {
-            IERC20Upgradeable(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+            IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
         }
 
-        // 分发费用
+        // Distribute fees.
         if (platformAmt > 0) {
-            IERC20Upgradeable(token).safeTransfer(_platformTreasury, platformAmt);
+            IERC20(token).safeTransfer(_platformTreasury, platformAmt);
         }
         if (ecoAmt > 0) {
-            IERC20Upgradeable(token).safeTransfer(_ecosystemVault, ecoAmt);
+            IERC20(token).safeTransfer(_ecosystemVault, ecoAmt);
         }
         if (remaining > 0) {
-            // 余量返还给调用者（通常是资金池/编排合约）
-            IERC20Upgradeable(token).safeTransfer(msg.sender, remaining);
+            // Refund remainder to msg.sender (usually an orchestrator contract).
+            IERC20(token).safeTransfer(msg.sender, remaining);
         }
 
-        // 更新统计和缓存
+        // Update stats and cache.
         _feeStatistics[token][feeType] += totalAmount;
         _feeCache[token][feeType] += totalAmount;
-
-        // 数据更新完成
+        _pushFeeRouterViewAfterDistribution(payer, token, feeType, totalAmount, appliedFeeBps);
 
         emit FeeDistributed(token, platformAmt, ecoAmt);
         emit FeeStatisticsUpdated(token, feeType, _feeStatistics[token][feeType]);
-		// 统一数据推送
-		DataPushLibrary._emitData(
-			DataPushTypes.DATA_TYPE_FEE_DISTRIBUTED,
-			abi.encode(token, platformAmt, ecoAmt, remaining, feeType, totalAmount, msg.sender, block.timestamp)
-		);
+        // Unified data push.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_FEE_DISTRIBUTED,
+            abi.encode(token, platformAmt, ecoAmt, remaining, feeType, totalAmount, msg.sender, ts)
+        );
     }
 
 
 
     /**
-     * @notice 升级授权函数
-     * @param newImpl 新实现地址
+     * @notice Authorize UUPS upgrade.
+     * @dev Reverts if caller lacks ACTION_UPGRADE_MODULE role (ACM).
+     * @param newImpl New implementation address.
      */
     function _authorizeUpgrade(address newImpl) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
@@ -720,34 +1094,11 @@ contract FeeRouter is
         newImpl; // silence unused parameter
     }
 
-	// ============ Gas优化内部函数（消除重复）============
-
-    /// @notice 通过Registry获取模块地址（Gas优化）
-    function _getModule(bytes32 moduleKey) internal view returns (address) {
-        try IRegistry(_registryAddr).getModule(moduleKey) returns (address moduleAddr) {
-            return moduleAddr;
-        } catch {
-            return address(0);
-        }
-    }
-
-    /// @notice 获取AccessControlManager模块地址
-    function _getAcmModule(bool useRevert) internal view returns (address) {
-        if (useRevert) {
-            return IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        } else {
-            try IRegistry(_registryAddr).getModule(ModuleKeys.KEY_ACCESS_CONTROL) returns (address acmAddr) {
-                return acmAddr;
-            } catch {
-                return address(0);
-            }
-        }
-    }
-
     /*━━━━━━━━━━━━━━━ GAP ━━━━━━━━━━━━━━━*/
-    uint256[32] private __gap; // 调整为32以适应新增的存储变量
+    uint256[32] private __gap; // Storage gap for upgrade-safe state layout changes.
 }
 
 
 
+ 
  

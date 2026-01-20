@@ -46,7 +46,7 @@ graph TB
     end
     
     subgraph "View层（双架构协调器）"
-        VaultView[VaultView<br/>双架构智能协调器]
+        VaultRouter[VaultRouter<br/>双架构智能协调器]
     end
     
     subgraph "业务逻辑层"
@@ -86,8 +86,8 @@ graph TB
     end
     
     User --> VaultCore
-    VaultCore --> VaultView
-    VaultView --> VaultBusinessLogic
+    VaultCore --> VaultRouter
+    VaultRouter --> VaultBusinessLogic
     VaultBusinessLogic --> SettlementMatchLib
     VaultBusinessLogic --> CollateralManager
     VaultBusinessLogic --> LendingEngine
@@ -96,8 +96,8 @@ graph TB
     LendingEngine --> CollateralManager
     LendingEngine --> FeeRouter
     LendingEngine --> RewardManager
-    VaultView --> StatisticsView
-    VaultView --> HealthView
+    VaultRouter --> StatisticsView
+    VaultRouter --> HealthView
     VaultBusinessLogic --> AssetWhitelist
     VaultBusinessLogic --> PriceOracle
     VaultCore --> ACM
@@ -112,7 +112,7 @@ graph TB
 | 模块 | 职责 | 状态 | 特性 |
 |------|------|------|------|
 | **VaultCore** | 极简入口，传送数据至 View 层 | ✅ 已实现 | 双架构设计、极简实现、Registry 升级能力 |
-| **VaultView** | 双架构智能协调器 | ✅ 已实现 | 事件驱动、View 层缓存、模块分发、免费查询 |
+| **VaultRouter** | 双架构智能协调器 | ✅ 已实现 | 事件驱动、View 层缓存、模块分发、免费查询 |
 | **VaultBusinessLogic** | 业务逻辑模块 | ✅ 已实现 | 真实资金流转、撮合结算、SafeERC20、批量操作 |
 | **SettlementMatchLib** | 撮合结算库 | ✅ 已实现 | 原子化操作、订单落地、保证金锁定 |
 | **CollateralManager** | 抵押物管理，记录用户余额 | ✅ 已实现 | 真实 token 转账、事件记录 |
@@ -131,7 +131,7 @@ graph TB
 | **VaultAdmin** | 极简治理入口 | ✅ 已实现 | 健康因子下发、升级鉴权 |
 | **ModuleKeys** | 模块常量库 | ✅ 已实现 | 模块标识、字符串映射、类型安全 |
 | **ActionKeys** | 动作常量库 | ✅ 已实现 | **44个**标准化动作、权限分发、事件追踪 |
-| **VaultTypes** | 事件和数据结构 | ✅ 已实现 | 标准化事件、数据结构定义 |
+| **SystemEvents** | 标准化事件 | ✅ 已实现 | 跨模块共享事件 SSOT（原 VaultTypes） |
 | **VaultMath** | 数学计算库 | ✅ 已实现 | 统一数学计算、健康因子、LTV、百分比计算 |
 
 ---
@@ -145,7 +145,7 @@ RWA 借贷平台采用**统一的权限控制中心**架构，所有模块通过
 
 - **统一管理**: 所有权限集中在 ACM 中管理
 - **模块化设计**: 每个模块独立但通过 ACM 协调
-- **标准化接口**: 使用 ActionKeys 和 VaultTypes 提供标准化接口
+- **标准化接口**: 使用 ActionKeys 和 SystemEvents 提供标准化接口
 - **安全审计**: 完整的事件记录和权限追踪
 - **灵活扩展**: 支持多级权限和角色管理
 
@@ -291,7 +291,7 @@ event ActionExecuted(bytes32 indexed actionKey, string actionName, address index
 #### 🔧 **事件使用**
 ```solidity
 // 记录标准化动作
-emit VaultTypes.ActionExecuted(
+emit SystemEvents.ActionExecuted(
     ActionKeys.ACTION_DEPOSIT,
     ActionKeys.getActionKeyString(ActionKeys.ACTION_DEPOSIT),
     msg.sender,
@@ -334,7 +334,7 @@ function getModule(bytes32 moduleKey) external view returns (address)
 - **双架构支持**：遵循双架构设计，只负责传送数据
 - **可升级**：支持 UUPS 升级模式
 
-### 3.2 VaultView（双架构智能协调器）
+### 3.2 VaultRouter（双架构智能协调器）
 
 #### 📋 **核心功能**
 - **双架构协调**：事件驱动 + View 层缓存
@@ -481,7 +481,7 @@ function calculateExpectedInterest(address user, address asset, uint256 amount)
 ### 3.5 VaultAdmin（极简治理入口）
 
 #### 📋 **核心功能**
-- **参数下发**：最小健康因子路由至 LiquidationRiskManager
+- **参数下发**：阈值/最小健康因子 **SSOT** 下沉至 `KEY_LIQUIDATION_CONFIG_MANAGER → LiquidationConfigModule`；`LiquidationRiskManager` 仅做兼容透传与只读聚合
 - **升级鉴权**：自身 UUPS 升级授权
 - **只读**：Registry 地址查询
 
@@ -506,23 +506,31 @@ function getRegistryAddr() external view returns (address)
 
 #### 🔧 **主要函数**
 ```solidity
-// 核心业务逻辑（由 VaultView 调用）
-function processDeposit(address user, address asset, uint256 amount) external onlyVaultView
-function processWithdraw(address user, address asset, uint256 amount) external onlyVaultView
+// 核心业务逻辑（由 VaultRouter 调用）
+function processDeposit(address user, address asset, uint256 amount) external onlyVaultRouter
+function processWithdraw(address user, address asset, uint256 amount) external onlyVaultRouter
 
 // 兼容性接口（重定向到核心函数）
-function depositCollateral(address user, address asset, uint256 amount) external onlyVaultView
-function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultView
+function depositCollateral(address user, address asset, uint256 amount) external onlyVaultRouter
+function withdrawCollateral(address user, address asset, uint256 amount) external onlyVaultRouter
 
 // 批量操作
-function batchProcessDeposit(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultView
-function batchProcessWithdraw(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultView
+function batchProcessDeposit(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultRouter
+function batchProcessWithdraw(address user, address[] calldata assets, uint256[] calldata amounts) external onlyVaultRouter
 
 // 查询功能
 function getCollateral(address user, address asset) external view returns (uint256)
 function getTotalCollateralByAsset(address asset) external view returns (uint256)
 function getUserCollateralAssets(address user) external view returns (address[] memory)
+```
+
+### 3.6.x PositionView（仓位视图 + 抵押估值）
+
+#### 🔧 **主要估值函数（只读，统一口径）**
+```solidity
 function getUserTotalCollateralValue(address user) external view returns (uint256)
+function getTotalCollateralValue() external view returns (uint256)
+function getAssetValue(address asset, uint256 amount) external view returns (uint256)
 ```
 
 ### 3.7 AssetWhitelist（资产白名单）
@@ -559,11 +567,10 @@ function getAssetInfo(address asset) external view returns (AssetInfo memory)
 ### 3.8 AccessControlManager（统一权限控制中心）
 
 #### 📋 **核心功能**
-- **多级权限管理**：支持从 NONE 到 OWNER 的 6 级权限
-- **角色管理系统**：基于 ActionKeys 的标准化角色管理
-- **权限缓存机制**：提高权限查询效率
-- **批量操作支持**：支持批量权限设置和查询
-- **事件记录系统**：完整的权限变更审计
+- **权限级别（推断）**：`getUserPermission` 按角色动态推断（NONE / VIEWER / OPERATOR / ADMIN）
+- **角色管理系统（SSOT）**：基于 ActionKeys 的标准化角色管理（`grantRole/revokeRole/hasRole/requireRole`）
+- **事件审计**：`RoleGranted/RoleRevoked` 用于链下审计与权限盘点
+- **职责边界（SSOT）**：系统暂停/恢复由 `VaultRouter` 收敛（`ACTION_PAUSE_SYSTEM` / `ACTION_UNPAUSE_SYSTEM`），ACM 不维护“暂停状态机”
 
 #### 🔧 **主要函数**
 ```solidity
@@ -576,14 +583,6 @@ function grantRole(bytes32 role, address account) external onlyOwner
 function revokeRole(bytes32 role, address account) external onlyOwner
 function hasRole(bytes32 role, address account) external view returns (bool)
 function requireRole(bytes32 role, address caller) external view
-
-// Keeper 管理
-function setKeeper(address newKeeper) external onlyOwner
-function getKeeper() external view returns (address)
-
-// 紧急暂停
-function emergencyPause(string memory reason) external onlyKeeper
-function emergencyUnpause() external onlyKeeper
 ```
 
 ### 3.9 CrossChainGovernance（跨链治理）
@@ -694,7 +693,7 @@ function getActionKeyString(bytes32 key) external pure returns (string memory)
 ### 4.1 双架构数据流
 
 ```
-用户操作 → VaultCore（极简入口）→ VaultView（双架构协调器）
+用户操作 → VaultCore（极简入口）→ VaultRouter（双架构协调器）
          → VaultBusinessLogic（业务逻辑）→ SettlementMatchLib（撮合结算）
          → LendingEngine（账本写入）→ View 层缓存更新 + 事件推送
          → 数据库收集 + 免费查询
@@ -706,7 +705,7 @@ function getActionKeyString(bytes32 key) external pure returns (string memory)
 sequenceDiagram
     participant User as 用户
     participant VaultCore as VaultCore<br/>极简入口
-    participant VaultView as VaultView<br/>双架构协调器
+    participant VaultRouter as VaultRouter<br/>双架构协调器
     participant VaultBL as VaultBusinessLogic<br/>业务逻辑
     participant Settlement as SettlementMatchLib<br/>撮合结算
     participant CM as CollateralManager<br/>抵押物管理
@@ -724,29 +723,29 @@ sequenceDiagram
     LE->>LE: mintLoanNFT(...)
     Settlement->>ERGM: lockGuaranteeRecord(...)
     Settlement->>GFM: lockGuarantee(user, asset, interest)
-    LE->>VaultView: pushUserPositionUpdate(...)
-    VaultView->>VaultView: 更新缓存 + 事件推送
+    LE->>VaultRouter: pushUserPositionUpdate(...)
+    VaultRouter->>VaultRouter: 更新缓存 + 事件推送
     VaultBusinessLogic-->>User: 完成借款
 
     Note over User,Token: 基础借款流程（无利率）
     User->>VaultCore: borrow(asset, amount)
-    VaultCore->>VaultView: processUserOperation("BORROW", ...)
-    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultCore->>VaultRouter: processUserOperation("BORROW", ...)
+    VaultRouter->>VaultBL: 分发到业务逻辑模块
     VaultBL->>Token: safeTransfer(user, amount)
     VaultBL-->>User: 完成借款
 
     Note over User,Token: 还款流程
     User->>VaultCore: repay(asset, amount)
-    VaultCore->>VaultView: processUserOperation("REPAY", ...)
-    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultCore->>VaultRouter: processUserOperation("REPAY", ...)
+    VaultRouter->>VaultBL: 分发到业务逻辑模块
     VaultBL->>Token: safeTransferFrom(user, VaultBL, amount)
     VaultBL->>LE: repay(user, asset, amount)
     VaultBL-->>User: 完成还款
 
     Note over User,Token: 提取抵押物流程
     User->>VaultCore: withdraw(asset, amount)
-    VaultCore->>VaultView: processUserOperation("WITHDRAW", ...)
-    VaultView->>VaultBL: 分发到业务逻辑模块
+    VaultCore->>VaultRouter: processUserOperation("WITHDRAW", ...)
+    VaultRouter->>VaultBL: 分发到业务逻辑模块
     VaultBL->>CM: withdrawCollateral(user, asset, amount)
     VaultBL->>Token: safeTransfer(user, amount)
     VaultBL-->>User: 完成提取
@@ -769,7 +768,7 @@ try ICollateralManager(collateralManager).depositCollateral(user, asset, amount)
     // 成功处理
 } catch (bytes memory lowLevelData) {
     // 错误处理
-    emit VaultTypes.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
+    emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
     revert ExternalModuleRevertedRaw("CollateralManager", lowLevelData);
 }
 ```
@@ -820,7 +819,7 @@ function _checkAssetWhitelist(address asset) internal view {
 
 #### 🔧 **实现方式**
 ```solidity
-contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IRegistryUpgradeEvents {
+contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
     /// @notice Registry合约地址
     address private _registryAddr;
     
@@ -872,7 +871,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist, IReg
         emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, block.timestamp);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
@@ -920,7 +919,7 @@ function batchAddAllowedAssets(address[] calldata assets) external onlyValidRegi
     );
     
     // 记录标准化动作事件
-    emit VaultTypes.ActionExecuted(
+    emit SystemEvents.ActionExecuted(
         ActionKeys.ACTION_ADD_WHITELIST,
         ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
         msg.sender,
@@ -970,7 +969,7 @@ function batchRemoveAllowedAssets(address[] calldata assets) external onlyValidR
     );
     
     // 记录标准化动作事件
-    emit VaultTypes.ActionExecuted(
+    emit SystemEvents.ActionExecuted(
         ActionKeys.ACTION_REMOVE_WHITELIST,
         ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
         msg.sender,
@@ -1033,7 +1032,7 @@ function updateAssetInfo(address asset) external onlyValidRegistry {
 
 #### 🛡️ **安全特性**
 - **Registry 集成**：通过 Registry 获取 ACM 进行权限验证
-- **标准化事件**：所有操作都发出 `VaultTypes.ActionExecuted` 事件
+- **标准化事件**：所有操作都发出 `SystemEvents.ActionExecuted` 事件
 - **错误处理**：使用自定义错误 `ZeroAddress` 和 `AmountIsZero`
 - **UUPS 升级**：支持可升级合约模式
 
@@ -1105,7 +1104,7 @@ function finalizeAtomicFull(
 sequenceDiagram
     participant User as 用户
     participant VaultCore as VaultCore
-    participant VaultView as VaultView
+    participant VaultRouter as VaultRouter
     participant VaultBL as VaultBusinessLogic
     participant Settlement as SettlementMatchLib
     participant CM as CollateralManager
@@ -1127,8 +1126,8 @@ sequenceDiagram
     
     Note over Settlement: 注意：保证金锁定不在 finalizeAtomic 中，<br/>应在业务层单独处理（如需要）
     
-    LE->>VaultView: pushUserPositionUpdate(...)
-    VaultView->>VaultView: 更新缓存 + 事件推送
+    LE->>VaultRouter: pushUserPositionUpdate(...)
+    VaultRouter->>VaultRouter: 更新缓存 + 事件推送
     
     VaultBusinessLogic-->>User: 完成借款
 ```
@@ -1144,8 +1143,8 @@ sequenceDiagram
    - LoanNFT 铸造、Reward 奖励、DataPush 推送（由 LendingEngine 统一完成）
    - **finalizeAtomicFull 额外步骤**：借款手续费分发（FeeRouter.distributeNormal）和净额转账
 3. **保证金锁定**（如需要）：应在业务层单独处理，不在 finalizeAtomic 中
-4. **缓存更新**：LendingEngine 推送仓位更新到 VaultView
-5. **事件推送**：VaultView 更新缓存并发出事件
+4. **缓存更新**：LendingEngine 推送仓位更新到 VaultRouter
+5. **事件推送**：VaultRouter 更新缓存并发出事件
 
 ### 6.3 还款流程（早偿结算）
 
@@ -1155,7 +1154,7 @@ sequenceDiagram
 sequenceDiagram
     participant User as 用户
     participant VaultCore as VaultCore
-    participant VaultView as VaultView
+    participant VaultRouter as VaultRouter
     participant VaultBL as VaultBusinessLogic
     participant LE as LendingEngine
     participant ERGM as EarlyRepaymentGM
@@ -1176,8 +1175,8 @@ sequenceDiagram
         GFM->>Token: safeTransfer(platform, fee)
     end
     
-    LE->>VaultView: pushUserPositionUpdate(...)
-    VaultView->>VaultView: 更新缓存 + 事件推送
+    LE->>VaultRouter: pushUserPositionUpdate(...)
+    VaultRouter->>VaultRouter: 更新缓存 + 事件推送
     
     VaultBusinessLogic-->>User: 完成还款
 ```
@@ -1194,8 +1193,8 @@ sequenceDiagram
      - 返还给借款方（refundToBorrower）
      - 罚金给贷款方（penaltyToLender）
      - 平台手续费给平台（platformFee）
-5. **缓存更新**：LendingEngine 推送仓位更新到 VaultView
-6. **事件推送**：VaultView 更新缓存并发出事件
+5. **缓存更新**：LendingEngine 推送仓位更新到 VaultRouter
+6. **事件推送**：VaultRouter 更新缓存并发出事件
 
 ### 6.4 保证金系统集成
 
@@ -1236,26 +1235,14 @@ sequenceDiagram
 健康因子 = (抵押物价值 × 清算阈值) / 债务价值
 ```
 
-#### 🔧 **实现代码**
-```solidity
-// 清算系统中使用 LiquidationViewLibrary 计算健康因子（包含清算阈值）
-function calculateHealthFactor(
-    uint256 totalCollateralValue,
-    uint256 totalDebtValue,
-    uint256 liquidationThreshold
-) internal pure returns (uint256 healthFactor) {
-    if (totalDebtValue == 0) {
-        return 1e20; // MAX_HEALTH_FACTOR
-    }
-    // 健康因子 = (总抵押物价值 * 清算阈值) / 总债务价值
-    healthFactor = (totalCollateralValue * liquidationThreshold) / totalDebtValue;
-}
-```
+#### 🔧 **实现口径（对齐当前代码与架构指南）**
+
+- **健康因子数值口径（bps）**：`healthFactor = collateralValue / debtValue * 10_000`（在代码中由 `LiquidationRiskLib.calculateHealthFactor` 或 `HealthFactorLib.calcHealthFactor` 提供）。
+- **清算判定主路径（避免除法）**：以 `HealthFactorLib.isUnderCollateralized(collateralValue, debtValue, thresholdBps)` 判定是否低于阈值（阈值来自 `LiquidationConfigModule`/`LiquidationRiskManager` 的 SSOT 读取）。
 
 > **注意**：
-> - 清算系统使用 `LiquidationViewLibrary.calculateHealthFactor()`，该函数包含清算阈值参数
-> - `VaultMath.calculateHealthFactor()` 是简化版本，不包含清算阈值，主要用于基础计算
-> - VaultMath 库的详细功能和使用标准请参考 [第17章 VaultMath 数学计算标准](#17-vaultmath-数学计算标准)
+> - `LiquidationViewLibrary` 已移除，避免旧口径（如 1e18）与职责边界分叉。
+> - 预言机与优雅降级只在 `VaultLendingEngine`/`PositionView` 的估值路径内执行，清算域不直接访问预言机。
 
 ### 7.2 清算触发条件
 
@@ -1274,58 +1261,28 @@ function isLiquidatable(address user) external view returns (bool) {
 ### 7.3 清算执行流程（模块化清算系统）
 
 #### 📋 **清算步骤**
-`LiquidationCoreOperations.executeLiquidation()` 执行的核心步骤：
-1. **抵押物扣押**：通过 `LiquidationCollateralManager` 扣押用户抵押物
-2. **债务减少**：通过 `LiquidationDebtManager` 强制减少用户债务
-3. **奖励计算**：计算清算奖励金额
+对齐当前实现与 `docs/Architecture-Guide.md` 的 SSOT 口径：
+
+1. **keeper/机器人入口（推荐/默认，SSOT）**：调用 `SettlementManager.settleOrLiquidate(orderId)`  
+2. **清算分支直达账本写入**（由 `SettlementManager` 内部编排，或转交 `LiquidationManager` 执行器执行）：
+   - **扣押/分配抵押**：`CollateralManager.withdrawCollateralTo(...)`（执行器内部根据 `LiquidationPayoutManager` 的 recipients/rates 分配 shares）
+   - **减少债务**：`VaultLendingEngine.forceReduceDebt(...)`
+3. **单点推送（best-effort）**：`LiquidatorView.pushLiquidationUpdate/Batch`（失败不回滚账本写入；失败事件供链下重试）
 
 **完整的清算流程还包括**：
-- **清算检查**：`LiquidationRiskManager` 验证用户是否可清算（健康因子 < 清算阈值，默认 105%）
-- **风险评估**：计算清算风险和奖励
-- **奖励分配**：`LiquidationRewardDistributor` 分配清算残值（平台 3%，风险储备 2%，贷款方 17%，清算人 78%）
-- **保证金没收**：`LiquidationGuaranteeManager` 处理保证金没收（如果适用）
+- **清算检查（只读）**：`HealthView`/`LiquidationRiskManager`（健康因子 bps + 阈值 bps，风险分数 0-100）
+- **残值分配（SSOT）**：`LiquidationPayoutManager`（recipients/rates 与 shares 计算）
+- **预言机与优雅降级**：仅在 `VaultLendingEngine`/`PositionView` 估值路径内执行
 
 #### 🔧 **清算实现（LiquidationManager）**
-```solidity
-function liquidate(
-    address targetUser,
-    address collateralAsset,
-    address debtAsset,
-    uint256 collateralAmount,
-    uint256 debtAmount
-) external override whenNotPaused nonReentrant onlyLiquidator 
-    returns (uint256 bonus) 
-{
-    // 真实落地清算：扣押 → 减债 → 奖励计算 → 事件
-    bonus = LiquidationCoreOperations.executeLiquidation(
-        targetUser,
-        collateralAsset,
-        debtAsset,
-        collateralAmount,
-        debtAmount,
-        msg.sender,
-        liquidationConfigStorage,
-        _moduleCache,
-        _userCollateralSeizureRecords,
-        _userTotalLiquidationAmount,
-        _liquidatorCollateralStats
-    );
-
-    // 单点推送：仅通过 KEY_LIQUIDATION_VIEW（LiquidatorView）
-    _pushLiquidationEvent(
-        targetUser, collateralAsset, debtAsset, 
-        collateralAmount, debtAmount, msg.sender, bonus
-    );
-}
-```
+当前 `LiquidationManager` 的定位是“**直达账本执行器 + 单点推送**”，并保留显式参数入口用于测试/应急；keeper 常态入口应走 `SettlementManager.settleOrLiquidate(orderId)`。
 
 **清算系统架构**：
-- **LiquidationManager**：清算入口和协调器
-- **LiquidationRiskManager**：风险评估和健康因子检查
-- **LiquidationCollateralManager**：抵押物扣押管理
-- **LiquidationDebtManager**：债务减少管理
-- **LiquidationRewardManager**：奖励计算和分配
-- **LiquidationGuaranteeManager**：保证金没收管理
+- **SettlementManager**：唯一对外写入口（SSOT）
+- **LiquidationManager**：清算执行器（直达账本写入 + best-effort 单点推送）
+- **LiquidationRiskManager / HealthView**：风控只读聚合/缓存（不承载写入口）
+- **LiquidationPayoutManager**：残值分配 SSOT
+- **LiquidatorView**：DataPush 单点（链下消费与重试）
 
 详见 [清算系统集成总结文档](./liquidation-system-integration-summary.md)
 
@@ -1581,7 +1538,7 @@ contract VaultBusinessLogic is
         _requireRole(ActionKeys.ACTION_PAUSE_SYSTEM, msg.sender);
         _pause();
         
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_PAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_PAUSE_SYSTEM),
             msg.sender,
@@ -1593,7 +1550,7 @@ contract VaultBusinessLogic is
         _requireRole(ActionKeys.ACTION_UNPAUSE_SYSTEM, msg.sender);
         _unpause();
         
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UNPAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UNPAUSE_SYSTEM),
             msg.sender,
@@ -1637,7 +1594,7 @@ contract VaultBusinessLogic is UUPSUpgradeable {
         if (newImplementation == address(0)) revert ZeroAddress();
         
         // 记录升级动作
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
@@ -1813,7 +1770,7 @@ registry.executeModuleUpgrade(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
 
 ### 📈 **性能指标**
 - **Gas 优化**：批量操作减少 30% Gas 消耗
-- **查询效率**：VaultView 提供高效查询接口
+- **查询效率**：VaultRouter 提供高效查询接口
 - **权限缓存**：ACM 权限缓存提高查询效率
 - **升级安全**：模块化升级不影响用户资金
 - **错误处理**：统一的错误处理和事件机制

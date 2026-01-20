@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
 import { IGuaranteeFundManager } from "../interfaces/IGuaranteeFundManager.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ExternalModuleRevertedRaw, AmountIsZero, InvalidAmounts, AssetNotAllowed, ZeroAddress } from "../errors/StandardErrors.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { GracefulDegradation } from "./GracefulDegradation.sol";
@@ -126,7 +126,7 @@ library VaultBusinessLogicLibrary {
         try ICollateralManager(collateralManager).depositCollateral(user, asset, amount) {
             // success
         } catch (bytes memory lowLevelData) {
-            emit VaultTypes.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
             revert ExternalModuleRevertedRaw("CollateralManager", lowLevelData);
         }
     }
@@ -145,7 +145,7 @@ library VaultBusinessLogicLibrary {
         try ICollateralManager(collateralManager).withdrawCollateral(user, asset, amount) {
             // ok
         } catch (bytes memory lowLevelData) {
-            emit VaultTypes.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
             revert ExternalModuleRevertedRaw("CollateralManager", lowLevelData);
         }
     }
@@ -170,7 +170,7 @@ library VaultBusinessLogicLibrary {
         try IStatisticsViewMinimal(statsView).pushUserStatsUpdate(user, collateralAdd, collateralSub, debtAdd, debtSub) {
             // ok
         } catch (bytes memory lowLevelData) {
-            emit VaultTypes.ExternalModuleReverted("StatisticsView", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("StatisticsView", lowLevelData, block.timestamp);
             revert ExternalModuleRevertedRaw("StatisticsView", lowLevelData);
         }
     }
@@ -187,7 +187,7 @@ library VaultBusinessLogicLibrary {
         try IStatisticsViewGuaranteeMinimal(statsView).pushGuaranteeUpdate(user, asset, amount, isLocked) {
             // ok
         } catch (bytes memory lowLevelData) {
-            emit VaultTypes.ExternalModuleReverted("StatisticsView", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("StatisticsView", lowLevelData, block.timestamp);
             // 不中断主流程
         }
     }
@@ -206,7 +206,7 @@ library VaultBusinessLogicLibrary {
         try IGuaranteeFundManager(guaranteeManager).lockGuarantee(user, asset, amount) {
             // success
         } catch (bytes memory lowLevelData) {
-            emit VaultTypes.ExternalModuleReverted("GuaranteeFundManager", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("GuaranteeFundManager", lowLevelData, block.timestamp);
             revert ExternalModuleRevertedRaw("GuaranteeFundManager", lowLevelData);
         }
     }
@@ -225,7 +225,7 @@ library VaultBusinessLogicLibrary {
         try IGuaranteeFundManager(guaranteeManager).releaseGuarantee(user, asset, amount) {
             // ok
         } catch (bytes memory lowLevelData) {
-            emit VaultTypes.ExternalModuleReverted("GuaranteeFundManager", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("GuaranteeFundManager", lowLevelData, block.timestamp);
             revert ExternalModuleRevertedRaw("GuaranteeFundManager", lowLevelData);
         }
     }
@@ -405,7 +405,7 @@ library VaultBusinessLogicLibrary {
     ) internal {
         emit BusinessOperation(operation, user, asset, amount);
         
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             actionKey,
             ActionKeys.getActionKeyString(actionKey),
             msg.sender,

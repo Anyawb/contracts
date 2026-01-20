@@ -1,28 +1,39 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import "@openzeppelin/contracts/utils/Address.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
-import { IRegistry } from "../interfaces/IRegistry.sol";
-import { IRegistryDynamicModuleKey } from "../interfaces/IRegistryDynamicModuleKey.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { RegistryStorage } from "./RegistryStorageLibrary.sol";
-import { RegistryEvents } from "./RegistryEventsLibrary.sol";
-import { RegistryQuery } from "./RegistryQueryLibrary.sol";
-import { RegistryCore } from "./RegistryCore.sol";
-import { RegistryUpgradeManager } from "./RegistryUpgradeManager.sol";
-import { RegistryAdmin } from "./RegistryAdmin.sol";
+import {IRegistry} from "../interfaces/IRegistry.sol";
+import {IRegistryStorageMigrator} from "../interfaces/IRegistryStorageMigrator.sol";
+import {
+    IndexOutOfBounds,
+    ModuleAlreadyExists,
+    ModuleCapExceeded,
+    ModuleUpgradeNotFound,
+    ModuleUpgradeNotReady,
+    NotAContract
+} from "../errors/StandardErrors.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {RegistryStorage} from "./RegistryStorageLibrary.sol";
+import {RegistryEvents} from "./RegistryEventsLibrary.sol";
+import {RegistryQuery} from "./RegistryQueryLibrary.sol";
+import {RegistryCompatQuery} from "./RegistryCompatQueryLibrary.sol";
 
-/// @title Registry
-/// @notice 轻量级模块地址注册中心入口点
-/// @dev 作为统一入口，将功能委托给专门的模块合约
-/// @dev 保持向后兼容性，同时减少合约大小
-/// @dev 只负责路由和权限控制，不包含任何业务逻辑
+/**
+ * @title Registry
+ * @notice Unified module-address registry entrypoint for governance and upgrades.
+ * @dev Reverts if:
+ *      - storage layout is incompatible with CURRENT_STORAGE_VERSION (in compat-gated methods)
+ *
+ * Security:
+ * - UUPS upgrade authorization is gated by upgradeAdmin / emergencyAdmin / owner
+ * - Governance and module writes are owner-gated and pause-aware
+ * - Timelocked module upgrades rely on block.timestamp by design (for scheduling/execution)
+ */
 contract Registry is 
     IRegistry,
     Initializable, 
@@ -31,550 +42,1326 @@ contract Registry is
     UUPSUpgradeable,
     PausableUpgradeable
 {
-    using Address for address;
-    
-    // ============ 类型定义 ============
-    /// @notice 升级历史记录结构体
-    struct UpgradeHistory {
-        address oldAddress;        // 旧地址
-        address newAddress;        // 新地址
-        uint256 timestamp;         // 升级时间戳
-        address executor;          // 执行者地址
-    }
-    
     // ============ Custom Errors ============
-    /// @notice 非升级管理员错误
-    error NotUpgradeAdmin(address caller);
-    /// @notice 延迟时间过长错误
-    error DelayTooLong(uint256 provided, uint256 max);
-    /// @notice 延迟时间无效错误
-    error InvalidDelayValue(uint256 delay);
-    /// @notice 模块未设置错误
-    error ModuleNotSet(string moduleName);
-    /// @notice 非待接管管理员错误
-    error NotPendingAdmin(address caller, address pendingAdmin);
-    /// @notice 无效的待接管管理员错误
-    error InvalidPendingAdmin(address pendingAdmin);
-    /// @notice 紧急管理员未授权错误
-    error EmergencyAdminNotAuthorized(address caller, address emergencyAdmin);
-    /// @notice 零地址错误
-    error ZeroAddress();
+    /**
+     * @notice The caller is not authorized to perform an upgrade.
+     * @param caller The caller attempting to upgrade.
+     */
+    error Registry__NotUpgradeAdmin(address caller);
+
+    /**
+     * @notice The provided delay exceeds the maximum allowed delay.
+     * @param provided The provided delay (seconds).
+     * @param max The maximum allowed delay (seconds).
+     */
+    error Registry__DelayTooLong(uint256 provided, uint256 max);
+
+    /**
+     * @notice The provided delay value is invalid.
+     * @param delay The provided delay (seconds).
+     */
+    error Registry__InvalidDelayValue(uint256 delay);
+
+    /**
+     * @notice A compat-path module is not configured.
+     * @param moduleName Human-readable module name.
+     */
+    error Registry__ModuleNotSet(string moduleName);
+
+    /**
+     * @notice The caller is not the pending admin.
+     * @param caller The caller attempting to accept admin.
+     * @param pendingAdmin The currently configured pending admin.
+     */
+    error Registry__NotPendingAdmin(address caller, address pendingAdmin);
+
+    /**
+     * @notice The pending admin address is invalid.
+     * @param pendingAdmin The provided/loaded pending admin.
+     */
+    error Registry__InvalidPendingAdmin(address pendingAdmin);
+
+    /**
+     * @notice The caller is not authorized as emergency admin.
+     * @param caller The caller attempting the emergency action.
+     * @param emergencyAdmin The configured emergency admin.
+     */
+    error Registry__EmergencyAdminNotAuthorized(address caller, address emergencyAdmin);
+
+    /**
+     * @notice A zero address was provided where it is not allowed.
+     */
+    error Registry__ZeroAddress();
+
+    /**
+     * @notice The upgrade admin address is invalid.
+     * @param newAdmin The proposed upgrade admin address.
+     */
+    error Registry__InvalidUpgradeAdmin(address newAdmin);
+
+    /**
+     * @notice An input parameter is invalid (tests/compat only).
+     * @param reason A human-readable reason string.
+     */
+    error Registry__InvalidParameter(string reason);
+
+    /**
+     * @notice Array lengths mismatch in a batch operation.
+     * @param keysLength Length of the keys array.
+     * @param addressesLength Length of the addresses array.
+     */
+    error Registry__MismatchedArrayLengths(uint256 keysLength, uint256 addressesLength);
+
+    /**
+     * @notice The migrator must be a deployed contract (EOA / empty-code is forbidden).
+     * @param migrator The migrator address.
+     */
+    error Registry__MigratorNotContract(address migrator);
+
+    /**
+     * @notice Storage version mismatch.
+     * @param expected The expected storage version.
+     * @param actual The actual storage version.
+     */
+    error Registry__StorageVersionMismatch(uint256 expected, uint256 actual);
+
+    /**
+     * @notice The migration target is invalid (must be strictly increasing).
+     * @param fromVersion The current/expected storage version.
+     * @param toVersion The target storage version.
+     */
+    error Registry__InvalidMigrationTarget(uint256 fromVersion, uint256 toVersion);
+
+    /**
+     * @notice The migrator execution failed.
+     * @param migrator The migrator contract address.
+     * @param reason Low-level revert reason bytes.
+     */
+    error Registry__MigratorFailed(address migrator, bytes reason);
 
     // ============ Constants ============
-    /// @notice 最大延迟时间（7天）
+    /// @notice Maximum delay window (7 days).
     uint256 private constant _MAX_DELAY = 7 days;
+    /// @notice Upgrade history ring size cap.
+    uint256 private constant _MAX_UPGRADE_HISTORY = 100;
+    /// @notice Batch size cap (tests/safety).
+    uint256 private constant _MAX_BATCH_SIZE = 50;
 
     // ============ Upgrade Admin ============
-    /// @notice 升级管理员地址
+    /// @notice Upgrade admin address.
     address private _upgradeAdmin;
-    /// @notice 紧急管理员地址
+    /// @notice Emergency admin address.
     address private _emergencyAdmin;
 
-    // ============ 模块合约地址 ============
-    /// @notice 核心业务逻辑模块（私有存储）
-    RegistryCore private _registryCore;
-    /// @notice 升级管理模块（私有存储）
-    RegistryUpgradeManager private _upgradeManager;
-    /// @notice 治理管理模块（私有存储）
-    RegistryAdmin private _registryAdmin;
-    /// @notice 动态模块键注册表地址
+    // ============ Optional integrations ============
+    /// @notice Dynamic module key registry address.
     address private _dynamicModuleKeyRegistry;
 
     // ============ Constructor ============
-    /// @notice 构造函数，禁用初始化器
+    /**
+     * @notice Constructs the implementation contract and disables initializers.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Disables Initializable initializers on the implementation instance
+     *
+     * @custom:oz-upgrades-unsafe-allow constructor
+     */
     constructor() {
         _disableInitializers();
     }
 
     // ============ Initializer ============
-    /// @notice 初始化Registry合约
-    /// @param _minDelay 最小延迟时间（秒）
-    /// @dev 初始化所有必要的状态变量和权限设置
-    /// @param _minDelay 最小延迟时间
-    /// @param upgradeAdmin_ 升级管理员地址
-    /// @param emergencyAdmin_ 紧急管理员地址
-    function initialize(uint256 _minDelay, address upgradeAdmin_, address emergencyAdmin_) external initializer {
-        if (_minDelay > _MAX_DELAY) revert DelayTooLong(_minDelay, _MAX_DELAY);
-        if (upgradeAdmin_ == address(0)) revert ZeroAddress();
-        if (emergencyAdmin_ == address(0)) revert ZeroAddress();
+    /**
+     * @notice Initializes the Registry and configures governance and upgrade authority.
+     * @dev Reverts if:
+     *      - minDelaySeconds > MAX_DELAY()
+     *      - upgradeAdmin == address(0)
+     *      - emergencyAdmin == address(0)
+     *      - initialOwner == address(0)
+     *
+     * Security:
+     * - Single-use initializer (Initializable)
+     * - Sets governance owner/admin to initialOwner (not msg.sender)
+     *
+     * @param minDelaySeconds Minimum delay window for timelocked module upgrades (seconds).
+     * @param upgradeAdmin Address authorized to perform UUPS upgrades.
+     * @param emergencyAdmin Address authorized to pause/cancel upgrades in emergencies.
+     * @param initialOwner Initial governance owner/admin address.
+     */
+    function initialize(uint256 minDelaySeconds, address upgradeAdmin, address emergencyAdmin, address initialOwner)
+        external
+        initializer
+    {
+        if (minDelaySeconds > _MAX_DELAY) revert Registry__DelayTooLong(minDelaySeconds, _MAX_DELAY);
+        if (upgradeAdmin == address(0)) revert Registry__ZeroAddress();
+        if (emergencyAdmin == address(0)) revert Registry__ZeroAddress();
+        if (initialOwner == address(0)) revert Registry__ZeroAddress();
         
-        __Ownable_init();
+        __Ownable_init(initialOwner);
         __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
         __Pausable_init();
         
         RegistryStorage.initializeStorageVersion();
         
-        RegistryStorage.Layout storage l = RegistryStorage.layout();
-        l.admin = msg.sender;
-        l.pendingAdmin = address(0);
-        l.minDelay = uint64(_minDelay);
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        // Governance/admin (compat) should follow the explicit initial owner, not the initializer caller.
+        layout.admin = initialOwner;
+        layout.pendingAdmin = address(0);
+        layout.minDelay = uint64(minDelaySeconds);
         
-        _upgradeAdmin = upgradeAdmin_;
-        _emergencyAdmin = emergencyAdmin_;
+        _upgradeAdmin = upgradeAdmin;
+        _emergencyAdmin = emergencyAdmin;
         
         emit RegistryEvents.RegistryInitialized(
-            msg.sender,
-            _minDelay,
-            upgradeAdmin_
+            initialOwner,
+            minDelaySeconds,
+            msg.sender
         );
     }
 
     // ============ UUPS Upgrade Authorization ============
-    /// @notice UUPS升级授权函数
-    /// @param newImplementation 新的实现合约地址
-    /// @dev 只有升级管理员、紧急管理员或owner可以升级
-    function _authorizeUpgrade(address newImplementation) internal override {
+    /**
+     * @notice Authorizes a UUPS upgrade to a new implementation.
+     * @dev Reverts if:
+     *      - newImplementation == address(0)
+     *      - newImplementation has no code (EOA / empty-code)
+     *      - msg.sender is not upgradeAdmin, emergencyAdmin, or owner
+     *
+     * Security:
+     * - UUPS upgrade gate (UUPSUpgradeable)
+     *
+     * @param newImplementation The new implementation address.
+     */
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        if (newImplementation == address(0)) revert Registry__ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
         if (msg.sender == _upgradeAdmin || msg.sender == _emergencyAdmin || msg.sender == owner()) {
-            emit RegistryEvents.ModuleUpgradeAuthorized(
-                msg.sender,
-                newImplementation
-            );
             return;
         }
-        revert NotUpgradeAdmin(msg.sender);
+        revert Registry__NotUpgradeAdmin(msg.sender);
     }
 
-    // ============ 模块设置函数 ============
-    /// @notice 设置核心业务逻辑模块地址
-    /// @param registryCoreAddr 核心业务逻辑模块地址
-    /// @dev 只有owner可以设置模块地址
-    function setRegistryCore(address registryCoreAddr) external onlyOwner {
-        if (registryCoreAddr == address(0)) revert ZeroAddress();
-        if (!registryCoreAddr.isContract()) revert("Registry core must be a contract");
-        
-        // 验证模块是否实现了必要的接口（可选）
-        // 这里可以添加更严格的验证逻辑
-        
-        _registryCore = RegistryCore(registryCoreAddr);
-        emit RegistryEvents.ModuleChanged(bytes32("RegistryCore"), address(0), registryCoreAddr);
-    }
+    // ============ Optional integrations ============
 
-    /// @notice 设置升级管理模块地址
-    /// @param upgradeManagerAddr 升级管理模块地址
-    /// @dev 只有owner可以设置模块地址
-    function setUpgradeManager(address upgradeManagerAddr) external onlyOwner {
-        if (upgradeManagerAddr == address(0)) revert ZeroAddress();
-        if (!upgradeManagerAddr.isContract()) revert("Upgrade manager must be a contract");
-        
-        // 验证模块是否实现了必要的接口（可选）
-        // 这里可以添加更严格的验证逻辑
-        
-        _upgradeManager = RegistryUpgradeManager(upgradeManagerAddr);
-        emit RegistryEvents.ModuleChanged(bytes32("RegistryUpgradeManager"), address(0), upgradeManagerAddr);
-        // 尝试初始化升级管理器，绑定 Registry 地址（忽略已初始化的情况，由其内部防重复）
-        try _upgradeManager.initialize(address(this)) {
-        } catch {}
-    }
-
-    /// @notice 设置治理管理模块地址
-    /// @param registryAdminAddr 治理管理模块地址
-    /// @dev 只有owner可以设置模块地址
-    function setRegistryAdmin(address registryAdminAddr) external onlyOwner {
-        if (registryAdminAddr == address(0)) revert ZeroAddress();
-        if (!registryAdminAddr.isContract()) revert("Registry admin must be a contract");
-        
-        // 验证模块是否实现了必要的接口（可选）
-        // 这里可以添加更严格的验证逻辑
-        
-        _registryAdmin = RegistryAdmin(registryAdminAddr);
-        emit RegistryEvents.ModuleChanged(bytes32("RegistryAdmin"), address(0), registryAdminAddr);
-    }
-
-    /// @notice 设置动态模块键注册表地址
-    /// @param dynamicModuleKeyRegistryAddr 动态模块键注册表地址
-    /// @dev 只有owner可以设置模块地址
+    /**
+     * @notice Sets (or clears) the dynamic module key registry integration address.
+     * @dev Reverts if:
+     *      - dynamicModuleKeyRegistryAddr is non-zero and has no code
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param dynamicModuleKeyRegistryAddr Dynamic module key registry contract address (or zero to disable).
+     */
     function setDynamicModuleKeyRegistry(address dynamicModuleKeyRegistryAddr) external onlyOwner {
-        if (dynamicModuleKeyRegistryAddr != address(0) && !dynamicModuleKeyRegistryAddr.isContract()) {
-            revert("Dynamic module key registry must be a contract or zero address");
+        if (dynamicModuleKeyRegistryAddr != address(0) && dynamicModuleKeyRegistryAddr.code.length == 0) {
+            revert NotAContract(dynamicModuleKeyRegistryAddr);
         }
         
         address oldAddr = _dynamicModuleKeyRegistry;
         _dynamicModuleKeyRegistry = dynamicModuleKeyRegistryAddr;
-        emit RegistryEvents.ModuleChanged(bytes32("DynamicModuleKeyRegistry"), oldAddr, dynamicModuleKeyRegistryAddr);
+        emit RegistryEvents.DynamicModuleKeyRegistryChanged(oldAddr, dynamicModuleKeyRegistryAddr, msg.sender);
     }
 
-    // ============ 接口函数覆盖 ============
-    /// @notice 获取所有者地址（覆盖IRegistry接口）
-    /// @return 所有者地址
+    // ============ Interface overrides ============
+    /**
+     * @notice Returns the governance owner of the Registry.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return The owner address.
+     */
     function owner() public view override(IRegistry, OwnableUpgradeable) returns (address) {
         return super.owner();
     }
 
-    /// @notice 转移所有权（覆盖IRegistry接口）
-    /// @param newOwner 新所有者地址
+    /**
+     * @notice Transfers governance ownership to a new owner.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - newOwner == address(0)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newOwner The new owner address.
+     */
     function transferOwnership(address newOwner) public override(IRegistry, OwnableUpgradeable) onlyOwner {
+        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        if (newOwner == address(0)) revert Registry__ZeroAddress();
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+
+        address oldAdmin = owner();
+        address oldPending = layout.pendingAdmin;
+
         super.transferOwnership(newOwner);
+        layout.admin = newOwner;
+
+        if (oldPending != address(0)) {
+            layout.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
+        emit RegistryEvents.AdminChanged(oldAdmin, newOwner);
     }
 
-    // ============ 纯查询功能 (委托给RegistryQuery) ============
-    /// @notice 获取模块地址
-    /// @param key 模块键
-    /// @return 模块地址，如果未设置则返回零地址
+    /**
+     * @notice Renounces governance ownership.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * Notes:
+     * - Keeps RegistryStorage.admin/pendingAdmin consistent with Ownable owner.
+     */
+    function renounceOwnership() public override(OwnableUpgradeable) onlyOwner {
+        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+
+        address oldAdmin = owner();
+        address oldPending = layout.pendingAdmin;
+
+        super.renounceOwnership();
+        layout.admin = address(0);
+
+        if (oldPending != address(0)) {
+            layout.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
+        emit RegistryEvents.AdminChanged(oldAdmin, address(0));
+    }
+
+    // ============ Read-only queries (via RegistryQuery) ============
+    /**
+     * @notice Returns the module address for a given module key.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param key The module key.
+     * @return The module address (zero if not set).
+     */
     function getModule(bytes32 key) external view override returns (address) {
         return RegistryQuery.getModule(key);
     }
 
-    /// @notice 获取模块地址，如果未设置则回滚
-    /// @param key 模块键
-    /// @return 模块地址
-    /// @dev 如果模块未注册，函数会回滚
+    /**
+     * @notice Returns the module address for a key, reverting if it is not registered.
+     * @dev Reverts if:
+     *      - module is not registered for key (via RegistryQuery)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param key The module key.
+     * @return The module address.
+     */
     function getModuleOrRevert(bytes32 key) external view override returns (address) {
         return RegistryQuery.getModuleOrRevert(key);
     }
 
-    /// @notice 检查模块是否已注册
-    /// @param key 模块键
-    /// @return 是否已注册
+    /**
+     * @notice Returns whether a module is registered for the given key.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param key The module key.
+     * @return True if registered.
+     */
     function isModuleRegistered(bytes32 key) external view override returns (bool) {
         return RegistryQuery.isModuleRegistered(key);
     }
 
-    /// @notice 获取当前最小延迟时间
-    /// @return 最小延迟时间（秒）
+    /**
+     * @notice Returns the current minimum delay window for timelocked module upgrades.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return The minimum delay window (seconds).
+     */
     function minDelay() external view override returns (uint256) {
         return RegistryStorage.layout().minDelay;
     }
 
-    // ============ 升级管理员管理 (纯入口) ============
-    /// @notice 设置升级管理员
-    /// @param newAdmin 新的升级管理员地址
-    /// @dev 只有owner可以设置升级管理员
+    // ============ Upgrade admin management ============
+    /**
+     * @notice Sets the upgrade admin address (UUPS upgrade authority).
+     * @dev Reverts if:
+     *      - newAdmin == address(0)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newAdmin The new upgrade admin address.
+     */
     function setUpgradeAdmin(address newAdmin) external onlyOwner {
-        if (newAdmin == address(0)) revert ZeroAddress();
+        if (newAdmin == address(0)) revert Registry__InvalidUpgradeAdmin(newAdmin);
+        address oldAdmin = _upgradeAdmin;
         _upgradeAdmin = newAdmin;
-        emit RegistryEvents.UpgradeAdminChanged(_upgradeAdmin, newAdmin);
+        emit RegistryEvents.UpgradeAdminChanged(oldAdmin, newAdmin);
     }
 
-    /// @notice 设置紧急管理员
-    /// @param newAdmin 新的紧急管理员地址
-    /// @dev 只有owner可以设置紧急管理员
+    /**
+     * @notice Sets the emergency admin address (pause/cancel authority).
+     * @dev Reverts if:
+     *      - newAdmin == address(0)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newAdmin The new emergency admin address.
+     */
     function setEmergencyAdmin(address newAdmin) external onlyOwner {
-        if (newAdmin == address(0)) revert ZeroAddress();
+        if (newAdmin == address(0)) revert Registry__ZeroAddress();
+        address oldAdmin = _emergencyAdmin;
         _emergencyAdmin = newAdmin;
-        emit RegistryEvents.EmergencyAdminChanged(_emergencyAdmin, newAdmin);
+        emit RegistryEvents.EmergencyAdminChanged(oldAdmin, newAdmin);
     }
 
-    /// @notice 获取升级管理员地址
-    /// @return 升级管理员地址
+    /**
+     * @notice Returns the configured upgrade admin address.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return The upgrade admin address.
+     */
     function getUpgradeAdmin() external view returns (address) {
         return _upgradeAdmin;
     }
 
-    /// @notice 获取紧急管理员地址
-    /// @return 紧急管理员地址
+    /**
+     * @notice Returns the configured emergency admin address.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return The emergency admin address.
+     */
     function getEmergencyAdmin() external view returns (address) {
         return _emergencyAdmin;
     }
 
-    /// @notice 获取动态模块键注册表地址
-    /// @return 动态模块键注册表地址
+    /**
+     * @notice Returns the dynamic module key registry integration address.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return The dynamic module key registry address (zero if disabled).
+     */
     function getDynamicModuleKeyRegistry() external view returns (address) {
         return _dynamicModuleKeyRegistry;
     }
 
-    // ============ 治理功能 (委托给RegistryAdmin) ============
-    /// @notice 获取主治理地址
-    /// @return 主治理地址
+    // ============ Governance (compat) ============
+    /**
+     * @notice Returns the governance admin address (compat path).
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return The governance admin (owner) address.
+     */
     function getAdmin() external view override returns (address) {
         return owner();
     }
 
-    /// @notice 获取待接管地址
-    /// @return 待接管地址
+    /**
+     * @notice Returns the pending admin address (compat path).
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return The pending admin address (zero if none).
+     */
     function getPendingAdmin() external view override returns (address) {
         return RegistryStorage.layout().pendingAdmin;
     }
 
-    /// @notice 检查是否已暂停
-    /// @return 是否已暂停
+    /**
+     * @notice Returns whether the Registry is paused.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return True if paused.
+     */
     function isPaused() external view override returns (bool) {
         return paused();
     }
 
-    /// @notice 设置主治理地址
-    /// @param newAdmin 新的治理地址
-    /// @dev 只有owner可以设置治理地址
+    /**
+     * @notice Sets a new governance admin (compat path) by transferring ownership.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - newAdmin == address(0)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newAdmin The new governance admin/owner address.
+     */
     function setAdmin(address newAdmin) external onlyOwner {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        if (newAdmin == address(0)) revert Registry__ZeroAddress();
         address oldAdmin = owner();
         _transferOwnership(newAdmin);
-        RegistryStorage.layout().admin = newAdmin;
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        address oldPending = layout.pendingAdmin;
+        layout.admin = newAdmin;
+        if (oldPending != address(0)) {
+            layout.pendingAdmin = address(0);
+            emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
+        }
         emit RegistryEvents.AdminChanged(oldAdmin, newAdmin);
     }
 
-    /// @notice 设置待接管地址
-    /// @param newPendingAdmin 新的待接管地址
-    /// @dev 只有owner可以设置待接管地址
+    /**
+     * @notice Sets the pending admin address (compat path).
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newPendingAdmin The new pending admin address (can be zero to clear).
+     */
     function setPendingAdmin(address newPendingAdmin) external override onlyOwner {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        RegistryStorage.Layout storage l = RegistryStorage.layout();
-        address oldPending = l.pendingAdmin;
-        l.pendingAdmin = newPendingAdmin;
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        address oldPending = layout.pendingAdmin;
+        layout.pendingAdmin = newPendingAdmin;
         emit RegistryEvents.PendingAdminChanged(oldPending, newPendingAdmin);
     }
 
-    /// @notice 接受治理权转移
-    /// @dev 只有待接管管理员可以调用此函数
+    /**
+     * @notice Accepts the pending admin role (compat path) and becomes owner/admin.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - msg.sender != pendingAdmin
+     *      - pendingAdmin == address(0)
+     *
+     * Security:
+     * - Caller must be the configured pending admin
+     */
     function acceptAdmin() external override {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        RegistryStorage.Layout storage l = RegistryStorage.layout();
-        if (msg.sender != l.pendingAdmin) revert NotPendingAdmin(msg.sender, l.pendingAdmin);
-        if (l.pendingAdmin == address(0)) revert InvalidPendingAdmin(l.pendingAdmin);
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        if (msg.sender != layout.pendingAdmin) revert Registry__NotPendingAdmin(msg.sender, layout.pendingAdmin);
+        if (layout.pendingAdmin == address(0)) revert Registry__InvalidPendingAdmin(layout.pendingAdmin);
         
         address oldAdmin = owner();
+        address oldPending = layout.pendingAdmin;
         _transferOwnership(msg.sender);
-        l.admin = msg.sender;
-        l.pendingAdmin = address(0);
+        layout.admin = msg.sender;
+        layout.pendingAdmin = address(0);
+        emit RegistryEvents.PendingAdminChanged(oldPending, address(0));
         emit RegistryEvents.AdminChanged(oldAdmin, msg.sender);
     }
 
-    /// @notice 暂停合约
-    /// @dev 只有owner和紧急管理员可以暂停
+    /**
+     * @notice Pauses the Registry (blocks whenNotPaused module/governance write paths).
+     * @dev Reverts if:
+     *      - msg.sender is not owner and not emergencyAdmin
+     *      - storage version is incompatible (compat gate)
+     *
+     * Security:
+     * - Emergency action; callable by owner or emergencyAdmin
+     */
     function pause() external override {
         if (msg.sender != owner() && msg.sender != _emergencyAdmin) {
-            revert EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
+            revert Registry__EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
         }
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         _pause();
         RegistryStorage.layout().paused = 1;
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.PAUSE),
-            msg.sender
+            msg.sender,
+            // Timestamp is emitted for off-chain auditing; not used for business decisions.
+            // solhint-disable-next-line not-rely-on-time
+            block.timestamp
         );
     }
 
-    /// @notice 恢复合约
-    /// @dev 只有owner可以恢复
+    /**
+     * @notice Unpauses the Registry (re-enables whenNotPaused write paths).
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *
+     * Security:
+     * - onlyOwner
+     */
     function unpause() external override onlyOwner {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
         _unpause();
         RegistryStorage.layout().paused = 0;
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.UNPAUSE),
-            msg.sender
+            msg.sender,
+            // Timestamp is emitted for off-chain auditing; not used for business decisions.
+            // solhint-disable-next-line not-rely-on-time
+            block.timestamp
         );
     }
 
-    // ============ 模块管理 (委托给RegistryCore) ============
-    /// @notice 设置模块地址
-    /// @param key 模块键
-    /// @param moduleAddr 模块地址
-    /// @dev 委托给RegistryCore模块处理
+    // ============ Module management (writes to RegistryStorage) ============
+    /**
+     * @notice Sets a module address for a given module key.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - moduleAddr == address(0)
+     *      - module already exists and replacement is not allowed (in internal logic)
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param key The module key.
+     * @param moduleAddr The module contract address.
+     */
     function setModule(bytes32 key, address moduleAddr) external override onlyOwner whenNotPaused {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        if (moduleAddr == address(0)) revert("Invalid module address: zero address");
-        if (!moduleAddr.isContract()) revert("Module must be a contract");
-        _registryCore.setModule(key, moduleAddr);
+        _setModuleInternal(key, moduleAddr, true, true);
     }
 
-    /// @notice 设置模块地址（返回变更状态）
-    /// @param key 模块键
-    /// @param moduleAddr 模块合约地址
-    /// @return changed 是否实际发生了变更
-    function setModuleWithStatus(bytes32 key, address moduleAddr) external override onlyOwner whenNotPaused returns (bool changed) {
+    /**
+     * @notice Sets a module address and returns whether it changed.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - moduleAddr == address(0)
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param key The module key.
+     * @param moduleAddr The module contract address.
+     * @return changed True if the stored address changed.
+     */
+    function setModuleWithStatus(bytes32 key, address moduleAddr)
+        external
+        override
+        onlyOwner
+        whenNotPaused
+        returns (bool changed)
+    {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        if (moduleAddr == address(0)) revert("Invalid module address: zero address");
-        if (!moduleAddr.isContract()) revert("Module must be a contract");
-        return _registryCore.setModuleWithStatus(key, moduleAddr);
+        changed = _setModuleInternal(key, moduleAddr, true, true);
     }
 
-    /// @notice 设置模块地址（支持allowReplace参数）
-    /// @param key 模块键
-    /// @param moduleAddr 模块地址
-    /// @param _allowReplace 是否允许替换现有模块
-    /// @dev 委托给RegistryCore模块处理
-    function setModuleWithReplaceFlag(bytes32 key, address moduleAddr, bool _allowReplace) external override onlyOwner whenNotPaused {
+    /**
+     * @notice Sets a module address with an explicit allowReplace flag.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - moduleAddr == address(0)
+     *      - allowReplace == false and a different module is already set
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param key The module key.
+     * @param moduleAddr The module contract address.
+     * @param allowReplace Whether to allow replacing an existing module address.
+     */
+    function setModuleWithReplaceFlag(bytes32 key, address moduleAddr, bool allowReplace)
+        external
+        override
+        onlyOwner
+        whenNotPaused
+    {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        if (moduleAddr == address(0)) revert ZeroAddress();
-        if (!moduleAddr.isContract()) revert("Module must be a contract");
-        
-        _registryCore.setModuleWithReplaceFlag(key, moduleAddr, _allowReplace);
+        _setModuleInternal(key, moduleAddr, allowReplace, true);
     }
 
-    /// @notice 批量设置模块地址（返回变更状态）
-    /// @param keys 模块键名数组
-    /// @param addresses 模块地址数组
-    /// @return changedCount 实际发生变更的模块数量
-    /// @return changedKeys 发生变更的模块键名数组
-    function setModulesWithStatus(bytes32[] calldata keys, address[] calldata addresses) external override onlyOwner whenNotPaused 
-        returns (uint256 changedCount, bytes32[] memory changedKeys) {
+    /**
+     * @notice Batch sets module addresses and returns which keys changed.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - keys.length != addresses.length
+     *      - keys.length > _MAX_BATCH_SIZE
+     *      - any moduleAddr == address(0)
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param keys Module keys.
+     * @param addresses Module addresses.
+     * @return changedCount Number of keys that changed.
+     * @return changedKeys Keys that changed (only first changedCount entries are populated).
+     */
+    function setModulesWithStatus(bytes32[] calldata keys, address[] calldata addresses)
+        external
+        override
+        onlyOwner
+        whenNotPaused
+        returns (uint256 changedCount, bytes32[] memory changedKeys)
+    {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        return _registryCore.setModulesWithStatus(keys, addresses);
+        if (keys.length != addresses.length) revert Registry__MismatchedArrayLengths(keys.length, addresses.length);
+        if (keys.length > _MAX_BATCH_SIZE) revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
+        // Emit only the batch event (avoid duplicate per-item events).
+        address[] memory oldAddresses = new address[](keys.length);
+        changedKeys = new bytes32[](keys.length);
+        for (uint256 i = 0; i < keys.length; i++) {
+            oldAddresses[i] = RegistryStorage.layout().modules[keys[i]];
+            bool changed = _setModuleInternal(keys[i], addresses[i], true, false);
+            if (changed) {
+                changedKeys[changedCount] = keys[i];
+                changedCount++;
+            }
+        }
+        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, addresses, msg.sender);
     }
 
-    /// @notice 批量设置模块地址（控制事件触发）
-    /// @param keys 模块键名数组
-    /// @param addresses 模块地址数组
-    /// @param emitIndividualEvents 是否同时触发单个模块变更事件
-    function setModulesWithEvents(bytes32[] calldata keys, address[] calldata addresses, bool emitIndividualEvents) external override onlyOwner whenNotPaused {
+    /**
+     * @notice Compat: batch sets modules with an allowReplace flag (tests/compat).
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - keys.length != addresses.length
+     *      - keys.length > _MAX_BATCH_SIZE
+     *      - any moduleAddr == address(0)
+     *      - allowReplace == false and a different module is already set
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param keys Module keys.
+     * @param addresses Module addresses.
+     * @param allowReplace Whether to allow replacing existing module addresses.
+     */
+    function batchSetModules(bytes32[] calldata keys, address[] calldata addresses, bool allowReplace)
+        external
+        onlyOwner
+        whenNotPaused
+    {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        _registryCore.setModulesWithEvents(keys, addresses, emitIndividualEvents);
+        if (keys.length != addresses.length) revert Registry__MismatchedArrayLengths(keys.length, addresses.length);
+        if (keys.length > _MAX_BATCH_SIZE) revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
+        address[] memory oldAddresses = new address[](keys.length);
+        for (uint256 i = 0; i < keys.length; i++) {
+            oldAddresses[i] = RegistryStorage.layout().modules[keys[i]];
+            _setModuleInternal(keys[i], addresses[i], allowReplace, false);
+        }
+        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, addresses, msg.sender);
     }
 
-    /// @notice 批量设置模块地址
-    /// @param keys 模块键数组
-    /// @param addresses 模块地址数组
-    /// @dev 委托给RegistryCore模块处理
-    function setModules(bytes32[] calldata keys, address[] calldata addresses) external override onlyOwner whenNotPaused {
+    /**
+     * @notice Batch sets module addresses (event control; compat).
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - keys.length != addresses.length
+     *      - keys.length > _MAX_BATCH_SIZE
+     *      - any moduleAddr == address(0)
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param keys Module keys.
+     * @param addresses Module addresses.
+     * @param emitIndividualEvents Ignored (kept for interface compatibility).
+     */
+    function setModulesWithEvents(bytes32[] calldata keys, address[] calldata addresses, bool emitIndividualEvents)
+        external
+        override
+        onlyOwner
+        whenNotPaused
+    {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_registryCore) == address(0)) revert ModuleNotSet("RegistryCore");
-        _registryCore.setModules(keys, addresses);
+        if (keys.length != addresses.length) revert Registry__MismatchedArrayLengths(keys.length, addresses.length);
+        if (keys.length > _MAX_BATCH_SIZE) revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
+        if (emitIndividualEvents) {
+            for (uint256 i = 0; i < keys.length; i++) {
+                _setModuleInternal(keys[i], addresses[i], true, true);
+            }
+            return;
+        }
+
+        address[] memory oldAddresses = new address[](keys.length);
+        for (uint256 i = 0; i < keys.length; i++) {
+            oldAddresses[i] = RegistryStorage.layout().modules[keys[i]];
+            _setModuleInternal(keys[i], addresses[i], true, false);
+        }
+        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, addresses, msg.sender);
     }
 
-    // ============ 升级管理 (委托给RegistryUpgradeManager) ============
-    /// @notice 计划模块升级
-    /// @param key 模块键
-    /// @param newAddr 新模块地址
-    /// @dev 委托给RegistryUpgradeManager模块处理
+    /**
+     * @notice Batch sets module addresses without emitting per-item events (compat).
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - keys.length != addresses.length
+     *      - keys.length > _MAX_BATCH_SIZE
+     *      - any moduleAddr == address(0)
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     *
+     * @param keys Module keys.
+     * @param addresses Module addresses.
+     */
+    function setModules(bytes32[] calldata keys, address[] calldata addresses)
+        external
+        override
+        onlyOwner
+        whenNotPaused
+    {
+        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        if (keys.length != addresses.length) revert Registry__MismatchedArrayLengths(keys.length, addresses.length);
+        if (keys.length > _MAX_BATCH_SIZE) revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
+        address[] memory oldAddresses = new address[](keys.length);
+        for (uint256 i = 0; i < keys.length; i++) {
+            oldAddresses[i] = RegistryStorage.layout().modules[keys[i]];
+            _setModuleInternal(keys[i], addresses[i], true, false);
+        }
+        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, addresses, msg.sender);
+    }
+
+    /// @dev Internal module write; supports allowReplace and per-item event emission.
+    function _setModuleInternal(bytes32 key, address moduleAddr, bool allowReplace, bool emitEvent)
+        internal
+        returns (bool changed)
+    {
+        if (moduleAddr == address(0)) revert Registry__ZeroAddress();
+
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        address old = layout.modules[key];
+
+        if (!allowReplace && old != address(0) && old != moduleAddr) {
+            revert ModuleAlreadyExists(key);
+        }
+
+        if (old == moduleAddr) {
+            return false;
+        }
+
+        layout.modules[key] = moduleAddr;
+        if (emitEvent) {
+            emit RegistryEvents.ModuleChanged(key, old, moduleAddr);
+        }
+        // Record upgrade history (write order; 0 is the first change).
+        _recordUpgradeHistory(key, old, moduleAddr, msg.sender);
+        return true;
+    }
+
+    function _recordUpgradeHistory(bytes32 key, address oldAddr, address newAddr, address executor) internal {
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        RegistryStorage.UpgradeHistory memory history = RegistryStorage.UpgradeHistory({
+            oldAddress: oldAddr,
+            newAddress: newAddr,
+            // Timestamp is stored for off-chain auditing/forensics; not used for business decisions.
+            // solhint-disable-next-line not-rely-on-time
+            timestamp: block.timestamp,
+            executor: executor
+        });
+        uint256 currentIndex = layout.historyIndex[key];
+        uint256 ringIndex = currentIndex % _MAX_UPGRADE_HISTORY;
+        if (layout.upgradeHistory[key].length < _MAX_UPGRADE_HISTORY) {
+            layout.upgradeHistory[key].push(history);
+        } else {
+            layout.upgradeHistory[key][ringIndex] = history;
+        }
+        layout.historyIndex[key] = currentIndex + 1;
+    }
+
+    // ============ Upgrade scheduling/execution ============
+    /**
+     * @notice Schedules a timelocked module upgrade for a given key.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - newAddr == address(0)
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     * - Uses block.timestamp for timelock scheduling by design
+     *
+     * @param key The module key.
+     * @param newAddr The new module address.
+     */
     function scheduleModuleUpgrade(bytes32 key, address newAddr) external override onlyOwner whenNotPaused {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_upgradeManager) == address(0)) revert ModuleNotSet("RegistryUpgradeManager");
-        _upgradeManager.scheduleModuleUpgrade(key, newAddr);
+        if (newAddr == address(0)) revert Registry__ZeroAddress();
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        address oldAddress = layout.modules[key];
+        // Timelock scheduling relies on block.timestamp by design.
+        // solhint-disable-next-line not-rely-on-time
+        uint256 executeAfter = block.timestamp + uint256(layout.minDelay);
+        layout.pendingUpgrades[key] = RegistryStorage.PendingUpgrade({
+            newAddr: newAddr,
+            executeAfter: executeAfter,
+            proposer: msg.sender,
+            minDelaySnapshot: uint256(layout.minDelay)
+        });
+        emit RegistryEvents.ModuleUpgradeScheduled(key, oldAddress, newAddr, executeAfter, msg.sender);
     }
 
-    /// @notice 取消模块升级
-    /// @param key 模块键
-    /// @dev 只有owner和紧急管理员可以取消升级
-    function cancelModuleUpgrade(bytes32 key) external override onlyOwner whenNotPaused {
+    /**
+     * @notice Cancels a scheduled module upgrade for a key.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - msg.sender is not owner and not emergencyAdmin
+     *      - Registry is paused
+     *
+     * Security:
+     * - whenNotPaused
+     * - Callable by owner or emergencyAdmin
+     *
+     * @param key The module key.
+     */
+    function cancelModuleUpgrade(bytes32 key) external override whenNotPaused {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_upgradeManager) == address(0)) revert ModuleNotSet("RegistryUpgradeManager");
-        _upgradeManager.cancelModuleUpgrade(key);
+        if (msg.sender != owner() && msg.sender != _emergencyAdmin) {
+            revert Registry__EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
+        }
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[key];
+        if (p.newAddr == address(0)) return;
+        address oldAddress = layout.modules[key];
+        delete layout.pendingUpgrades[key];
+        emit RegistryEvents.ModuleUpgradeCancelled(key, oldAddress, p.newAddr, msg.sender);
     }
 
-    /// @notice 执行模块升级
-    /// @param key 模块键
-    /// @dev 委托给RegistryUpgradeManager模块处理
-    function executeModuleUpgrade(bytes32 key) external override onlyOwner nonReentrant whenNotPaused {
+    /**
+     * @notice Executes a scheduled timelocked module upgrade for a key.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - no pending upgrade exists for key
+     *      - block.timestamp < executeAfter (timelock not elapsed)
+     *      - Registry is paused
+     *
+     * Security:
+     * - onlyOwner
+     * - whenNotPaused
+     * - nonReentrant
+     * - Uses block.timestamp for timelock checks by design
+     *
+     * @param key The module key.
+     */
+    function executeModuleUpgrade(bytes32 key) external override onlyOwner whenNotPaused nonReentrant {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (address(_upgradeManager) == address(0)) revert ModuleNotSet("RegistryUpgradeManager");
-        _upgradeManager.executeModuleUpgrade(key);
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[key];
+        if (p.newAddr == address(0)) revert ModuleUpgradeNotFound(key);
+        // Timelock execution relies on block.timestamp by design.
+        // solhint-disable-next-line not-rely-on-time
+        if (block.timestamp < p.executeAfter) revert ModuleUpgradeNotReady(key, p.executeAfter, block.timestamp);
+        address oldAddress = layout.modules[key];
+        address newAddr = p.newAddr;
+        layout.modules[key] = newAddr;
+        delete layout.pendingUpgrades[key];
+        emit RegistryEvents.ModuleUpgraded(key, oldAddress, newAddr, msg.sender);
+        _recordUpgradeHistory(key, oldAddress, newAddr, msg.sender);
     }
 
-    // ============ 查询功能 (委托给RegistryQuery) ============
-    /// @notice 获取待升级模块信息
-    /// @param key 模块键
-    /// @return newAddr 新模块地址
-    /// @return executeAfter 执行时间
-    /// @return hasPendingUpgrade 是否有待升级
+    /**
+     * @notice Emergency admin cancels all pending upgrades across known module keys.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - msg.sender != emergencyAdmin
+     *
+     * Security:
+     * - Callable while paused (pause-then-cancel workflow)
+     *
+     * Notes:
+     * - Iterates over ModuleKeys.getAllKeys().
+     */
+    function emergencyCancelAllUpgrades() external {
+        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        if (msg.sender != _emergencyAdmin) {
+            revert Registry__EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
+        }
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        bytes32[] memory keys = ModuleKeys.getAllKeys();
+        for (uint256 i = 0; i < keys.length; i++) {
+            RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[keys[i]];
+            if (p.newAddr == address(0)) continue;
+            address oldAddress = layout.modules[keys[i]];
+            delete layout.pendingUpgrades[keys[i]];
+            emit RegistryEvents.ModuleUpgradeCancelled(keys[i], oldAddress, p.newAddr, msg.sender);
+        }
+    }
+
+    /**
+     * @notice Emergency admin recovers upgrade authority by setting upgradeAdmin = emergencyAdmin.
+     * @dev Reverts if:
+     *      - msg.sender != emergencyAdmin
+     *
+     * Security:
+     * - Emergency-only path
+     */
+    function emergencyRecoverUpgrade() external {
+        if (msg.sender != _emergencyAdmin) {
+            revert Registry__EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
+        }
+        address oldAdmin = _upgradeAdmin;
+        _upgradeAdmin = _emergencyAdmin;
+        emit RegistryEvents.UpgradeAdminChanged(oldAdmin, _upgradeAdmin);
+        emit RegistryEvents.EmergencyActionExecuted(
+            uint8(RegistryEvents.EmergencyAction.EMERGENCY_RECOVERY),
+            msg.sender,
+            // Timestamp is emitted for off-chain auditing; not used for business decisions.
+            // solhint-disable-next-line not-rely-on-time
+            block.timestamp
+        );
+    }
+
+    // ============ Query helpers ============
+    /**
+     * @notice Returns pending upgrade information for a module key.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param key The module key.
+     * @return newAddr The pending new module address.
+     * @return executeAfter The earliest execution time (unix seconds).
+     * @return hasPendingUpgrade True if a pending upgrade exists.
+     */
     function getPendingUpgrade(bytes32 key) external view override returns (
         address newAddr,
         uint256 executeAfter,
         bool hasPendingUpgrade
     ) {
-        return RegistryQuery.getPendingUpgrade(key);
+        RegistryStorage.PendingUpgrade memory p = RegistryStorage.layout().pendingUpgrades[key];
+        return (p.newAddr, p.executeAfter, p.newAddr != address(0));
     }
 
-    /// @notice 检查升级是否准备就绪
-    /// @param key 模块键
-    /// @return 是否准备就绪
+    /**
+     * @notice Returns whether a pending upgrade is ready to execute for a module key.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     * - Uses block.timestamp for readiness checks by design
+     *
+     * @param key The module key.
+     * @return True if ready.
+     */
     function isUpgradeReady(bytes32 key) external view override returns (bool) {
-        return RegistryQuery.isUpgradeReady(key);
+        RegistryStorage.PendingUpgrade memory p = RegistryStorage.layout().pendingUpgrades[key];
+        // Timelock readiness check relies on block.timestamp by design.
+        // solhint-disable-next-line not-rely-on-time
+        return p.newAddr != address(0) && block.timestamp >= p.executeAfter;
     }
 
-    // 轻量化：移除 getAllModuleKeys
-    
-    // 轻量化：移除 getAllRegisteredModuleKeys / getAllRegisteredModules
+    /* ============ Query helpers (tests/compat) ============ */
 
-    // 轻量化：移除 checkModulesExist
+    /**
+     * @notice Returns all known module keys (including those not currently registered).
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only (pure)
+     *
+     * @return All module keys.
+     */
+    function getAllModuleKeys() external pure returns (bytes32[] memory) {
+        return ModuleKeys.getAllKeys();
+    }
 
-    // 轻量化：移除 findModuleKeyByAddress (2个重载)
+    /**
+     * @notice Returns all currently registered module keys (compat query).
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return Registered module keys.
+     */
+    function getAllRegisteredModuleKeys() external view returns (bytes32[] memory) {
+        return RegistryCompatQuery.getAllRegisteredModuleKeys();
+    }
 
-    // 轻量化：移除 batchFindModuleKeysByAddresses (2个重载)
+    /**
+     * @notice Returns all registered module keys and their addresses (compat query).
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return keys Registered module keys.
+     * @return addresses Registered module addresses (aligned with keys).
+     */
+    function getAllRegisteredModules() external view returns (bytes32[] memory keys, address[] memory addresses) {
+        keys = RegistryCompatQuery.getAllRegisteredModuleKeys();
+        addresses = new address[](keys.length);
+        RegistryStorage.Layout storage layout = RegistryStorage.layout();
+        for (uint256 i = 0; i < keys.length; i++) {
+            addresses[i] = layout.modules[keys[i]];
+        }
+        return (keys, addresses);
+    }
 
-    // 轻量化：移除 batchModuleExists
+    /**
+     * @notice Returns registered module keys using pagination (compat query).
+     * @dev Reverts if:
+     *      - offset is out of bounds (handled in compat query library)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param offset Start index in the registered keys list.
+     * @param limit Maximum number of keys to return.
+     * @return keys Page of registered keys.
+     * @return totalCount Total number of registered keys.
+     */
+    function getRegisteredModuleKeysPaginated(uint256 offset, uint256 limit)
+        external
+        view
+        returns (bytes32[] memory keys, uint256 totalCount)
+    {
+        return RegistryCompatQuery.getRegisteredModuleKeysPaginated(offset, limit);
+    }
 
-    // 轻量化：移除 getRegisteredModuleKeysPaginated
-
-    /// @notice 获取模块的升级历史数量
-    /// @param key 模块键
-    /// @return 升级历史记录数量
+    /**
+     * @notice Returns the number of stored upgrade history entries for a module key.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param key The module key.
+     * @return Upgrade history entry count.
+     */
     function getUpgradeHistoryCount(bytes32 key) external view returns (uint256) {
-        return RegistryQuery.getUpgradeHistoryCount(key);
+        return RegistryStorage.layout().upgradeHistory[key].length;
     }
 
-    /// @notice 获取模块的升级历史记录
-    /// @param key 模块键
-    /// @param index 历史记录索引
-    /// @return oldAddress 旧地址
-    /// @return newAddress 新地址
-    /// @return timestamp 升级时间戳
-    /// @return executor 执行者地址
+    /**
+     * @notice Returns an upgrade history record by index.
+     * @dev Reverts if:
+     *      - index is out of bounds
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param key The module key.
+     * @param index The history index (0-based).
+     * @return oldAddress Old module address.
+     * @return newAddress New module address.
+     * @return timestamp Upgrade timestamp (unix seconds).
+     * @return executor Upgrade executor address.
+     */
     function getUpgradeHistory(bytes32 key, uint256 index) external view returns (
         address oldAddress,
         address newAddress,
         uint256 timestamp,
         address executor
     ) {
-        return RegistryQuery.getUpgradeHistory(key, index);
+        RegistryStorage.UpgradeHistory[] storage history = RegistryStorage.layout().upgradeHistory[key];
+        if (index >= history.length) revert IndexOutOfBounds(index, history.length);
+        RegistryStorage.UpgradeHistory storage h = history[index];
+        return (h.oldAddress, h.newAddress, h.timestamp, h.executor);
     }
 
-    /// @notice 获取模块的所有升级历史记录
-    /// @param key 模块键
-    /// @return 升级历史记录数组
-    function getAllUpgradeHistory(bytes32 key) external view override returns (bytes memory) {
-        RegistryStorage.UpgradeHistory[] memory history = RegistryQuery.getAllUpgradeHistory(key);
-        
-        // 将结构体数组编码为bytes
-        return abi.encode(history);
+    /**
+     * @notice Returns all upgrade history records for a module key.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param key The module key.
+     * @return Upgrade history records.
+     */
+    function getAllUpgradeHistory(bytes32 key) external view override returns (IRegistry.UpgradeHistory[] memory) {
+        RegistryStorage.UpgradeHistory[] storage history = RegistryStorage.layout().upgradeHistory[key];
+        IRegistry.UpgradeHistory[] memory out = new IRegistry.UpgradeHistory[](history.length);
+        for (uint256 i = 0; i < history.length; i++) {
+            RegistryStorage.UpgradeHistory storage h = history[i];
+            out[i] = IRegistry.UpgradeHistory({
+                oldAddress: h.oldAddress,
+                newAddress: h.newAddress,
+                timestamp: h.timestamp,
+                executor: h.executor
+            });
+        }
+        return out;
     }
 
-    // ============ 模块状态检查 ============
-    // 轻量化：移除 areModulesInitialized / getModuleInitializationStatus
-
-    // 轻量化：移除 registryCore / upgradeManager / registryAdmin getter
-
-    // ============ 工具函数 (委托给RegistryStorage) ============
-    /// @notice 设置最小延迟时间
-    /// @param newDelay 新的延迟时间（秒）
-    /// @dev 只有owner可以设置延迟时间
+    // ============ Utils ============
+    /**
+     * @notice Sets the minimum delay window for timelocked module upgrades.
+     * @dev Reverts if:
+     *      - storage version is incompatible (compat gate)
+     *      - newDelay > MAX_DELAY()
+     *      - newDelay == 0
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newDelay New delay window (seconds).
+     */
     function setMinDelay(uint256 newDelay) external override onlyOwner {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (newDelay > _MAX_DELAY) revert DelayTooLong(newDelay, _MAX_DELAY);
-        if (newDelay == 0) revert InvalidDelayValue(newDelay);
+        if (newDelay > _MAX_DELAY) revert Registry__DelayTooLong(newDelay, _MAX_DELAY);
+        if (newDelay == 0) revert Registry__InvalidDelayValue(newDelay);
         uint256 oldDelay = RegistryStorage.layout().minDelay;
         RegistryStorage.layout().minDelay = uint64(newDelay);
         emit RegistryEvents.MinDelayChanged(oldDelay, newDelay);
     }
 
-    /// @notice 升级存储版本（仅治理地址可调用）
-    /// @param newVersion 新的存储版本
-    function upgradeStorageVersion(uint256 newVersion) external override onlyOwner {
-        RegistryStorage.upgradeStorageVersion(newVersion);
+    /**
+     * @notice Executes a storage migration via an external migrator (keeps STORAGE_SLOT).
+     * @dev Reverts if:
+     *      - migrator == address(0)
+     *      - migrator has no code (EOA / empty-code)
+     *      - current storage version != fromVersion
+     *      - toVersion <= current storage version
+     *      - migrator delegatecall fails
+     *
+     * Security:
+     * - onlyOwner
+     * - Uses delegatecall to keep fixed STORAGE_SLOT (upgrade-safe migration pattern)
+     *
+     * Flow:
+     * - Validate currentVersion == fromVersion and toVersion is increasing
+     * - validateStorageLayout() before migration
+     * - delegatecall migrator.migrate(fromVersion,toVersion) (keep slot)
+     * - bump storageVersion to toVersion
+     * - validateStorageLayout() after migration
+     *
+     * @param fromVersion Expected current storage version.
+     * @param toVersion Target storage version (must be greater than current).
+     * @param migrator Migrator contract address.
+     * @custom:oz-upgrades-unsafe-allow delegatecall
+     */
+    function migrateStorage(uint256 fromVersion, uint256 toVersion, address migrator) external override onlyOwner {
+        if (migrator == address(0)) revert Registry__ZeroAddress();
+        // Safety: forbid delegatecall to EOA / empty-code address.
+        if (migrator.code.length == 0) revert Registry__MigratorNotContract(migrator);
+
+        uint256 cur = RegistryStorage.getStorageVersion();
+        if (cur != fromVersion) revert Registry__StorageVersionMismatch(fromVersion, cur);
+        if (toVersion <= cur) revert Registry__InvalidMigrationTarget(fromVersion, toVersion);
+
+        // Pre-migration validation (ensure critical fields are intact).
+        RegistryStorage.validateStorageLayout();
+
+        // Perform migration (data move/init) via delegatecall; keep STORAGE_SLOT unchanged.
+        bytes memory data = abi.encodeWithSelector(IRegistryStorageMigrator.migrate.selector, fromVersion, toVersion);
+        // delegatecall is required for storage migration with a fixed STORAGE_SLOT.
+        // solhint-disable-next-line avoid-low-level-calls
+        (bool ok, bytes memory reason) = migrator.delegatecall(data);
+        if (!ok) revert Registry__MigratorFailed(migrator, reason);
+
+        // Bump version and run post-migration validation.
+        RegistryStorage.upgradeStorageVersion(toVersion);
+        RegistryStorage.validateStorageLayout();
+
+        emit RegistryEvents.StorageMigrated(fromVersion, toVersion, migrator);
     }
 
-    /// @notice 验证存储布局
-    /// @dev 用于确保存储布局的正确性
+    /**
+     * @notice Upgrades the storage version marker.
+     * @dev Reverts if:
+     *      - storage upgrade rules fail in RegistryStorageLibrary
+     *
+     * Security:
+     * - onlyOwner
+     *
+     * @param newVersion New storage version.
+     */
+    function upgradeStorageVersion(uint256 newVersion) external override onlyOwner {
+        uint256 oldVersion = RegistryStorage.getStorageVersion();
+        RegistryStorage.upgradeStorageVersion(newVersion);
+        emit RegistryEvents.StorageVersionUpgraded(oldVersion, newVersion);
+    }
+
+    /**
+     * @notice Validates the current storage layout invariants.
+     * @dev Reverts if:
+     *      - storage invariants fail (RegistryStorageLibrary)
+     *
+     * Security:
+     * - Read-only
+     */
     function validateStorageLayout() external view override {
         RegistryStorage.validateStorageLayout();
     }
 
-    /// @notice 获取最大延迟时间
-    /// @return 最大延迟时间（秒）
+    /**
+     * @notice Returns the maximum delay window allowed for setMinDelay/initialize.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only (pure)
+     *
+     * @return Maximum delay window (seconds).
+     */
+    // Interface requires MAX_DELAY() (legacy UPPER_SNAKE_CASE naming).
+    // solhint-disable-next-line func-name-mixedcase
     function MAX_DELAY() external pure override returns (uint256) {
         return _MAX_DELAY;
     }
 
-    /// @notice 检查是否为管理员
-    /// @param addr 待检查地址
-    /// @return 是否为管理员
+    /**
+     * @notice Returns whether an address is an admin (compat check).
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param addr Address to check.
+     * @return True if admin.
+     */
     function isAdmin(address addr) external view override returns (bool) {
         return RegistryStorage.isAdmin(addr);
     }
 
-    /// @notice 获取存储版本
-    /// @return 存储版本
+    /**
+     * @notice Returns the current storage version marker.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return Storage version.
+     */
     function getStorageVersion() external view override returns (uint256) {
         return RegistryStorage.getStorageVersion();
     }
 
-    /// @notice 检查是否已初始化
-    /// @return 是否已初始化
+    /**
+     * @notice Returns whether the Registry storage has been initialized.
+     * @dev Reverts if: (none)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return True if initialized.
+     */
     function isInitialized() external view override returns (bool) {
         return RegistryStorage.isInitialized();
     }

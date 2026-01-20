@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 /// @title IAccessControlManager
 /// @notice 简化的权限控制管理器接口
-/// @dev 提供基础的角色管理、权限验证、Keeper管理和紧急暂停功能
+/// @dev 提供基础的角色管理与权限验证（业务写权限 SSOT）
 /// @custom:security-contact security@example.com
 interface IAccessControlManager {
     // =================== 权限级别枚举 ===================
@@ -40,45 +40,12 @@ interface IAccessControlManager {
     /// @param account 目标账户
     function revokeRole(bytes32 role, address account) external;
 
-    // =================== Keeper管理接口 ===================
-    
-    /// @notice 更新keeper地址
-    /// @param newKeeper 新的keeper地址
-    function updateKeeper(address newKeeper) external;
-
-    // =================== 紧急暂停接口 ===================
-    
-    /// @notice 紧急暂停合约
-    /// @param reason 暂停原因
-    function emergencyPause(string calldata reason) external;
-
-    /// @notice 恢复合约运行
-    function emergencyUnpause() external;
-
     // =================== 查询接口 ===================
-    
-    /// @notice 获取账户拥有的所有角色
-    /// @param account 目标账户
-    /// @return 角色数组
-    function getAccountRoles(address account) external view returns (bytes32[] memory);
-    
-    /// @notice 获取角色拥有的所有账户
-    /// @param role 目标角色
-    /// @return 账户数组
-    function getRoleAccounts(bytes32 role) external view returns (address[] memory);
-    
-    /// @notice 获取角色的账户数量
-    /// @param role 目标角色
-    /// @return 账户数量
-    function getRoleAccountCount(bytes32 role) external view returns (uint256);
-    
+    // 注意：角色枚举/分页等“治理运维查询”能力不属于本接口的 SSOT 范畴，避免接口膨胀。
+
     /// @notice 获取当前owner地址
     /// @return owner地址
     function owner() external view returns (address);
-    
-    /// @notice 获取合约暂停状态（兼容旧接口）
-    /// @return paused 合约是否已暂停
-    function getContractStatus() external view returns (bool paused);
     
     // =================== Permission Helper ===================
     /// @notice 获取账户的综合权限级别

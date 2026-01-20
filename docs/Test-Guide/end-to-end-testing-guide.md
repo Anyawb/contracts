@@ -46,7 +46,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       await vaultCore.borrow(asset, borrowAmount);
       
       // 3. 用户还款
-      await vaultCore.repay(asset, repayAmount);
+      await vaultCore.repay(orderId, asset, repayAmount);
       
       // 4. 用户提款
       await vaultCore.withdraw(asset, withdrawAmount);
@@ -285,7 +285,7 @@ async function deployFullSystemFixture() {
   
   // 2. 部署所有核心模块
   const vaultCore = await deployVaultCore();
-  const vaultView = await deployVaultView();
+  const vaultRouter = await deployVaultRouter();
   const collateralManager = await deployCollateralManager();
   const lendingEngine = await deployLendingEngine();
   const priceOracle = await deployPriceOracle();
@@ -294,14 +294,14 @@ async function deployFullSystemFixture() {
   
   // 3. 注册所有模块到 Registry
   await registry.setModule(KEY_VAULT_CORE, vaultCore.address);
-  await registry.setModule(KEY_VAULT_VIEW, vaultView.address);
+  await registry.setModule(KEY_VAULT_VIEW, vaultRouter.address);
   await registry.setModule(KEY_CM, collateralManager.address);
   await registry.setModule(KEY_LE, lendingEngine.address);
   // ... 其他模块
   
   // 4. 初始化所有模块
-  await vaultCore.initialize(registry.address, vaultView.address);
-  await vaultView.initialize(registry.address);
+  await vaultCore.initialize(registry.address, vaultRouter.address);
+  await vaultRouter.initialize(registry.address);
   // ... 其他初始化
   
   // 5. 设置权限
@@ -309,7 +309,7 @@ async function deployFullSystemFixture() {
   await accessControlManager.grantRole(ACTION_BORROW, user.address);
   // ... 其他权限
   
-  return { registry, vaultCore, vaultView, ... };
+  return { registry, vaultCore, vaultRouter, ... };
 }
 ```
 
@@ -452,7 +452,7 @@ open coverage/index.html
 
 ## 📚 相关文档
 
-- [VaultView 测试指南](./vaultview-testing-guide.md) - VaultView 测试说明
+- [VaultRouter 测试指南](./vaultview-testing-guide.md) - VaultRouter 测试说明
 - [Reward 测试指南](./reward-testing-guide.md) - Reward 测试说明
 - [清算系统测试指南](./liquidation-testing-guide.md) - 清算测试说明
 - [架构指南](../Architecture-Guide.md) - 系统架构说明

@@ -1,66 +1,140 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ICollateralManager 多资产抵押物管理模块接口
-/// @notice 提供存入、提取多资产抵押物及余额查询的统一入口
-/// @dev 支持多种 ERC20 资产作为抵押物，每种资产独立记账
+/**
+ * @title ICollateralManager
+ * @notice Multi-asset collateral ledger + custody interface (SSOT for collateral accounting and transfers).
+ * @dev Reverts if:
+ *      - caller is not authorized (implementation-defined; typically onlyVaultRouter / role-gated)
+ *      - input validation fails (implementation-defined; zero addresses/amounts)
+ *
+ * Security:
+ * - User-path writes are typically routed via VaultCore -> VaultRouter -> CollateralManager (onlyVaultRouter)
+ * - Seizure/exit paths are typically role-gated (e.g. ACTION_LIQUIDATE) and/or restricted callers
+ */
 interface ICollateralManager {
     /**
-     * @notice 向指定用户仓位存入指定资产的抵押物
-     * @param user 用户地址
-     * @param asset 抵押资产地址
-     * @param amount 抵押物数量
+     * @notice Deposit collateral for a user.
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - `user` is zero
+     *      - `asset` is zero
+     *      - `amount` is zero
+     *
+     * Security:
+     * - Routed entry (typically onlyVaultRouter)
+     *
+     * @param user User address
+     * @param asset Collateral asset address
+     * @param amount Amount to deposit (token decimals of `asset`)
      */
     function depositCollateral(address user, address asset, uint256 amount) external;
 
     /**
-     * @notice 从指定用户仓位提取指定资产的抵押物
-     * @param user 用户地址
-     * @param asset 抵押资产地址
-     * @param amount 提取数量
+     * @notice Withdraw collateral for a user.
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - `user` is zero
+     *      - `asset` is zero
+     *      - `amount` is zero
+     *      - user has insufficient collateral (implementation-defined)
+     *
+     * Security:
+     * - Routed entry (typically onlyVaultRouter)
+     *
+     * @param user User address
+     * @param asset Collateral asset address
+     * @param amount Amount to withdraw (token decimals of `asset`)
      */
     function withdrawCollateral(address user, address asset, uint256 amount) external;
 
     /**
-     * @notice 查询用户指定资产的当前抵押物数量
-     * @param user 用户地址
-     * @param asset 抵押资产地址
-     * @return balance 抵押物数量
+     * @notice Unified collateral exit: update ledger and transfer ERC20 collateral to `receiver`.
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - `user` is zero
+     *      - `asset` is zero
+     *      - `receiver` is zero
+     *      - `amount` is zero
+     *      - user has insufficient collateral (implementation-defined)
+     *      - ERC20 transfer fails (implementation-defined)
+     *
+     * Security:
+     * - If `receiver == user`, this is a user withdraw / settlement release path
+     *   (typically onlyVaultRouter/SettlementManager).
+     * - If `receiver != user`, this is a seizure/liquidation path (typically role-gated).
+     *
+     * @param user User whose collateral balance is reduced
+     * @param asset Collateral asset address
+     * @param amount Amount to reduce and transfer (token decimals of `asset`)
+     * @param receiver Recipient of the real ERC20 transfer
+     */
+    function withdrawCollateralTo(address user, address asset, uint256 amount, address receiver) external;
+
+    /**
+     * @notice Seize collateral for liquidation (reduce ledger and transfer collateral to liquidator).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined; typically liquidation role)
+     *      - `targetUser` is zero
+     *      - `collateralAsset` is zero
+     *      - `liquidator` is zero
+     *      - `collateralAmount` is zero
+     *      - user has insufficient collateral (implementation-defined)
+     *      - ERC20 transfer fails (implementation-defined)
+     *
+     * Security:
+     * - Role-gated in implementation (liquidation path)
+     *
+     * @param targetUser Target user whose collateral is seized
+     * @param collateralAsset Collateral asset address
+     * @param collateralAmount Amount seized (token decimals of `collateralAsset`)
+     * @param liquidator Liquidator/receiver address
+     */
+    function seizeCollateralForLiquidation(
+        address targetUser,
+        address collateralAsset,
+        uint256 collateralAmount,
+        address liquidator
+    ) external;
+
+    /**
+     * @notice Get a user's collateral balance for an asset.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address
+     * @param asset Collateral asset address
+     * @return balance Collateral balance (token decimals of `asset`)
      */
     function getCollateral(address user, address asset) external view returns (uint256 balance);
 
     /**
-     * @notice 查询指定资产的总抵押量
-     * @param asset 抵押资产地址
-     * @return total 该资产的总抵押量
+     * @notice Get total collateral for an asset across the system.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param asset Collateral asset address
+     * @return total Total collateral (token decimals of `asset`)
      */
     function getTotalCollateralByAsset(address asset) external view returns (uint256 total);
 
     /**
-     * @notice 查询用户总抵押物价值（以结算币计价）
-     * @param user 用户地址
-     * @return totalValue 用户总抵押价值
-     */
-    function getUserTotalCollateralValue(address user) external view returns (uint256 totalValue);
-
-    /**
-     * @notice 查询系统总抵押物价值（以结算币计价）
-     * @return totalValue 系统总抵押价值
-     */
-    function getTotalCollateralValue() external view returns (uint256 totalValue);
-
-    /**
-     * @notice 查询用户所有抵押资产列表
-     * @param user 用户地址
-     * @return assets 用户抵押的资产地址数组
+     * @notice Get list of collateral assets for a user.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address
+     * @return assets Array of collateral asset addresses
      */
     function getUserCollateralAssets(address user) external view returns (address[] memory assets);
 
-    /**
-     * @notice 计算指定数量资产的价值（以结算币计价）
-     * @param asset 资产地址
-     * @param amount 资产数量
-     * @return value 资产价值
-     */
-    function getAssetValue(address asset, uint256 amount) external view returns (uint256 value);
 } 

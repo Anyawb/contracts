@@ -1,12 +1,18 @@
-import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title SettlementIntentLib
-/// @notice 撮合意向（借/贷）EIP-712 结构校验与状态管理的轻量库
+import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import { MessageHashUtils } from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+
+/**
+ * @title SettlementIntentLib
+ * @notice Lightweight library for EIP-712 hashing, signature validation, and intent state checks (borrow/lend).
+ */
 library SettlementIntentLib {
     /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
+    // NOTE: Field order is EIP-712 canonical and MUST match the type string in `hashBorrowIntent`.
+    // solhint-disable-next-line gas-struct-packing
     struct BorrowIntent {
         address borrower;
         address collateralAsset;
@@ -19,8 +25,15 @@ library SettlementIntentLib {
         bytes32 salt;
     }
 
+    // NOTE: Field order is EIP-712 canonical and MUST match the type string in `hashLendIntent`.
+    // solhint-disable-next-line gas-struct-packing
     struct LendIntent {
-        address lender;
+        /**
+         * @notice Lender intent signer (EOA / ERC-1271 smart wallet).
+         * @dev This is the match authorizer / fund owner, and is NOT the same as `LoanOrder.lender`
+         *      (which may be a pool vault address depending on the architecture variant).
+         */
+        address lenderSigner;
         address asset;
         uint256 amount;
         uint16 minTermDays;
@@ -31,16 +44,33 @@ library SettlementIntentLib {
     }
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
-    error Settlement__IntentExpired();
-    error Settlement__AlreadyMatched();
-    error Settlement__InvalidSignature();
+    /// @notice Thrown when an intent has expired (block.timestamp > expireAt).
+    error SettlementIntentLib__IntentExpired();
+    /// @notice Thrown when an intent hash is already marked as matched.
+    error SettlementIntentLib__AlreadyMatched();
+    /// @notice Thrown when a provided signature is invalid for the expected signer/digest.
+    error SettlementIntentLib__InvalidSignature();
 
     /*━━━━━━━━━━━━━━━ API ━━━━━━━━━━━━━━━*/
-    /// @notice 计算 BorrowIntent 的哈希（用于 EIP-712）
+    /**
+     * @notice Compute the EIP-712 struct hash for a BorrowIntent.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function; does not validate intent semantics (e.g., expiration).
+     *
+     * @param bi Borrow intent payload.
+     * @return structHash EIP-712 struct hash for BorrowIntent.
+     */
     function hashBorrowIntent(BorrowIntent memory bi) internal pure returns (bytes32) {
         return keccak256(abi.encode(
+            // solhint-disable-next-line gas-small-strings
             keccak256(
-                "BorrowIntent(address borrower,address collateralAsset,uint256 collateralAmount,address borrowAsset,uint256 amount,uint16 termDays,uint256 rateBps,uint256 expireAt,bytes32 salt)"
+                // solhint-disable-next-line gas-small-strings
+                "BorrowIntent(address borrower,address collateralAsset,uint256 collateralAmount,address borrowAsset,"
+                // solhint-disable-next-line gas-small-strings
+                "uint256 amount,uint16 termDays,uint256 rateBps,uint256 expireAt,bytes32 salt)"
             ),
             bi.borrower,
             bi.collateralAsset,
@@ -54,13 +84,27 @@ library SettlementIntentLib {
         ));
     }
 
-    /// @notice 计算 LendIntent 的哈希（用于 EIP-712）
+    /**
+     * @notice Compute the EIP-712 struct hash for a LendIntent.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function; does not validate intent semantics (e.g., expiration).
+     *
+     * @param li Lend intent payload.
+     * @return structHash EIP-712 struct hash for LendIntent.
+     */
     function hashLendIntent(LendIntent memory li) internal pure returns (bytes32) {
         return keccak256(abi.encode(
+            // solhint-disable-next-line gas-small-strings
             keccak256(
-                "LendIntent(address lender,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                // solhint-disable-next-line gas-small-strings
+                "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,"
+                // solhint-disable-next-line gas-small-strings
+                "uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
             ),
-            li.lender,
+            li.lenderSigner,
             li.asset,
             li.amount,
             li.minTermDays,
@@ -71,7 +115,20 @@ library SettlementIntentLib {
         ));
     }
 
-    /// @notice 组装 EIP-712 域分隔符
+    /**
+     * @notice Build an EIP-712 domain separator.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function; caller is responsible for supplying the correct chainId and verifyingContract.
+     *
+     * @param name EIP-712 domain name.
+     * @param version EIP-712 domain version.
+     * @param chainId Chain id used for domain separation.
+     * @param verifyingContract Verifying contract address used for domain separation.
+     * @return domainSeparator EIP-712 domain separator.
+     */
     function buildDomainSeparator(
         string memory name,
         string memory version,
@@ -80,6 +137,7 @@ library SettlementIntentLib {
     ) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
+                // solhint-disable-next-line gas-small-strings
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256(bytes(name)),
                 keccak256(bytes(version)),
@@ -89,39 +147,96 @@ library SettlementIntentLib {
         );
     }
 
-    /// @notice 计算 EIP-712 Typed Data 哈希
+    /**
+     * @notice Compute the EIP-712 typed data digest for signing/verification.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function.
+     *
+     * @param domainSeparator EIP-712 domain separator.
+     * @param structHash EIP-712 struct hash (e.g., from hashBorrowIntent/hashLendIntent).
+     * @return digest EIP-712 typed data digest.
+     */
     function toTypedDataHash(bytes32 domainSeparator, bytes32 structHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        return MessageHashUtils.toTypedDataHash(domainSeparator, structHash);
     }
 
-    /// @notice 校验 EOA/合约钱包签名（ERC-1271）并返回是否有效
+    /**
+     * @notice Verify an EOA signature or an ERC-1271 contract wallet signature.
+     * @dev Reverts if:
+     *      - (none) (returns false on failure)
+     *
+     * Security:
+     * - Calls into `signer` if it is a contract (ERC-1271); signer MUST be trusted for potential reverts.
+     *
+     * @param signer Expected signer address (EOA or ERC-1271 contract).
+     * @param digest EIP-712 typed data digest.
+     * @param signature Signature bytes.
+     * @return valid True if signature is valid for signer/digest.
+     */
     function verifySignature(
         address signer,
         bytes32 digest,
         bytes memory signature
     ) internal view returns (bool) {
         if (signer == address(0)) return false;
-        if (isContract(signer)) {
+        if (_isContract(signer)) {
             return IERC1271(signer).isValidSignature(digest, signature) == 0x1626ba7e;
         }
         return ECDSA.recover(digest, signature) == signer;
     }
 
-    function isContract(address account) internal view returns (bool) {
+    /**
+     * @notice Returns whether an address is a contract.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Uses `account.code.length` (EVM semantics).
+     *
+     * @param account Address to check.
+     * @return isContract_ True if `account` has code.
+     */
+    function _isContract(address account) private view returns (bool isContract_) {
         return account.code.length > 0;
     }
 
-    /// @notice 校验过期与已匹配状态
+    /**
+     * @notice Validate an intent is open (not expired and not yet matched).
+     * @dev Reverts if:
+     *      - block.timestamp > expireAt (SettlementIntentLib__IntentExpired)
+     *      - matched[intentHash] is true (SettlementIntentLib__AlreadyMatched)
+     *
+     * Security:
+     * - Relies on block.timestamp for expiry checks (expected for intent validity windows).
+     *
+     * @param matched Mapping of intentHash => matched flag (storage).
+     * @param intentHash Intent hash identifier.
+     * @param expireAt Expiration timestamp (unix timestamp, seconds).
+     */
     function validateOpen(
         mapping(bytes32 => bool) storage matched,
         bytes32 intentHash,
         uint256 expireAt
     ) internal view {
-        if (block.timestamp > expireAt) revert Settlement__IntentExpired();
-        if (matched[intentHash]) revert Settlement__AlreadyMatched();
+        // solhint-disable-next-line not-rely-on-time
+        if (block.timestamp > expireAt) revert SettlementIntentLib__IntentExpired();
+        if (matched[intentHash]) revert SettlementIntentLib__AlreadyMatched();
     }
 
-    /// @notice 设置意向为已匹配
+    /**
+     * @notice Mark an intent hash as matched.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Storage-only.
+     *
+     * @param matched Mapping of intentHash => matched flag (storage).
+     * @param intentHash Intent hash identifier.
+     */
     function markMatched(
         mapping(bytes32 => bool) storage matched,
         bytes32 intentHash

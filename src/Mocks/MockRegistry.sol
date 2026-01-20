@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {RegistryEvents} from "../registry/RegistryEventsLibrary.sol";
+
 /// @title MockRegistry
 /// @notice 仅用于测试环境的轻量级Registry，实现基本的模块地址管理
 /// @dev 不包含访问控制，任何人都可设置模块地址，切勿用于生产
 contract MockRegistry {
     mapping(bytes32 => address) private _modules;
-
-    event ModuleUpgraded(bytes32 indexed key, address indexed oldAddress, address indexed newAddress);
 
     /// @notice 设置模块地址
     /// @param key 模块键
@@ -15,7 +15,7 @@ contract MockRegistry {
     function setModule(bytes32 key, address moduleAddr) external {
         address oldAddr = _modules[key];
         _modules[key] = moduleAddr;
-        emit ModuleUpgraded(key, oldAddr, moduleAddr);
+        emit RegistryEvents.ModuleChanged(key, oldAddr, moduleAddr);
     }
 
     /// @notice 读取模块地址
@@ -25,9 +25,8 @@ contract MockRegistry {
         return _modules[key];
     }
 
-    /// @notice 读取模块地址，如果不存在则回滚
+    /// @notice 读取模块地址，不存在则 revert
     /// @param key 模块键
-    /// @return 模块地址
     function getModuleOrRevert(bytes32 key) external view returns (address) {
         address moduleAddr = _modules[key];
         require(moduleAddr != address(0), "MockRegistry: module not found");

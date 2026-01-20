@@ -1,33 +1,53 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title SettlementReserveLib
-/// @notice 出借资金保留/取消/消耗的轻量库（仅管理状态与最小校验，不做外部转账）
-/// @dev 存储变量需定义在调用方合约中（mapping(bytes32=>LendReserve)），库仅对其进行读写
+/**
+ * @title SettlementReserveLib
+ * @notice Lightweight library for reserving, cancelling, and consuming lender funds (state-only; no transfers).
+ * @dev Storage MUST be declared in the caller contract (e.g., `mapping(bytes32 => LendReserve)`), and this library
+ *      only reads/writes that storage.
+ */
 library SettlementReserveLib {
     /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
+    // solhint-disable-next-line gas-struct-packing
     struct LendReserve {
-        address lender;      // 出借人
-        address asset;       // 借出资产
-        uint256 amount;      // 预留金额
-        bool active;         // 是否有效
+        address lender; // Lender address
+        address asset; // Reserved asset (ERC20)
+        uint256 amount; // Reserved amount (token decimals)
+        bool active; // Whether this reserve record is active
     }
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
-    error Settlement__ZeroAddress();
-    error Settlement__InvalidAmount();
-    error Settlement__AlreadyReserved();
-    error Settlement__NotActive();
-    error Settlement__NotOwner();
+    /// @notice Thrown when an input address is zero.
+    error SettlementReserveLib__ZeroAddress();
+    /// @notice Thrown when an input amount is zero or otherwise invalid for the operation.
+    error SettlementReserveLib__InvalidAmount();
+    /// @notice Thrown when attempting to reserve an intentHash that is already active.
+    error SettlementReserveLib__AlreadyReserved();
+    /// @notice Thrown when the reserve record is missing or inactive.
+    error SettlementReserveLib__NotActive();
+    /// @notice Thrown when the caller/lender check fails for the reserve record.
+    error SettlementReserveLib__NotOwner();
 
     /*━━━━━━━━━━━━━━━ API ━━━━━━━━━━━━━━━*/
 
-    /// @notice 记录一次资金保留（不做转账，由上层负责先完成转账，再落状态更安全）
-    /// @param reserves 储备映射（调用方合约中的 storage）
-    /// @param lender 出借人
-    /// @param asset 资产
-    /// @param amount 金额
-    /// @param intentHash 出借意向哈希（去中心化订单标识）
+    /**
+     * @notice Record a reserve for lender funds for a given intent hash (state-only; no token transfer).
+     * @dev Reverts if:
+     *      - lender == address(0) or asset == address(0) (SettlementReserveLib__ZeroAddress)
+     *      - amount == 0 (SettlementReserveLib__InvalidAmount)
+     *      - reserves[intentHash] is already active (SettlementReserveLib__AlreadyReserved)
+     *
+     * Security:
+     * - No external calls; storage-only.
+     * - Caller is responsible for performing the actual token movement BEFORE recording the reserve, if required.
+     *
+     * @param reserves Reserve mapping stored in the caller contract (storage).
+     * @param lender Lender address.
+     * @param asset Reserved asset (ERC20).
+     * @param amount Reserved amount (token decimals).
+     * @param intentHash Unique intent identifier (offchain/decentralized order hash).
+     */
     function reserve(
         mapping(bytes32 => LendReserve) storage reserves,
         address lender,
@@ -35,10 +55,10 @@ library SettlementReserveLib {
         uint256 amount,
         bytes32 intentHash
     ) internal {
-        if (lender == address(0) || asset == address(0)) revert Settlement__ZeroAddress();
-        if (amount == 0) revert Settlement__InvalidAmount();
+        if (lender == address(0) || asset == address(0)) revert SettlementReserveLib__ZeroAddress();
+        if (amount == 0) revert SettlementReserveLib__InvalidAmount();
         LendReserve storage slot = reserves[intentHash];
-        if (slot.active) revert Settlement__AlreadyReserved();
+        if (slot.active) revert SettlementReserveLib__AlreadyReserved();
 
         slot.lender = lender;
         slot.asset = asset;
@@ -46,56 +66,95 @@ library SettlementReserveLib {
         slot.active = true;
     }
 
-    /// @notice 取消已保留的资金（仅限原出借人）
-    /// @return asset 被释放资产
-    /// @return amount 被释放金额
+    /**
+     * @notice Cancel an existing reserve and delete the record (caller must be the original lender).
+     * @dev Reverts if:
+     *      - reserves[intentHash] is not active (SettlementReserveLib__NotActive)
+     *      - caller != slot.lender (SettlementReserveLib__NotOwner)
+     *
+     * Security:
+     * - No external calls; storage-only.
+     *
+     * @param reserves Reserve mapping stored in the caller contract (storage).
+     * @param intentHash Unique intent identifier.
+     * @param caller Address asserted as the cancellation caller (passed by the entrypoint).
+     * @return asset Reserved asset (ERC20).
+     * @return amount Reserved amount (token decimals).
+     */
     function cancel(
         mapping(bytes32 => LendReserve) storage reserves,
         bytes32 intentHash,
         address caller
     ) internal returns (address asset, uint256 amount) {
         LendReserve storage slot = reserves[intentHash];
-        if (!slot.active) revert Settlement__NotActive();
-        if (slot.lender != caller) revert Settlement__NotOwner();
+        if (!slot.active) revert SettlementReserveLib__NotActive();
+        if (slot.lender != caller) revert SettlementReserveLib__NotOwner();
         asset = slot.asset;
         amount = slot.amount;
         delete reserves[intentHash];
     }
 
-    /// @notice 成交时消耗保留资金（将其标记为无效）
-    /// @dev 仅允许原出借人或上层指定的撮合执行者调用（此处仅检查 lender，一般由上层传入并二次校验）
-    /// @return lender 出借人
-    /// @return asset 资产
-    /// @return amount 金额
+    /**
+     * @notice Consume a reserve on match finalization and delete the record.
+     * @dev Reverts if:
+     *      - reserves[intentHash] is not active (SettlementReserveLib__NotActive)
+     *      - expectedLender != address(0) and slot.lender != expectedLender (SettlementReserveLib__NotOwner)
+     *
+     * Security:
+     * - No external calls; storage-only.
+     * - This method only checks the lender constraint; caller SHOULD apply additional authorization at the entrypoint.
+     *
+     * @param reserves Reserve mapping stored in the caller contract (storage).
+     * @param intentHash Unique intent identifier.
+     * @param expectedLender Optional lender constraint (set to address(0) to skip).
+     * @return lender Stored lender address.
+     * @return asset Reserved asset (ERC20).
+     * @return amount Reserved amount (token decimals).
+     */
     function consume(
         mapping(bytes32 => LendReserve) storage reserves,
         bytes32 intentHash,
         address expectedLender
     ) internal returns (address lender, address asset, uint256 amount) {
         LendReserve storage slot = reserves[intentHash];
-        if (!slot.active) revert Settlement__NotActive();
-        if (expectedLender != address(0) && slot.lender != expectedLender) revert Settlement__NotOwner();
+        if (!slot.active) revert SettlementReserveLib__NotActive();
+        if (expectedLender != address(0) && slot.lender != expectedLender) revert SettlementReserveLib__NotOwner();
         lender = slot.lender;
         asset = slot.asset;
         amount = slot.amount;
         delete reserves[intentHash];
     }
 
-    /// @notice 按需消耗（最多消耗 maxAmount），支持部分消耗并回写剩余
-    /// @return lender 出借人
-    /// @return asset 资产
-    /// @return used 实际消耗金额
-    /// @return remaining 剩余保留金额（0 表示该 intentHash 已被清除）
+    /**
+     * @notice Consume up to `maxAmount` from a reserve, supporting partial consumption and writing back the remainder.
+     * @dev Reverts if:
+     *      - maxAmount == 0 (SettlementReserveLib__InvalidAmount)
+     *      - reserves[intentHash] is not active (SettlementReserveLib__NotActive)
+     *      - expectedLender != address(0) and slot.lender != expectedLender (SettlementReserveLib__NotOwner)
+     *
+     * Security:
+     * - No external calls; storage-only.
+     * - Caller SHOULD apply additional authorization at the entrypoint.
+     *
+     * @param reserves Reserve mapping stored in the caller contract (storage).
+     * @param intentHash Unique intent identifier.
+     * @param expectedLender Optional lender constraint (set to address(0) to skip).
+     * @param maxAmount Maximum amount to consume (token decimals).
+     * @return lender Stored lender address.
+     * @return asset Reserved asset (ERC20).
+     * @return used Amount actually consumed (token decimals).
+     * @return remaining Remaining reserved amount (token decimals). Zero means the record was deleted.
+     */
     function consumeUpTo(
         mapping(bytes32 => LendReserve) storage reserves,
         bytes32 intentHash,
         address expectedLender,
         uint256 maxAmount
     ) internal returns (address lender, address asset, uint256 used, uint256 remaining) {
-        if (maxAmount == 0) revert Settlement__InvalidAmount();
+        if (maxAmount == 0) revert SettlementReserveLib__InvalidAmount();
         LendReserve storage slot = reserves[intentHash];
-        if (!slot.active) revert Settlement__NotActive();
-        if (expectedLender != address(0) && slot.lender != expectedLender) revert Settlement__NotOwner();
+        if (!slot.active) revert SettlementReserveLib__NotActive();
+        if (expectedLender != address(0) && slot.lender != expectedLender) revert SettlementReserveLib__NotOwner();
         lender = slot.lender;
         asset = slot.asset;
         if (slot.amount <= maxAmount) {

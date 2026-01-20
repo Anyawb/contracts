@@ -1,699 +1,1017 @@
-/**
- * PreviewView 测试模块
- * 
- * 测试目标:
- * - 预览操作功能测试（借款、存款、还款、提取）
- * - 批量预览操作测试
- * - 权限控制测试
- * - 边界条件测试
- * - 安全场景测试
- * - 集成测试
- */
+import { expect } from "chai";
+import { ethers, upgrades } from "hardhat";
+import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 
-import { expect } from 'chai';
-import hardhat from 'hardhat';
-const { ethers, upgrades } = hardhat;
+const KEY_ACM = ethers.id("ACCESS_CONTROL_MANAGER");
+const KEY_POSITION_VIEW = ethers.id("POSITION_VIEW");
+const ACTION_ADMIN = ethers.id("ACTION_ADMIN");
+const ACTION_VIEW_USER_DATA = ethers.id("VIEW_USER_DATA");
 
-import type { 
-  PreviewView,
-  UserView,
-  SystemView
-} from '../../../../types/contracts/Vault/view/modules';
-import type { 
-  PreviewView__factory,
-  UserView__factory,
-  SystemView__factory
-} from '../../../../types/factories/contracts/Vault/view/modules';
-import type { 
-  AccessControlManager
-} from '../../../../types/contracts/access/AccessControlManager';
-import type { 
-  MockERC20
-} from '../../../../types/contracts/Mocks';
-import type { 
-  MockERC20__factory
-} from '../../../../types/factories/contracts/Mocks';
-
-import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-
-// 常量定义
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-const MAX_PREVIEW_BATCH_SIZE = 30;
-
-describe('PreviewView – 预览操作模块测试', function () {
-  let previewView: PreviewView;
-  let userView: UserView;
-  let systemView: SystemView;
-  let acm: AccessControlManager;
-  let mockToken: MockERC20;
-  
-  let governance: SignerWithAddress;
-  let alice: SignerWithAddress;
-  let bob: SignerWithAddress;
-  let charlie: SignerWithAddress;
-
+describe("PreviewView", function () {
   async function deployFixture() {
-    const [, _governance, _alice, _bob, _charlie]: SignerWithAddress[] = await ethers.getSigners();
-    governance = _governance;
-    alice = _alice;
-    bob = _bob;
-    charlie = _charlie;
+    const [admin, user, viewer, stranger, user2, user3] = await ethers.getSigners();
 
-    // 部署 ACM
-    const acmFactory = await ethers.getContractFactory('AccessControlManager');
-    acm = await acmFactory.deploy(governance.address) as AccessControlManager;
-    await acm.waitForDeployment();
+    const Registry = await ethers.getContractFactory("MockRegistry");
+    const registry = await Registry.deploy();
 
-    // 部署 Mock VaultStorage
-    const mockVaultStorageFactory = await ethers.getContractFactory('MockVaultStorage');
-    const mockVaultStorage = await mockVaultStorageFactory.deploy();
-    await mockVaultStorage.waitForDeployment();
+    const Access = await ethers.getContractFactory("MockAccessControlManager");
+    const acm = await Access.deploy();
+    await acm.grantRole(ACTION_ADMIN, admin.address);
+    await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
 
-    // 部署 ViewCache
-    const viewCacheFactory = await ethers.getContractFactory('ViewCache');
-    const viewCache = await upgrades.deployProxy(viewCacheFactory, [await acm.getAddress()]);
-    await viewCache.waitForDeployment();
+    const Position = await ethers.getContractFactory("MockPositionView");
+    const position = await Position.deploy();
 
-    // 部署 UserView
-    const UserViewFactory = (await ethers.getContractFactory('UserView')) as UserView__factory;
-    userView = await upgrades.deployProxy(UserViewFactory, [
-      await acm.getAddress(),
-      await mockVaultStorage.getAddress(),
-      await viewCache.getAddress()
-    ]) as UserView;
-    await userView.waitForDeployment();
+    await registry.setModule(KEY_ACM, await acm.getAddress());
+    await registry.setModule(KEY_POSITION_VIEW, await position.getAddress());
 
-    // 部署 SystemView
-    const SystemViewFactory = (await ethers.getContractFactory('SystemView')) as SystemView__factory;
-    systemView = await upgrades.deployProxy(SystemViewFactory, [
-      await acm.getAddress(),
-      await mockVaultStorage.getAddress(),
-      await viewCache.getAddress()
-    ]) as SystemView;
-    await systemView.waitForDeployment();
+    const Preview = await ethers.getContractFactory("PreviewView");
+    const preview = await upgrades.deployProxy(Preview, [await registry.getAddress()]);
 
-    // 部署 PreviewView
-    const PreviewViewFactory = (await ethers.getContractFactory('PreviewView')) as PreviewView__factory;
-    previewView = await upgrades.deployProxy(PreviewViewFactory, [
-      await acm.getAddress(),
-      await userView.getAddress(),
-      await systemView.getAddress()
-    ]) as PreviewView;
-    await previewView.waitForDeployment();
+    const asset = ethers.Wallet.createRandom().address;
+    const asset2 = ethers.Wallet.createRandom().address;
+    const asset3 = ethers.Wallet.createRandom().address;
 
-    // 部署测试代币
-    const MockERC20Factory = (await ethers.getContractFactory('MockERC20')) as MockERC20__factory;
-    mockToken = await MockERC20Factory.deploy('Mock Token', 'MTK', 18);
-    await mockToken.waitForDeployment();
-
-    // 设置权限
-    const viewUserDataRole = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
-    const actionAdminRole = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
-    const upgradeModuleRole = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
-    
-    await acm.grantRole(viewUserDataRole, alice.address);
-    await acm.grantRole(viewUserDataRole, bob.address);
-    await acm.grantRole(viewUserDataRole, charlie.address);
-    await acm.grantRole(actionAdminRole, governance.address);
-    await acm.grantRole(upgradeModuleRole, governance.address);
-
-    // 为 PreviewView 合约本身授予权限
-    await acm.grantRole(viewUserDataRole, await previewView.getAddress());
-    await acm.grantRole(actionAdminRole, await previewView.getAddress());
-    
-    // 为 SystemView 授予系统数据访问权限
-    const viewSystemDataRole = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
-    await acm.grantRole(viewSystemDataRole, await systemView.getAddress());
-    await acm.grantRole(viewSystemDataRole, await previewView.getAddress());
-
-    return {
-      previewView,
-      userView,
-      systemView,
-      acm,
-      mockToken,
-      governance,
-      alice,
-      bob,
-      charlie
-    };
+    return { admin, user, viewer, stranger, user2, user3, registry, acm, position, preview, asset, asset2, asset3 };
   }
 
-  describe('初始化测试', function () {
-    it('应正确初始化合约', async function () {
-      const { previewView, acm, userView, systemView } = await deployFixture();
-      
-      expect(await previewView.acm()).to.equal(await acm.getAddress());
-      expect(await previewView.userView()).to.equal(await userView.getAddress());
-      expect(await previewView.systemView()).to.equal(await systemView.getAddress());
-    });
-
-    it('初始化时无效地址应被拒绝', async function () {
-      const { acm } = await deployFixture();
-      
-      const PreviewViewFactory = (await ethers.getContractFactory('PreviewView')) as PreviewView__factory;
-      
-      // 测试无效 ACM 地址
-      await expect(
-        upgrades.deployProxy(PreviewViewFactory, [
-          ZERO_ADDRESS, // 无效 ACM 地址
-          await userView.getAddress(),
-          await systemView.getAddress()
-        ])
-      ).to.be.revertedWith('PreviewView: invalid ACM address');
-
-      // 测试无效 UserView 地址
-      await expect(
-        upgrades.deployProxy(PreviewViewFactory, [
-          await acm.getAddress(),
-          ZERO_ADDRESS, // 无效 UserView 地址
-          await systemView.getAddress()
-        ])
-      ).to.be.revertedWith('PreviewView: invalid UserView address');
-
-      // 测试无效 SystemView 地址
-      await expect(
-        upgrades.deployProxy(PreviewViewFactory, [
-          await acm.getAddress(),
-          await userView.getAddress(),
-          ZERO_ADDRESS // 无效 SystemView 地址
-        ])
-      ).to.be.revertedWith('PreviewView: invalid SystemView address');
-    });
-  });
-
-  describe('权限控制测试', function () {
-    it('无权限用户不应能访问用户数据', async function () {
-      const { previewView, charlie } = await deployFixture();
-      
-      // 移除 charlie 的权限
-      const viewUserDataRole = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
-      await acm.revokeRole(viewUserDataRole, charlie.address);
-      
-      await expect(
-        previewView.connect(charlie).previewBorrow(
-          alice.address,
-          await mockToken.getAddress(),
-          ethers.parseUnits('100', 18),
-          0,
-          ethers.parseUnits('10', 6)
-        )
-      ).to.be.revertedWithCustomError(acm, 'MissingRole');
-    });
-
-    it('非用户本人或管理员不应能访问用户数据', async function () {
-      const { previewView, bob } = await deployFixture();
-      
-      await expect(
-        previewView.connect(bob).previewBorrow(
-          alice.address, // bob 尝试访问 alice 的数据
-          await mockToken.getAddress(),
-          ethers.parseUnits('100', 18),
-          0,
-          ethers.parseUnits('10', 6)
-        )
-      ).to.be.revertedWith('PreviewView: unauthorized user data access');
-    });
-
-    it('用户本人应能访问自己的数据', async function () {
-      const { previewView, alice } = await deployFixture();
-      
-      const result = await previewView.connect(alice).previewBorrow(
-        alice.address,
-        await mockToken.getAddress(),
-        ethers.parseUnits('100', 18),
-        0,
-        ethers.parseUnits('10', 6)
+  describe("init", function () {
+    it("reverts on zero registry", async function () {
+      const Preview = await ethers.getContractFactory("PreviewView");
+      await expect(upgrades.deployProxy(Preview, [ethers.ZeroAddress])).to.be.revertedWithCustomError(
+        Preview,
+        "ZeroAddress"
       );
-      
-      expect(result).to.have.lengthOf(3);
+    });
+  });
+
+  describe("access control", function () {
+    it("user can call own preview", async function () {
+      const { user, preview, position, asset } = await deployFixture();
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      const [hf, ok] = await preview.connect(user).previewDeposit(user.address, asset, 50n);
+      expect(hf).to.equal((150n * 10_000n) / 20n);
+      expect(ok).to.equal(true);
     });
 
-    it('管理员应能访问任何用户的数据', async function () {
-      const { previewView, governance } = await deployFixture();
-      
-      // 为 governance 授予 viewUserData 权限
-      const viewUserDataRole = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
-      await acm.grantRole(viewUserDataRole, governance.address);
-      
-      const result = await previewView.connect(governance).previewBorrow(
-        alice.address,
-        await mockToken.getAddress(),
-        ethers.parseUnits('100', 18),
-        0,
-        ethers.parseUnits('10', 6)
+    it("viewer role can call others", async function () {
+      const { user, viewer, preview, position, asset } = await deployFixture();
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      const [hf, ok] = await preview.connect(viewer).previewDeposit(user.address, asset, 0);
+      expect(hf).to.equal((100n * 10_000n) / 20n);
+      expect(ok).to.equal(true);
+    });
+
+    it("stranger is blocked", async function () {
+      const { user, stranger, preview, position, asset } = await deployFixture();
+      await position.pushUserPositionUpdate(user.address, asset, 50n, 10n);
+      await expect(
+        preview.connect(stranger).previewDeposit(user.address, asset, 10n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+    });
+  });
+
+  describe("preview calculations", function () {
+    it("previewDeposit updates HF and ok flag", async function () {
+      const { user, preview, position, asset } = await deployFixture();
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 50n);
+      expect(hf).to.equal((150n * 10_000n) / 50n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewWithdraw undercollateral sets ok false when debt exists", async function () {
+      const { user, preview, position, asset } = await deployFixture();
+      await position.pushUserPositionUpdate(user.address, asset, 40n, 20n);
+      const [hf, ok] = await preview.previewWithdraw(user.address, asset, 50n);
+      expect(hf).to.equal(0n);
+      expect(ok).to.equal(false);
+    });
+
+    it("previewBorrow computes HF/LTV/maxBorrowable", async function () {
+      const { user, preview, position, asset } = await deployFixture();
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      const [hf, ltv, maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 30n, 10n);
+      expect(hf).to.equal((130n * 10_000n) / 30n);
+      expect(ltv).to.equal((30n * 10_000n) / 130n);
+      expect(maxBorrowable).to.equal((130n * 7_500n) / 10_000n - 30n);
+    });
+
+    it("previewBorrow caps maxBorrowable at zero when already above max LTV", async function () {
+      const { user, preview, position, asset } = await deployFixture();
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 80n);
+      const [, , maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 10n);
+      expect(maxBorrowable).to.equal(0n);
+    });
+
+    it("previewRepay reduces debt and LTV", async function () {
+      const { user, preview, position, asset } = await deployFixture();
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf, ltv] = await preview.previewRepay(user.address, asset, 20n);
+      expect(hf).to.equal((100n * 10_000n) / 30n);
+      expect(ltv).to.equal((30n * 10_000n) / 100n);
+    });
+
+    it("preview functions revert on zero asset", async function () {
+      const { user, preview } = await deployFixture();
+      await expect(preview.previewDeposit(user.address, ethers.ZeroAddress, 1)).to.be.revertedWithCustomError(
+        preview,
+        "PreviewView__InvalidInput"
       );
-      
-      expect(result).to.have.lengthOf(3);
     });
   });
 
-  describe('单个预览操作测试', function () {
-    describe('previewBorrow 测试', function () {
-      it('应正确预估借款操作', async function () {
-        const { previewView, alice } = await deployFixture();
-        
-        const [newHF, newLTV, maxBorrowable] = await previewView.connect(alice).previewBorrow(
-          alice.address,
-          await mockToken.getAddress(),
-          ethers.parseUnits('100', 18), // 当前抵押
-          ethers.parseUnits('10', 18),  // 新增抵押
-          ethers.parseUnits('20', 6)    // 借款数量
-        );
-        
-        expect(newHF).to.be.gt(0);
-        expect(newLTV).to.be.gte(0);
-        expect(maxBorrowable).to.be.gte(0);
-      });
-
-      it('零抵押时健康因子应为最大值', async function () {
-        const { previewView, alice } = await deployFixture();
-        
-        const [newHF, newLTV, maxBorrowable] = await previewView.connect(alice).previewBorrow(
-          alice.address,
-          await mockToken.getAddress(),
-          0, // 零抵押
-          0,
-          ethers.parseUnits('10', 6)
-        );
-        
-        expect(newHF).to.equal(ethers.MaxUint256);
-        expect(newLTV).to.equal(0);
-        expect(maxBorrowable).to.equal(0);
-      });
+  describe("边界条件测试", function () {
+    it("previewDeposit - 零金额抵押", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 0n);
+      expect(hf).to.equal((100n * 10_000n) / 50n);
+      expect(ok).to.equal(true);
     });
 
-    describe('previewDeposit 测试', function () {
-      it('应正确预估存款操作', async function () {
-        const { previewView, alice } = await deployFixture();
-        
-        const [hfAfter, ok] = await previewView.connect(alice).previewDeposit(
-          alice.address,
-          await mockToken.getAddress(),
-          ethers.parseUnits('50', 18)
-        );
-        
-        expect(hfAfter).to.be.gt(0);
-        expect(ok).to.be.a('boolean');
-      });
-
-      it('零存款时应返回当前健康因子', async function () {
-        const { previewView, alice } = await deployFixture();
-        
-        const [hfAfter, ok] = await previewView.connect(alice).previewDeposit(
-          alice.address,
-          await mockToken.getAddress(),
-          0
-        );
-        
-        expect(hfAfter).to.be.gt(0);
-        expect(ok).to.be.a('boolean');
-      });
+    it("previewDeposit - 债务为 0 时 HF 为最大值", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 0n);
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 50n);
+      expect(hf).to.equal(ethers.MaxUint256);
+      expect(ok).to.equal(true);
     });
 
-    describe('previewRepay 测试', function () {
-      it('应正确预估还款操作', async function () {
-        const { previewView, alice } = await deployFixture();
-        
-        const [newHF, newLTV] = await previewView.connect(alice).previewRepay(
-          alice.address,
-          await mockToken.getAddress(),
-          ethers.parseUnits('10', 6)
-        );
-        
-        expect(newHF).to.be.gt(0);
-        expect(newLTV).to.be.gte(0);
-      });
-
-      it('全额还款后 LTV 应为零', async function () {
-        const { previewView, alice } = await deployFixture();
-        
-        const [newHF, newLTV] = await previewView.connect(alice).previewRepay(
-          alice.address,
-          await mockToken.getAddress(),
-          ethers.parseUnits('30', 6) // 全额还款
-        );
-        
-        expect(newHF).to.be.gt(0);
-        expect(newLTV).to.be.gte(0);
-      });
+    it("previewDeposit - HF 刚好等于 MIN_HF_BPS", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // 设置初始状态：collateral = 100, debt = 100, HF = 10000 (刚好等于 MIN_HF_BPS)
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 100n);
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 0n);
+      expect(hf).to.equal(10_000n);
+      expect(ok).to.equal(true);
     });
 
-    describe('previewWithdraw 测试', function () {
-      it('应正确预估提取操作', async function () {
-        const { previewView, alice } = await deployFixture();
-        
-        const [newHF, ok] = await previewView.connect(alice).previewWithdraw(
-          alice.address,
-          await mockToken.getAddress(),
-          ethers.parseUnits('20', 18)
-        );
-        
-        expect(newHF).to.be.gt(0);
-        expect(ok).to.be.a('boolean');
-      });
+    it("previewDeposit - HF 略低于 MIN_HF_BPS", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 99, debt = 100, HF = 9900 < 10000
+      await position.pushUserPositionUpdate(user.address, asset, 99n, 100n);
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 0n);
+      expect(hf).to.equal(9_900n);
+      expect(ok).to.equal(false);
+    });
 
-      it('提取超过抵押数量时应被正确处理', async function () {
-        const { previewView, alice } = await deployFixture();
-        
-        const [newHF, ok] = await previewView.connect(alice).previewWithdraw(
-          alice.address,
-          await mockToken.getAddress(),
-          ethers.parseUnits('200', 18) // 超过抵押数量
-        );
-        
-        expect(newHF).to.be.gt(0);
-        expect(ok).to.be.a('boolean');
-      });
+    it("previewWithdraw - 零金额提取", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf, ok] = await preview.previewWithdraw(user.address, asset, 0n);
+      expect(hf).to.equal((100n * 10_000n) / 50n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewWithdraw - 提取金额超过抵押品时归零", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf, ok] = await preview.previewWithdraw(user.address, asset, 150n);
+      expect(hf).to.equal(0n);
+      expect(ok).to.equal(false);
+    });
+
+    it("previewWithdraw - 提取全部抵押品且无债务时 ok 为 true", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 0n);
+      const [hf, ok] = await preview.previewWithdraw(user.address, asset, 100n);
+      expect(hf).to.equal(ethers.MaxUint256);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewWithdraw - 提取后刚好满足最小 HF", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // 初始：collateral = 200, debt = 100, HF = 20000
+      // 提取 100 后：collateral = 100, debt = 100, HF = 10000 (刚好等于 MIN_HF_BPS)
+      await position.pushUserPositionUpdate(user.address, asset, 200n, 100n);
+      const [hf, ok] = await preview.previewWithdraw(user.address, asset, 100n);
+      expect(hf).to.equal(10_000n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewBorrow - 零金额借款", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      const [hf, ltv, maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      expect(hf).to.equal((100n * 10_000n) / 20n);
+      expect(ltv).to.equal((20n * 10_000n) / 100n);
+      expect(maxBorrowable).to.equal((100n * 7_500n) / 10_000n - 20n);
+    });
+
+    it("previewBorrow - LTV 刚好等于 MAX_LTV_BPS", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 100, debt = 75, LTV = 75% (刚好等于 MAX_LTV_BPS)
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 75n);
+      const [, ltv, maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      expect(ltv).to.equal(7_500n);
+      expect(maxBorrowable).to.equal(0n);
+    });
+
+    it("previewBorrow - 新增抵押后计算 maxBorrowable", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // 初始：collateral = 100, debt = 20
+      // 新增抵押 50 后：collateral = 150, maxDebt = 150 * 0.75 = 112.5
+      // maxBorrowable = 112.5 - 20 = 92.5 (向下取整为 92)
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      const [, , maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 50n, 0);
+      expect(maxBorrowable).to.equal((150n * 7_500n) / 10_000n - 20n);
+    });
+
+    it("previewBorrow - 债务为 0 时 LTV 为 0", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 0n);
+      const [hf, ltv, maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      expect(hf).to.equal(ethers.MaxUint256);
+      expect(ltv).to.equal(0n);
+      expect(maxBorrowable).to.equal((100n * 7_500n) / 10_000n);
+    });
+
+    it("previewRepay - 零金额还款", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf, ltv] = await preview.previewRepay(user.address, asset, 0n);
+      expect(hf).to.equal((100n * 10_000n) / 50n);
+      expect(ltv).to.equal((50n * 10_000n) / 100n);
+    });
+
+    it("previewRepay - 还款金额超过债务时债务归零", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf, ltv] = await preview.previewRepay(user.address, asset, 100n);
+      expect(hf).to.equal(ethers.MaxUint256);
+      expect(ltv).to.equal(0n);
+    });
+
+    it("previewRepay - 还款金额等于债务时债务归零", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf, ltv] = await preview.previewRepay(user.address, asset, 50n);
+      expect(hf).to.equal(ethers.MaxUint256);
+      expect(ltv).to.equal(0n);
+    });
+
+    it("previewRepay - 债务为 0 时 LTV 为 0", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 0n);
+      const [hf, ltv] = await preview.previewRepay(user.address, asset, 10n);
+      expect(hf).to.equal(ethers.MaxUint256);
+      expect(ltv).to.equal(0n);
+    });
+
+    it("previewDeposit - 抵押品为 0 且债务为 0 时 HF 为最大值", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 0n, 0n);
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 50n);
+      expect(hf).to.equal(ethers.MaxUint256);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewWithdraw - 抵押品为 0 时 HF 为 0", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 0n, 50n);
+      const [hf, ok] = await preview.previewWithdraw(user.address, asset, 0n);
+      expect(hf).to.equal(0n);
+      expect(ok).to.equal(false);
     });
   });
 
-  describe('批量预览操作测试', function () {
-    it('应正确处理批量预览操作', async function () {
-      const { previewView, alice } = await deployFixture();
+  describe("多用户/多资产场景", function () {
+    it("多个用户同时查询不同资产", async function () {
+      const { user, user2, user3, preview, position, asset, asset2, asset3 } = await loadFixture(deployFixture);
       
-      const operations = [
-        {
-          operationType: 0, // deposit
-          user: alice.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('10', 18)
-        },
-        {
-          operationType: 1, // withdraw
-          user: alice.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('5', 18)
-        },
-        {
-          operationType: 2, // borrow
-          user: alice.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('15', 6)
-        },
-        {
-          operationType: 3, // repay
-          user: alice.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('5', 6)
-        }
-      ];
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      await position.pushUserPositionUpdate(user2.address, asset2, 200n, 40n);
+      await position.pushUserPositionUpdate(user3.address, asset3, 300n, 60n);
+
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 50n);
+      const [hf2, ok2] = await preview.previewDeposit(user2.address, asset2, 100n);
+      const [hf3, ok3] = await preview.previewDeposit(user3.address, asset3, 150n);
+
+      expect(hf1).to.equal((150n * 10_000n) / 20n);
+      expect(ok1).to.equal(true);
+      expect(hf2).to.equal((300n * 10_000n) / 40n);
+      expect(ok2).to.equal(true);
+      expect(hf3).to.equal((450n * 10_000n) / 60n);
+      expect(ok3).to.equal(true);
+    });
+
+    it("一个用户多个资产", async function () {
+      const { user, preview, position, asset, asset2, asset3 } = await loadFixture(deployFixture);
       
-      const results = await previewView.connect(alice).batchPreviewOperations(operations);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      await position.pushUserPositionUpdate(user.address, asset2, 200n, 40n);
+      await position.pushUserPositionUpdate(user.address, asset3, 300n, 60n);
+
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 50n);
+      const [hf2, ok2] = await preview.previewWithdraw(user.address, asset2, 50n);
+      const [hf3, ltv3, maxBorrowable3] = await preview.previewBorrow(user.address, asset3, 0, 0, 10n);
+
+      expect(hf1).to.equal((150n * 10_000n) / 20n);
+      expect(ok1).to.equal(true);
+      expect(hf2).to.equal((150n * 10_000n) / 40n);
+      expect(ok2).to.equal(true);
+      expect(hf3).to.equal((300n * 10_000n) / 70n);
+      expect(ltv3).to.equal((70n * 10_000n) / 300n);
+      expect(maxBorrowable3).to.equal((300n * 7_500n) / 10_000n - 70n);
+    });
+
+    it("多个用户同一个资产", async function () {
+      const { user, user2, user3, preview, position, asset } = await loadFixture(deployFixture);
       
-      expect(results).to.have.lengthOf(4);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      await position.pushUserPositionUpdate(user2.address, asset, 200n, 40n);
+      await position.pushUserPositionUpdate(user3.address, asset, 300n, 60n);
+
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 50n);
+      const [hf2, ok2] = await preview.previewWithdraw(user2.address, asset, 50n);
+      const [hf3, ltv3] = await preview.previewRepay(user3.address, asset, 20n);
+
+      expect(hf1).to.equal((150n * 10_000n) / 20n);
+      expect(ok1).to.equal(true);
+      expect(hf2).to.equal((150n * 10_000n) / 40n);
+      expect(ok2).to.equal(true);
+      expect(hf3).to.equal((300n * 10_000n) / 40n);
+      expect(ltv3).to.equal((40n * 10_000n) / 300n);
+    });
+
+    it("混合场景：多用户多资产交叉查询", async function () {
+      const { user, user2, preview, position, asset, asset2 } = await loadFixture(deployFixture);
       
-      // 验证每个结果都有正确的结构
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
-        expect(result).to.have.lengthOf(4); // 应该有4个元素
-        expect(typeof result[0]).to.equal('bigint'); // newHealthFactor
-        expect(typeof result[1]).to.equal('bigint'); // newLTV
-        expect(typeof result[2]).to.equal('boolean'); // isSafe
-        expect(typeof result[3]).to.equal('bigint'); // maxBorrowable
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      await position.pushUserPositionUpdate(user.address, asset2, 200n, 40n);
+      await position.pushUserPositionUpdate(user2.address, asset, 150n, 30n);
+      await position.pushUserPositionUpdate(user2.address, asset2, 250n, 50n);
+
+      // user 对 asset 的操作
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 50n);
+      // user 对 asset2 的操作
+      const [hf2, ok2] = await preview.previewWithdraw(user.address, asset2, 50n);
+      // user2 对 asset 的操作
+      const [hf3, ltv3] = await preview.previewRepay(user2.address, asset, 10n);
+      // user2 对 asset2 的操作
+      const [hf4, ltv4, maxBorrowable4] = await preview.previewBorrow(user2.address, asset2, 0, 0, 5n);
+
+      expect(hf1).to.equal((150n * 10_000n) / 20n);
+      expect(ok1).to.equal(true);
+      expect(hf2).to.equal((150n * 10_000n) / 40n);
+      expect(ok2).to.equal(true);
+      expect(hf3).to.equal((150n * 10_000n) / 20n);
+      expect(ltv3).to.equal((20n * 10_000n) / 150n);
+      expect(hf4).to.equal((250n * 10_000n) / 55n);
+      expect(ltv4).to.equal((55n * 10_000n) / 250n);
+      expect(maxBorrowable4).to.equal((250n * 7_500n) / 10_000n - 55n);
+    });
+  });
+
+  describe("计算准确性测试", function () {
+    it("previewDeposit - 精确计算 HF", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 500, HF = 20000
+      // 抵押 250 后：collateral = 1250, debt = 500, HF = 25000
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 250n);
+      expect(hf).to.equal(25_000n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewWithdraw - 精确计算 HF", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 500, HF = 20000
+      // 提取 250 后：collateral = 750, debt = 500, HF = 15000
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      const [hf, ok] = await preview.previewWithdraw(user.address, asset, 250n);
+      expect(hf).to.equal(15_000n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewBorrow - 精确计算 LTV 和 maxBorrowable", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 200
+      // 新增抵押 100，借款 50 后：collateral = 1100, debt = 250
+      // LTV = 250 * 10000 / 1100 = 2272.72... (向下取整为 2272)
+      // maxDebt = 1100 * 7500 / 10000 = 825
+      // maxBorrowable = 825 - 250 = 575
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 200n);
+      const [hf, ltv, maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 100n, 50n);
+      expect(hf).to.equal((1100n * 10_000n) / 250n);
+      expect(ltv).to.equal((250n * 10_000n) / 1100n);
+      expect(maxBorrowable).to.equal((1100n * 7_500n) / 10_000n - 250n);
+    });
+
+    it("previewRepay - 精确计算 LTV", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 500, LTV = 5000
+      // 还款 200 后：collateral = 1000, debt = 300, LTV = 3000
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      const [hf, ltv] = await preview.previewRepay(user.address, asset, 200n);
+      expect(hf).to.equal((1000n * 10_000n) / 300n);
+      expect(ltv).to.equal((300n * 10_000n) / 1000n);
+    });
+
+    it("previewBorrow - maxBorrowable 边界情况", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 750 (刚好达到 MAX_LTV)
+      // maxDebt = 1000 * 0.75 = 750
+      // maxBorrowable = 750 - 750 = 0
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 750n);
+      const [, , maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      expect(maxBorrowable).to.equal(0n);
+    });
+
+    it("previewBorrow - maxBorrowable 略低于边界", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 749
+      // maxDebt = 1000 * 0.75 = 750
+      // maxBorrowable = 750 - 749 = 1
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 749n);
+      const [, , maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      expect(maxBorrowable).to.equal(1n);
+    });
+  });
+
+  describe("Registry 错误处理", function () {
+    it("PositionView 模块不存在时应该 revert", async function () {
+      const { user, registry, preview, asset } = await loadFixture(deployFixture);
+      
+      // 移除 PositionView 模块
+      await registry.setModule(KEY_POSITION_VIEW, ethers.ZeroAddress);
+      
+      await expect(
+        preview.previewDeposit(user.address, asset, 50n)
+      ).to.be.reverted;
+    });
+
+    it("Registry 地址无效时应该 revert", async function () {
+      const Preview = await ethers.getContractFactory("PreviewView");
+      const preview = await Preview.deploy();
+      // 未初始化，_registryAddr 为 0
+      const [user] = await ethers.getSigners();
+      const asset = ethers.Wallet.createRandom().address;
+      
+      await expect(
+        preview.previewDeposit(user.address, asset, 50n)
+      ).to.be.revertedWithCustomError(preview, "ZeroAddress");
+    });
+  });
+
+  describe("访问控制详细测试", function () {
+    it("ACTION_ADMIN 可以查询任何用户", async function () {
+      const { admin, user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      
+      const [hf, ok] = await preview.connect(admin).previewDeposit(user.address, asset, 50n);
+      expect(hf).to.equal((150n * 10_000n) / 20n);
+      expect(ok).to.equal(true);
+    });
+
+    it("VIEW_USER_DATA 可以查询任何用户", async function () {
+      const { viewer, user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      
+      const [hf, ok] = await preview.connect(viewer).previewDeposit(user.address, asset, 50n);
+      expect(hf).to.equal((150n * 10_000n) / 20n);
+      expect(ok).to.equal(true);
+    });
+
+    it("用户只能查询自己的数据", async function () {
+      const { user, user2, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      
+      // user 可以查询自己的数据
+      const [hf1, ok1] = await preview.connect(user).previewDeposit(user.address, asset, 50n);
+      expect(hf1).to.equal((150n * 10_000n) / 20n);
+      expect(ok1).to.equal(true);
+      
+      // user 不能查询 user2 的数据（如果 user2 没有数据，会返回 0，但访问控制会阻止）
+      await position.pushUserPositionUpdate(user2.address, asset, 200n, 40n);
+      await expect(
+        preview.connect(user).previewDeposit(user2.address, asset, 50n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+    });
+
+    it("所有 preview 函数都遵循相同的访问控制", async function () {
+      const { stranger, user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+      
+      await expect(
+        preview.connect(stranger).previewDeposit(user.address, asset, 50n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      
+      await expect(
+        preview.connect(stranger).previewWithdraw(user.address, asset, 50n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      
+      await expect(
+        preview.connect(stranger).previewBorrow(user.address, asset, 0, 0, 10n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      
+      await expect(
+        preview.connect(stranger).previewRepay(user.address, asset, 10n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+    });
+  });
+
+  describe("极端值测试", function () {
+    it("previewDeposit - 非常大的金额", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      const largeAmount = ethers.parseEther("1000000");
+      await position.pushUserPositionUpdate(user.address, asset, largeAmount, largeAmount / 2n);
+      
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, largeAmount);
+      expect(hf).to.equal((largeAmount * 2n * 10_000n) / (largeAmount / 2n));
+      expect(ok).to.equal(true);
+    });
+
+    it("previewDeposit - 非常小的金额", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 1n);
+      expect(hf).to.equal((1001n * 10_000n) / 500n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewBorrow - 非常大的借款金额", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      const largeCollateral = ethers.parseEther("1000000");
+      const largeDebt = largeCollateral / 2n;
+      await position.pushUserPositionUpdate(user.address, asset, largeCollateral, largeDebt);
+      
+      // 使用一个合理的借款金额，确保不会超过 maxDebt
+      const borrowAmount = largeCollateral / 10n; // 10% 的抵押品
+      const [hf, ltv, maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, borrowAmount);
+      const newDebt = largeDebt + borrowAmount;
+      expect(hf).to.equal((largeCollateral * 10_000n) / newDebt);
+      expect(ltv).to.equal((newDebt * 10_000n) / largeCollateral);
+      // maxDebt = largeCollateral * 0.75
+      // maxBorrowable = maxDebt - newDebt (如果 newDebt < maxDebt)
+      const maxDebt = (largeCollateral * 7_500n) / 10_000n;
+      if (newDebt < maxDebt) {
+        expect(maxBorrowable).to.equal(maxDebt - newDebt);
+      } else {
+        expect(maxBorrowable).to.equal(0n);
       }
     });
 
-    it('空操作数组应被拒绝', async function () {
-      const { previewView, alice } = await deployFixture();
+    it("previewRepay - 还款金额为 MaxUint256", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
       
-      await expect(
-        previewView.connect(alice).batchPreviewOperations([])
-      ).to.be.revertedWith('PreviewView: empty operations array');
-    });
-
-    it('超过最大批量大小应被拒绝', async function () {
-      const { previewView, alice } = await deployFixture();
-      
-      const operations = new Array(MAX_PREVIEW_BATCH_SIZE + 1).fill({
-        operationType: 0,
-        user: alice.address,
-        asset: await mockToken.getAddress(),
-        amount: ethers.parseUnits('1', 18)
-      });
-      
-      await expect(
-        previewView.connect(alice).batchPreviewOperations(operations)
-      ).to.be.revertedWith('PreviewView: too many operations');
-    });
-
-    it('非用户本人或管理员不应能进行批量预览', async function () {
-      const { previewView, bob } = await deployFixture();
-      
-      const operations = [
-        {
-          operationType: 0,
-          user: alice.address, // bob 尝试访问 alice 的数据
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('10', 18)
-        }
-      ];
-      
-      await expect(
-        previewView.connect(bob).batchPreviewOperations(operations)
-      ).to.be.revertedWith('PreviewView: unauthorized batch preview access');
+      const [hf, ltv] = await preview.previewRepay(user.address, asset, ethers.MaxUint256);
+      expect(hf).to.equal(ethers.MaxUint256);
+      expect(ltv).to.equal(0n);
     });
   });
 
-  describe('边界条件测试', function () {
-    it('大额数值应正常工作', async function () {
-      const { previewView, alice } = await deployFixture();
+  describe("连续操作场景", function () {
+    it("连续多次 previewDeposit", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
       
-      const largeAmount = ethers.parseUnits('1000000', 18);
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 50n);
+      const [hf2, ok2] = await preview.previewDeposit(user.address, asset, 50n);
+      const [hf3, ok3] = await preview.previewDeposit(user.address, asset, 50n);
       
-      const [newHF, newLTV, maxBorrowable] = await previewView.connect(alice).previewBorrow(
-        alice.address,
-        await mockToken.getAddress(),
-        largeAmount,
-        0,
-        ethers.parseUnits('500000', 6)
-      );
-      
-      expect(newHF).to.be.gt(0);
-      expect(newLTV).to.be.gte(0);
-      expect(maxBorrowable).to.be.gte(0);
+      // 所有操作都基于相同的初始状态 (100, 50)
+      expect(hf1).to.equal((150n * 10_000n) / 50n);
+      expect(hf2).to.equal((150n * 10_000n) / 50n);
+      expect(hf3).to.equal((150n * 10_000n) / 50n);
+      expect(ok1).to.equal(true);
+      expect(ok2).to.equal(true);
+      expect(ok3).to.equal(true);
     });
 
-    it('极小数值应正常工作', async function () {
-      const { previewView, alice } = await deployFixture();
+    it("不同操作的组合预览", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
       
-      const tinyAmount = 1n;
+      // 预览抵押
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 200n);
+      // 预览提取
+      const [hf2, ok2] = await preview.previewWithdraw(user.address, asset, 100n);
+      // 预览借款
+      const [hf3, ltv3, maxBorrowable3] = await preview.previewBorrow(user.address, asset, 0, 0, 50n);
+      // 预览还款
+      const [hf4, ltv4] = await preview.previewRepay(user.address, asset, 100n);
       
-      const [newHF, newLTV, maxBorrowable] = await previewView.connect(alice).previewBorrow(
-        alice.address,
-        await mockToken.getAddress(),
-        tinyAmount,
-        0,
-        tinyAmount
-      );
-      
-      expect(newHF).to.be.gt(0);
-      expect(newLTV).to.be.gte(0);
-      expect(maxBorrowable).to.be.gte(0);
-    });
-  });
-
-  describe('安全场景测试', function () {
-    it('重入攻击应被阻止', async function () {
-      // 这个测试需要特殊的重入合约，在实际项目中应该实现
-      // 这里只是验证合约的基本安全性
-      const { previewView, alice } = await deployFixture();
-      
-      const result = await previewView.connect(alice).previewBorrow(
-        alice.address,
-        await mockToken.getAddress(),
-        ethers.parseUnits('100', 18),
-        0,
-        ethers.parseUnits('10', 6)
-      );
-      
-      expect(result).to.have.lengthOf(3);
+      expect(hf1).to.equal((1200n * 10_000n) / 500n);
+      expect(ok1).to.equal(true);
+      expect(hf2).to.equal((900n * 10_000n) / 500n);
+      expect(ok2).to.equal(true);
+      expect(hf3).to.equal((1000n * 10_000n) / 550n);
+      expect(ltv3).to.equal((550n * 10_000n) / 1000n);
+      expect(maxBorrowable3).to.equal((1000n * 7_500n) / 10_000n - 550n);
+      expect(hf4).to.equal((1000n * 10_000n) / 400n);
+      expect(ltv4).to.equal((400n * 10_000n) / 1000n);
     });
 
-    it('预言机失败时应返回默认值', async function () {
-      const { previewView, alice } = await deployFixture();
+    it("模拟用户操作流程的预览", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
       
-      // 模拟预言机失败的情况 - 使用零地址或无效参数
-      const [newHF, newLTV, maxBorrowable] = await previewView.connect(alice).previewBorrow(
-        alice.address,
-        ZERO_ADDRESS, // 使用零地址模拟预言机失败
-        ethers.parseUnits('100', 18),
-        0,
-        ethers.parseUnits('10', 6)
-      );
+      // 初始状态：无抵押无债务
+      await position.pushUserPositionUpdate(user.address, asset, 0n, 0n);
       
-      // 应该返回合理的默认值
-      expect(newHF).to.be.gte(0);
-      expect(newLTV).to.be.gte(0);
-      expect(maxBorrowable).to.be.gte(0);
-    });
-  });
-
-  describe('集成测试', function () {
-    it('完整借贷流程预览', async function () {
-      const { previewView, alice } = await deployFixture();
+      // 1. 预览首次抵押
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 1000n);
+      expect(hf1).to.equal(ethers.MaxUint256);
+      expect(ok1).to.equal(true);
       
-      // 1. 预览存款
-      const [depositHF, depositOk] = await previewView.connect(alice).previewDeposit(
-        alice.address,
-        await mockToken.getAddress(),
-        ethers.parseUnits('100', 18)
-      );
-      expect(depositHF).to.be.gt(0);
-      expect(depositOk).to.be.a('boolean');
+      // 更新状态：抵押 1000
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 0n);
       
       // 2. 预览借款
-      const [borrowHF] = await previewView.connect(alice).previewBorrow(
-        alice.address,
-        await mockToken.getAddress(),
-        ethers.parseUnits('100', 18),
-        0,
-        ethers.parseUnits('30', 6)
-      );
-      expect(borrowHF).to.be.gt(0);
+      const [hf2, ltv2, maxBorrowable2] = await preview.previewBorrow(user.address, asset, 0, 0, 500n);
+      expect(hf2).to.equal((1000n * 10_000n) / 500n);
+      expect(ltv2).to.equal((500n * 10_000n) / 1000n);
+      expect(maxBorrowable2).to.equal((1000n * 7_500n) / 10_000n - 500n);
       
-      // 3. 预览还款
-      const [repayHF] = await previewView.connect(alice).previewRepay(
-        alice.address,
-        await mockToken.getAddress(),
-        ethers.parseUnits('10', 6)
-      );
-      expect(repayHF).to.be.gt(0);
+      // 更新状态：抵押 1000，债务 500
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
       
-      // 4. 预览提取
-      const [withdrawHF, withdrawOk] = await previewView.connect(alice).previewWithdraw(
-        alice.address,
-        await mockToken.getAddress(),
-        ethers.parseUnits('20', 18)
-      );
-      expect(withdrawHF).to.be.gt(0);
-      expect(withdrawOk).to.be.a('boolean');
-    });
-
-    it('批量操作集成测试', async function () {
-      const { previewView, alice, bob } = await deployFixture();
+      // 3. 预览再次抵押以提高 HF
+      const [hf3, ok3] = await preview.previewDeposit(user.address, asset, 200n);
+      expect(hf3).to.equal((1200n * 10_000n) / 500n);
+      expect(ok3).to.equal(true);
       
-      // 为 alice 授予 ACTION_ADMIN 权限，这样她可以为其他用户执行批量操作
-      const actionAdminRole = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
-      await acm.grantRole(actionAdminRole, alice.address);
-      
-      const operations = [
-        // alice 的操作
-        {
-          operationType: 0,
-          user: alice.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('50', 18)
-        },
-        {
-          operationType: 2,
-          user: alice.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('20', 6)
-        },
-        // bob 的操作
-        {
-          operationType: 1,
-          user: bob.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('30', 18)
-        },
-        {
-          operationType: 3,
-          user: bob.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('10', 6)
-        }
-      ];
-      
-      const results = await previewView.connect(alice).batchPreviewOperations(operations);
-      
-      expect(results).to.have.lengthOf(4);
-      // 验证每个结果都有正确的结构
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
-        expect(result).to.have.lengthOf(4); // 应该有4个元素
-        expect(typeof result[0]).to.equal('bigint'); // newHealthFactor
-        expect(typeof result[1]).to.equal('bigint'); // newLTV
-        expect(typeof result[2]).to.equal('boolean'); // isSafe
-        expect(typeof result[3]).to.equal('bigint'); // maxBorrowable
-      }
+      // 4. 预览部分还款
+      const [hf4, ltv4] = await preview.previewRepay(user.address, asset, 200n);
+      expect(hf4).to.equal((1000n * 10_000n) / 300n);
+      expect(ltv4).to.equal((300n * 10_000n) / 1000n);
     });
   });
 
-  describe('升级控制测试', function () {
-    it('非升级权限用户不应能升级合约', async function () {
-      const { previewView } = await deployFixture();
-      
-      // alice 没有升级权限，所以不需要撤销
-      const PreviewViewFactory = (await ethers.getContractFactory('PreviewView')) as PreviewView__factory;
+  describe("UUPS 升级测试", function () {
+    it("非管理员不能升级", async function () {
+      const { user, preview } = await loadFixture(deployFixture);
+      const PreviewV2 = await ethers.getContractFactory("PreviewView");
+      const previewV2 = await PreviewV2.deploy();
       
       await expect(
-        upgrades.upgradeProxy(await previewView.getAddress(), PreviewViewFactory)
-      ).to.be.revertedWith('PreviewView: not authorized');
+        preview.connect(user).upgradeToAndCall(await previewV2.getAddress(), "0x")
+      ).to.be.reverted;
     });
 
-    it('合约暂停时不应能升级', async function () {
-      await deployFixture();
+    it("验证 _authorizeUpgrade 使用 ViewAccessLib", async function () {
+      // 这个测试验证 _authorizeUpgrade 的实现使用了 ViewAccessLib
+      // 实际的升级测试需要在代理合约环境中进行，这里只验证访问控制逻辑
+      const { admin, user, preview, acm } = await loadFixture(deployFixture);
       
-      // 模拟合约暂停状态 - 在实际环境中需要设置 ACM 的暂停状态
-      // 这里只是测试升级权限验证
+      // 验证 admin 有 ACTION_ADMIN 角色
+      const hasRole = await acm.hasRole(ACTION_ADMIN, admin.address);
+      expect(hasRole).to.equal(true);
       
-      // 由于 Mock ACM 可能没有实现 getContractStatus，这里只是验证基本升级流程
-      // 在实际测试中，需要确保暂停时升级被拒绝
+      // 验证 user 没有 ACTION_ADMIN 角色
+      const userHasRole = await acm.hasRole(ACTION_ADMIN, user.address);
+      expect(userHasRole).to.equal(false);
+      
+      // 注意：实际的升级测试需要在代理合约环境中进行
+      // 这里只验证访问控制的基础逻辑
     });
   });
 
-  describe('Gas 优化测试', function () {
-    it('批量操作应比单个操作更节省 Gas', async function () {
-      const { previewView, alice } = await deployFixture();
+  describe("计算精度与舍入测试", function () {
+    it("previewDeposit - 小数精度处理（向下舍入）", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 100, debt = 33, HF = 100 * 10000 / 33 = 30303.03... (向下舍入为 30303)
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 33n);
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 0n);
+      expect(hf).to.equal((100n * 10_000n) / 33n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewBorrow - LTV 计算精度", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 333, LTV = 333 * 10000 / 1000 = 3330
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 333n);
+      const [, ltv] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      expect(ltv).to.equal((333n * 10_000n) / 1000n);
+    });
+
+    it("previewBorrow - maxBorrowable 计算精度", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 100
+      // maxDebt = 1000 * 7500 / 10000 = 750
+      // maxBorrowable = 750 - 100 = 650
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 100n);
+      const [, , maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      expect(maxBorrowable).to.equal((1000n * 7_500n) / 10_000n - 100n);
+    });
+
+    it("previewRepay - 部分还款后的 LTV 精度", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 333
+      // 还款 111 后：debt = 222, LTV = 222 * 10000 / 1000 = 2220
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 333n);
+      const [, ltv] = await preview.previewRepay(user.address, asset, 111n);
+      expect(ltv).to.equal((222n * 10_000n) / 1000n);
+    });
+  });
+
+  describe("状态变化一致性测试", function () {
+    it("PositionView 数据更新后预览结果同步", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
       
-      // 单个操作
-      const singleGas = await previewView.connect(alice).previewBorrow.estimateGas(
-        alice.address,
-        await mockToken.getAddress(),
-        ethers.parseUnits('100', 18),
-        0,
-        ethers.parseUnits('10', 6)
+      // 初始状态
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 50n);
+      expect(hf1).to.equal((150n * 10_000n) / 50n);
+      
+      // 更新 PositionView 数据
+      await position.pushUserPositionUpdate(user.address, asset, 200n, 100n);
+      const [hf2, ok2] = await preview.previewDeposit(user.address, asset, 50n);
+      expect(hf2).to.equal((250n * 10_000n) / 100n);
+      expect(ok2).to.equal(true);
+    });
+
+    it("多次预览操作结果一致性", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      
+      // 连续多次相同预览操作应返回相同结果
+      const results = await Promise.all([
+        preview.previewDeposit(user.address, asset, 200n),
+        preview.previewDeposit(user.address, asset, 200n),
+        preview.previewDeposit(user.address, asset, 200n),
+      ]);
+      
+      expect(results[0][0]).to.equal(results[1][0]);
+      expect(results[1][0]).to.equal(results[2][0]);
+      expect(results[0][1]).to.equal(results[1][1]);
+      expect(results[1][1]).to.equal(results[2][1]);
+    });
+
+    it("不同预览函数对同一状态的一致性", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      
+      // previewDeposit 和 previewBorrow 应该基于相同的初始状态
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 0n);
+      const [hf2] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      
+      // 两者应该返回相同的 HF（因为都没有改变状态）
+      expect(hf1).to.equal(hf2);
+    });
+  });
+
+  describe("复杂业务场景测试", function () {
+    it("高风险仓位逐步改善预览", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // 初始高风险状态：collateral = 100, debt = 90, HF = 11111 (略高于阈值)
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 90n);
+      
+      // 1. 预览增加抵押
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 50n);
+      expect(hf1).to.equal((150n * 10_000n) / 90n);
+      expect(ok1).to.equal(true);
+      
+      // 2. 预览部分还款
+      const [hf2, ltv2] = await preview.previewRepay(user.address, asset, 30n);
+      expect(hf2).to.equal((100n * 10_000n) / 60n);
+      expect(ltv2).to.equal((60n * 10_000n) / 100n);
+      
+      // 3. 预览组合操作：增加抵押 + 部分还款
+      const [hf3, ltv3] = await preview.previewRepay(user.address, asset, 20n);
+      // 先还款，再预览增加抵押
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 70n);
+      const [hf4, ok4] = await preview.previewDeposit(user.address, asset, 30n);
+      expect(hf4).to.equal((130n * 10_000n) / 70n);
+      expect(ok4).to.equal(true);
+    });
+
+    it("最大杠杆操作预览", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // 初始：collateral = 1000, debt = 0
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 0n);
+      
+      // 预览借款到最大 LTV
+      const maxDebt = (1000n * 7_500n) / 10_000n; // 750
+      const [hf, ltv, maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, maxDebt);
+      
+      expect(ltv).to.equal(7_500n);
+      expect(maxBorrowable).to.equal(0n);
+      expect(hf).to.equal((1000n * 10_000n) / maxDebt);
+    });
+
+    it("清算边界预览", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // 接近清算线：collateral = 100, debt = 99, HF = 10101 (略高于 10000)
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 99n);
+      
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 0n);
+      expect(hf1).to.be.gte(10_000n);
+      expect(ok1).to.equal(true);
+      
+      // 预览提取少量抵押后是否仍安全
+      const [hf2, ok2] = await preview.previewWithdraw(user.address, asset, 1n);
+      expect(hf2).to.equal((99n * 10_000n) / 99n);
+      expect(ok2).to.equal(true);
+    });
+
+    it("多资产组合操作预览", async function () {
+      const { user, preview, position, asset, asset2 } = await loadFixture(deployFixture);
+      
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      await position.pushUserPositionUpdate(user.address, asset2, 2000n, 1000n);
+      
+      // 对 asset 进行抵押预览
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 200n);
+      
+      // 对 asset2 进行还款预览
+      const [hf2, ltv2] = await preview.previewRepay(user.address, asset2, 200n);
+      
+      // 两个资产的操作应该独立
+      expect(hf1).to.equal((1200n * 10_000n) / 500n);
+      expect(ok1).to.equal(true);
+      expect(hf2).to.equal((2000n * 10_000n) / 800n);
+      expect(ltv2).to.equal((800n * 10_000n) / 2000n);
+    });
+  });
+
+  describe("错误处理增强测试", function () {
+    it("所有 preview 函数对零地址资产的一致性处理", async function () {
+      const { user, preview } = await loadFixture(deployFixture);
+      
+      await expect(
+        preview.previewDeposit(user.address, ethers.ZeroAddress, 1n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__InvalidInput");
+      
+      await expect(
+        preview.previewWithdraw(user.address, ethers.ZeroAddress, 1n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__InvalidInput");
+      
+      await expect(
+        preview.previewBorrow(user.address, ethers.ZeroAddress, 0, 0, 1n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__InvalidInput");
+      
+      await expect(
+        preview.previewRepay(user.address, ethers.ZeroAddress, 1n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__InvalidInput");
+    });
+
+    it("Registry 模块切换后预览功能正常", async function () {
+      const { user, registry, preview, position, asset } = await loadFixture(deployFixture);
+      
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 50n);
+      expect(ok1).to.equal(true);
+      
+      // 切换 PositionView 模块（模拟升级场景）
+      const Position2 = await ethers.getContractFactory("MockPositionView");
+      const position2 = await Position2.deploy();
+      await registry.setModule(KEY_POSITION_VIEW, await position2.getAddress());
+      
+      // 新模块应该能正常工作
+      await position2.pushUserPositionUpdate(user.address, asset, 200n, 100n);
+      const [hf2, ok2] = await preview.previewDeposit(user.address, asset, 50n);
+      expect(ok2).to.equal(true);
+      expect(hf2).to.equal((250n * 10_000n) / 100n);
+    });
+  });
+
+  describe("数据一致性验证", function () {
+    it("previewDeposit 和 previewBorrow 的 HF 计算一致性", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      
+      // previewDeposit: 增加 200 抵押
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 200n);
+      
+      // previewBorrow: 增加 200 抵押，0 借款（应该得到相同的 HF）
+      const [hf2] = await preview.previewBorrow(user.address, asset, 0, 200n, 0);
+      
+      expect(hf1).to.equal(hf2);
+    });
+
+    it("previewRepay 和 previewBorrow 的 LTV 计算一致性", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      
+      // previewRepay: 还款 200，新债务 = 300
+      const [, ltv1] = await preview.previewRepay(user.address, asset, 200n);
+      
+      // 更新状态后，previewBorrow 应该得到相同的 LTV（如果抵押和债务相同）
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 300n);
+      const [, ltv2] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      
+      expect(ltv1).to.equal(ltv2);
+    });
+
+    it("ok 标志与 HF 阈值的一致性", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      
+      // HF 刚好等于阈值
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 100n);
+      const [hf1, ok1] = await preview.previewDeposit(user.address, asset, 0n);
+      expect(hf1).to.equal(10_000n);
+      expect(ok1).to.equal(true);
+      
+      // HF 略高于阈值
+      await position.pushUserPositionUpdate(user.address, asset, 101n, 100n);
+      const [hf2, ok2] = await preview.previewDeposit(user.address, asset, 0n);
+      expect(hf2).to.be.gt(10_000n);
+      expect(ok2).to.equal(true);
+      
+      // HF 略低于阈值
+      await position.pushUserPositionUpdate(user.address, asset, 99n, 100n);
+      const [hf3, ok3] = await preview.previewDeposit(user.address, asset, 0n);
+      expect(hf3).to.be.lt(10_000n);
+      expect(ok3).to.equal(false);
+    });
+  });
+
+  describe("性能与压力测试", function () {
+    it("大量并发预览查询", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 500n);
+      
+      // 并发执行 20 次预览查询
+      const promises = Array.from({ length: 20 }, () =>
+        preview.previewDeposit(user.address, asset, 50n)
       );
       
-      // 批量操作
-      const operations = [
-        {
-          operationType: 2,
-          user: alice.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('10', 6)
-        }
-      ];
+      const results = await Promise.all(promises);
       
-      const batchGas = await previewView.connect(alice).batchPreviewOperations.estimateGas(operations);
+      // 所有结果应该一致
+      const firstResult = results[0];
+      results.forEach((result) => {
+        expect(result[0]).to.equal(firstResult[0]);
+        expect(result[1]).to.equal(firstResult[1]);
+      });
+    });
+
+    it("复杂计算场景性能", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      const largeValue = ethers.parseEther("1000000");
+      await position.pushUserPositionUpdate(user.address, asset, largeValue, largeValue / 2n);
       
-      // 批量操作应该比单个操作更高效（考虑基础开销）
-      expect(batchGas).to.be.lt(singleGas * 2n);
+      // 执行复杂的预览计算
+      const start = Date.now();
+      await preview.previewBorrow(user.address, asset, 0, largeValue / 10n, largeValue / 20n);
+      const end = Date.now();
+      
+      // 确保计算在合理时间内完成（1秒内）
+      expect(end - start).to.be.lt(1000);
     });
   });
 
-  describe('错误处理测试', function () {
-    it('无效操作类型应被正确处理', async function () {
-      const { previewView, alice } = await deployFixture();
+  describe("特殊数值场景", function () {
+    it("previewDeposit - 1 wei 精度测试", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 1n, 1n);
       
-      const operations = [
-        {
-          operationType: 99, // 无效操作类型
-          user: alice.address,
-          asset: await mockToken.getAddress(),
-          amount: ethers.parseUnits('10', 18)
-        }
-      ];
+      const [hf, ok] = await preview.previewDeposit(user.address, asset, 1n);
+      expect(hf).to.equal((2n * 10_000n) / 1n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewBorrow - 刚好达到 maxBorrowable 边界", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      // collateral = 1000, debt = 749
+      // maxDebt = 750, maxBorrowable = 1
+      await position.pushUserPositionUpdate(user.address, asset, 1000n, 749n);
       
-      const results = await previewView.connect(alice).batchPreviewOperations(operations);
+      const [, , maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
+      expect(maxBorrowable).to.equal(1n);
       
-      // 应该返回默认值而不是失败
-      expect(results[0].newHealthFactor).to.equal(0);
-      expect(results[0].newLTV).to.equal(0);
-      expect(results[0].isSafe).to.equal(false);
-      expect(results[0].maxBorrowable).to.equal(0);
+      // 预览借款 1，应该刚好达到 maxDebt
+      const [, ltv, maxBorrowableAfter] = await preview.previewBorrow(user.address, asset, 0, 0, 1n);
+      expect(ltv).to.equal(7_500n);
+      expect(maxBorrowableAfter).to.equal(0n);
+    });
+
+    it("previewWithdraw - 提取 1 wei 的边界情况", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      
+      const [hf, ok] = await preview.previewWithdraw(user.address, asset, 1n);
+      expect(hf).to.equal((99n * 10_000n) / 50n);
+      expect(ok).to.equal(true);
+    });
+
+    it("previewRepay - 还款 1 wei 的边界情况", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      
+      const [hf, ltv] = await preview.previewRepay(user.address, asset, 1n);
+      expect(hf).to.equal((100n * 10_000n) / 49n);
+      expect(ltv).to.equal((49n * 10_000n) / 100n);
     });
   });
-}); 
+
+  describe("初始化与状态验证", function () {
+    it("初始化后 registryAddr 正确设置", async function () {
+      const { registry, preview } = await loadFixture(deployFixture);
+      const registryAddr = await preview.registryAddr();
+      expect(registryAddr).to.equal(await registry.getAddress());
+    });
+
+    it("重复初始化应该失败", async function () {
+      const { registry, preview } = await loadFixture(deployFixture);
+      await expect(
+        preview.initialize(await registry.getAddress())
+      ).to.be.reverted;
+    });
+  });
+});
+

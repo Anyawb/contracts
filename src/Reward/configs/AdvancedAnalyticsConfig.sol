@@ -5,7 +5,7 @@ import { BaseServiceConfig } from "../BaseServiceConfig.sol";
 import { RewardTypes } from "../RewardTypes.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { VaultTypes } from "../../Vault/VaultTypes.sol";
+import { SystemEvents } from "../../Vault/SystemEvents.sol";
 import { ZeroAddress } from "../../errors/StandardErrors.sol";
 
 /// @title AdvancedAnalyticsConfig - 高级数据分析服务配置
@@ -20,7 +20,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
     // ============ 事件定义 ============
     
     /// @notice 高级数据分析服务配置更新事件
-    /// @dev 记录服务配置的变更，与 VaultTypes.ActionExecuted 配合使用
+    /// @dev 记录服务配置的变更，与 SystemEvents.ActionExecuted 配合使用
     event AdvancedAnalyticsConfigUpdated(
         uint8 indexed level,
         uint256 price,
@@ -89,7 +89,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         super._initialize(initialRegistryAddr);
         
         // 记录初始化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -113,7 +113,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -265,7 +265,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -297,7 +297,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         );
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -321,7 +321,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         );
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -343,7 +343,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         serviceRevenue[level] += points;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_CONSUME_POINTS,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_CONSUME_POINTS),
             msg.sender,
@@ -433,7 +433,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -461,7 +461,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -490,7 +490,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_PAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_PAUSE_SYSTEM),
             msg.sender,
@@ -517,7 +517,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         }
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UNPAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UNPAUSE_SYSTEM),
             msg.sender,

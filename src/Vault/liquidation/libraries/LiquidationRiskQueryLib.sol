@@ -1,89 +1,109 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./ModuleCache.sol";
+import { ModuleCache } from "./ModuleCache.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { GracefulDegradation } from "../../../libraries/GracefulDegradation.sol";
+import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
+import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
 import { Registry } from "../../../registry/Registry.sol";
 
+/**
+ * @title Liquidation Risk Query Library
+ * @author RWA Lending Platform
+ * @notice Provides module resolution and user value aggregation functions for liquidation risk assessment.
+ * @dev Security:
+ * - View-only library for querying ledger modules (LendingEngine + PositionView).
+ * - Uses try/catch to avoid reverting the caller on downstream module failures.
+ *
+ * Architecture (SSOT):
+ * - This library intentionally does NOT access oracles nor implement graceful degradation logic.
+ * - Valuation (including graceful degradation) must be centralized in LendingEngine/PositionView.
+ */
 library LiquidationRiskQueryLib {
     using ModuleCache for ModuleCache.ModuleCacheStorage;
 
-    function getUserValuesWithFallback(
-        address user,
+    /**
+     * @notice Get module address from cache or Registry (view-only, graceful fallback).
+     * @dev Reverts if:
+     *      - none (returns address(0) on missing modules)
+     *
+     * Security:
+     * - View function (read-only).
+     * - Best-effort: falls back to Registry if cache is stale or missing.
+     * - Time rollback tolerant: treats cache as valid if block.timestamp < cached timestamp.
+     *
+     * @param registryAddr Registry contract address (for fallback resolution)
+     * @param moduleCache Module cache storage reference
+     * @param key Module key identifier
+     * @param maxCacheAge Maximum cache age in seconds (0 = cache always valid)
+     * @return moduleAddr Module address (address(0) if not found)
+     */
+    function _getModuleView(
+        address registryAddr,
         ModuleCache.ModuleCacheStorage storage moduleCache,
-        uint256 maxCacheAge,
-        address priceOracle,
-        address settlementToken
-    ) internal view returns (uint256 collateralValue, uint256 debtValue) {
-        address lendingEngine = ModuleCache.get(moduleCache, ModuleKeys.KEY_LE, maxCacheAge);
-        address collateralManager = ModuleCache.get(moduleCache, ModuleKeys.KEY_CM, maxCacheAge);
-
-        if (lendingEngine == address(0) || collateralManager == address(0)) return (0, 0);
-
-        // debt
-        (bool dsuccess, bytes memory ddata) = lendingEngine.staticcall(abi.encodeWithSignature("getUserTotalDebtValue(address)", user));
-        if (!dsuccess || ddata.length < 32) return (0, 0);
-        debtValue = abi.decode(ddata, (uint256));
-
-        // collateral with graceful degradation
-        collateralValue = getUserTotalCollateralValueWithFallback(user, moduleCache, maxCacheAge, priceOracle, settlementToken);
-    }
-
-    function getUserTotalCollateralValueWithFallback(
-        address user,
-        ModuleCache.ModuleCacheStorage storage moduleCache,
-        uint256 maxCacheAge,
-        address priceOracle,
-        address settlementToken
-    ) internal view returns (uint256 totalValue) {
-        GracefulDegradation.DegradationConfig memory config = 
-            GracefulDegradation.createDefaultConfig(settlementToken);
-
-        address[] memory assets = getUserCollateralAssets(user, moduleCache, maxCacheAge);
-        uint256 length = assets.length;
-        for (uint256 i = 0; i < length;) {
-            address asset = assets[i];
-            uint256 amount = getUserCollateralAmount(user, asset, moduleCache, maxCacheAge);
-            if (amount > 0) {
-                GracefulDegradation.PriceResult memory result = 
-                    GracefulDegradation.getAssetValueWithFallback(priceOracle, asset, amount, config);
-                totalValue += result.value;
-            }
-            unchecked { ++i; }
+        bytes32 key,
+        uint256 maxCacheAge
+    ) private view returns (address moduleAddr) {
+        // 1) Prefer cache if present and not stale.
+        moduleAddr = moduleCache.moduleAddresses[key];
+        uint256 ts = moduleCache.cacheTimestamps[key];
+        if (moduleAddr != address(0) && ts != 0) {
+            // If maxCacheAge == 0, treat cache as always valid.
+            if (maxCacheAge == 0) return moduleAddr;
+            // Safe time rollback handling: if time goes backwards, treat cache as valid to avoid underflow.
+            // solhint-disable-next-line not-rely-on-time
+            if (block.timestamp < ts) return moduleAddr;
+            // solhint-disable-next-line not-rely-on-time
+            if (block.timestamp - ts <= maxCacheAge) return moduleAddr;
         }
+
+        // 2) Fallback to Registry (view-only) to avoid reverting due to cache staleness.
+        if (registryAddr == address(0)) return address(0);
+        moduleAddr = Registry(registryAddr).getModule(key);
     }
 
-    function getUserCollateralAssets(
+    /**
+     * @notice Get user's aggregated collateral and debt values from ledger modules.
+     * @dev Reverts if:
+     *      - none (returns zeros on missing modules or call failures)
+     *
+     * Security:
+     * - View function (read-only).
+     * - Best-effort: returns (0, 0) if modules are not registered or calls fail.
+     * - Architecture alignment: does NOT access oracles nor implement graceful degradation logic.
+     * - Uses try/catch to handle external call failures gracefully.
+     *
+     * @param user User address to query
+     * @param registryAddr Registry contract address for module resolution
+     * @param moduleCache Module cache storage reference
+     * @param maxCacheAge Maximum cache age in seconds (0 = cache always valid)
+     * @return collateralValue Total collateral value (settlement token denominated, scaled by 1e18, 0 if query fails)
+     * @return debtValue Total debt value (settlement token denominated, scaled by 1e18, 0 if query fails)
+     */
+    function getUserValues(
         address user,
+        address registryAddr,
         ModuleCache.ModuleCacheStorage storage moduleCache,
         uint256 maxCacheAge
-    ) internal view returns (address[] memory) {
-        address collateralManager = ModuleCache.get(moduleCache, ModuleKeys.KEY_CM, maxCacheAge);
-        if (collateralManager == address(0)) return new address[](0);
-        (bool success, bytes memory data) = collateralManager.staticcall(abi.encodeWithSignature("getUserCollateralAssets(address)", user));
-        if (!success || data.length == 0) return new address[](0);
-        return abi.decode(data, (address[]));
-    }
+    ) internal view returns (uint256 collateralValue, uint256 debtValue) {
+        address lendingEngine = _getModuleView(registryAddr, moduleCache, ModuleKeys.KEY_LE, maxCacheAge);
+        address positionView = _getModuleView(registryAddr, moduleCache, ModuleKeys.KEY_POSITION_VIEW, maxCacheAge);
 
-    function getUserCollateralAmount(
-        address user,
-        address asset,
-        ModuleCache.ModuleCacheStorage storage moduleCache,
-        uint256 maxCacheAge
-    ) internal view returns (uint256) {
-        address collateralManager = ModuleCache.get(moduleCache, ModuleKeys.KEY_CM, maxCacheAge);
-        if (collateralManager == address(0)) return 0;
-        (bool success, bytes memory data) = collateralManager.staticcall(abi.encodeWithSignature("getCollateral(address,address)", user, asset));
-        if (!success || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
-    }
+        if (lendingEngine == address(0) || positionView == address(0)) return (0, 0);
 
-    function checkPriceOracleHealth(
-        address priceOracle,
-        address asset
-    ) internal view returns (bool isHealthy, string memory details) {
-        return GracefulDegradation.checkPriceOracleHealth(priceOracle, asset);
+        // debt value (settlement token denominated; produced by LE valuation)
+        try ILendingEngineBasic(lendingEngine).getUserTotalDebtValue(user) returns (uint256 v) {
+            debtValue = v;
+        } catch {
+            debtValue = 0;
+        }
+
+        // collateral value (settlement token denominated; produced by PositionView valuation)
+        try IPositionViewValuation(positionView).getUserTotalCollateralValue(user) returns (uint256 v) {
+            collateralValue = v;
+        } catch {
+            collateralValue = 0;
+        }
     }
 }
 

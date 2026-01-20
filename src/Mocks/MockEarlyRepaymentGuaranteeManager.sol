@@ -11,6 +11,9 @@ contract MockEarlyRepaymentGuaranteeManager {
     event GuaranteeRecordLocked(address indexed user, address indexed lender, address indexed asset, uint256 amount, uint256 interest, uint256 termDays);
     event GuaranteeRecordReleased(address indexed user, address indexed lender, address indexed asset, uint256 amount);
     event EarlyRepaymentSettled(address indexed user, address indexed asset, uint256 amount);
+    event GuaranteeEnabledUpdated(address indexed asset, bool enabled);
+
+    mapping(address => bool) private _enabledByAsset;
     
     /// @notice 锁定保证金记录
     /// @param user 用户地址
@@ -58,6 +61,17 @@ contract MockEarlyRepaymentGuaranteeManager {
     ) external {
         // Mock实现：简单记录事件
         emit EarlyRepaymentSettled(user, asset, amount);
+    }
+
+    /// @notice 是否启用保证金（按资产）
+    function isGuaranteeEnabled(address asset) external view returns (bool enabled) {
+        return _enabledByAsset[asset];
+    }
+
+    /// @notice 设置保证金启用开关（mock，无权限控制）
+    function setGuaranteeEnabled(address asset, bool enabled) external {
+        _enabledByAsset[asset] = enabled;
+        emit GuaranteeEnabledUpdated(asset, enabled);
     }
     
     /// @notice 获取用户保证金记录数量

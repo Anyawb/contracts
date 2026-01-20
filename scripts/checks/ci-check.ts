@@ -56,4 +56,7 @@ async function runChecks(): Promise<void> {
 }
 
 // 执行检查
-await runChecks(); 
+runChecks().catch((e) => {
+  logger.error(e?.message || String(e));
+  process.exitCode = 1;
+});

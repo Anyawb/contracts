@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import { BaseServiceConfig } from "../BaseServiceConfig.sol";
 import { RewardTypes } from "../RewardTypes.sol";
 import { ActionKeys } from "../../constants/ActionKeys.sol";
-import { VaultTypes } from "../../Vault/VaultTypes.sol";
+import { SystemEvents } from "../../Vault/SystemEvents.sol";
 
 /// @title GovernanceAccessConfig - 治理访问配置
 /// @notice 管理治理访问服务的配置和价格
@@ -91,7 +91,7 @@ contract GovernanceAccessConfig is BaseServiceConfig {
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,

@@ -3,14 +3,17 @@ pragma solidity ^0.8.20;
 
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
 
+interface IPositionViewPush {
+    function pushUserPositionUpdate(address user, address asset, uint256 collateral, uint256 debt) external;
+}
+
 /// @title MockCollateralManager
 /// @notice 抵押物管理器的Mock实现，用于测试
 contract MockCollateralManager is ICollateralManager {
     // 用户抵押物映射
     mapping(address => mapping(address => uint256)) private _userCollateral;
     mapping(address => uint256) private _totalByAsset;
-    mapping(address => uint256) private _userTotalValue;
-    uint256 private _totalValue;
+    mapping(address => address[]) private _userAssets;
     
     // 测试控制标志
     bool public shouldFail;
@@ -27,8 +30,7 @@ contract MockCollateralManager is ICollateralManager {
         if (shouldFail) revert("MockCollateralManager: deposit failed");
         _userCollateral[user][asset] += amount;
         _totalByAsset[asset] += amount;
-        _userTotalValue[user] += amount;
-        _totalValue += amount;
+        _addAsset(user, asset);
         emit CollateralDeposited(user, asset, amount);
     }
     
@@ -41,9 +43,31 @@ contract MockCollateralManager is ICollateralManager {
         require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
         _userCollateral[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
-        _userTotalValue[user] = _userTotalValue[user] > amount ? _userTotalValue[user] - amount : 0;
-        _totalValue = _totalValue > amount ? _totalValue - amount : 0;
         emit CollateralWithdrawn(user, asset, amount);
+    }
+
+    function withdrawCollateralTo(address user, address asset, uint256 amount, address receiver) external override {
+        receiver; // mock: ignore receiver (no real ERC20 transfer)
+        if (shouldFail) revert("MockCollateralManager: withdraw failed");
+        require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
+        _userCollateral[user][asset] -= amount;
+        _totalByAsset[asset] -= amount;
+        emit CollateralWithdrawn(user, asset, amount);
+    }
+
+    /// @notice 清算扣押（方案A接口）
+    /// @dev Mock 只做账本扣减与事件记录，不做真实 ERC20 转账
+    function seizeCollateralForLiquidation(
+        address targetUser,
+        address collateralAsset,
+        uint256 collateralAmount,
+        address liquidator
+    ) external override {
+        if (shouldFail) revert("MockCollateralManager: seize failed");
+        require(_userCollateral[targetUser][collateralAsset] >= collateralAmount, "Insufficient collateral");
+        _userCollateral[targetUser][collateralAsset] -= collateralAmount;
+        _totalByAsset[collateralAsset] -= collateralAmount;
+        emit CollateralSeized(liquidator, targetUser, collateralAsset, collateralAmount, block.timestamp);
     }
     
     /// @notice 获取用户抵押物数量
@@ -51,14 +75,8 @@ contract MockCollateralManager is ICollateralManager {
     /// @param asset 资产地址
     /// @return 抵押物数量
     function getCollateral(address user, address asset) external view override returns (uint256) {
+        if (shouldFail) revert("MockCollateralManager: getCollateral failed");
         return _userCollateral[user][asset];
-    }
-    
-    /// @notice 获取用户总抵押物价值
-    /// @param user 用户地址
-    /// @return 总抵押物价值
-    function getUserTotalCollateralValue(address user) external view override returns (uint256) {
-        return _userTotalValue[user];
     }
     
     /// @notice 获取资产总抵押物数量
@@ -68,31 +86,16 @@ contract MockCollateralManager is ICollateralManager {
         return _totalByAsset[asset];
     }
     
-    /// @notice 获取总抵押物价值
-    /// @return 总抵押物价值
-    function getTotalCollateralValue() external view override returns (uint256) {
-        return _totalValue;
+    /// @notice 测试辅助：直接设置资产总抵押
+    function setTotalCollateralByAsset(address asset, uint256 amount) external {
+        _totalByAsset[asset] = amount;
     }
     
     /// @notice 获取用户抵押物资产列表
     /// @param _user 用户地址
     /// @return 资产地址数组
-    function getUserCollateralAssets(address _user) external pure override returns (address[] memory) {
-        // 触发读取以消除未使用参数告警
-        _user;
-        // 简化实现，返回空数组
-        return new address[](0);
-    }
-    
-    /// @notice 获取资产价值
-    /// @param _asset 资产地址
-    /// @param amount 数量
-    /// @return 价值
-    function getAssetValue(address _asset, uint256 amount) external pure override returns (uint256) {
-        // 触发读取以消除未使用参数告警
-        _asset;
-        // Mock实现：1:1比例
-        return amount;
+    function getUserCollateralAssets(address _user) external view override returns (address[] memory) {
+        return _userAssets[_user];
     }
     
     /// @notice 获取用户抵押物数量（兼容性方法）
@@ -130,8 +133,6 @@ contract MockCollateralManager is ICollateralManager {
         if (seizedAmount > 0) {
             _userCollateral[user][asset] -= seizedAmount;
             _totalByAsset[asset] -= seizedAmount;
-            _userTotalValue[user] = _userTotalValue[user] > seizedAmount ? _userTotalValue[user] - seizedAmount : 0;
-            _totalValue = _totalValue > seizedAmount ? _totalValue - seizedAmount : 0;
             
             // 发出扣押事件
             emit CollateralSeized(liquidator, user, asset, seizedAmount, block.timestamp);
@@ -148,6 +149,23 @@ contract MockCollateralManager is ICollateralManager {
         return _userCollateral[user][asset];
     }
 
+    /// @notice 测试辅助：直接设置用户抵押
+    function setUserCollateral(address user, address asset, uint256 amount) external {
+        _userCollateral[user][asset] = amount;
+        _totalByAsset[asset] = amount;
+        _addAsset(user, asset);
+    }
+
+    function _addAsset(address user, address asset) private {
+        address[] storage assets = _userAssets[user];
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i] == asset) {
+                return;
+            }
+        }
+        assets.push(asset);
+    }
+
     // 事件
     event CollateralSeized(
         address indexed liquidator,
@@ -161,5 +179,10 @@ contract MockCollateralManager is ICollateralManager {
     /// @param fail 是否失败
     function setShouldFail(bool fail) external {
         shouldFail = fail;
+    }
+
+    /// @notice 测试辅助：以本合约身份调用 PositionView 推送缓存
+    function pushToPositionView(address positionView, address user, address asset, uint256 collateral, uint256 debt) external {
+        IPositionViewPush(positionView).pushUserPositionUpdate(user, asset, collateral, debt);
     }
 }

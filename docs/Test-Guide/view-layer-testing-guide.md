@@ -470,7 +470,7 @@ open coverage/index.html
 ## 📚 相关文档
 
 - [架构指南](../Architecture-Guide.md) - 双架构设计说明
-- [VaultView 测试指南](./vaultview-testing-guide.md) - VaultView 测试说明
+- [VaultRouter 测试指南](./vaultview-testing-guide.md) - VaultRouter 测试说明
 - [智能合约标准](../SmartContractStandard.md) - 代码规范
 
 ## 🎯 总结

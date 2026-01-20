@@ -1,205 +1,175 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ILendingEngineBasic 多资产债务管理基础接口
-/// @notice 提供多资产债务记录、查询和管理的统一入口
-/// @dev 支持多种结算币的债务管理，每种资产独立记账
+/**
+ * @title ILendingEngineBasic
+ * @notice Debt-ledger SSOT interface (KEY_LE): multi-asset debt writes and debt/valuation reads.
+ * @dev Reverts if:
+ *      - caller is not authorized (implementation-defined; typically onlyVaultCore / role-gated)
+ *
+ * Security:
+ * - Role-gated / onlyVaultCore in the implementation
+ *
+ * Architecture:
+ * - ORDER_ENGINE handles order lifecycle side-effects (e.g. LoanNFT minting, DataPush events).
+ * - KEY_LE tracks debt balances and valuation, called via VaultCore.borrowFor/repayFor and liquidation paths.
+ */
 interface ILendingEngineBasic {
     /**
-     * @notice 记录用户指定资产的借款
-     * @param user 用户地址
-     * @param asset 债务资产地址
-     * @param amount 借款金额
-     * @param collateralAdded 本次伴随的新增抵押物价值（占位参数）
-     * @param termDays 借款期限（天，预留参数）
+     * @notice Record a borrow for a user on a given debt asset.
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined; typically onlyVaultCore/role-gated)
+     *
+     * Security:
+     * - Role-gated / onlyVaultCore in implementation.
+     *
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @param amount Borrow amount (token decimals of `asset`).
+     * @param collateralAdded Placeholder: accompanying collateral delta (implementation-defined).
+     * @param termDays Placeholder: term length in days (implementation-defined).
      */
     function borrow(address user, address asset, uint256 amount, uint256 collateralAdded, uint16 termDays) external;
 
     /**
-     * @notice 记录用户指定资产的还款
-     * @param user 用户地址
-     * @param asset 债务资产地址
-     * @param amount 还款金额
+     * @notice Record a repayment for a user on a given debt asset.
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined; typically onlyVaultCore/role-gated)
+     *
+     * Security:
+     * - Role-gated / onlyVaultCore in implementation.
+     *
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @param amount Repay amount (token decimals of `asset`).
      */
     function repay(address user, address asset, uint256 amount) external;
 
     /**
-     * @notice 查询用户指定资产的当前债务
-     * @param user 用户地址
-     * @param asset 债务资产地址
-     * @return debt 当前债务金额
+     * @notice Get current debt balance for a user on an asset.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address.
+     * @param asset Debt asset address.
+     * @return debt Debt amount (token decimals of `asset`).
      */
     function getDebt(address user, address asset) external view returns (uint256 debt);
 
     /**
-     * @notice 查询指定资产的总债务
-     * @param asset 债务资产地址
-     * @return totalDebt 总债务金额
+     * @notice Get total debt for a given asset across the system.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param asset Debt asset address.
+     * @return totalDebt Total debt amount (token decimals of `asset`).
      */
     function getTotalDebtByAsset(address asset) external view returns (uint256 totalDebt);
 
     /**
-     * @notice 查询用户总债务价值（以结算币计价）
-     * @param user 用户地址
-     * @return totalValue 用户总债务价值
+     * @notice Get user's total debt value (denominated in settlement token).
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address.
+     * @return totalValue Debt value in settlement token decimals (implementation-defined).
      */
     function getUserTotalDebtValue(address user) external view returns (uint256 totalValue);
 
     /**
-     * @notice 查询系统总债务价值（以结算币计价）
-     * @return totalValue 系统总债务价值
+     * @notice Get system total debt value (denominated in settlement token).
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @return totalValue Debt value in settlement token decimals (implementation-defined).
      */
     function getTotalDebtValue() external view returns (uint256 totalValue);
 
     /**
-     * @notice 查询用户所有债务资产列表
-     * @param user 用户地址
-     * @return assets 用户债务的资产地址数组
+     * @notice Get list of debt assets for a user.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address.
+     * @return assets Array of debt asset addresses.
      */
     function getUserDebtAssets(address user) external view returns (address[] memory assets);
 
     /**
-     * @notice 强制减少用户指定资产的债务（清算场景）
-     * @param user 用户地址
-     * @param asset 债务资产地址
-     * @param amount 减少的债务金额
+     * @notice Force reduce user debt (liquidation path).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined; typically ACTION_LIQUIDATE)
+     *
+     * Security:
+     * - Role-gated in implementation
+     *
+     * @param user User address.
+     * @param asset Debt asset address.
+     * @param amount Debt amount to reduce (token decimals of `asset`).
      */
     function forceReduceDebt(address user, address asset, uint256 amount) external;
 
     /**
-     * @notice 计算用户借款一定数量资产时应该产生的利息
-     * @param user 用户地址
-     * @param asset 债务资产地址
-     * @param amount 借款金额
-     * @return interest 预估利息金额
+     * @notice Calculate expected interest for a hypothetical borrow.
+     * @dev Reverts if:
+     *      - none (implementation-defined)
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address.
+     * @param asset Debt asset address.
+     * @param amount Borrow amount (token decimals of `asset`).
+     * @return interest Estimated interest amount (token decimals; implementation-defined).
      */
-    function calculateExpectedInterest(address user, address asset, uint256 amount) external view returns (uint256 interest);
+    function calculateExpectedInterest(address user, address asset, uint256 amount)
+        external
+        view
+        returns (uint256 interest);
 
-    /* ============ Liquidation Related Functions ============ */
+    /*━━━━━━━━━━━━━━━ LIQUIDATION RELATED FUNCTIONS ━━━━━━━━━━━━━━━*/
     
     /**
-     * @notice 获取用户可清算的债务数量
-     * @param user 用户地址
-     * @param asset 债务资产地址
-     * @return reducibleAmount 可清算数量
+     * @notice Get reducible (liquidatable) debt amount for a user on an asset.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address.
+     * @param asset Debt asset address.
+     * @return reducibleAmount Reducible debt amount (token decimals of `asset`).
      */
     function getReducibleDebtAmount(address user, address asset) external view returns (uint256 reducibleAmount);
 
     /**
-     * @notice 计算债务价值（以结算币计价）
-     * @param user 用户地址
-     * @param asset 债务资产地址
-     * @return value 债务价值
+     * @notice Calculate debt value for a user on an asset (denominated in settlement token).
+     * @dev Reverts if:
+     *      - none (implementation-defined)
+     *
+     * Security:
+     * - View only
+     *
+     * @param user User address.
+     * @param asset Debt asset address.
+     * @return value Debt value in settlement token decimals (implementation-defined).
      */
     function calculateDebtValue(address user, address asset) external view returns (uint256 value);
 
-    /**
-     * @notice 计算最优清算组合
-     * @param user 用户地址
-     * @param maxDebtReduction 最大债务减少量
-     * @param maxCollateralReduction 最大抵押物减少量
-     * @return debtReduction 最优债务减少量
-     * @return collateralReduction 最优抵押物减少量
-     * @return healthFactor 健康因子
-     */
-    function calculateOptimalLiquidation(
-        address user,
-        uint256 maxDebtReduction,
-        uint256 maxCollateralReduction
-    ) external view returns (
-        uint256 debtReduction,
-        uint256 collateralReduction,
-        uint256 healthFactor
-    );
-
-    /**
-     * @notice 预览清算状态
-     * @param user 用户地址
-     * @param debtReduction 债务减少量
-     * @param collateralReduction 抵押物减少量
-     * @return newHealthFactor 新健康因子
-     * @return newRiskScore 新风险评分
-     * @return newRiskLevel 新风险等级
-     */
-    function previewLiquidationState(
-        address user,
-        uint256 debtReduction,
-        uint256 collateralReduction
-    ) external view returns (
-        uint256 newHealthFactor,
-        uint256 newRiskScore,
-        uint256 newRiskLevel
-    );
-
-    /**
-     * @notice 获取用户健康因子
-     * @param user 用户地址
-     * @return healthFactor 健康因子
-     */
-    function getUserHealthFactor(address user) external view returns (uint256 healthFactor);
-
-    /**
-     * @notice 获取用户风险评分
-     * @param user 用户地址
-     * @return riskScore 风险评分
-     */
-    function getUserRiskScore(address user) external view returns (uint256 riskScore);
-
-    /**
-     * @notice 获取高风险用户列表
-     * @param riskThreshold 风险阈值
-     * @param limit 限制数量
-     * @return users 用户地址数组
-     * @return riskScores 风险评分数组
-     */
-    function getHighRiskUsers(
-        uint256 riskThreshold,
-        uint256 limit
-    ) external view returns (
-        address[] memory users,
-        uint256[] memory riskScores
-    );
-
-    /**
-     * @notice 获取可清算用户列表
-     * @param healthFactorThreshold 健康因子阈值
-     * @param limit 限制数量
-     * @return users 用户地址数组
-     * @return healthFactors 健康因子数组
-     */
-    function getLiquidatableUsers(
-        uint256 healthFactorThreshold,
-        uint256 limit
-    ) external view returns (
-        address[] memory users,
-        uint256[] memory healthFactors
-    );
-
-    /**
-     * @notice 计算最优清算路径
-     * @param user 用户地址
-     * @param targetHealthFactor 目标健康因子
-     * @return liquidationSteps 清算步骤数组
-     * @return totalDebtReduction 总债务减少量
-     * @return totalCollateralReduction 总抵押物减少量
-     */
-    function calculateOptimalLiquidationPath(
-        address user,
-        uint256 targetHealthFactor
-    ) external view returns (
-        address[] memory liquidationSteps,
-        uint256 totalDebtReduction,
-        uint256 totalCollateralReduction
-    );
-
-    /**
-     * @notice 优化清算策略
-     * @param user 用户地址
-     * @param targetHealthFactor 目标健康因子
-     * @return strategy 优化策略
-     */
-    function optimizeLiquidationStrategy(
-        address user,
-        uint256 targetHealthFactor
-    ) external view returns (bytes memory strategy);
 } 

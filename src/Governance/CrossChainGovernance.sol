@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 error CrossChainGovernance__InvalidProposal();
 error CrossChainGovernance__ProposalNotActive();
@@ -361,7 +361,11 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @notice 批量更新投票权重
     /// @param users 用户地址数组
     /// @param weights 权重数组
-    function batchUpdateVotingPower(address[] calldata users, uint256[] calldata weights) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
+    function batchUpdateVotingPower(address[] calldata users, uint256[] calldata weights)
+        external
+        onlyRole(GOVERNANCE_ROLE)
+        nonReentrant
+    {
         if (users.length != weights.length) {
             revert CrossChainGovernance__InvalidProposal();
         }
@@ -495,5 +499,11 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @notice 升级授权函数
     /// @dev onlyRole modifier 已经足够验证权限
     /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
+    function _authorizeUpgrade(address newImplementation) internal view override onlyRole(DEFAULT_ADMIN_ROLE) {
+        // 防御式校验：避免升级到 EOA/零地址
+        require(newImplementation.code.length > 0, "Invalid implementation");
+    }
+
+    // ============ Storage Gap ============
+    uint256[50] private __gap;
 } 

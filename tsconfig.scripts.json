@@ -13,6 +13,10 @@
     "skipLibCheck": true,
     "noImplicitAny": false,
     "downlevelIteration": true,
+    "typeRoots": [
+      "./node_modules/@types",
+      "./node_modules"
+    ],
     "types": [
       "node",
       "chai",
@@ -23,6 +27,6 @@
       "@nomicfoundation/hardhat-ethers"
     ]
   },
-  "include": ["scripts/**/*", "types/**/*"],
+  "include": ["scripts/**/*", "frontend-config/**/*"],
   "exclude": ["node_modules", "test/**/*", "hardhat.config.ts", "scripts/test-utils/**/*"]
 } 

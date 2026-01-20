@@ -2,13 +2,18 @@
 pragma solidity ^0.8.20;
 
 import { RewardPoints } from "../Token/RewardPoints.sol";
+/// @dev 最小接口：通过 RMCore 代理销毁积分，保持 MINTER_ROLE 仅授予 RMCore
+interface IRewardManagerCoreBurn {
+    function burnPointsFor(address user, uint256 points) external;
+}
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { RewardTypes } from "./RewardTypes.sol";
 import { IServiceConfig } from "./interfaces/IServiceConfig.sol";
 import { Registry } from "../registry/Registry.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { VaultTypes } from "../Vault/VaultTypes.sol";
+import { SystemEvents } from "../Vault/SystemEvents.sol";
+import { RewardEvents } from "./RewardEvents.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 import {
     ZeroAddress,
@@ -19,12 +24,12 @@ import {
 } from "../errors/StandardErrors.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 /// @title RewardCore - 积分消费核心业务逻辑
 /// @notice 处理积分消费、升级和批量操作的核心逻辑
 /// @dev 遵循 docs/SmartContractStandard.md 注释规范
-/// @dev 使用 ActionKeys、ModuleKeys、VaultTypes、StandardErrors 进行标准化管理
+/// @dev 使用 ActionKeys、ModuleKeys、SystemEvents、StandardErrors 进行标准化管理
 /// @dev 通过 Registry 进行模块地址管理，确保架构一致性
 contract RewardCore is 
     Initializable, 
@@ -33,6 +38,10 @@ contract RewardCore is
     RewardModuleBase,
     RewardTypes
 {
+    /// @notice 入口收紧引导错误（用于提示外部调用者应通过 RewardConsumption 调用）
+    error RewardCore__UseRewardConsumptionEntry();
+    /// @notice DEPRECATED：检测到直接调用核心入口，将被拒绝
+    event DeprecatedDirectEntryAttempt(address indexed caller, uint256 timestamp);
     
     /// @notice Registry 合约地址（私有存储）
     address private _registryAddr;
@@ -83,7 +92,7 @@ contract RewardCore is
         _isTestnetMode = true;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -104,8 +113,16 @@ contract RewardCore is
     /// @notice 消费积分购买服务
     /// @param serviceType 服务类型
     /// @param level 服务等级
-    function consumePointsForService(ServiceType serviceType, ServiceLevel level) external nonReentrant onlyValidRegistry {
-        _consumePointsForService(msg.sender, serviceType, level);
+    function consumePointsForService(ServiceType serviceType, ServiceLevel level) external onlyValidRegistry {
+        serviceType; level; // deprecated entry: keep signature stable, silence unused warnings
+        // 收紧入口：仅允许 RewardConsumption 调用（对外统一入口）
+        address consumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
+        if (msg.sender != consumption) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            revert RewardCore__UseRewardConsumptionEntry();
+        }
+        // 兼容旧签名：由 RewardConsumption 使用新函数携带 user；此处不再支持“隐式 user=msg.sender”语义
+        revert RewardCore__UseRewardConsumptionEntry();
     }
 
     /// @notice 批量消费积分
@@ -117,55 +134,92 @@ contract RewardCore is
         ServiceType[] calldata serviceTypes,
         ServiceLevel[] calldata levels
     ) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_BATCH_WITHDRAW, msg.sender);
+        address consumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
+        if (msg.sender != consumption) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            revert RewardCore__UseRewardConsumptionEntry();
+        }
+        // 仅 RewardConsumption 可触发批量；权限校验由 RewardConsumption 负责
         _batchConsumePoints(users, serviceTypes, levels);
     }
 
     /// @notice 升级服务等级
     /// @param serviceType 服务类型
     /// @param newLevel 新等级
-    function upgradeServiceLevel(ServiceType serviceType, ServiceLevel newLevel) external nonReentrant onlyValidRegistry {
-        _upgradeServiceLevel(msg.sender, serviceType, newLevel);
+    function upgradeServiceLevel(ServiceType serviceType, ServiceLevel newLevel) external onlyValidRegistry {
+        serviceType; newLevel; // deprecated entry: keep signature stable, silence unused warnings
+        address consumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
+        if (msg.sender != consumption) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            revert RewardCore__UseRewardConsumptionEntry();
+        }
+        revert RewardCore__UseRewardConsumptionEntry();
     }
 
-    // ========== 查询接口 ==========
-
-    /// @notice 查询用户特权状态
-    /// @param user 用户地址
-    /// @return privilege 用户特权状态
-    function getUserPrivilege(address user) external view returns (UserPrivilege memory privilege) {
-        return _userPrivileges[user];
+    /// @notice 消费积分购买服务（仅 RewardConsumption 调用，显式指定 user）
+    function consumePointsForServiceFor(address user, ServiceType serviceType, ServiceLevel level)
+        external
+        onlyValidRegistry
+        nonReentrant
+        returns (uint256 pointsBurned, uint256 privilegePacked, uint256 expirationTime)
+    {
+        address consumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
+        if (msg.sender != consumption) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            revert RewardCore__UseRewardConsumptionEntry();
+        }
+        ServiceConfig memory config = _getServiceConfig(serviceType, level);
+        pointsBurned = config.price;
+        expirationTime = block.timestamp + config.duration;
+        _consumePointsForService(user, serviceType, level);
+        privilegePacked = _packUserPrivilege(user);
     }
 
-    /// @notice 查询用户消费记录
-    /// @param user 用户地址
-    /// @return records 消费记录数组
-    function getUserConsumptions(address user) external view returns (ConsumptionRecord[] memory records) {
-        return _userConsumptions[user];
+    /// @notice 升级服务等级（仅 RewardConsumption 调用，显式指定 user）
+    function upgradeServiceLevelFor(address user, ServiceType serviceType, ServiceLevel newLevel)
+        external
+        onlyValidRegistry
+        nonReentrant
+        returns (uint256 pointsBurned, uint256 privilegePacked, uint256 expirationTime)
+    {
+        address consumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
+        if (msg.sender != consumption) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            revert RewardCore__UseRewardConsumptionEntry();
+        }
+        ServiceConfig memory config = _getServiceConfig(serviceType, newLevel);
+        pointsBurned = (config.price * _upgradeMultiplier) / 10000;
+        expirationTime = block.timestamp + config.duration;
+        _upgradeServiceLevel(user, serviceType, newLevel);
+        privilegePacked = _packUserPrivilege(user);
     }
 
-    /// @notice 查询服务使用统计
-    /// @param serviceType 服务类型
-    /// @return usage 使用次数
-    function getServiceUsage(ServiceType serviceType) external view returns (uint256 usage) {
-        return _serviceUsage[serviceType];
-    }
-
-    /// @notice 查询用户最后消费时间
-    /// @param user 用户地址
-    /// @param serviceType 服务类型
-    /// @return timestamp 最后消费时间
-    function getUserLastConsumption(address user, ServiceType serviceType) external view returns (uint256 timestamp) {
-        return _userLastConsumption[user][serviceType];
-    }
-
-    /// @notice 查询服务配置
-    /// @param serviceType 服务类型
-    /// @param level 服务等级
-    /// @return config 服务配置
-    function getServiceConfig(ServiceType serviceType, ServiceLevel level) external view returns (ServiceConfig memory config) {
-        IServiceConfig configModule = _getServiceConfigModule(serviceType);
-        return configModule.getConfig(level);
+    /// @notice 批量消费（仅 RewardConsumption 调用）；返回每个用户的扣减积分与最新特权 packed
+    function batchConsumePointsFor(
+        address[] calldata users,
+        ServiceType[] calldata serviceTypes,
+        ServiceLevel[] calldata levels
+    )
+        external
+        onlyValidRegistry
+        returns (uint256[] memory pointsBurned, uint256[] memory privilegePacked, uint256[] memory expirationTimes)
+    {
+        address consumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
+        if (msg.sender != consumption) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            revert RewardCore__UseRewardConsumptionEntry();
+        }
+        if (users.length != serviceTypes.length || users.length != levels.length) revert InvalidCaller();
+        pointsBurned = new uint256[](users.length);
+        privilegePacked = new uint256[](users.length);
+        expirationTimes = new uint256[](users.length);
+        for (uint256 i = 0; i < users.length; i++) {
+            ServiceConfig memory config = _getServiceConfig(serviceTypes[i], levels[i]);
+            pointsBurned[i] = config.price;
+            expirationTimes[i] = block.timestamp + config.duration;
+            _consumePointsForService(users[i], serviceTypes[i], levels[i]);
+            privilegePacked[i] = _packUserPrivilege(users[i]);
+        }
     }
 
     /// @notice 获取服务冷却期
@@ -188,18 +242,19 @@ contract RewardCore is
     /// @param newMultiplier 新倍数 (BPS)
     function setUpgradeMultiplier(uint256 newMultiplier) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        uint256 oldMultiplier = _upgradeMultiplier;
         _upgradeMultiplier = newMultiplier;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
             block.timestamp
         );
         
-        // 记录参数更新事件
-        emit VaultTypes.VaultParamsUpdated(newMultiplier, 0, block.timestamp);
+        // Reward-domain parameter update event (avoid using Vault-domain events).
+        emit RewardEvents.UpgradeMultiplierUpdated(oldMultiplier, newMultiplier, block.timestamp);
     }
 
     /// @notice 设置测试网模式
@@ -209,7 +264,7 @@ contract RewardCore is
         _isTestnetMode = newIsTestnet;
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
@@ -226,8 +281,10 @@ contract RewardCore is
         
         ServiceConfig memory config = _getServiceConfig(serviceType, level);
         _validateUserBalance(user, config.price);
-        
-        _processConsumptionRecord(user, serviceType, level, config.price);
+
+        // expirationTime 必须严格以配置模块的 duration 为准（与 RewardConsumption→RewardView 推送对齐）
+        uint256 expirationTime = block.timestamp + config.duration;
+        _processConsumptionRecord(user, serviceType, level, config.price, expirationTime);
     }
     
     /// @dev 升级服务等级 - 核心逻辑
@@ -243,7 +300,9 @@ contract RewardCore is
         _validateUpgradeCost(upgradeCost);
         
         _validateUserBalance(user, upgradeCost);
-        _processUpgradeRecord(user, serviceType, newLevel, upgradeCost);
+        // expirationTime 必须严格以配置模块的 duration 为准（与 RewardConsumption→RewardView 推送对齐）
+        uint256 expirationTime = block.timestamp + config.duration;
+        _processUpgradeRecord(user, serviceType, newLevel, upgradeCost, expirationTime);
     }
     
     /// @dev 批量消费积分 - 核心逻辑
@@ -338,12 +397,15 @@ contract RewardCore is
     // ========== 处理逻辑 ==========
 
     /// @dev 处理消费记录
-    function _processConsumptionRecord(address user, ServiceType serviceType, ServiceLevel level, uint256 points) internal {
-        // 获取积分代币合约
-        RewardPoints rewardToken = RewardPoints(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_POINTS));
-        
-        // 扣除积分
-        rewardToken.burnPoints(user, points);
+    function _processConsumptionRecord(
+        address user,
+        ServiceType serviceType,
+        ServiceLevel level,
+        uint256 points,
+        uint256 expirationTime
+    ) internal {
+        // 扣减积分通过 RMCore 代理，保持 MINTER_ROLE 仅授予 RMCore
+        _getRewardManagerCore().burnPointsFor(user, points);
         
         // 更新统计
         _totalConsumedPoints += points;
@@ -357,7 +419,7 @@ contract RewardCore is
             serviceType: serviceType,
             serviceLevel: level,
             isActive: true,
-            expirationTime: block.timestamp + 30 days
+            expirationTime: expirationTime
         });
         
         _userConsumptions[user].push(record);
@@ -366,25 +428,26 @@ contract RewardCore is
         _updateUserPrivilege(user, serviceType, level);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_CONSUME_POINTS,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_CONSUME_POINTS),
             user,
             block.timestamp
         );
-        
-        // 记录奖励消费事件
-        emit VaultTypes.RewardEarned(user, points, "Service Consumption", block.timestamp);
-        _tryPushPointsBurned(user, points, "Service Consumption");
+
+        // DEPRECATED：消费侧事件以 RewardView.DataPushed(DATA_TYPE_REWARD_BURNED/...) 为准，避免重复与语义混淆（RewardEarned 名称不适用于消费）。
     }
     
     /// @dev 处理升级记录
-    function _processUpgradeRecord(address user, ServiceType serviceType, ServiceLevel newLevel, uint256 points) internal {
-        // 获取积分代币合约
-        RewardPoints rewardToken = RewardPoints(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_POINTS));
-        
-        // 扣除积分
-        rewardToken.burnPoints(user, points);
+    function _processUpgradeRecord(
+        address user,
+        ServiceType serviceType,
+        ServiceLevel newLevel,
+        uint256 points,
+        uint256 expirationTime
+    ) internal {
+        // 扣减积分通过 RMCore 代理，保持 MINTER_ROLE 仅授予 RMCore
+        _getRewardManagerCore().burnPointsFor(user, points);
         
         // 更新统计
         _totalConsumedPoints += points;
@@ -396,7 +459,7 @@ contract RewardCore is
             serviceType: serviceType,
             serviceLevel: newLevel,
             isActive: true,
-            expirationTime: block.timestamp + 30 days
+            expirationTime: expirationTime
         });
         
         _userConsumptions[user].push(record);
@@ -405,16 +468,14 @@ contract RewardCore is
         _updateUserPrivilege(user, serviceType, newLevel);
         
         // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
+        emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_SERVICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_SERVICE),
             user,
             block.timestamp
         );
-        
-        // 记录奖励消费事件
-        emit VaultTypes.RewardEarned(user, points, "Service Upgrade", block.timestamp);
-        _tryPushPointsBurned(user, points, "Service Upgrade");
+
+        // DEPRECATED：消费侧事件以 RewardView.DataPushed 为准，避免重复与语义混淆。
     }
     
     /// @dev 处理批量消费
@@ -430,19 +491,12 @@ contract RewardCore is
         for (uint256 i = 0; i < users.length; i++) {
             ServiceConfig memory config = _getServiceConfig(serviceTypes[i], levels[i]);
             totalPoints += config.price;
-            
-            _processConsumptionRecord(users[i], serviceTypes[i], levels[i], config.price);
+
+            uint256 expirationTime = block.timestamp + config.duration;
+            _processConsumptionRecord(users[i], serviceTypes[i], levels[i], config.price, expirationTime);
         }
         
         _totalBatchConsumptions++;
-        
-        // 记录标准化动作事件
-        emit VaultTypes.ActionExecuted(
-            ActionKeys.ACTION_CONSUME_POINTS,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_CONSUME_POINTS),
-            msg.sender,
-            block.timestamp
-        );
         
         return totalPoints;
     }
@@ -479,7 +533,21 @@ contract RewardCore is
         packed |= (privilege.featureLevel & 0xFF) << 24;
         packed |= (privilege.governanceLevel & 0xFF) << 32;
         packed |= (privilege.testnetLevel & 0xFF) << 40;
-        _tryPushUserPrivilege(user, packed);
+        // push 由 RewardConsumption 负责（RewardView.onlyWriter 白名单）
+    }
+
+    function _packUserPrivilege(address user) internal view returns (uint256 packed) {
+        UserPrivilege storage privilege = _userPrivileges[user];
+        if (privilege.hasAdvancedAnalytics) packed |= 1 << 0;
+        if (privilege.hasPriorityService)   packed |= 1 << 1;
+        if (privilege.hasFeatureUnlock)     packed |= 1 << 2;
+        if (privilege.hasGovernanceAccess)  packed |= 1 << 3;
+        if (privilege.hasTestnetFeatures)   packed |= 1 << 4;
+        packed |= (privilege.analyticsLevel & 0xFF) << 8;
+        packed |= (privilege.priorityLevel & 0xFF) << 16;
+        packed |= (privilege.featureLevel & 0xFF) << 24;
+        packed |= (privilege.governanceLevel & 0xFF) << 32;
+        packed |= (privilege.testnetLevel & 0xFF) << 40;
     }
 
     // RewardView 推送工具由基类提供
@@ -487,12 +555,22 @@ contract RewardCore is
     /// @notice 升级授权函数
     /// @dev onlyRole modifier 已经足够验证权限
     /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
-    function _authorizeUpgrade(address) internal view override {
+    function _authorizeUpgrade(address newImplementation) internal view override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
+        if (newImplementation == address(0)) revert ZeroAddress();
     }
 
     // ========== 基类抽象实现 ==========
     function _getRegistryAddr() internal view override returns (address) {
         return _registryAddr;
     }
+
+    /// @dev 获取 RewardManagerCore（用于代理 burn，保持 MINTER_ROLE 仅在 RMCore）
+    function _getRewardManagerCore() internal view returns (IRewardManagerCoreBurn) {
+        address rmCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_MANAGER_CORE);
+        return IRewardManagerCoreBurn(rmCore);
+    }
+
+    // ============ UUPS storage gap ============
+    uint256[50] private __gap;
 } 

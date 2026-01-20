@@ -10,11 +10,13 @@ import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
+import { ViewVersioned } from "../ViewVersioned.sol";
+import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 
 /// @title AccessControlView
 /// @notice 权限视图缓存模块：缓存用户权限位和权限级别，供前端 0 gas 查询
 /// @dev 权限数据由链上 AccessControlManager 推送；本模块仅做缓存写入与只读查询
-contract AccessControlView is Initializable, UUPSUpgradeable {
+contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     // =========================  Events  =========================
 
     /// @notice 单个权限位更新事件
@@ -27,6 +29,7 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
 
     error AccessControlView__ZeroAddress();
     error AccessControlView__Unauthorized();
+    error AccessControlView__OnlyACM();
 
     // =========================  Storage  =========================
 
@@ -66,20 +69,27 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
     // =========================  Modifiers  =========================
 
     modifier onlyValidRegistry() {
-        if (_registryAddr == address(0)) revert AccessControlView__ZeroAddress();
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
     /// @dev 仅允许 AccessControlManager 模块调用
     modifier onlyACM() {
-        require(msg.sender == _getACM(), "AccessControlView: caller is not ACM");
+        if (msg.sender != _getACM()) revert AccessControlView__OnlyACM();
         _;
     }
 
     // =========================  Initialiser  =========================
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     function initialize(address initialRegistryAddr) external initializer {
-        if (initialRegistryAddr == address(0)) revert AccessControlView__ZeroAddress();
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -106,6 +116,11 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
     }
 
     // =========================  Read APIs  =========================
+
+    /// @notice 当前 AccessControlManager 合约地址
+    function getACM() external view onlyValidRegistry returns (address) {
+        return _getACM();
+    }
 
     /// @notice 查询用户是否拥有某权限位
     function getUserPermission(address user, bytes32 actionKey) external view onlyValidRegistry onlyAuthorizedFor(user) returns (bool hasPermission, bool isValid) {
@@ -140,9 +155,22 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         // 仅 ADMIN 允许升级
         IAccessControlManager(_getACM()).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-        if (newImplementation == address(0)) revert AccessControlView__ZeroAddress();
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     /// @notice 兼容旧版 getter
     function registryAddr() external view returns(address){ return _registryAddr; }
+
+    // ============ Versioning (C+B baseline) ============
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    /// @notice Storage gap for future upgrades
+    uint256[50] private __gap;
 } 

@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ActionKeys
-/// @notice 系统标准化动作的 `bytes32` 哈希常量管理合约
-/// @dev 统一管理动作标识符，避免散落硬编码；新增常量需保持向后兼容，勿随意改动已有取值
-/// @dev 这些常量用于事件记录和权限验证，确保系统操作的一致性
-/// @dev 所有常量都通过keccak256哈希生成，确保唯一性和不可变性
-/// @dev 使用bytes32类型确保与权限系统的兼容性
-/// @custom:security-contact security@example.com
+/**
+ * @title ActionKeys
+ * @notice Centralized action key constants (`bytes32`, keccak256 hashes) for permissions and auditing.
+ * @dev Reverts if:
+ *      - N/A (constants-only library)
+ *
+ * Security:
+ * - Keys must remain stable once deployed; do not change existing values.
+ * - Prefer reusing these constants instead of duplicating keccak256 literals across modules.
+ *
+ * @custom:security-contact security@example.com
+ */
 library ActionKeys {
     // ============ 常量定义 ============
     /// @notice 动作Key总数常量
     /// @dev 避免硬编码，便于维护和扩展
-    uint256 internal constant ACTION_KEY_COUNT = 44;
+    uint256 internal constant ACTION_KEY_COUNT = 49;
 
     // ============ 基础业务动作 Key ============
     /// @notice 存入抵押物操作的标识符
@@ -54,6 +59,18 @@ library ActionKeys {
     /// @dev 用于事件记录和权限验证
     /// @dev 哈希值：keccak256("LIQUIDATE_GUARANTEE")
     bytes32 public constant ACTION_LIQUIDATE_GUARANTEE = keccak256("LIQUIDATE_GUARANTEE");
+
+    /// @notice 锁定“提前还款保证金记录”的标识符
+    /// @dev 用于 EarlyRepaymentGuaranteeManager.lockGuaranteeRecord 的审计与权限语义
+    /// @dev 哈希值：keccak256("LOCK_EARLY_REPAYMENT_GUARANTEE")
+    bytes32 public constant ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE =
+        keccak256("LOCK_EARLY_REPAYMENT_GUARANTEE");
+
+    /// @notice 结算“提前还款保证金（提前还款）”的标识符
+    /// @dev 用于 EarlyRepaymentGuaranteeManager.settleEarlyRepayment 的审计与权限语义
+    /// @dev 哈希值：keccak256("SETTLE_EARLY_REPAYMENT_GUARANTEE")
+    bytes32 public constant ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE =
+        keccak256("SETTLE_EARLY_REPAYMENT_GUARANTEE");
 
     // ============ 奖励相关动作 Key ============
     /// @notice 领取奖励操作的标识符
@@ -202,6 +219,11 @@ library ActionKeys {
     /// @dev 哈希值：keccak256("VIEW_CACHE_DATA")
     bytes32 public constant ACTION_VIEW_CACHE_DATA = keccak256("VIEW_CACHE_DATA");
     
+    /// @notice 推送缓存更新操作的标识符（专用于 View 推送入口）
+    /// @dev 用于权限验证，限制谁可以向 View 推送缓存数据
+    /// @dev 哈希值：keccak256("ACTION_VIEW_PUSH")
+    bytes32 public constant ACTION_VIEW_PUSH = keccak256("ACTION_VIEW_PUSH");
+    
     /// @notice 管理事件历史操作的标识符
     /// @dev 用于事件记录和权限验证
     /// @dev 哈希值：keccak256("MANAGE_EVENT_HISTORY")
@@ -249,6 +271,15 @@ library ActionKeys {
     /// @dev 哈希值：keccak256("QUERY_MANAGER")
     bytes32 public constant ACTION_QUERY_MANAGER = keccak256("QUERY_MANAGER");
 
+    // ============ 出借资金池（Reserve Flow）动作 Key ============
+    /// @notice 出借资金入池/预留（reserveForLending）的标识符
+    /// @dev 哈希值：keccak256("RESERVE_FOR_LENDING")
+    bytes32 public constant ACTION_RESERVE_FOR_LENDING = keccak256("RESERVE_FOR_LENDING");
+
+    /// @notice 出借资金撤回/取消预留（cancelReserve）的标识符
+    /// @dev 哈希值：keccak256("CANCEL_RESERVE")
+    bytes32 public constant ACTION_CANCEL_RESERVE = keccak256("CANCEL_RESERVE");
+
     /// @notice 检查是否为有效的动作Key
     /// @param key 待检查的动作Key
     /// @return 是否为有效动作Key
@@ -274,6 +305,8 @@ library ActionKeys {
         if (key == ACTION_LIQUIDATE) return "liquidate";
         if (key == ACTION_LIQUIDATE_PARTIAL) return "liquidatePartial";
         if (key == ACTION_LIQUIDATE_GUARANTEE) return "liquidateGuarantee";
+        if (key == ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE) return "lockEarlyRepaymentGuarantee";
+        if (key == ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE) return "settleEarlyRepaymentGuarantee";
         if (key == ACTION_CLAIM_REWARD) return "claimReward";
         if (key == ACTION_CONSUME_POINTS) return "consumePoints";
         if (key == ACTION_UPGRADE_SERVICE) return "upgradeService";
@@ -304,12 +337,15 @@ library ActionKeys {
         if (key == ACTION_VIEW_CACHE_DATA) return "viewCacheData";
         if (key == ACTION_VIEW_PRICE_DATA) return "viewPriceData";
         if (key == ACTION_VIEW_DEGRADATION_DATA) return "viewDegradationData";
+        if (key == ACTION_VIEW_PUSH) return "actionViewPush";
         if (key == ACTION_ADMIN) return "actionAdmin";
         if (key == ACTION_MODIFY_USER_DATA) return "actionModifyUserData";
         if (key == ACTION_SET_UPGRADE_ADMIN) return "setUpgradeAdmin";
         if (key == ACTION_EMERGENCY_SET_PARAMETER) return "emergencySetParameter";
         if (key == ACTION_VIEW_SYSTEM_STATUS) return "actionViewSystemStatus";
         if (key == ACTION_QUERY_MANAGER) return "queryManager";
+        if (key == ACTION_RESERVE_FOR_LENDING) return "reserveForLending";
+        if (key == ACTION_CANCEL_RESERVE) return "cancelReserve";
         return "";
     }
 
@@ -361,6 +397,11 @@ library ActionKeys {
         keys[41] = ACTION_VIEW_SYSTEM_STATUS;
         keys[42] = ACTION_QUERY_MANAGER;
         keys[43] = ACTION_ORDER_CREATE;
+        keys[44] = ACTION_VIEW_PUSH;
+        keys[45] = ACTION_RESERVE_FOR_LENDING;
+        keys[46] = ACTION_CANCEL_RESERVE;
+        keys[47] = ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE;
+        keys[48] = ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE;
         return keys;
     }
 } 

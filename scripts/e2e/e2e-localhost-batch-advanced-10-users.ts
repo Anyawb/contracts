@@ -278,7 +278,8 @@ export async function runAdvancedBatch(opts?: { sampleBorrowerIndex?: number }) 
   const positionViewAddr = await registry.getModuleOrRevert(key("POSITION_VIEW"));
   const userViewAddr = await registry.getModuleOrRevert(key("USER_VIEW"));
   const riskViewAddr = await registry.getModuleOrRevert(key("RISK_VIEW"));
-  const statisticsViewAddr = await registry.getModuleOrRevert(key("STATISTICS_VIEW"));
+  // Canonical key for StatisticsView is "VAULT_STATISTICS" (ModuleKeys.KEY_STATS)
+  const statisticsViewAddr = await registry.getModuleOrRevert(key("VAULT_STATISTICS"));
 
   const positionView = (await ethers.getContractAt("PositionView", positionViewAddr)) as any;
   const userView = (await ethers.getContractAt("UserView", userViewAddr)) as any;

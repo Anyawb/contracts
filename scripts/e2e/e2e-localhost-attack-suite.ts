@@ -1464,14 +1464,8 @@ async function main() {
       // 13.2 View modules with setRegistry must reject EOA registry updates (anti-footgun).
       // (a) ValuationOracleView.setRegistry
       {
-        // Some deployments register ValuationOracleView under "VALUATION_ORACLE_VIEW" (view module),
-        // while others may use "VALUATION_ORACLE". Try both for compatibility.
-        let valViewAddr: string;
-        try {
-          valViewAddr = (await registry.getModuleOrRevert(key("VALUATION_ORACLE_VIEW"))) as string;
-        } catch {
-          valViewAddr = (await registry.getModuleOrRevert(key("VALUATION_ORACLE"))) as string;
-        }
+        // Canonical key for ValuationOracleView is "VALUATION_ORACLE_VIEW".
+        const valViewAddr = (await registry.getModuleOrRevert(key("VALUATION_ORACLE_VIEW"))) as string;
         const valView = (await ethers.getContractAt("ValuationOracleView", valViewAddr, deployer)) as any;
         await mustRevertMatch("ValuationOracleView.setRegistry(EOA) should revert NotAContract", "NotAContract", async () => {
           await (await valView.setRegistry(attacker.address)).wait();

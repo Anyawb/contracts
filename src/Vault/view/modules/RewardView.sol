@@ -10,21 +10,35 @@ import { RewardTypes } from "../../../Reward/RewardTypes.sol";
 import { IServiceConfig } from "../../../Reward/interfaces/IServiceConfig.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+// solhint-disable-next-line no-global-import
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+// solhint-disable-next-line no-global-import
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+import { ViewConstants } from "../ViewConstants.sol";
 
-interface IRewardCoreConfig {
-    function getServiceConfig(RewardTypes.ServiceType serviceType, RewardTypes.ServiceLevel level) external view returns (RewardTypes.ServiceConfig memory);
-}
-
-/// @title RewardView
-/// @notice 专用于积分系统的只读聚合与统一 DataPush 的视图模块
-/// @dev 仅允许白名单业务模块写入（RewardManagerCore / RewardConsumption），其余为只读 0 gas 查询
+/**
+ * @title RewardView
+ * @notice Reward system view module: read aggregations + unified DataPush for off-chain consumers.
+ * @dev Reverts if:
+ *      - registry is zero / not a contract (ZeroAddress / NotAContract)
+ *      - caller is not an authorized writer for push APIs (RewardView__UnauthorizedWriter)
+ *      - caller is not authorized for a user-scoped read (MissingRole)
+ *
+ * Security:
+ * - Role-gated writes: only RewardManagerCore and RewardConsumption (resolved via Registry) can push updates.
+ * - Some reads are role-gated for ops/admin visibility (VIEW_USER_DATA / ADMIN), as these can reveal user reward data.
+ * - Unified DataPush: push* functions emit DataPushed events via DataPushLibrary for off-chain indexing.
+ */
 contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
-    // ============ Errors ============
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
+
+    /// @notice Caller is not an authorized writer module.
+    /// @dev Reverts when caller is not RewardManagerCore nor RewardConsumption (as resolved via Registry).
     error RewardView__UnauthorizedWriter();
-    // ============ Storage ============
+
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
+
     address private _registryAddr;
 
     struct UserSummary {
@@ -39,22 +53,33 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     mapping(address => UserSummary) private _userSummary;
+    mapping(address => uint256) private _userCacheTimestamps;
 
-    // 活动记录
-    struct Activity { uint8 kind; uint256 amount; uint256 ts; }
-    // kind: 1=earned, 2=burned, 3=penalty
+    /*━━━━━━━━━━━━━━━ Local activity cache (RewardView-only) ━━━━━━━━━━━━━━━*/
+
+    /// @notice Minimal activity record for user-centric reward activity browsing.
+    /// @dev kind: 1=earned, 2=burned, 3=penalty.
+    struct Activity {
+        uint8 kind;
+        uint256 amount;
+        uint256 ts;
+    }
+
     mapping(address => Activity[]) private _activities;
-    uint256 private constant MAX_ACTIVITY_SCAN = 500;
+    uint256 private constant _MAX_ACTIVITY_SCAN = 500;
+    uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION;
 
-    // 消费侧缓存（仅供 RewardView 免费查询；写入由 RewardConsumption 推送）
+    /*━━━━━━━━━━━━━━━ Consumption-side cache (RewardView-only) ━━━━━━━━━━━━━━━*/
+
     mapping(address => RewardTypes.ConsumptionRecord[]) private _consumptions;
     mapping(address => mapping(RewardTypes.ServiceType => uint256)) private _lastConsumption;
     mapping(RewardTypes.ServiceType => uint256) private _serviceUsage;
     
-    // Top Earners 缓存（固定长度）
-    uint256 private constant TOP_N = 10;
-    address[TOP_N] private _topEarners;
-    uint256[TOP_N] private _topEarnedAmounts;
+    /*━━━━━━━━━━━━━━━ Top earners cache (fixed length) ━━━━━━━━━━━━━━━*/
+
+    uint256 private constant _TOP_N = 10;
+    address[_TOP_N] private _topEarners;
+    uint256[_TOP_N] private _topEarnedAmounts;
     mapping(address => bool) private _isActiveUser;
 
     struct SystemStats {
@@ -65,7 +90,8 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     SystemStats private _systemStats;
 
-    // ============ Modifiers ============
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
@@ -82,7 +108,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         _;
     }
 
-    /// @notice 仅限本人或具有查看用户数据权限的调用者
+    /// @dev Gate: caller must be the user, or have VIEW_USER_DATA.
     modifier onlyAuthorizedFor(address user) {
         if (msg.sender != user && !_hasViewUserDataRole(msg.sender)) {
             revert MissingRole();
@@ -90,29 +116,42 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         _;
     }
 
-    /// @notice 仅运营/管理员可读（用于系统级统计/榜单，避免泄露积分信息）
+    /// @dev Gate: caller must have VIEW_USER_DATA or ADMIN.
     modifier onlyOps() {
-        if (!_hasViewUserDataRole(msg.sender) && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+        if (
+            !_hasViewUserDataRole(msg.sender)
+                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+        ) {
             revert MissingRole();
         }
         _;
     }
 
-    /// @notice 仅 LendingEngine 可调用（协议内校验入口）
+    /// @dev Gate: caller must be LendingEngine (KEY_LE).
     modifier onlyLendingEngine() {
         address le = _getModule(ModuleKeys.KEY_LE);
         if (le == address(0) || msg.sender != le) revert MissingRole();
         _;
     }
 
-    // ============ Init & Admin ============
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /// @notice 初始化函数（UUPS）
-    /// @param initialRegistryAddr Registry 地址
+    /**
+     * @notice Initialize the RewardView (UUPS).
+     * @dev Reverts if:
+     *      - initialRegistryAddr is zero (ZeroAddress)
+     *      - initialRegistryAddr is not a contract (NotAContract)
+     *
+     * Security:
+     * - initializer (UUPS)
+     *
+     * @param initialRegistryAddr Registry contract address
+     */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
@@ -120,9 +159,21 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         _registryAddr = initialRegistryAddr;
     }
 
-    /// @notice 更新 Registry 地址（需治理权限）
-    /// @dev 仅允许具有 ACTION_ADMIN 权限的治理/管理员调用
-    /// @param newRegistry 新的 Registry 地址
+    /*━━━━━━━━━━━━━━━ Admin APIs ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Update the Registry address.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (MissingRole via ViewAccessLib.requireRole)
+     *      - newRegistry is zero (ZeroAddress)
+     *      - newRegistry is not a contract (NotAContract)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     *
+     * @param newRegistry New Registry contract address
+     */
     function setRegistry(address newRegistry) external onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newRegistry == address(0)) revert ZeroAddress();
@@ -130,99 +181,211 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         _registryAddr = newRegistry;
     }
 
-    // ============ Push (writers only) ============
-    /// @notice 写入：记录用户获得积分，并触发统一 DataPush
-    /// @dev 仅允许业务写入方（RewardManagerCore/RewardConsumption）调用
-    /// @param user 用户地址
-    /// @param amount 获得的积分数量
-    /// @param reason 获得原因（短字符串）
-    /// @param ts 业务发生时间戳
-    function pushRewardEarned(address user, uint256 amount, string calldata reason, uint256 ts) external onlyWriter {
+    /*━━━━━━━━━━━━━━━ Push APIs (writers only) ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Push a "reward earned" update for a user and emit a unified DataPush event.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract)
+     *      - RewardManagerCore / RewardConsumption is missing in Registry (ZeroAddress via onlyWriter)
+     *      - caller is not an authorized writer module (RewardView__UnauthorizedWriter)
+     *
+     * Security:
+     * - onlyWriter (RewardManagerCore / RewardConsumption)
+     * - Emits DataPushed(DATA_TYPE_REWARD_EARNED, abi.encode(user, amount, reason, ts))
+     *
+     * @param user User address
+     * @param amount Earned points amount (points units, system-defined)
+     * @param reason Short reason string (off-chain display only)
+     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     */
+    function pushRewardEarned(address user, uint256 amount, string calldata reason, uint256 ts)
+        external
+        onlyWriter
+    {
         UserSummary storage s = _userSummary[user];
         s.totalEarned += amount;
         if (ts > s.lastActivity) s.lastActivity = ts;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
         _activities[user].push(Activity({ kind: 1, amount: amount, ts: ts }));
         _updateTopEarners(user, s.totalEarned);
+        _touchUserCache(user);
         DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_EARNED, abi.encode(user, amount, reason, ts));
     }
 
-    /// @notice 写入：记录用户被扣减的积分，并触发统一 DataPush
-    /// @dev 仅允许业务写入方调用
-    /// @param user 用户地址
-    /// @param amount 扣减的积分数量
-    /// @param reason 扣减原因
-    /// @param ts 业务发生时间戳
-    function pushPointsBurned(address user, uint256 amount, string calldata reason, uint256 ts) external onlyWriter {
+    /**
+     * @notice Push a "points burned" update for a user and emit a unified DataPush event.
+     * @dev Reverts if:
+     *      - see {pushRewardEarned} (onlyWriter)
+     *
+     * Security:
+     * - onlyWriter (RewardManagerCore / RewardConsumption)
+     * - Emits DataPushed(DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, ts))
+     *
+     * @param user User address
+     * @param amount Burned points amount (points units, system-defined)
+     * @param reason Short reason string (off-chain display only)
+     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     */
+    function pushPointsBurned(address user, uint256 amount, string calldata reason, uint256 ts)
+        external
+        onlyWriter
+    {
         UserSummary storage s = _userSummary[user];
         s.totalBurned += amount;
         if (ts > s.lastActivity) s.lastActivity = ts;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
         _activities[user].push(Activity({ kind: 2, amount: amount, ts: ts }));
+        _touchUserCache(user);
         DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, ts));
     }
 
-    /// @notice 治理/运维：手动重推（PointsBurned）
-    /// @dev 用于链下捕获到 RewardViewPushFailed 后的人工重试；不应在正常路径中使用
-    function retryPushPointsBurned(address user, uint256 amount, string calldata reason, uint256 ts) external onlyValidRegistry {
+    /**
+     * @notice Admin retry helper: replay a "points burned" push (manual recovery).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (MissingRole via ViewAccessLib.requireRole)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     * - Should not be used on normal paths (manual recovery only)
+     *
+     * @param user User address
+     * @param amount Burned points amount
+     * @param reason Short reason string
+     * @param ts Business timestamp (seconds since epoch; admin-defined)
+     */
+    function retryPushPointsBurned(address user, uint256 amount, string calldata reason, uint256 ts)
+        external
+        onlyValidRegistry
+    {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         UserSummary storage s = _userSummary[user];
         s.totalBurned += amount;
         if (ts > s.lastActivity) s.lastActivity = ts;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
         _activities[user].push(Activity({ kind: 2, amount: amount, ts: ts }));
+        _touchUserCache(user);
         DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, ts));
     }
 
-    /// @notice 写入：记录用户欠分账本（余额不足时的待扣减积分）
-    /// @dev 仅允许业务写入方调用
-    /// @param user 用户地址
-    /// @param pendingDebt 欠分数量
-    /// @param ts 业务发生时间戳
+    /**
+     * @notice Push a penalty ledger (pending points debt) update for a user.
+     * @dev Reverts if:
+     *      - see {pushRewardEarned} (onlyWriter)
+     *
+     * Security:
+     * - onlyWriter (RewardManagerCore / RewardConsumption)
+     * - Emits DataPushed(DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED, abi.encode(user, pendingDebt, ts))
+     *
+     * @param user User address
+     * @param pendingDebt Pending points debt (points units, system-defined)
+     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     */
     function pushPenaltyLedger(address user, uint256 pendingDebt, uint256 ts) external onlyWriter {
         UserSummary storage s = _userSummary[user];
         s.pendingPenalty = pendingDebt;
         if (ts > s.lastActivity) s.lastActivity = ts;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
         _activities[user].push(Activity({ kind: 3, amount: pendingDebt, ts: ts }));
-        // 重要：penaltyLedger 必须使用独立 dataTypeHash，避免与 REWARD_STATS_UPDATED（系统统计）payload 冲突
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED, abi.encode(user, pendingDebt, ts));
+        _touchUserCache(user);
+        // penaltyLedger uses a dedicated dataTypeHash to avoid payload ambiguity with REWARD_STATS_UPDATED.
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED,
+            abi.encode(user, pendingDebt, ts)
+        );
     }
 
-    /// @notice 写入：更新用户等级（1-5）
-    /// @dev 仅允许业务写入方调用
-    /// @param user 用户地址
-    /// @param newLevel 新等级（1-5）
-    /// @param ts 业务发生时间戳
+    /**
+     * @notice Push a user level update and emit a unified DataPush event.
+     * @dev Reverts if:
+     *      - see {pushRewardEarned} (onlyWriter)
+     *
+     * Security:
+     * - onlyWriter (RewardManagerCore / RewardConsumption)
+     * - Emits DataPushed(DATA_TYPE_REWARD_LEVEL_UPDATED, abi.encode(user, newLevel, ts))
+     *
+     * @param user User address
+     * @param newLevel New level (system-defined; not range-validated here)
+     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     */
     function pushUserLevel(address user, uint8 newLevel, uint256 ts) external onlyWriter {
         _userSummary[user].level = newLevel;
         if (ts > _userSummary[user].lastActivity) _userSummary[user].lastActivity = ts;
+        _touchUserCache(user);
         DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_LEVEL_UPDATED, abi.encode(user, newLevel, ts));
     }
 
-    /// @notice 写入：更新用户特权（按位压缩的 uint256）
-    /// @dev 仅允许业务写入方调用
-    /// @param user 用户地址
-    /// @param privilegePacked 特权打包位图
-    /// @param ts 业务发生时间戳
+    /**
+     * @notice Push a user privilege bitmap update and emit a unified DataPush event.
+     * @dev Reverts if:
+     *      - see {pushRewardEarned} (onlyWriter)
+     *
+     * Security:
+     * - onlyWriter (RewardManagerCore / RewardConsumption)
+     * - Emits DataPushed(DATA_TYPE_REWARD_PRIVILEGE_UPDATED, abi.encode(user, privilegePacked, ts))
+     *
+     * @param user User address
+     * @param privilegePacked Packed privilege bitmap (uint256)
+     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     */
     function pushUserPrivilege(address user, uint256 privilegePacked, uint256 ts) external onlyWriter {
         _userSummary[user].privilegesPacked = privilegePacked;
         if (ts > _userSummary[user].lastActivity) _userSummary[user].lastActivity = ts;
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_PRIVILEGE_UPDATED, abi.encode(user, privilegePacked, ts));
+        _touchUserCache(user);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_PRIVILEGE_UPDATED,
+            abi.encode(user, privilegePacked, ts)
+        );
     }
 
-    /// @notice 治理/运维：手动重推（UserPrivilege）
-    /// @dev 用于链下捕获到 RewardViewPushFailed 后的人工重试；不应在正常路径中使用
-    function retryPushUserPrivilege(address user, uint256 privilegePacked, uint256 ts) external onlyValidRegistry {
+    /**
+     * @notice Admin retry helper: replay a "user privilege" push (manual recovery).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (MissingRole via ViewAccessLib.requireRole)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     * - Should not be used on normal paths (manual recovery only)
+     *
+     * @param user User address
+     * @param privilegePacked Packed privilege bitmap
+     * @param ts Business timestamp (seconds since epoch; admin-defined)
+     */
+    function retryPushUserPrivilege(address user, uint256 privilegePacked, uint256 ts)
+        external
+        onlyValidRegistry
+    {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         _userSummary[user].privilegesPacked = privilegePacked;
         if (ts > _userSummary[user].lastActivity) _userSummary[user].lastActivity = ts;
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_PRIVILEGE_UPDATED, abi.encode(user, privilegePacked, ts));
+        _touchUserCache(user);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_PRIVILEGE_UPDATED,
+            abi.encode(user, privilegePacked, ts)
+        );
     }
 
-    /// @notice 写入：记录用户消费记录（用于 RewardView 查询）
-    /// @dev 不额外发 DataPush，避免与 REWARD_BURNED/REWARD_PRIVILEGE_UPDATED 重复语义；链下订阅以现有 DataPushed 为准
-    /// @dev 仅允许 RewardConsumption 调用（writer 白名单内），RewardManagerCore 不应写入消费记录
+    /**
+     * @notice Push a user consumption record into RewardView's local cache.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract)
+     *      - RewardManagerCore / RewardConsumption is missing in Registry (ZeroAddress via onlyWriter)
+     *      - caller is not an authorized writer module (RewardView__UnauthorizedWriter)
+     *      - caller is not RewardConsumption (RewardView__UnauthorizedWriter)
+     *
+     * Security:
+     * - onlyWriter (and additionally restricted to RewardConsumption)
+     * - Does NOT emit DataPushed to avoid duplicating semantics with REWARD_BURNED / REWARD_PRIVILEGE_UPDATED.
+     *
+     * @param user User address
+     * @param serviceType Service type (RewardTypes.ServiceType)
+     * @param serviceLevel Service level (RewardTypes.ServiceLevel)
+     * @param points Points spent (points units)
+     * @param expirationTime Expiration time (seconds since epoch; service-defined)
+     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     */
     function pushConsumptionRecord(
         address user,
         RewardTypes.ServiceType serviceType,
@@ -246,10 +409,26 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         );
         _lastConsumption[user][serviceType] = ts;
         unchecked { _serviceUsage[serviceType] += 1; }
+        _touchUserCache(user);
     }
 
-    /// @notice 治理/运维：手动重推（ConsumptionRecord）
-    /// @dev 用于链下捕获到 RewardViewPushFailed 后的人工重试；不应在正常路径中使用
+    /**
+     * @notice Admin retry helper: replay a "consumption record" push (manual recovery).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (MissingRole via ViewAccessLib.requireRole)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     * - Should not be used on normal paths (manual recovery only)
+     *
+     * @param user User address
+     * @param serviceType Service type
+     * @param serviceLevel Service level
+     * @param points Points spent (points units)
+     * @param expirationTime Expiration time (seconds)
+     * @param ts Business timestamp (seconds)
+     */
     function retryPushConsumptionRecord(
         address user,
         RewardTypes.ServiceType serviceType,
@@ -271,72 +450,202 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         );
         _lastConsumption[user][serviceType] = ts;
         unchecked { _serviceUsage[serviceType] += 1; }
+        _touchUserCache(user);
     }
 
-    /// @notice 写入：系统统计（批量次数、缓存命中次数）
-    /// @dev 仅允许业务写入方调用
-    /// @param totalBatchOps 批量操作总次数
-    /// @param totalCachedRewards 积分缓存命中总次数
-    /// @param ts 业务发生时间戳
-    function pushSystemStats(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 ts) external onlyWriter {
+    /**
+     * @notice Push system-level reward stats and emit a unified DataPush event.
+     * @dev Reverts if:
+     *      - see {pushRewardEarned} (onlyWriter)
+     *
+     * Security:
+     * - onlyWriter (RewardManagerCore / RewardConsumption)
+     * - Emits DataPushed(DATA_TYPE_REWARD_STATS_UPDATED, abi.encode(totalBatchOps, totalCachedRewards, ts))
+     *
+     * @param totalBatchOps Total batch operations count (writer-defined)
+     * @param totalCachedRewards Total cache-hit count (writer-defined)
+     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     */
+    function pushSystemStats(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 ts)
+        external
+        onlyWriter
+    {
         _systemStats.totalBatchOps = totalBatchOps;
         _systemStats.totalCachedRewards = totalCachedRewards;
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_STATS_UPDATED, abi.encode(totalBatchOps, totalCachedRewards, ts));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_STATS_UPDATED,
+            abi.encode(totalBatchOps, totalCachedRewards, ts)
+        );
     }
 
-    // ============ Views (0 gas) ============
-    /// @notice 查询：用户奖励汇总
-    /// @param user 用户地址
-    /// @return totalEarned 累计获得积分
-    /// @return totalBurned 累计扣减积分
-    /// @return pendingPenalty 欠分数量
-    /// @return level 用户等级
-    /// @return privilegesPacked 特权位图
-    /// @return lastActivity 最近活跃时间
-    /// @return totalLoans 预留（当前未维护）
-    /// @return totalVolume 预留（当前未维护）
-    function getUserRewardSummary(address user) external view onlyAuthorizedFor(user) returns (
-        uint256 totalEarned,
-        uint256 totalBurned,
-        uint256 pendingPenalty,
-        uint8 level,
-        uint256 privilegesPacked,
-        uint256 lastActivity,
-        uint256 totalLoans,
-        uint256 totalVolume
-    ) {
+    /*━━━━━━━━━━━━━━━ Read APIs (0-gas views) ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Get a user's reward summary from RewardView local cache.
+     * @dev Reverts if:
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return totalEarned Total earned points (points units)
+     * @return totalBurned Total burned points (points units)
+     * @return pendingPenalty Pending penalty debt (points units)
+     * @return level User level (system-defined)
+     * @return privilegesPacked Packed privilege bitmap (uint256)
+     * @return lastActivity Last activity timestamp (seconds since epoch; writer-defined)
+     * @return totalLoans Reserved (currently not maintained)
+     * @return totalVolume Reserved (currently not maintained)
+     */
+    function getUserRewardSummary(address user)
+        external
+        view
+        onlyAuthorizedFor(user)
+        returns (
+            uint256 totalEarned,
+            uint256 totalBurned,
+            uint256 pendingPenalty,
+            uint8 level,
+            uint256 privilegesPacked,
+            uint256 lastActivity,
+            uint256 totalLoans,
+            uint256 totalVolume
+        )
+    {
         UserSummary storage s = _userSummary[user];
-        return (s.totalEarned, s.totalBurned, s.pendingPenalty, s.level, s.privilegesPacked, s.lastActivity, s.totalLoans, s.totalVolume);
+        return (
+            s.totalEarned,
+            s.totalBurned,
+            s.pendingPenalty,
+            s.level,
+            s.privilegesPacked,
+            s.lastActivity,
+            s.totalLoans,
+            s.totalVolume
+        );
     }
 
-    /// @notice 查询：系统奖励统计
-    /// @return totalBatchOps 批量操作总次数
-    /// @return totalCachedRewards 积分缓存命中总次数
-    /// @return activeUsers 活跃用户数量
-    function getSystemRewardStats() external view onlyValidRegistry onlyOps returns (uint256 totalBatchOps, uint256 totalCachedRewards, uint256 activeUsers) {
+    /**
+     * @notice Get a user's reward summary plus local cache metadata (timestamp + TTL validity).
+     * @dev Reverts if:
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return totalEarned Total earned points
+     * @return totalBurned Total burned points
+     * @return pendingPenalty Pending penalty debt
+     * @return level User level
+     * @return privilegesPacked Packed privilege bitmap
+     * @return lastActivity Last activity timestamp (seconds; writer-defined)
+     * @return totalLoans Reserved (currently not maintained)
+     * @return totalVolume Reserved (currently not maintained)
+     * @return timestamp RewardView local cache last-write time (block.timestamp, seconds)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+     */
+    function getUserRewardSummaryWithMeta(address user)
+        external
+        view
+        onlyAuthorizedFor(user)
+        returns (
+            uint256 totalEarned,
+            uint256 totalBurned,
+            uint256 pendingPenalty,
+            uint8 level,
+            uint256 privilegesPacked,
+            uint256 lastActivity,
+            uint256 totalLoans,
+            uint256 totalVolume,
+            uint256 timestamp,
+            bool isValid
+        )
+    {
+        UserSummary storage s = _userSummary[user];
+        timestamp = _userCacheTimestamps[user];
+        isValid = _isUserCacheValid(timestamp);
+        return (
+            s.totalEarned,
+            s.totalBurned,
+            s.pendingPenalty,
+            s.level,
+            s.privilegesPacked,
+            s.lastActivity,
+            s.totalLoans,
+            s.totalVolume,
+            timestamp,
+            isValid
+        );
+    }
+
+    /**
+     * @notice Get system-level reward stats from RewardView local cache.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyOps)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return totalBatchOps Total batch operations count (writer-defined)
+     * @return totalCachedRewards Total cache-hit count (writer-defined)
+     * @return activeUsers Active user count (RewardView-local)
+     */
+    function getSystemRewardStats()
+        external
+        view
+        onlyValidRegistry
+        onlyOps
+        returns (uint256 totalBatchOps, uint256 totalCachedRewards, uint256 activeUsers)
+    {
         return (_systemStats.totalBatchOps, _systemStats.totalCachedRewards, _systemStats.activeUsers);
     }
 
-    /// @notice 查询：当前 Registry 地址
+    /**
+     * @notice Get the current Registry address used by this module.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return registryAddr Registry contract address
+     */
     function getRegistry() external view returns (address) {
         return _registryAddr;
     }
 
-    // ============ Extended Views ============
-    /// @notice 查询：用户最近奖励相关活动（按时间窗口、限制数量，倒序扫描）
-    /// @param user 用户地址
-    /// @param fromTs 起始时间（含），0 表示不限制
-    /// @param toTs 截止时间（含），0 表示不限制
-    /// @param limit 最大返回条目数
-    /// @return out 活动记录数组
-    function getUserRecentActivities(address user, uint256 fromTs, uint256 toTs, uint256 limit) external view onlyAuthorizedFor(user) returns (Activity[] memory out) {
+    /*━━━━━━━━━━━━━━━ Extended read APIs ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Get a user's recent reward activities from local cache (reverse scan with window filters).
+     * @dev Reverts if:
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @param fromTs Inclusive start timestamp filter (seconds). 0 means no lower bound.
+     * @param toTs Inclusive end timestamp filter (seconds). 0 means no upper bound.
+     * @param limit Maximum number of entries to return (0 returns empty)
+     * @return out Activity array (most recent first). Scan is capped by _MAX_ACTIVITY_SCAN.
+     */
+    function getUserRecentActivities(address user, uint256 fromTs, uint256 toTs, uint256 limit)
+        external
+        view
+        onlyAuthorizedFor(user)
+        returns (Activity[] memory out)
+    {
         Activity[] storage arr = _activities[user];
         if (arr.length == 0 || limit == 0) return new Activity[](0);
         uint256 count;
         uint256 scanned;
-        // 从末尾向前扫描，最多扫描 MAX_ACTIVITY_SCAN
-        for (uint256 i = arr.length; i > 0 && scanned < MAX_ACTIVITY_SCAN && count < limit; i--) {
-            Activity storage a = arr[i-1];
+        // Reverse scan from the end, capped by _MAX_ACTIVITY_SCAN.
+        for (uint256 i = arr.length; i > 0 && scanned < _MAX_ACTIVITY_SCAN && count < limit; i--) {
+            Activity storage a = arr[i - 1];
             scanned++;
             if ((fromTs == 0 || a.ts >= fromTs) && (toTs == 0 || a.ts <= toTs)) {
                 count++;
@@ -345,8 +654,8 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         out = new Activity[](count);
         uint256 idx;
         scanned = 0;
-        for (uint256 i = arr.length; i > 0 && scanned < MAX_ACTIVITY_SCAN && idx < count; i--) {
-            Activity storage a2 = arr[i-1];
+        for (uint256 i = arr.length; i > 0 && scanned < _MAX_ACTIVITY_SCAN && idx < count; i--) {
+            Activity storage a2 = arr[i - 1];
             scanned++;
             if ((fromTs == 0 || a2.ts >= fromTs) && (toTs == 0 || a2.ts <= toTs)) {
                 out[idx++] = a2;
@@ -354,244 +663,706 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
-    /// @notice 查询：Top N（固定 N=10）累计获得积分最多的用户
-    /// @return addrs 地址数组（长度固定 N）
-    /// @return amounts 对应累计获得积分数组
-    function getTopEarners() external view onlyValidRegistry onlyOps returns (address[] memory addrs, uint256[] memory amounts) {
-        // 返回固定 TOP_N 列表，按当前缓存
-        uint256 n = TOP_N;
+    /**
+     * @notice Get the Top-N earners from RewardView local cache.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyOps)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return addrs Top-N user addresses (fixed length)
+     * @return amounts Top-N earned totals (fixed length)
+     */
+    function getTopEarners()
+        external
+        view
+        onlyValidRegistry
+        onlyOps
+        returns (address[] memory addrs, uint256[] memory amounts)
+    {
+        // Return fixed _TOP_N list from local cache.
+        uint256 n = _TOP_N;
         addrs = new address[](n);
         amounts = new uint256[](n);
-        for (uint256 i = 0; i < n; i++) { addrs[i] = _topEarners[i]; amounts[i] = _topEarnedAmounts[i]; }
+        for (uint256 i = 0; i < n; i++) {
+            addrs[i] = _topEarners[i];
+            amounts[i] = _topEarnedAmounts[i];
+        }
     }
 
-    /// @notice 协议内校验入口：查询用户等级（仅 LendingEngine 调用）
-    /// @dev 用于长周期借款期限门槛等“链上硬约束”校验；不受 onlyAuthorizedFor 限制，但仅允许 KEY_LE 调用。
-    function getUserLevelForBorrowCheck(address user) external view onlyValidRegistry onlyLendingEngine returns (uint8) {
+    /**
+     * @notice Protocol-enforced read: get a user's level for borrow checks (LendingEngine only).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not LendingEngine (MissingRole via onlyLendingEngine)
+     *
+     * Security:
+     * - Role-gated: KEY_LE only (protocol internal check path)
+     *
+     * @param user Target user address
+     * @return level User level (returns 0 if RewardManagerCore module is missing)
+     */
+    function getUserLevelForBorrowCheck(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyLendingEngine
+        returns (uint8)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getUserLevel(user);
     }
     
-    // ============ Additional Views (pass-through to modules) ============
-    /// @notice 查询：用户消费记录（RewardView 缓存）
-    function getUserConsumptions(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (RewardTypes.ConsumptionRecord[] memory records) {
+    /*━━━━━━━━━━━━━━━ Additional read APIs (pass-through + local cache) ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Get a user's consumption records from RewardView local cache.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return records Consumption records (RewardTypes.ConsumptionRecord[])
+     */
+    function getUserConsumptions(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (RewardTypes.ConsumptionRecord[] memory records)
+    {
         return _consumptions[user];
     }
 
-    /// @notice 查询：服务配置（透传各配置模块）
-    function getServiceConfig(RewardTypes.ServiceType serviceType, RewardTypes.ServiceLevel level) 
-        external view onlyValidRegistry returns (RewardTypes.ServiceConfig memory config) 
+    /**
+     * @notice Get service configuration (best-effort passthrough to service config modules).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns a zero/default config if the module is missing or the call fails.
+     *
+     * @param serviceType Service type (RewardTypes.ServiceType)
+     * @param level Service level (RewardTypes.ServiceLevel)
+     * @return config Service configuration struct (zero/default on failure)
+     */
+    function getServiceConfig(RewardTypes.ServiceType serviceType, RewardTypes.ServiceLevel level)
+        external
+        view
+        onlyValidRegistry
+        returns (RewardTypes.ServiceConfig memory config)
     {
         address moduleAddr = _resolveServiceConfigModule(serviceType);
         if (moduleAddr == address(0)) return config;
-        // 优先尝试 RewardCore 兼容签名
+        // Try RewardCore legacy-compatible signature first.
         (bool ok, bytes memory ret) = moduleAddr.staticcall(
             abi.encodeWithSignature("getServiceConfig(uint8,uint8)", uint8(serviceType), uint8(level))
         );
         if (ok && ret.length > 0) {
             return abi.decode(ret, (RewardTypes.ServiceConfig));
         }
-        // 标准 IServiceConfig 接口
-        try IServiceConfig(moduleAddr).getConfig(level) returns (RewardTypes.ServiceConfig memory cfg) { return cfg; }
-        catch {}
+        // Standard IServiceConfig interface.
+        try IServiceConfig(moduleAddr).getConfig(level) returns (RewardTypes.ServiceConfig memory cfg) {
+            return cfg;
+        } catch {
+            // Best-effort passthrough: return default config on failure.
+            // solhint-disable-next-line no-unused-vars
+            config = config; // no-op to satisfy no-empty-blocks
+        }
         return config;
     }
 
-    /// @notice 查询：用户积分余额（透传 RewardPoints.balanceOf）
-    function getUserBalance(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256 balance) {
+    /**
+     * @notice Get a user's RewardPoints balance (best-effort passthrough).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardPoints module is missing.
+     *
+     * @param user Target user address
+     * @return balance RewardPoints balance (points units)
+     */
+    function getUserBalance(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 balance)
+    {
         address rp = _getModule(ModuleKeys.KEY_REWARD_POINTS);
         if (rp == address(0)) return 0;
         return IRewardPointsMinimal(rp).balanceOf(user);
     }
 
-    /// @notice 查询：服务使用统计（RewardView 缓存）
-    function getServiceUsage(RewardTypes.ServiceType serviceType) external view onlyValidRegistry returns (uint256 usage) {
+    /**
+     * @notice Get service usage stats (RewardCore passthrough with local fallback).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: if RewardCore is present and callable, returns its value; otherwise returns local cache.
+     *
+     * @param serviceType Service type
+     * @return usage Usage count (implementation-defined)
+     */
+    function getServiceUsage(RewardTypes.ServiceType serviceType)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 usage)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_CORE);
         if (core != address(0)) {
-            (bool ok, uint256 val) = _staticCallUint(core, abi.encodeWithSignature("getServiceUsage(uint8)", uint8(serviceType)));
+            (bool ok, uint256 val) =
+                _staticCallUint(core, abi.encodeWithSignature("getServiceUsage(uint8)", uint8(serviceType)));
             if (ok) return val;
         }
         return _serviceUsage[serviceType];
     }
 
-    /// @notice 查询：用户最后消费时间（RewardView 缓存）
-    function getUserLastConsumption(address user, RewardTypes.ServiceType serviceType) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256 timestamp) {
+    /**
+     * @notice Get the user's last consumption timestamp for a service type.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: if RewardCore is present and callable, returns its value; otherwise returns local cache.
+     *
+     * @param user Target user address
+     * @param serviceType Service type
+     * @return timestamp Timestamp (seconds since epoch), 0 if unknown
+     */
+    function getUserLastConsumption(address user, RewardTypes.ServiceType serviceType)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 timestamp)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_CORE);
         if (core != address(0)) {
-            (bool ok, uint256 val) = _staticCallUint(core, abi.encodeWithSignature("getUserLastConsumption(address,uint8)", user, uint8(serviceType)));
+            (bool ok, uint256 val) = _staticCallUint(
+                core,
+                abi.encodeWithSignature("getUserLastConsumption(address,uint8)", user, uint8(serviceType))
+            );
             if (ok) return val;
         }
         return _lastConsumption[user][serviceType];
     }
 
-    /// @notice 查询：用户特权（打包位图，来自本地缓存）
-    function getUserPrivilegePacked(address user) external view onlyAuthorizedFor(user) returns (uint256 privilegePacked) {
+    /**
+     * @notice Get a user's packed privilege bitmap from RewardView local cache.
+     * @dev Reverts if:
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return privilegePacked Packed privilege bitmap (uint256)
+     */
+    function getUserPrivilegePacked(address user)
+        external
+        view
+        onlyAuthorizedFor(user)
+        returns (uint256 privilegePacked)
+    {
         return _userSummary[user].privilegesPacked;
     }
 
-    // ============ RewardManagerCore 相关视图透传（统一从 View 查询） ============
-    // NOTE: 为严格对齐 Architecture-Guide，“外部查询统一走 RewardView”。
-    // 下方同时提供 *View 形式（历史/兼容）与无后缀形式（推荐）。无后缀形式为推荐 API。
+    /*━━━━━━━━━━━━━━━ RewardManagerCore passthrough reads (preferred external query path) ━━━━━━━━━━━━━━━*/
 
-    /// @notice 查询：积分计算参数（推荐：统一从 RewardView 查询）
-    function getRewardParameters() external view onlyValidRegistry returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth) {
+    // NOTE: Per Architecture-Guide, external reward queries should go through RewardView.
+    // Both legacy "*View" aliases and the preferred non-suffixed forms are provided for compatibility.
+
+    /**
+     * @notice Get reward calculation parameters (RewardManagerCore passthrough).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns zeros if RewardManagerCore module is missing.
+     *
+     * @return baseUsd Parameter (RewardManagerCore-defined units)
+     * @return perDay Parameter (RewardManagerCore-defined units)
+     * @return bonus Parameter (RewardManagerCore-defined units)
+     * @return baseEth Parameter (RewardManagerCore-defined units)
+     */
+    function getRewardParameters()
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0, 0, 0);
         return IRewardManagerCoreView(core).getRewardParameters();
     }
 
-    function getRewardParametersView() external view onlyValidRegistry returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth) {
+    /**
+     * @notice Legacy alias for {getRewardParameters}.
+     * @dev Reverts if:
+     *      - see {getRewardParameters}
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return baseUsd See {getRewardParameters}
+     * @return perDay See {getRewardParameters}
+     * @return bonus See {getRewardParameters}
+     * @return baseEth See {getRewardParameters}
+     */
+    function getRewardParametersView()
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0, 0, 0);
         return IRewardManagerCoreView(core).getRewardParameters();
     }
 
-    /// @notice 查询：用户积分缓存（推荐：统一从 RewardView 查询）
-    function getUserCache(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256 points, uint256 timestamp, bool isValid) {
+    /**
+     * @notice Get user points cache from RewardManagerCore (authoritative passthrough).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns (0,0,false) if RewardManagerCore module is missing.
+     *
+     * @param user Target user address
+     * @return points Cached points (points units)
+     * @return timestamp Cache timestamp (seconds; RewardManagerCore-defined)
+     * @return isValid Cache validity flag (RewardManagerCore-defined)
+     */
+    function getUserCache(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 points, uint256 timestamp, bool isValid)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0, false);
         return IRewardManagerCoreView(core).getUserCache(user);
     }
 
-    function getUserCacheView(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256 points, uint256 timestamp, bool isValid) {
+    /**
+     * @notice Legacy alias for {getUserCache}.
+     * @dev Reverts if:
+     *      - see {getUserCache}
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return points See {getUserCache}
+     * @return timestamp See {getUserCache}
+     * @return isValid See {getUserCache}
+     */
+    function getUserCacheView(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 points, uint256 timestamp, bool isValid)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0, false);
         return IRewardManagerCoreView(core).getUserCache(user);
     }
 
-    /// @notice 查询：缓存过期时间（推荐：统一从 RewardView 查询）
-    function getCacheExpirationTime() external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Get cache expiration time from RewardManagerCore.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @return expirationTime Cache expiration time (seconds; RewardManagerCore-defined), or 0 on failure
+     */
+    function getCacheExpirationTime() external view onlyValidRegistry returns (uint256 expirationTime) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getCacheExpirationTime();
     }
 
-    function getCacheExpirationTimeView() external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Legacy alias for {getCacheExpirationTime}.
+     * @dev Reverts if:
+     *      - see {getCacheExpirationTime}
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return expirationTime See {getCacheExpirationTime}
+     */
+    function getCacheExpirationTimeView() external view onlyValidRegistry returns (uint256 expirationTime) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getCacheExpirationTime();
     }
 
-    function getDynamicRewardParametersView() external view onlyValidRegistry returns (uint256 threshold, uint256 multiplier) {
+    /**
+     * @notice Get dynamic reward parameters (legacy "*View" alias).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns (0,0) if RewardManagerCore module is missing.
+     *
+     * @return threshold Parameter (RewardManagerCore-defined units)
+     * @return multiplier Parameter (RewardManagerCore-defined units)
+     */
+    function getDynamicRewardParametersView()
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 threshold, uint256 multiplier)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0);
         return IRewardManagerCoreView(core).getDynamicRewardParameters();
     }
 
-    function getLastRewardResetTimeView() external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Get last reward reset time (legacy "*View" alias).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @return timestamp Last reset timestamp (seconds), or 0 on failure
+     */
+    function getLastRewardResetTimeView() external view onlyValidRegistry returns (uint256 timestamp) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getLastRewardResetTime();
     }
 
-    /// @notice 查询：最后重置时间（推荐：统一从 RewardView 查询）
-    function getLastRewardResetTime() external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Get last reward reset time from RewardManagerCore.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @return timestamp Last reset timestamp (seconds), or 0 on failure
+     */
+    function getLastRewardResetTime() external view onlyValidRegistry returns (uint256 timestamp) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getLastRewardResetTime();
     }
 
-    /// @notice 查询：用户等级（推荐：统一从 RewardView 查询）
-    /// @dev 正确性优先：治理手动更新等级不一定会触发 push，因此此处透传 RMCore 以避免读到过期缓存。
-    function getUserLevel(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint8) {
+    /**
+     * @notice Get user level from RewardManagerCore (authoritative passthrough).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Correctness-first: reads RewardManagerCore directly to avoid stale local cache (e.g., governance updates).
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @param user Target user address
+     * @return level User level (system-defined), or 0 on failure
+     */
+    function getUserLevel(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint8)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getUserLevel(user);
     }
 
-    function getUserLevelView(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint8) {
+    /**
+     * @notice Legacy alias for {getUserLevel}.
+     * @dev Reverts if:
+     *      - see {getUserLevel}
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return level See {getUserLevel}
+     */
+    function getUserLevelView(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint8 level)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getUserLevel(user);
     }
 
-    /// @notice 查询：等级倍数（推荐：统一从 RewardView 查询）
-    function getLevelMultiplier(uint8 level) external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Get level multiplier from RewardManagerCore.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @param level Level (system-defined)
+     * @return multiplier Multiplier (RewardManagerCore-defined units), or 0 on failure
+     */
+    function getLevelMultiplier(uint8 level) external view onlyValidRegistry returns (uint256 multiplier) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getLevelMultiplier(level);
     }
 
-    function getLevelMultiplierView(uint8 level) external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Legacy alias for {getLevelMultiplier}.
+     * @dev Reverts if:
+     *      - see {getLevelMultiplier}
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param level Level
+     * @return multiplier See {getLevelMultiplier}
+     */
+    function getLevelMultiplierView(uint8 level) external view onlyValidRegistry returns (uint256 multiplier) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getLevelMultiplier(level);
     }
 
-    /// @notice 查询：用户活跃度信息（推荐：统一从 RewardView 查询）
-    function getUserActivity(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume) {
+    /**
+     * @notice Get user activity info from RewardManagerCore.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns (0,0,0) if RewardManagerCore module is missing.
+     *
+     * @param user Target user address
+     * @return lastActivity Last activity timestamp (seconds)
+     * @return totalLoans Total loans (RewardManagerCore-defined)
+     * @return totalVolume Total volume (RewardManagerCore-defined)
+     */
+    function getUserActivity(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0, 0);
         return IRewardManagerCoreView(core).getUserActivity(user);
     }
 
-    function getUserActivityView(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume) {
+    /**
+     * @notice Legacy alias for {getUserActivity}.
+     * @dev Reverts if:
+     *      - see {getUserActivity}
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return lastActivity See {getUserActivity}
+     * @return totalLoans See {getUserActivity}
+     * @return totalVolume See {getUserActivity}
+     */
+    function getUserActivityView(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0, 0);
         return IRewardManagerCoreView(core).getUserActivity(user);
     }
 
-    /// @notice 查询：用户欠分（推荐：统一从 RewardView 查询）
-    /// @dev 正确性优先：欠分账本是 RMCore 权威存储，此处透传以避免 push 失败/延迟导致的读偏差。
-    function getUserPenaltyDebt(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256) {
+    /**
+     * @notice Get user's penalty debt from RewardManagerCore (authoritative passthrough).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Correctness-first: reads RewardManagerCore directly to avoid drift from push failures/delays.
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @param user Target user address
+     * @return debt Pending penalty debt (points units), or 0 on failure
+     */
+    function getUserPenaltyDebt(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 debt)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getUserPenaltyDebt(user);
     }
 
-    function getUserPenaltyDebtView(address user) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256) {
+    /**
+     * @notice Legacy alias for {getUserPenaltyDebt}.
+     * @dev Reverts if:
+     *      - see {getUserPenaltyDebt}
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return debt See {getUserPenaltyDebt}
+     */
+    function getUserPenaltyDebtView(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 debt)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getUserPenaltyDebt(user);
     }
 
-    /// @notice 查询：系统统计（批量次数）
-    function getTotalBatchOperations() external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Get total batch operations count from RewardManagerCore.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @return total Total batch operations count, or 0 on failure
+     */
+    function getTotalBatchOperations() external view onlyValidRegistry returns (uint256 total) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getTotalBatchOperations();
     }
 
-    /// @notice 查询：系统统计（缓存命中次数）
-    function getTotalCachedRewards() external view onlyValidRegistry returns (uint256) {
+    /**
+     * @notice Get total cached rewards count from RewardManagerCore.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @return total Total cached rewards count, or 0 on failure
+     */
+    function getTotalCachedRewards() external view onlyValidRegistry returns (uint256 total) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getTotalCachedRewards();
     }
 
-    function getSystemRewardCoreStatsView() external view onlyValidRegistry returns (uint256 totalBatchOps, uint256 totalCachedRewards) {
+    /**
+     * @notice Get system stats from RewardManagerCore (legacy "*View" composite helper).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns (0,0) if RewardManagerCore module is missing.
+     *
+     * @return totalBatchOps Total batch operations count
+     * @return totalCachedRewards Total cached rewards count
+     */
+    function getSystemRewardCoreStatsView()
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 totalBatchOps, uint256 totalCachedRewards)
+    {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0);
         totalBatchOps = IRewardManagerCoreView(core).getTotalBatchOperations();
         totalCachedRewards = IRewardManagerCoreView(core).getTotalCachedRewards();
     }
 
-    // ============ Internals ============
+    /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
+
     function _updateTopEarners(address user, uint256 totalEarned) internal {
-        // 如果已在列表中，更新位置（简单插入排序思路）
-        uint256 pos = TOP_N; 
-        for (uint256 i = 0; i < TOP_N; i++) {
-            if (_topEarners[i] == user) { pos = i; break; }
+        // If already in the list, update and potentially bubble up (simple insertion-sort approach).
+        uint256 pos = _TOP_N;
+        for (uint256 i = 0; i < _TOP_N; i++) {
+            if (_topEarners[i] == user) {
+                pos = i;
+                break;
+            }
         }
-        if (pos == TOP_N) {
-            // 不在列表，则若优于最末项则插入
-            if (totalEarned <= _topEarnedAmounts[TOP_N-1]) return;
-            pos = TOP_N - 1;
+        if (pos == _TOP_N) {
+            // Not in list: insert only if better than the current tail.
+            if (totalEarned <= _topEarnedAmounts[_TOP_N - 1]) return;
+            pos = _TOP_N - 1;
             _topEarners[pos] = user;
             _topEarnedAmounts[pos] = totalEarned;
         } else {
             _topEarnedAmounts[pos] = totalEarned;
         }
-        // 向前冒泡保持降序
-        while (pos > 0 && _topEarnedAmounts[pos] > _topEarnedAmounts[pos-1]) {
-            ( _topEarners[pos], _topEarners[pos-1] ) = ( _topEarners[pos-1], _topEarners[pos] );
-            ( _topEarnedAmounts[pos], _topEarnedAmounts[pos-1] ) = ( _topEarnedAmounts[pos-1], _topEarnedAmounts[pos] );
+        // Bubble up to keep descending order.
+        while (pos > 0 && _topEarnedAmounts[pos] > _topEarnedAmounts[pos - 1]) {
+            (_topEarners[pos], _topEarners[pos - 1]) = (_topEarners[pos - 1], _topEarners[pos]);
+            (_topEarnedAmounts[pos], _topEarnedAmounts[pos - 1]) =
+                (_topEarnedAmounts[pos - 1], _topEarnedAmounts[pos]);
             pos--;
         }
     }
 
-    // ============ Internal ============
+    function _touchUserCache(address user) internal {
+        // solhint-disable-next-line not-rely-on-time
+        _userCacheTimestamps[user] = block.timestamp;
+    }
+
+    function _isUserCacheValid(uint256 ts) internal view returns (bool) {
+        // solhint-disable-next-line not-rely-on-time
+        return ts > 0 && block.timestamp - ts <= _CACHE_DURATION;
+    }
+
+    /*━━━━━━━━━━━━━━━ Access helpers ━━━━━━━━━━━━━━━*/
+
     function _hasViewUserDataRole(address user) internal view returns (bool) {
         return ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, user);
     }
@@ -608,7 +1379,11 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         value = abi.decode(ret, (uint256));
     }
 
-    function _resolveServiceConfigModule(RewardTypes.ServiceType serviceType) internal view returns (address moduleAddr) {
+    function _resolveServiceConfigModule(RewardTypes.ServiceType serviceType)
+        internal
+        view
+        returns (address moduleAddr)
+    {
         bytes32 moduleKey;
         if (serviceType == RewardTypes.ServiceType.AdvancedAnalytics) {
             moduleKey = ModuleKeys.KEY_ADVANCED_ANALYTICS_CONFIG;
@@ -630,41 +1405,90 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         return moduleAddr;
     }
 
+    /*━━━━━━━━━━━━━━━ UUPS upgrade ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Authorize a UUPS upgrade.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (reverts in ViewAccessLib.requireRole)
+     *      - newImplementation is zero (ZeroAddress)
+     *      - newImplementation is not a contract (NotAContract)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     *
+     * @param newImplementation New implementation address
+     */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
     
-    // ============ Versioning (C+B baseline) ============
+    /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Get the API version for this module.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return version API semantic version
+     */
     function apiVersion() public pure override returns (uint256) {
-        // v2: 修复 penaltyLedger 的 DataPushed type（从 REWARD_STATS_UPDATED 拆分为 REWARD_PENALTY_LEDGER_UPDATED）
+        // v2: split penalty-ledger DataPush type from REWARD_STATS_UPDATED into REWARD_PENALTY_LEDGER_UPDATED.
         return 2;
     }
 
+    /**
+     * @notice Get the schema version for this module's outputs.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return version Schema version
+     */
     function schemaVersion() public pure override returns (uint256) {
         return 1;
     }
 
+    /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
+
     uint256[50] private __gap;
 }
 
-/// @dev RewardManagerCore 只读最小接口（供视图透传查询）
+/**
+ * @notice Minimal RewardManagerCore view interface (used by RewardView passthrough reads).
+ * @dev This interface is intentionally minimal to keep coupling low.
+ */
 interface IRewardManagerCoreView {
-    function getRewardParameters() external view returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth);
+    function getRewardParameters()
+        external
+        view
+        returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth);
     function getUserCache(address user) external view returns (uint256 points, uint256 timestamp, bool isValid);
     function getCacheExpirationTime() external view returns (uint256);
     function getDynamicRewardParameters() external view returns (uint256 threshold, uint256 multiplier);
     function getLastRewardResetTime() external view returns (uint256);
     function getUserLevel(address user) external view returns (uint8);
     function getLevelMultiplier(uint8 level) external view returns (uint256);
-    function getUserActivity(address user) external view returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume);
+    function getUserActivity(address user)
+        external
+        view
+        returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume);
     function getUserPenaltyDebt(address user) external view returns (uint256);
     function getTotalBatchOperations() external view returns (uint256);
     function getTotalCachedRewards() external view returns (uint256);
 }
 
-/// @dev RewardPoints 最小接口
+/**
+ * @notice Minimal RewardPoints interface (used by RewardView).
+ */
 interface IRewardPointsMinimal {
     function balanceOf(address owner) external view returns (uint256);
 }

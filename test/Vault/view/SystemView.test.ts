@@ -77,6 +77,17 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
     const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER'));
     const KEY_VIEW_CACHE = ethers.keccak256(ethers.toUtf8Bytes('VIEW_CACHE'));
 
+    // SystemView route*() keys (integration path; MUST be consumable without relying on revert strings)
+    const KEY_VALUATION_ORACLE_VIEW = ethers.keccak256(ethers.toUtf8Bytes('VALUATION_ORACLE_VIEW'));
+    const KEY_REWARD_VIEW = ethers.keccak256(ethers.toUtf8Bytes('REWARD_VIEW'));
+    const KEY_LIQUIDATION_VIEW = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_VIEW'));
+    const KEY_RISK_VIEW = ethers.keccak256(ethers.toUtf8Bytes('RISK_VIEW'));
+    const KEY_USER_VIEW = ethers.keccak256(ethers.toUtf8Bytes('USER_VIEW'));
+    const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW'));
+    const KEY_BATCH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('BATCH_VIEW'));
+    const KEY_DASHBOARD_VIEW = ethers.keccak256(ethers.toUtf8Bytes('DASHBOARD_VIEW'));
+    const KEY_PREVIEW_VIEW = ethers.keccak256(ethers.toUtf8Bytes('PREVIEW_VIEW'));
+
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(KEY_CM, await collateralManager.getAddress());
     await registry.setModule(KEY_LE, await lendingEngine.getAddress());
@@ -85,6 +96,18 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
     await registry.setModule(KEY_RM, await rewardManager.getAddress());
     await registry.setModule(KEY_GUARANTEE_FUND, await guaranteeFundManager.getAddress());
     await registry.setModule(KEY_VIEW_CACHE, await viewCache.getAddress());
+
+    // Bind route targets (addresses do not need to implement specific interfaces for routing tests;
+    // they only need to be non-zero and Registry-consistent).
+    await registry.setModule(KEY_VALUATION_ORACLE_VIEW, await priceOracle.getAddress());
+    await registry.setModule(KEY_REWARD_VIEW, await rewardManager.getAddress());
+    await registry.setModule(KEY_LIQUIDATION_VIEW, await guaranteeFundManager.getAddress());
+    await registry.setModule(KEY_RISK_VIEW, await lendingEngine.getAddress());
+    await registry.setModule(KEY_USER_VIEW, await collateralManager.getAddress());
+    await registry.setModule(KEY_POSITION_VIEW, await collateralManager.getAddress());
+    await registry.setModule(KEY_BATCH_VIEW, await statisticsView.getAddress());
+    await registry.setModule(KEY_DASHBOARD_VIEW, await viewCache.getAddress());
+    await registry.setModule(KEY_PREVIEW_VIEW, await viewCache.getAddress());
     // named module for getNamedModule
     const collateralManagerKey = ethers.keccak256(ethers.toUtf8Bytes('collateralManager'));
     await registry.setModule(collateralManagerKey, await collateralManager.getAddress());
@@ -173,26 +196,62 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
   });
 
   describe('资产与价格查询（已拆分至专属 View）', function () {
-    it('getTotalCollateral 应提示使用 StatisticsView', async function () {
-      await expect(systemView.connect(owner).getTotalCollateral(ZERO_ADDRESS)).to.be.revertedWith(
-        'SystemView: use StatisticsView.getTotalCollateral'
-      );
+    it('DEPRECATED: getTotalCollateral 应 revert（不依赖 revert 文本）', async function () {
+      await expect(systemView.connect(owner).getTotalCollateral(ZERO_ADDRESS)).to.be.reverted;
     });
 
-    it('getTotalDebt 应提示使用 StatisticsView', async function () {
-      await expect(systemView.connect(owner).getTotalDebt(ZERO_ADDRESS)).to.be.revertedWith(
-        'SystemView: use StatisticsView.getTotalDebt'
-      );
+    it('DEPRECATED: getTotalDebt 应 revert（不依赖 revert 文本）', async function () {
+      await expect(systemView.connect(owner).getTotalDebt(ZERO_ADDRESS)).to.be.reverted;
     });
 
-    it('getAssetPrice 应提示使用 ValuationOracleView', async function () {
-      await expect(systemView.connect(owner).getAssetPrice(ZERO_ADDRESS)).to.be.revertedWith(
-        'SystemView: use ValuationOracleView.getAssetPrice'
-      );
+    it('DEPRECATED: getAssetPrice 应 revert（不依赖 revert 文本）', async function () {
+      await expect(systemView.connect(owner).getAssetPrice(ZERO_ADDRESS)).to.be.reverted;
     });
 
     it('不再暴露 batchGetAssetStatus（由 BatchView 承担）', async function () {
       expect((systemView as any).batchGetAssetStatus).to.equal(undefined);
+    });
+  });
+
+  describe('路由/发现性（MUST：可消费下一跳，不依赖 revert 文本）', function () {
+    it('routePrice 应返回 primary+fallback 路由信息（moduleKey/moduleAddr 与 Registry 一致）', async function () {
+      const expectedPrimaryKey = ethers.keccak256(ethers.toUtf8Bytes('VALUATION_ORACLE_VIEW'));
+      const expectedFallbackKey = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
+
+      const expectedPrimaryAddr = await registry.getModule(expectedPrimaryKey);
+      const expectedFallbackAddr = await registry.getModule(expectedFallbackKey);
+
+      const hint = await systemView.connect(owner).routePrice();
+      expect(hint.primaryRoute.moduleKey).to.equal(expectedPrimaryKey);
+      expect(hint.primaryRoute.moduleAddr).to.equal(expectedPrimaryAddr);
+      expect(hint.primaryRoute.moduleAddr).to.not.equal(ZERO_ADDRESS);
+
+      expect(hint.fallbackRoute.moduleKey).to.equal(expectedFallbackKey);
+      expect(hint.fallbackRoute.moduleAddr).to.equal(expectedFallbackAddr);
+      expect(hint.fallbackRoute.moduleAddr).to.not.equal(ZERO_ADDRESS);
+    });
+
+    it('routeStatistics/routeReward/routeLiquidation 等应返回可消费路由（moduleKey/moduleAddr 与 Registry 一致）', async function () {
+      const cases = [
+        { label: 'routeStatistics', fn: () => systemView.connect(owner).routeStatistics(), key: 'VAULT_STATISTICS' },
+        { label: 'routeReward', fn: () => systemView.connect(owner).routeReward(), key: 'REWARD_VIEW' },
+        { label: 'routeLiquidation', fn: () => systemView.connect(owner).routeLiquidation(), key: 'LIQUIDATION_VIEW' },
+        { label: 'routeRisk', fn: () => systemView.connect(owner).routeRisk(), key: 'RISK_VIEW' },
+        { label: 'routeUser', fn: () => systemView.connect(owner).routeUser(), key: 'USER_VIEW' },
+        { label: 'routePosition', fn: () => systemView.connect(owner).routePosition(), key: 'POSITION_VIEW' },
+        { label: 'routeBatch', fn: () => systemView.connect(owner).routeBatch(), key: 'BATCH_VIEW' },
+        { label: 'routeDashboard', fn: () => systemView.connect(owner).routeDashboard(), key: 'DASHBOARD_VIEW' },
+        { label: 'routePreview', fn: () => systemView.connect(owner).routePreview(), key: 'PREVIEW_VIEW' }
+      ] as const;
+
+      for (const c of cases) {
+        const expectedKey = ethers.keccak256(ethers.toUtf8Bytes(c.key));
+        const expectedAddr = await registry.getModule(expectedKey);
+        const r = await c.fn();
+        expect(r.moduleKey, `${c.label}: moduleKey`).to.equal(expectedKey);
+        expect(r.moduleAddr, `${c.label}: moduleAddr`).to.equal(expectedAddr);
+        expect(r.moduleAddr, `${c.label}: moduleAddr non-zero`).to.not.equal(ZERO_ADDRESS);
+      }
     });
   });
 
@@ -206,14 +265,12 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
       expect(result.lastUpdateTime).to.be.a('bigint');
     });
 
-    it('getRewardSystemView 应提示使用 RewardView', async function () {
-      await expect(systemView.connect(owner).getRewardSystemView()).to.be.revertedWith('SystemView: use RewardView.getRewardStats');
+    it('DEPRECATED: getRewardSystemView 应 revert（不依赖 revert 文本）', async function () {
+      await expect(systemView.connect(owner).getRewardSystemView()).to.be.reverted;
     });
 
-    it('getGuaranteeSystemView 应提示使用 StatisticsView', async function () {
-      await expect(systemView.connect(owner).getGuaranteeSystemView()).to.be.revertedWith(
-        'SystemView: use StatisticsView.getTotalGuarantee'
-      );
+    it('DEPRECATED: getGuaranteeSystemView 应 revert（不依赖 revert 文本）', async function () {
+      await expect(systemView.connect(owner).getGuaranteeSystemView()).to.be.reverted;
     });
   });
 

@@ -1,89 +1,117 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+// solhint-disable-next-line no-global-import
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+// solhint-disable-next-line no-global-import
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { RiskUtils } from "../../utils/RiskUtils.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
-/// @notice PositionView 只读接口
-/// @dev 用于从 PositionView 模块读取用户仓位数据，避免循环依赖
+/**
+ * @notice Minimal PositionView read interface.
+ * @dev Used by PreviewView to fetch user position data from PositionView without introducing circular dependencies.
+ */
 interface IPositionViewRead {
-    /// @notice 获取用户指定资产的仓位信息
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return 抵押数量和债务数量
+    /**
+     * @notice Get a user's position for a given asset.
+     * @dev Reverts if:
+     *      - PositionView reverts (implementation-defined)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user User address
+     * @param asset Asset address
+     * @return collateral Collateral amount (PositionView-defined units/decimals)
+     * @return debt Debt amount (PositionView-defined units/decimals)
+     */
     function getUserPosition(address user, address asset) external view returns (uint256, uint256);
 }
 
-/// @title PreviewView
-/// @notice 预览类查询门面，基于 PositionView 读到的仓位做只读估算
-/// @dev 不存业务状态，仅持有 Registry 指针；权威结果仍以 UserView/PositionView 为准
-/// @dev 作为前端入口，提供 deposit/withdraw/borrow/repay 操作的预估接口
-/// @dev 遵循双架构设计标准，提供 0-gas 查询接口
-/// @custom:security-contact security@example.com
+/**
+ * @title PreviewView
+ * @notice Read-only preview facade for basic deposit/withdraw/borrow/repay estimations (0-gas queries).
+ * @dev Reverts if:
+ *      - registry is zero / not a contract (ZeroAddress / NotAContract)
+ *      - caller is not the target user and lacks VIEW_USER_DATA / ADMIN (MissingRole)
+ *      - PositionView module is missing in Registry (reverts in Registry.getModuleOrRevert)
+ *      - asset is zero address (PreviewView__InvalidInput)
+ *
+ * Security:
+ * - Read-only: does not perform core business writes; values are computed from PositionView snapshots.
+ * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
+ */
 contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
-    // ============ Errors ============
-    /// @notice 未授权访问错误
-    /// @dev 当调用者不是用户本人且不具有管理员或查看者角色时触发
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
+
+    /// @notice Legacy error kept for backward compatibility; new paths revert `MissingRole()`.
     error PreviewView__Unauthorized();
     
-    /// @notice 无效输入参数错误
-    /// @dev 当资产地址为零地址时触发
+    /// @notice Invalid input parameters.
+    /// @dev Reverts when `asset` is the zero address.
+    ///      Used by: previewDeposit/previewWithdraw/previewBorrow/previewRepay.
     error PreviewView__InvalidInput();
 
-    // ============ Storage ============
-    /// @notice Registry 合约地址，用于模块解析和权限验证
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
+
+    /// @notice Registry contract address (internal use only).
     address private _registryAddr;
 
-    // ============ Constants ============
-    /// @notice 最小健康因子阈值（基点），10000 = 100%
-    /// @dev 健康因子低于此值时，操作将被标记为不安全
-    uint256 private constant MIN_HF_BPS = 10_000;
-    
-    /// @notice 最大贷款价值比（基点），7500 = 75%
-    /// @dev 用于计算最大可借额度
-    uint256 private constant MAX_LTV_BPS = 7_500;
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
 
-    // ============ Modifiers ============
-    /// @notice Registry 有效性验证修饰符
-    /// @dev 确保 Registry 地址不为零地址，防止无效调用
+    /// @dev Minimum health factor threshold in basis points (bps=1e4). 10_000 = 100%.
+    uint256 private constant _MIN_HF_BPS = 10_000;
+    
+    /// @dev Maximum LTV in basis points (bps=1e4). 7_500 = 75%.
+    uint256 private constant _MAX_LTV_BPS = 7_500;
+
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
-    /// @notice 用户或查看者权限验证修饰符
-    /// @dev 允许用户本人、管理员或具有 VIEW_USER_DATA 角色的地址访问
-    /// @param user 要查询的用户地址
+    /// @dev Gate: caller must be the target user, or have VIEW_USER_DATA / ADMIN.
     modifier onlyUserOrViewer(address user) {
         if (
             msg.sender != user &&
             !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender) &&
             !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
         ) {
-            revert PreviewView__Unauthorized();
+            // Strict permission alignment across view modules.
+            // solhint-disable-next-line custom-errors
+            revert MissingRole();
         }
         _;
     }
 
-    // ============ Initializer ============
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /// @notice 初始化合约并设置 Registry 地址
-    /// @param initialRegistryAddr Registry 合约地址
-    /// @dev 初始化 UUPS 可升级合约，设置 Registry 地址用于模块解析
-    /// @custom:security 确保 Registry 地址不为零地址
+    /**
+     * @notice Initialize the PreviewView (UUPS).
+     * @dev Reverts if:
+     *      - initialRegistryAddr is zero (ZeroAddress)
+     *      - initialRegistryAddr is not a contract (NotAContract)
+     *
+     * Security:
+     * - initializer (UUPS)
+     *
+     * @param initialRegistryAddr Registry contract address
+     */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
@@ -91,17 +119,25 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         _registryAddr = initialRegistryAddr;
     }
 
-    // ============ Preview Functions ============
+    /*━━━━━━━━━━━━━━━ Preview APIs ━━━━━━━━━━━━━━━*/
     
-    /// @notice 预览抵押操作后的健康因子
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 抵押数量
-    /// @return hfAfter 抵押后的健康因子（基点）
-    /// @return ok 是否满足最小健康因子要求
-    /// @dev 基于当前仓位计算增加抵押后的健康因子，用于前端预览
-    /// @dev 健康因子计算公式：HF = (collateral * 10000) / debt
-    /// @dev 当债务为 0 时，健康因子返回最大值
+    /**
+     * @notice Preview the post-deposit health factor for a user's position.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyUserOrViewer)
+     *      - asset is zero address (PreviewView__InvalidInput)
+     *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @param asset Asset address
+     * @param amount Amount to add to collateral (PositionView-defined units/decimals)
+     * @return hfAfter Health factor after the deposit (bps=1e4). Returns max uint256 if debt is zero.
+     * @return ok Whether hfAfter >= MIN threshold
+     */
     function previewDeposit(address user, address asset, uint256 amount)
         external
         view
@@ -113,17 +149,26 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         (uint256 collateral, uint256 debt) = _getPosition(user, asset);
         uint256 newCollateral = collateral + amount;
         hfAfter = _calcHF(newCollateral, debt);
-        ok = hfAfter >= MIN_HF_BPS;
+        ok = hfAfter >= _MIN_HF_BPS;
     }
 
-    /// @notice 预览提取抵押物后的健康因子
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 提取数量
-    /// @return hfAfter 提取后的健康因子（基点）
-    /// @return ok 是否满足最小健康因子要求
-    /// @dev 基于当前仓位计算减少抵押后的健康因子
-    /// @dev 如果提取数量超过抵押品，新抵押品将归零
+    /**
+     * @notice Preview the post-withdraw health factor for a user's position.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyUserOrViewer)
+     *      - asset is zero address (PreviewView__InvalidInput)
+     *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @param asset Asset address
+     * @param amount Amount to remove from collateral (PositionView-defined units/decimals)
+     * @return hfAfter Health factor after the withdrawal (bps=1e4). Returns max uint256 if debt is zero.
+     * @return ok Whether hfAfter >= MIN threshold
+     */
     function previewWithdraw(address user, address asset, uint256 amount)
         external
         view
@@ -135,24 +180,33 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         (uint256 collateral, uint256 debt) = _getPosition(user, asset);
         uint256 newCollateral = collateral > amount ? collateral - amount : 0;
         hfAfter = _calcHF(newCollateral, debt);
-        ok = hfAfter >= MIN_HF_BPS;
+        ok = hfAfter >= _MIN_HF_BPS;
     }
 
-    /// @notice 预览借款操作后的健康因子、贷款价值比和最大可借额度
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param collateralAdd 新增抵押数量
-    /// @param borrowAmount 借款数量
-    /// @return newHF 借款后的健康因子（基点）
-    /// @return newLTV 借款后的贷款价值比（基点）
-    /// @return maxBorrowable 最大可借额度（如果已达到最大 LTV 则返回 0）
-    /// @dev 计算新增抵押和借款后的健康因子和 LTV
-    /// @dev 最大可借额度 = (新抵押品 * MAX_LTV_BPS / 10000) - 新债务
-    /// @dev 注意：函数签名中包含预留参数 collateralIn（当前未使用），用于未来扩展
+    /**
+     * @notice Preview the post-borrow health factor, LTV, and remaining borrowable headroom.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyUserOrViewer)
+     *      - asset is zero address (PreviewView__InvalidInput)
+     *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @param asset Asset address
+     * @param collateralIn Reserved/ignored for backward compatibility (currently unused)
+     * @param collateralAdd Amount to add to collateral (PositionView-defined units/decimals)
+     * @param borrowAmount Amount to add to debt (PositionView-defined units/decimals)
+     * @return newHF Health factor after the borrow (bps=1e4). Returns max uint256 if debt is zero.
+     * @return newLTV Loan-to-value ratio after the borrow (bps=1e4). Returns 0 if collateral==0 or debt==0.
+     * @return maxBorrowable Remaining borrowable headroom under MAX LTV (0 if already at/above max)
+     */
     function previewBorrow(
         address user,
         address asset,
-        uint256 /*collateralIn*/,
+        uint256 collateralIn,
         uint256 collateralAdd,
         uint256 borrowAmount
     )
@@ -163,6 +217,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (uint256 newHF, uint256 newLTV, uint256 maxBorrowable)
     {
         if (asset == address(0)) revert PreviewView__InvalidInput();
+        collateralIn; // reserved/ignored (backward compatibility)
         (uint256 collateral, uint256 debt) = _getPosition(user, asset);
 
         uint256 newCollateral = collateral + collateralAdd;
@@ -171,7 +226,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         newHF = _calcHF(newCollateral, newDebt);
         newLTV = _calcLTV(newCollateral, newDebt);
 
-        uint256 maxDebt = (newCollateral * MAX_LTV_BPS) / 10_000;
+        uint256 maxDebt = (newCollateral * _MAX_LTV_BPS) / 10_000;
         if (newDebt >= maxDebt) {
             maxBorrowable = 0;
         } else {
@@ -179,14 +234,23 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
-    /// @notice 预览还款操作后的健康因子和贷款价值比
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 还款数量
-    /// @return newHF 还款后的健康因子（基点）
-    /// @return newLTV 还款后的贷款价值比（基点）
-    /// @dev 如果还款数量大于等于债务，债务将归零
-    /// @dev 当债务归零时，健康因子返回最大值，LTV 返回 0
+    /**
+     * @notice Preview the post-repay health factor and LTV for a user's position.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyUserOrViewer)
+     *      - asset is zero address (PreviewView__InvalidInput)
+     *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @param asset Asset address
+     * @param amount Amount to reduce from debt (PositionView-defined units/decimals)
+     * @return newHF Health factor after the repay (bps=1e4). Returns max uint256 if debt becomes zero.
+     * @return newLTV Loan-to-value ratio after the repay (bps=1e4). Returns 0 if collateral==0 or debt==0.
+     */
     function previewRepay(address user, address asset, uint256 amount)
         external
         view
@@ -201,77 +265,97 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         newLTV = _calcLTV(collateral, newDebt);
     }
 
-    // ============ Internal Functions ============
+    /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取 PositionView 模块实例
-    /// @return PositionView 模块接口实例
-    /// @dev 从 Registry 动态解析 PositionView 模块地址
     function _positionView() internal view returns (IPositionViewRead) {
         return IPositionViewRead(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW));
     }
 
-    /// @notice 获取用户指定资产的仓位信息
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return collateral 抵押数量
-    /// @return debt 债务数量
-    /// @dev 委托调用 PositionView 获取用户仓位数据
     function _getPosition(address user, address asset) internal view returns (uint256 collateral, uint256 debt) {
         return _positionView().getUserPosition(user, asset);
     }
 
-    /// @notice 计算健康因子
-    /// @param collateral 抵押数量
-    /// @param debt 债务数量
-    /// @return 健康因子（基点），债务为 0 时返回最大值，抵押为 0 时返回 0
-    /// @dev 健康因子计算公式：HF = (collateral * 10000) / debt
     function _calcHF(uint256 collateral, uint256 debt) internal pure returns (uint256) {
         if (debt == 0) return type(uint256).max;
         if (collateral == 0) return 0;
         return (collateral * 10_000) / debt;
     }
 
-    /// @notice 计算贷款价值比
-    /// @param collateral 抵押数量
-    /// @param debt 债务数量
-    /// @return 贷款价值比（基点），抵押或债务为 0 时返回 0
-    /// @dev 委托调用 RiskUtils.calculateLTV 进行计算
     function _calcLTV(uint256 collateral, uint256 debt) internal pure returns (uint256) {
         if (collateral == 0) return 0;
         if (debt == 0) return 0;
         return RiskUtils.calculateLTV(debt, collateral);
     }
 
-    // ============ UUPS Upgrade Functions ============
+    /*━━━━━━━━━━━━━━━ UUPS upgrade ━━━━━━━━━━━━━━━*/
     
-    /// @notice UUPS 升级授权函数
-    /// @param newImplementation 新实现合约地址
-    /// @dev 仅允许具有 ACTION_ADMIN 角色的地址执行升级
-    /// @dev 确保新实现地址不为零地址
+    /**
+     * @notice Authorize a UUPS upgrade.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (reverts in ViewAccessLib.requireRole)
+     *      - newImplementation is zero (ZeroAddress)
+     *      - newImplementation is not a contract (NotAContract)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     *
+     * @param newImplementation New implementation address
+     */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
-    // ============ Public Getters ============
+    /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
     
-    /// @notice 获取 Registry 合约地址
-    /// @return Registry 合约地址
-    /// @dev 兼容旧版接口的 getter 函数
+    /**
+     * @notice Get the Registry contract address.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return registryAddr Registry contract address
+     */
     function registryAddr() external view returns (address) {
         return _registryAddr;
     }
 
-    // ============ Versioning (C+B baseline) ============
+    /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Get the API version for this module.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return version API semantic version
+     */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
+    /**
+     * @notice Get the schema version for this module's outputs.
+     * @dev Reverts if:
+     *      - none
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return version Schema version
+     */
     function schemaVersion() public pure override returns (uint256) {
         return 1;
     }
 
-    /// @notice Storage gap for future upgrades
+    /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
+
+    /// @notice Storage gap for future upgrades.
     uint256[50] private __gap;
 } 

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+// solhint-disable-next-line no-global-import
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+// solhint-disable-next-line no-global-import
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
@@ -11,113 +13,298 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 import { IOrderEngine } from "../../../interfaces/IOrderEngine.sol";
 import { IOrderEngineViewAdapter } from "../../../interfaces/IOrderEngineViewAdapter.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 
-/// @title LendingEngineView
-/// @notice 仅负责借贷引擎相关的数据查询（0 gas），不承载任何业务写操作
-/// @dev 与核心 LendingEngine 解耦，通过 Registry 获取模块地址
+/**
+ * @title LendingEngineView
+ * @notice Read-only view module for lending/order-engine data (0-gas queries).
+ * @dev This module is decoupled from the core engine and resolves dependencies via Registry.
+ *
+ * Reverts if:
+ * - registry is zero / not a contract (ZeroAddress / NotAContract)
+ * - caller lacks required role for a gated read (MissingRole)
+ *
+ * Security:
+ * - Read-only: this module does not perform business writes
+ * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM)
+ */
 contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
-	// =========================  Errors  =========================
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
-	error LendingEngineView__ZeroAddress();
-	error LendingEngineView__Unauthorized();
+    /// @notice Legacy error kept for backward compatibility.
+    error LendingEngineView__ZeroAddress();
 
-	// =========================  Storage  =========================
+    /// @notice Legacy error kept for backward compatibility; new paths revert `MissingRole()`.
+    error LendingEngineView__Unauthorized();
 
-	address private _registryAddr;
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
-	// =========================  Modifiers  =========================
+    /// @notice Registry contract address (internal use only).
+    address private _registryAddr;
 
-	modifier onlyValidRegistry() {
-		if (_registryAddr == address(0)) revert ZeroAddress();
-		if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
-		_;
-	}
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
-	// =========================  Initialiser  =========================
+    modifier onlyValidRegistry() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
+        _;
+    }
 
-	/// @custom:oz-upgrades-unsafe-allow constructor
-	constructor() {
-		_disableInitializers();
-	}
+    /// @dev Gate for ops/system-level diagnostics reads.
+    modifier onlyOps() {
+        if (
+            !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender)
+                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+        ) revert MissingRole();
+        _;
+    }
 
-	function initialize(address initialRegistryAddr) external initializer {
-		if (initialRegistryAddr == address(0)) revert ZeroAddress();
-		if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+    /// @dev Gate for user-scoped reads (caller must be the user, or have VIEW_USER_DATA / ADMIN).
+    modifier onlyAuthorizedUser(address user) {
+        if (
+            msg.sender != user && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+        ) revert MissingRole();
+        _;
+    }
 
-		__UUPSUpgradeable_init();
-		_registryAddr = initialRegistryAddr;
-	}
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
 
-	// =========================  Read APIs  =========================
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
-	/// @notice 查询贷款订单详情
-	function getLoanOrder(uint256 orderId) external view onlyValidRegistry returns (IOrderEngine.LoanOrder memory order) {
-		return _engine()._getLoanOrderForView(orderId);
-	}
+    /**
+     * @notice Initialize the LendingEngineView (UUPS).
+     * @dev Reverts if:
+     *      - initialRegistryAddr is zero (ZeroAddress)
+     *      - initialRegistryAddr is not a contract (NotAContract)
+     *
+     * Security:
+     * - initializer (UUPS)
+     *
+     * @param initialRegistryAddr Registry contract address
+     */
+    function initialize(address initialRegistryAddr) external initializer {
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
-	/// @notice 查询用户贷款数量
-	function getUserLoanCount(address user) external view onlyValidRegistry returns (uint256 count) {
-		return _engine()._getUserLoanCountForView(user);
-	}
+        __UUPSUpgradeable_init();
+        _registryAddr = initialRegistryAddr;
+    }
 
-	/// @notice 查询某订单累计失败手续费（用于运维排查）
-	function getFailedFeeAmount(uint256 orderId) external view onlyValidRegistry returns (uint256 feeAmount) {
-		return _engine()._getFailedFeeAmountForView(orderId);
-	}
+    /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
-	/// @notice 查询某订单的 NFT 铸造重试次数
-	function getNftRetryCount(uint256 orderId) external view onlyValidRegistry returns (uint256 retryCount) {
-		return _engine()._getNftRetryCountForView(orderId);
-	}
+    /**
+     * @notice Get a loan order snapshot for off-chain display.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not authorized to view the order (MissingRole)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param orderId Engine order identifier
+     * @return order Loan order struct snapshot (see IOrderEngine.LoanOrder)
+     */
+    function getLoanOrder(uint256 orderId)
+        external
+        view
+        onlyValidRegistry
+        returns (IOrderEngine.LoanOrder memory order)
+    {
+        // Strict permission alignment: allow borrower/lender access, or ops/admin (VIEW_USER_DATA / ADMIN).
+        bool isOps = ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+            || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!isOps && !_engine()._canAccessLoanOrderForView(orderId, msg.sender)) revert MissingRole();
+        return _engine()._getLoanOrderForView(orderId);
+    }
 
-	/// @notice 判断用户是否可访问某订单（借款人/贷方/管理员）
-	function canAccessLoanOrder(uint256 orderId, address user) external view onlyValidRegistry returns (bool hasAccess) {
-		return _engine()._canAccessLoanOrderForView(orderId, user);
-	}
+    /**
+     * @notice Get the number of loan orders for a given user.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyAuthorizedUser)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @return count Number of orders for the user
+     */
+    function getUserLoanCount(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedUser(user)
+        returns (uint256 count)
+    {
+        return _engine()._getUserLoanCountForView(user);
+    }
 
-	/// @notice 判断账户是否具备撮合权限（撮合引擎）
-	function isMatchEngine(address account) external view onlyValidRegistry returns (bool isMatch) {
-		return _engine()._isMatchEngineForView(account);
-	}
+    /**
+     * @notice Get the accumulated failed fee amount for an order (ops diagnostics).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param orderId Engine order identifier
+     * @return feeAmount Failed fee amount (engine-defined units/decimals)
+     */
+    function getFailedFeeAmount(uint256 orderId)
+        external
+        view
+        onlyValidRegistry
+        onlyOps
+        returns (uint256 feeAmount)
+    {
+        return _engine()._getFailedFeeAmountForView(orderId);
+    }
 
-	/// @notice 便利函数：返回当前 Registry 地址（来自引擎视图）
-	function getRegistryFromEngine() external view onlyValidRegistry returns (address registry) {
-		return _engine()._getRegistryForView();
-	}
+    /**
+     * @notice Get the NFT mint retry count for an order (ops diagnostics).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param orderId Engine order identifier
+     * @return retryCount Retry count
+     */
+    function getNftRetryCount(uint256 orderId)
+        external
+        view
+        onlyValidRegistry
+        onlyOps
+        returns (uint256 retryCount)
+    {
+        return _engine()._getNftRetryCountForView(orderId);
+    }
 
-	/// @notice 获取 Registry 地址（首选接口）
-	function getRegistry() external view returns (address) {
-		return _registryAddr;
-	}
+    /**
+     * @notice Check whether a user can access a given loan order.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyAuthorizedUser)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param orderId Engine order identifier
+     * @param user Target user address
+     * @return hasAccess Whether the user is allowed to view the order
+     */
+    function canAccessLoanOrder(uint256 orderId, address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedUser(user)
+        returns (bool hasAccess)
+    {
+        return _engine()._canAccessLoanOrderForView(orderId, user);
+    }
 
-	// =========================  Internal helpers  =========================
+    /**
+     * @notice Check whether an account is the match engine (ops diagnostics).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param account Account address to check
+     * @return isMatch Whether the account is the match engine
+     */
+    function isMatchEngine(address account)
+        external
+        view
+        onlyValidRegistry
+        onlyOps
+        returns (bool isMatch)
+    {
+        return _engine()._isMatchEngineForView(account);
+    }
 
-	function _engine() internal view returns (IOrderEngineViewAdapter) {
-		address engineAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
-		return IOrderEngineViewAdapter(engineAddr);
-	}
+    /**
+     * @notice Convenience helper to read the Registry address from the underlying engine adapter (ops only).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return registry Registry contract address as reported by the engine adapter
+     */
+    function getRegistryFromEngine()
+        external
+        view
+        onlyValidRegistry
+        onlyOps
+        returns (address registry)
+    {
+        return _engine()._getRegistryForView();
+    }
 
-	function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-		// 仅管理员可升级
-		address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-		IAccessControlManager(acm).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-		if (newImplementation == address(0)) revert ZeroAddress();
-		if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
-	}
+    /**
+     * @notice Get the Registry contract address.
+     * @dev This getter may return address(0) if the contract is not initialized.
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return registryAddrVar Registry contract address
+     */
+    function getRegistry() external view returns (address registryAddrVar) {
+        return _registryAddr;
+    }
 
-	/// @notice 兼容旧版 getter
-	function registryAddr() external view returns(address){ return _registryAddr; }
+    /**
+     * @notice Get the Registry contract address (legacy getter).
+     * @dev This function is kept for backward compatibility; prefer `getRegistry()`.
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return registryAddrVar Registry contract address
+     */
+    function registryAddr() external view returns (address registryAddrVar) {
+        return _registryAddr;
+    }
 
-	// ============ Versioning (C+B baseline) ============
-	function apiVersion() public pure override returns (uint256) {
-		return 1;
-	}
+    /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
-	function schemaVersion() public pure override returns (uint256) {
-		return 1;
-	}
+    function _engine() internal view returns (IOrderEngineViewAdapter) {
+        address engineAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+        return IOrderEngineViewAdapter(engineAddr);
+    }
 
-	// =========================  Storage gap for upgrade safety  =========================
-	uint256[50] private __gap;
+    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
+        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acm).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+    }
+
+    /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
+
+    function apiVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    function schemaVersion() public pure override returns (uint256) {
+        return 1;
+    }
+
+    /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
+
+    uint256[50] private __gap;
 }

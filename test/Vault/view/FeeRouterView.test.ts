@@ -305,6 +305,104 @@ describe('FeeRouterView', function () {
     });
   });
 
+  describe('ARCH 4.9 FRV-01: push permission (FeeRouter-only)', function () {
+    it('reverts for non-FeeRouter callers across all push entrypoints', async function () {
+      const { feeRouterView, admin, user } = await loadFixture(deployFixture);
+
+      await expect(feeRouterView.connect(user).pushGlobalStatsUpdate(1n, 2n)).to.be.revertedWithCustomError(
+        feeRouterView,
+        'FeeRouterView__OnlyFeeRouter',
+      );
+      await expect(feeRouterView.connect(admin).pushGlobalStatsUpdate(1n, 2n)).to.be.revertedWithCustomError(
+        feeRouterView,
+        'FeeRouterView__OnlyFeeRouter',
+      );
+
+      await expect(
+        feeRouterView
+          .connect(user)
+          .pushSystemConfigUpdate(
+            ethers.Wallet.createRandom().address,
+            ethers.Wallet.createRandom().address,
+            200n,
+            100n,
+            [],
+          ),
+      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__OnlyFeeRouter');
+      await expect(
+        feeRouterView
+          .connect(admin)
+          .pushSystemConfigUpdate(
+            ethers.Wallet.createRandom().address,
+            ethers.Wallet.createRandom().address,
+            200n,
+            100n,
+            [],
+          ),
+      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__OnlyFeeRouter');
+
+      await expect(
+        feeRouterView
+          .connect(user)
+          .pushGlobalFeeStatistic(ethers.Wallet.createRandom().address, ethers.ZeroHash, 123n),
+      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__OnlyFeeRouter');
+      await expect(
+        feeRouterView
+          .connect(admin)
+          .pushGlobalFeeStatistic(ethers.Wallet.createRandom().address, ethers.ZeroHash, 123n),
+      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__OnlyFeeRouter');
+    });
+  });
+
+  describe('ARCH 4.9 FRV-02: staleness output (timestamp/isValid/needsSync)', function () {
+    it('getSyncStatus is valid initially and flips to stale after SYNC_INTERVAL', async function () {
+      const { feeRouterView } = await loadFixture(deployFixture);
+
+      const [isValid0, ts0, needs0] = await feeRouterView.getSyncStatus();
+      expect(ts0).to.be.greaterThan(0n);
+      expect(needs0).to.equal(false);
+      expect(isValid0).to.equal(true);
+
+      await time.increase(301);
+      const [isValid1, ts1, needs1] = await feeRouterView.getSyncStatus();
+      expect(ts1).to.equal(ts0);
+      expect(needs1).to.equal(true);
+      expect(isValid1).to.equal(false);
+    });
+
+    it('FeeRouter push refreshes sync status, emits DataPushed, and timestamp is monotonic', async function () {
+      const { feeRouterView, feeRouter } = await loadFixture(deployFixture);
+
+      const [, ts0, needs0] = await feeRouterView.getSyncStatus();
+      expect(needs0).to.equal(false);
+
+      await time.increase(301);
+      const [isValidStale, tsStale, needsStale] = await feeRouterView.getSyncStatus();
+      expect(tsStale).to.equal(ts0);
+      expect(needsStale).to.equal(true);
+      expect(isValidStale).to.equal(false);
+
+      const tx1 = await feeRouterView.connect(feeRouter).pushGlobalStatsUpdate(5n, 500n);
+      const receipt1 = await tx1.wait();
+      const block1 = await ethers.provider.getBlock(receipt1!.blockNumber!);
+
+      const [isValid1, ts1, needs1] = await feeRouterView.getSyncStatus();
+      expect(needs1).to.equal(false);
+      expect(isValid1).to.equal(true);
+      expect(ts1).to.equal(BigInt(block1!.timestamp));
+      expect(ts1).to.be.greaterThan(ts0);
+
+      await time.increase(1);
+      const tx2 = await feeRouterView.connect(feeRouter).pushGlobalStatsUpdate(6n, 600n);
+      const receipt2 = await tx2.wait();
+      const block2 = await ethers.provider.getBlock(receipt2!.blockNumber!);
+
+      const [, ts2] = await feeRouterView.getSyncStatus();
+      expect(ts2).to.equal(BigInt(block2!.timestamp));
+      expect(ts2).to.be.greaterThan(ts1);
+    });
+  });
+
   describe('admin queries', function () {
     it('pushGlobalStatsUpdate and read global stats', async function () {
       const { feeRouterView, feeRouter, admin } = await loadFixture(deployFixture);

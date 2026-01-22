@@ -199,5 +199,104 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
     expect(await eventsView.getUserLiquidationCount(user.address)).to.equal(1n);
     expect(await eventsView.getLiquidatorTotalBonus(liquidator.address)).to.equal(5n);
   });
+
+  it("ARCH 4.10 LQ-01: liquidation DataPushed is emitted only by LiquidatorView (single point, no duplicates)", async function () {
+    const { liquidationManager, liquidator, user, asset, registry, access } = await loadFixture(deployFixture);
+
+    // Swap the liquidation view implementation to the real LiquidatorView, so the liquidation flow
+    // calls LiquidatorView.push* and emits DataPushed from the view contract itself.
+    const LiquidatorViewF = await ethers.getContractFactory("LiquidatorView");
+    const liquidatorView = await upgrades.deployProxy(
+      LiquidatorViewF,
+      [await registry.getAddress(), ethers.ZeroAddress],
+      { kind: "uups" },
+    );
+    await liquidatorView.waitForDeployment();
+    await registry.setModule(ethers.id("LIQUIDATION_VIEW"), await liquidatorView.getAddress());
+
+    // Ensure role key is consistent with other tests (LiquidationManager checks caller in ACM).
+    const ACTION_LIQUIDATE = ethers.id("LIQUIDATE");
+    await access.grantRole(ACTION_LIQUIDATE, liquidator.address);
+
+    const tx = await liquidationManager.connect(liquidator).liquidate(user.address, asset, asset, 30n, 30n, 5n);
+    const receipt = await tx.wait();
+    const block = await ethers.provider.getBlock(receipt!.blockNumber!);
+
+    // DataPushed(bytes32 indexed dataTypeHash, bytes payload)
+    const DATA_PUSH_TOPIC0 = ethers.id("DataPushed(bytes32,bytes)");
+    const TYPE_LIQUIDATION_UPDATE = ethers.id("LIQUIDATION_UPDATE");
+    const TYPE_LIQUIDATION_PAYOUT = ethers.id("LIQUIDATION_PAYOUT");
+
+    const dataPushLogs = receipt!.logs.filter((l) => l.topics?.[0] === DATA_PUSH_TOPIC0);
+
+    // There should be exactly one LIQUIDATION_UPDATE and one LIQUIDATION_PAYOUT, and both must come from LiquidatorView.
+    const counts: Record<string, number> = {};
+    for (const l of dataPushLogs) {
+      expect(l.address).to.equal(await liquidatorView.getAddress());
+      const t = l.topics[1]!.toLowerCase();
+      counts[t] = (counts[t] ?? 0) + 1;
+    }
+    expect(counts[TYPE_LIQUIDATION_UPDATE.toLowerCase()] ?? 0).to.equal(1);
+    expect(counts[TYPE_LIQUIDATION_PAYOUT.toLowerCase()] ?? 0).to.equal(1);
+
+    // Decode and assert payloads so we don't accidentally accept duplicate/mis-typed pushes.
+    const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+    const updateLog = dataPushLogs.find((l) => l.topics[1]!.toLowerCase() === TYPE_LIQUIDATION_UPDATE.toLowerCase())!;
+    const payoutLog = dataPushLogs.find((l) => l.topics[1]!.toLowerCase() === TYPE_LIQUIDATION_PAYOUT.toLowerCase())!;
+
+    const updatePayload: string = abiCoder.decode(["bytes"], updateLog.data)[0];
+    const [
+      uUser,
+      uCollateralAsset,
+      uDebtAsset,
+      uCollateralAmount,
+      uDebtAmount,
+      uLiquidator,
+      uBonus,
+      uTimestamp,
+    ] = abiCoder.decode(
+      ["address", "address", "address", "uint256", "uint256", "address", "uint256", "uint256"],
+      updatePayload,
+    );
+    expect(uUser).to.equal(user.address);
+    expect(uCollateralAsset).to.equal(asset);
+    expect(uDebtAsset).to.equal(asset);
+    expect(uCollateralAmount).to.equal(30n);
+    expect(uDebtAmount).to.equal(30n);
+    expect(uLiquidator).to.equal(liquidator.address);
+    expect(uBonus).to.equal(5n);
+    expect(uTimestamp).to.equal(BigInt(block!.timestamp));
+
+    const payoutPayload: string = abiCoder.decode(["bytes"], payoutLog.data)[0];
+    const [
+      pUser,
+      pCollateralAsset,
+      pPlatform,
+      pReserve,
+      pLender,
+      pLiquidator,
+      pPlatformShare,
+      pReserveShare,
+      pLenderShare,
+      pLiquidatorShare,
+      pTimestamp,
+    ] = abiCoder.decode(
+      ["address", "address", "address", "address", "address", "address", "uint256", "uint256", "uint256", "uint256", "uint256"],
+      payoutPayload,
+    );
+
+    // Recipients are all admin in this fixture; shares are derived from payoutRates in deployFixture.
+    expect(pUser).to.equal(user.address);
+    expect(pCollateralAsset).to.equal(asset);
+    expect(pLiquidator).to.equal(liquidator.address);
+    expect(pPlatformShare).to.equal(3n); // 30 * 1000 / 10000
+    expect(pReserveShare).to.equal(6n); // 30 * 2000 / 10000
+    expect(pLenderShare).to.equal(6n); // 30 * 2000 / 10000
+    expect(pLiquidatorShare).to.equal(15n); // remainder
+    expect(pTimestamp).to.equal(BigInt(block!.timestamp));
+
+    // Permission semantics: no view-role mixing here; push is strictly initiated by LiquidationManager via registry wiring.
+    pPlatform; pReserve; pLender;
+  });
 });
 

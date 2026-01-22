@@ -5,17 +5,71 @@ contract MockPositionViewBatch {
     struct Position {
         uint256 collateral;
         uint256 debt;
+        bool isValid;
+        uint256 updatedAt;
+        uint64 version;
     }
 
     mapping(address => mapping(address => Position)) private _positions;
 
     function setPosition(address user, address asset, uint256 collateral, uint256 debt) external {
-        _positions[user][asset] = Position({ collateral: collateral, debt: debt });
+        Position storage p = _positions[user][asset];
+        p.collateral = collateral;
+        p.debt = debt;
+        p.isValid = true;
+        // solhint-disable-next-line not-rely-on-time
+        p.updatedAt = block.timestamp;
+        unchecked {
+            p.version += 1;
+        }
+    }
+
+    function setPositionWithMeta(
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt,
+        bool isValid,
+        uint256 updatedAt,
+        uint64 version
+    ) external {
+        _positions[user][asset] = Position({
+            collateral: collateral,
+            debt: debt,
+            isValid: isValid,
+            updatedAt: updatedAt,
+            version: version
+        });
     }
 
     function getUserPosition(address user, address asset) external view returns (uint256 collateral, uint256 debt) {
         Position memory p = _positions[user][asset];
         return (p.collateral, p.debt);
+    }
+
+    function getUserPositionWithValidity(
+        address user,
+        address asset
+    ) external view returns (uint256 collateral, uint256 debt, bool isValid) {
+        Position memory p = _positions[user][asset];
+        return (p.collateral, p.debt, p.isValid);
+    }
+
+    function getPositionUpdatedAt(address user, address asset) external view returns (uint256) {
+        return _positions[user][asset].updatedAt;
+    }
+
+    function getPositionVersion(address user, address asset) external view returns (uint64) {
+        return _positions[user][asset].version;
+    }
+
+    function getUserPositionWithMeta(address user, address asset)
+        external
+        view
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 timestamp, uint64 version)
+    {
+        Position memory p = _positions[user][asset];
+        return (p.collateral, p.debt, p.isValid, p.updatedAt, p.version);
     }
 
     function batchGetUserPositions(
@@ -38,32 +92,57 @@ contract MockHealthViewBatch {
     struct HF {
         uint256 value;
         bool valid;
+        uint256 timestamp;
     }
 
     mapping(address => HF) private _hfs;
 
     function setHealth(address user, uint256 healthFactor, bool valid) external {
-        _hfs[user] = HF({ value: healthFactor, valid: valid });
+        // solhint-disable-next-line not-rely-on-time
+        _hfs[user] = HF({ value: healthFactor, valid: valid, timestamp: block.timestamp });
     }
 
-    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid) {
+    function setHealthWithTimestamp(address user, uint256 healthFactor, bool valid, uint256 timestamp) external {
+        _hfs[user] = HF({ value: healthFactor, valid: valid, timestamp: timestamp });
+    }
+
+    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid, uint256 timestamp) {
         HF memory h = _hfs[user];
-        return (h.value, h.valid);
+        return (h.value, h.valid, h.timestamp);
+    }
+
+    function getUserHealthFactorWithMeta(address user)
+        external
+        view
+        returns (uint256 healthFactor, bool isValid, uint256 timestamp)
+    {
+        HF memory h = _hfs[user];
+        return (h.value, h.valid, h.timestamp);
     }
 
     function batchGetHealthFactors(address[] calldata users)
         external
         view
-        returns (uint256[] memory healthFactors, bool[] memory valid)
+        returns (uint256[] memory healthFactors, bool[] memory valid, uint256[] memory timestamps)
     {
         uint256 len = users.length;
         healthFactors = new uint256[](len);
         valid = new bool[](len);
+        timestamps = new uint256[](len);
         for (uint256 i; i < len; ++i) {
             HF memory h = _hfs[users[i]];
             healthFactors[i] = h.value;
             valid[i] = h.valid;
+            timestamps[i] = h.timestamp;
         }
+    }
+
+    function batchGetHealthFactorsWithMeta(address[] calldata users)
+        external
+        view
+        returns (uint256[] memory healthFactors, bool[] memory valid, uint256[] memory timestamps)
+    {
+        return this.batchGetHealthFactors(users);
     }
 }
 

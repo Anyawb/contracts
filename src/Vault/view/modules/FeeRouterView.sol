@@ -20,15 +20,13 @@ import { IFeeRouterView } from "../../../interfaces/IFeeRouterView.sol";
  * @title FeeRouterView
  * @notice FeeRouter read-only mirror (view/cache): best-effort, low-gas reads backed by FeeRouter pushes.
  * @dev Reverts if:
- *      - Registry is not configured (see `onlyValidRegistry`)
- *      - caller is not authorized to access the requested user/system data (see modifiers)
- *      - caller is not FeeRouter for push entrypoints (see `onlyFeeRouter`)
+ *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+ *      - caller lacks required read permissions for the requested scope (see access-control modifiers)
+ *      - caller is not the SSOT FeeRouter writer for push entrypoints (see {FeeRouterView__OnlyFeeRouter})
  *
  * Security:
- * - Role-gated via `ViewAccessLib.requireRole(...)`
- * - Push entrypoints are restricted to FeeRouter (Registry.KEY_FR)
- *
- * @custom:security-contact security@example.com
+ * - Role-gated reads via {ViewAccessLib} and {ActionKeys}
+ * - Writer-gated pushes: only the FeeRouter module resolved via the Registry (KEY_FR)
  */
 contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRouterView {
     
@@ -256,20 +254,6 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     /*━━━━━━━━━━━━━━━ PUSH FROM FEEROUTER ━━━━━━━━━━━━━━━*/
     
     /**
-     * @notice Push user fee update from FeeRouter.
-     * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller is not FeeRouter (FeeRouterView__OnlyFeeRouter)
-     *
-     * Security:
-     * - Restricted to FeeRouter (SSOT)
-     *
-     * @param user User address
-     * @param feeType Fee type key
-     * @param feeAmount Fee amount paid (token decimals; implementation-defined)
-     * @param personalFeeBps Personal fee bps (\(1e4 = 100%\))
-     */
-    /**
      * @notice Push a user-scoped fee update into the view cache.
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
@@ -309,18 +293,6 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         );
     }
     
-    /**
-     * @notice Push global stats update from FeeRouter.
-     * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller is not FeeRouter (FeeRouterView__OnlyFeeRouter)
-     *
-     * Security:
-     * - Restricted to FeeRouter (SSOT)
-     *
-     * @param totalDistributions Total distributions count
-     * @param totalAmountDistributed Total distributed amount (token decimals; implementation-defined)
-     */
     /**
      * @notice Push global distribution counters into the view cache.
      * @dev Reverts if:
@@ -438,6 +410,42 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     function needsSync() public view returns (bool) {
         // solhint-disable-next-line not-rely-on-time
         return (block.timestamp - _lastSyncTimestamp) > SYNC_INTERVAL;
+    }
+
+    /**
+     * @notice Returns cache sync metadata for this view module.
+     * @dev Reverts if:
+     *      - (never)
+     *
+     * Security:
+     * - Time-based heuristic using block.timestamp via {needsSync}
+     *
+     * @return isValid True if cache is considered valid by the time heuristic
+     * @return lastSyncTimestamp Last sync timestamp (seconds)
+     * @return needsSyncFlag True if cache is considered stale by the time heuristic
+     */
+    function getSyncStatus()
+        external
+        view
+        returns (bool isValid, uint256 lastSyncTimestamp, bool needsSyncFlag)
+    {
+        lastSyncTimestamp = _lastSyncTimestamp;
+        needsSyncFlag = needsSync();
+        isValid = lastSyncTimestamp > 0 && !needsSyncFlag;
+    }
+
+    /**
+     * @notice Returns the last sync timestamp of the view cache.
+     * @dev Reverts if:
+     *      - (never)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return timestamp Last sync timestamp (seconds)
+     */
+    function getLastSyncTimestamp() external view returns (uint256) {
+        return _lastSyncTimestamp;
     }
     
     /**
@@ -788,7 +796,19 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      *
      * @return registry Registry address
      */
-    function registryAddr() external view returns(address){return _registryAddr;}
+    /**
+     * @notice Returns the Registry address (legacy getter name).
+     * @dev Reverts if:
+     *      - (never; may return address(0) if not initialized)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return registry Registry address
+     */
+    function registryAddr() external view returns (address registry) {
+        return _registryAddr;
+    }
 
     /*━━━━━━━━━━━━━━━ CONTRACT UPGRADE ━━━━━━━━━━━━━━━*/
     

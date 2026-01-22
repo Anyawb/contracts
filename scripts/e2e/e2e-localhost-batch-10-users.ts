@@ -209,7 +209,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   const loanNftAddr = await registry.getModuleOrRevert(key("LOAN_NFT"));
   const loanNft = (await ethers.getContractAt("LoanNFT", loanNftAddr)) as any;
 
-  const statisticsViewAddr = await registry.getModuleOrRevert(key("STATISTICS_VIEW"));
+  // Canonical key for StatisticsView is "VAULT_STATISTICS" (ModuleKeys.KEY_STATS)
+  const statisticsViewAddr = await registry.getModuleOrRevert(key("VAULT_STATISTICS"));
   const statisticsView = (await ethers.getContractAt("StatisticsView", statisticsViewAddr)) as any;
 
   const positionViewAddr = await registry.getModuleOrRevert(key("POSITION_VIEW"));

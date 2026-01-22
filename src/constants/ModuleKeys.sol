@@ -136,6 +136,11 @@ library ModuleKeys {
     /// @dev Replaced by KEY_PRICE_ORACLE; preserved for backward compatibility only. New code must not use it.
     /// @dev Hash: keccak256("VALUATION_ORACLE")
     bytes32 internal constant KEY_VALUATION_ORACLE = keccak256("VALUATION_ORACLE");
+
+    /// @notice ValuationOracleView module key (canonical price view facade).
+    /// @dev Used by Registry to store the ValuationOracleView contract address.
+    /// @dev Hash: keccak256("VALUATION_ORACLE_VIEW")
+    bytes32 internal constant KEY_VALUATION_ORACLE_VIEW = keccak256("VALUATION_ORACLE_VIEW");
     
     /// @notice Guarantee fund manager module key.
     /// @dev Used by Registry to store the GuaranteeFundManager contract address.
@@ -444,7 +449,8 @@ library ModuleKeys {
         keys[10] = KEY_REWARD_MANAGER_CORE;
         keys[11] = KEY_REWARD_CONFIG;
         keys[12] = KEY_REWARD_CONSUMPTION;
-        keys[13] = KEY_VALUATION_ORACLE; // DEPRECATED: placeholder only
+        // Canonical price view facade.
+        keys[13] = KEY_VALUATION_ORACLE_VIEW;
         keys[14] = KEY_GUARANTEE_FUND;
         keys[15] = KEY_KEEPER_REGISTRY;
         keys[16] = KEY_WHITELIST_REGISTRY;
@@ -567,7 +573,7 @@ library ModuleKeys {
         names[10] = "KEY_REWARD_MANAGER_CORE";
         names[11] = "KEY_REWARD_CONFIG";
         names[12] = "KEY_REWARD_CONSUMPTION";
-        names[13] = "KEY_VALUATION_ORACLE"; // DEPRECATED
+        names[13] = "KEY_VALUATION_ORACLE_VIEW";
         names[14] = "KEY_GUARANTEE_FUND";
         names[15] = "KEY_KEEPER_REGISTRY";
         names[16] = "KEY_WHITELIST_REGISTRY";
@@ -717,6 +723,7 @@ library ModuleKeys {
         if (key == KEY_REWARD_CONSUMPTION) return "rewardConsumption";
         // DEPRECATED: use "priceOracle" in new code.
         if (key == KEY_VALUATION_ORACLE) return "valuationOracle";
+        if (key == KEY_VALUATION_ORACLE_VIEW) return "valuationOracleView";
         if (key == KEY_GUARANTEE_FUND) return "guaranteeFundManager";
         if (key == KEY_KEEPER_REGISTRY) return "keeperRegistry";
         if (key == KEY_WHITELIST_REGISTRY) return "whitelistRegistry";
@@ -798,6 +805,7 @@ library ModuleKeys {
         if (key == KEY_REWARD_CONSUMPTION) return "KEY_REWARD_CONSUMPTION";
         // DEPRECATED: preserved for backward compatibility only.
         if (key == KEY_VALUATION_ORACLE) return "KEY_VALUATION_ORACLE";
+        if (key == KEY_VALUATION_ORACLE_VIEW) return "KEY_VALUATION_ORACLE_VIEW";
         if (key == KEY_GUARANTEE_FUND) return "KEY_GUARANTEE_FUND";
         if (key == KEY_KEEPER_REGISTRY) return "KEY_KEEPER_REGISTRY";
         if (key == KEY_WHITELIST_REGISTRY) return "KEY_WHITELIST_REGISTRY";
@@ -880,6 +888,7 @@ library ModuleKeys {
         if (nameHash == keccak256(abi.encodePacked("rewardConfig"))) return KEY_REWARD_CONFIG;
         if (nameHash == keccak256(abi.encodePacked("rewardConsumption"))) return KEY_REWARD_CONSUMPTION;
         if (nameHash == keccak256(abi.encodePacked("valuationOracle"))) return KEY_VALUATION_ORACLE; // DEPRECATED
+        if (nameHash == keccak256(abi.encodePacked("valuationOracleView"))) return KEY_VALUATION_ORACLE_VIEW;
         if (nameHash == keccak256(abi.encodePacked("guaranteeFundManager"))) return KEY_GUARANTEE_FUND;
         if (nameHash == keccak256(abi.encodePacked("keeperRegistry"))) return KEY_KEEPER_REGISTRY;
         if (nameHash == keccak256(abi.encodePacked("whitelistRegistry"))) return KEY_WHITELIST_REGISTRY;
@@ -923,6 +932,8 @@ library ModuleKeys {
         if (nameHash == keccak256(abi.encodePacked("dashboardView"))) return KEY_DASHBOARD_VIEW;
         if (nameHash == keccak256(abi.encodePacked("previewView"))) return KEY_PREVIEW_VIEW;
         if (nameHash == keccak256(abi.encodePacked("liquidationView"))) return KEY_LIQUIDATION_VIEW;
+        // DEPRECATED alias: prefer "liquidationView"
+        if (nameHash == keccak256(abi.encodePacked("liquidatorView"))) return KEY_LIQUIDATION_VIEW;
         if (nameHash == keccak256(abi.encodePacked("rewardView"))) return KEY_REWARD_VIEW;
         if (nameHash == keccak256(abi.encodePacked("vaultLendingEngine"))) return KEY_VAULT_LENDING_ENGINE;
         if (nameHash == keccak256(abi.encodePacked("degradationStorage"))) return KEY_DEGRADATION_STORAGE;

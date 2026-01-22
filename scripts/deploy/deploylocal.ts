@@ -163,7 +163,8 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     EarlyRepaymentGuaranteeManager: 'EARLY_REPAYMENT_GUARANTEE_MANAGER',
     HealthView: 'HEALTH_VIEW',
     SystemView: 'SYSTEM_VIEW',
-    StatisticsView: 'STATISTICS_VIEW',
+    // Canonical Registry key for StatisticsView (ModuleKeys.KEY_STATS)
+    StatisticsView: 'VAULT_STATISTICS',
     PositionView: 'POSITION_VIEW',
     PreviewView: 'PREVIEW_VIEW',
     DashboardView: 'DASHBOARD_VIEW',
@@ -266,13 +267,6 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     if (changed) registryChanged += 1;
     else registryUnchanged += 1;
   }
-
-  // Legacy compatibility: bind KEY_STATS (VAULT_STATISTICS) -> StatisticsView
-  const stats = await bindRegistryModule(registry, 'VAULT_STATISTICS', deployed.StatisticsView, {
-    label: 'KEY_STATS (VAULT_STATISTICS)',
-  });
-  if (stats.changed) registryChanged += 1;
-  else registryUnchanged += 1;
 
   console.log(`🧾 Registry binding summary: changed=${registryChanged}, unchanged=${registryUnchanged}`);
 
@@ -881,6 +875,57 @@ async function main() {
     } catch (error) {
       console.log('⚠️ BatchView deployment failed:', error);
     }
+  }
+
+  // 为“只读聚合器 ↔ 专属 View”权限一致性提供支撑（部署后补齐）：
+  // 当下游专属 View 引入只读权限检查时，聚合器/适配层合约地址也必须具备对应 view 角色，否则模块间调用会被误拦。
+  // 注意：聚合器仍会对外部 caller 做权限校验；这里仅用于模块间内部调用通过。
+  try {
+    const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+    const grants: Array<{ role: string; to?: string; label: string }> = [
+      // BatchView calls HealthView/RiskView/ValuationOracleView-like sources
+      { role: 'VIEW_RISK_DATA', to: deployed.BatchView, label: 'BatchView' },
+      { role: 'VIEW_PRICE_DATA', to: deployed.BatchView, label: 'BatchView' },
+      { role: 'ACTION_VIEW_SYSTEM_STATUS', to: deployed.BatchView, label: 'BatchView' },
+
+      // Dashboard/CacheOptimized call PositionView + HealthView + (Dashboard also reads prices)
+      { role: 'VIEW_USER_DATA', to: deployed.DashboardView, label: 'DashboardView' },
+      { role: 'VIEW_RISK_DATA', to: deployed.DashboardView, label: 'DashboardView' },
+      { role: 'VIEW_PRICE_DATA', to: deployed.DashboardView, label: 'DashboardView' },
+
+      { role: 'VIEW_USER_DATA', to: deployed.CacheOptimizedView, label: 'CacheOptimizedView' },
+      { role: 'VIEW_RISK_DATA', to: deployed.CacheOptimizedView, label: 'CacheOptimizedView' },
+      { role: 'VIEW_SYSTEM_DATA', to: deployed.CacheOptimizedView, label: 'CacheOptimizedView' },
+
+      // UserView internally calls multiple view modules (positions + health + stats)
+      { role: 'VIEW_USER_DATA', to: deployed.UserView, label: 'UserView' },
+      { role: 'VIEW_RISK_DATA', to: deployed.UserView, label: 'UserView' },
+      { role: 'VIEW_SYSTEM_DATA', to: deployed.UserView, label: 'UserView' },
+
+      // RiskView internally calls HealthView + PositionView valuation
+      { role: 'VIEW_RISK_DATA', to: deployed.RiskView, label: 'RiskView' },
+
+      // PreviewView internally calls PositionView for user positions
+      { role: 'VIEW_USER_DATA', to: deployed.PreviewView, label: 'PreviewView' },
+
+      // LendingEngineView calls ORDER_ENGINE view-adapter methods (order/user data + ops diagnostics)
+      { role: 'VIEW_USER_DATA', to: deployed.LendingEngineView, label: 'LendingEngineView' },
+      { role: 'VIEW_SYSTEM_DATA', to: deployed.LendingEngineView, label: 'LendingEngineView' },
+
+      // ModuleHealthView internally calls HealthView.pushModuleHealth (msg.sender is ModuleHealthView)
+      { role: 'ACTION_VIEW_SYSTEM_STATUS', to: deployed.ModuleHealthView, label: 'ModuleHealthView' },
+    ];
+
+    for (const g of grants) {
+      if (!g.to) continue;
+      const role = ethers.keccak256(ethers.toUtf8Bytes(g.role));
+      const already = await acm.hasRole(role, g.to);
+      if (already) continue;
+      await (await acm.grantRole(role, g.to)).wait();
+      console.log(`🔑 Granted ${g.role} to ${g.label}`);
+    }
+  } catch (e) {
+    console.log('⚠️ Grant view roles to aggregator/view modules skipped/failed:', e);
   }
 
   // LiquidatorView（需要 SystemView）

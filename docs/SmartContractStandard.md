@@ -1014,8 +1014,9 @@ const ONE_USD = ethers.parseUnits("1", 6);
 // ✅ 正确：补全 asset 参数
 await vault.getUserPosition(user.address, ZERO_ADDRESS);
 await vault.getHealthFactor(user.address, ZERO_ADDRESS);
-await vault.getTotalCollateral(ZERO_ADDRESS);
-await vault.getTotalDebt(ZERO_ADDRESS);
+// ✅ 正确：系统级聚合/价格等应走专属 View（或先用 SystemView.route* 发现地址再下一跳调用）
+await statisticsView.getTotalCollateral(ZERO_ADDRESS);
+await statisticsView.getTotalDebt(ZERO_ADDRESS);
 
 // ✅ 正确：补全所有参数
 await vault.previewBorrow(user.address, ZERO_ADDRESS, collateralAmount, 0, borrowAmount);

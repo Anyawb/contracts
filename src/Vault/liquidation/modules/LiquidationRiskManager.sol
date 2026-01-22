@@ -30,7 +30,7 @@ interface ILiquidationConfigModuleLite {
 
 /// @dev Minimal HealthView interface (read-only cache).
 interface IHealthViewLite {
-    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid);
+    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid, uint256 timestamp);
 }
 
 /// @title LiquidationRiskManager - Liquidation Risk Manager
@@ -746,7 +746,7 @@ contract LiquidationRiskManager is
         // Best-effort: prefer cached module, but if stale try Registry (view-only) to improve availability.
         address hv = _getModuleViewBestEffort(ModuleKeys.KEY_HEALTH_VIEW);
         if (hv == address(0)) revert LiquidationRiskManager__MissingModule(ModuleKeys.KEY_HEALTH_VIEW);
-        return IHealthViewLite(hv).getUserHealthFactor(user);
+        (hf, valid, ) = IHealthViewLite(hv).getUserHealthFactor(user);
     }
 
     /**

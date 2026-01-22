@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
@@ -11,54 +11,81 @@ import { IAccessControlManager } from "../../../interfaces/IAccessControlManager
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
 import { SystemEvents } from "../../SystemEvents.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { BatchTooLarge, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
-/// @dev 本地最小接口：仅用于健康检查，避免接口不匹配导致的编译错误
+/**
+ * @dev Local minimal interface used for health checks only.
+ *      This avoids hard-coupling the view to a potentially larger oracle interface.
+ */
 interface IPriceOracleHealth {
     function checkPriceOracleHealth(address asset) external view returns (bool isHealthy, string memory details);
 }
 
-/// @title ValuationOracleView
-/// @notice 价格预言机视图模块 - 专门提供价格预言机相关的查询功能
-/// @dev 提供价格查询、健康检查、预言机状态等功能的统一接口
-/// @dev 已迁移到Registry系统，使用标准化的模块管理方式
-/// @dev 增强权限隔离：细粒度权限控制、数据访问审计
-/// @custom:security-contact security@example.com
+/**
+ * @title ValuationOracleView
+ * @notice Exposes read-only price-oracle queries for the Vault system.
+ * @dev Reverts if:
+ *      - registry address is zero (see {ZeroAddress})
+ *      - registry address is not a contract (see {NotAContract})
+ *      - caller lacks required read permissions (role-gated via {ViewAccessLib})
+ *
+ * Security:
+ * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
+ * - Upgrade authorization is role-gated (ACTION_UPGRADE_MODULE)
+ */
 contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
-    uint256 private constant MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
-    string private constant ORACLE_CALL_FAILED = "oracle call failed";
+    uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
+    string private constant _ORACLE_CALL_FAILED = "oracle call failed";
 
-    /// @notice Registry 合约地址
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
+    /// @dev Registry contract address (private; exposed via getters for compatibility).
     address private _registryAddr;
 
-    error ValuationOracleView__EmptyAssets();
-    error ValuationOracleView__BatchTooLarge(uint256 length, uint256 max);
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when an upgrade implementation address is the zero address.
     error ValuationOracleView__ZeroImplementation();
     
-    /// @notice Registry 有效性验证修饰符
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+    /// @dev Ensures the Registry address is configured and is a contract.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
     
-    /// @notice 权限验证逻辑改由 ViewAccessLib 统一提供
-    /// @notice 价格数据查看权限修饰符
+    /// @dev Ensures the caller has the ACTION_VIEW_PRICE_DATA role in the Registry ACM.
     modifier onlyPriceViewer() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_PRICE_DATA, msg.sender);
         _;
     }
 
-    /// @notice 防止逻辑合约被直接初始化
+    /*━━━━━━━━━━━━━━━ Constructor ━━━━━━━━━━━━━━━*/
+    /**
+     * @dev Reverts if:
+     *      - (never; constructor only disables initializers)
+     *
+     * Security:
+     * - Prevents the implementation contract from being initialized directly
+     */
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /// @notice 初始化 ValuationOracleView 模块
-    /// @param initialRegistryAddr Registry合约地址
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Initializes the view module with the Registry address.
+     * @dev Reverts if:
+     *      - initialRegistryAddr is zero (see {ZeroAddress})
+     *      - initialRegistryAddr is not a contract (see {NotAContract})
+     *
+     * Security:
+     * - Initializer is single-use (OpenZeppelin Initializable)
+     *
+     * @param initialRegistryAddr Registry contract address
+     */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
@@ -67,23 +94,54 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         _registryAddr = initialRegistryAddr;
     }
 
-    /// @notice Registry 地址（推荐 getter）
+    /*━━━━━━━━━━━━━━━ View (Registry) ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Returns the Registry address (preferred getter name).
+     * @dev Reverts if:
+     *      - (never; returns stored address even if unset)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return Registry contract address
+     */
     function registryAddrVar() external view returns (address) {
         return _registryAddr;
     }
 
-    /// @notice Registry 地址（兼容旧命名）
+    /**
+     * @notice Returns the Registry address (legacy getter name).
+     * @dev Reverts if:
+     *      - (never; returns stored address even if unset)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return Registry contract address
+     */
     function registryAddr() external view returns (address) {
         return _registryAddr;
     }
 
-    /* ============ 价格查询功能 ============ */
+    /*━━━━━━━━━━━━━━━ View (Pricing) ━━━━━━━━━━━━━━━*/
 
-    /// @notice 获取单个资产价格
-    /// @param asset 资产地址
-    /// @return price 价格
-    /// @return timestamp 时间戳
-    function getAssetPrice(address asset) external view onlyValidRegistry onlyPriceViewer returns (uint256 price, uint256 timestamp) {
+    /**
+     * @notice Returns the latest price and timestamp for a single asset.
+     * @dev Reverts if:
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
+     *
+     * Security:
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
+     * - Best-effort oracle call: returns (0,0) if the oracle call fails
+     *
+     * @param asset Asset address
+     * @return price Asset price (oracle-defined precision)
+     * @return timestamp Oracle timestamp (seconds)
+     */
+    function getAssetPrice(
+        address asset
+    ) external view onlyValidRegistry onlyPriceViewer returns (uint256 price, uint256 timestamp) {
         address priceOracle = _priceOracle();
 
         try IPriceOracle(priceOracle).getPrice(asset) returns (uint256 p, uint256 ts, uint256) {
@@ -93,30 +151,65 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
-    /// @notice 批量获取资产价格
-    /// @param assets 资产地址数组
-    /// @return prices 价格数组
-    /// @return timestamps 时间戳数组
-    function getAssetPrices(address[] calldata assets) external view onlyValidRegistry onlyPriceViewer returns (uint256[] memory prices, uint256[] memory timestamps) {
+    /**
+     * @notice Returns latest prices and timestamps for a batch of assets.
+     * @dev Reverts if:
+     *      - assets is empty (see {EmptyArray})
+     *      - assets.length exceeds the maximum batch size (see {BatchTooLarge})
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
+     *
+     * Security:
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
+     * - Best-effort oracle call: returns zero-filled arrays if the oracle call fails
+     *
+     * @param assets Asset addresses
+     * @return prices Asset prices (oracle-defined precision)
+     * @return timestamps Oracle timestamps (seconds)
+     */
+    function getAssetPrices(
+        address[] calldata assets
+    )
+        external
+        view
+        onlyValidRegistry
+        onlyPriceViewer
+        returns (uint256[] memory prices, uint256[] memory timestamps)
+    {
         uint256 length = assets.length;
-        if (length == 0) revert ValuationOracleView__EmptyAssets();
-        if (length > MAX_BATCH_SIZE) revert ValuationOracleView__BatchTooLarge(length, MAX_BATCH_SIZE);
+        if (length == 0) revert EmptyArray();
+        if (length > _MAX_BATCH_SIZE) revert BatchTooLarge(length, _MAX_BATCH_SIZE);
 
         prices = new uint256[](length);
         timestamps = new uint256[](length);
 
         address priceOracle = _priceOracle();
-        try IPriceOracle(priceOracle).getPrices(assets) returns (uint256[] memory p, uint256[] memory ts, uint256[] memory) {
+        try IPriceOracle(priceOracle).getPrices(assets) returns (
+            uint256[] memory p,
+            uint256[] memory ts,
+            uint256[] memory
+        ) {
             prices = p;
             timestamps = ts;
         } catch {
-            // best-effort fallback：保持默认零值
+            // Best-effort fallback: keep default zero values.
+            return (prices, timestamps);
         }
     }
 
-    /// @notice 检查价格是否有效
-    /// @param asset 资产地址
-    /// @return isValid 价格是否有效
+    /**
+     * @notice Returns whether the oracle considers the price for an asset valid.
+     * @dev Reverts if:
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
+     *
+     * Security:
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
+     * - Best-effort oracle call: returns false if the oracle call fails
+     *
+     * @param asset Asset address
+     * @return isValid True if oracle reports the price is valid
+     */
     function isPriceValid(address asset) external view onlyValidRegistry onlyPriceViewer returns (bool isValid) {
         address priceOracle = _priceOracle();
 
@@ -127,47 +220,56 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
-    /* ============ 预言机状态查询 ============ */
-
-    /// @notice 获取资产的预言机地址
-    /// @param asset 资产地址
-    /// @return oracle 预言机地址
-    // NOTE: 旧接口 getAssetOracle 移除
-
-    /// @notice 检查价格预言机健康状态
-    /// @param asset 资产地址
-    /// @return isHealthy 是否健康
-    /// @return details 详细信息
-    function checkPriceOracleHealth(address asset) external view onlyValidRegistry onlyPriceViewer returns (bool isHealthy, string memory details) {
+    /*━━━━━━━━━━━━━━━ View (Oracle Health) ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Checks the health status of the price oracle for a given asset.
+     * @dev Reverts if:
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
+     *
+     * Security:
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
+     * - Best-effort oracle call: returns (false, "oracle call failed") if the oracle call fails
+     *
+     * @param asset Asset address
+     * @return isHealthy True if the oracle reports healthy status for the asset
+     * @return details Human-readable diagnostic details
+     */
+    function checkPriceOracleHealth(
+        address asset
+    ) external view onlyValidRegistry onlyPriceViewer returns (bool isHealthy, string memory details) {
         address priceOracle = _priceOracle();
 
         try IPriceOracleHealth(priceOracle).checkPriceOracleHealth(asset) returns (bool healthy, string memory info) {
             return (healthy, info);
         } catch {
-            return (false, ORACLE_CALL_FAILED);
+            return (false, _ORACLE_CALL_FAILED);
         }
     }
 
-    /// @notice 获取默认预言机地址
-    /// @return 默认预言机地址
-    // NOTE: 旧接口 getDefaultOracle 移除
-
-    /// @notice 获取结算币地址
-    /// @return 结算币地址
-    // NOTE: 旧接口 getSettlementToken 移除
-
-    /* ============ 批量健康检查 ============ */
-
-    /// @notice 批量检查价格预言机健康状态
-    /// @param assets 资产地址数组
-    /// @return healthStatuses 健康状态数组
-    /// @return details 详细信息数组
+    /*━━━━━━━━━━━━━━━ View (Oracle Health - Batch) ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Checks the health status of the price oracle for a batch of assets.
+     * @dev Reverts if:
+     *      - assets is empty (see {EmptyArray})
+     *      - assets.length exceeds the maximum batch size (see {BatchTooLarge})
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
+     *
+     * Security:
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
+     * - Best-effort oracle call: per-asset fallback to (false, "oracle call failed")
+     *
+     * @param assets Asset addresses
+     * @return healthStatuses Per-asset health status
+     * @return details Per-asset diagnostic details
+     */
     function batchCheckPriceOracleHealth(
         address[] calldata assets
     ) external view onlyValidRegistry onlyPriceViewer returns (bool[] memory healthStatuses, string[] memory details) {
         uint256 length = assets.length;
-        if (length == 0) revert ValuationOracleView__EmptyAssets();
-        if (length > MAX_BATCH_SIZE) revert ValuationOracleView__BatchTooLarge(length, MAX_BATCH_SIZE);
+        if (length == 0) revert EmptyArray();
+        if (length > _MAX_BATCH_SIZE) revert BatchTooLarge(length, _MAX_BATCH_SIZE);
 
         healthStatuses = new bool[](length);
         details = new string[](length);
@@ -175,27 +277,49 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         address priceOracle = _priceOracle();
 
         for (uint256 i = 0; i < length; ++i) {
-            try IPriceOracleHealth(priceOracle).checkPriceOracleHealth(assets[i]) returns (bool healthy, string memory info) {
+            try IPriceOracleHealth(priceOracle).checkPriceOracleHealth(assets[i]) returns (
+                bool healthy,
+                string memory info
+            ) {
                 healthStatuses[i] = healthy;
                 details[i] = info;
             } catch {
                 healthStatuses[i] = false;
-                details[i] = ORACLE_CALL_FAILED;
+                details[i] = _ORACLE_CALL_FAILED;
             }
         }
     }
 
-    /* ============ 管理功能 ============ */
-
-    /// @notice 获取Registry地址（仅管理员）
-    /// @return Registry地址
+    /*━━━━━━━━━━━━━━━ Admin ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Returns the Registry address (admin-gated).
+     * @dev Reverts if:
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_ADMIN role (via {ViewAccessLib})
+     *
+     * Security:
+     * - Role-gated (ACTION_ADMIN)
+     *
+     * @return Registry contract address
+     */
     function getRegistry() external view onlyValidRegistry returns (address) {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         return _registryAddr;
     }
 
-    /// @notice 更新Registry地址
-    /// @param newRegistryAddr 新的Registry地址
+    /**
+     * @notice Updates the Registry address used by this view module.
+     * @dev Reverts if:
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_ADMIN role (via {ViewAccessLib})
+     *      - newRegistryAddr is zero (see {ZeroAddress})
+     *      - newRegistryAddr is not a contract (see {NotAContract})
+     *
+     * Security:
+     * - Role-gated (ACTION_ADMIN)
+     *
+     * @param newRegistryAddr New Registry contract address
+     */
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
@@ -208,36 +332,77 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
+            // solhint-disable-next-line not-rely-on-time
             block.timestamp
         );
     }
 
-    // ============ Versioning (C+B baseline) ============
+    /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Returns the API version of this module.
+     * @dev Reverts if:
+     *      - (never)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @return API version
+     */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
+    /**
+     * @notice Returns the schema version of this module's outputs.
+     * @dev Reverts if:
+     *      - (never)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @return Schema version
+     */
     function schemaVersion() public pure override returns (uint256) {
         return 1;
     }
 
-    /// @notice 检查升级权限
-    /// @param user 用户地址
-    /// @return hasUpgradePermission 是否有升级权限
+    /**
+     * @notice Returns whether a user has permission to upgrade this module.
+     * @dev Reverts if:
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - Registry does not have KEY_ACCESS_CONTROL configured (reverts in {Registry.getModuleOrRevert})
+     *
+     * Security:
+     * - Read-only; consults the Registry ACM (ACTION_UPGRADE_MODULE)
+     *
+     * @param user User address to check
+     * @return hasUpgradePermission True if user has ACTION_UPGRADE_MODULE role
+     */
     function hasUpgradePermission(address user) external view onlyValidRegistry returns (bool) {
-        // 通过Registry系统检查用户是否有升级权限
+        // Check upgrade permission via the Registry ACM.
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         return IAccessControlManager(acmAddr).hasRole(ActionKeys.ACTION_UPGRADE_MODULE, user);
     }
 
-    /* ============ Internal helpers ============ */
+    /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
     function _priceOracle() internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
     }
 
-    /* ============ UUPS Upgradeable ============ */
-    /// @notice 升级授权函数
-    /// @dev 只有具有升级权限的用户可以升级
+    /*━━━━━━━━━━━━━━━ UUPS Upgradeable ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Authorizes upgrades for the UUPS proxy.
+     * @dev Reverts if:
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_UPGRADE_MODULE role (via {ViewAccessLib})
+     *      - newImplementation is zero (see {ValuationOracleView__ZeroImplementation})
+     *      - newImplementation is not a contract (see {NotAContract})
+     *
+     * Security:
+     * - Role-gated upgrades (ACTION_UPGRADE_MODULE)
+     *
+     * @param newImplementation New implementation contract address
+     */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
 
@@ -245,6 +410,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
-    /// @notice Storage gap for future upgrades
+    /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
+    /// @dev Storage gap for future upgrades.
     uint256[50] private __gap;
 }

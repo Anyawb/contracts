@@ -221,13 +221,25 @@ describe("PositionView - 缓存有效性与回退", function () {
     const { pv, user, asset, collateral, lending } = await loadFixture(deployFixture);
     await collateral.depositCollateral(user.address, asset, 123n);
     await lending.setUserDebt(user.address, asset, 45n);
-    await expect(
-      (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 123n, 45n)
-    ).to.emit(pv, "UserPositionCached").withArgs(user.address, asset, 123n, 45n, anyValue);
+    const DATA_TYPE_USER_POSITION_UPDATE = ethers.id("USER_POSITION_UPDATE");
+    const tx = await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 123n, 45n);
+    await expect(tx).to.emit(pv, "UserPositionCached").withArgs(user.address, asset, 123n, 45n, anyValue);
+    await expect(tx).to.emit(pv, "DataPushed").withArgs(DATA_TYPE_USER_POSITION_UPDATE, anyValue);
     const [c, d, isValid] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
     expect(c).to.equal(123n);
     expect(d).to.equal(45n);
     expect(isValid).to.equal(true);
+  });
+
+  it("Phase3 可观测性：增量 push 成功路径应发出 DataPushed", async function () {
+    const { pv, user, asset, collateral, lending } = await loadFixture(deployFixture);
+    const DATA_TYPE_USER_POSITION_UPDATE = ethers.id("USER_POSITION_UPDATE");
+    await collateral.depositCollateral(user.address, asset, 10n);
+    await lending.setUserDebt(user.address, asset, 1n);
+    await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 1n);
+
+    const tx = await pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user.address, asset, 5, 1);
+    await expect(tx).to.emit(pv, "DataPushed").withArgs(DATA_TYPE_USER_POSITION_UPDATE, anyValue);
   });
 
   it("默认推送自动自增版本", async function () {
@@ -847,11 +859,10 @@ describe("PositionView - 缓存有效性与回退", function () {
     await lending.setUserDebt(user.address, asset1, 50n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset1, 100n, 50n);
 
-    // asset2: 缓存过期（在asset1推送之前，但asset1的推送更新了整个用户的缓存时间戳）
-    // 所以asset2的缓存时间戳也被更新了，显示为有效，但数据仍然是旧的
-    // 注意：asset1的推送在缓存有效期内，所以整个用户的缓存时间戳仍然有效
-    // 等待一段时间，但不超过缓存有效期（asset1推送后）
-    await time.increase(2 * 60); // 在缓存有效期内
+    // (ARCH) 缓存有效性必须是 (user,asset) 维度：
+    // asset2 的缓存不会因为 asset1 的推送而“续命”。
+    // 等待到 asset2 过期（>5min），但 asset1 仍有效（<5min）。
+    await time.increase(4 * 60);
     await collateral.depositCollateral(user.address, asset2, 50n); // 更新账本到250
     await lending.setUserDebt(user.address, asset2, 100n); // 更新账本到100
 
@@ -860,7 +871,6 @@ describe("PositionView - 缓存有效性与回退", function () {
     await lending.setUserDebt(user.address, asset3, 120n);
 
     // 验证缓存状态
-    // 注意：由于asset1的推送更新了整个用户的缓存时间戳，所以asset2的缓存也显示为有效
     const [c1, d1, valid1] = await pv.getUserPositionWithValidity(user.address, asset1);
     const [c2, d2, valid2] = await pv.getUserPositionWithValidity(user.address, asset2);
     const [c3, d3, valid3] = await pv.getUserPositionWithValidity(user.address, asset3);
@@ -870,16 +880,15 @@ describe("PositionView - 缓存有效性与回退", function () {
     expect(c1).to.equal(100n);
     expect(d1).to.equal(50n);
 
-    // asset2: 由于asset1的推送更新了整个用户的缓存时间戳，所以显示为有效
-    // 但数据仍然是旧的缓存值（200, 80），不是账本值（250, 100）
-    expect(valid2).to.equal(true); // 因为asset1的推送更新了整个用户的缓存时间戳
-    expect(c2).to.equal(200n); // 缓存值（不是账本值250）
-    expect(d2).to.equal(80n); // 缓存值（不是账本值100）
+    // asset2: 自己的缓存已过期，应回退到账本并标记无效
+    expect(valid2).to.equal(false);
+    expect(c2).to.equal(250n);
+    expect(d2).to.equal(100n);
 
-    // asset3: 未推送过，但由于用户的缓存时间戳仍在有效期内，视为有效，数据为默认缓存0
-    expect(valid3).to.equal(true);
-    expect(c3).to.equal(0n);
-    expect(d3).to.equal(0n);
+    // asset3: 未推送过，无效，回退到账本
+    expect(valid3).to.equal(false);
+    expect(c3).to.equal(300n);
+    expect(d3).to.equal(120n);
   });
 
   it("一个资产多个用户，部分缓存有效部分失效", async function () {

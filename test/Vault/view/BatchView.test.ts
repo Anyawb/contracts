@@ -197,7 +197,7 @@ describe('BatchView', function () {
       const { batchView, viewer } = await loadFixture(deployFixture);
       await expect(batchView.connect(viewer).batchGetHealthFactors([])).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__EmptyArray',
+        'EmptyArray',
       );
     });
 
@@ -206,8 +206,8 @@ describe('BatchView', function () {
       const largeList = new Array(101).fill(viewer.address); // MAX_BATCH_SIZE is 100
       await expect(batchView.connect(viewer).batchGetHealthFactors(largeList)).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__BatchTooLarge',
-      );
+        'BatchTooLarge',
+      ).withArgs(101n, 100n);
     });
 
     it('requires VIEW_RISK_DATA role', async function () {
@@ -279,7 +279,7 @@ describe('BatchView', function () {
       const { batchView, viewer } = await loadFixture(deployFixture);
       await expect(batchView.connect(viewer).batchGetRiskAssessments([])).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__EmptyArray',
+        'EmptyArray',
       );
     });
 
@@ -288,8 +288,8 @@ describe('BatchView', function () {
       const largeList = new Array(101).fill(viewer.address); // MAX_BATCH_SIZE is 100
       await expect(batchView.connect(viewer).batchGetRiskAssessments(largeList)).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__BatchTooLarge',
-      );
+        'BatchTooLarge',
+      ).withArgs(101n, 100n);
     });
 
     it('requires VIEW_RISK_DATA role', async function () {
@@ -363,7 +363,7 @@ describe('BatchView', function () {
       const { batchView, viewer } = await loadFixture(deployFixture);
       await expect(batchView.connect(viewer).batchGetAssetPrices([])).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__EmptyArray',
+        'EmptyArray',
       );
     });
 
@@ -372,8 +372,8 @@ describe('BatchView', function () {
       const largeList = new Array(101).fill(assetA); // MAX_BATCH_SIZE is 100
       await expect(batchView.connect(viewer).batchGetAssetPrices(largeList)).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__BatchTooLarge',
-      );
+        'BatchTooLarge',
+      ).withArgs(101n, 100n);
     });
 
     it('requires VIEW_PRICE_DATA role', async function () {
@@ -442,7 +442,7 @@ describe('BatchView', function () {
       const { batchView, viewer } = await loadFixture(deployFixture);
       await expect(batchView.connect(viewer).batchGetModuleHealth([])).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__EmptyArray',
+        'EmptyArray',
       );
     });
 
@@ -451,8 +451,8 @@ describe('BatchView', function () {
       const largeList = new Array(101).fill(await batchView.getAddress()); // MAX_BATCH_SIZE is 100
       await expect(batchView.connect(viewer).batchGetModuleHealth(largeList)).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__BatchTooLarge',
-      );
+        'BatchTooLarge',
+      ).withArgs(101n, 100n);
     });
 
     it('requires VIEW_SYSTEM_STATUS role', async function () {
@@ -505,8 +505,8 @@ describe('BatchView', function () {
       const { batchView, viewer } = await loadFixture(deployFixture);
       await expect(batchView.connect(viewer).getDegradationHistory(101)).to.be.revertedWithCustomError(
         batchView,
-        'BatchView__BatchTooLarge',
-      );
+        'BatchTooLarge',
+      ).withArgs(101n, 100n);
     });
 
     it('requires VIEW_SYSTEM_STATUS role', async function () {
@@ -703,6 +703,35 @@ describe('BatchView', function () {
       await priceOracle.setPrice(assetA, largePrice);
       const items = await batchView.connect(viewer).batchGetAssetPrices([assetA]);
       expect(items[0].price).to.equal(largePrice);
+    });
+  });
+
+  describe('ARCH 4.11 BV-01: aggregator has no write/push entrypoints', function () {
+    it('exposes no push* functions and no business-writable entrypoints', async function () {
+      const { batchView } = await loadFixture(deployFixture);
+      const funcFragments = batchView.interface.fragments.filter((f: any) => f.type === 'function');
+      const names: string[] = funcFragments.map((f: any) => f.name);
+
+      expect(names.some((n) => n.toLowerCase().startsWith('push'))).to.equal(false);
+
+      const writable = funcFragments.filter((f: any) => !['view', 'pure'].includes(String(f.stateMutability)));
+      const writableNames = Array.from(new Set(writable.map((f: any) => f.name)));
+      const allowed = new Set(['initialize', 'upgradeTo', 'upgradeToAndCall']);
+      for (const n of writableNames) {
+        expect(allowed.has(n), `unexpected writable function in BatchView ABI: ${n}`).to.equal(true);
+      }
+    });
+
+    it('calling read functions via tx emits no DataPushed', async function () {
+      const { batchView, viewer } = await loadFixture(deployFixture);
+      const DATA_PUSH_TOPIC0 = ethers.id('DataPushed(bytes32,bytes)');
+      const txReq = await viewer.sendTransaction({
+        to: await batchView.getAddress(),
+        data: batchView.interface.encodeFunctionData('batchGetHealthFactors', [[viewer.address]]),
+      });
+      const receipt = await txReq.wait();
+      const hasDataPushed = receipt!.logs.some((l) => l.topics?.[0] === DATA_PUSH_TOPIC0);
+      expect(hasDataPushed).to.equal(false);
     });
   });
 });

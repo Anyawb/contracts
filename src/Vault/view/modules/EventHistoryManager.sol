@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+// solhint-disable-next-line no-global-import
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+// solhint-disable-next-line no-global-import
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
@@ -11,20 +13,45 @@ import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
-/// @title EventHistoryManager（轻量级桩件）
-/// @notice 2025-08 架构重构后，链上事件归档已迁移至链下。本合约仅保留一个 `HistoryRecorded` 事件，
-///         供索引服务监听，并且不再持久化任何链上存储，以最低成本兼容旧模块（如 `UserView`）。
+/**
+ * @title EventHistoryManager
+ * @notice Lightweight event history stub (no on-chain persistence).
+ * @dev Reverts if:
+ *      - registry is zero / not a contract (ZeroAddress / NotAContract)
+ *      - caller lacks required role (MissingRole via ACM)
+ *
+ * Security:
+ * - No stateful history is stored on-chain (events-only).
+ * - `recordEvent` is role-gated to prevent arbitrary log spam.
+ * - UUPS upgradeability is role-gated (ACTION_ADMIN).
+ */
 contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
-    // =========================  Events  =========================
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
 
-    /// @notice 业务模块记录事件时触发，供链下索引消费
-    event HistoryRecorded(bytes32 indexed eventType, address indexed user, address indexed asset, uint256 amount, bytes extraData, uint256 timestamp);
+    /**
+     * @notice Emitted when a business event is recorded for off-chain indexing.
+     * @param eventType Event type hash (e.g. keccak256("UPPER_SNAKE_CASE"))
+     * @param user Related user address (may be zero depending on event semantics)
+     * @param asset Related asset address (may be zero depending on event semantics)
+     * @param amount Amount/quantity (token decimals as defined by the event producer)
+     * @param extraData ABI-encoded extra payload for off-chain decoders
+     * @param timestamp Event timestamp (seconds since epoch)
+     */
+    event HistoryRecorded(
+        bytes32 indexed eventType,
+        address indexed user,
+        address indexed asset,
+        uint256 amount,
+        bytes extraData,
+        uint256 timestamp
+    );
 
-    // =========================  Storage  =========================
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
+    /// @notice Registry contract address (internal use only).
     address private _registryAddr;
 
-    // =========================  Modifiers  =========================
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
@@ -37,7 +64,7 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
         _;
     }
 
-    // =========================  Initialiser  =========================
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -45,9 +72,15 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice 初始化事件历史管理器
-     * @param initialRegistryAddr Registry 合约地址
-     * @dev 只能调用一次；若 `initialRegistryAddr` 为 0 地址则回滚
+     * @notice Initialize the EventHistoryManager (UUPS).
+     * @dev Reverts if:
+     *      - initialRegistryAddr is zero (ZeroAddress)
+     *      - initialRegistryAddr is not a contract (NotAContract)
+     *
+     * Security:
+     * - initializer (UUPS)
+     *
+     * @param initialRegistryAddr Registry contract address
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -56,28 +89,42 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
         _registryAddr = initialRegistryAddr;
     }
 
-    // =========================  Public API  =========================
+    /*━━━━━━━━━━━━━━━ Push APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 记录业务事件（仅供链下消费）
-     * @param eventType 事件类型哈希
-     * @param user      相关用户地址
-     * @param asset     相关资产地址
-     * @param amount    金额/数量
-     * @param extraData 额外 ABI 编码数据
+     * @notice Record a business event for off-chain indexing.
+     * @dev Reverts if:
+     *      - registry is not configured (ZeroAddress / NotAContract)
+     *      - caller lacks ACTION_MANAGE_EVENT_HISTORY (MissingRole via ACM)
+     *
+     * Security:
+     * - events-only (no persistent storage writes except registry address)
+     *
+     * @param eventType Event type hash (keccak256("UPPER_SNAKE_CASE") suggested)
+     * @param user Related user address (may be zero depending on event semantics)
+     * @param asset Related asset address (may be zero depending on event semantics)
+     * @param amount Amount/quantity (token decimals as defined by producer)
+     * @param extraData ABI-encoded extra payload for off-chain decoders
      */
-    function recordEvent(bytes32 eventType, address user, address asset, uint256 amount, bytes calldata extraData) external onlyValidRegistry onlyAuthorizedModule {
+    function recordEvent(
+        bytes32 eventType,
+        address user,
+        address asset,
+        uint256 amount,
+        bytes calldata extraData
+    ) external onlyValidRegistry onlyAuthorizedModule {
+        // solhint-disable-next-line not-rely-on-time
         uint256 timestamp = block.timestamp;
         emit HistoryRecorded(eventType, user, asset, amount, extraData, timestamp);
 
-        // 触发统一 DataPushed 事件，符合《Architecture-Guide》中的“统一 DataPush 接口”
+        // Unified DataPush event (off-chain consumers should subscribe to DataPushed)
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_HISTORY,
             abi.encode(eventType, user, asset, amount, extraData)
         );
     }
 
-    // =========================  UUPS upgradeability  =========================
+    /*━━━━━━━━━━━━━━━ UUPS upgradeability ━━━━━━━━━━━━━━━*/
 
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
@@ -85,18 +132,35 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
-    /// @notice 兼容旧版 getter
-    function registryAddr() external view returns(address){return _registryAddr;}
+    /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 获取 Registry 合约地址（新接口）
-     * @dev 建议使用本函数而非已废弃的 `registryAddr()`
+     * @notice Get the Registry contract address (legacy getter).
+     * @dev This function is kept for backward compatibility; prefer `getRegistry()`.
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return registryAddrVar Registry contract address
      */
-    function getRegistry() external view returns (address) {
+    function registryAddr() external view returns (address registryAddrVar) {
         return _registryAddr;
     }
 
-    // ============ Versioning (C+B baseline) ============
+    /**
+     * @notice Get the Registry contract address.
+     * @dev Prefer this function over the legacy `registryAddr()` getter.
+     *
+     * Security:
+     * - Read-only
+     *
+     * @return registryAddrVar Registry contract address
+     */
+    function getRegistry() external view returns (address registryAddrVar) {
+        return _registryAddr;
+    }
+
+    /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }

@@ -31,7 +31,7 @@ interface IVaultCoreWithRegistry { function getRegistry() external view returns 
 
 /// @dev HealthView read-only interface (per docs/Architecture-Guide.md)
 interface IHealthViewLite {
-    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid);
+    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid, uint256 timestamp);
 }
 
 /// @title RWAAutoLeveragedStrategy
@@ -438,7 +438,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
         if (reg == address(0)) return 0;
         address hv = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
-        (healthFactor, ) = IHealthViewLite(hv).getUserHealthFactor(user);
+        (healthFactor, , ) = IHealthViewLite(hv).getUserHealthFactor(user);
     }
     
     /// @notice 检查用户是否处于清算风险

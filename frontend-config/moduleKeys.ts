@@ -8,8 +8,8 @@
  * 请勿手动修改，如需更新请运行: npm run generate:module-keys
  * Do not modify manually, run: npm run generate:module-keys to update
  * 
- * 生成时间: 2026-01-12T13:41:18.471Z
- * Generated at: 2026-01-12T13:41:18.471Z
+ * 生成时间: 2026-01-21T06:33:49.909Z
+ * Generated at: 2026-01-21T06:33:49.909Z
  */
 
 import { ethers } from 'ethers';
@@ -27,6 +27,7 @@ export const ModuleKeys = {
 
   KEY_ORDER_ENGINE: '0xe3d59e66fbb5261ad61cd931bb88ea1b69086fee33424bb4854e747e7cd1e28e',
 
+  /** @deprecated Deprecated: replaced by HealthView / LiquidationRiskManager. */
   KEY_HF_CALC: '0xb698664393bbcbd982c6727951042734676ce432028102613986ccde80626967',
 
   KEY_STATS: '0x81e10853f6ca1239c67be9009513f05a266a0dc86f0901f26f5d74ddf7616ff3',
@@ -59,7 +60,10 @@ export const ModuleKeys = {
 
   KEY_REWARD_CONSUMPTION: '0x966e91e20091eaf6b74e4b1ccca427d0593c4880927d49ca0d373f8e2220b800',
 
+  /** @deprecated Deprecated: replaced by KEY_PRICE_ORACLE + KEY_VALUATION_ORACLE_VIEW. */
   KEY_VALUATION_ORACLE: '0x715bde44bb4e4cd793f6bcfa098958c12cb87e0dc8ed92f354601a1fe28a3fa2',
+
+  KEY_VALUATION_ORACLE_VIEW: '0x1dba5994c48657be41f2eb41a0d57f1b4495d8724cf1862b98b72a72c2b14a0c',
 
   KEY_GUARANTEE_FUND: '0x7d04cca2768ad5ecf26de7b710ed130d25bc104066d06158f2c14902327f4390',
 
@@ -194,6 +198,7 @@ export const MODULE_KEY_STRINGS = [
   'KEY_REWARD_CONFIG',
   'KEY_REWARD_CONSUMPTION',
   'KEY_VALUATION_ORACLE',
+  'KEY_VALUATION_ORACLE_VIEW',
   'KEY_GUARANTEE_FUND',
   'KEY_EARLY_REPAYMENT_GUARANTEE',
   'KEY_KEEPER_REGISTRY',

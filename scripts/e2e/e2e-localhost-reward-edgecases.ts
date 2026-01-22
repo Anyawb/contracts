@@ -55,7 +55,12 @@ export async function runRewardEdgecases() {
   if (signers.length < 15) throw new Error(`Need at least 15 signers (have ${signers.length})`);
 
   const deployer = signers[0];
-  const borrower = signers[11];
+  // NOTE: matchflow may lock EarlyRepaymentGuarantee per (borrower, asset).
+  // This script is often re-run on a "dirty" local node; we therefore pick borrowers dynamically
+  // to avoid colliding with any already-active guarantee records.
+  let borrowerA: any;
+  let borrowerB: any;
+  let borrowerC: any;
   const lenderA = signers[12];
   const lenderB = signers[13];
 
@@ -97,7 +102,8 @@ export async function runRewardEdgecases() {
   const DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED = ethers.keccak256(ethers.toUtf8Bytes("REWARD_PENALTY_LEDGER_UPDATED"));
 
   // ============ ViewScan (best-effort) ============
-  await scanViewModules(CONTRACT_ADDRESSES.Registry, { assetAddr: usdc.target as string, sampleUser: borrower.address });
+  // Use a stable sample user for scan (borrowers are picked later based on guarantee state).
+  await scanViewModules(CONTRACT_ADDRESSES.Registry, { assetAddr: usdc.target as string, sampleUser: signers[11].address });
 
   // ============ Preflight: VaultCore must trust ORDER_ENGINE as business module ============
   // ORDER_ENGINE.repay() 会调用 VaultCore.repayFor(...) 做账本同步；如果 VaultCore.registryAddrVar 指向错误的 Registry（或 Registry 未绑定 ORDER_ENGINE），会导致回滚。
@@ -178,11 +184,50 @@ export async function runRewardEdgecases() {
   await ensureRole("ORDER_CREATE", CONTRACT_ADDRESSES.VaultBusinessLogic);
   await ensureRole("DEPOSIT", CONTRACT_ADDRESSES.VaultBusinessLogic);
 
-  // borrower needs repay permission on ORDER_ENGINE
-  await ensureRole("REPAY", borrower.address);
-
   // asset/price setup
   const assetAddr = usdc.target as string;
+
+  // ============ EarlyRepaymentGuarantee-aware borrower selection ============
+  // matchflow may lock a guarantee record and reject re-locks for the same (borrower, asset),
+  // so we pick borrowers that currently have no active guarantee for this asset.
+  const ergmAddr =
+    ((await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE_MANAGER"))) as string) ||
+    ((await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE"))) as string);
+  const ergm =
+    ergmAddr && ergmAddr !== ethers.ZeroAddress
+      ? ((await ethers.getContractAt("EarlyRepaymentGuaranteeManager", ergmAddr)) as any)
+      : null;
+
+  const pickBorrowers = async (count: number): Promise<any[]> => {
+    const out: any[] = [];
+    for (let i = 1; i < signers.length && out.length < count; i++) {
+      const s = signers[i];
+      // skip deployer and dedicated lenders used by this script
+      if (s.address.toLowerCase() === deployer.address.toLowerCase()) continue;
+      if (s.address.toLowerCase() === lenderA.address.toLowerCase()) continue;
+      if (s.address.toLowerCase() === lenderB.address.toLowerCase()) continue;
+      if (!ergm) {
+        out.push(s);
+        continue;
+      }
+      const has = (await ergm.hasActiveGuarantee(s.address, assetAddr)) as boolean;
+      if (!has) out.push(s);
+    }
+    if (out.length < count) {
+      throw new Error(`Not enough clean borrowers: need=${count} got=${out.length}. Try restarting hardhat node or re-deploying.`);
+    }
+    return out;
+  };
+
+  [borrowerA, borrowerB, borrowerC] = await pickBorrowers(3);
+
+  // borrower needs repay/order_create permission on ORDER_ENGINE
+  await ensureRole("REPAY", borrowerA.address);
+  await ensureRole("REPAY", borrowerB.address);
+  await ensureRole("REPAY", borrowerC.address);
+  await ensureRole("ORDER_CREATE", borrowerA.address);
+  await ensureRole("ORDER_CREATE", borrowerB.address);
+  await ensureRole("ORDER_CREATE", borrowerC.address);
   if (!(await aw.isAssetAllowed(assetAddr))) await (await aw.connect(deployer).addAllowedAsset(assetAddr)).wait();
   {
     const cfg = await po.getAssetConfig(assetAddr);
@@ -193,17 +238,23 @@ export async function runRewardEdgecases() {
   if (!(await feeRouter.isTokenSupported(assetAddr))) await (await feeRouter.connect(deployer).addSupportedToken(assetAddr)).wait();
 
   // fund users
-  await (await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("50000", 6))).wait();
+  await (await usdc.connect(deployer).transfer(borrowerA.address, ethers.parseUnits("50000", 6))).wait();
+  await (await usdc.connect(deployer).transfer(borrowerB.address, ethers.parseUnits("50000", 6))).wait();
+  await (await usdc.connect(deployer).transfer(borrowerC.address, ethers.parseUnits("50000", 6))).wait();
   await (await usdc.connect(deployer).transfer(lenderA.address, ethers.parseUnits("50000", 6))).wait();
   await (await usdc.connect(deployer).transfer(lenderB.address, ethers.parseUnits("50000", 6))).wait();
 
-  // Ensure borrower has enough collateral in ledger for multiple borrows
-  // (matchflow path requires collateral manager updates via VaultCore.deposit)
-  const collateralAmt = ethers.parseUnits("5000", 6);
-  if ((await cm.getCollateral(borrower.address, assetAddr)) < collateralAmt) {
-    await (await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, collateralAmt)).wait();
-    await (await vaultCore.connect(borrower).deposit(assetAddr, collateralAmt)).wait();
+  async function ensureCollateral(user: any, amount: bigint) {
+    if ((await cm.getCollateral(user.address, assetAddr)) < amount) {
+      // Collateral is pulled by CollateralManager (ledger SSOT), not by VaultCore.
+      await (await usdc.connect(user).approve(CONTRACT_ADDRESSES.CollateralManager, amount)).wait();
+      await (await vaultCore.connect(user).deposit(assetAddr, amount)).wait();
+    }
   }
+  const collateralAmt = ethers.parseUnits("5000", 6);
+  await ensureCollateral(borrowerA, collateralAmt);
+  await ensureCollateral(borrowerB, collateralAmt);
+  await ensureCollateral(borrowerC, collateralAmt);
 
   // EIP-712 domain/types for matchflow (aligned with existing batch e2e scripts)
   const domain = {
@@ -255,15 +306,15 @@ export async function runRewardEdgecases() {
     ],
   };
 
-  const readSnapshot = async (label: string): Promise<RewardSnapshot> => {
-    const balance = (await rewardPoints.balanceOf(borrower.address)) as bigint;
-    const summary = await rewardView.connect(borrower).getUserRewardSummary(borrower.address);
+  const readSnapshot = async (label: string, user: any): Promise<RewardSnapshot> => {
+    const balance = (await rewardPoints.balanceOf(user.address)) as bigint;
+    const summary = await rewardView.connect(user).getUserRewardSummary(user.address);
     const totalEarned = summary[0] as bigint;
     const totalBurned = summary[1] as bigint;
     // penaltyDebt 权威读取应来自 RewardView.getUserPenaltyDebt（透传 RMCore）；若旧部署缺 module key 或 read-gate 配置异常，则回退到缓存字段 summary.pendingPenalty
     let penaltyDebt: bigint;
     try {
-      penaltyDebt = (await rewardView.connect(borrower).getUserPenaltyDebt(borrower.address)) as bigint;
+      penaltyDebt = (await rewardView.connect(user).getUserPenaltyDebt(user.address)) as bigint;
     } catch {
       penaltyDebt = summary[2] as bigint;
     }
@@ -273,10 +324,17 @@ export async function runRewardEdgecases() {
     return { balance, totalEarned, totalBurned, penaltyDebt };
   };
 
-  async function createOrder(params: { lender: any; termDays: bigint; principal: bigint; rateBps: bigint; tag: string }): Promise<bigint> {
+  async function createOrder(params: {
+    borrower: any;
+    lender: any;
+    termDays: bigint;
+    principal: bigint;
+    rateBps: bigint;
+    tag: string;
+  }): Promise<bigint> {
     const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
     const borrowIntent = {
-      borrower: borrower.address,
+      borrower: params.borrower.address,
       collateralAsset: assetAddr,
       collateralAmount: ethers.parseUnits("1000", 6),
       borrowAsset: assetAddr,
@@ -302,8 +360,12 @@ export async function runRewardEdgecases() {
     const lendHash = buildLendIntentHash(lendIntent);
     await (await vbl.connect(params.lender).reserveForLending(params.lender.address, assetAddr, params.principal, lendHash)).wait();
 
-    const sigBorrower = await borrower.signTypedData(domain, typesBorrow as any, borrowIntent as any);
+    const sigBorrower = await params.borrower.signTypedData(domain, typesBorrow as any, borrowIntent as any);
     const sigLender = await params.lender.signTypedData(domain, typesLend as any, lendIntent as any);
+
+    // NOTE: matchflow may lock EarlyRepaymentGuarantee via GuaranteeFundManager, which pulls settlementToken via transferFrom.
+    // Ensure borrower has sufficient allowance to avoid ERC20InsufficientAllowance during finalizeMatch.
+    await (await usdc.connect(params.borrower).approve(CONTRACT_ADDRESSES.GuaranteeFundManager, ethers.MaxUint256)).wait();
 
     const tx = await vbl.connect(deployer).finalizeMatch(borrowIntent, [lendIntent], sigBorrower, [sigLender]);
     const receipt = await tx.wait();
@@ -324,7 +386,7 @@ export async function runRewardEdgecases() {
 
     // Borrower needs USDC to repay; keep a buffer
     // borrower needs USDC to repay (matchflow may transfer principal; ensure buffer anyway)
-    await (await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("5000", 6))).wait();
+    await (await usdc.connect(deployer).transfer(params.borrower.address, ethers.parseUnits("5000", 6))).wait();
     return orderId;
   }
 
@@ -343,9 +405,9 @@ export async function runRewardEdgecases() {
     return principal + interest;
   }
 
-  async function repay(orderId: bigint, amount: bigint) {
-    await (await usdc.connect(borrower).approve(orderEngineAddr, amount)).wait();
-    return await (await orderEngine.connect(borrower).repay(orderId, amount)).wait();
+  async function repay(user: any, orderId: bigint, amount: bigint) {
+    await (await usdc.connect(user).approve(orderEngineAddr, amount)).wait();
+    return await (await orderEngine.connect(user).repay(orderId, amount)).wait();
   }
 
   // ========= Scenario 1: partial repay MUST NOT trigger reward =========
@@ -355,8 +417,9 @@ export async function runRewardEdgecases() {
     const rateBps = 1000n;
     const termDays = 5n;
 
-    const s0 = await readSnapshot("before partial");
-    const orderId = await createOrder({ lender: lenderA, termDays, principal, rateBps, tag: "partial" });
+    const user = borrowerA;
+    const s0 = await readSnapshot("before partial", user);
+    const orderId = await createOrder({ borrower: user, lender: lenderA, termDays, principal, rateBps, tag: "partial" });
     const totalDue = await getTotalDueFromChain(orderId);
     const partial = totalDue / 2n;
     {
@@ -366,7 +429,7 @@ export async function runRewardEdgecases() {
       );
       console.log(`  [debug] totalDue=${totalDue.toString()} partial=${partial.toString()}`);
     }
-    const receipt = await repay(orderId, partial);
+    const receipt = await repay(user, orderId, partial);
 
     const pushed = parseRewardDataPushed(receipt, rewardView.target as string);
     if (pushed.length !== 0) {
@@ -402,7 +465,7 @@ export async function runRewardEdgecases() {
       }
       throw new Error(`partial repay should not emit RewardView.DataPushed, got ${pushed.length}: ${detail}`);
     }
-    const s1 = await readSnapshot("after partial");
+    const s1 = await readSnapshot("after partial", user);
     if (s1.balance !== s0.balance || s1.totalEarned !== s0.totalEarned || s1.totalBurned !== s0.totalBurned || s1.penaltyDebt !== s0.penaltyDebt) {
       throw new Error("partial repay changed reward state unexpectedly");
     }
@@ -416,17 +479,18 @@ export async function runRewardEdgecases() {
     const rateBps = 1000n;
     const termDays = 30n; // ensure early: now + window < maturity
 
-    const s0 = await readSnapshot("before early");
-    const orderId = await createOrder({ lender: lenderA, termDays, principal, rateBps, tag: "early" });
+    const user = borrowerB; // fresh borrower to avoid active guarantee from Scenario 1
+    const s0 = await readSnapshot("before early", user);
+    const orderId = await createOrder({ borrower: user, lender: lenderA, termDays, principal, rateBps, tag: "early" });
     const totalDue = await getTotalDueFromChain(orderId);
-    const receipt = await repay(orderId, totalDue);
+    const receipt = await repay(user, orderId, totalDue);
 
     const pushed = parseRewardDataPushed(receipt, rewardView.target as string);
     if (pushed.length !== 0) {
       // early full repay should NOT emit reward events
       throw new Error(`early full repay should not emit RewardView.DataPushed, got ${pushed.length}`);
     }
-    const s1 = await readSnapshot("after early");
+    const s1 = await readSnapshot("after early", user);
     if (s1.balance !== s0.balance) throw new Error("early full repay minted points unexpectedly");
     if (s1.penaltyDebt !== s0.penaltyDebt) throw new Error("early full repay changed penaltyDebt unexpectedly");
     console.log("  ✅ OK\n");
@@ -439,8 +503,9 @@ export async function runRewardEdgecases() {
     const rateBps = 1000n;
     const termDays = 5n;
 
-    const s0 = await readSnapshot("before on-time");
-    const orderId = await createOrder({ lender: lenderA, termDays, principal, rateBps, tag: "ontime" });
+    const user = borrowerC; // fresh borrower to avoid active guarantee from Scenario 2
+    const s0 = await readSnapshot("before on-time", user);
+    const orderId = await createOrder({ borrower: user, lender: lenderA, termDays, principal, rateBps, tag: "ontime" });
     const totalDue = await getTotalDueFromChain(orderId);
 
     // repay near maturity to be on-time (within window)
@@ -452,8 +517,8 @@ export async function runRewardEdgecases() {
         await evmIncreaseTime(maturity - nowTs - ONE_HOUR);
       }
     }
-    const receipt = await repay(orderId, totalDue);
-    const s1 = await readSnapshot("after on-time");
+    const receipt = await repay(user, orderId, totalDue);
+    const s1 = await readSnapshot("after on-time", user);
 
     if (s1.balance - s0.balance !== ONE_POINT) throw new Error(`expected +1 point, got ${fmtPoints(s1.balance - s0.balance)}`);
     const pushed = parseRewardDataPushed(receipt, rewardView.target as string);
@@ -466,7 +531,7 @@ export async function runRewardEdgecases() {
       ["address", "uint256", "string", "uint256"],
       earned.payload
     ) as unknown as [string, bigint, string, bigint];
-    if (u.toLowerCase() !== borrower.address.toLowerCase()) throw new Error("REWARD_EARNED payload user mismatch");
+    if (u.toLowerCase() !== user.address.toLowerCase()) throw new Error("REWARD_EARNED payload user mismatch");
     if (amt !== ONE_POINT) throw new Error(`REWARD_EARNED payload amount mismatch: ${amt.toString()}`);
     console.log("  ✅ OK\n");
   }
@@ -475,7 +540,22 @@ export async function runRewardEdgecases() {
   console.log("=== 4) Late full repay (insufficient balance): penaltyLedger increases and emits REWARD_PENALTY_LEDGER_UPDATED ===");
   {
     // use a fresh borrower with zero points to make the condition deterministic
-    const borrower2 = signers[14];
+    let borrower2: any | null = null;
+    for (let i = 11; i < signers.length; i++) {
+      const s = signers[i];
+      const addr = s.address.toLowerCase();
+      if (addr === borrowerA.address.toLowerCase() || addr === borrowerB.address.toLowerCase() || addr === borrowerC.address.toLowerCase()) continue;
+      if (ergm) {
+        const has = (await ergm.hasActiveGuarantee(s.address, assetAddr)) as boolean;
+        if (has) continue;
+      }
+      const bal = (await rewardPoints.balanceOf(s.address)) as bigint;
+      if (bal !== 0n) continue;
+      borrower2 = s;
+      break;
+    }
+    if (!borrower2) throw new Error("No clean borrower with 0 points found for Scenario 4 (try restarting node / redeploy).");
+
     await ensureRole("ORDER_CREATE", borrower2.address);
     await ensureRole("REPAY", borrower2.address);
     await (await usdc.connect(deployer).transfer(borrower2.address, ethers.parseUnits("50000", 6))).wait();
@@ -497,8 +577,7 @@ export async function runRewardEdgecases() {
     // borrower2 deposit collateral so matchflow can borrow
     // Over-collateralize to avoid config-dependent risk checks rejecting the borrow
     const depositAmt2 = ethers.parseUnits("20000", 6);
-    await (await usdc.connect(borrower2).approve(CONTRACT_ADDRESSES.VaultCore, depositAmt2)).wait();
-    await (await vaultCore.connect(borrower2).deposit(assetAddr, depositAmt2)).wait();
+    await ensureCollateral(borrower2, depositAmt2);
 
     const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
     const borrowIntent2 = {
@@ -527,6 +606,8 @@ export async function runRewardEdgecases() {
     await (await vbl.connect(lenderB).reserveForLending(lenderB.address, assetAddr, principal, lendHash2)).wait();
     const sigBorrower2 = await borrower2.signTypedData(domain, typesBorrow as any, borrowIntent2 as any);
     const sigLender2 = await lenderB.signTypedData(domain, typesLend as any, lendIntent2 as any);
+    // matchflow may lock EarlyRepaymentGuarantee via GuaranteeFundManager, which pulls settlementToken via transferFrom.
+    await (await usdc.connect(borrower2).approve(CONTRACT_ADDRESSES.GuaranteeFundManager, ethers.MaxUint256)).wait();
     const tx2 = await vbl.connect(deployer).finalizeMatch(borrowIntent2, [lendIntent2], sigBorrower2, [sigLender2]);
     const receiptCreate2 = await tx2.wait();
     let orderId: bigint | null = null;
@@ -557,17 +638,53 @@ export async function runRewardEdgecases() {
     console.log("  ✅ OK\n");
   }
 
-  // ========= Scenario 5: multi-order independence (same borrower) =========
-  console.log("=== 5) Multi-order independence: same borrower 2 orders with different outcomes ===");
+  // ========= Scenario 5: multi-order independence (best-effort, no active-guarantee collision) =========
+  // NOTE:
+  // EarlyRepaymentGuaranteeManager enforces at most one active guarantee per (borrower, asset).
+  // matchflow orders lock a guarantee record, so "2 concurrent orders for same borrower+asset" may revert by design.
+  // This scenario uses 2 fresh borrowers to validate "different outcomes do not interfere" without colliding on guarantees.
+  console.log("=== 5) Multi-order independence: 2 borrowers, 2 orders with different outcomes ===");
   {
+    let borrowerD: any | null = null;
+    let borrowerE: any | null = null;
+    for (let i = 1; i < signers.length; i++) {
+      const s = signers[i];
+      const addr = s.address.toLowerCase();
+      if (addr === deployer.address.toLowerCase()) continue;
+      if (addr === lenderA.address.toLowerCase() || addr === lenderB.address.toLowerCase()) continue;
+      if (addr === borrowerA.address.toLowerCase() || addr === borrowerB.address.toLowerCase() || addr === borrowerC.address.toLowerCase()) continue;
+      if (ergm) {
+        const has = (await ergm.hasActiveGuarantee(s.address, assetAddr)) as boolean;
+        if (has) continue;
+      }
+      const bal = (await rewardPoints.balanceOf(s.address)) as bigint;
+      if (bal !== 0n) continue;
+      if (!borrowerD) {
+        borrowerD = s;
+      } else if (!borrowerE && addr !== borrowerD.address.toLowerCase()) {
+        borrowerE = s;
+        break;
+      }
+    }
+    if (!borrowerD || !borrowerE) throw new Error("No 2 clean borrowers found for Scenario 5 (try restarting node / redeploy).");
+    await ensureRole("ORDER_CREATE", borrowerD.address);
+    await ensureRole("REPAY", borrowerD.address);
+    await ensureRole("ORDER_CREATE", borrowerE.address);
+    await ensureRole("REPAY", borrowerE.address);
+    await (await usdc.connect(deployer).transfer(borrowerD.address, ethers.parseUnits("50000", 6))).wait();
+    await (await usdc.connect(deployer).transfer(borrowerE.address, ethers.parseUnits("50000", 6))).wait();
+    await ensureCollateral(borrowerD, collateralAmt);
+    await ensureCollateral(borrowerE, collateralAmt);
+
     const principal = ethers.parseUnits("1200", 6); // >= MIN_ELIGIBLE_PRINCIPAL(1000)
     const rateBps = 1000n;
 
-    // Order A: on-time (10d)
-    // Order B: late (5d) - should burn or ledger depending on balance; borrower currently has some balance, so likely burn.
-    const before = await readSnapshot("before multi-order");
-    const orderA = await createOrder({ lender: lenderA, termDays: 10n, principal, rateBps, tag: "multiA" });
-    const orderB = await createOrder({ lender: lenderB, termDays: 5n, principal, rateBps, tag: "multiB" });
+    // Order A: on-time (10d) for borrowerD
+    // Order B: late (5d) for borrowerE
+    const beforeD = await readSnapshot("before multi-order A", borrowerD);
+    const beforeE = await readSnapshot("before multi-order B", borrowerE);
+    const orderA = await createOrder({ borrower: borrowerD, lender: lenderA, termDays: 10n, principal, rateBps, tag: "multiA" });
+    const orderB = await createOrder({ borrower: borrowerE, lender: lenderB, termDays: 5n, principal, rateBps, tag: "multiB" });
 
     // repay orderA on-time
     {
@@ -579,7 +696,7 @@ export async function runRewardEdgecases() {
       }
     }
     const totalDueA = await getTotalDueFromChain(orderA);
-    const rA = await repay(orderA, totalDueA);
+    const rA = await repay(borrowerD, orderA, totalDueA);
     const pushedA = parseRewardDataPushed(rA, rewardView.target as string);
     if (!pushedA.some((p) => p.typeHash.toLowerCase() === DATA_TYPE_REWARD_EARNED.toLowerCase())) {
       throw new Error("expected REWARD_EARNED on orderA on-time repay");
@@ -595,15 +712,23 @@ export async function runRewardEdgecases() {
       if (target > nowTs) await evmIncreaseTime(target - nowTs);
     }
     const totalDueB = await getTotalDueFromChain(orderB);
-    const rB = await repay(orderB, totalDueB);
+    const rB = await repay(borrowerE, orderB, totalDueB);
     const pushedB = parseRewardDataPushed(rB, rewardView.target as string);
     if (!pushedB.some((p) => p.typeHash.toLowerCase() === DATA_TYPE_REWARD_BURNED.toLowerCase() || p.typeHash.toLowerCase() === DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED.toLowerCase())) {
       throw new Error("expected REWARD_BURNED or REWARD_PENALTY_LEDGER_UPDATED on orderB late repay");
     }
 
-    const after = await readSnapshot("after multi-order");
-    const earnedDelta = after.totalEarned - before.totalEarned;
-    if (earnedDelta !== ONE_POINT) throw new Error(`multi-order: expected earned delta == 1 point, got ${fmtPoints(earnedDelta)}`);
+    const afterD = await readSnapshot("after multi-order A", borrowerD);
+    const afterE = await readSnapshot("after multi-order B", borrowerE);
+    const earnedDeltaD = afterD.totalEarned - beforeD.totalEarned;
+    if (earnedDeltaD !== ONE_POINT) {
+      throw new Error(`multi-order: expected borrowerD earned delta == 1 point, got ${fmtPoints(earnedDeltaD)}`);
+    }
+    // borrowerE outcome is late: should not mint; allow 0 delta
+    const earnedDeltaE = afterE.totalEarned - beforeE.totalEarned;
+    if (earnedDeltaE !== 0n) {
+      throw new Error(`multi-order: expected borrowerE earned delta == 0, got ${fmtPoints(earnedDeltaE)}`);
+    }
     console.log("  ✅ OK\n");
   }
 

@@ -26,36 +26,23 @@ import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
  * @title LiquidatorView
- * @notice Liquidation single-point view module: forwards liquidation updates/payouts to the unified DataPush stream.
+ * @notice Liquidation view module that exposes role-gated reads and forwards liquidation updates/payouts to DataPush.
  * @dev Reverts if:
- *      - Registry is not configured (see `onlyValidRegistry`)
- *      - caller lacks required view permissions (see `onlySystemViewer`, `onlyLiquidationViewer`, `onlyUserData`)
- *      - unauthorized module attempts to push (see `onlyBusinessModule`, `onlyLiquidationOrPayoutModule`)
+ *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+ *      - caller lacks required view permissions (see access-control modifiers)
+ *      - unauthorized module attempts to push (see {InvalidCaller})
  *
  * Security:
- * - Role-gated reads via `ViewAccessLib.requireRole(...)`
- * - Push entrypoints are restricted to liquidation business modules (Registry-resolved)
- * - Not SSOT for ledger state; it is a view/cache push surface
- *
- * @custom:security-contact security@example.com
+ * - Role-gated reads via {ViewAccessLib} and {ActionKeys}
+ * - Writer-gated pushes: only Registry-resolved liquidation modules may push updates
+ * - Not an SSOT for ledger state; this is a view/cache push surface
  */
 contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsView, ViewVersioned {
     
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
-    /**
-     * @notice Batch size exceeds the maximum supported limit.
-     * @dev Reverts if:
-     *      - N/A (error selector only)
-     *
-     * Security:
-     * - DoS/gas guard for batch view aggregation
-     */
+    /// @dev Reverts when a batch query limit exceeds {ViewConstants.MAX_BATCH_SIZE}.
     error LiquidatorView__BatchTooLarge();
-    /**
-     * @notice Invalid `limit` parameter.
-     * @dev Reverts if:
-     *      - N/A (error selector only)
-     */
+    /// @dev Reverts when a caller-provided `limit` parameter is invalid (e.g., zero).
     error LiquidatorView__InvalidLimit();
 
     /*━━━━━━━━━━━━━━━ STATE ━━━━━━━━━━━━━━━*/
@@ -65,7 +52,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /// @notice Legacy SystemView placeholder (optional, backwards compatibility).
     address private _legacySystemViewAddr;
 
-    // ============ Local Types (formerly LiquidationViewTypes) ============
+    /*━━━━━━━━━━━━━━━ Local Types (formerly LiquidationViewTypes) ━━━━━━━━━━━━━━━*/
     struct LiquidatorProfitView {
         address liquidator;
         uint256 totalProfit;
@@ -110,6 +97,16 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      */
     modifier onlySystemViewer() {
         ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        _;
+    }
+
+    /**
+     * @notice Require risk-level view permission.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_RISK_DATA
+     */
+    modifier onlyRiskViewer() {
+        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
         _;
     }
 
@@ -189,22 +186,36 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /**
      * @notice Get legacy SystemView address (compatibility).
      * @dev Reverts if:
-     *      - none
+     *      - (never)
      *
      * Security:
      * - View only
+     *
+     * @return systemView Legacy SystemView address (may be zero)
      */
-    function systemViewVar() external view returns (address) { return _legacySystemViewAddr; }
+    function systemViewVar() external view returns (address systemView) {
+        return _legacySystemViewAddr;
+    }
 
     /*━━━━━━━━━━━━━━━ PUSH FROM BUSINESS (SINGLE POINT) ━━━━━━━━━━━━━━━*/
     /**
      * @notice Push a single liquidation update into the unified DataPush stream.
      * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller is not the registered liquidation manager (InvalidCaller)
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller is not the registered liquidation manager (see {InvalidCaller})
      *
      * Security:
-     * - Restricted to liquidation manager module
+     * - Writer-gated: only the liquidation manager module may push updates
+     * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_UPDATE} for off-chain consumers
+     *
+     * @param user User address
+     * @param collateralAsset Collateral asset address
+     * @param debtAsset Debt asset address
+     * @param collateralAmount Collateral amount seized (asset decimals; as provided by writer)
+     * @param debtAmount Debt amount repaid (asset decimals; as provided by writer)
+     * @param liquidator Liquidator address
+     * @param bonus Liquidation bonus value (implementation-defined units; as provided by writer)
+     * @param timestamp Event timestamp (seconds; as provided by writer)
      */
     function pushLiquidationUpdate(
         address user,
@@ -225,11 +236,22 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /**
      * @notice Push a batch liquidation update into the unified DataPush stream.
      * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller is not the registered liquidation manager (InvalidCaller)
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller is not the registered liquidation manager (see {InvalidCaller})
      *
      * Security:
-     * - Restricted to liquidation manager module
+     * - Writer-gated: only the liquidation manager module may push updates
+     * - Assumes writer provides aligned arrays (this function does not validate lengths)
+     * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_BATCH_UPDATE} for off-chain consumers
+     *
+     * @param users User addresses
+     * @param collateralAssets Collateral asset addresses
+     * @param debtAssets Debt asset addresses
+     * @param collateralAmounts Collateral amounts seized (asset decimals; as provided by writer)
+     * @param debtAmounts Debt amounts repaid (asset decimals; as provided by writer)
+     * @param liquidator Liquidator address (applies to the batch)
+     * @param bonuses Liquidation bonus values (implementation-defined units; as provided by writer)
+     * @param timestamp Event timestamp (seconds; as provided by writer)
      */
     function pushBatchLiquidationUpdate(
         address[] calldata users,
@@ -259,11 +281,24 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /**
      * @notice Push liquidation payout distribution into the unified DataPush stream.
      * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller is not liquidation manager or payout manager (InvalidCaller)
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller is not liquidation manager or payout manager (see {InvalidCaller})
      *
      * Security:
-     * - Restricted to liquidation/payout modules
+     * - Writer-gated: only liquidation/payout modules may push updates
+     * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_PAYOUT} for off-chain consumers
+     *
+     * @param user User address
+     * @param collateralAsset Collateral asset address
+     * @param platform Platform payout recipient address
+     * @param reserve Reserve payout recipient address
+     * @param lender Lender payout recipient address
+     * @param liquidator Liquidator payout recipient address
+     * @param platformShare Platform share amount (asset decimals; as provided by writer)
+     * @param reserveShare Reserve share amount (asset decimals; as provided by writer)
+     * @param lenderShare Lender share amount (asset decimals; as provided by writer)
+     * @param liquidatorShare Liquidator share amount (asset decimals; as provided by writer)
+     * @param timestamp Event timestamp (seconds; as provided by writer)
      */
     function pushLiquidationPayout(
         address user,
@@ -567,7 +602,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /**
      * @notice Get liquidator risk analysis (placeholder; aggregated off-chain).
      * @dev Reverts if:
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA
+     *      - caller lacks ACTION_VIEW_RISK_DATA
      *
      * Security:
      * - View only
@@ -576,7 +611,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         external
         view
         onlyValidRegistry
-        onlySystemViewer
+        onlyRiskViewer
         returns (uint256 riskScore, uint8 riskLevel, string[] memory riskFactors)
     {
         // Placeholder: aggregated off-chain; return defaults on-chain.
@@ -731,7 +766,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (uint256 seizableAmount)
     {
         if (user == address(0) || asset == address(0)) return 0;
-        // 直接委托 CollateralManager；若未注册则返回 0（不回滚）
+        // Delegate to CollateralManager; if not registered, returns 0 (best-effort, no revert).
         address cm = Registry(_registryAddr).getModule(ModuleKeys.KEY_CM);
         if (cm == address(0)) return 0;
         try ICollateralManager(cm).getCollateral(user, asset) returns (uint256 amt) {
@@ -760,7 +795,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (address[] memory assets, uint256[] memory amounts)
     {
         if (user == address(0)) return (new address[](0), new uint256[](0));
-        // 通过 CollateralManager 组装（若未注册则返回空）
+        // Assemble via CollateralManager; if not registered, returns empty arrays (best-effort).
         address cm = Registry(_registryAddr).getModule(ModuleKeys.KEY_CM);
         if (cm == address(0)) return (new address[](0), new uint256[](0));
         address[] memory assetsList = ICollateralManager(cm).getUserCollateralAssets(user);
@@ -945,34 +980,37 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /**
      * @notice Get Registry address.
      * @dev Reverts if:
-     *      - none
+     *      - (never; may return address(0) if not initialized)
      *
      * Security:
      * - View only
      *
-     * @return Registry address
+     * @return registry Registry address
      */
-    function getRegistry() external view returns (address) {
+    function getRegistry() external view returns (address registry) {
         return _registryAddr;
     }
     
     /**
      * @notice Legacy getter for Registry address (compatibility).
      * @dev Reverts if:
-     *      - none
+     *      - (never; may return address(0) if not initialized)
      *
      * Security:
      * - View only
      *
-     * @return Registry address
+     * @return registry Registry address
      */
-    function registryAddr() external view returns (address) { return _registryAddr; }
+    function registryAddr() external view returns (address registry) {
+        return _registryAddr;
+    }
     
     /**
      * @notice DEPRECATED: schedule module upgrade via Registry (kept for backwards compatibility).
      * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller lacks ACTION_UPGRADE_MODULE
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_UPGRADE_MODULE (see {ViewAccessLib})
+     *      - Registry rejects the upgrade schedule (reverts in {Registry.scheduleModuleUpgrade})
      *
      * Security:
      * - Role-gated (ACTION_UPGRADE_MODULE)
@@ -988,8 +1026,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /**
      * @notice DEPRECATED: execute module upgrade via Registry (kept for backwards compatibility).
      * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller lacks ACTION_UPGRADE_MODULE
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_UPGRADE_MODULE (see {ViewAccessLib})
+     *      - Registry rejects upgrade execution (reverts in {Registry.executeModuleUpgrade})
      *
      * Security:
      * - Role-gated (ACTION_UPGRADE_MODULE)
@@ -1004,8 +1043,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /**
      * @notice DEPRECATED: cancel module upgrade via Registry (kept for backwards compatibility).
      * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller lacks ACTION_UPGRADE_MODULE
+     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller lacks ACTION_UPGRADE_MODULE (see {ViewAccessLib})
+     *      - Registry rejects upgrade cancellation (reverts in {Registry.cancelModuleUpgrade})
      *
      * Security:
      * - Role-gated (ACTION_UPGRADE_MODULE)
@@ -1055,15 +1095,36 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         }
     }
     
-    /*━━━━━━━━━━━━━━━ VERSIONING / STORAGE GAP ━━━━━━━━━━━━━━━*/
-    /// @notice Storage gap reserved for future upgrades.
+    /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Returns the API version of this module.
+     * @dev Reverts if:
+     *      - (never)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @return version API version
+     */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
+    /**
+     * @notice Returns the schema version of this module.
+     * @dev Reverts if:
+     *      - (never)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @return version Schema version
+     */
     function schemaVersion() public pure override returns (uint256) {
         return 1;
     }
 
+    /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
+    /// @dev Storage gap reserved for future upgrades.
     uint256[50] private __gap;
 } 

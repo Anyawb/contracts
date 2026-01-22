@@ -52,7 +52,9 @@ async function main() {
   const borrower = signers[1];
   const lender = signers[2];
   const outsider = signers[3];
-  const ops = signers[4];
+  // Use a fresh EOA to ensure it starts with no roles (deploylocal may grant roles to some default signers).
+  const ops = ethers.Wallet.createRandom().connect(ethers.provider);
+  await deployer.sendTransaction({ to: ops.address, value: ethers.parseEther("1") });
 
   console.log("=== E2E Reward Privacy + Read-Gate (localhost) ===\n");
   console.log("Scenarios:");
@@ -206,7 +208,9 @@ async function main() {
     // (VaultCore is the only allowed caller of VaultLendingEngine due to onlyVaultCore.)
     const collateralAmt = ethers.parseUnits("5000", 6);
     await (await usdc.connect(deployer).transfer(borrower.address, collateralAmt)).wait();
+    // VaultCore.deposit may route tokens through CollateralManager; approve both to avoid allowance ambiguity.
     await (await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, collateralAmt)).wait();
+    await (await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt)).wait();
     await (await vaultCore.connect(borrower).deposit(assetAddr, collateralAmt)).wait();
     await (await vaultCore.connect(borrower).borrow(assetAddr, principal)).wait();
     // ensure borrower has extra funds for interest + fee

@@ -15,6 +15,8 @@ const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_M
 const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW'));
 const KEY_HEALTH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW'));
 const KEY_PREVIEW_VIEW = ethers.keccak256(ethers.toUtf8Bytes('PREVIEW_VIEW'));
+const KEY_STATS = ethers.keccak256(ethers.toUtf8Bytes('VAULT_STATISTICS'));
+const KEY_SETTLEMENT_TOKEN = ethers.keccak256(ethers.toUtf8Bytes('SETTLEMENT_TOKEN'));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 const MAX_BATCH_SIZE = 100;
 
@@ -38,6 +40,9 @@ describe('UserView', function () {
     const PreviewF = await ethers.getContractFactory('MockPreviewView');
     const preview = (await PreviewF.deploy()) as unknown as MockPreviewView;
 
+    const StatsF = await ethers.getContractFactory('MockStatisticsViewUserSnapshot');
+    const stats = await StatsF.deploy();
+
     const TokenF = await ethers.getContractFactory('MockERC20');
     const token = (await TokenF.deploy(
       'Test Token',
@@ -57,11 +62,13 @@ describe('UserView', function () {
     await registry.setModule(KEY_POSITION_VIEW, await position.getAddress());
     await registry.setModule(KEY_HEALTH_VIEW, await health.getAddress());
     await registry.setModule(KEY_PREVIEW_VIEW, await preview.getAddress());
+    await registry.setModule(KEY_STATS, await stats.getAddress());
+    await registry.setModule(KEY_SETTLEMENT_TOKEN, tokenAddr);
 
     const UserViewF = await ethers.getContractFactory('UserView');
     const userView = (await upgrades.deployProxy(UserViewF, [await registry.getAddress()])) as unknown as UserView;
 
-    return { admin, user, other, registry, acm, position, health, preview, token, userView };
+    return { admin, user, other, registry, acm, position, health, preview, token, userView, stats };
   }
 
   describe('initialize', function () {
@@ -119,6 +126,268 @@ describe('UserView', function () {
       expect(stats.debt).to.equal(ethers.parseUnits('40', 18));
       expect(stats.hf).to.equal(12_000n);
       expect(stats.ltv).to.be.greaterThan(0n);
+    });
+  });
+
+  describe('ARCH 4.7 UV-01: facade MUST NOT drop downstream validity/meta', function () {
+    it('getUserPositionWithMeta matches downstream PositionView meta (isValid/timestamp/version)', async function () {
+      const { userView, user, token, position } = await loadFixture(deployFixture);
+
+      const blk = await ethers.provider.getBlock('latest');
+      const pTs = BigInt(blk!.timestamp) - 11n;
+      const pVer = 42n;
+
+      await position.setPositionWithMeta(
+        user.address,
+        await token.getAddress(),
+        ethers.parseUnits('123', 18),
+        ethers.parseUnits('45', 18),
+        false,
+        pTs,
+        pVer
+      );
+
+      const downstream = await position.getUserPositionWithMeta(user.address, await token.getAddress());
+      const facade = await userView.getUserPositionWithMeta(user.address, await token.getAddress());
+
+      expect(facade).to.deep.equal(downstream);
+    });
+
+    it('getUserStatsWithMeta preserves position + health meta alongside business fields', async function () {
+      const { userView, user, token, position, health } = await loadFixture(deployFixture);
+
+      const blk = await ethers.provider.getBlock('latest');
+      const pTs = BigInt(blk!.timestamp) - 33n;
+      const hTs = BigInt(blk!.timestamp) - 22n;
+      const pVer = 9n;
+
+      await position.setPositionWithMeta(
+        user.address,
+        await token.getAddress(),
+        ethers.parseUnits('200', 18),
+        ethers.parseUnits('50', 18),
+        true,
+        pTs,
+        pVer
+      );
+      await health.setHealthWithTimestamp(user.address, 11_000, false, hTs);
+
+      const [stats, positionIsValid, positionTimestamp, positionVersion, healthIsValid, healthTimestamp] =
+        await userView.getUserStatsWithMeta(user.address, await token.getAddress());
+
+      expect(stats.collateral).to.equal(ethers.parseUnits('200', 18));
+      expect(stats.debt).to.equal(ethers.parseUnits('50', 18));
+      expect(stats.hf).to.equal(11_000n);
+      expect(stats.ltv).to.be.greaterThan(0n);
+
+      expect(positionIsValid).to.equal(true);
+      expect(positionTimestamp).to.equal(pTs);
+      expect(positionVersion).to.equal(pVer);
+      expect(healthIsValid).to.equal(false);
+      expect(healthTimestamp).to.equal(hTs);
+    });
+
+    it('getUserTotalsWithMeta preserves StatisticsView meta (isValid/timestamp/version/seq)', async function () {
+      const { userView, user, stats } = await loadFixture(deployFixture);
+
+      const blk = await ethers.provider.getBlock('latest');
+      const ts = BigInt(blk!.timestamp);
+      await stats.setUserSnapshot(user.address, 123n, 45n, 0n, 0n, ts, true, 7);
+
+      const downstream = await stats.getUserSnapshotWithMeta(user.address);
+      const [s, v, seq, , isValid, timestamp] = downstream;
+
+      const [tc, td, fValid, fTs, fVer, fSeq] = await userView.getUserTotalsWithMeta(user.address);
+
+      expect(tc).to.equal(s.collateral);
+      expect(td).to.equal(s.debt);
+      expect(fValid).to.equal(isValid);
+      expect(fTs).to.equal(timestamp);
+      expect(fVer).to.equal(v);
+      expect(fSeq).to.equal(seq);
+    });
+  });
+
+  describe('ARCH 4.7: totals MUST NOT use asset=0 placeholder', function () {
+    it('getUserTotalsWithMeta reads from StatisticsView (not PositionView address(0))', async function () {
+      const { userView, user, stats, registry } = await loadFixture(deployFixture);
+
+      // Make PositionView missing to ensure totals still work (i.e. not calling getUserPosition(user, address(0))).
+      await registry.setModule(KEY_POSITION_VIEW, ethers.ZeroAddress);
+
+      // Seed user snapshot in stats mock (ts = now)
+      const blk = await ethers.provider.getBlock('latest');
+      const ts = BigInt(blk!.timestamp);
+      await stats.setUserSnapshot(user.address, 123n, 45n, 0n, 0n, ts, true, 7);
+
+      const [tc, td, isValid, timestamp, version, seq] = await userView.getUserTotalsWithMeta(user.address);
+      expect(tc).to.equal(123n);
+      expect(td).to.equal(45n);
+      expect(isValid).to.equal(true);
+      expect(timestamp).to.equal(ts);
+      expect(version).to.equal(7n);
+      expect(seq).to.equal(0n);
+
+      // Legacy helpers should forward to totals (no asset=0 semantics).
+      expect(await userView.getUserTotalCollateral(user.address)).to.equal(123n);
+      expect(await userView.getUserTotalDebt(user.address)).to.equal(45n);
+    });
+  });
+
+  describe('ARCH 4.7 UV-02: no business write/push entrypoints', function () {
+    it('exposes no push* or pushData functions in ABI', async function () {
+      const { userView } = await loadFixture(deployFixture);
+
+      const funcFragments = userView.interface.fragments.filter((f: any) => f.type === 'function');
+      const names: string[] = funcFragments.map((f: any) => f.name);
+
+      expect(names.some((n) => n.toLowerCase().startsWith('push'))).to.equal(false);
+      expect(names.includes('pushData')).to.equal(false);
+    });
+
+    it('has no writable entrypoints besides initialize/upgrade plumbing', async function () {
+      const { userView } = await loadFixture(deployFixture);
+
+      const funcFragments = userView.interface.fragments.filter((f: any) => f.type === 'function');
+      const writable = funcFragments.filter(
+        (f: any) => !['view', 'pure'].includes(String(f.stateMutability))
+      );
+      const writableNames = Array.from(new Set(writable.map((f: any) => f.name)));
+
+      const allowed = new Set(['initialize', 'upgradeTo', 'upgradeToAndCall']);
+      for (const n of writableNames) {
+        expect(allowed.has(n), `unexpected writable function in UserView ABI: ${n}`).to.equal(true);
+      }
+    });
+  });
+
+  describe('selector constants (explicit)', function () {
+    function sigSelector(sig: string): string {
+      // ethers.id() == keccak256(utf8(sig)); selector == first 4 bytes
+      return ethers.id(sig).slice(0, 10);
+    }
+
+    it('matches canonical signatures and SSOT module ABIs', async function () {
+      const HarnessF = await ethers.getContractFactory('UserViewSelectorHarness');
+      const harness = await HarnessF.deploy();
+
+      const positionIface = (await ethers.getContractFactory('PositionView')).interface;
+      const healthIface = (await ethers.getContractFactory('HealthView')).interface;
+      const statsIface = (await ethers.getContractFactory('StatisticsView')).interface;
+      const previewIface = (await ethers.getContractFactory('PreviewView')).interface;
+
+      // ---- PositionView selectors ----
+      expect(await harness.selGetUserPosition()).to.equal(sigSelector('getUserPosition(address,address)'));
+      expect(await harness.selGetUserPosition()).to.equal(positionIface.getFunction('getUserPosition').selector);
+
+      expect(await harness.selGetUserPositionWithMeta()).to.equal(sigSelector('getUserPositionWithMeta(address,address)'));
+      expect(await harness.selGetUserPositionWithMeta()).to.equal(positionIface.getFunction('getUserPositionWithMeta').selector);
+
+      expect(await harness.selGetUserPositionWithValidity()).to.equal(
+        sigSelector('getUserPositionWithValidity(address,address)')
+      );
+      expect(await harness.selGetUserPositionWithValidity()).to.equal(
+        positionIface.getFunction('getUserPositionWithValidity').selector
+      );
+
+      expect(await harness.selGetPositionUpdatedAt()).to.equal(sigSelector('getPositionUpdatedAt(address,address)'));
+      expect(await harness.selGetPositionUpdatedAt()).to.equal(positionIface.getFunction('getPositionUpdatedAt').selector);
+
+      expect(await harness.selGetPositionVersion()).to.equal(sigSelector('getPositionVersion(address,address)'));
+      expect(await harness.selGetPositionVersion()).to.equal(positionIface.getFunction('getPositionVersion').selector);
+
+      expect(await harness.selBatchGetUserPositions()).to.equal(sigSelector('batchGetUserPositions(address[],address[])'));
+      expect(await harness.selBatchGetUserPositions()).to.equal(
+        positionIface.getFunction('batchGetUserPositions').selector
+      );
+
+      // ---- HealthView selectors ----
+      expect(await harness.selGetUserHealthFactor()).to.equal(sigSelector('getUserHealthFactor(address)'));
+      expect(await harness.selGetUserHealthFactor()).to.equal(healthIface.getFunction('getUserHealthFactor').selector);
+
+      expect(await harness.selGetUserHealthFactorWithMeta()).to.equal(sigSelector('getUserHealthFactorWithMeta(address)'));
+      expect(await harness.selGetUserHealthFactorWithMeta()).to.equal(
+        healthIface.getFunction('getUserHealthFactorWithMeta').selector
+      );
+
+      expect(await harness.selBatchGetHealthFactors()).to.equal(sigSelector('batchGetHealthFactors(address[])'));
+      expect(await harness.selBatchGetHealthFactors()).to.equal(healthIface.getFunction('batchGetHealthFactors').selector);
+
+      expect(await harness.selBatchGetHealthFactorsWithMeta()).to.equal(sigSelector('batchGetHealthFactorsWithMeta(address[])'));
+      expect(await harness.selBatchGetHealthFactorsWithMeta()).to.equal(
+        healthIface.getFunction('batchGetHealthFactorsWithMeta').selector
+      );
+
+      // ---- StatisticsView selectors ----
+      expect(await harness.selGetUserSnapshot()).to.equal(sigSelector('getUserSnapshot(address)'));
+      expect(await harness.selGetUserSnapshot()).to.equal(statsIface.getFunction('getUserSnapshot').selector);
+
+      expect(await harness.selGetUserSnapshotWithMeta()).to.equal(sigSelector('getUserSnapshotWithMeta(address)'));
+      expect(await harness.selGetUserSnapshotWithMeta()).to.equal(statsIface.getFunction('getUserSnapshotWithMeta').selector);
+
+      // ---- PreviewView selectors ----
+      expect(await harness.selPreviewBorrow()).to.equal(
+        sigSelector('previewBorrow(address,address,uint256,uint256,uint256)')
+      );
+      expect(await harness.selPreviewBorrow()).to.equal(previewIface.getFunction('previewBorrow').selector);
+
+      expect(await harness.selPreviewDeposit()).to.equal(sigSelector('previewDeposit(address,address,uint256)'));
+      expect(await harness.selPreviewDeposit()).to.equal(previewIface.getFunction('previewDeposit').selector);
+
+      expect(await harness.selPreviewRepay()).to.equal(sigSelector('previewRepay(address,address,uint256)'));
+      expect(await harness.selPreviewRepay()).to.equal(previewIface.getFunction('previewRepay').selector);
+
+      expect(await harness.selPreviewWithdraw()).to.equal(sigSelector('previewWithdraw(address,address,uint256)'));
+      expect(await harness.selPreviewWithdraw()).to.equal(previewIface.getFunction('previewWithdraw').selector);
+
+      // ---- ERC20 selector ----
+      expect(await harness.selBalanceOf()).to.equal(sigSelector('balanceOf(address)'));
+      expect(await harness.selBalanceOf()).to.equal('0x70a08231');
+    });
+
+    it('matches encoded calldata prefixes (sanity)', async function () {
+      const HarnessF = await ethers.getContractFactory('UserViewSelectorHarness');
+      const harness = await HarnessF.deploy();
+
+      const user = ethers.Wallet.createRandom().address;
+      const asset = ethers.Wallet.createRandom().address;
+      const users = [user];
+      const assets = [asset];
+
+      const positionIface = (await ethers.getContractFactory('PositionView')).interface;
+      const healthIface = (await ethers.getContractFactory('HealthView')).interface;
+      const statsIface = (await ethers.getContractFactory('StatisticsView')).interface;
+      const previewIface = (await ethers.getContractFactory('PreviewView')).interface;
+
+      const p1 = positionIface.encodeFunctionData('getUserPosition', [user, asset]).slice(0, 10);
+      expect(p1).to.equal(await harness.selGetUserPosition());
+
+      const p2 = positionIface.encodeFunctionData('getUserPositionWithMeta', [user, asset]).slice(0, 10);
+      expect(p2).to.equal(await harness.selGetUserPositionWithMeta());
+
+      const p3 = positionIface.encodeFunctionData('batchGetUserPositions', [users, assets]).slice(0, 10);
+      expect(p3).to.equal(await harness.selBatchGetUserPositions());
+
+      const h1 = healthIface.encodeFunctionData('getUserHealthFactor', [user]).slice(0, 10);
+      expect(h1).to.equal(await harness.selGetUserHealthFactor());
+
+      const h2 = healthIface.encodeFunctionData('batchGetHealthFactors', [users]).slice(0, 10);
+      expect(h2).to.equal(await harness.selBatchGetHealthFactors());
+
+      const s1 = statsIface.encodeFunctionData('getUserSnapshotWithMeta', [user]).slice(0, 10);
+      expect(s1).to.equal(await harness.selGetUserSnapshotWithMeta());
+
+      const pv1 = previewIface.encodeFunctionData('previewBorrow', [user, asset, 0, 0, 0]).slice(0, 10);
+      expect(pv1).to.equal(await harness.selPreviewBorrow());
+    });
+  });
+
+  describe('settlement token balance (authority path)', function () {
+    it('getUserSettlementBalanceStrict reads SETTLEMENT_TOKEN.balanceOf', async function () {
+      const { userView, user, token } = await loadFixture(deployFixture);
+      // MockERC20 initial supply minted to deployer; transfer to user
+      await token.transfer(user.address, 777n);
+      expect(await userView.getUserSettlementBalanceStrict(user.address)).to.equal(777n);
     });
   });
 

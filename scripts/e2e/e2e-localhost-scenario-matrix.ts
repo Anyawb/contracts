@@ -1,0 +1,736 @@
+import { ethers, network } from "hardhat";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { runViewPreflight } from "./utils/view-preflight";
+
+const ONE_DAY = 24n * 60n * 60n;
+
+function key(s: string) {
+  return ethers.keccak256(ethers.toUtf8Bytes(s));
+}
+
+function assertOk(cond: unknown, msg: string): asserts cond {
+  if (!cond) throw new Error(msg);
+}
+
+function fmtErr(e: any) {
+  return e?.shortMessage ?? e?.message ?? String(e);
+}
+
+function isMissingSelectorError(msg: string): boolean {
+  return String(msg).includes("function selector was not recognized");
+}
+
+function errorSelector(sig: string): string {
+  return ethers.id(sig).slice(0, 10);
+}
+
+function extractRevertData(e: any): string | undefined {
+  const candidates: Array<unknown> = [
+    e?.data,
+    e?.error?.data,
+    e?.error?.error?.data,
+    e?.info?.error?.data,
+    e?.info?.error?.error?.data,
+    e?.receipt?.revertReason,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.startsWith("0x")) return c;
+  }
+  const msg = fmtErr(e);
+  const m = String(msg).match(/return data:\s*(0x[0-9a-fA-F]+)/);
+  if (m?.[1]) return m[1];
+  return undefined;
+}
+
+function extractCustomErrorSigFromMessage(e: any): string | undefined {
+  const msg = fmtErr(e);
+  const m = String(msg).match(/custom error\s+'([^']+)'/);
+  if (!m?.[1]) return undefined;
+  const raw = m[1].trim(); // e.g. "MissingRole()" or "BatchTooLarge(101, 100)"
+  if (raw.endsWith("()")) return raw;
+  // Special-case: errors with args where types are known but values are shown.
+  if (raw.startsWith("BatchTooLarge(")) return "BatchTooLarge(uint256,uint256)";
+  return undefined;
+}
+
+async function mustRevertWithSelector(label: string, fn: () => Promise<unknown>, expectedSel: string) {
+  try {
+    await fn();
+  } catch (e: any) {
+    const msg = fmtErr(e);
+    if (isMissingSelectorError(String(msg))) {
+      throw new Error(
+        `[FAIL] ${label}: call reverted due to missing function selector (deployment/ABI mismatch). Re-run compile + deploy:localhost.`
+      );
+    }
+    const data = extractRevertData(e);
+    let sel: string | undefined =
+      data && data.startsWith("0x") && data.length >= 10 ? data.slice(0, 10).toLowerCase() : undefined;
+    if (!sel) {
+      const sig = extractCustomErrorSigFromMessage(e);
+      if (sig) sel = errorSelector(sig).toLowerCase();
+    }
+    assertOk(!!sel, `${label}: missing revert data (cannot validate selector). msg=${msg}`);
+    assertOk(sel === expectedSel.toLowerCase(), `${label}: unexpected error selector ${sel}, expected ${expectedSel}`);
+    console.log(`  ✅ [revert selector ok] ${label}: ${sel}`);
+    return;
+  }
+  throw new Error(`[FAIL] Expected revert, but succeeded: ${label}`);
+}
+
+async function snapshot(): Promise<string> {
+  return await network.provider.send("evm_snapshot", []);
+}
+
+async function revertTo(id: string) {
+  await network.provider.send("evm_revert", [id]);
+}
+
+function calcTotalDue(principal: bigint, rateBps: bigint, termSec: bigint) {
+  // interest = principal * rate / 1e4 * term / 365 days
+  const denom = 365n * ONE_DAY * 10_000n;
+  const interest = (principal * rateBps * termSec) / denom;
+  return principal + interest;
+}
+
+function buildLendIntentHash(li: any) {
+  const typeHash = ethers.keccak256(
+    ethers.toUtf8Bytes(
+      "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+    )
+  );
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  return ethers.keccak256(
+    coder.encode(
+      ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
+      [
+        typeHash,
+        li.lenderSigner,
+        li.asset,
+        li.amount,
+        li.minTermDays,
+        li.maxTermDays,
+        li.minRateBps,
+        li.expireAt,
+        li.salt,
+      ]
+    )
+  );
+}
+
+// ===== DataPush (SSOT observability) =====
+// NOTE: Some deployments may have DataPushed with or without `indexed` dataTypeHash.
+// We parse logs by topic0 and decode accordingly (robust across both shapes).
+const coder = ethers.AbiCoder.defaultAbiCoder();
+const DATA_PUSH_TOPIC0 = ethers.keccak256(ethers.toUtf8Bytes("DataPushed(bytes32,bytes)")).toLowerCase();
+
+function extractDataPushed(receipt: any): Array<{ dataTypeHash: string; payload: string }> {
+  const out: Array<{ dataTypeHash: string; payload: string }> = [];
+  for (const log of receipt?.logs || []) {
+    const topics = (log.topics as string[]) || [];
+    if (topics.length === 0) continue;
+    if ((topics[0] as string).toLowerCase() !== DATA_PUSH_TOPIC0) continue;
+
+    // Variant A (preferred): event DataPushed(bytes32 indexed dataTypeHash, bytes payload)
+    // - topics[1] = dataTypeHash
+    // - data      = abi.encode(payload)
+    if (topics.length >= 2) {
+      const dataTypeHash = (topics[1] as string).toLowerCase();
+      const [payload] = coder.decode(["bytes"], log.data) as unknown as [string];
+      out.push({ dataTypeHash, payload });
+      continue;
+    }
+
+    // Variant B (legacy): event DataPushed(bytes32 dataTypeHash, bytes payload)
+    // - topics[0] = signature only
+    // - data      = abi.encode(dataTypeHash, payload)
+    const [dataTypeHash, payload] = coder.decode(["bytes32", "bytes"], log.data) as unknown as [string, string];
+    out.push({ dataTypeHash: (dataTypeHash as string).toLowerCase(), payload });
+  }
+  return out;
+}
+
+function recordDataPushCounts(
+  label: string,
+  receipt: any,
+  counts: Map<string, number>
+): Array<{ dataTypeHash: string; payload: string }> {
+  const pushes = extractDataPushed(receipt);
+  assertOk(pushes.length > 0, `${label}: expected at least one DataPushed, but found none`);
+  for (const p of pushes) {
+    counts.set(p.dataTypeHash, (counts.get(p.dataTypeHash) ?? 0) + 1);
+  }
+  return pushes;
+}
+
+async function main() {
+  const snap = await snapshot();
+  try {
+    const signers = await ethers.getSigners();
+    const deployer = signers[0];
+    const borrowerA = signers[1];
+    const lenderA = signers[2];
+    const borrowerB = signers[3];
+    const lenderB = signers[4];
+
+    console.log("=== E2E Scenario Matrix (ARCH 5.1.3: E2E-01/02/03) ===\n");
+
+    await runViewPreflight({
+      registryAddr: CONTRACT_ADDRESSES.Registry,
+      acmAddr: CONTRACT_ADDRESSES.AccessControlManager,
+      adminSigner: deployer,
+      assetForPriceCheck: CONTRACT_ADDRESSES.MockUSDC,
+    });
+
+    const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
+    const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
+    const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+    const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
+    const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter)) as any;
+    const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
+    const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
+    const vbl = (await ethers.getContractAt("VaultBusinessLogic", CONTRACT_ADDRESSES.VaultBusinessLogic)) as any;
+
+    const cm = (await ethers.getContractAt("CollateralManager", CONTRACT_ADDRESSES.CollateralManager)) as any;
+    // Registry key is keccak256("LENDING_ENGINE") (ModuleKeys.KEY_LE).
+    const leAddr = await registry.getModuleOrRevert(key("LENDING_ENGINE"));
+    const le = (await ethers.getContractAt("src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine", leAddr)) as any;
+
+    const orderEngineAddr = (await registry.getModuleOrRevert(key("ORDER_ENGINE"))) as string;
+    const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr)) as any;
+
+    // View modules
+    const batchAddr = (await registry.getModuleOrRevert(key("BATCH_VIEW"))) as string;
+    const cacheOptAddr = (await registry.getModuleOrRevert(key("CACHE_OPTIMIZED_VIEW"))) as string;
+    const dashboardAddr = (await registry.getModuleOrRevert(key("DASHBOARD_VIEW"))) as string;
+    const pvAddr = (await registry.getModuleOrRevert(key("POSITION_VIEW"))) as string;
+    const hvAddr = (await registry.getModuleOrRevert(key("HEALTH_VIEW"))) as string;
+    const statsAddr = (await registry.getModuleOrRevert(key("VAULT_STATISTICS"))) as string;
+
+    const batch = (await ethers.getContractAt("BatchView", batchAddr)) as any;
+    const cacheOpt = (await ethers.getContractAt("CacheOptimizedView", cacheOptAddr)) as any;
+    const dashboard = (await ethers.getContractAt("DashboardView", dashboardAddr)) as any;
+    const pv = (await ethers.getContractAt("PositionView", pvAddr)) as any;
+    const hv = (await ethers.getContractAt("HealthView", hvAddr)) as any;
+    const stats = (await ethers.getContractAt("StatisticsView", statsAddr)) as any;
+
+    const vaultRouterAddr = (await vaultCore.viewContractAddrVar()) as string;
+
+    console.log("  Registry:", CONTRACT_ADDRESSES.Registry);
+    console.log("  VaultCore:", await vaultCore.getAddress());
+    console.log("  VaultRouter(viewContractAddrVar):", vaultRouterAddr);
+    console.log("  CollateralManager:", await cm.getAddress());
+    console.log("  VaultLendingEngine(KEY_LE):", leAddr);
+    console.log("  ORDER_ENGINE:", orderEngineAddr);
+    console.log("  BatchView:", batchAddr);
+    console.log("  CacheOptimizedView:", cacheOptAddr);
+    console.log("  DashboardView:", dashboardAddr);
+    console.log("  PositionView:", pvAddr);
+    console.log("  HealthView:", hvAddr);
+    console.log("  StatisticsView:", statsAddr);
+    console.log("");
+
+    // ====== Setup roles/config (best-effort idempotent) ======
+    const ensureRole = async (role: string, who: string) => {
+      if (!(await acm.hasRole(role, who))) {
+        await acm.grantRole(role, who);
+      }
+    };
+
+    const ACTION_ADD_WHITELIST = key("ADD_WHITELIST");
+    const ACTION_UPDATE_PRICE = key("UPDATE_PRICE");
+    const ACTION_SET_PARAMETER = key("SET_PARAMETER");
+    const ACTION_ORDER_CREATE = key("ORDER_CREATE");
+    const ACTION_DEPOSIT = key("DEPOSIT");
+    const ACTION_BORROW = key("BORROW");
+    const ACTION_REPAY = key("REPAY");
+    const ACTION_VIEW_PUSH = key("ACTION_VIEW_PUSH"); // writer gate for PositionView/HealthView
+
+    await ensureRole(ACTION_ADD_WHITELIST, deployer.address);
+    await ensureRole(ACTION_UPDATE_PRICE, deployer.address);
+    await ensureRole(ACTION_SET_PARAMETER, deployer.address);
+
+    // VBL orchestration permissions
+    await ensureRole(ACTION_ORDER_CREATE, CONTRACT_ADDRESSES.VaultBusinessLogic);
+    await ensureRole(ACTION_DEPOSIT, CONTRACT_ADDRESSES.VaultBusinessLogic);
+
+    // ORDER_ENGINE needs BORROW for LoanNFT mint/update
+    await ensureRole(ACTION_BORROW, orderEngineAddr);
+
+    // Borrowers need repay permission (SettlementManager -> ORDER_ENGINE.repay is role-gated by ACTION_REPAY on ORDER_ENGINE)
+    await ensureRole(ACTION_REPAY, borrowerA.address);
+    await ensureRole(ACTION_REPAY, borrowerB.address);
+
+    // Ensure VaultRouter has view push role (E2E-02 will revoke + restore)
+    await ensureRole(ACTION_VIEW_PUSH, vaultRouterAddr);
+
+    // whitelist + price
+    if (!(await aw.isAssetAllowed(usdc.target))) {
+      await aw.connect(deployer).addAllowedAsset(usdc.target);
+    }
+    {
+      const cfg = await po.getAssetConfig(usdc.target);
+      if (!cfg.isActive) {
+        await po.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600);
+      }
+    }
+    {
+      const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+      await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now);
+    }
+
+    // FeeRouter needs supported token for matchflow
+    if (!(await feeRouter.isTokenSupported(usdc.target))) {
+      await feeRouter.connect(deployer).addSupportedToken(usdc.target);
+    }
+
+    // Fund users + approve
+    for (const u of [borrowerA, lenderA, borrowerB, lenderB]) {
+      await usdc.connect(deployer).transfer(u.address, ethers.parseUnits("50000", 6));
+    }
+    // Approvals:
+    // - deposit/withdraw use VaultCore, which routes to CM pulling from user; approve CM directly.
+    // - VBL.reserveForLending pulls from lender; approve VBL.
+    // - VaultCore.repay pulls from borrower; approve VaultCore.
+    await usdc.connect(borrowerA).approve(CONTRACT_ADDRESSES.CollateralManager, ethers.MaxUint256);
+    await usdc.connect(borrowerB).approve(CONTRACT_ADDRESSES.CollateralManager, ethers.MaxUint256);
+    // Extension flow: EarlyRepaymentGuarantee may lock interest into GuaranteeFundManager at borrow-time.
+    await usdc.connect(borrowerA).approve(CONTRACT_ADDRESSES.GuaranteeFundManager, ethers.MaxUint256);
+    await usdc.connect(borrowerB).approve(CONTRACT_ADDRESSES.GuaranteeFundManager, ethers.MaxUint256);
+    await usdc.connect(lenderA).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, ethers.MaxUint256);
+    await usdc.connect(lenderB).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, ethers.MaxUint256);
+    await usdc.connect(borrowerA).approve(CONTRACT_ADDRESSES.VaultCore, ethers.MaxUint256);
+    await usdc.connect(borrowerB).approve(CONTRACT_ADDRESSES.VaultCore, ethers.MaxUint256);
+
+    const assetAddr = usdc.target as string;
+    const users = [borrowerA.address, borrowerB.address];
+    const assetsForPairs = [assetAddr, assetAddr];
+
+    const countsByType = new Map<string, number>();
+    const failedPushCounts = {
+      cacheUpdateFailed: 0,
+      viewCachePushFailed: 0,
+      userStatsPushFailed: 0,
+    };
+
+    const cacheIface = new ethers.Interface([
+      "event CacheUpdateFailed(address indexed user,address indexed asset,address viewAddr,uint256 collateral,uint256 debt,bytes reason)",
+    ]);
+    const cmIface = new ethers.Interface(["event ViewCachePushFailed(address indexed user,address indexed asset,bytes reason)"]);
+    const vrIface = new ethers.Interface([
+      "event UserStatsPushFailed(address indexed user,address indexed stats,uint256 collateralIn,uint256 collateralOut,uint256 borrow,uint256 repay,bytes reason)",
+    ]);
+
+    function recordFailureEvents(receipt: any) {
+      for (const log of receipt?.logs || []) {
+        // CacheUpdateFailed can be emitted by multiple modules; match by topic0.
+        if (log.topics?.[0] === cacheIface.getEvent("CacheUpdateFailed").topicHash) failedPushCounts.cacheUpdateFailed++;
+        if (log.topics?.[0] === cmIface.getEvent("ViewCachePushFailed").topicHash) failedPushCounts.viewCachePushFailed++;
+        if (log.topics?.[0] === vrIface.getEvent("UserStatsPushFailed").topicHash) failedPushCounts.userStatsPushFailed++;
+      }
+    }
+
+    async function assertTriBatchConsistency(stepLabel: string) {
+      // (A) Position meta: PositionView vs CacheOptimizedView vs DashboardView
+      const pvMeta: Array<{ c: bigint; d: bigint; ok: boolean; ts: bigint; ver: bigint }> = [];
+      for (const u of users) {
+        const [c, d, ok, ts, ver] = (await pv.getUserPositionWithMeta(u, assetAddr)) as [
+          bigint,
+          bigint,
+          boolean,
+          bigint,
+          bigint,
+        ];
+        pvMeta.push({ c, d, ok, ts, ver });
+      }
+
+      const positionsMeta = (await cacheOpt.batchGetUserPositionsWithMeta(users, assetsForPairs)) as any[];
+      assertOk(positionsMeta.length === users.length, `${stepLabel}: cacheOpt positions length mismatch`);
+
+      for (let i = 0; i < users.length; i++) {
+        const p = positionsMeta[i];
+        const ref = pvMeta[i];
+        assertOk(p.user.toLowerCase() === users[i].toLowerCase(), `${stepLabel}: cacheOpt.user mismatch`);
+        assertOk(p.asset.toLowerCase() === assetAddr.toLowerCase(), `${stepLabel}: cacheOpt.asset mismatch`);
+        assertOk(p.collateral === ref.c, `${stepLabel}: collateral mismatch (cacheOpt vs PositionView)`);
+        assertOk(p.debt === ref.d, `${stepLabel}: debt mismatch (cacheOpt vs PositionView)`);
+        assertOk(p.positionIsValid === ref.ok, `${stepLabel}: pos.isValid mismatch (cacheOpt vs PositionView)`);
+        assertOk(p.positionTimestamp === ref.ts, `${stepLabel}: pos.timestamp mismatch (cacheOpt vs PositionView)`);
+        assertOk(BigInt(p.positionVersion) === ref.ver, `${stepLabel}: pos.version mismatch (cacheOpt vs PositionView)`);
+
+        const [overview, posValidFlags, posTimestamps, posVersions, healthTs] =
+          (await dashboard.getUserOverviewWithMeta(users[i], [assetAddr])) as [any, boolean[], bigint[], bigint[], bigint];
+        assertOk(posValidFlags.length === 1, `${stepLabel}: dashboard posValidFlags length`);
+        assertOk(posTimestamps.length === 1, `${stepLabel}: dashboard posTimestamps length`);
+        assertOk(posVersions.length === 1, `${stepLabel}: dashboard posVersions length`);
+
+        assertOk(overview.totalCollateral === ref.c, `${stepLabel}: dashboard totalCollateral mismatch`);
+        assertOk(overview.totalDebt === ref.d, `${stepLabel}: dashboard totalDebt mismatch`);
+        assertOk(posValidFlags[0] === ref.ok, `${stepLabel}: dashboard positionIsValid mismatch`);
+        assertOk(posTimestamps[0] === ref.ts, `${stepLabel}: dashboard positionTimestamp mismatch`);
+        assertOk(BigInt(posVersions[0]) === ref.ver, `${stepLabel}: dashboard positionVersion mismatch`);
+
+        const items = (await dashboard.getUserAssetBreakdownWithMeta(users[i], [assetAddr])) as any[];
+        assertOk(items.length === 1, `${stepLabel}: dashboard breakdown length`);
+        assertOk(items[0].collateral === ref.c, `${stepLabel}: dashboard breakdown collateral mismatch`);
+        assertOk(items[0].debt === ref.d, `${stepLabel}: dashboard breakdown debt mismatch`);
+        assertOk(items[0].positionIsValid === ref.ok, `${stepLabel}: dashboard breakdown positionIsValid mismatch`);
+        assertOk(items[0].positionTimestamp === ref.ts, `${stepLabel}: dashboard breakdown positionTimestamp mismatch`);
+        assertOk(BigInt(items[0].positionVersion) === ref.ver, `${stepLabel}: dashboard breakdown positionVersion mismatch`);
+
+        // (B) Health: HealthView vs BatchView vs Dashboard/CacheOpt meta timestamp
+        const [hf, hfOk, hfTs] = (await hv.getUserHealthFactor(users[i])) as [bigint, boolean, bigint];
+        assertOk(overview.healthFactor === hf, `${stepLabel}: dashboard healthFactor mismatch`);
+        assertOk(overview.healthFactorValid === hfOk, `${stepLabel}: dashboard healthFactorValid mismatch`);
+        assertOk(healthTs === hfTs, `${stepLabel}: dashboard healthTimestamp mismatch`);
+      }
+
+      const hfItems = (await batch.batchGetHealthFactors(users)) as any[];
+      assertOk(hfItems.length === users.length, `${stepLabel}: batch healthFactors length mismatch`);
+      for (let i = 0; i < users.length; i++) {
+        const [hf, hfOk] = (await hv.getUserHealthFactor(users[i])) as [bigint, boolean, bigint];
+        assertOk(hfItems[i].user.toLowerCase() === users[i].toLowerCase(), `${stepLabel}: batch hf.user mismatch`);
+        assertOk(hfItems[i].healthFactor === hf, `${stepLabel}: batch hf.value mismatch`);
+        assertOk(hfItems[i].isValid === hfOk, `${stepLabel}: batch hf.isValid mismatch`);
+      }
+
+      // (C) Stats: StatisticsView meta must be present; CacheOptimizedView system stats must match.
+      const [g, isValid, ts] = (await stats.getGlobalStatisticsWithMeta()) as [any, boolean, bigint];
+      assertOk(typeof isValid === "boolean", `${stepLabel}: stats meta isValid missing`);
+      assertOk(ts === g.lastUpdateTime, `${stepLabel}: stats meta timestamp must equal lastUpdateTime`);
+      const s = (await cacheOpt.getSystemStats()) as any;
+      assertOk(s.totalCollateral === g.totalCollateral, `${stepLabel}: systemStats.totalCollateral mismatch`);
+      assertOk(s.totalDebt === g.totalDebt, `${stepLabel}: systemStats.totalDebt mismatch`);
+      assertOk(s.totalUsers === g.totalUsers, `${stepLabel}: systemStats.totalUsers mismatch`);
+    }
+
+    async function ledgerSnapshot(label: string) {
+      const out: any[] = [];
+      for (const u of users) {
+        const col = (await cm.getCollateral(u, assetAddr)) as bigint;
+        const debt = (await le.getDebt(u, assetAddr)) as bigint;
+        out.push({ user: u, collateral: col, debt });
+      }
+      console.log(`  [Ledger] ${label}:`, out.map((x) => `${x.user.slice(0, 6)}.. col=${x.collateral} debt=${x.debt}`).join(" | "));
+    }
+
+    async function finalizeMatchFor(borrower: any, lender: any, principal: bigint, collateralAmt: bigint) {
+      // BorrowIntent & LendIntent (see scripts/e2e/e2e-localhost-matchflow.ts)
+      const termDays = 5;
+      const rateBps = 1000n;
+      const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+
+      const borrowIntent = {
+        borrower: borrower.address,
+        collateralAsset: assetAddr,
+        collateralAmount: collateralAmt,
+        borrowAsset: assetAddr,
+        amount: principal,
+        termDays,
+        rateBps,
+        expireAt,
+        salt: ethers.keccak256(ethers.toUtf8Bytes(`borrow-salt-${borrower.address}`)),
+      };
+      const lendIntent = {
+        lenderSigner: lender.address,
+        asset: assetAddr,
+        amount: principal,
+        minTermDays: 1,
+        maxTermDays: 30,
+        minRateBps: 0n,
+        expireAt,
+        salt: ethers.keccak256(ethers.toUtf8Bytes(`lend-salt-${lender.address}`)),
+      };
+
+      const lendHash = buildLendIntentHash(lendIntent);
+      await (await vbl.connect(lender).reserveForLending(lender.address, assetAddr, principal, lendHash)).wait();
+
+      const domain = {
+        name: "RwaLending",
+        version: "1",
+        chainId: Number((await ethers.provider.getNetwork()).chainId),
+        verifyingContract: CONTRACT_ADDRESSES.VaultBusinessLogic,
+      } as const;
+
+      const typesBorrow = {
+        BorrowIntent: [
+          { name: "borrower", type: "address" },
+          { name: "collateralAsset", type: "address" },
+          { name: "collateralAmount", type: "uint256" },
+          { name: "borrowAsset", type: "address" },
+          { name: "amount", type: "uint256" },
+          { name: "termDays", type: "uint16" },
+          { name: "rateBps", type: "uint256" },
+          { name: "expireAt", type: "uint256" },
+          { name: "salt", type: "bytes32" },
+        ],
+      };
+
+      const typesLend = {
+        LendIntent: [
+          { name: "lenderSigner", type: "address" },
+          { name: "asset", type: "address" },
+          { name: "amount", type: "uint256" },
+          { name: "minTermDays", type: "uint16" },
+          { name: "maxTermDays", type: "uint16" },
+          { name: "minRateBps", type: "uint256" },
+          { name: "expireAt", type: "uint256" },
+          { name: "salt", type: "bytes32" },
+        ],
+      };
+
+      const sigBorrower = await borrower.signTypedData(domain, typesBorrow as any, borrowIntent as any);
+      const sigLender = await lender.signTypedData(domain, typesLend as any, lendIntent as any);
+
+      const tx = await vbl.connect(deployer).finalizeMatch(borrowIntent, [lendIntent], sigBorrower, [sigLender]);
+      const receipt = await tx.wait();
+      assertOk(!!receipt, "missing receipt for finalizeMatch");
+
+      let orderId: bigint | null = null;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = orderEngine.interface.parseLog({ topics: log.topics as string[], data: log.data });
+          if (parsed?.name === "LoanOrderCreated") {
+            orderId = parsed.args.orderId as bigint;
+            break;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      assertOk(orderId !== null, "LoanOrderCreated not found; cannot infer orderId");
+      const termSec = BigInt(termDays) * ONE_DAY;
+      const totalDue = calcTotalDue(principal, rateBps, termSec);
+      return { orderId, totalDue, finalizeReceipt: receipt };
+    }
+
+    // ============================================================
+    // E2E-01 多用户资金流回放（每步后三路批量读一致性）
+    // ============================================================
+    console.log("=== E2E-01: multi-user orderflow replay + tri-aggregator consistency ===\n");
+
+    await ledgerSnapshot("initial");
+
+    // Step 1: deposit A
+    const depA = ethers.parseUnits("2000", 6);
+    const rDepA = await (await vaultCore.connect(borrowerA).deposit(assetAddr, depA)).wait();
+    assertOk(!!rDepA, "missing receipt deposit A");
+    recordFailureEvents(rDepA);
+    recordDataPushCounts("deposit A", rDepA, countsByType);
+    await assertTriBatchConsistency("after deposit A");
+    await ledgerSnapshot("after deposit A");
+
+    // Step 2: deposit B
+    const depB = ethers.parseUnits("1500", 6);
+    const rDepB = await (await vaultCore.connect(borrowerB).deposit(assetAddr, depB)).wait();
+    assertOk(!!rDepB, "missing receipt deposit B");
+    recordFailureEvents(rDepB);
+    recordDataPushCounts("deposit B", rDepB, countsByType);
+    await assertTriBatchConsistency("after deposit B");
+    await ledgerSnapshot("after deposit B");
+
+    // Step 3: withdraw A (still no debt)
+    const wdA = ethers.parseUnits("200", 6);
+    const rWdA = await (await vaultCore.connect(borrowerA).withdraw(assetAddr, wdA)).wait();
+    assertOk(!!rWdA, "missing receipt withdraw A");
+    recordFailureEvents(rWdA);
+    recordDataPushCounts("withdraw A", rWdA, countsByType);
+    await assertTriBatchConsistency("after withdraw A");
+    await ledgerSnapshot("after withdraw A");
+
+    // Step 4: borrow A via matchflow finalizeMatch
+    const principalA = ethers.parseUnits("500", 6);
+    const { orderId: orderA, totalDue: dueA, finalizeReceipt: rMatchA } = await finalizeMatchFor(
+      borrowerA,
+      lenderA,
+      principalA,
+      depA - wdA
+    );
+    recordFailureEvents(rMatchA);
+    recordDataPushCounts("finalizeMatch A", rMatchA, countsByType);
+    await assertTriBatchConsistency("after borrow A (match finalized)");
+    await ledgerSnapshot("after borrow A");
+
+    // Step 5: withdraw B (still no debt)
+    const wdB = ethers.parseUnits("100", 6);
+    const rWdB = await (await vaultCore.connect(borrowerB).withdraw(assetAddr, wdB)).wait();
+    assertOk(!!rWdB, "missing receipt withdraw B");
+    recordFailureEvents(rWdB);
+    recordDataPushCounts("withdraw B", rWdB, countsByType);
+    await assertTriBatchConsistency("after withdraw B");
+    await ledgerSnapshot("after withdraw B");
+
+    // Step 6: borrow B via matchflow finalizeMatch
+    const principalB = ethers.parseUnits("400", 6);
+    const { orderId: orderB, totalDue: dueB, finalizeReceipt: rMatchB } = await finalizeMatchFor(
+      borrowerB,
+      lenderB,
+      principalB,
+      depB - wdB
+    );
+    recordFailureEvents(rMatchB);
+    recordDataPushCounts("finalizeMatch B", rMatchB, countsByType);
+    await assertTriBatchConsistency("after borrow B (match finalized)");
+    await ledgerSnapshot("after borrow B");
+
+    // Step 7: repay A (VaultCore -> SettlementManager SSOT)
+    const rRepayA = await (await vaultCore.connect(borrowerA).repay(orderA, assetAddr, dueA)).wait();
+    assertOk(!!rRepayA, "missing receipt repay A");
+    recordFailureEvents(rRepayA);
+    recordDataPushCounts("repay A", rRepayA, countsByType);
+    await assertTriBatchConsistency("after repay A");
+    await ledgerSnapshot("after repay A");
+
+    // Step 8: repay B
+    const rRepayB = await (await vaultCore.connect(borrowerB).repay(orderB, assetAddr, dueB)).wait();
+    assertOk(!!rRepayB, "missing receipt repay B");
+    recordFailureEvents(rRepayB);
+    recordDataPushCounts("repay B", rRepayB, countsByType);
+    await assertTriBatchConsistency("after repay B");
+    await ledgerSnapshot("after repay B");
+
+    console.log("\n  ✅ E2E-01 done\n");
+
+    // ============================================================
+    // E2E-02 推送失败模拟与链下重试（失败事件 + 重试成功 DataPushed）
+    // ============================================================
+    console.log("=== E2E-02: push failure injection + offline retry + stats ===\n");
+
+    // Inject failure by revoking ACTION_VIEW_PUSH from VaultRouter (PositionView writer gate).
+    const hadViewPush = (await acm.hasRole(ACTION_VIEW_PUSH, vaultRouterAddr)) as boolean;
+    assertOk(hadViewPush, "precondition: VaultRouter must have ACTION_VIEW_PUSH before failure injection");
+
+    await (await acm.connect(deployer).revokeRole(ACTION_VIEW_PUSH, vaultRouterAddr)).wait();
+    assertOk(!(await acm.hasRole(ACTION_VIEW_PUSH, vaultRouterAddr)), "revokeRole failed (VaultRouter still has ACTION_VIEW_PUSH)");
+
+    // Trigger a deposit that attempts a best-effort push via CollateralManager -> VaultCore.pushUserPositionUpdateDelta
+    const injUser = borrowerA; // re-use (already funded/approved)
+    const injAmt = ethers.parseUnits("10", 6);
+    const before = (await pv.getUserPositionWithMeta(injUser.address, assetAddr)) as [bigint, bigint, boolean, bigint, bigint];
+
+    const rInj = await (await vaultCore.connect(injUser).deposit(assetAddr, injAmt)).wait();
+    assertOk(!!rInj, "missing receipt for injected deposit");
+    recordDataPushCounts("deposit (failure injection)", rInj, countsByType);
+
+    // Verify failures are observable (CacheUpdateFailed and/or ViewCachePushFailed)
+    const wantCacheFailedTopic = cacheIface.getEvent("CacheUpdateFailed").topicHash;
+    const wantViewCacheFailedTopic = cmIface.getEvent("ViewCachePushFailed").topicHash;
+    const cacheFailedLogs = (rInj.logs as any[]).filter((l) => l.topics?.[0] === wantCacheFailedTopic);
+    const viewCacheFailedLogs = (rInj.logs as any[]).filter((l) => l.topics?.[0] === wantViewCacheFailedTopic);
+    assertOk(cacheFailedLogs.length + viewCacheFailedLogs.length > 0, "expected CacheUpdateFailed/ViewCachePushFailed logs");
+    failedPushCounts.cacheUpdateFailed += cacheFailedLogs.length;
+    failedPushCounts.viewCachePushFailed += viewCacheFailedLogs.length;
+
+    console.log(`  [FailureInjected] CacheUpdateFailed=${cacheFailedLogs.length} ViewCachePushFailed=${viewCacheFailedLogs.length}`);
+
+    // Offline retry: restore role, then call PositionView.retryUserPositionUpdate (admin-only)
+    await (await acm.connect(deployer).grantRole(ACTION_VIEW_PUSH, vaultRouterAddr)).wait();
+    assertOk(await acm.hasRole(ACTION_VIEW_PUSH, vaultRouterAddr), "grantRole failed (VaultRouter missing ACTION_VIEW_PUSH)");
+
+    const retryTx = await pv.connect(deployer).retryUserPositionUpdate(injUser.address, assetAddr);
+    const retryRc = await retryTx.wait();
+    assertOk(!!retryRc, "missing receipt for retryUserPositionUpdate");
+    recordDataPushCounts("offline retry (PositionView.retryUserPositionUpdate)", retryRc, countsByType);
+
+    const after = (await pv.getUserPositionWithMeta(injUser.address, assetAddr)) as [bigint, bigint, boolean, bigint, bigint];
+    assertOk(after[2] === true, "after retry: expected PositionView cache isValid=true");
+    assertOk(after[3] >= before[3], "after retry: expected timestamp monotonic");
+
+    console.log(`  ✅ retry ok: isValid=${after[2]} ts(before=${before[3].toString()} after=${after[3].toString()})`);
+    console.log("\n  ✅ E2E-02 done\n");
+
+    // ============================================================
+    // E2E-03 批量边界与性能（接近 MAX_BATCH_SIZE + 超限一致失败）
+    // ============================================================
+    console.log("=== E2E-03: batch boundary + unified failure selector ===\n");
+
+    const tooLargeSel = errorSelector("BatchTooLarge(uint256,uint256)");
+    const users100 = new Array(100).fill(borrowerA.address);
+    const users101 = new Array(101).fill(borrowerA.address);
+    const assets100 = new Array(100).fill(assetAddr);
+    const assets101 = new Array(101).fill(assetAddr);
+
+    // near MAX (should succeed, and must not OOG)
+    await cacheOpt.batchGetUserPositionsWithMeta(users100, assets100);
+    await batch.batchGetHealthFactors(users100);
+    await dashboard.getUserOverviewWithMeta(borrowerA.address, assets100);
+    await cacheOpt.getUserSummaryWithMeta(borrowerA.address, assets100);
+    console.log("  ✅ near MAX_BATCH_SIZE calls succeeded (len=100)");
+
+    // oversized (must revert BatchTooLarge)
+    await mustRevertWithSelector(
+      "CacheOptimizedView.batchGetUserPositionsWithMeta oversized",
+      async () => cacheOpt.batchGetUserPositionsWithMeta(users101, assets101),
+      tooLargeSel
+    );
+    await mustRevertWithSelector(
+      "BatchView.batchGetHealthFactors oversized",
+      async () => batch.batchGetHealthFactors(users101),
+      tooLargeSel
+    );
+    await mustRevertWithSelector(
+      "DashboardView.getUserOverviewWithMeta oversized",
+      async () => dashboard.getUserOverviewWithMeta(borrowerA.address, assets101),
+      tooLargeSel
+    );
+    await mustRevertWithSelector(
+      "CacheOptimizedView.getUserSummaryWithMeta oversized",
+      async () => cacheOpt.getUserSummaryWithMeta(borrowerA.address, assets101),
+      tooLargeSel
+    );
+
+    console.log("\n  ✅ E2E-03 done\n");
+
+    // ============================================================
+    // Artifacts / summaries (ARCH 5.1.4)
+    // ============================================================
+    console.log("=== Artifacts ===");
+    console.log("  Module address snapshot (key -> addr):");
+    const keysToPrint = [
+      "SYSTEM_VIEW",
+      "POSITION_VIEW",
+      "HEALTH_VIEW",
+      "VAULT_STATISTICS",
+      "LENDING_ENGINE",
+      "BATCH_VIEW",
+      "CACHE_OPTIMIZED_VIEW",
+      "DASHBOARD_VIEW",
+      "ORDER_ENGINE",
+    ];
+    for (const k of keysToPrint) {
+      const addr = (await registry.getModuleOrRevert(key(k))) as string;
+      console.log(`   - ${k}: ${addr}`);
+    }
+
+    console.log("\n  DataPushed counts by dataTypeHash:");
+    const sorted = [...countsByType.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [typeHash, n] of sorted) {
+      console.log(`   - ${typeHash}: ${n}`);
+    }
+
+    console.log("\n  Failure events stats:");
+    console.log(`   - CacheUpdateFailed: ${failedPushCounts.cacheUpdateFailed}`);
+    console.log(`   - ViewCachePushFailed: ${failedPushCounts.viewCachePushFailed}`);
+    console.log(`   - UserStatsPushFailed: ${failedPushCounts.userStatsPushFailed}`);
+
+    console.log("\n✅ All E2E-01/02/03 checks passed.");
+  } catch (e: any) {
+    const msg = fmtErr(e);
+    if (isMissingSelectorError(msg)) {
+      console.error(
+        `[FAIL] Missing selector on-chain (deployment/ABI mismatch). Re-run compile + deploy:localhost. Details: ${msg}`
+      );
+    } else {
+      console.error(e);
+    }
+    throw e;
+  } finally {
+    await revertTo(snap);
+  }
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exitCode = 1;
+});
+

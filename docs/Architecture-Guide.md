@@ -83,7 +83,7 @@
 - **统计聚合（迁移完成）**：StatisticsView.sol（承接活跃用户、全局抵押/债务、保证金聚合；业务入口统一推送）
 - **系统级缓存快照**：ViewCache.sol（仅系统级数据缓存）
 - **权限控制**：AccessControlView.sol（双架构支持）
-- **清算只读/风控**：LiquidationRiskManager + LiquidationView（仅只读与风控聚合，写入直达账本，不经 View）
+- **清算只读/风控**：LiquidationRiskManager + LiquidatorView（仅只读与风控聚合，写入直达账本，不经 View）
 - **积分管理（Reward）**：通过 RewardManager 集成（双架构支持，落账后触发）
 - **批量操作**：BatchView.sol（双架构支持）
 
@@ -735,13 +735,13 @@ contract LendingEngine {
   - 非授权直接调用 `CollateralManager.withdrawCollateral` 与 `LendingEngine.forceReduceDebt` 必须回滚（权限校验在账本层）。
   - 通过 `LiquidationManager` 发起时，账本写入成功且 `LiquidatorView.push*` 被触发；
   - 不依赖具体清算算法；仅验证路由、权限与单点事件/DataPush 原则。
-- 参考：将 `LiquidationViewForward` 测试替换为 `LiquidationDirectLedger.test.ts` 骨架。
+- 参考：将 `LiquidatorViewForward` 测试替换为 `LiquidationDirectLedger.test.ts` 骨架。
 
 ### 迁移与兼容
 - 若历史代码为"经 View 转发写入"，应迁移到"直达账本"：
   - 清算写入改为直接调用 `KEY_CM/KEY_LE`；
   - 事件/DataPush 保持由 `LiquidatorView.push*` 单点触发；
-  - 保留只读 Aggregation 在 `LiquidationRiskManager`/`LiquidationView`。
+  - 保留只读 Aggregation 在 `LiquidationRiskManager`/`LiquidatorView`。
 
 ---
 
@@ -836,7 +836,7 @@ jobs:
 
 
 ### 统计模块迁移说明（重要）
-- 阶段一（当前）：保留 `KEY_STATS`，并将其映射到 `StatisticsView`。`StatisticsView` 在 View 层承接“全局统计”的状态存储与写接口（`pushUserStatsUpdate`、`pushGuaranteeUpdate`、`recordSnapshot`），提供只读聚合（`getGlobalSnapshot`）。
+- 阶段一（当前）：保留 `KEY_STATS`（**Registry 注册键标签为 `VAULT_STATISTICS`**），并将其映射到 `StatisticsView`。`StatisticsView` 在 View 层承接“全局统计”的状态存储与写接口（`pushUserStatsUpdate`、`pushGuaranteeUpdate`、`recordSnapshot`），提供只读聚合（`getGlobalSnapshot`）。
 - 活跃用户计数规则：严格以“仓位>0（collateral>0 或 debt>0）”为活跃判定。
 - 兼容性：为便于平滑迁移，`StatisticsView` 暴露与旧接口兼容的 `updateUserStats`/`updateGuaranteeStats`，内部转调新 `push*` 接口。
 - 阶段二（后续）：统一地址解析到 `KEY_VAULT_CORE -> viewContractAddrVar()`，逐步去除对 `KEY_STATS` 的依赖；清理 `VaultStatistics.sol` 与 `IVaultStatistics.sol` 遗留。

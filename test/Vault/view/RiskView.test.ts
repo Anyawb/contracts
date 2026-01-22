@@ -8,6 +8,7 @@ const KEY_LE = ethers.keccak256(ethers.toUtf8Bytes("LENDING_ENGINE"));
 const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes("POSITION_VIEW"));
 const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes("GUARANTEE_FUND_MANAGER"));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes("ACTION_ADMIN"));
+const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes("VIEW_RISK_DATA"));
 
 describe("RiskView", function () {
   async function deployFixture() {
@@ -37,6 +38,7 @@ describe("RiskView", function () {
     await registry.setModule(KEY_GUARANTEE_FUND, await gf.getAddress());
 
     await acm.grantRole(ACTION_ADMIN, admin.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, admin.address);
 
     const RiskView = await ethers.getContractFactory("RiskView");
     const rv = await upgrades.deployProxy(RiskView, [await registry.getAddress()], { kind: "uups" });
@@ -110,6 +112,45 @@ describe("RiskView", function () {
     await expect(
       rv.connect(other).upgradeToAndCall(ethers.Wallet.createRandom().address, "0x")
     ).to.be.reverted;
+  });
+
+  describe("ARCH 4.xx RV-01/RV-02/RV-03: responsibility boundary, batch limit, permission consistency", function () {
+    it("RV-01: exposes no push* functions and no business-writable entrypoints", async function () {
+      const { rv } = await loadFixture(deployFixture);
+      const funcFragments = rv.interface.fragments.filter((f: any) => f.type === "function");
+      const names: string[] = funcFragments.map((f: any) => f.name);
+
+      expect(names.some((n) => n.toLowerCase().startsWith("push"))).to.equal(false);
+
+      const writable = funcFragments.filter((f: any) => !["view", "pure"].includes(String(f.stateMutability)));
+      const writableNames = Array.from(new Set(writable.map((f: any) => f.name)));
+      const allowed = new Set(["initialize", "upgradeTo", "upgradeToAndCall"]);
+      expect(writableNames.every((n) => allowed.has(n))).to.equal(true);
+    });
+
+    it("RV-02: batch upper bound is enforced", async function () {
+      const { rv } = await loadFixture(deployFixture);
+      const tooMany = Array.from({ length: 101 }, () => ethers.Wallet.createRandom().address);
+      await expect(rv.batchGetRiskAssessments(tooMany)).to.be.revertedWithCustomError(rv, "RiskView__BatchTooLarge");
+    });
+
+    it("RV-03: unauthorized callers cannot bypass RiskView read gate", async function () {
+      const { rv, acm, user, other } = await loadFixture(deployFixture);
+
+      await expect(rv.connect(other).getUserRiskAssessment(user.address)).to.be.revertedWithCustomError(
+        acm,
+        "MissingRole"
+      );
+      await expect(rv.connect(other).batchGetRiskAssessments([user.address])).to.be.revertedWithCustomError(
+        acm,
+        "MissingRole"
+      );
+
+      await acm.grantRole(ACTION_VIEW_RISK_DATA, other.address);
+
+      const a = await rv.connect(other).getUserRiskAssessment(user.address);
+      expect(a.healthFactor).to.be.a("bigint");
+    });
   });
 });
 

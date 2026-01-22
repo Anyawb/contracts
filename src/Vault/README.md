@@ -41,35 +41,20 @@ function batchRepay(address[] calldata assets, uint256[] calldata amounts) exter
 function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external
 ```
 
-### 2. VaultRouter.sol - 查询接口
+### 2. VaultRouter.sol - 路由协调器（不承担读取）
 **文件路径**: `contracts/Vault/VaultRouter.sol`
 
-**主要功能**: 提供所有查询功能，包括用户状态、健康因子、价格等
+**主要功能**: 仅负责写入路径的路由/协调（符合 `docs/Architecture-Guide.md` 的 “写入不经 View / 查询迁移到独立 View 模块” 原则）。  
+查询能力已迁移到 `src/Vault/view/modules/` 下的专属 View。
 
-**暴露接口**:
-```solidity
-// 用户状态查询
-function getUserCollateral(address user, address asset) external view returns (uint256)
-function getUserDebt(address user, address asset) external view returns (uint256)
-function getUserHealthFactor(address user) external view returns (uint256)
-function getUserTotalCollateral(address user) external view returns (uint256)
-function getUserTotalDebt(address user) external view returns (uint256)
+**前端/SDK 查询入口（推荐）**
+- **路由/发现性**：`SystemView.route*()` 返回 `moduleKey + moduleAddr`，前端可据此“下一跳”直连专属 View（不依赖 revert 文本）。
+- **模块枚举/分页**：`RegistryView`（前端发现模块地址的工具视图）。
+- **价格**：`ValuationOracleView.getAssetPrice(asset)`；批量用 `BatchView.batchGetAssetPrices(assets)`.
+- **系统统计**：`StatisticsView`（例如 `getGlobalStatistics/getTotalCollateral/getTotalDebt`）。
+- **用户仓位**：`PositionView` / `UserView`。
 
-// 资产状态查询
-function getTotalCollateral(address asset) external view returns (uint256)
-function getTotalDebt(address asset) external view returns (uint256)
-function getAssetPrice(address asset) external view returns (uint256)
-
-// 系统状态查询
-function getVaultCap() external view returns (uint256)
-function getMinHealthFactor() external view returns (uint256)
-function getLiquidationThreshold() external view returns (uint256)
-
-// 预览功能
-function previewBorrow(address user, address asset, uint256 amount) external view returns (uint256)
-function previewRepay(address user, address asset, uint256 amount) external view returns (uint256)
-function previewWithdraw(address user, address asset, uint256 amount) external view returns (uint256)
-```
+> 注意：`SystemView` 中保留的 legacy getter（如 `getAssetPrice/getTotalDebt/...`）为兼容债务，可能会直接 revert；集成代码应统一切换到 `route*()` 或直接调用专属 View。
 
 ### 3. （已移除）VaultStorage.sol - 旧版存储合约
 **说明**：按 `docs/Architecture-Guide.md` 的 SSOT 口径，模块地址解析与系统配置不再通过 `VaultStorage` 作为中间层。

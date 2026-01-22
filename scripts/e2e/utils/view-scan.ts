@@ -48,7 +48,7 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
   console.log("=== ViewScan (Registry-driven) ===");
   console.log(`  strict=${strict}`);
 
-  // 21 view modules deployed by deploylocal.ts (keys are UPPER_SNAKE_CASE strings)
+  // View modules deployed by deploylocal.ts (keys are UPPER_SNAKE_CASE strings as bound in Registry)
   const modules: Array<{
     key: string;
     name: string;
@@ -59,7 +59,8 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
     { key: "HEALTH_VIEW", name: "HealthView", expectedApi: 1n, expectedSchema: 1n },
     { key: "SYSTEM_VIEW", name: "SystemView", expectedApi: 1n, expectedSchema: 1n },
     { key: "REGISTRY_VIEW", name: "RegistryView", expectedApi: 1n, expectedSchema: 1n },
-    { key: "STATISTICS_VIEW", name: "StatisticsView", expectedApi: 1n, expectedSchema: 1n },
+    // Canonical Registry key for StatisticsView (ModuleKeys.KEY_STATS)
+    { key: "VAULT_STATISTICS", name: "StatisticsView", expectedApi: 1n, expectedSchema: 1n },
     { key: "POSITION_VIEW", name: "PositionView", expectedApi: 1n, expectedSchema: 2n },
     { key: "PREVIEW_VIEW", name: "PreviewView", expectedApi: 1n, expectedSchema: 1n },
     { key: "DASHBOARD_VIEW", name: "DashboardView", expectedApi: 1n, expectedSchema: 1n },
@@ -122,8 +123,10 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
       await safeCall(
         "HealthView.getUserHealthFactor(sampleUser)",
         async () => {
-          const [hf, isValid] = (await hv.getUserHealthFactor(sampleUser)) as [bigint, boolean];
-          console.log(`  [Sanity] HealthView.getUserHealthFactor: hf=${hf.toString()} isValid=${isValid}`);
+          const [hf, isValid, timestamp] = (await hv.getUserHealthFactor(sampleUser)) as [bigint, boolean, bigint];
+          console.log(
+            `  [Sanity] HealthView.getUserHealthFactor: hf=${hf.toString()} isValid=${isValid} ts=${timestamp.toString()}`
+          );
         },
         strict
       );

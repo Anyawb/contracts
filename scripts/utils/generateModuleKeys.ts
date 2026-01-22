@@ -16,6 +16,12 @@ interface ModuleKeyEntry {
 }
 type ModuleKeyMapping = Record<string, string>;
 
+// Keys that still exist on-chain for compatibility but should not be used for new integrations.
+const DEPRECATED_KEYS: Record<string, string> = {
+  KEY_HF_CALC: 'Deprecated: replaced by HealthView / LiquidationRiskManager.',
+  KEY_VALUATION_ORACLE: 'Deprecated: replaced by KEY_PRICE_ORACLE + KEY_VALUATION_ORACLE_VIEW.',
+};
+
 /**
  * 生成 TypeScript 模块键文件
  */
@@ -26,7 +32,9 @@ export async function generateModuleKeysTS(): Promise<void> {
     // 1) 解析 Solidity 源码，提取 bytes32 constant KEY_* = keccak256("...") 定义
     const moduleKeysSolPath = path.join(__dirname, '../../src/constants/ModuleKeys.sol');
     const source = fs.readFileSync(moduleKeysSolPath, 'utf8');
-    const regex = /bytes32\s+constant\s+(KEY_[A-Z0-9_]+)\s*=\s*keccak256\("([^"]+)"\)/g;
+    // Allow optional visibility (`internal`) between `bytes32` and `constant`
+    // e.g. `bytes32 internal constant KEY_X = keccak256("...")`
+    const regex = /bytes32\s+(?:internal\s+)?constant\s+(KEY_[A-Z0-9_]+)\s*=\s*keccak256\("([^"]+)"\)/g;
     const entries: ModuleKeyEntry[] = [];
     let match: RegExpExecArray | null;
     while ((match = regex.exec(source)) !== null) {
@@ -175,7 +183,13 @@ export default ModuleKeys;
 
   // 生成主体内容
   const body = Object.entries(moduleKeyMapping)
-    .map(([key, hash]) => `  ${key}: '${hash}',`)
+    .map(([key, hash]) => {
+      const dep = DEPRECATED_KEYS[key];
+      if (dep) {
+        return `  /** @deprecated ${dep} */\n  ${key}: '${hash}',`;
+      }
+      return `  ${key}: '${hash}',`;
+    })
     .join('\n\n');
 
   return header + body + '\n' + footer;

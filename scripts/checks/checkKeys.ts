@@ -59,10 +59,11 @@ async function checkKeys(): Promise<void> {
   // 检查键的数量是否符合预期
   try {
     // 尝试调用 getExpectedKeyCount 方法，如果存在的话
-    const testContract = test as unknown as { getExpectedKeyCount?: () => Promise<number> };
+    const testContract = test as unknown as { getExpectedKeyCount?: () => Promise<bigint> };
     const expectedKeyCount = await testContract.getExpectedKeyCount?.();
-    if (expectedKeyCount && keys.length !== expectedKeyCount) {
-      logger.error(`键数量不匹配: 发现 ${keys.length} 个, 预期 ${expectedKeyCount} 个`);
+    const expected = expectedKeyCount === undefined ? undefined : Number(expectedKeyCount);
+    if (expected !== undefined && keys.length !== expected) {
+      logger.error(`键数量不匹配: 发现 ${keys.length} 个, 预期 ${expected} 个`);
       hasErrors = true;
     }
   } catch (error) {

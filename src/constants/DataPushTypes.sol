@@ -110,6 +110,12 @@ library DataPushTypes {
         // solhint-disable-next-line gas-small-strings
         keccak256("FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED");
     bytes32 public constant DATA_TYPE_USER_POSITION_UPDATE     = keccak256("USER_POSITION_UPDATE");
+    /// @dev StatisticsView user-scoped stats update (cache + global aggregates).
+    bytes32 public constant DATA_TYPE_USER_STATS_UPDATE        = keccak256("USER_STATS_UPDATE");
+    /// @dev StatisticsView guarantee aggregation update.
+    bytes32 public constant DATA_TYPE_GUARANTEE_STATS_UPDATE   = keccak256("GUARANTEE_STATS_UPDATE");
+    /// @dev StatisticsView lightweight snapshot marker (observability for recordSnapshot).
+    bytes32 public constant DATA_TYPE_STATS_SNAPSHOT_RECORDED  = keccak256("STATS_SNAPSHOT_RECORDED");
     bytes32 public constant DATA_TYPE_LIQUIDATION_UPDATE       = keccak256("LIQUIDATION_UPDATE");
     bytes32 public constant DATA_TYPE_LIQUIDATION_BATCH_UPDATE = keccak256("LIQUIDATION_BATCH_UPDATE");
     bytes32 public constant DATA_TYPE_LIQUIDATION_PAYOUT       = keccak256("LIQUIDATION_PAYOUT");

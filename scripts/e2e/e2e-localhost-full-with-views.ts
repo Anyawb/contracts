@@ -39,7 +39,8 @@ function buildLendIntentHash(li: any) {
 }
 
 async function main() {
-  const [deployer, borrower, lender] = await ethers.getSigners();
+  const signers = await ethers.getSigners();
+  const deployer = signers[0];
 
   console.log("=== E2E Full Test with View Layer Verification ===\n");
 
@@ -55,10 +56,44 @@ async function main() {
   const cm = (await ethers.getContractAt("CollateralManager", CONTRACT_ADDRESSES.CollateralManager)) as any;
   const vle = (await ethers.getContractAt("src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine", CONTRACT_ADDRESSES.VaultLendingEngine)) as any;
 
+  // Pick "clean" borrower/lender to make re-runs on dirty node stable.
+  // matchflow may lock EarlyRepaymentGuarantee per (borrower, asset); if an active record exists,
+  // EarlyRepaymentGuaranteeManager may revert with GuaranteeAlreadyProcessed().
+  let borrower = signers[1];
+  let lender = signers[2];
+  try {
+    const assetAddr = usdc.target as string;
+    const ergmAddr =
+      ((await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE_MANAGER"))) as string) ||
+      ((await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE"))) as string);
+    if (ergmAddr && ergmAddr !== ethers.ZeroAddress) {
+      const ergm = (await ethers.getContractAt("EarlyRepaymentGuaranteeManager", ergmAddr)) as any;
+      for (let i = 1; i < signers.length; i++) {
+        const s = signers[i];
+        if (s.address.toLowerCase() === deployer.address.toLowerCase()) continue;
+        const has = (await ergm.hasActiveGuarantee(s.address, assetAddr)) as boolean;
+        if (!has) {
+          borrower = s;
+          break;
+        }
+      }
+      for (let i = 1; i < signers.length; i++) {
+        const s = signers[i];
+        if (s.address.toLowerCase() === deployer.address.toLowerCase()) continue;
+        if (s.address.toLowerCase() === borrower.address.toLowerCase()) continue;
+        lender = s;
+        break;
+      }
+    }
+  } catch {
+    // best-effort: keep defaults
+  }
+
   // Resolve View modules
   const positionViewAddr = await registry.getModuleOrRevert(key("POSITION_VIEW"));
   const healthViewAddr = await registry.getModuleOrRevert(key("HEALTH_VIEW"));
-  const statisticsViewAddr = await registry.getModuleOrRevert(key("STATISTICS_VIEW"));
+  // Canonical key for StatisticsView is "VAULT_STATISTICS" (ModuleKeys.KEY_STATS)
+  const statisticsViewAddr = await registry.getModuleOrRevert(key("VAULT_STATISTICS"));
   const rewardViewAddr = await registry.getModuleOrRevert(key("REWARD_VIEW"));
   const dashboardViewAddr = await registry.getModuleOrRevert(key("DASHBOARD_VIEW"));
   const riskViewAddr = await registry.getModuleOrRevert(key("RISK_VIEW"));
@@ -111,6 +146,9 @@ async function main() {
   await ensureRole(ACTION_DEPOSIT, CONTRACT_ADDRESSES.VaultBusinessLogic);
   await ensureRole(ACTION_BORROW, orderEngineAddr);
   await ensureRole(ACTION_REPAY, borrower.address);
+  // SSOT repay path: VaultCore.repay -> SettlementManager.repayAndSettle -> ORDER_ENGINE.repay.
+  // ORDER_ENGINE.repay is role-gated by ACTION_REPAY, so SettlementManager must have this role.
+  await ensureRole(ACTION_REPAY, CONTRACT_ADDRESSES.SettlementManager);
   console.log("");
 
   // ============ Setup Asset & Price ============
@@ -309,6 +347,9 @@ async function main() {
   const borrowerTokensBefore = await loanNft.getUserTokens(borrower.address);
 
   // Finalize match
+  // NOTE: matchflow may lock EarlyRepaymentGuarantee via GuaranteeFundManager, which pulls settlementToken via transferFrom.
+  // Ensure borrower has sufficient allowance to avoid ERC20InsufficientAllowance during finalizeMatch.
+  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.GuaranteeFundManager, ethers.MaxUint256);
   const tx = await vbl.connect(deployer).finalizeMatch(
     borrowIntent,
     [lendIntent],

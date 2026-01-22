@@ -840,7 +840,7 @@ const vaultCoreAddr     = await registry.getModule(KEY_VAULT_CORE);
 - 视图与只读入口：
   - `REWARD_VIEW`：统一 Reward 只读与 DataPush 入口，查询 0 gas；
   - `VAULT_CORE`：后续如需“由 Core 解析 View 地址”的路径，可通过 `KEY_VAULT_CORE → VaultCore.viewContractAddrVar()`；
-  - `VAULT_STATISTICS`：迁移阶段指向 `StatisticsView`（只读聚合）。
+  - `VAULT_STATISTICS (KEY_STATS)`：迁移阶段指向 `StatisticsView`（只读聚合）。不要使用 `STATISTICS_VIEW` 作为注册键（非 canonical）。
 - 多环境与热更新：
   - 首屏可读取 `frontend-config/contracts-*.ts` 作为初值，随后立即用 Registry 解析结果更新状态；
   - 监听 `ModuleAddressUpdated` 保持前端地址热更新；
@@ -1284,6 +1284,94 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
 - **权限数据**：`AccessControlView` ⇒ `getUserPermission`, `getUserPermissionLevel` 等。
 - **系统级快照(可选)**：`ViewCache` ⇒ `getSystemStatus` / `batchGetSystemStatus`。
   （用户维度缓存已并入 `UserView`，前端无需单独调用 ViewCache 获取用户缓存。）
+
+### 2.1 View 层与前端结合：方式、方法与 MUST 约束（2026-01）
+
+> 目标：把 “View 层是前端读接口 SSOT” 这件事落到工程实践，避免出现：
+> - 地址漂移（Registry 与 SystemView 路由不一致）
+> - 权限口径不一致（同类数据走不同入口行为不同）
+> - 批量接口超限/OOG
+> - 缓存陈旧但 UI 无提示
+> - push 失败不可观测、不可重试
+
+#### 2.1.1 地址发现：Registry 为 SSOT，SystemView 为“可选路由表”（推荐组合）
+
+- **推荐做法（启动时）**：
+  - 用 `Registry.getModuleOrRevert(key)` 解析每个专属 View 的地址（SSOT）
+  - 同时调用 `SystemView.route*()` 做一次 **Preflight 对齐校验**（路由表可消费、且与 Registry 完全一致）
+  - 对每个 View 读取 `getVersionInfo()`（用于升级排障：api/schema/implementation）
+
+> 仓库已提供可复用的“Preflight 参考实现”：`scripts/e2e/utils/view-preflight.ts`（前端/后端可按同思路实现）。
+
+#### 2.1.2 权限（Read Gate）：前端必须按 `VIEW_*_DATA` 口径设计调用链
+
+多数 View 读接口是 **role-gated** 的（典型错误为 `MissingRole()`）。你有两种可落地的集成方案：
+
+- **方案 A（推荐）：前端 → 后端 Read Service（持有角色）→ 链上 View**
+  - **优点**：用户无需链上授予权限；可统一做缓存、限流、批量合并、错误归一化；适配隐私/运维接口
+  - **缺点**：需要额外的后端服务与密钥管理
+  - **适用**：生产环境默认选项
+
+- **方案 B：前端直连链上 View（为每个用户授予角色）**
+  - **优点**：去中心化/无后端依赖
+  - **缺点**：需要为每个用户地址单独 grant；用户换钱包/多端同步成本高；不适合大规模用户
+  - **适用**：内部工具、少量白名单用户
+
+前端需要明确知道（并在 UI 中处理）以下只读权限键（见 `src/constants/ActionKeys.sol`）：
+- `VIEW_USER_DATA`：用户私域（Position/User/Preview 等）
+- `VIEW_RISK_DATA`：风险/健康（Health/Risk 等）
+- `VIEW_PRICE_DATA`：价格（ValuationOracleView/BatchView prices 等）
+- `VIEW_SYSTEM_DATA`：系统级信息（SystemView/RegistryView/部分 stats）
+
+> **强制要求**：同一类数据，无论走“聚合器入口”还是“专属 View 入口”，权限行为必须一致（见 `scripts/e2e/e2e-localhost-batch-aggregators-acceptance.ts` 的验收口径）。
+
+#### 2.1.3 三类聚合器：Dashboard / CacheOptimized / Batch 的“分工”与前端推荐用法
+
+- **DashboardView（UI 聚合 + meta）**
+  - 适合：用户资产总览页、资产 breakdown 卡片、需要 `positionIsValid/timestamp/version` 的 UI
+  - 典型调用：`getUserOverviewWithMeta(user, trackedAssets[])`、`getUserAssetBreakdownWithMeta(user, assets[])`
+
+- **CacheOptimizedView（批量 + 最少 RPC 次数）**
+  - 适合：多用户/多资产列表页、监控面板、一次性拉取 `(user,asset)` 组合
+  - 典型调用：`batchGetUserPositionsWithMeta(users[], assets[])`、`getSystemStats()`
+
+- **BatchView（轻量 batch：risk/price/system-status）**
+  - 适合：批量 healthFactor、批量风险评估、批量价格、模块健康/系统降级历史
+  - 典型调用：`batchGetHealthFactors(users[])`、`batchGetAssetPrices(assets[])`
+
+#### 2.1.4 有效性字段（meta）是“产品需求”：UI 必须展示/处理 `isValid/timestamp/version`
+
+对前端来说，`isValid/timestamp/version` 不是“调试信息”，而是**是否可信/是否陈旧**的产品语义：
+- **当 `isValid=false`**：
+  - UI 必须提示“数据可能延迟/陈旧”，并显示 `timestamp`（若有）用于用户判断
+  - 不要静默把 0 值当成真实值（尤其是 price/healthFactor/统计总量）
+- **当 `timestamp` 不单调/为 0**：
+  - 视为“不可用/未知”，UI 需降级（隐藏某些字段、提示需要刷新或等待索引）
+- **当 `version` 存在**：
+  - 可用于前端/后端做幂等去重、比对“是否读到了新快照”
+
+> TTL/过期窗口以链上 `ViewConstants.CACHE_DURATION` 为准（当前为 5 minutes）；前端不要自行硬编码另一个 TTL。
+
+#### 2.1.5 批量边界（MAX_BATCH_SIZE）与错误口径：必须 chunk + 识别 `BatchTooLarge`
+
+- `MAX_BATCH_SIZE`（当前为 100）适用于多数组合批量入口（Dashboard/CacheOptimized/Batch 等）。
+- **超限必须** `revert BatchTooLarge(length,max)`；空数组必须 `revert EmptyArray()`（全仓一致口径）。
+- 前端建议：
+  - 对大数组做 `chunk(assets/users, 100)` 分批并发调用
+  - 错误识别优先用 **TypeChain ABI 的 custom error selector**；不要依赖 revert string
+  - 参考本文档 “前端如何精准识别 custom error” 小节（见下方 5.3）
+
+#### 2.1.6 可观测性与离线重试：DataPushed + CacheUpdateFailed 是前端/后端协同闭环
+
+- **监听服务**统一订阅 `DataPushed(bytes32 indexed dataTypeHash, bytes payload)`（见本文档 §9）
+- **push 失败**（主流程不中断）通过失败事件可观测：
+  - `CacheUpdateFailed(...)`（SSOT，见本文档 §11）
+  - `ViewCachePushFailed(...)`（CollateralManager best-effort push 失败提示）
+- **离线重试**：后端/运维以 admin 身份调用 `PositionView.retryUserPositionUpdate(user, asset)`，前端只展示状态与发起请求（见本文档 §11.3）
+
+> 本仓库已提供端到端验收脚本，可作为前后端联调与回归基准：
+> - `scripts/e2e/e2e-localhost-batch-aggregators-acceptance.ts`（三聚合器职责/权限/超限）
+> - `scripts/e2e/e2e-localhost-scenario-matrix.ts`（ARCH 5.1.3：E2E-01/02/03，包含“失败注入→重试→统计”闭环）
 
 ### 3. 实现示例（TypeScript / Ethers v6）
 ```ts

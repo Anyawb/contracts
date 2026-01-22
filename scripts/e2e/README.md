@@ -23,6 +23,55 @@
   - 仅用于 **ViewScan**（启动阶段扫描所有 View 模块）强制失败策略；
   - 说明：部分脚本会把 ViewScan.strict 直接绑定到 `E2E_STRICT_VIEWS`（因此 `E2E_VIEW_STRICT` 只对未显式传 strict 的脚本生效）。
 
+## ✅ View 相关 E2E 验收要求（MUST）
+
+> 目标：把“路由/权限/回退/版本信息”等 **跨 View 的一致性承诺**变成可重复、可自动化的硬指标；避免“脚本只测业务 happy path，但部署/路由/回退已悄悄漂移”。
+
+### 1) 统一 Preflight（所有 View acceptance 脚本必须执行）
+
+- **统一入口**：`scripts/e2e/utils/view-preflight.ts` 的 `runViewPreflight(...)`
+- **执行时机**：每个 `e2e-localhost-*-acceptance.ts` 的 `main()` 开头必须调用一次（在任何业务断言之前）
+- **Preflight 必须做到**：
+  - **SystemView ↔ Registry 对齐**（硬失败）  
+    - 对所有 `SystemView.route*()` 返回的 `moduleKey/moduleAddr`：必须与 `Registry.getModuleOrRevert(key)` 完全一致
+    - 必须打印路由表（至少包含：Statistics/Reward/Liquidation/Risk/User/Position/Batch/Dashboard/Preview/Price）
+  - **实现地址与版本信息可观测**（用于升级定位）  
+    - 对每个路由出来的 View：打印 `getVersionInfo()` 的 `apiVersion/schemaVersion/implementation`
+  - **routePrice fallback 一致性（PRICE_ORACLE）**  
+    - `routePrice.primary` 必须是 `VALUATION_ORACLE_VIEW`，`fallback` 必须是 `PRICE_ORACLE`（两者地址都要与 Registry 对齐）
+    - 对同一资产（脚本一般用 `MockUSDC`）：  
+      - `ValuationOracleView.getAssetPrice(asset)` 与 `PriceOracle.getPrice(asset)` 的 `(price,timestamp)` 必须一致  
+      - 若 `PriceOracle.getPrice(asset)` 因“未配置/不支持” revert，则按 best-effort 语义视为 `(0,0)`，并要求 `ValuationOracleView` 返回也为 `(0,0)`（避免语义分叉）
+  - **角色前置（硬失败）**  
+    - 运行 preflight 的 admin/deployer 必须具备：`VIEW_SYSTEM_DATA`、`VIEW_PRICE_DATA`、`VIEW_RISK_DATA`、`VIEW_USER_DATA`（避免脚本靠临时 grant 混过）
+
+### 2) 严格失败策略（避免“假阳性”）
+
+- **ABI/部署不匹配必须硬失败**  
+  - 如果出现 `function selector was not recognized`（通常代表代理指向旧实现/ABI 不一致），必须直接失败并提示重新 `compile + deploy:localhost`
+- **不依赖 revert 文本**  
+  - 对“必须 revert”的断言：优先断言 custom error selector/参数（如 `BatchTooLarge(length,max)`）；不要依赖 revert string
+
+### 3) 各脚本的专属验收（与 Preflight 叠加）
+
+- Preflight 只负责“跨模块一致性与可观测性”；每个模块的 acceptance 脚本仍需覆盖其章节要求（如 `nextVersion/requestId/seq/DataPushed/TTL` 等）。
+
+### 4) 聚合器 ↔ 专属 View 的权限完全一致（更严 MUST）
+- **目标**：对“同一类数据”，外部调用者无论走“聚合器入口”还是“专属 View 入口”，**权限行为必须完全一致**（同 ActionKey、同 revert 类型/selector）。
+- **规则**：
+  - **同类数据 → 同一 ActionKey**：
+    - price：统一 `VIEW_PRICE_DATA`
+    - risk：统一 `VIEW_RISK_DATA`（healthFactor / riskAssessment 等）
+    - user：统一 `VIEW_USER_DATA`（仓位/用户私域聚合等）
+    - system：统一 `VIEW_SYSTEM_DATA`
+  - **聚合器不得绕过下游权限**：
+    - 当专属 View 对某类数据要求 `requireRole(X)` 时，聚合器对同类数据也必须要求 `requireRole(X)`；反之亦然
+  - **验收口径（硬指标）**：
+    - 无权限 caller 调用“聚合器入口”和“专属 View 入口”都必须 `revert MissingRole()`（selector 一致）
+    - 有权限 caller 两边都必须成功且返回一致
+  - **实现注意**：
+    - 当下游专属 View 增加只读鉴权后，为保证模块间调用不被误拦，部署脚本必须为聚合器模块地址授予必要的只读角色（但聚合器仍需对外部 caller 做鉴权）
+
 ## 脚本列表
 
 ### 1. `e2e-localhost-run.ts`
@@ -67,6 +116,130 @@
   - **协议内读取**：`RewardView.getUserLevelForBorrowCheck` 仅允许 `KEY_LE` 调用（用于 LendingEngine 链上校验）
   - **Read-Gate**：`RewardManagerCore.get*` 查询接口禁止 EOA 直连（必须通过 RewardView）
   - **积分语义**：按期还款 +1；提前还款 +0；逾期还款扣 5%（默认 `latePenaltyBps=500`）
+
+### 4.2 `e2e-localhost-systemview-routing.ts` ⭐
+**SystemView 路由/发现性 + “不依赖 revert 文本”专项验收**
+- 覆盖场景：
+  - `SystemView.route*()` 必须返回可消费的 `moduleKey/moduleAddr`（前端/SDK 可下一跳直连专属 View）
+  - `route*()` 返回地址必须与 `Registry.getModuleOrRevert(key)` 一致
+  - `VIEW_SYSTEM_DATA` 统一口径权限：无权限调用者对 `SystemView.getModule* / route*` 必须被 gate 拦截
+  - deprecated getter（如 `getAssetPrice/getTotalDebt/...`）允许 revert，但测试 **不解析也不依赖** revert 文本
+
+### 4.3 `e2e-localhost-positionview-acceptance.ts` ⭐
+**PositionView（ARCH 4.2）专项验收：version/nextVersion/requestId/seq/DataPush + (user,asset) validity**
+- 覆盖场景：
+  - 读取 `getUserPositionWithMeta()` 必须返回 `collateral/debt + isValid + timestamp + version`
+  - `nextVersion` 严格并发：`currentVersion -> push(nextVersion=current+1) -> version 递增`；错误版本必须 revert
+  - `requestId` 幂等：同 `requestId` 且 `nextVersion==currentVersion` 的重放应被忽略（不递增、不重复 DataPushed）
+  - `seq` 顺序：非幂等场景下 `seq` 必须严格递增，否则 revert
+  - 可观测性：成功 push 必须出现 `DataPushed(USER_POSITION_UPDATE, payload)` 且 payload 可解码与写入一致
+  - (user,asset) 缓存有效性：一个资产的 push 不应给另一个资产“续命”
+
+### 4.4 `e2e-localhost-healthview-acceptance.ts` ⭐
+**HealthView（ARCH 4.3）专项验收：读路径公开 + batch 限制 + push gate + DataPushed + timestamp/validity**
+
+### 4.5 `e2e-localhost-viewcache-acceptance.ts` ⭐
+**ViewCache（ARCH 4.5）专项验收：系统级快照 isValid/timestamp + 写入口 gate + DataPushed**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.5）：
+  - 读 `getSystemStatus(asset)` 必须返回 `timestamp` 且可用于判断 `isValid`
+  - 无权限账号调用 `setSystemStatus` 必须 revert
+  - 有权限写入后 `isValid=true` 且 timestamp 更新，并出现 `DataPushed(SYSTEM_STATUS_CACHE, payload)`
+
+### 4.6 `e2e-localhost-accesscontrolview-acceptance.ts` ⭐
+**AccessControlView（ARCH 4.6）专项验收：onlyACM push + DataPushed(type/payload) + 读带有效性 + TTL 过期**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.6）：
+  - 只能由 `AccessControlManager` 推送缓存（EOA 调用 `push*` 必须 revert）
+  - 权限位/权限级别更新后必须出现 `DataPushed`，且 `dataTypeHash` 分别为 `PERMISSION_BIT_UPDATE` / `PERMISSION_LEVEL_UPDATE`，payload 可 ABI 解码
+  - push 后立即可读：`getUserPermissionWithMeta/getUserPermissionLevelWithMeta` 返回 `isValid=true` 且 `timestamp` 合理
+  - 超过 TTL 后 `isValid` 变为 false（值与 timestamp 保留）
+
+### 4.7 `e2e-localhost-userview-acceptance.ts` ⭐
+**UserView（ARCH 4.7）专项验收：纯 façade + meta 透传 + 聚合一致性 + 禁止 asset=0 总量语义**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.7）：
+  - `UserView` 不得包含任何 `push*` 写入口（脚本从 ABI 扫描并硬失败）
+  - `getUserTotalsWithMeta/getUserTotalCollateral/getUserTotalDebt` 必须从 `StatisticsView` 权威快照读取（不允许通过 `asset=0` 占位实现）
+  - `getUserStatsWithMeta` 的数值与 meta 必须与 `PositionView.getUserPositionWithMeta` / `HealthView.getUserHealthFactorWithMeta` 一致
+  - TTL 过期后，`UserView` 透传的 `isValid` 必须随下游变为 false
+
+### 4.8 `e2e-localhost-valuationoracleview-acceptance.ts` ⭐
+**ValuationOracleView（ARCH 4.8）专项验收：价格读取权限一致性（与 BatchView 对齐）+ batch 限制 + best-effort**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.8）：
+  - 无 `VIEW_PRICE_DATA` 的调用者：`ValuationOracleView.getAssetPrice` 与 `BatchView.batchGetAssetPrices` 必须一致 revert
+  - 有权限调用者：同一资产价格在 `ValuationOracleView` 与 `BatchView` 的返回语义一致（至少 price 一致）
+  - 超过 `MAX_BATCH_SIZE` 必须按统一口径失败（脚本不依赖 revert 文本，但要求确实失败）
+  - 未配置资产的 best-effort 返回可被脚本覆盖（默认 price=0 允许）
+
+### 4.9 `e2e-localhost-feerouterview-acceptance.ts` ⭐
+**FeeRouterView（ARCH 4.9）专项验收：only FeeRouter push + staleness/validity + DataPushed**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.9）：
+  - 非 FeeRouter 地址调用任意 `push*` 必须 revert（writer SSOT：`FEE_ROUTER`）
+  - FeeRouter 调用 `pushGlobalStatsUpdate` 后：
+    - `getSyncStatus()` 返回 `lastSyncTimestamp == tx block.timestamp`
+    - `needsSync=false` 且 `isValid=true`
+    - 必须出现 `DataPushed(GLOBAL_FEE_STATS, payload)`，payload 可 ABI 解码
+  - 超过 `SYNC_INTERVAL` 后 `needsSync=true` 且 `isValid=false`（`lastSyncTimestamp` 不变）
+
+### 4.10 `e2e-localhost-liquidatorview-acceptance.ts` ⭐
+**LiquidatorView / LiquidationView（ARCH 4.10）专项验收：单点 push + DataPushed + 权限口径不混用**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.10）：
+  - **单点推送（writer gating）**：
+    - 非 `LIQUIDATION_MANAGER` 调用 `pushLiquidationUpdate/pushBatchLiquidationUpdate` 必须 `revert InvalidCaller()`
+    - 非 `LIQUIDATION_MANAGER`/`LIQUIDATION_PAYOUT_MANAGER` 调用 `pushLiquidationPayout` 必须 `revert InvalidCaller()`
+  - **事件（DataPushed）**：
+    - `pushLiquidationUpdate` 成功后必须出现 `DataPushed(LIQUIDATION_UPDATE, payload)` 且 payload 可 ABI 解码并匹配入参
+    - `pushLiquidationPayout` 成功后必须出现 `DataPushed(LIQUIDATION_PAYOUT, payload)`
+  - **权限口径一致（不得混用 system/risk/user/liquidation）**：
+    - system 读接口：需 `VIEW_SYSTEM_DATA`
+    - risk 读接口：需 `VIEW_RISK_DATA`
+    - user 私域：需 `VIEW_USER_DATA`（非本人需 admin）
+    - liquidation 读接口：需 `VIEW_LIQUIDATION_DATA`
+  - **新鲜度字段（placeholder 一致性）**：
+    - 对返回的 `lastLiquidationTime/daysSinceLastLiquidation` 做基本一致性断言（0 → 0）
+
+### 4.11 `e2e-localhost-batch-aggregators-acceptance.ts` ⭐
+**BatchView / CacheOptimizedView / DashboardView（ARCH 4.11）专项验收：只聚合不写入 + batch 限制统一 + 权限不绕过**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.11）：
+  - **职责边界（静态合规）**：
+    - 断言三者 ABI 中不存在任何 `push*` 写入口
+    - 断言除 UUPS/initializer 必要入口外，ABI 中不存在其他非 `view/pure` 的外部函数（防“偷偷写状态”回归）
+  - **批量限制（统一错误类型）**：
+    - 对 101 长度数组/limit 触发超限，必须统一 `revert BatchTooLarge(101, 100)`
+  - **权限一致性（不得绕过下游）**：
+    - 对 price 数据：`BatchView.batchGetAssetPrices` 与 `ValuationOracleView.getAssetPrices` 对无权限 caller 均 `revert MissingRole()`
+  - **返回一致性**：
+    - `BatchView.batchGetAssetPrices([asset])` 与 `ValuationOracleView.getAssetPrices([asset])` 返回价格一致
+    - `DashboardView.getUserAssetBreakdownWithMeta` 的 PositionView meta 字段与 `PositionView.getUserPositionWithMeta` 一致
+
+### 4.12 `e2e-localhost-lendingengineview-acceptance.ts` ⭐
+**LendingEngineView（ARCH 4.12）专项验收：订单私域/运维查询的权限口径统一 + 无 push 写入口**
+- 覆盖场景：
+  - ABI 不存在 `push*` 写入口
+  - `getLoanOrder`：仅订单相关方（borrower/lender）或 ops（`VIEW_USER_DATA`）可读；其它 caller `MissingRole()`
+  - 运维接口（如 `getFailedFeeAmount`）：仅 ops（`VIEW_SYSTEM_DATA`）可读；其它 caller `MissingRole()`
+
+### 4.13 `e2e-localhost-previewview-acceptance.ts` ⭐
+**PreviewView（ARCH 4.13）专项验收：只读预览门面 + 用户私域权限（MissingRole 统一）**
+- 覆盖场景：
+  - ABI 不存在 `push*` 写入口
+  - 非本人调用 preview 系列接口必须 `MissingRole()`
+  - 本人调用可成功
+  - 输入校验（asset=0）按实现 revert（`PreviewView__InvalidInput()`）
+
+### 4.14 `e2e-localhost-modulehealthview-acceptance.ts` ⭐
+**ModuleHealthView（ARCH 4.15）专项验收：运维/监控扩展 View + DataPush(MODULE_HEALTH) + 缓存 meta（isValid/timestamp）**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.15）：
+  - `unauthorized` 调用 `checkAndPushModuleHealth/getModuleHealthStatus/getModuleHealthStatusWithMeta/checkModuleHealth` 必须 `MissingRole()`
+  - `operator`（具备 `ACTION_VIEW_SYSTEM_STATUS`）调用 `checkAndPushModuleHealth` 必须成功
+  - 成功后必须出现 `DataPushed(MODULE_HEALTH, payload)` 且 payload 可 ABI 解码
+  - `getModuleHealthStatusWithMeta` 返回 `timestamp/isValid`，TTL 过期后 `isValid=false`（timestamp 不变）
+
+### 4.15 `e2e-localhost-eventhistorymanager-acceptance.ts` ⭐
+**EventHistoryManager（ARCH 4.16）专项验收：events-only + recordEvent 权限 gate + DataPushed(EVENT_HISTORY) 可解码**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.16）：
+  - 无权限账号调用 `recordEvent` 必须 `MissingRole()`
+  - 有权限账号调用 `recordEvent` 必须成功
+  - 成功后必须同时观察到 `HistoryRecorded` 与 `DataPushed(EVENT_HISTORY, payload)`
+  - `DataPushed` 的 payload 必须可 ABI 解码回 `eventType/user/asset/amount/extraData`
 
 ### 5. `e2e-localhost-batch-10-users.ts`
 **10 用户批量撮合借贷（5 组 borrower+lender）+ 总数验收**
@@ -195,6 +368,21 @@ npx hardhat run scripts/e2e/e2e-localhost-full-with-views.ts --network localhost
 #### Reward 隐私 + Read-Gate 专项验收 ⭐
 ```bash
 npx hardhat run scripts/e2e/e2e-localhost-reward-privacy.ts --network localhost
+```
+
+#### SystemView 路由/发现性专项验收 ⭐
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-systemview-routing.ts --network localhost
+```
+
+#### PositionView（ARCH 4.2）专项验收 ⭐
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-positionview-acceptance.ts --network localhost
+```
+
+#### HealthView（ARCH 4.3）专项验收 ⭐
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-healthview-acceptance.ts --network localhost
 ```
 
 #### Reward Edge Cases（多订单/partial repay/提前-按期-逾期/penaltyLedger）⭐

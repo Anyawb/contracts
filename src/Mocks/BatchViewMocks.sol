@@ -35,8 +35,8 @@ contract BatchMockHealthView {
         });
     }
 
-    function getUserHealthFactor(address user) external view returns (uint256, bool) {
-        return (_healthFactor[user], _isValid[user]);
+    function getUserHealthFactor(address user) external view returns (uint256, bool, uint256) {
+        return (_healthFactor[user], _isValid[user], 0);
     }
 
     function getModuleHealth(address module) external view returns (ModuleHealth memory) {

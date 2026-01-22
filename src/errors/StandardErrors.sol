@@ -25,6 +25,9 @@ error InvalidCaller();
 error VaultCapExceeded();
 error StatsNotFound();
 error InvalidStatsData();
+/// @notice Batch size exceeds a global max.
+/// @dev Standardized across view/aggregator modules: `BatchTooLarge(actual, max)`.
+error BatchTooLarge(uint256 length, uint256 max);
 
 // ============ Registry 模块精确错误 ============
 error MismatchedArrayLengths(uint256 keysLength, uint256 addressesLength);

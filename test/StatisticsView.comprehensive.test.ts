@@ -2,6 +2,7 @@ import { expect } from 'chai';
 import hardhat from 'hardhat';
 const { ethers, upgrades } = hardhat;
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 
 describe('StatisticsView – 全面测试', function () {
   const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -10,6 +11,7 @@ describe('StatisticsView – 全面测试', function () {
   const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
   const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
   const ACTION_VIEW_SYSTEM_STATUS = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_SYSTEM_STATUS'));
+  const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_SYSTEM_DATA'));
 
   async function deployFixture() {
     const [deployer, user1, user2, user3, unauthorized] = await ethers.getSigners();
@@ -26,6 +28,7 @@ describe('StatisticsView – 全面测试', function () {
     await acm.grantRole(ACTION_SET_PARAMETER, await deployer.getAddress());
     await acm.grantRole(ACTION_ADMIN, await deployer.getAddress());
     await acm.grantRole(ACTION_VIEW_SYSTEM_STATUS, await deployer.getAddress());
+    await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, await deployer.getAddress());
 
     const StatsF = await ethers.getContractFactory('StatisticsView');
     const stats = await upgrades.deployProxy(StatsF, [await registry.getAddress()]);
@@ -44,6 +47,7 @@ describe('StatisticsView – 全面测试', function () {
       expect(snap.timestamp).to.be.greaterThan(0n);
 
       const globalStats = await stats.getGlobalStatistics();
+      expect(globalStats.totalUsers).to.equal(0n);
       expect(globalStats.activeUsers).to.equal(0n);
       expect(globalStats.totalCollateral).to.equal(0n);
       expect(globalStats.totalDebt).to.equal(0n);
@@ -70,6 +74,21 @@ describe('StatisticsView – 全面测试', function () {
   });
 
   describe('用户统计更新 – 边界条件', function () {
+    it('应在 pushUserStatsUpdate 成功路径发出 DataPushed（可观测性）', async function () {
+      const { stats, user1 } = await loadFixture(deployFixture);
+      const DATA_TYPE_USER_STATS_UPDATE = ethers.keccak256(ethers.toUtf8Bytes('USER_STATS_UPDATE'));
+      const tx = await stats.pushUserStatsUpdate(await user1.getAddress(), 1n, 0n, 0n, 0n);
+      await expect(tx).to.emit(stats, 'DataPushed').withArgs(DATA_TYPE_USER_STATS_UPDATE, anyValue);
+
+      const [u, version, seq, lastReq, isValid, ts] = await stats.getUserSnapshotWithMeta(await user1.getAddress());
+      expect(u.timestamp).to.equal(ts);
+      expect(ts).to.be.greaterThan(0n);
+      expect(isValid).to.equal(true);
+      expect(version).to.equal(1n);
+      expect(seq).to.equal(0n);
+      expect(lastReq).to.equal(ethers.ZeroHash);
+    });
+
     it('应正确处理零值输入', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
@@ -95,6 +114,7 @@ describe('StatisticsView – 全面测试', function () {
       const snap = await stats.getGlobalSnapshot();
       expect(snap.totalCollateral).to.equal(1n);
       expect(snap.activeUsers).to.equal(1n);
+      expect(await stats.getTotalUsers()).to.equal(1n);
     });
 
     it('应正确处理极大金额', async function () {
@@ -136,7 +156,7 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushUserStatsUpdate(await user1.getAddress(), 100n, 0n, 0n, 0n);
       await stats.pushUserStatsUpdate(await user1.getAddress(), 50n, 0n, 0n, 0n);
 
-      // 版本号是内部的，通过多次更新验证不会失败
+      expect(await stats.getUserStatsVersion(await user1.getAddress())).to.equal(2n);
       const snap = await stats.getGlobalSnapshot();
       expect(snap.totalCollateral).to.equal(150n);
     });
@@ -190,6 +210,46 @@ describe('StatisticsView – 全面测试', function () {
           await user1.getAddress(), 50n, 0n, 0n, 0n, 2n
         )
       ).to.be.revertedWithCustomError(stats, 'StatisticsView__StaleUserStatsVersion').withArgs(2n, 2n);
+    });
+
+    it('应支持 requestId 幂等重放（strict nextVersion 绑定）', async function () {
+      const { stats, user1 } = await loadFixture(deployFixture);
+      const user = await user1.getAddress();
+      const requestId = ethers.keccak256(ethers.toUtf8Bytes('REQ1'));
+
+      await stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,bytes32,uint64,uint64)'](
+        user, 100n, 0n, 0n, 0n, requestId, 1n, 1n
+      );
+      expect(await stats.getUserStatsSeq(user)).to.equal(1n);
+      expect(await stats.getUserStatsLastAppliedRequestId(user)).to.equal(requestId);
+
+      // 重放同一请求：nextVersion == currentVersion 且 requestId 相同 => 幂等忽略，不改变数据
+      await expect(
+        stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,bytes32,uint64,uint64)'](
+          user, 100n, 0n, 0n, 0n, requestId, 2n, 1n
+        )
+      ).to.emit(stats, 'IdempotentRequestIgnored');
+
+      const snap = await stats.getGlobalSnapshot();
+      expect(snap.totalCollateral).to.equal(100n);
+      // 幂等忽略不应推进 seq
+      expect(await stats.getUserStatsSeq(user)).to.equal(1n);
+    });
+
+    it('seq 必须严格递增（乱序应 revert）', async function () {
+      const { stats, user1 } = await loadFixture(deployFixture);
+      const user = await user1.getAddress();
+      const requestId = ethers.keccak256(ethers.toUtf8Bytes('REQSEQ'));
+
+      await stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,bytes32,uint64,uint64)'](
+        user, 1n, 0n, 0n, 0n, requestId, 10n, 1n
+      );
+
+      await expect(
+        stats['pushUserStatsUpdate(address,uint256,uint256,uint256,uint256,bytes32,uint64,uint64)'](
+          user, 0n, 0n, 0n, 0n, requestId, 9n, 2n
+        )
+      ).to.be.revertedWithCustomError(stats, 'StatisticsView__OutOfOrderSeq');
     });
   });
 
@@ -322,6 +382,11 @@ describe('StatisticsView – 全面测试', function () {
 
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset, 0n, true);
       expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset)).to.equal(0n);
+
+      const [amount, isValid, ts] = await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset);
+      expect(amount).to.equal(0n);
+      expect(ts).to.be.greaterThan(0n);
+      expect(isValid).to.equal(true);
     });
   });
 
@@ -433,7 +498,9 @@ describe('StatisticsView – 全面测试', function () {
       const timeBefore = await stats.getUserLastActiveTime(await user1.getAddress());
       expect(timeBefore).to.equal(0n);
 
-      await stats.recordSnapshot(await user1.getAddress());
+      const DATA_TYPE_STATS_SNAPSHOT_RECORDED = ethers.keccak256(ethers.toUtf8Bytes('STATS_SNAPSHOT_RECORDED'));
+      const tx = await stats.recordSnapshot(await user1.getAddress());
+      await expect(tx).to.emit(stats, 'DataPushed').withArgs(DATA_TYPE_STATS_SNAPSHOT_RECORDED, anyValue);
       const timeAfter = await stats.getUserLastActiveTime(await user1.getAddress());
       expect(timeAfter).to.be.greaterThan(0n);
     });
@@ -523,6 +590,7 @@ describe('StatisticsView – 全面测试', function () {
       const globalStats = await stats.getGlobalStatistics();
       const snap = await stats.getGlobalSnapshot();
 
+      expect(globalStats.totalUsers).to.equal(await stats.getTotalUsers());
       expect(globalStats.activeUsers).to.equal(snap.activeUsers);
       expect(globalStats.totalCollateral).to.equal(snap.totalCollateral);
       expect(globalStats.totalDebt).to.equal(snap.totalDebt);

@@ -11,6 +11,8 @@ const KEY_PRICE_ORACLE = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
 const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
+const ACTION_VIEW_PRICE_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_PRICE_DATA'));
 
 describe('DashboardView', function () {
   async function deployFixture() {
@@ -66,10 +68,16 @@ describe('DashboardView', function () {
     await acm.grantRole(ACTION_ADMIN, admin.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, admin.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, admin.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, admin.address);
+    await acm.grantRole(ACTION_VIEW_PRICE_DATA, admin.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, viewer.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
+    await acm.grantRole(ACTION_VIEW_PRICE_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, viewer2.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, viewer2.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer2.address);
+    await acm.grantRole(ACTION_VIEW_PRICE_DATA, viewer2.address);
 
     return {
       dashboardView,
@@ -199,6 +207,22 @@ describe('DashboardView', function () {
       ).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
 
+    it('also requires VIEW_RISK_DATA role (must not bypass downstream gate)', async function () {
+      const { dashboardView, other, assetA, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
+      await expect(
+        dashboardView.connect(other).getUserOverview(other.address, [assetA]),
+      ).to.be.revertedWithCustomError(acm, 'MissingRole');
+    });
+
+    it('reverts when trackedAssets exceeds MAX_BATCH_SIZE', async function () {
+      const { dashboardView, viewer, assetA } = await loadFixture(deployFixture);
+      const assets = new Array(101).fill(assetA);
+      await expect(dashboardView.connect(viewer).getUserOverview(viewer.address, assets))
+        .to.be.revertedWithCustomError(dashboardView, 'BatchTooLarge')
+        .withArgs(101n, 100n);
+    });
+
     it('handles user with no positions', async function () {
       const { dashboardView, viewer } = await loadFixture(deployFixture);
       const newUser = ethers.Wallet.createRandom().address;
@@ -282,6 +306,7 @@ describe('DashboardView', function () {
       const assetA = ethers.Wallet.createRandom().address;
       await positionView.setPosition(viewer.address, assetA, 1_000n, 100n);
       await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
+      await acm.grantRole(ACTION_VIEW_PRICE_DATA, viewer.address);
 
       const items = await dashboardView.connect(viewer).getUserAssetBreakdown(viewer.address, [assetA]);
       expect(items[0].price).to.equal(0n); // Should be 0 when oracle is missing
@@ -308,6 +333,22 @@ describe('DashboardView', function () {
       await expect(
         dashboardView.connect(other).getUserAssetBreakdown(other.address, [assetA]),
       ).to.be.revertedWithCustomError(acm, 'MissingRole');
+    });
+
+    it('also requires VIEW_PRICE_DATA role (must not bypass downstream gate)', async function () {
+      const { dashboardView, other, assetA, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
+      await expect(
+        dashboardView.connect(other).getUserAssetBreakdown(other.address, [assetA]),
+      ).to.be.revertedWithCustomError(acm, 'MissingRole');
+    });
+
+    it('reverts when assets exceeds MAX_BATCH_SIZE', async function () {
+      const { dashboardView, viewer, assetA } = await loadFixture(deployFixture);
+      const assets = new Array(101).fill(assetA);
+      await expect(dashboardView.connect(viewer).getUserAssetBreakdown(viewer.address, assets))
+        .to.be.revertedWithCustomError(dashboardView, 'BatchTooLarge')
+        .withArgs(101n, 100n);
     });
 
     it('returns correct order of assets', async function () {
@@ -422,6 +463,8 @@ describe('DashboardView', function () {
       const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
       await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
       // 不设置 KEY_HEALTH_VIEW
+      const positionView = await (await ethers.getContractFactory('CacheMockPositionView')).deploy();
+      await registry.setModule(KEY_POSITION_VIEW, await positionView.getAddress());
 
       const DashboardViewFactory = await ethers.getContractFactory('DashboardView');
       const dashboardView = await upgrades.deployProxy(DashboardViewFactory, [await registry.getAddress()], {
@@ -429,7 +472,9 @@ describe('DashboardView', function () {
       });
 
       await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
+      await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
       const assetA = ethers.Wallet.createRandom().address;
+      await positionView.setPosition(viewer.address, assetA, 1_000n, 100n);
 
       await expect(
         dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]),
@@ -451,6 +496,7 @@ describe('DashboardView', function () {
       });
 
       await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
+      await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
       const assetA = ethers.Wallet.createRandom().address;
 
       await expect(
@@ -547,6 +593,35 @@ describe('DashboardView', function () {
 
       expect(overview1.isRisky).to.equal(false); // 120% > 110%
       expect(overview2.isRisky).to.equal(true); // 105% < 110%
+    });
+  });
+
+  describe('ARCH 4.11 BV-01: aggregator has no write/push entrypoints', function () {
+    it('exposes no push* functions and no business-writable entrypoints', async function () {
+      const { dashboardView } = await loadFixture(deployFixture);
+      const funcFragments = dashboardView.interface.fragments.filter((f: any) => f.type === 'function');
+      const names: string[] = funcFragments.map((f: any) => f.name);
+
+      expect(names.some((n) => n.toLowerCase().startsWith('push'))).to.equal(false);
+
+      const writable = funcFragments.filter((f: any) => !['view', 'pure'].includes(String(f.stateMutability)));
+      const writableNames = Array.from(new Set(writable.map((f: any) => f.name)));
+      const allowed = new Set(['initialize', 'upgradeTo', 'upgradeToAndCall']);
+      for (const n of writableNames) {
+        expect(allowed.has(n), `unexpected writable function in DashboardView ABI: ${n}`).to.equal(true);
+      }
+    });
+
+    it('calling read functions via tx emits no DataPushed', async function () {
+      const { dashboardView, viewer, assetA } = await loadFixture(deployFixture);
+      const DATA_PUSH_TOPIC0 = ethers.id('DataPushed(bytes32,bytes)');
+      const txReq = await viewer.sendTransaction({
+        to: await dashboardView.getAddress(),
+        data: dashboardView.interface.encodeFunctionData('getUserOverview', [viewer.address, [assetA]]),
+      });
+      const receipt = await txReq.wait();
+      const hasDataPushed = receipt!.logs.some((l) => l.topics?.[0] === DATA_PUSH_TOPIC0);
+      expect(hasDataPushed).to.equal(false);
     });
   });
 });

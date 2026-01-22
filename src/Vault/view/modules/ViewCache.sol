@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { AccessControlLibrary } from "../../../libraries/AccessControlLibrary.sol";
@@ -10,57 +10,67 @@ import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-
-// 常量迁移至 DataPushTypes
+import { BatchTooLarge, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 
 /**
  * @title ViewCache
- * @notice 视图缓存模块（系统级快照）
- * @dev 用户维度缓存已迁移至 `UserView`；本合约仅负责系统级批量缓存，所有写操作触发 `CacheUpdated` 事件。
+ * @notice System-level view cache for per-asset snapshots.
+ * @dev Reverts if:
+ *      - registry is not set or is not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+ *
+ * Security:
+ * - UUPS upgradeable contract; upgrades are admin-gated via Registry roles.
+ * - Write APIs are role-gated via Registry.
+ *
+ * Notes:
+ * - User-scoped caches live in `UserView`; this module only caches system-level snapshots.
+ * - `SystemStatusCache.utilizationRate` is expressed in WAD (1e18).
  */
 contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
-    // =========================  Events  =========================
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
 
-    /// @notice Emitted whenever a system snapshot is successfully written.
+    /**
+     * @notice Emitted when a system snapshot is written or cleared for an asset.
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - Event only.
+     *
+     * @param asset Asset address the snapshot corresponds to.
+     * @param updater Caller that performed the write/clear.
+     * @param timestamp Emit timestamp (seconds).
+     */
     event CacheUpdated(address indexed asset, address indexed updater, uint256 timestamp);
 
-    // =========================  Errors  =========================
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
-    error ViewCache__ZeroAddress();
+    /// @notice Thrown when the provided cache payload is invalid.
     error ViewCache__InvalidCacheData();
-    error ViewCache__EmptyArray();
-    error ViewCache__BatchTooLarge(uint256 length, uint256 max);
+    /// @notice Thrown when attempting to upgrade to the zero address.
     error ViewCache__ZeroImplementation();
 
-    // =========================  Structs  =========================
+    /*━━━━━━━━━━━━━━━ Types ━━━━━━━━━━━━━━━*/
 
     struct SystemStatusCache {
-        uint256 totalCollateral;   // Aggregated collateral amount
-        uint256 totalDebt;         // Aggregated debt amount
-        uint256 utilizationRate;   // Utilisation rate (WAD)
-        uint256 timestamp;         // Snapshot timestamp
-        bool    isValid;           // Explicit validity flag
+        uint256 totalCollateral;   // Aggregated collateral amount (domain-specific unit)
+        uint256 totalDebt;         // Aggregated debt amount (domain-specific unit)
+        uint256 utilizationRate;   // Utilization rate (WAD, 1e18)
+        uint256 timestamp;         // Snapshot timestamp (seconds)
+        bool    isValid;           // Explicit validity flag (in addition to time-based freshness)
     }
 
-    // =========================  Constants  =========================
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
-    // 统一常量
-    uint256 private constant CACHE_DURATION = ViewConstants.CACHE_DURATION;
-    uint256 private constant MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
-
-    // =========================  Storage  =========================
-
-    /// @notice Registry contract address
+    /// @notice Registry address used for SSOT module resolution and access control.
     address private _registryAddr;
 
-    /// @notice Per-asset snapshot cache
+    /// @notice asset => cached system snapshot.
     mapping(address => SystemStatusCache) private _systemStatusCache;
 
-    /// @notice Last write timestamp for each asset (redundant to the struct but handy for off-chain tooling)
+    /// @notice asset => last write timestamp (redundant to the struct but convenient for offchain tooling).
     mapping(address => uint256) private _systemCacheTimestamps;
 
-    // =========================  Modifiers  =========================
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
@@ -68,17 +78,24 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         _;
     }
 
-    // =========================  Initialiser  =========================
+    /*━━━━━━━━━━━━━━━ Initialization ━━━━━━━━━━━━━━━*/
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /// @param initialRegistryAddr 协议 Registry 合约地址
-    ///
-    /// @notice 初始化合约
-    /// @dev 仅在首次部署时调用，一旦初始化后不可再次执行。
+    /**
+     * @notice Initialize the ViewCache proxy.
+     * @dev Reverts if:
+     *      - initialRegistryAddr == address(0) (ZeroAddress)
+     *      - initialRegistryAddr is not a contract (NotAContract)
+     *
+     * Security:
+     * - Initializer: callable once.
+     *
+     * @param initialRegistryAddr Registry contract address.
+     */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
@@ -87,24 +104,45 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         _registryAddr = initialRegistryAddr;
     }
 
-    /// @notice Registry 地址（推荐）
+    /**
+     * @notice Return the configured Registry address (preferred naming).
+     * @dev Reverts if: (never)
+     * Security: (read-only)
+     *
+     * @return Registry address.
+     */
     function registryAddrVar() external view returns (address) {
         return _registryAddr;
     }
 
-    /// @notice Registry 地址（兼容旧命名）
+    /**
+     * @notice Return the configured Registry address (legacy alias).
+     * @dev Reverts if: (never)
+     * Security: (read-only)
+     *
+     * @return Registry address.
+     */
     function registryAddr() external view returns (address) {
         return _registryAddr;
     }
 
-    // =========================  Write APIs  =========================
+    /*━━━━━━━━━━━━━━━ Write Functions ━━━━━━━━━━━━━━━*/
 
-    /// @notice 写入或覆盖指定资产的系统快照
-    /// @param asset 资产地址
-    /// @param totalCollateral 总抵押数量
-    /// @param totalDebt 总债务数量
-    /// @param utilizationRate 利用率（WAD）
-    /// @dev 仅持有 Registry 中 ACTION_VIEW_SYSTEM_DATA 权限的账户可调用。
+    /**
+     * @notice Write or overwrite a system snapshot for a given asset.
+     * @dev Reverts if:
+     *      - registry is not set (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA (AccessControlLibrary.requireRole)
+     *      - asset == address(0) (ViewCache__InvalidCacheData)
+     *
+     * Security:
+     * - Role-gated: ACTION_VIEW_SYSTEM_DATA.
+     *
+     * @param asset Asset address.
+     * @param totalCollateral Total collateral (domain-specific unit).
+     * @param totalDebt Total debt (domain-specific unit).
+     * @param utilizationRate Utilization rate (WAD, 1e18).
+     */
     function setSystemStatus(
         address asset,
         uint256 totalCollateral,
@@ -120,44 +158,65 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
 
         if (asset == address(0)) revert ViewCache__InvalidCacheData();
 
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
         _systemStatusCache[asset] = SystemStatusCache({
             totalCollateral: totalCollateral,
             totalDebt: totalDebt,
             utilizationRate: utilizationRate,
-            timestamp: block.timestamp,
+            timestamp: ts,
             isValid: true
         });
-        _systemCacheTimestamps[asset] = block.timestamp;
+        _systemCacheTimestamps[asset] = ts;
 
-        emit CacheUpdated(asset, msg.sender, block.timestamp);
+        emit CacheUpdated(asset, msg.sender, ts);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
-            abi.encode(asset, totalCollateral, totalDebt, utilizationRate, block.timestamp)
+            abi.encode(asset, totalCollateral, totalDebt, utilizationRate, ts)
         );
     }
 
-    /// @notice 清理指定资产的缓存
-    /// @param asset 资产地址
-    /// @dev 仅管理员 (ACTION_ADMIN) 可调用。
+    /**
+     * @notice Clear the cached system snapshot for an asset.
+     * @dev Reverts if:
+     *      - registry is not set (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (AccessControlLibrary.requireRole)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN.
+     *
+     * @param asset Asset address.
+     */
     function clearSystemCache(address asset) external onlyValidRegistry {
         AccessControlLibrary.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender, msg.sender);
 
         delete _systemStatusCache[asset];
         delete _systemCacheTimestamps[asset];
 
-        emit CacheUpdated(asset, msg.sender, block.timestamp);
+        // solhint-disable-next-line not-rely-on-time
+        uint256 ts = block.timestamp;
+        emit CacheUpdated(asset, msg.sender, ts);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
-            abi.encode(asset, uint256(0), uint256(0), uint256(0), block.timestamp)
+            abi.encode(asset, uint256(0), uint256(0), uint256(0), ts)
         );
     }
 
-    // =========================  Read APIs  =========================
+    /*━━━━━━━━━━━━━━━ View Functions ━━━━━━━━━━━━━━━*/
 
-    /// @notice 获取系统快照及其有效性
-    /// @param asset 资产地址
-    /// @return status 系统快照结构体
-    /// @return isValid 快照是否有效
+    /**
+     * @notice Return the cached system snapshot for an asset along with validity.
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param asset Asset address.
+     * @return status Cached snapshot struct.
+     * @return isValid True if both:
+     *         - timestamp is fresh within `ViewConstants.CACHE_DURATION`, and
+     *         - the explicit `status.isValid` flag is true.
+     */
     function getSystemStatus(
         address asset
     ) external view returns (SystemStatusCache memory status, bool isValid) {
@@ -165,17 +224,25 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         isValid = _isCacheValid(status.timestamp) && status.isValid;
     }
 
-    /// @notice 批量获取系统快照
-    /// @param assets 资产地址数组
-    /// @return statuses 系统快照数组
-    /// @return validFlags 是否有效数组
-    /// @dev 当 `assets.length` 超过 MAX_BATCH_SIZE 时回退，避免过高 gas 消耗。
+    /**
+     * @notice Batch fetch system snapshots for multiple assets.
+     * @dev Reverts if:
+     *      - assets.length == 0 (EmptyArray)
+     *      - assets.length > ViewConstants.MAX_BATCH_SIZE (BatchTooLarge)
+     *
+     * Security:
+     * - Read-only.
+     *
+     * @param assets Asset address list.
+     * @return statuses Cached snapshot structs (1:1 with `assets`).
+     * @return validFlags Freshness/validity flags (1:1 with `assets`).
+     */
     function batchGetSystemStatus(
         address[] calldata assets
     ) external view returns (SystemStatusCache[] memory statuses, bool[] memory validFlags) {
         uint256 length = assets.length;
-        if (length == 0) revert ViewCache__EmptyArray();
-        if (length > MAX_BATCH_SIZE) revert ViewCache__BatchTooLarge(length, MAX_BATCH_SIZE);
+        if (length == 0) revert EmptyArray();
+        if (length > ViewConstants.MAX_BATCH_SIZE) revert BatchTooLarge(length, ViewConstants.MAX_BATCH_SIZE);
 
         statuses   = new SystemStatusCache[](length);
         validFlags = new bool[](length);
@@ -187,30 +254,54 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
-    // =========================  Internal helpers  =========================
+    /*━━━━━━━━━━━━━━━ Internal Helpers ━━━━━━━━━━━━━━━*/
 
     function _isCacheValid(uint256 timestamp) internal view returns (bool) {
-        return timestamp > 0 && block.timestamp - timestamp <= CACHE_DURATION;
+        // solhint-disable-next-line not-rely-on-time
+        uint256 nowTs = block.timestamp;
+        return timestamp > 0 && nowTs - timestamp <= ViewConstants.CACHE_DURATION;
     }
 
-    // =========================  UUPS upgradeability  =========================
+    /*━━━━━━━━━━━━━━━ UUPS Upgrade ━━━━━━━━━━━━━━━*/
 
-    /// @notice 升级授权（UUPS）
-    /// @dev 仅管理员 (ACTION_ADMIN) 可通过。
+    /**
+     * @notice Authorize a UUPS upgrade.
+     * @dev Reverts if:
+     *      - registry is not set (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (AccessControlLibrary.requireRole)
+     *      - newImplementation == address(0) (ViewCache__ZeroImplementation)
+     *      - newImplementation is not a contract (NotAContract)
+     *
+     * Security:
+     * - Admin-gated via Registry.
+     *
+     * @param newImplementation New implementation address.
+     */
     function _authorizeUpgrade(address newImplementation) internal override onlyValidRegistry {
         AccessControlLibrary.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender, msg.sender);
         if (newImplementation == address(0)) revert ViewCache__ZeroImplementation();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
-    /// @notice Storage gap for future upgrades
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
+    /// @dev Storage gap for upgrade safety (UUPS).
     uint256[50] private __gap;
 
-    // ============ Versioning (C+B baseline) ============
+    /*━━━━━━━━━━━━━━━ Versioning ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Return the external API semantic version for this view module.
+     * @dev Reverts if: (never)
+     * Security: (read-only)
+     */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
+    /**
+     * @notice Return the schema version for cached outputs and DataPushed payloads.
+     * @dev Reverts if: (never)
+     * Security: (read-only)
+     */
     function schemaVersion() public pure override returns (uint256) {
         return 1;
     }

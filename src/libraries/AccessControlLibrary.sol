@@ -6,6 +6,7 @@ import { EventLibrary } from "./EventLibrary.sol";
 import { ModuleAccessLibrary } from "./ModuleAccessLibrary.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
+import { MissingRole } from "../errors/StandardErrors.sol";
 
 /// @title AccessControlLibrary
 /// @notice 统一的权限控制库
@@ -29,14 +30,14 @@ library AccessControlLibrary {
         
         if (acmAddr == address(0)) {
             emit EventLibrary.PermissionVerified(user, actionKey, false, block.timestamp);
-            revert("Access control module not available");
+            revert MissingRole();
         }
         
         try IAccessControlManager(acmAddr).requireRole(actionKey, user) {
             emit EventLibrary.PermissionVerified(user, actionKey, true, block.timestamp);
         } catch {
             emit EventLibrary.PermissionVerified(user, actionKey, false, block.timestamp);
-            revert("Insufficient permissions");
+            revert MissingRole();
         }
     }
     

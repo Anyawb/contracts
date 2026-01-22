@@ -62,11 +62,14 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
 
   describe('权限与写入', function () {
     it('无 VIEW_SYSTEM_DATA 权限调用 setSystemStatus 应被拒绝', async function () {
-      await expect(viewCache.connect(alice).setSystemStatus(ASSET, 1, 2, 3)).to.be.revertedWith('Insufficient permissions');
+      await expect(viewCache.connect(alice).setSystemStatus(ASSET, 1, 2, 3)).to.be.revertedWithCustomError(
+        viewCache,
+        'MissingRole'
+      );
     });
 
     it('无 ADMIN 权限调用 clearSystemCache 应被拒绝', async function () {
-      await expect(viewCache.connect(alice).clearSystemCache(ASSET)).to.be.revertedWith('Insufficient permissions');
+      await expect(viewCache.connect(alice).clearSystemCache(ASSET)).to.be.revertedWithCustomError(viewCache, 'MissingRole');
     });
 
     it('asset 为零地址应 revert', async function () {
@@ -209,15 +212,12 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
 
   describe('批量读取', function () {
     it('空数组应 revert', async function () {
-      await expect(viewCache.connect(owner).batchGetSystemStatus([])).to.be.revertedWithCustomError(viewCache, 'ViewCache__EmptyArray');
+      await expect(viewCache.connect(owner).batchGetSystemStatus([])).to.be.revertedWithCustomError(viewCache, 'EmptyArray');
     });
 
     it('超过批量上限应 revert', async function () {
       const oversized = Array(Number(MAX_BATCH_SIZE) + 1).fill(ASSET);
-      await expect(viewCache.connect(owner).batchGetSystemStatus(oversized)).to.be.revertedWithCustomError(
-        viewCache,
-        'ViewCache__BatchTooLarge'
-      );
+      await expect(viewCache.connect(owner).batchGetSystemStatus(oversized)).to.be.revertedWithCustomError(viewCache, 'BatchTooLarge');
     });
 
     it('应返回批量快照与有效标记', async function () {
@@ -364,7 +364,10 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, alice.address);
       await viewCache.connect(alice).setSystemStatus(ASSET, 1, 2, 3);
       await acm.revokeRole(ACTION_VIEW_SYSTEM_DATA, alice.address);
-      await expect(viewCache.connect(alice).setSystemStatus(ASSET, 10, 20, 30)).to.be.revertedWith('Insufficient permissions');
+      await expect(viewCache.connect(alice).setSystemStatus(ASSET, 10, 20, 30)).to.be.revertedWithCustomError(
+        viewCache,
+        'MissingRole'
+      );
     });
   });
 

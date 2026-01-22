@@ -746,6 +746,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      */
     // solhint-disable-next-line private-vars-leading-underscore
     function _getLoanOrderForView(uint256 orderId) external view onlyValidRegistry returns (LoanOrder memory order) {
+        // System/ops-only view adapter: used by LendingEngineView and SettlementManager.
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
         return _loanOrders[orderId];
@@ -765,6 +766,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      */
     // solhint-disable-next-line private-vars-leading-underscore
     function _getUserLoanCountForView(address user) external view onlyValidRegistry returns (uint256 count) {
+        // System/ops-only view adapter: used by LendingEngineView and off-chain diagnostics.
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
         uint256 currentOrderId = _orderIdCounter;
@@ -789,7 +791,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      */
     // solhint-disable-next-line private-vars-leading-underscore
     function _getFailedFeeAmountForView(uint256 orderId) external view onlyValidRegistry returns (uint256 feeAmount) {
-        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
         return _failedFeeAmount[orderId];
     }
@@ -808,7 +810,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      */
     // solhint-disable-next-line private-vars-leading-underscore
     function _getNftRetryCountForView(uint256 orderId) external view onlyValidRegistry returns (uint256 retryCount) {
-        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
         return _nftRetryCount[orderId];
     }

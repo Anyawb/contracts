@@ -67,7 +67,7 @@ describe("PreviewView", function () {
       await position.pushUserPositionUpdate(user.address, asset, 50n, 10n);
       await expect(
         preview.connect(stranger).previewDeposit(user.address, asset, 10n)
-      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      ).to.be.revertedWithCustomError(preview, "MissingRole");
     });
   });
 
@@ -487,7 +487,7 @@ describe("PreviewView", function () {
       await position.pushUserPositionUpdate(user2.address, asset, 200n, 40n);
       await expect(
         preview.connect(user).previewDeposit(user2.address, asset, 50n)
-      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      ).to.be.revertedWithCustomError(preview, "MissingRole");
     });
 
     it("所有 preview 函数都遵循相同的访问控制", async function () {
@@ -496,19 +496,19 @@ describe("PreviewView", function () {
       
       await expect(
         preview.connect(stranger).previewDeposit(user.address, asset, 50n)
-      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      ).to.be.revertedWithCustomError(preview, "MissingRole");
       
       await expect(
         preview.connect(stranger).previewWithdraw(user.address, asset, 50n)
-      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      ).to.be.revertedWithCustomError(preview, "MissingRole");
       
       await expect(
         preview.connect(stranger).previewBorrow(user.address, asset, 0, 0, 10n)
-      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      ).to.be.revertedWithCustomError(preview, "MissingRole");
       
       await expect(
         preview.connect(stranger).previewRepay(user.address, asset, 10n)
-      ).to.be.revertedWithCustomError(preview, "PreviewView__Unauthorized");
+      ).to.be.revertedWithCustomError(preview, "MissingRole");
     });
   });
 

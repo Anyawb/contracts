@@ -9,6 +9,7 @@ const KEY_STATS = ethers.keccak256(ethers.toUtf8Bytes('VAULT_STATISTICS'));
 
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
 const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 
 describe('CacheOptimizedView (read-only facade)', function () {
@@ -62,11 +63,14 @@ describe('CacheOptimizedView (read-only facade)', function () {
     await acm.grantRole(ACTION_ADMIN, admin.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, admin.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, admin.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, admin.address);
 
     await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, viewer.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, viewer2.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, viewer2.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer2.address);
 
     return {
       cacheOptimizedView,
@@ -122,7 +126,7 @@ describe('CacheOptimizedView (read-only facade)', function () {
       expect(valid).to.equal(false);
     });
 
-    it('requires VIEW_USER_DATA role', async function () {
+    it('requires VIEW_RISK_DATA role', async function () {
       const { cacheOptimizedView, other, acm } = await loadFixture(deployFixture);
       await expect(cacheOptimizedView.connect(other).getUserHealthFactor(other.address)).to.be.revertedWithCustomError(
         acm,
@@ -167,8 +171,8 @@ describe('CacheOptimizedView (read-only facade)', function () {
       const bigList = new Array(101).fill(admin.address);
       await expect(cacheOptimizedView.connect(admin).batchGetUserHealthFactors(bigList)).to.be.revertedWithCustomError(
         cacheOptimizedView,
-        'CacheOptimizedView__BatchTooLarge',
-      );
+        'BatchTooLarge',
+      ).withArgs(101n, 100n);
     });
 
     it('batch query accepts maximum batch size', async function () {
@@ -272,7 +276,7 @@ describe('CacheOptimizedView (read-only facade)', function () {
       const bigAssets = new Array(101).fill(assetA);
       await expect(
         cacheOptimizedView.connect(viewer).batchGetUserPositions(bigUsers, bigAssets),
-      ).to.be.revertedWithCustomError(cacheOptimizedView, 'CacheOptimizedView__BatchTooLarge');
+      ).to.be.revertedWithCustomError(cacheOptimizedView, 'BatchTooLarge').withArgs(101n, 100n);
     });
 
     it('accepts maximum batch size', async function () {
@@ -344,6 +348,16 @@ describe('CacheOptimizedView (read-only facade)', function () {
       await expect(
         cacheOptimizedView.connect(other).getUserSummary(other.address, [assetA]),
       ).to.be.revertedWithCustomError(acm, 'MissingRole');
+    });
+
+    it('also requires VIEW_RISK_DATA role (must not bypass downstream gate)', async function () {
+      const { cacheOptimizedView, other, acm } = await loadFixture(deployFixture);
+      // Grant only USER_DATA, but not RISK_DATA.
+      await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
+      await expect(cacheOptimizedView.connect(other).getUserSummary(other.address, [])).to.be.revertedWithCustomError(
+        acm,
+        'MissingRole',
+      );
     });
 
     it('handles zero collateral and debt', async function () {
@@ -462,7 +476,8 @@ describe('CacheOptimizedView (read-only facade)', function () {
         { kind: 'uups' },
       );
 
-      await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
+      // getUserHealthFactor is risk-scoped; grant the required role so we reach module resolution.
+      await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
 
       await expect(
         cacheOptimizedView.connect(viewer).getUserHealthFactor(viewer.address),
@@ -547,6 +562,36 @@ describe('CacheOptimizedView (read-only facade)', function () {
 
       expect(singleHf).to.equal(batchFactors[0]);
       expect(singleValid).to.equal(batchFlags[0]);
+    });
+  });
+
+  describe('ARCH 4.11 BV-01: aggregator has no write/push entrypoints', function () {
+    it('exposes no push* functions and no business-writable entrypoints', async function () {
+      const { cacheOptimizedView } = await loadFixture(deployFixture);
+      const funcFragments = cacheOptimizedView.interface.fragments.filter((f: any) => f.type === 'function');
+      const names: string[] = funcFragments.map((f: any) => f.name);
+
+      expect(names.some((n) => n.toLowerCase().startsWith('push'))).to.equal(false);
+
+      const writable = funcFragments.filter((f: any) => !['view', 'pure'].includes(String(f.stateMutability)));
+      const writableNames = Array.from(new Set(writable.map((f: any) => f.name)));
+      const allowed = new Set(['initialize', 'upgradeTo', 'upgradeToAndCall']);
+      for (const n of writableNames) {
+        expect(allowed.has(n), `unexpected writable function in CacheOptimizedView ABI: ${n}`).to.equal(true);
+      }
+    });
+
+    it('calling read functions via tx emits no DataPushed', async function () {
+      const { cacheOptimizedView, viewer } = await loadFixture(deployFixture);
+
+      const DATA_PUSH_TOPIC0 = ethers.id('DataPushed(bytes32,bytes)');
+      const txReq = await viewer.sendTransaction({
+        to: await cacheOptimizedView.getAddress(),
+        data: cacheOptimizedView.interface.encodeFunctionData('getSystemStats'),
+      });
+      const receipt = await txReq.wait();
+      const hasDataPushed = receipt!.logs.some((l) => l.topics?.[0] === DATA_PUSH_TOPIC0);
+      expect(hasDataPushed).to.equal(false);
     });
   });
 });

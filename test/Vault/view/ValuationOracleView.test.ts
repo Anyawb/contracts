@@ -12,7 +12,7 @@ import type {
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const KEY_PRICE_ORACLE = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
-const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+const ACTION_VIEW_PRICE_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_PRICE_DATA'));
 const MAX_BATCH_SIZE = 100n; // ViewConstants.MAX_BATCH_SIZE
 
 describe('ValuationOracleView – view-only price oracle facade', function () {
@@ -48,8 +48,8 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
     });
 
     await acm.grantRole(ACTION_ADMIN, owner.address);
-    await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, owner.address);
-    await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, await valuationOracleView.getAddress());
+    await acm.grantRole(ACTION_VIEW_PRICE_DATA, owner.address);
+    await acm.grantRole(ACTION_VIEW_PRICE_DATA, await valuationOracleView.getAddress());
 
     return { owner, alice, valuationOracleView, registry, acm, priceOracle, ASSET };
   }
@@ -78,7 +78,7 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
   });
 
   describe('访问控制', function () {
-    it('缺少 VIEW_SYSTEM_DATA 权限应被拒绝', async function () {
+    it('缺少 VIEW_PRICE_DATA 权限应被拒绝', async function () {
       await expect(valuationOracleView.connect(alice).getAssetPrice(ASSET)).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
 
@@ -114,7 +114,7 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
     it('空数组应 revert', async function () {
       await expect(valuationOracleView.connect(owner).getAssetPrices([])).to.be.revertedWithCustomError(
         valuationOracleView,
-        'ValuationOracleView__EmptyAssets'
+        'EmptyArray'
       );
     });
 
@@ -122,8 +122,8 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       const oversized = Array(Number(MAX_BATCH_SIZE) + 1).fill(ASSET);
       await expect(valuationOracleView.connect(owner).getAssetPrices(oversized)).to.be.revertedWithCustomError(
         valuationOracleView,
-        'ValuationOracleView__BatchTooLarge'
-      );
+        'BatchTooLarge'
+      ).withArgs(101n, MAX_BATCH_SIZE);
     });
 
     it('Oracle 回退路径：预言机报错时返回零值', async function () {
@@ -293,7 +293,7 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
     it('批量健康检查空数组应 revert', async function () {
       await expect(valuationOracleView.connect(owner).batchCheckPriceOracleHealth([])).to.be.revertedWithCustomError(
         valuationOracleView,
-        'ValuationOracleView__EmptyAssets'
+        'EmptyArray'
       );
     });
 
@@ -301,8 +301,8 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       const oversized = Array(Number(MAX_BATCH_SIZE) + 1).fill(ASSET);
       await expect(valuationOracleView.connect(owner).batchCheckPriceOracleHealth(oversized)).to.be.revertedWithCustomError(
         valuationOracleView,
-        'ValuationOracleView__BatchTooLarge'
-      );
+        'BatchTooLarge'
+      ).withArgs(101n, MAX_BATCH_SIZE);
     });
   });
 
@@ -396,8 +396,8 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       const newView = await upgrades.deployProxy(ValuationOracleViewF, [await newRegistry.getAddress()], {
         kind: 'uups'
       });
-      await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, owner.address);
-      await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, await newView.getAddress());
+      await acm.grantRole(ACTION_VIEW_PRICE_DATA, owner.address);
+      await acm.grantRole(ACTION_VIEW_PRICE_DATA, await newView.getAddress());
 
       // 调用应失败，因为 Registry.getModuleOrRevert 会 revert
       await expect(newView.connect(owner).getAssetPrice(ASSET)).to.be.revertedWith('MockRegistry: module not found');

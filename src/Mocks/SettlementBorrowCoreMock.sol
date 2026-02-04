@@ -44,7 +44,7 @@ contract SettlementBorrowCoreMock {
             ActionKeys.ACTION_DEPOSIT,
             asset,
             amount,
-            block.timestamp
+            block.number
         );
     }
 
@@ -56,7 +56,7 @@ contract SettlementBorrowCoreMock {
             ActionKeys.ACTION_WITHDRAW,
             asset,
             amount,
-            block.timestamp
+            block.number
         );
     }
 

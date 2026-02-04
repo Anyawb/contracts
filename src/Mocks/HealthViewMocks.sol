@@ -22,7 +22,7 @@ contract MockHealthDegradationMonitor {
 
     function setStats(
         uint256 totalDegradations,
-        uint256 lastDegradationTime,
+        uint256 lastDegradationBlock,
         address lastDegradedModule,
         bytes32 lastDegradationReasonHash,
         uint256 fallbackValueUsed,
@@ -31,7 +31,7 @@ contract MockHealthDegradationMonitor {
     ) external {
         _stats = GracefulDegradationCore.DegradationStats({
             totalDegradations: totalDegradations,
-            lastDegradationTime: lastDegradationTime,
+            lastDegradationBlock: lastDegradationBlock,
             lastDegradedModule: lastDegradedModule,
             lastDegradationReasonHash: lastDegradationReasonHash,
             fallbackValueUsed: fallbackValueUsed,
@@ -65,7 +65,7 @@ contract MockHealthDegradationMonitor {
         bytes32 reasonHash,
         uint256 fallbackValue,
         bool usedFallback,
-        uint256 timestamp,
+        uint256 legacyBlockNumber,
         uint256 blockNumber
     ) external {
         _history.push(
@@ -74,7 +74,7 @@ contract MockHealthDegradationMonitor {
                 reasonHash: reasonHash,
                 fallbackValue: fallbackValue,
                 usedFallback: usedFallback,
-                timestamp: timestamp,
+                legacyBlockNumber: legacyBlockNumber,
                 blockNumber: blockNumber
             })
         );

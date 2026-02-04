@@ -14,7 +14,7 @@ pragma solidity ^0.8.20;
  */
 interface IRegistry {
 
-    /* ============ Structs ============ */
+    /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
     /**
      * @notice Module upgrade history record.
      * @dev Reverts if:
@@ -24,13 +24,17 @@ interface IRegistry {
      * - Returned from view methods; values are for off-chain attribution/auditing.
      */
     struct UpgradeHistory {
+        /// @notice Previous module address.
         address oldAddress;
+        /// @notice New module address.
         address newAddress;
-        uint256 timestamp;
+        /// @notice Upgrade block number (block.number time axis).
+        uint256 blockNumber;
+        /// @notice Upgrade executor address.
         address executor;
     }
 
-    /* ============ View Functions ============ */
+    /*━━━━━━━━━━━━━━━ View Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Returns the module address for a module key (zero if unset).
@@ -79,7 +83,7 @@ interface IRegistry {
      * Security:
      * - Read-only.
      *
-     * @return minDelaySeconds Delay window (seconds).
+     * @return minDelaySeconds Delay window (blocks; block.number time axis).
      */
     function minDelay() external view returns (uint256 minDelaySeconds);
     
@@ -91,7 +95,7 @@ interface IRegistry {
      * Security:
      * - Read-only (pure in the implementation).
      *
-     * @return maxDelaySeconds Maximum delay window (seconds).
+     * @return maxDelaySeconds Maximum delay window (blocks; block.number time axis).
      */
     function MAX_DELAY() external view returns (uint256 maxDelaySeconds);
 
@@ -180,7 +184,7 @@ interface IRegistry {
      */
     function owner() external view returns (address owner_);
 
-    /* ============ Admin Functions ============ */
+    /*━━━━━━━━━━━━━━━ Admin Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Sets a module address for a module key.
@@ -403,7 +407,7 @@ interface IRegistry {
      *      - caller is not owner (onlyOwner)
      *      - Registry is paused
      *      - no pending upgrade exists for key
-     *      - upgrade is not ready (block.timestamp < executeAfter)
+     *      - upgrade is not ready (block.number < executeAfter)
      *      - storage layout/version is incompatible (compat gate)
      *
      * Security:
@@ -424,7 +428,7 @@ interface IRegistry {
      * Security:
      * - onlyOwner
      *
-     * @param newDelay New delay window (seconds).
+     * @param newDelay New delay window (blocks).
      */
     function setMinDelay(uint256 newDelay) external;
     
@@ -465,7 +469,7 @@ interface IRegistry {
      */
     function getAllUpgradeHistory(bytes32 key) external view returns (UpgradeHistory[] memory history);
 
-    /* ============ Upgrade authority (UUPS) ============ */
+    /*━━━━━━━━━━━━━━━ Upgrade Authority (UUPS) ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Sets the upgrade admin address (UUPS authority).
@@ -517,7 +521,7 @@ interface IRegistry {
      */
     function getEmergencyAdmin() external view returns (address emergencyAdmin);
     
-    /* ============ Upgrade query helpers ============ */
+    /*━━━━━━━━━━━━━━━ Upgrade Query Helpers ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Returns pending upgrade info for a module key.
@@ -529,7 +533,7 @@ interface IRegistry {
      *
      * @param key Module key.
      * @return newAddr Proposed new module address.
-     * @return executeAfter Earliest execution time (unix timestamp, seconds).
+     * @return executeAfter Earliest execution block (block.number).
      * @return hasPendingUpgrade True if a pending upgrade exists.
      */
     function getPendingUpgrade(bytes32 key) external view returns (
@@ -545,7 +549,7 @@ interface IRegistry {
      *
      * Security:
      * - Read-only.
-     * - Uses block.timestamp for readiness checks by design (timelock mechanism).
+     * - Uses block.number for readiness checks by design (timelock mechanism).
      *
      * @param key Module key.
      * @return ready True if ready.
@@ -577,13 +581,13 @@ interface IRegistry {
      * @param index History index (0-based).
      * @return oldAddress Old module address.
      * @return newAddress New module address.
-     * @return timestamp Upgrade timestamp (unix timestamp, seconds).
+     * @return blockNumber Upgrade block number (block.number).
      * @return executor Upgrade executor address.
      */
     function getUpgradeHistory(bytes32 key, uint256 index) external view returns (
         address oldAddress,
         address newAddress,
-        uint256 timestamp,
+        uint256 blockNumber,
         address executor
     );
     

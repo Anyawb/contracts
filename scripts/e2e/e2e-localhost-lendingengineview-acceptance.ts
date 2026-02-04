@@ -109,6 +109,8 @@ async function main() {
     const deployer = signers[0];
     const borrower = signers[1];
     const outsider = signers[2];
+    const borrowerAddr = await borrower.getAddress();
+    const outsiderAddr = await outsider.getAddress();
 
     console.log("=== E2E LendingEngineView Acceptance (ARCH 4.12) ===\n");
 
@@ -135,6 +137,16 @@ async function main() {
 
     assertNoPushEntryPoints(view, "LendingEngineView");
 
+    // ====== MUST: version observability (5.1.2) ======
+    const [apiVer, schemaVer, implAddr] = (await mustSucceed("LendingEngineView.getVersionInfo()", async () =>
+      view.getVersionInfo()
+    )) as [bigint, bigint, string];
+    assertOk(apiVer === (await view.apiVersion()), "apiVersion mismatch vs getVersionInfo");
+    assertOk(schemaVer === (await view.schemaVersion()), "schemaVersion mismatch vs getVersionInfo");
+    assertOk(implAddr !== ethers.ZeroAddress, "implementation must be non-zero");
+    assertOk(implAddr.toLowerCase() !== viewAddr.toLowerCase(), "implementation must differ from proxy address");
+    console.log(`  [version] api=${apiVer} schema=${schemaVer} impl=${implAddr}`);
+
     // helper: grant roles
     const ensureRole = async (roleName: string, who: string | any) => {
       const whoAddr = await ethers.resolveAddress(who);
@@ -146,9 +158,9 @@ async function main() {
 
     // Make sure borrower can create an order (minimal setup)
     await ensureRole("ADD_WHITELIST", deployer.address);
-    await ensureRole("ORDER_CREATE", borrower.address);
-    await ensureRole("DEPOSIT", borrower.address);
-    await ensureRole("BORROW", borrower.address);
+    await ensureRole("ORDER_CREATE", borrowerAddr);
+    await ensureRole("DEPOSIT", borrowerAddr);
+    await ensureRole("BORROW", borrowerAddr);
     // OrderEngine mints LoanNFT; mint is gated by ActionKeys.ACTION_BORROW (see LoanNFT.MINTER_ROLE_VAR)
     await ensureRole("BORROW", orderEngineAddr);
     await ensureRole("DEPOSIT", orderEngineAddr);
@@ -160,7 +172,7 @@ async function main() {
 
     // Seed borrower collateral so order exists and access checks are meaningful
     const collateralAmt = ethers.parseUnits("5000", 6);
-    await (await usdc.connect(deployer).transfer(borrower.address, collateralAmt)).wait();
+    await (await usdc.connect(deployer).transfer(borrowerAddr, collateralAmt)).wait();
     await (await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, collateralAmt)).wait();
     await (await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt)).wait();
     await (await vaultCore.connect(borrower).deposit(assetAddr, collateralAmt)).wait();
@@ -172,7 +184,7 @@ async function main() {
       principal,
       rate: rateBps,
       term: termSec,
-      borrower: borrower.address,
+      borrower: borrowerAddr,
       lender: CONTRACT_ADDRESSES.LenderPoolVault,
       asset: assetAddr,
       startTimestamp: 0,
@@ -187,7 +199,22 @@ async function main() {
     const missingRoleSel = errorSelector("MissingRole()");
 
     // ====== MUST: privacy gates ======
-    await mustSucceed("Borrower can read own order via view.getLoanOrder", async () => view.connect(borrower).getLoanOrder(orderId));
+    await mustSucceed("Borrower can read own order via view.getLoanOrder", async () =>
+      view.connect(borrower).getLoanOrder(orderId)
+    );
+
+    // canAccessLoanOrder: borrower should see true; zero user should be false
+    const [hasAccessBorrower] = (await mustSucceed("Borrower canAccessLoanOrder(self)", async () =>
+      view.connect(borrower).canAccessLoanOrder(orderId, borrowerAddr)
+    )) as [boolean, boolean, bigint];
+    assertOk(hasAccessBorrower === true, "canAccessLoanOrder must be true for borrower");
+
+    // Note: canAccessLoanOrder is user-scoped (onlyAuthorizedUser(user)).
+    // user=0 is still gated, so we query it as deployer (has roles) and expect false.
+    const [hasAccessZero] = (await mustSucceed("Deployer canAccessLoanOrder(zero user) returns false", async () =>
+      view.connect(deployer).canAccessLoanOrder(orderId, ethers.ZeroAddress)
+    )) as [boolean, boolean, bigint];
+    assertOk(hasAccessZero === false, "canAccessLoanOrder must be false for user=0");
 
     await mustRevertWithSelector(
       "Outsider cannot read loan order via view.getLoanOrder",
@@ -197,30 +224,87 @@ async function main() {
 
     await mustRevertWithSelector(
       "Outsider cannot read borrower loan count",
-      async () => view.connect(outsider).getUserLoanCount(borrower.address),
+      async () => view.connect(outsider).getUserLoanCount(borrowerAddr),
       missingRoleSel
     );
-
-    // Ops/admin can read after VIEW_USER_DATA
-    const ops = ethers.Wallet.createRandom().connect(ethers.provider);
-    await deployer.sendTransaction({ to: ops.address, value: ethers.parseEther("1") });
 
     await mustRevertWithSelector(
-      "Ops without VIEW_USER_DATA cannot read loan order",
-      async () => view.connect(ops).getLoanOrder(orderId),
+      "Outsider cannot call canAccessLoanOrder(borrower)",
+      async () => view.connect(outsider).canAccessLoanOrder(orderId, borrowerAddr),
       missingRoleSel
     );
-    await ensureRole("VIEW_USER_DATA", ops.address);
-    await mustSucceed("Ops with VIEW_USER_DATA can read loan order", async () => view.connect(ops).getLoanOrder(orderId));
+
+    // canAccessLoanOrder: self (not borrower/lender) should be allowed and return false
+    const [outsiderSelfAccess] = (await mustSucceed("Outsider canAccessLoanOrder(self) returns false", async () =>
+      view.connect(outsider).canAccessLoanOrder(orderId, outsiderAddr)
+    )) as [boolean, boolean, bigint];
+    assertOk(outsiderSelfAccess === false, "canAccessLoanOrder must be false for non-party self");
+
+    // Ops/admin equivalence matrix:
+    // - VIEW_USER_DATA grants getLoanOrder and canAccessLoanOrder(user!=caller)
+    // - VIEW_SYSTEM_DATA grants ops diagnostics only
+    // - ACTION_ADMIN grants both
+    const opsUser = ethers.Wallet.createRandom().connect(ethers.provider);
+    const opsSystem = ethers.Wallet.createRandom().connect(ethers.provider);
+    const adminOnly = ethers.Wallet.createRandom().connect(ethers.provider);
+    await deployer.sendTransaction({ to: opsUser.address, value: ethers.parseEther("1") });
+    await deployer.sendTransaction({ to: opsSystem.address, value: ethers.parseEther("1") });
+    await deployer.sendTransaction({ to: adminOnly.address, value: ethers.parseEther("1") });
+
+    // baseline: no roles
+    await mustRevertWithSelector(
+      "opsUser without VIEW_USER_DATA cannot read loan order",
+      async () => view.connect(opsUser).getLoanOrder(orderId),
+      missingRoleSel
+    );
+    await mustRevertWithSelector(
+      "opsSystem without VIEW_SYSTEM_DATA cannot read failed fee amount",
+      async () => view.connect(opsSystem).getFailedFeeAmount(orderId),
+      missingRoleSel
+    );
+
+    // grant VIEW_USER_DATA to opsUser
+    await ensureRole("VIEW_USER_DATA", opsUser.address);
+    await mustSucceed("opsUser with VIEW_USER_DATA can read loan order", async () => view.connect(opsUser).getLoanOrder(orderId));
+    const [opsUserAccess] = (await mustSucceed("opsUser with VIEW_USER_DATA can call canAccessLoanOrder(borrower)", async () =>
+      view.connect(opsUser).canAccessLoanOrder(orderId, borrowerAddr)
+    )) as [boolean, boolean, bigint];
+    assertOk(opsUserAccess === true, "opsUser canAccessLoanOrder should be true for borrower order");
+    await mustRevertWithSelector(
+      "opsUser with VIEW_USER_DATA cannot read failed fee amount (needs VIEW_SYSTEM_DATA)",
+      async () => view.connect(opsUser).getFailedFeeAmount(orderId),
+      missingRoleSel
+    );
+
+    // grant VIEW_SYSTEM_DATA to opsSystem
+    await ensureRole("VIEW_SYSTEM_DATA", opsSystem.address);
+    await mustSucceed("opsSystem with VIEW_SYSTEM_DATA can read failed fee amount", async () => view.connect(opsSystem).getFailedFeeAmount(orderId));
+    await mustRevertWithSelector(
+      "opsSystem with VIEW_SYSTEM_DATA cannot read loan order (still needs VIEW_USER_DATA or party)",
+      async () => view.connect(opsSystem).getLoanOrder(orderId),
+      missingRoleSel
+    );
+
+    // grant ACTION_ADMIN to adminOnly (equivalent to ops+admin in view)
+    await ensureRole("ACTION_ADMIN", adminOnly.address);
+    await mustSucceed("adminOnly with ACTION_ADMIN can read loan order", async () => view.connect(adminOnly).getLoanOrder(orderId));
+    await mustSucceed("adminOnly with ACTION_ADMIN can read failed fee amount", async () => view.connect(adminOnly).getFailedFeeAmount(orderId));
 
     // ====== MUST: system ops gates ======
+    // Above opsSystem/adminOnly already cover this matrix.
+
+    // ====== Edge: non-existent order behavior ======
+    const missingOrderId = orderId + 999_999n;
     await mustRevertWithSelector(
-      "Ops without VIEW_SYSTEM_DATA cannot read failed fee amount",
-      async () => view.connect(ops).getFailedFeeAmount(orderId),
+      "Borrower cannot read missing orderId (treated as non-party) -> MissingRole",
+      async () => view.connect(borrower).getLoanOrder(missingOrderId),
       missingRoleSel
     );
-    await ensureRole("VIEW_SYSTEM_DATA", ops.address);
-    await mustSucceed("Ops with VIEW_SYSTEM_DATA can read failed fee amount", async () => view.connect(ops).getFailedFeeAmount(orderId));
+    const missingAsOps = (await mustSucceed("opsUser can read missing orderId (default struct)", async () =>
+      view.connect(opsUser).getLoanOrder(missingOrderId)
+    )) as any;
+    assertOk(missingAsOps.principal === 0n, "missing order principal must be 0");
+    assertOk(missingAsOps.borrower === ethers.ZeroAddress, "missing order borrower must be 0");
 
     console.log("\n✅ LendingEngineView acceptance PASSED");
   } finally {

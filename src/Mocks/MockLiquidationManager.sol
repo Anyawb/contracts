@@ -24,7 +24,7 @@ contract MockLiquidationManager is ILiquidationManager {
         uint256 collateralAmount,
         uint256 debtAmount,
         uint256 bonus,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 执行清算操作（Mock：不改账本，只做输入校验与事件/计数）
@@ -62,7 +62,7 @@ contract MockLiquidationManager is ILiquidationManager {
             collateralAmount,
             debtAmount,
             bonus,
-            block.timestamp
+            block.number
         );
     }
 
@@ -100,7 +100,7 @@ contract MockLiquidationManager is ILiquidationManager {
             collateralAmount,
             debtAmount,
             bonus,
-            block.timestamp
+            block.number
         );
     }
 
@@ -151,7 +151,7 @@ contract MockLiquidationManager is ILiquidationManager {
                 collateralAmounts[i],
                 debtAmounts[i],
                 b,
-                block.timestamp
+                block.number
             );
         }
     }

@@ -24,13 +24,18 @@ import {ICacheRefreshable} from "../../../interfaces/ICacheRefreshable.sol";
 interface ILiquidationConfigModuleLite {
     function getLiquidationThreshold() external view returns (uint256);
     function getMinHealthFactor() external view returns (uint256);
+    function getMaxLtvBps() external view returns (uint256);
     function updateLiquidationThresholdFromRiskManager(uint256 newThreshold, address caller) external;
     function updateMinHealthFactorFromRiskManager(uint256 newMinHealthFactor, address caller) external;
+    function updateMaxLtvBpsFromRiskManager(uint256 newMaxLtvBps, address caller) external;
 }
 
 /// @dev Minimal HealthView interface (read-only cache).
 interface IHealthViewLite {
-    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid, uint256 timestamp);
+    function getUserHealthFactorWithMeta(address user)
+        external
+        view
+        returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
 }
 
 /// @title LiquidationRiskManager - Liquidation Risk Manager
@@ -39,7 +44,7 @@ interface IHealthViewLite {
 /// @dev Provides liquidation threshold, liquidatability checks, and risk scoring aggregation capabilities.
 /// @dev Follows architecture guide: risk control is read-only/aggregation, does not participate in write operations
 /// @dev Module resolution: dynamically resolves KEY_CM/KEY_LE/KEY_POSITION_VIEW/KEY_HEALTH_VIEW via Registry.
-/// @dev Health factor SSOT: reads through HealthView.getUserHealthFactor cache
+/// @dev Health factor SSOT: reads through HealthView.getUserHealthFactorWithMeta cache
 ///      (RiskManager does not directly calculate/push HealthView cache).
 /// @dev Oracle/GD: does not access PriceOracle, nor implements Graceful Degradation.
 ///      Valuation degradation is centralized in VaultLendingEngine.
@@ -84,7 +89,10 @@ contract LiquidationRiskManager is
     uint256 public liquidationThresholdVar;
     /// @notice Minimum health factor in basis points (bps, 10000 = 100%)
     uint256 public minHealthFactorVar;
-    /// @notice Maximum cache duration in seconds
+    /// @notice Maximum LTV in basis points (bps, 10000 = 100%)
+    uint256 public maxLtvBpsVar;
+    /// @notice Maximum cache duration (legacy name; semantics are blocks).
+    /// @dev Time-Dependency-Refactor SSOT: cache aging is block-based (block.number).
     uint256 public maxCacheDurationVar;
     /// @notice Maximum batch operation size
     uint256 public maxBatchSizeVar;
@@ -108,21 +116,23 @@ contract LiquidationRiskManager is
      * @notice Emitted when minimum health factor is updated.
      * @param oldMinHealthFactor Previous minimum health factor (bps, 10000 = 100%)
      * @param newMinHealthFactor New minimum health factor (bps, 10000 = 100%)
-     * @param timestamp Update timestamp (in seconds)
+     * @param blockNumber Update blockNumber (blocks)
      */
-    event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 timestamp);
+    event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 blockNumber);
 
     /**
      * @notice Emitted when module cache is refreshed via maintenance manager.
      * @param caller Caller that performed refresh (should be CacheMaintenanceManager)
-     * @param timestamp Refresh timestamp (in seconds)
+     * @param blockNumber Refresh blockNumber (blocks)
      */
-    event ModuleCacheRefreshed(address indexed caller, uint256 timestamp);
+    event ModuleCacheRefreshed(address indexed caller, uint256 blockNumber);
 
     /// @dev Parameter key: liquidation threshold
     bytes32 private constant _PARAM_LIQUIDATION_THRESHOLD = keccak256("LIQUIDATION_THRESHOLD");
     /// @dev Parameter key: minimum health factor
     bytes32 private constant _PARAM_MIN_HEALTH_FACTOR = keccak256("MIN_HEALTH_FACTOR");
+    /// @dev Parameter key: maximum LTV
+    bytes32 private constant _PARAM_MAX_LTV_BPS = keccak256("MAX_LTV_BPS");
 
     // ============ Modifiers ============
     /**
@@ -162,7 +172,7 @@ contract LiquidationRiskManager is
      *
      * @param initialRegistryAddr Registry contract address for module resolution
      * @param initialAccessControl Access control interface address (backward compatible, not validated)
-     * @param initialMaxCacheDuration Maximum cache duration in seconds
+     * @param initialMaxCacheDuration Maximum cache duration in blocks (legacy param name kept for ABI stability)
      * @param initialMaxBatchSize Maximum batch operation size
      */
     function initialize(
@@ -184,6 +194,7 @@ contract LiquidationRiskManager is
         initialAccessControl;
         liquidationThresholdVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
         minHealthFactorVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
+        maxLtvBpsVar = LiquidationTypes.DEFAULT_MAX_LTV_BPS;
         maxCacheDurationVar = initialMaxCacheDuration;
         maxBatchSizeVar = initialMaxBatchSize;
 
@@ -207,8 +218,7 @@ contract LiquidationRiskManager is
         _refreshModuleCacheBestEffort();
         // Optional migration helper: keep local threshold mirrors aligned to ConfigManager SSOT.
         _syncThresholdMirrorBestEffort();
-        // solhint-disable-next-line not-rely-on-time
-        emit ModuleCacheRefreshed(msg.sender, block.timestamp);
+        emit ModuleCacheRefreshed(msg.sender, block.number);
     }
 
     /**
@@ -270,16 +280,15 @@ contract LiquidationRiskManager is
      *
      * Security:
      * - Internal function (no external access)
-     * - Updates cache timestamp on successful fetch
+     * - Updates cache block on successful fetch
      *
      * @param key Module key to resolve
      * @return moduleAddr Resolved module address
      */
     function _resolveModule(bytes32 key) internal returns (address moduleAddr) {
         moduleAddr = _moduleCache.moduleAddresses[key];
-        uint256 ts = _moduleCache.cacheTimestamps[key];
-        // solhint-disable-next-line not-rely-on-time
-        if (moduleAddr != address(0) && ts != 0 && block.timestamp - ts <= maxCacheDurationVar) {
+        uint256 cacheBlock = _moduleCache.cacheBlocks[key];
+        if (moduleAddr != address(0) && cacheBlock != 0 && block.number - cacheBlock <= maxCacheDurationVar) {
             return moduleAddr;
         }
 
@@ -287,8 +296,7 @@ contract LiquidationRiskManager is
         if (moduleAddr == address(0)) revert LiquidationRiskManager__MissingModule(key);
 
         _moduleCache.moduleAddresses[key] = moduleAddr;
-        // solhint-disable-next-line not-rely-on-time
-        _moduleCache.cacheTimestamps[key] = block.timestamp;
+        _moduleCache.cacheBlocks[key] = block.number;
         return moduleAddr;
     }
 
@@ -308,8 +316,7 @@ contract LiquidationRiskManager is
             return;
         }
         _moduleCache.moduleAddresses[key] = addr;
-        // solhint-disable-next-line not-rely-on-time
-        _moduleCache.cacheTimestamps[key] = block.timestamp;
+        _moduleCache.cacheBlocks[key] = block.number;
     }
 
     /**
@@ -346,8 +353,7 @@ contract LiquidationRiskManager is
             return;
         }
         _moduleCache.moduleAddresses[key] = moduleAddr;
-        // solhint-disable-next-line not-rely-on-time
-        _moduleCache.cacheTimestamps[key] = block.timestamp;
+        _moduleCache.cacheBlocks[key] = block.number;
     }
 
     // ============ Registry Helper Functions (Read-Only) ============
@@ -626,8 +632,7 @@ contract LiquidationRiskManager is
         uint256 oldThreshold = liquidationThresholdVar;
         liquidationThresholdVar = newThreshold;
         emit ParameterUpdated(_PARAM_LIQUIDATION_THRESHOLD, oldThreshold, newThreshold);
-        // solhint-disable-next-line not-rely-on-time
-        emit LiquidationThresholdUpdated(oldThreshold, newThreshold, block.timestamp);
+        emit LiquidationThresholdUpdated(oldThreshold, newThreshold, block.number);
     }
 
     /**
@@ -643,6 +648,46 @@ contract LiquidationRiskManager is
      */
     function getMinHealthFactor() external view override returns (uint256) {
         return _getMinHealthFactorBps();
+    }
+
+    /**
+     * @notice Get the current maximum LTV (bps=1e4).
+     * @dev SSOT migration: prefers `KEY_LIQUIDATION_CONFIG_MANAGER` if available; falls back to `maxLtvBpsVar`.
+     * @return maxLtvBps Maximum LTV in basis points (bps, 10_000 = 100%)
+     */
+    function getMaxLtvBps() external view override returns (uint256 maxLtvBps) {
+        return _getMaxLtvBps();
+    }
+
+    /**
+     * @notice Update maximum LTV (governance function).
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *      - newMaxLtvBps is zero or > 10_000 bps
+     *
+     * Security:
+     * - Role-gated via onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+     * - Syncs with LiquidationConfigManager if available (SSOT migration)
+     *
+     * @param newMaxLtvBps New maximum LTV in basis points (bps, 10_000 = 100%)
+     */
+    function updateMaxLtvBps(uint256 newMaxLtvBps)
+        external
+        override
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+    {
+        if (!LiquidationTypes.isValidMaxLtvBps(newMaxLtvBps)) {
+            revert LiquidationRiskManager__InvalidThreshold();
+        }
+
+        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+        if (cfg != address(0)) {
+            ILiquidationConfigModuleLite(cfg).updateMaxLtvBpsFromRiskManager(newMaxLtvBps, msg.sender);
+        }
+
+        uint256 old = maxLtvBpsVar;
+        maxLtvBpsVar = newMaxLtvBps;
+        emit ParameterUpdated(_PARAM_MAX_LTV_BPS, old, newMaxLtvBps);
     }
 
     /**
@@ -679,8 +724,7 @@ contract LiquidationRiskManager is
         uint256 oldFactor = minHealthFactorVar;
         minHealthFactorVar = newMinHealthFactor;
         emit ParameterUpdated(_PARAM_MIN_HEALTH_FACTOR, oldFactor, newMinHealthFactor);
-        // solhint-disable-next-line not-rely-on-time
-        emit MinHealthFactorUpdated(oldFactor, newMinHealthFactor, block.timestamp);
+        emit MinHealthFactorUpdated(oldFactor, newMinHealthFactor, block.number);
     }
 
     // ============ Internal Helper Functions ============
@@ -710,6 +754,19 @@ contract LiquidationRiskManager is
         return minHealthFactorVar;
     }
 
+    /// @dev SSOT migration: prefer ConfigManager, fallback to local mirror (deployment transition only).
+    function _getMaxLtvBps() internal view returns (uint256 maxLtvBps) {
+        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+        if (cfg != address(0)) {
+            try ILiquidationConfigModuleLite(cfg).getMaxLtvBps() returns (uint256 v) {
+                if (v != 0) return v;
+            } catch {
+                _noop();
+            }
+        }
+        return maxLtvBpsVar;
+    }
+
     /// @dev Best-effort mirror sync: used by CacheMaintenanceManager to reduce accidental direct reads of `*Var`.
     function _syncThresholdMirrorBestEffort() internal {
         address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
@@ -724,6 +781,12 @@ contract LiquidationRiskManager is
 
         try ILiquidationConfigModuleLite(cfg).getMinHealthFactor() returns (uint256 m) {
             if (m != 0) minHealthFactorVar = m;
+        } catch {
+            _noop();
+        }
+
+        try ILiquidationConfigModuleLite(cfg).getMaxLtvBps() returns (uint256 v) {
+            if (v != 0) maxLtvBpsVar = v;
         } catch {
             _noop();
         }
@@ -746,7 +809,7 @@ contract LiquidationRiskManager is
         // Best-effort: prefer cached module, but if stale try Registry (view-only) to improve availability.
         address hv = _getModuleViewBestEffort(ModuleKeys.KEY_HEALTH_VIEW);
         if (hv == address(0)) revert LiquidationRiskManager__MissingModule(ModuleKeys.KEY_HEALTH_VIEW);
-        (hf, valid, ) = IHealthViewLite(hv).getUserHealthFactor(user);
+        (hf, valid, ) = IHealthViewLite(hv).getUserHealthFactorWithMeta(user);
     }
 
     /**
@@ -762,14 +825,11 @@ contract LiquidationRiskManager is
      */
     function _getModuleViewBestEffort(bytes32 key) internal view returns (address moduleAddr) {
         moduleAddr = _moduleCache.moduleAddresses[key];
-        uint256 ts = _moduleCache.cacheTimestamps[key];
-        if (moduleAddr != address(0) && ts != 0) {
+        uint256 cacheBlock = _moduleCache.cacheBlocks[key];
+        if (moduleAddr != address(0) && cacheBlock != 0) {
             if (maxCacheDurationVar == 0) return moduleAddr;
-            // If time goes backwards, keep cache to avoid underflow and keep availability.
-            // solhint-disable-next-line not-rely-on-time
-            if (block.timestamp < ts) return moduleAddr;
-            // solhint-disable-next-line not-rely-on-time
-            if (block.timestamp - ts <= maxCacheDurationVar) return moduleAddr;
+            // block.number is monotonic; treat cache as valid if within age blocks.
+            if (block.number - cacheBlock <= maxCacheDurationVar) return moduleAddr;
         }
         // Cache missing or stale: fall back to Registry without updating cache.
         address fromReg = Registry(_registryAddr).getModule(key);
@@ -794,7 +854,6 @@ contract LiquidationRiskManager is
         IAccessControlManager(acmAddr).requireRole(role, caller);
     }
 
-    /// @dev No-op helper to satisfy solhint `no-empty-blocks` in best-effort try/catch paths.
     function _noop() private pure {
         uint256 unused = 0;
         unused;
@@ -802,5 +861,5 @@ contract LiquidationRiskManager is
 
     // ============ Storage Gap ============
     // NOTE: Reserved storage space to allow for layout changes in future upgrades.
-    uint256[50] private __gap;
+    uint256[49] private __gap;
 } 

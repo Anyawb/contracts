@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import { IOrderEngine } from "./IOrderEngine.sol";
 
 /// @title IOrderEngineViewAdapter (view-only adapter surface)
-/// @notice Read-only adapter functions used by view-layer modules (e.g. LendingEngineView) and SettlementManager.
+/// @notice Read-only adapter functions used by view-layer modules (e.g., LendingEngineView) and SettlementManager.
 /// @dev These are intentionally separated from IOrderEngine to avoid mixing "write SSOT" with view helpers.
 interface IOrderEngineViewAdapter {
     /**
@@ -18,51 +18,83 @@ interface IOrderEngineViewAdapter {
      * @param orderId Loan order id.
      * @return order Loan order snapshot (see IOrderEngine.LoanOrder).
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getLoanOrderForView(uint256 orderId) external view returns (IOrderEngine.LoanOrder memory order);
+    function getLoanOrderForView(uint256 orderId) external view returns (IOrderEngine.LoanOrder memory order);
 
     /**
      * @notice View-only read of a user's loan count (borrower perspective).
      * @dev Reverts if:
      *      - implementation enforces read ACL and caller lacks permissions
+     *
+     * Security:
+     * - View-only; must not mutate state.
+     *
+     * @param user Borrower address.
+     * @return count Number of loans for the borrower.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getUserLoanCountForView(address user) external view returns (uint256 count);
+    function getUserLoanCountForView(address user) external view returns (uint256 count);
 
     /**
      * @notice View-only read of accumulated failed fee amount for an order (ops/monitoring).
      * @dev Reverts if:
      *      - implementation enforces read ACL and caller lacks permissions
+     *
+     * Security:
+     * - View-only; must not mutate state.
+     *
+     * @param orderId Loan order id.
+     * @return feeAmount Failed fee amount (token decimals of order.asset).
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getFailedFeeAmountForView(uint256 orderId) external view returns (uint256 feeAmount);
+    function getFailedFeeAmountForView(uint256 orderId) external view returns (uint256 feeAmount);
 
     /**
      * @notice View-only read of NFT retry count for an order (ops/monitoring).
      * @dev Reverts if:
      *      - implementation enforces read ACL and caller lacks permissions
+     *
+     * Security:
+     * - View-only; must not mutate state.
+     *
+     * @param orderId Loan order id.
+     * @return retryCount Number of NFT mint retry attempts.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getNftRetryCountForView(uint256 orderId) external view returns (uint256 retryCount);
+    function getNftRetryCountForView(uint256 orderId) external view returns (uint256 retryCount);
 
     /**
      * @notice View-only access check for a loan order.
      * @dev Intended for frontends/AI to preflight whether an address is allowed to view an order.
+     *      Returns false for disallowed callers if implementation enforces ACL.
+     *
+     * Security:
+     * - View-only; must not mutate state.
+     *
+     * @param orderId Loan order id.
+     * @param user Address to check.
+     * @return hasAccess True if user can access the order, otherwise false.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess);
+    function canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess);
 
     /**
      * @notice View-only check whether an account is considered a match engine (keeper/orchestrator capability).
+     * @dev Reverts if:
+     *      - implementation enforces read ACL and caller lacks permissions
+     *
+     * Security:
+     * - View-only; must not mutate state.
+     *
+     * @param account Address to check.
+     * @return isMatch True if account is a match engine, otherwise false.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _isMatchEngineForView(address account) external view returns (bool isMatch);
+    function isMatchEngineForView(address account) external view returns (bool isMatch);
 
     /**
      * @notice View-only getter for the Registry address stored in ORDER_ENGINE.
      * @dev Convenience for tooling/AI; should match Registry module SSOT.
+     *
+     * Security:
+     * - View-only; must not mutate state.
+     *
+     * @return registry Registry address.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getRegistryForView() external view returns (address registry);
+    function getRegistryForView() external view returns (address registry);
 }
 

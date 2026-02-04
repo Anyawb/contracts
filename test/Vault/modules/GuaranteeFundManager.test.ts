@@ -138,7 +138,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     
     // MockERC20 需要构造函数参数
     const MockERC20Factory = await ethers.getContractFactory('MockERC20');
-    const erc20 = await MockERC20Factory.deploy('Mock Token', 'MTK', ethers.parseUnits('1000000', 18));
+    const erc20 = await MockERC20Factory.deploy('Mock Token', 'MTK', 18, ethers.parseUnits('1000000', 18));
     await erc20.waitForDeployment();
 
     // 3. 注册模块到 Registry
@@ -327,8 +327,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.lockGuarantee(TEST_USER, mockERC20.target, TEST_AMOUNT)
       ).to.emit(guaranteeFundManager, 'GuaranteeLocked')
-        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
 
       expect(await guaranteeFundManager.getLockedGuarantee(TEST_USER, mockERC20.target)).to.equal(TEST_AMOUNT);
@@ -363,8 +363,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.releaseGuarantee(TEST_USER, mockERC20.target, releaseAmount)
       ).to.emit(guaranteeFundManager, 'GuaranteeReleased')
-        .withArgs(TEST_USER, mockERC20.target, releaseAmount, (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, mockERC20.target, releaseAmount, (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
 
       expect(await guaranteeFundManager.getLockedGuarantee(TEST_USER, mockERC20.target)).to.equal(TEST_AMOUNT - releaseAmount);
@@ -382,8 +382,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.releaseGuarantee(TEST_USER, mockERC20.target, releaseAmount)
       ).to.emit(guaranteeFundManager, 'GuaranteeReleased')
-        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
 
       expect(await guaranteeFundManager.getLockedGuarantee(TEST_USER, mockERC20.target)).to.equal(BigInt(0));
@@ -400,8 +400,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.forfeitGuarantee(TEST_USER, mockERC20.target, TEST_FEE_RECEIVER)
       ).to.emit(guaranteeFundManager, 'GuaranteeForfeited')
-        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, TEST_FEE_RECEIVER, (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, TEST_FEE_RECEIVER, (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
 
       expect(await guaranteeFundManager.getLockedGuarantee(TEST_USER, mockERC20.target)).to.equal(BigInt(0));
@@ -445,7 +445,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     it('GuaranteeFundManager – 应该正确批量锁定保证金', async function () {
       // 第二个资产必须是 ERC20 合约地址（批量锁定会执行真实 transferFrom）
       const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
-      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', ethers.parseUnits('1000000', 18));
+      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
       const erc20_2Typed = erc20_2 as unknown as MockERC20;
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
@@ -457,8 +457,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.batchLockGuarantees(TEST_USER, assets, amounts)
       ).to.emit(guaranteeFundManager, 'GuaranteeLocked')
-        .withArgs(TEST_USER, assets[0], amounts[0], (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, assets[0], amounts[0], (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
 
       expect(await guaranteeFundManager.getLockedGuarantee(TEST_USER, assets[0])).to.equal(amounts[0]);
@@ -470,7 +470,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     it('GuaranteeFundManager – 应该正确处理批量锁定中的零金额', async function () {
       // 第二个资产必须是 ERC20 合约地址（即使 amount=0，保持测试语义一致）
       const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
-      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', ethers.parseUnits('1000000', 18));
+      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
       const erc20_2Typed = erc20_2 as unknown as MockERC20;
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
@@ -535,7 +535,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     it('GuaranteeFundManager – 应该正确批量释放保证金', async function () {
       // 部署第二个 ERC20 合约用于测试
       const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
-      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', ethers.parseUnits('1000000', 18));
+      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
       
       // 给第二个合约铸造代币
@@ -556,8 +556,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.batchReleaseGuarantees(TEST_USER, assets, releaseAmounts)
       ).to.emit(guaranteeFundManager, 'GuaranteeReleased')
-        .withArgs(TEST_USER, assets[0], releaseAmounts[0], (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, assets[0], releaseAmounts[0], (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
 
       expect(await guaranteeFundManager.getLockedGuarantee(TEST_USER, assets[0])).to.equal(amounts[0] - releaseAmounts[0]);
@@ -571,7 +571,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     it('GuaranteeFundManager – 应该正确处理批量释放中的零金额', async function () {
       // 部署第二个 ERC20 合约用于测试
       const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
-      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', ethers.parseUnits('1000000', 18));
+      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
       
       // 给第二个合约铸造代币
@@ -681,8 +681,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.lockGuarantee(TEST_USER, mockERC20.target, TEST_AMOUNT)
       ).to.emit(guaranteeFundManager, 'GuaranteeLocked')
-        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
     });
 
@@ -692,8 +692,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.releaseGuarantee(TEST_USER, mockERC20.target, TEST_AMOUNT / 2n)
       ).to.emit(guaranteeFundManager, 'GuaranteeReleased')
-        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT / 2n, (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT / 2n, (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
     });
 
@@ -703,8 +703,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await expect(
         mockVaultCore.forfeitGuarantee(TEST_USER, mockERC20.target, TEST_FEE_RECEIVER)
       ).to.emit(guaranteeFundManager, 'GuaranteeForfeited')
-        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, TEST_FEE_RECEIVER, (timestamp: bigint) => {
-          return timestamp > BigInt(0);
+        .withArgs(TEST_USER, mockERC20.target, TEST_AMOUNT, TEST_FEE_RECEIVER, (blockNumber: bigint) => {
+          return blockNumber > BigInt(0);
         });
     });
 
@@ -737,7 +737,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     it('GuaranteeFundManager – 应该正确处理多个资产的保证金', async function () {
       // 第二个资产必须是 ERC20 合约地址
       const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
-      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', ethers.parseUnits('1000000', 18));
+      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
       const asset2 = erc20_2.target;
       const erc20_2Typed = erc20_2 as unknown as MockERC20;
@@ -794,7 +794,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     it('GuaranteeFundManager – 应该正确处理批量操作的完整生命周期', async function () {
       // 部署第二个 ERC20 合约
       const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
-      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', ethers.parseUnits('1000000', 18));
+      const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
       
       // 给第二个合约铸造代币

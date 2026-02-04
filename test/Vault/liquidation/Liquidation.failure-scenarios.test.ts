@@ -265,7 +265,8 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
     expect(uDebtAmount).to.equal(30n);
     expect(uLiquidator).to.equal(liquidator.address);
     expect(uBonus).to.equal(5n);
-    expect(uTimestamp).to.equal(BigInt(block!.timestamp));
+    // Time-Dependency-Refactor: payload blockNumber is a blockNumber time-axis marker.
+    expect(uTimestamp).to.equal(BigInt(block!.number));
 
     const payoutPayload: string = abiCoder.decode(["bytes"], payoutLog.data)[0];
     const [
@@ -293,7 +294,8 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
     expect(pReserveShare).to.equal(6n); // 30 * 2000 / 10000
     expect(pLenderShare).to.equal(6n); // 30 * 2000 / 10000
     expect(pLiquidatorShare).to.equal(15n); // remainder
-    expect(pTimestamp).to.equal(BigInt(block!.timestamp));
+    // Time-Dependency-Refactor: payload blockNumber is a blockNumber time-axis marker.
+    expect(pTimestamp).to.equal(BigInt(block!.number));
 
     // Permission semantics: no view-role mixing here; push is strictly initiated by LiquidationManager via registry wiring.
     pPlatform; pReserve; pLender;

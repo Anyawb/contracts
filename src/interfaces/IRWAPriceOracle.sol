@@ -17,8 +17,8 @@ interface IRWAPriceOracle {
     /// @notice 价格更新事件
     /// @param token    资产地址
     /// @param price    最新价格（USD 定价）
-    /// @param timestamp 更新时间戳
-    event PriceUpdated(address indexed token, uint256 price, uint256 timestamp);
+    /// @param blockNumber 更新区块号（blockNumber）
+    event PriceUpdated(address indexed token, uint256 price, uint256 blockNumber);
 
     /// @notice RWA 资产配置更新事件
     /// @param token 资产地址
@@ -54,7 +54,7 @@ interface IRWAPriceOracle {
     /// @notice RWA 价格数据结构
     struct RWAPriceData {
         uint256 price;        // 价格（USD 定价，8位小数）
-        uint256 timestamp;    // 价格更新时间戳
+        uint256 blockNumber;    // 价格更新区块号（blockNumber）
         uint8 decimals;       // 价格精度
         bool isValid;         // 价格是否有效
         string assetType;     // 资产类型（如：real-estate, commodities, etc.）
@@ -129,20 +129,20 @@ interface IRWAPriceOracle {
      * @notice 更新 RWA 资产价格（仅授权地址可调用）
      * @param token 资产地址
      * @param price 价格（USD 定价，8位小数）
-     * @param timestamp 价格时间戳
+     * @param blockNumber 价格区块号（blockNumber）
      */
-    function updatePrice(address token, uint256 price, uint256 timestamp) external;
+    function updatePrice(address token, uint256 price, uint256 blockNumber) external;
 
     /**
      * @notice 批量更新 RWA 资产价格（仅授权地址可调用）
      * @param tokens 资产地址数组
      * @param prices 价格数组
-     * @param timestamps 时间戳数组
+     * @param blockNumbers 区块号数组（blockNumber）
      */
     function updatePrices(
         address[] calldata tokens,
         uint256[] calldata prices,
-        uint256[] calldata timestamps
+        uint256[] calldata blockNumbers
     ) external;
 
     /**

@@ -10,8 +10,8 @@ import { IRewardConsumptionEvents } from "../interfaces/IRewardConsumptionEvents
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ZeroAddress } from "../errors/StandardErrors.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 
@@ -66,7 +66,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -86,7 +86,7 @@ contract RewardConsumption is
         // Spend 侧统一推送（RewardView.onlyWriter 白名单）
         _tryPushPointsBurned(msg.sender, pointsBurned, "Service Consumption");
         _tryPushUserPrivilege(msg.sender, privilegePacked);
-        _tryPushConsumptionRecord(msg.sender, uint8(_serviceType), uint8(_level), pointsBurned, expirationTime, block.timestamp);
+        _tryPushConsumptionRecord(msg.sender, uint8(_serviceType), uint8(_level), pointsBurned, expirationTime, block.number);
     }
 
     /// @notice 批量消费积分
@@ -107,7 +107,7 @@ contract RewardConsumption is
             if (pointsBurned[i] > 0) {
                 _tryPushPointsBurned(users[i], pointsBurned[i], "Service Consumption");
                 _tryPushUserPrivilege(users[i], privilegePacked[i]);
-                _tryPushConsumptionRecord(users[i], uint8(serviceTypes[i]), uint8(levels[i]), pointsBurned[i], expirationTimes[i], block.timestamp);
+                _tryPushConsumptionRecord(users[i], uint8(serviceTypes[i]), uint8(levels[i]), pointsBurned[i], expirationTimes[i], block.number);
             }
         }
         
@@ -116,7 +116,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_BATCH_WITHDRAW,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_BATCH_WITHDRAW),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -128,7 +128,7 @@ contract RewardConsumption is
             _rewardCore.upgradeServiceLevelFor(msg.sender, serviceType, newLevel);
         _tryPushPointsBurned(msg.sender, pointsBurned, "Service Upgrade");
         _tryPushUserPrivilege(msg.sender, privilegePacked);
-        _tryPushConsumptionRecord(msg.sender, uint8(serviceType), uint8(newLevel), pointsBurned, expirationTime, block.timestamp);
+        _tryPushConsumptionRecord(msg.sender, uint8(serviceType), uint8(newLevel), pointsBurned, expirationTime, block.number);
     }
 
     // ========== 管理接口 ==========
@@ -153,7 +153,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -168,7 +168,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -185,7 +185,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -200,7 +200,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -216,7 +216,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -235,7 +235,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
         
         // 发出模块地址更新事件
@@ -243,7 +243,7 @@ contract RewardConsumption is
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
-            block.timestamp
+            block.number
         );
     }
     
@@ -267,7 +267,7 @@ contract RewardConsumption is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 

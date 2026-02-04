@@ -152,13 +152,13 @@ async function backupWalletAssets(): Promise<void> {
     fs.mkdirSync(backupDir, { recursive: true });
   }
   
-  // 生成备份文件名 Generate backup filename
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupFile = path.join(backupDir, `arbitrum-sepolia-backup-${timestamp}.json`);
+  // 生成备份文件名（区块号口径） Generate backup filename (block-based)
+  const backupBlock = await deployer.provider.getBlockNumber();
+  const backupFile = path.join(backupDir, `arbitrum-sepolia-backup-${backupBlock}.json`);
   
   // 保存备份信息 Save backup information
   const backupData = {
-    timestamp: new Date().toISOString(),
+    blockNumber: backupBlock,
     network: ARBITRUM_SEPOLIA_CONFIG.name,
     deployer: deployer.address,
     balance: ethers.formatEther(balance),
@@ -541,7 +541,7 @@ async function main() {
       }
     }
 
-    // 授权 SettlementManager 执行订单级还款与只读查询（ORDER_ENGINE.repay / _getLoanOrderForView）
+    // 授权 SettlementManager 执行订单级还款与只读查询（ORDER_ENGINE.repay / getLoanOrderForView）
     try {
       if (deployed.AccessControlManager && deployed.SettlementManager) {
         const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
@@ -738,6 +738,36 @@ async function main() {
     if (!deployed.StatisticsView) {
       try { deployed.StatisticsView = await deployProxy('StatisticsView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ StatisticsView deployment failed:', error); }
     }
+
+    // Strict B+ (snapshot + single-entry orchestrator): StatisticsPushManager
+    if (!deployed.StatisticsPushManager) {
+      try {
+        deployed.StatisticsPushManager = await deployProxy(
+          'src/Vault/modules/StatisticsPushManager.sol:StatisticsPushManager',
+          [deployed.Registry]
+        );
+        save(deployed);
+      } catch (error) {
+        console.log('⚠️ StatisticsPushManager deployment failed:', error);
+      }
+    }
+
+    // Grant VIEW_PRICE_DATA to StatisticsPushManager so it can read PositionView USD-8 valuations.
+    try {
+      if (deployed.StatisticsPushManager && deployed.AccessControlManager) {
+        const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+        const VIEW_PRICE_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_PRICE_DATA'));
+        const already = await acm.hasRole(VIEW_PRICE_DATA, deployed.StatisticsPushManager);
+        if (!already) {
+          await (await acm.grantRole(VIEW_PRICE_DATA, deployed.StatisticsPushManager)).wait();
+          console.log('🔑 Granted VIEW_PRICE_DATA to StatisticsPushManager');
+        } else {
+          console.log('✅ StatisticsPushManager has VIEW_PRICE_DATA (verified)');
+        }
+      }
+    } catch (e) {
+      console.log('⚠️ Grant VIEW_PRICE_DATA to StatisticsPushManager skipped/failed:', e);
+    }
     if (!deployed.PositionView) {
       try { deployed.PositionView = await deployProxy('PositionView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ PositionView deployment failed:', error); }
     }
@@ -766,6 +796,9 @@ async function main() {
     }
     if (!deployed.RiskView) {
       try { deployed.RiskView = await deployProxy('RiskView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RiskView deployment failed:', error); }
+    }
+    if (!deployed.SystemRiskView) {
+      try { deployed.SystemRiskView = await deployProxy('SystemRiskView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ SystemRiskView deployment failed:', error); }
     }
     if (!deployed.ViewCache) {
       try { deployed.ViewCache = await deployProxy('ViewCache', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ ViewCache deployment failed:', error); }
@@ -892,6 +925,7 @@ async function main() {
       // 不注册未部署的 RWA Token
       SystemView: 'SYSTEM_VIEW',
       StatisticsView: 'STATISTICS_VIEW',
+      StatisticsPushManager: 'STATISTICS_PUSH_MANAGER',
       PositionView: 'POSITION_VIEW',
       PreviewView: 'PREVIEW_VIEW',
       DashboardView: 'DASHBOARD_VIEW',
@@ -900,6 +934,7 @@ async function main() {
       AccessControlView: 'ACCESS_CONTROL_VIEW',
       CacheOptimizedView: 'CACHE_OPTIMIZED_VIEW',
       RiskView: 'RISK_VIEW',
+      SystemRiskView: 'SYSTEM_RISK_VIEW',
       ViewCache: 'VIEW_CACHE',
       EventHistoryManager: 'EVENT_HISTORY_MANAGER',
       ValuationOracleView: 'VALUATION_ORACLE_VIEW',
@@ -949,6 +984,7 @@ async function main() {
         'HealthView',
         'SystemView',
         'StatisticsView',
+      'StatisticsPushManager',
         'PositionView',
         'PreviewView',
         'DashboardView',
@@ -957,6 +993,7 @@ async function main() {
         'AccessControlView',
         'CacheOptimizedView',
         'RiskView',
+      'SystemRiskView',
         'ViewCache',
         'EventHistoryManager',
         'RewardView',

@@ -2,45 +2,64 @@
 pragma solidity ^0.8.20;
 
 /// @title SystemEvents
-/// @notice Protocol-wide standardized events (single source of truth for cross-module events).
-/// @dev Architecture-Guide alignment:
-///      - Prefer module-local events + DataPush for business flows.
+/// @notice Protocol-wide standardized events (SSOT for cross-module indexing).
+/// @dev Architecture alignment:
+///      - Prefer module-local events for business flows.
 ///      - Keep only truly shared, cross-module events here to avoid duplication.
 library SystemEvents {
-    /* ============ Events ============ */
+    /*━━━━━━━━━━━━━━━ Registry events ━━━━━━━━━━━━━━━*/
 
     /// @notice Emitted when a module address is updated in the Registry.
-    /// @dev Related action key: ActionKeys.ACTION_UPGRADE_MODULE.
-    /// @param moduleName Module name (human-readable).
+    /// @dev
+    /// - Expected to be emitted by the Registry when updating module wiring.
+    /// - `moduleName` is a human-readable label intended for off-chain indexing; it is not a key.
+    /// - Time-Dependency-Refactor: `blockNumber` is treated as an onchain time axis marker (preferred: `block.number`).
+    ///
+    /// Related permission: typically gated by `ActionKeys.ACTION_UPGRADE_MODULE` in governance flows.
+    ///
+    /// @param moduleName Human-readable module name.
     /// @param oldModuleAddr Previous module address.
     /// @param newModuleAddr New module address.
-    /// @param timestamp Block timestamp when the update is recorded.
+    /// @param blockNumber Onchain blockNumber marker (recommended: block.number at emit time).
     event ModuleAddressUpdated(
         string indexed moduleName,
         address oldModuleAddr,
         address newModuleAddr,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
-    // ---------- Action & Governance Events ----------
+    /*━━━━━━━━━━━━━━━ Action & governance events ━━━━━━━━━━━━━━━*/
     /// @notice Emitted when an ActionKeys-governed operation is executed.
-    /// @dev Designed for uniform off-chain indexing across modules.
-    /// @param actionKey Action key (see ActionKeys constants).
-    /// @param actionName Human-readable action name (e.g. ActionKeys.getActionKeyString(actionKey)).
-    /// @param executor Executor address.
-    /// @param timestamp Block timestamp when the action is recorded.
+    /// @dev
+    /// - Designed for uniform off-chain indexing across modules and governance entrypoints.
+    /// - `actionName` is optional; emitters MAY pass an empty string to reduce gas.
+    /// - Time-Dependency-Refactor: `blockNumber` is treated as an onchain time axis marker (preferred: `block.number`).
+    ///
+    /// @param actionKey The action key (see `ActionKeys` constants).
+    /// @param actionName A human-readable label (optional; may be empty).
+    /// @param executor The executor address.
+    /// @param blockNumber Onchain blockNumber marker (recommended: block.number at emit time).
     event ActionExecuted(
         bytes32 indexed actionKey,
         string actionName,
         address indexed executor,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
-    // ---------- External Module & Error Events ----------
+    /*━━━━━━━━━━━━━━━ Best-effort external call events ━━━━━━━━━━━━━━━*/
     /// @notice Emitted when a best-effort external module call reverts.
-    /// @param moduleName Module name (human-readable).
+    /// @dev
+    /// - Intended for try/catch call sites that swallow reverts but still record diagnostics.
+    /// - `revertData` is the raw returndata from the failed call; it may be empty.
+    /// - Time-Dependency-Refactor: `blockNumber` is treated as an onchain time axis marker (preferred: `block.number`).
+    ///
+    /// @param moduleName Human-readable module name.
     /// @param revertData Raw revert data returned by the call.
-    /// @param timestamp Block timestamp when the failure is recorded.
-    event ExternalModuleReverted(string moduleName, bytes revertData, uint256 timestamp);
+    /// @param blockNumber Onchain blockNumber marker (recommended: block.number at emit time).
+    event ExternalModuleReverted(
+        string moduleName,
+        bytes revertData,
+        uint256 blockNumber
+    );
 }
 

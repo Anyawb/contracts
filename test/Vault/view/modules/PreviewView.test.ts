@@ -4,6 +4,7 @@ import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 
 const KEY_ACM = ethers.id("ACCESS_CONTROL_MANAGER");
 const KEY_POSITION_VIEW = ethers.id("POSITION_VIEW");
+const KEY_SYSTEM_RISK_VIEW = ethers.id("SYSTEM_RISK_VIEW");
 const ACTION_ADMIN = ethers.id("ACTION_ADMIN");
 const ACTION_VIEW_USER_DATA = ethers.id("VIEW_USER_DATA");
 
@@ -22,8 +23,16 @@ describe("PreviewView", function () {
     const Position = await ethers.getContractFactory("MockPositionView");
     const position = await Position.deploy();
 
+    // PreviewView depends on system risk thresholds (Architecture-Guide SSOT: SystemRiskView).
+    // Use a minimal mock that exposes getMinHealthFactor/getMaxLtvBps without role-gates.
+    const SysRisk = await ethers.getContractFactory("MockLiquidationRiskManager");
+    const systemRiskView = await SysRisk.deploy();
+    await systemRiskView.setMinHealthFactor(10_000); // HF threshold: 1.0 (bps=1e4)
+    await systemRiskView.setMaxLtvBps(7_500);        // Max LTV: 75%
+
     await registry.setModule(KEY_ACM, await acm.getAddress());
     await registry.setModule(KEY_POSITION_VIEW, await position.getAddress());
+    await registry.setModule(KEY_SYSTEM_RISK_VIEW, await systemRiskView.getAddress());
 
     const Preview = await ethers.getContractFactory("PreviewView");
     const preview = await upgrades.deployProxy(Preview, [await registry.getAddress()]);
@@ -35,6 +44,55 @@ describe("PreviewView", function () {
     return { admin, user, viewer, stranger, user2, user3, registry, acm, position, preview, asset, asset2, asset3 };
   }
 
+  async function deployRoleGatedPositionFixture() {
+    const [admin, user, viewer, stranger] = await ethers.getSigners();
+
+    const Registry = await ethers.getContractFactory("MockRegistry");
+    const registry = await Registry.deploy();
+
+    const Access = await ethers.getContractFactory("MockAccessControlManager");
+    const acm = await Access.deploy();
+    await acm.grantRole(ACTION_ADMIN, admin.address);
+    await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
+
+    await registry.setModule(KEY_ACM, await acm.getAddress());
+
+    // PositionView mock that enforces Scheme-U read gating (requires roles on msg.sender when non-self).
+    const Position = await ethers.getContractFactory("MockPositionViewRoleGated");
+    const position = await Position.deploy(await registry.getAddress());
+    await registry.setModule(KEY_POSITION_VIEW, await position.getAddress());
+
+    const SysRisk = await ethers.getContractFactory("MockLiquidationRiskManager");
+    const systemRiskView = await SysRisk.deploy();
+    await systemRiskView.setMinHealthFactor(10_000); // HF threshold: 1.0 (bps=1e4)
+    await systemRiskView.setMaxLtvBps(7_500);        // Max LTV: 75%
+    await registry.setModule(KEY_SYSTEM_RISK_VIEW, await systemRiskView.getAddress());
+
+    const Preview = await ethers.getContractFactory("PreviewView");
+    const preview = await upgrades.deployProxy(Preview, [await registry.getAddress()]);
+
+    const asset = ethers.Wallet.createRandom().address;
+
+    return { admin, user, viewer, stranger, registry, acm, position, preview, asset };
+  }
+
+  async function expectMissingRole(p: Promise<unknown>, preview: any) {
+    const missingRole = preview.interface.getError("MissingRole");
+    try {
+      await p;
+      expect.fail("expected MissingRole revert");
+    } catch (e: any) {
+      // Hardhat/ethers v6 errors can expose revert data under different keys; check best-effort.
+      const data: string | undefined = e?.data ?? e?.error?.data ?? e?.info?.error?.data;
+      if (typeof data === "string") {
+        expect(data.slice(0, 10)).to.equal(missingRole.selector);
+      } else {
+        // Fallback to chai matcher if raw data is not present.
+        await expect(p).to.be.revertedWithCustomError(preview, "MissingRole");
+      }
+    }
+  }
+
   describe("init", function () {
     it("reverts on zero registry", async function () {
       const Preview = await ethers.getContractFactory("PreviewView");
@@ -42,6 +100,30 @@ describe("PreviewView", function () {
         Preview,
         "ZeroAddress"
       );
+    });
+  });
+
+  describe("PRV-01 static interface constraints", function () {
+    it("has no push* functions; all externals are view/pure except initialize/upgradeTo*", async function () {
+      const { preview } = await loadFixture(deployFixture);
+      const fns = preview.interface.fragments.filter((f: any) => f.type === "function");
+
+      const allowedNonView = new Set(["initialize", "upgradeTo", "upgradeToAndCall"]);
+
+      for (const fn of fns) {
+        expect(fn.name.startsWith("push")).to.equal(false, `forbidden function name: ${fn.name}`);
+
+        const mut = fn.stateMutability;
+        const isViewLike = mut === "view" || mut === "pure";
+        const isAllowedNonView = allowedNonView.has(fn.name) || fn.name.startsWith("upgradeTo");
+
+        if (!isViewLike) {
+          expect(isAllowedNonView).to.equal(
+            true,
+            `non-view external function not allowed by policy: ${fn.name} (${mut})`
+          );
+        }
+      }
     });
   });
 
@@ -65,9 +147,26 @@ describe("PreviewView", function () {
     it("stranger is blocked", async function () {
       const { user, stranger, preview, position, asset } = await deployFixture();
       await position.pushUserPositionUpdate(user.address, asset, 50n, 10n);
-      await expect(
-        preview.connect(stranger).previewDeposit(user.address, asset, 10n)
-      ).to.be.revertedWithCustomError(preview, "MissingRole");
+      await expectMissingRole(preview.connect(stranger).previewDeposit(user.address, asset, 10n), preview);
+    });
+  });
+
+  describe("PRV-02 entry gate (non-self must be MissingRole)", function () {
+    it("unauthorized caller querying another user reverts MissingRole (selector) for all preview*", async function () {
+      const { user, stranger, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+
+      await expectMissingRole(preview.connect(stranger).previewDeposit(user.address, asset, 1n), preview);
+      await expectMissingRole(preview.connect(stranger).previewWithdraw(user.address, asset, 1n), preview);
+      await expectMissingRole(preview.connect(stranger).previewBorrow(user.address, asset, 0, 0, 1n), preview);
+      await expectMissingRole(preview.connect(stranger).previewRepay(user.address, asset, 1n), preview);
+    });
+
+    it("gate triggers before input validation (asset=0 still MissingRole when non-self)", async function () {
+      const { user, stranger, preview } = await loadFixture(deployFixture);
+
+      await expectMissingRole(preview.connect(stranger).previewDeposit(user.address, ethers.ZeroAddress, 1n), preview);
+      await expectMissingRole(preview.connect(stranger).previewBorrow(user.address, ethers.ZeroAddress, 0, 0, 1n), preview);
     });
   });
 
@@ -118,6 +217,50 @@ describe("PreviewView", function () {
         preview,
         "PreviewView__InvalidInput"
       );
+    });
+  });
+
+  describe("PRV-03/04 return fields & delegated reads", function () {
+    it("self previewBorrow/previewRepay returns stable named fields (newHF/newLTV)", async function () {
+      const { user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+
+      const borrowRes = await preview.connect(user).previewBorrow(user.address, asset, 0, 30n, 10n);
+      // tuple has both positional and named fields in ethers v6
+      expect(borrowRes.newHF).to.equal(borrowRes[0]);
+      expect(borrowRes.newLTV).to.equal(borrowRes[1]);
+      expect(borrowRes.maxBorrowable).to.equal(borrowRes[2]);
+      expect(borrowRes.newHF).to.equal((130n * 10_000n) / 30n);
+      expect(borrowRes.newLTV).to.equal((30n * 10_000n) / 130n);
+      expect(borrowRes.positionIsValid).to.equal(true);
+      expect(borrowRes.positionTimestamp).to.be.gt(0n);
+      expect(borrowRes.positionVersion).to.be.gt(0n);
+
+      const repayRes = await preview.connect(user).previewRepay(user.address, asset, 5n);
+      expect(repayRes.newHF).to.equal(repayRes[0]);
+      expect(repayRes.newLTV).to.equal(repayRes[1]);
+      expect(repayRes.newHF).to.equal((100n * 10_000n) / 15n);
+      expect(repayRes.newLTV).to.equal((15n * 10_000n) / 100n);
+      expect(repayRes.positionIsValid).to.equal(true);
+      expect(repayRes.positionTimestamp).to.be.gt(0n);
+      expect(repayRes.positionVersion).to.be.gt(0n);
+    });
+
+    it("ops/admin can delegate-read and matches self behavior", async function () {
+      const { admin, viewer, user, preview, position, asset } = await loadFixture(deployFixture);
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+
+      const self = await preview.connect(user).previewBorrow(user.address, asset, 0, 30n, 10n);
+      const asViewer = await preview.connect(viewer).previewBorrow(user.address, asset, 0, 30n, 10n);
+      const asAdmin = await preview.connect(admin).previewBorrow(user.address, asset, 0, 30n, 10n);
+
+      expect(asViewer.newHF).to.equal(self.newHF);
+      expect(asViewer.newLTV).to.equal(self.newLTV);
+      expect(asViewer.maxBorrowable).to.equal(self.maxBorrowable);
+
+      expect(asAdmin.newHF).to.equal(self.newHF);
+      expect(asAdmin.newLTV).to.equal(self.newLTV);
+      expect(asAdmin.maxBorrowable).to.equal(self.maxBorrowable);
     });
   });
 
@@ -273,6 +416,48 @@ describe("PreviewView", function () {
       const [hf, ok] = await preview.previewWithdraw(user.address, asset, 0n);
       expect(hf).to.equal(0n);
       expect(ok).to.equal(false);
+    });
+  });
+
+  describe("PRV-05 invalid input policy (as-implemented)", function () {
+    it("asset=0 reverts PreviewView__InvalidInput for all preview functions (when caller is authorized)", async function () {
+      const { user, preview } = await loadFixture(deployFixture);
+
+      await expect(
+        preview.connect(user).previewDeposit(user.address, ethers.ZeroAddress, 1n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__InvalidInput");
+      await expect(
+        preview.connect(user).previewWithdraw(user.address, ethers.ZeroAddress, 1n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__InvalidInput");
+      await expect(
+        preview.connect(user).previewBorrow(user.address, ethers.ZeroAddress, 0, 0, 1n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__InvalidInput");
+      await expect(
+        preview.connect(user).previewRepay(user.address, ethers.ZeroAddress, 1n)
+      ).to.be.revertedWithCustomError(preview, "PreviewView__InvalidInput");
+    });
+  });
+
+  describe("PRV-06 internal grant does not bypass external gate", function () {
+    it("granting downstream VIEW_USER_DATA to PreviewView enables internal reads but external non-self is still blocked", async function () {
+      const { user, stranger, acm, preview, position, asset } = await loadFixture(deployRoleGatedPositionFixture);
+
+      // Seed a position.
+      await position.pushUserPositionUpdate(user.address, asset, 100n, 20n);
+
+      // Downstream (PositionView) requires VIEW_USER_DATA on msg.sender when msg.sender != user.
+      // Since PreviewView calls PositionView, we grant the role to the PreviewView *contract address*.
+      await acm.grantRole(ACTION_VIEW_USER_DATA, await preview.getAddress());
+
+      // Self-read should succeed even though the EOA user does NOT have VIEW_USER_DATA
+      // (PreviewView entry gate allows self; downstream read is authorized by PreviewView's contract role).
+      const [hf, ok] = await preview.connect(user).previewDeposit(user.address, asset, 0n);
+      expect(hf).to.equal((100n * 10_000n) / 20n);
+      expect(ok).to.equal(true);
+
+      // External non-self must still be blocked at PreviewView entry gate (MissingRole),
+      // even though downstream would now allow the PreviewView contract to read.
+      await expectMissingRole(preview.connect(stranger).previewDeposit(user.address, asset, 0n), preview);
     });
   });
 

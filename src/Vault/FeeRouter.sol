@@ -279,8 +279,8 @@ contract FeeRouter is
         _emitActionExecuted(ActionKeys.ACTION_DEPOSIT);
 
         // Unified data push (batch distribution summary).
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_FEE_DISTRIBUTED,
             abi.encode(token, totalAmount, length, msg.sender, ts)
@@ -497,8 +497,8 @@ contract FeeRouter is
         _pushSystemConfigToView();
 
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_CONFIG_UPDATED,
             abi.encode(platformBps, ecosystemBps, msg.sender, ts)
@@ -540,8 +540,8 @@ contract FeeRouter is
         _pushSystemConfigToView();
 
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_TREASURY_UPDATED,
             abi.encode(oldPlatformTreasury, platformTreasury, oldEcosystemVault, ecosystemVault, msg.sender, ts)
@@ -582,8 +582,8 @@ contract FeeRouter is
         _pushSystemConfigToView();
 
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_DYNAMIC_FEE_UPDATED,
             abi.encode(token, feeType, oldFee, feeBps, msg.sender, ts)
@@ -615,8 +615,8 @@ contract FeeRouter is
         _pushSystemConfigToView();
 
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_TOKEN_SUPPORTED,
             abi.encode(token, true, msg.sender, ts)
@@ -654,8 +654,8 @@ contract FeeRouter is
         _pushSystemConfigToView();
 
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_TOKEN_SUPPORTED,
             abi.encode(token, false, msg.sender, ts)
@@ -683,8 +683,8 @@ contract FeeRouter is
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
 
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_CACHE_CLEARED,
             abi.encode(token, feeType, msg.sender, ts)
@@ -705,8 +705,8 @@ contract FeeRouter is
         _emitActionExecuted(ActionKeys.ACTION_PAUSE_SYSTEM);
 
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(true, msg.sender, ts));
     }
 
@@ -724,8 +724,8 @@ contract FeeRouter is
         _emitActionExecuted(ActionKeys.ACTION_UNPAUSE_SYSTEM);
 
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(false, msg.sender, ts));
     }
     
@@ -755,8 +755,8 @@ contract FeeRouter is
         _emitActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE);
         
         // Emit module address update event.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_FR),
             oldRegistry,
@@ -782,8 +782,8 @@ contract FeeRouter is
      * @param actionKey Action key.
      */
     function _emitActionExecuted(bytes32 actionKey) internal {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         emit SystemEvents.ActionExecuted(
             actionKey,
             ActionKeys.getActionKeyString(actionKey),
@@ -1012,7 +1012,6 @@ contract FeeRouter is
     }
 
     /**
-     * @notice No-op helper used to satisfy solhint's no-empty-blocks rule for try/catch blocks.
      */
     function _noop() private pure {
         return;
@@ -1073,8 +1072,8 @@ contract FeeRouter is
         emit FeeDistributed(token, platformAmt, ecoAmt);
         emit FeeStatisticsUpdated(token, feeType, _feeStatistics[token][feeType]);
         // Unified data push.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 ts = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_DISTRIBUTED,
             abi.encode(token, platformAmt, ecoAmt, remaining, feeType, totalAmount, msg.sender, ts)

@@ -82,7 +82,7 @@ describe('viewContractAddrVar - 全面功能测试', function () {
 
     // Deploy Settlement Token
     const ERC20 = await ethers.getContractFactory('MockERC20');
-    const settlementToken = (await ERC20.deploy('Settlement', 'ST', ethers.parseEther('1000000'))) as MockERC20;
+    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as MockERC20;
 
     // Configure price oracle
     const nowTs = Math.floor(Date.now() / 1000);

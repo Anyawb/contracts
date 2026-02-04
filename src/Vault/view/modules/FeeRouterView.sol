@@ -6,7 +6,14 @@ import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import {
+    ArrayLengthMismatch,
+    BatchTooLarge,
+    EmptyArray,
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
@@ -71,15 +78,21 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     struct UserStats {
         uint256 totalFeePaid;
         uint256 transactionCount;
-        uint256 lastActivityTime;
+        /// @dev Time-Dependency-Refactor: block-based time axis marker (block.number).
+        uint256 lastActivityBlock;
     }
     mapping(address => UserStats) private _userStats;
+    /// @notice Per-user cache write marker (legacy naming in APIs may still call this "blockNumber").
+    /// @dev Stored value is `updateBlock` (block.number), not seconds.
+    mapping(address => uint256) private _userCacheUpdateBlocks;
     
-    /// @notice Last sync timestamp (seconds).
-    uint256 private _lastSyncTimestamp;
+    /// @notice Last sync marker (legacy naming in APIs may still call this "blockNumber").
+    /// @dev Stored value is `lastSyncBlock` (block.number), not seconds.
+    uint256 private _lastSyncBlock;
     
-    /// @notice Sync interval (seconds).
-    uint256 public constant SYNC_INTERVAL = 300; // 5 minutes
+    /// @notice Sync interval expressed in blocks (SSOT for time-dependency refactor).
+    /// @dev Default aligns with `ViewConstants.CACHE_DURATION_BLOCKS` (5 minutes ~= 150 blocks on ~2s chains).
+    uint256 public constant SYNC_INTERVAL_BLOCKS = ViewConstants.CACHE_DURATION_BLOCKS;
     
     /*━━━━━━━━━━━━━━━ TYPES ━━━━━━━━━━━━━━━*/
 
@@ -120,9 +133,9 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      *      - N/A (event emission only)
      *
      * @param caller Writer address that performed the sync (expected: FeeRouter)
-     * @param timestamp Block timestamp (seconds)
+     * @param blockNumber Legacy field: emit-time axis marker (treated as blockNumber in this repo)
      */
-    event DataSynced(address indexed caller, uint256 timestamp);
+    event DataSynced(address indexed caller, uint256 blockNumber);
     
     /**
      * @notice DEPRECATED: emitted when user-scoped data is pushed.
@@ -134,10 +147,9 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      *
      * @param user User address
      * @param dataType Human-readable data type label (deprecated)
-     * @param timestamp Block timestamp (seconds)
+     * @param blockNumber Legacy field: emit-time axis marker (treated as blockNumber in this repo)
      */
-    // solhint-disable-next-line max-line-length
-    event UserDataPushed(address indexed user, string dataType, uint256 timestamp); // DEPRECATED – use IDataPush.DataPushed
+    event UserDataPushed(address indexed user, string dataType, uint256 blockNumber); // DEPRECATED – use IDataPush.DataPushed
     
     /**
      * @notice DEPRECATED: emitted when system-scoped data is pushed.
@@ -149,27 +161,15 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      *
      * @param pusher Writer address
      * @param dataType Human-readable data type label (deprecated)
-     * @param timestamp Block timestamp (seconds)
+     * @param blockNumber Legacy field: emit-time axis marker (treated as blockNumber in this repo)
      */
-    // solhint-disable-next-line max-line-length
-    event SystemDataPushed(address indexed pusher, string dataType, uint256 timestamp); // DEPRECATED – use IDataPush.DataPushed
+    event SystemDataPushed(address indexed pusher, string dataType, uint256 blockNumber); // DEPRECATED – use IDataPush.DataPushed
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
     
-    /// @notice Thrown when caller is not authorized to access the requested user-scoped data.
-    error FeeRouterView__UnauthorizedAccess();
-    /// @notice Thrown when an input user address is invalid (reserved for future validation).
-    error FeeRouterView__InvalidUser();
-    /// @notice Thrown when caller has insufficient permissions (reserved for future use).
-    error FeeRouterView__InsufficientPermission();
     /// @notice Thrown when a push entrypoint is called by a non-FeeRouter address.
     error FeeRouterView__OnlyFeeRouter();
-    /// @notice Thrown when a batch query exceeds MAX_BATCH_SIZE.
-    error FeeRouterView__BatchSizeTooLarge();
-    /// @notice Thrown when two batch arrays have mismatched lengths.
-    error FeeRouterView__ArrayLengthMismatch();
-    /// @notice Thrown when an empty array is provided where a non-empty array is required.
-    error FeeRouterView__EmptyArray();
+    // Batch errors use StandardErrors for cross-module consistency.
 
     /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
 
@@ -190,7 +190,9 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      *      - caller lacks ACTION_ADMIN
      */
     modifier onlyAdmin() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         _;
     }
     
@@ -207,17 +209,19 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     /**
      * @notice Require caller to be authorized to access `user` data.
      * @dev Reverts if:
-     *      - caller lacks ACTION_VIEW_USER_DATA for self access
-     *      - caller is not admin for non-self access
+     *      - msg.sender != user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole)
      *
      * @param user Target user address
      */
     modifier onlyAuthorizedFor(address user) {
+        // Scheme U (SSOT):
+        // - self read: allowed
+        // - non-self: ops/admin only
         if (msg.sender != user) {
-            bool isAdmin = ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
-            if (!isAdmin) revert FeeRouterView__UnauthorizedAccess();
-        } else {
-            ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
+            bool ok =
+                ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                    || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+            if (!ok) revert MissingRole();
         }
         _;
     }
@@ -245,8 +249,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         _registryAddr = initialRegistryAddr;
-        // solhint-disable-next-line not-rely-on-time
-        _lastSyncTimestamp = block.timestamp;
+        _lastSyncBlock = block.number;
         
         __UUPSUpgradeable_init();
     }
@@ -282,11 +285,10 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         // Update user statistics
         _userStats[user].totalFeePaid += feeAmount;
         _userStats[user].transactionCount += 1;
-        // solhint-disable-next-line not-rely-on-time
-        _userStats[user].lastActivityTime = block.timestamp;
+        _userStats[user].lastActivityBlock = block.number;
+        _userCacheUpdateBlocks[user] = block.number;
         
-        // solhint-disable-next-line not-rely-on-time
-        emit UserDataPushed(user, "FeeUpdate", block.timestamp);
+        emit UserDataPushed(user, "FeeUpdate", block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_FEE,
             abi.encode(user, feeType, feeAmount, personalFeeBps)
@@ -312,11 +314,9 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     ) external override onlyValidRegistry onlyFeeRouter {
         _globalStats.totalDistributions = totalDistributions;
         _globalStats.totalAmountDistributed = totalAmountDistributed;
-        // solhint-disable-next-line not-rely-on-time
-        _lastSyncTimestamp = block.timestamp;
+        _lastSyncBlock = block.number;
 
-        // solhint-disable-next-line not-rely-on-time
-        emit SystemDataPushed(msg.sender, "GlobalStatsUpdate", block.timestamp);
+        emit SystemDataPushed(msg.sender, "GlobalStatsUpdate", block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_GLOBAL_FEE_STATS,
             abi.encode(totalDistributions, totalAmountDistributed)
@@ -361,8 +361,8 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
             _supportedTokens[supportedTokens[i]] = true;
         }
 
-        // solhint-disable-next-line not-rely-on-time
-        emit DataSynced(msg.sender, block.timestamp);
+        _lastSyncBlock = block.number;
+        emit DataSynced(msg.sender, block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_ROUTER_SYSTEM_CONFIG_UPDATED,
             abi.encode(platformTreasury, ecosystemVault, platformFeeBps, ecosystemFeeBps, supportedTokens)
@@ -389,6 +389,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         uint256 amount
     ) external override onlyValidRegistry onlyFeeRouter {
         _globalFeeStatistics[token][feeType] = amount;
+        _lastSyncBlock = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED,
             abi.encode(token, feeType, amount)
@@ -398,18 +399,19 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     /*━━━━━━━━━━━━━━━ USER QUERY FUNCTIONS (ACCESS CONTROLLED) ━━━━━━━━━━━━━━━*/
     
     /**
-     * @notice Check whether this view cache appears stale based on the last sync timestamp.
+     * @notice Check whether this view cache appears stale based on the last sync blockNumber.
      * @dev Reverts if:
      *      - none
      *
      * Security:
-     * - Reads block.timestamp (time-based heuristic).
+     * - Block-based heuristic using block.number (Time-Dependency-Refactor).
      *
-     * @return True if `(block.timestamp - _lastSyncTimestamp) > SYNC_INTERVAL`.
+     * @return True if `(block.number - _lastSyncBlock) > SYNC_INTERVAL_BLOCKS`.
      */
-    function needsSync() public view returns (bool) {
-        // solhint-disable-next-line not-rely-on-time
-        return (block.timestamp - _lastSyncTimestamp) > SYNC_INTERVAL;
+    function _needsSync() internal view returns (bool) {
+        uint256 last = _lastSyncBlock;
+        if (last == 0 || last > block.number) return true;
+        return (block.number - last) > SYNC_INTERVAL_BLOCKS;
     }
 
     /**
@@ -418,10 +420,10 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      *      - (never)
      *
      * Security:
-     * - Time-based heuristic using block.timestamp via {needsSync}
+     * - Block-based heuristic using block.number via {needsSync}
      *
      * @return isValid True if cache is considered valid by the time heuristic
-     * @return lastSyncTimestamp Last sync timestamp (seconds)
+     * @return lastSyncTimestamp Legacy field: last sync marker (treated as blockNumber)
      * @return needsSyncFlag True if cache is considered stale by the time heuristic
      */
     function getSyncStatus()
@@ -429,30 +431,16 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         view
         returns (bool isValid, uint256 lastSyncTimestamp, bool needsSyncFlag)
     {
-        lastSyncTimestamp = _lastSyncTimestamp;
-        needsSyncFlag = needsSync();
+        lastSyncTimestamp = _lastSyncBlock;
+        needsSyncFlag = _needsSync();
         isValid = lastSyncTimestamp > 0 && !needsSyncFlag;
     }
 
     /**
-     * @notice Returns the last sync timestamp of the view cache.
-     * @dev Reverts if:
-     *      - (never)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return timestamp Last sync timestamp (seconds)
-     */
-    function getLastSyncTimestamp() external view returns (uint256) {
-        return _lastSyncTimestamp;
-    }
-    
-    /**
-     * @notice Get user fee statistics for a fee type (user-scoped view; access-controlled).
+     * @notice Get user fee statistics for a fee type, with cache metadata (user-scoped; access-controlled).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
-     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *      - msg.sender is not authorized for `user` (MissingRole via Scheme U)
      *
      * Security:
      * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
@@ -460,17 +448,26 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * @param user Target user address
      * @param feeType Fee type identifier (bytes32)
      * @return amount Accumulated fee amount (token decimals; as pushed by FeeRouter)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getUserFeeStatistics(address user, bytes32 feeType) 
-        external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256) {
-        return _userFeeStatistics[user][feeType];
+    function getUserFeeStatisticsWithMeta(address user, bytes32 feeType)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 amount, uint256 blockNumber, bool isValid)
+    {
+        amount = _userFeeStatistics[user][feeType];
+        blockNumber = _userCacheUpdateBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get the last pushed personal fee rate for a user and fee type (user-scoped; access-controlled).
+     * @notice Get the last pushed personal fee rate for a user and fee type, with cache metadata.
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
-     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *      - msg.sender is not authorized for `user` (MissingRole via Scheme U)
      *
      * Security:
      * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
@@ -478,78 +475,121 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * @param user Target user address
      * @param feeType Fee type identifier (bytes32)
      * @return feeBps Personal fee rate in bps (\(1e4 = 100%\))
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getUserDynamicFee(address user, bytes32 feeType) 
-        external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256) {
-        return _userDynamicFees[user][feeType];
+    function getUserDynamicFeeWithMeta(address user, bytes32 feeType)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 feeBps, uint256 blockNumber, bool isValid)
+    {
+        feeBps = _userDynamicFees[user][feeType];
+        blockNumber = _userCacheUpdateBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get per-user aggregate stats (user-scoped; access-controlled).
+     * @notice Get per-user aggregate stats, with cache metadata (user-scoped; access-controlled).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
-     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *      - msg.sender is not authorized for `user` (MissingRole via Scheme U)
      *
      * Security:
      * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
      *
      * @param user Target user address
-     * @return stats User stats struct (amounts in token decimals, timestamps in seconds)
+     * @return stats User stats struct (amounts in token decimals, blockNumbers as blocks)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getUserStats(address user) 
-        external view onlyValidRegistry onlyAuthorizedFor(user) returns (UserStats memory stats) {
-        return _userStats[user];
+    function getUserStatsWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (UserStats memory stats, uint256 blockNumber, bool isValid)
+    {
+        stats = _userStats[user];
+        blockNumber = _userCacheUpdateBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get a derived user fee config view (placeholder analytics; access-controlled).
+     * @notice Get a derived user fee config view, with cache metadata (placeholder analytics; access-controlled).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
-     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
+     *      - msg.sender is not authorized for `user` (MissingRole via Scheme U)
      *
      * Security:
      * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
      *
      * @param user Target user address
      * @return config Derived config view (bps in 1e4 scale; counts unitless; amounts in token decimals)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getUserFeeConfig(address user) 
-        external view onlyValidRegistry onlyAuthorizedFor(user) returns (UserFeeConfig memory config) {
+    function getUserFeeConfigWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (UserFeeConfig memory config, uint256 blockNumber, bool isValid)
+    {
         config.personalFeeBps = _userDynamicFees[user][bytes32(0)]; // Default fee rate
         config.totalFeePaid = _userStats[user].totalFeePaid;
         config.transactionCount = _userStats[user].transactionCount;
         // Calculate VIP status and discount level based on fee payments.
         config.vipStatus = _userStats[user].totalFeePaid > 1000 ether;
         config.discountLevel = _calculateDiscountLevel(user);
+        blockNumber = _userCacheUpdateBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Check whether a token is supported (public view).
+     * @notice Check whether a token is supported, with cache metadata (public view).
      * @dev Reverts if:
      *      - none
      *
      * @param token ERC20 token address
      * @return supported True if token is currently marked as supported in the cached config.
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function isTokenSupported(address token) external view returns (bool) {
-        return _supportedTokens[token];
+    function isTokenSupportedWithMeta(address token)
+        external
+        view
+        returns (bool supported, uint256 blockNumber, bool isValid)
+    {
+        supported = _supportedTokens[token];
+        blockNumber = _lastSyncBlock;
+        isValid = _isSystemCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get supported token list (public view).
+     * @notice Get supported token list, with cache metadata (public view).
      * @dev Reverts if:
      *      - none
      *
      * @return tokens List of supported ERC20 token addresses (cached)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getSupportedTokens() external view returns (address[] memory) {
-        return _systemConfig.supportedTokens;
+    function getSupportedTokensWithMeta()
+        external
+        view
+        returns (address[] memory tokens, uint256 blockNumber, bool isValid)
+    {
+        tokens = _systemConfig.supportedTokens;
+        blockNumber = _lastSyncBlock;
+        isValid = _isSystemCacheValid(blockNumber);
     }
 
     /*━━━━━━━━━━━━━━━ ADMIN QUERY FUNCTIONS (ONLY ADMIN) ━━━━━━━━━━━━━━━*/
     
     /**
-     * @notice Get global fee statistics for (token, feeType) (admin-only).
+     * @notice Get global fee statistics for (token, feeType), with cache metadata (admin-only).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
      *      - msg.sender lacks ACTION_ADMIN (ACM)
@@ -560,14 +600,23 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * @param token ERC20 token address
      * @param feeType Fee type identifier (bytes32)
      * @return amount Total accumulated amount (token decimals; as pushed by FeeRouter)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getGlobalFeeStatistics(address token, bytes32 feeType) 
-        external view onlyValidRegistry onlyAdmin returns (uint256) {
-        return _globalFeeStatistics[token][feeType];
+    function getGlobalFeeStatisticsWithMeta(address token, bytes32 feeType)
+        external
+        view
+        onlyValidRegistry
+        onlyAdmin
+        returns (uint256 amount, uint256 blockNumber, bool isValid)
+    {
+        amount = _globalFeeStatistics[token][feeType];
+        blockNumber = _lastSyncBlock;
+        isValid = _isSystemCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get global operation stats (admin-only).
+     * @notice Get global operation stats, with cache metadata (admin-only).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
      *      - msg.sender lacks ACTION_ADMIN (ACM)
@@ -577,14 +626,24 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      *
      * @return distributions Total distribution count (unitless)
      * @return totalAmount Total distributed amount (token decimals aggregated by FeeRouter)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getGlobalOperationStats() 
-        external view onlyValidRegistry onlyAdmin returns (uint256 distributions, uint256 totalAmount) {
-        return (_globalStats.totalDistributions, _globalStats.totalAmountDistributed);
+    function getGlobalOperationStatsWithMeta()
+        external
+        view
+        onlyValidRegistry
+        onlyAdmin
+        returns (uint256 distributions, uint256 totalAmount, uint256 blockNumber, bool isValid)
+    {
+        distributions = _globalStats.totalDistributions;
+        totalAmount = _globalStats.totalAmountDistributed;
+        blockNumber = _lastSyncBlock;
+        isValid = _isSystemCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get cached system config (admin-only).
+     * @notice Get cached system config, with cache metadata (admin-only).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
      *      - msg.sender lacks ACTION_ADMIN (ACM)
@@ -593,14 +652,23 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * - Admin-gated via ACTION_ADMIN.
      *
      * @return config Cached system config (addresses + bps + token list)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getSystemConfig() 
-        external view onlyValidRegistry onlyAdmin returns (SystemConfig memory config) {
-        return _systemConfig;
+    function getSystemConfigWithMeta()
+        external
+        view
+        onlyValidRegistry
+        onlyAdmin
+        returns (SystemConfig memory config, uint256 blockNumber, bool isValid)
+    {
+        config = _systemConfig;
+        blockNumber = _lastSyncBlock;
+        isValid = _isSystemCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get derived system fee analytics (admin-only; placeholder).
+     * @notice Get derived system fee analytics, with cache metadata (admin-only; placeholder).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
      *      - msg.sender lacks ACTION_ADMIN (ACM)
@@ -609,9 +677,16 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * - Admin-gated via ACTION_ADMIN.
      *
      * @return analytics Derived analytics values (amounts in token decimals; bps in 1e4 scale)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getSystemFeeAnalytics() 
-        external view onlyValidRegistry onlyAdmin returns (SystemFeeAnalytics memory analytics) {
+    function getSystemFeeAnalyticsWithMeta()
+        external
+        view
+        onlyValidRegistry
+        onlyAdmin
+        returns (SystemFeeAnalytics memory analytics, uint256 blockNumber, bool isValid)
+    {
         analytics.distributionCount = _globalStats.totalDistributions;
         analytics.totalVolume = _globalStats.totalAmountDistributed;
         
@@ -622,16 +697,19 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         analytics.platformRevenue = (analytics.totalVolume * platformFeeBps) / 10000;
         analytics.ecosystemRevenue = (analytics.totalVolume * ecosystemFeeBps) / 10000;
         analytics.averageFeeRate = platformFeeBps + ecosystemFeeBps;
+        blockNumber = _lastSyncBlock;
+        isValid = _isSystemCacheValid(blockNumber);
     }
 
     /*━━━━━━━━━━━━━━━ BATCH QUERY FUNCTIONS ━━━━━━━━━━━━━━━*/
     
     /**
-     * @notice Batch get user fee statistics for multiple fee types (user-scoped; access-controlled).
+     * @notice Batch get user fee statistics for multiple fee types, with cache metadata.
+     *         (User-scoped; access-controlled.)
      * @dev Reverts if:
-     *      - _registryAddr == address(0) (ZeroAddress)
-     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
-     *      - feeTypes.length > MAX_BATCH_SIZE (FeeRouterView__BatchSizeTooLarge)
+     *      - _registryAddr == address(0) (see {ZeroAddress})
+     *      - msg.sender is not authorized for `user` (MissingRole via Scheme U)
+     *      - feeTypes.length > MAX_BATCH_SIZE (see {BatchTooLarge})
      *
      * Security:
      * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
@@ -639,26 +717,39 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * @param user Target user address
      * @param feeTypes Fee type identifiers (bytes32[])
      * @return feeStatistics Per-feeType accumulated amounts (token decimals; as pushed by FeeRouter)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function batchGetUserFeeStatistics(
+    function batchGetUserFeeStatisticsWithMeta(
         address user,
         bytes32[] calldata feeTypes
-    ) external view onlyValidRegistry onlyAuthorizedFor(user) returns (uint256[] memory feeStatistics) {
-        if (feeTypes.length > MAX_BATCH_SIZE) revert FeeRouterView__BatchSizeTooLarge();
+    )
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256[] memory feeStatistics, uint256 blockNumber, bool isValid)
+    {
+        if (feeTypes.length == 0) revert EmptyArray();
+        if (feeTypes.length > MAX_BATCH_SIZE) {
+            revert BatchTooLarge(feeTypes.length, MAX_BATCH_SIZE);
+        }
         
         feeStatistics = new uint256[](feeTypes.length);
         for (uint256 i = 0; i < feeTypes.length; i++) {
             feeStatistics[i] = _userFeeStatistics[user][feeTypes[i]];
         }
+        blockNumber = _userCacheUpdateBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Batch get global fee statistics for multiple (token, feeType) pairs (admin-only).
+     * @notice Batch get global fee statistics for multiple (token, feeType) pairs, with cache metadata (admin-only).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
      *      - msg.sender lacks ACTION_ADMIN (ACM)
-     *      - tokens.length != feeTypes.length (FeeRouterView__ArrayLengthMismatch)
-     *      - tokens.length > MAX_BATCH_SIZE (FeeRouterView__BatchSizeTooLarge)
+     *      - tokens.length != feeTypes.length (ArrayLengthMismatch)
+     *      - tokens.length > MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
      * - Admin-gated via ACTION_ADMIN.
@@ -666,65 +757,97 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * @param tokens ERC20 token addresses
      * @param feeTypes Fee type identifiers (bytes32[])
      * @return feeStatistics Per-pair accumulated amounts (token decimals)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function batchGetGlobalFeeStatistics(
+    function batchGetGlobalFeeStatisticsWithMeta(
         address[] calldata tokens, 
         bytes32[] calldata feeTypes
-    ) external view onlyValidRegistry onlyAdmin returns (uint256[] memory feeStatistics) {
-        if (tokens.length != feeTypes.length) revert FeeRouterView__ArrayLengthMismatch();
-        if (tokens.length > MAX_BATCH_SIZE) revert FeeRouterView__BatchSizeTooLarge();
+    )
+        external
+        view
+        onlyValidRegistry
+        onlyAdmin
+        returns (uint256[] memory feeStatistics, uint256 blockNumber, bool isValid)
+    {
+        if (tokens.length == 0) revert EmptyArray();
+        if (tokens.length != feeTypes.length) revert ArrayLengthMismatch(tokens.length, feeTypes.length);
+        if (tokens.length > MAX_BATCH_SIZE) {
+            revert BatchTooLarge(tokens.length, MAX_BATCH_SIZE);
+        }
         
         feeStatistics = new uint256[](tokens.length);
         for (uint256 i = 0; i < tokens.length; i++) {
             feeStatistics[i] = _globalFeeStatistics[tokens[i]][feeTypes[i]];
         }
+        blockNumber = _lastSyncBlock;
+        isValid = _isSystemCacheValid(blockNumber);
     }
 
     /**
-     * @notice Batch check token support status (public view).
+     * @notice Batch check token support status, with cache metadata (public view).
      * @dev Reverts if:
-     *      - tokens.length == 0 (FeeRouterView__EmptyArray)
-     *      - tokens.length > MAX_BATCH_SIZE (FeeRouterView__BatchSizeTooLarge)
+     *      - tokens.length == 0 (EmptyArray)
+     *      - tokens.length > MAX_BATCH_SIZE (BatchTooLarge)
      *
      * @param tokens ERC20 token addresses
      * @return supported Per-token support flags
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function batchCheckTokenSupport(address[] calldata tokens) 
-        external view returns (bool[] memory supported) {
-        if (tokens.length == 0) revert FeeRouterView__EmptyArray();
-        if (tokens.length > MAX_BATCH_SIZE) revert FeeRouterView__BatchSizeTooLarge();
+    function batchCheckTokenSupportWithMeta(address[] calldata tokens)
+        external
+        view
+        returns (bool[] memory supported, uint256 blockNumber, bool isValid)
+    {
+        if (tokens.length == 0) revert EmptyArray();
+        if (tokens.length > MAX_BATCH_SIZE) {
+            revert BatchTooLarge(tokens.length, MAX_BATCH_SIZE);
+        }
         
         supported = new bool[](tokens.length);
         for (uint256 i = 0; i < tokens.length; i++) {
             supported[i] = _supportedTokens[tokens[i]];
         }
+        blockNumber = _lastSyncBlock;
+        isValid = _isSystemCacheValid(blockNumber);
     }
     
     /*━━━━━━━━━━━━━━━ ADVANCED ANALYTICS FUNCTIONS ━━━━━━━━━━━━━━━*/
     
     /**
-     * @notice Get derived user fee analytics (placeholder; access-controlled).
+     * @notice Get derived user fee analytics, with cache metadata (placeholder; access-controlled).
      * @dev Reverts if:
      *      - _registryAddr == address(0) (ZeroAddress)
-     *      - msg.sender is not authorized for `user` (FeeRouterView__UnauthorizedAccess / ACM roles)
-     *      - feeTypes.length > MAX_BATCH_SIZE (FeeRouterView__BatchSizeTooLarge)
+     *      - msg.sender is not authorized for `user` (MissingRole via Scheme U)
+     *      - feeTypes.length > MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
      * - Access-controlled via ACTION_VIEW_USER_DATA (self) or ACTION_ADMIN (non-self).
      *
      * @param user Target user address
      * @param feeTypes Fee type identifiers (bytes32[])
-     * @return analytics Derived analytics (amounts in token decimals; counts unitless; timestamps in seconds)
+     * @return analytics Derived analytics (amounts in token decimals; counts unitless; blockNumbers as blocks)
+     * @return blockNumber Cache blockNumber (blocks)
+     * @return isValid Cache validity (TTL based on SYNC_INTERVAL)
      */
-    function getUserFeeAnalytics(address user, bytes32[] calldata feeTypes) 
-        external view onlyValidRegistry onlyAuthorizedFor(user) returns (UserFeeAnalytics memory analytics) {
-        if (feeTypes.length > MAX_BATCH_SIZE) revert FeeRouterView__BatchSizeTooLarge();
+    function getUserFeeAnalyticsWithMeta(address user, bytes32[] calldata feeTypes)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (UserFeeAnalytics memory analytics, uint256 blockNumber, bool isValid)
+    {
+        if (feeTypes.length == 0) revert EmptyArray();
+        if (feeTypes.length > MAX_BATCH_SIZE) {
+            revert BatchTooLarge(feeTypes.length, MAX_BATCH_SIZE);
+        }
         
         UserStats memory userStats = _userStats[user];
         
         analytics.totalPaidFees = userStats.totalFeePaid;
         analytics.transactionCount = userStats.transactionCount;
-        analytics.lastTransactionTime = userStats.lastActivityTime;
+        analytics.lastTransactionTime = userStats.lastActivityBlock;
         analytics.feeTypes = feeTypes;
         analytics.feeAmounts = new uint256[](feeTypes.length);
         
@@ -739,6 +862,8 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         if (analytics.transactionCount > 0) {
             analytics.averageFeeRate = (totalFees * 10000) / analytics.transactionCount;
         }
+        blockNumber = _userCacheUpdateBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /*━━━━━━━━━━━━━━━ INTERNAL HELPER FUNCTIONS ━━━━━━━━━━━━━━━*/
@@ -825,13 +950,27 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * @param newImplementation New implementation address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
     function _getFeeRouter() internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
+    }
+
+    function _isUserCacheValid(uint256 blockNumber) internal view returns (bool) {
+        // Time-Dependency-Refactor: `blockNumber` is an updateBlock marker (legacy name).
+        if (blockNumber == 0 || blockNumber > block.number) return false;
+        return (block.number - blockNumber) <= SYNC_INTERVAL_BLOCKS;
+    }
+
+    function _isSystemCacheValid(uint256 blockNumber) internal view returns (bool) {
+        // Time-Dependency-Refactor: `blockNumber` is a lastSyncBlock marker (legacy name).
+        if (blockNumber == 0 || blockNumber > block.number) return false;
+        return (block.number - blockNumber) <= SYNC_INTERVAL_BLOCKS;
     }
 
     /**
@@ -859,5 +998,5 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     /*━━━━━━━━━━━━━━━ STORAGE GAP FOR UPGRADE-SAFE LAYOUT CHANGES ━━━━━━━━━━━━━━━*/
     
     /// @notice Reserved storage gap for upgrade-safe layout changes.
-    uint256[35] private __gap;
+    uint256[50] private __gap;
 }

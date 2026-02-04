@@ -42,10 +42,10 @@ async function main() {
   console.log(`  订单 ID: ${orderId.toString()}`);
 
   const orderEngineAbi = [
-    "function _getLoanOrderForView(uint256) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startTimestamp,uint256 maturity,uint256 repaidAmount))",
+    "function getLoanOrderForView(uint256) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startTimestamp,uint256 maturity,uint256 repaidAmount))",
   ];
   const orderEngineContract = (await ethers.getContractAt(orderEngineAbi, orderEngine)) as any;
-  const orderRes = (await orderEngineContract._getLoanOrderForView(orderId)) as any;
+  const orderRes = (await orderEngineContract.getLoanOrderForView(orderId)) as any;
   const order = Array.isArray(orderRes) && orderRes.length === 1 ? orderRes[0] : orderRes;
   const orderBorrower = (order?.borrower ?? order?.[3]) as string | undefined;
   const debtAsset = (order?.asset ?? order?.[5]) as string | undefined;

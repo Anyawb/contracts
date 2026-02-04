@@ -3,11 +3,14 @@ import hardhat from 'hardhat';
 const { ethers, upgrades } = hardhat;
 
 /**
- * 统计快照的更新来源已迁移为 VaultRouter 的 best-effort push（由 VaultCore 推送 position delta 时触发）。
- * 因此这里用 VaultRouter + MockStatisticsView 的最小集成来验证：collateral/debt 的增减能反映到快照里。
+ * 统计快照（StatisticsView）已按 Architecture-Guide 收敛为 Strict B+：
+ * - 写入口由 StatisticsPushManager 统一编排（push* 不再由 VaultRouter 驱动）
+ *
+ * 因此这里改为验证更底层、仍然成立的“SSOT push 链路”：
+ * VaultCore → VaultRouter.pushUserPositionUpdateDelta → PositionView 缓存更新（不触碰 StatisticsView）。
  */
-describe('VaultRouter → StatisticsView – 统计视图联动（最小集）', function () {
-  it('deposit/borrow/repay/withdraw 的 delta 推动统计视图快照变化', async function () {
+describe('VaultCore → VaultRouter → PositionView – delta push (SSOT)', function () {
+  it('deposit/borrow/repay/withdraw 的 delta 会更新 PositionView cache（不触碰 StatisticsView）', async function () {
     const [owner, user] = await ethers.getSigners();
 
     const RegistryF = await ethers.getContractFactory('MockRegistry');
@@ -32,7 +35,7 @@ describe('VaultRouter → StatisticsView – 统计视图联动（最小集）',
     await po.waitForDeployment();
 
     const TokenF = await ethers.getContractFactory('MockERC20');
-    const settlementToken = await TokenF.deploy('Settlement', 'SET', ethers.parseUnits('1000000', 18));
+    const settlementToken = await TokenF.deploy('Settlement', 'SET', 18, ethers.parseUnits('1000000', 18));
     await settlementToken.waitForDeployment();
 
     // Ledger mocks required by PositionView module resolution (onlyBusinessContract)
@@ -96,15 +99,8 @@ describe('VaultRouter → StatisticsView – 统计视图联动（最小集）',
     const asset = await settlementToken.getAddress();
     const userAddr = await user.getAddress();
 
-    // Seed ledger state so the first delta push (when cache is invalid) can sync from ledger
-    // and subsequent negative deltas won't underflow cached values.
+    // Seed + update the ledger SSOT first, then push the delta (mirrors real flow ordering).
     await cm.depositCollateral(userAddr, asset, ethers.parseUnits('10', 18));
-
-    let snap = await stats.getGlobalSnapshot();
-    expect(snap.totalCollateral).to.equal(0n);
-    expect(snap.totalDebt).to.equal(0n);
-
-    // deposit: +10 collateral (must go through VaultCore -> VaultRouter due to onlyVaultCore)
     await vaultCoreModule.pushUserPositionUpdateDelta(
       userAddr,
       asset,
@@ -114,10 +110,16 @@ describe('VaultRouter → StatisticsView – 统计视图联动（最小集）',
       0,
       0
     );
-    snap = await stats.getGlobalSnapshot();
-    expect(snap.totalCollateral).to.equal(ethers.parseUnits('10', 18));
+    {
+      const [col, debt, isValid] = await positionView.connect(user).getUserPositionWithMeta(userAddr, asset);
+      expect(isValid).to.equal(true);
+      // Cache invalid -> syncs to ledger (10), not "10 + delta".
+      expect(col).to.equal(ethers.parseUnits('10', 18));
+      expect(debt).to.equal(0n);
+    }
 
-    // borrow: +5 debt
+    // borrow: +5 debt (update ledger, then push delta)
+    await le.borrow(userAddr, asset, ethers.parseUnits('5', 18), 0, 0);
     await vaultCoreModule.pushUserPositionUpdateDelta(
       userAddr,
       asset,
@@ -127,10 +129,14 @@ describe('VaultRouter → StatisticsView – 统计视图联动（最小集）',
       0,
       0
     );
-    snap = await stats.getGlobalSnapshot();
-    expect(snap.totalDebt).to.equal(ethers.parseUnits('5', 18));
+    {
+      const [, debt, isValid] = await positionView.connect(user).getUserPositionWithMeta(userAddr, asset);
+      expect(isValid).to.equal(true);
+      expect(debt).to.equal(ethers.parseUnits('5', 18));
+    }
 
-    // repay: -3 debt
+    // repay: -3 debt (update ledger, then push delta)
+    await le.repay(userAddr, asset, ethers.parseUnits('3', 18));
     await vaultCoreModule.pushUserPositionUpdateDelta(
       userAddr,
       asset,
@@ -140,10 +146,14 @@ describe('VaultRouter → StatisticsView – 统计视图联动（最小集）',
       0,
       0
     );
-    snap = await stats.getGlobalSnapshot();
-    expect(snap.totalDebt).to.equal(ethers.parseUnits('2', 18));
+    {
+      const [, debt, isValid] = await positionView.connect(user).getUserPositionWithMeta(userAddr, asset);
+      expect(isValid).to.equal(true);
+      expect(debt).to.equal(ethers.parseUnits('2', 18));
+    }
 
-    // withdraw: -4 collateral
+    // withdraw: -4 collateral (update ledger, then push delta)
+    await cm.withdrawCollateral(userAddr, asset, ethers.parseUnits('4', 18));
     await vaultCoreModule.pushUserPositionUpdateDelta(
       userAddr,
       asset,
@@ -153,8 +163,11 @@ describe('VaultRouter → StatisticsView – 统计视图联动（最小集）',
       0,
       0
     );
-    snap = await stats.getGlobalSnapshot();
-    expect(snap.totalCollateral).to.equal(ethers.parseUnits('6', 18));
+    {
+      const [col, , isValid] = await positionView.connect(user).getUserPositionWithMeta(userAddr, asset);
+      expect(isValid).to.equal(true);
+      expect(col).to.equal(ethers.parseUnits('6', 18));
+    }
   });
 });
 

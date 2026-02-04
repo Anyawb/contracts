@@ -163,7 +163,7 @@ event LiquidationExecuted(
     uint256 collateralAmount,
     uint256 debtAmount,
     uint256 bonus,
-    uint256 timestamp
+    uint256 blockNumber
 );
 ```
 

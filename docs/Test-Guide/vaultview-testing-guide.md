@@ -93,30 +93,32 @@ npx hardhat test test/VaultRouter.test.ts --grep "权限控制测试"
 ```typescript
 describe('免费查询接口测试', function () {
   it('应该正确返回用户位置信息', async function () {
-    const [collateral, debt] = await vaultRouter.getUserPosition(user, asset);
+    const [collateral, debt, isValid, blockNumber, version] =
+        await userView.getUserPositionWithMeta(user, asset);
     expect(collateral).to.equal(expectedCollateral);
     expect(debt).to.equal(expectedDebt);
   });
 
   it('应该正确返回用户抵押数量', async function () {
-    const collateral = await vaultRouter.getUserCollateral(user, asset);
+    const [collateral] = await userView.getUserCollateral(user, asset);
     expect(collateral).to.equal(expectedCollateral);
   });
 
   it('应该正确返回用户债务数量', async function () {
-    const debt = await vaultRouter.getUserDebt(user, asset);
+    const [debt] = await userView.getUserDebt(user, asset);
     expect(debt).to.equal(expectedDebt);
   });
 
   it('应该正确检查用户缓存有效性', async function () {
-    const isValid = await vaultRouter.isUserCacheValid(user);
+    const [isValid, blockNumber] = await positionView.getUserCacheStatusWithMeta(user);
     expect(isValid).to.be.a('boolean');
+    expect(blockNumber).to.be.a('bigint');
   });
 
   it('应该正确批量获取用户位置', async function () {
     const users = [user1, user2];
     const assets = [asset1, asset2];
-    const positions = await vaultRouter.batchGetUserPositions(users, assets);
+    const positions = await cacheOptimizedView.batchGetUserPositions(users, assets);
     expect(positions.length).to.equal(2);
   });
 
@@ -124,7 +126,7 @@ describe('免费查询接口测试', function () {
     const users = [user1];
     const assets = [asset1, asset2]; // 长度不匹配
     await expect(
-      vaultRouter.batchGetUserPositions(users, assets)
+      cacheOptimizedView.batchGetUserPositions(users, assets)
     ).to.be.revertedWith('Arrays length mismatch');
   });
 });
@@ -148,9 +150,9 @@ npx hardhat test test/VaultRouter.test.ts --grep "免费查询接口测试"
 describe('事件测试', function () {
   it('应该正确发出用户操作事件', async function () {
     await expect(
-      vaultRouter.processUserOperation(user, operationType, asset, amount, timestamp)
+      vaultRouter.processUserOperation(user, operationType, asset, amount, blockNumber)
     ).to.emit(vaultRouter, 'UserOperation')
-      .withArgs(user, operationType, asset, amount, timestamp);
+      .withArgs(user, operationType, asset, amount, blockNumber);
   });
 
   it('应该正确发出用户位置更新事件', async function () {
@@ -187,14 +189,14 @@ npx hardhat test test/VaultRouter.test.ts --grep "事件测试"
 describe('错误处理测试', function () {
   it('应该正确处理零地址错误', async function () {
     // 查询函数可能不检查零地址，但写入函数应该检查
-    const result = await vaultRouter.getUserPosition(ZERO_ADDRESS, asset);
+    const result = await userView.getUserPositionWithMeta(ZERO_ADDRESS, asset);
     // 验证返回默认值或正确处理
   });
 
   it('应该正确处理无效金额错误', async function () {
     // 在 processUserOperation 中检查金额
     await expect(
-      vaultRouter.processUserOperation(user, operationType, asset, 0, timestamp)
+      vaultRouter.processUserOperation(user, operationType, asset, 0, blockNumber)
     ).to.be.revertedWithCustomError(vaultRouter, 'VaultRouter__InvalidAmount');
   });
 });
@@ -219,13 +221,15 @@ describe('边界条件测试', function () {
   it('应该正确处理最大数值', async function () {
     const maxValue = ethers.MaxUint256;
     // 测试最大 uint256 值的处理
-    const [collateral, debt] = await vaultRouter.getUserPosition(user, asset);
+    const [collateral, debt, isValid, blockNumber, version] =
+        await userView.getUserPositionWithMeta(user, asset);
     // 验证不会溢出
   });
 
   it('应该正确处理零金额', async function () {
     // 测试零金额的处理
-    const [collateral, debt] = await vaultRouter.getUserPosition(user, asset);
+    const [collateral, debt, isValid, blockNumber, version] =
+        await userView.getUserPositionWithMeta(user, asset);
     expect(collateral).to.equal(0);
     expect(debt).to.equal(0);
   });
@@ -250,13 +254,13 @@ npx hardhat test test/VaultRouter.test.ts --grep "边界条件测试"
 describe('缓存机制测试', function () {
   it('应该正确管理缓存时间戳', async function () {
     const user = user1.address;
-    const isValid = await vaultRouter.isUserCacheValid(user);
+    const [isValid, blockNumber] = await positionView.getUserCacheStatusWithMeta(user);
     // 初始状态缓存应该无效
     expect(isValid).to.be.false;
     
     // 更新缓存后应该有效
     await vaultRouter.pushUserPositionUpdate(user, asset, collateral, debt);
-    const isValidAfter = await vaultRouter.isUserCacheValid(user);
+    const [isValidAfter] = await positionView.getUserCacheStatusWithMeta(user);
     expect(isValidAfter).to.be.true;
   });
 });

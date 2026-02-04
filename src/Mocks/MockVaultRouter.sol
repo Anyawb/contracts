@@ -12,7 +12,7 @@ contract MockVaultRouter is IVaultRouter {
     
     // 事件
     event UserPositionUpdated(address indexed user, address indexed asset, uint256 collateral, uint256 debt);
-    event UserOperationProcessed(address indexed user, bytes32 operation, address indexed asset, uint256 amount, uint256 timestamp);
+    event UserOperationProcessed(address indexed user, bytes32 operation, address indexed asset, uint256 amount, uint256 blockNumber);
     event CollateralSeized(address indexed user, address indexed asset, uint256 amount, address indexed liquidator);
     event DebtReduced(address indexed user, address indexed asset, uint256 amount, address indexed liquidator);
     
@@ -22,7 +22,7 @@ contract MockVaultRouter is IVaultRouter {
         bytes32 operationType,
         address asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
     ) external override {
         // 根据操作类型更新用户位置
         if (operationType == keccak256(abi.encodePacked("DEPOSIT"))) {
@@ -39,7 +39,7 @@ contract MockVaultRouter is IVaultRouter {
             }
         }
         
-        emit UserOperationProcessed(user, operationType, asset, amount, timestamp);
+        emit UserOperationProcessed(user, operationType, asset, amount, blockNumber);
     }
     
     /// @notice 推送用户位置更新（严格版本：携带上下文 + nextVersion）

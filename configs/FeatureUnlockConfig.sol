@@ -33,7 +33,7 @@ contract FeatureUnlockConfig is BaseServiceConfig {
     function _initializeConfigs() internal override {
         configs[ServiceLevel.Basic] = ServiceConfig({
             price: 200e18, // 200积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Basic,
             description: "Custom interest rate calculator"
@@ -41,7 +41,7 @@ contract FeatureUnlockConfig is BaseServiceConfig {
         
         configs[ServiceLevel.Standard] = ServiceConfig({
             price: 800e18, // 800积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Standard,
             description: "Batch operation tools"
@@ -49,7 +49,7 @@ contract FeatureUnlockConfig is BaseServiceConfig {
         
         configs[ServiceLevel.Premium] = ServiceConfig({
             price: 1500e18, // 1500积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Premium,
             description: "Advanced risk management tools"
@@ -57,7 +57,7 @@ contract FeatureUnlockConfig is BaseServiceConfig {
         
         configs[ServiceLevel.VIP] = ServiceConfig({
             price: 3000e18, // 3000积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.VIP,
             description: "Full feature unlock"
@@ -66,7 +66,7 @@ contract FeatureUnlockConfig is BaseServiceConfig {
     
     /// @dev 初始化冷却期
     function _initializeCooldown() internal override {
-        cooldown = 7 days;
+        cooldown = 7 days / 2 seconds;
     }
     
     /// @notice 获取服务类型
@@ -95,7 +95,7 @@ contract FeatureUnlockConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     

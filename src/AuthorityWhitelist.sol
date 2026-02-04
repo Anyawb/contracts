@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { IAuthorityWhitelist } from "./interfaces/IAuthorityWhitelist.sol";
 import { IAccessControlManager } from "./interfaces/IAccessControlManager.sol";
@@ -66,7 +66,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -83,7 +83,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -101,7 +101,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
             ActionKeys.ACTION_REMOVE_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -136,7 +136,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
         
         // 发出模块地址更新事件
@@ -144,7 +144,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
-            block.timestamp
+            block.number
         );
     }
 
@@ -179,7 +179,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 

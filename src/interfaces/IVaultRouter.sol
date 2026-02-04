@@ -30,14 +30,14 @@ interface IVaultRouter {
      * @param operationType Action key (see ActionKeys)
      * @param asset Asset address
      * @param amount Amount (token decimals)
-     * @param timestamp Timestamp supplied by VaultCore (seconds); for observability/auditing
+     * @param blockNumber BlockNumber supplied by VaultCore (block.number); for observability/auditing
      */
     function processUserOperation(
         address user,
         bytes32 operationType,
         address asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
     ) external;
 
     /* ============ Push forwarding (VaultCore -> View modules) ============ */

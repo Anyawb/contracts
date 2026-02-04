@@ -11,43 +11,32 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ArrayLengthMismatch, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import {
+    ArrayLengthMismatch,
+    BatchTooLarge,
+    EmptyArray,
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
-
-/**
- * @dev Minimal HealthView interface (read-only).
- *      This view module intentionally relies on a narrow surface area to reduce coupling.
- */
-interface IHealthViewLite {
-    function getUserHealthFactor(address user)
-        external
-        view
-        returns (uint256 healthFactor, bool isValid, uint256 timestamp);
-    function getCacheTimestamp(address user) external view returns (uint256); // legacy
-    function batchGetHealthFactors(address[] calldata users)
-        external
-        view
-        returns (uint256[] memory factors, bool[] memory validFlags, uint256[] memory timestamps);
-}
 
 /**
  * @title LiquidationRiskView
  * @notice Exposes role-gated liquidation risk reads and batch helpers for liquidation risk evaluation.
+ * @dev DEPRECATED as a primary entrypoint: use RiskView (user-dimensional risk) and
+ *      HealthView (health factor) for canonical reads. System-only parameters are in SystemRiskView.
  * @dev Reverts if:
  *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
- *      - caller lacks required risk-view permissions (see access-control modifiers)
- *      - batch inputs are invalid (see {EmptyArray}, {ArrayLengthMismatch}, {LiquidationRiskView__BatchTooLarge})
+ *      - caller lacks required Scheme U permissions (see access-control modifiers)
+ *      - batch inputs are invalid (see {EmptyArray}, {ArrayLengthMismatch}, {BatchTooLarge})
  *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
  *
  * Security:
- * - Role-gated reads via {ViewAccessLib} and {ActionKeys}
+ * - Scheme U reads via {ViewAccessLib} and {ActionKeys}
  * - Upgrade authorization is role-gated (ACTION_ADMIN)
  */
 contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
-    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-    /// @dev Reverts when a batch query exceeds {ViewConstants.MAX_BATCH_SIZE}.
-    error LiquidationRiskView__BatchTooLarge();
-
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     address private _registryAddr;
 
@@ -68,32 +57,37 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Requires system-level risk view permission.
+     * @notice Scheme U access for a specific user.
      * @dev Reverts if:
-     *      - caller lacks ACTION_VIEW_RISK_DATA (via {ViewAccessLib})
+     *      - caller is not user and lacks VIEW_USER_DATA or ADMIN
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
+     * - Self access is allowed; non-self requires VIEW_USER_DATA or ADMIN
+     *
+     * @param user Target user address
      */
-    modifier onlyRiskViewerSystem() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
+    modifier onlyUserOrViewer(address user) {
+        if (
+            msg.sender != user
+                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+        ) revert MissingRole();
         _;
     }
 
     /**
-     * @notice Requires caller to be authorized to view risk data for a specific user.
+     * @notice Scheme U batch access (no self-bypass).
      * @dev Reverts if:
-     *      - caller is not user and lacks ACTION_VIEW_RISK_DATA (via {ViewAccessLib})
+     *      - caller lacks VIEW_USER_DATA or ADMIN
      *
      * Security:
-     * - Self access is allowed; non-self access is risk-role gated
-     *
-     * @param user Target user address
+     * - Role-gated reads (VIEW_USER_DATA or ADMIN)
      */
-    modifier onlyRiskViewerFor(address user) {
-        if (msg.sender != user) {
-            ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
-        }
+    modifier onlyUserBatchViewer() {
+        if (
+            !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+        ) revert MissingRole();
         _;
     }
 
@@ -150,283 +144,156 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Returns the cached health factor together with a read-time block number.
+     * @notice Returns whether a user is liquidatable according to the RiskManager, with metadata.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not authorized for user (see {onlyRiskViewerFor})
+     *      - caller is not authorized for user (see {onlyUserOrViewer})
      *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated reads (self or ACTION_VIEW_RISK_DATA)
-     * - Best-effort semantics: returns (0,0,0) if cache is missing/invalid
-     *
-     * @param user Target user address
-     * @return healthFactor Cached health factor (implementation-defined scale); 0 if missing/invalid
-     * @return timestamp Cache timestamp (seconds); 0 if missing/invalid
-     * @return blockNumber Current block number at read time; 0 if missing/invalid
-     */
-    function getHealthFactorCacheWithBlock(address user)
-        external
-        view
-        onlyValidRegistry
-        onlyRiskViewerFor(user)
-        returns (uint256 healthFactor, uint256 timestamp, uint256 blockNumber)
-    {
-        (uint256 hf, bool valid, uint256 ts) = _hv().getUserHealthFactor(user);
-        if (hf == 0 || !valid || ts == 0) {
-            return (0, 0, 0);
-        }
-        return (hf, ts, block.number);
-    }
-
-    /**
-     * @notice Returns whether a user is liquidatable according to the RiskManager.
-     * @dev Reverts if:
-     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not authorized for user (see {onlyRiskViewerFor})
-     *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
-     *
-     * Security:
-     * - Role-gated reads (self or ACTION_VIEW_RISK_DATA)
+     * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
      * @param user Target user address
      * @return liquidatable True if the RiskManager reports the user is liquidatable
+     * @return isValid Whether the read succeeded
+     * @return blockNumber Read block number (block.number)
      */
-    function isLiquidatable(address user) external view onlyValidRegistry onlyRiskViewerFor(user) returns (bool) {
-        return _rm().isLiquidatable(user);
+    function isLiquidatable(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyUserOrViewer(user)
+        returns (bool liquidatable, bool isValid, uint256 blockNumber)
+    {
+        liquidatable = _rm().isLiquidatable(user);
+        return (liquidatable, true, _now());
     }
 
     /**
-     * @notice Returns whether a user is liquidatable under a provided collateral/debt scenario for an asset.
+     * @notice Returns whether a user is liquidatable under a provided collateral/debt scenario, with metadata.
+     *         (Scenario is provided for a specific asset.)
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not authorized for user (see {onlyRiskViewerFor})
+     *      - caller is not authorized for user (see {onlyUserOrViewer})
      *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated reads (self or ACTION_VIEW_RISK_DATA)
+     * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
      * @param user Target user address
      * @param collateral Collateral amount (asset decimals; as expected by RiskManager)
      * @param debt Debt amount (asset decimals; as expected by RiskManager)
      * @param asset Asset address
      * @return liquidatable True if the RiskManager reports the scenario is liquidatable
+     * @return isValid Whether the read succeeded
+     * @return blockNumber Read block number (block.number)
      */
     function isLiquidatable(
         address user,
         uint256 collateral,
         uint256 debt,
         address asset
-    ) external view onlyValidRegistry onlyRiskViewerFor(user) returns (bool) {
-        return _rm().isLiquidatable(user, collateral, debt, asset);
+    )
+        external
+        view
+        onlyValidRegistry
+        onlyUserOrViewer(user)
+        returns (bool liquidatable, bool isValid, uint256 blockNumber)
+    {
+        liquidatable = _rm().isLiquidatable(user, collateral, debt, asset);
+        return (liquidatable, true, _now());
     }
 
     /**
-     * @notice Returns the liquidation risk score for a user.
+     * @notice Returns the liquidation risk score for a user, with metadata.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not authorized for user (see {onlyRiskViewerFor})
+     *      - caller is not authorized for user (see {onlyUserOrViewer})
      *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated reads (self or ACTION_VIEW_RISK_DATA)
+     * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
      * @param user Target user address
      * @return riskScore Risk score (implementation-defined scale)
+     * @return isValid Whether the read succeeded
+     * @return blockNumber Read block number (block.number)
      */
     function getLiquidationRiskScore(address user)
         external
         view
         onlyValidRegistry
-        onlyRiskViewerFor(user)
-        returns (uint256 riskScore)
+        onlyUserOrViewer(user)
+        returns (uint256 riskScore, bool isValid, uint256 blockNumber)
     {
-        return _rm().getLiquidationRiskScore(user);
+        riskScore = _rm().getLiquidationRiskScore(user);
+        return (riskScore, true, _now());
     }
 
     /**
-     * @notice Returns the cached user health factor (0 if invalid).
-     * @dev Reverts if:
-     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not authorized for user (see {onlyRiskViewerFor})
-     *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
-     *
-     * Security:
-     * - Role-gated reads (self or ACTION_VIEW_RISK_DATA)
-     * - Best-effort semantics: returns 0 if cache validity flag is false
-     *
-     * @param user Target user address
-     * @return healthFactor Cached health factor (implementation-defined scale); 0 if invalid
-     */
-    function getUserHealthFactor(address user)
-        external
-        view
-        onlyValidRegistry
-        onlyRiskViewerFor(user)
-        returns (uint256 healthFactor)
-    {
-        (uint256 hf, bool valid, ) = _hv().getUserHealthFactor(user);
-        return valid ? hf : 0;
-    }
-
-    /**
-     * @notice Batch-check whether users are liquidatable.
+     * @notice Batch-check whether users are liquidatable, with metadata.
      * @dev Reverts if:
      *      - users is empty (see {EmptyArray})
-     *      - users.length exceeds the maximum batch size (see {LiquidationRiskView__BatchTooLarge})
+     *      - users.length exceeds the maximum batch size (see {BatchTooLarge})
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks ACTION_VIEW_RISK_DATA (via {ViewAccessLib})
+     *      - caller lacks VIEW_USER_DATA or ADMIN (Scheme U batch)
      *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
+     * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
      * @param users Target user addresses
      * @return liquidatableFlags Per-user liquidation flags
+     * @return isValid Whether the read succeeded
+     * @return blockNumber Read block number (block.number)
      */
     function batchIsLiquidatable(address[] calldata users)
         external
         view
         onlyValidRegistry
-        onlyRiskViewerSystem
-        returns (bool[] memory liquidatableFlags)
+        onlyUserBatchViewer
+        returns (bool[] memory liquidatableFlags, bool isValid, uint256 blockNumber)
     {
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
-        if (len > ViewConstants.MAX_BATCH_SIZE) revert LiquidationRiskView__BatchTooLarge();
-        return _rm().batchIsLiquidatable(users);
-    }
-
-    /**
-     * @notice Returns cached health factors for a batch of users (0 if invalid per user).
-     * @dev Reverts if:
-     *      - users is empty (see {EmptyArray})
-     *      - users.length exceeds the maximum batch size (see {LiquidationRiskView__BatchTooLarge})
-     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks ACTION_VIEW_RISK_DATA (via {ViewAccessLib})
-     *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
-     *
-     * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
-     * - Best-effort semantics: invalid cache entries are returned as 0
-     *
-     * @param users Target user addresses
-     * @return healthFactors Cached health factors (implementation-defined scale); 0 where invalid
-     */
-    function batchGetUserHealthFactors(address[] calldata users)
-        external
-        view
-        onlyValidRegistry
-        onlyRiskViewerSystem
-        returns (uint256[] memory healthFactors)
-    {
-        uint256 len = users.length;
-        if (len == 0) revert EmptyArray();
-        if (len > ViewConstants.MAX_BATCH_SIZE) revert LiquidationRiskView__BatchTooLarge();
-        (uint256[] memory factors, bool[] memory flags, ) = _hv().batchGetHealthFactors(users);
-        uint256[] memory out = new uint256[](len);
-        for (uint256 i; i < len; ++i) {
-            out[i] = flags[i] ? factors[i] : 0;
+        if (len > ViewConstants.MAX_BATCH_SIZE) {
+            revert BatchTooLarge(len, ViewConstants.MAX_BATCH_SIZE);
         }
-        return out;
+        liquidatableFlags = _rm().batchIsLiquidatable(users);
+        return (liquidatableFlags, true, _now());
     }
 
     /**
-     * @notice Returns liquidation risk scores for a batch of users.
+     * @notice Returns liquidation risk scores for a batch of users, with metadata.
      * @dev Reverts if:
      *      - users is empty (see {EmptyArray})
-     *      - users.length exceeds the maximum batch size (see {LiquidationRiskView__BatchTooLarge})
+     *      - users.length exceeds the maximum batch size (see {BatchTooLarge})
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks ACTION_VIEW_RISK_DATA (via {ViewAccessLib})
+     *      - caller lacks VIEW_USER_DATA or ADMIN (Scheme U batch)
      *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
+     * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
      * @param users Target user addresses
      * @return riskScores Risk scores (implementation-defined scale)
+     * @return isValid Whether the read succeeded
+     * @return blockNumber Read block number (block.number)
      */
     function batchGetLiquidationRiskScores(address[] calldata users)
         external
         view
         onlyValidRegistry
-        onlyRiskViewerSystem
-        returns (uint256[] memory riskScores)
+        onlyUserBatchViewer
+        returns (uint256[] memory riskScores, bool isValid, uint256 blockNumber)
     {
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
-        if (len > ViewConstants.MAX_BATCH_SIZE) revert LiquidationRiskView__BatchTooLarge();
-        return _rm().batchGetLiquidationRiskScores(users);
-    }
-
-    /**
-     * @notice Returns the liquidation threshold as defined by the RiskManager.
-     * @dev Reverts if:
-     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks ACTION_VIEW_RISK_DATA (via {ViewAccessLib})
-     *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
-     *
-     * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
-     *
-     * @return threshold Liquidation threshold (implementation-defined scale; commonly bps)
-     */
-    function getLiquidationThreshold()
-        external
-        view
-        onlyValidRegistry
-        onlyRiskViewerSystem
-        returns (uint256 threshold)
-    {
-        return _rm().getLiquidationThreshold();
-    }
-
-    /**
-     * @notice Returns the minimum health factor as defined by the RiskManager.
-     * @dev Reverts if:
-     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks ACTION_VIEW_RISK_DATA (via {ViewAccessLib})
-     *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
-     *
-     * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
-     *
-     * @return minHealthFactor Minimum health factor (implementation-defined scale; commonly bps)
-     */
-    function getMinHealthFactor()
-        external
-        view
-        onlyValidRegistry
-        onlyRiskViewerSystem
-        returns (uint256 minHealthFactor)
-    {
-        return _rm().getMinHealthFactor();
-    }
-
-    /**
-     * @notice Returns the raw cached health factor and timestamp from HealthView.
-     * @dev Reverts if:
-     *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not authorized for user (see {onlyRiskViewerFor})
-     *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
-     *
-     * Security:
-     * - Role-gated reads (self or ACTION_VIEW_RISK_DATA)
-     * - This function returns the raw cache tuple; it does not enforce the HealthView validity flag
-     *
-     * @param user Target user address
-     * @return healthFactor Cached health factor (implementation-defined scale)
-     * @return timestamp Cache timestamp (seconds)
-     */
-    function getHealthFactorCache(address user)
-        external
-        view
-        onlyValidRegistry
-        onlyRiskViewerFor(user)
-        returns (uint256 healthFactor, uint256 timestamp)
-    {
-        (uint256 hf, , uint256 ts) = _hv().getUserHealthFactor(user);
-        return (hf, ts);
+        if (len > ViewConstants.MAX_BATCH_SIZE) {
+            revert BatchTooLarge(len, ViewConstants.MAX_BATCH_SIZE);
+        }
+        riskScores = _rm().batchGetLiquidationRiskScores(users);
+        return (riskScores, true, _now());
     }
 
     /*━━━━━━━━━━━━━━━ View (Registry) ━━━━━━━━━━━━━━━*/
@@ -459,14 +326,14 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
+    /// @dev View-only block helper for meta outputs (not used for state changes).
+    function _now() internal view returns (uint256) {
+        return block.number;
+    }
+
     function _rm() internal view returns (ILiquidationRiskManager) {
         address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
         return ILiquidationRiskManager(rm);
-    }
-
-    function _hv() internal view returns (IHealthViewLite) {
-        address hv = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
-        return IHealthViewLite(hv);
     }
 
     /*━━━━━━━━━━━━━━━ UUPS Upgradeable ━━━━━━━━━━━━━━━*/
@@ -484,7 +351,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation contract address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }

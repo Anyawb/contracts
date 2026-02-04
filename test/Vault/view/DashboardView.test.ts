@@ -7,6 +7,7 @@ const KEY_HEALTH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW'));
 const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW'));
 const KEY_STATS = ethers.keccak256(ethers.toUtf8Bytes('VAULT_STATISTICS'));
 const KEY_PRICE_ORACLE = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
+const KEY_SYSTEM_RISK_VIEW = ethers.keccak256(ethers.toUtf8Bytes('SYSTEM_RISK_VIEW'));
 
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
@@ -22,6 +23,12 @@ describe('DashboardView', function () {
     const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
 
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+    // DashboardView derives "isRisky" from SystemRiskView (SSOT). Use a minimal mock that exposes
+    // getMinHealthFactor() without role-gates.
+    const systemRiskView = await (await ethers.getContractFactory('MockLiquidationRiskManager')).deploy();
+    await systemRiskView.setMinHealthFactor(11_000);
+    await registry.setModule(KEY_SYSTEM_RISK_VIEW, await systemRiskView.getAddress());
 
     const healthView = await (await ethers.getContractFactory('BatchMockHealthView')).deploy();
     const positionView = await (await ethers.getContractFactory('CacheMockPositionView')).deploy();
@@ -58,7 +65,7 @@ describe('DashboardView', function () {
       activeUsers: 80,
       totalCollateral: 10_000n,
       totalDebt: 5_000n,
-      lastUpdateTime: 1_234_567n,
+      lastUpdateBlock: 1_234_567n,
     });
 
     await priceOracle.setPrice(assetA, 2_000_000_000_000_000_000n); // 2e18
@@ -121,7 +128,7 @@ describe('DashboardView', function () {
   describe('getUserOverview', function () {
     it('aggregates collateral/debt/health', async function () {
       const { dashboardView, viewer, assetA, assetB } = await loadFixture(deployFixture);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA, assetB]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA, assetB]);
       expect(overview.totalCollateral).to.equal(1_500n);
       expect(overview.totalDebt).to.equal(100n);
       expect(overview.healthFactor).to.equal(12_000n);
@@ -131,7 +138,7 @@ describe('DashboardView', function () {
 
     it('handles empty tracked assets array', async function () {
       const { dashboardView, viewer } = await loadFixture(deployFixture);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, []);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, []);
       expect(overview.totalCollateral).to.equal(0n);
       expect(overview.totalDebt).to.equal(0n);
       expect(overview.healthFactor).to.equal(12_000n);
@@ -141,7 +148,7 @@ describe('DashboardView', function () {
 
     it('aggregates multiple assets correctly', async function () {
       const { dashboardView, viewer, assetA, assetB, assetC } = await loadFixture(deployFixture);
-      const overview = await dashboardView
+      const [overview] = await dashboardView
         .connect(viewer)
         .getUserOverview(viewer.address, [assetA, assetB, assetC]);
       expect(overview.totalCollateral).to.equal(1_700n); // 1000 + 500 + 200
@@ -152,7 +159,7 @@ describe('DashboardView', function () {
       const { dashboardView, viewer, assetA, healthView } = await loadFixture(deployFixture);
       // Set health factor below threshold (11000 bps = 110%)
       await healthView.setUserHealth(viewer.address, 9_000n, true); // 90% = 9000 bps
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
       expect(overview.healthFactor).to.equal(9_000n);
       expect(overview.isRisky).to.equal(true); // Below 110% threshold (11000 bps)
     });
@@ -161,14 +168,14 @@ describe('DashboardView', function () {
       const { dashboardView, viewer, assetA, healthView } = await loadFixture(deployFixture);
       // Set health factor exactly at threshold (11000 bps = 110%)
       await healthView.setUserHealth(viewer.address, 11_000n, true);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
       expect(overview.healthFactor).to.equal(11_000n);
       expect(overview.isRisky).to.equal(false); // At or above 110% threshold (11000 bps)
     });
 
     it('marks user as not risky when health factor above threshold', async function () {
       const { dashboardView, viewer, assetA } = await loadFixture(deployFixture);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
       expect(overview.healthFactor).to.equal(12_000n);
       expect(overview.isRisky).to.equal(false);
     });
@@ -176,7 +183,7 @@ describe('DashboardView', function () {
     it('handles invalid health factor cache', async function () {
       const { dashboardView, healthView, viewer, assetA } = await loadFixture(deployFixture);
       await healthView.setUserHealth(viewer.address, 8_000n, false);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
       expect(overview.healthFactor).to.equal(8_000n);
       expect(overview.healthFactorValid).to.equal(false);
       expect(overview.isRisky).to.equal(false); // When invalid, isRisky is false
@@ -186,7 +193,7 @@ describe('DashboardView', function () {
       const { dashboardView, positionView, viewer, assetA } = await loadFixture(deployFixture);
       const newAsset = ethers.Wallet.createRandom().address;
       await positionView.setPosition(viewer.address, newAsset, 0n, 0n);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [newAsset]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [newAsset]);
       expect(overview.totalCollateral).to.equal(0n);
       expect(overview.totalDebt).to.equal(0n);
     });
@@ -195,24 +202,34 @@ describe('DashboardView', function () {
       const { dashboardView, positionView, viewer, assetA } = await loadFixture(deployFixture);
       const largeAmount = ethers.parseEther('1000000');
       await positionView.setPosition(viewer.address, assetA, largeAmount, largeAmount / 2n);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
       expect(overview.totalCollateral).to.equal(largeAmount);
       expect(overview.totalDebt).to.equal(largeAmount / 2n);
     });
 
-    it('requires VIEW_USER_DATA role', async function () {
-      const { dashboardView, other, assetA, acm } = await loadFixture(deployFixture);
-      await expect(
-        dashboardView.connect(other).getUserOverview(other.address, [assetA]),
-      ).to.be.revertedWithCustomError(acm, 'MissingRole');
+    it('self-read requires no roles (Scheme U self-read)', async function () {
+      const { dashboardView, other, assetA } = await loadFixture(deployFixture);
+      await expect(dashboardView.connect(other).getUserOverview(other.address, [assetA])).to.not.be.reverted;
     });
 
-    it('also requires VIEW_RISK_DATA role (must not bypass downstream gate)', async function () {
-      const { dashboardView, other, assetA, acm } = await loadFixture(deployFixture);
+    it('non-self requires VIEW_USER_DATA or ADMIN (Scheme U)', async function () {
+      const { dashboardView, other, viewer, assetA } = await loadFixture(deployFixture);
+      await expect(dashboardView.connect(other).getUserOverview(viewer.address, [assetA])).to.be.revertedWithCustomError(
+        dashboardView,
+        'MissingRole',
+      );
+    });
+
+    it('non-self is allowed with ADMIN role (Scheme U admin bypass)', async function () {
+      const { dashboardView, other, viewer, assetA, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_ADMIN, other.address);
+      await expect(dashboardView.connect(other).getUserOverview(viewer.address, [assetA])).to.not.be.reverted;
+    });
+
+    it('non-self is allowed with VIEW_USER_DATA role (Scheme U ops read)', async function () {
+      const { dashboardView, other, viewer, assetA, acm } = await loadFixture(deployFixture);
       await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
-      await expect(
-        dashboardView.connect(other).getUserOverview(other.address, [assetA]),
-      ).to.be.revertedWithCustomError(acm, 'MissingRole');
+      await expect(dashboardView.connect(other).getUserOverview(viewer.address, [assetA])).to.not.be.reverted;
     });
 
     it('reverts when trackedAssets exceeds MAX_BATCH_SIZE', async function () {
@@ -228,7 +245,7 @@ describe('DashboardView', function () {
       const newUser = ethers.Wallet.createRandom().address;
       await dashboardView.connect(viewer).getUserOverview(newUser, []);
       // Should not revert, just return zeros
-      const overview = await dashboardView.connect(viewer).getUserOverview(newUser, []);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(newUser, []);
       expect(overview.totalCollateral).to.equal(0n);
       expect(overview.totalDebt).to.equal(0n);
     });
@@ -315,7 +332,9 @@ describe('DashboardView', function () {
     it('handles zero address asset', async function () {
       const { dashboardView, viewer, positionView } = await loadFixture(deployFixture);
       await positionView.setPosition(viewer.address, ethers.ZeroAddress, 0n, 0n);
-      const items = await dashboardView.connect(viewer).getUserAssetBreakdown(viewer.address, [ethers.ZeroAddress]);
+      const items = await dashboardView
+        .connect(viewer)
+        .getUserAssetBreakdown(viewer.address, [ethers.ZeroAddress]);
       expect(items[0].asset).to.equal(ethers.ZeroAddress);
       expect(items[0].price).to.equal(0n);
     });
@@ -328,19 +347,32 @@ describe('DashboardView', function () {
       expect(items[0].debt).to.equal(0n);
     });
 
-    it('requires VIEW_USER_DATA role', async function () {
+    it('self-read requires no roles (Scheme U self-read)', async function () {
       const { dashboardView, other, assetA, acm } = await loadFixture(deployFixture);
-      await expect(
-        dashboardView.connect(other).getUserAssetBreakdown(other.address, [assetA]),
-      ).to.be.revertedWithCustomError(acm, 'MissingRole');
+      await acm.grantRole(ACTION_VIEW_PRICE_DATA, other.address);
+      await expect(dashboardView.connect(other).getUserAssetBreakdown(other.address, [assetA])).to.not.be.reverted;
     });
 
-    it('also requires VIEW_PRICE_DATA role (must not bypass downstream gate)', async function () {
-      const { dashboardView, other, assetA, acm } = await loadFixture(deployFixture);
-      await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
+    it('non-self requires VIEW_USER_DATA or ADMIN (Scheme U)', async function () {
+      const { dashboardView, other, viewer, assetA, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_VIEW_PRICE_DATA, other.address);
       await expect(
-        dashboardView.connect(other).getUserAssetBreakdown(other.address, [assetA]),
-      ).to.be.revertedWithCustomError(acm, 'MissingRole');
+        dashboardView.connect(other).getUserAssetBreakdown(viewer.address, [assetA]),
+      ).to.be.revertedWithCustomError(dashboardView, 'MissingRole');
+    });
+
+    it('non-self is allowed with ADMIN role (Scheme U admin bypass)', async function () {
+      const { dashboardView, other, viewer, assetA, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_ADMIN, other.address);
+      await acm.grantRole(ACTION_VIEW_PRICE_DATA, other.address);
+      await expect(dashboardView.connect(other).getUserAssetBreakdown(viewer.address, [assetA])).to.not.be.reverted;
+    });
+
+    it('non-self is allowed with VIEW_USER_DATA role (Scheme U ops read)', async function () {
+      const { dashboardView, other, viewer, assetA, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
+      await acm.grantRole(ACTION_VIEW_PRICE_DATA, other.address);
+      await expect(dashboardView.connect(other).getUserAssetBreakdown(viewer.address, [assetA])).to.not.be.reverted;
     });
 
     it('reverts when assets exceeds MAX_BATCH_SIZE', async function () {
@@ -370,9 +402,31 @@ describe('DashboardView', function () {
       expect(stats.activeUsers).to.equal(80n);
       expect(stats.totalCollateral).to.equal(10_000n);
       expect(stats.totalDebt).to.equal(5_000n);
-      expect(stats.lastUpdateTime).to.equal(1_234_567n);
+      expect(stats.lastUpdateBlock).to.equal(1_234_567n);
 
       await expect(dashboardView.connect(other).getSystemOverview()).to.be.revertedWithCustomError(
+        acm,
+        'MissingRole',
+      );
+    });
+
+    it('returns statistics with meta from StatisticsView', async function () {
+      const { dashboardView, statsView, viewer } = await loadFixture(deployFixture);
+      const [overview, isValid, blockNumber] = await dashboardView.connect(viewer).getSystemOverviewWithMeta();
+      const [stats, directValid, directTs] = await statsView.getGlobalStatisticsWithMeta();
+
+      expect(overview.totalUsers).to.equal(stats.totalUsers);
+      expect(overview.activeUsers).to.equal(stats.activeUsers);
+      expect(overview.totalCollateral).to.equal(stats.totalCollateral);
+      expect(overview.totalDebt).to.equal(stats.totalDebt);
+      expect(overview.lastUpdateBlock).to.equal(stats.lastUpdateBlock);
+      expect(isValid).to.equal(directValid);
+      expect(blockNumber).to.equal(directTs);
+    });
+
+    it('getSystemOverviewWithMeta enforces role', async function () {
+      const { dashboardView, other, acm } = await loadFixture(deployFixture);
+      await expect(dashboardView.connect(other).getSystemOverviewWithMeta()).to.be.revertedWithCustomError(
         acm,
         'MissingRole',
       );
@@ -385,14 +439,14 @@ describe('DashboardView', function () {
         activeUsers: 150,
         totalCollateral: 50_000n,
         totalDebt: 20_000n,
-        lastUpdateTime: 2_345_678n,
+        lastUpdateBlock: 2_345_678n,
       });
       const stats = await dashboardView.connect(viewer).getSystemOverview();
       expect(stats.totalUsers).to.equal(200n);
       expect(stats.activeUsers).to.equal(150n);
       expect(stats.totalCollateral).to.equal(50_000n);
       expect(stats.totalDebt).to.equal(20_000n);
-      expect(stats.lastUpdateTime).to.equal(2_345_678n);
+      expect(stats.lastUpdateBlock).to.equal(2_345_678n);
     });
 
     it('handles zero statistics', async function () {
@@ -402,14 +456,14 @@ describe('DashboardView', function () {
         activeUsers: 0,
         totalCollateral: 0n,
         totalDebt: 0n,
-        lastUpdateTime: 0n,
+        lastUpdateBlock: 0n,
       });
       const stats = await dashboardView.connect(viewer).getSystemOverview();
       expect(stats.totalUsers).to.equal(0n);
       expect(stats.activeUsers).to.equal(0n);
       expect(stats.totalCollateral).to.equal(0n);
       expect(stats.totalDebt).to.equal(0n);
-      expect(stats.lastUpdateTime).to.equal(0n);
+      expect(stats.lastUpdateBlock).to.equal(0n);
     });
 
     it('handles large statistics values', async function () {
@@ -420,7 +474,7 @@ describe('DashboardView', function () {
         activeUsers: 800000,
         totalCollateral: largeValue,
         totalDebt: largeValue / 2n,
-        lastUpdateTime: 9999999999n,
+        lastUpdateBlock: 9999999999n,
       });
       const stats = await dashboardView.connect(viewer).getSystemOverview();
       expect(stats.totalCollateral).to.equal(largeValue);
@@ -527,8 +581,10 @@ describe('DashboardView', function () {
   describe('data consistency', function () {
     it('getUserOverview matches getUserAssetBreakdown totals', async function () {
       const { dashboardView, viewer, assetA, assetB } = await loadFixture(deployFixture);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA, assetB]);
-      const breakdown = await dashboardView.connect(viewer).getUserAssetBreakdown(viewer.address, [assetA, assetB]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA, assetB]);
+      const breakdown = await dashboardView
+        .connect(viewer)
+        .getUserAssetBreakdown(viewer.address, [assetA, assetB]);
 
       const breakdownCollateral = breakdown[0].collateral + breakdown[1].collateral;
       const breakdownDebt = breakdown[0].debt + breakdown[1].debt;
@@ -539,8 +595,8 @@ describe('DashboardView', function () {
 
     it('getUserOverview health factor matches direct query', async function () {
       const { dashboardView, healthView, viewer, assetA } = await loadFixture(deployFixture);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
-      const [directHf, directValid] = await healthView.getUserHealthFactor(viewer.address);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [directHf, directValid] = await healthView.getUserHealthFactorWithMeta(viewer.address);
 
       expect(overview.healthFactor).to.equal(directHf);
       expect(overview.healthFactorValid).to.equal(directValid);
@@ -549,13 +605,13 @@ describe('DashboardView', function () {
     it('getSystemOverview matches StatisticsView directly', async function () {
       const { dashboardView, statsView, viewer } = await loadFixture(deployFixture);
       const overview = await dashboardView.connect(viewer).getSystemOverview();
-      const stats = await statsView.getGlobalStatistics();
+      const [stats] = await statsView.getGlobalStatisticsWithMeta();
 
       expect(overview.totalUsers).to.equal(stats.totalUsers);
       expect(overview.activeUsers).to.equal(stats.activeUsers);
       expect(overview.totalCollateral).to.equal(stats.totalCollateral);
       expect(overview.totalDebt).to.equal(stats.totalDebt);
-      expect(overview.lastUpdateTime).to.equal(stats.lastUpdateTime);
+      expect(overview.lastUpdateBlock).to.equal(stats.lastUpdateBlock);
     });
   });
 
@@ -564,7 +620,7 @@ describe('DashboardView', function () {
       const { dashboardView, viewer, assetA } = await loadFixture(deployFixture);
       const newAsset = ethers.Wallet.createRandom().address;
       // viewer has position in assetA but not newAsset
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA, newAsset]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA, newAsset]);
       expect(overview.totalCollateral).to.equal(1_000n); // Only assetA
       expect(overview.totalDebt).to.equal(100n);
     });
@@ -573,12 +629,12 @@ describe('DashboardView', function () {
       const { dashboardView, healthView, viewer, assetA } = await loadFixture(deployFixture);
       // Set health factor exactly at threshold (11000 bps = 110%)
       await healthView.setUserHealth(viewer.address, 11_000n, true);
-      const overview = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [overview] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
       expect(overview.isRisky).to.equal(false); // At threshold, not risky
 
       // Set health factor just below threshold
       await healthView.setUserHealth(viewer.address, 10_999n, true);
-      const overview2 = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [overview2] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
       expect(overview2.isRisky).to.equal(true); // Below threshold, risky
     });
 
@@ -588,8 +644,8 @@ describe('DashboardView', function () {
       await healthView.setUserHealth(viewer.address, 12_000n, true); // 120% - safe
       await healthView.setUserHealth(viewer2.address, 10_500n, true); // 105% - risky (below 110%)
       
-      const overview1 = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
-      const overview2 = await dashboardView.connect(viewer2).getUserOverview(viewer2.address, [assetA]);
+      const [overview1] = await dashboardView.connect(viewer).getUserOverview(viewer.address, [assetA]);
+      const [overview2] = await dashboardView.connect(viewer2).getUserOverview(viewer2.address, [assetA]);
 
       expect(overview1.isRisky).to.equal(false); // 120% > 110%
       expect(overview2.isRisky).to.equal(true); // 105% < 110%
@@ -622,6 +678,45 @@ describe('DashboardView', function () {
       const receipt = await txReq.wait();
       const hasDataPushed = receipt!.logs.some((l) => l.topics?.[0] === DATA_PUSH_TOPIC0);
       expect(hasDataPushed).to.equal(false);
+    });
+  });
+
+  describe('SSOT callsite assertions (trap ACM)', function () {
+    it('user-dimensional gate MUST use hasRole (must not call ACM.requireRole)', async function () {
+      const [, viewer, other] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManagerTrapRequireRole')).deploy();
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+      const DashboardViewFactory = await ethers.getContractFactory('DashboardView');
+      const dashboardView = await upgrades.deployProxy(DashboardViewFactory, [await registry.getAddress()], {
+        kind: 'uups',
+      });
+
+      // non-self: should be rejected by DashboardView's Scheme U gate without invoking requireRole().
+      await expect(dashboardView.connect(other).getUserOverview(viewer.address, [])).to.be.revertedWithCustomError(
+        dashboardView,
+        'MissingRole',
+      );
+    });
+
+    it('system gate MUST revert MissingRole (no role)', async function () {
+      const [, other] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+      const DashboardViewFactory = await ethers.getContractFactory('DashboardView');
+      const dashboardView = await upgrades.deployProxy(DashboardViewFactory, [await registry.getAddress()], {
+        kind: 'uups',
+      });
+
+      await expect(dashboardView.connect(other).getSystemOverview()).to.be.revertedWithCustomError(
+        dashboardView,
+        'MissingRole',
+      );
     });
   });
 });

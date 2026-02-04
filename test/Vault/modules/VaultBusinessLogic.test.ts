@@ -105,7 +105,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     
     // 创建 Mock ERC20
     mockERC20Factory = await ethers.getContractFactory('MockERC20');
-    mockERC20 = await mockERC20Factory.deploy('Test Token', 'TEST', TEST_AMOUNT * 100n);
+    mockERC20 = await mockERC20Factory.deploy('Test Token', 'TEST', 18, TEST_AMOUNT * 100n);
     await mockERC20.waitForDeployment();
     
     // 部署 Mock 合约实例

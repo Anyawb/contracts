@@ -67,7 +67,7 @@ contract MockCollateralManager is ICollateralManager {
         require(_userCollateral[targetUser][collateralAsset] >= collateralAmount, "Insufficient collateral");
         _userCollateral[targetUser][collateralAsset] -= collateralAmount;
         _totalByAsset[collateralAsset] -= collateralAmount;
-        emit CollateralSeized(liquidator, targetUser, collateralAsset, collateralAmount, block.timestamp);
+        emit CollateralSeized(liquidator, targetUser, collateralAsset, collateralAmount, block.number);
     }
     
     /// @notice 获取用户抵押物数量
@@ -135,7 +135,7 @@ contract MockCollateralManager is ICollateralManager {
             _totalByAsset[asset] -= seizedAmount;
             
             // 发出扣押事件
-            emit CollateralSeized(liquidator, user, asset, seizedAmount, block.timestamp);
+            emit CollateralSeized(liquidator, user, asset, seizedAmount, block.number);
         }
         
         return seizedAmount;
@@ -172,7 +172,7 @@ contract MockCollateralManager is ICollateralManager {
         address indexed user,
         address indexed asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 设置失败标志（测试用）

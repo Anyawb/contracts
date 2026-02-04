@@ -42,7 +42,7 @@ library RegistryEvents {
      * - Emitted by the Registry initializer path.
      *
      * @param admin Governance/admin address configured at initialization.
-     * @param minDelay Minimum upgrade delay window (seconds).
+     * @param minDelay Minimum upgrade delay window (blocks).
      * @param initializer Initializer caller address (e.g., deployer/EOA/contract).
      */
     event RegistryInitialized(
@@ -169,12 +169,12 @@ library RegistryEvents {
      *      - (none)
      *
      * Security:
-     * - Scheduling relies on block.timestamp by design (timelock mechanism).
+     * - Scheduling relies on block.number by design (timelock mechanism).
      *
      * @param key Module key (bytes32; see ModuleKeys).
      * @param oldAddress Current module address at scheduling time.
      * @param newAddress Proposed new module address.
-     * @param executeAfter Earliest execution time (unix timestamp, seconds).
+     * @param executeAfter Earliest execution block (block.number).
      * @param proposer Proposal submitter address.
      */
     event ModuleUpgradeScheduled(
@@ -280,12 +280,12 @@ library RegistryEvents {
      *        - 3: EMERGENCY_RECOVERY
      *        - 4: EMERGENCY_WITHDRAW
      * @param executor Caller/executor address.
-     * @param timestamp Action timestamp (unix timestamp, seconds).
+     * @param blockNumber Action block number (block.number).
      */
     event EmergencyActionExecuted(
         uint8 indexed action, 
         address indexed executor,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     // ============ Configuration change events ============
@@ -298,8 +298,8 @@ library RegistryEvents {
      * Security:
      * - Delay window changes should be governance-gated by the emitting contract.
      *
-     * @param oldDelay Previous delay window (seconds).
-     * @param newDelay New delay window (seconds).
+     * @param oldDelay Previous delay window (blocks).
+     * @param newDelay New delay window (blocks).
      */
     event MinDelayChanged(
         uint256 oldDelay, 

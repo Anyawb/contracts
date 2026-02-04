@@ -2,6 +2,8 @@ import { ethers } from "hardhat";
 import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
 
 const ONE_DAY = 24n * 60n * 60n;
+const ONE_HOUR_BLOCKS = 1_800n;
+const BLOCKS_PER_DAY = 43_200n;
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -30,6 +32,17 @@ function buildLendIntentHash(li: any) {
       ]
     )
   );
+}
+
+async function latestBlockNumber(): Promise<bigint> {
+  return BigInt(await ethers.provider.getBlockNumber());
+}
+
+async function mineToBlock(targetBlock: bigint) {
+  const current = await latestBlockNumber();
+  if (targetBlock <= current) return;
+  const delta = targetBlock - current;
+  await ethers.provider.send("hardhat_mine", [ethers.toBeHex(delta)]);
 }
 
 async function main() {
@@ -104,9 +117,10 @@ async function main() {
   {
     const cfg = await po.getAssetConfig(usdc.target);
     if (!cfg.isActive) {
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
       throw new Error(
         `[Config] PriceOracle asset is not active for ${usdc.target}. ` +
-          `Pre-config required: call PriceOracle.configureAsset(${usdc.target}, "usd-coin", 8, 3600) via governance.`
+          `Pre-config required: call PriceOracle.configureAsset(${usdc.target}, "usd-coin", ${usdcDecimals}, 3600) via governance.`
       );
     }
     try {
@@ -140,7 +154,7 @@ async function main() {
   const borrowAmt = ethers.parseUnits("500", 6);
   const termDays = 5;
   const rateBps = 1000n;
-  const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+  const expireAt = (await latestBlockNumber()) + ONE_HOUR_BLOCKS;
 
   const borrowIntent = {
     borrower: borrower.address,
@@ -276,13 +290,12 @@ async function main() {
     }
   }
 
-  const termSec = BigInt(termDays) * ONE_DAY;
+  const termBlocks = BigInt(termDays) * BLOCKS_PER_DAY;
   const createdBlock = await ethers.provider.getBlock(receipt!.blockNumber);
-  const maturity = BigInt(createdBlock!.timestamp) + termSec;
-  await ethers.provider.send("evm_increaseTime", [Number(termSec + 60n)]);
-  await ethers.provider.send("evm_mine", []);
+  const maturity = BigInt(createdBlock!.number) + termBlocks;
+  await mineToBlock(maturity + ONE_HOUR_BLOCKS);
 
-  const nowAfter = (await ethers.provider.getBlock("latest"))!.timestamp;
+  const nowAfter = await latestBlockNumber();
   console.log("order maturity", maturity.toString());
   console.log("now", nowAfter.toString(), "(overdue=true)");
   console.log("");

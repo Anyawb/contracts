@@ -92,7 +92,7 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
     mockAssetWhitelist = await MockAssetWhitelistFactory.deploy();
 
     const MockERC20Factory = await ethers.getContractFactory('MockERC20');
-    mockSettlementToken = await MockERC20Factory.deploy('Settlement Token', 'SETTLE', ethers.parseUnits('1000000', 18));
+    mockSettlementToken = await MockERC20Factory.deploy('Settlement Token', 'SETTLE', 18, ethers.parseUnits('1000000', 18));
 
     const MockRegistryFactory = await ethers.getContractFactory('MockRegistry');
     mockRegistry = await MockRegistryFactory.deploy() as unknown as MockRegistry;
@@ -196,7 +196,7 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           this.testAsset,
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
-          anyValue, // timestamp
+          anyValue, // blockNumber
           ethers.ZeroHash, // requestId (默认 0)
           0 // seq (默认 0)
         );
@@ -230,7 +230,7 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           this.testAsset,
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
-          anyValue, // timestamp
+          anyValue, // blockNumber
           requestId,
           seq
         );
@@ -287,7 +287,7 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
           ethers.parseUnits('100', 6),
-          anyValue, // timestamp
+          anyValue, // blockNumber
           ethers.ZeroHash, // requestId (默认 0)
           0 // seq (默认 0)
         );
@@ -318,7 +318,7 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
           ONE_ETH,
           ethers.parseUnits('0.5', 18),
           ethers.parseUnits('100', 6),
-          anyValue, // timestamp
+          anyValue, // blockNumber
           requestId,
           seq
         );

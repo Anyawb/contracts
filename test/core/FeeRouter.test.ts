@@ -45,7 +45,7 @@ describe('FeeRouter – 费率管理测试', function () {
     // 部署 MockERC20 代币 - 增加初始供应量
     const mockTokenFactory = await ethers.getContractFactory('MockERC20');
     const initialSupply = ethers.parseUnits('2000000', 6); // 200万代币（增加以支持大金额测试）
-    const mockToken = await mockTokenFactory.deploy('Mock USDC', 'USDC', initialSupply);
+    const mockToken = await mockTokenFactory.deploy('Mock USDC', 'USDC', 6, initialSupply);
     await mockToken.waitForDeployment();
     
     // 部署 FeeRouter
@@ -472,7 +472,7 @@ describe('FeeRouter – 费率管理测试', function () {
       
       // 部署新代币
       const mockTokenFactory = await ethers.getContractFactory('MockERC20');
-      const newToken = await mockTokenFactory.deploy('New Token', 'NEW', ethers.parseUnits('1000000', 18));
+      const newToken = await mockTokenFactory.deploy('New Token', 'NEW', 18, ethers.parseUnits('1000000', 18));
       await newToken.waitForDeployment();
       
       await expect(feeRouter.connect(governance).addSupportedToken(await newToken.getAddress()))
@@ -820,7 +820,7 @@ describe('FeeRouter – 费率管理测试', function () {
       
       // 部署第二个代币
       const mockTokenFactory = await ethers.getContractFactory('MockERC20');
-      const token2 = await mockTokenFactory.deploy('Token 2', 'T2', ethers.parseUnits('1000000', 18));
+      const token2 = await mockTokenFactory.deploy('Token 2', 'T2', 18, ethers.parseUnits('1000000', 18));
       await token2.waitForDeployment();
       
       await feeRouter.connect(governance).addSupportedToken(await token2.getAddress());
@@ -951,7 +951,7 @@ describe('FeeRouter – 费率管理测试', function () {
       
       // 部署新代币但不添加
       const mockTokenFactory = await ethers.getContractFactory('MockERC20');
-      const newToken = await mockTokenFactory.deploy('New Token', 'NEW', ethers.parseUnits('1000000', 18));
+      const newToken = await mockTokenFactory.deploy('New Token', 'NEW', 18, ethers.parseUnits('1000000', 18));
       await newToken.waitForDeployment();
       
       await expect(

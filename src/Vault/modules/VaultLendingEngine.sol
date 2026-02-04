@@ -18,6 +18,10 @@ import { LendingEngineStorage } from "./lendingEngine/LendingEngineStorage.sol";
 import { LendingEngineValuation } from "./lendingEngine/LendingEngineValuation.sol";
 import { LendingEngineCore } from "./lendingEngine/LendingEngineCore.sol";
 
+interface IStatisticsPushManagerMinimal {
+    function notifyUserStats(address user) external;
+}
+
 /**
  * @title VaultLendingEngine
  * @notice Debt ledger SSOT (multi-asset) for the Vault: records borrow/repay/liquidation debt changes.
@@ -177,6 +181,17 @@ contract VaultLendingEngine is
     /// @param user Address to validate.
     function _requireRole(bytes32 actionKey, address user) internal view {
         LendingEngineCore._requireRole(_s(), actionKey, user);
+    }
+
+    /// @dev Best-effort notify the single Statistics push orchestrator (strict B+).
+    ///      This ledger module MUST NOT call StatisticsView directly.
+    function _tryNotifyStatsPushManager(address user) internal {
+        address mgr = LendingEngineCore._getModuleAddressOrZero(_s(), ModuleKeys.KEY_STATS_PUSH_MANAGER);
+        if (mgr == address(0) || mgr.code.length == 0) return;
+        try IStatisticsPushManagerMinimal(mgr).notifyUserStats(user) {
+        } catch {
+            // Best-effort: do not revert; failure observability is handled by the push manager.
+        }
     }
 
     /*━━━━━━━━━━━━━━━ Construction & initialization ━━━━━━━━━━━━━━━*/
@@ -342,8 +357,7 @@ contract VaultLendingEngine is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -593,6 +607,7 @@ contract VaultLendingEngine is
     ) external override onlyValidRegistry onlyVaultCore nonReentrant {
         collateralAdded; // silence unused parameter
         _s().borrow(user, asset, amount, termDays);
+        _tryNotifyStatsPushManager(user);
     }
 
     /**
@@ -628,6 +643,7 @@ contract VaultLendingEngine is
         nonReentrant
     {
         _s().repay(user, asset, amount);
+        _tryNotifyStatsPushManager(user);
     }
 
     /**
@@ -664,6 +680,7 @@ contract VaultLendingEngine is
         nonReentrant
     {
         _s().forceReduceDebt(user, asset, amount);
+        _tryNotifyStatsPushManager(user);
     }
 
     /// @notice Update the cached total debt value for a user (internal helper).
@@ -711,8 +728,7 @@ contract VaultLendingEngine is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -746,8 +762,7 @@ contract VaultLendingEngine is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -781,8 +796,7 @@ contract VaultLendingEngine is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -814,8 +828,7 @@ contract VaultLendingEngine is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -860,8 +873,7 @@ contract VaultLendingEngine is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 

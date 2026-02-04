@@ -6,6 +6,8 @@ function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
+const BLOCKS_PER_MINUTE = 30n;
+
 function assertOk(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
@@ -104,13 +106,13 @@ async function main() {
 
     const actionKey = key("VIEW_USER_DATA");
 
-    // ====== MUST: read returns isValid/timestamp (or at least isValid) ======
-    const [p0, valid0, ts0] = (await mustSucceed("getUserPermissionWithMeta (empty)", async () =>
+    // ====== MUST: read returns isValid/blockNumber (or at least isValid) ======
+    const [p0, valid0, block0] = (await mustSucceed("getUserPermissionWithMeta (empty)", async () =>
       acv.connect(user).getUserPermissionWithMeta(user.address, actionKey)
     )) as [boolean, boolean, bigint];
     assertOk(p0 === false, "empty cache should return hasPermission=false");
     assertOk(valid0 === false, "empty cache should be invalid");
-    assertOk(ts0 === 0n, "empty cache timestamp must be 0");
+    assertOk(block0 === 0n, "empty cache blockNumber must be 0");
 
     // ====== MUST: only ACM can push ======
     await mustRevert("pushPermissionUpdate from EOA must revert (onlyACM)", async () =>
@@ -137,9 +139,9 @@ async function main() {
     assertOk(!!rc1, "missing receipt for pushPermissionUpdate");
 
     const blk1 = await ethers.provider.getBlock(rc1.blockNumber);
-    const expectedTs1 = BigInt(blk1!.timestamp);
+    const expectedBlock1 = BigInt(blk1!.number);
 
-    // Legacy event must be present and timestamp must match tx block.timestamp
+    // Legacy event must be present and blockNumber must match tx block.number
     const legacyBitLogs = rc1.logs
       .filter((l: any) => l.address.toLowerCase() === acvAddr.toLowerCase())
       .filter((l: any) => l.topics?.[0] === legacyBitTopic);
@@ -148,7 +150,7 @@ async function main() {
     assertOk((legacyParsed.args[0] as string).toLowerCase() === user.address.toLowerCase(), "legacy user mismatch");
     assertOk((legacyParsed.args[1] as string).toLowerCase() === actionKey.toLowerCase(), "legacy actionKey mismatch");
     assertOk(legacyParsed.args[2] === true, "legacy hasPermission mismatch");
-    assertOk(BigInt(legacyParsed.args[3]) === expectedTs1, "legacy timestamp must equal tx block.timestamp");
+    assertOk(BigInt(legacyParsed.args[3]) === expectedBlock1, "legacy blockNumber must equal tx block.number");
 
     const dpLogs1 = rc1.logs
       .filter((l: any) => l.address.toLowerCase() === acvAddr.toLowerCase())
@@ -163,23 +165,22 @@ async function main() {
     assertOk(decoded1[2] === true, "payload.hasPermission mismatch");
 
     // ====== MUST: push then immediate read, isValid correct ======
-    const [p1, valid1, ts1] = (await mustSucceed("getUserPermissionWithMeta (after push)", async () =>
+    const [p1, valid1, block1] = (await mustSucceed("getUserPermissionWithMeta (after push)", async () =>
       acv.connect(user).getUserPermissionWithMeta(user.address, actionKey)
     )) as [boolean, boolean, bigint];
     assertOk(p1 === true, "after push, hasPermission must be true");
     assertOk(valid1 === true, "after push, isValid must be true");
-    assertOk(ts1 === expectedTs1, "timestamp must equal tx block.timestamp");
+    assertOk(block1 === expectedBlock1, "blockNumber must equal tx block.number");
 
     // TTL expiry (ViewConstants.CACHE_DURATION = 5min)
-    await network.provider.send("evm_increaseTime", [5 * 60 + 1]);
-    await network.provider.send("evm_mine", []);
+    await network.provider.send("hardhat_mine", [ethers.toBeHex(5n * BLOCKS_PER_MINUTE + 1n)]);
 
-    const [pExp, validExp, tsExp] = (await mustSucceed("getUserPermissionWithMeta (expired)", async () =>
+    const [pExp, validExp, blockExp] = (await mustSucceed("getUserPermissionWithMeta (expired)", async () =>
       acv.connect(user).getUserPermissionWithMeta(user.address, actionKey)
     )) as [boolean, boolean, bigint];
     assertOk(pExp === true, "expired cache must keep stored permission value");
     assertOk(validExp === false, "expired cache must have isValid=false");
-    assertOk(tsExp === ts1, "expired cache must keep original timestamp");
+    assertOk(blockExp === block1, "expired cache must keep original blockNumber");
 
     // ====== Permission level update path ======
     const DATA_TYPE_LEVEL = key("PERMISSION_LEVEL_UPDATE");
@@ -193,9 +194,9 @@ async function main() {
     assertOk(!!rc2, "missing receipt for pushPermissionLevelUpdate");
 
     const blk2 = await ethers.provider.getBlock(rc2.blockNumber);
-    const expectedTs2 = BigInt(blk2!.timestamp);
+    const expectedBlock2 = BigInt(blk2!.number);
 
-    // Legacy event must be present and timestamp must match tx block.timestamp
+    // Legacy event must be present and blockNumber must match tx block.number
     const legacyLvlLogs = rc2.logs
       .filter((l: any) => l.address.toLowerCase() === acvAddr.toLowerCase())
       .filter((l: any) => l.topics?.[0] === legacyLevelTopic);
@@ -203,7 +204,7 @@ async function main() {
     const legacyLvlParsed = acv.interface.parseLog({ topics: legacyLvlLogs[0].topics, data: legacyLvlLogs[0].data });
     assertOk((legacyLvlParsed.args[0] as string).toLowerCase() === user.address.toLowerCase(), "legacy level user mismatch");
     assertOk(Number(legacyLvlParsed.args[1]) === newLevel, "legacy level newLevel mismatch");
-    assertOk(BigInt(legacyLvlParsed.args[2]) === expectedTs2, "legacy level timestamp must equal tx block.timestamp");
+    assertOk(BigInt(legacyLvlParsed.args[2]) === expectedBlock2, "legacy level blockNumber must equal tx block.number");
 
     const dpLogs2 = rc2.logs
       .filter((l: any) => l.address.toLowerCase() === acvAddr.toLowerCase())
@@ -217,21 +218,20 @@ async function main() {
     assertOk((decoded2[0] as string).toLowerCase() === user.address.toLowerCase(), "level payload.user mismatch");
     assertOk(Number(decoded2[1]) === newLevel, "level payload.newLevel mismatch");
 
-    const [lvl1, lvlValid1, lvlTs1] = (await mustSucceed("getUserPermissionLevelWithMeta (after push)", async () =>
+    const [lvl1, lvlValid1, lvlBlock1] = (await mustSucceed("getUserPermissionLevelWithMeta (after push)", async () =>
       acv.connect(user).getUserPermissionLevelWithMeta(user.address)
     )) as [bigint, boolean, bigint];
     assertOk(Number(lvl1) === newLevel, "after push, level mismatch");
     assertOk(lvlValid1 === true, "after push, level isValid must be true");
-    assertOk(lvlTs1 > 0n, "after push, level timestamp must be >0");
+    assertOk(lvlBlock1 > 0n, "after push, level blockNumber must be >0");
 
-    await network.provider.send("evm_increaseTime", [5 * 60 + 1]);
-    await network.provider.send("evm_mine", []);
-    const [lvlExp, lvlValidExp, lvlTsExp] = (await mustSucceed("getUserPermissionLevelWithMeta (expired)", async () =>
+    await network.provider.send("hardhat_mine", [ethers.toBeHex(5n * BLOCKS_PER_MINUTE + 1n)]);
+    const [lvlExp, lvlValidExp, lvlBlockExp] = (await mustSucceed("getUserPermissionLevelWithMeta (expired)", async () =>
       acv.connect(user).getUserPermissionLevelWithMeta(user.address)
     )) as [bigint, boolean, bigint];
     assertOk(Number(lvlExp) === newLevel, "expired cache must keep stored level value");
     assertOk(lvlValidExp === false, "expired cache must have isValid=false");
-    assertOk(lvlTsExp === lvlTs1, "expired cache must keep original timestamp");
+    assertOk(lvlBlockExp === lvlBlock1, "expired cache must keep original blockNumber");
 
     // Clean up impersonation (best-effort)
     await network.provider.send("hardhat_stopImpersonatingAccount", [acmAddr]);

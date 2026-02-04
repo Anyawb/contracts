@@ -4,8 +4,14 @@ import { scanViewModules } from "./utils/view-scan";
 
 type AnyFn = () => Promise<unknown>;
 
+const ONE_HOUR_BLOCKS = 1_800n;
+
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
+}
+
+async function latestBlockNumber(): Promise<bigint> {
+  return BigInt(await ethers.provider.getBlockNumber());
 }
 
 function fmtErr(e: any) {
@@ -194,7 +200,13 @@ async function main() {
   // Always derive core addresses from Registry to avoid stale frontend-config values.
   const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
   const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreAddr, deployer)) as any;
-  const vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
+  let vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
+  const vblAddrConfig = (CONTRACT_ADDRESSES as any).VaultBusinessLogic as string | undefined;
+  if (vblAddrConfig && vblAddr.toLowerCase() !== vblAddrConfig.toLowerCase()) {
+    // Ensure VAULT_BUSINESS_LOGIC points to real VBL (avoid router/legacy mis-wire).
+    await (await registry.connect(deployer).setModule(key("VAULT_BUSINESS_LOGIC"), vblAddrConfig)).wait();
+    vblAddr = vblAddrConfig;
+  }
   const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddr, deployer)) as any;
   const priceOracle = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle, deployer)) as any;
   const collateralManagerAddr = (await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"))) as string;
@@ -295,7 +307,8 @@ async function main() {
       await (await poAsAttacker.updatePrice(await usdc.getAddress(), 1n, now)).wait();
     });
     await mustRevert("attacker: PriceOracle.configureAsset(USDC,...)", async () => {
-      await (await poAsAttacker.configureAsset(await usdc.getAddress(), "x", 8, 60n)).wait();
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await (await poAsAttacker.configureAsset(await usdc.getAddress(), "x", usdcDecimals, 60n)).wait();
     });
     await mustRevert("attacker: PriceOracle.setAssetActive(...)", async () => {
       await (await poAsAttacker.setAssetActive(await usdc.getAddress(), true)).wait();
@@ -416,8 +429,13 @@ async function main() {
       const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
       const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr, deployer)) as any;
       const poolAddr = (await registry.getModuleOrRevert(key("LENDER_POOL_VAULT"))) as string;
-      const block = await ethers.provider.getBlock("latest");
-      const now = BigInt(block!.timestamp);
+      const ergmAddr = (await registry.getModuleOrRevert(key("EARLY_REPAYMENT_GUARANTEE_MANAGER"))) as string;
+      const ergm = (await ethers.getContractAt(
+        ["function setGuaranteeEnabled(address asset, bool enabled) external", "function isGuaranteeEnabled(address asset) view returns (bool)"],
+        ergmAddr,
+        deployer
+      )) as any;
+      const nowBlock = await latestBlockNumber();
 
       // Minimal role setup for local environment.
       const ensureRole = async (roleName: string, who: string) => {
@@ -436,6 +454,15 @@ async function main() {
       // LendingEngine mints LoanNFT; LoanNFT requires MINTER_ROLE_VALUE == ACTION_BORROW on msg.sender (the ORDER_ENGINE).
       await mustSucceed("role: BORROW to ORDER_ENGINE (LoanNFT minter)", async () => ensureRole("BORROW", orderEngineAddr));
 
+      // IMPORTANT: In local/dirty-state runs, guarantee may remain enabled from previous tests.
+      // Section 8 focuses on EIP-712 signature correctness and replay; keep it decoupled from guarantee allowance requirements.
+      await mustSucceed("disable guarantee for signature tests (best-effort)", async () => {
+        const enabled = await ergm.isGuaranteeEnabled(asset);
+        if (enabled) {
+          await (await ergm.connect(deployer).setGuaranteeEnabled(asset, false)).wait();
+        }
+      });
+
       // Ensure asset is allowed + oracle supported + fresh price.
       if (!(await assetWhitelist.isAssetAllowed(asset))) {
         await (await assetWhitelist.connect(deployer).addAllowedAsset(asset)).wait();
@@ -446,10 +473,11 @@ async function main() {
       {
         const cfg = await priceOracle.getAssetConfig(asset);
         if (!cfg.isActive) {
-          await (await priceOracle.connect(deployer).configureAsset(asset, "usd-coin", 8, 3600n)).wait();
+          const d = Number(await (await ethers.getContractAt("MockERC20", asset)).decimals().catch(() => 18));
+          await (await priceOracle.connect(deployer).configureAsset(asset, "usd-coin", d, 3600n)).wait();
         }
       }
-      await (await priceOracle.connect(deployer).updatePrice(asset, ethers.parseUnits("1", 8), Number(now))).wait();
+      await (await priceOracle.connect(deployer).updatePrice(asset, ethers.parseUnits("1", 8), nowBlock)).wait();
 
       // Fund borrower + lender and set approvals.
       await (await usdc.connect(deployer).transfer(victim.address, ethers.parseUnits("100000", 6))).wait();
@@ -464,7 +492,7 @@ async function main() {
       await (await usdc.connect(victim).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt)).wait();
       await (await vaultCore.connect(victim).deposit(asset, collateralAmt)).wait();
 
-      const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+      const expireAt = (await latestBlockNumber()) + ONE_HOUR_BLOCKS;
       const borrowIntent = {
         borrower: victim.address,
         collateralAsset: asset,
@@ -585,7 +613,7 @@ async function main() {
           }
         }
         if (orderId === null) throw new Error("LoanOrderCreated not found (invariant check)");
-        const ord = await orderEngine.connect(deployer)._getLoanOrderForView(orderId);
+        const ord = await orderEngine.connect(deployer).getLoanOrderForView(orderId);
         const lenderInOrder = (ord.lender as string) ?? "";
         if (lenderInOrder.toLowerCase() !== poolAddr.toLowerCase()) {
           throw new Error(`LoanOrder.lender mismatch: got=${lenderInOrder} expectedPool=${poolAddr} orderId=${orderId.toString()}`);
@@ -598,6 +626,7 @@ async function main() {
       });
 
       // Expired intent must revert (even with valid sig).
+      const now = await latestBlockNumber();
       const expiredBorrow = { ...borrowIntent, salt: ethers.keccak256(ethers.toUtf8Bytes("attack-borrow-expired")), expireAt: now - 1n };
       const expiredLend = { ...lendIntent, salt: ethers.keccak256(ethers.toUtf8Bytes("attack-lend-expired")), expireAt: now - 1n };
       const sigBorrowExpired = await victim.signTypedData(domainOk, typesBorrow as any, expiredBorrow as any);
@@ -755,7 +784,7 @@ async function main() {
             }
           }
           if (orderId === null) throw new Error("LoanOrderCreated not found (ERC-1271 lenderSigner)");
-          const ord = await orderEngine.connect(deployer)._getLoanOrderForView(orderId);
+          const ord = await orderEngine.connect(deployer).getLoanOrderForView(orderId);
           const lenderInOrder = (ord.lender as string) ?? "";
           if (lenderInOrder.toLowerCase() !== poolAddr.toLowerCase()) {
             throw new Error(`LoanOrder.lender mismatch: got=${lenderInOrder} expectedPool=${poolAddr} orderId=${orderId.toString()}`);
@@ -858,11 +887,12 @@ async function main() {
       {
         const cfg = await priceOracle.getAssetConfig(asset);
         if (!cfg.isActive) {
-          await (await priceOracle.connect(deployer).configureAsset(asset, "usd-coin", 8, 3600n)).wait();
+          const d = Number(await (await ethers.getContractAt("MockERC20", asset)).decimals().catch(() => 18));
+          await (await priceOracle.connect(deployer).configureAsset(asset, "usd-coin", d, 3600n)).wait();
         }
       }
-      const now = BigInt((await ethers.provider.getBlock("latest"))!.timestamp);
-      await (await priceOracle.connect(deployer).updatePrice(asset, ethers.parseUnits("1", 8), Number(now))).wait();
+      const now = await latestBlockNumber();
+      await (await priceOracle.connect(deployer).updatePrice(asset, ethers.parseUnits("1", 8), now)).wait();
 
       // Deployment sanity: if ERGM toggle is missing (old localhost), skip with a clear note.
       let toggleSupported = true;
@@ -885,13 +915,39 @@ async function main() {
       // Fund borrower(s) + lender and deposit collateral (borrower must pre-deposit via VaultCore SSOT).
       await (await usdc.connect(deployer).transfer(victim.address, ethers.parseUnits("100000", 6))).wait();
       await (await usdc.connect(deployer).transfer(attacker.address, ethers.parseUnits("100000", 6))).wait();
-      const extraBorrower = (await ethers.getSigners())[3];
-      await (await usdc.connect(deployer).transfer(extraBorrower.address, ethers.parseUnits("100000", 6))).wait();
+      const signers = await ethers.getSigners();
+      const leLedger = await ethers.getContractAt(
+        ["function getDebt(address user, address asset) view returns (uint256)"],
+        CONTRACT_ADDRESSES.VaultLendingEngine
+      );
+      const pickBorrowerWithoutGuarantee = async (exclude: Set<string>) => {
+        for (const s of signers.slice(3)) {
+          if (exclude.has(s.address.toLowerCase())) continue;
+          const active = (await ergm.hasActiveGuarantee(s.address, asset)) as boolean;
+          const locked = (await gfm.getLockedGuarantee(s.address, asset)) as bigint;
+          const debt = (await leLedger.getDebt(s.address, asset)) as bigint;
+          if (!active && locked === 0n && debt === 0n) return s;
+        }
+        throw new Error("[FAIL] no borrower without active guarantee/debt found");
+      };
+      const exclude = new Set<string>([
+        deployer.address.toLowerCase(),
+        attacker.address.toLowerCase(),
+        victim.address.toLowerCase(),
+      ]);
+      const offBorrower = await pickBorrowerWithoutGuarantee(exclude);
+      exclude.add(offBorrower.address.toLowerCase());
+      const guaranteeBorrower = await pickBorrowerWithoutGuarantee(exclude);
+
+      await (await usdc.connect(deployer).transfer(offBorrower.address, ethers.parseUnits("100000", 6))).wait();
+      await (await usdc.connect(deployer).transfer(guaranteeBorrower.address, ethers.parseUnits("100000", 6))).wait();
       const collateralAmt = ethers.parseUnits("5000", 6);
       await (await usdc.connect(victim).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt)).wait();
       await (await vaultCore.connect(victim).deposit(asset, collateralAmt)).wait();
-      await (await usdc.connect(extraBorrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt)).wait();
-      await (await vaultCore.connect(extraBorrower).deposit(asset, collateralAmt)).wait();
+      await (await usdc.connect(offBorrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt)).wait();
+      await (await vaultCore.connect(offBorrower).deposit(asset, collateralAmt)).wait();
+      await (await usdc.connect(guaranteeBorrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt)).wait();
+      await (await vaultCore.connect(guaranteeBorrower).deposit(asset, collateralAmt)).wait();
 
       const chainId = Number((await ethers.provider.getNetwork()).chainId);
       const domainOk = buildTypedDataDomain(chainId, CONTRACT_ADDRESSES.VaultBusinessLogic);
@@ -901,7 +957,7 @@ async function main() {
       const termDays = 5n;
       const rateBps = 1000n;
       const mkMatch = async (suffix: string, borrowerSigner: any) => {
-        const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+        const expireAt = (await latestBlockNumber()) + ONE_HOUR_BLOCKS;
         const borrowIntent = {
           borrower: borrowerSigner.address,
           collateralAsset: asset,
@@ -956,13 +1012,13 @@ async function main() {
         await (await ergm.connect(deployer).setGuaranteeEnabled(asset, false)).wait();
       });
       await mustSucceed("toggle OFF: finalizeMatch succeeds without GFM approval", async () => {
-        const m = await mkMatch("off-1", extraBorrower);
+        const m = await mkMatch("off-1", offBorrower);
         await (await vbl.connect(deployer).finalizeMatch(m.borrowIntent as any, [m.lendIntent] as any, m.sigBorrowerOk, [m.sigLenderOk])).wait();
       });
-      if ((await ergm.hasActiveGuarantee(extraBorrower.address, asset)) as boolean) {
+      if ((await ergm.hasActiveGuarantee(offBorrower.address, asset)) as boolean) {
         throw new Error("[FAIL] toggle OFF: ERGM.hasActiveGuarantee unexpectedly true");
       }
-      const lockedAfterOff = (await gfm.getLockedGuarantee(extraBorrower.address, asset)) as bigint;
+      const lockedAfterOff = (await gfm.getLockedGuarantee(offBorrower.address, asset)) as bigint;
       if (lockedAfterOff !== 0n) {
         throw new Error(`[FAIL] toggle OFF: GFM locked guarantee unexpectedly non-zero: ${lockedAfterOff.toString()}`);
       }
@@ -971,16 +1027,23 @@ async function main() {
       await mustSucceed("toggle ON: setGuaranteeEnabled(asset,true)", async () => {
         await (await ergm.connect(deployer).setGuaranteeEnabled(asset, true)).wait();
       });
+      // Hard reset allowance to make this test robust even if the localhost chain is "dirty"
+      // (e.g. a previous run approved GFM for victim already).
+      await (await usdc.connect(guaranteeBorrower).approve(gfmAddr, 0n)).wait();
+      const allowance0 = (await usdc.allowance(guaranteeBorrower.address, gfmAddr)) as bigint;
+      if (allowance0 !== 0n) {
+        throw new Error(`[FAIL] expected borrower->GFM allowance=0 before no-approve test, got ${allowance0.toString()}`);
+      }
       await mustRevertMatch("toggle ON: finalizeMatch without GFM approval should revert (allowance)", "ERC20InsufficientAllowance", async () => {
-        const m = await mkMatch("on-no-approve", victim);
+        const m = await mkMatch("on-no-approve", guaranteeBorrower);
         await (await vbl.connect(deployer).finalizeMatch(m.borrowIntent as any, [m.lendIntent] as any, m.sigBorrowerOk, [m.sigLenderOk])).wait();
       });
 
       // 3) Toggle ON + proper GFM approval: finalizeMatch should lock custody + record.
       const promisedInterest = calcInterest(principal, rateBps, termDays);
       if (promisedInterest === 0n) throw new Error("[FAIL] promisedInterest computed as 0; test setup invalid");
-      await (await usdc.connect(victim).approve(gfmAddr, promisedInterest)).wait();
-      const mOk = await mkMatch("on-approved", victim);
+      await (await usdc.connect(guaranteeBorrower).approve(gfmAddr, promisedInterest)).wait();
+      const mOk = await mkMatch("on-approved", guaranteeBorrower);
       const tx = await vbl.connect(deployer).finalizeMatch(mOk.borrowIntent as any, [mOk.lendIntent] as any, mOk.sigBorrowerOk, [mOk.sigLenderOk]);
       const receipt = await tx.wait();
       let orderId: bigint | null = null;
@@ -997,41 +1060,51 @@ async function main() {
       }
       if (orderId === null) throw new Error("[FAIL] LoanOrderCreated not found (guarantee section)");
       // Sanity: order lender must be pool (SSOT)
-      const ord = await orderEngine.connect(deployer)._getLoanOrderForView(orderId);
+      const ord = await orderEngine.connect(deployer).getLoanOrderForView(orderId);
       if (((ord.lender as string) || "").toLowerCase() !== poolAddr.toLowerCase()) {
         throw new Error("[FAIL] guarantee section: LoanOrder.lender is not pool");
       }
-      const locked = (await gfm.getLockedGuarantee(victim.address, asset)) as bigint;
+      const locked = (await gfm.getLockedGuarantee(guaranteeBorrower.address, asset)) as bigint;
       if (locked !== promisedInterest) throw new Error(`[FAIL] GFM locked mismatch: got=${locked.toString()} expected=${promisedInterest.toString()}`);
-      const gid = (await ergm.getUserGuaranteeId(victim.address, asset)) as bigint;
+      const gid = (await ergm.getUserGuaranteeId(guaranteeBorrower.address, asset)) as bigint;
       if (gid === 0n) throw new Error("[FAIL] ERGM guaranteeId not set");
-      if (!((await ergm.hasActiveGuarantee(victim.address, asset)) as boolean)) throw new Error("[FAIL] ERGM expected active guarantee");
+      if (!((await ergm.hasActiveGuarantee(guaranteeBorrower.address, asset)) as boolean)) {
+        throw new Error("[FAIL] ERGM expected active guarantee");
+      }
 
       // 4) Unauthorized callers must not hit core entrypoints directly.
       await mustRevert("attacker: GFM.lockGuarantee(...) must be restricted", async () => {
-        await (await gfm.connect(attacker).lockGuarantee(victim.address, asset, 1n)).wait();
+        await (await gfm.connect(attacker).lockGuarantee(guaranteeBorrower.address, asset, 1n)).wait();
       });
       await mustRevert("attacker: ERGM.lockGuaranteeRecord(...) must be restricted", async () => {
-        await (await ergm.connect(attacker).lockGuaranteeRecord(victim.address, poolAddr, asset, 1n, 1n, 1n)).wait();
+        await (await ergm.connect(attacker).lockGuaranteeRecord(guaranteeBorrower.address, poolAddr, asset, 1n, 1n, 1n)).wait();
       });
       await mustRevert("attacker: ERGM.settleEarlyRepayment(...) must be restricted", async () => {
-        await (await ergm.connect(attacker).settleEarlyRepayment(victim.address, asset, 1n)).wait();
+        await (await ergm.connect(attacker).settleEarlyRepayment(guaranteeBorrower.address, asset, 1n)).wait();
       });
       await mustRevert("attacker: ERGM.processDefault(...) must be restricted", async () => {
-        await (await ergm.connect(attacker).processDefault(victim.address, asset)).wait();
+        await (await ergm.connect(attacker).processDefault(guaranteeBorrower.address, asset)).wait();
       });
 
       // 5) Guarantee DoS guard: with an active guarantee, a second finalizeMatch for same (user,asset) should revert
       // (ERGM enforces single active guarantee per user/asset).
       await mustRevert("toggle ON: finalizeMatch again with active guarantee should revert", async () => {
         // Provide GFM allowance so we hit the intended "already active guarantee" guard rather than allowance failure.
-        await (await usdc.connect(victim).approve(gfmAddr, promisedInterest)).wait();
-        const mDos = await mkMatch("dos-while-active", victim);
+        await (await usdc.connect(guaranteeBorrower).approve(gfmAddr, promisedInterest)).wait();
+        const mDos = await mkMatch("dos-while-active", guaranteeBorrower);
         await (await vbl.connect(deployer).finalizeMatch(mDos.borrowIntent as any, [mDos.lendIntent] as any, mDos.sigBorrowerOk, [mDos.sigLenderOk])).wait();
       });
 
       // 6) SSOT trigger: VaultCore.repay -> SettlementManager should emit EarlyRepaymentProcessed and clear custody.
-      const totalDue = principal + promisedInterest;
+      // Ensure full-repay release is enabled so ERGM settlement path is exercised.
+      const sm = await ethers.getContractAt(["function setRequireFullRepayRelease(bool) external"], settlementManagerAddr);
+      await (await sm.connect(deployer).setRequireFullRepayRelease(true)).wait();
+      const ordForRepay = await orderEngine.getLoanOrderForView(orderId);
+      const YEAR_BLOCKS = 2_628_000n;
+      const interest = (ordForRepay.principal * ordForRepay.rate * ordForRepay.term) / (YEAR_BLOCKS * 10_000n);
+      const totalDueRaw = ordForRepay.principal + interest;
+      const totalDue =
+        ordForRepay.repaidAmount >= totalDueRaw ? 0n : totalDueRaw - (ordForRepay.repaidAmount as bigint);
       const parseHasEarlyProcessed = (rc: any) =>
         (rc?.logs || []).some((log: any) => {
           try {
@@ -1042,15 +1115,17 @@ async function main() {
           }
         });
 
-      await (await usdc.connect(victim).approve(vaultCoreAddr, totalDue)).wait();
-      const repayRc = await (await vaultCore.connect(victim).repay(orderId, asset, totalDue)).wait();
+      await (await usdc.connect(guaranteeBorrower).approve(vaultCoreAddr, totalDue)).wait();
+      const repayRc = await (await vaultCore.connect(guaranteeBorrower).repay(orderId, asset, totalDue)).wait();
       const foundProcessed = parseHasEarlyProcessed(repayRc);
       if (!foundProcessed) {
         console.log("  (note) repay did not include ERGM.EarlyRepaymentProcessed log; falling back to state-based assertion");
       }
-      const lockedAfter = (await gfm.getLockedGuarantee(victim.address, asset)) as bigint;
+      const lockedAfter = (await gfm.getLockedGuarantee(guaranteeBorrower.address, asset)) as bigint;
       if (lockedAfter !== 0n) throw new Error(`[FAIL] repay did not clear GFM locked guarantee (lockedAfter=${lockedAfter.toString()})`);
-      if ((await ergm.hasActiveGuarantee(victim.address, asset)) as boolean) throw new Error("[FAIL] repay did not clear ERGM active guarantee");
+      if ((await ergm.hasActiveGuarantee(guaranteeBorrower.address, asset)) as boolean) {
+        throw new Error("[FAIL] repay did not clear ERGM active guarantee");
+      }
     } finally {
       await revertTo(snap);
     }
@@ -1109,31 +1184,33 @@ async function main() {
     }
   }
 
-  console.log("\n== Section 10: Price manipulation chain (updater perms, timestamp rollback/future DoS, maxPriceAge DoS) ==");
+  console.log("\n== Section 10: Price manipulation chain (updater perms, blockNumber rollback/future DoS, maxPriceAge DoS) ==");
   {
     const snap = await snapshot();
     try {
       const asset = await usdc.getAddress();
-      const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+      const nowBlock = await latestBlockNumber();
       const poAsAttacker = priceOracle.connect(attacker);
       await mustRevert("attacker: PriceOracle.configureAsset()", async () => {
-        await (await poAsAttacker.configureAsset(asset, "x", 8, 3600n)).wait();
+        const d = Number(await (await ethers.getContractAt("MockERC20", asset)).decimals().catch(() => 18));
+        await (await poAsAttacker.configureAsset(asset, "x", d, 3600n)).wait();
       });
       await mustRevert("attacker: PriceOracle.updatePrice()", async () => {
-        await (await poAsAttacker.updatePrice(asset, 1n, now)).wait();
+        await (await poAsAttacker.updatePrice(asset, 1n, nowBlock)).wait();
       });
       await mustRevert("attacker: PriceOracle.configureAsset()", async () => {
-        await (await poAsAttacker.configureAsset(asset, "x", 8, 1n)).wait();
+        const d = Number(await (await ethers.getContractAt("MockERC20", asset)).decimals().catch(() => 18));
+        await (await poAsAttacker.configureAsset(asset, "x", d, 1n)).wait();
       });
 
       if (priceUpdater) {
         const upAsAttacker = priceUpdater.connect(attacker);
         await mustRevert("attacker: CoinGeckoPriceUpdater.updateAssetPrice()", async () => {
-          await (await upAsAttacker.updateAssetPrice(asset, 1n, now)).wait();
+          await (await upAsAttacker.updateAssetPrice(asset, 1n, nowBlock)).wait();
         });
       }
 
-      // Admin-only "timestamp future" DoS check: if updater sets timestamp > block.timestamp,
+      // Admin-only "blockNumber future" DoS check: if updater sets blockNumber > block.number,
       // PriceOracle.getPrice() will underflow and revert in Solidity 0.8.
       const ACTION_UPDATE_PRICE = key("UPDATE_PRICE");
       if (!(await acm.hasRole(ACTION_UPDATE_PRICE, deployer.address))) {
@@ -1146,23 +1223,24 @@ async function main() {
           if (!(await acm.hasRole(ACTION_SET_PARAMETER, deployer.address))) {
             await (await acm.grantRole(ACTION_SET_PARAMETER, deployer.address)).wait();
           }
-          await (await priceOracle.connect(deployer).configureAsset(asset, "usd-coin", 8, 3600n)).wait();
+          const d = Number(await (await ethers.getContractAt("MockERC20", asset)).decimals().catch(() => 18));
+          await (await priceOracle.connect(deployer).configureAsset(asset, "usd-coin", d, 3600n)).wait();
         }
       }
 
-      await mustSucceed("admin: updatePrice(asset, price=1, timestamp=now)", async () => {
-        await (await priceOracle.connect(deployer).updatePrice(asset, 1n, now)).wait();
+      await mustSucceed("admin: updatePrice(asset, price=1, blockNumber=now)", async () => {
+        await (await priceOracle.connect(deployer).updatePrice(asset, 1n, nowBlock)).wait();
       });
 
-      await mustSucceed("admin: updatePrice(asset, timestamp in the past) (allowed behavior)", async () => {
-        await (await priceOracle.connect(deployer).updatePrice(asset, 1n, now - 10)).wait();
+      await mustRevert("admin: updatePrice(asset, blockNumber in the past) should revert", async () => {
+        await (await priceOracle.connect(deployer).updatePrice(asset, 1n, nowBlock - 10n)).wait();
       });
 
-      // After fix: future timestamps are rejected at write-time, and read-path never panics.
-      await mustRevert("admin: updatePrice(asset, timestamp in the future) should revert (prevent DoS)", async () => {
-        await (await priceOracle.connect(deployer).updatePrice(asset, 1n, now + 3600)).wait();
+      // NOTE: blockNumber is a monotonic marker only (not compared to block.number).
+      await mustSucceed("admin: updatePrice(asset, blockNumber in the future) (allowed behavior)", async () => {
+        await (await priceOracle.connect(deployer).updatePrice(asset, 1n, nowBlock + ONE_HOUR_BLOCKS)).wait();
       });
-      await mustSucceed("PriceOracle.getPrice should NOT panic (even if future timestamp attempted)", async () => {
+      await mustSucceed("PriceOracle.getPrice should NOT panic (even if future blockNumber attempted)", async () => {
         await priceOracle.getPrice(asset);
       });
     } finally {

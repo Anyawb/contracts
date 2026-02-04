@@ -14,8 +14,8 @@ import {
     NotAContract,
     MissingRole
 } from "../errors/StandardErrors.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 /// @dev RewardManagerCore 的 V2 最小接口（用于让 IDE/静态分析器稳定识别 onLoanEventV2）
@@ -50,7 +50,7 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
     address private _registryAddr;
 
     /// @notice 惩罚执行事件（用于审计与监控：明确 executor + user + points）
-    event PenaltyApplied(address indexed executor, address indexed user, uint256 points, uint256 timestamp);
+    event PenaltyApplied(address indexed executor, address indexed user, uint256 points, uint256 blockNumber);
 
     /// @notice 初始化合约
     /// @param initialRegistryAddr Registry 合约地址
@@ -93,7 +93,7 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
     /// @notice ORDER_ENGINE(core/LendingEngine) 在 borrow 或 repay 后调用此函数
     /// @param user 用户地址
     /// @param amount 金额（以最小单位；USDT/USDC 按 6 位，ETH 按 18 位）
-    /// @param duration 借款时长（秒）：borrow 推荐传订单 term（用于锁定/计算奖励）；若上游无法提供期限可传 0（表示未知/不计分/不锁定）；repay 固定传 0
+    /// @param duration 借款时长（区块数）：borrow 推荐传订单 term（用于锁定/计算奖励）；若上游无法提供期限可传 0（表示未知/不计分/不锁定）；repay 固定传 0
     /// @param hfHighEnough 历史遗留命名：由 LendingEngine 传入；当前实现中用于“按期且足额还清”的判定 flag（主要在 repay 场景有意义）
     function onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough)
         external
@@ -153,14 +153,14 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         // 调用核心合约的惩罚功能
         _getRewardManagerCore().deductPoints(user, points);
         
-        emit PenaltyApplied(msg.sender, user, points, block.timestamp);
+        emit PenaltyApplied(msg.sender, user, points, block.number);
 
         // 使用标准化事件记录惩罚（executor 必须为真实执行者：清算模块）
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_LIQUIDATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -206,7 +206,7 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
     }
 
     /// @notice 设置缓存过期时间
-    /// @param newExpirationTime 过期时间 (秒)
+    /// @param newExpirationTime 过期时间（区块数）
     function setCacheExpirationTime(uint256 newExpirationTime) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         
@@ -250,7 +250,7 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         _getRewardManagerCore().resetDynamicRewardTime();
     }
 
-    /// @notice 设置按期窗口（秒）
+    /// @notice 设置按期窗口（区块数）
     function setOnTimeWindow(uint256 newWindow) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         _getRewardManagerCore().setOnTimeWindow(newWindow);

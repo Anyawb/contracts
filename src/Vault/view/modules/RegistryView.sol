@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { IRegistryDynamicModuleKey } from "../../../interfaces/IRegistryDynamicModuleKey.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { BatchTooLarge, EmptyArray, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
@@ -20,7 +18,7 @@ import { ViewVersioned } from "../ViewVersioned.sol";
  * @notice Read-only Registry facade for listing module keys, checking registrations, reverse lookups, and pagination.
  * @dev Reverts if:
  *      - registry is zero / not a contract (ZeroAddress / NotAContract)
- *      - batch size exceeds MAX_BATCH_SIZE (RegistryView__BatchTooLarge)
+ *      - batch size exceeds MAX_BATCH_SIZE (BatchTooLarge)
  *
  * Security:
  * - Read-only: this module does not mutate Registry state; it only reads and aggregates data for 0-gas queries.
@@ -29,17 +27,6 @@ import { ViewVersioned } from "../ViewVersioned.sol";
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  */
 contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
-    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-
-    /**
-     * @notice Batch size exceeds MAX_BATCH_SIZE.
-     * @dev Reverts when an input batch length is greater than ViewConstants.MAX_BATCH_SIZE.
-     *      Used by: checkModulesExist, batchFindModuleKeysByAddresses, getRegisteredModuleKeysPaginated.
-     * @param length Input batch length
-     * @param maxAllowed Maximum allowed batch size
-     */
-    error RegistryView__BatchTooLarge(uint256 length, uint256 maxAllowed);
-
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
     address private _registryAddr;
@@ -81,7 +68,8 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
     function _enforceBatchLimit(uint256 len) internal pure {
-        if (len > _MAX_BATCH_SIZE) revert RegistryView__BatchTooLarge(len, _MAX_BATCH_SIZE);
+        if (len == 0) revert EmptyArray();
+        if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
     }
 
     /**
@@ -208,7 +196,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Batch-check whether modules exist (registered) for the given keys.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - keys.length exceeds MAX_BATCH_SIZE (RegistryView__BatchTooLarge)
+     *      - keys.length exceeds MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
      * - Read-only
@@ -284,7 +272,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Batch reverse lookup static keys by module addresses.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - moduleAddrs.length exceeds MAX_BATCH_SIZE (RegistryView__BatchTooLarge)
+     *      - moduleAddrs.length exceeds MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
      * - Read-only
@@ -314,7 +302,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Get registered module keys with pagination (static + dynamic).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - limit exceeds MAX_BATCH_SIZE (RegistryView__BatchTooLarge)
+     *      - limit exceeds MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
      * - Read-only
@@ -330,7 +318,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyValidRegistry
         returns (bytes32[] memory keys, uint256 totalCount)
     {
-        if (limit > _MAX_BATCH_SIZE) revert RegistryView__BatchTooLarge(limit, _MAX_BATCH_SIZE);
+        if (limit > _MAX_BATCH_SIZE) revert BatchTooLarge(limit, _MAX_BATCH_SIZE);
         bytes32[] memory allKeys = _getAllModuleKeys();
         for (uint256 i; i < allKeys.length; i++) {
             if (Registry(_registryAddr).getModule(allKeys[i]) != address(0)) totalCount++;
@@ -401,7 +389,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Read-only
      * - Best-effort: returns 0 if the underlying Registry call fails or the function is not implemented.
      *
-     * @return delay Governance minDelay (seconds), or 0 on failure
+     * @return delay Governance minDelay (blocks), or 0 on failure
      */
     function minDelay() external view onlyValidRegistry returns (uint256) {
         try Registry(_registryAddr).minDelay() returns (uint256 v) { return v; } catch { return 0; }
@@ -443,7 +431,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Authorize a UUPS upgrade.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_ADMIN (reverts in ViewAccessLib.requireRole)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
      *      - newImplementation is zero (ZeroAddress)
      *      - newImplementation is not a contract (NotAContract)
      *
@@ -453,7 +441,9 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }

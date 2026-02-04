@@ -50,7 +50,7 @@ function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) ex
 **前端/SDK 查询入口（推荐）**
 - **路由/发现性**：`SystemView.route*()` 返回 `moduleKey + moduleAddr`，前端可据此“下一跳”直连专属 View（不依赖 revert 文本）。
 - **模块枚举/分页**：`RegistryView`（前端发现模块地址的工具视图）。
-- **价格**：`ValuationOracleView.getAssetPrice(asset)`；批量用 `BatchView.batchGetAssetPrices(assets)`.
+- **价格**：`ValuationOracleView.getAssetPrice(asset)`（返回 `price, blockNumber, isValid`）；批量用 `BatchView.batchGetAssetPrices(assets)`.
 - **系统统计**：`StatisticsView`（例如 `getGlobalStatistics/getTotalCollateral/getTotalDebt`）。
 - **用户仓位**：`PositionView` / `UserView`。
 
@@ -135,7 +135,7 @@ function getTotalCollateralByAsset(address asset) external view returns (uint256
 
 **暴露接口**:
 ```solidity
-function borrow(address user, address asset, uint256 amount, uint256 fee, uint256 timestamp) external
+function borrow(address user, address asset, uint256 amount, uint256 fee, uint256 blockNumber) external
 function repay(address user, address asset, uint256 amount) external
 function getDebt(address user, address asset) external view returns (uint256)
 function getTotalDebtByAsset(address asset) external view returns (uint256)
@@ -195,13 +195,13 @@ await vaultCore.deposit(assetAddress, amount);
 
 // 4. 查询存款后的状态
 const userCollateral = await vaultView.getUserCollateral(userAddress, assetAddress);
-const healthFactor = await vaultView.getUserHealthFactor(userAddress);
+const [healthFactor, isValid] = await vaultView.getUserHealthFactorWithMeta(userAddress);
 ```
 
 #### 借款操作
 ```javascript
 // 1. 检查健康因子
-const healthFactor = await vaultView.getUserHealthFactor(userAddress);
+const [healthFactor, isValid] = await vaultView.getUserHealthFactorWithMeta(userAddress);
 
 // 2. 检查合约流动性
 const contractBalance = await tokenContract.balanceOf(vaultCoreAddress);
@@ -234,7 +234,7 @@ const remainingDebt = await vaultView.getUserDebt(userAddress, assetAddress);
 const userCollateral = await vaultView.getUserCollateral(userAddress, assetAddress);
 
 // 2. 检查健康因子
-const healthFactor = await vaultView.getUserHealthFactor(userAddress);
+const [healthFactor, isValid] = await vaultView.getUserHealthFactorWithMeta(userAddress);
 
 // 3. 执行提取
 await vaultCore.withdraw(assetAddress, amount);
@@ -256,12 +256,12 @@ const remainingCollateral = await vaultView.getUserCollateral(userAddress, asset
 
 ### 事件监听
 前端需要监听以下事件：
-- `Deposit(address indexed user, address indexed asset, uint256 amount, uint256 timestamp)`
-- `Withdraw(address indexed user, address indexed asset, uint256 amount, uint256 timestamp)`
-- `Borrow(address indexed user, address indexed asset, uint256 amount, uint256 timestamp)`
-- `Repay(address indexed user, address indexed asset, uint256 amount, uint256 timestamp)`
-- `DepositAndBorrow(address indexed user, address indexed collateralAsset, uint256 collateralAmount, address indexed borrowAsset, uint256 borrowAmount, uint256 timestamp)`
-- `RepayAndWithdraw(address indexed user, address indexed repayAsset, uint256 repayAmount, address indexed withdrawAsset, uint256 withdrawAmount, uint256 timestamp)`
+- `Deposit(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber)`
+- `Withdraw(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber)`
+- `Borrow(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber)`
+- `Repay(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber)`
+- `DepositAndBorrow(address indexed user, address indexed collateralAsset, uint256 collateralAmount, address indexed borrowAsset, uint256 borrowAmount, uint256 blockNumber)`
+- `RepayAndWithdraw(address indexed user, address indexed repayAsset, uint256 repayAmount, address indexed withdrawAsset, uint256 withdrawAmount, uint256 blockNumber)`
 
 ## 注意事项
 

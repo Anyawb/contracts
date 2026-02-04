@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import { ERC721Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
-// solhint-disable-next-line max-line-length
 import { ERC721EnumerableUpgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721EnumerableUpgradeable.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -161,8 +160,7 @@ contract LoanNFT is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // Do not push business data during initialization (no valid tokenId context).
@@ -196,8 +194,7 @@ contract LoanNFT is
             ActionKeys.ACTION_PAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_PAUSE_SYSTEM),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // Unified data push (architecture requirement).
@@ -205,8 +202,7 @@ contract LoanNFT is
             DataPushTypes.DATA_TYPE_LOAN_NFT_PAUSED,
             abi.encode(
                 msg.sender,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
     }
@@ -229,8 +225,7 @@ contract LoanNFT is
             ActionKeys.ACTION_UNPAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UNPAUSE_SYSTEM),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // Unified data push (architecture requirement).
@@ -238,8 +233,7 @@ contract LoanNFT is
             DataPushTypes.DATA_TYPE_LOAN_NFT_UNPAUSED,
             abi.encode(
                 msg.sender,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
     }
@@ -308,8 +302,7 @@ contract LoanNFT is
             ActionKeys.ACTION_BORROW,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_BORROW),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // Unified data push (architecture requirement).
@@ -322,8 +315,7 @@ contract LoanNFT is
                 data.principal,
                 data.rate,
                 data.term,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
     }
@@ -352,8 +344,7 @@ contract LoanNFT is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // Unified data push (architecture requirement).
@@ -362,8 +353,7 @@ contract LoanNFT is
             abi.encode(
                 tokenId,
                 msg.sender,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
     }
@@ -392,8 +382,7 @@ contract LoanNFT is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // Unified data push (architecture requirement).
@@ -402,8 +391,7 @@ contract LoanNFT is
             abi.encode(
                 tokenId,
                 msg.sender,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
     }
@@ -433,8 +421,7 @@ contract LoanNFT is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // Unified data push (architecture requirement).
@@ -444,8 +431,7 @@ contract LoanNFT is
                 tokenId,
                 newStatus,
                 msg.sender,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
     }
@@ -625,8 +611,7 @@ contract LoanNFT is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -674,8 +659,7 @@ contract LoanNFT is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // Unified data push (architecture requirement).
@@ -685,8 +669,7 @@ contract LoanNFT is
                 oldRegistry,
                 newRegistryAddr,
                 msg.sender,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
     }

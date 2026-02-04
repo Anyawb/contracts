@@ -32,7 +32,7 @@ interface ILiquidationEventsView {
      * @param debtAmount Debt amount reduced (token native decimals)
      * @param liquidator Keeper/liquidator address (attribution)
      * @param bonus Liquidation bonus for reporting (units implementation-defined; typically token native decimals)
-     * @param timestamp Timestamp in seconds (best-effort; typically `block.timestamp`)
+     * @param blockNumber Block number (best-effort; typically `block.number`)
      */
     function pushLiquidationUpdate(
         address user,
@@ -42,7 +42,7 @@ interface ILiquidationEventsView {
         uint256 debtAmount,
         address liquidator,
         uint256 bonus,
-        uint256 timestamp
+        uint256 blockNumber
     ) external;
 
     /**
@@ -61,7 +61,7 @@ interface ILiquidationEventsView {
      * @param debtAmounts Debt amounts array (token native decimals)
      * @param liquidator Keeper/liquidator address (attribution)
      * @param bonuses Bonus array (units implementation-defined)
-     * @param timestamp Timestamp in seconds (best-effort; typically `block.timestamp`)
+     * @param blockNumber Block number (best-effort; typically `block.number`)
      */
     function pushBatchLiquidationUpdate(
         address[] calldata users,
@@ -71,7 +71,7 @@ interface ILiquidationEventsView {
         uint256[] calldata debtAmounts,
         address liquidator,
         uint256[] calldata bonuses,
-        uint256 timestamp
+        uint256 blockNumber
     ) external;
 
     /**
@@ -92,7 +92,7 @@ interface ILiquidationEventsView {
      * @param reserveShare Reserve share (token native decimals)
      * @param lenderShare Lender-compensation share (token native decimals)
      * @param liquidatorShare Liquidator share (token native decimals; includes remainder)
-     * @param timestamp Timestamp in seconds (best-effort; typically `block.timestamp`)
+     * @param blockNumber Block number (best-effort; typically `block.number`)
      */
     function pushLiquidationPayout(
         address user,
@@ -105,7 +105,7 @@ interface ILiquidationEventsView {
         uint256 reserveShare,
         uint256 lenderShare,
         uint256 liquidatorShare,
-        uint256 timestamp
+        uint256 blockNumber
     ) external;
 }
 

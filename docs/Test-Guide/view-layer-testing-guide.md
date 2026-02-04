@@ -87,20 +87,20 @@ describe('BatchView – 批量查询视图测试', function () {
   it('应该正确批量获取用户位置', async function () {
     const users = [user1.address, user2.address, user3.address];
     const assets = [asset1, asset2, asset3];
-    const positions = await batchView.batchGetUserPositions(users, assets);
+    const positions = await cacheOptimizedView.batchGetUserPositionsWithMeta(users, assets);
     expect(positions.length).to.equal(3);
   });
 
   it('应该正确批量获取健康因子', async function () {
     const users = [user1.address, user2.address];
-    const healthFactors = await batchView.batchGetHealthFactors(users);
+    const healthFactors = await batchView.batchGetHealthFactorsWithMeta(users);
     expect(healthFactors.length).to.equal(2);
   });
 
   it('应该验证数据一致性', async function () {
     // 验证批量查询结果与单个查询结果一致
-    const batchResult = await batchView.batchGetUserPositions([user1.address], [asset1]);
-    const singleResult = await userView.getUserPosition(user1.address, asset1);
+    const batchResult = await cacheOptimizedView.batchGetUserPositionsWithMeta([user1.address], [asset1]);
+    const singleResult = await userView.getUserPositionWithMeta(user1.address, asset1);
     expect(batchResult[0].collateral).to.equal(singleResult.collateral);
     expect(batchResult[0].debt).to.equal(singleResult.debt);
   });
@@ -406,8 +406,8 @@ const result = await viewModule.getUserData(user);
 **解决方案**:
 ```typescript
 // 验证数据一致性
-const batchResult = await batchView.batchGetUserPositions([user], [asset]);
-const singleResult = await userView.getUserPosition(user, asset);
+const batchResult = await cacheOptimizedView.batchGetUserPositionsWithMeta([user], [asset]);
+const singleResult = await userView.getUserPositionWithMeta(user, asset);
 expect(batchResult[0].collateral).to.equal(singleResult.collateral);
 ```
 
@@ -416,7 +416,8 @@ expect(batchResult[0].collateral).to.equal(singleResult.collateral);
 1. **使用 console.log**:
 ```typescript
 console.log('User data:', await viewModule.getUserData(user.address));
-console.log('Cache valid:', await viewModule.isCacheValid(user.address));
+const [isValid, blockNumber] = await viewModule.getUserCacheStatusWithMeta(user.address);
+console.log('Cache valid:', isValid, 'blockNumber:', blockNumber);
 ```
 
 2. **使用 hardhat console**:

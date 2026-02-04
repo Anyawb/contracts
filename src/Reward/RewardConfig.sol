@@ -8,8 +8,8 @@ import { IServiceConfig } from "./interfaces/IServiceConfig.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ZeroAddress } from "../errors/StandardErrors.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 
 /// @title RewardConfig - 积分系统配置管理
@@ -74,7 +74,7 @@ contract RewardConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -118,7 +118,7 @@ contract RewardConfig is
     /// @param serviceType 服务类型
     /// @param level 服务等级
     /// @param price 价格
-    /// @param duration 持续时间
+    /// @param duration 持续时间（区块数）
     /// @param isActive 是否激活
     function updateServiceConfig(
         ServiceType serviceType,
@@ -136,13 +136,13 @@ contract RewardConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
     /// @notice 获取服务冷却期
     /// @param serviceType 服务类型
-    /// @return cooldown 冷却期 (秒)
+    /// @return cooldown 冷却期（区块数）
     function serviceCooldowns(ServiceType serviceType) external view onlyValidRegistry returns (uint256 cooldown) {
         IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
         return configModule.getCooldown();
@@ -150,7 +150,7 @@ contract RewardConfig is
 
     /// @notice 更新服务冷却期
     /// @param serviceType 服务类型
-    /// @param cooldown 冷却期 (秒)
+    /// @param cooldown 冷却期（区块数）
     function setServiceCooldown(ServiceType serviceType, uint256 cooldown) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
@@ -161,7 +161,7 @@ contract RewardConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -180,7 +180,7 @@ contract RewardConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -196,7 +196,7 @@ contract RewardConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -212,7 +212,7 @@ contract RewardConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -228,7 +228,7 @@ contract RewardConfig is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -286,7 +286,7 @@ contract RewardConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
         
         // 发出模块地址更新事件
@@ -294,7 +294,7 @@ contract RewardConfig is
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
-            block.timestamp
+            block.number
         );
     }
     
@@ -318,7 +318,7 @@ contract RewardConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     

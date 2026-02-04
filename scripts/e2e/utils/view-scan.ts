@@ -63,17 +63,21 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
     { key: "VAULT_STATISTICS", name: "StatisticsView", expectedApi: 1n, expectedSchema: 1n },
     { key: "POSITION_VIEW", name: "PositionView", expectedApi: 1n, expectedSchema: 2n },
     { key: "PREVIEW_VIEW", name: "PreviewView", expectedApi: 1n, expectedSchema: 1n },
-    { key: "DASHBOARD_VIEW", name: "DashboardView", expectedApi: 1n, expectedSchema: 1n },
+    // DashboardView schema bumped to 2 after view-alignment / Scheme U updates.
+    { key: "DASHBOARD_VIEW", name: "DashboardView", expectedApi: 1n, expectedSchema: 2n },
     { key: "USER_VIEW", name: "UserView", expectedApi: 1n, expectedSchema: 1n },
     { key: "ACCESS_CONTROL_VIEW", name: "AccessControlView", expectedApi: 1n, expectedSchema: 1n },
-    { key: "CACHE_OPTIMIZED_VIEW", name: "CacheOptimizedView", expectedApi: 1n, expectedSchema: 1n },
+    // CacheOptimizedView schema bumped to 2 after view-alignment / Scheme U updates.
+    { key: "CACHE_OPTIMIZED_VIEW", name: "CacheOptimizedView", expectedApi: 1n, expectedSchema: 2n },
     { key: "LENDING_ENGINE_VIEW", name: "LendingEngineView", expectedApi: 1n, expectedSchema: 1n },
     { key: "FEE_ROUTER_VIEW", name: "FeeRouterView", expectedApi: 1n, expectedSchema: 1n },
     { key: "RISK_VIEW", name: "RiskView", expectedApi: 1n, expectedSchema: 1n },
+    { key: "SYSTEM_RISK_VIEW", name: "SystemRiskView", expectedApi: 1n, expectedSchema: 1n },
     { key: "VIEW_CACHE", name: "ViewCache", expectedApi: 1n, expectedSchema: 1n },
     { key: "EVENT_HISTORY_MANAGER", name: "EventHistoryManager", expectedApi: 1n, expectedSchema: 1n },
     { key: "VALUATION_ORACLE_VIEW", name: "ValuationOracleView", expectedApi: 1n, expectedSchema: 1n },
-    { key: "MODULE_HEALTH_VIEW", name: "ModuleHealthView", expectedApi: 1n, expectedSchema: 1n },
+    // ModuleHealthView bumped apiVersion to 2 after expanding module health surface.
+    { key: "MODULE_HEALTH_VIEW", name: "ModuleHealthView", expectedApi: 2n, expectedSchema: 1n },
     { key: "BATCH_VIEW", name: "BatchView", expectedApi: 1n, expectedSchema: 1n },
     { key: "LIQUIDATION_VIEW", name: "LiquidatorView", expectedApi: 1n, expectedSchema: 1n },
     { key: "LIQUIDATION_RISK_VIEW", name: "LiquidationRiskView", expectedApi: 1n, expectedSchema: 1n },
@@ -121,11 +125,15 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
     if (hvAddr) {
       const hv = await ethers.getContractAt("HealthView", hvAddr);
       await safeCall(
-        "HealthView.getUserHealthFactor(sampleUser)",
+        "HealthView.getUserHealthFactorWithMeta(sampleUser)",
         async () => {
-          const [hf, isValid, timestamp] = (await hv.getUserHealthFactor(sampleUser)) as [bigint, boolean, bigint];
+          const [hf, isValid, blockNumber] = (await hv.getUserHealthFactorWithMeta(sampleUser)) as [
+            bigint,
+            boolean,
+            bigint
+          ];
           console.log(
-            `  [Sanity] HealthView.getUserHealthFactor: hf=${hf.toString()} isValid=${isValid} ts=${timestamp.toString()}`
+            `  [Sanity] HealthView.getUserHealthFactorWithMeta: hf=${hf.toString()} isValid=${isValid} block=${blockNumber.toString()}`
           );
         },
         strict
@@ -141,7 +149,9 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
         "ViewCache.getSystemStatus(asset)",
         async () => {
           const [status, isValid] = await vc.getSystemStatus(assetAddr);
-          console.log(`  [Sanity] ViewCache.getSystemStatus: isValid=${isValid} ts=${status.timestamp?.toString?.() ?? "?"}`);
+          console.log(
+            `  [Sanity] ViewCache.getSystemStatus: isValid=${isValid} block=${status.updateBlock?.toString?.() ?? "?"}`
+          );
         },
         strict
       );

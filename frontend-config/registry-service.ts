@@ -2,7 +2,7 @@ import { Contract, JsonRpcProvider, Interface } from 'ethers';
 
 // 统计视图最小 ABI
 const STATISTICS_VIEW_ABI = [
-  'function getGlobalSnapshot() external view returns (tuple(uint256 activeUsers, uint256 totalCollateral, uint256 totalDebt, uint256 timestamp))',
+  'function getGlobalStatisticsWithMeta() external view returns (tuple(uint256 totalUsers, uint256 activeUsers, uint256 totalCollateral, uint256 totalDebt, uint256 lastUpdateTime), bool isValid, uint256 blockNumber)',
 ];
 
 // Registry 最小 ABI 由调用方传入（测试用例中提供）
@@ -14,7 +14,7 @@ export type GlobalSnapshot = {
   activeUsers: bigint;
   totalCollateral: bigint;
   totalDebt: bigint;
-  timestamp: bigint;
+  blockNumber: bigint;
 };
 
 export class RegistryQueryService {
@@ -55,13 +55,13 @@ export class RegistryQueryService {
   private async fetchSnapshot(viewAddr: string): Promise<GlobalSnapshot | null> {
     const statsView = new Contract(viewAddr, STATISTICS_VIEW_ABI, this.provider);
     try {
-      const snap = await statsView.getGlobalSnapshot();
+      const [stats, , blockNumber] = await statsView.getGlobalStatisticsWithMeta();
       // 返回结构体保持 bigint 类型，符合 ethers v6 默认返回
       return {
-        activeUsers: snap.activeUsers,
-        totalCollateral: snap.totalCollateral,
-        totalDebt: snap.totalDebt,
-        timestamp: snap.timestamp,
+        activeUsers: stats.activeUsers,
+        totalCollateral: stats.totalCollateral,
+        totalDebt: stats.totalDebt,
+        blockNumber,
       };
     } catch {
       return null;

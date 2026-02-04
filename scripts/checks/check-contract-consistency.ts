@@ -173,8 +173,10 @@ async function checkModuleDependencies(contracts: ContractInfo[], report: Consis
   logger.info('🔍 检查模块依赖...');
   
   const coreModules = ['VaultCore', 'VaultRouter', 'VaultAdmin'];
-  const businessModules = ['CollateralManager', 'LendingEngine', 'HealthFactorCalculator', 'StatisticsView'];
-  const infrastructureModules = ['AssetWhitelist', 'FeeRouter', 'RewardManager', 'ValuationOracleAdapter'];
+  // NOTE(Architecture-Guide): HealthFactorCalculator / ValuationOracleAdapter are deprecated in this repo.
+  // Keep the list aligned with the current module set.
+  const businessModules = ['CollateralManager', 'LendingEngine', 'VaultLendingEngine', 'HealthView', 'StatisticsView'];
+  const infrastructureModules = ['AssetWhitelist', 'FeeRouter', 'RewardManager', 'PriceOracle', 'CoinGeckoPriceUpdater', 'ValuationOracleView'];
   
   // 检查核心模块依赖
   for (const module of coreModules) {

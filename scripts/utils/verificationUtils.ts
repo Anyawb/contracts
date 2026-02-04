@@ -10,7 +10,7 @@ export interface VerificationConfig {
   constructorArgs?: unknown[];
   apiKey?: string;
   apiUrl?: string;
-  timestamp?: number;
+  verifiedAtMs?: number;
 }
 
 /**
@@ -116,7 +116,7 @@ export function saveVerificationInfo(config: VerificationConfig): void {
   
   verifications[config.contractAddress] = {
     ...config,
-    timestamp: Math.floor(Date.now() / 1000)
+    verifiedAtMs: Date.now()
   };
   
   fs.writeFileSync(filePath, JSON.stringify(verifications, null, 2));
@@ -140,7 +140,7 @@ export function saveVerificationResults(
       total: contracts.length,
       successful: Object.values(results).filter(Boolean).length,
       failed: Object.values(results).filter(r => !r).length,
-      timestamp: Math.floor(Date.now() / 1000)
+      generatedAtMs: Date.now()
     }
   };
   

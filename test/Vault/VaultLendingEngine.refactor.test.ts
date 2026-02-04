@@ -46,6 +46,7 @@ const ModuleKeys = {
 
 // Action keys（与 ActionKeys.sol 保持一致）
 const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
+const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
 
 describe('VaultLendingEngine – refactor regression', function () {
   async function deployFixture() {
@@ -85,7 +86,7 @@ describe('VaultLendingEngine – refactor regression', function () {
     await lrm.waitForDeployment();
 
     const ERC20 = await ethers.getContractFactory('MockERC20');
-    const settlementToken = (await ERC20.deploy('Settlement', 'ST', ethers.parseEther('1000000'))) as MockERC20;
+    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as MockERC20;
     await settlementToken.waitForDeployment();
 
     // Configure oracle price
@@ -161,6 +162,8 @@ describe('VaultLendingEngine – refactor regression', function () {
     // Roles
     await acm.grantRole(ACTION_LIQUIDATE, liquidator.address);
     await acm.grantRole(ACTION_LIQUIDATE, liquidationManager.address);
+    // VaultLendingEngine health push valuation reads PositionView collateral value (risk-gated)
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, await lending.getAddress());
 
     // Seed collateral to get meaningful health factor
     await cm.depositCollateral(user.address, debtAsset, 200);
@@ -259,11 +262,11 @@ describe('VaultLendingEngine – refactor regression', function () {
 
       // Debug: Check price and decimals
       try {
-        const [price, timestamp, decimals] = await priceOracle.getPrice(debtAsset);
+        const [price, blockNumber, decimals] = await priceOracle.getPrice(debtAsset);
         console.log('\n=== Price Debug Info ===');
         console.log('debtAsset:', debtAsset);
         console.log('Price:', price.toString());
-        console.log('Timestamp:', timestamp.toString());
+        console.log('BlockNumber:', blockNumber.toString());
         console.log('Decimals:', decimals.toString());
         console.log('Amount to borrow: 50');
         // Calculate expected value: 50 * price / 10^decimals
@@ -557,7 +560,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       expect(await lending.getDebt(user.address, debtAsset)).to.equal(50);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(50);
       // HealthView should receive an update (health factor > 0)
-      expect(await healthView.getUserHealthFactor(user.address)).to.be.gt(0);
+      expect((await healthView.getUserHealthFactorWithMeta(user.address))[0]).to.be.gt(0);
       // VaultRouter updated via pushUserPositionUpdate
       expect(await vaultRouter.getUserDebt(user.address, debtAsset)).to.equal(50);
       // Collateral unchanged in cm, debt recorded in ledger
@@ -585,7 +588,7 @@ describe('VaultLendingEngine – refactor regression', function () {
 
       expect(await lending.getDebt(user.address, debtAsset)).to.equal(20);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(20);
-      expect(await healthView.getUserHealthFactor(user.address)).to.be.gt(0);
+      expect((await healthView.getUserHealthFactorWithMeta(user.address))[0]).to.be.gt(0);
       expect(await vaultRouter.getUserDebt(user.address, debtAsset)).to.equal(20);
       expect(await cm.getCollateral(user.address, debtAsset)).to.equal(200);
     });
@@ -670,7 +673,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       expect(await lending.getDebt(liquidator.address, debtAsset)).to.equal(15);
       expect(await cm.getCollateral(liquidator.address, debtAsset)).to.equal(0); // liquidator had no collateral seeded
       expect(await vaultRouter.getUserDebt(liquidator.address, debtAsset)).to.equal(15);
-      expect(await healthView.getUserHealthFactor(liquidator.address)).to.be.gte(0);
+      expect((await healthView.getUserHealthFactorWithMeta(liquidator.address))[0]).to.be.gte(0);
     });
 
     it('should cap reduction to current debt amount', async function () {
@@ -780,9 +783,9 @@ describe('VaultLendingEngine – refactor regression', function () {
 
     it('should push health status on borrow', async function () {
       const { vaultCoreModule, user, healthView, debtAsset } = await loadFixture(deployFixture);
-      const beforeHF = await healthView.getUserHealthFactor(user.address);
+      const [beforeHF] = await healthView.getUserHealthFactorWithMeta(user.address);
       await vaultCoreModule.borrow(user.address, debtAsset, 50, 0, 0);
-      const afterHF = await healthView.getUserHealthFactor(user.address);
+      const [afterHF] = await healthView.getUserHealthFactorWithMeta(user.address);
       expect(afterHF).to.not.equal(beforeHF);
     });
 
@@ -790,11 +793,11 @@ describe('VaultLendingEngine – refactor regression', function () {
       const { vaultCoreModule, user, healthView, debtAsset } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(user.address, debtAsset, 50, 0, 0);
       
-      const beforeHF = await healthView.getUserHealthFactor(user.address);
+      const [beforeHF] = await healthView.getUserHealthFactorWithMeta(user.address);
       
       await vaultCoreModule.repay(user.address, debtAsset, 20);
       
-      const afterHF = await healthView.getUserHealthFactor(user.address);
+      const [afterHF] = await healthView.getUserHealthFactorWithMeta(user.address);
       expect(afterHF).to.not.equal(beforeHF);
       // Health should improve after repay
       expect(afterHF).to.be.gt(beforeHF);
@@ -806,11 +809,11 @@ describe('VaultLendingEngine – refactor regression', function () {
       await cm.depositCollateral(liquidator.address, debtAsset, 200);
       await vaultCoreModule.borrow(liquidator.address, debtAsset, 50, 0, 0);
       
-      const beforeHF = await healthView.getUserHealthFactor(liquidator.address);
+      const [beforeHF] = await healthView.getUserHealthFactorWithMeta(liquidator.address);
       
       await lending.connect(liquidationManager).forceReduceDebt(liquidator.address, debtAsset, 30);
       
-      const afterHF = await healthView.getUserHealthFactor(liquidator.address);
+      const [afterHF] = await healthView.getUserHealthFactorWithMeta(liquidator.address);
       expect(afterHF).to.not.equal(beforeHF);
     });
   });

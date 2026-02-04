@@ -8,7 +8,7 @@
   "deployer": "0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6",
   "version": "1.0.0",
   "description": "RWA Lending Platform deployment on arbitrum-sepolia",
-  "timestamp": 1704067200000,
+  "generatedAtMs": 1704067200000,
   "contracts": {
     "Registry": {
       "address": "0x1234567890123456789012345678901234567890",

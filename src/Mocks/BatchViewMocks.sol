@@ -7,7 +7,7 @@ contract BatchMockHealthView {
     struct ModuleHealth {
         bool    isHealthy;
         bytes32 detailsHash;
-        uint32  lastCheckTime;
+        uint32  lastCheckBlock;
         uint32  consecutiveFailures;
     }
 
@@ -24,40 +24,43 @@ contract BatchMockHealthView {
         address module,
         bool isHealthy,
         bytes32 detailsHash,
-        uint32 lastCheckTime,
+        uint32 lastCheckBlock,
         uint32 consecutiveFailures
     ) external {
         _moduleHealth[module] = ModuleHealth({
             isHealthy: isHealthy,
             detailsHash: detailsHash,
-            lastCheckTime: lastCheckTime,
+            lastCheckBlock: lastCheckBlock,
             consecutiveFailures: consecutiveFailures
         });
     }
 
-    function getUserHealthFactor(address user) external view returns (uint256, bool, uint256) {
+    function getUserHealthFactorWithMeta(address user) external view returns (uint256, bool, uint256) {
         return (_healthFactor[user], _isValid[user], 0);
     }
 
-    function getModuleHealth(address module) external view returns (ModuleHealth memory) {
-        return _moduleHealth[module];
+    function getModuleHealthWithMeta(address module) external view returns (ModuleHealth memory, bool, uint256) {
+        ModuleHealth memory mh = _moduleHealth[module];
+        return (mh, true, uint256(mh.lastCheckBlock));
     }
 }
 
 contract BatchMockRiskView {
-    struct RiskAssessment {
+    struct RiskAssessmentWithMeta {
         bool liquidatable;
-        uint256 healthFactor;
+        bool isValid;
         uint8 warningLevel;
+        uint256 healthFactor;
+        uint256 blockNumber;
     }
 
-    mapping(address => RiskAssessment) private _assessments;
+    mapping(address => RiskAssessmentWithMeta) private _assessments;
 
     function setRiskAssessment(address user, bool liquidatable, uint256 healthFactor, uint8 warningLevel) external {
-        _assessments[user] = RiskAssessment(liquidatable, healthFactor, warningLevel);
+        _assessments[user] = RiskAssessmentWithMeta(liquidatable, true, warningLevel, healthFactor, block.number);
     }
 
-    function getUserRiskAssessment(address user) external view returns (RiskAssessment memory) {
+    function getUserRiskAssessment(address user) external view returns (RiskAssessmentWithMeta memory) {
         return _assessments[user];
     }
 }
@@ -69,10 +72,10 @@ contract BatchMockPriceOracle {
         _prices[asset] = price;
     }
 
-    function getPrice(address asset) external view returns (uint256 price, uint256 refreshedAt, uint256) {
+    function getPrice(address asset) external view returns (uint256 price, uint256 blockNumber, uint256) {
         price = _prices[asset];
-        refreshedAt = block.timestamp;
-        return (price, refreshedAt, 0);
+        blockNumber = block.number;
+        return (price, blockNumber, 0);
     }
 }
 
@@ -84,7 +87,7 @@ contract BatchMockDegradationMonitor {
         bytes32 reasonHash,
         uint256 fallbackValue,
         bool usedFallback,
-        uint256 timestamp,
+        uint256 legacyBlockNumber,
         uint256 blockNumber
     ) external {
         _events.push(
@@ -93,7 +96,7 @@ contract BatchMockDegradationMonitor {
                 reasonHash: reasonHash,
                 fallbackValue: fallbackValue,
                 usedFallback: usedFallback,
-                timestamp: timestamp,
+                legacyBlockNumber: legacyBlockNumber,
                 blockNumber: blockNumber
             })
         );
@@ -127,9 +130,13 @@ contract CacheMockPositionView {
         _positions[user][asset] = Position({ collateral: collateral, debt: debt });
     }
 
-    function getUserPosition(address user, address asset) external view returns (uint256 collateral, uint256 debt) {
+    function getUserPositionWithMeta(address user, address asset)
+        external
+        view
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 updateBlock, uint64 version)
+    {
         Position memory p = _positions[user][asset];
-        return (p.collateral, p.debt);
+        return (p.collateral, p.debt, true, 0, 0);
     }
 }
 
@@ -139,7 +146,7 @@ contract CacheMockStatisticsView {
         uint256 activeUsers;
         uint256 totalCollateral;
         uint256 totalDebt;
-        uint256 lastUpdateTime;
+        uint256 lastUpdateBlock;
     }
 
     GlobalStatistics private _stats;
@@ -148,7 +155,11 @@ contract CacheMockStatisticsView {
         _stats = stats_;
     }
 
-    function getGlobalStatistics() external view returns (GlobalStatistics memory) {
-        return _stats;
+    function getGlobalStatisticsWithMeta()
+        external
+        view
+        returns (GlobalStatistics memory, bool, uint256)
+    {
+        return (_stats, true, _stats.lastUpdateBlock);
     }
 }

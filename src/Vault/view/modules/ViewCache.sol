@@ -38,9 +38,12 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param asset Asset address the snapshot corresponds to.
      * @param updater Caller that performed the write/clear.
-     * @param timestamp Emit timestamp (seconds).
+     * @param blockNumber Legacy field: emit time axis marker (treated as updateBlock in this repo).
      */
-    event CacheUpdated(address indexed asset, address indexed updater, uint256 timestamp);
+    event CacheUpdated(address indexed asset, address indexed updater, uint256 blockNumber);
+
+    /// @notice Explicit block-based companion event for CacheUpdated.
+    event CacheUpdatedV2(address indexed asset, address indexed updater, uint256 updateBlock);
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
@@ -55,7 +58,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 totalCollateral;   // Aggregated collateral amount (domain-specific unit)
         uint256 totalDebt;         // Aggregated debt amount (domain-specific unit)
         uint256 utilizationRate;   // Utilization rate (WAD, 1e18)
-        uint256 timestamp;         // Snapshot timestamp (seconds)
+        uint256 updateBlock;       // Legacy field: snapshot time axis marker (treated as updateBlock)
         bool    isValid;           // Explicit validity flag (in addition to time-based freshness)
     }
 
@@ -67,8 +70,9 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @notice asset => cached system snapshot.
     mapping(address => SystemStatusCache) private _systemStatusCache;
 
-    /// @notice asset => last write timestamp (redundant to the struct but convenient for offchain tooling).
-    mapping(address => uint256) private _systemCacheTimestamps;
+    /// @notice asset => last write marker (redundant to the struct but convenient for offchain tooling).
+    /// NOTE: Time-Dependency-Refactor: stored value is `updateBlock` (block.number), not seconds.
+    mapping(address => uint256) private _systemCacheUpdateBlocks;
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
@@ -158,21 +162,21 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
 
         if (asset == address(0)) revert ViewCache__InvalidCacheData();
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 updateBlock = block.number;
         _systemStatusCache[asset] = SystemStatusCache({
             totalCollateral: totalCollateral,
             totalDebt: totalDebt,
             utilizationRate: utilizationRate,
-            timestamp: ts,
+            updateBlock: updateBlock,
             isValid: true
         });
-        _systemCacheTimestamps[asset] = ts;
+        _systemCacheUpdateBlocks[asset] = updateBlock;
 
-        emit CacheUpdated(asset, msg.sender, ts);
+        emit CacheUpdated(asset, msg.sender, updateBlock);
+        emit CacheUpdatedV2(asset, msg.sender, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
-            abi.encode(asset, totalCollateral, totalDebt, utilizationRate, ts)
+            abi.encode(asset, totalCollateral, totalDebt, utilizationRate, updateBlock)
         );
     }
 
@@ -191,14 +195,14 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         AccessControlLibrary.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender, msg.sender);
 
         delete _systemStatusCache[asset];
-        delete _systemCacheTimestamps[asset];
+        delete _systemCacheUpdateBlocks[asset];
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
-        emit CacheUpdated(asset, msg.sender, ts);
+        uint256 updateBlock = block.number;
+        emit CacheUpdated(asset, msg.sender, updateBlock);
+        emit CacheUpdatedV2(asset, msg.sender, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
-            abi.encode(asset, uint256(0), uint256(0), uint256(0), ts)
+            abi.encode(asset, uint256(0), uint256(0), uint256(0), updateBlock)
         );
     }
 
@@ -214,14 +218,39 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset Asset address.
      * @return status Cached snapshot struct.
      * @return isValid True if both:
-     *         - timestamp is fresh within `ViewConstants.CACHE_DURATION`, and
+     *         - updateBlock is fresh within `ViewConstants.CACHE_DURATION_BLOCKS`, and
      *         - the explicit `status.isValid` flag is true.
      */
     function getSystemStatus(
         address asset
     ) external view returns (SystemStatusCache memory status, bool isValid) {
         status  = _systemStatusCache[asset];
-        isValid = _isCacheValid(status.timestamp) && status.isValid;
+        isValid = _isCacheValid(status.updateBlock) && status.isValid;
+    }
+
+    /**
+     * @notice Return cached system snapshot with explicit block-based metadata.
+     * @dev Reverts if: (never)
+     *
+     * @param asset Asset address.
+     * @return status Cached snapshot struct (legacy `updateBlock` field holds updateBlock).
+     * @return isValid Whether the cache is valid (block-based TTL + explicit flag).
+     * @return updateBlock The block number when the snapshot was last written (0 if never written).
+     * @return ageBlocks The number of blocks since update (0 if updateBlock==0 or in the future).
+     */
+    function getSystemStatusWithMetaV2(address asset)
+        external
+        view
+        returns (SystemStatusCache memory status, bool isValid, uint256 updateBlock, uint256 ageBlocks)
+    {
+        status = _systemStatusCache[asset];
+        updateBlock = status.updateBlock;
+        isValid = _isCacheValid(updateBlock) && status.isValid;
+        if (updateBlock == 0 || updateBlock > block.number) {
+            ageBlocks = 0;
+        } else {
+            ageBlocks = block.number - updateBlock;
+        }
     }
 
     /**
@@ -250,16 +279,17 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         for (uint256 i; i < length; ++i) {
             SystemStatusCache memory cache = _systemStatusCache[assets[i]];
             statuses[i]   = cache;
-            validFlags[i] = _isCacheValid(cache.timestamp) && cache.isValid;
+            validFlags[i] = _isCacheValid(cache.updateBlock) && cache.isValid;
         }
     }
 
     /*━━━━━━━━━━━━━━━ Internal Helpers ━━━━━━━━━━━━━━━*/
 
-    function _isCacheValid(uint256 timestamp) internal view returns (bool) {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 nowTs = block.timestamp;
-        return timestamp > 0 && nowTs - timestamp <= ViewConstants.CACHE_DURATION;
+    function _isCacheValid(uint256 updateBlock) internal view returns (bool) {
+        uint256 nowBlock = block.number;
+        if (updateBlock == 0) return false;
+        if (updateBlock > nowBlock) return false;
+        return nowBlock - updateBlock <= ViewConstants.CACHE_DURATION_BLOCKS;
     }
 
     /*━━━━━━━━━━━━━━━ UUPS Upgrade ━━━━━━━━━━━━━━━*/

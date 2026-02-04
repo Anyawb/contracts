@@ -28,8 +28,8 @@ contract MockRewardCoreView {
         return _serviceUsage[serviceType];
     }
 
-    function setUserLastConsumption(address user, RewardTypes.ServiceType serviceType, uint256 ts) external {
-        _lastConsumption[user][serviceType] = ts;
+    function setUserLastConsumption(address user, RewardTypes.ServiceType serviceType, uint256 blockNumber) external {
+        _lastConsumption[user][serviceType] = blockNumber;
     }
 
     function getUserLastConsumption(address user, RewardTypes.ServiceType serviceType) external view returns (uint256) {
@@ -56,7 +56,7 @@ contract MockRewardCoreView {
 contract MockRewardManagerCoreView {
     struct UserCache {
         uint256 points;
-        uint256 timestamp;
+        uint256 blockNumber;
         bool isValid;
         uint8 level;
         uint256 lastActivity;
@@ -91,13 +91,23 @@ contract MockRewardManagerCoreView {
         return (baseUsd, perDay, bonus, baseEth);
     }
 
-    function setUserCache(address user, uint256 points, uint256 timestamp, bool isValid, uint8 level_, uint256 lastAct, uint256 loans, uint256 volume, uint256 penalty) external {
-        userCache[user] = UserCache(points, timestamp, isValid, level_, lastAct, loans, volume, penalty);
+    function setUserCache(
+        address user,
+        uint256 points,
+        uint256 blockNumber,
+        bool isValid,
+        uint8 level_,
+        uint256 lastAct,
+        uint256 loans,
+        uint256 volume,
+        uint256 penalty
+    ) external {
+        userCache[user] = UserCache(points, blockNumber, isValid, level_, lastAct, loans, volume, penalty);
     }
 
     function getUserCache(address user) external view returns (uint256, uint256, bool) {
         UserCache memory c = userCache[user];
-        return (c.points, c.timestamp, c.isValid);
+        return (c.points, c.blockNumber, c.isValid);
     }
 
     function getCacheExpirationTime() external view returns (uint256) {
@@ -115,7 +125,7 @@ contract MockRewardManagerCoreView {
         return (dynamicThreshold, dynamicMultiplier);
     }
 
-    function setLastRewardResetTime(uint256 ts) external { lastRewardResetTime = ts; }
+    function setLastRewardResetTime(uint256 blockNumber) external { lastRewardResetTime = blockNumber; }
 
     function getLastRewardResetTime() external view returns (uint256) {
         return lastRewardResetTime;

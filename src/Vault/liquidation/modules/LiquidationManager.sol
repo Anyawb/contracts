@@ -489,8 +489,7 @@ contract LiquidationManager is
             debtAmount,
             liquidator,
             bonus,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         ) {
             pushedUpdate = true;
         } catch (bytes memory reason) {
@@ -521,8 +520,7 @@ contract LiquidationManager is
                         reserveShare,
                         lenderShare,
                         liquidatorShare,
-                        // solhint-disable-next-line not-rely-on-time
-                        block.timestamp
+                        block.number
                     ) {
                         pushedPayout = true;
                     } catch (bytes memory reason) {
@@ -610,8 +608,7 @@ contract LiquidationManager is
             debtAmounts,
             liquidator,
             bonuses,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         ) {
             pushedBatch = true;
         } catch (bytes memory reason) {
@@ -650,8 +647,7 @@ contract LiquidationManager is
                             reserveShare,
                             lenderShare,
                             liquidatorShare,
-                            // solhint-disable-next-line not-rely-on-time
-                            block.timestamp
+                            block.number
                         ) {
                             pushedPayout = true;
                         } catch (bytes memory reason) {

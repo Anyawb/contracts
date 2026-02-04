@@ -32,18 +32,18 @@ describe('StatisticsView migration – minimal', function () {
   it('should update global snapshot and active users via pushUserStatsUpdate', async function () {
     const { stats, user } = await deployFixture();
 
-    let snap = await stats.getGlobalSnapshot();
+    let snap = (await stats.getGlobalSnapshotWithMeta())[0];
     expect(snap.totalCollateral).to.equal(0n);
     expect(snap.totalDebt).to.equal(0n);
     expect(snap.activeUsers).to.equal(0n);
 
     await stats.pushUserStatsUpdate(await user.getAddress(), ethers.parseUnits('100', 18), 0n, 0n, 0n);
-    snap = await stats.getGlobalSnapshot();
+    snap = (await stats.getGlobalSnapshotWithMeta())[0];
     expect(snap.totalCollateral).to.equal(ethers.parseUnits('100', 18));
     expect(snap.activeUsers).to.equal(1n);
 
     await stats.pushUserStatsUpdate(await user.getAddress(), 0n, ethers.parseUnits('100', 18), 0n, 0n);
-    snap = await stats.getGlobalSnapshot();
+    snap = (await stats.getGlobalSnapshotWithMeta())[0];
     expect(snap.totalCollateral).to.equal(0n);
     expect(snap.activeUsers).to.equal(0n);
   });
@@ -56,7 +56,7 @@ describe('StatisticsView migration – minimal', function () {
   it('getRewardStats should return zero when module missing and rewardRate should remain 0 even when RM present', async function () {
     const { stats, registry, acm, deployer } = await deployFixture();
 
-    let reward = await stats.getRewardStats();
+    let reward = (await stats.getRewardStatsWithMeta())[0];
     expect(reward.rewardRate).to.equal(0n);
 
     const RmF = await ethers.getContractFactory('MockRewardManager');
@@ -64,7 +64,7 @@ describe('StatisticsView migration – minimal', function () {
     await registry.setModule(KEY_RM, await rm.getAddress());
     await acm.grantRole(ACTION_SET_PARAMETER, await deployer.getAddress()); // already granted, safe
 
-    reward = await stats.getRewardStats();
+    reward = (await stats.getRewardStatsWithMeta())[0];
     expect(reward.rewardRate).to.equal(0n);
   });
 
@@ -74,7 +74,7 @@ describe('StatisticsView migration – minimal', function () {
     await expect(
       stats.connect(other).pushDegradationStats({
         totalDegradations: 1,
-        lastDegradationTime: 1,
+        lastDegradationBlock: 1,
         lastDegradedModule: await user.getAddress(),
         lastDegradationReasonHash: ethers.keccak256(ethers.toUtf8Bytes('reason')),
         fallbackValueUsed: 1,
@@ -86,7 +86,7 @@ describe('StatisticsView migration – minimal', function () {
     await expect(
       stats.connect(user).pushDegradationStats({
         totalDegradations: 1,
-        lastDegradationTime: 1,
+        lastDegradationBlock: 1,
         lastDegradedModule: await user.getAddress(),
         lastDegradationReasonHash: ethers.keccak256(ethers.toUtf8Bytes('reason')),
         fallbackValueUsed: 1,

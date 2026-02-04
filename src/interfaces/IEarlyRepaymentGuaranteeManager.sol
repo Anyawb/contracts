@@ -2,32 +2,47 @@
 pragma solidity ^0.8.20;
 
 /// @title IEarlyRepaymentGuaranteeManager
-/// @notice 提前还款保证金管理接口
-/// @dev 定义提前还款保证金管理的核心功能接口
+/// @notice Interface for early-repayment guarantee records and settlement hooks.
+/// @dev Implemented by EarlyRepaymentGuaranteeManager; this interface is the SSOT for structs/events used by
+///      offchain indexers, frontends, and integration tests.
 interface IEarlyRepaymentGuaranteeManager {
-    /* ============ Structs ============ */
-    /// @notice 保证金记录结构
+    /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
+    /// @notice Guarantee record for a borrower/asset pair.
     struct GuaranteeRecord {
-        uint256 principal;                    // 借款本金
-        uint256 promisedInterest;             // 承诺的利息（保证金）
-        uint256 startTime;                    // 借款开始时间
-        uint256 maturityTime;                 // 到期时间
-        uint256 earlyRepayPenaltyDays;        // 提前还款罚金天数
-        bool isActive;                        // 是否活跃
-        address lender;                       // 贷款方地址
-        address asset;                        // 资产地址
+        /// @notice Borrow principal amount (asset units).
+        uint256 principal;
+        /// @notice Promised interest amount locked as guarantee (asset units).
+        uint256 promisedInterest;
+        /// @dev Legacy field name. Semantics in this repo: startBlock (block.number), NOT unix time.
+        uint256 startTime;
+        /// @dev Legacy field name. Semantics in this repo: maturityBlock (block.number), NOT unix time.
+        uint256 maturityTime;
+        /// @notice Early repayment penalty in days (block-based time axis in implementation).
+        uint256 earlyRepayPenaltyDays;
+        /// @notice Whether the guarantee is active.
+        bool isActive;
+        /// @notice Lender address receiving penalties/forfeits.
+        address lender;
+        /// @notice Guarantee asset address.
+        address asset;
     }
 
-    /// @notice 提前还款结果结构
+    /// @notice Early repayment settlement outcome (asset units).
     struct EarlyRepaymentResult {
-        uint256 penaltyToLender;              // 给贷款方的罚金
-        uint256 refundToBorrower;             // 返还给借款方的金额
-        uint256 platformFee;                  // 平台手续费
-        uint256 actualInterestPaid;           // 实际支付的利息
+        /// @notice Amount paid to lender from guarantee (asset units).
+        uint256 penaltyToLender;
+        /// @notice Amount refunded to borrower (asset units).
+        uint256 refundToBorrower;
+        /// @notice Platform fee (asset units).
+        uint256 platformFee;
+        /// @notice Interest actually paid to lender (asset units).
+        uint256 actualInterestPaid;
     }
 
-    /* ============ Events ============ */
-    /// @notice 保证金锁定事件
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when a guarantee record is locked for a borrower/asset pair.
+    /// @dev Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` represents
+    ///      blockNumber (block-based time axis).
     event GuaranteeLocked(
         uint256 indexed guaranteeId,
         address indexed borrower,
@@ -38,10 +53,12 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 startTime,
         uint256 maturityTime,
         uint256 earlyRepayPenaltyDays,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
-    /// @notice 提前还款处理事件
+    /// @notice Emitted when an early repayment is settled and the guarantee is distributed.
+    /// @dev Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` represents
+    ///      blockNumber (block-based time axis).
     event EarlyRepaymentProcessed(
         uint256 indexed guaranteeId,
         address indexed borrower,
@@ -51,55 +68,113 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 refundToBorrower,
         uint256 platformFee,
         uint256 actualInterestPaid,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
-    /// @notice 保证金没收事件（违约）
+    /// @notice Emitted when a guarantee is forfeited due to default.
+    /// @dev Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` represents
+    ///      blockNumber (block-based time axis).
     event GuaranteeForfeited(
         uint256 indexed guaranteeId,
         address indexed borrower,
         address indexed lender,
         address asset,
         uint256 forfeitedAmount,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
-    /* ============ View Functions ============ */
-    /// @notice 查询保证金记录
-    /// @param guaranteeId 保证金ID
-    /// @return record 保证金记录
+    /*━━━━━━━━━━━━━━━ View Functions ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Get a guarantee record by id.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * Note:
+     * - If the id was never created, returns a zero-initialized record.
+     *
+     * @param guaranteeId Guarantee id.
+     * @return record Guarantee record.
+     */
     function getGuaranteeRecord(uint256 guaranteeId) external view returns (GuaranteeRecord memory record);
 
-    /// @notice 查询用户的保证金ID
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return guaranteeId 保证金ID
+    /**
+     * @notice Get the active (or last) guarantee id for a (user, asset) pair.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * Note:
+     * - Returns 0 if no guarantee has ever been set for the pair.
+     *
+     * @param user Borrower address.
+     * @param asset Guarantee asset address.
+     * @return guaranteeId Guarantee id (0 if none).
+     */
     function getUserGuaranteeId(address user, address asset) external view returns (uint256 guaranteeId);
 
-    /// @notice 查询用户是否有活跃的保证金
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return isActive 是否有活跃保证金
+    /**
+     * @notice Check whether a user currently has an active guarantee for an asset.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param user Borrower address.
+     * @param asset Guarantee asset address.
+     * @return isActive True if an active guarantee exists, otherwise false.
+     */
     function hasActiveGuarantee(address user, address asset) external view returns (bool isActive);
 
-    /// @notice 预览提前还款结果
-    /// @param guaranteeId 保证金ID
-    /// @param actualRepayAmount 实际还款金额
-    /// @return result 提前还款结果
+    /**
+     * @notice Preview early repayment settlement amounts for a guarantee id.
+     * @dev Reverts if:
+     *      - guarantee is not active (GuaranteeNotActive)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param guaranteeId Guarantee id.
+     * @param actualRepayAmount Actual repay amount (asset units; reserved for future rules).
+     * @return result Previewed settlement amounts.
+     */
     function previewEarlyRepayment(
         uint256 guaranteeId,
         uint256 actualRepayAmount
     ) external view returns (EarlyRepaymentResult memory result);
 
-    /* ============ Core Functions ============ */
-    /// @notice 锁定保证金记录
-    /// @param borrower 借款方地址
-    /// @param lender 贷款方地址
-    /// @param asset 资产地址
-    /// @param principal 本金金额
-    /// @param promisedInterest 承诺利息金额
-    /// @param termDays 借款期限（天）
-    /// @return guaranteeId 保证金ID
+    /*━━━━━━━━━━━━━━━ Core Functions ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Lock a new early-repayment guarantee record for (borrower, asset).
+     * @dev Reverts if:
+     *      - caller is not VaultCore or VaultBusinessLogic resolved via Registry (EarlyRepaymentGuaranteeManager__OnlyVaultCore)
+     *      - registry reference is zero or not a contract (ZeroAddress / NotAContract)
+     *      - borrower/lender/asset is zero (ZeroAddress)
+     *      - principal/promisedInterest/termDays is zero (AmountIsZero)
+     *      - borrower == lender (BorrowerCannotBeLender)
+     *      - termDays is out of range (InvalidGuaranteeTerm)
+     *      - promisedInterest is too high vs principal (GuaranteeInterestTooHigh)
+     *      - an active guarantee already exists for (borrower, asset) (GuaranteeAlreadyProcessed)
+     *      - guarantee id counter overflows (GuaranteeIdOverflow)
+     *      - guarantee feature is disabled for the asset (EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled)
+     *
+     * Security:
+     * - onlyVaultCoreOrBusinessLogic (Registry-resolved)
+     * - nonReentrant
+     *
+     * @param borrower Borrower address.
+     * @param lender Lender address.
+     * @param asset Guarantee asset address.
+     * @param principal Borrow principal amount (asset units).
+     * @param promisedInterest Promised interest amount locked as guarantee (asset units).
+     * @param termDays Loan term (days; converted to blocks in implementation).
+     * @return guaranteeId New guarantee id.
+     */
     function lockGuaranteeRecord(
         address borrower,
         address lender,
@@ -109,29 +184,74 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 termDays
     ) external returns (uint256 guaranteeId);
 
-    /// @notice 处理提前还款
-    /// @param borrower 借款方地址
-    /// @param asset 资产地址
-    /// @param actualRepayAmount 实际还款金额
-    /// @return result 提前还款结果
+    /**
+     * @notice Settle early repayment for (borrower, asset) by distributing the guarantee.
+     * @dev Reverts if:
+     *      - caller is not SettlementManager (or VaultCore for legacy flows) resolved via Registry
+     *        (EarlyRepaymentGuaranteeManager__OnlySettlementManager)
+     *      - registry reference is zero or not a contract (ZeroAddress / NotAContract)
+     *      - borrower/asset is zero (ZeroAddress)
+     *      - actualRepayAmount is zero (AmountIsZero)
+     *      - no guarantee exists for (borrower, asset) (GuaranteeRecordNotFound)
+     *      - guarantee is not active (GuaranteeNotActive)
+     *      - guarantee feature is disabled for the asset (EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled)
+     *      - Registry missing KEY_GUARANTEE_FUND (Registry.getModuleOrRevert)
+     *      - GuaranteeFundManager settlement reverts (ExternalModuleRevertedRaw)
+     *
+     * Security:
+     * - onlySettlementManager (Registry-resolved; VaultCore allowed for legacy tests)
+     * - nonReentrant
+     * - CEI: record state is updated before external settlement call
+     *
+     * @param borrower Borrower address.
+     * @param asset Guarantee asset address.
+     * @param actualRepayAmount Actual repay amount (asset units; reserved for future rules).
+     * @return result Computed settlement amounts.
+     */
     function settleEarlyRepayment(
         address borrower,
         address asset,
         uint256 actualRepayAmount
     ) external returns (EarlyRepaymentResult memory result);
 
-    /// @notice 处理违约（没收保证金）
-    /// @param borrower 借款方地址
-    /// @param asset 资产地址
-    /// @return forfeitedAmount 没收金额
+    /**
+     * @notice Process default for (borrower, asset) by forfeiting the full guarantee to the lender.
+     * @dev Reverts if:
+     *      - caller is not SettlementManager (or VaultCore for legacy flows) resolved via Registry
+     *        (EarlyRepaymentGuaranteeManager__OnlySettlementManager)
+     *      - registry reference is zero or not a contract (ZeroAddress / NotAContract)
+     *      - borrower/asset is zero (ZeroAddress)
+     *      - no guarantee exists for (borrower, asset) (GuaranteeRecordNotFound)
+     *      - guarantee is not active (GuaranteeNotActive)
+     *      - guarantee feature is disabled for the asset (EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled)
+     *      - Registry missing KEY_GUARANTEE_FUND (Registry.getModuleOrRevert)
+     *      - GuaranteeFundManager forfeiture reverts (ExternalModuleRevertedRaw)
+     *
+     * Security:
+     * - onlySettlementManager (Registry-resolved; VaultCore allowed for legacy tests)
+     * - nonReentrant
+     * - CEI: record state is updated before external forfeiture call
+     *
+     * @param borrower Borrower address.
+     * @param asset Guarantee asset address.
+     * @return forfeitedAmount Amount forfeited (asset units).
+     */
     function processDefault(
         address borrower,
         address asset
     ) external returns (uint256 forfeitedAmount);
 
-    /* ============ Feature toggle (recommended) ============ */
-    /// @notice Whether early-repayment guarantee is enabled for a given asset.
-    /// @param asset Guarantee asset address.
-    /// @return enabled True if enabled, otherwise false.
+    /*━━━━━━━━━━━━━━━ Feature Toggle ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Whether early-repayment guarantee is enabled for a given asset.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param asset Guarantee asset address.
+     * @return enabled True if enabled, otherwise false.
+     */
     function isGuaranteeEnabled(address asset) external view returns (bool enabled);
 } 

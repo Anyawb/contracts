@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../Reward/RewardTypes.sol";
+import { RewardTypes } from "../Reward/RewardTypes.sol";
 
 /// @title IRewardConsumptionEvents - 积分消费事件定义接口
 /// @notice 统一管理所有积分消费相关的事件定义
@@ -13,7 +13,7 @@ interface IRewardConsumptionEvents {
         uint8 serviceType, 
         uint8 level, 
         uint256 points, 
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     // 配置更新事件

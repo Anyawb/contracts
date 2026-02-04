@@ -12,7 +12,11 @@ contract MockHealthViewLite {
         hfs[user] = HF({ value: hf, valid: valid });
     }
 
-    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid, uint256 timestamp) {
+    function getUserHealthFactorWithMeta(address user)
+        external
+        view
+        returns (uint256 healthFactor, bool isValid, uint256 blockNumber)
+    {
         HF memory h = hfs[user];
         return (h.value, h.valid, 0);
     }

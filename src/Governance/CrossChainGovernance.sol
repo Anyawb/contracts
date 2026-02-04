@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 error CrossChainGovernance__InvalidProposal();
@@ -23,6 +23,9 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
     /// @notice 执行者角色
     bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
+
+    /// @notice 默认区块时间假设（~2s/block），用于将天数映射到区块数
+    uint256 private constant _BLOCKS_PER_DAY = 43_200;
     
     /// @notice 提案状态枚举
     enum ProposalState {
@@ -49,9 +52,9 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         uint256 forVotes;
         uint256 againstVotes;
         uint256 abstainVotes;
-        uint256 startTime;
-        uint256 endTime;
-        uint256 executionTime;
+        uint256 startBlock; // block.number (Time-Dependency-Refactor)
+        uint256 endBlock; // block.number (Time-Dependency-Refactor)
+        uint256 executionBlock; // block.number (Time-Dependency-Refactor)
         bool executed;
         bool canceled;
         ProposalState state;
@@ -65,7 +68,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     struct Vote {
         VoteOption option;
         uint256 weight;
-        uint256 timestamp;
+        uint256 voteBlock; // block.number (Time-Dependency-Refactor)
         bool hasVoted;
     }
     
@@ -97,14 +100,14 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @notice 投票权重映射
     mapping(address => uint256) public votingPower;
     
-    /// @notice 最小提案时间
-    uint256 public minProposalTime = 1 days;
+    /// @notice 最小提案时间（区块）
+    uint256 public minProposalBlocks = 1 * _BLOCKS_PER_DAY;
     
-    /// @notice 最大提案时间
-    uint256 public maxProposalTime = 30 days;
+    /// @notice 最大提案时间（区块）
+    uint256 public maxProposalBlocks = 30 * _BLOCKS_PER_DAY;
     
-    /// @notice 执行延迟时间
-    uint256 public executionDelay = 2 days;
+    /// @notice 执行延迟时间（区块）
+    uint256 public executionDelayBlocks = 2 * _BLOCKS_PER_DAY;
     
     /// @notice 法定人数比例 (BPS)
     uint256 public quorumBPS = 4000; // 40%
@@ -118,12 +121,12 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @notice 跨链消息哈希验证
     mapping(bytes32 => bool) public executedCrossChainMessages;
 
-    event ProposalCreated(uint256 indexed proposalId, address indexed proposer, string description, uint256 startTime, uint256 endTime);
+    event ProposalCreated(uint256 indexed proposalId, address indexed proposer, string description, uint256 startBlock, uint256 endBlock);
     event VoteCast(uint256 indexed proposalId, address indexed voter, VoteOption option, uint256 weight);
     event ProposalExecuted(uint256 indexed proposalId, address indexed executor);
     event CrossChainVoteReceived(uint256 indexed proposalId, uint256 indexed chainId, uint256 forVotes, uint256 againstVotes, uint256 abstainVotes);
     event CrossChainExecution(uint256 indexed proposalId, uint256 indexed chainId, bytes32 messageHash);
-    event GovernanceParametersUpdated(uint256 minProposalTime, uint256 maxProposalTime, uint256 executionDelay, uint256 quorumBPS, uint256 voteThresholdBPS);
+    event GovernanceParametersUpdated(uint256 minProposalBlocks, uint256 maxProposalBlocks, uint256 executionDelayBlocks, uint256 quorumBPS, uint256 voteThresholdBPS);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -152,21 +155,21 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @param description 提案描述
     /// @param actions 执行动作数组
     /// @param targets 目标合约数组
-    /// @param votingPeriod 投票周期
+    /// @param votingPeriod 投票周期（区块）
     function createProposal(
         string calldata description,
         bytes[] calldata actions,
         address[] calldata targets,
         uint256 votingPeriod
     ) external onlyRole(GOVERNANCE_ROLE) returns (uint256 proposalId) {
-        if (votingPeriod < minProposalTime || votingPeriod > maxProposalTime) {
+        if (votingPeriod < minProposalBlocks || votingPeriod > maxProposalBlocks) {
             revert CrossChainGovernance__InvalidProposal();
         }
         
         proposalId = ++proposalCount;
         
-        uint256 startTime = block.timestamp;
-        uint256 endTime = startTime + votingPeriod;
+        uint256 startBlock = block.number;
+        uint256 endBlock = startBlock + votingPeriod;
         uint256 quorum = _calculateQuorum();
         
         proposals[proposalId] = Proposal({
@@ -176,9 +179,9 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
             forVotes: 0,
             againstVotes: 0,
             abstainVotes: 0,
-            startTime: startTime,
-            endTime: endTime,
-            executionTime: 0,
+            startBlock: startBlock,
+            endBlock: endBlock,
+            executionBlock: 0,
             executed: false,
             canceled: false,
             state: ProposalState.Active,
@@ -188,7 +191,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
             targets: targets
         });
         
-        emit ProposalCreated(proposalId, msg.sender, description, startTime, endTime);
+        emit ProposalCreated(proposalId, msg.sender, description, startBlock, endBlock);
     }
 
     /// @notice 投票
@@ -201,7 +204,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
             revert CrossChainGovernance__ProposalNotActive();
         }
         
-        if (block.timestamp < proposal.startTime || block.timestamp > proposal.endTime) {
+        if (block.number < proposal.startBlock || block.number > proposal.endBlock) {
             revert CrossChainGovernance__ProposalNotActive();
         }
         
@@ -217,7 +220,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         
         userVote.option = option;
         userVote.weight = weight;
-        userVote.timestamp = block.timestamp;
+        userVote.voteBlock = block.number;
         userVote.hasVoted = true;
         
         if (option == VoteOption.For) {
@@ -244,12 +247,12 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
             revert CrossChainGovernance__ExecutionFailed();
         }
         
-        if (block.timestamp < proposal.endTime + executionDelay) {
+        if (block.number < proposal.endBlock + executionDelayBlocks) {
             revert CrossChainGovernance__ExecutionFailed();
         }
         
         proposal.executed = true;
-        proposal.executionTime = block.timestamp;
+        proposal.executionBlock = block.number;
         proposal.state = ProposalState.Executed;
         
         // 执行提案动作
@@ -376,25 +379,25 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     }
 
     /// @notice 更新治理参数
-    /// @param minTime 最小提案时间
-    /// @param maxTime 最大提案时间
-    /// @param delay 执行延迟
+    /// @param minBlocks 最小提案时间（区块）
+    /// @param maxBlocks 最大提案时间（区块）
+    /// @param delayBlocks 执行延迟（区块）
     /// @param quorum 法定人数比例
     /// @param threshold 投票阈值比例
     function updateGovernanceParameters(
-        uint256 minTime,
-        uint256 maxTime,
-        uint256 delay,
+        uint256 minBlocks,
+        uint256 maxBlocks,
+        uint256 delayBlocks,
         uint256 quorum,
         uint256 threshold
     ) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
-        minProposalTime = minTime;
-        maxProposalTime = maxTime;
-        executionDelay = delay;
+        minProposalBlocks = minBlocks;
+        maxProposalBlocks = maxBlocks;
+        executionDelayBlocks = delayBlocks;
         quorumBPS = quorum;
         voteThresholdBPS = threshold;
         
-        emit GovernanceParametersUpdated(minTime, maxTime, delay, quorum, threshold);
+        emit GovernanceParametersUpdated(minBlocks, maxBlocks, delayBlocks, quorum, threshold);
     }
 
     /// @notice 添加跨链验证器
@@ -435,11 +438,11 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
             return ProposalState.Defeated;
         }
         
-        if (block.timestamp < proposal.startTime) {
+        if (block.number < proposal.startBlock) {
             return ProposalState.Pending;
         }
         
-        if (block.timestamp > proposal.endTime) {
+        if (block.number > proposal.endBlock) {
             uint256 totalVotes = proposal.forVotes + proposal.againstVotes + proposal.abstainVotes;
             if (totalVotes >= proposal.quorum && proposal.forVotes > proposal.againstVotes) {
                 return ProposalState.Succeeded;
@@ -456,16 +459,16 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @param voter 投票者地址
     /// @return option 投票选项
     /// @return weight 投票权重
-    /// @return timestamp 投票时间
+    /// @return voteBlock 投票区块号（blockNumber）
     /// @return hasVoted 是否已投票
     function getUserVote(uint256 proposalId, address voter) external view returns (
         VoteOption option,
         uint256 weight,
-        uint256 timestamp,
+        uint256 voteBlock,
         bool hasVoted
     ) {
         Vote storage userVote = votes[proposalId][voter];
-        return (userVote.option, userVote.weight, userVote.timestamp, userVote.hasVoted);
+        return (userVote.option, userVote.weight, userVote.voteBlock, userVote.hasVoted);
     }
 
     /// @notice 获取跨链投票信息

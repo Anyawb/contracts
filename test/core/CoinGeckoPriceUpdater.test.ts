@@ -116,7 +116,7 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       const coingeckoId = 'bitcoin';
 
       await expect(
-        coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId)
+        coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8)
       ).to.emit(coinGeckoUpdater, 'AssetConfigUpdated')
        .withArgs(asset, coingeckoId, true);
     });
@@ -135,7 +135,7 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
 
       await expect(
         coinGeckoUpdater.connect(governance).configureAsset(asset, '')
-      ).to.be.revertedWith('Invalid CoinGecko ID');
+      ).to.be.revertedWithCustomError(coinGeckoUpdater, 'CoinGeckoPriceUpdater__InvalidCoingeckoId');
     });
 
     it('应拒绝无权限用户配置资产', async function () {
@@ -153,7 +153,7 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       const coingeckoId = 'bitcoin';
 
       // 先配置资产
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
 
       // 移除资产
       await expect(
@@ -168,7 +168,7 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
 
       await expect(
         coinGeckoUpdater.connect(governance).removeAsset(asset)
-      ).to.be.revertedWith('Asset not configured');
+      ).to.be.revertedWithCustomError(coinGeckoUpdater, 'CoinGeckoPriceUpdater__AssetNotConfigured');
     });
   });
 
@@ -180,10 +180,10 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 使用较小的价格以避免超过 MAX_REASONABLE_PRICE (1e12)
       // 50000 * 10^8 = 5e12，超过了 1e12，所以使用更小的价格
       const price = ethers.parseUnits('1000', 8); // 1000 USD，在合理范围内
-      const timestamp = Math.floor(Date.now() / 1000);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
       // 先配置资产
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
       
       // 注意：CoinGeckoPriceUpdater 在更新价格时会自动调用 configureAsset
       // 但健康检查需要资产是 active 的，所以我们先设置一个初始价格
@@ -195,9 +195,9 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 注意：由于健康检查可能失败，价格更新可能使用应急模式
       // 应急模式也会发出 PriceUpdated 事件，所以我们只验证事件被发出
       await expect(
-        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, timestamp)
+        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, blockNumber)
       ).to.emit(coinGeckoUpdater, 'PriceUpdated')
-       .withArgs(asset, coingeckoId, price, timestamp);
+       .withArgs(asset, coingeckoId, price, blockNumber);
     });
 
     it('应拒绝更新未配置资产的价格', async function () {
@@ -206,10 +206,10 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 使用较小的价格以避免超过 MAX_REASONABLE_PRICE (1e12)
       // 50000 * 10^8 = 5e12，超过了 1e12，所以使用更小的价格
       const price = ethers.parseUnits('1000', 8); // 1000 USD，在合理范围内
-      const timestamp = Math.floor(Date.now() / 1000);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
       await expect(
-        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, timestamp)
+        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, blockNumber)
       ).to.be.revertedWithCustomError(coinGeckoUpdater, 'CoinGeckoPriceUpdater__AssetNotConfigured');
     });
 
@@ -217,16 +217,16 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       const { coinGeckoUpdater, governance, updater } = await deployFixture();
       const asset = ethers.Wallet.createRandom().address;
       const coingeckoId = 'bitcoin';
-      const timestamp = Math.floor(Date.now() / 1000);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
 
       await expect(
-        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, 0, timestamp)
+        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, 0, blockNumber)
       ).to.be.revertedWithCustomError(coinGeckoUpdater, 'CoinGeckoPriceUpdater__InvalidPrice');
     });
 
-    it('应拒绝未来时间戳', async function () {
+    it('未来区块号仅作为信息字段，应允许更新', async function () {
       const { coinGeckoUpdater, governance, updater } = await deployFixture();
       const asset = ethers.Wallet.createRandom().address;
       const coingeckoId = 'bitcoin';
@@ -234,15 +234,15 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 50000 * 10^8 = 5e12，超过了 1e12，所以使用更小的价格
       const price = ethers.parseUnits('1000', 8); // 1000 USD，在合理范围内
       // 注意：全量测试运行时可能有其他用例推进链上时间。
-      // 这里必须基于“当前链上时间”构造未来时间戳，才能稳定触发合约的 timestamp > block.timestamp 校验。
-      const latestBlock = await ethers.provider.getBlock('latest');
-      const futureTimestamp = (latestBlock?.timestamp ?? Math.floor(Date.now() / 1000)) + 3600;
+      // 这里基于“当前区块号”构造未来区块号，避免依赖时间戳。
+      const latestBlockNumber = await ethers.provider.getBlockNumber();
+      const futureBlockNumber = latestBlockNumber + 100;
 
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
 
       await expect(
-        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, futureTimestamp)
-      ).to.be.revertedWithCustomError(coinGeckoUpdater, 'CoinGeckoPriceUpdater__InvalidTimestamp');
+        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, futureBlockNumber)
+      ).to.not.be.reverted;
     });
 
     it('应拒绝无权限用户更新价格', async function () {
@@ -252,12 +252,12 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 使用较小的价格以避免超过 MAX_REASONABLE_PRICE (1e12)
       // 50000 * 10^8 = 5e12，超过了 1e12，所以使用更小的价格
       const price = ethers.parseUnits('1000', 8); // 1000 USD，在合理范围内
-      const timestamp = Math.floor(Date.now() / 1000);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
 
       await expect(
-        coinGeckoUpdater.connect(user).updateAssetPrice(asset, price, timestamp)
+        coinGeckoUpdater.connect(user).updateAssetPrice(asset, price, blockNumber)
       ).to.be.reverted;
     });
 
@@ -267,20 +267,21 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       const asset2 = ethers.Wallet.createRandom().address;
       const coingeckoId1 = 'bitcoin';
       const coingeckoId2 = 'ethereum';
-      const price1 = ethers.parseUnits('50000', 8);
-      const price2 = ethers.parseUnits('3000', 8);
-      const timestamp = Math.floor(Date.now() / 1000);
+      // 使用较小的价格以避免超过 MAX_REASONABLE_PRICE (1e12)
+      const price1 = ethers.parseUnits('1000', 8);
+      const price2 = ethers.parseUnits('300', 8);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
       // 配置资产
-      await coinGeckoUpdater.connect(governance).configureAsset(asset1, coingeckoId1);
-      await coinGeckoUpdater.connect(governance).configureAsset(asset2, coingeckoId2);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset1, coingeckoId1, 8);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset2, coingeckoId2, 8);
 
       // 批量更新价格
       await expect(
         coinGeckoUpdater.connect(updater).updateAssetPrices(
           [asset1, asset2],
           [price1, price2],
-          [timestamp, timestamp]
+          [blockNumber, blockNumber]
         )
       ).to.emit(coinGeckoUpdater, 'PriceUpdated');
     });
@@ -300,15 +301,15 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 使用较小的价格以避免超过 MAX_REASONABLE_PRICE (1e12)
       // 50000 * 10^8 = 5e12，超过了 1e12，所以使用更小的价格
       const price = ethers.parseUnits('1000', 8); // 1000 USD，在合理范围内
-      const timestamp = Math.floor(Date.now() / 1000);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
 
       await expect(
         coinGeckoUpdater.connect(updater).updateAssetPrices(
           [asset],
           [price, price], // 价格数组长度不匹配
-          [timestamp]
+          [blockNumber]
         )
       ).to.be.revertedWithCustomError(coinGeckoUpdater, 'ArrayLengthMismatch');
     });
@@ -350,15 +351,15 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 使用较小的价格以避免超过 MAX_REASONABLE_PRICE (1e12)
       // 50000 * 10^8 = 5e12，超过了 1e12，所以使用更小的价格
       const price = ethers.parseUnits('1000', 8); // 1000 USD，在合理范围内
-      const timestamp = Math.floor(Date.now() / 1000);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
       
       // 禁用价格验证以确保更新成功
       await coinGeckoUpdater.connect(governance).togglePriceValidation(false);
       
       // 更新价格（即使健康检查失败，应急模式也会更新 _lastUpdateTime）
-      const tx = await coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, timestamp);
+      const tx = await coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, blockNumber);
       await tx.wait(); // 等待交易完成
 
       // 立即检查应该不需要更新（因为刚更新过，且 UPDATE_INTERVAL 是 300 秒）
@@ -424,6 +425,14 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       ).to.emit(coinGeckoUpdater, 'MonitoringRegistered');
     });
 
+    it('应拒绝非合约地址的监控服务注册', async function () {
+      const { coinGeckoUpdater, governance, user } = await deployFixture();
+
+      await expect(
+        coinGeckoUpdater.connect(governance).registerMonitoring(user.address, 'EOAMonitor')
+      ).to.be.revertedWithCustomError(coinGeckoUpdater, 'CoinGeckoPriceUpdater__MonitorNotAContract');
+    });
+
     it('应拒绝零地址监控服务注册', async function () {
       const { coinGeckoUpdater, governance } = await deployFixture();
 
@@ -458,22 +467,34 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       const { coinGeckoUpdater, governance, updater } = await deployFixture();
       const asset = ethers.Wallet.createRandom().address;
       const coingeckoId = 'bitcoin';
-      const initialPrice = ethers.parseUnits('50000', 8);
-      const extremePrice = ethers.parseUnits('1000000', 8); // 20倍价格，超过10%偏差限制
-      const timestamp = Math.floor(Date.now() / 1000);
+      const initialPrice = ethers.parseUnits('1000', 8);
+      const extremePrice = ethers.parseUnits('2000', 8); // 价格偏差超过10%
+      const blockNumber = await ethers.provider.getBlockNumber();
 
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
       
       // 首次更新应该成功
-      await coinGeckoUpdater.connect(updater).updateAssetPrice(asset, initialPrice, timestamp);
+      await coinGeckoUpdater.connect(updater).updateAssetPrice(asset, initialPrice, blockNumber);
 
-      // 极端价格更新可能会触发验证失败事件或成功更新
-      // 取决于价格验证逻辑的具体实现
-      // 由于价格偏差过大，可能会触发验证失败，但也可能成功更新
+      // 极端价格更新可能触发验证失败事件
       // 我们只验证交易不会 revert
       await expect(
-        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, extremePrice, timestamp)
+        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, extremePrice, blockNumber)
       ).to.not.be.reverted;
+    });
+
+    it('应在价格超出合理上限时发出验证失败事件', async function () {
+      const { coinGeckoUpdater, governance, updater } = await deployFixture();
+      const asset = ethers.Wallet.createRandom().address;
+      const coingeckoId = 'bitcoin';
+      const blockNumber = await ethers.provider.getBlockNumber();
+      const overMax = ethers.parseUnits('100000', 8); // 1e13 > 1e12
+
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
+
+      await expect(
+        coinGeckoUpdater.connect(updater).updateAssetPrice(asset, overMax, blockNumber)
+      ).to.emit(coinGeckoUpdater, 'PriceValidationFailed');
     });
   });
 
@@ -485,13 +506,13 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       // 使用较小的价格以避免超过 MAX_REASONABLE_PRICE (1e12)
       // 50000 * 10^8 = 5e12，超过了 1e12，所以使用更小的价格
       const price = ethers.parseUnits('1000', 8); // 1000 USD，在合理范围内
-      const timestamp = Math.floor(Date.now() / 1000);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
       // 1. 配置资产
-      await coinGeckoUpdater.connect(governance).configureAsset(asset, coingeckoId);
+      await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(asset, coingeckoId, 8);
 
       // 2. 更新价格
-      const tx = await coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, timestamp);
+      const tx = await coinGeckoUpdater.connect(updater).updateAssetPrice(asset, price, blockNumber);
       await tx.wait(); // 等待交易完成
 
       // 3. 检查是否需要更新（应该不需要，因为刚更新过）
@@ -519,22 +540,22 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
       ];
       const coingeckoIds = ['bitcoin', 'ethereum', 'usd-coin'];
       const prices = [
-        ethers.parseUnits('50000', 8),
-        ethers.parseUnits('3000', 8),
+        ethers.parseUnits('1000', 8),
+        ethers.parseUnits('300', 8),
         ethers.parseUnits('1', 8)
       ];
-      const timestamp = Math.floor(Date.now() / 1000);
+      const blockNumber = await ethers.provider.getBlockNumber();
 
       // 配置所有资产
       for (let i = 0; i < assets.length; i++) {
-        await coinGeckoUpdater.connect(governance).configureAsset(assets[i], coingeckoIds[i]);
+        await coinGeckoUpdater.connect(governance).configureAssetWithDecimals(assets[i], coingeckoIds[i], 8);
       }
 
       // 批量更新价格
       const tx = await coinGeckoUpdater.connect(updater).updateAssetPrices(assets, prices, [
-        timestamp,
-        timestamp,
-        timestamp
+        blockNumber,
+        blockNumber,
+        blockNumber
       ]);
       await tx.wait(); // 等待交易完成
 

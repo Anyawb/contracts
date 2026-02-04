@@ -36,7 +36,7 @@ describe("Funds-Flow – Deposit authority path", function () {
 
     // Collateral asset (also used as settlement token for router init; irrelevant for deposit path)
     const MockERC20 = await ethers.getContractFactory("MockERC20");
-    const collateralToken = await MockERC20.deploy("Mock USDC", "USDC", ethers.parseUnits("1000000", 18));
+    const collateralToken = await MockERC20.deploy("Mock USDC", "USDC", 18, ethers.parseUnits("1000000", 18));
 
     // Give user balance
     await (await collateralToken.transfer(user.address, ethers.parseUnits("10000", 18))).wait();

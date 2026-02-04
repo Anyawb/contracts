@@ -31,7 +31,7 @@ describe('Mock 合约演示 - Mock Contract Demo', function () {
 
     // 2. 部署 MockERC20 代币
     const tokenFactory = await ethers.getContractFactory('MockERC20');
-    mockToken = await tokenFactory.deploy('Mock USDC', 'USDC', ethers.parseUnits('1000000', 6));
+    mockToken = await tokenFactory.deploy('Mock USDC', 'USDC', 6, ethers.parseUnits('1000000', 6));
     await mockToken.waitForDeployment();
 
     // 分配代币给用户

@@ -15,6 +15,7 @@ const ACTION_UPGRADE_MODULE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODUL
 const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
 const ACTION_VIEW_LIQUIDATION_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_LIQUIDATION_DATA'));
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
+const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
 
 describe('LiquidatorView', function () {
   async function deployFixture() {
@@ -47,6 +48,8 @@ describe('LiquidatorView', function () {
     await acm.grantRole(ACTION_VIEW_LIQUIDATION_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, admin.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, admin.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
 
     const asset = ethers.Wallet.createRandom().address;
     await collateralMgr.depositCollateral(admin.address, asset, 1_000);
@@ -61,6 +64,10 @@ describe('LiquidatorView', function () {
     const view = await upgrades.deployProxy(LiquidatorViewFactory, [await registry.getAddress(), ethers.ZeroAddress], {
       kind: 'uups',
     });
+
+    // LiquidatorView delegates valuation to PositionView, which is risk-role gated.
+    // Grant risk role to the LiquidatorView contract itself so those internal calls succeed.
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, await view.getAddress());
 
     return { view, registry, acm, admin, viewer, other, business, user2, collateralMgr, lendingEngine, priceOracle, positionView, profitStats, recordMgr, asset };
   }
@@ -152,18 +159,50 @@ describe('LiquidatorView', function () {
   describe('user and system stats', function () {
     it('returns user liquidation stats', async function () {
       const { view, admin } = await deployFixture();
-      const stats = await view.connect(admin).getUserLiquidationStats(admin.address);
+      const [stats] = await view.connect(admin).getUserLiquidationStats(admin.address);
       expect(stats.totalLiquidations).to.equal(0n);
       expect(stats.totalSeizedValue).to.equal(0n);
       expect(stats.lastLiquidationTime).to.equal(0n);
     });
 
+    it('allows self-read of user liquidation stats without VIEW_USER_DATA role (Scheme U self-read)', async function () {
+      const { view, acm, viewer } = await deployFixture();
+      // Revoke viewer role; self-read should still pass.
+      await acm.revokeRole(ACTION_VIEW_USER_DATA, viewer.address);
+      await acm.revokeRole(ACTION_ADMIN, viewer.address);
+
+      const [stats] = await view.connect(viewer).getUserLiquidationStats(viewer.address);
+      expect(stats.totalLiquidations).to.equal(0n);
+    });
+
+    it('allows non-self read of user liquidation stats with VIEW_USER_DATA role (Scheme U ops read)', async function () {
+      const { view, viewer, admin } = await deployFixture();
+      const [stats] = await view.connect(viewer).getUserLiquidationStats(admin.address);
+      expect(stats.totalLiquidations).to.equal(0n);
+    });
+
+    it('denies non-self read of user liquidation stats without roles (Scheme U)', async function () {
+      const { view, other, admin } = await deployFixture();
+      await expect(view.connect(other).getUserLiquidationStats(admin.address)).to.be.revertedWithCustomError(view, 'MissingRole');
+    });
+
     it('returns batch user liquidation stats', async function () {
       const { view, admin, user2 } = await deployFixture();
-      const list = await view.connect(admin).batchGetLiquidationStats([admin.address, user2.address]);
+      const [list] = await view.connect(admin).batchGetLiquidationStats([admin.address, user2.address]);
       expect(list.length).to.equal(2);
       expect(list[0].totalLiquidations).to.equal(0n);
       expect(list[1].totalLiquidations).to.equal(0n);
+    });
+
+    it('batch user stats: no self-bypass (requires VIEW_USER_DATA or ADMIN)', async function () {
+      const { view, acm, viewer } = await deployFixture();
+      // remove ops/admin; even querying only self must revert for users[] batch.
+      await acm.revokeRole(ACTION_VIEW_USER_DATA, viewer.address);
+      await acm.revokeRole(ACTION_ADMIN, viewer.address);
+      await expect(view.connect(viewer).batchGetLiquidationStats([viewer.address])).to.be.revertedWithCustomError(
+        view,
+        'MissingRole',
+      );
     });
 
     it('returns system liquidation snapshot', async function () {
@@ -177,12 +216,14 @@ describe('LiquidatorView', function () {
   describe('collateral queries', function () {
     it('returns seizable collateral amount', async function () {
       const { view, admin, asset } = await deployFixture();
-      expect(await view.connect(admin).getSeizableCollateralAmount(admin.address, asset)).to.equal(1_000n);
+      const [amount] = await view.connect(admin).getSeizableCollateralAmount(admin.address, asset);
+      expect(amount).to.equal(1_000n);
     });
 
     it('returns user total collateral value', async function () {
       const { view, admin } = await deployFixture();
-      expect(await view.connect(admin).getUserTotalCollateralValue(admin.address)).to.equal(1_000n);
+      const [totalValue] = await view.connect(admin).getUserTotalCollateralValue(admin.address);
+      expect(totalValue).to.equal(1_000n);
     });
 
     it('batch calculates collateral values', async function () {
@@ -203,7 +244,7 @@ describe('LiquidatorView', function () {
       const many = new Array(101).fill(viewer.address);
       await expect(view.connect(viewer).batchGetLiquidatorProfitViews(many)).to.be.revertedWithCustomError(
         view,
-        'LiquidatorView__BatchTooLarge',
+        'BatchTooLarge',
       );
     });
 
@@ -214,7 +255,7 @@ describe('LiquidatorView', function () {
 
     it('reverts on limit too large', async function () {
       const { view, viewer } = await deployFixture();
-      await expect(view.connect(viewer).getLiquidatorLeaderboard(200)).to.be.revertedWithCustomError(view, 'LiquidatorView__BatchTooLarge');
+      await expect(view.connect(viewer).getLiquidatorLeaderboard(200)).to.be.revertedWithCustomError(view, 'BatchTooLarge');
     });
 
     it('reverts on array length mismatch for seizable amounts', async function () {
@@ -273,19 +314,21 @@ describe('LiquidatorView', function () {
 
     it('handles zero address user in liquidation stats', async function () {
       const { view, admin } = await deployFixture();
-      const stats = await view.connect(admin).getUserLiquidationStats(ethers.ZeroAddress);
+      const [stats] = await view.connect(admin).getUserLiquidationStats(ethers.ZeroAddress);
       expect(stats.totalLiquidations).to.equal(0n);
       expect(stats.totalSeizedValue).to.equal(0n);
     });
 
     it('handles zero address asset in seizable collateral', async function () {
       const { view, admin } = await deployFixture();
-      expect(await view.connect(admin).getSeizableCollateralAmount(admin.address, ethers.ZeroAddress)).to.equal(0n);
+      const [amount] = await view.connect(admin).getSeizableCollateralAmount(admin.address, ethers.ZeroAddress);
+      expect(amount).to.equal(0n);
     });
 
     it('handles zero address user in seizable collateral', async function () {
       const { view, admin, asset } = await deployFixture();
-      expect(await view.connect(admin).getSeizableCollateralAmount(ethers.ZeroAddress, asset)).to.equal(0n);
+      const [amount] = await view.connect(admin).getSeizableCollateralAmount(ethers.ZeroAddress, asset);
+      expect(amount).to.equal(0n);
     });
 
     it('handles very large profit values', async function () {
@@ -335,7 +378,9 @@ describe('LiquidatorView', function () {
 
     it('calculates days since last liquidation correctly', async function () {
       const { view, viewer, profitStats, admin } = await deployFixture();
-      const oneDayAgo = Math.floor(Date.now() / 1000) - 86400;
+      // Time-Dependency-Refactor: treat lastLiquidationTime as blockNumber time-axis marker (legacy name).
+      // Use any non-zero value; view returns placeholders so this mainly asserts non-revert.
+      const oneDayAgo = 1;
       await profitStats.setProfitStats(admin.address, 1_000, 1, oneDayAgo);
       const res = await view.connect(viewer).getLiquidatorProfitView(admin.address);
       expect(res.daysSinceLastLiquidation).to.be.gte(0n);
@@ -443,19 +488,19 @@ describe('LiquidatorView', function () {
       const asset2 = ethers.Wallet.createRandom().address;
       await collateralMgr.depositCollateral(admin.address, asset1, 1_000);
       await collateralMgr.depositCollateral(admin.address, asset2, 2_000);
-      const result = await view.connect(admin).getSeizableCollaterals(admin.address);
+      const [assets, amounts] = await view.connect(admin).getSeizableCollaterals(admin.address);
       // Note: MockCollateralManager.getUserCollateralAssets returns empty array
       // This test verifies the function doesn't revert
-      expect(result[0]).to.be.an('array');
-      expect(result[1]).to.be.an('array');
+      expect(assets).to.be.an('array');
+      expect(amounts).to.be.an('array');
     });
 
     it('handles user with no collateral', async function () {
       const { view, admin } = await deployFixture();
       const newUser = ethers.Wallet.createRandom().address;
-      const result = await view.connect(admin).getSeizableCollaterals(newUser);
-      expect(result[0].length).to.equal(0);
-      expect(result[1].length).to.equal(0);
+      const [assets, amounts] = await view.connect(admin).getSeizableCollaterals(newUser);
+      expect(assets.length).to.equal(0);
+      expect(amounts.length).to.equal(0);
     });
 
     it('batch gets seizable amounts for multiple users', async function () {
@@ -484,7 +529,7 @@ describe('LiquidatorView', function () {
       const { view, admin, recordMgr, profitStats } = await deployFixture();
       await recordMgr.setUserRecord(admin.address, 5, 500);
       await profitStats.setProfitStats(admin.address, 3_000, 5, 500);
-      const stats = await view.connect(admin).getUserLiquidationStats(admin.address);
+      const [stats] = await view.connect(admin).getUserLiquidationStats(admin.address);
       // Scheme A: user liquidation stats are aggregated off-chain; on-chain returns placeholders.
       expect(stats.totalLiquidations).to.equal(0n);
       expect(stats.totalSeizedValue).to.equal(0n);
@@ -494,7 +539,7 @@ describe('LiquidatorView', function () {
     it('returns zero stats when record manager module is not registered', async function () {
       const { view, admin, registry } = await deployFixture();
       await registry.setModule(KEY_LIQUIDATION_RECORD_MANAGER, ethers.ZeroAddress);
-      const stats = await view.connect(admin).getUserLiquidationStats(admin.address);
+      const [stats] = await view.connect(admin).getUserLiquidationStats(admin.address);
       expect(stats.totalLiquidations).to.equal(0n);
       expect(stats.totalSeizedValue).to.equal(0n);
     });
@@ -502,7 +547,7 @@ describe('LiquidatorView', function () {
     it('returns zero stats when profit stats manager module is not registered', async function () {
       const { view, admin, registry } = await deployFixture();
       await registry.setModule(KEY_LIQUIDATION_PROFIT_STATS_MANAGER, ethers.ZeroAddress);
-      const stats = await view.connect(admin).getUserLiquidationStats(admin.address);
+      const [stats] = await view.connect(admin).getUserLiquidationStats(admin.address);
       expect(stats.totalLiquidations).to.equal(0n);
       expect(stats.totalSeizedValue).to.equal(0n);
     });
@@ -693,7 +738,8 @@ describe('LiquidatorView', function () {
       const { view, admin, registry, asset } = await deployFixture();
       await registry.setModule(KEY_CM, ethers.ZeroAddress);
       await expect(view.connect(admin).getSeizableCollateralAmount(admin.address, asset)).to.not.be.reverted;
-      expect(await view.connect(admin).getSeizableCollateralAmount(admin.address, asset)).to.equal(0n);
+      const [amount] = await view.connect(admin).getSeizableCollateralAmount(admin.address, asset);
+      expect(amount).to.equal(0n);
     });
 
     it('handles missing liquidation manager for push operations', async function () {
@@ -736,7 +782,9 @@ describe('LiquidatorView', function () {
 
     it('handles batch user liquidation stats with zero addresses', async function () {
       const { view, admin } = await deployFixture();
-      const list = await view.connect(admin).batchGetLiquidationStats([admin.address, ethers.ZeroAddress]);
+      const [list] = await view
+        .connect(admin)
+        .batchGetLiquidationStats([admin.address, ethers.ZeroAddress]);
       expect(list.length).to.equal(2);
       expect(list[0].totalLiquidations).to.equal(0n);
       expect(list[1].totalLiquidations).to.equal(0n);
@@ -802,6 +850,72 @@ describe('LiquidatorView', function () {
       expect(result.riskScore).to.equal(0n);
       expect(result.riskLevel).to.equal(0);
       expect(result.riskFactors.length).to.equal(0);
+    });
+
+    it('risk analysis requires VIEW_RISK_DATA (reverts MissingRole)', async function () {
+      const { view, acm, other, admin } = await deployFixture();
+      await acm.revokeRole(ACTION_VIEW_RISK_DATA, other.address);
+      await expect(view.connect(other).getLiquidatorRiskAnalysis(admin.address)).to.be.revertedWithCustomError(view, 'MissingRole');
+    });
+  });
+
+  describe('SSOT callsite assertions (MissingRole)', function () {
+    it('system-scoped gate MUST revert MissingRole (no role)', async function () {
+      const [admin, viewer, other, business] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
+
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+      await registry.setModule(KEY_LIQUIDATION_MANAGER, business.address);
+
+      const LiquidatorViewFactory = await ethers.getContractFactory('LiquidatorView');
+      const view = await upgrades.deployProxy(LiquidatorViewFactory, [await registry.getAddress(), ethers.ZeroAddress], {
+        kind: 'uups',
+      });
+
+      await expect(view.connect(other).getGlobalLiquidationView()).to.be.revertedWithCustomError(view, 'MissingRole');
+      // silence unused
+      admin; viewer;
+    });
+
+    it('user-dimensional gate MUST revert MissingRole (no role)', async function () {
+      const [admin, viewer, other, business] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
+
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+      await registry.setModule(KEY_LIQUIDATION_MANAGER, business.address);
+
+      const LiquidatorViewFactory = await ethers.getContractFactory('LiquidatorView');
+      const view = await upgrades.deployProxy(LiquidatorViewFactory, [await registry.getAddress(), ethers.ZeroAddress], {
+        kind: 'uups',
+      });
+
+      await expect(view.connect(other).getUserLiquidationStats(viewer.address)).to.be.revertedWithCustomError(view, 'MissingRole');
+      admin; // silence unused
+    });
+
+    it('batch: liquidation-viewer gate reverts MissingRole (no role)', async function () {
+      const [admin, viewer, other, business] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
+
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+      await registry.setModule(KEY_LIQUIDATION_MANAGER, business.address);
+
+      const LiquidatorViewFactory = await ethers.getContractFactory('LiquidatorView');
+      const view = await upgrades.deployProxy(LiquidatorViewFactory, [await registry.getAddress(), ethers.ZeroAddress], {
+        kind: 'uups',
+      });
+
+      await expect(view.connect(other).batchGetLiquidationStats([viewer.address])).to.be.revertedWithCustomError(
+        view,
+        'MissingRole',
+      );
+      admin; // silence unused
     });
   });
 });

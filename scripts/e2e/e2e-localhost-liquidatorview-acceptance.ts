@@ -121,7 +121,7 @@ async function main() {
     const payoutMgrAddr = (await registry.getModuleOrRevert(key("LIQUIDATION_PAYOUT_MANAGER"))) as string;
 
     console.log("  Registry:", CONTRACT_ADDRESSES.Registry);
-    console.log("  LiquidationView (LiquidatorView):", liqViewAddr);
+    console.log("  LiquidatorView:", liqViewAddr);
     console.log("  LiquidationManager (writer):", liqMgrAddr);
     console.log("  LiquidationPayoutManager (writer):", payoutMgrAddr);
 
@@ -183,7 +183,7 @@ async function main() {
     const dpTopic = liqView.interface.getEvent("DataPushed").topicHash;
 
     // Push single liquidation update and assert DataPushed type/payload
-    const now1 = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const now1 = BigInt((await ethers.provider.getBlock("latest"))!.number);
     const user1 = ethers.Wallet.createRandom().address;
     const coll1 = CONTRACT_ADDRESSES.MockUSDC;
     const debt1 = CONTRACT_ADDRESSES.MockUSDT ?? CONTRACT_ADDRESSES.MockUSDC; // fallback if USDT not present in config
@@ -212,10 +212,10 @@ async function main() {
     assertOk(dec1[3] === 123n && dec1[4] === 456n, "payload.amount mismatch");
     assertOk(dec1[5] === liq1, "payload.liquidator mismatch");
     assertOk(dec1[6] === 7n, "payload.bonus mismatch");
-    assertOk(dec1[7] === BigInt(now1), "payload.timestamp mismatch");
+    assertOk(dec1[7] === now1, "payload.blockNumber mismatch");
 
     // Push payout update via payout manager and assert DataPushed type/payload
-    const now2 = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const now2 = BigInt((await ethers.provider.getBlock("latest"))!.number);
     const tx2 = await mustSucceed("authorized pushLiquidationPayout (payout manager)", async () =>
       liqView
         .connect(payoutMgr)
@@ -252,17 +252,8 @@ async function main() {
     const userSigner = ethers.Wallet.createRandom().connect(ethers.provider);
     await deployer.sendTransaction({ to: userSigner.address, value: ethers.parseEther("1") });
 
-    // Ensure user initially lacks role
-    const hadUserRole = (await acm.hasRole(ROLE_VIEW_USER_DATA, userSigner.address)) as boolean;
-    if (!hadUserRole) {
-      await mustRevertWithSelector(
-        "user read (self) without VIEW_USER_DATA",
-        async () => liqView.connect(userSigner).getSeizableCollateralAmount(userSigner.address, CONTRACT_ADDRESSES.MockUSDC),
-        MISSING_ROLE_SEL
-      );
-      await mustSucceed("grant VIEW_USER_DATA to user", async () => acm.grantRole(ROLE_VIEW_USER_DATA, userSigner.address));
-    }
-    await mustSucceed("user read (self) with VIEW_USER_DATA", async () =>
+    // Scheme U: self-read is allowed without VIEW_USER_DATA.
+    await mustSucceed("user read (self) without VIEW_USER_DATA (Scheme U self-bypass)", async () =>
       liqView.connect(userSigner).getSeizableCollateralAmount(userSigner.address, CONTRACT_ADDRESSES.MockUSDC)
     );
 
@@ -271,6 +262,15 @@ async function main() {
       "user read (non-self) without admin",
       async () => liqView.connect(userSigner).getSeizableCollateralAmount(deployer.address, CONTRACT_ADDRESSES.MockUSDC),
       MISSING_ROLE_SEL
+    );
+
+    // With VIEW_USER_DATA, a caller can read other users' user-dimensional data.
+    const hadUserRole = (await acm.hasRole(ROLE_VIEW_USER_DATA, userSigner.address)) as boolean;
+    if (!hadUserRole) {
+      await mustSucceed("grant VIEW_USER_DATA to user", async () => acm.grantRole(ROLE_VIEW_USER_DATA, userSigner.address));
+    }
+    await mustSucceed("user read (non-self) with VIEW_USER_DATA", async () =>
+      liqView.connect(userSigner).getSeizableCollateralAmount(deployer.address, CONTRACT_ADDRESSES.MockUSDC)
     );
 
     // Liquidation read requires VIEW_LIQUIDATION_DATA (not system/user)

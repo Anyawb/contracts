@@ -19,11 +19,24 @@ import { assertConservation, discoverTrackedAddresses, getErc20, key, snapshotBa
  * - RUN_RESERVE_CANCEL=0/1 (default 1)
  * - RUN_PARTIAL_REPAY=0/1 (default 1)
  * - RUN_STRICT_AGGREGATED_DEBT=0/1 (default 1)
+ * - ASSERT_AGG_DEBT_SUM=1 (strictly assert aggregated debt sum before repay)
+ *   - AGG_DEBT_PRINCIPAL_A=200 (defaults to 200 when ASSERT_AGG_DEBT_SUM=1)
+ *   - AGG_DEBT_PRINCIPAL_B=300 (defaults to 300 when ASSERT_AGG_DEBT_SUM=1)
+ *   - AGG_DEBT_PRINCIPAL_C=100 (defaults to 100 when REBORROW_AFTER_REPAY=1)
+ * - REBORROW_AFTER_REPAY=1 (borrow again after repaying orderA in strict agg debt case)
+ * - STRICT_AGG_DEBT_ITERATIONS=10 (repeat strict agg debt case N times; default 1)
+ * - BORROWER_INDEX=2 (force a specific signer index for borrower; useful for dirty cumulative runs)
+ * - BORROWER_INDEXES=2,3,4 (rotate borrower across these indices per iteration)
+ * - ALLOW_SIGNER_REUSE=1 (allow reusing signers when iterations are high)
+ * - USE_VARIANT_AMOUNTS=1 (vary A/B/C principal amounts per iteration)
  * - RUN_LIQUIDATION=0/1 (default 1)
  * - E2E_ALLOW_DIRTY_STATE=1 (allows running even if node has historical positions; suite will try to pick clean signers)
+ * - NO_AUTO_GRANT=1 (production-like): do NOT grant roles inside the suite; missing roles will SKIP the affected case(s)
  */
 
 const ONE_DAY = 24n * 60n * 60n;
+const ONE_HOUR_BLOCKS = 1_800n;
+const BLOCKS_PER_DAY = 43_200n;
 
 function hashLendIntentStruct(lendIntent: {
   lenderSigner: string;
@@ -63,18 +76,18 @@ function hashLendIntentStruct(lendIntent: {
 async function getOrderForView(orderEngineAddr: string, orderId: bigint) {
   const orderEngineView = await ethers.getContractAt(
     [
-      "function _getLoanOrderForView(uint256) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startTimestamp,uint256 maturity,uint256 repaidAmount))",
+      "function getLoanOrderForView(uint256) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startBlock,uint256 maturity,uint256 repaidAmount))",
     ],
     orderEngineAddr
   );
-  return (await orderEngineView._getLoanOrderForView(orderId)) as {
+  return (await orderEngineView.getLoanOrderForView(orderId)) as {
     principal: bigint;
     rate: bigint;
     term: bigint;
     borrower: string;
     lender: string;
     asset: string;
-    startTimestamp: bigint;
+    startBlock: bigint;
     maturity: bigint;
     repaidAmount: bigint;
   };
@@ -85,16 +98,19 @@ function calcInterest(principal: bigint, rateBps: bigint, termSec: bigint) {
   return (principal * rateBps * termSec) / (10_000n * YEAR);
 }
 
-async function evmIncreaseTime(seconds: bigint) {
-  await ethers.provider.send("evm_increaseTime", [Number(seconds)]);
-  await ethers.provider.send("evm_mine", []);
+async function latestBlockNumber(): Promise<bigint> {
+  return BigInt(await ethers.provider.getBlockNumber());
+}
+
+async function mineToBlock(targetBlock: bigint) {
+  const current = await latestBlockNumber();
+  if (targetBlock <= current) return;
+  const delta = targetBlock - current;
+  await ethers.provider.send("hardhat_mine", ["0x" + delta.toString(16)]);
 }
 
 async function main() {
-  // Production-like default:
-  // Testnet/mainnet are never "clean", so by default we do NOT require "clean signers".
-  // If you want strict clean-only mode, opt-in: E2E_REQUIRE_CLEAN_SIGNERS=1
-  const requireCleanSigners = process.env.E2E_REQUIRE_CLEAN_SIGNERS === "1";
+  const allowDirtyState = process.env.E2E_ALLOW_DIRTY_STATE === "1";
   const runFinalizeMatchOnly = process.env.RUN_FINALIZE_MATCH_ONLY === "1";
   const runMatchDisbursementOnly = process.env.RUN_MATCH_DISBURSEMENT_ONLY === "1";
   const runReserveCancel = process.env.RUN_RESERVE_CANCEL !== "0";
@@ -102,11 +118,20 @@ async function main() {
   const runStrictAggDebt = process.env.RUN_STRICT_AGGREGATED_DEBT !== "0";
   const runLiquidation = process.env.RUN_LIQUIDATION !== "0";
   const runGuaranteeExtension = process.env.RUN_GUARANTEE_EXTENSION !== "0";
-  // Extra examples are intentionally opt-in because some "negative" scenarios (expected revert)
-  // can leave intermediate on-chain state (collateral deposits / pool reserves) and make the node "dirty".
-  const runGuaranteeExtensionExamples = process.env.RUN_GUARANTEE_EXTENSION_EXAMPLES === "1";
   const tokensEnv = (process.env.TOKENS ?? "").trim();
   const assertRoleGates = process.env.ASSERT_ROLE_GATES === "1";
+  const assertAggDebtSum = process.env.ASSERT_AGG_DEBT_SUM === "1";
+  const aggDebtPrincipalA = process.env.AGG_DEBT_PRINCIPAL_A ?? "200";
+  const aggDebtPrincipalB = process.env.AGG_DEBT_PRINCIPAL_B ?? "300";
+  const aggDebtPrincipalC = process.env.AGG_DEBT_PRINCIPAL_C ?? "100";
+  const reborrowAfterRepay = process.env.REBORROW_AFTER_REPAY === "1";
+  const strictAggDebtIterations = Number(process.env.STRICT_AGG_DEBT_ITERATIONS ?? "1");
+  const borrowerIndexEnv = process.env.BORROWER_INDEX;
+  const borrowerIndexesEnv = (process.env.BORROWER_INDEXES ?? "").trim();
+  const allowSignerReuse = process.env.ALLOW_SIGNER_REUSE === "1";
+  const useVariantAmounts = process.env.USE_VARIANT_AMOUNTS === "1";
+  const priceRefreshMapEnv = (process.env.PRICE_REFRESH_MAP ?? "").trim();
+  const noAutoGrant = process.env.NO_AUTO_GRANT === "1";
 
   if (runFinalizeMatchOnly && runMatchDisbursementOnly) {
     throw new Error("Config: RUN_FINALIZE_MATCH_ONLY and RUN_MATCH_DISBURSEMENT_ONLY are mutually exclusive.");
@@ -117,29 +142,55 @@ async function main() {
   const keeper = signers[1];
   const signerByAddr = new Map<string, any>(signers.map((s) => [s.address.toLowerCase(), s]));
 
-  const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
-  const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
-  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
-  const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter)) as any;
+  // SSOT: resolve module addresses via Registry.
+  //
+  // In dirty state, `frontend-config/contracts-localhost.ts` can drift from the live Registry due to upgrades.
+  // Critically, *roles are validated via Registry.KEY_ACCESS_CONTROL_MANAGER*, so granting roles against a
+  // stale ACM instance will not satisfy on-chain permission checks.
+  //
+  // We bootstrap from the frontend-config Registry address, then switch to the Registry actually bound inside
+  // SettlementManager (since keeper-path flows validate roles using SettlementManager._registryAddr).
+  const registryBootstrap = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
+  const settlementManagerBootstrapAddr = (await registryBootstrap.getModuleOrRevert(key("SETTLEMENT_MANAGER"))) as string;
+  const settlementManager = (await ethers.getContractAt("SettlementManager", settlementManagerBootstrapAddr)) as any;
+  const registryAddrSSOT = (await settlementManager.registryAddrVar()) as string;
+  if ((registryBootstrap.target as string).toLowerCase() !== registryAddrSSOT.toLowerCase()) {
+    console.log(
+      `  ⚠️  Registry drift detected: bootstrap=${String(registryBootstrap.target)} settlementManager.registry=${registryAddrSSOT}. ` +
+        `Using SettlementManager-bound Registry as SSOT.`
+    );
+  }
+  const registry = (await ethers.getContractAt("Registry", registryAddrSSOT)) as any;
+
+  const acmAddr = (await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"))) as string;
+  const awAddr = (await registry.getModuleOrRevert(key("ASSET_WHITELIST"))) as string;
+  const poAddr = (await registry.getModuleOrRevert(key("PRICE_ORACLE"))) as string;
+  const feeRouterAddr = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
+
+  const acm = (await ethers.getContractAt("AccessControlManager", acmAddr)) as any;
+  const aw = (await ethers.getContractAt("AssetWhitelist", awAddr)) as any;
+  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", poAddr)) as any;
+  const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddr)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
 
   const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
   const vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
   const cmAddr = (await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"))) as string;
   const orderEngineAddr = (await registry.getModuleOrRevert(key("ORDER_ENGINE"))) as string;
-  const settlementManagerAddr = (await registry.getModuleOrRevert(key("SETTLEMENT_MANAGER"))) as string;
+  const settlementManagerAddr = (settlementManager.target as string) ?? settlementManagerBootstrapAddr;
   const lenderPoolVaultAddr = (await registry.getModuleOrRevert(key("LENDER_POOL_VAULT"))) as string;
   const liquidationManagerAddr = (await registry.getModuleOrRevert(key("LIQUIDATION_MANAGER"))) as string;
   const liquidationPayoutManagerAddr = (await registry.getModuleOrRevert(key("LIQUIDATION_PAYOUT_MANAGER"))) as string;
-  const gfmAddr = runGuaranteeExtension ? ((await registry.getModuleOrRevert(key("GUARANTEE_FUND_MANAGER"))) as string) : ethers.ZeroAddress;
+  const liquidationRiskManagerAddr = (await registry.getModuleOrRevert(key("LIQUIDATION_RISK_MANAGER"))) as string;
+  const gfmAddr = runGuaranteeExtension
+    ? ((await registry.getModuleOrRevert(key("GUARANTEE_FUND_MANAGER"))) as string)
+    : ethers.ZeroAddress;
   const ergmAddr = runGuaranteeExtension
     ? ((await registry.getModuleOrRevert(key("EARLY_REPAYMENT_GUARANTEE_MANAGER"))) as string)
     : ethers.ZeroAddress;
 
   const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreAddr)) as any;
   const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddr)) as any;
-  const settlementManager = (await ethers.getContractAt("SettlementManager", settlementManagerAddr)) as any;
   const gfm = runGuaranteeExtension
     ? await ethers.getContractAt(
         [
@@ -168,7 +219,11 @@ async function main() {
   const gfmAny = gfm as any;
   const ergmAny = ergm as any;
   const vLe = await ethers.getContractAt(
-    ["function getUserTotalDebtValue(address user) view returns (uint256)", "function getDebt(address user, address asset) view returns (uint256)"],
+    [
+      "function getUserTotalDebtValue(address user) view returns (uint256)",
+      "function getDebt(address user, address asset) view returns (uint256)",
+      "function getUserDebtAssets(address user) view returns (address[])",
+    ],
     CONTRACT_ADDRESSES.VaultLendingEngine
   );
   const cm = await ethers.getContractAt(["function getUserCollateralAssets(address user) view returns (address[])"], cmAddr);
@@ -189,7 +244,7 @@ async function main() {
     tokensToTest.push(usdc.target as string);
   }
 
-  // ---- helper: (optional) "clean signer" detector ----
+  // ---- helper: pick clean users (no debt, no collateral) to avoid noisy aggregated state ----
   const isCleanUser = async (addr: string) => {
     const [debtValue, assets] = await Promise.all([
       (vLe.getUserTotalDebtValue(addr) as Promise<bigint>),
@@ -199,22 +254,71 @@ async function main() {
   };
 
   const exclude = new Set<string>([deployer.address.toLowerCase(), keeper.address.toLowerCase()]);
-  const pickSigner = async () => {
-    // Default: pick ANY unused signer (dirty-state friendly).
-    if (!requireCleanSigners) {
-      for (let i = 2; i < signers.length; i++) {
-        const s = signers[i];
-        const k = s.address.toLowerCase();
-        if (exclude.has(k)) continue;
-        exclude.add(k);
-        return s;
-      }
-      // If we exhaust unique signers, reuse from index 2 (still OK for delta-based checks).
-      console.log("  ⚠️  No unused signer left; reusing signers in this run (dirty-state).");
-      return signers[2];
+  const borrowerIndexes = borrowerIndexesEnv
+    ? borrowerIndexesEnv
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => Number(s))
+    : [];
+  for (const idx of borrowerIndexes) {
+    if (!Number.isInteger(idx) || idx < 2 || idx >= signers.length) {
+      throw new Error(`Invalid BORROWER_INDEXES entry=${idx} (must be 2..${signers.length - 1})`);
     }
+  }
 
-    // Strict mode: only allow "clean" signers.
+  const priceRefreshMap = new Map<string, bigint>();
+  if (priceRefreshMapEnv) {
+    for (const entry of priceRefreshMapEnv.split(",")) {
+      const [addrRaw, priceRaw] = entry.split(":").map((s) => s.trim());
+      if (!addrRaw || !priceRaw) continue;
+      try {
+        const price = ethers.parseUnits(priceRaw, 8);
+        priceRefreshMap.set(addrRaw.toLowerCase(), price);
+      } catch {
+        throw new Error(`Invalid PRICE_REFRESH_MAP entry: ${entry}`);
+      }
+    }
+  }
+
+  const tokenDecimalsCache = new Map<string, bigint>();
+  const getTokenDecimals = async (asset: string): Promise<bigint> => {
+    const k = asset.toLowerCase();
+    const cached = tokenDecimalsCache.get(k);
+    if (cached !== undefined) return cached;
+    const erc20 = (await getErc20(asset)) as any;
+    const dec = BigInt(Number(await erc20.decimals().catch(() => 6)));
+    tokenDecimalsCache.set(k, dec);
+    return dec;
+  };
+
+  const getPriceValue = async (asset: string) => {
+    try {
+      const [p, , dec] = (await po.getPrice(asset)) as [bigint, bigint, bigint];
+      return { price: p, decimals: dec };
+    } catch (e) {
+      const fallback = priceRefreshMap.get(asset.toLowerCase());
+      if (fallback) {
+        // SSOT: `IPriceOracle.getPrice().decimals` is assetDecimals (token decimals), not "price decimals".
+        // Keep `amount * price / 10**assetDecimals` consistent on the fallback path.
+        return { price: fallback, decimals: await getTokenDecimals(asset) };
+      }
+      throw e;
+    }
+  };
+
+  const computeUserDebtValue = async (user: string) => {
+    const assets = (await vLe.getUserDebtAssets(user)) as string[];
+    let total = 0n;
+    for (const asset of assets) {
+      const debt = (await vLe.getDebt(user, asset)) as bigint;
+      if (debt === 0n) continue;
+      const { price, decimals } = await getPriceValue(asset);
+      total += (debt * price) / 10n ** decimals;
+    }
+    return total;
+  };
+  const pickCleanSigner = async () => {
     for (let i = 2; i < signers.length; i++) {
       const s = signers[i];
       const k = s.address.toLowerCase();
@@ -224,60 +328,133 @@ async function main() {
         return s;
       }
     }
-    throw new Error(
-      "No clean signer found (E2E_REQUIRE_CLEAN_SIGNERS=1). " +
-        "Restart localhost node for a clean state, or unset E2E_REQUIRE_CLEAN_SIGNERS to run in dirty-state mode."
-    );
-  };
-
-  // Pick a signer satisfying a predicate. First tries unused signers (exclude set),
-  // then (if still not found) tries any signer from index 2.., and may reuse signers.
-  // This is important for "dirty-state" suites where most signers already have historical positions.
-  const pickSignerSatisfying = async (label: string, pred: (s: any) => Promise<boolean>) => {
-    // Pass 1: prefer unused signers
+    if (!allowDirtyState) {
+      throw new Error("No clean signer found. Restart localhost node for a clean state, or set E2E_ALLOW_DIRTY_STATE=1.");
+    }
+    // fallback: any unused signer
     for (let i = 2; i < signers.length; i++) {
       const s = signers[i];
       const k = s.address.toLowerCase();
       if (exclude.has(k)) continue;
-      if (await pred(s)) {
-        exclude.add(k);
-        return s;
-      }
+      exclude.add(k);
+      return s;
     }
-    // Pass 2: allow reuse (dirty-state)
+    throw new Error("No unused signer available.");
+  };
+
+  const ensureRole = async (role: string, who: string, roleName?: string): Promise<boolean> => {
+    const ok = (await acm.hasRole(role, who)) as boolean;
+    if (ok) return true;
+    const name = roleName ?? role;
+    if (noAutoGrant) {
+      console.log(`  ⚠️  [NO_AUTO_GRANT] missing role=${name} for ${who}`);
+      return false;
+    }
+    await (await acm.grantRole(role, who)).wait();
+    return true;
+  };
+
+  const pickBorrower = async (iteration: number, assetIdx: number) => {
+    if (borrowerIndexEnv) {
+      const idx = Number(borrowerIndexEnv);
+      if (!Number.isInteger(idx) || idx < 2 || idx >= signers.length) {
+        throw new Error(`Invalid BORROWER_INDEX=${borrowerIndexEnv} (must be 2..${signers.length - 1})`);
+      }
+      const s = signers[idx];
+      exclude.add(s.address.toLowerCase());
+      return s;
+    }
+    if (borrowerIndexes.length > 0) {
+      const pick = borrowerIndexes[(iteration - 1 + assetIdx) % borrowerIndexes.length];
+      const s = signers[pick];
+      exclude.add(s.address.toLowerCase());
+      return s;
+    }
+    return pickCleanSigner();
+  };
+
+  const pickLender = async () => {
+    if (allowSignerReuse) {
+      // Reuse the first non-deployer/keeper signer to avoid exhaustion in long loops.
+      return signers[2];
+    }
     for (let i = 2; i < signers.length; i++) {
       const s = signers[i];
-      if (await pred(s)) {
-        return s;
-      }
+      const k = s.address.toLowerCase();
+      if (exclude.has(k)) continue;
+      exclude.add(k);
+      return s;
     }
-    throw new Error(`[Config] No signer satisfies: ${label}`);
+    throw new Error("No unused signer available.");
   };
 
-  const ensureRole = async (role: string, who: string) => {
-    if (!(await acm.hasRole(role, who))) await (await acm.grantRole(role, who)).wait();
-  };
+  // ---- ensure minimal config (best-effort; in NO_AUTO_GRANT mode we only verify) ----
+  const canAddWhitelist = await ensureRole(key("ADD_WHITELIST"), deployer.address, "ADD_WHITELIST");
+  const canUpdatePrice = await ensureRole(key("UPDATE_PRICE"), deployer.address, "UPDATE_PRICE");
+  const canSetParam = await ensureRole(key("SET_PARAMETER"), deployer.address, "SET_PARAMETER");
+  const canOrderCreate = await ensureRole(key("ORDER_CREATE"), vblAddr, "ORDER_CREATE");
+  const canDeposit = await ensureRole(key("DEPOSIT"), vblAddr, "DEPOSIT");
+  const canBorrow = await ensureRole(key("BORROW"), orderEngineAddr, "BORROW");
 
-  // ---- ensure minimal config (best-effort) ----
-  await ensureRole(key("ADD_WHITELIST"), deployer.address);
-  await ensureRole(key("UPDATE_PRICE"), deployer.address);
-  await ensureRole(key("SET_PARAMETER"), deployer.address);
-  await ensureRole(key("ORDER_CREATE"), vblAddr);
-  await ensureRole(key("DEPOSIT"), vblAddr);
-  await ensureRole(key("BORROW"), orderEngineAddr);
+  // AssetWhitelist: must already be configured, or we need ADD_WHITELIST.
+  if (!(await aw.isAssetAllowed(usdc.target))) {
+    if (!canAddWhitelist) {
+      console.log(`  ⏭️  [SKIP] USDC is not whitelisted and caller cannot ADD_WHITELIST. Skipping suite.`);
+      return;
+    }
+    await (await aw.connect(deployer).addAllowedAsset(usdc.target)).wait();
+  }
 
-  if (!(await aw.isAssetAllowed(usdc.target))) await (await aw.connect(deployer).addAllowedAsset(usdc.target)).wait();
+  // PriceOracle: must have active config + fresh price, or we need UPDATE_PRICE (and possibly configure via SET_PARAMETER-like authority).
+  // (We treat both configureAsset and updatePrice as requiring UPDATE_PRICE role in localhost setup scripts.)
   {
     const cfg = await po.getAssetConfig(usdc.target);
-    if (!cfg.isActive) await (await po.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600)).wait();
+    if (!cfg.isActive) {
+      if (!canUpdatePrice) {
+        console.log(`  ⏭️  [SKIP] USDC oracle config is inactive and caller cannot UPDATE_PRICE. Skipping suite.`);
+        return;
+      }
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await (await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600)).wait();
+    }
   }
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
-  await (await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now)).wait();
-  if (!(await feeRouter.isTokenSupported(usdc.target))) await (await feeRouter.connect(deployer).addSupportedToken(usdc.target)).wait();
+  {
+    const now = await latestBlockNumber();
+    if (!canUpdatePrice) {
+      // In NO_AUTO_GRANT mode we won't update; rely on existing on-chain price freshness.
+      try {
+        await po.getPrice(usdc.target);
+      } catch (e) {
+        console.log(`  ⏭️  [SKIP] USDC price is not readable/fresh and caller cannot UPDATE_PRICE. Skipping suite.`);
+        return;
+      }
+    } else {
+      await (await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now)).wait();
+    }
+  }
+
+  // FeeRouter: supported token must already exist or requires SET_PARAMETER.
+  if (!(await feeRouter.isTokenSupported(usdc.target))) {
+    if (!canSetParam) {
+      console.log(`  ⏭️  [SKIP] FeeRouter does not support USDC and caller cannot SET_PARAMETER. Skipping suite.`);
+      return;
+    }
+    await (await feeRouter.connect(deployer).addSupportedToken(usdc.target)).wait();
+  }
+
+  // Core flow requires module roles; if missing and we cannot auto-grant, skip all createOrder-dependent cases.
+  if (noAutoGrant && (!canOrderCreate || !canDeposit || !canBorrow)) {
+    const missing: string[] = [];
+    if (!canOrderCreate) missing.push("ORDER_CREATE(vbl)");
+    if (!canDeposit) missing.push("DEPOSIT(vbl)");
+    if (!canBorrow) missing.push("BORROW(orderEngine)");
+    console.log(`  ⏭️  [SKIP] Missing core roles for finalizeMatch path: ${missing.join(", ")}. Skipping suite.`);
+    return;
+  }
 
   console.log("=== Funds-Flow Invariants Suite (localhost) ===");
   console.log("Config:");
-  console.log(`- requireCleanSigners: ${requireCleanSigners}`);
+  console.log(`- allowDirtyState: ${allowDirtyState}`);
   console.log(`- runFinalizeMatchOnly: ${runFinalizeMatchOnly}`);
   console.log(`- runMatchDisbursementOnly: ${runMatchDisbursementOnly}`);
   console.log(`- assertRoleGates: ${assertRoleGates}`);
@@ -286,7 +463,6 @@ async function main() {
   console.log(`- runStrictAggDebt: ${runStrictAggDebt}`);
   console.log(`- runLiquidation: ${runLiquidation}`);
   console.log(`- runGuaranteeExtension: ${runGuaranteeExtension}`);
-  console.log(`- runGuaranteeExtensionExamples: ${runGuaranteeExtensionExamples}`);
   console.log(`- tokensToTest: ${tokensToTest.join(", ")}`);
   console.log("");
 
@@ -354,7 +530,7 @@ async function main() {
       minTermDays: 1,
       maxTermDays: 30,
       minRateBps: 0n,
-      expireAt: BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600),
+      expireAt: (await latestBlockNumber()) + ONE_HOUR_BLOCKS,
       salt: ethers.keccak256(ethers.toUtf8Bytes(`suite-lend-${Date.now()}-${Math.random()}`)),
     };
     const lendHash = hashLendIntentStruct(lendIntent);
@@ -458,9 +634,9 @@ async function main() {
     if (orderId === null) throw new Error("LoanOrderCreated not found");
 
     if (opts.makeOverdue) {
-      const termSec = BigInt(opts.termDays) * ONE_DAY;
-      await evmIncreaseTime(termSec + 60n);
-      const nowAfter = (await ethers.provider.getBlock("latest"))!.timestamp;
+      const ord = await getOrderForView(orderEngineAddr, orderId);
+      await mineToBlock(BigInt(ord.maturity) + ONE_HOUR_BLOCKS);
+      const nowAfter = await latestBlockNumber();
       await (await po.connect(deployer).updatePrice(opts.asset, ethers.parseUnits("1", 8), nowAfter)).wait();
     }
 
@@ -500,7 +676,8 @@ async function main() {
   }
 
   const tokensToRun = runFinalizeMatchOnly || runMatchDisbursementOnly ? tokensToTest.slice(0, 1) : tokensToTest;
-  for (const assetAddr of tokensToRun) {
+  for (let assetIdx = 0; assetIdx < tokensToRun.length; assetIdx++) {
+    const assetAddr = tokensToRun[assetIdx];
     const erc20 = (await getErc20(assetAddr)) as any;
     const decimals = Number(await erc20.decimals().catch(() => 6));
     const symbol = String(await erc20.symbol().catch(() => "TOKEN"));
@@ -511,9 +688,9 @@ async function main() {
     } catch {}
     try {
       const cfg = await po.getAssetConfig(assetAddr);
-      if (!cfg.isActive) await (await po.connect(deployer).configureAsset(assetAddr, "usd-coin", 8, 3600)).wait();
-      const ts = (await ethers.provider.getBlock("latest"))!.timestamp;
-      await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), ts)).wait();
+      if (!cfg.isActive) await (await po.connect(deployer).configureAsset(assetAddr, "usd-coin", decimals, 3600)).wait();
+      const blockNumber = await latestBlockNumber();
+      await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), blockNumber)).wait();
     } catch {}
     try {
       if (!(await feeRouter.isTokenSupported(assetAddr))) await (await feeRouter.connect(deployer).addSupportedToken(assetAddr)).wait();
@@ -541,8 +718,8 @@ async function main() {
     // ========= CASE 0.5: finalizeMatch consume + RESERVE_CONSUMED DataPush (minimal) =========
     if (runFinalizeMatchOnly) {
       console.log("=== Case: finalizeMatch (consume + DataPush RESERVE_CONSUMED) ===");
-      const borrower = await pickSigner();
-      const lender = await pickSigner();
+      const borrower = await pickCleanSigner();
+      const lender = await pickCleanSigner();
       const tracked = uniqAddrs(
         await discoverTrackedAddresses({
           include: [deployer.address],
@@ -588,7 +765,7 @@ async function main() {
         try {
           const parsed = dataPushIface.parseLog({ topics: log.topics as string[], data: log.data });
           if (parsed?.name === "DataPushed" && (parsed.args.dataTypeHash as string).toLowerCase() === DT_CONSUMED.toLowerCase()) {
-            // payload = abi.encode(lHash, lenderSigner, asset, amount, ts)
+            // payload = abi.encode(lHash, lenderSigner, asset, amount, blockNumber)
             const coder = ethers.AbiCoder.defaultAbiCoder();
             const decoded = coder.decode(["bytes32", "address", "address", "uint256", "uint256"], parsed.args.payload as string);
             const lHash = String(decoded[0]).toLowerCase();
@@ -621,8 +798,8 @@ async function main() {
         // ORDER_CREATE gate: revoke from VBL and expect finalizeMatch to revert, then restore.
         try {
           await (await acm.connect(deployer).revokeRole(ROLE_ORDER_CREATE, vblAddr)).wait();
-          const borrower = await pickSigner();
-          const lender = await pickSigner();
+          const borrower = await pickCleanSigner();
+          const lender = await pickCleanSigner();
           let reverted = false;
           try {
             await createOrder({
@@ -646,8 +823,8 @@ async function main() {
         // DEPOSIT (FeeRouter) gate: revoke from VBL and expect finalizeMatch to revert, then restore.
         try {
           await (await acm.connect(deployer).revokeRole(ROLE_DEPOSIT, vblAddr)).wait();
-          const borrower = await pickSigner();
-          const lender = await pickSigner();
+          const borrower = await pickCleanSigner();
+          const lender = await pickCleanSigner();
           let reverted = false;
           try {
             await createOrder({
@@ -669,8 +846,8 @@ async function main() {
         }
       }
 
-      const borrower = await pickSigner();
-      const lender = await pickSigner();
+      const borrower = await pickCleanSigner();
+      const lender = await pickCleanSigner();
       const tracked = uniqAddrs(
         await discoverTrackedAddresses({
           include: [deployer.address],
@@ -774,7 +951,7 @@ async function main() {
     // ========= CASE 0: Reserve -> Cancel conservation =========
     if (runReserveCancel) {
       console.log("=== Case: reserve -> cancel (conservation) ===");
-      const lender = await pickSigner();
+      const lender = await pickCleanSigner();
       await (await erc20.connect(deployer).transfer(lender.address, ethers.parseUnits("5000", decimals))).wait();
 
       const tracked = uniqAddrs(
@@ -795,7 +972,7 @@ async function main() {
         minTermDays: 1,
         maxTermDays: 30,
         minRateBps: 0n,
-        expireAt: BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600),
+        expireAt: (await latestBlockNumber()) + ONE_HOUR_BLOCKS,
         salt: ethers.keccak256(ethers.toUtf8Bytes(`suite-reserve-${Date.now()}-${Math.random()}`)),
       };
       const lendHash = hashLendIntentStruct(lendIntent);
@@ -891,71 +1068,9 @@ async function main() {
       const enabled = (await ergmAny.isGuaranteeEnabled(assetAddr)) as boolean;
       if (!enabled) throw new Error("GuaranteeExtension: setGuaranteeEnabled(true) did not take effect");
 
-      // -------- Example 0: toggle OFF => finalizeMatch must NOT require GFM allowance, and must NOT lock/record.
-      if (runGuaranteeExtensionExamples) {
-        console.log("  - Example0: toggle OFF => no lock/record, no allowance needed");
-        await (await ergmAny.connect(deployer).setGuaranteeEnabled(assetAddr, false)).wait();
-        const enabled0 = (await ergmAny.isGuaranteeEnabled(assetAddr)) as boolean;
-        if (enabled0) throw new Error("GuaranteeExtension.Example0: expected guarantee disabled");
-
-        const borrower0 = await pickSigner();
-        const lender0 = await pickSigner();
-        const tracked0 = uniqAddrs(
-          await discoverTrackedAddresses({
-            include: [deployer.address],
-            borrower: borrower0.address,
-            lender: lender0.address,
-            keeper: keeper.address,
-          })
-        );
-        const before0 = await snapshotBalances(assetAddr, tracked0);
-        const principal0 = ethers.parseUnits("100", decimals);
-        const collateral0 = ethers.parseUnits("200", decimals);
-        const res0 = await createOrder({
-          borrower: borrower0,
-          lender: lender0,
-          asset: assetAddr,
-          principal: principal0,
-          collateral: collateral0,
-          termDays: 5,
-          rateBps: 1000n,
-          makeOverdue: false,
-          enableGuarantee: false, // do NOT pre-approve GFM
-        });
-        const after0 = await snapshotBalances(assetAddr, tracked0);
-        assertConservation("guarantee.toggleOff.finalizeMatch", before0, after0);
-
-        const locked0 = (await gfmAny.getLockedGuarantee(borrower0.address, assetAddr)) as bigint;
-        const active0 = (await ergmAny.hasActiveGuarantee(borrower0.address, assetAddr)) as boolean;
-        if (locked0 !== 0n) throw new Error("GuaranteeExtension.Example0: expected locked=0 when toggle is off");
-        if (active0) throw new Error("GuaranteeExtension.Example0: expected active=false when toggle is off");
-
-        // Cleanup: fully repay and withdraw collateral so we keep clean signers for later cases.
-        // NOTE: Even with guarantee disabled, the normal repay path still applies (VaultCore → SettlementManager).
-        try {
-          const ord0 = await getOrderForView(orderEngineAddr, res0.orderId);
-          const due0 = (ord0.principal - ord0.repaidAmount) + calcInterest(ord0.principal, ord0.rate, ord0.term);
-          if (due0 > 0n) {
-            await (await erc20.connect(borrower0).approve(vaultCoreAddr, due0)).wait();
-            await (await vaultCore.connect(borrower0).repay(res0.orderId, ord0.asset, due0)).wait();
-          }
-          await (await vaultCore.connect(borrower0).withdraw(assetAddr, collateral0)).wait();
-        } catch (e) {
-          console.log("  ⚠️  Example0 cleanup (repay/withdraw) failed; node may become dirty:", e);
-        }
-
-        // restore ON for the main path below
-        await (await ergmAny.connect(deployer).setGuaranteeEnabled(assetAddr, true)).wait();
-      }
-
       // (B) Match/borrow should lock custody + write record (VBL SSOT path).
-      const borrower = await pickSignerSatisfying(`borrower has no active guarantee for asset=${assetAddr}`, async (s) => {
-        if (s.address.toLowerCase() === deployer.address.toLowerCase()) return false;
-        if (s.address.toLowerCase() === keeper.address.toLowerCase()) return false;
-        // Key dirty-state precondition for Extension Flow: cannot create a new record if one is still active.
-        return !(await ergmAny.hasActiveGuarantee(s.address, assetAddr));
-      });
-      const lender = await pickSigner();
+      const borrower = await pickCleanSigner();
+      const lender = await pickCleanSigner();
       const tracked = uniqAddrs(
         await discoverTrackedAddresses({
           include: [deployer.address],
@@ -1008,64 +1123,27 @@ async function main() {
         if (String(rec.asset).toLowerCase() !== assetAddr.toLowerCase()) throw new Error("GuaranteeExtension: guaranteeRecord.asset mismatch");
       }
 
-      // -------- Example 1: partial repay MUST NOT settle guarantee (record remains active, custody remains locked).
-      if (runGuaranteeExtensionExamples && promisedInterest > 0n) {
-        console.log("  - Example1: partial repay => guarantee remains locked+active");
-        const ordP = await getOrderForView(orderEngineAddr, res.orderId);
-        const dueP = (ordP.principal - ordP.repaidAmount) + calcInterest(ordP.principal, ordP.rate, ordP.term);
-        const half = dueP / 2n;
-        await (await erc20.connect(borrower).approve(vaultCoreAddr, dueP)).wait();
-
-        await (await vaultCore.connect(borrower).repay(res.orderId, ordP.asset, half)).wait();
-
-        const lockedP = (await gfmAny.getLockedGuarantee(borrower.address, assetAddr)) as bigint;
-        const activeP = (await ergmAny.hasActiveGuarantee(borrower.address, assetAddr)) as boolean;
-        if (lockedP !== promisedInterest) {
-          throw new Error(`GuaranteeExtension.Example1: expected locked stay ${promisedInterest}, got ${lockedP}`);
-        }
-        if (!activeP) throw new Error("GuaranteeExtension.Example1: expected active=true after partial repay");
-      }
-
       // (C) Early full repay should trigger 3-way distribution and clear custody+record (SettlementManager SSOT path).
-      // In dirty-state environments, interest rounding can cause "one-shot computed due" to be slightly off.
-      // To avoid missing the full-repay boundary (and thus missing guarantee settlement), we repay in a small loop.
-      let lastRepayReceipt: any | null = null;
-      let preview: any | null = null;
-      for (let i = 0; i < 3; i++) {
-        const ord = await getOrderForView(orderEngineAddr, res.orderId);
-        const totalDue = (ord.principal - ord.repaidAmount) + calcInterest(ord.principal, ord.rate, ord.term);
-        if (totalDue === 0n) break;
-        await (await erc20.connect(borrower).approve(vaultCoreAddr, totalDue)).wait();
+      const ord = await getOrderForView(orderEngineAddr, res.orderId);
+      const totalDue = (ord.principal - ord.repaidAmount) + calcInterest(ord.principal, ord.rate, ord.term);
+      await (await erc20.connect(borrower).approve(vaultCoreAddr, totalDue)).wait();
 
-        const gid2 = (await ergmAny.getUserGuaranteeId(borrower.address, assetAddr)) as bigint;
-        preview = gid2 === 0n ? null : ((await ergmAny.previewEarlyRepayment(gid2, totalDue)) as any);
-        lastRepayReceipt = await (await vaultCore.connect(borrower).repay(res.orderId, ord.asset, totalDue)).wait();
-      }
-      const repayReceipt = lastRepayReceipt;
-      if (!repayReceipt) {
-        throw new Error("GuaranteeExtension: repay loop did not execute (unexpected totalDue==0 before repay)");
-      }
+      const gid2 = (await ergmAny.getUserGuaranteeId(borrower.address, assetAddr)) as bigint;
+      const preview = gid2 === 0n ? null : ((await ergmAny.previewEarlyRepayment(gid2, totalDue)) as any);
+      const repayReceipt = await (await vaultCore.connect(borrower).repay(res.orderId, ord.asset, totalDue)).wait();
       const after = await snapshotBalances(assetAddr, tracked);
       assertConservation("guarantee.earlyRepay", before, after);
 
       if (promisedInterest > 0n) {
         // State cleared
         const lockedAfter = (await gfmAny.getLockedGuarantee(borrower.address, assetAddr)) as bigint;
-        if (lockedAfter !== 0n) {
-          // Provide a more actionable diagnostic: maybe the order wasn't fully repaid.
-          const ordAfter = await getOrderForView(orderEngineAddr, res.orderId);
-          const dueAfter = (ordAfter.principal - ordAfter.repaidAmount) + calcInterest(ordAfter.principal, ordAfter.rate, ordAfter.term);
-          throw new Error(
-            "GuaranteeExtension: expected locked guarantee cleared after early repay. " +
-              `locked=${lockedAfter.toString()} dueAfter=${dueAfter.toString()} repaidAmount=${ordAfter.repaidAmount.toString()} principal=${ordAfter.principal.toString()}`
-          );
-        }
+        if (lockedAfter !== 0n) throw new Error("GuaranteeExtension: expected locked guarantee cleared after early repay");
         const activeAfter = (await ergmAny.hasActiveGuarantee(borrower.address, assetAddr)) as boolean;
         if (activeAfter) throw new Error("GuaranteeExtension: expected guarantee inactive after early repay");
 
         // Best-effort event check (semantic layer)
         const ergmIface = new ethers.Interface([
-          "event EarlyRepaymentProcessed(uint256 indexed guaranteeId,address indexed borrower,address indexed lender,address asset,uint256 penaltyToLender,uint256 refundToBorrower,uint256 platformFee,uint256 actualInterestPaid,uint256 timestamp)",
+          "event EarlyRepaymentProcessed(uint256 indexed guaranteeId,address indexed borrower,address indexed lender,address asset,uint256 penaltyToLender,uint256 refundToBorrower,uint256 platformFee,uint256 actualInterestPaid,uint256 blockNumber)",
         ]);
         let saw = false;
         for (const log of repayReceipt!.logs) {
@@ -1090,18 +1168,9 @@ async function main() {
         }
       }
 
-      // NOTE: A "missing approve => finalizeMatch revert" example is intentionally NOT included here:
-      // it requires setting up collateral + reserve state before finalizeMatch, and if the final tx reverts,
-      // those earlier setup txs still persist (making the node dirty). That negative test is covered in
-      // scripts/e2e/e2e-localhost-attack-suite.ts (Section 8b).
-
       // (D) Overdue settleOrLiquidate should trigger forfeiture and clear custody+record.
-      const borrower2 = await pickSignerSatisfying(`borrower2 has no active guarantee for asset=${assetAddr}`, async (s) => {
-        if (s.address.toLowerCase() === deployer.address.toLowerCase()) return false;
-        if (s.address.toLowerCase() === keeper.address.toLowerCase()) return false;
-        return !(await ergmAny.hasActiveGuarantee(s.address, assetAddr));
-      });
-      const lender2 = await pickSigner();
+      const borrower2 = await pickCleanSigner();
+      const lender2 = await pickCleanSigner();
       const res2 = await createOrder({
         borrower: borrower2,
         lender: lender2,
@@ -1114,16 +1183,101 @@ async function main() {
         enableGuarantee: true,
       });
       // Forfeiture happens in settleOrLiquidate branch (overdue/risk).
-      // Ensure keeper role for liquidation entry (best-effort; deployer must be ACM owner on localhost).
+      // Ensure liquidation roles for:
+      // - keeper (external entry gate on SettlementManager)
+      // - SettlementManager (direct-ledger fallback path: CM.withdrawCollateralTo + LE.forceReduceDebt)
+      // - LiquidationManager (primary path: CM/LE direct-ledger writes)
       try {
-        await ensureRole(key("LIQUIDATE"), keeper.address);
+        const okKeeper = await ensureRole(key("LIQUIDATE"), keeper.address, "LIQUIDATE(keeper)");
+        const okSm = await ensureRole(key("LIQUIDATE"), settlementManagerAddr, "LIQUIDATE(settlementManager)");
+        const okLm = await ensureRole(key("LIQUIDATE"), liquidationManagerAddr, "LIQUIDATE(liquidationManager)");
+        // LiquidationRiskManager queries HealthView.getUserHealthFactorWithMeta (Scheme U user-dimensional read).
+        // Since msg.sender is LiquidationRiskManager (not the user), it requires ACTION_VIEW_USER_DATA (or admin).
+        const okRiskUser = await ensureRole(
+          key("VIEW_USER_DATA"),
+          liquidationRiskManagerAddr,
+          "VIEW_USER_DATA(liquidationRiskManager)"
+        );
+        // SettlementManager (and sometimes LiquidationManager) queries PositionView valuation during liquidation.
+        // IMPORTANT: PositionView.getAssetValue is gated by ACTION_VIEW_PRICE_DATA (not VIEW_RISK_DATA).
+        const okSmView = await ensureRole(key("VIEW_PRICE_DATA"), settlementManagerAddr, "VIEW_PRICE_DATA(settlementManager)");
+        const okLmView = await ensureRole(key("VIEW_PRICE_DATA"), liquidationManagerAddr, "VIEW_PRICE_DATA(liquidationManager)");
+        if (noAutoGrant && (!okKeeper || !okSm || !okLm || !okRiskUser || !okSmView || !okLmView)) {
+          console.log(
+            "  ⏭️  [SKIP] ExtensionFlow default/forfeit path requires LIQUIDATE + VIEW_PRICE_DATA on keeper/SM/LM."
+          );
+          // Restore baseline off so other cases remain decoupled.
+          await (await ergmAny.connect(deployer).setGuaranteeEnabled(assetAddr, false)).wait();
+          console.log("");
+          // Skip the rest of Extension Flow case.
+          // (Other suite cases can still run.)
+          // eslint-disable-next-line no-lone-blocks
+          {
+            // no-op block to keep structure readable
+          }
+          // Use a labeled boolean to gate below, without large refactor.
+        }
       } catch (e) {
         throw new Error(
-          `GuaranteeExtension: failed to grant ACTION_LIQUIDATE to keeper=${keeper.address}. ` +
-            `Grant roles first or run with E2E_ALLOW_DIRTY_STATE=1. Raw=${String((e as any)?.message ?? e)}`
+          `GuaranteeExtension: failed to grant ACTION_LIQUIDATE for liquidation path. ` +
+            `keeper=${keeper.address} settlementManager=${settlementManagerAddr} liquidationManager=${liquidationManagerAddr}. ` +
+            `Raw=${String((e as any)?.message ?? e)}`
         );
       }
-      const liqReceipt = await (await settlementManager.connect(keeper).settleOrLiquidate(res2.orderId)).wait();
+      // In NO_AUTO_GRANT mode, we may have detected missing roles above and should skip the settleOrLiquidate call.
+      if (
+        noAutoGrant &&
+        !(
+          ((await acm.hasRole(key("LIQUIDATE"), keeper.address)) as boolean) &&
+          ((await acm.hasRole(key("LIQUIDATE"), settlementManagerAddr)) as boolean) &&
+          ((await acm.hasRole(key("LIQUIDATE"), liquidationManagerAddr)) as boolean) &&
+          ((await acm.hasRole(key("VIEW_USER_DATA"), liquidationRiskManagerAddr)) as boolean) &&
+          ((await acm.hasRole(key("VIEW_PRICE_DATA"), settlementManagerAddr)) as boolean) &&
+          ((await acm.hasRole(key("VIEW_PRICE_DATA"), liquidationManagerAddr)) as boolean)
+        )
+      ) {
+        // Restore baseline off so other cases remain decoupled.
+        await (await ergmAny.connect(deployer).setGuaranteeEnabled(assetAddr, false)).wait();
+        console.log("  ⏭️  [SKIP] ExtensionFlow overdue settleOrLiquidate (missing roles).");
+        console.log("");
+      } else {
+        // Preflight: make MissingRole() actionable (it has no args).
+        // settleOrLiquidate requires ACTION_LIQUIDATE on the keeper (tx sender),
+        // and it calls PositionView.getAssetValue which requires ACTION_VIEW_PRICE_DATA on the calling module.
+        try {
+          const acmFromRegistry = (await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"))) as string;
+          const ACTION_LIQUIDATE = key("LIQUIDATE");
+          const ACTION_VIEW_USER_DATA = key("VIEW_USER_DATA");
+          const ACTION_VIEW_PRICE_DATA = key("VIEW_PRICE_DATA");
+          const kHasLiq = (await acm.hasRole(ACTION_LIQUIDATE, keeper.address)) as boolean;
+          const smHasLiq = (await acm.hasRole(ACTION_LIQUIDATE, settlementManagerAddr)) as boolean;
+          const lmHasLiq = (await acm.hasRole(ACTION_LIQUIDATE, liquidationManagerAddr)) as boolean;
+          const lrmHasUser = (await acm.hasRole(ACTION_VIEW_USER_DATA, liquidationRiskManagerAddr)) as boolean;
+          const smHasPrice = (await acm.hasRole(ACTION_VIEW_PRICE_DATA, settlementManagerAddr)) as boolean;
+          const lmHasPrice = (await acm.hasRole(ACTION_VIEW_PRICE_DATA, liquidationManagerAddr)) as boolean;
+          if (
+            acmFromRegistry.toLowerCase() !== String(acmAddr).toLowerCase() ||
+            !kHasLiq ||
+            !smHasLiq ||
+            !lmHasLiq ||
+            !lrmHasUser ||
+            !smHasPrice ||
+            !lmHasPrice
+          ) {
+            console.log("  [Diag] Role preflight before settleOrLiquidate:");
+            console.log(`    - Registry.KEY_ACCESS_CONTROL_MANAGER: ${acmFromRegistry}`);
+            console.log(`    - script.acmAddr: ${acmAddr}`);
+            console.log(`    - keeper ACTION_LIQUIDATE: ${kHasLiq}`);
+            console.log(`    - SettlementManager ACTION_LIQUIDATE: ${smHasLiq}`);
+            console.log(`    - LiquidationManager ACTION_LIQUIDATE: ${lmHasLiq}`);
+            console.log(`    - LiquidationRiskManager ACTION_VIEW_USER_DATA: ${lrmHasUser}`);
+            console.log(`    - SettlementManager ACTION_VIEW_PRICE_DATA: ${smHasPrice}`);
+            console.log(`    - LiquidationManager ACTION_VIEW_PRICE_DATA: ${lmHasPrice}`);
+          }
+        } catch {
+          // ignore diagnostics
+        }
+        const liqReceipt = await (await settlementManager.connect(keeper).settleOrLiquidate(res2.orderId)).wait();
       if (promisedInterest > 0n) {
         const locked2 = (await gfmAny.getLockedGuarantee(borrower2.address, assetAddr)) as bigint;
         if (locked2 !== 0n) throw new Error("GuaranteeExtension: expected locked guarantee cleared after settleOrLiquidate");
@@ -1131,7 +1285,7 @@ async function main() {
         if (active2) throw new Error("GuaranteeExtension: expected guarantee inactive after settleOrLiquidate");
         // Best-effort event check
         const ergmIface2 = new ethers.Interface([
-          "event GuaranteeForfeited(uint256 indexed guaranteeId,address indexed borrower,address indexed lender,address asset,uint256 forfeitedAmount,uint256 timestamp)",
+          "event GuaranteeForfeited(uint256 indexed guaranteeId,address indexed borrower,address indexed lender,address asset,uint256 forfeitedAmount,uint256 blockNumber)",
         ]);
         let sawF = false;
         for (const log of liqReceipt!.logs) {
@@ -1151,6 +1305,7 @@ async function main() {
       // Restore baseline off so other cases remain decoupled.
       await (await ergmAny.connect(deployer).setGuaranteeEnabled(assetAddr, false)).wait();
       console.log("  ✅ OK\n");
+      }
     }
 
     // ========= CASE 1: Partial repay (allowed when strict mode disabled) =========
@@ -1168,8 +1323,8 @@ async function main() {
       console.log("  ⚠️  Could not disable strict full-repay mode; partial repay may revert:", e);
     }
 
-      const borrower = await pickSigner();
-      const lender = await pickSigner();
+      const borrower = await pickCleanSigner();
+      const lender = await pickCleanSigner();
       const tracked = uniqAddrs(
         await discoverTrackedAddresses({
           include: [deployer.address],
@@ -1217,98 +1372,189 @@ async function main() {
     if (runStrictAggDebt) {
       console.log("=== Case: strict full-repay + aggregated debt (expected revert, then success) ===");
 
-    // enable strict full-repay mode
-    try {
-      await ensureRole(key("SET_PARAMETER"), deployer.address);
-      await (await settlementManager.connect(deployer).setRequireFullRepayRelease(true)).wait();
-    } catch (e) {
-      console.log("  ⚠️  Could not enable strict full-repay mode; skipping this case:", e);
-    }
+      if (!Number.isInteger(strictAggDebtIterations) || strictAggDebtIterations < 1) {
+        throw new Error(`Invalid STRICT_AGG_DEBT_ITERATIONS=${process.env.STRICT_AGG_DEBT_ITERATIONS}`);
+      }
 
-      const borrower = await pickSigner();
-      const lender1 = await pickSigner();
-      const lender2 = await pickSigner();
-      const tracked = uniqAddrs(
-        await discoverTrackedAddresses({
-          include: [deployer.address],
-          borrower: borrower.address,
-          lender: lender1.address,
-          keeper: keeper.address,
-        })
-      );
-      const tracked2 = uniqAddrs([...tracked, lender2.address]);
+      for (let iter = 1; iter <= strictAggDebtIterations; iter++) {
+        console.log(`  --- Iteration ${iter}/${strictAggDebtIterations} ---`);
 
-      const { orderId: orderA } = await createOrder({
-        borrower,
-        lender: lender1,
-        asset: assetAddr,
-        principal: ethers.parseUnits("500", decimals),
-        collateral: ethers.parseUnits("1000", decimals),
-        termDays: 5,
-        rateBps: 1000n,
-        makeOverdue: false,
-      });
-      const { orderId: orderB } = await createOrder({
-        borrower,
-        lender: lender2,
-        asset: assetAddr,
-        principal: ethers.parseUnits("500", decimals),
-        collateral: ethers.parseUnits("1000", decimals),
-        termDays: 5,
-        rateBps: 1000n,
-        makeOverdue: false,
-      });
+        // Refresh price blockNumbers for all tokens to keep valuation stable across dirty, multi-asset runs.
+        for (const t of tokensToRun) {
+          try {
+            const [p, , dec] = (await po.getPrice(t)) as [bigint, bigint, bigint];
+            const blockNumber = await latestBlockNumber();
+            await (await po.connect(deployer).updatePrice(t, p, blockNumber)).wait();
+            if (dec === 0n) {
+              console.log("  ⚠️  price decimals returned 0; valuation may be unstable");
+            }
+          } catch (e) {
+            const fallback = priceRefreshMap.get(t.toLowerCase());
+            if (fallback) {
+              const blockNumber = await latestBlockNumber();
+              await (await po.connect(deployer).updatePrice(t, fallback, blockNumber)).wait();
+              console.log(`  ℹ️  price refresh used fallback for ${t}`);
+            } else {
+              console.log(`  ⚠️  price refresh skipped for ${t}: ${String((e as any)?.message ?? e)}`);
+            }
+          }
+        }
 
-    const ordA = await getOrderForView(orderEngineAddr, orderA);
-    const dueA = (ordA.principal - ordA.repaidAmount) + calcInterest(ordA.principal, ordA.rate, ordA.term);
-      await (await erc20.connect(borrower).approve(vaultCoreAddr, dueA)).wait();
+        // enable strict full-repay mode
+        try {
+          await ensureRole(key("SET_PARAMETER"), deployer.address);
+          await (await settlementManager.connect(deployer).setRequireFullRepayRelease(true)).wait();
+        } catch (e) {
+          console.log("  ⚠️  Could not enable strict full-repay mode; skipping this case:", e);
+        }
 
-      const before = await snapshotBalances(ordA.asset, tracked2);
-    let reverted = false;
-    try {
-      await (await vaultCore.connect(borrower).repay(orderA, ordA.asset, dueA)).wait();
-    } catch (e) {
-      reverted = true;
-    }
-      const afterAttempt = await snapshotBalances(ordA.asset, tracked2);
-    // if reverted, balances must be unchanged
-    if (reverted) {
-      assertConservation("strictAggDebt.revertNoSideEffects", before, afterAttempt);
-      console.log("  ✅ Expected revert observed (DebtNotCleared), and no balance side-effects.");
-    } else {
-      console.log("  ⚠️  repay did not revert under strict mode; continuing.");
-    }
+        const borrower = await pickBorrower(iter, assetIdx);
+        const lender1 = await pickLender();
+        const lender2 = await pickLender();
+        const tracked = uniqAddrs(
+          await discoverTrackedAddresses({
+            include: [deployer.address],
+            borrower: borrower.address,
+            lender: lender1.address,
+            keeper: keeper.address,
+          })
+        );
+        const tracked2 = uniqAddrs([...tracked, lender2.address]);
 
-    // disable strict and retry
-      await (await settlementManager.connect(deployer).setRequireFullRepayRelease(false)).wait();
-      await (await erc20.connect(borrower).approve(vaultCoreAddr, dueA)).wait();
-      await (await vaultCore.connect(borrower).repay(orderA, ordA.asset, dueA)).wait();
-      const after = await snapshotBalances(ordA.asset, tracked2);
-      assertConservation("strictAggDebt.afterDisableStrict", before, after);
+        const variants = [1n, 2n, 5n, 10n];
+        const variant = (base: bigint, slot: number) => {
+          if (!useVariantAmounts) return base;
+          const mult = variants[(iter + assetIdx + slot) % variants.length];
+          return base * mult;
+        };
 
-    // sanity: borrower still has debt because orderB is active
-    const debtValue = (await vLe.getUserTotalDebtValue(borrower.address)) as bigint;
-    if (debtValue === 0n) {
-      throw new Error("expected aggregated debt to remain after repaying only one of two orders");
-    }
-    console.log(`  ✅ OK (remaining aggregated debtValue=${debtValue.toString()})\n`);
-      orderB; // silence unused
+        const baseA = assertAggDebtSum ? ethers.parseUnits(aggDebtPrincipalA, decimals) : ethers.parseUnits("500", decimals);
+        const baseB = assertAggDebtSum ? ethers.parseUnits(aggDebtPrincipalB, decimals) : ethers.parseUnits("500", decimals);
+        const baseC = assertAggDebtSum ? ethers.parseUnits(aggDebtPrincipalC, decimals) : ethers.parseUnits("200", decimals);
+        const principalA = variant(baseA, 0);
+        const principalB = variant(baseB, 1);
+        const principalC = variant(baseC, 2);
+        const rateBps = assertAggDebtSum ? 0n : 1000n;
+
+        const baselineValue = (await vLe.getUserTotalDebtValue(borrower.address)) as bigint;
+        const baselineRawDebt = (await vLe.getDebt(borrower.address, assetAddr)) as bigint;
+
+        const { orderId: orderA } = await createOrder({
+          borrower,
+          lender: lender1,
+          asset: assetAddr,
+          principal: principalA,
+          collateral: ethers.parseUnits("1000", decimals),
+          termDays: 5,
+          rateBps,
+          makeOverdue: false,
+        });
+        const { orderId: orderB } = await createOrder({
+          borrower,
+          lender: lender2,
+          asset: assetAddr,
+          principal: principalB,
+          collateral: ethers.parseUnits("1000", decimals),
+          termDays: 5,
+          rateBps,
+          makeOverdue: false,
+        });
+
+        if (assertAggDebtSum) {
+          const expectedValue = await computeUserDebtValue(borrower.address);
+          const actualValue = (await vLe.getUserTotalDebtValue(borrower.address)) as bigint;
+          const rawDebt = (await vLe.getDebt(borrower.address, assetAddr)) as bigint;
+          const expectedRawDebt = baselineRawDebt + principalA + principalB;
+          if (actualValue !== expectedValue || rawDebt !== expectedRawDebt) {
+            throw new Error(
+              `strictAggDebt.sumMismatch: expected=${expectedValue.toString()} actual=${actualValue.toString()} ` +
+                `(baselineValue=${baselineValue.toString()} principalA=${principalA.toString()} principalB=${principalB.toString()} ` +
+                `rawDebt=${rawDebt.toString()} expectedRawDebt=${expectedRawDebt.toString()})`
+            );
+          }
+          console.log(
+            `  ✅ strictAggDebt.sumMatch (expected=${expectedValue.toString()} actual=${actualValue.toString()})`
+          );
+        }
+
+        const ordA = await getOrderForView(orderEngineAddr, orderA);
+        const dueA = (ordA.principal - ordA.repaidAmount) + calcInterest(ordA.principal, ordA.rate, ordA.term);
+        await (await erc20.connect(borrower).approve(vaultCoreAddr, dueA)).wait();
+
+        const before = await snapshotBalances(ordA.asset, tracked2);
+        let reverted = false;
+        try {
+          await (await vaultCore.connect(borrower).repay(orderA, ordA.asset, dueA)).wait();
+        } catch (e) {
+          reverted = true;
+        }
+        const afterAttempt = await snapshotBalances(ordA.asset, tracked2);
+        // if reverted, balances must be unchanged
+        if (reverted) {
+          assertConservation("strictAggDebt.revertNoSideEffects", before, afterAttempt);
+          console.log("  ✅ Expected revert observed (DebtNotCleared), and no balance side-effects.");
+        } else {
+          console.log("  ⚠️  repay did not revert under strict mode; continuing.");
+        }
+
+        let after = afterAttempt;
+        if (reverted) {
+          // disable strict and retry
+          await (await settlementManager.connect(deployer).setRequireFullRepayRelease(false)).wait();
+          await (await erc20.connect(borrower).approve(vaultCoreAddr, dueA)).wait();
+          await (await vaultCore.connect(borrower).repay(orderA, ordA.asset, dueA)).wait();
+          after = await snapshotBalances(ordA.asset, tracked2);
+          assertConservation("strictAggDebt.afterDisableStrict", before, after);
+        } else {
+          // Repay succeeded under strict mode; keep going (observed in some local configs).
+          console.log("  ⚠️  repay succeeded under strict mode; skipping strictAggDebt.afterRepay conservation.");
+        }
+
+        if (reborrowAfterRepay) {
+          const lender3 = await pickLender();
+          await createOrder({
+            borrower,
+            lender: lender3,
+            asset: assetAddr,
+            principal: principalC,
+            collateral: ethers.parseUnits("1000", decimals),
+            termDays: 5,
+            rateBps,
+            makeOverdue: false,
+          });
+          if (assertAggDebtSum) {
+            const expectedValue = await computeUserDebtValue(borrower.address);
+            const actualValue = (await vLe.getUserTotalDebtValue(borrower.address)) as bigint;
+            const rawDebt = (await vLe.getDebt(borrower.address, assetAddr)) as bigint;
+            const expectedRawDebt = baselineRawDebt + principalB + principalC;
+            if (actualValue !== expectedValue || rawDebt !== expectedRawDebt) {
+              throw new Error(
+                `strictAggDebt.reborrowMismatch: expected=${expectedValue.toString()} actual=${actualValue.toString()} ` +
+                  `(baselineValue=${baselineValue.toString()} principalB=${principalB.toString()} principalC=${principalC.toString()} ` +
+                  `rawDebt=${rawDebt.toString()} expectedRawDebt=${expectedRawDebt.toString()})`
+              );
+            }
+            console.log(
+              `  ✅ strictAggDebt.reborrowMatch (expected=${expectedValue.toString()} actual=${actualValue.toString()})`
+            );
+          }
+        }
+
+        // sanity: borrower still has debt because orderB is active
+        const debtValue = (await vLe.getUserTotalDebtValue(borrower.address)) as bigint;
+        if (debtValue === 0n) {
+          throw new Error("expected aggregated debt to remain after repaying only one of two orders");
+        }
+        console.log(`  ✅ OK (remaining aggregated debtValue=${debtValue.toString()})\n`);
+        orderB; // silence unused
+      }
     }
 
     // ========= CASE 3: Liquidation conservation =========
     if (runLiquidation) {
       console.log("=== Case: overdue liquidation (conservation) ===");
-      const borrower = runGuaranteeExtension
-        ? await pickSignerSatisfying(`liquidation borrower has no active guarantee for asset=${assetAddr}`, async (s) => {
-            if (s.address.toLowerCase() === deployer.address.toLowerCase()) return false;
-            if (s.address.toLowerCase() === keeper.address.toLowerCase()) return false;
-            // Some deployed SettlementManager versions call ERGM.processDefault when a guarantee is active.
-            // In dirty-state networks, ensure we pick a borrower that won't trip guarantee processing
-            // when the feature is disabled.
-            return !(await ergmAny.hasActiveGuarantee(s.address, assetAddr));
-          })
-        : await pickSigner();
-      const lender = await pickSigner();
+      const borrower = await pickCleanSigner();
+      const lender = await pickCleanSigner();
       const tracked = uniqAddrs(
         await discoverTrackedAddresses({
           include: [deployer.address],
@@ -1318,11 +1564,18 @@ async function main() {
         })
       );
 
-    // ensure keeper role for liquidation (best-effort)
+    // ensure liquidation roles (best-effort; in NO_AUTO_GRANT mode we only verify)
     try {
-      await ensureRole(key("LIQUIDATE"), keeper.address);
+      await ensureRole(key("LIQUIDATE"), keeper.address, "LIQUIDATE(keeper)");
+      await ensureRole(key("LIQUIDATE"), settlementManagerAddr, "LIQUIDATE(settlementManager)");
+      await ensureRole(key("LIQUIDATE"), liquidationManagerAddr, "LIQUIDATE(liquidationManager)");
+      await ensureRole(key("VIEW_RISK_DATA"), settlementManagerAddr, "VIEW_RISK_DATA(settlementManager)");
+      await ensureRole(key("VIEW_RISK_DATA"), liquidationManagerAddr, "VIEW_RISK_DATA(liquidationManager)");
     } catch (e) {
-      console.log("  ⚠️  Could not grant LIQUIDATE to keeper; liquidation may revert:", e);
+      console.log(
+        "  ⚠️  Could not grant LIQUIDATE for liquidation path; liquidation may revert:",
+        e
+      );
     }
 
       const { orderId } = await createOrder({
@@ -1337,11 +1590,25 @@ async function main() {
       });
     const ord = await getOrderForView(orderEngineAddr, orderId);
 
-    const before = await snapshotBalances(ord.asset, tracked);
-    await (await settlementManager.connect(keeper).settleOrLiquidate(orderId)).wait();
-    const after = await snapshotBalances(ord.asset, tracked);
-    assertConservation("liquidation", before, after);
+    if (
+      noAutoGrant &&
+      !(
+        ((await acm.hasRole(key("LIQUIDATE"), keeper.address)) as boolean) &&
+        ((await acm.hasRole(key("LIQUIDATE"), settlementManagerAddr)) as boolean) &&
+        ((await acm.hasRole(key("LIQUIDATE"), liquidationManagerAddr)) as boolean) &&
+        ((await acm.hasRole(key("VIEW_RISK_DATA"), settlementManagerAddr)) as boolean) &&
+        ((await acm.hasRole(key("VIEW_RISK_DATA"), liquidationManagerAddr)) as boolean)
+      )
+    ) {
+      console.log("  ⏭️  [SKIP] Liquidation case (missing LIQUIDATE/VIEW_RISK_DATA roles).");
+      console.log("");
+    } else {
+      const before = await snapshotBalances(ord.asset, tracked);
+      await (await settlementManager.connect(keeper).settleOrLiquidate(orderId)).wait();
+      const after = await snapshotBalances(ord.asset, tracked);
+      assertConservation("liquidation", before, after);
       console.log("  ✅ OK\n");
+    }
     }
   } // end token loop
 

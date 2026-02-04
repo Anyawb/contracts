@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
@@ -17,8 +15,19 @@ import { DegradationMonitor as GracefulDegradationMonitor } from "../../../monit
 import { DegradationCore as GracefulDegradationCore } from "../../../monitor/DegradationCore.sol";
 import { DegradationStorage as GracefulDegradationStorage } from "../../../monitor/DegradationStorage.sol";
 import { ModuleHealthView } from "./ModuleHealthView.sol";
-import { ArrayLengthMismatch, BatchTooLarge, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import {
+    ArrayLengthMismatch,
+    BatchTooLarge,
+    EmptyArray,
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+
+interface ISystemRiskViewLite {
+    function getMinHealthFactor() external view returns (uint256 minHealthFactor);
+}
 
 /**
  * @title HealthView
@@ -34,7 +43,9 @@ import { ViewVersioned } from "../ViewVersioned.sol";
  *
  * Security:
  * - Cache writes are restricted via ACTION_VIEW_PUSH and/or system-status/admin roles.
- * - Read entrypoints are role-gated via ViewAccessLib to prevent unauthorized access.
+ * - User health-factor reads follow Scheme U (self read allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN).
+ * - Batch user reads (users[]) are treated as enumeration capabilities: no self-bypass; requires
+ *   ACTION_VIEW_USER_DATA or ACTION_ADMIN.
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  */
 contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
@@ -44,9 +55,9 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Emitted when a user's health factor is cached.
      * @param user Target user address
      * @param healthFactor Cached health factor (bps)
-     * @param timestamp Cache update timestamp (seconds since epoch)
+     * @param blockNumber Cache update blockNumber (block.number)
      */
-    event HealthFactorCached(address indexed user, uint256 healthFactor, uint256 timestamp);
+    event HealthFactorCached(address indexed user, uint256 healthFactor, uint256 blockNumber);
 
     /**
      * @notice Emitted when a module health status is cached for off-chain indexing.
@@ -54,31 +65,30 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param isHealthy Whether the module is healthy
      * @param detailsHash Details hash (off-chain resolvable)
      * @param failures Consecutive failure count
-     * @param timestamp Cache update timestamp (seconds since epoch)
+     * @param blockNumber Cache update blockNumber (block.number)
      */
     event ModuleHealthCached(
         address indexed module,
         bool isHealthy,
         bytes32 detailsHash,
         uint32 failures,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
-    /// @notice Caller is not authorized for the requested system health operation.
-    error HealthView__CallerNotAuthorized();
+    /// @notice System-scoped minimum health factor is invalid (misconfigured as 0).
+    error HealthView__InvalidMinHealthFactor();
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     address private _registryAddr;
 
     /*━━━━━━━━━━━━━━━ User health-factor cache ━━━━━━━━━━━━━━━*/
     mapping(address => uint256) private _healthFactorCache;
-    mapping(address => uint256) private _cacheTimestamps;
+    mapping(address => uint256) private _cacheUpdateBlocks;
 
     /*━━━━━━━━━━━━━━━ Module health cache ━━━━━━━━━━━━━━━*/
     // NOTE: Storage layout must remain stable across upgrades; do not reorder fields for packing.
-    // solhint-disable-next-line gas-struct-packing
     struct ModuleHealth {
         bool    isHealthy;
         bytes32 detailsHash;
@@ -98,13 +108,9 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     modifier onlyViewPusher() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_PUSH, msg.sender);
-        _;
-    }
-
-    /// @notice Risk data viewer (health factor / risk status)
-    modifier onlyRiskViewer() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_PUSH, msg.sender)) {
+            revert MissingRole();
+        }
         _;
     }
 
@@ -112,7 +118,7 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (
             !_hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender) &&
             !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
-        ) revert HealthView__CallerNotAuthorized();
+        ) revert MissingRole();
         _;
     }
 
@@ -120,7 +126,25 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (
             !_hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender) &&
             !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
-        ) revert HealthView__CallerNotAuthorized();
+        ) revert MissingRole();
+        _;
+    }
+
+    /// @dev Scheme U: self read allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN.
+    modifier onlyAuthorizedFor(address user) {
+        if (msg.sender != user) {
+            bool ok =
+                _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) || _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
+            if (!ok) revert MissingRole();
+        }
+        _;
+    }
+
+    /// @dev Scheme U batch: no self-bypass; requires ACTION_VIEW_USER_DATA or ACTION_ADMIN.
+    modifier onlyOpsOrAdmin() {
+        bool ok =
+            _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) || _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ok) revert MissingRole();
         _;
     }
 
@@ -165,10 +189,8 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function pushHealthFactor(address user, uint256 healthFactor) external onlyValidRegistry onlyViewPusher {
         _healthFactorCache[user] = healthFactor;
-        // solhint-disable-next-line not-rely-on-time
-        _cacheTimestamps[user]   = block.timestamp;
-        // solhint-disable-next-line not-rely-on-time
-        emit HealthFactorCached(user, healthFactor, block.timestamp);
+        _cacheUpdateBlocks[user] = block.number;
+        emit HealthFactorCached(user, healthFactor, block.number);
         // Push to generic data stream
         DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_HEALTH_FACTOR, abi.encode(user, healthFactor));
     }
@@ -181,28 +203,27 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Role-gated via ACTION_VIEW_PUSH
-     * - If `timestamp == 0`, the current block timestamp is used.
+     * - If `blockNumber == 0`, the current block number is used.
      *
      * @param user Target user address
      * @param healthFactorBps Health factor (bps, 1e4 = 100%)
      * @param minHFBps Minimum health factor threshold (bps)
      * @param undercollateralized Whether healthFactorBps is below the threshold
-     * @param timestamp Cache timestamp override (seconds since epoch; 0 to use block timestamp)
+     * @param blockNumber Cache update blockNumber override (block.number; 0 to use current block)
      */
     function pushRiskStatus(
         address user,
         uint256 healthFactorBps,
         uint256 minHFBps,
         bool undercollateralized,
-        uint256 timestamp
+        uint256 blockNumber
     ) external onlyValidRegistry onlyViewPusher {
         _healthFactorCache[user] = healthFactorBps;
-        // solhint-disable-next-line not-rely-on-time
-        _cacheTimestamps[user] = timestamp == 0 ? block.timestamp : timestamp;
-        emit HealthFactorCached(user, healthFactorBps, _cacheTimestamps[user]);
+        _cacheUpdateBlocks[user] = blockNumber == 0 ? block.number : blockNumber;
+        emit HealthFactorCached(user, healthFactorBps, _cacheUpdateBlocks[user]);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_RISK_STATUS,
-            abi.encode(user, healthFactorBps, minHFBps, undercollateralized, _cacheTimestamps[user])
+            abi.encode(user, healthFactorBps, minHFBps, undercollateralized, _cacheUpdateBlocks[user])
         );
     }
 
@@ -217,23 +238,25 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Role-gated via ACTION_VIEW_PUSH
-     * - If `timestamp == 0`, the current block timestamp is used.
+     * - If `blockNumber == 0`, the current block number is used.
      *
      * @param users Target user addresses
      * @param healthFactorsBps Health factors (bps)
      * @param minHFsBps Minimum health factor thresholds (bps)
      * @param underFlags Undercollateralized flags
-     * @param timestamp Cache timestamp override (seconds since epoch; 0 to use block timestamp)
+     * @param blockNumber Cache update blockNumber override (block.number; 0 to use current block)
      */
     function pushRiskStatusBatch(
         address[] calldata users,
         uint256[] calldata healthFactorsBps,
         uint256[] calldata minHFsBps,
         bool[] calldata underFlags,
-        uint256 timestamp
+        uint256 blockNumber
     ) external onlyValidRegistry onlyViewPusher {
         if (users.length == 0) revert EmptyArray();
-        if (users.length > ViewConstants.MAX_BATCH_SIZE) revert BatchTooLarge(users.length, ViewConstants.MAX_BATCH_SIZE);
+        if (users.length > ViewConstants.MAX_BATCH_SIZE) {
+            revert BatchTooLarge(users.length, ViewConstants.MAX_BATCH_SIZE);
+        }
         if (users.length != healthFactorsBps.length) {
             revert ArrayLengthMismatch(users.length, healthFactorsBps.length);
         }
@@ -244,17 +267,16 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
             revert ArrayLengthMismatch(users.length, underFlags.length);
         }
         uint256 len = users.length;
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = timestamp == 0 ? block.timestamp : timestamp;
+        uint256 resolvedBlockNumber = blockNumber == 0 ? block.number : blockNumber;
         for (uint256 i; i < len; ++i) {
             address u = users[i];
             _healthFactorCache[u] = healthFactorsBps[i];
-            _cacheTimestamps[u] = ts;
-            emit HealthFactorCached(u, healthFactorsBps[i], ts);
+            _cacheUpdateBlocks[u] = resolvedBlockNumber;
+            emit HealthFactorCached(u, healthFactorsBps[i], resolvedBlockNumber);
         }
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_RISK_STATUS_BATCH,
-            abi.encode(users, healthFactorsBps, minHFsBps, underFlags, ts)
+            abi.encode(users, healthFactorsBps, minHFsBps, underFlags, resolvedBlockNumber)
         );
     }
 
@@ -284,199 +306,156 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         mh.isHealthy = isHealthy;
         mh.detailsHash = detailsHash;
         mh.consecutiveFailures = consecutiveFailures;
-        // solhint-disable-next-line not-rely-on-time
-        mh.lastCheckTime = uint32(block.timestamp);
+        uint256 blockNumber = block.number;
+        mh.lastCheckTime = uint32(blockNumber);
 
-        // solhint-disable-next-line not-rely-on-time
-        emit ModuleHealthCached(module, isHealthy, detailsHash, consecutiveFailures, block.timestamp);
+        emit ModuleHealthCached(module, isHealthy, detailsHash, consecutiveFailures, blockNumber);
         // Push to generic data stream
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_MODULE_HEALTH,
-            abi.encode(module, isHealthy, detailsHash, consecutiveFailures)
+            abi.encode(module, isHealthy, detailsHash, consecutiveFailures, blockNumber)
         );
     }
 
     /**
-     * @notice Get cached module health status.
-     * @dev Reverts if:
-     *      - (none)
+     * @notice Get cached module health status with cache metadata.
+     * @dev Reverts if: (never)
      *
      * Security:
      * - Read-only
      *
      * @param module Target module address
      * @return moduleHealth_ Cached module health data
+     * @return isValid Whether the cache update block is within `ViewConstants.CACHE_DURATION_BLOCKS`
+     * @return blockNumber Cache update blockNumber (block.number)
      */
-    function getModuleHealth(address module) external view returns (ModuleHealth memory) {
-        return _moduleHealth[module];
+    function getModuleHealthWithMeta(address module)
+        external
+        view
+        returns (ModuleHealth memory moduleHealth_, bool isValid, uint256 blockNumber)
+    {
+        moduleHealth_ = _moduleHealth[module];
+        blockNumber = uint256(moduleHealth_.lastCheckTime);
+        isValid = _isValid(blockNumber);
     }
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get a user's cached health factor, including cache validity and timestamp.
+     * @notice Get a user's health factor with cache validity and blockNumber (B-class unified output).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission (via onlyRiskViewer / ViewAccessLib)
+     *      - caller is not the target user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via Scheme U)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
+     * - Scheme U user-dimensional read (self allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN)
      *
      * @param user Target user address
      * @return healthFactor Cached health factor (bps)
-     * @return isValid Whether the cached value is valid (within CACHE_DURATION)
-     * @return timestamp Cache update timestamp (seconds since epoch)
-     */
-    function getUserHealthFactor(address user)
-        external
-        view
-        onlyValidRegistry
-        onlyRiskViewer
-        returns (uint256 healthFactor, bool isValid, uint256 timestamp)
-    {
-        healthFactor = _healthFactorCache[user];
-        timestamp = _cacheTimestamps[user];
-        isValid = _isValid(timestamp);
-    }
-
-    /**
-     * @notice Get a user's health factor with cache validity and timestamp (B-class unified output).
-     * @dev Reverts if:
-     *      - (same as getUserHealthFactor)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
-     *
-     * @param user Target user address
-     * @return healthFactor Cached health factor (bps)
-     * @return isValid Whether the cached value is valid (within CACHE_DURATION)
-     * @return timestamp Cache update timestamp (seconds since epoch)
+     * @return isValid Whether the cached value is valid (within CACHE_DURATION_BLOCKS)
+     * @return blockNumber Cache update blockNumber (block.number)
      */
     function getUserHealthFactorWithMeta(address user)
         external
         view
         onlyValidRegistry
-        onlyRiskViewer
-        returns (uint256 healthFactor, bool isValid, uint256 timestamp)
+        onlyAuthorizedFor(user)
+        returns (uint256 healthFactor, bool isValid, uint256 blockNumber)
     {
-        // NOTE: Do NOT call `this.getUserHealthFactor(user)` here.
-        // `this.*` is an external call where msg.sender becomes the HealthView contract itself,
-        // which will fail the role gate (VIEW_RISK_DATA) unless the contract is granted that role.
+        // NOTE: Do NOT call `this.getUserHealthFactorWithMeta(user)` here.
+        // `this.*` would be an external call (unnecessary) and may change the effective msg.sender.
         healthFactor = _healthFactorCache[user];
-        timestamp = _cacheTimestamps[user];
-        isValid = _isValid(timestamp);
-    }
-
-    /**
-     * @notice Check whether a user is liquidatable based on cached health factor (best-effort).
-     * @dev Reverts if:
-     *      - (same as getUserHealthFactor)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
-     * - Conservative: returns false if cache is invalid.
-     *
-     * @param user Target user address
-     * @return isLiquidatable True if cached health factor is valid and below 100% (bps)
-     */
-    function isUserLiquidatable(address user) external view onlyValidRegistry onlyRiskViewer returns (bool) {
-        (uint256 hf, bool valid, ) = this.getUserHealthFactor(user);
-        if (!valid) return false; // fall back to safe
-        return hf < 10_000; // <100% health factor (bps)
-    }
-
-    /**
-     * @notice Batch query cached health factors with cache validity and timestamps.
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission (via onlyRiskViewer / ViewAccessLib)
-     *      - users is empty (EmptyArray)
-     *      - users.length > MAX_BATCH_SIZE (BatchTooLarge)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
-     *
-     * @param users Target user addresses
-     * @return factors Cached health factors (bps)
-     * @return validFlags Cache validity flags
-     * @return timestamps Cache update timestamps (seconds since epoch)
-     */
-    function batchGetHealthFactors(address[] calldata users)
-        external
-        view
-        onlyValidRegistry
-        onlyRiskViewer
-        returns (uint256[] memory factors, bool[] memory validFlags, uint256[] memory timestamps)
-    {
-        if (users.length == 0) revert EmptyArray();
-        if (users.length > ViewConstants.MAX_BATCH_SIZE) revert BatchTooLarge(users.length, ViewConstants.MAX_BATCH_SIZE);
-        uint256 len = users.length;
-        factors     = new uint256[](len);
-        validFlags  = new bool[](len);
-        timestamps  = new uint256[](len);
-        for (uint256 i; i < len; ++i) {
-            uint256 ts = _cacheTimestamps[users[i]];
-            factors[i] = _healthFactorCache[users[i]];
-            timestamps[i] = ts;
-            validFlags[i] = _isValid(ts);
-        }
+        blockNumber = _cacheUpdateBlocks[user];
+        isValid = _isValid(blockNumber);
     }
 
     /**
      * @notice Batch query cached health factors with meta (B-class unified output).
      * @dev Reverts if:
-     *      - (same as batchGetHealthFactors)
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole; batch user reads have no self-bypass)
+     *      - users is empty (EmptyArray)
+     *      - users.length > MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
+     * - Scheme U batch user-dimensional read: enumeration capability (no self-bypass; ops/admin only)
      *
      * @param users Target user addresses
      * @return factors Cached health factors (bps)
      * @return validFlags Cache validity flags
-     * @return timestamps Cache update timestamps (seconds since epoch)
+     * @return blockNumbers Cache update blockNumbers (block.number)
      */
     function batchGetHealthFactorsWithMeta(address[] calldata users)
         external
         view
         onlyValidRegistry
-        onlyRiskViewer
-        returns (uint256[] memory factors, bool[] memory validFlags, uint256[] memory timestamps)
+        onlyOpsOrAdmin
+        returns (uint256[] memory factors, bool[] memory validFlags, uint256[] memory blockNumbers)
     {
-        // NOTE: Do NOT call `this.batchGetHealthFactors(users)` here for the same reason as above.
+        // NOTE: Do NOT call `this.batchGetHealthFactorsWithMeta(users)` here (unnecessary external call).
         if (users.length == 0) revert EmptyArray();
-        if (users.length > ViewConstants.MAX_BATCH_SIZE) revert BatchTooLarge(users.length, ViewConstants.MAX_BATCH_SIZE);
+        if (users.length > ViewConstants.MAX_BATCH_SIZE) {
+            revert BatchTooLarge(users.length, ViewConstants.MAX_BATCH_SIZE);
+        }
         uint256 len = users.length;
         factors     = new uint256[](len);
         validFlags  = new bool[](len);
-        timestamps  = new uint256[](len);
+        blockNumbers  = new uint256[](len);
         for (uint256 i; i < len; ++i) {
-            uint256 ts = _cacheTimestamps[users[i]];
+            uint256 blockNumber = _cacheUpdateBlocks[users[i]];
             factors[i] = _healthFactorCache[users[i]];
-            timestamps[i] = ts;
-            validFlags[i] = _isValid(ts);
+            blockNumbers[i] = blockNumber;
+            validFlags[i] = _isValid(blockNumber);
         }
     }
 
     /**
-     * @notice Get the cached timestamp for a user.
+     * @notice Check whether a user is liquidatable based on cached health factor (best-effort).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission (via onlyRiskViewer / ViewAccessLib)
+     *      - caller is not the target user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via Scheme U)
+     *      - SystemRiskView returns `minHealthFactor == 0` (HealthView__InvalidMinHealthFactor)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
+     * - Scheme U user-dimensional read (self allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN)
+     * - Conservative: returns `(false, false, blockNumber)` if cache is invalid or system risk parameters cannot be read.
      *
      * @param user Target user address
-     * @return timestamp Cache update timestamp (seconds since epoch)
+     * @return isLiquidatable True if cached health factor is valid and below the SSOT min health factor.
+     * @return isValid Whether this best-effort determination is valid (cache valid AND min health factor resolved).
+     * @return blockNumber Cache update blockNumber (block.number)
      */
-    function getCacheTimestamp(address user) external view onlyValidRegistry onlyRiskViewer returns (uint256) {
-        return _cacheTimestamps[user];
+    function isUserLiquidatableWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (bool isLiquidatable, bool isValid, uint256 blockNumber)
+    {
+        blockNumber = _cacheUpdateBlocks[user];
+        isValid = _isValid(blockNumber);
+        if (!isValid) return (false, false, blockNumber); // conservative: invalid cache => not liquidatable
+
+        // SSOT threshold: resolve SystemRiskView (system-scoped) and read min health factor.
+        // If the SystemRiskView is not configured or the call fails, return "unknown/invalid" conservatively.
+        address srv = Registry(_registryAddr).getModule(ModuleKeys.KEY_SYSTEM_RISK_VIEW);
+        if (srv == address(0)) return (false, false, blockNumber);
+
+        uint256 minHf;
+        try ISystemRiskViewLite(srv).getMinHealthFactor() returns (uint256 v) {
+            minHf = v;
+        } catch {
+            return (false, false, blockNumber);
+        }
+        if (minHf == 0) revert HealthView__InvalidMinHealthFactor();
+
+        return (_healthFactorCache[user] < minHf, true, blockNumber);
     }
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
-    function _isValid(uint256 ts) internal view returns (bool) {
-        // solhint-disable-next-line not-rely-on-time
-        return ts > 0 && block.timestamp - ts <= ViewConstants.CACHE_DURATION;
+    function _isValid(uint256 updateBlock) internal view returns (bool) {
+        if (updateBlock == 0 || updateBlock > block.number) return false;
+        return block.number - updateBlock <= ViewConstants.CACHE_DURATION_BLOCKS;
     }
 
     function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
@@ -500,7 +479,9 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation contract address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
@@ -557,7 +538,7 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (mon == address(0)) {
             return GracefulDegradationCore.DegradationStats({
                 totalDegradations: 0,
-                lastDegradationTime: 0,
+                lastDegradationBlock: 0,
                 lastDegradedModule: address(0),
                 lastDegradationReasonHash: bytes32(0),
                 fallbackValueUsed: 0,

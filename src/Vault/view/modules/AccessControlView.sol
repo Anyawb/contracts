@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
@@ -14,14 +12,14 @@ import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 
 /**
  * @title AccessControlView
  * @notice Permission view cache module: caches user permission bits and permission levels for frontend 0-gas queries.
  * @dev Reverts if:
  *      - registry is zero / not a contract (ZeroAddress / NotAContract)
- *      - caller is not authorized (AccessControlView__UnauthorizedAccess)
  *      - caller is not the AccessControlManager module (AccessControlView__OnlyACM)
  *
  * Security:
@@ -37,31 +35,28 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param user Target user address
      * @param actionKey Permission action key (bytes32)
      * @param hasPermission Whether the permission bit is granted
-     * @param timestamp Cache update timestamp (seconds since epoch)
+     * @param blockNumber Cache update blockNumber (block.number)
      */
     event PermissionDataUpdated(
         address indexed user,
         bytes32 indexed actionKey,
         bool hasPermission,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /**
      * @notice Emitted when a user's permission level is cached.
      * @param user Target user address
      * @param newLevel New permission level (IAccessControlManager.PermissionLevel)
-     * @param timestamp Cache update timestamp (seconds since epoch)
+     * @param blockNumber Cache update blockNumber (block.number)
      */
     event PermissionLevelUpdated(
         address indexed user,
         IAccessControlManager.PermissionLevel newLevel,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-
-    /// @notice Caller is not authorized to perform the requested read.
-    error AccessControlView__UnauthorizedAccess();
 
     /// @notice Caller must be the AccessControlManager module.
     error AccessControlView__OnlyACM();
@@ -77,22 +72,19 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev User permission level cache.
     mapping(address => IAccessControlManager.PermissionLevel) private _userPermissionLevelCache;
 
-    /// @dev Last cache update timestamp (seconds since epoch).
-    mapping(address => uint256) private _cacheTimestamps;
+    /// @dev Last cache update block (block.number).
+    mapping(address => uint256) private _cacheUpdateBlocks;
 
-    uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION;
+    uint256 private constant _CACHE_DURATION_BLOCKS = ViewConstants.CACHE_DURATION_BLOCKS;
 
     /*━━━━━━━━━━━━━━━ Access helpers ━━━━━━━━━━━━━━━*/
-
-    function _getUserPermission(address user) internal view returns (IAccessControlManager.PermissionLevel) {
-        return IAccessControlManager(_getACM()).getUserPermission(user);
-    }
-
-    /// @dev Only allows caller if they are the target user or have ADMIN permission level.
+    /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyAuthorizedFor(address targetUser) {
-        IAccessControlManager.PermissionLevel level = _getUserPermission(msg.sender);
-        if (level < IAccessControlManager.PermissionLevel.ADMIN && msg.sender != targetUser) {
-            revert AccessControlView__UnauthorizedAccess();
+        if (msg.sender != targetUser) {
+            bool ok =
+                ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                    || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+            if (!ok) revert MissingRole();
         }
         _;
     }
@@ -158,10 +150,9 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
         bool hasPermission
     ) external onlyValidRegistry onlyACM {
         _userPermissionsCache[user][actionKey] = hasPermission;
-        // solhint-disable-next-line not-rely-on-time
-        uint256 timestamp = block.timestamp;
-        _cacheTimestamps[user] = timestamp;
-        emit PermissionDataUpdated(user, actionKey, hasPermission, timestamp);
+        uint256 updateBlock = block.number;
+        _cacheUpdateBlocks[user] = updateBlock;
+        emit PermissionDataUpdated(user, actionKey, hasPermission, updateBlock);
         // Unified DataPush (for off-chain consumers)
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_PERMISSION_BIT_UPDATE,
@@ -186,10 +177,9 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
         IAccessControlManager.PermissionLevel newLevel
     ) external onlyValidRegistry onlyACM {
         _userPermissionLevelCache[user] = newLevel;
-        // solhint-disable-next-line not-rely-on-time
-        uint256 timestamp = block.timestamp;
-        _cacheTimestamps[user] = timestamp;
-        emit PermissionLevelUpdated(user, newLevel, timestamp);
+        uint256 updateBlock = block.number;
+        _cacheUpdateBlocks[user] = updateBlock;
+        emit PermissionLevelUpdated(user, newLevel, updateBlock);
         // Unified DataPush (for off-chain consumers)
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_PERMISSION_LEVEL_UPDATE,
@@ -214,153 +204,85 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Query whether a user has a specific permission bit.
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the target user and lacks ADMIN permission level (AccessControlView__UnauthorizedAccess)
-     *
-     * Security:
-     * - onlyAuthorizedFor modifier (only target user or ADMIN can query)
-     *
-     * @param user User address
-     * @param actionKey Action key (bytes32)
-     * @return hasPermission Whether the user has the permission
-     * @return isValid Whether the cache is valid (within CACHE_DURATION)
-     */
-    function getUserPermission(
-        address user,
-        bytes32 actionKey
-    ) external view onlyValidRegistry onlyAuthorizedFor(user) returns (bool hasPermission, bool isValid) {
-        hasPermission = _userPermissionsCache[user][actionKey];
-        isValid = _isCacheValid(_cacheTimestamps[user]);
-    }
-
-    /**
-     * @notice Query whether a user has a specific permission bit, with cache validity and timestamp
+     * @notice Query whether a user has a specific permission bit, with cache validity and blockNumber
      *         (B-class cache unified output format).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the target user and lacks ADMIN permission level (AccessControlView__UnauthorizedAccess)
+     *      - caller is not authorized to read `user` (Scheme U; see {onlyAuthorizedFor})
      *
      * Security:
-     * - onlyAuthorizedFor modifier (only target user or ADMIN can query)
+     * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
      *
      * @param user User address
      * @param actionKey Action key (bytes32)
      * @return hasPermission Whether the user has the permission
-     * @return isValid Whether the cache is valid (within CACHE_DURATION)
-     * @return timestamp Cache update timestamp (seconds since epoch)
+     * @return isValid Whether the cache is valid (within CACHE_DURATION_BLOCKS)
+     * @return blockNumber Cache update blockNumber (block.number)
      */
     function getUserPermissionWithMeta(address user, bytes32 actionKey)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (bool hasPermission, bool isValid, uint256 timestamp)
+        returns (bool hasPermission, bool isValid, uint256 blockNumber)
     {
-        timestamp = _cacheTimestamps[user];
+        blockNumber = _cacheUpdateBlocks[user];
         hasPermission = _userPermissionsCache[user][actionKey];
-        isValid = _isCacheValid(timestamp);
+        isValid = _isCacheValid(blockNumber);
     }
 
     /**
-     * @notice Query whether a user is an administrator.
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the target user and lacks ADMIN permission level (AccessControlView__UnauthorizedAccess)
-     *
-     * Security:
-     * - onlyAuthorizedFor modifier (only target user or ADMIN can query)
-     *
-     * @param user User address
-     * @return isAdmin Whether the user is an administrator
-     * @return isValid Whether the cache is valid (within CACHE_DURATION)
-     */
-    function isUserAdmin(
-        address user
-    ) external view onlyValidRegistry onlyAuthorizedFor(user) returns (bool isAdmin, bool isValid) {
-        isAdmin = _userPermissionsCache[user][ActionKeys.ACTION_ADMIN];
-        isValid = _isCacheValid(_cacheTimestamps[user]);
-    }
-
-    /**
-     * @notice Query whether a user is an administrator, with cache validity and timestamp
+     * @notice Query whether a user is an administrator, with cache validity and blockNumber
      *         (B-class cache unified output format).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the target user and lacks ADMIN permission level (AccessControlView__UnauthorizedAccess)
+     *      - caller is not authorized to read `user` (Scheme U; see {onlyAuthorizedFor})
      *
      * Security:
-     * - onlyAuthorizedFor modifier (only target user or ADMIN can query)
+     * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
      *
      * @param user User address
      * @return isAdmin Whether the user is an administrator
-     * @return isValid Whether the cache is valid (within CACHE_DURATION)
-     * @return timestamp Cache update timestamp (seconds since epoch)
+     * @return isValid Whether the cache is valid (within CACHE_DURATION_BLOCKS)
+     * @return blockNumber Cache update blockNumber (block.number)
      */
     function isUserAdminWithMeta(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (bool isAdmin, bool isValid, uint256 timestamp)
+        returns (bool isAdmin, bool isValid, uint256 blockNumber)
     {
-        timestamp = _cacheTimestamps[user];
+        blockNumber = _cacheUpdateBlocks[user];
         isAdmin = _userPermissionsCache[user][ActionKeys.ACTION_ADMIN];
-        isValid = _isCacheValid(timestamp);
+        isValid = _isCacheValid(blockNumber);
     }
 
     /**
-     * @notice Query a user's permission level.
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the target user and lacks ADMIN permission level (AccessControlView__UnauthorizedAccess)
-     *
-     * Security:
-     * - onlyAuthorizedFor modifier (only target user or ADMIN can query)
-     *
-     * @param user User address
-     * @return level Permission level (PermissionLevel enum)
-     * @return isValid Whether the cache is valid (within CACHE_DURATION)
-     */
-    function getUserPermissionLevel(
-        address user
-    )
-        external
-        view
-        onlyValidRegistry
-        onlyAuthorizedFor(user)
-        returns (IAccessControlManager.PermissionLevel level, bool isValid)
-    {
-        level   = _userPermissionLevelCache[user];
-        isValid = _isCacheValid(_cacheTimestamps[user]);
-    }
-
-    /**
-     * @notice Query a user's permission level, with cache validity and timestamp
+     * @notice Query a user's permission level, with cache validity and blockNumber
      *         (B-class cache unified output format).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the target user and lacks ADMIN permission level (AccessControlView__UnauthorizedAccess)
+     *      - caller is not authorized to read `user` (Scheme U; see {onlyAuthorizedFor})
      *
      * Security:
-     * - onlyAuthorizedFor modifier (only target user or ADMIN can query)
+     * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
      *
      * @param user User address
      * @return level Permission level (PermissionLevel enum)
-     * @return isValid Whether the cache is valid (within CACHE_DURATION)
-     * @return timestamp Cache update timestamp (seconds since epoch)
+     * @return isValid Whether the cache is valid (within CACHE_DURATION_BLOCKS)
+     * @return blockNumber Cache update blockNumber (block.number)
      */
     function getUserPermissionLevelWithMeta(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (IAccessControlManager.PermissionLevel level, bool isValid, uint256 timestamp)
+        returns (IAccessControlManager.PermissionLevel level, bool isValid, uint256 blockNumber)
     {
-        timestamp = _cacheTimestamps[user];
+        blockNumber = _cacheUpdateBlocks[user];
         level = _userPermissionLevelCache[user];
-        isValid = _isCacheValid(timestamp);
+        isValid = _isCacheValid(blockNumber);
     }
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
@@ -369,9 +291,9 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
     }
 
-    function _isCacheValid(uint256 timestamp) internal view returns (bool) {
-        // solhint-disable-next-line not-rely-on-time
-        return timestamp > 0 && block.timestamp - timestamp <= _CACHE_DURATION;
+    function _isCacheValid(uint256 updateBlock) internal view returns (bool) {
+        if (updateBlock == 0 || updateBlock > block.number) return false;
+        return block.number - updateBlock <= _CACHE_DURATION_BLOCKS;
     }
 
     /*━━━━━━━━━━━━━━━ UUPS upgradeability ━━━━━━━━━━━━━━━*/
@@ -391,7 +313,9 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation contract address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        IAccessControlManager(_getACM()).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }

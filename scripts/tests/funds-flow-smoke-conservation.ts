@@ -16,7 +16,20 @@ import {
 // If tokens flow to an untracked address, the test will fail and print the diff.
 
 const ONE_DAY = 24n * 60n * 60n;
+const ONE_HOUR_BLOCKS = 1_800n;
+const BLOCKS_PER_DAY = 43_200n;
 let cachedNonStableCollateral: string | null = null;
+
+async function latestBlockNumber(): Promise<bigint> {
+  return BigInt(await ethers.provider.getBlockNumber());
+}
+
+async function mineToBlock(targetBlock: bigint) {
+  const current = await latestBlockNumber();
+  if (targetBlock <= current) return;
+  const delta = targetBlock - current;
+  await ethers.provider.send("hardhat_mine", ["0x" + delta.toString(16)]);
+}
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -49,7 +62,7 @@ async function getOrDeployNonStableCollateral(deployer: any) {
   if (cachedNonStableCollateral) return cachedNonStableCollateral;
   const mockErc20Factory = await ethers.getContractFactory("MockERC20");
   // NOTE: constructor mints initialSupply to deployer (single-time mint at deployment); no further minting is used in flows.
-  const mock = await mockErc20Factory.deploy("MockWETH", "mWETH", ethers.parseUnits("1000000", 18));
+  const mock = await mockErc20Factory.deploy("MockWETH", "mWETH", 18, ethers.parseUnits("1000000", 18));
   await mock.waitForDeployment();
   cachedNonStableCollateral = mock.target as string;
   console.log(`  ℹ️  Deployed non-stable collateral token mWETH @ ${cachedNonStableCollateral}`);
@@ -209,11 +222,11 @@ async function mustRevert(label: string, p: Promise<any>, hints?: string[]) {
 async function getOrderForView(orderEngineAddr: string, orderId: bigint) {
   const orderEngineView = await ethers.getContractAt(
     [
-      "function _getLoanOrderForView(uint256) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startTimestamp,uint256 maturity,uint256 repaidAmount))",
+      "function getLoanOrderForView(uint256) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startTimestamp,uint256 maturity,uint256 repaidAmount))",
     ],
     orderEngineAddr
   );
-  return (await orderEngineView._getLoanOrderForView(orderId)) as {
+  return (await orderEngineView.getLoanOrderForView(orderId)) as {
     principal: bigint;
     rate: bigint;
     term: bigint;
@@ -293,10 +306,11 @@ async function createOrder(opts: {
   {
     const cfg = await po.getAssetConfig(usdc.target);
     if (!cfg.isActive) {
-      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600);
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
     }
   }
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+  const now = await latestBlockNumber();
   await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now);
   if (!(await feeRouter.isTokenSupported(usdc.target))) {
     await feeRouter.connect(deployer).addSupportedToken(usdc.target);
@@ -322,18 +336,18 @@ async function createOrder(opts: {
     }
 
     // Configure/update collateral oracle based on mode
-    const now2 = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const now2 = await latestBlockNumber();
     if (collateralPriceMode === "stale") {
-      await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 8, 1);
+      await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 18, 1);
       await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 8), now2 - 10);
     } else if (collateralPriceMode === "unreasonable") {
-      await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 8, 3600);
+      await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 18, 3600);
       await po.connect(deployer).updatePrice(collateralAssetAddr, 10n ** 13n, now2); // > 1e12 => unreasonable (GD path), PV will return 0 if getPrice reverts
     } else if (collateralPriceMode === "bad_decimals") {
       await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 4, 3600); // <6 triggers GD fallback in valuation paths that use GD
       await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 4), now2);
     } else {
-      await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 8, 3600);
+      await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 18, 3600);
       await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 8), now2);
     }
 
@@ -350,7 +364,7 @@ async function createOrder(opts: {
   const borrowAmt = ethers.parseUnits("500", 6);
   const termDays = 5;
   const rateBps = 1000n;
-  const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+  const expireAt = (await latestBlockNumber()) + ONE_HOUR_BLOCKS;
 
   const borrowIntent = {
     borrower: borrower.address,
@@ -589,10 +603,9 @@ async function createOrder(opts: {
 
   if (opts.makeOverdue) {
     // Make it overdue so liquidation path is available.
-    const termSec = BigInt(termDays) * ONE_DAY;
-    await ethers.provider.send("evm_increaseTime", [Number(termSec + 60n)]);
-    await ethers.provider.send("evm_mine", []);
-    const nowAfter = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const ord = await orderEngine.getLoanOrderForView(orderId);
+    await mineToBlock(BigInt(ord.maturity) + ONE_HOUR_BLOCKS);
+    const nowAfter = await latestBlockNumber();
     await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), nowAfter);
     if (useNonStableCollateral) {
       // Best-effort: refresh collateral price in fresh/unreasonable/bad_decimals modes (stale mode intentionally stays stale)
@@ -632,7 +645,7 @@ async function runOracleEdgeChecks() {
   if (!(await acm.hasRole(ACTION_SET_PARAMETER, deployer.address))) await acm.grantRole(ACTION_SET_PARAMETER, deployer.address);
 
   const mockErc20Factory = await ethers.getContractFactory("MockERC20");
-  const mock = await mockErc20Factory.deploy("MockWETH", "mWETH", ethers.parseUnits("1000000", 18));
+  const mock = await mockErc20Factory.deploy("MockWETH", "mWETH", 18, ethers.parseUnits("1000000", 18));
   await mock.waitForDeployment();
   const token = mock.target as string;
 
@@ -646,11 +659,11 @@ async function runOracleEdgeChecks() {
   const settlementToken = CONTRACT_ADDRESSES.MockUSDC;
   const cfg = await gd.createDefaultConfig(settlementToken);
   const amount = ethers.parseUnits("10", 18);
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+  const now = await latestBlockNumber();
   const expectedFallback = (amount * 5000n) / 10_000n; // conservativeRatio=50%
 
   // 1) Fresh price -> strict oracle ok, GD usedFallback=false.
-  await po.connect(deployer).configureAsset(token, "mock-weth", 8, 3600);
+  await po.connect(deployer).configureAsset(token, "mock-weth", 18, 3600);
   await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 8), now);
   const strict = await po.getPrice(token);
   if ((strict[0] as bigint) === 0n) throw new Error("[OracleEdge] strict getPrice returned zero price unexpectedly");
@@ -658,7 +671,7 @@ async function runOracleEdgeChecks() {
   if (rFresh.usedFallback) throw new Error(`[OracleEdge] expected usedFallback=false for fresh price, got reason=${rFresh.reason}`);
 
   // 2) Stale price -> strict oracle should revert, GD should fallback to conservative value.
-  await po.connect(deployer).configureAsset(token, "mock-weth", 8, 1); // maxPriceAge = 1 sec
+  await po.connect(deployer).configureAsset(token, "mock-weth", 18, 1); // maxPriceAge = 1 sec
   await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 8), now - 10);
   await mustRevert("OracleEdge.strictStale", po.getPrice(token), ["StalePrice", "PriceOracle__StalePrice"]);
   const rStale = await gd.getAssetValueWithFallback(po.target, token, amount, cfg);
@@ -669,7 +682,7 @@ async function runOracleEdgeChecks() {
   }
 
   // 3) Unreasonable price -> GD should fallback (maxReasonablePrice default is 1e12).
-  await po.connect(deployer).configureAsset(token, "mock-weth", 8, 3600);
+  await po.connect(deployer).configureAsset(token, "mock-weth", 18, 3600);
   await po.connect(deployer).updatePrice(token, 10n ** 13n, now); // > 1e12 => unreasonable
   const rUnreasonable = await gd.getAssetValueWithFallback(po.target, token, amount, cfg);
   if (!rUnreasonable.usedFallback || (rUnreasonable.value as bigint) !== expectedFallback) {
@@ -678,9 +691,10 @@ async function runOracleEdgeChecks() {
     );
   }
 
-  // 4) Invalid decimals (<6) -> GD should fallback.
+  // 4) Invalid decimals (<6) -> strict oracle config allows it, but GD should treat it as invalid and fallback.
+  // SSOT: oracle.getPrice().decimals is token decimals (assetDecimals), not price precision.
   await po.connect(deployer).configureAsset(token, "mock-weth", 4, 3600);
-  await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 4), now);
+  await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 8), now);
   const rBadDecimals = await gd.getAssetValueWithFallback(po.target, token, amount, cfg);
   if (!rBadDecimals.usedFallback || (rBadDecimals.value as bigint) !== expectedFallback) {
     throw new Error(

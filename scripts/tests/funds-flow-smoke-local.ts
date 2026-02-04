@@ -594,7 +594,7 @@ async function main() {
   }
 
   const orderEngineIface = new ethers.Interface([
-    "function _getLoanOrderForView(uint256) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startTimestamp,uint256 maturity,uint256 repaidAmount))",
+    "function getLoanOrderForView(uint256) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startBlock,uint256 maturity,uint256 repaidAmount))",
   ]);
   const loanNftIface = new ethers.Interface([
     "function getUserTokens(address user) view returns (uint256[])",
@@ -621,8 +621,8 @@ async function main() {
   const riskIface = new ethers.Interface(["function isLiquidatable(address user) view returns (bool)"]);
   const pvIface = new ethers.Interface(["function getAssetValue(address asset, uint256 amount) view returns (uint256)"]);
   const poIface = new ethers.Interface([
-    "function getPrice(address asset) view returns (uint256 price, uint256 timestamp, uint256 decimals)",
-    "function getPriceData(address asset) view returns (tuple(uint256 price,uint256 timestamp,uint256 decimals,bool isValid))",
+    "function getPrice(address asset) view returns (uint256 price, uint256 blockNumber, uint256 assetDecimals)",
+    "function getPriceData(address asset) view returns (tuple(uint256 price,uint256 blockNumber,uint256 decimals,bool isValid))",
     "function getAssetConfig(address asset) view returns (tuple(string coingeckoId,uint256 decimals,bool isActive,uint256 maxPriceAge))",
     "function isPriceValid(address asset) view returns (bool)",
   ]);
@@ -661,7 +661,7 @@ async function main() {
     settlementManagerAddr,
     orderEngineAddr,
     orderEngineIface,
-    "_getLoanOrderForView",
+    "getLoanOrderForView",
     [orderId]
   );
   if (!orderRes.ok) {
@@ -682,7 +682,7 @@ async function main() {
     borrower: string;
     lender: string;
     asset: string;
-    startTimestamp: bigint;
+    startBlock: bigint;
     maturity: bigint;
     repaidAmount: bigint;
   };
@@ -753,12 +753,12 @@ async function main() {
   if (!latestBlock) {
     throw new Error("[StrictCheck] Latest block is null; cannot compute price age.");
   }
-  const nowTs = BigInt(latestBlock.timestamp);
+  const nowBlock = BigInt(latestBlock.number);
   const debt = (requireOk(debtRes, "LendingEngine.getDebt")[0] ?? 0n) as bigint;
   const reducibleDebt = (requireOk(reducibleRes, "LendingEngine.getReducibleDebtAmount")[0] ?? 0n) as bigint;
   const debtValue = (requireOk(debtValueRes, "LendingEngine.calculateDebtValue")[0] ?? 0n) as bigint;
   const totalDebtValue = (requireOk(totalDebtValueRes, "LendingEngine.getUserTotalDebtValue")[0] ?? 0n) as bigint;
-  const overdue = nowTs > order.maturity && debt > 0n;
+  const overdue = nowBlock > order.maturity && debt > 0n;
   if (loanNftAddr === ethers.ZeroAddress) {
     throw new Error("[StrictCheck] LoanNFT is not registered; cannot validate order/ledger consistency.");
   }
@@ -796,8 +796,8 @@ async function main() {
     const orderRes = await tryCallAs(
       settlementManagerAddr,
       orderEngineAddr,
-      orderEngineIface,
-      "_getLoanOrderForView",
+    orderEngineIface,
+    "getLoanOrderForView",
       [meta.loanId]
     );
     if (!orderRes.ok) continue;
@@ -931,7 +931,7 @@ async function main() {
           maxPriceAge: bigint;
         };
         const coingeckoId = cfg.coingeckoId ?? "";
-        const decimals = cfg.decimals ?? 0n;
+        const decimals = cfg.assetDecimals ?? 0n;
         const isActive = cfg.isActive ?? false;
         const maxPriceAge = cfg.maxPriceAge ?? 0n;
         console.log(
@@ -951,27 +951,27 @@ async function main() {
       if (dataRes.ok) {
         const data = (dataRes.decoded.length === 1 ? dataRes.decoded[0] : dataRes.decoded) as {
           price: bigint;
-          timestamp: bigint;
+          blockNumber: bigint;
           decimals: bigint;
           isValid: boolean;
         };
         const price = data.price ?? 0n;
-        const ts = data.timestamp ?? 0n;
+        const blockNumber = data.blockNumber ?? 0n;
         const decimals = data.decimals ?? 0n;
         const isValid = data.isValid ?? false;
         console.log(
-          `  - price data ${shortAddr(asset)}: price=${price.toString()} decimals=${decimals.toString()} ts=${ts.toString()} valid=${isValid}`
+          `  - price data ${shortAddr(asset)}: price=${price.toString()} decimals=${decimals.toString()} block=${blockNumber.toString()} valid=${isValid}`
         );
-        const age = nowTs > ts ? nowTs - ts : 0n;
-        console.log(`  - price age ${shortAddr(asset)}: ${age.toString()}s`);
+        const ageBlocks = nowBlock > blockNumber ? nowBlock - blockNumber : 0n;
+        console.log(`  - price age ${shortAddr(asset)}: ${ageBlocks.toString()} blocks`);
       } else {
         console.log(`  - price data read failed for ${shortAddr(asset)}: ${dataRes.decoded}`);
         if (dataRes.raw) console.log(`    raw: ${dataRes.raw}`);
       }
       if (priceRes.ok) {
-        const [price, ts, decimals] = priceRes.decoded as [bigint, bigint, bigint];
+        const [price, blockNumber, decimals] = priceRes.decoded as [bigint, bigint, bigint];
         console.log(
-          `  - price ${shortAddr(asset)}: price=${price.toString()} decimals=${decimals.toString()} ts=${ts.toString()}`
+          `  - price ${shortAddr(asset)}: price=${price.toString()} decimals=${decimals.toString()} block=${blockNumber.toString()}`
         );
       } else {
         console.log(`  - price read failed for ${shortAddr(asset)}: ${priceRes.decoded}`);

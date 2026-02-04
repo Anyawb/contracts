@@ -22,9 +22,9 @@ interface LoanEvents {
      * @param user User address
      * @param asset Guarantee asset address
      * @param amount Locked amount (token decimals)
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Emission time-axis marker (blockNumber)
      */
-    event GuaranteeLocked(address indexed user, address indexed asset, uint256 amount, uint256 timestamp);
+    event GuaranteeLocked(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber);
 
     /**
      * @notice Emitted when a guarantee amount is released.
@@ -37,9 +37,9 @@ interface LoanEvents {
      * @param user User address
      * @param asset Guarantee asset address
      * @param amount Released amount (token decimals)
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Emission time-axis marker (blockNumber)
      */
-    event GuaranteeReleased(address indexed user, address indexed asset, uint256 amount, uint256 timestamp);
+    event GuaranteeReleased(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber);
 
     /**
      * @notice Emitted when a guarantee amount is forfeited (e.g., penalty/fee distribution).
@@ -53,13 +53,13 @@ interface LoanEvents {
      * @param asset Guarantee asset address
      * @param amount Forfeited amount (token decimals)
      * @param feeReceiver Receiver of the forfeited funds
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Emission time-axis marker (blockNumber)
      */
     event GuaranteeForfeited(
         address indexed user,
         address indexed asset,
         uint256 amount,
         address indexed feeReceiver,
-        uint256 timestamp
+        uint256 blockNumber
     );
 }

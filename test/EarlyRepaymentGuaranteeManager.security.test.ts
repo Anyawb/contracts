@@ -14,7 +14,7 @@ import hardhat from 'hardhat';
 const { ethers, upgrades } = hardhat;
 import { expect } from 'chai';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, mine } from '@nomicfoundation/hardhat-network-helpers';
 
 // 导入合约类型
 import type { EarlyRepaymentGuaranteeManager } from '../../types/contracts/Vault/modules/EarlyRepaymentGuaranteeManager';
@@ -36,6 +36,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
   const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
   const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER'));
   const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE'));
+  const BLOCKS_PER_DAY = 7200;
 
   // 合约实例
   let earlyRepaymentGuaranteeManager: EarlyRepaymentGuaranteeManager;
@@ -60,7 +61,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
 
     // 部署 Mock 合约
     const MockERC20Factory = await ethers.getContractFactory('MockERC20');
-    const mockToken = (await MockERC20Factory.deploy('Mock Token', 'MTK', LARGE_SUPPLY)) as MockERC20;
+    const mockToken = (await MockERC20Factory.deploy('Mock Token', 'MTK', 18, LARGE_SUPPLY)) as MockERC20;
     await mockToken.waitForDeployment();
 
     const MockRegistryFactory = await ethers.getContractFactory('MockRegistry');
@@ -193,9 +194,8 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
           TEST_TERM_DAYS
         );
 
-        // 模拟时间经过
-        await ethers.provider.send('evm_increaseTime', [15 * 24 * 3600]); // 15天
-        await ethers.provider.send('evm_mine', []);
+        // Time-Dependency-Refactor: advance by blocks (not wall-clock seconds).
+        await mine(15 * BLOCKS_PER_DAY);
 
         // 预览提前还款
         const result = await earlyRepaymentGuaranteeManager.previewEarlyRepayment(1, TEST_AMOUNT);
@@ -493,9 +493,9 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
         TEST_TERM_DAYS
       );
 
-      // 模拟极长时间经过
-      await ethers.provider.send('evm_increaseTime', [365 * 24 * 3600]); // 1年
-      await ethers.provider.send('evm_mine', []);
+      // Time-Dependency-Refactor: advance beyond maturity by blocks (not wall-clock seconds).
+      // Term is TEST_TERM_DAYS; mining termDays+1 ensures we are "past maturity" on a blocks-per-day axis.
+      await mine(TEST_TERM_DAYS * BLOCKS_PER_DAY + 1);
 
       // 应该仍然能正常处理
       await expect(

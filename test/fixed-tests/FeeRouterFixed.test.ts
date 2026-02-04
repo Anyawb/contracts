@@ -41,7 +41,7 @@ describe('FeeRouter – 修复版费率管理测试', function () {
     // 部署 MockERC20 代币 - 增加初始供应量
     const mockTokenFactory = await ethers.getContractFactory('MockERC20');
     const initialSupply = ethers.parseUnits('1000000', 6); // 100万代币
-    const mockToken = await mockTokenFactory.deploy('Mock USDC', 'USDC', initialSupply);
+    const mockToken = await mockTokenFactory.deploy('Mock USDC', 'USDC', 6, initialSupply);
     await mockToken.waitForDeployment();
     
     // 部署 FeeRouter

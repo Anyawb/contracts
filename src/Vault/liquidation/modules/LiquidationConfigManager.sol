@@ -51,9 +51,10 @@ abstract contract LiquidationConfigManager is
 
     /* ============ Constants ============ */
     
-    /// @notice Maximum cache validity period for module addresses (in seconds)
-    /// @dev Maximum validity period for module address cache, must be refreshed from Registry after this time
-    uint256 public constant CACHE_MAX_AGE = 1 days;
+    /// @notice Maximum cache validity period for module addresses (in blocks).
+    /// @dev Time-Dependency-Refactor SSOT: cache aging is block-based (block.number).
+    ///      Baseline assumes ~12s per block, so 1 day ≈ 7200 blocks.
+    uint256 public constant CACHE_MAX_AGE = 7200;
 
     /* ============ Storage ============ */
     
@@ -83,6 +84,11 @@ abstract contract LiquidationConfigManager is
     /// @dev Governance-managed parameter; used as a shared safety bound across risk/settlement flows.
     uint256 public minHealthFactorVar;
 
+    /// @notice Maximum loan-to-value (LTV) in basis points (bps=1e4).
+    /// @dev Governance-managed, system-scoped parameter; Preview/risk modules MUST read via SSOT
+    ///      (preferably `SystemRiskView.getMaxLtvBps()`).
+    uint256 public maxLtvBpsVar;
+
     /**
      * @notice Get Registry address (naming follows architecture conventions)
      * @return registryAddr Registry contract address
@@ -95,6 +101,9 @@ abstract contract LiquidationConfigManager is
     /// @notice Invalid minimum health factor (must be >= liquidationThresholdVar and non-zero)
     error LiquidationConfigManager__InvalidMinHealthFactor();
 
+    /// @notice Invalid maximum LTV (must be non-zero and <= 10_000 bps).
+    error LiquidationConfigManager__InvalidMaxLtvBps();
+
     /// @notice Unauthorized caller for cache refresh (CacheMaintenanceManager-only).
     error LiquidationConfigManager__UnauthorizedAccess();
 
@@ -103,35 +112,43 @@ abstract contract LiquidationConfigManager is
     /**
      * @notice System paused event
      * @param pauser Address that executed the pause
-     * @param timestamp Pause timestamp (in seconds)
+     * @param blockNumber Pause block number (block.number)
      * @dev Follows event naming convention: PascalCase, past tense
      * @dev Emitted when the system is emergency paused, for off-chain monitoring and auditing
      */
-    event SystemPaused(address indexed pauser, uint256 timestamp);
+    event SystemPaused(address indexed pauser, uint256 blockNumber);
 
     /**
      * @notice System unpaused event
      * @param unpauser Address that executed the unpause
-     * @param timestamp Unpause timestamp (in seconds)
+     * @param blockNumber Unpause block number (block.number)
      * @dev Follows event naming convention: PascalCase, past tense
      * @dev Emitted when the system resumes from paused state, for off-chain monitoring and auditing
      */
-    event SystemUnpaused(address indexed unpauser, uint256 timestamp);
+    event SystemUnpaused(address indexed unpauser, uint256 blockNumber);
 
     /**
      * @notice Minimum health factor updated event
      * @param oldMinHealthFactor Old minimum health factor (bps=1e4)
      * @param newMinHealthFactor New minimum health factor (bps=1e4)
-     * @param timestamp Update timestamp (in seconds)
+     * @param blockNumber Update block number (block.number)
      */
-    event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 timestamp);
+    event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 blockNumber);
+
+    /**
+     * @notice Maximum LTV updated event.
+     * @param oldMaxLtvBps Old maximum LTV (bps=1e4)
+     * @param newMaxLtvBps New maximum LTV (bps=1e4)
+     * @param blockNumber Update block number (block.number)
+     */
+    event MaxLtvBpsUpdated(uint256 oldMaxLtvBps, uint256 newMaxLtvBps, uint256 blockNumber);
 
     /**
      * @notice Emitted when module cache is refreshed via maintenance manager.
      * @param caller Caller that performed refresh (should be CacheMaintenanceManager)
-     * @param timestamp Refresh timestamp (in seconds)
+     * @param blockNumber Refresh block number (block.number)
      */
-    event ModuleCacheRefreshed(address indexed caller, uint256 timestamp);
+    event ModuleCacheRefreshed(address indexed caller, uint256 blockNumber);
 
     /* ============ Constructor ============ */
     
@@ -190,6 +207,7 @@ abstract contract LiquidationConfigManager is
         liquidationBonusRateVar = LiquidationTypes.DEFAULT_LIQUIDATION_BONUS;
         liquidationThresholdVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
         minHealthFactorVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
+        maxLtvBpsVar = LiquidationTypes.DEFAULT_MAX_LTV_BPS;
 
         // Prime commonly-used module cache entries (best-effort).
         _refreshModuleCacheBestEffort();
@@ -264,8 +282,7 @@ abstract contract LiquidationConfigManager is
         );
         if (msg.sender != maint) revert LiquidationConfigManager__UnauthorizedAccess();
         _refreshModuleCacheBestEffort();
-        // solhint-disable-next-line not-rely-on-time
-        emit ModuleCacheRefreshed(msg.sender, block.timestamp);
+        emit ModuleCacheRefreshed(msg.sender, block.number);
     }
 
     /**
@@ -384,6 +401,14 @@ abstract contract LiquidationConfigManager is
     }
 
     /**
+     * @notice Get maximum LTV.
+     * @return maxLtvBps Maximum LTV (bps=1e4)
+     */
+    function getMaxLtvBps() external view returns (uint256 maxLtvBps) {
+        return maxLtvBpsVar;
+    }
+
+    /**
      * @notice Update minimum health factor.
      * @dev Reverts if:
      *      - caller does not have ACTION_SET_PARAMETER role
@@ -401,8 +426,28 @@ abstract contract LiquidationConfigManager is
         }
         uint256 old = minHealthFactorVar;
         minHealthFactorVar = newMinHealthFactor;
-        // solhint-disable-next-line not-rely-on-time
-        emit MinHealthFactorUpdated(old, newMinHealthFactor, block.timestamp);
+        emit MinHealthFactorUpdated(old, newMinHealthFactor, block.number);
+    }
+
+    /**
+     * @notice Update maximum LTV.
+     * @dev Reverts if:
+     *      - caller does not have ACTION_SET_PARAMETER role
+     *      - newMaxLtvBps is zero
+     *      - newMaxLtvBps > 10_000 bps
+     *
+     * Security:
+     * - Role-gated (ACTION_SET_PARAMETER)
+     *
+     * @param newMaxLtvBps New maximum LTV (bps=1e4)
+     */
+    function updateMaxLtvBps(uint256 newMaxLtvBps) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        if (!LiquidationTypes.isValidMaxLtvBps(newMaxLtvBps)) {
+            revert LiquidationConfigManager__InvalidMaxLtvBps();
+        }
+        uint256 old = maxLtvBpsVar;
+        maxLtvBpsVar = newMaxLtvBps;
+        emit MaxLtvBpsUpdated(old, newMaxLtvBps, block.number);
     }
 
     /* ============ Query Functions ============ */
@@ -468,8 +513,7 @@ abstract contract LiquidationConfigManager is
      */
     function emergencyPause() external onlyRole(ActionKeys.ACTION_LIQUIDATE) {
         _pause();
-        // solhint-disable-next-line not-rely-on-time
-        emit SystemPaused(msg.sender, block.timestamp);
+        emit SystemPaused(msg.sender, block.number);
     }
 
     /**
@@ -483,8 +527,7 @@ abstract contract LiquidationConfigManager is
      */
     function emergencyUnpause() external onlyRole(ActionKeys.ACTION_LIQUIDATE) {
         _unpause();
-        // solhint-disable-next-line not-rely-on-time
-        emit SystemUnpaused(msg.sender, block.timestamp);
+        emit SystemUnpaused(msg.sender, block.number);
     }
 
     /**
@@ -564,8 +607,7 @@ abstract contract LiquidationConfigManager is
 
         address old = _moduleCache.moduleAddresses[key];
         _moduleCache.moduleAddresses[key] = addr;
-        // solhint-disable-next-line not-rely-on-time
-        _moduleCache.cacheTimestamps[key] = block.timestamp;
+        _moduleCache.cacheBlocks[key] = block.number;
 
         if (old != addr) {
             emit RegistryEvents.ModuleCacheUpdated(key, old, addr);
@@ -575,12 +617,10 @@ abstract contract LiquidationConfigManager is
     /// @dev Best-effort cache lookup; falls back to Registry without updating cache.
     function _getModuleViewBestEffort(bytes32 key) internal view returns (address moduleAddr) {
         moduleAddr = _moduleCache.moduleAddresses[key];
-        uint256 ts = _moduleCache.cacheTimestamps[key];
-        if (moduleAddr != address(0) && ts != 0) {
-            // solhint-disable-next-line not-rely-on-time
-            if (block.timestamp < ts) return moduleAddr;
-            // solhint-disable-next-line not-rely-on-time
-            if (block.timestamp - ts <= CACHE_MAX_AGE) return moduleAddr;
+        uint256 cacheBlock = _moduleCache.cacheBlocks[key];
+        if (moduleAddr != address(0) && cacheBlock != 0) {
+            // block.number is monotonic; treat cache as valid if within age blocks.
+            if (block.number - cacheBlock <= CACHE_MAX_AGE) return moduleAddr;
         }
 
         address fromReg = Registry(_registryAddr).getModule(key);
@@ -588,5 +628,5 @@ abstract contract LiquidationConfigManager is
     }
 
     // ============ Storage Gap ============
-    uint256[50] private __gap;
+    uint256[49] private __gap;
 } 

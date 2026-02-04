@@ -6,10 +6,15 @@ pragma solidity ^0.8.20;
  * @notice Lightweight library for reserving, cancelling, and consuming lender funds (state-only; no transfers).
  * @dev Storage MUST be declared in the caller contract (e.g., `mapping(bytes32 => LendReserve)`), and this library
  *      only reads/writes that storage.
+ *
+ * Reverts if:
+ * - (none; see per-function notes)
+ *
+ * Security:
+ * - Stateless library; does not perform external calls.
  */
 library SettlementReserveLib {
     /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
-    // solhint-disable-next-line gas-struct-packing
     struct LendReserve {
         address lender; // Lender address
         address asset; // Reserved asset (ERC20)

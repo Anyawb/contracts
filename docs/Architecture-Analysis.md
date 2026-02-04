@@ -81,7 +81,7 @@ Architecture-Guide.md 文档中的代码示例使用**字符串类型**操作标
 ```solidity
 // 文档中显示：使用 "DEPOSIT"、"BORROW" 字符串类型
 function deposit(address asset, uint256 amount) external {
-    IVaultRouter(viewContractAddrVar).processUserOperation(msg.sender, "DEPOSIT", asset, amount, block.timestamp);
+    IVaultRouter(viewContractAddrVar).processUserOperation(msg.sender, "DEPOSIT", asset, amount, block.number);
 }
 ```
 
@@ -89,7 +89,7 @@ function deposit(address asset, uint256 amount) external {
 ```solidity
 // 实际使用 ActionKeys.ACTION_DEPOSIT (bytes32 类型)
 function deposit(address asset, uint256 amount) external {
-    IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.timestamp);
+    IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.number);
 }
 ```
 
@@ -340,7 +340,7 @@ mapping(address => mapping(address => uint256)) private _userCollateralV2; // �
      - `schemaVersion`：缓存/输出结构版本（字段/编码/解释变化时递增）
      - 存储变量仍必须遵循 **append-only**（仅追加到 `__gap` 之前并缩减 `__gap`），避免破坏布局
    - **A：关键模块显式 V2/V3（外部依赖强时）**：
-     - 例如保留旧事件/旧入口，并新增 `*V2` 事件携带新字段（如 `timestamp/version`），实现平滑迁移
+     - 例如保留旧事件/旧入口，并新增 `*V2` 事件携带新字段（如 `blockNumber/version`），实现平滑迁移
      - 对写入型缓存接口，结合 `nextVersion/requestId/seq` 做并发与幂等控制，避免乱序/重复覆盖
 
 ### 7. VaultLendingEngine 规模过大 ⚠️ **高风险** ✅ 已验证
@@ -557,7 +557,7 @@ bytes32 internal constant STORAGE_SLOT = keccak256("registry.storage.v1");
     - **模块缺失场景**（3个用例）：
       - 验证 CollateralManager 未注册时应回滚
       - 验证 LendingEngine 未注册时应回滚
-      - 验证 LiquidationView 未注册时应回滚
+      - 验证 LiquidatorView（`LIQUIDATION_VIEW`）未注册时应回滚
     - **成功清算后的状态验证**（2个用例）：
       - 验证成功清算后正确更新抵押和债务
       - 验证成功清算后发出事件
@@ -765,7 +765,7 @@ LendingEngine 内部：
   - 允许的唯一路径：`LendingEngine` → `RewardManager.onLoanEvent(uint256)` → `RewardManagerCore.onLoanEvent(uint256)`
   - `RewardManagerCore.onLoanEvent` / `onBatchLoanEvents` 必须拒绝任何非 `RewardManager` 的直接调用：
     - revert：`RewardManagerCore__UseRewardManagerEntry`
-    - event：`DeprecatedDirectEntryAttempt(caller,timestamp)`（供链下审计）
+    - event：`DeprecatedDirectEntryAttempt(caller,blockNumber)`（供链下审计）
 - **代码级检查（grep/CI 可执行）**
   - 全仓库不应出现除 `src/Reward/RewardManager.sol` 之外的：
     - `RewardManagerCore(...).onLoanEvent(` / `RewardManagerCore(...).onBatchLoanEvents(`
@@ -848,7 +848,7 @@ function _notifyRewardManager(LendingEngineStorage.Layout storage s, address use
     hfBps,
     minHFBps,
     under,
-    block.timestamp
+    block.number
 ));
 ok; // silence  <-- 显式忽略返回值
 ```

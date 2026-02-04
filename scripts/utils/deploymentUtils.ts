@@ -11,7 +11,7 @@ export interface DeploymentInfo {
   transactionHash: string;
   blockNumber: number;
   gasUsed: string;
-  timestamp: number;
+  deployedAtMs: number;
 }
 
 export interface DeploymentConfig {
@@ -56,7 +56,7 @@ export async function deployContract(
     transactionHash: deployment.hash,
     blockNumber: receipt!.blockNumber,
     gasUsed: receipt!.gasUsed.toString(),
-    timestamp: Math.floor(Date.now() / 1000)
+    deployedAtMs: Date.now()
   };
   
   console.log(`✅ ${contractName} 部署成功: ${address}`);
@@ -136,7 +136,7 @@ export function saveDeploymentConfig(
   const deploymentData = {
     config,
     results,
-    timestamp: Math.floor(Date.now() / 1000)
+    generatedAtMs: Date.now()
   };
   
   fs.writeFileSync(filePath, JSON.stringify(deploymentData, null, 2));

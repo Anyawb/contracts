@@ -10,68 +10,79 @@ import { ActionKeys } from "../constants/ActionKeys.sol";
 import { InvalidHealthFactor, NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 
-/* -------------------------------------------------------------------------- */
-/*                                Interfaces                                 */
-/* -------------------------------------------------------------------------- */
+/*━━━━━━━━━━━━━━━ Interfaces ━━━━━━━━━━━━━━━*/
 /// @dev Minimal governance interface; keeps this file decoupled from full implementations.
 import { ILiquidationConfigManager } from "../interfaces/ILiquidationConfigManager.sol";
 
 /**
  * @title VaultAdmin
- * @notice Minimal governance entrypoint for Vault-level parameter dispatch.
+ * @notice Governance-gated dispatch surface for Vault-level parameter updates.
  * @dev Architecture SSOT:
  * - Parameter SSOT is owned by dedicated modules (e.g., LiquidationConfigManager).
- * - VaultAdmin exists to provide a stable, governance-gated dispatch surface.
+ * - VaultAdmin exists to provide a stable entrypoint that forwards to SSOT modules.
  *
  * Security:
  * - UUPS upgradeable (implementation disables initializers).
- * - All governance methods are role-gated via ACM (ActionKeys).
+ * - Governance methods are role-gated via ACM `ActionKeys` (resolved through `Registry`).
  */
 contract VaultAdmin is 
     Initializable,
     UUPSUpgradeable
 {
-    /* ============ Errors ============ */
-    
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
+
+    /// @dev Reverts when `newImplementation` is not a deployed contract (code length is zero).
+    ///      Used by {_authorizeUpgrade}.
     error VaultAdmin__InvalidImplementation();
-    /* ============ Constructor ============ */
+
+    /*━━━━━━━━━━━━━━━ Constructor ━━━━━━━━━━━━━━━*/
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /* ============ Storage ============ */
-    /// @dev Registry address (authoritative module registry).
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
+    /// @dev Registry address (authoritative module registry). Set once in {initialize}.
     address private _adminRegistryAddr;
 
-    /* ============ Modifiers ============ */
-    
-    /// @notice Ensure Registry is configured.
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+
+    /// @notice Ensures the Registry is configured and is a contract.
+    /// @dev Reverts if:
+    ///      - Registry is unset (see {ZeroAddress})
+    ///      - Registry has no code (see {NotAContract})
     modifier onlyValidRegistry() {
         if (_adminRegistryAddr == address(0)) revert ZeroAddress();
         if (_adminRegistryAddr.code.length == 0) revert NotAContract(_adminRegistryAddr);
         _;
     }
 
-    /// @notice Enforce that caller has a required role in ACM.
+    /// @notice Ensures the caller has `actionKey` in the ACM.
+    /// @dev Reverts if:
+    ///      - Registry is unset or invalid (see notes in {onlyValidRegistry})
+    ///      - Registry missing `ModuleKeys.KEY_ACCESS_CONTROL` (reverts in {IRegistry.getModuleOrRevert})
+    ///      - caller lacks `actionKey` (reverts in {IAccessControlManager.requireRole})
     modifier onlyRole(bytes32 actionKey) {
         _requireRole(actionKey, msg.sender);
         _;
     }
 
-    /* ============ Events ============ */
-    
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    // NOTE: This contract emits {SystemEvents.ActionExecuted} for auditability.
 
-    /* ============ Initializer ============ */
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Initialize VaultAdmin.
+     * @notice Initializes the VaultAdmin with an authoritative Registry address.
      * @dev Reverts if:
-     *      - initialRegistryAddr == address(0)
+     *      - called more than once (initializer)
+     *      - `initialRegistryAddr` is zero (see {ZeroAddress})
+     *      - `initialRegistryAddr` has no code (see {NotAContract})
      *
      * Security:
      * - initializer (callable once)
+     * - Sets the Registry used to resolve ACM and SSOT modules.
      *
-     * @param initialRegistryAddr Registry contract address
+     * @param initialRegistryAddr The Registry contract address.
      */
     function initialize(
         address initialRegistryAddr
@@ -84,7 +95,7 @@ contract VaultAdmin is
         _adminRegistryAddr = initialRegistryAddr;
     }
 
-    /* ============ Registry resolution helpers ============ */
+    /*━━━━━━━━━━━━━━━ Registry resolution helpers ━━━━━━━━━━━━━━━*/
     /// @dev Resolve a module address via Registry (reverts if not registered).
     function _getModule(bytes32 moduleKey) internal view returns (address) {
         return IRegistry(_adminRegistryAddr).getModuleOrRevert(moduleKey);
@@ -102,40 +113,42 @@ contract VaultAdmin is
             actionKey,
             "",
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
-    /* ============ 只读 Getter 函数 ============ */
+    /*━━━━━━━━━━━━━━━ View functions ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Get Registry address.
+     * @notice Returns the configured Registry address.
      * @dev Reverts if:
      *      - (none)
      *
      * Security:
      * - View-only function.
      *
-     * @return registryAddr Registry contract address
+     * @return registryAddr The Registry contract address.
      */
     function getRegistryAddr() external view returns (address) {
         return _adminRegistryAddr;
     }
 
-    /* ============ 核心业务函数 ============ */
+    /*━━━━━━━━━━━━━━━ Governance actions ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Set the minimum health factor (bps).
+     * @notice Updates the system-wide minimum health factor, in basis points.
      * @dev Reverts if:
-     *      - Registry is not configured
-     *      - caller does not have ACTION_SET_PARAMETER role
-     *      - hf is zero or out of allowed range
-     *      - LiquidationConfigManager is not registered
-     *      - LiquidationConfigManager.updateMinHealthFactor reverts
+     *      - Registry is unset (see {ZeroAddress}) or has no code (see {NotAContract})
+     *      - caller lacks `ActionKeys.ACTION_SET_PARAMETER` (reverts in {IAccessControlManager.requireRole})
+     *      - Registry missing `ModuleKeys.KEY_ACCESS_CONTROL` (reverts in {IRegistry.getModuleOrRevert})
+     *      - `hf` is outside \(1..20000\) bps (see {InvalidHealthFactor})
+     *      - Registry missing `ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER` (reverts in {IRegistry.getModuleOrRevert})
+     *      - Registry resolves `ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER` to zero (see {ZeroAddress})
+     *      - SSOT module call reverts in {ILiquidationConfigManager.updateMinHealthFactor}
      *
      * Security:
-     * - Role-gated via ACM (ActionKeys.ACTION_SET_PARAMETER)
+     * - Role-gated via ACM (`ActionKeys.ACTION_SET_PARAMETER`) resolved through `Registry`.
+     * - Emits {SystemEvents.ActionExecuted} for auditability.
      *
-     * @param hf New minimum health factor in basis points (bps, 10000 = 100%)
+     * @param hf The new minimum health factor in basis points (bps). \(10000 = 100%\).
      */
     function setMinHealthFactor(uint256 hf) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (!(hf > 0 && hf <= 20_000)) revert InvalidHealthFactor();
@@ -151,18 +164,21 @@ contract VaultAdmin is
 
     // Intentionally minimal: other parameters should be managed by their SSOT modules.
 
-    /* ============ Upgrade Auth ============ */
+    /*━━━━━━━━━━━━━━━ Upgrade auth ━━━━━━━━━━━━━━━*/
     /**
-     * @notice UUPS upgrade authorization hook.
+     * @notice Authorizes an implementation upgrade (UUPS).
      * @dev Reverts if:
-     *      - caller does not have ACTION_UPGRADE_MODULE role
-     *      - newImplementation == address(0)
-     *      - newImplementation has no code
+     *      - Registry is unset/invalid, or missing `ModuleKeys.KEY_ACCESS_CONTROL`
+     *        (reverts in {IRegistry.getModuleOrRevert})
+     *      - caller lacks `ActionKeys.ACTION_UPGRADE_MODULE` (reverts in {IAccessControlManager.requireRole})
+     *      - `newImplementation` is zero (see {ZeroAddress})
+     *      - `newImplementation` has no code (see {VaultAdmin__InvalidImplementation})
      *
      * Security:
-     * - Role-gated via ACM (ActionKeys.ACTION_UPGRADE_MODULE)
+     * - Role-gated via ACM (`ActionKeys.ACTION_UPGRADE_MODULE`) resolved through `Registry`.
+     * - Emits {SystemEvents.ActionExecuted} on success.
      *
-     * @param newImplementation New implementation address
+     * @param newImplementation The new implementation contract address.
      */
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
@@ -173,6 +189,6 @@ contract VaultAdmin is
         _emitActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE);
     }
 
-    /* ============ Storage Gap ============ */
+    /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
     uint256[50] private __gap;
 } 

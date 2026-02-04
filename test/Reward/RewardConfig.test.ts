@@ -155,7 +155,7 @@ describe('RewardConfig Modular Architecture', () => {
       // 验证高级数据分析基础配置
       const analyticsConfig = await rewardConfig.getServiceConfig(0, 0); // AdvancedAnalytics, Basic
       expect(analyticsConfig.price).to.be.gt(0);
-      expect(analyticsConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+      expect(analyticsConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
       expect(analyticsConfig.isActive).to.be.true;
       expect(analyticsConfig.description).to.equal('Basic data analysis report with market trends');
     });
@@ -181,11 +181,11 @@ describe('RewardConfig Modular Architecture', () => {
 
     it('应该正确查询服务冷却期', async () => {
       const cooldowns = [
-        { serviceType: 0, expectedCooldown: 24 * 60 * 60 }, // AdvancedAnalytics: 1 day
-        { serviceType: 1, expectedCooldown: 12 * 60 * 60 }, // PriorityService: 12 hours
-        { serviceType: 2, expectedCooldown: 7 * 24 * 60 * 60 }, // FeatureUnlock: 7 days
-        { serviceType: 3, expectedCooldown: 30 * 24 * 60 * 60 }, // GovernanceAccess: 30 days
-        { serviceType: 4, expectedCooldown: 60 * 60 } // TestnetFeatures: 1 hour
+        { serviceType: 0, expectedCooldown: (24 * 60 * 60) / 2 }, // AdvancedAnalytics: 1 day (blocks)
+        { serviceType: 1, expectedCooldown: (12 * 60 * 60) / 2 }, // PriorityService: 12 hours (blocks)
+        { serviceType: 2, expectedCooldown: (7 * 24 * 60 * 60) / 2 }, // FeatureUnlock: 7 days (blocks)
+        { serviceType: 3, expectedCooldown: (30 * 24 * 60 * 60) / 2 }, // GovernanceAccess: 30 days (blocks)
+        { serviceType: 4, expectedCooldown: (60 * 60) / 2 } // TestnetFeatures: 1 hour (blocks)
       ];
 
       for (const cooldown of cooldowns) {
@@ -198,7 +198,7 @@ describe('RewardConfig Modular Architecture', () => {
   describe('配置更新', () => {
     it('应该允许治理者更新服务配置', async () => {
       const newPrice = ethers.parseEther('200');
-      const newDuration = 60 * 24 * 60 * 60; // 60 days
+      const newDuration = (60 * 24 * 60 * 60) / 2; // 60 days (blocks)
       const newIsActive = false;
 
       await rewardConfig.updateServiceConfig(0, 0, newPrice, newDuration, newIsActive); // AdvancedAnalytics Basic
@@ -210,7 +210,7 @@ describe('RewardConfig Modular Architecture', () => {
     });
 
     it('应该允许治理者更新服务冷却期', async () => {
-      const newCooldown = 48 * 60 * 60; // 48 hours
+      const newCooldown = (48 * 60 * 60) / 2; // 48 hours (blocks)
       await rewardConfig.setServiceCooldown(0, newCooldown); // AdvancedAnalytics
 
       const updatedCooldown = await rewardConfig.serviceCooldowns(0);
@@ -236,7 +236,7 @@ describe('RewardConfig Modular Architecture', () => {
   describe('权限控制', () => {
     it('应该只允许治理者更新配置', async () => {
       await expect(
-        rewardConfig.connect(user).updateServiceConfig(0, 0, ONE_ETH, 30 * 24 * 60 * 60, true)
+        rewardConfig.connect(user).updateServiceConfig(0, 0, ONE_ETH, (30 * 24 * 60 * 60) / 2, true)
       ).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
 

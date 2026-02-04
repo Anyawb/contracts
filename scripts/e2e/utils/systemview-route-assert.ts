@@ -46,7 +46,7 @@ async function assertRouteEqualsRegistry(registry: any, label: string, expectedK
  * - Requires caller (adminSigner) can grant roles if missing.
  * - Uses deployer role VIEW_SYSTEM_DATA to call SystemView.route*.
  * - Validates: routePrice.primary == VALUATION_ORACLE_VIEW; routePrice.fallback == PRICE_ORACLE.
- * - Validates: PriceOracle.getPrice(asset) matches ValuationOracleView.getAssetPrice(asset) (price + timestamp).
+ * - Validates: PriceOracle.getPrice(asset) matches ValuationOracleView.getAssetPrice(asset) (price + blockNumber).
  */
 export async function assertPriceRoutesAndFallbackConsistency(params: {
   registryAddr: string;
@@ -78,23 +78,23 @@ export async function assertPriceRoutesAndFallbackConsistency(params: {
   const vov = (await ethers.getContractAt("ValuationOracleView", primaryAddr)) as any;
   const oracle = (await ethers.getContractAt("PriceOracle", fallbackAddr)) as any;
 
-  // Best-effort consistency: ValuationOracleView wraps oracle calls and returns (0,0) on failure.
-  const [vp, vts] = (await vov.connect(adminSigner).getAssetPrice(assetForCheck)) as [bigint, bigint];
+  // Best-effort consistency: ValuationOracleView wraps oracle calls and returns (0,0,false) on failure.
+  const [vp, vBlock] = (await vov.connect(adminSigner).getAssetPrice(assetForCheck)) as [bigint, bigint, boolean];
 
   let op: bigint = 0n;
-  let ots: bigint = 0n;
+  let oBlock: bigint = 0n;
   try {
     const r = (await oracle.getPrice(assetForCheck)) as [bigint, bigint, bigint];
     op = r[0];
-    ots = r[1];
+    oBlock = r[1];
   } catch {
     // PriceOracle may revert for unsupported asset; treat as (0,0) to match ValuationOracleView's best-effort semantics.
     op = 0n;
-    ots = 0n;
+    oBlock = 0n;
   }
 
   assertOk(vp === op, "PRICE_ORACLE fallback inconsistency: price mismatch between ValuationOracleView and PriceOracle");
-  assertOk(vts === ots, "PRICE_ORACLE fallback inconsistency: timestamp mismatch between ValuationOracleView and PriceOracle");
+  assertOk(vBlock === oBlock, "PRICE_ORACLE fallback inconsistency: blockNumber mismatch between ValuationOracleView and PriceOracle");
 }
 
 /**

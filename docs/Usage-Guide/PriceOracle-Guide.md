@@ -45,7 +45,7 @@ const priceOracle = IPriceOracle__factory.connect(PRICE_ORACLE_ADDRESS, signer);
 await priceOracle.configureAsset(
     "0xA0b86a33E6441b8c4C8C8C8C8C8C8C8C8C8C8C8", // USDC 地址
     "usd-coin",                                    // CoinGecko ID
-    6,                                             // 精度
+    6,                                             // assetDecimals（token decimals）
     3600                                           // 1小时过期
 );
 ```
@@ -54,8 +54,10 @@ await priceOracle.configureAsset(
 
 ```typescript
 // 获取价格
-const [price, timestamp, decimals] = await priceOracle.getPrice(assetAddress);
-const priceUSD = ethers.formatUnits(price, decimals);
+const [price, blockNumber, assetDecimals] = await priceOracle.getPrice(assetAddress);
+// price 是 USD-8（$1.00 = 100000000），始终用 8 来格式化
+// assetDecimals 是 token decimals，用于 amount(token base units) → valueUSD8 换算，不是 price 的精度
+const priceUSD = ethers.formatUnits(price, 8);
 console.log(`价格: $${priceUSD}`);
 ```
 
@@ -64,8 +66,8 @@ console.log(`价格: $${priceUSD}`);
 ```typescript
 // 更新价格（需要 UPDATE_PRICE 权限）
 const price = ethers.parseUnits("1.00", 8); // $1.00
-const timestamp = Math.floor(Date.now() / 1000);
-await priceOracle.updatePrice(assetAddress, price, timestamp);
+const blockNumber = await ethers.provider.getBlockNumber();
+await priceOracle.updatePrice(assetAddress, price, blockNumber);
 ```
 
 ---
@@ -119,7 +121,7 @@ graph TB
     subgraph "核心预言机层"
         PO[PriceOracle]
         CGU[CoinGeckoPriceUpdater]
-        VOA[ValuationOracleAdapter]
+        VOA[ValuationOracleView]
     end
     
     subgraph "权限控制层"
@@ -129,7 +131,7 @@ graph TB
     
     subgraph "业务应用层"
         LE[LendingEngine]
-        HF[HealthFactorCalculator]
+        HF[HealthView]
         CM[CollateralManager]
         Other[其他合约]
     end
@@ -171,10 +173,10 @@ graph TB
 **关键接口**：
 ```solidity
 interface IPriceOracle {
-    function getPrice(address asset) external view returns (uint256 price, uint256 timestamp, uint256 decimals);
-    function getPrices(address[] calldata assets) external view returns (uint256[] memory prices, uint256[] memory timestamps, uint256[] memory decimalsArray);
-    function updatePrice(address asset, uint256 price, uint256 timestamp) external;
-    function configureAsset(address asset, string calldata coingeckoId, uint256 decimals, uint256 maxPriceAge) external;
+    function getPrice(address asset) external view returns (uint256 price, uint256 blockNumber, uint256 assetDecimals);
+    function getPrices(address[] calldata assets) external view returns (uint256[] memory prices, uint256[] memory blockNumbers, uint256[] memory assetDecimalsArray);
+    function updatePrice(address asset, uint256 price, uint256 blockNumber) external;
+    function configureAsset(address asset, string calldata coingeckoId, uint256 assetDecimals, uint256 maxPriceAge) external;
     function isPriceValid(address asset) external view returns (bool);
 }
 ```
@@ -192,15 +194,17 @@ interface IPriceOracle {
 **关键接口**：
 ```solidity
 interface ICoinGeckoPriceUpdater {
-    function updateAssetPrice(address asset, uint256 price, uint256 timestamp) external;
-    function updateAssetPrices(address[] calldata assets, uint256[] calldata prices, uint256[] calldata timestamps) external;
+    function updateAssetPrice(address asset, uint256 price, uint256 blockNumber) external;
+    function updateAssetPrices(address[] calldata assets, uint256[] calldata prices, uint256[] calldata blockNumbers) external;
     function configureAsset(address asset, string calldata coingeckoId) external;
+    // 对无法读取 ERC20 decimals() 的资产，建议显式配置 assetDecimals（token decimals）
+    function configureAssetWithDecimals(address asset, string calldata coingeckoId, uint8 assetDecimals) external;
 }
 ```
 
-#### 3. ValuationOracleAdapter（估值适配器）
+#### 3. ValuationOracleView（只读门面）
 
-**职责**：为业务合约提供统一的价格查询接口
+**职责**：为前端/运维提供统一的价格查询与健康检查入口（role-gated 读取），并遵循架构指南：健康检查走 `GracefulDegradation`，不要求 oracle 合约实现额外 health 方法。
 
 **核心功能**：
 - 价格缓存机制
@@ -210,10 +214,13 @@ interface ICoinGeckoPriceUpdater {
 
 **关键接口**：
 ```solidity
-interface IValuationOracleAdapter {
-    function getAssetPrice(address asset) external view returns (uint256 price, uint256 timestamp);
-    function getAssetPrices(address[] calldata assets) external view returns (uint256[] memory prices, uint256[] memory timestamps);
-    function isPriceValid(address asset) external view returns (bool);
+interface IValuationOracleView {
+    function getAssetPrice(address asset) external view returns (uint256 price, uint256 blockNumber, bool isValid);
+    function getAssetPrices(address[] calldata assets)
+        external
+        view
+        returns (uint256[] memory prices, uint256[] memory blockNumbers, bool[] memory validFlags);
+    function isPriceValid(address asset) external view returns (bool isValid, uint256 blockNumber);
 }
 ```
 
@@ -272,7 +279,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant App as 业务合约
-    participant VOA as ValuationOracleAdapter
+    participant VOA as ValuationOracleView
     participant PO as PriceOracle
     participant Cache as 缓存
     
@@ -315,16 +322,16 @@ contract PriceOracle is Initializable, UUPSUpgradeable {
 系统对价格数据进行多重验证：
 
 ```solidity
-function _validatePrice(uint256 price, uint256 timestamp) internal view {
+function _validatePrice(uint256 price, uint256 blockNumber) internal view {
     if (price == 0) revert PriceOracle__InvalidPrice();
-    if (timestamp > block.timestamp) revert PriceOracle__InvalidTimestamp();
-    if (block.timestamp - timestamp > maxPriceAge) revert PriceOracle__StalePrice();
+    if (blockNumber > block.number) revert PriceOracle__InvalidTimestamp();
+    if (block.number - blockNumber > maxPriceAge) revert PriceOracle__StalePrice();
 }
 ```
 
 **验证规则**：
 - 价格不能为零
-- 时间戳不能是未来时间
+- 区块号不能是未来区块
 - 价格年龄不能超过 `maxPriceAge`
 
 #### 2. 权限验证
@@ -432,19 +439,19 @@ contract MyContract {
  * 配置新资产到预言机系统
  * @param asset 资产合约地址
  * @param coingeckoId CoinGecko API 中的资产ID
- * @param decimals 资产精度
+ * @param assetDecimals 资产精度（token decimals）
  * @param maxPriceAge 最大价格年龄（秒）
  */
 async function configureAsset(
     asset: string,
     coingeckoId: string,
-    decimals: number,
+    assetDecimals: number,
     maxPriceAge: number = 3600
 ) {
     const tx = await priceOracle.configureAsset(
         asset,
         coingeckoId,
-        decimals,
+        assetDecimals,
         maxPriceAge
     );
     await tx.wait();
@@ -515,7 +522,7 @@ await configureAssets(ethers, priceOracleAddress, assets);
     {
       "address": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
       "coingeckoId": "usd-coin",
-      "decimals": 6,
+          "decimals": 6, // assetDecimals（token decimals）
       "maxPriceAge": 3600,
       "active": true
     }
@@ -533,17 +540,18 @@ await configureAssets(ethers, priceOracleAddress, assets);
 /**
  * 获取单个资产价格
  * @param asset 资产地址
- * @returns {price, timestamp, decimals, priceUSD}
+ * @returns {price, blockNumber, assetDecimals, priceUSD}
  */
 async function getAssetPrice(asset: string) {
     try {
-        const [price, timestamp, decimals] = await priceOracle.getPrice(asset);
+        const [price, blockNumber, assetDecimals] = await priceOracle.getPrice(asset);
         
         return {
             price: price.toString(),
-            timestamp: timestamp.toString(),
-            decimals: decimals.toString(),
-            priceUSD: ethers.formatUnits(price, decimals)
+            blockNumber: blockNumber.toString(),
+            assetDecimals: assetDecimals.toString(),
+            // price 是 USD-8；assetDecimals 是 token decimals（用于 amount 换算）
+            priceUSD: ethers.formatUnits(price, 8)
         };
     } catch (error) {
         console.error(`获取资产 ${asset} 价格失败:`, error);
@@ -554,7 +562,7 @@ async function getAssetPrice(asset: string) {
 // 使用示例
 const priceData = await getAssetPrice(usdcAddress);
 console.log(`USDC 价格: $${priceData.priceUSD}`);
-console.log(`更新时间: ${new Date(Number(priceData.timestamp) * 1000).toLocaleString()}`);
+console.log(`更新区块: ${priceData.blockNumber}`);
 ```
 
 ### 批量价格查询
@@ -567,14 +575,14 @@ console.log(`更新时间: ${new Date(Number(priceData.timestamp) * 1000).toLoca
  */
 async function getAssetPrices(assets: string[]) {
     try {
-        const [prices, timestamps, decimals] = await priceOracle.getPrices(assets);
+        const [prices, blockNumbers, assetDecimalsArray] = await priceOracle.getPrices(assets);
         
         return assets.map((asset, index) => ({
             asset,
             price: prices[index].toString(),
-            timestamp: timestamps[index].toString(),
-            decimals: decimals[index].toString(),
-            priceUSD: ethers.formatUnits(prices[index], decimals[index])
+            blockNumber: blockNumbers[index].toString(),
+            assetDecimals: assetDecimalsArray[index].toString(),
+            priceUSD: ethers.formatUnits(prices[index], 8)
         }));
     } catch (error) {
         console.error("批量获取价格失败:", error);
@@ -621,10 +629,12 @@ async function getPriceData(asset: string) {
         const priceData = await priceOracle.getPriceData(asset);
         return {
             price: priceData.price.toString(),
-            timestamp: priceData.timestamp.toString(),
-            decimals: priceData.decimals.toString(),
+            blockNumber: priceData.timestamp.toString(),
+            assetDecimals: priceData.assetDecimals.toString(),
             isValid: priceData.isValid,
-            priceUSD: ethers.formatUnits(priceData.price, priceData.decimals)
+            // price 是 USD-8（$1.00 = 100000000）
+            // assetDecimals 是 token decimals，用于 amount→valueUSD8 换算，不是 price 精度
+            priceUSD: ethers.formatUnits(priceData.price, 8)
         };
     } catch (error) {
         console.error(`获取资产 ${asset} 价格数据失败:`, error);
@@ -646,7 +656,7 @@ async function getAssetConfig(asset: string) {
         const config = await priceOracle.getAssetConfig(asset);
         return {
             coingeckoId: config.coingeckoId,
-            decimals: config.decimals.toString(),
+            assetDecimals: config.assetDecimals.toString(),
             isActive: config.isActive,
             maxPriceAge: config.maxPriceAge.toString()
         };
@@ -687,14 +697,14 @@ async function getSupportedAssets(): Promise<string[]> {
  * 手动更新资产价格
  * @param asset 资产地址
  * @param price 新价格（8位精度）
- * @param timestamp 价格时间戳
+ * @param blockNumber 价格区块号
  */
 async function updateAssetPrice(
     asset: string,
     price: bigint,
-    timestamp: number
+    blockNumber: number
 ) {
-    const tx = await priceOracle.updatePrice(asset, price, timestamp);
+    const tx = await priceOracle.updatePrice(asset, price, blockNumber);
     await tx.wait();
     
     console.log(`资产 ${asset} 价格更新成功`);
@@ -702,8 +712,8 @@ async function updateAssetPrice(
 
 // 使用示例
 const price = ethers.parseUnits("1.00", 8); // $1.00 (8位精度)
-const timestamp = Math.floor(Date.now() / 1000);
-await updateAssetPrice(usdcAddress, price, timestamp);
+const blockNumber = await ethers.provider.getBlockNumber();
+await updateAssetPrice(usdcAddress, price, blockNumber);
 ```
 
 ### 批量更新价格
@@ -713,18 +723,18 @@ await updateAssetPrice(usdcAddress, price, timestamp);
  * 批量更新多个资产价格
  * @param assets 资产地址数组
  * @param prices 价格数组（8位精度）
- * @param timestamps 时间戳数组
+ * @param blockNumbers 区块号数组
  */
 async function updateAssetPrices(
     assets: string[],
     prices: bigint[],
-    timestamps: number[]
+    blockNumbers: number[]
 ) {
-    if (assets.length !== prices.length || assets.length !== timestamps.length) {
+    if (assets.length !== prices.length || assets.length !== blockNumbers.length) {
         throw new Error("数组长度不匹配");
     }
     
-    const tx = await priceOracle.updatePrices(assets, prices, timestamps);
+    const tx = await priceOracle.updatePrices(assets, prices, blockNumbers);
     await tx.wait();
     
     console.log("批量价格更新成功");
@@ -736,11 +746,11 @@ const prices = [
     ethers.parseUnits("1.00", 8),  // USDC: $1.00
     ethers.parseUnits("2000.00", 8) // WETH: $2000.00
 ];
-const timestamps = [
-    Math.floor(Date.now() / 1000),
-    Math.floor(Date.now() / 1000)
+const blockNumbers = [
+    await ethers.provider.getBlockNumber(),
+    await ethers.provider.getBlockNumber()
 ];
-await updateAssetPrices(assets, prices, timestamps);
+await updateAssetPrices(assets, prices, blockNumbers);
 ```
 
 ---
@@ -758,14 +768,14 @@ CoinGeckoPriceUpdater 提供了从 CoinGecko API 自动获取和更新价格的�
  * 通过 CoinGecko 更新器更新价格
  * @param asset 资产地址
  * @param price 新价格
- * @param timestamp 时间戳
+ * @param blockNumber 区块号
  */
 async function updateViaCoinGecko(
     asset: string,
     price: bigint,
-    timestamp: number
+    blockNumber: number
 ) {
-    const tx = await coinGeckoUpdater.updateAssetPrice(asset, price, timestamp);
+    const tx = await coinGeckoUpdater.updateAssetPrice(asset, price, blockNumber);
     await tx.wait();
     
     console.log(`通过 CoinGecko 更新器更新 ${asset} 价格成功`);
@@ -779,17 +789,17 @@ async function updateViaCoinGecko(
  * 批量更新多个资产价格（通过 CoinGecko）
  * @param assets 资产地址数组
  * @param prices 价格数组
- * @param timestamps 时间戳数组
+ * @param blockNumbers 区块号数组
  */
 async function batchUpdateViaCoinGecko(
     assets: string[],
     prices: bigint[],
-    timestamps: number[]
+    blockNumbers: number[]
 ) {
     const tx = await coinGeckoUpdater.updateAssetPrices(
         assets,
         prices,
-        timestamps
+        blockNumbers
     );
     await tx.wait();
     
@@ -934,10 +944,10 @@ contract LendingContract {
             registry.getModule(ModuleKeys.KEY_PRICE_ORACLE)
         );
         
-        (uint256 price, , uint256 decimals) = oracle.getPrice(asset);
+        (uint256 price, , uint256 assetDecimals) = oracle.getPrice(asset);
         
-        // 计算价值：amount * price / 10^decimals
-        return (amount * price) / (10 ** decimals);
+        // 计算价值：amount * price / 10^assetDecimals
+        return (amount * price) / (10 ** assetDecimals);
     }
     
     /**
@@ -1119,7 +1129,7 @@ const stopMonitoring = monitorPrices(
  */
 async function checkOracleHealth() {
     const report = {
-        timestamp: Date.now(),
+        blockNumber: await ethers.provider.getBlockNumber(),
         status: 'healthy',
         issues: [] as string[],
         assets: {} as Record<string, any>
@@ -1132,17 +1142,17 @@ async function checkOracleHealth() {
         for (const asset of supportedAssets) {
             try {
                 const isValid = await priceOracle.isPriceValid(asset);
-                const [price, timestamp] = await priceOracle.getPrice(asset);
+                const [price, blockNumber] = await priceOracle.getPrice(asset);
                 const config = await priceOracle.getAssetConfig(asset);
-                
-                const priceAge = Date.now() / 1000 - Number(timestamp);
+
+                const priceAgeBlocks = report.blockNumber - Number(blockNumber);
                 
                 report.assets[asset] = {
                     isValid,
                     price: price.toString(),
-                    timestamp: timestamp.toString(),
-                    age: priceAge,
-                    maxAge: config.maxPriceAge.toString(),
+                    blockNumber: blockNumber.toString(),
+                    ageBlocks: priceAgeBlocks,
+                    maxAgeBlocks: config.maxPriceAge.toString(),
                     isActive: config.isActive
                 };
 
@@ -1151,8 +1161,8 @@ async function checkOracleHealth() {
                     report.status = 'warning';
                 }
                 
-                if (priceAge > Number(config.maxPriceAge)) {
-                    report.issues.push(`资产 ${asset} 价格已过期 (${priceAge}秒)`);
+                if (priceAgeBlocks > Number(config.maxPriceAge)) {
+                    report.issues.push(`资产 ${asset} 价格已过期 (${priceAgeBlocks} blocks)`);
                     report.status = 'warning';
                 }
             } catch (error: any) {
@@ -1183,22 +1193,22 @@ console.log('问题列表:', healthReport.issues);
 #### 缓存价格数据
 
 ```typescript
-// 简单的内存缓存
-const priceCache = new Map<string, { price: string; timestamp: number; expiry: number }>();
+// 简单的内存缓存（block-based）
+const priceCache = new Map<string, { price: string; blockNumber: number; expiryBlock: number }>();
 
-async function getCachedPrice(asset: string, maxAge: number = 60) {
+async function getCachedPrice(asset: string, maxAgeBlocks: number = 300) {
     const cached = priceCache.get(asset);
-    const now = Date.now() / 1000;
+    const nowBlock = await ethers.provider.getBlockNumber();
     
-    if (cached && (now - cached.timestamp) < maxAge) {
+    if (cached && (nowBlock - cached.blockNumber) < maxAgeBlocks) {
         return cached.price;
     }
     
     const priceData = await getAssetPrice(asset);
     priceCache.set(asset, {
         price: priceData.priceUSD,
-        timestamp: Number(priceData.timestamp),
-        expiry: now + maxAge
+        blockNumber: Number(priceData.blockNumber),
+        expiryBlock: nowBlock + maxAgeBlocks
     });
     
     return priceData.priceUSD;
@@ -1372,22 +1382,23 @@ if (!config.isActive) {
 
 **解决方案**：
 ```typescript
-// 1. 检查价格年龄
-const [price, timestamp] = await priceOracle.getPrice(assetAddress);
+// 1. 检查价格年龄（block-based）
+const [price, blockNumber] = await priceOracle.getPrice(assetAddress);
 const config = await priceOracle.getAssetConfig(assetAddress);
-const priceAge = Date.now() / 1000 - Number(timestamp);
+const nowBlock = await ethers.provider.getBlockNumber();
+const priceAgeBlocks = nowBlock - Number(blockNumber);
 
-console.log(`价格年龄: ${priceAge}秒，最大年龄: ${config.maxPriceAge}秒`);
+console.log(`价格年龄: ${priceAgeBlocks} blocks，最大年龄: ${config.maxPriceAge} blocks`);
 
 // 2. 更新价格
 const newPrice = ethers.parseUnits("1.00", 8);
-await priceOracle.updatePrice(assetAddress, newPrice, Math.floor(Date.now() / 1000));
+await priceOracle.updatePrice(assetAddress, newPrice, await ethers.provider.getBlockNumber());
 
 // 3. 或调整 maxPriceAge（如果需要）
 await priceOracle.configureAsset(
     assetAddress,
     config.coingeckoId,
-    config.decimals,
+    config.assetDecimals,
     7200 // 增加到2小时
 );
 ```
@@ -1458,10 +1469,10 @@ async function safeUpdatePrice(
         
         // 3. 格式化价格（8位精度）
         const price = ethers.parseUnits(priceUSD, 8);
-        const timestamp = Math.floor(Date.now() / 1000);
+        const blockNumber = await ethers.provider.getBlockNumber();
         
         // 4. 更新价格
-        const tx = await priceOracle.updatePrice(asset, price, timestamp);
+        const tx = await priceOracle.updatePrice(asset, price, blockNumber);
         await tx.wait();
         
         console.log("价格更新成功");
@@ -1537,6 +1548,7 @@ await acm.grantRole(ADD_WHITELIST_ROLE, whitelistManagerAddress);
 - [PriceOracle 合约源码](../src/core/PriceOracle.sol)
 - [CoinGeckoPriceUpdater 合约源码](../src/core/CoinGeckoPriceUpdater.sol)
 - [IPriceOracle 接口](../src/interfaces/IPriceOracle.sol)
+- [Units & Conversions SSOT（USD-8）](../Units-And-Conversions-SSOT.md)
 - [权限管理指南](./permission-management-guide.md)
 - [Registry 系统文档](../docs/registry-deployment.md)
 - [测试文件](../test/core/PriceOracle.test.ts)

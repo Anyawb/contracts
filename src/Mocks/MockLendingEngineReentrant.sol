@@ -42,8 +42,14 @@ contract MockLendingEngineReentrant {
     }
 
     // Stubs to satisfy interface shape (not used in reentry test)
-    function borrow(address, address, uint256, uint256, uint16) external pure {}
-    function repay(address, address, uint256) external pure {}
+    function borrow(address, address, uint256, uint256, uint16) external pure {
+        uint256 noop = 0;
+        noop;
+    }
+    function repay(address, address, uint256) external pure {
+        uint256 noop = 0;
+        noop;
+    }
     function getDebt(address, address) external pure returns (uint256) { return 0; }
     function getTotalDebtByAsset(address) external pure returns (uint256) { return 0; }
     function getUserTotalDebtValue(address) external pure returns (uint256) { return 0; }

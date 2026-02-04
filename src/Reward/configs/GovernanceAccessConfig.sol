@@ -33,7 +33,7 @@ contract GovernanceAccessConfig is BaseServiceConfig {
     function _initializeConfigs() internal override {
         configs[ServiceLevel.Basic] = ServiceConfig({
             price: 200e18, // 200积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Basic,
             description: "Basic voting rights"
@@ -41,7 +41,7 @@ contract GovernanceAccessConfig is BaseServiceConfig {
         
         configs[ServiceLevel.Standard] = ServiceConfig({
             price: 1000e18, // 1000积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Standard,
             description: "Proposal creation rights"
@@ -49,7 +49,7 @@ contract GovernanceAccessConfig is BaseServiceConfig {
         
         configs[ServiceLevel.Premium] = ServiceConfig({
             price: 2500e18, // 2500积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Premium,
             description: "Parameter adjustment suggestions"
@@ -57,7 +57,7 @@ contract GovernanceAccessConfig is BaseServiceConfig {
         
         configs[ServiceLevel.VIP] = ServiceConfig({
             price: 6000e18, // 6000积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.VIP,
             description: "Core governance participation"
@@ -66,7 +66,7 @@ contract GovernanceAccessConfig is BaseServiceConfig {
     
     /// @dev 初始化冷却期
     function _initializeCooldown() internal override {
-        cooldown = 30 days;
+        cooldown = 30 days / 2 seconds;
     }
     
     /// @notice 获取服务类型
@@ -95,7 +95,7 @@ contract GovernanceAccessConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     

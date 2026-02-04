@@ -60,6 +60,11 @@ contract EarlyRepaymentGuaranteeManager is
     ReentrancyGuardUpgradeable,
     IEarlyRepaymentGuaranteeManager
 {
+    /*━━━━━━━━━━━━━━━ TIME AXIS (SSOT: blocks) ━━━━━━━━━━━━━━━*/
+    /// @dev Baseline blocks-per-day used across this repo (assumes ~12s/block).
+    ///      Frontend/keeper should do ETA mapping offchain.
+    uint256 private constant _BLOCKS_PER_DAY = 7200;
+
     /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
     // NOTE: Structs/events are defined in `IEarlyRepaymentGuaranteeManager` and used here to ensure
     // interface-level consistency for frontends, tests, and offchain indexers.
@@ -131,12 +136,12 @@ contract EarlyRepaymentGuaranteeManager is
      *
      * @param oldReceiver Previous receiver address.
      * @param newReceiver New receiver address.
-     * @param timestamp Emission timestamp (seconds).
+     * @param blockNumber Legacy field name: emission time-axis marker (blockNumber).
      */
     event PlatformFeeReceiverUpdated(
         address indexed oldReceiver,
         address indexed newReceiver,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /**
@@ -149,12 +154,12 @@ contract EarlyRepaymentGuaranteeManager is
      *
      * @param oldRate Previous rate (bps).
      * @param newRate New rate (bps).
-     * @param timestamp Emission timestamp (seconds).
+     * @param blockNumber Legacy field name: emission time-axis marker (blockNumber).
      */
     event PlatformFeeRateUpdated(
         uint256 oldRate,
         uint256 newRate,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /**
@@ -248,8 +253,7 @@ contract EarlyRepaymentGuaranteeManager is
     ) external initializer {
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
         
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         if (initialPlatformFeeReceiverAddr == address(0)) revert ZeroAddress();
@@ -264,7 +268,7 @@ contract EarlyRepaymentGuaranteeManager is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -517,10 +521,9 @@ contract EarlyRepaymentGuaranteeManager is
     ) external view override returns (EarlyRepaymentResult memory result) {
         IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[guaranteeId];
         if (!record.isActive) revert GuaranteeNotActive();
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
 
-        return _calculateEarlyRepaymentResult(record, actualRepayAmount, ts);
+        return _calculateEarlyRepaymentResult(record, actualRepayAmount, blockNumber);
     }
 
     /*━━━━━━━━━━━━━━━ Core functions ━━━━━━━━━━━━━━━*/
@@ -555,8 +558,7 @@ contract EarlyRepaymentGuaranteeManager is
         uint256 promisedInterest,
         uint256 termDays
     ) external override onlyVaultCoreOrBusinessLogic onlyValidRegistry nonReentrant returns (uint256 guaranteeId) {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
         // Basic parameter validation.
         if (borrower == address(0)) revert ZeroAddress();
         if (lender == address(0)) revert ZeroAddress();
@@ -590,8 +592,11 @@ contract EarlyRepaymentGuaranteeManager is
         IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[newGuaranteeId];
         record.principal = principal;
         record.promisedInterest = promisedInterest;
-        record.startTime = ts;
-        record.maturityTime = ts + (termDays * 1 days);
+        // NOTE (Time-Dependency-Refactor):
+        // - `startTime/maturityTime` are legacy field names; semantics are startBlock/maturityBlock (block.number).
+        // - termDays is converted to blocks using the repo baseline blocks-per-day.
+        record.startTime = blockNumber;
+        record.maturityTime = blockNumber + (termDays * _BLOCKS_PER_DAY);
         record.earlyRepayPenaltyDays = _DEFAULT_EARLY_REPAY_PENALTY_DAYS;
         record.isActive = true;
         record.lender = lender;
@@ -610,7 +615,7 @@ contract EarlyRepaymentGuaranteeManager is
             record.startTime,
             record.maturityTime,
             record.earlyRepayPenaltyDays,
-            ts
+            blockNumber
         );
         
         // Emit standardized action event for observability.
@@ -618,7 +623,7 @@ contract EarlyRepaymentGuaranteeManager is
             ActionKeys.ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE),
             msg.sender,
-            ts
+            blockNumber
         );
         return guaranteeId;
     }
@@ -647,8 +652,7 @@ contract EarlyRepaymentGuaranteeManager is
         address asset,
         uint256 actualRepayAmount
     ) external override onlySettlementManager onlyValidRegistry nonReentrant returns (EarlyRepaymentResult memory result) {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
         if (borrower == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (actualRepayAmount == 0) revert AmountIsZero();
@@ -661,7 +665,7 @@ contract EarlyRepaymentGuaranteeManager is
         if (!record.isActive) revert GuaranteeNotActive();
         
         // Compute early repayment settlement amounts.
-        result = _calculateEarlyRepaymentResult(record, actualRepayAmount, ts);
+        result = _calculateEarlyRepaymentResult(record, actualRepayAmount, blockNumber);
         
         // CEI: update state first (Effects).
         record.isActive = false;
@@ -695,7 +699,7 @@ contract EarlyRepaymentGuaranteeManager is
             result.refundToBorrower,
             result.platformFee,
             result.actualInterestPaid,
-            ts
+            blockNumber
         );
         
         // Emit standardized action event for observability.
@@ -703,7 +707,7 @@ contract EarlyRepaymentGuaranteeManager is
             ActionKeys.ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE),
             msg.sender,
-            ts
+            blockNumber
         );
         return result;
     }
@@ -729,8 +733,7 @@ contract EarlyRepaymentGuaranteeManager is
         address borrower,
         address asset
     ) external override onlySettlementManager onlyValidRegistry nonReentrant returns (uint256 forfeitedAmount) {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
         if (borrower == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (!_isEnabled(asset)) revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
@@ -769,7 +772,7 @@ contract EarlyRepaymentGuaranteeManager is
             record.lender,
             asset,
             forfeitedAmount,
-            ts
+            blockNumber
         );
         
         // Emit standardized action event for observability.
@@ -777,7 +780,7 @@ contract EarlyRepaymentGuaranteeManager is
             ActionKeys.ACTION_LIQUIDATE_GUARANTEE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE_GUARANTEE),
             msg.sender,
-            ts
+            blockNumber
         );
         return forfeitedAmount;
     }
@@ -800,20 +803,19 @@ contract EarlyRepaymentGuaranteeManager is
         onlyValidRegistry
         onlyRole(ActionKeys.ACTION_SET_PARAMETER)
     {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
         _validateModuleAddress(newReceiverAddr);
         address oldReceiver = _platformFeeReceiverAddr;
         _platformFeeReceiverAddr = newReceiverAddr;
         
-        emit PlatformFeeReceiverUpdated(oldReceiver, newReceiverAddr, ts);
+        emit PlatformFeeReceiverUpdated(oldReceiver, newReceiverAddr, blockNumber);
         
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -831,21 +833,20 @@ contract EarlyRepaymentGuaranteeManager is
      * @param newRate New platform fee rate (bps).
      */
     function setPlatformFeeRate(uint256 newRate) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
         if (newRate > 1000) revert EarlyRepaymentGuaranteeManager__RateTooHigh();
         if (newRate == _platformFeeRate) revert EarlyRepaymentGuaranteeManager__RateUnchanged();
         uint256 oldRate = _platformFeeRate;
         _platformFeeRate = newRate;
         
-        emit PlatformFeeRateUpdated(oldRate, newRate, ts);
+        emit PlatformFeeRateUpdated(oldRate, newRate, blockNumber);
         
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -909,8 +910,7 @@ contract EarlyRepaymentGuaranteeManager is
         onlyValidRegistry
         onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
     {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
         _validateModuleAddress(newRegistryAddr);
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
@@ -922,7 +922,7 @@ contract EarlyRepaymentGuaranteeManager is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -931,13 +931,13 @@ contract EarlyRepaymentGuaranteeManager is
     /**
      * @notice Compute early repayment settlement amounts for a record.
      * @dev Reverts if:
-     *      - currentTimestamp < record.startTime (InvalidGuaranteeId)
+     *      - currentBlock < record.startTime (InvalidGuaranteeId)
      *
      * Security:
      * - View-only internal helper (does not mutate state)
      *
      * @param record Guarantee record reference.
-     * @param currentTimestamp Current timestamp (seconds) used for the settlement calculation.
+     * @param currentTimestamp Legacy param name: current block number used for the settlement calculation.
      * @return result Computed settlement amounts.
      */
     function _calculateEarlyRepaymentResult(
@@ -948,11 +948,11 @@ contract EarlyRepaymentGuaranteeManager is
         // Validate time bounds.
         if (currentTimestamp < record.startTime) revert InvalidGuaranteeId();
         
-        // Compute elapsed days.
-        uint256 actualDays = (currentTimestamp - record.startTime) / 1 days;
+        // Compute elapsed days (block-based time axis).
+        uint256 actualDays = (currentTimestamp - record.startTime) / _BLOCKS_PER_DAY;
         
         // Compute total days.
-        uint256 totalDays = (record.maturityTime - record.startTime) / 1 days;
+        uint256 totalDays = (record.maturityTime - record.startTime) / _BLOCKS_PER_DAY;
         if (totalDays == 0) totalDays = 1; // prevent div-by-zero
         // Clamp to maturity.
         if (actualDays > totalDays) {
@@ -1004,8 +1004,7 @@ contract EarlyRepaymentGuaranteeManager is
      * @param newImplementation New implementation address.
      */
     function _authorizeUpgrade(address newImplementation) internal override {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 blockNumber = block.number;
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         
@@ -1016,7 +1015,7 @@ contract EarlyRepaymentGuaranteeManager is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            ts
+            blockNumber
         );
         
         // Additional validations can be added here (e.g., interface checks, storage layout compatibility).

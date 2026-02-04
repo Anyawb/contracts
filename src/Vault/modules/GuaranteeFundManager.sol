@@ -19,13 +19,8 @@ import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../constants/DataPushTypes.sol";
 import { IGuaranteeFundManager } from "../../interfaces/IGuaranteeFundManager.sol";
 
-/**
- * @notice Minimal StatisticsView interface used for best-effort guarantee pushes.
- * @dev Reverts if: (depends on the StatisticsView implementation)
- * Security: (external call; handled via try/catch by the caller)
- */
-interface IStatisticsViewGuaranteeMinimal {
-    function pushGuaranteeUpdate(address user, address asset, uint256 amount, bool isLocked) external;
+interface IStatisticsPushManagerMinimal {
+    function notifyGuarantee(address user, address asset) external;
 }
 
 /**
@@ -200,8 +195,8 @@ contract GuaranteeFundManager is
     ) external initializer {
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         
         // Keep strict non-zero guards for backward-compatible deploy & test flows.
         if (initialVaultCoreAddr == address(0)) revert ZeroAddress();
@@ -239,29 +234,14 @@ contract GuaranteeFundManager is
         return _registryAddr;
     }
 
-    /// @dev Resolve StatisticsView via Registry (SSOT). Returns zero if not configured.
-    function _statisticsViewAddr() internal view returns (address) {
-        return Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
-    }
-
-    /// @dev Best-effort push to StatisticsView with failure observability (no revert).
-    function _pushGuaranteeUpdateToStats(address user, address asset, uint256 amount, bool isLocked) internal {
-        address stats = _statisticsViewAddr();
-        uint256 opFlag = isLocked ? 1 : 0;
-        if (stats == address(0)) {
-            // CacheEvents.CacheUpdateFailed signature is canonical:
-            // (user, asset, viewAddr, collateral, debt, reason).
-            // For guarantee pushes we treat:
-            // - collateral = amount (the value attempted to push)
-            // - debt = 0 (not applicable)
-            // Encode `opFlag` into `reason` for offchain debugging (1=lock, 0=release).
-            emit CacheUpdateFailed(user, asset, address(0), amount, 0, abi.encode(opFlag, bytes("stats view not configured")));
-            return;
-        }
-        // solhint-disable-next-line no-empty-blocks
-        try IStatisticsViewGuaranteeMinimal(stats).pushGuaranteeUpdate(user, asset, amount, isLocked) {
-        } catch (bytes memory reason) {
-            emit CacheUpdateFailed(user, asset, stats, amount, 0, abi.encode(opFlag, reason));
+    /// @dev Best-effort notify the single Statistics push orchestrator (strict B+).
+    ///      This module MUST NOT call StatisticsView directly (centralize seq/requestId/nextVersion and failure events).
+    function _tryNotifyGuaranteeStatsPushManager(address user, address asset) internal {
+        address mgr = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS_PUSH_MANAGER);
+        if (mgr == address(0) || mgr.code.length == 0) return;
+        try IStatisticsPushManagerMinimal(mgr).notifyGuarantee(user, asset) {
+        } catch {
+            // Best-effort: do not revert; failure observability is handled by the push manager.
         }
     }
 
@@ -406,8 +386,8 @@ contract GuaranteeFundManager is
         onlyValidRegistry
         nonReentrant
     {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
@@ -428,7 +408,7 @@ contract GuaranteeFundManager is
             DataPushTypes.DATA_TYPE_GUARANTEE_LOCKED,
             abi.encode(user, asset, amount, ts)
         );
-        _pushGuaranteeUpdateToStats(user, asset, amount, true);
+        _tryNotifyGuaranteeStatsPushManager(user, asset);
     }
 
     /**
@@ -459,8 +439,8 @@ contract GuaranteeFundManager is
         onlyValidRegistry
         nonReentrant
     {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
@@ -486,7 +466,7 @@ contract GuaranteeFundManager is
                 DataPushTypes.DATA_TYPE_GUARANTEE_RELEASED,
                 abi.encode(user, asset, amount, ts)
             );
-            _pushGuaranteeUpdateToStats(user, asset, amount, false);
+            _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
     }
 
@@ -518,8 +498,8 @@ contract GuaranteeFundManager is
         onlyValidRegistry
         nonReentrant
     {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (feeReceiver == address(0)) revert ZeroAddress();
@@ -540,7 +520,7 @@ contract GuaranteeFundManager is
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
                 abi.encode(user, asset, currentGuarantee, feeReceiver, ts)
             );
-            _pushGuaranteeUpdateToStats(user, asset, currentGuarantee, false);
+            _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
     }
 
@@ -578,8 +558,8 @@ contract GuaranteeFundManager is
         uint256 penaltyToLender,
         uint256 platformFee
     ) external override onlyVaultCoreOrEarlyRepaymentGuaranteeManager onlyValidRegistry nonReentrant {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         uint256 total = _userGuarantees[user][asset];
@@ -599,7 +579,7 @@ contract GuaranteeFundManager is
                 DataPushTypes.DATA_TYPE_GUARANTEE_RELEASED,
                 abi.encode(user, asset, refundToBorrower, ts)
             );
-            _pushGuaranteeUpdateToStats(user, asset, refundToBorrower, false);
+            _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
 
         if (penaltyToLender > 0) {
@@ -610,7 +590,7 @@ contract GuaranteeFundManager is
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
                 abi.encode(user, asset, penaltyToLender, lender, ts)
             );
-            _pushGuaranteeUpdateToStats(user, asset, penaltyToLender, false);
+            _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
 
         if (platformFee > 0) {
@@ -621,7 +601,7 @@ contract GuaranteeFundManager is
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
                 abi.encode(user, asset, platformFee, platform, ts)
             );
-            _pushGuaranteeUpdateToStats(user, asset, platformFee, false);
+            _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
     }
 
@@ -652,8 +632,8 @@ contract GuaranteeFundManager is
         address receiver,
         uint256 amount
     ) external override onlyVaultCoreOrEarlyRepaymentGuaranteeManager onlyValidRegistry nonReentrant {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (receiver == address(0)) revert ZeroAddress();
@@ -672,7 +652,7 @@ contract GuaranteeFundManager is
             DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
             abi.encode(user, asset, amount, receiver, ts)
         );
-        _pushGuaranteeUpdateToStats(user, asset, amount, false);
+        _tryNotifyGuaranteeStatsPushManager(user, asset);
     }
 
     /**
@@ -705,8 +685,8 @@ contract GuaranteeFundManager is
         address[] calldata receivers,
         uint256[] calldata amounts
     ) external override onlyVaultCore onlyValidRegistry nonReentrant {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         uint256 len = receivers.length;
@@ -738,7 +718,7 @@ contract GuaranteeFundManager is
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
                 abi.encode(user, asset, amt, recv, ts)
             );
-            _pushGuaranteeUpdateToStats(user, asset, amt, false);
+            _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
     }
 
@@ -771,8 +751,8 @@ contract GuaranteeFundManager is
         address[] calldata assets,
         uint256[] calldata amounts
     ) external override onlyVaultCoreOrBusinessLogic onlyValidRegistry nonReentrant {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         if (user == address(0)) revert ZeroAddress();
         uint256 length = assets.length;
         if (length != amounts.length) revert GuaranteeFundManager__LengthMismatch();
@@ -801,7 +781,7 @@ contract GuaranteeFundManager is
                 DataPushTypes.DATA_TYPE_GUARANTEE_LOCKED,
                 abi.encode(user, asset, amount, ts)
             );
-            _pushGuaranteeUpdateToStats(user, asset, amount, true);
+            _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
         
         // DataPush (batch summary).
@@ -840,8 +820,8 @@ contract GuaranteeFundManager is
         address[] calldata assets,
         uint256[] calldata amounts
     ) external override onlyVaultCore onlyValidRegistry nonReentrant {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         if (user == address(0)) revert ZeroAddress();
         uint256 length = assets.length;
         if (length != amounts.length) revert GuaranteeFundManager__LengthMismatch();
@@ -876,7 +856,7 @@ contract GuaranteeFundManager is
                     DataPushTypes.DATA_TYPE_GUARANTEE_RELEASED,
                     abi.encode(user, asset, amount, ts)
                 );
-                _pushGuaranteeUpdateToStats(user, asset, amount, false);
+                _tryNotifyGuaranteeStatsPushManager(user, asset);
             }
         }
         
@@ -901,8 +881,8 @@ contract GuaranteeFundManager is
      * @param newImplementation New implementation address.
      */
     function _authorizeUpgrade(address newImplementation) internal override {
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
+        uint256 ts = block.number;
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         

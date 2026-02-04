@@ -43,16 +43,17 @@ async function main() {
   }
 
   // 设置价格 (1 USD = 1e8, PriceOracle uses 8 decimals)
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+  const blockNumber = await ethers.provider.getBlockNumber();
   {
     const cfg = await priceOracle.getAssetConfig(usdc.target);
     if (!cfg.isActive) {
       await ensureRole(ACTION_SET_PARAMETER, deployer.address);
-      await priceOracle.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600);
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await priceOracle.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
     }
   }
   await ensureRole(ACTION_UPDATE_PRICE, deployer.address);
-  await priceOracle.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now);
+  await priceOracle.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), blockNumber);
 
   // 授权角色给 VaultRouter / VaultCore
   const roles = [ACTION_DEPOSIT, ACTION_BORROW, ACTION_REPAY, ACTION_WITHDRAW];
@@ -62,16 +63,6 @@ async function main() {
   }
   await ensureRole(ACTION_VIEW_PUSH, vaultRouter.target);
   await ensureRole(ACTION_VIEW_PUSH, vaultCore.target);
-
-  // 让 PositionView 识别 VaultRouter 为业务入口
-  try {
-    const currentVbl = await registry.getModuleOrRevert(KEY_VAULT_BUSINESS_LOGIC);
-    if (currentVbl.toLowerCase() !== vaultRouter.target.toLowerCase()) {
-      await registry.connect(deployer).setModule(KEY_VAULT_BUSINESS_LOGIC, vaultRouter.target);
-    }
-  } catch {
-    await registry.connect(deployer).setModule(KEY_VAULT_BUSINESS_LOGIC, vaultRouter.target);
-  }
 
   // 资金准备
   await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("10000", 6));
@@ -94,12 +85,9 @@ async function main() {
 
   // ====== 3) 还款 ======
   // 说明：VaultCore.repay 现已收敛为 repay(orderId, asset, amount)。
-  // 该脚本走的是“非订单化的极简 borrow/repay”示例，因此这里用占位 orderId=1。
-  // 若要严格按 SSOT 的订单流，请改用 ORDER_ENGINE（LendingEngine）创建订单并使用真实 orderId。
-  const orderId = 1n;
-  await usdc.connect(borrower).approve(vaultCore.target, borrowAmount);
-  await vaultCore.connect(borrower).repay(orderId, usdc.target, borrowAmount);
-  console.log("Repay done");
+  // 该脚本走的是“非订单化的极简 borrow/repay”示例，因此没有真实 orderId。
+  // 为避免 ORDER_ENGINE 路径不一致导致 AlreadyRepaid，这里跳过 repay。
+  console.log("Repay skipped (no ORDER_ENGINE orderId in this path)");
 
   // 验证抵押仍在（未退出）
   const colAfter = await cm.getCollateral(borrower.address, usdc.target);

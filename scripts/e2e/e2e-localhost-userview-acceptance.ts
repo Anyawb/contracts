@@ -18,6 +18,107 @@ function isMissingSelectorError(msg: string): boolean {
   return msg.includes("function selector was not recognized");
 }
 
+function errorSelector(sig: string): string {
+  return ethers.id(sig).slice(0, 10);
+}
+
+function extractRevertData(e: any): string | undefined {
+  // ethers v6 sometimes sets `e.data` to *call data* (tx.data), not revert data.
+  // Prefer nested hardhat/ethers fields that usually contain revert data.
+  const txData: string | undefined = typeof e?.transaction?.data === "string" ? e.transaction.data : undefined;
+  const roots: Array<unknown> = [
+    e?.info?.error?.data,
+    e?.info?.error?.error?.data,
+    e?.error?.data,
+    e?.error?.error?.data,
+    e?.data,
+  ];
+
+  const seen = new Set<unknown>();
+  const hexes: string[] = [];
+  const stack: Array<{ v: unknown; depth: number }> = roots.map((v) => ({ v, depth: 0 }));
+
+  while (stack.length) {
+    const cur = stack.pop()!;
+    const v = cur.v;
+    if (!v || seen.has(v) || cur.depth > 4) continue;
+    seen.add(v);
+
+    if (typeof v === "string") {
+      if (v.startsWith("0x") && v.length >= 10) {
+        if (txData && v.toLowerCase() === txData.toLowerCase()) continue;
+        hexes.push(v);
+      }
+      continue;
+    }
+    if (typeof v === "object") {
+      // common fields in hardhat/ethers error payloads
+      const obj: any = v;
+      for (const k of ["data", "result", "returnData", "reason", "error", "value"]) {
+        if (obj && Object.prototype.hasOwnProperty.call(obj, k)) {
+          stack.push({ v: obj[k], depth: cur.depth + 1 });
+        }
+      }
+      continue;
+    }
+  }
+
+  // Prefer the shortest plausible revert payload (calldata for large arrays is typically much longer).
+  hexes.sort((a, b) => a.length - b.length);
+  if (hexes[0]) return hexes[0];
+
+  const msg = fmtErr(e);
+  const m = String(msg).match(/return data:\s*(0x[0-9a-fA-F]+)/);
+  if (m?.[1]) return m[1];
+  return undefined;
+}
+
+async function mustRevertWithSelector(label: string, fn: () => Promise<unknown>, expectedSel: string) {
+  try {
+    await fn();
+  } catch (e: any) {
+    const msg = fmtErr(e);
+    if (isMissingSelectorError(String(msg))) {
+      throw new Error(
+        `[FAIL] ${label}: call reverted due to missing function selector (deployment/ABI mismatch). Re-run compile + deploy:localhost.`
+      );
+    }
+    const data = extractRevertData(e);
+    const sel = data && data.startsWith("0x") && data.length >= 10 ? data.slice(0, 10).toLowerCase() : undefined;
+    assertOk(!!sel, `${label}: missing revert data (cannot validate selector)`);
+    assertOk(sel === expectedSel.toLowerCase(), `${label}: unexpected error selector ${sel}, expected ${expectedSel}`);
+    console.log(`  ✅ [revert selector ok] ${label}: ${sel}`);
+    return;
+  }
+  throw new Error(`[FAIL] Expected revert, but succeeded: ${label}`);
+}
+
+async function mustRevertMissingRole(label: string, fn: () => Promise<unknown>) {
+  const sel = errorSelector("MissingRole()");
+  try {
+    await fn();
+  } catch (e: any) {
+    const msg = fmtErr(e);
+    if (isMissingSelectorError(String(msg))) {
+      throw new Error(
+        `[FAIL] ${label}: call reverted due to missing function selector (deployment/ABI mismatch). Re-run compile + deploy:localhost.`
+      );
+    }
+    const data = extractRevertData(e);
+    if (data && data.startsWith("0x") && data.length >= 10) {
+      const got = data.slice(0, 10).toLowerCase();
+      assertOk(got === sel.toLowerCase(), `${label}: unexpected selector ${got}, expected ${sel}`);
+      console.log(`  ✅ [revert selector ok] ${label}: ${got}`);
+      return;
+    }
+    // Fallback: some call paths only expose the custom error name in message
+    assertOk(String(msg).includes("MissingRole"), `${label}: expected MissingRole(), got: ${msg}`);
+    console.log(`  ✅ [revert name ok] ${label}: ${msg}`);
+    return;
+  }
+  throw new Error(`[FAIL] Expected MissingRole() revert, but succeeded: ${label}`);
+}
+
 async function mustRevert(label: string, fn: () => Promise<unknown>) {
   try {
     await fn();
@@ -73,6 +174,8 @@ async function main() {
       adminSigner: deployer,
       assetForPriceCheck: CONTRACT_ADDRESSES.MockUSDC,
     });
+
+    const missingRoleSel = errorSelector("MissingRole()");
 
     const userViewAddr = (await registry.getModuleOrRevert(key("USER_VIEW"))) as string;
     const userView = (await ethers.getContractAt("UserView", userViewAddr)) as any;
@@ -132,14 +235,22 @@ async function main() {
     assertOk(tVer === verU, "UserView totals version must match StatisticsView version");
 
     // Legacy helpers must match totals (and must not be derived from asset=0 semantics)
-    assertOk(
-      (await mustSucceed("UserView.getUserTotalCollateral", async () => userView.getUserTotalCollateral(user.address))) === tc,
-      "getUserTotalCollateral mismatch"
-    );
-    assertOk(
-      (await mustSucceed("UserView.getUserTotalDebt", async () => userView.getUserTotalDebt(user.address))) === td,
-      "getUserTotalDebt mismatch"
-    );
+    {
+      const [c] = (await mustSucceed("UserView.getUserTotalCollateral", async () =>
+        userView.getUserTotalCollateral(user.address)
+      )) as [bigint, boolean, bigint, bigint, bigint];
+      assertOk(c === tc, "getUserTotalCollateral mismatch");
+    }
+    {
+      const [d] = (await mustSucceed("UserView.getUserTotalDebt", async () => userView.getUserTotalDebt(user.address))) as [
+        bigint,
+        boolean,
+        bigint,
+        bigint,
+        bigint,
+      ];
+      assertOk(d === td, "getUserTotalDebt mismatch");
+    }
 
     // ====== MUST: UserView aggregate output matches downstream views (value + meta passthrough) ======
     // Seed PositionView + HealthView directly via their accepted push paths and compare UserView aggregation.
@@ -229,6 +340,73 @@ async function main() {
     )) as [any, boolean, bigint, bigint, boolean, bigint];
     assertOk(posValidExp2 === pValidExp, "UserView must passthrough expired PositionView isValid");
     assertOk(healthValidExp2 === hValidExp, "UserView must passthrough expired HealthView isValid");
+
+    // ====== Scheme U E2E acceptance (user-dimensional read policy) ======
+    // MUST:
+    // - self-read allowed without roles
+    // - non-self requires VIEW_USER_DATA or ACTION_ADMIN (revert MissingRole() otherwise)
+    // - batch has NO self-bypass (requires VIEW_USER_DATA or ACTION_ADMIN)
+    console.log("\n=== Scheme U (User-dimensional read policy) ===");
+    const unauth = ethers.Wallet.createRandom().connect(ethers.provider);
+    await deployer.sendTransaction({ to: unauth.address, value: ethers.parseEther("1") });
+
+    // Self-read: no roles required
+    await mustSucceed("self-read: UserView.getUserTotalsWithMeta (no roles)", async () =>
+      userView.connect(user).getUserTotalsWithMeta(user.address)
+    );
+    await mustSucceed("self-read: UserView.getHealthFactor (no roles)", async () =>
+      userView.connect(user).getHealthFactor(user.address)
+    );
+
+    // Non-self: unauthorized must revert MissingRole()
+    await mustRevertMissingRole("non-self: unauthorized user totals must revert MissingRole()", async () =>
+      userView.connect(unauth).getUserTotalsWithMeta(user.address)
+    );
+    await mustRevertMissingRole("non-self: unauthorized getHealthFactor must revert MissingRole()", async () =>
+      userView.connect(unauth).getHealthFactor(user.address)
+    );
+
+    // Admin bypass: grant ACTION_ADMIN only (no VIEW_USER_DATA) and must succeed for non-self reads
+    const adminOnly = ethers.Wallet.createRandom().connect(ethers.provider);
+    await deployer.sendTransaction({ to: adminOnly.address, value: ethers.parseEther("1") });
+    await mustSucceed("grant ACTION_ADMIN to adminOnly", async () => acm.connect(deployer).grantRole(ROLE_ADMIN, adminOnly.address));
+    await mustSucceed("non-self: admin bypass user totals", async () =>
+      userView.connect(adminOnly).getUserTotalsWithMeta(user.address)
+    );
+    await mustSucceed("non-self: admin bypass getHealthFactor", async () =>
+      userView.connect(adminOnly).getHealthFactor(user.address)
+    );
+
+    // Ops role: VIEW_USER_DATA must allow non-self reads
+    const ROLE_VIEW_USER_DATA = key("VIEW_USER_DATA");
+    const ops = ethers.Wallet.createRandom().connect(ethers.provider);
+    await deployer.sendTransaction({ to: ops.address, value: ethers.parseEther("1") });
+    await mustSucceed("grant VIEW_USER_DATA to ops", async () =>
+      acm.connect(deployer).grantRole(ROLE_VIEW_USER_DATA, ops.address)
+    );
+    await mustSucceed("non-self: ops can read user totals", async () =>
+      userView.connect(ops).getUserTotalsWithMeta(user.address)
+    );
+    await mustSucceed("non-self: ops can read getHealthFactor", async () =>
+      userView.connect(ops).getHealthFactor(user.address)
+    );
+
+    // Batch: no self-bypass (even [self] must revert without roles)
+    await mustRevertMissingRole("batch: self included but no roles must revert MissingRole()", async () =>
+      userView.connect(user).batchGetUserHealthFactors([user.address])
+    );
+    await mustRevertMissingRole("batch: mixed users (includes self) still must revert without roles", async () =>
+      userView.connect(user).batchGetUserHealthFactors([user.address, unauth.address])
+    );
+    await mustSucceed("batch: ops can batch read health factors", async () =>
+      userView.connect(ops).batchGetUserHealthFactors([user.address])
+    );
+    await mustSucceed("batch: ops can batch read mixed users", async () =>
+      userView.connect(ops).batchGetUserHealthFactors([user.address, unauth.address])
+    );
+    await mustSucceed("batch: admin bypass can batch read mixed users", async () =>
+      userView.connect(adminOnly).batchGetUserHealthFactors([user.address, unauth.address])
+    );
 
     // Cleanup impersonation
     await network.provider.send("hardhat_stopImpersonatingAccount", [vaultRouterAddr]);

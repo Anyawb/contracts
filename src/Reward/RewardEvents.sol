@@ -9,19 +9,19 @@ library RewardEvents {
     /// @param user User address
     /// @param points Points minted (token decimals)
     /// @param reason Human-readable reason (short string)
-    /// @param timestamp Emission timestamp (seconds)
-    event RewardEarned(address indexed user, uint256 points, string reason, uint256 timestamp);
+    /// @param blockNumber Emission block number (block.number)
+    event RewardEarned(address indexed user, uint256 points, string reason, uint256 blockNumber);
 
     /// @notice Emitted for lightweight performance/metric tracking in Reward flows.
     /// @param operation Operation name
     /// @param value Metric value (context-dependent)
-    /// @param timestamp Emission timestamp (seconds)
-    event PerformanceMonitor(string operation, uint256 value, uint256 timestamp);
+    /// @param blockNumber Emission block number (block.number)
+    event PerformanceMonitor(string operation, uint256 value, uint256 blockNumber);
 
     /// @notice Emitted when upgrade multiplier is updated.
     /// @param oldMultiplier Previous multiplier (bps)
     /// @param newMultiplier New multiplier (bps)
-    /// @param timestamp Emission timestamp (seconds)
-    event UpgradeMultiplierUpdated(uint256 oldMultiplier, uint256 newMultiplier, uint256 timestamp);
+    /// @param blockNumber Emission block number (block.number)
+    event UpgradeMultiplierUpdated(uint256 oldMultiplier, uint256 newMultiplier, uint256 blockNumber);
 }
 

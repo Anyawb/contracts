@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 import { ethers, upgrades } from 'hardhat';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
@@ -110,12 +110,11 @@ describe('EventHistoryManager', function () {
 
       const tx = await eventHistory.connect(manager).recordEvent(eventType, stranger.address, asset, amount, extraData);
       const receipt = await tx.wait();
-      const block = await ethers.provider.getBlock(receipt!.blockNumber!);
-      const timestamp = block!.timestamp;
+      const blockNumber = receipt!.blockNumber!;
 
       await expect(tx)
         .to.emit(eventHistory, 'HistoryRecorded')
-        .withArgs(eventType, stranger.address, asset, amount, extraData, timestamp);
+        .withArgs(eventType, stranger.address, asset, amount, extraData, blockNumber);
 
       const abiCoder = ethers.AbiCoder.defaultAbiCoder();
       const expectedPayload = abiCoder.encode(
@@ -243,17 +242,16 @@ describe('EventHistoryManager', function () {
       expect(decoded[4]).to.equal(extraData);
     });
 
-    it('timestamp in HistoryRecorded matches block timestamp', async function () {
+    it('blockNumber in HistoryRecorded matches receipt block', async function () {
       const { eventHistory, manager, stranger } = await loadFixture(deployFixture);
       const eventType = ethers.keccak256(ethers.toUtf8Bytes('TIMESTAMP_TEST'));
       const asset = ethers.Wallet.createRandom().address;
 
       const tx = await eventHistory.connect(manager).recordEvent(eventType, stranger.address, asset, 100n, '0x');
       const receipt = await tx.wait();
-      const block = await ethers.provider.getBlock(receipt!.blockNumber!);
 
       const historyEvent = eventHistory.interface.parseLog(receipt!.logs[0]);
-      expect(historyEvent!.args[5]).to.equal(block!.timestamp);
+      expect(historyEvent!.args[5]).to.equal(receipt!.blockNumber!);
     });
   });
 

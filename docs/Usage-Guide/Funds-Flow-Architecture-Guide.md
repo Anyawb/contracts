@@ -21,6 +21,27 @@
 - **清算残值分配 SSOT**：`LiquidationPayoutManager`（`KEY_LIQUIDATION_PAYOUT_MANAGER`）
 - **事件/DataPush 单点（清算）**：`LiquidatorView`（`KEY_LIQUIDATION_VIEW`）
 
+## 估值口径（Value Unit SSOT：USD-8）
+
+本仓库中存在两类“数量”：
+
+- **amount（账本 SSOT）**：token base units（按各资产自身 decimals 记账），权威来源是 `CollateralManager` 与 `VaultLendingEngine`。
+- **value（估值输出 SSOT）**：**USD value with 8 decimals（USD-8）**。任何跨资产聚合（Statistics/风险/LTV/HF/清算参数）都必须先统一到 USD-8。
+
+### USD-8 换算公式（隐含但必须固化为 SSOT）
+
+系统当前隐含的换算公式为：
+
+\[
+\text{valueUSD8}=\frac{\text{amount(token base units)}\times\text{price(USD-8 per 1 token)}}{10^{\text{assetDecimals}}}
+\]
+
+关键说明（避免口径分叉）：
+
+- `price` 的单位是 **USD-8 per 1 token**（例如 $1.00 记为 `100000000`）。
+- `assetDecimals` 是**资产自身 decimals**（用于把 token base units 归一到 “1 token”）。
+- **注意**：当前 `IPriceOracle.getPrice(asset)` 的返回值里 `decimals` 在实现中被用作 `assetDecimals`（用于上述除数），**不是**“price 的精度”。price 的精度固定为 USD-8。
+
 ## 架构指南原文入口（建议先读）
 
 - `docs/Architecture-Guide.md`
@@ -80,9 +101,9 @@
 
 #### 1.3.2 仓位推送链路（SSOT，best-effort）
 
-写入账本成功后（例如 `LendingEngine` borrow/repay、清算 forceReduceDebt、或抵押变化），业务模块会走如下链路更新 View：
+写入账本成功后（例如 **债务账本 `VaultLendingEngine`（`KEY_LE`）** 的 borrow/repay/forceReduceDebt、或抵押账本 `CollateralManager` 的抵押变化），业务模块会走如下链路更新 View：
 
-`业务/账本模块（如 LendingEngine） → VaultCore.pushUserPositionUpdate* / pushUserPositionUpdateDelta* → VaultRouter.push* → PositionView.push*`
+`业务/账本模块（如 VaultLendingEngine / CollateralManager / SettlementManager） → VaultCore.pushUserPositionUpdate* / pushUserPositionUpdateDelta* → VaultRouter.push* → PositionView.push*`
 
 关键点：
 
@@ -93,10 +114,10 @@
 #### 1.3.3 建议订阅/对账的事件（按“唯一来源”）
 
 - **路由层（VaultRouter）**：
-  - `VaultAction(action, user, amount1, amount2, asset, timestamp)`：仅用于 deposit/withdraw 路由的可观测记录
-  - `UserPositionPushed(user, asset, collateral, debt, timestamp, requestId, seq)`：全量仓位推送（forward 到 PositionView）
-  - `UserPositionDeltaPushed(user, asset, collateralDelta, debtDelta, timestamp, requestId, seq)`：增量仓位推送（forward 到 PositionView；同时 best-effort 推动统计）
-  - `ModuleCacheRefreshed(timestamp)`：A 类模块地址缓存刷新（仅 `CacheMaintenanceManager` 可调用）
+  - `VaultAction(action, user, amount1, amount2, asset, blockNumber)`：仅用于 deposit/withdraw 路由的可观测记录
+  - `UserPositionPushed(user, asset, collateral, debt, blockNumber, requestId, seq)`：全量仓位推送（forward 到 PositionView）
+  - `UserPositionDeltaPushed(user, asset, collateralDelta, debtDelta, blockNumber, requestId, seq)`：增量仓位推送（forward 到 PositionView；同时 best-effort 推动统计）
+  - `ModuleCacheRefreshed(blockNumber)`：A 类模块地址缓存刷新（仅 `CacheMaintenanceManager` 可调用）
 - **缓存层（PositionView）**：
   - `UserPositionCachedV2(user, asset, collateral, debt, version, ts)`：仓位缓存落地（带版本，推荐对账订阅）
   - `CacheUpdateFailed(...)` / `IdempotentRequestIgnored(...)`：推送失败与幂等重放观测
@@ -211,7 +232,7 @@
          - FeeRouter 从撮合合约拉取 `amount`，按配置分发到 `platformTreasury/ecosystemVault`，并将 **remaining** 返还给撮合合约
       3) 撮合合约将 FeeRouter 返还的 **remaining（即净额）** 转给 borrower（净额以“真实返还结果”为准，避免按 bps 复算造成舍入漂移）
   - **(D) 账本落地与订单创建（写入不经 View）**
-    - 债务账本写入：通过 `VaultCore.borrowFor(borrower, borrowAsset, amount, termDays)` 统一入口触达 `LendingEngine`（`onlyVaultCore`）
+    - 债务账本写入：通过 `VaultCore.borrowFor(borrower, borrowAsset, amount, termDays)` 统一入口触达 **`VaultLendingEngine`（`KEY_LE`，`ILendingEngineBasic`）**（`onlyVaultCore`）
     - 订单创建：`ORDER_ENGINE(LendingEngine).createLoanOrder(order)` 创建 `orderId`，并由 `LoanNFT`/`LendingEngine` 发出 `LOAN_*`/NFT/DataPush 等事件
   - **关键口径（必须）**：`LoanOrder.lender` 固定写 `LenderPoolVault` 地址（资金池），不写 `lenderSigner`
 
@@ -250,7 +271,7 @@
 
 - **发起方**：用户
 - **入口（SSOT）**：`VaultCore.repay(orderId, debtAsset, amount)` → `Registry(KEY_SETTLEMENT_MANAGER)` → `SettlementManager.repayAndSettle(user, debtAsset, amount, orderId)`
-- **核心原则**：还款不再直达 `LendingEngine`，必须统一进入 `SettlementManager`，避免 “repay vs settle vs liquidate” 分叉。
+- **核心原则**：用户还款入口不直达账本（`VaultLendingEngine`）/订单引擎（`ORDER_ENGINE`），必须统一进入 `SettlementManager`，避免 “repay vs settle vs liquidate” 分叉。
 - **前端集成（approve/调用示例）**：统一见 `docs/FRONTEND_CONTRACTS_INTEGRATION.md`（避免多处重复导致口径漂移）
 
 ### 4.2 正常结算（按时/提前）
@@ -278,7 +299,7 @@
   - `onlyVaultCore` + `whenNotPaused` + `nonReentrant`
   - **依赖 ORDER_ENGINE 的权限门槛**：
     - `SettlementManager` 需要具备 `ActionKeys.ACTION_REPAY`（才能调用 `ORDER_ENGINE.repay`）
-    - `SettlementManager` 需要具备 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`（才能读取 `ORDER_ENGINE._getLoanOrderForView(orderId)` 做 orderId/user/asset cross-check）
+    - `SettlementManager` 需要具备 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`（才能读取 `ORDER_ENGINE.getLoanOrderForView(orderId)` 做 orderId/user/asset cross-check）
 - **CollateralManager.withdrawCollateralTo（抵押返还）**
   - 允许 `SettlementManager` 作为 authorized collateral exit caller（`receiver == user` 场景）
 
@@ -296,8 +317,8 @@
 
 - **用户入口（SSOT）**：`src/Vault/VaultCore.sol`（`repay(orderId, asset, amount)`）
 - **结算入口（SSOT）**：`src/Vault/liquidation/modules/SettlementManager.sol`（`repayAndSettle` / `settleOrLiquidate`）
-- **订单引擎（orderId SSOT）**：`src/core/LendingEngine.sol`（`repay` / `_getLoanOrderForView` / ON_TIME_WINDOW 判定）
-- **债务账本（用户总债务价值）**：`src/interfaces/ILendingEngineBasic.sol`（`getUserTotalDebtValue` 等；实现为 Registry `KEY_LE` 指向的引擎；注意这是“价值口径”，通常以 settlement token 计价）
+- **订单引擎（orderId SSOT）**：`src/core/LendingEngine.sol`（`repay` / `getLoanOrderForView` / ON_TIME_WINDOW 判定）
+- **债务账本（用户总债务价值，USD-8）**：`src/interfaces/ILendingEngineBasic.sol`（`getUserTotalDebtValue` 等；实现为 Registry `KEY_LE` 指向的引擎；注意这是 **USD-8 value**，不是 token base units）
 - **当前默认实现（截至 commit `ec7a417`）**：`KEY_LE` → `src/Vault/modules/VaultLendingEngine.sol`（contract: `VaultLendingEngine`）
 - **抵押返还（真实转账）**：`src/Vault/modules/CollateralManager.sol`（`withdrawCollateralTo`）
 - **费用路由（如有）**：`src/Vault/FeeRouter.sol`
@@ -394,7 +415,7 @@
   - `SettlementManager.settleOrLiquidate(orderId)` 计算清算参数
   - → `LiquidationManager.liquidateFromSettlementManager(liquidator=keeper, ...)`
   - → `CollateralManager.withdrawCollateralTo(user, collateralAsset, share, receiver)`（按 residual shares 分配）
-  - → `LendingEngine.forceReduceDebt(user, debtAsset, debtAmount)`（直写账本）
+  - → `ILendingEngineBasic(KEY_LE).forceReduceDebt(user, debtAsset, debtAmount)`（直写债务账本；当前实现为 `VaultLendingEngine`）
 - **保留入口**：`LiquidationManager.liquidate/batchLiquidate` 仅作为“显式参数执行器”（测试/应急），不建议作为常态 keeper 入口。
 
 ### 6.3 残值分配（SSOT）
@@ -556,7 +577,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-create-order.ts" --netw
   - 若未配置 `ACCESS_CONTROL_MANAGER` 或自动授予失败，会直接报错退出
   - 增加 **Preflight 诊断**：
     - 订单读取（从 OrderEngine 以 SettlementManager 身份模拟调用）
-    - 债务/可清算数量/债务价值（LendingEngine）
+    - 债务/可清算数量/债务价值（VaultLendingEngine / `KEY_LE`）
     - 风险清算判定（LiquidationRiskManager）
     - 抵押品资产与估值（CollateralManager + PositionView）
 

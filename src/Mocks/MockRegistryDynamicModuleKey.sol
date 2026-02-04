@@ -22,7 +22,6 @@ contract MockRegistryDynamicModuleKey is IRegistryDynamicModuleKey {
     mapping(bytes32 => bool) private _keyExists;
     mapping(bytes32 => string) private _keyNames;
 
-    // Minimal admin/pause state to avoid empty-block bodies (solhint no-empty-blocks).
     address private _registrationAdmin;
     address private _systemAdmin;
     bool private _paused;

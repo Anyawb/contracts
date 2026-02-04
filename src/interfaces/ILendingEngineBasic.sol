@@ -73,7 +73,7 @@ interface ILendingEngineBasic {
     function getTotalDebtByAsset(address asset) external view returns (uint256 totalDebt);
 
     /**
-     * @notice Get user's total debt value (denominated in settlement token).
+     * @notice Get user's total debt value (USD-8 value).
      * @dev Reverts if:
      *      - none
      *
@@ -81,19 +81,19 @@ interface ILendingEngineBasic {
      * - View only
      *
      * @param user User address.
-     * @return totalValue Debt value in settlement token decimals (implementation-defined).
+     * @return totalValue Debt value in USD-8.
      */
     function getUserTotalDebtValue(address user) external view returns (uint256 totalValue);
 
     /**
-     * @notice Get system total debt value (denominated in settlement token).
+     * @notice Get system total debt value (USD-8 value).
      * @dev Reverts if:
      *      - none
      *
      * Security:
      * - View only
      *
-     * @return totalValue Debt value in settlement token decimals (implementation-defined).
+     * @return totalValue Debt value in USD-8.
      */
     function getTotalDebtValue() external view returns (uint256 totalValue);
 
@@ -159,7 +159,7 @@ interface ILendingEngineBasic {
     function getReducibleDebtAmount(address user, address asset) external view returns (uint256 reducibleAmount);
 
     /**
-     * @notice Calculate debt value for a user on an asset (denominated in settlement token).
+     * @notice Calculate debt value for a user on an asset (USD-8 value).
      * @dev Reverts if:
      *      - none (implementation-defined)
      *
@@ -168,7 +168,7 @@ interface ILendingEngineBasic {
      *
      * @param user User address.
      * @param asset Debt asset address.
-     * @return value Debt value in settlement token decimals (implementation-defined).
+     * @return value Debt value in USD-8.
      */
     function calculateDebtValue(address user, address asset) external view returns (uint256 value);
 

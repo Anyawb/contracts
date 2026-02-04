@@ -10,6 +10,7 @@ StatisticsView 的测试文件包括：
 
 ```
 test/
+├── StatisticsPushManager.usd8.snapshot.test.ts     # Strict B+：USD-8 snapshot + 单入口写入（推荐）
 ├── StatisticsView.active-users.test.ts          # 活跃用户统计测试
 ├── StatisticsView.guarantee-aggregation.test.ts  # 保证金聚合测试
 ├── StatisticsView.migration.test.ts              # 迁移测试
@@ -111,6 +112,11 @@ npx hardhat test test/StatisticsView*.test.ts
 npx hardhat test test/VaultStatistics.test.ts
 ```
 
+```bash
+# 运行 Strict B+（推荐主链路）：编排器重算 USD-8 快照并推送到 StatisticsView
+npx hardhat test test/StatisticsPushManager.usd8.snapshot.test.ts
+```
+
 ### 运行特定测试文件
 
 ```bash
@@ -138,6 +144,7 @@ npx hardhat test test/StatisticsView.migration.test.ts
 ## 📚 相关文档
 
 - [架构指南](../Architecture-Guide.md) - 双架构设计说明
+- [Strict B+ 实施清单](../Usage-Guide/StatisticsView-Strict-B-Push-Pipeline-Implementation-Checklist.md) - Snapshot + 单入口编排器（StatisticsPushManager）
 - [View 层测试指南](./view-layer-testing-guide.md) - View 层测试说明
 - [智能合约标准](../SmartContractStandard.md) - 代码规范
 

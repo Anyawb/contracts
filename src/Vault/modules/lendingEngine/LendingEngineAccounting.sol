@@ -55,8 +55,7 @@ library LendingEngineAccounting {
             ActionKeys.ACTION_BORROW,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_BORROW),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -100,8 +99,7 @@ library LendingEngineAccounting {
             ActionKeys.ACTION_REPAY,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -148,8 +146,7 @@ library LendingEngineAccounting {
             ActionKeys.ACTION_LIQUIDATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         return amount;

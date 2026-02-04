@@ -1,15 +1,56 @@
-import { ethers } from "hardhat";
+import { ethers, network } from "hardhat";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { runViewPreflight } from "./utils/view-preflight";
 
-const ONE_DAY = 24n * 60n * 60n;
+const BLOCKS_PER_DAY = 7_200n;
+const ONE_HOUR_BLOCKS = 1_800n;
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
-function calcTotalDue(principal: bigint, rateBps: bigint, termSec: bigint) {
-  const denom = 365n * ONE_DAY * 10_000n;
-  const interest = (principal * rateBps * termSec) / denom;
+function mkArtifactsWriter() {
+  const outDir = path.join(__dirname, "artifacts");
+  try {
+    fs.mkdirSync(outDir, { recursive: true });
+  } catch {
+    // ignore
+  }
+  return {
+    outDir,
+    writeJson: (name: string, data: unknown) => {
+      const p = path.join(outDir, name);
+      const replacer = (_k: string, v: any) => (typeof v === "bigint" ? v.toString() : v);
+      fs.writeFileSync(p, JSON.stringify(data, replacer, 2) + "\n", "utf8");
+      return p;
+    },
+  };
+}
+
+type RewardDp = { typeHash: string; payload: string };
+function parseRewardDataPushed(receipt: any, rewardViewAddr: string): RewardDp[] {
+  const iface = new ethers.Interface(["event DataPushed(bytes32 indexed dataTypeHash, bytes payload)"]);
+  const out: RewardDp[] = [];
+  for (const log of receipt?.logs ?? []) {
+    if (!log?.address) continue;
+    if (String(log.address).toLowerCase() !== rewardViewAddr.toLowerCase()) continue;
+    try {
+      const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
+      if (parsed?.name === "DataPushed") {
+        out.push({ typeHash: String(parsed.args.dataTypeHash), payload: String(parsed.args.payload) });
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return out;
+}
+
+function calcTotalDue(principal: bigint, rateBps: bigint, termBlocks: bigint) {
+  const denom = 365n * BLOCKS_PER_DAY * 10_000n;
+  const interest = (principal * rateBps * termBlocks) / denom;
   return principal + interest;
 }
 
@@ -39,10 +80,19 @@ function buildLendIntentHash(li: any) {
 }
 
 async function main() {
-  const signers = await ethers.getSigners();
-  const deployer = signers[0];
+  const snap = await network.provider.send("evm_snapshot", []);
+  const artifacts = mkArtifactsWriter();
+  const dataPushedCounts: Record<string, number> = {};
+  const bump = (k: string) => {
+    const kk = k.toLowerCase();
+    dataPushedCounts[kk] = (dataPushedCounts[kk] ?? 0) + 1;
+  };
 
-  console.log("=== E2E Full Test with View Layer Verification ===\n");
+  try {
+    const signers = await ethers.getSigners();
+    const deployer = signers[0];
+
+    console.log("=== E2E Full Test with View Layer Verification ===\n");
 
   // ============ Setup Contracts ============
   const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
@@ -50,11 +100,23 @@ async function main() {
   const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter)) as any;
+  const settlementManager = (await ethers.getContractAt(
+    "src/Vault/liquidation/modules/SettlementManager.sol:SettlementManager",
+    CONTRACT_ADDRESSES.SettlementManager
+  )) as any;
   const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
   const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
   const vbl = (await ethers.getContractAt("VaultBusinessLogic", CONTRACT_ADDRESSES.VaultBusinessLogic)) as any;
   const cm = (await ethers.getContractAt("CollateralManager", CONTRACT_ADDRESSES.CollateralManager)) as any;
   const vle = (await ethers.getContractAt("src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine", CONTRACT_ADDRESSES.VaultLendingEngine)) as any;
+
+  // MUST: Preflight for route↔registry + version info + required roles
+  await runViewPreflight({
+    registryAddr: CONTRACT_ADDRESSES.Registry,
+    acmAddr: CONTRACT_ADDRESSES.AccessControlManager,
+    adminSigner: deployer,
+    assetForPriceCheck: CONTRACT_ADDRESSES.MockUSDC,
+  });
 
   // Pick "clean" borrower/lender to make re-runs on dirty node stable.
   // matchflow may lock EarlyRepaymentGuarantee per (borrower, asset); if an active record exists,
@@ -112,6 +174,11 @@ async function main() {
   const loanNftAddr = await registry.getModuleOrRevert(key("LOAN_NFT"));
   const loanNft = (await ethers.getContractAt("LoanNFT", loanNftAddr)) as any;
 
+  const rewardPointsAddr = await registry.getModuleOrRevert(key("REWARD_POINTS"));
+  const rewardPoints = (await ethers.getContractAt("src/Token/RewardPoints.sol:RewardPoints", rewardPointsAddr)) as any;
+  const rewardDecimals = (await rewardPoints.decimals()) as number;
+  const fmtPoints = (x: bigint) => ethers.formatUnits(x, rewardDecimals);
+
   console.log("📋 View Modules:");
   console.log("  PositionView:", positionViewAddr);
   console.log("  HealthView:", healthViewAddr);
@@ -120,6 +187,7 @@ async function main() {
   console.log("  DashboardView:", dashboardViewAddr);
   console.log("  RiskView:", riskViewAddr);
   console.log("  UserView:", userViewAddr);
+  console.log("  RewardPoints:", rewardPointsAddr);
   console.log("");
 
   // ============ Setup Roles ============
@@ -159,11 +227,12 @@ async function main() {
   {
     const cfg = await po.getAssetConfig(usdc.target);
     if (!cfg.isActive) {
-      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600);
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
     }
   }
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
-  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 6), now);
+  const blockNumber = await ethers.provider.getBlockNumber();
+  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 6), blockNumber);
 
   if (!(await feeRouter.isTokenSupported(usdc.target))) {
     await feeRouter.connect(deployer).addSupportedToken(usdc.target);
@@ -196,17 +265,19 @@ async function main() {
     await updateStatisticsFromLedger(user, asset);
     
     try {
-      // PositionView
-      const [collateral, debt] = await positionView.getUserPosition(user, asset);
-      console.log(`  PositionView: collateral=${ethers.formatUnits(collateral, 6)}, debt=${ethers.formatUnits(debt, 6)}`);
+      // PositionView (meta)
+      const [collateral, debt, isValid, blockNumber, ver] = await positionView.getUserPositionWithMeta(user, asset);
+      console.log(
+        `  PositionView: collateral=${ethers.formatUnits(collateral, 6)}, debt=${ethers.formatUnits(debt, 6)}, isValid=${isValid}, block=${blockNumber.toString()}, ver=${ver.toString()}`
+      );
     } catch (e: any) {
       console.log(`  PositionView: ${e.message || "query failed"}`);
     }
 
     try {
-      // HealthView
-      const [hf, isValid] = await healthView.getUserHealthFactor(user);
-      console.log(`  HealthView: healthFactor=${hf.toString()}, isValid=${isValid}`);
+      // HealthView (meta)
+      const [hf, isValid, blockNumber] = await healthView.getUserHealthFactorWithMeta(user);
+      console.log(`  HealthView: healthFactor=${hf.toString()}, isValid=${isValid}, block=${blockNumber.toString()}`);
     } catch (e: any) {
       console.log(`  HealthView: ${e.message || "query failed"}`);
     }
@@ -228,26 +299,42 @@ async function main() {
     }
 
     try {
-      // StatisticsView
-      const stats = await statisticsView.getGlobalStatistics();
-      console.log(`  StatisticsView: totalUsers=${stats.totalUsers}, totalCollateral=${ethers.formatUnits(stats.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(stats.totalDebt, 6)}`);
+      // StatisticsView (meta)
+      const [stats, isValid, blockNumber] = await statisticsView.getGlobalStatisticsWithMeta();
+      console.log(
+        `  StatisticsView: totalUsers=${stats.totalUsers}, totalCollateral=${ethers.formatUnits(stats.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(stats.totalDebt, 6)}, isValid=${isValid}, block=${blockNumber.toString()}`
+      );
     } catch (e: any) {
       console.log(`  StatisticsView: ${e.message || "query failed"}`);
     }
 
     try {
-      // DashboardView
-      const overview = await dashboardView.getUserOverview(user, [asset]);
-      console.log(`  DashboardView: totalCollateral=${ethers.formatUnits(overview.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(overview.totalDebt, 6)}, healthFactor=${overview.healthFactor.toString()}`);
+      // DashboardView (meta)
+      const [overview, posValid, posBlocks, posVer, hfBlock] = await dashboardView.getUserOverviewWithMeta(user, [asset]);
+      console.log(
+        `  DashboardView: totalCollateral=${ethers.formatUnits(overview.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(overview.totalDebt, 6)}, healthFactor=${overview.healthFactor.toString()}, posValid=${posValid[0]}, posBlock=${posBlocks[0].toString()}, posVer=${posVer[0].toString()}, hfBlock=${hfBlock.toString()}`
+      );
     } catch (e: any) {
       console.log(`  DashboardView: ${e.message || "query failed"}`);
     }
 
     try {
-      // RewardView
-      const [totalEarned, totalBurned, pendingPenalty, level, privilegesPacked, lastActivity, totalLoans, totalVolume] = 
-        await rewardView.getUserRewardSummary(user);
-      console.log(`  RewardView: totalEarned=${totalEarned.toString()}, level=${level}, totalLoans=${totalLoans.toString()}`);
+      // RewardView (meta)
+      const [
+        totalEarned,
+        totalBurned,
+        pendingPenalty,
+        level,
+        privilegesPacked,
+        lastActivity,
+        totalLoans,
+        totalVolume,
+        blockNumber,
+        isValid,
+      ] = await rewardView.getUserRewardSummaryWithMeta(user);
+      console.log(
+        `  RewardView: totalEarned=${totalEarned.toString()}, level=${level}, totalLoans=${totalLoans.toString()}, block=${blockNumber.toString()}, isValid=${isValid}`
+      );
     } catch (e: any) {
       console.log(`  RewardView: ${e.message || "query failed"}`);
     }
@@ -275,7 +362,7 @@ async function main() {
   const borrowAmt2 = ethers.parseUnits("500", 6);
   const termDays = 5;
   const rateBps = 1000n;
-  const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+  const expireAt = BigInt(await ethers.provider.getBlockNumber()) + ONE_HOUR_BLOCKS;
 
   const borrowIntent = {
     borrower: borrower.address,
@@ -381,12 +468,24 @@ async function main() {
 
   // ============ Step 3: Repay Match Loan (via SettlementManager SSOT) ============
   console.log("\n=== Step 3: Borrower Repays Match Loan ===");
+  const requireFullRepayRelease = (await settlementManager.requireFullRepayRelease()) as boolean;
+  if (requireFullRepayRelease) {
+    console.log("  ⚠️  SettlementManager.requireFullRepayRelease=true; disabling for this run");
+    await (await settlementManager.connect(deployer).setRequireFullRepayRelease(false)).wait();
+  }
   if (orderId === null) throw new Error("LoanOrderCreated not found");
-  const termSec = BigInt(termDays) * ONE_DAY;
-  const totalDue = calcTotalDue(borrowAmt2, rateBps, termSec);
+  const termBlocks = BigInt(termDays) * BLOCKS_PER_DAY;
+  const totalDue = calcTotalDue(borrowAmt2, rateBps, termBlocks);
+  // Reward baseline: this script uses borrowAmt2=500 USDC (<1000e6), so rewards MUST NOT change.
+  const rewardBalBefore = (await rewardPoints.balanceOf(borrower.address)) as bigint;
+  const rewardSummaryBefore = await rewardView.getUserRewardSummaryWithMeta(borrower.address);
+  const earnedBefore = rewardSummaryBefore[0] as bigint;
   // 统一入口：走 VaultCore.repay → SettlementManager
   await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, totalDue);
-  await vaultCore.connect(borrower).repay(orderId, usdc.target, totalDue);
+  const repayTx = await vaultCore.connect(borrower).repay(orderId, usdc.target, totalDue);
+  const repayRcpt = await repayTx.wait();
+  const rewardPushes = parseRewardDataPushed(repayRcpt, String(rewardViewAddr));
+  for (const p of rewardPushes) bump(p.typeHash);
   console.log("✅ Repay completed. totalDue:", ethers.formatUnits(totalDue, 6));
 
   if (newTokenId !== undefined) {
@@ -396,6 +495,24 @@ async function main() {
 
   await verifyViews("After Match Repay", borrower.address, usdc.target);
 
+  // Reward strict check: delta must be zero (ineligible principal)
+  const rewardBalAfter = (await rewardPoints.balanceOf(borrower.address)) as bigint;
+  const rewardSummaryAfter = await rewardView.getUserRewardSummaryWithMeta(borrower.address);
+  const earnedAfter = rewardSummaryAfter[0] as bigint;
+  const balDelta = rewardBalAfter - rewardBalBefore;
+  const earnedDelta = earnedAfter - earnedBefore;
+  console.log(
+    `  [Reward] repay delta (ineligible): balDelta=${fmtPoints(balDelta)} earnedDelta=${fmtPoints(earnedDelta)} dataPushed=${rewardPushes.length}`
+  );
+  if (balDelta !== 0n || earnedDelta !== 0n) {
+    throw new Error(
+      `[Reward] expected no points change for ineligible principal (<1000e6): balDelta=${balDelta.toString()} earnedDelta=${earnedDelta.toString()}`
+    );
+  }
+  if (rewardPushes.length !== 0) {
+    throw new Error(`[Reward] expected no RewardView.DataPushed for ineligible repay, got ${rewardPushes.length}`);
+  }
+
   // ============ Final Summary ============
   console.log("\n=== Final Summary ===");
   const finalCol = await cm.getCollateral(borrower.address, usdc.target);
@@ -404,13 +521,13 @@ async function main() {
   console.log("  Collateral:", ethers.formatUnits(finalCol, 6));
   console.log("  Debt:", ethers.formatUnits(finalDebt, 6));
 
-  const finalStats = await statisticsView.getGlobalStatistics();
+  const [finalStats] = await statisticsView.getGlobalStatisticsWithMeta();
   console.log("\n📈 StatisticsView (Cached - May be stale):");
   console.log("  Active Users:", finalStats.activeUsers.toString());
   console.log("  Total Collateral:", ethers.formatUnits(finalStats.totalCollateral, 6));
   console.log("  Total Debt:", ethers.formatUnits(finalStats.totalDebt, 6));
-  console.log("  Last Update Time:", finalStats.lastUpdateTime > 0n 
-    ? new Date(Number(finalStats.lastUpdateTime) * 1000).toISOString() 
+  console.log("  Last Update Block:", finalStats.lastUpdateBlock > 0n 
+    ? finalStats.lastUpdateBlock.toString()
     : "Never");
   
   // Compare ledger vs cached
@@ -430,6 +547,37 @@ async function main() {
   }
 
   console.log("\n✅ E2E Full Test with View Layer Verification Completed!");
+
+  // Artifacts: module snapshot + RewardView version + reward dp counts
+  const rvVer = (await rewardView.getVersionInfo()) as [bigint, bigint, string];
+  const artifactBlock = await ethers.provider.getBlockNumber();
+  const artifactPath = artifacts.writeJson(`full-with-views.${artifactBlock}.json`, {
+    name: "e2e-localhost-full-with-views (Reward-aligned)",
+    generatedAt: new Date().toISOString(),
+    chainId: (await ethers.provider.getNetwork()).chainId.toString(),
+    modules: {
+      Registry: CONTRACT_ADDRESSES.Registry,
+      AccessControlManager: CONTRACT_ADDRESSES.AccessControlManager,
+      RewardView: String(rewardViewAddr),
+      RewardPoints: String(rewardPointsAddr),
+      OrderEngine: String(orderEngineAddr),
+    },
+    versionInfo: {
+      RewardView: { apiVersion: rvVer[0].toString(), schemaVersion: rvVer[1].toString(), implementation: rvVer[2] },
+    },
+    counters: {
+      rewardDataPushedByTypeHash: dataPushedCounts,
+    },
+    rewardCheck: {
+      principalRaw: borrowAmt2.toString(),
+      pointsBalanceDeltaRaw: balDelta.toString(),
+      totalEarnedDeltaRaw: earnedDelta.toString(),
+    },
+  });
+  console.log("  📦 artifacts:", artifactPath);
+  } finally {
+    await network.provider.send("evm_revert", [snap]);
+  }
 }
 
 main().catch((e) => {

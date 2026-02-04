@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers, upgrades } from "hardhat";
-import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+import { loadFixture, mine } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 
 const KEY_ACM = ethers.keccak256(ethers.toUtf8Bytes("ACCESS_CONTROL_MANAGER"));
 const KEY_REWARD_MANAGER_CORE = ethers.keccak256(ethers.toUtf8Bytes("REWARD_MANAGER_CORE"));
@@ -10,6 +10,7 @@ const KEY_REWARD_POINTS = ethers.keccak256(ethers.toUtf8Bytes("REWARD_POINTS"));
 
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes("ACTION_ADMIN"));
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes("VIEW_USER_DATA"));
+const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes("VIEW_SYSTEM_DATA"));
 
 describe("RewardView", function () {
   async function getModuleSigner(address: string) {
@@ -49,6 +50,7 @@ describe("RewardView", function () {
     await acm.grantRole(ACTION_ADMIN, admin.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, admin.address);
     await acm.grantRole(ACTION_VIEW_USER_DATA, user.address);
+    await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, admin.address);
 
     // deploy RewardView
     const RewardView = await ethers.getContractFactory("RewardView");
@@ -65,6 +67,30 @@ describe("RewardView", function () {
       rewardConsumption,
       rewardPoints,
       rv,
+    };
+  }
+
+  async function getSummary(rv: any, userAddr: string, signer?: any) {
+    const view = signer ? rv.connect(signer) : rv;
+    const [
+      totalEarned,
+      totalBurned,
+      pendingPenalty,
+      level,
+      privilegesPacked,
+      lastActivity,
+      totalLoans,
+      totalVolume,
+    ] = await view.getUserRewardSummaryWithMeta(userAddr);
+    return {
+      totalEarned,
+      totalBurned,
+      pendingPenalty,
+      level,
+      privilegesPacked,
+      lastActivity,
+      totalLoans,
+      totalVolume,
     };
   }
 
@@ -95,7 +121,7 @@ describe("RewardView", function () {
 
     const writer = await getModuleSigner(await rewardManagerCore.getAddress());
     await rv.connect(writer).pushRewardEarned(user.address, 100, "bonus", 1);
-    const summary = await rv.getUserRewardSummary(user.address);
+    const summary = await getSummary(rv, user.address);
     expect(summary.totalEarned).to.equal(100);
   });
 
@@ -103,12 +129,12 @@ describe("RewardView", function () {
     const { rv, rewardManagerCore, user, other, acm } = await loadFixture(deployFixture);
     const writer = await getModuleSigner(await rewardManagerCore.getAddress());
     await rv.connect(writer).pushRewardEarned(user.address, 50, "bonus", 1);
-    await expect(rv.connect(other).getUserRewardSummary(user.address)).to.be.revertedWithCustomError(rv, "MissingRole");
+    await expect(rv.connect(other).getUserRewardSummaryWithMeta(user.address)).to.be.revertedWithCustomError(rv, "MissingRole");
 
     await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
-    const summary = await rv.connect(other).getUserRewardSummary(user.address);
+    const summary = await getSummary(rv, user.address, other);
     expect(summary.totalEarned).to.equal(50);
-    const selfSummary = await rv.connect(user).getUserRewardSummary(user.address);
+    const selfSummary = await getSummary(rv, user.address, user);
     expect(selfSummary.totalEarned).to.equal(50);
   });
 
@@ -122,21 +148,21 @@ describe("RewardView", function () {
     await rv.connect(writer).pushUserPrivilege(user.address, 0x1234n, 50);
     await rv.connect(writer).pushSystemStats(3, 7, 60);
 
-    const summary = await rv.getUserRewardSummary(user.address);
+    const summary = await getSummary(rv, user.address);
     expect(summary.totalEarned).to.equal(100);
     expect(summary.totalBurned).to.equal(20);
     expect(summary.pendingPenalty).to.equal(5);
     expect(summary.level).to.equal(2);
     expect(summary.privilegesPacked).to.equal(0x1234n);
 
-    const sys = await rv.getSystemRewardStats();
-    expect(sys.totalBatchOps).to.equal(3);
-    expect(sys.totalCachedRewards).to.equal(7);
+    const [totalBatchOps, totalCachedRewards] = await rv.getSystemRewardStatsWithMeta();
+    expect(totalBatchOps).to.equal(3);
+    expect(totalCachedRewards).to.equal(7);
 
-    const activities = await rv.getUserRecentActivities(user.address, 0, 0, 10);
+    const [activities] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 10);
     expect(activities.length).to.equal(3);
 
-    const [topAddrs, topAmounts] = await rv.getTopEarners();
+    const [topAddrs, topAmounts] = await rv.getTopEarnersWithMeta();
     expect(topAddrs[0]).to.equal(user.address);
     expect(topAmounts[0]).to.equal(100);
   });
@@ -148,19 +174,22 @@ describe("RewardView", function () {
     await rv.connect(writer).pushRewardEarned(user.address, 20, "b", 20);
     await rv.connect(writer).pushPointsBurned(user.address, 5, "c", 30);
 
-    const all = await rv.getUserRecentActivities(user.address, 0, 0, 2);
+    const [all] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 2);
     expect(all.length).to.equal(2);
 
-    const filtered = await rv.getUserRecentActivities(user.address, 15, 25, 5);
+    const [filtered] = await rv.getUserRecentActivitiesWithMeta(user.address, 15, 25, 5);
     expect(filtered.length).to.equal(1);
     expect(filtered[0].amount).to.equal(20);
   });
 
   it("pass-through queries return data from underlying modules", async function () {
     const { rv, rewardManagerCore, rewardCore, rewardPoints, user, admin } = await loadFixture(deployFixture);
+    const writer = await getModuleSigner(await rewardManagerCore.getAddress());
+    await rv.connect(writer).pushRewardEarned(user.address, 1, "seed", 1);
     // RewardPoints balance
     await rewardPoints.setBalance(user.address, 999);
-    expect(await rv.getUserBalance(user.address)).to.equal(999);
+    const [balance] = await rv.getUserBalance(user.address);
+    expect(balance).to.equal(999);
 
     // RewardCore configs and usage
     const cfg = {
@@ -177,7 +206,8 @@ describe("RewardView", function () {
     const returnedCfg = await rv.getServiceConfig(0, 0);
     expect(returnedCfg.price).to.equal(1);
     expect(await rv.getServiceUsage(0)).to.equal(123);
-    expect(await rv.getUserLastConsumption(user.address, 0)).to.equal(777);
+    const [lastConsumption] = await rv.getUserLastConsumption(user.address, 0);
+    expect(lastConsumption).to.equal(777);
 
     // RewardManagerCore values
     await rewardManagerCore.setRewardParameters(10, 20, 30, 40);
@@ -200,16 +230,50 @@ describe("RewardView", function () {
     expect(dyn[0]).to.equal(66n);
     expect(dyn[1]).to.equal(77n);
     expect(await rv.getLastRewardResetTimeView()).to.equal(888n);
-    expect(await rv.getUserLevelView(user.address)).to.equal(2);
+    const [levelView] = await rv.getUserLevelView(user.address);
+    expect(levelView).to.equal(2);
     expect(await rv.getLevelMultiplierView(1)).to.equal(999n);
-    const activity = await rv.getUserActivityView(user.address);
-    expect(activity[0]).to.equal(11n);
-    expect(activity[1]).to.equal(22n);
-    expect(activity[2]).to.equal(33n);
-    expect(await rv.getUserPenaltyDebtView(user.address)).to.equal(44n);
+    const [lastActivity, totalLoans, totalVolume] = await rv.getUserActivityView(user.address);
+    expect(lastActivity).to.equal(11n);
+    expect(totalLoans).to.equal(22n);
+    expect(totalVolume).to.equal(33n);
+    const [penaltyDebt] = await rv.getUserPenaltyDebtView(user.address);
+    expect(penaltyDebt).to.equal(44n);
     const sys = await rv.getSystemRewardCoreStatsView();
     expect(sys[0]).to.equal(5n);
     expect(sys[1]).to.equal(6n);
+
+    const balanceWithMeta = await rv.connect(admin).getUserBalanceWithMeta(user.address);
+    expect(balanceWithMeta[0]).to.equal(999n);
+    expect(balanceWithMeta[1]).to.be.gt(0n);
+    expect(balanceWithMeta[2]).to.equal(true);
+
+    const usageWithMeta = await rv.connect(admin).getServiceUsageWithMeta(0);
+    expect(usageWithMeta[0]).to.equal(123n);
+    expect(usageWithMeta[1]).to.be.gt(0n);
+    expect(usageWithMeta[2]).to.equal(true);
+
+    const lastConsumptionWithMeta = await rv.connect(admin).getUserLastConsumptionWithMeta(user.address, 0);
+    expect(lastConsumptionWithMeta[0]).to.equal(777n);
+    expect(lastConsumptionWithMeta[1]).to.be.gt(0n);
+    expect(lastConsumptionWithMeta[2]).to.equal(true);
+
+    const levelWithMeta = await rv.connect(admin).getUserLevelWithMeta(user.address);
+    expect(levelWithMeta[0]).to.equal(2);
+    expect(levelWithMeta[1]).to.be.gt(0n);
+    expect(levelWithMeta[2]).to.equal(true);
+
+    const activityWithMeta = await rv.connect(admin).getUserActivityWithMeta(user.address);
+    expect(activityWithMeta[0]).to.equal(11n);
+    expect(activityWithMeta[1]).to.equal(22n);
+    expect(activityWithMeta[2]).to.equal(33n);
+    expect(activityWithMeta[3]).to.be.gt(0n);
+    expect(activityWithMeta[4]).to.equal(true);
+
+    const penaltyWithMeta = await rv.connect(admin).getUserPenaltyDebtWithMeta(user.address);
+    expect(penaltyWithMeta[0]).to.equal(44n);
+    expect(penaltyWithMeta[1]).to.be.gt(0n);
+    expect(penaltyWithMeta[2]).to.equal(true);
   });
 
   describe("事件序列测试", function () {
@@ -341,6 +405,76 @@ describe("RewardView", function () {
       }
     });
 
+    it("pushConsumptionRecord 应发出正确的 DataPush 事件", async function () {
+      const { rv, rewardConsumption, user } = await loadFixture(deployFixture);
+      const writer = await getModuleSigner(await rewardConsumption.getAddress());
+
+      const DATA_TYPE_REWARD_CONSUMPTION_RECORDED = ethers.keccak256(
+        ethers.toUtf8Bytes("REWARD_CONSUMPTION_RECORDED")
+      );
+      const tx = await rv.connect(writer).pushConsumptionRecord(user.address, 1, 2, 10, 1000, 123456);
+      const receipt = await tx.wait();
+
+      const event = receipt?.logs.find((log: any) => {
+        try {
+          const parsed = rv.interface.parseLog(log);
+          return parsed?.name === "DataPushed";
+        } catch {
+          return false;
+        }
+      });
+
+      expect(event).to.not.be.undefined;
+      if (event) {
+        const parsed = rv.interface.parseLog(event);
+        expect(parsed?.args[0]).to.equal(DATA_TYPE_REWARD_CONSUMPTION_RECORDED);
+        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+          ["address", "uint8", "uint8", "uint256", "uint256", "uint256"],
+          parsed?.args[1]
+        );
+        expect(decoded[0]).to.equal(user.address);
+        expect(decoded[1]).to.equal(1n);
+        expect(decoded[2]).to.equal(2n);
+        expect(decoded[3]).to.equal(10n);
+        expect(decoded[4]).to.equal(1000n);
+        expect(decoded[5]).to.equal(123456n);
+      }
+    });
+
+    it("retryPushConsumptionRecord 应发出正确的 DataPush 事件", async function () {
+      const { rv, user, admin } = await loadFixture(deployFixture);
+      const DATA_TYPE_REWARD_CONSUMPTION_RECORDED = ethers.keccak256(
+        ethers.toUtf8Bytes("REWARD_CONSUMPTION_RECORDED")
+      );
+      const tx = await rv.connect(admin).retryPushConsumptionRecord(user.address, 1, 2, 10, 1000, 123456);
+      const receipt = await tx.wait();
+
+      const event = receipt?.logs.find((log: any) => {
+        try {
+          const parsed = rv.interface.parseLog(log);
+          return parsed?.name === "DataPushed";
+        } catch {
+          return false;
+        }
+      });
+
+      expect(event).to.not.be.undefined;
+      if (event) {
+        const parsed = rv.interface.parseLog(event);
+        expect(parsed?.args[0]).to.equal(DATA_TYPE_REWARD_CONSUMPTION_RECORDED);
+        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+          ["address", "uint8", "uint8", "uint256", "uint256", "uint256"],
+          parsed?.args[1]
+        );
+        expect(decoded[0]).to.equal(user.address);
+        expect(decoded[1]).to.equal(1n);
+        expect(decoded[2]).to.equal(2n);
+        expect(decoded[3]).to.equal(10n);
+        expect(decoded[4]).to.equal(1000n);
+        expect(decoded[5]).to.equal(123456n);
+      }
+    });
+
     it("多个连续操作应按顺序发出事件", async function () {
       const { rv, rewardManagerCore, user } = await loadFixture(deployFixture);
       const writer = await getModuleSigner(await rewardManagerCore.getAddress());
@@ -409,13 +543,13 @@ describe("RewardView", function () {
       }
       
       // 查询应该只返回最近的记录（受 limit 限制）
-      const recent = await rv.getUserRecentActivities(user.address, 0, 0, 10);
+      const [recent] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 10);
       expect(recent.length).to.equal(10);
       expect(recent[0].amount).to.equal(BigInt(count)); // 最新的记录
       expect(recent[9].amount).to.equal(BigInt(count - 9)); // 第10条记录
       
       // 查询所有记录（但受 MAX_ACTIVITY_SCAN 限制）
-      const all = await rv.getUserRecentActivities(user.address, 0, 0, 1000);
+      const [all] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 1000);
       // 应该只返回最多 500 条（MAX_ACTIVITY_SCAN）
       expect(all.length).to.be.at.most(500);
     });
@@ -435,7 +569,7 @@ describe("RewardView", function () {
         }
         
         // 验证每个用户的活动记录
-        const activities = await rv.getUserRecentActivities(user.address, 0, 0, 100);
+        const [activities] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 100);
         expect(activities.length).to.equal(activitiesPerUser);
       }
     });
@@ -456,7 +590,7 @@ describe("RewardView", function () {
         await rv.connect(writer).pushRewardEarned(user.address, amount, "top_earner", 1);
       }
       
-      const [topAddrs, topAmounts] = await rv.getTopEarners();
+      const [topAddrs, topAmounts] = await rv.getTopEarnersWithMeta();
       
       // 应该只返回 TOP_N = 10 个用户
       expect(topAddrs.length).to.equal(10);
@@ -503,14 +637,14 @@ describe("RewardView", function () {
         await rv.connect(writer).pushRewardEarned(user.address, (10 - i) * 100, "initial", 1);
       }
       
-      const [topAddrs1, topAmounts1] = await rv.getTopEarners();
+      const [topAddrs1, topAmounts1] = await rv.getTopEarnersWithMeta();
       expect(topAddrs1[0]).to.equal(users[0].address);
       expect(topAmounts1[0]).to.equal(1000n);
       
       // 更新最后一个用户的积分，使其超过第一个用户
       await rv.connect(writer).pushRewardEarned(users[9].address, 2000, "boost", 2);
       
-      const [topAddrs2, topAmounts2] = await rv.getTopEarners();
+      const [topAddrs2, topAmounts2] = await rv.getTopEarnersWithMeta();
       expect(topAddrs2[0]).to.equal(users[9].address);
       expect(topAmounts2[0]).to.equal(2100n); // 100 + 2000
       expect(topAddrs2[1]).to.equal(users[0].address);
@@ -543,11 +677,11 @@ describe("RewardView", function () {
       
       // 验证每个用户的数据
       for (const user of users) {
-        const summary = await rv.getUserRewardSummary(user.address);
+        const summary = await getSummary(rv, user.address);
         const expectedTotal = (operationsPerUser - 1) * operationsPerUser / 2 * 10;
         expect(summary.totalEarned).to.equal(BigInt(expectedTotal));
         
-        const activities = await rv.getUserRecentActivities(user.address, 0, 0, 100);
+        const [activities] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 100);
         expect(activities.length).to.equal(operationsPerUser);
       }
     });
@@ -583,11 +717,11 @@ describe("RewardView", function () {
       
       // 验证每个用户的数据
       for (let u = 0; u < userCount; u++) {
-        const summary = await rv.getUserRewardSummary(users[u].address);
+        const summary = await getSummary(rv, users[u].address);
         expect(summary.totalEarned).to.equal(BigInt((u + 1) * 100));
         expect(summary.totalBurned).to.equal(BigInt((u + 1) * 50));
         
-        const activities = await rv.getUserRecentActivities(users[u].address, 0, 0, 100);
+        const [activities] = await rv.getUserRecentActivitiesWithMeta(users[u].address, 0, 0, 100);
         expect(activities.length).to.equal(2); // earn + burn
       }
     });
@@ -616,13 +750,13 @@ describe("RewardView", function () {
       
       // 验证每个用户的数据
       for (let u = 0; u < userCount; u++) {
-        const summary = await rv.getUserRewardSummary(users[u].address);
+        const summary = await getSummary(rv, users[u].address);
         expect(summary.totalEarned).to.equal(100n);
         expect(summary.totalBurned).to.equal(20n);
         expect(summary.pendingPenalty).to.equal(5n);
         expect(summary.level).to.equal((u % 5) + 1);
         
-        const activities = await rv.getUserRecentActivities(users[u].address, 0, 0, 100);
+        const [activities] = await rv.getUserRecentActivitiesWithMeta(users[u].address, 0, 0, 100);
         expect(activities.length).to.equal(3); // earn, burn, penalty (level 不产生活动记录)
       }
     });
@@ -652,17 +786,17 @@ describe("RewardView", function () {
       await Promise.all(promises);
       
       // 验证系统统计
-      const stats = await rv.getSystemRewardStats();
-      expect(stats.activeUsers).to.equal(userCount);
+      const [, , activeUsers] = await rv.getSystemRewardStatsWithMeta();
+      expect(activeUsers).to.equal(userCount);
       
       // 随机抽样验证几个用户的数据
       const sampleIndices = [0, 25, 50, 75, 99];
       for (const idx of sampleIndices) {
-        const summary = await rv.getUserRewardSummary(users[idx].address);
+        const summary = await getSummary(rv, users[idx].address);
         const expectedTotal = operationsPerUser * (operationsPerUser - 1) / 2 * 10 + operationsPerUser * idx;
         expect(summary.totalEarned).to.equal(BigInt(expectedTotal));
         
-        const activities = await rv.getUserRecentActivities(users[idx].address, 0, 0, 100);
+        const [activities] = await rv.getUserRecentActivitiesWithMeta(users[idx].address, 0, 0, 100);
         expect(activities.length).to.equal(operationsPerUser);
       }
     });
@@ -695,7 +829,7 @@ describe("RewardView", function () {
       await Promise.all(promises);
       
       // 验证 Top Earners
-      const [topAddrs, topAmounts] = await rv.getTopEarners();
+      const [topAddrs, topAmounts] = await rv.getTopEarnersWithMeta();
       
       // 验证排序（降序）
       for (let i = 0; i < topAmounts.length - 1; i++) {
@@ -707,7 +841,7 @@ describe("RewardView", function () {
       // 验证 Top Earners 中的用户数据正确
       for (let i = 0; i < topAddrs.length; i++) {
         if (topAddrs[i] !== ethers.ZeroAddress) {
-          const summary = await rv.getUserRewardSummary(topAddrs[i]);
+          const summary = await getSummary(rv, topAddrs[i]);
           expect(summary.totalEarned).to.equal(topAmounts[i]);
           expect(summary.totalEarned).to.equal(expectedAmounts.get(topAddrs[i]));
         }
@@ -732,26 +866,26 @@ describe("RewardView", function () {
         expectedActivities.set(users[u].address, []);
       }
       
-      // 并发写入（使用唯一时间戳避免冲突）
+      // 并发写入（使用唯一区块号避免冲突）
       for (let u = 0; u < userCount; u++) {
         for (let op = 0; op < operationsPerUser; op++) {
           const amount = op * 10;
-          const ts = u * 1000 + op; // 确保每个用户和操作都有唯一时间戳
-          expectedActivities.get(users[u].address)!.push({ amount, ts, kind: 1 });
-          await rv.connect(writer).pushRewardEarned(users[u].address, amount, `op_${op}`, ts);
+          const blockNumber = u * 1000 + op; // 确保每个用户和操作都有唯一 blockNumber
+          expectedActivities.get(users[u].address)!.push({ amount, blockNumber, kind: 1 });
+          await rv.connect(writer).pushRewardEarned(users[u].address, amount, `op_${op}`, blockNumber);
         }
       }
 
       // 验证每个用户的活动记录完整性（严格：全部写入应被记录）
       let totalActivities = 0;
       for (let u = 0; u < userCount; u++) {
-        const activities = await rv.getUserRecentActivities(users[u].address, 0, 0, 200);
+        const [activities] = await rv.getUserRecentActivitiesWithMeta(users[u].address, 0, 0, 200);
         totalActivities += activities.length;
 
         // 验证活动记录按时间倒序（最新的在前）
         if (activities.length > 1) {
           for (let i = 0; i < activities.length - 1; i++) {
-            expect(activities[i].ts).to.be.gte(activities[i + 1].ts);
+            expect(activities[i].blockNumber).to.be.gte(activities[i + 1].blockNumber);
           }
         }
 
@@ -764,7 +898,7 @@ describe("RewardView", function () {
         }
 
         // 验证汇总数据（应该等于所有操作的总和）
-        const summary = await rv.getUserRewardSummary(users[u].address);
+        const summary = await getSummary(rv, users[u].address);
         const expectedTotal = operationsPerUser * (operationsPerUser - 1) / 2 * 10;
         expect(summary.totalEarned).to.equal(BigInt(expectedTotal));
       }
@@ -804,14 +938,14 @@ describe("RewardView", function () {
       
       // 验证系统统计（最后一次更新应该生效）
       // 注意：由于并发执行，最后一次 pushSystemStats 可能不是索引 9
-      // 但应该是最新的时间戳对应的值
-      const stats = await rv.getSystemRewardStats();
+      // 但应该是最新 blockNumber 对应的值
+      const [totalBatchOps, totalCachedRewards, activeUsers] = await rv.getSystemRewardStatsWithMeta();
       // 验证值在合理范围内（最后一次应该是 100-109 之间）
-      expect(stats.totalBatchOps).to.be.gte(100);
-      expect(stats.totalBatchOps).to.be.lte(109);
-      expect(stats.totalCachedRewards).to.be.gte(200);
-      expect(stats.totalCachedRewards).to.be.lte(209);
-      expect(stats.activeUsers).to.equal(userCount);
+      expect(totalBatchOps).to.be.gte(100);
+      expect(totalBatchOps).to.be.lte(109);
+      expect(totalCachedRewards).to.be.gte(200);
+      expect(totalCachedRewards).to.be.lte(209);
+      expect(activeUsers).to.equal(userCount);
     });
 
     it("并发写入大量用户时应正确处理 Top Earners 更新", async function () {
@@ -839,7 +973,7 @@ describe("RewardView", function () {
       await Promise.all(promises);
       
       // 验证 Top Earners 只包含前 10 个用户
-      const [topAddrs, topAmounts] = await rv.getTopEarners();
+      const [topAddrs, topAmounts] = await rv.getTopEarnersWithMeta();
       expect(topAddrs.length).to.equal(10);
       expect(topAmounts.length).to.equal(10);
       
@@ -873,33 +1007,33 @@ describe("RewardView", function () {
       for (let i = 0; i < updateCount; i++) {
         updates.push({
           amount: (i + 1) * 10,
-          ts: i + 1
+          blockNumber: i + 1
         });
       }
       
       // 顺序执行所有更新，确保全部成功写入
       for (let idx = 0; idx < updates.length; idx++) {
         const update = updates[idx];
-        await rv.connect(writer).pushRewardEarned(user.address, update.amount, `update_${idx}`, update.ts);
+        await rv.connect(writer).pushRewardEarned(user.address, update.amount, `update_${idx}`, update.blockNumber);
       }
       
       // 验证用户汇总
-      const summary = await rv.getUserRewardSummary(user.address);
+      const summary = await getSummary(rv, user.address);
       const expectedTotal = updateCount * (updateCount + 1) / 2 * 10;
       expect(summary.totalEarned).to.equal(BigInt(expectedTotal));
       expect(summary.lastActivity).to.equal(BigInt(updateCount));
       
       // 验证活动记录（顺序执行，期望全部存在）
-      const activities = await rv.getUserRecentActivities(user.address, 0, 0, 200);
+      const [activities] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 200);
       expect(activities.length).to.equal(updateCount);
       
       // 验证活动记录按时间倒序
       for (let i = 0; i < activities.length - 1; i++) {
-        expect(activities[i].ts).to.be.gte(activities[i + 1].ts);
+        expect(activities[i].blockNumber).to.be.gte(activities[i + 1].blockNumber);
       }
       
       // 验证 Top Earners 包含该用户
-      const [topAddrs, topAmounts] = await rv.getTopEarners();
+      const [topAddrs, topAmounts] = await rv.getTopEarnersWithMeta();
       expect(topAddrs).to.include(user.address);
       const userIndex = topAddrs.indexOf(user.address);
       expect(topAmounts[userIndex]).to.equal(BigInt(expectedTotal));
@@ -935,17 +1069,17 @@ describe("RewardView", function () {
         
         // Earn
         state.totalEarned += 1000n;
-        state.activities.push({ kind: 1, amount: 1000, ts: u * 4 });
+        state.activities.push({ kind: 1, amount: 1000, blockNumber: u * 4 });
         promises.push(rv.connect(writer).pushRewardEarned(users[u].address, 1000, "earn", u * 4));
         
         // Burn
         state.totalBurned += 200n;
-        state.activities.push({ kind: 2, amount: 200, ts: u * 4 + 1 });
+        state.activities.push({ kind: 2, amount: 200, blockNumber: u * 4 + 1 });
         promises.push(rv.connect(writer).pushPointsBurned(users[u].address, 200, "burn", u * 4 + 1));
         
         // Penalty
         state.pendingPenalty = 50n;
-        state.activities.push({ kind: 3, amount: 50, ts: u * 4 + 2 });
+        state.activities.push({ kind: 3, amount: 50, blockNumber: u * 4 + 2 });
         promises.push(rv.connect(writer).pushPenaltyLedger(users[u].address, 50, u * 4 + 2));
         
         // Level
@@ -957,7 +1091,7 @@ describe("RewardView", function () {
       
       // 验证每个用户的数据一致性
       for (let u = 0; u < userCount; u++) {
-        const summary = await rv.getUserRewardSummary(users[u].address);
+        const summary = await getSummary(rv, users[u].address);
         const expected = expectedState.get(users[u].address);
         
         expect(summary.totalEarned).to.equal(expected.totalEarned);
@@ -965,7 +1099,7 @@ describe("RewardView", function () {
         expect(summary.pendingPenalty).to.equal(expected.pendingPenalty);
         expect(summary.level).to.equal(expected.level);
         
-        const activities = await rv.getUserRecentActivities(users[u].address, 0, 0, 100);
+        const [activities] = await rv.getUserRecentActivitiesWithMeta(users[u].address, 0, 0, 100);
         expect(activities.length).to.equal(3); // earn, burn, penalty (level 不产生 activity)
       }
     });
@@ -982,7 +1116,7 @@ describe("RewardView", function () {
       await rv.connect(writer).pushUserLevel(user.address, 0, 4);
       await rv.connect(writer).pushUserPrivilege(user.address, 0, 5);
       
-      const summary = await rv.getUserRewardSummary(user.address);
+      const summary = await getSummary(rv, user.address);
       expect(summary.totalEarned).to.equal(0);
       expect(summary.totalBurned).to.equal(0);
       expect(summary.pendingPenalty).to.equal(0);
@@ -1003,7 +1137,7 @@ describe("RewardView", function () {
       await rv.connect(writer).pushUserLevel(user.address, Number(maxUint8), 4);
       await rv.connect(writer).pushUserPrivilege(user.address, maxUint256, 5);
       
-      const summary = await rv.getUserRewardSummary(user.address);
+      const summary = await getSummary(rv, user.address);
       expect(summary.totalEarned).to.equal(maxUint256);
       expect(summary.totalBurned).to.equal(maxUint256);
       expect(summary.pendingPenalty).to.equal(maxUint256);
@@ -1015,7 +1149,7 @@ describe("RewardView", function () {
       const { rv, rewardManagerCore, user } = await loadFixture(deployFixture);
       const writer = await getModuleSigner(await rewardManagerCore.getAddress());
       
-      // 创建不同时间戳的活动
+      // 创建不同 blockNumber 的活动
       await rv.connect(writer).pushRewardEarned(user.address, 10, "t1", 100);
       await rv.connect(writer).pushRewardEarned(user.address, 20, "t2", 200);
       await rv.connect(writer).pushRewardEarned(user.address, 30, "t3", 300);
@@ -1023,19 +1157,19 @@ describe("RewardView", function () {
       await rv.connect(writer).pushRewardEarned(user.address, 50, "t5", 500);
       
       // 测试精确边界
-      const exact = await rv.getUserRecentActivities(user.address, 200, 400, 10);
+      const [exact] = await rv.getUserRecentActivitiesWithMeta(user.address, 200, 400, 10);
       expect(exact.length).to.equal(3);
       expect(exact[0].amount).to.equal(40); // t4
       expect(exact[1].amount).to.equal(30); // t3
       expect(exact[2].amount).to.equal(20); // t2
       
       // 测试包含边界
-      const inclusive = await rv.getUserRecentActivities(user.address, 200, 200, 10);
+      const [inclusive] = await rv.getUserRecentActivitiesWithMeta(user.address, 200, 200, 10);
       expect(inclusive.length).to.equal(1);
       expect(inclusive[0].amount).to.equal(20);
       
       // 测试无匹配窗口
-      const noMatch = await rv.getUserRecentActivities(user.address, 1000, 2000, 10);
+      const [noMatch] = await rv.getUserRecentActivitiesWithMeta(user.address, 1000, 2000, 10);
       expect(noMatch.length).to.equal(0);
     });
 
@@ -1045,14 +1179,14 @@ describe("RewardView", function () {
       
       await rv.connect(writer).pushRewardEarned(user.address, 10, "test", 1);
       
-      const result = await rv.getUserRecentActivities(user.address, 0, 0, 0);
+      const [result] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 0);
       expect(result.length).to.equal(0);
     });
 
     it("Top Earners 应正确处理空列表", async function () {
       const { rv } = await loadFixture(deployFixture);
       
-      const [topAddrs, topAmounts] = await rv.getTopEarners();
+      const [topAddrs, topAmounts] = await rv.getTopEarnersWithMeta();
       expect(topAddrs.length).to.equal(10);
       expect(topAmounts.length).to.equal(10);
       
@@ -1070,7 +1204,7 @@ describe("RewardView", function () {
     it("应正确处理用户从未有活动的情况", async function () {
       const { rv, user } = await loadFixture(deployFixture);
       
-      const summary = await rv.getUserRewardSummary(user.address);
+      const summary = await getSummary(rv, user.address);
       expect(summary.totalEarned).to.equal(0);
       expect(summary.totalBurned).to.equal(0);
       expect(summary.pendingPenalty).to.equal(0);
@@ -1078,26 +1212,26 @@ describe("RewardView", function () {
       expect(summary.privilegesPacked).to.equal(0);
       expect(summary.lastActivity).to.equal(0);
       
-      const activities = await rv.getUserRecentActivities(user.address, 0, 0, 100);
+      const [activities] = await rv.getUserRecentActivitiesWithMeta(user.address, 0, 0, 100);
       expect(activities.length).to.equal(0);
     });
 
-    it("应正确处理活动时间戳的更新逻辑", async function () {
+    it("应正确处理活动 blockNumber 的更新逻辑", async function () {
       const { rv, rewardManagerCore, user } = await loadFixture(deployFixture);
       const writer = await getModuleSigner(await rewardManagerCore.getAddress());
       
       await rv.connect(writer).pushRewardEarned(user.address, 10, "old", 100);
-      let summary = await rv.getUserRewardSummary(user.address);
+      let summary = await getSummary(rv, user.address);
       expect(summary.lastActivity).to.equal(100);
       
-      // 更新的时间戳应该更新 lastActivity
+      // 更新的 blockNumber 应该更新 lastActivity
       await rv.connect(writer).pushRewardEarned(user.address, 20, "new", 200);
-      summary = await rv.getUserRewardSummary(user.address);
+      summary = await getSummary(rv, user.address);
       expect(summary.lastActivity).to.equal(200);
       
-      // 更旧的时间戳不应该更新 lastActivity
+      // 更旧的 blockNumber 不应更新 lastActivity
       await rv.connect(writer).pushRewardEarned(user.address, 30, "older", 150);
-      summary = await rv.getUserRewardSummary(user.address);
+      summary = await getSummary(rv, user.address);
       expect(summary.lastActivity).to.equal(200);
     });
 
@@ -1108,21 +1242,173 @@ describe("RewardView", function () {
       const user1 = ethers.Wallet.createRandom();
       const user2 = ethers.Wallet.createRandom();
       
-      let stats = await rv.getSystemRewardStats();
-      expect(stats.activeUsers).to.equal(0);
+      let [, , activeUsers] = await rv.getSystemRewardStatsWithMeta();
+      expect(activeUsers).to.equal(0);
       
       await rv.connect(writer).pushRewardEarned(user1.address, 10, "test", 1);
-      stats = await rv.getSystemRewardStats();
-      expect(stats.activeUsers).to.equal(1);
+      [, , activeUsers] = await rv.getSystemRewardStatsWithMeta();
+      expect(activeUsers).to.equal(1);
       
       await rv.connect(writer).pushRewardEarned(user2.address, 20, "test", 2);
-      stats = await rv.getSystemRewardStats();
-      expect(stats.activeUsers).to.equal(2);
+      [, , activeUsers] = await rv.getSystemRewardStatsWithMeta();
+      expect(activeUsers).to.equal(2);
       
       // 同一用户再次操作不应增加计数
       await rv.connect(writer).pushRewardEarned(user1.address, 30, "test", 3);
-      stats = await rv.getSystemRewardStats();
-      expect(stats.activeUsers).to.equal(2);
+      [, , activeUsers] = await rv.getSystemRewardStatsWithMeta();
+      expect(activeUsers).to.equal(2);
+    });
+  });
+
+  describe("SSOT callsite assertions (trap ACM)", function () {
+    it("user-dimensional gate MUST use hasRole (must not call ACM.requireRole)", async function () {
+      const [admin, user, other] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory("MockRegistry")).deploy();
+      const acm = await (await ethers.getContractFactory("MockAccessControlManagerTrapRequireRole")).deploy();
+
+      await registry.setModule(KEY_ACM, await acm.getAddress());
+      // RewardView initializer only needs registry; this read test only needs ACM module.
+      const RewardViewF = await ethers.getContractFactory("RewardView");
+      const rv = await upgrades.deployProxy(RewardViewF, [await registry.getAddress()], { kind: "uups" });
+
+      // non-self: should be rejected by RewardView's Scheme U gate without invoking requireRole().
+      await expect(rv.connect(other).getUserRewardSummaryWithMeta(user.address)).to.be.revertedWithCustomError(rv, "MissingRole");
+      admin; // silence unused
+    });
+
+    it("admin gate MUST revert MissingRole (no role)", async function () {
+      const [, other] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory("MockRegistry")).deploy();
+      const acm = await (await ethers.getContractFactory("MockAccessControlManager")).deploy();
+      await registry.setModule(KEY_ACM, await acm.getAddress());
+
+      const RewardViewF = await ethers.getContractFactory("RewardView");
+      const rv = await upgrades.deployProxy(RewardViewF, [await registry.getAddress()], { kind: "uups" });
+
+      await expect(rv.connect(other).setRegistry(await registry.getAddress())).to.be.revertedWithCustomError(rv, "MissingRole");
+    });
+
+    it("ops gate MUST use hasRole (must not call ACM.requireRole)", async function () {
+      const [, other] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory("MockRegistry")).deploy();
+      const acm = await (await ethers.getContractFactory("MockAccessControlManagerTrapRequireRole")).deploy();
+      await registry.setModule(KEY_ACM, await acm.getAddress());
+
+      const RewardViewF = await ethers.getContractFactory("RewardView");
+      const rv = await upgrades.deployProxy(RewardViewF, [await registry.getAddress()], { kind: "uups" });
+
+      await expect(rv.connect(other).getSystemRewardStatsWithMeta()).to.be.revertedWithCustomError(rv, "MissingRole");
+    });
+  });
+
+  describe("ARCH 4.14 RewardView matrix coverage", function () {
+    it("RV-01: all push* APIs must reject non-writer with RewardView__UnauthorizedWriter", async function () {
+      const { rv, user, other } = await loadFixture(deployFixture);
+
+      await expect(rv.connect(other).pushRewardEarned(user.address, 1, "x", 1)).to.be.revertedWithCustomError(
+        rv,
+        "RewardView__UnauthorizedWriter"
+      );
+      await expect(rv.connect(other).pushPointsBurned(user.address, 1, "x", 1)).to.be.revertedWithCustomError(
+        rv,
+        "RewardView__UnauthorizedWriter"
+      );
+      await expect(rv.connect(other).pushPenaltyLedger(user.address, 1, 1)).to.be.revertedWithCustomError(
+        rv,
+        "RewardView__UnauthorizedWriter"
+      );
+      await expect(rv.connect(other).pushUserLevel(user.address, 1, 1)).to.be.revertedWithCustomError(
+        rv,
+        "RewardView__UnauthorizedWriter"
+      );
+      await expect(rv.connect(other).pushUserPrivilege(user.address, 1, 1)).to.be.revertedWithCustomError(
+        rv,
+        "RewardView__UnauthorizedWriter"
+      );
+      await expect(rv.connect(other).pushSystemStats(1, 1, 1)).to.be.revertedWithCustomError(
+        rv,
+        "RewardView__UnauthorizedWriter"
+      );
+      await expect(
+        rv.connect(other).pushConsumptionRecord(user.address, 1, 1, 1, 1, 1)
+      ).to.be.revertedWithCustomError(rv, "RewardView__UnauthorizedWriter");
+    });
+
+    it("RV-02: pushPenaltyLedger must emit DataPushed with distinct type and decodable payload", async function () {
+      const { rv, rewardManagerCore, user } = await loadFixture(deployFixture);
+      const writer = await getModuleSigner(await rewardManagerCore.getAddress());
+
+      const DATA_TYPE_REWARD_STATS_UPDATED = ethers.keccak256(ethers.toUtf8Bytes("REWARD_STATS_UPDATED"));
+      const DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED = ethers.keccak256(ethers.toUtf8Bytes("REWARD_PENALTY_LEDGER_UPDATED"));
+
+      const tx = await rv.connect(writer).pushPenaltyLedger(user.address, 5, 123);
+      const receipt = await tx.wait();
+
+      const event = receipt?.logs.find((log: any) => {
+        try {
+          const parsed = rv.interface.parseLog(log);
+          return parsed?.name === "DataPushed";
+        } catch {
+          return false;
+        }
+      });
+
+      expect(event).to.not.be.undefined;
+      if (event) {
+        const parsed = rv.interface.parseLog(event);
+        expect(parsed?.args[0]).to.equal(DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED);
+        expect(parsed?.args[0]).to.not.equal(DATA_TYPE_REWARD_STATS_UPDATED);
+        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+          ["address", "uint256", "uint256"],
+          parsed?.args[1]
+        );
+        expect(decoded[0]).to.equal(user.address);
+        expect(decoded[1]).to.equal(5n);
+        expect(decoded[2]).to.equal(123n);
+      }
+    });
+
+    it("RV-04/RV-05: getUserRewardSummaryWithMeta must provide blockNumber/isValid and obey TTL", async function () {
+      const { rv, rewardManagerCore, user } = await loadFixture(deployFixture);
+      const writer = await getModuleSigner(await rewardManagerCore.getAddress());
+
+      // initial push touches local user cache blockNumber
+      await rv.connect(writer).pushRewardEarned(user.address, 1, "init", 1);
+      const withMeta0 = await rv.connect(user).getUserRewardSummaryWithMeta(user.address);
+      const block0 = withMeta0[8] as bigint;
+      const isValid0 = withMeta0[9] as boolean;
+      expect(block0).to.be.gt(0n);
+      expect(isValid0).to.equal(true);
+
+      // expire TTL (ViewConstants.CACHE_DURATION_BLOCKS = 150)
+      await mine(151);
+
+      const withMeta1 = await rv.connect(user).getUserRewardSummaryWithMeta(user.address);
+      const block1 = withMeta1[8] as bigint;
+      const isValid1 = withMeta1[9] as boolean;
+      expect(block1).to.equal(block0);
+      expect(isValid1).to.equal(false);
+
+      // new push must advance blockNumber and restore validity
+      await mine(1);
+      await rv.connect(writer).pushRewardEarned(user.address, 1, "refresh", 2);
+      const withMeta2 = await rv.connect(user).getUserRewardSummaryWithMeta(user.address);
+      const block2 = withMeta2[8] as bigint;
+      const isValid2 = withMeta2[9] as boolean;
+      expect(block2).to.be.gte(block1);
+      expect(isValid2).to.equal(true);
+    });
+
+    it("RV-06: all external get* APIs must be view/pure (no read-side effects)", async function () {
+      const { rv } = await loadFixture(deployFixture);
+      const fns = rv.interface.fragments.filter((f: any) => f.type === "function");
+      const getters = fns.filter((f: any) => typeof f.name === "string" && f.name.startsWith("get"));
+      for (const g of getters) {
+        expect(["view", "pure"]).to.include(g.stateMutability);
+      }
     });
   });
 });

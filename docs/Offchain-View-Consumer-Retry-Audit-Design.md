@@ -140,7 +140,7 @@
 
 ### 5.1 作为“写入发生”的权威信号（推荐）
 优先订阅 `PositionView` 的：
-- `UserPositionCachedV2(user, asset, collateral, debt, version, ts)`
+- `UserPositionCachedV2(user, asset, collateral, debt, version, blockNumber)`
 - `IdempotentRequestIgnored(user, asset, requestId, seq)`（用于监控重复重放与链下队列健康）
 
 原因：
@@ -177,8 +177,8 @@
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `PositionView`<br/>`src/Vault/view/modules/PositionView.sol` | `UserPositionCached` | `UserPositionCached(address,address,uint256,uint256,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`ts: uint256` | **旧事件**；建议优先用 `UserPositionCachedV2`（含 version）落库。 |
-| `PositionView` | `UserPositionCachedV2` | `UserPositionCachedV2(address,address,uint256,uint256,uint64,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`version: uint64`<br/>`ts: uint256` | **权威写入成功信号**：物化视图按该事件 upsert，并用 `version` 做单调校验。 |
+| `PositionView`<br/>`src/Vault/view/modules/PositionView.sol` | `UserPositionCached` | `UserPositionCached(address,address,uint256,uint256,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`blockNumber: uint256` | **旧事件**；建议优先用 `UserPositionCachedV2`（含 version）落库。 |
+| `PositionView` | `UserPositionCachedV2` | `UserPositionCachedV2(address,address,uint256,uint256,uint64,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`version: uint64`<br/>`blockNumber: uint256` | **权威写入成功信号**：物化视图按该事件 upsert，并用 `version` 做单调校验。 |
 | `PositionView` | `IdempotentRequestIgnored` | `IdempotentRequestIgnored(address,address,bytes32,uint64)` | `user: address`<br/>`asset: address`<br/>`requestId: bytes32` | `seq: uint64` | 用于监控重复重放/队列健康；链下可与 `requestId/seq` 关联审计。 |
 | `PositionView` | `CacheUpdateFailed` | `CacheUpdateFailed(address,address,address,uint256,uint256,bytes)` | `user: address`<br/>`asset: address` | `viewAddr: address`<br/>`collateral: uint256`<br/>`debt: uint256`<br/>`reason: bytes` | 失败入队来源之一（同名事件也在其他模块出现）；`reason` 建议枚举化/截断展示。 |
 
@@ -186,10 +186,10 @@
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `VaultRouter`<br/>`src/Vault/VaultRouter.sol` | `UserPositionPushed` | `UserPositionPushed(address,address,uint256,uint256,uint256,bytes32,uint64)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`timestamp: uint256`<br/>`requestId: bytes32`<br/>`seq: uint64` | **路由轨迹事件**（请求已发起/已路由），不等价"写入成功"；用于链下追踪输入与重放线索。 |
-| `VaultRouter` | `UserPositionDeltaPushed` | `UserPositionDeltaPushed(address,address,int256,int256,uint256,bytes32,uint64)` | `user: address`<br/>`asset: address` | `collateralDelta: int256`<br/>`debtDelta: int256`<br/>`timestamp: uint256`<br/>`requestId: bytes32`<br/>`seq: uint64` | 同上；若链下要构建"delta 重放"，需配合 strict `nextVersion` 策略与审计。 |
-| `VaultRouter` | `AssetStatsPushed` | `AssetStatsPushed(address,uint256,uint256,uint256,uint256,bytes32,uint64)` | `asset: address` | `totalCollateral: uint256`<br/>`totalDebt: uint256`<br/>`price: uint256`<br/>`timestamp: uint256`<br/>`requestId: bytes32`<br/>`seq: uint64` | 可用于统计镜像；同样属于"路由轨迹"而非最终写入确认。 |
-| `VaultRouter` | `UserPositionUpdated`<br/>（legacy） | `UserPositionUpdated(address,address,uint256,uint256,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`timestamp: uint256` | 兼容旧版：可不订阅；若订阅应标记为 legacy。 |
+| `VaultRouter`<br/>`src/Vault/VaultRouter.sol` | `UserPositionPushed` | `UserPositionPushed(address,address,uint256,uint256,uint256,bytes32,uint64)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`blockNumber: uint256`<br/>`requestId: bytes32`<br/>`seq: uint64` | **路由轨迹事件**（请求已发起/已路由），不等价"写入成功"；用于链下追踪输入与重放线索。 |
+| `VaultRouter` | `UserPositionDeltaPushed` | `UserPositionDeltaPushed(address,address,int256,int256,uint256,bytes32,uint64)` | `user: address`<br/>`asset: address` | `collateralDelta: int256`<br/>`debtDelta: int256`<br/>`blockNumber: uint256`<br/>`requestId: bytes32`<br/>`seq: uint64` | 同上；若链下要构建"delta 重放"，需配合 strict `nextVersion` 策略与审计。 |
+| `VaultRouter` | `AssetStatsPushed` | `AssetStatsPushed(address,uint256,uint256,uint256,uint256,bytes32,uint64)` | `asset: address` | `totalCollateral: uint256`<br/>`totalDebt: uint256`<br/>`price: uint256`<br/>`blockNumber: uint256`<br/>`requestId: bytes32`<br/>`seq: uint64` | 可用于统计镜像；同样属于"路由轨迹"而非最终写入确认。 |
+| `VaultRouter` | `UserPositionUpdated`<br/>（legacy） | `UserPositionUpdated(address,address,uint256,uint256,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`blockNumber: uint256` | 兼容旧版：可不订阅；若订阅应标记为 legacy。 |
 
 #### LendingEngineCore 事件
 
@@ -208,28 +208,28 @@
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `StatisticsView`<br/>`src/Vault/view/modules/StatisticsView.sol` | `DegradationStatsCached` | `DegradationStatsCached(uint256,uint256,address,bytes32,uint256,uint256,uint256,uint256)` | `lastDegradedModule: address`<br/>`reasonHash: bytes32` | `totalDegradations: uint256`<br/>`lastDegradationTime: uint256`<br/>`fallbackValueUsed: uint256`<br/>`totalFallbackValue: uint256`<br/>`averageFallbackValue: uint256`<br/>`timestamp: uint256` | 系统级降级统计：用于链下监控与运营面板聚合；可与 `DegradationMonitor` 的链下指标汇总对齐。 |
+| `StatisticsView`<br/>`src/Vault/view/modules/StatisticsView.sol` | `DegradationStatsCached` | `DegradationStatsCached(uint256,uint256,address,bytes32,uint256,uint256,uint256,uint256)` | `lastDegradedModule: address`<br/>`reasonHash: bytes32` | `totalDegradations: uint256`<br/>`lastDegradationBlock: uint256`<br/>`fallbackValueUsed: uint256`<br/>`totalFallbackValue: uint256`<br/>`averageFallbackValue: uint256`<br/>`blockNumber: uint256` | 系统级降级统计：用于链下监控与运营面板聚合；可与 `DegradationMonitor` 的链下指标汇总对齐。 |
 
 #### ViewCache 事件
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `ViewCache`<br/>`src/Vault/view/modules/ViewCache.sol` | `CacheUpdated` | `CacheUpdated(address,address,uint256)` | `asset: address`<br/>`updater: address` | `timestamp: uint256` | 系统级快照写入成功信号；链下如维护系统快照镜像可直接以该事件为准。 |
+| `ViewCache`<br/>`src/Vault/view/modules/ViewCache.sol` | `CacheUpdated` | `CacheUpdated(address,address,uint256)` | `asset: address`<br/>`updater: address` | `blockNumber: uint256` | 系统级快照写入成功信号；链下如维护系统快照镜像可直接以该事件为准。 |
 
 #### AccessControlView 事件
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `AccessControlView`<br/>`src/Vault/view/modules/AccessControlView.sol` | `PermissionDataUpdated` | `PermissionDataUpdated(address,bytes32,bool,uint256)` | `user: address`<br/>`actionKey: bytes32` | `hasPermission: bool`<br/>`timestamp: uint256` | 权限位变更事件：链下可用于权限变更审计与前端权限提示。 |
-| `AccessControlView` | `PermissionLevelUpdated` | `PermissionLevelUpdated(address,uint8,uint256)` | `user: address` | `newLevel: uint8`<br/>`timestamp: uint256` | 用户权限级别变更：链下按需建立用户权限级别镜像。 |
+| `AccessControlView`<br/>`src/Vault/view/modules/AccessControlView.sol` | `PermissionDataUpdated` | `PermissionDataUpdated(address,bytes32,bool,uint256)` | `user: address`<br/>`actionKey: bytes32` | `hasPermission: bool`<br/>`blockNumber: uint256` | 权限位变更事件：链下可用于权限变更审计与前端权限提示。 |
+| `AccessControlView` | `PermissionLevelUpdated` | `PermissionLevelUpdated(address,uint8,uint256)` | `user: address` | `newLevel: uint8`<br/>`blockNumber: uint256` | 用户权限级别变更：链下按需建立用户权限级别镜像。 |
 
 #### FeeRouterView 事件
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `FeeRouterView`<br/>`src/Vault/view/modules/FeeRouterView.sol` | `DataSynced` | `DataSynced(address,uint256)` | `caller: address` | `timestamp: uint256` | 数据同步轨迹事件：用于链下同步任务观测。 |
-| `FeeRouterView` | `UserDataPushed` | `UserDataPushed(address,string,uint256)` | `user: address` | `dataType: string`<br/>`timestamp: uint256` | 标注为 DEPRECATED（源码注释）；链下优先使用统一 `DataPush` 事件体系（如有）。 |
-| `FeeRouterView` | `SystemDataPushed` | `SystemDataPushed(address,string,uint256)` | `pusher: address` | `dataType: string`<br/>`timestamp: uint256` | 标注为 DEPRECATED（源码注释）；同上。 |
+| `FeeRouterView`<br/>`src/Vault/view/modules/FeeRouterView.sol` | `DataSynced` | `DataSynced(address,uint256)` | `caller: address` | `blockNumber: uint256` | 数据同步轨迹事件：用于链下同步任务观测。 |
+| `FeeRouterView` | `UserDataPushed` | `UserDataPushed(address,string,uint256)` | `user: address` | `dataType: string`<br/>`blockNumber: uint256` | 标注为 DEPRECATED（源码注释）；链下优先使用统一 `DataPush` 事件体系（如有）。 |
+| `FeeRouterView` | `SystemDataPushed` | `SystemDataPushed(address,string,uint256)` | `pusher: address` | `dataType: string`<br/>`blockNumber: uint256` | 标注为 DEPRECATED（源码注释）；同上。 |
 
 #### ModuleHealthView 事件
 
@@ -241,14 +241,14 @@
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `HealthView`<br/>`src/Vault/view/modules/HealthView.sol` | `HealthFactorCached` | `HealthFactorCached(address,uint256,uint256)` | `user: address` | `healthFactor: uint256`<br/>`timestamp: uint256` | 用户健康因子缓存写入：链下可用于风控快照/回放。 |
-| `HealthView` | `ModuleHealthCached` | `ModuleHealthCached(address,bool,bytes32,uint32,uint256)` | `module: address` | `isHealthy: bool`<br/>`detailsHash: bytes32`<br/>`failures: uint32`<br/>`timestamp: uint256` | 模块健康缓存：与 `ModuleHealthView` 的检查轨迹形成闭环。 |
+| `HealthView`<br/>`src/Vault/view/modules/HealthView.sol` | `HealthFactorCached` | `HealthFactorCached(address,uint256,uint256)` | `user: address` | `healthFactor: uint256`<br/>`blockNumber: uint256` | 用户健康因子缓存写入：链下可用于风控快照/回放。 |
+| `HealthView` | `ModuleHealthCached` | `ModuleHealthCached(address,bool,bytes32,uint32,uint256)` | `module: address` | `isHealthy: bool`<br/>`detailsHash: bytes32`<br/>`failures: uint32`<br/>`blockNumber: uint256` | 模块健康缓存：与 `ModuleHealthView` 的检查轨迹形成闭环。 |
 
 #### EventHistoryManager 事件
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `EventHistoryManager`<br/>`src/Vault/view/modules/EventHistoryManager.sol` | `HistoryRecorded` | `HistoryRecorded(bytes32,address,address,uint256,bytes,uint256)` | `eventType: bytes32`<br/>`user: address`<br/>`asset: address` | `amount: uint256`<br/>`extraData: bytes`<br/>`timestamp: uint256` | 轻量归档事件：链下可用于统一业务事件流入库（但该合约本身不做持久化）。 |
+| `EventHistoryManager`<br/>`src/Vault/view/modules/EventHistoryManager.sol` | `HistoryRecorded` | `HistoryRecorded(bytes32,address,address,uint256,bytes,uint256)` | `eventType: bytes32`<br/>`user: address`<br/>`asset: address` | `amount: uint256`<br/>`extraData: bytes`<br/>`blockNumber: uint256` | 轻量归档事件：链下可用于统一业务事件流入库（但该合约本身不做持久化）。 |
 
 #### 其他 View Modules（无事件 / 纯读）
 
@@ -282,7 +282,7 @@
   - 最简单策略：只在 `N confirmations` 后写 `position_cache_mirror`，在此之前仅写 `chain_events/view_apply_log`
 
 ### 6.2 物化视图更新逻辑（以 PositionView 事件为准）
-当收到 `UserPositionCachedV2(user, asset, collateral, debt, version, ts)`：
+当收到 `UserPositionCachedV2(user, asset, collateral, debt, version, blockNumber)`：
 - upsert `position_cache_mirror(user, asset)`：
   - 若 `incoming.version <= current.version`：标为 `ignored/duplicate`（理论上不应出现；出现则告警）
   - 否则更新 collateral/debt/version/last_chain_* 等字段

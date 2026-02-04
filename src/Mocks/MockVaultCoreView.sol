@@ -30,10 +30,10 @@ contract MockVaultCoreView {
         bytes32 operationType,
         address asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
     ) external {
         if (viewContractAddr == address(0)) return;
-        IVaultRouter(viewContractAddr).processUserOperation(user, operationType, asset, amount, timestamp);
+        IVaultRouter(viewContractAddr).processUserOperation(user, operationType, asset, amount, blockNumber);
     }
 
     /**

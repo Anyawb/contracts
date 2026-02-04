@@ -1,25 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
-
-/**
- * @dev Minimal interface for best-effort cross-module staticcalls.
- */
-interface IPositionView {
-    function getMaxBorrowable(address user, address asset) external view returns (uint256);
-}
 
 /**
  * @title SystemView
@@ -39,23 +28,6 @@ interface IPositionView {
 contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Types ━━━━━━━━━━━━━━━*/
 
-    struct GlobalStatisticsView {
-        uint256 totalUsers;
-        uint256 activeUsers;
-        uint256 totalCollateral;
-        uint256 totalDebt;
-        uint256 lastUpdateTime;
-    }
-
-    struct RewardSystemView {
-        uint256 rewardRate;
-        uint256 totalRewardPoints;
-    }
-
-    struct GuaranteeSystemView {
-        uint256 totalGuarantee;
-    }
-
     struct RouteInfo {
         bytes32 moduleKey;
         address moduleAddr;
@@ -68,24 +40,20 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
-    /// @notice Named module string is unknown to both ModuleKeys mapping and legacy Registry entries.
+    /// @notice Thrown when a module name cannot be resolved via ModuleKeys mapping nor legacy Registry fallback.
+    /// @dev Reverts when `name` is unknown. Used by {getNamedModule}.
     error SystemView__UnknownModuleName();
-
-    /// @notice Deprecated entrypoint: use `routeStatistics()` and query the StatisticsView directly.
-    error SystemView__DeprecatedUseStatisticsView();
-
-    /// @notice Deprecated entrypoint: use `routeReward()` and query the RewardView directly.
-    error SystemView__DeprecatedUseRewardView();
-
-    /// @notice Deprecated entrypoint: use `routePrice()` and query the ValuationOracleView (or PRICE_ORACLE fallback).
-    error SystemView__DeprecatedUseValuationOracleView();
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
+    /**
+     * @notice Registry address used for module discovery and access control.
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - SystemView is a read-only routing facade and MUST NOT store any business caches.
+     */
     address private _registryAddr;
-    // NOTE: Keep this storage slot for upgrade-safe layout compatibility.
-    // The authoritative ViewCache address must be resolved from Registry on each read.
-    address private _viewCacheAddr;
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
@@ -96,7 +64,9 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     modifier onlyViewRole() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender)) {
+            revert MissingRole();
+        }
         _;
     }
 
@@ -123,8 +93,6 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
-        // Best-effort resolve ViewCache for backward-compatible storage layout. (Getter resolves dynamically.)
-        _viewCacheAddr = Registry(initialRegistryAddr).getModule(ModuleKeys.KEY_VIEW_CACHE);
     }
 
     /*━━━━━━━━━━━━━━━ Basic metadata ━━━━━━━━━━━━━━━*/
@@ -362,7 +330,7 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the LiquidationView route.
+     * @notice Get the LiquidatorView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
@@ -370,7 +338,7 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Role-gated via ACTION_VIEW_SYSTEM_DATA
      *
-     * @return routeInfo_ Route info for LiquidationView (may return address(0) if not configured)
+     * @return routeInfo_ Route info for LiquidatorView (may return address(0) if not configured)
      */
     function routeLiquidation() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -394,6 +362,24 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
         routeInfo_ = RouteInfo({
             moduleKey: ModuleKeys.KEY_RISK_VIEW,
             moduleAddr: Registry(_registryAddr).getModule(ModuleKeys.KEY_RISK_VIEW)
+        });
+    }
+
+    /**
+     * @notice Get the SystemRiskView route.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
+     *
+     * Security:
+     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+     *
+     * @return routeInfo_ Route info for SystemRiskView (may return address(0) if not configured)
+     */
+    function routeSystemRisk() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
+        routeInfo_ = RouteInfo({
+            moduleKey: ModuleKeys.KEY_SYSTEM_RISK_VIEW,
+            moduleAddr: Registry(_registryAddr).getModule(ModuleKeys.KEY_SYSTEM_RISK_VIEW)
         });
     }
 
@@ -487,293 +473,6 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
         });
     }
 
-    /*━━━━━━━━━━━━━━━ Assets & debt (legacy helpers) ━━━━━━━━━━━━━━━*/
-
-    /**
-     * @notice Get a legacy bundle of vault parameters (best-effort).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     * - Best-effort cross-module reads; returns 0 for unavailable sources.
-     *
-     * @return minHealthFactor Minimum health factor (best-effort; see ILiquidationRiskManager for semantics)
-     * @return vaultCap Vault cap (best-effort; legacy compatibility only, may be 0)
-     * @return liquidationThreshold Liquidation threshold (best-effort; see ILiquidationRiskManager for semantics)
-     */
-    function getVaultParams()
-        external
-        view
-        onlyValidRegistry
-        onlyViewRole
-        returns (uint256 minHealthFactor, uint256 vaultCap, uint256 liquidationThreshold)
-    {
-        minHealthFactor = _tryGetMinHealthFactor();
-        vaultCap = _tryGetVaultCap();
-        liquidationThreshold = _tryGetLiquidationThreshold();
-    }
-
-    /**
-     * @notice Get the vault cap (legacy helper; best-effort).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     *
-     * @return vaultCap Vault cap (legacy compatibility only, may be 0)
-     */
-    function getVaultCap() external view onlyValidRegistry onlyViewRole returns (uint256 vaultCap) {
-        return _tryGetVaultCap();
-    }
-
-    /**
-     * @notice Get the remaining vault cap (legacy placeholder).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     *
-     * @param asset Asset address (unused; kept for legacy ABI compatibility)
-     * @return remaining Remaining cap (always 0 until a dedicated SSOT module exists)
-     */
-    function getVaultCapRemaining(address asset)
-        external
-        view
-        onlyValidRegistry
-        onlyViewRole
-        returns (uint256 remaining)
-    {
-        asset; // silence unused variable warnings
-        return 0;
-    }
-
-    /**
-     * @notice Get a user's max borrowable amount for an asset (best-effort).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     * - Best-effort: returns 0 if PositionView is not configured or does not support the selector.
-     *
-     * @param user Target user address
-     * @param asset Asset address
-     * @return maxBorrowable Max borrowable amount (asset decimals; best-effort, may be 0)
-     */
-    function getMaxBorrowable(address user, address asset)
-        external
-        view
-        onlyValidRegistry
-        onlyViewRole
-        returns (uint256)
-    {
-        // 统一入口：优先走 PositionView 的权威实现（若存在）
-        address pv = Registry(_registryAddr).getModule(ModuleKeys.KEY_POSITION_VIEW);
-        if (pv == address(0)) return 0;
-        (bool ok, bytes memory data) = pv.staticcall(
-            abi.encodeCall(IPositionView.getMaxBorrowable, (user, asset))
-        );
-        if (!ok || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
-    }
-
-    /**
-     * @notice Get the settlement token module address (best-effort).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     *
-     * @return settlementTokenAddr Settlement token address (or Registry address as a non-zero placeholder)
-     */
-    function getSettlementToken() external view onlyValidRegistry onlyViewRole returns (address settlementTokenAddr) {
-        address token = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_TOKEN);
-        return token == address(0) ? _registryAddr : token;
-    }
-
-    /**
-     * @notice Get the minimum health factor (best-effort).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     *
-     * @return minHealthFactor Minimum health factor (best-effort; see ILiquidationRiskManager for semantics)
-     */
-    function getMinHealthFactor() external view onlyValidRegistry onlyViewRole returns (uint256 minHealthFactor) {
-        return _tryGetMinHealthFactor();
-    }
-
-    /**
-     * @notice Get the governance module address (best-effort).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     *
-     * @return governanceAddr Governance module address (or Registry address as a non-zero placeholder)
-     */
-    function governance() external view onlyValidRegistry onlyViewRole returns (address governanceAddr) {
-        address gov = Registry(_registryAddr).getModule(ModuleKeys.KEY_CROSS_CHAIN_GOV);
-        return gov == address(0) ? _registryAddr : gov;
-    }
-
-    /**
-     * @notice DEPRECATED: Use `routeStatistics()` to discover the StatisticsView, then call it directly.
-     * @dev Reverts if:
-     *      - always (SystemView__DeprecatedUseStatisticsView)
-     *
-     * Security:
-     * - Read-only (always reverts)
-     */
-    function getTotalCollateral(address) public pure returns (uint256) {
-        revert SystemView__DeprecatedUseStatisticsView();
-    }
-
-    /**
-     * @notice DEPRECATED: Use `routeStatistics()` to discover the StatisticsView, then call it directly.
-     * @dev Reverts if:
-     *      - always (SystemView__DeprecatedUseStatisticsView)
-     *
-     * Security:
-     * - Read-only (always reverts)
-     */
-    function getTotalDebt(address) public pure returns (uint256) {
-        revert SystemView__DeprecatedUseStatisticsView();
-    }
-
-    /**
-     * @notice DEPRECATED: Use `routePrice()` to discover ValuationOracleView (or PRICE_ORACLE fallback),
-     *         then call it directly.
-     * @dev Reverts if:
-     *      - always (SystemView__DeprecatedUseValuationOracleView)
-     *
-     * Security:
-     * - Read-only (always reverts)
-     */
-    function getAssetPrice(address) public pure returns (uint256) {
-        revert SystemView__DeprecatedUseValuationOracleView();
-    }
-
-    /*━━━━━━━━━━━━━━━ Statistics & health ━━━━━━━━━━━━━━━*/
-
-    /**
-     * @notice Get a snapshot of global statistics (best-effort).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     * - Best-effort: returns zeros if StatisticsView is not configured or does not support the selector.
-     *
-     * @return globalStats_ Global statistics snapshot (best-effort; fields may be zero)
-     */
-    function getGlobalStatisticsView()
-        external
-        view
-        onlyValidRegistry
-        onlyViewRole
-        returns (GlobalStatisticsView memory globalStats_)
-    {
-        address stats = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
-        if (stats != address(0)) {
-            (bool ok, bytes memory data) = stats.staticcall(abi.encodeWithSignature("getGlobalStatistics()"));
-            if (ok && data.length >= 160) {
-                (
-                    globalStats_.totalUsers,
-                    globalStats_.activeUsers,
-                    globalStats_.totalCollateral,
-                    globalStats_.totalDebt,
-                    globalStats_.lastUpdateTime
-                ) = abi.decode(data, (uint256, uint256, uint256, uint256, uint256));
-            }
-        }
-    }
-
-    /**
-     * @notice DEPRECATED: Use `routeReward()` to discover RewardView, then call it directly.
-     * @dev Reverts if:
-     *      - always (SystemView__DeprecatedUseRewardView)
-     *
-     * Security:
-     * - Read-only (always reverts)
-     */
-    function getRewardSystemView() external pure returns (RewardSystemView memory) {
-        revert SystemView__DeprecatedUseRewardView();
-    }
-
-    /**
-     * @notice DEPRECATED: Use `routeStatistics()` to discover StatisticsView, then call it directly.
-     * @dev Reverts if:
-     *      - always (SystemView__DeprecatedUseStatisticsView)
-     *
-     * Security:
-     * - Read-only (always reverts)
-     */
-    function getGuaranteeSystemView() external pure returns (GuaranteeSystemView memory) {
-        revert SystemView__DeprecatedUseStatisticsView();
-    }
-
-    /**
-     * @notice Get degradation stats from StatisticsView (best-effort passthrough).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     *
-     * @return stats Degradation stats payload (ABI-encoded; empty if unavailable)
-     */
-    function getGracefulDegradationStats() external view onlyValidRegistry onlyViewRole returns (bytes memory stats) {
-        address statsView = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
-        if (statsView != address(0)) {
-            (bool ok, bytes memory data) = statsView.staticcall(abi.encodeWithSignature("getDegradationStats()"));
-            if (ok) return data;
-        }
-        return "";
-    }
-
-    /**
-     * @notice Perform a minimal sanity check for a module address (no external calls).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
-     * - Read-only; does not perform external calls to the module.
-     *
-     * @param moduleAddr Module address to check
-     * @return healthy Whether the module looks healthy
-     * @return details Human-readable status string (intended for off-chain tools; not for on-chain branching)
-     */
-    function checkModuleHealth(address moduleAddr)
-        external
-        view
-        onlyValidRegistry
-        onlyViewRole
-        returns (bool healthy, string memory details)
-    {
-        if (moduleAddr == address(0)) return (false, "Module not configured");
-        if (moduleAddr.code.length == 0) return (false, "Module has no code");
-        return (true, "OK");
-    }
-
     /*━━━━━━━━━━━━━━━ UUPS upgradeability ━━━━━━━━━━━━━━━*/
 
     /**
@@ -791,53 +490,11 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation contract address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acmAddr).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
-    }
-
-    /*━━━━━━━━━━━━━━━ Internal helpers (best-effort) ━━━━━━━━━━━━━━━*/
-    function _readUint(bytes32 moduleKey, bytes memory callData) private view returns (uint256) {
-        (bool ok, bytes memory data) = _staticCall(moduleKey, callData);
-        if (!ok || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
-    }
-
-    function _staticCall(bytes32 moduleKey, bytes memory callData) private view returns (bool, bytes memory) {
-        address module = Registry(_registryAddr).getModuleOrRevert(moduleKey);
-        return module.staticcall(callData);
-    }
-
-    function _readUintOptional(bytes32 moduleKey, bytes memory callData) private view returns (uint256) {
-        (bool ok, bytes memory data) = _staticCallOptional(moduleKey, callData);
-        if (!ok || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
-    }
-
-    function _staticCallOptional(bytes32 moduleKey, bytes memory callData) private view returns (bool, bytes memory) {
-        address module = Registry(_registryAddr).getModule(moduleKey);
-        if (module == address(0)) return (false, bytes(""));
-        return module.staticcall(callData);
-    }
-
-    function _tryGetMinHealthFactor() internal view returns (uint256) {
-        address rm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        if (rm == address(0)) return 0;
-        try ILiquidationRiskManager(rm).getMinHealthFactor() returns (uint256 v) { return v; } catch { return 0; }
-    }
-
-    function _tryGetLiquidationThreshold() internal view returns (uint256) {
-        address rm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        if (rm == address(0)) return 0;
-        try ILiquidationRiskManager(rm).getLiquidationThreshold() returns (uint256 v) { return v; } catch { return 0; }
-    }
-
-    function _tryGetVaultCap() internal pure returns (uint256) {
-        // Architecture-Guide alignment:
-        // VaultCap is not an SSOT in the current refactored stack (no dedicated config module).
-        // Keep the getter for backward compatibility, but return 0 until a proper config module is introduced.
-        return 0;
     }
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/

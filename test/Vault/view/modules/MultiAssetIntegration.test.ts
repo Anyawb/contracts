@@ -22,6 +22,7 @@ const KEY_SYSTEM_VIEW = ethers.id("SYSTEM_VIEW");
 const KEY_STATISTICS_VIEW = ethers.id("STATISTICS_VIEW");
 const KEY_LIQUIDATOR_VIEW = ethers.id("LIQUIDATOR_VIEW");
 const KEY_RISK_VIEW = ethers.id("RISK_VIEW");
+const KEY_SYSTEM_RISK_VIEW = ethers.id("SYSTEM_RISK_VIEW");
 const KEY_CM = ethers.id("COLLATERAL_MANAGER");
 const KEY_LE = ethers.id("LENDING_ENGINE");
 
@@ -29,6 +30,7 @@ const ACTION_ADMIN = ethers.id("ACTION_ADMIN");
 const ACTION_VIEW_USER_DATA = ethers.id("VIEW_USER_DATA");
 const ACTION_VIEW_SYSTEM_DATA = ethers.id("VIEW_SYSTEM_DATA");
 const ACTION_VIEW_PUSH = ethers.id("ACTION_VIEW_PUSH");
+const ACTION_VIEW_RISK_DATA = ethers.id("VIEW_RISK_DATA");
 
 describe("多资产组合操作综合测试 - Multi-Asset Integration", function () {
   async function deployFixture() {
@@ -45,6 +47,7 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
     await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_PUSH, admin.address);
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, admin.address);
 
     // 部署 PositionView
     const Position = await ethers.getContractFactory("MockPositionView");
@@ -58,6 +61,13 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
     const Health = await ethers.getContractFactory("HealthView");
     const health = await upgrades.deployProxy(Health, [await registry.getAddress()]);
 
+    // SystemRiskView SSOT dependency for PreviewView (minHF/maxLTV).
+    // Use a minimal mock that exposes getMinHealthFactor/getMaxLtvBps without role-gates.
+    const SysRisk = await ethers.getContractFactory("MockLiquidationRiskManager");
+    const systemRiskView = await SysRisk.deploy();
+    await systemRiskView.setMinHealthFactor(10_000); // HF threshold: 1.0 (bps=1e4)
+    await systemRiskView.setMaxLtvBps(7_500);        // Max LTV: 75%
+
     // 部署 UserView（使用代理）
     const User = await ethers.getContractFactory("UserView");
     const userView = await upgrades.deployProxy(User, [await registry.getAddress()]);
@@ -68,12 +78,18 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
     await registry.setModule(KEY_PREVIEW_VIEW, await preview.getAddress());
     await registry.setModule(KEY_USER_VIEW, await userView.getAddress());
     await registry.setModule(KEY_HEALTH_VIEW, await health.getAddress());
+    await registry.setModule(KEY_SYSTEM_RISK_VIEW, await systemRiskView.getAddress());
     await registry.setModule(KEY_CM, admin.address);
     await registry.setModule(KEY_LE, admin.address);
 
     // 授权推送权限
     await acm.grantRole(ACTION_VIEW_PUSH, await position.getAddress());
     await acm.grantRole(ACTION_VIEW_PUSH, await health.getAddress());
+
+    // Downstream view modules (HealthView/PositionView/etc) enforce roles based on msg.sender.
+    // UserView calls those modules internally, so the UserView contract itself must be granted the relevant roles.
+    await acm.grantRole(ACTION_VIEW_USER_DATA, await userView.getAddress());
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, await userView.getAddress());
 
     // 创建多个测试资产
     const asset1 = ethers.Wallet.createRandom().address;
@@ -111,9 +127,9 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       await position.pushUserPositionUpdate(user3.address, asset3, 3000n, 1500n);
 
       // 查询所有仓位
-      const [c1, d1] = await position.getUserPosition(user1.address, asset1);
-      const [c2, d2] = await position.getUserPosition(user2.address, asset2);
-      const [c3, d3] = await position.getUserPosition(user3.address, asset3);
+      const [c1, d1] = await position.getUserPositionWithMeta(user1.address, asset1);
+      const [c2, d2] = await position.getUserPositionWithMeta(user2.address, asset2);
+      const [c3, d3] = await position.getUserPositionWithMeta(user3.address, asset3);
 
       expect(c1).to.equal(1000n);
       expect(d1).to.equal(500n);
@@ -131,9 +147,9 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       await position.pushUserPositionUpdate(user1.address, asset2, 2000n, 800n);
       await position.pushUserPositionUpdate(user1.address, asset3, 3000n, 1200n);
 
-      const [c1, d1] = await position.getUserPosition(user1.address, asset1);
-      const [c2, d2] = await position.getUserPosition(user1.address, asset2);
-      const [c3, d3] = await position.getUserPosition(user1.address, asset3);
+      const [c1, d1] = await position.getUserPositionWithMeta(user1.address, asset1);
+      const [c2, d2] = await position.getUserPositionWithMeta(user1.address, asset2);
+      const [c3, d3] = await position.getUserPositionWithMeta(user1.address, asset3);
 
       expect(c1).to.equal(1000n);
       expect(d1).to.equal(500n);
@@ -151,9 +167,9 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       await position.pushUserPositionUpdate(user2.address, asset1, 2000n, 1000n);
       await position.pushUserPositionUpdate(user3.address, asset1, 3000n, 1500n);
 
-      const [c1, d1] = await position.getUserPosition(user1.address, asset1);
-      const [c2, d2] = await position.getUserPosition(user2.address, asset1);
-      const [c3, d3] = await position.getUserPosition(user3.address, asset1);
+      const [c1, d1] = await position.getUserPositionWithMeta(user1.address, asset1);
+      const [c2, d2] = await position.getUserPositionWithMeta(user2.address, asset1);
+      const [c3, d3] = await position.getUserPositionWithMeta(user3.address, asset1);
 
       expect(c1).to.equal(1000n);
       expect(d1).to.equal(500n);
@@ -246,9 +262,9 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       await position.pushUserPositionUpdate(user3.address, asset1, 3000n, 2000n);
       await health.pushHealthFactor(user3.address, 15_000n); // HF = 150%
 
-      const [hf1, valid1] = await health.getUserHealthFactor(user1.address);
-      const [hf2, valid2] = await health.getUserHealthFactor(user2.address);
-      const [hf3, valid3] = await health.getUserHealthFactor(user3.address);
+      const [hf1, valid1] = await health.getUserHealthFactorWithMeta(user1.address);
+      const [hf2, valid2] = await health.getUserHealthFactorWithMeta(user2.address);
+      const [hf3, valid3] = await health.getUserHealthFactorWithMeta(user3.address);
 
       expect(hf1).to.equal(20_000n);
       expect(valid1).to.equal(true);
@@ -265,7 +281,7 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       await position.pushUserPositionUpdate(user1.address, asset2, 2000n, 800n);
       await health.pushHealthFactor(user1.address, 18_000n);
 
-      const hf = await userView.connect(user1).getHealthFactor(user1.address);
+      const [hf] = await userView.connect(user1).getHealthFactor(user1.address);
       expect(hf).to.equal(18_000n);
     });
   });
@@ -286,10 +302,10 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       // 使用 PositionView 的批量查询（如果存在）
       // 这里我们模拟批量查询，实际调用单个查询
       const results = await Promise.all([
-        position.getUserPosition(users[0], assets[0]),
-        position.getUserPosition(users[1], assets[1]),
-        position.getUserPosition(users[2], assets[2]),
-        position.getUserPosition(users[3], assets[3]),
+        position.getUserPositionWithMeta(users[0], assets[0]),
+        position.getUserPositionWithMeta(users[1], assets[1]),
+        position.getUserPositionWithMeta(users[2], assets[2]),
+        position.getUserPositionWithMeta(users[3], assets[3]),
       ]);
 
       expect(results[0][0]).to.equal(1000n); // user1, asset1, collateral
@@ -362,7 +378,7 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       await position.pushUserPositionUpdate(user1.address, asset1, 1000n, 500n);
 
       // PositionView 查询
-      const [c1, d1] = await position.getUserPosition(user1.address, asset1);
+      const [c1, d1] = await position.getUserPositionWithMeta(user1.address, asset1);
 
       // PreviewView 预览（不改变状态）
       const [hf, ok] = await preview.previewDeposit(user1.address, asset1, 0n);
@@ -379,16 +395,16 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       await position.pushUserPositionUpdate(user1.address, asset2, 2000n, 800n);
 
       // PositionView 查询
-      const [c1, d1] = await position.getUserPosition(user1.address, asset1);
-      const [c2, d2] = await position.getUserPosition(user1.address, asset2);
+      const [c1, d1] = await position.getUserPositionWithMeta(user1.address, asset1);
+      const [c2, d2] = await position.getUserPositionWithMeta(user1.address, asset2);
 
       // PreviewView 预览
       const [hf1] = await preview.previewDeposit(user1.address, asset1, 0n);
       const [hf2] = await preview.previewDeposit(user1.address, asset2, 0n);
 
       // UserView 查询（通过 PositionView）
-      const [c1_uv, d1_uv] = await userView.connect(user1).getUserPosition(user1.address, asset1);
-      const [c2_uv, d2_uv] = await userView.connect(user1).getUserPosition(user1.address, asset2);
+      const [c1_uv, d1_uv] = await userView.connect(user1).getUserPositionWithMeta(user1.address, asset1);
+      const [c2_uv, d2_uv] = await userView.connect(user1).getUserPositionWithMeta(user1.address, asset2);
 
       // 验证数据一致性
       expect(c1).to.equal(c1_uv);
@@ -435,12 +451,12 @@ describe("多资产组合操作综合测试 - Multi-Asset Integration", function
       await position.pushUserPositionUpdate(user1.address, asset2, 0n, 0n);
 
       // 查询 asset1
-      const [c1, d1] = await position.getUserPosition(user1.address, asset1);
+      const [c1, d1] = await position.getUserPositionWithMeta(user1.address, asset1);
       expect(c1).to.equal(1000n);
       expect(d1).to.equal(500n);
 
       // 查询 asset2（零仓位）
-      const [c2, d2] = await position.getUserPosition(user1.address, asset2);
+      const [c2, d2] = await position.getUserPositionWithMeta(user1.address, asset2);
       expect(c2).to.equal(0n);
       expect(d2).to.equal(0n);
 

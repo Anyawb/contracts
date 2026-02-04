@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
 import { ethers, upgrades } from "hardhat";
-import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+import { loadFixture, mine } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 
 const KEY_CM = ethers.id("COLLATERAL_MANAGER");
 const KEY_LE = ethers.id("LENDING_ENGINE");
@@ -10,8 +10,10 @@ const KEY_VC = ethers.id("VAULT_CORE");
 const KEY_VBL = ethers.id("VAULT_BUSINESS_LOGIC");
 const ACTION_ADMIN = ethers.id("ACTION_ADMIN");
 const ACTION_VIEW_PUSH = ethers.id("ACTION_VIEW_PUSH");
+const ACTION_VIEW_USER_DATA = ethers.id("VIEW_USER_DATA");
 
 describe("PositionView - 缓存有效性与回退", function () {
+  const CACHE_DURATION_BLOCKS = 150; // ViewConstants.CACHE_DURATION_BLOCKS
   async function deployFixture() {
     const [admin, user, vbl] = await ethers.getSigners();
 
@@ -60,11 +62,40 @@ describe("PositionView - 缓存有效性与回退", function () {
     await collateral.depositCollateral(user.address, asset, 100n);
     await lending.setUserDebt(user.address, asset, 50n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 100n, 50n);
-    const [collateralOut, debtOut, isValid] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [collateralOut, debtOut, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
 
     expect(isValid).to.equal(true);
     expect(collateralOut).to.equal(100n);
     expect(debtOut).to.equal(50n);
+  });
+
+  it("本人读取无需 VIEW_USER_DATA 角色（Scheme U self-read）", async function () {
+    const { pv, user, asset, collateral, lending, access } = await loadFixture(deployFixture);
+
+    // Explicitly ensure user has no viewer role; self-read should still pass.
+    await access.revokeRole(ACTION_VIEW_USER_DATA, user.address);
+
+    await collateral.depositCollateral(user.address, asset, 25n);
+    await lending.setUserDebt(user.address, asset, 7n);
+    await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 25n, 7n);
+
+    const [c, d] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
+    expect(c).to.equal(25n);
+    expect(d).to.equal(7n);
+  });
+
+  it("非本人：拥有 VIEW_USER_DATA 角色可读取他人仓位（Scheme U ops read）", async function () {
+    const { pv, user, asset, collateral, lending, access } = await loadFixture(deployFixture);
+    const [, , stranger] = await ethers.getSigners();
+
+    await collateral.depositCollateral(user.address, asset, 25n);
+    await lending.setUserDebt(user.address, asset, 7n);
+    await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 25n, 7n);
+
+    await access.grantRole(ACTION_VIEW_USER_DATA, stranger.address);
+    const [c, d] = await pv.connect(stranger).getUserPositionWithMeta(user.address, asset);
+    expect(c).to.equal(25n);
+    expect(d).to.equal(7n);
   });
 
   it("缓存过期时回退账本并标记无效", async function () {
@@ -79,25 +110,27 @@ describe("PositionView - 缓存有效性与回退", function () {
     await collateral.depositCollateral(user.address, asset, 190n);
     await lending.setUserDebt(user.address, asset, 80n);
 
-    await time.increase(5 * 60 + 1); // 超过 CACHE_DURATION
+    await mine(CACHE_DURATION_BLOCKS + 1); // 超过 CACHE_DURATION
 
-    const [collateralOut, debtOut, isValid] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [collateralOut, debtOut, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
     expect(isValid).to.equal(false);
     expect(collateralOut).to.equal(200n);
     expect(debtOut).to.equal(80n);
   });
 
-  it("任何地址都可以免费查询他人仓位", async function () {
+  it("非本人且无角色：读取他人仓位将被拒绝（Scheme U）", async function () {
     const { pv, user, asset, collateral, lending } = await loadFixture(deployFixture);
-    const [, stranger] = await ethers.getSigners();
+    // NOTE: fixture 的 `user` 是第二个 signer，因此这里取第三个 signer 作为“非本人”。
+    const [, , stranger] = await ethers.getSigners();
 
     await collateral.depositCollateral(user.address, asset, 25n);
     await lending.setUserDebt(user.address, asset, 7n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 25n, 7n);
 
-    const [c, d] = await pv.connect(stranger).getUserPosition(user.address, asset);
-    expect(c).to.equal(25n);
-    expect(d).to.equal(7n);
+    await expect(pv.connect(stranger).getUserPositionWithMeta(user.address, asset)).to.be.revertedWithCustomError(
+      pv,
+      "MissingRole",
+    );
   });
 
   it("非业务模块调用被拒绝", async function () {
@@ -131,6 +164,9 @@ describe("PositionView - 缓存有效性与回退", function () {
     await expect(tx)
       .to.emit(pv, "CacheUpdateFailed")
       .withArgs(user.address, asset, await pv.getAddress(), 1n, 1n, anyValue);
+    await expect(tx)
+      .to.emit(pv, "CacheUpdateFailedV2")
+      .withArgs(user.address, asset, anyValue, await pv.getAddress(), 1n, 1n, anyValue, anyValue, anyValue);
   });
 
   it("账本读取债务失败时发出 CacheUpdateFailed 并回滚", async function () {
@@ -140,9 +176,12 @@ describe("PositionView - 缓存有效性与回退", function () {
     await expect(tx)
       .to.emit(pv, "CacheUpdateFailed")
       .withArgs(user.address, asset, await pv.getAddress(), 1n, 1n, anyValue);
+    await expect(tx)
+      .to.emit(pv, "CacheUpdateFailedV2")
+      .withArgs(user.address, asset, anyValue, await pv.getAddress(), 1n, 1n, anyValue, anyValue, anyValue);
     // 恢复账本读取，避免 read path 的账本回退读取直接透传 revert
     await lending.setMockSuccess(true);
-    const [collateralCached, debtCached, isValid] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [collateralCached, debtCached, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
     expect(isValid).to.equal(false); // 未写入缓存
     expect(collateralCached).to.equal(0n);
     expect(debtCached).to.equal(0n);
@@ -157,14 +196,41 @@ describe("PositionView - 缓存有效性与回退", function () {
     await expect(
       (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 5n)
     ).to.emit(pv, "CacheUpdateFailed");
+    await expect(
+      (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 5n)
+    ).to.emit(pv, "CacheUpdateFailedV2");
     await lending.setMockSuccess(true);
 
     // 手动重试应刷新缓存
     await pv.connect(admin).retryUserPositionUpdate(user.address, asset);
-    const [c, d, isValid] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [c, d, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
     expect(isValid).to.equal(true);
     expect(c).to.equal(10n);
     expect(d).to.equal(5n);
+  });
+
+  it("retryUserPositionUpdate 账本读取再次失败时应 best-effort emit CacheUpdateFailedV2 并返回（不 revert）", async function () {
+    const { pv, admin, user, asset, registry, collateral, lending } = await loadFixture(deployFixture);
+
+    // Prepare some ledger values (not strictly needed for the failure case).
+    await collateral.depositCollateral(user.address, asset, 10n);
+    await lending.setUserDebt(user.address, asset, 5n);
+
+    // Swap CM to a reverting implementation to force guarded read failure.
+    const Bad = await ethers.getContractFactory("RevertingCollateralTotals");
+    const bad = await Bad.deploy();
+    await bad.waitForDeployment();
+    await registry.setModule(KEY_CM, await bad.getAddress());
+
+    const txFail = await pv.connect(admin).retryUserPositionUpdate(user.address, asset);
+    await expect(txFail)
+      .to.emit(pv, "CacheUpdateFailedV2")
+      .withArgs(user.address, asset, anyValue, await pv.getAddress(), 0n, 0n, anyValue, 0, 0);
+
+    // Restore CM and self-heal.
+    await registry.setModule(KEY_CM, await collateral.getAddress());
+    const txOk = await pv.connect(admin).retryUserPositionUpdate(user.address, asset);
+    await expect(txOk).to.emit(pv, "UserPositionCachedV2").withArgs(user.address, asset, 10n, 5n, anyValue, anyValue);
   });
 
   it("零地址输入被拒绝", async function () {
@@ -194,7 +260,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       to: await pv.getAddress(),
       data: pv.interface.encodeFunctionData("pushUserPositionUpdate(address,address,uint256,uint256)", [user.address, asset, 0, 0])
     });
-    const [collateralCached, debtCached, isValid] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [collateralCached, debtCached, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
     expect(collateralCached).to.equal(0n);
     expect(debtCached).to.equal(0n);
     expect(isValid).to.equal(true);
@@ -225,7 +291,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     const tx = await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 123n, 45n);
     await expect(tx).to.emit(pv, "UserPositionCached").withArgs(user.address, asset, 123n, 45n, anyValue);
     await expect(tx).to.emit(pv, "DataPushed").withArgs(DATA_TYPE_USER_POSITION_UPDATE, anyValue);
-    const [c, d, isValid] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [c, d, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
     expect(c).to.equal(123n);
     expect(d).to.equal(45n);
     expect(isValid).to.equal(true);
@@ -316,7 +382,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       .withArgs(user.address, asset, requestId, 1);
 
     // 缓存与版本保持不变
-    const [c, d, isValid] = await pv.getUserPositionWithValidity(user.address, asset);
+    const [c, d, isValid] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(isValid).to.equal(true);
     expect(c).to.equal(10n);
     expect(d).to.equal(1n);
@@ -442,7 +508,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       2
     );
     expect(await pv.getPositionVersion(user.address, asset)).to.equal(2n);
-    const [c1, d1] = await pv.getUserPosition(user.address, asset);
+    const [c1, d1] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(c1).to.equal(15n);
     expect(d1).to.equal(2n);
 
@@ -461,7 +527,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       .to.emit(pv, "IdempotentRequestIgnored")
       .withArgs(user.address, asset, requestId, 1);
 
-    const [c2, d2] = await pv.getUserPosition(user.address, asset);
+    const [c2, d2] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(c2).to.equal(15n);
     expect(d2).to.equal(2n);
     expect(await pv.getPositionVersion(user.address, asset)).to.equal(2n);
@@ -479,14 +545,14 @@ describe("PositionView - 缓存有效性与回退", function () {
     // 增量 +5 collateral, +1 debt
     await pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user.address, asset, 5, 1);
     expect(await pv.getPositionVersion(user.address, asset)).to.equal(2n);
-    const [c1, d1, ] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [c1, d1, ] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
     expect(c1).to.equal(15n);
     expect(d1).to.equal(2n);
 
     // 增量 -3 collateral, 0 debt，指定版本
     await pv["pushUserPositionUpdateDelta(address,address,int256,int256,uint64)"](user.address, asset, -3, 0, 3);
     expect(await pv.getPositionVersion(user.address, asset)).to.equal(3n);
-    const [c2, d2, ] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [c2, d2, ] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
     expect(c2).to.equal(12n);
     expect(d2).to.equal(2n);
   });
@@ -516,7 +582,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     ).to.be.revertedWithCustomError(pv, "PositionView__Unauthorized");
 
     await (collateralNew as any).pushToPositionView(pv.getAddress(), user.address, asset, 0n, 0n);
-    const [collateralCached, debtCached, isValid] = await pv.connect(user).getUserPositionWithValidity(user.address, asset);
+    const [collateralCached, debtCached, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
     expect(collateralCached).to.equal(0n);
     expect(debtCached).to.equal(0n);
     expect(isValid).to.equal(true);
@@ -526,7 +592,7 @@ describe("PositionView - 缓存有效性与回退", function () {
   it("批量查询：空数组被拒绝", async function () {
     const { pv } = await loadFixture(deployFixture);
     await expect(
-      pv.batchGetUserPositions([], [])
+      pv.batchGetUserPositionsWithMeta([], [])
     ).to.be.revertedWithCustomError(pv, "EmptyArray");
   });
 
@@ -534,7 +600,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     const { pv, user } = await loadFixture(deployFixture);
     const asset = ethers.Wallet.createRandom().address;
     await expect(
-      pv.batchGetUserPositions([user.address], [])
+      pv.batchGetUserPositionsWithMeta([user.address], [])
     ).to.be.revertedWithCustomError(pv, "ArrayLengthMismatch");
   });
 
@@ -543,8 +609,27 @@ describe("PositionView - 缓存有效性与回退", function () {
     const users = Array(101).fill(user.address);
     const assets = Array(101).fill(ethers.Wallet.createRandom().address);
     await expect(
-      pv.batchGetUserPositions(users, assets)
-    ).to.be.revertedWithCustomError(pv, "PositionView__BatchTooLarge");
+      pv.batchGetUserPositionsWithMeta(users, assets)
+    )
+      .to.be.revertedWithCustomError(pv, "BatchTooLarge")
+      .withArgs(101, 100);
+  });
+
+  it("批量查询：即便包含本人，也不能 self-bypass（Scheme U batch）", async function () {
+    const { pv, user, asset, collateral, lending, access } = await loadFixture(deployFixture);
+
+    await collateral.depositCollateral(user.address, asset, 25n);
+    await lending.setUserDebt(user.address, asset, 7n);
+    await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 25n, 7n);
+
+    // Ensure caller has no ops/admin role; batch must revert even if querying self.
+    await access.revokeRole(ACTION_VIEW_USER_DATA, user.address);
+    await access.revokeRole(ACTION_ADMIN, user.address);
+
+    await expect(pv.connect(user).batchGetUserPositionsWithMeta([user.address], [asset])).to.be.revertedWithCustomError(
+      pv,
+      "MissingRole",
+    );
   });
 
   it("批量查询：正常批量查询返回正确结果", async function () {
@@ -567,7 +652,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user2.address, asset2, 200n, 80n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user3.address, asset3, 300n, 120n);
 
-    const [collaterals, debts] = await pv.batchGetUserPositions(
+    const [collaterals, debts] = await pv.batchGetUserPositionsWithMeta(
       [user1.address, user2.address, user3.address],
       [asset1, asset2, asset3]
     );
@@ -591,11 +676,11 @@ describe("PositionView - 缓存有效性与回退", function () {
     await collateral.depositCollateral(user2.address, asset2, 200n);
     await lending.setUserDebt(user2.address, asset2, 80n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user2.address, asset2, 200n, 80n);
-    await time.increase(5 * 60 + 1); // 过期
+    await mine(CACHE_DURATION_BLOCKS + 1); // 过期
     await collateral.depositCollateral(user2.address, asset2, 50n); // 更新账本
     await lending.setUserDebt(user2.address, asset2, 30n);
 
-    const [collaterals, debts] = await pv.batchGetUserPositions(
+    const [collaterals, debts] = await pv.batchGetUserPositionsWithMeta(
       [user1.address, user2.address],
       [asset1, asset2]
     );
@@ -615,7 +700,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       users.push(wallet.address);
       assets.push(ethers.Wallet.createRandom().address);
     }
-    const [collaterals, debts] = await pv.batchGetUserPositions(users, assets);
+    const [collaterals, debts] = await pv.batchGetUserPositionsWithMeta(users, assets);
     expect(collaterals.length).to.equal(100);
     expect(debts.length).to.equal(100);
     expect(collaterals.every((v) => v === 0n)).to.equal(true);
@@ -629,9 +714,11 @@ describe("PositionView - 缓存有效性与回退", function () {
     await lending.setUserDebt(user.address, asset, 50n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 100n, 50n);
 
-    expect(await pv.isUserCacheValid(user.address)).to.equal(true);
+    const [isValidBefore] = await pv.getUserCacheStatusWithMeta(user.address);
+    expect(isValidBefore).to.equal(true);
     await pv.connect(user).clearUserCache(user.address);
-    expect(await pv.isUserCacheValid(user.address)).to.equal(false);
+    const [isValidAfter] = await pv.getUserCacheStatusWithMeta(user.address);
+    expect(isValidAfter).to.equal(false);
   });
 
   it("管理员可以清理任何用户的缓存", async function () {
@@ -640,9 +727,11 @@ describe("PositionView - 缓存有效性与回退", function () {
     await lending.setUserDebt(user.address, asset, 50n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 100n, 50n);
 
-    expect(await pv.isUserCacheValid(user.address)).to.equal(true);
+    const [isValid] = await pv.getUserCacheStatusWithMeta(user.address);
+    expect(isValid).to.equal(true);
     await pv.connect(admin).clearUserCache(user.address);
-    expect(await pv.isUserCacheValid(user.address)).to.equal(false);
+    const [isValidAfter] = await pv.getUserCacheStatusWithMeta(user.address);
+    expect(isValidAfter).to.equal(false);
   });
 
   it("非用户非管理员无法清理缓存", async function () {
@@ -692,7 +781,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     const receipt = await tx.wait();
     const block = await ethers.provider.getBlock(receipt!.blockNumber);
     const updatedAt = await pv.getPositionUpdatedAt(user.address, asset);
-    expect(updatedAt).to.equal(block!.timestamp);
+    expect(updatedAt).to.equal(BigInt(block!.number));
   });
 
   // ============ 事件验证测试 ============
@@ -733,8 +822,8 @@ describe("PositionView - 缓存有效性与回退", function () {
     await lending.setUserDebt(user.address, asset2, 80n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset2, 200n, 80n);
 
-    const [c1, d1] = await pv.getUserPosition(user.address, asset1);
-    const [c2, d2] = await pv.getUserPosition(user.address, asset2);
+    const [c1, d1] = await pv.getUserPositionWithMeta(user.address, asset1);
+    const [c2, d2] = await pv.getUserPositionWithMeta(user.address, asset2);
 
     expect(c1).to.equal(100n);
     expect(d1).to.equal(50n);
@@ -758,8 +847,8 @@ describe("PositionView - 缓存有效性与回退", function () {
     await lending.setUserDebt(user2.address, asset, 80n);
     await (collateral as any).pushToPositionView(pv.getAddress(), user2.address, asset, 200n, 80n);
 
-    const [c1, d1] = await pv.getUserPosition(user1.address, asset);
-    const [c2, d2] = await pv.getUserPosition(user2.address, asset);
+    const [c1, d1] = await pv.getUserPositionWithMeta(user1.address, asset);
+    const [c2, d2] = await pv.getUserPositionWithMeta(user2.address, asset);
 
     expect(c1).to.equal(100n);
     expect(d1).to.equal(50n);
@@ -811,10 +900,10 @@ describe("PositionView - 缓存有效性与回退", function () {
     const tx1 = await (collateral as any).pushToPositionView(pv.getAddress(), user1.address, asset1, 100n, 50n);
     const receipt1 = await tx1.wait();
     const block1 = await ethers.provider.getBlock(receipt1!.blockNumber);
-    const ts1 = block1!.timestamp;
+    const ts1 = BigInt(block1!.number);
 
     // 等待一段时间
-    await time.increase(60);
+    await mine(30);
 
     // user1, asset2: 推送
     await collateral.depositCollateral(user1.address, asset2, 200n);
@@ -822,7 +911,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     const tx2 = await (collateral as any).pushToPositionView(pv.getAddress(), user1.address, asset2, 200n, 80n);
     const receipt2 = await tx2.wait();
     const block2 = await ethers.provider.getBlock(receipt2!.blockNumber);
-    const ts2 = block2!.timestamp;
+    const ts2 = BigInt(block2!.number);
 
     // user2, asset1: 推送
     await collateral.depositCollateral(user2.address, asset1, 300n);
@@ -830,7 +919,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     const tx3 = await (collateral as any).pushToPositionView(pv.getAddress(), user2.address, asset1, 300n, 120n);
     const receipt3 = await tx3.wait();
     const block3 = await ethers.provider.getBlock(receipt3!.blockNumber);
-    const ts3 = block3!.timestamp;
+    const ts3 = BigInt(block3!.number);
 
     // 验证时间戳独立
     expect(await pv.getPositionUpdatedAt(user1.address, asset1)).to.equal(ts1);
@@ -852,7 +941,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset2, 200n, 80n);
     
     // 等待一段时间但不超过缓存有效期
-    await time.increase(2 * 60);
+    await mine(60);
     
     // asset1: 后推送（会更新整个用户的缓存时间戳）
     await collateral.depositCollateral(user.address, asset1, 100n);
@@ -862,7 +951,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     // (ARCH) 缓存有效性必须是 (user,asset) 维度：
     // asset2 的缓存不会因为 asset1 的推送而“续命”。
     // 等待到 asset2 过期（>5min），但 asset1 仍有效（<5min）。
-    await time.increase(4 * 60);
+    await mine(120);
     await collateral.depositCollateral(user.address, asset2, 50n); // 更新账本到250
     await lending.setUserDebt(user.address, asset2, 100n); // 更新账本到100
 
@@ -871,9 +960,9 @@ describe("PositionView - 缓存有效性与回退", function () {
     await lending.setUserDebt(user.address, asset3, 120n);
 
     // 验证缓存状态
-    const [c1, d1, valid1] = await pv.getUserPositionWithValidity(user.address, asset1);
-    const [c2, d2, valid2] = await pv.getUserPositionWithValidity(user.address, asset2);
-    const [c3, d3, valid3] = await pv.getUserPositionWithValidity(user.address, asset3);
+    const [c1, d1, valid1] = await pv.getUserPositionWithMeta(user.address, asset1);
+    const [c2, d2, valid2] = await pv.getUserPositionWithMeta(user.address, asset2);
+    const [c3, d3, valid3] = await pv.getUserPositionWithMeta(user.address, asset3);
 
     // asset1: 有效（最后推送）
     expect(valid1).to.equal(true);
@@ -902,7 +991,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user2.address, asset, 200n, 80n);
     
     // 等待一段时间但不超过缓存有效期
-    await time.increase(2 * 60);
+    await mine(60);
     
     // user1: 后推送（每个用户的缓存时间戳是独立的）
     await collateral.depositCollateral(user1.address, asset, 100n);
@@ -912,7 +1001,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     // user2: 缓存过期（在user1推送之前，且已经超过缓存有效期）
     // 注意：每个用户的缓存时间戳是独立的，所以user2的缓存不会因为user1的推送而更新
     // 调整等待时间：让 user2 过期，但 user1 仍在有效期内
-    await time.increase(4 * 60); // user2 总共约6 分钟，过期；user1 约4 分钟，未过期
+    await mine(120); // user2 总共约6 分钟，过期；user1 约4 分钟，未过期
     await collateral.depositCollateral(user2.address, asset, 50n); // 更新账本到250
     await lending.setUserDebt(user2.address, asset, 100n); // 更新账本到100
 
@@ -922,9 +1011,9 @@ describe("PositionView - 缓存有效性与回退", function () {
 
     // 验证缓存状态
     // 注意：每个用户的缓存时间戳是独立的
-    const [c1, d1, valid1] = await pv.getUserPositionWithValidity(user1.address, asset);
-    const [c2, d2, valid2] = await pv.getUserPositionWithValidity(user2.address, asset);
-    const [c3, d3, valid3] = await pv.getUserPositionWithValidity(user3.address, asset);
+    const [c1, d1, valid1] = await pv.getUserPositionWithMeta(user1.address, asset);
+    const [c2, d2, valid2] = await pv.getUserPositionWithMeta(user2.address, asset);
+    const [c3, d3, valid3] = await pv.getUserPositionWithMeta(user3.address, asset);
 
     // user1: 有效（最后推送）
     expect(valid1).to.equal(true);
@@ -963,7 +1052,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user3.address, asset3, 300n, 120n);
 
     // 批量查询
-    const [collaterals, debts] = await pv.batchGetUserPositions(
+    const [collaterals, debts] = await pv.batchGetUserPositionsWithMeta(
       [user1.address, user2.address, user3.address],
       [asset1, asset2, asset3]
     );
@@ -987,18 +1076,22 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user2.address, asset, 200n, 80n);
 
     // 验证两个用户的缓存都有效
-    expect(await pv.isUserCacheValid(user1.address)).to.equal(true);
-    expect(await pv.isUserCacheValid(user2.address)).to.equal(true);
+    const [isValid1] = await pv.getUserCacheStatusWithMeta(user1.address);
+    const [isValid2] = await pv.getUserCacheStatusWithMeta(user2.address);
+    expect(isValid1).to.equal(true);
+    expect(isValid2).to.equal(true);
 
     // user1 清理自己的缓存
     await pv.connect(user1).clearUserCache(user1.address);
 
     // 验证只有 user1 的缓存被清理
-    expect(await pv.isUserCacheValid(user1.address)).to.equal(false);
-    expect(await pv.isUserCacheValid(user2.address)).to.equal(true);
+    const [isValid1After] = await pv.getUserCacheStatusWithMeta(user1.address);
+    const [isValid2After] = await pv.getUserCacheStatusWithMeta(user2.address);
+    expect(isValid1After).to.equal(false);
+    expect(isValid2After).to.equal(true);
 
     // user2 的数据仍然可以正常查询
-    const [c2, d2] = await pv.getUserPosition(user2.address, asset);
+    const [c2, d2] = await pv.getUserPositionWithMeta(user2.address, asset);
     expect(c2).to.equal(200n);
     expect(d2).to.equal(80n);
   });
@@ -1084,10 +1177,10 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user2.address, asset2, 440n, 180n);
 
     // 验证所有数据都正确更新且互不干扰
-    const [c11, d11] = await pv.getUserPosition(user1.address, asset1);
-    const [c12, d12] = await pv.getUserPosition(user1.address, asset2);
-    const [c21, d21] = await pv.getUserPosition(user2.address, asset1);
-    const [c22, d22] = await pv.getUserPosition(user2.address, asset2);
+    const [c11, d11] = await pv.getUserPositionWithMeta(user1.address, asset1);
+    const [c12, d12] = await pv.getUserPositionWithMeta(user1.address, asset2);
+    const [c21, d21] = await pv.getUserPositionWithMeta(user2.address, asset1);
+    const [c22, d22] = await pv.getUserPositionWithMeta(user2.address, asset2);
 
     expect(c11).to.equal(110n);
     expect(d11).to.equal(55n);
@@ -1129,10 +1222,10 @@ describe("PositionView - 缓存有效性与回退", function () {
     await pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user2.address, asset2, -40, -20);
 
     // 验证增量推送独立计算
-    const [c11, d11] = await pv.getUserPosition(user1.address, asset1);
-    const [c12, d12] = await pv.getUserPosition(user1.address, asset2);
-    const [c21, d21] = await pv.getUserPosition(user2.address, asset1);
-    const [c22, d22] = await pv.getUserPosition(user2.address, asset2);
+    const [c11, d11] = await pv.getUserPositionWithMeta(user1.address, asset1);
+    const [c12, d12] = await pv.getUserPositionWithMeta(user1.address, asset2);
+    const [c21, d21] = await pv.getUserPositionWithMeta(user2.address, asset1);
+    const [c22, d22] = await pv.getUserPositionWithMeta(user2.address, asset2);
 
     expect(c11).to.equal(110n); // 100+10
     expect(d11).to.equal(55n);  // 50+5
@@ -1152,7 +1245,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 1n);
 
     await pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user.address, asset, 0, 0);
-    const [c, d] = await pv.getUserPosition(user.address, asset);
+    const [c, d] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(c).to.equal(10n);
     expect(d).to.equal(1n);
     expect(await pv.getPositionVersion(user.address, asset)).to.equal(2n);
@@ -1165,7 +1258,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 5n);
 
     await pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user.address, asset, 0, -5);
-    const [c, d] = await pv.getUserPosition(user.address, asset);
+    const [c, d] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(c).to.equal(10n);
     expect(d).to.equal(0n);
   });
@@ -1177,7 +1270,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 5n);
 
     await pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user.address, asset, -10, 0);
-    const [c, d] = await pv.getUserPosition(user.address, asset);
+    const [c, d] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(c).to.equal(0n);
     expect(d).to.equal(5n);
   });
@@ -1189,14 +1282,14 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 5n);
 
     // 缓存过期
-    await time.increase(5 * 60 + 1);
+    await mine(CACHE_DURATION_BLOCKS + 1);
     // 更新账本（注意：MockCollateralManager的deposit是累加的，MockLendingEngineBasic的setUserDebt是直接设置的）
     await collateral.depositCollateral(user.address, asset, 5n); // 账本collateral=15 (10+5)
     await lending.setUserDebt(user.address, asset, 7n); // 账本debt=7 (直接设置)
 
     // 缓存失效时，PositionView 会避免“base 已是变更后账本”的双计数风险，退化为全量对齐账本（忽略 delta）
     await pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user.address, asset, 5, 1);
-    const [c, d] = await pv.getUserPosition(user.address, asset);
+    const [c, d] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(c).to.equal(15n);
     expect(d).to.equal(7n);
   });
@@ -1242,7 +1335,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       .to.emit(pv, "UserPositionCachedV2")
       .withArgs(user.address, asset, 15n, 3n, 2n, anyValue);
 
-    const [c, d] = await pv.getUserPosition(user.address, asset);
+    const [c, d] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(c).to.equal(15n);
     expect(d).to.equal(3n);
     expect(await pv.getPositionVersion(user.address, asset)).to.equal(2n);
@@ -1263,7 +1356,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       await (collateral as any).pushToPositionView(pv.getAddress(), wallet.address, asset, BigInt(100 + i), BigInt(10 + i));
     }
 
-    const [collaterals, debts] = await pv.batchGetUserPositions(users, assets);
+    const [collaterals, debts] = await pv.batchGetUserPositionsWithMeta(users, assets);
     expect(collaterals.length).to.equal(100);
     expect(debts.length).to.equal(100);
     for (let i = 0; i < 100; i++) {
@@ -1295,20 +1388,23 @@ describe("PositionView - 缓存有效性与回退", function () {
     await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 100n, 50n);
 
     // 刚好5分钟，应该仍然有效
-    await time.increase(5 * 60);
-    expect(await pv.isUserCacheValid(user.address)).to.equal(true);
+    await mine(CACHE_DURATION_BLOCKS);
+    const [isValid] = await pv.getUserCacheStatusWithMeta(user.address);
+    expect(isValid).to.equal(true);
 
     // 超过1秒，应该失效
-    await time.increase(1);
-    expect(await pv.isUserCacheValid(user.address)).to.equal(false);
+    await mine(1);
+    const [isValidAfter] = await pv.getUserCacheStatusWithMeta(user.address);
+    expect(isValidAfter).to.equal(false);
   });
 
   it("缓存时间戳为零时视为无效", async function () {
     const { pv, user, asset } = await loadFixture(deployFixture);
     // 未推送过，时间戳为0
-    expect(await pv.isUserCacheValid(user.address)).to.equal(false);
-    const [c, d, isValid] = await pv.getUserPositionWithValidity(user.address, asset);
-    expect(isValid).to.equal(false);
+    const [isValidCache] = await pv.getUserCacheStatusWithMeta(user.address);
+    expect(isValidCache).to.equal(false);
+    const [c, d, isValidPosition] = await pv.getUserPositionWithMeta(user.address, asset);
+    expect(isValidPosition).to.equal(false);
   });
 
   // ============ 版本号边界测试 ============
@@ -1372,10 +1468,51 @@ describe("PositionView - 缓存有效性与回退", function () {
     // 恢复账本读取，然后验证缓存未更新（仍然无效）
     await lending.setMockSuccess(true);
     // 由于缓存未更新，查询时会回退到账本（此时账本返回0，因为没有设置）
-    const [c, d, isValid] = await pv.getUserPositionWithValidity(user.address, asset);
+    const [c, d, isValid] = await pv.getUserPositionWithMeta(user.address, asset);
     expect(isValid).to.equal(false);
     expect(c).to.equal(0n);
     expect(d).to.equal(0n);
+  });
+
+  describe("SSOT callsite assertions (trap ACM)", function () {
+    it("user-dimensional gate MUST use hasRole (must not call ACM.requireRole)", async function () {
+      const [admin, user, stranger] = await ethers.getSigners();
+
+      const Registry = await ethers.getContractFactory("MockRegistry");
+      const registry = await Registry.deploy();
+
+      const TrapACM = await ethers.getContractFactory("MockAccessControlManagerTrapRequireRole");
+      const access = await TrapACM.deploy();
+
+      await registry.setModule(KEY_ACM, await access.getAddress());
+
+      const PositionView = await ethers.getContractFactory("PositionView");
+      const pv = await upgrades.deployProxy(PositionView, [await registry.getAddress()], { kind: "uups" });
+
+      // Non-self + no roles: should be rejected by the view without calling requireRole().
+      await expect(pv.connect(stranger).getUserPositionWithMeta(user.address, ethers.Wallet.createRandom().address))
+        .to.be.revertedWithCustomError(pv, "MissingRole");
+    });
+
+    it("risk gate MUST revert MissingRole (no role)", async function () {
+      const [, user, viewer] = await ethers.getSigners();
+
+      const Registry = await ethers.getContractFactory("MockRegistry");
+      const registry = await Registry.deploy();
+
+      const ACM = await ethers.getContractFactory("MockAccessControlManager");
+      const access = await ACM.deploy();
+
+      await registry.setModule(KEY_ACM, await access.getAddress());
+
+      const PositionView = await ethers.getContractFactory("PositionView");
+      const pv = await upgrades.deployProxy(PositionView, [await registry.getAddress()], { kind: "uups" });
+
+      await expect(pv.connect(viewer).getUserTotalCollateralValue(user.address)).to.be.revertedWithCustomError(
+        pv,
+        "MissingRole",
+      );
+    });
   });
 });
 

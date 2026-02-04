@@ -28,9 +28,10 @@ library RegistryStorage {
     error RegistryStorage__IncompatibleStorageVersion(uint256 expected, uint256 actual);
 
     // ============ Constants ============
-    /// @notice Maximum allowed minDelay (seconds) for Registry timelock.
+    /// @notice Maximum allowed minDelay (blocks) for Registry timelock.
     /// @dev Must stay consistent with Registry.MAX_DELAY() / Registry initialization constraints.
-    uint256 internal constant MAX_MIN_DELAY = 7 days;
+    ///      Default assumes ~2s blocks: 7 days ~= 302,400 blocks.
+    uint256 internal constant MAX_MIN_DELAY_BLOCKS = 7 days / 2 seconds;
     struct Layout {
         // ============ Storage versioning ============
         uint256 storageVersion; // Storage layout version marker (prevents incompatible upgrades)
@@ -41,10 +42,10 @@ library RegistryStorage {
 
         // ============ Timelock config ============
         uint8 paused; // Emergency pause flag (compat mirror of Pausable)
-        uint64 minDelay; // Minimum timelock delay (seconds); stored as uint64 for packing
+        uint64 minDelay; // Minimum timelock delay (blocks); stored as uint64 for packing
         // Storage packing notes:
         // - paused(uint8) + minDelay(uint64) share one storage slot (gas-efficient).
-        // - Although uint64 supports extremely large values, the protocol policy caps minDelay to MAX_MIN_DELAY.
+        // - Although uint64 supports extremely large values, the protocol policy caps minDelay to MAX_MIN_DELAY_BLOCKS.
 
         // ============ Module mapping ============
         mapping(bytes32 => address) modules; // moduleKey => moduleAddress
@@ -71,7 +72,7 @@ library RegistryStorage {
 
     struct PendingUpgrade {
         address newAddr; // Proposed new module address
-        uint256 executeAfter; // Earliest execution timestamp (unix seconds)
+        uint256 executeAfter; // Earliest execution block (block.number)
         address proposer; // Proposal submitter (for audit attribution)
         uint256 minDelaySnapshot; // Snapshot of minDelay at scheduling time (stability across governance changes)
     }
@@ -79,7 +80,7 @@ library RegistryStorage {
     struct UpgradeHistory {
         address oldAddress; // Previous address
         address newAddress; // New address
-        uint256 timestamp; // Timestamp (unix seconds)
+        uint256 blockNumber; // Block number (block.number)
         address executor; // Executor address (caller)
     }
 
@@ -102,7 +103,6 @@ library RegistryStorage {
     /// @return layout_ Storage layout pointer.
     function layout() internal pure returns (Layout storage layout_) {
         bytes32 slot = STORAGE_SLOT;
-        // solhint-disable-next-line no-inline-assembly
         assembly {
             layout_.slot := slot
         }
@@ -132,14 +132,14 @@ library RegistryStorage {
      *      - admin_ == address(0) (ZeroAddress)
      *      - storageVersion != 0 (AlreadyInitialized)
      *      - minDelay_ > type(uint64).max (MinDelayOverflow)
-     *      - minDelay_ > MAX_MIN_DELAY (MinDelayTooLarge)
+     *      - minDelay_ > MAX_MIN_DELAY_BLOCKS (MinDelayTooLarge)
      *
      * Security:
      * - Intended to run exactly once on the shared STORAGE_SLOT.
      * - minDelay is policy-capped to match Registry.MAX_DELAY().
      *
      * @param admin_ Governance/admin address.
-     * @param minDelay_ Minimum timelock delay (seconds).
+     * @param minDelay_ Minimum timelock delay (blocks).
      */
     function initializeRegistryStorage(address admin_, uint256 minDelay_) internal {
         if (admin_ == address(0)) revert ZeroAddress();
@@ -149,7 +149,7 @@ library RegistryStorage {
         // Prevent uint64 truncation on assignment.
         if (minDelay_ > type(uint64).max) revert MinDelayOverflow(minDelay_);
         // Keep consistent with Registry's max delay policy.
-        if (minDelay_ > MAX_MIN_DELAY) revert MinDelayTooLarge(minDelay_, MAX_MIN_DELAY);
+        if (minDelay_ > MAX_MIN_DELAY_BLOCKS) revert MinDelayTooLarge(minDelay_, MAX_MIN_DELAY_BLOCKS);
 
         layout_.storageVersion = CURRENT_STORAGE_VERSION;
         layout_.admin = admin_;
@@ -255,7 +255,7 @@ library RegistryStorage {
      * Security:
      * - Read-only.
      *
-     * @return Minimum delay (seconds).
+     * @return Minimum delay (blocks).
      */
     function getMinDelay() internal view returns (uint256) {
         return layout().minDelay;
@@ -322,7 +322,7 @@ library RegistryStorage {
      * @dev Reverts if:
      *      - storageVersion == 0 (NotInitialized)
      *      - admin == address(0) (ZeroAddress)
-     *      - minDelay > MAX_MIN_DELAY (MinDelayTooLarge)
+     *      - minDelay > MAX_MIN_DELAY_BLOCKS (MinDelayTooLarge)
      *
      * Security:
      * - Used before/after migrations to ensure invariants remain intact.
@@ -334,7 +334,9 @@ library RegistryStorage {
         if (layout_.admin == address(0)) revert ZeroAddress();
         
         // Optional but useful safety check (must match Registry policy).
-        if (layout_.minDelay > MAX_MIN_DELAY) revert MinDelayTooLarge(layout_.minDelay, MAX_MIN_DELAY);
+        if (layout_.minDelay > MAX_MIN_DELAY_BLOCKS) {
+            revert MinDelayTooLarge(layout_.minDelay, MAX_MIN_DELAY_BLOCKS);
+        }
         
         // If you want to enforce presence of critical modules, add checks here.
         // Be careful: enabling such checks can break deployment flows where modules are registered later.

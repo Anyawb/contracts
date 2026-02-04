@@ -15,7 +15,7 @@ interface IResidualAllocation {
     /// @param riskReserve 风险准备金金额
     /// @param lenderCompensation 出借人补偿金额
     /// @param liquidatorReward 清算人奖励金额
-    /// @param timestamp 操作时间戳
+    /// @param blockNumber 操作区块号（blockNumber）
     event ResidualAllocated(
         address indexed user,
         uint256 totalResidual,
@@ -23,43 +23,43 @@ interface IResidualAllocation {
         uint256 riskReserve,
         uint256 lenderCompensation,
         uint256 liquidatorReward,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 平台收入收取事件
     /// @param user 被清算用户地址
     /// @param amount 平台收入金额
     /// @param receiver 接收者地址
-    /// @param timestamp 操作时间戳
+    /// @param blockNumber 操作区块号（blockNumber）
     event PlatformRevenueCollected(
         address indexed user,
         uint256 amount,
         address indexed receiver,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 风险准备金增加事件
     /// @param user 被清算用户地址
     /// @param amount 风险准备金金额
     /// @param reservePool 风险准备金池地址
-    /// @param timestamp 操作时间戳
+    /// @param blockNumber 操作区块号（blockNumber）
     event RiskReserveIncreased(
         address indexed user,
         uint256 amount,
         address indexed reservePool,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 出借人补偿发放事件
     /// @param user 被清算用户地址
     /// @param amount 补偿金额
     /// @param lender 出借人地址
-    /// @param timestamp 操作时间戳
+    /// @param blockNumber 操作区块号（blockNumber）
     event LenderCompensationPaid(
         address indexed user,
         uint256 amount,
         address indexed lender,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /* ============ Core Functions ============ */

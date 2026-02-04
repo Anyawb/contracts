@@ -15,6 +15,7 @@ import { ModuleKeys } from '../frontend-config/moduleKeys';
 describe('CollateralManager / PositionView – migration-aligned', function () {
   const ACTION_UPGRADE_MODULE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
   const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
+  const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
 
   async function deployFixture() {
     const [admin, routerEOA, routerEOA2, user, liquidator] = await ethers.getSigners();
@@ -34,7 +35,7 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
     await oracle.waitForDeployment();
 
     const ERC20 = await ethers.getContractFactory('MockERC20');
-    const asset = await ERC20.deploy('Test Asset', 'TST', ethers.parseUnits('1000000', 18));
+    const asset = await ERC20.deploy('Test Asset', 'TST', 18, ethers.parseUnits('1000000', 18));
     await asset.waitForDeployment();
 
     // MockVaultCoreView: used only to return "router address" for CM permission gate
@@ -75,6 +76,8 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
 
     // Strong constraint (Architecture-Guide SSOT): seizure path must be role-gated at ledger layer.
     await acm.grantRole(ACTION_LIQUIDATE, liquidator.address);
+    // PositionView collateral valuation is risk-gated (onlyRiskViewer).
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, admin.address);
 
     // Configure oracle supported assets + price
     const nowTs = await time.latest();

@@ -12,22 +12,13 @@
  * - localhost node running: pnpm -s run node
  * - deployed addresses exist: pnpm -s run deploy:localhost
  */
-import { readFileSync } from "fs";
-import path from "path";
+import { envBool, loadAddressMap, resolveAddress } from "./_addressResolver";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const hre = require("hardhat");
 const { ethers, network } = hre;
 
-type DeployMap = Record<string, string>;
-
 function requireEnv(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
-}
-
-function loadDeployments(): DeployMap {
-  const p = path.join(__dirname, "..", "deployments", "localhost.json");
-  const raw = readFileSync(p, "utf8");
-  return JSON.parse(raw) as DeployMap;
 }
 
 function keyOf(upperSnake: string): string {
@@ -50,29 +41,36 @@ function pickNewThreshold(cur: bigint): bigint {
 
 async function main() {
   console.log(`[verify-config-ssot-local] network=${network.name}`);
-  requireEnv(network.name === "localhost", "This script must run with --network localhost");
+  const addressMap = loadAddressMap(network.name);
+  const registryAddr = resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
+  const registry = await ethers.getContractAt("Registry", registryAddr);
+  const readOnly = envBool("READ_ONLY", network.name !== "localhost");
 
-  const deployed = loadDeployments();
-  requireEnv(deployed.Registry, "Missing Registry in scripts/deployments/localhost.json");
-  requireEnv(deployed.LiquidationRiskManager, "Missing LiquidationRiskManager in scripts/deployments/localhost.json");
-  requireEnv(deployed.LiquidationConfigModule, "Missing LiquidationConfigModule in scripts/deployments/localhost.json");
+  const lrmAddr =
+    resolveAddress({ name: "LiquidationRiskManager", map: addressMap, required: false }) ||
+    (await registry.getModule(keyOf("LIQUIDATION_RISK_MANAGER")));
+  const cfgAddr =
+    resolveAddress({ name: "LiquidationConfigModule", map: addressMap, required: false }) ||
+    (await registry.getModule(keyOf("LIQUIDATION_CONFIG_MANAGER")));
 
-  const registry = await ethers.getContractAt("Registry", deployed.Registry);
+  requireEnv(lrmAddr && lrmAddr !== ethers.ZeroAddress, "Missing LiquidationRiskManager address");
+  requireEnv(cfgAddr && cfgAddr !== ethers.ZeroAddress, "Missing LiquidationConfigModule address");
+
   const lrm = await ethers.getContractAt(
     "src/Vault/liquidation/modules/LiquidationRiskManager.sol:LiquidationRiskManager",
-    deployed.LiquidationRiskManager
+    lrmAddr
   );
   const cfg = await ethers.getContractAt(
     "src/Vault/liquidation/modules/LiquidationConfigModule.sol:LiquidationConfigModule",
-    deployed.LiquidationConfigModule
+    cfgAddr
   );
 
   // 1) Registry binding sanity check
   const cfgKey = keyOf("LIQUIDATION_CONFIG_MANAGER");
   const boundCfg = await registry.getModule(cfgKey);
-  if (boundCfg.toLowerCase() !== deployed.LiquidationConfigModule.toLowerCase()) {
+  if (boundCfg.toLowerCase() !== cfgAddr.toLowerCase()) {
     throw new Error(
-      `Registry binding mismatch: LIQUIDATION_CONFIG_MANAGER=${boundCfg}, expected=${deployed.LiquidationConfigModule}`
+      `Registry binding mismatch: LIQUIDATION_CONFIG_MANAGER=${boundCfg}, expected=${cfgAddr}`
     );
   }
   console.log(`[ok] registry bound LIQUIDATION_CONFIG_MANAGER -> ${boundCfg}`);
@@ -88,6 +86,12 @@ async function main() {
     throw new Error(`SSOT read mismatch: LRM.minHF=${mRm0} Config.minHF=${mCfg0}`);
   }
   console.log(`[ok] read SSOT: threshold=${tRm0} minHF=${mRm0}`);
+
+  if (readOnly) {
+    console.log("[info] READ_ONLY=1: skipping write-path SSOT updates.");
+    console.log("\n✅ verify-config-ssot-local (read-only) PASSED\n");
+    return;
+  }
 
   // 3) Write-path acceptance: updating via LRM should update ConfigModule (not just mirror vars).
   //    NOTE: caller must have ActionKeys.ACTION_SET_PARAMETER role in ACM.

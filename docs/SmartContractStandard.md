@@ -370,12 +370,12 @@ revert IVaultBusinessLogicErrors.VaultBusinessLogic__InvalidParameter("param", v
 2. **事件引用规范**
 ```solidity
 // ❌ 避免 - 直接引用事件
-emit UserOperationProcessed(user, asset, amount, block.timestamp);
-emit MatchCompleted(orderId, borrower, lender, block.timestamp);
+emit UserOperationProcessed(user, asset, amount, block.number);
+emit MatchCompleted(orderId, borrower, lender, block.number);
 
 // ✅ 推荐 - 使用完整的接口名称引用事件
-emit IVaultBusinessLogicEvents.UserOperationProcessed(user, asset, amount, block.timestamp);
-emit IVaultBusinessLogicEvents.MatchCompleted(orderId, borrower, lender, block.timestamp);
+emit IVaultBusinessLogicEvents.UserOperationProcessed(user, asset, amount, block.number);
+emit IVaultBusinessLogicEvents.MatchCompleted(orderId, borrower, lender, block.number);
 ```
 
 3. **错误和事件接口组织**
@@ -390,8 +390,8 @@ interface IVaultBusinessLogicErrors {
 
 // ✅ 推荐 - 将事件定义在专门的接口中
 interface IVaultBusinessLogicEvents {
-    event UserOperationProcessed(address indexed user, address indexed asset, uint256 amount, uint256 timestamp);
-    event MatchCompleted(uint256 indexed orderId, address indexed borrower, address indexed lender, uint256 timestamp);
+    event UserOperationProcessed(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber);
+    event MatchCompleted(uint256 indexed orderId, address indexed borrower, address indexed lender, uint256 blockNumber);
     // ... 其他事件定义
 }
 
@@ -775,7 +775,7 @@ contract MyContract is Pausable {
             // 1. 检查价格是否为零
             require(price > 0, "Oracle: Invalid price");
             // 2. 检查价格是否过时
-            require(block.timestamp - priceOracle.lastUpdateTime() < PRICE_TIMEOUT, "Oracle: Stale price");
+            require(block.number - priceOracle.lastUpdateBlock() < PRICE_TIMEOUT_BLOCKS, "Oracle: Stale price");
             // 3. (可选) 检查价格波动是否在合理范围内
             
             return (collateralAmount * price) / 1e8;
@@ -1012,15 +1012,15 @@ const ONE_USD = ethers.parseUnits("1", 6);
 
 ```typescript
 // ✅ 正确：补全 asset 参数
-await vault.getUserPosition(user.address, ZERO_ADDRESS);
-await vault.getHealthFactor(user.address, ZERO_ADDRESS);
+await userView.getUserPositionWithMeta(user.address, ZERO_ADDRESS);
+const [hf] = await userView.getHealthFactor(user.address);
 // ✅ 正确：系统级聚合/价格等应走专属 View（或先用 SystemView.route* 发现地址再下一跳调用）
 await statisticsView.getTotalCollateral(ZERO_ADDRESS);
 await statisticsView.getTotalDebt(ZERO_ADDRESS);
 
 // ✅ 正确：补全所有参数
-await vault.previewBorrow(user.address, ZERO_ADDRESS, collateralAmount, 0, borrowAmount);
-await vault.previewDeposit(ZERO_ADDRESS, depositAmount);
+await userView.previewBorrow(user.address, ZERO_ADDRESS, collateralAmount, 0, borrowAmount);
+await userView.previewDeposit(user.address, ZERO_ADDRESS, depositAmount);
 ```
 
 #### 8.2.2. 精度处理标准
@@ -1053,7 +1053,7 @@ await expect(
 ```typescript
 describe("权限控制测试", function () {
   it("外部账户不应能直接调用关键函数", async function () {
-    const { vault, alice } = await deployFixture();
+    const { vault, userView, alice } = await deployFixture();
     
     await expect(
       vault.connect(alice).adminOnlyFunction()
@@ -1064,7 +1064,7 @@ describe("权限控制测试", function () {
     const { vault, alice } = await deployFixture();
     
     // view 函数应该可以正常调用
-    const result = await vault.connect(alice).getUserPosition(alice.address, ZERO_ADDRESS);
+    const result = await vault.connect(alice).getUserPositionWithMeta(alice.address, ZERO_ADDRESS);
     expect(result).to.be.defined;
   });
 });
@@ -1076,7 +1076,7 @@ describe("边界条件测试", function () {
   it("零抵押时健康因子应为最大值", async function () {
     const { vault, alice } = await deployFixture();
     
-    const hf = await vault.getHealthFactor(alice.address, ZERO_ADDRESS);
+    const [hf] = await userView.getHealthFactor(alice.address);
     expect(hf).to.equal(ethers.MaxUint256);
   });
   
@@ -1086,7 +1086,7 @@ describe("边界条件测试", function () {
     const largeAmount = ethers.parseUnits("1000000", 18);
     await vault.connect(alice).deposit(ZERO_ADDRESS, largeAmount);
     
-    const position = await vault.getUserPosition(alice.address, ZERO_ADDRESS);
+    const position = await userView.getUserPositionWithMeta(alice.address, ZERO_ADDRESS);
     expect(position.collateral).to.equal(largeAmount);
   });
 });
@@ -1096,7 +1096,7 @@ describe("边界条件测试", function () {
 ```typescript
 describe("集成测试", function () {
   it("完整借贷流程", async function () {
-    const { vault, alice } = await deployFixture();
+    const { vault, userView, alice } = await deployFixture();
     
     // 1. 存款
     const depositAmount = ethers.parseUnits("100", 18);
@@ -1107,12 +1107,12 @@ describe("集成测试", function () {
     await vault.connect(alice).borrow(ZERO_ADDRESS, borrowAmount);
     
     // 3. 验证状态
-    const position = await vault.getUserPosition(alice.address, ZERO_ADDRESS);
+    const position = await userView.getUserPositionWithMeta(alice.address, ZERO_ADDRESS);
     expect(position.collateral).to.equal(depositAmount);
     expect(position.debt).to.equal(borrowAmount);
     
     // 4. 验证健康因子
-    const hf = await vault.getHealthFactor(alice.address, ZERO_ADDRESS);
+    const [hf] = await userView.getHealthFactor(alice.address);
     expect(hf).to.be.gt(Number(ethers.parseUnits("1", 18)));
   });
 });

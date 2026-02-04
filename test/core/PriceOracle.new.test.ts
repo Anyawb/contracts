@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 import { ethers, upgrades } from 'hardhat';
-import { time } from '@nomicfoundation/hardhat-network-helpers';
+import { mine } from '@nomicfoundation/hardhat-network-helpers';
 
 // 目标：
 // 1) 验证 PriceOracle 在移除优雅降级(GD)与DataPush后仍能完成核心功能
@@ -53,27 +53,30 @@ describe('PriceOracle - 瘦身后核心功能验证 (No GD, No DataPush)', funct
 
     // 具备 UPDATE_PRICE 权限的更新者更新价格
     const price = ethers.parseUnits('1', 8);
-    const ts = await time.latest();
+    const blockNumber = BigInt(await ethers.provider.getBlockNumber());
     await expect(
-      priceOracle.connect(updater).updatePrice(usdc, price, ts)
+      priceOracle.connect(updater).updatePrice(usdc, price, blockNumber)
     ).to.emit(priceOracle, 'PriceUpdated')
-     .withArgs(usdc, price, ts);
+     .withArgs(usdc, price, blockNumber);
 
     // 查询价格（应成功，且为8位精度）
-    const [p, t, d] = await priceOracle.getPrice(usdc);
+    const [p, t, assetDecimals] = await priceOracle.getPrice(usdc);
     expect(p).to.equal(price);
-    expect(t).to.equal(ts);
-    expect(d).to.equal(8);
+    expect(t).to.equal(blockNumber);
+    expect(assetDecimals).to.equal(8);
   });
 
   it('应在价格过期时拒绝严格查询，并通过 isPriceValid 返回 false', async function () {
     const { governance, updater, priceOracle } = await deployFixture();
     const asset = ethers.Wallet.createRandom().address;
 
-    await priceOracle.connect(governance).configureAsset(asset, 'asset-x', 8, 1); // 1秒过期
+    await priceOracle.connect(governance).configureAsset(asset, 'asset-x', 8, 1); // 1 block 过期
     const price = ethers.parseUnits('2', 8);
-    const oldTs = (await time.latest()) - 10; // 过期时间
-    await priceOracle.connect(updater).updatePrice(asset, price, oldTs);
+    const blockNumber = BigInt(await ethers.provider.getBlockNumber());
+    await priceOracle.connect(updater).updatePrice(asset, price, blockNumber);
+
+    // 推进区块超过 maxPriceAgeBlocks
+    await mine(2);
 
     // 严格读取应revert为过期
     await expect(priceOracle.getPrice(asset)).to.be.revertedWithCustomError(priceOracle, 'PriceOracle__StalePrice');
@@ -131,23 +134,23 @@ describe('PriceOracle - 瘦身后核心功能验证 (No GD, No DataPush)', funct
     await priceOracle.connect(governance).configureAsset(a1, 'a1', 8, 3600);
     await priceOracle.connect(governance).configureAsset(a2, 'a2', 8, 3600);
 
-    const ts = await time.latest();
-    await priceOracle.connect(updater).updatePrice(a1, ethers.parseUnits('10', 8), ts);
-    await priceOracle.connect(updater).updatePrice(a2, ethers.parseUnits('20', 8), ts);
+    const blockNumber = BigInt(await ethers.provider.getBlockNumber());
+    await priceOracle.connect(updater).updatePrice(a1, ethers.parseUnits('10', 8), blockNumber);
+    await priceOracle.connect(updater).updatePrice(a2, ethers.parseUnits('20', 8), blockNumber);
 
     // getPriceData：应返回结构体，不revert
     const pd = await priceOracle.getPriceData(a1);
     expect(pd.price).to.equal(ethers.parseUnits('10', 8));
-    expect(pd.timestamp).to.equal(ts);
-    expect(pd.decimals).to.equal(8);
+    expect(pd.blockNumber).to.equal(blockNumber);
+    expect(pd.assetDecimals).to.equal(8);
     expect(pd.isValid).to.equal(true);
 
     // 批量
-    const [prices, timestamps, decimals] = await priceOracle.getPrices([a1, a2]);
+    const [prices, blockNumbers, assetDecimalsArray] = await priceOracle.getPrices([a1, a2]);
     expect(prices[0]).to.equal(ethers.parseUnits('10', 8));
     expect(prices[1]).to.equal(ethers.parseUnits('20', 8));
-    expect(timestamps[0]).to.equal(ts);
-    expect(decimals[1]).to.equal(8);
+    expect(blockNumbers[0]).to.equal(blockNumber);
+    expect(assetDecimalsArray[1]).to.equal(8);
 
     // 有效性
     expect(await priceOracle.isPriceValid(a1)).to.equal(true);
@@ -160,17 +163,17 @@ describe('PriceOracle - 瘦身后核心功能验证 (No GD, No DataPush)', funct
     await priceOracle.connect(governance).configureAsset(a1, 'a1', 8, 3600);
     await priceOracle.connect(governance).configureAsset(a2, 'a2', 8, 3600);
 
-    const ts = await time.latest();
+    const blockNumber = BigInt(await ethers.provider.getBlockNumber());
     await expect(
-      priceOracle.connect(updater).updatePrices([a1], [ethers.parseUnits('1', 8), ethers.parseUnits('2', 8)], [ts])
+      priceOracle.connect(updater).updatePrices([a1], [ethers.parseUnits('1', 8), ethers.parseUnits('2', 8)], [blockNumber])
     ).to.be.revertedWithCustomError(priceOracle, 'AmountMismatch');
 
     await expect(
-      priceOracle.connect(updater).updatePrices([ethers.ZeroAddress], [ethers.parseUnits('1', 8)], [ts])
+      priceOracle.connect(updater).updatePrices([ethers.ZeroAddress], [ethers.parseUnits('1', 8)], [blockNumber])
     ).to.be.revertedWithCustomError(priceOracle, 'ZeroAddress');
 
     await expect(
-      priceOracle.connect(updater).updatePrices([a1], [0], [ts])
+      priceOracle.connect(updater).updatePrices([a1], [0], [blockNumber])
     ).to.be.revertedWithCustomError(priceOracle, 'PriceOracle__InvalidPrice');
   });
 

@@ -1,13 +1,15 @@
 import { expect } from 'chai';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, mine } from '@nomicfoundation/hardhat-network-helpers';
 import { ethers, upgrades } from 'hardhat';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const KEY_DEGRADATION_MONITOR = ethers.keccak256(ethers.toUtf8Bytes('DEGRADATION_MONITOR'));
+const KEY_SYSTEM_RISK_VIEW = ethers.keccak256(ethers.toUtf8Bytes('SYSTEM_RISK_VIEW'));
 
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 const ACTION_VIEW_PUSH = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_PUSH'));
 const ACTION_VIEW_SYSTEM_STATUS = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_SYSTEM_STATUS'));
+const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
 
 const DATA_TYPE_HEALTH = ethers.keccak256(ethers.toUtf8Bytes('HEALTH_FACTOR_UPDATE'));
 const DATA_TYPE_RISK = ethers.keccak256(ethers.toUtf8Bytes('RISK_STATUS_UPDATE'));
@@ -21,6 +23,12 @@ describe('HealthView', function () {
     const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
     const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+    // System-scoped risk SSOT (HealthView reads minHealthFactor from this module).
+    const SystemRiskMock = await ethers.getContractFactory('MockLiquidationRiskManager');
+    const systemRisk = await SystemRiskMock.deploy();
+    await systemRisk.updateMinHealthFactor(10_000n);
+    await registry.setModule(KEY_SYSTEM_RISK_VIEW, await systemRisk.getAddress());
 
     await acm.grantRole(ACTION_ADMIN, admin.address);
     await acm.grantRole(ACTION_VIEW_PUSH, admin.address);
@@ -37,6 +45,7 @@ describe('HealthView', function () {
       healthView,
       registry,
       acm,
+      systemRisk,
       admin,
       pusher,
       systemViewer,
@@ -80,10 +89,10 @@ describe('HealthView', function () {
       const encoder = ethers.AbiCoder.defaultAbiCoder();
       const payload = encoder.encode(['address', 'uint256'], [other.address, 12_345n]);
 
-      await expect(tx).to.emit(healthView, 'HealthFactorCached').withArgs(other.address, 12_345n, block!.timestamp);
+      await expect(tx).to.emit(healthView, 'HealthFactorCached').withArgs(other.address, 12_345n, block!.number);
       await expect(tx).to.emit(healthView, 'DataPushed').withArgs(DATA_TYPE_HEALTH, payload);
 
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(12_345n);
       expect(valid).to.equal(true);
     });
@@ -96,7 +105,7 @@ describe('HealthView', function () {
     it('handles zero health factor', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushHealthFactor(other.address, 0n);
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(0n);
       expect(valid).to.equal(true);
     });
@@ -105,7 +114,7 @@ describe('HealthView', function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       const largeHF = ethers.MaxUint256;
       await healthView.connect(pusher).pushHealthFactor(other.address, largeHF);
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(largeHF);
       expect(valid).to.equal(true);
     });
@@ -113,20 +122,73 @@ describe('HealthView', function () {
     it('updates existing cache when called multiple times', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushHealthFactor(other.address, 10_000n);
-      const [hf1] = await healthView.getUserHealthFactor(other.address);
+      const [hf1] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf1).to.equal(10_000n);
 
       await healthView.connect(pusher).pushHealthFactor(other.address, 15_000n);
-      const [hf2] = await healthView.getUserHealthFactor(other.address);
+      const [hf2] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf2).to.equal(15_000n);
     });
 
     it('handles zero address user', async function () {
       const { healthView, pusher } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushHealthFactor(ethers.ZeroAddress, 10_000n);
-      const [hf, valid] = await healthView.getUserHealthFactor(ethers.ZeroAddress);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(ethers.ZeroAddress);
       expect(hf).to.equal(10_000n);
       expect(valid).to.equal(true);
+    });
+  });
+
+  describe('Scheme U reads (Health Factor)', function () {
+    it('allows self read without roles', async function () {
+      const { healthView, other } = await loadFixture(deployFixture);
+      const [hf, valid, blockNumber] = await healthView.connect(other).getUserHealthFactorWithMeta(other.address);
+      expect(hf).to.equal(0n);
+      expect(valid).to.equal(false);
+      expect(blockNumber).to.equal(0n);
+    });
+
+    it('reverts non-self read without VIEW_USER_DATA/ADMIN', async function () {
+      const { healthView, pusher, other } = await loadFixture(deployFixture);
+      await expect(healthView.connect(pusher).getUserHealthFactorWithMeta(other.address)).to.be.revertedWithCustomError(
+        healthView,
+        'MissingRole'
+      );
+    });
+
+    it('enforces batch reads as enumeration capability (no self-bypass)', async function () {
+      const { healthView, other } = await loadFixture(deployFixture);
+      await expect(
+        healthView.connect(other).batchGetHealthFactorsWithMeta([other.address])
+      ).to.be.revertedWithCustomError(healthView, 'MissingRole');
+    });
+
+    it('allows ops/admin batch reads', async function () {
+      const { healthView, acm, admin, pusher, other } = await loadFixture(deployFixture);
+
+      // Admin bypass should work.
+      await expect(healthView.connect(admin).batchGetHealthFactorsWithMeta([other.address])).to.not.be.reverted;
+
+      // VIEW_USER_DATA role should also work.
+      await acm.grantRole(ACTION_VIEW_USER_DATA, pusher.address);
+      await expect(healthView.connect(pusher).batchGetHealthFactorsWithMeta([other.address])).to.not.be.reverted;
+    });
+  });
+
+  describe('Scheme U reads (derived from HF)', function () {
+    it('allows self read on isUserLiquidatableWithMeta (uncached => conservative false)', async function () {
+      const { healthView, other } = await loadFixture(deployFixture);
+      const [isLiq, isValid, blockNumber] = await healthView.connect(other).isUserLiquidatableWithMeta(other.address);
+      expect(isLiq).to.equal(false);
+      expect(isValid).to.equal(false);
+      expect(blockNumber).to.equal(0n);
+    });
+
+    it('reverts non-self read on isUserLiquidatableWithMeta without VIEW_USER_DATA/ADMIN', async function () {
+      const { healthView, pusher, other } = await loadFixture(deployFixture);
+      await expect(
+        healthView.connect(pusher).isUserLiquidatableWithMeta(other.address)
+      ).to.be.revertedWithCustomError(healthView, 'MissingRole');
     });
   });
 
@@ -138,11 +200,11 @@ describe('HealthView', function () {
       const block = await ethers.provider.getBlock(receipt!.blockNumber!);
 
       const encoder = ethers.AbiCoder.defaultAbiCoder();
-      const payload = encoder.encode(['address', 'uint256', 'uint256', 'bool', 'uint256'], [other.address, 9500n, 10500n, true, block!.timestamp]);
+      const payload = encoder.encode(['address', 'uint256', 'uint256', 'bool', 'uint256'], [other.address, 9500n, 10500n, true, block!.number]);
 
       await expect(tx).to.emit(healthView, 'DataPushed').withArgs(DATA_TYPE_RISK, payload);
 
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(9500n);
       expect(valid).to.equal(true);
     });
@@ -152,21 +214,21 @@ describe('HealthView', function () {
       await expect(healthView.connect(other).pushRiskStatus(other.address, 9500n, 10500n, false, 0)).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
 
-    it('uses provided timestamp when non-zero', async function () {
+    it('uses provided blockNumber when non-zero', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
-      const customTimestamp = 1234567890n;
-      await healthView.connect(pusher).pushRiskStatus(other.address, 10_000n, 10_000n, false, customTimestamp);
-      const timestamp = await healthView.getCacheTimestamp(other.address);
-      expect(timestamp).to.equal(customTimestamp);
+      const customBlockNumber = 1234567890n;
+      await healthView.connect(pusher).pushRiskStatus(other.address, 10_000n, 10_000n, false, customBlockNumber);
+      const [, , blockNumber] = await healthView.getUserHealthFactorWithMeta(other.address);
+      expect(blockNumber).to.equal(customBlockNumber);
     });
 
-    it('uses block timestamp when timestamp is zero', async function () {
+    it('uses block number when blockNumber is zero', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       const tx = await healthView.connect(pusher).pushRiskStatus(other.address, 10_000n, 10_000n, false, 0);
       const receipt = await tx.wait();
       const block = await ethers.provider.getBlock(receipt!.blockNumber!);
-      const timestamp = await healthView.getCacheTimestamp(other.address);
-      expect(timestamp).to.equal(block!.timestamp);
+      const [, , blockNumber] = await healthView.getUserHealthFactorWithMeta(other.address);
+      expect(blockNumber).to.equal(block!.number);
     });
 
     it('handles all risk status combinations', async function () {
@@ -174,13 +236,13 @@ describe('HealthView', function () {
       
       // 健康因子低于阈值，undercollateralized = true
       await healthView.connect(pusher).pushRiskStatus(other.address, 9000n, 10000n, true, 0);
-      const [hf1, valid1] = await healthView.getUserHealthFactor(other.address);
+      const [hf1, valid1] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf1).to.equal(9000n);
       expect(valid1).to.equal(true);
 
       // 健康因子高于阈值，undercollateralized = false
       await healthView.connect(pusher).pushRiskStatus(other.address, 11000n, 10000n, false, 0);
-      const [hf2, valid2] = await healthView.getUserHealthFactor(other.address);
+      const [hf2, valid2] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf2).to.equal(11000n);
       expect(valid2).to.equal(true);
     });
@@ -188,7 +250,7 @@ describe('HealthView', function () {
     it('handles zero address user', async function () {
       const { healthView, pusher } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushRiskStatus(ethers.ZeroAddress, 10_000n, 10_000n, false, 0);
-      const [hf, valid] = await healthView.getUserHealthFactor(ethers.ZeroAddress);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(ethers.ZeroAddress);
       expect(hf).to.equal(10_000n);
       expect(valid).to.equal(true);
     });
@@ -207,10 +269,10 @@ describe('HealthView', function () {
       const block = await ethers.provider.getBlock(receipt!.blockNumber!);
 
       const encoder = ethers.AbiCoder.defaultAbiCoder();
-      const payload = encoder.encode(['address[]', 'uint256[]', 'uint256[]', 'bool[]', 'uint256'], [users, hfs, mins, flags, block!.timestamp]);
+      const payload = encoder.encode(['address[]', 'uint256[]', 'uint256[]', 'bool[]', 'uint256'], [users, hfs, mins, flags, block!.number]);
       await expect(tx).to.emit(healthView, 'DataPushed').withArgs(DATA_TYPE_RISK_BATCH, payload);
 
-      const [hf1] = await healthView.getUserHealthFactor(users[0]);
+      const [hf1] = await healthView.getUserHealthFactorWithMeta(users[0]);
       expect(hf1).to.equal(8800n);
     });
 
@@ -218,7 +280,7 @@ describe('HealthView', function () {
       const { healthView, pusher } = await loadFixture(deployFixture);
       await expect(healthView.connect(pusher).pushRiskStatusBatch([], [], [], [], 0)).to.be.revertedWithCustomError(
         healthView,
-        'HealthView__EmptyBatch',
+        'EmptyArray',
       );
     });
 
@@ -230,7 +292,9 @@ describe('HealthView', function () {
 
       await expect(
         healthView.connect(pusher).pushRiskStatusBatch(users, arr, arr, flags, 0),
-      ).to.be.revertedWithCustomError(healthView, 'HealthView__BatchTooLarge');
+      )
+        .to.be.revertedWithCustomError(healthView, 'BatchTooLarge')
+        .withArgs(101n, 100n);
     });
 
     it('reverts on array length mismatch', async function () {
@@ -249,7 +313,7 @@ describe('HealthView', function () {
 
       await healthView.connect(pusher).pushRiskStatusBatch(users, hfs, mins, flags, 0);
       
-      const [hf] = await healthView.getUserHealthFactor(users[0]);
+      const [hf] = await healthView.getUserHealthFactorWithMeta(users[0]);
       expect(hf).to.equal(10000n);
     });
 
@@ -263,7 +327,7 @@ describe('HealthView', function () {
       await healthView.connect(pusher).pushRiskStatusBatch(users, hfs, mins, flags, 0);
       
       // 最后一个值会覆盖前面的值
-      const [hf] = await healthView.getUserHealthFactor(other.address);
+      const [hf] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(9000n);
     });
 
@@ -276,21 +340,21 @@ describe('HealthView', function () {
 
       await healthView.connect(pusher).pushRiskStatusBatch(users, hfs, mins, flags, 0);
       
-      const [hf1] = await healthView.getUserHealthFactor(ethers.ZeroAddress);
+      const [hf1] = await healthView.getUserHealthFactorWithMeta(ethers.ZeroAddress);
       expect(hf1).to.equal(5000n);
     });
 
-    it('uses provided timestamp when non-zero', async function () {
+    it('uses provided blockNumber when non-zero', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
-      const customTimestamp = 1234567890n;
+      const customBlockNumber = 1234567890n;
       const users = [other.address];
       const hfs = [10000n];
       const mins = [10000n];
       const flags = [false];
 
-      await healthView.connect(pusher).pushRiskStatusBatch(users, hfs, mins, flags, customTimestamp);
-      const timestamp = await healthView.getCacheTimestamp(other.address);
-      expect(timestamp).to.equal(customTimestamp);
+      await healthView.connect(pusher).pushRiskStatusBatch(users, hfs, mins, flags, customBlockNumber);
+      const [, , blockNumber] = await healthView.getUserHealthFactorWithMeta(other.address);
+      expect(blockNumber).to.equal(customBlockNumber);
     });
 
     it('handles single user batch', async function () {
@@ -301,7 +365,7 @@ describe('HealthView', function () {
       const flags = [true];
 
       await healthView.connect(pusher).pushRiskStatusBatch(users, hfs, mins, flags, 0);
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(9500n);
       expect(valid).to.equal(true);
     });
@@ -310,51 +374,61 @@ describe('HealthView', function () {
   describe('queries', function () {
     it('isUserLiquidatable returns false when cache invalid', async function () {
       const { healthView, other } = await loadFixture(deployFixture);
-      expect(await healthView.isUserLiquidatable(other.address)).to.equal(false);
+      const [isLiquidatable] = await healthView.isUserLiquidatableWithMeta(other.address);
+      expect(isLiquidatable).to.equal(false);
     });
 
     it('isUserLiquidatable returns true when hf below threshold', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
-      await healthView.connect(pusher).pushRiskStatus(other.address, 9000n, 12000n, true, await time.latest());
-      expect(await healthView.isUserLiquidatable(other.address)).to.equal(true);
+      const latestBlock = await ethers.provider.getBlockNumber();
+      await healthView.connect(pusher).pushRiskStatus(other.address, 9000n, 12000n, true, BigInt(latestBlock));
+      const [isLiquidatable] = await healthView.isUserLiquidatableWithMeta(other.address);
+      expect(isLiquidatable).to.equal(true);
     });
 
     it('isUserLiquidatable returns false when hf at threshold', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
-      await healthView.connect(pusher).pushRiskStatus(other.address, 10000n, 10000n, false, await time.latest());
-      expect(await healthView.isUserLiquidatable(other.address)).to.equal(false);
+      const latestBlock = await ethers.provider.getBlockNumber();
+      await healthView.connect(pusher).pushRiskStatus(other.address, 10000n, 10000n, false, BigInt(latestBlock));
+      const [isLiquidatable] = await healthView.isUserLiquidatableWithMeta(other.address);
+      expect(isLiquidatable).to.equal(false);
     });
 
     it('isUserLiquidatable returns false when hf above threshold', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
-      await healthView.connect(pusher).pushRiskStatus(other.address, 11000n, 10000n, false, await time.latest());
-      expect(await healthView.isUserLiquidatable(other.address)).to.equal(false);
+      const latestBlock = await ethers.provider.getBlockNumber();
+      await healthView.connect(pusher).pushRiskStatus(other.address, 11000n, 10000n, false, BigInt(latestBlock));
+      const [isLiquidatable] = await healthView.isUserLiquidatableWithMeta(other.address);
+      expect(isLiquidatable).to.equal(false);
     });
 
     it('batchGetHealthFactors enforces bounds', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushHealthFactor(other.address, 12_000n);
 
-      const [factors, flags] = await healthView.batchGetHealthFactors([other.address]);
+      const [factors, flags] = await healthView.batchGetHealthFactorsWithMeta([other.address]);
       expect(factors[0]).to.equal(12_000n);
       expect(flags[0]).to.equal(true);
 
-      await expect(healthView.batchGetHealthFactors([])).to.be.revertedWithCustomError(healthView, 'HealthView__EmptyBatch');
+      await expect(healthView.batchGetHealthFactorsWithMeta([])).to.be.revertedWithCustomError(healthView, 'EmptyArray');
 
       const users = new Array(101).fill(other.address);
-      await expect(healthView.batchGetHealthFactors(users)).to.be.revertedWithCustomError(healthView, 'HealthView__BatchTooLarge');
+      await expect(healthView.batchGetHealthFactorsWithMeta(users))
+        .to.be.revertedWithCustomError(healthView, 'BatchTooLarge')
+        .withArgs(101n, 100n);
     });
 
-    it('exposes cache timestamps', async function () {
+    it('exposes cache blockNumbers', async function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushHealthFactor(other.address, 1_000n);
-      expect(await healthView.getCacheTimestamp(other.address)).to.be.gt(0n);
+      const [, , blockNumber] = await healthView.getUserHealthFactorWithMeta(other.address);
+      expect(blockNumber).to.be.gt(0n);
     });
 
-    it('returns zero timestamp for uncached user', async function () {
+    it('returns zero blockNumber for uncached user', async function () {
       const { healthView, other } = await loadFixture(deployFixture);
-      const timestamp = await healthView.getCacheTimestamp(other.address);
-      expect(timestamp).to.equal(0n);
+      const [, , blockNumber] = await healthView.getUserHealthFactorWithMeta(other.address);
+      expect(blockNumber).to.equal(0n);
     });
 
     it('batchGetHealthFactors handles multiple users', async function () {
@@ -367,7 +441,7 @@ describe('HealthView', function () {
       await healthView.connect(pusher).pushHealthFactor(user2, 12000n);
       await healthView.connect(pusher).pushHealthFactor(user3, 15000n);
 
-      const [factors, flags] = await healthView.batchGetHealthFactors([user1, user2, user3]);
+      const [factors, flags] = await healthView.batchGetHealthFactorsWithMeta([user1, user2, user3]);
       expect(factors.length).to.equal(3);
       expect(factors[0]).to.equal(8000n);
       expect(factors[1]).to.equal(12000n);
@@ -385,7 +459,7 @@ describe('HealthView', function () {
       await healthView.connect(pusher).pushHealthFactor(user1, 10000n);
       // user2 没有缓存
 
-      const [factors, flags] = await healthView.batchGetHealthFactors([user1, user2]);
+      const [factors, flags] = await healthView.batchGetHealthFactorsWithMeta([user1, user2]);
       expect(factors[0]).to.equal(10000n);
       expect(factors[1]).to.equal(0n);
       expect(flags[0]).to.equal(true);
@@ -394,7 +468,7 @@ describe('HealthView', function () {
 
     it('getUserHealthFactor returns zero and invalid for uncached user', async function () {
       const { healthView, other } = await loadFixture(deployFixture);
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(0n);
       expect(valid).to.equal(false);
     });
@@ -403,13 +477,13 @@ describe('HealthView', function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushHealthFactor(other.address, 10000n);
       
-      const [hf1, valid1] = await healthView.getUserHealthFactor(other.address);
+      const [hf1, valid1] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(valid1).to.equal(true);
 
-      // 推进时间超过缓存持续时间（5分钟）
-      await time.increase(6 * 60); // 6分钟
+      // 推进区块超过缓存持续时间（150 blocks）
+      await mine(180);
 
-      const [hf2, valid2] = await healthView.getUserHealthFactor(other.address);
+      const [hf2, valid2] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf2).to.equal(10000n); // 值仍然存在
       expect(valid2).to.equal(false); // 但标记为无效
     });
@@ -418,10 +492,10 @@ describe('HealthView', function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushHealthFactor(other.address, 10000n);
       
-      // 推进时间到刚好在缓存持续时间之前（4分59秒）
-      await time.increase(4 * 60 + 59);
+      // 推进区块到刚好在缓存持续时间之前（149 blocks）
+      await mine(149);
 
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(10000n);
       expect(valid).to.equal(true);
     });
@@ -430,7 +504,7 @@ describe('HealthView', function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       await healthView.connect(pusher).pushHealthFactor(other.address, 10000n);
 
-      const [factors, flags] = await healthView.batchGetHealthFactors([other.address, other.address]);
+      const [factors, flags] = await healthView.batchGetHealthFactorsWithMeta([other.address, other.address]);
       expect(factors.length).to.equal(2);
       expect(factors[0]).to.equal(10000n);
       expect(factors[1]).to.equal(10000n);
@@ -448,7 +522,7 @@ describe('HealthView', function () {
       const tx = await healthView.connect(systemViewer).pushModuleHealth(moduleAddr, true, details, 0);
       await expect(tx).to.emit(healthView, 'DataPushed');
 
-      const status = await healthView.getModuleHealth(moduleAddr);
+      const [status] = await healthView.getModuleHealthWithMeta(moduleAddr);
       expect(status.isHealthy).to.equal(true);
       expect(status.detailsHash).to.equal(details);
     });
@@ -466,7 +540,7 @@ describe('HealthView', function () {
       const details = ethers.keccak256(ethers.toUtf8Bytes('ADMIN_OK'));
 
       await healthView.connect(admin).pushModuleHealth(moduleAddr, true, details, 0);
-      const status = await healthView.getModuleHealth(moduleAddr);
+      const [status] = await healthView.getModuleHealthWithMeta(moduleAddr);
       expect(status.isHealthy).to.equal(true);
       expect(status.detailsHash).to.equal(details);
     });
@@ -476,7 +550,7 @@ describe('HealthView', function () {
       const moduleAddr = ethers.Wallet.createRandom().address;
       await expect(
         healthView.connect(other).pushModuleHealth(moduleAddr, true, ethers.ZeroHash, 0),
-      ).to.be.revertedWithCustomError(healthView, 'HealthView__CallerNotAuthorized');
+      ).to.be.revertedWithCustomError(healthView, 'MissingRole');
     });
 
     it('handles unhealthy module status', async function () {
@@ -485,7 +559,7 @@ describe('HealthView', function () {
       const details = ethers.keccak256(ethers.toUtf8Bytes('ERROR'));
 
       await healthView.connect(systemViewer).pushModuleHealth(moduleAddr, false, details, 5);
-      const status = await healthView.getModuleHealth(moduleAddr);
+      const [status] = await healthView.getModuleHealthWithMeta(moduleAddr);
       expect(status.isHealthy).to.equal(false);
       expect(status.detailsHash).to.equal(details);
       expect(status.consecutiveFailures).to.equal(5);
@@ -498,11 +572,11 @@ describe('HealthView', function () {
       const details2 = ethers.keccak256(ethers.toUtf8Bytes('UPDATED'));
 
       await healthView.connect(systemViewer).pushModuleHealth(moduleAddr, true, details1, 0);
-      const status1 = await healthView.getModuleHealth(moduleAddr);
+      const [status1] = await healthView.getModuleHealthWithMeta(moduleAddr);
       expect(status1.detailsHash).to.equal(details1);
 
       await healthView.connect(systemViewer).pushModuleHealth(moduleAddr, false, details2, 3);
-      const status2 = await healthView.getModuleHealth(moduleAddr);
+      const [status2] = await healthView.getModuleHealthWithMeta(moduleAddr);
       expect(status2.detailsHash).to.equal(details2);
       expect(status2.isHealthy).to.equal(false);
       expect(status2.consecutiveFailures).to.equal(3);
@@ -515,8 +589,8 @@ describe('HealthView', function () {
       const receipt = await tx.wait();
       const block = await ethers.provider.getBlock(receipt!.blockNumber!);
 
-      const status = await healthView.getModuleHealth(moduleAddr);
-      expect(status.lastCheckTime).to.equal(block!.timestamp);
+      const [status] = await healthView.getModuleHealthWithMeta(moduleAddr);
+      expect(status.lastCheckTime).to.equal(block!.number);
     });
 
     it('handles multiple modules', async function () {
@@ -529,9 +603,9 @@ describe('HealthView', function () {
       await healthView.connect(systemViewer).pushModuleHealth(module2, false, ethers.ZeroHash, 2);
       await healthView.connect(systemViewer).pushModuleHealth(module3, true, ethers.ZeroHash, 0);
 
-      const status1 = await healthView.getModuleHealth(module1);
-      const status2 = await healthView.getModuleHealth(module2);
-      const status3 = await healthView.getModuleHealth(module3);
+      const [status1] = await healthView.getModuleHealthWithMeta(module1);
+      const [status2] = await healthView.getModuleHealthWithMeta(module2);
+      const [status3] = await healthView.getModuleHealthWithMeta(module3);
 
       expect(status1.isHealthy).to.equal(true);
       expect(status2.isHealthy).to.equal(false);
@@ -549,7 +623,7 @@ describe('HealthView', function () {
 
       await expect(tx)
         .to.emit(healthView, 'ModuleHealthCached')
-        .withArgs(moduleAddr, true, details, 0, block!.timestamp);
+        .withArgs(moduleAddr, true, details, 0, block!.number);
     });
   });
 
@@ -558,7 +632,7 @@ describe('HealthView', function () {
       const { healthView, systemViewer } = await loadFixture(deployFixture);
       const stats = await healthView.connect(systemViewer).getGracefulDegradationStats();
       expect(stats.totalDegradations).to.equal(0n);
-      expect(stats.lastDegradationTime).to.equal(0n);
+      expect(stats.lastDegradationBlock).to.equal(0n);
       expect(stats.lastDegradedModule).to.equal(ethers.ZeroAddress);
       expect(stats.lastDegradationReasonHash).to.equal(ethers.ZeroHash);
       expect(stats.fallbackValueUsed).to.equal(0n);
@@ -587,7 +661,7 @@ describe('HealthView', function () {
 
       const history = await healthView.connect(systemViewer).getSystemDegradationHistory(1);
       expect(history.length).to.equal(1);
-      expect(history[0].timestamp).to.equal(111n);
+      expect(history[0].blockNumber).to.equal(222n);
 
       const checkResult = await healthView.connect(systemViewer).checkModuleHealth(systemViewer.address);
       expect(checkResult[0]).to.equal(true);
@@ -602,7 +676,7 @@ describe('HealthView', function () {
       const { healthView, other } = await loadFixture(deployFixture);
       await expect(healthView.connect(other).getGracefulDegradationStats()).to.be.revertedWithCustomError(
         healthView,
-        'HealthView__CallerNotAuthorized',
+        'MissingRole',
       );
     });
 
@@ -681,28 +755,28 @@ describe('HealthView', function () {
       const { healthView, other } = await loadFixture(deployFixture);
       await expect(
         healthView.connect(other).getModuleHealthStatus(ethers.Wallet.createRandom().address)
-      ).to.be.revertedWithCustomError(healthView, 'HealthView__CallerNotAuthorized');
+      ).to.be.revertedWithCustomError(healthView, 'MissingRole');
     });
 
     it('reverts when non-viewer calls getSystemDegradationHistory', async function () {
       const { healthView, other } = await loadFixture(deployFixture);
       await expect(
         healthView.connect(other).getSystemDegradationHistory(10)
-      ).to.be.revertedWithCustomError(healthView, 'HealthView__CallerNotAuthorized');
+      ).to.be.revertedWithCustomError(healthView, 'MissingRole');
     });
 
     it('reverts when non-viewer calls checkModuleHealth', async function () {
       const { healthView, other } = await loadFixture(deployFixture);
       await expect(
         healthView.connect(other).checkModuleHealth(ethers.Wallet.createRandom().address)
-      ).to.be.revertedWithCustomError(healthView, 'HealthView__CallerNotAuthorized');
+      ).to.be.revertedWithCustomError(healthView, 'MissingRole');
     });
 
     it('reverts when non-viewer calls getSystemDegradationTrends', async function () {
       const { healthView, other } = await loadFixture(deployFixture);
       await expect(
         healthView.connect(other).getSystemDegradationTrends()
-      ).to.be.revertedWithCustomError(healthView, 'HealthView__CallerNotAuthorized');
+      ).to.be.revertedWithCustomError(healthView, 'MissingRole');
     });
 
     it('handles zero limit in getSystemDegradationHistory', async function () {
@@ -748,7 +822,7 @@ describe('HealthView', function () {
       const { healthView, pusher, other, admin } = await loadFixture(deployFixture);
       // 推送一些数据
       await healthView.connect(pusher).pushHealthFactor(other.address, 10_000n);
-      const [hfBefore, validBefore] = await healthView.getUserHealthFactor(other.address);
+      const [hfBefore, validBefore] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hfBefore).to.equal(10_000n);
       expect(validBefore).to.equal(true);
 
@@ -757,7 +831,7 @@ describe('HealthView', function () {
       const upgraded = await upgrades.upgradeProxy(await healthView.getAddress(), HealthViewFactory);
 
       // 验证数据仍然存在
-      const [hfAfter, validAfter] = await upgraded.getUserHealthFactor(other.address);
+      const [hfAfter, validAfter] = await upgraded.getUserHealthFactorWithMeta(other.address);
       expect(hfAfter).to.equal(10_000n);
       expect(validAfter).to.equal(true);
     });
@@ -768,7 +842,7 @@ describe('HealthView', function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       const testHF = 12_345n;
       await healthView.connect(pusher).pushHealthFactor(other.address, testHF);
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(testHF);
       expect(valid).to.equal(true);
     });
@@ -777,7 +851,7 @@ describe('HealthView', function () {
       const { healthView, pusher, other } = await loadFixture(deployFixture);
       const testHF = 9500n;
       await healthView.connect(pusher).pushRiskStatus(other.address, testHF, 10000n, true, 0);
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(testHF);
       expect(valid).to.equal(true);
     });
@@ -794,7 +868,7 @@ describe('HealthView', function () {
       const flags = [true, false, false];
 
       await healthView.connect(pusher).pushRiskStatusBatch(users, hfs, mins, flags, 0);
-      const [factors, validFlags] = await healthView.batchGetHealthFactors(users);
+      const [factors, validFlags] = await healthView.batchGetHealthFactorsWithMeta(users);
 
       expect(factors.length).to.equal(3);
       expect(factors[0]).to.equal(8000n);
@@ -811,7 +885,7 @@ describe('HealthView', function () {
       const details = ethers.keccak256(ethers.toUtf8Bytes('TEST_DETAILS'));
 
       await healthView.connect(systemViewer).pushModuleHealth(moduleAddr, true, details, 0);
-      const status = await healthView.getModuleHealth(moduleAddr);
+      const [status] = await healthView.getModuleHealthWithMeta(moduleAddr);
 
       expect(status.isHealthy).to.equal(true);
       expect(status.detailsHash).to.equal(details);
@@ -830,11 +904,11 @@ describe('HealthView', function () {
       await healthView.connect(pusher).pushHealthFactor(users[1], hfs[1]);
 
       // 单独查询
-      const [hf1, valid1] = await healthView.getUserHealthFactor(users[0]);
-      const [hf2, valid2] = await healthView.getUserHealthFactor(users[1]);
+      const [hf1, valid1] = await healthView.getUserHealthFactorWithMeta(users[0]);
+      const [hf2, valid2] = await healthView.getUserHealthFactorWithMeta(users[1]);
 
       // 批量查询
-      const [factors, validFlags] = await healthView.batchGetHealthFactors(users);
+      const [factors, validFlags] = await healthView.batchGetHealthFactorsWithMeta(users);
 
       expect(factors[0]).to.equal(hf1);
       expect(factors[1]).to.equal(hf2);
@@ -852,7 +926,7 @@ describe('HealthView', function () {
         await healthView.connect(pusher).pushHealthFactor(other.address, hf);
       }
 
-      const [hf, valid] = await healthView.getUserHealthFactor(other.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(other.address);
       expect(hf).to.equal(8000n); // 最后一个值
       expect(valid).to.equal(true);
     });
@@ -866,7 +940,7 @@ describe('HealthView', function () {
 
       await healthView.connect(pusher).pushRiskStatusBatch(users, hfs, mins, flags, 0);
 
-      const [factors] = await healthView.batchGetHealthFactors(users);
+      const [factors] = await healthView.batchGetHealthFactorsWithMeta(users);
       expect(factors.length).to.equal(100);
       expect(factors[0]).to.equal(10000n);
       expect(factors[99]).to.equal(19900n);
@@ -876,7 +950,7 @@ describe('HealthView', function () {
       const { healthView, systemViewer } = await loadFixture(deployFixture);
       const moduleAddr = ethers.Wallet.createRandom().address;
       await healthView.connect(systemViewer).pushModuleHealth(moduleAddr, true, ethers.ZeroHash, 0);
-      const status = await healthView.getModuleHealth(moduleAddr);
+      const [status] = await healthView.getModuleHealthWithMeta(moduleAddr);
       expect(status.consecutiveFailures).to.equal(0);
     });
 
@@ -885,7 +959,7 @@ describe('HealthView', function () {
       const moduleAddr = ethers.Wallet.createRandom().address;
       const maxFailures = 4294967295; // uint32 max
       await healthView.connect(systemViewer).pushModuleHealth(moduleAddr, false, ethers.ZeroHash, maxFailures);
-      const status = await healthView.getModuleHealth(moduleAddr);
+      const [status] = await healthView.getModuleHealthWithMeta(moduleAddr);
       expect(status.consecutiveFailures).to.equal(maxFailures);
     });
 

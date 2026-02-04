@@ -40,21 +40,22 @@ describe('StatisticsView – 全面测试', function () {
     it('应正确初始化并返回零值', async function () {
       const { stats } = await loadFixture(deployFixture);
 
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(0n);
       expect(snap.totalDebt).to.equal(0n);
       expect(snap.activeUsers).to.equal(0n);
-      expect(snap.timestamp).to.be.greaterThan(0n);
+      expect(snap.blockNumber).to.be.greaterThan(0n);
 
-      const globalStats = await stats.getGlobalStatistics();
+      const [globalStats] = await stats.getGlobalStatisticsWithMeta();
       expect(globalStats.totalUsers).to.equal(0n);
       expect(globalStats.activeUsers).to.equal(0n);
       expect(globalStats.totalCollateral).to.equal(0n);
       expect(globalStats.totalDebt).to.equal(0n);
 
-      expect(await stats.getActiveUsers()).to.equal(0n);
+      const [activeUsers] = await stats.getActiveUsersWithMeta();
+      expect(activeUsers).to.equal(0n);
       // getLastGlobalUpdate 在初始化时可能为 0，因为还没有更新操作
-      const lastUpdate = await stats.getLastGlobalUpdate();
+      const [lastUpdate] = await stats.getLastGlobalUpdateWithMeta();
       expect(lastUpdate).to.be.gte(0n);
     });
 
@@ -80,9 +81,9 @@ describe('StatisticsView – 全面测试', function () {
       const tx = await stats.pushUserStatsUpdate(await user1.getAddress(), 1n, 0n, 0n, 0n);
       await expect(tx).to.emit(stats, 'DataPushed').withArgs(DATA_TYPE_USER_STATS_UPDATE, anyValue);
 
-      const [u, version, seq, lastReq, isValid, ts] = await stats.getUserSnapshotWithMeta(await user1.getAddress());
-      expect(u.timestamp).to.equal(ts);
-      expect(ts).to.be.greaterThan(0n);
+      const [u, version, seq, lastReq, isValid, blockNumber] = await stats.getUserSnapshotWithMeta(await user1.getAddress());
+      expect(u.blockNumber).to.equal(blockNumber);
+      expect(blockNumber).to.be.greaterThan(0n);
       expect(isValid).to.equal(true);
       expect(version).to.equal(1n);
       expect(seq).to.equal(0n);
@@ -93,7 +94,7 @@ describe('StatisticsView – 全面测试', function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 0n, 0n, 0n);
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(0n);
       expect(snap.totalDebt).to.equal(0n);
       expect(snap.activeUsers).to.equal(0n);
@@ -111,10 +112,11 @@ describe('StatisticsView – 全面测试', function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 1n, 0n, 0n, 0n);
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(1n);
       expect(snap.activeUsers).to.equal(1n);
-      expect(await stats.getTotalUsers()).to.equal(1n);
+      const [totalUsers] = await stats.getTotalUsersWithMeta();
+      expect(totalUsers).to.equal(1n);
     });
 
     it('应正确处理极大金额', async function () {
@@ -122,7 +124,7 @@ describe('StatisticsView – 全面测试', function () {
       const hugeAmount = ethers.parseUnits('1000000000', 18);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), hugeAmount, 0n, 0n, 0n);
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(hugeAmount);
     });
 
@@ -132,7 +134,7 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushUserStatsUpdate(await user1.getAddress(), ethers.parseUnits('100', 18), 0n, 0n, 0n);
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, ethers.parseUnits('200', 18), 0n, 0n);
 
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(0n);
       expect(snap.activeUsers).to.equal(0n);
     });
@@ -143,7 +145,7 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 0n, ethers.parseUnits('100', 18), 0n);
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 0n, 0n, ethers.parseUnits('200', 18));
 
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalDebt).to.equal(0n);
       expect(snap.activeUsers).to.equal(0n);
     });
@@ -157,7 +159,7 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushUserStatsUpdate(await user1.getAddress(), 50n, 0n, 0n, 0n);
 
       expect(await stats.getUserStatsVersion(await user1.getAddress())).to.equal(2n);
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(150n);
     });
 
@@ -172,7 +174,7 @@ describe('StatisticsView – 全面测试', function () {
         await user1.getAddress(), 50n, 0n, 0n, 0n, 2n
       );
 
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(150n);
     });
 
@@ -230,7 +232,7 @@ describe('StatisticsView – 全面测试', function () {
         )
       ).to.emit(stats, 'IdempotentRequestIgnored');
 
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(100n);
       // 幂等忽略不应推进 seq
       expect(await stats.getUserStatsSeq(user)).to.equal(1n);
@@ -261,47 +263,47 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushUserStatsUpdate(await user2.getAddress(), 0n, 0n, 50n, 0n);
       await stats.pushUserStatsUpdate(await user3.getAddress(), 200n, 0n, 100n, 0n);
 
-      expect(await stats.getActiveUsers()).to.equal(3n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
-      expect(await stats.isUserActive(await user2.getAddress())).to.equal(true);
-      expect(await stats.isUserActive(await user3.getAddress())).to.equal(true);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(3n);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
+      expect((await stats.isUserActiveWithMeta(await user2.getAddress()))[0]).to.equal(true);
+      expect((await stats.isUserActiveWithMeta(await user3.getAddress()))[0]).to.equal(true);
     });
 
     it('应正确处理用户从活跃变为不活跃', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 100n, 0n, 0n, 0n);
-      expect(await stats.getActiveUsers()).to.equal(1n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(1n);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 100n, 0n, 0n);
-      expect(await stats.getActiveUsers()).to.equal(0n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(false);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(0n);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(false);
     });
 
     it('应正确处理用户从不活跃变为活跃', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(false);
-      expect(await stats.getActiveUsers()).to.equal(0n);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(false);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(0n);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 100n, 0n, 0n, 0n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
-      expect(await stats.getActiveUsers()).to.equal(1n);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(1n);
     });
 
     it('应正确处理只有抵押的用户', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 100n, 0n, 0n, 0n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
     });
 
     it('应正确处理只有债务的用户', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 0n, 100n, 0n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
     });
 
     it('应正确处理活跃用户计数不会为负', async function () {
@@ -311,7 +313,7 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 100n, 0n, 0n);
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 0n, 0n, 0n);
 
-      expect(await stats.getActiveUsers()).to.equal(0n);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(0n);
     });
   });
 
@@ -322,12 +324,14 @@ describe('StatisticsView – 全面测试', function () {
       const amount = ethers.parseUnits('100', 18);
 
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset, amount, true);
-      expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset)).to.equal(amount);
-      expect(await stats.getTotalGuaranteeByAsset(asset)).to.equal(amount);
+      expect((await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset))[0]).to.equal(amount);
+      expect((await stats.getTotalGuaranteeByAssetWithMeta(asset))[0]).to.equal(amount);
 
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset, ethers.parseUnits('30', 18), false);
-      expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset)).to.equal(ethers.parseUnits('70', 18));
-      expect(await stats.getTotalGuaranteeByAsset(asset)).to.equal(ethers.parseUnits('70', 18));
+      expect((await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset))[0]).to.equal(
+        ethers.parseUnits('70', 18),
+      );
+      expect((await stats.getTotalGuaranteeByAssetWithMeta(asset))[0]).to.equal(ethers.parseUnits('70', 18));
     });
 
     it('应正确处理多用户同一资产的保证金', async function () {
@@ -337,7 +341,7 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset, ethers.parseUnits('100', 18), true);
       await stats.pushGuaranteeUpdate(await user2.getAddress(), asset, ethers.parseUnits('200', 18), true);
 
-      expect(await stats.getTotalGuaranteeByAsset(asset)).to.equal(ethers.parseUnits('300', 18));
+      expect((await stats.getTotalGuaranteeByAssetWithMeta(asset))[0]).to.equal(ethers.parseUnits('300', 18));
     });
 
     it('应正确处理多资产保证金', async function () {
@@ -348,8 +352,12 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset1, ethers.parseUnits('100', 18), true);
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset2, ethers.parseUnits('200', 18), true);
 
-      expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset1)).to.equal(ethers.parseUnits('100', 18));
-      expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset2)).to.equal(ethers.parseUnits('200', 18));
+      expect((await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset1))[0]).to.equal(
+        ethers.parseUnits('100', 18),
+      );
+      expect((await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset2))[0]).to.equal(
+        ethers.parseUnits('200', 18),
+      );
     });
 
     it('应拒绝零地址用户或资产', async function () {
@@ -372,8 +380,8 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset, ethers.parseUnits('100', 18), true);
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset, ethers.parseUnits('200', 18), false);
 
-      expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset)).to.equal(0n);
-      expect(await stats.getTotalGuaranteeByAsset(asset)).to.equal(0n);
+      expect((await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset))[0]).to.equal(0n);
+      expect((await stats.getTotalGuaranteeByAssetWithMeta(asset))[0]).to.equal(0n);
     });
 
     it('应正确处理零金额保证金操作', async function () {
@@ -381,7 +389,7 @@ describe('StatisticsView – 全面测试', function () {
       const asset = ethers.Wallet.createRandom().address;
 
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset, 0n, true);
-      expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset)).to.equal(0n);
+      expect((await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset))[0]).to.equal(0n);
 
       const [amount, isValid, ts] = await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset);
       expect(amount).to.equal(0n);
@@ -398,7 +406,7 @@ describe('StatisticsView – 全面测试', function () {
 
       const degradationStats = {
         totalDegradations: 5n,
-        lastDegradationTime: 1000n,
+        lastDegradationBlock: 1000n,
         lastDegradedModule: moduleAddr,
         lastDegradationReasonHash: reasonHash,
         fallbackValueUsed: 100n,
@@ -432,7 +440,7 @@ describe('StatisticsView – 全面测试', function () {
       await expect(
         stats.connect(unauthorized).pushDegradationStats({
           totalDegradations: 1n,
-          lastDegradationTime: 1n,
+          lastDegradationBlock: 1n,
           lastDegradedModule: await unauthorized.getAddress(),
           lastDegradationReasonHash: ethers.ZeroHash,
           fallbackValueUsed: 1n,
@@ -449,7 +457,7 @@ describe('StatisticsView – 全面测试', function () {
       await expect(
         stats.connect(user1).pushDegradationStats({
           totalDegradations: 1n,
-          lastDegradationTime: 1n,
+          lastDegradationBlock: 1n,
           lastDegradedModule: await user1.getAddress(),
           lastDegradationReasonHash: ethers.ZeroHash,
           fallbackValueUsed: 1n,
@@ -464,7 +472,7 @@ describe('StatisticsView – 全面测试', function () {
     it('应返回零值当奖励管理器未注册', async function () {
       const { stats } = await loadFixture(deployFixture);
 
-      const reward = await stats.getRewardStats();
+      const [reward] = await stats.getRewardStatsWithMeta();
       expect(reward.rewardRate).to.equal(0n);
       expect(reward.totalRewardPoints).to.equal(0n);
     });
@@ -477,7 +485,7 @@ describe('StatisticsView – 全面测试', function () {
       const rm = await RmF.deploy();
       await registry.setModule(KEY_RM, await rm.getAddress());
 
-      const reward = await stats.getRewardStats();
+      const [reward] = await stats.getRewardStatsWithMeta();
       expect(reward.rewardRate).to.equal(0n);
     });
 
@@ -485,7 +493,7 @@ describe('StatisticsView – 全面测试', function () {
       const { stats } = await loadFixture(deployFixture);
 
       // 如果模块不存在，getModule 返回 address(0)，会直接返回零值
-      const reward = await stats.getRewardStats();
+      const [reward] = await stats.getRewardStatsWithMeta();
       expect(reward.rewardRate).to.equal(0n);
       expect(reward.totalRewardPoints).to.equal(0n);
     });
@@ -495,24 +503,24 @@ describe('StatisticsView – 全面测试', function () {
     it('应正确记录用户快照时间', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
-      const timeBefore = await stats.getUserLastActiveTime(await user1.getAddress());
+      const [timeBefore] = await stats.getUserLastActiveTimeWithMeta(await user1.getAddress());
       expect(timeBefore).to.equal(0n);
 
       const DATA_TYPE_STATS_SNAPSHOT_RECORDED = ethers.keccak256(ethers.toUtf8Bytes('STATS_SNAPSHOT_RECORDED'));
       const tx = await stats.recordSnapshot(await user1.getAddress());
       await expect(tx).to.emit(stats, 'DataPushed').withArgs(DATA_TYPE_STATS_SNAPSHOT_RECORDED, anyValue);
-      const timeAfter = await stats.getUserLastActiveTime(await user1.getAddress());
+      const [timeAfter] = await stats.getUserLastActiveTimeWithMeta(await user1.getAddress());
       expect(timeAfter).to.be.greaterThan(0n);
     });
 
     it('应更新全局快照时间戳', async function () {
       const { stats, user1 } = await loadFixture(deployFixture);
 
-      const snapBefore = await stats.getGlobalSnapshot();
+      const [snapBefore] = await stats.getGlobalSnapshotWithMeta();
       await stats.recordSnapshot(await user1.getAddress());
-      const snapAfter = await stats.getGlobalSnapshot();
+      const [snapAfter] = await stats.getGlobalSnapshotWithMeta();
 
-      expect(snapAfter.timestamp).to.be.greaterThanOrEqual(snapBefore.timestamp);
+      expect(snapAfter.blockNumber).to.be.greaterThanOrEqual(snapBefore.blockNumber);
     });
 
     it('应拒绝零地址用户', async function () {
@@ -534,7 +542,7 @@ describe('StatisticsView – 全面测试', function () {
         stats.pushUserStatsUpdate(await user3.getAddress(), 300n, 0n, 0n, 0n)
       ]);
 
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(600n);
       expect(snap.activeUsers).to.equal(3n);
     });
@@ -544,13 +552,13 @@ describe('StatisticsView – 全面测试', function () {
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 100n, 0n, 0n, 0n);
       await stats.pushUserStatsUpdate(await user2.getAddress(), 200n, 0n, 0n, 0n);
-      expect(await stats.getActiveUsers()).to.equal(2n);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(2n);
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 100n, 0n, 0n);
-      expect(await stats.getActiveUsers()).to.equal(1n);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(1n);
 
       await stats.pushUserStatsUpdate(await user2.getAddress(), 0n, 200n, 0n, 0n);
-      expect(await stats.getActiveUsers()).to.equal(0n);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(0n);
     });
   });
 
@@ -587,14 +595,14 @@ describe('StatisticsView – 全面测试', function () {
 
       await stats.pushUserStatsUpdate(await user1.getAddress(), 100n, 0n, 50n, 0n);
 
-      const globalStats = await stats.getGlobalStatistics();
-      const snap = await stats.getGlobalSnapshot();
+      const [globalStats] = await stats.getGlobalStatisticsWithMeta();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
 
-      expect(globalStats.totalUsers).to.equal(await stats.getTotalUsers());
+      expect(globalStats.totalUsers).to.equal((await stats.getTotalUsersWithMeta())[0]);
       expect(globalStats.activeUsers).to.equal(snap.activeUsers);
       expect(globalStats.totalCollateral).to.equal(snap.totalCollateral);
       expect(globalStats.totalDebt).to.equal(snap.totalDebt);
-      expect(globalStats.lastUpdateTime).to.equal(snap.timestamp);
+      expect(globalStats.lastUpdateBlock).to.equal(snap.blockNumber);
     });
 
     it('getActiveUsers 应与快照中的 activeUsers 一致', async function () {
@@ -603,7 +611,9 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushUserStatsUpdate(await user1.getAddress(), 100n, 0n, 0n, 0n);
       await stats.pushUserStatsUpdate(await user2.getAddress(), 200n, 0n, 0n, 0n);
 
-      expect(await stats.getActiveUsers()).to.equal((await stats.getGlobalSnapshot()).activeUsers);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(
+        (await stats.getGlobalSnapshotWithMeta())[0].activeUsers,
+      );
     });
   });
 
@@ -614,7 +624,7 @@ describe('StatisticsView – 全面测试', function () {
       // updateUserStats 使用 this.pushUserStatsUpdate，需要给合约本身授予权限
       // 或者直接测试 pushUserStatsUpdate 的功能（因为 updateUserStats 只是包装）
       await stats.connect(deployer).pushUserStatsUpdate(await user1.getAddress(), 100n, 0n, 0n, 0n);
-      const snap = await stats.getGlobalSnapshot();
+      const [snap] = await stats.getGlobalSnapshotWithMeta();
       expect(snap.totalCollateral).to.equal(100n);
       
       // 验证 updateUserStats 存在且可调用（但需要给合约授权）
@@ -628,7 +638,7 @@ describe('StatisticsView – 全面测试', function () {
 
       // 直接测试 pushGuaranteeUpdate 的功能（因为 updateGuaranteeStats 只是包装）
       await stats.connect(deployer).pushGuaranteeUpdate(await user1.getAddress(), asset, 100n, true);
-      expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset)).to.equal(100n);
+      expect((await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset))[0]).to.equal(100n);
       
       // 验证 updateGuaranteeStats 存在且可调用
       expect(stats.updateGuaranteeStats).to.not.be.undefined;
@@ -649,25 +659,25 @@ describe('StatisticsView – 全面测试', function () {
 
       // 1. 用户首次存款
       await stats.pushUserStatsUpdate(await user1.getAddress(), 1000n, 0n, 0n, 0n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
-      expect(await stats.getActiveUsers()).to.equal(1n);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(1n);
 
       // 2. 用户借款
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 0n, 500n, 0n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
 
       // 3. 用户部分还款
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 0n, 0n, 200n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
 
       // 4. 用户提取部分抵押
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 300n, 0n, 0n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
 
       // 5. 用户完全还款和提取
       await stats.pushUserStatsUpdate(await user1.getAddress(), 0n, 700n, 0n, 300n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(false);
-      expect(await stats.getActiveUsers()).to.equal(0n);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(false);
+      expect((await stats.getActiveUsersWithMeta())[0]).to.equal(0n);
     });
 
     it('应正确处理保证金与统计的协同更新', async function () {
@@ -681,8 +691,8 @@ describe('StatisticsView – 全面测试', function () {
       await stats.pushGuaranteeUpdate(await user1.getAddress(), asset, 100n, true);
       
       // 验证两者独立
-      expect(await stats.getUserGuaranteeBalance(await user1.getAddress(), asset)).to.equal(100n);
-      expect(await stats.isUserActive(await user1.getAddress())).to.equal(true);
+      expect((await stats.getUserGuaranteeBalanceWithMeta(await user1.getAddress(), asset))[0]).to.equal(100n);
+      expect((await stats.isUserActiveWithMeta(await user1.getAddress()))[0]).to.equal(true);
     });
   });
 });

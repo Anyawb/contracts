@@ -47,13 +47,14 @@ async function main() {
   // 2) PriceOracle config + fresh price
   const cfg = await po.getAssetConfig(usdc.target);
   if (!cfg.isActive) {
-    const tx = await po.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600);
+    const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+    const tx = await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
     await tx.wait();
     console.log("  ✅ PriceOracle configured MockUSDC (active)");
   } else {
     console.log("  ℹ️  PriceOracle config already active for MockUSDC");
   }
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+  const now = await ethers.provider.getBlockNumber();
   const tx2 = await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now);
   await tx2.wait();
   console.log("  ✅ PriceOracle price updated for MockUSDC (fresh)");

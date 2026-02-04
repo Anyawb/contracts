@@ -1,110 +1,197 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IPriceOracleAdapter 价格预言机适配器接口
-/// @notice 提供统一的预言机接口，支持多种预言机实现（Chainlink、Uniswap TWAP、Redstone等）
-/// @dev 设计遵循 docs/SmartContractStandard.md 中的命名及错误规范
+/// @title IPriceOracleAdapter
+/// @notice Oracle adapter interface for unified price access across multiple oracle types.
+/// @dev Designed to align with docs/SmartContractStandard.md naming and error conventions.
 interface IPriceOracleAdapter {
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
     
+    /// @dev Reverts when an oracle type is not supported.
     error PriceOracleAdapter__UnsupportedOracle();
+    /// @dev Reverts when an oracle address is invalid (e.g., zero or non-contract).
     error PriceOracleAdapter__InvalidOracleAddress();
+    /// @dev Reverts when an oracle call fails.
     error PriceOracleAdapter__OracleCallFailed();
 
     /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
 
-    /// @notice 价格数据结构
+    /// @notice Price data structure.
     struct PriceData {
-        uint256 price;        // 价格（以 8 位小数表示，如 1 USDT = 100000000）
-        uint256 timestamp;    // 价格更新时间戳
-        uint256 decimals;     // 价格精度
-        bool isValid;         // 价格是否有效
-        string oracleType;    // 预言机类型（如 "chainlink", "uniswap", "redstone"）
+        /// @notice Price in USD-8 (e.g., $1.00 = 100000000).
+        uint256 price;
+        /// @notice Informational block number associated with the quoted price.
+        uint256 blockNumber;
+        /// @notice Token decimals used for valuation scaling (NOT price precision).
+        uint256 assetDecimals;
+        /// @notice Whether the returned price is valid.
+        bool isValid;
+        /// @notice Oracle type identifier (e.g., "chainlink", "uniswap", "redstone").
+        string oracleType;
     }
 
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
     
-    /// @notice 预言机调用事件
+    /// @notice Emitted when an oracle call is performed.
+    /// @dev Emission semantics are implementation-defined; may be emitted on best-effort calls.
     event OracleCall(address indexed asset, address indexed oracle, string oracleType, bool success);
 
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 获取指定资产的最新价格
-     * @param asset 资产地址
-     * @return price 价格（以 8 位小数表示）
-     * @return timestamp 价格更新时间戳
-     * @return decimals 价格精度
+     * @notice Get the latest price for an asset.
+     * @dev Reverts if:
+     *      - asset is zero (implementation-defined)
+     *      - oracle type is unsupported (PriceOracleAdapter__UnsupportedOracle)
+     *      - oracle address is invalid (PriceOracleAdapter__InvalidOracleAddress)
+     *      - oracle call fails (PriceOracleAdapter__OracleCallFailed)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param asset Asset address.
+     * @return price Price in USD-8 (e.g., $1.00 = 100000000).
+     * @return blockNumber Informational block number associated with the quoted price.
+     * @return assetDecimals Token decimals used for valuation scaling (NOT price precision).
      */
-    function getPrice(address asset) external view returns (uint256 price, uint256 timestamp, uint256 decimals);
+    function getPrice(address asset) external view returns (uint256 price, uint256 blockNumber, uint256 assetDecimals);
 
     /**
-     * @notice 获取指定资产的完整价格数据
-     * @param asset 资产地址
-     * @return priceData 价格数据结构
+     * @notice Get full price data for an asset.
+     * @dev Reverts if:
+     *      - asset is zero (implementation-defined)
+     *      - oracle type is unsupported (PriceOracleAdapter__UnsupportedOracle)
+     *      - oracle address is invalid (PriceOracleAdapter__InvalidOracleAddress)
+     *      - oracle call fails (PriceOracleAdapter__OracleCallFailed)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param asset Asset address.
+     * @return priceData Price data struct.
      */
     function getPriceData(address asset) external view returns (PriceData memory priceData);
 
     /**
-     * @notice 批量获取多个资产的价格
-     * @param assets 资产地址数组
-     * @return prices 价格数组
-     * @return timestamps 时间戳数组
-     * @return decimalsArray 精度数组
+     * @notice Batch get prices for multiple assets.
+     * @dev Reverts if:
+     *      - any asset is zero (implementation-defined)
+     *      - any oracle type is unsupported (PriceOracleAdapter__UnsupportedOracle)
+     *      - any oracle address is invalid (PriceOracleAdapter__InvalidOracleAddress)
+     *      - any oracle call fails (PriceOracleAdapter__OracleCallFailed)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param assets Asset address list.
+     * @return prices Price list in USD-8.
+     * @return blockNumbers Informational block number list.
+     * @return assetDecimalsArray Token decimals used for valuation scaling (NOT price precision).
      */
     function getPrices(address[] calldata assets) external view returns (
         uint256[] memory prices,
-        uint256[] memory timestamps,
-        uint256[] memory decimalsArray
+        uint256[] memory blockNumbers,
+        uint256[] memory assetDecimalsArray
     );
 
     /**
-     * @notice 检查价格是否有效（非过期且非零）
-     * @param asset 资产地址
-     * @return isValid 价格是否有效
+     * @notice Check whether the price is valid (non-zero and not stale).
+     * @dev Reverts if:
+     *      - (none; best-effort)
+     *
+     * Security:
+     * - View-only
+     * - Best-effort: returns false on invalid/unknown states
+     *
+     * @param asset Asset address.
+     * @return isValid True if valid, otherwise false.
      */
     function isPriceValid(address asset) external view returns (bool isValid);
 
     /**
-     * @notice 获取支持的预言机类型
-     * @return oracleTypes 支持的预言机类型数组
+     * @notice Get supported oracle types.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @return oracleTypes Supported oracle type identifiers.
      */
     function getSupportedOracleTypes() external view returns (string[] memory oracleTypes);
 
     /**
-     * @notice 检查预言机类型是否支持
-     * @param oracleType 预言机类型
-     * @return isSupported 是否支持
+     * @notice Check whether an oracle type is supported.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param oracleType Oracle type identifier.
+     * @return isSupported True if supported, otherwise false.
      */
     function isOracleTypeSupported(string calldata oracleType) external view returns (bool isSupported);
 
     /**
-     * @notice 获取指定资产的预言机类型
-     * @param asset 资产地址
-     * @return oracleType 预言机类型
+     * @notice Get the oracle type configured for an asset.
+     * @dev Reverts if:
+     *      - asset is zero (implementation-defined)
+     *      - oracle type is not configured (implementation-defined)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param asset Asset address.
+     * @return oracleType Oracle type identifier.
      */
     function getAssetOracleType(address asset) external view returns (string memory oracleType);
 
     /*━━━━━━━━━━━━━━━ ADMIN FUNCTIONS ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 注册预言机实现（仅授权地址可调用）
-     * @param oracleType 预言机类型
-     * @param oracleAddress 预言机地址
+     * @notice Register an oracle implementation (governance-only in implementations).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - oracleType is unsupported (PriceOracleAdapter__UnsupportedOracle)
+     *      - oracleAddress is invalid (PriceOracleAdapter__InvalidOracleAddress)
+     *
+     * Security:
+     * - Role-gated in implementation
+     *
+     * @param oracleType Oracle type identifier.
+     * @param oracleAddress Oracle address.
      */
     function registerOracle(string calldata oracleType, address oracleAddress) external;
 
     /**
-     * @notice 配置资产的预言机类型（仅授权地址可调用）
-     * @param asset 资产地址
-     * @param oracleType 预言机类型
+     * @notice Configure oracle type for an asset (governance-only in implementations).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - asset is zero (implementation-defined)
+     *      - oracleType is unsupported (PriceOracleAdapter__UnsupportedOracle)
+     *
+     * Security:
+     * - Role-gated in implementation
+     *
+     * @param asset Asset address.
+     * @param oracleType Oracle type identifier.
      */
     function configureAssetOracle(address asset, string calldata oracleType) external;
 
     /**
-     * @notice 批量配置资产的预言机类型（仅授权地址可调用）
-     * @param assets 资产地址数组
-     * @param oracleTypes 预言机类型数组
+     * @notice Batch configure oracle types for assets (governance-only in implementations).
+     * @dev Reverts if:
+     *      - caller is not authorized (implementation-defined)
+     *      - array lengths mismatch (implementation-defined)
+     *      - any asset is zero (implementation-defined)
+     *      - any oracleType is unsupported (PriceOracleAdapter__UnsupportedOracle)
+     *
+     * Security:
+     * - Role-gated in implementation
+     *
+     * @param assets Asset address list.
+     * @param oracleTypes Oracle type identifiers aligned to `assets`.
      */
     function configureAssetOracles(
         address[] calldata assets,

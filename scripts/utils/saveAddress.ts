@@ -21,7 +21,7 @@ export interface DeploymentRecord {
   deployer: string;
   version: string;
   description: string;
-  timestamp: number;
+  generatedAtMs: number;
   contracts: AddressConfig;
   proxyAddresses?: Record<string, string>;
   implementationAddresses?: Record<string, string>;
@@ -32,7 +32,7 @@ export interface AddressConfig {
     address: string;
     proxyAddress?: string;
     implementationAddress?: string;
-    deployedAt: number;
+    deployedAtMs: number;
     deployedBy: string;
   };
 }
@@ -69,7 +69,7 @@ export class AddressManager {
       address,
       proxyAddress: options?.proxyAddress,
       implementationAddress: options?.implementationAddress,
-      deployedAt: Date.now(),
+      deployedAtMs: Date.now(),
       deployedBy: deployer
     };
 
@@ -95,7 +95,7 @@ export class AddressManager {
       address: newAddress,
       proxyAddress: options?.proxyAddress || this.addresses[contractName].proxyAddress,
       implementationAddress: options?.implementationAddress || this.addresses[contractName].implementationAddress,
-      deployedAt: Date.now(),
+      deployedAtMs: Date.now(),
       deployedBy: deployer
     };
 
@@ -153,17 +153,17 @@ export class AddressManager {
    * Create a backup of current addresses
    */
   createBackup(): void {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupTag = new Date().toISOString().replace(/[:.]/g, '-');
     const backupDir = path.join(this.baseDir, 'backups');
     
     if (!fs.existsSync(backupDir)) {
       fs.mkdirSync(backupDir, { recursive: true });
     }
 
-    const backupFile = path.join(backupDir, `addresses.${this.network}.${timestamp}.json`);
+    const backupFile = path.join(backupDir, `addresses.${this.network}.${backupTag}.json`);
     const backupData = {
       network: this.networkInfo,
-      timestamp: Date.now(),
+      generatedAtMs: Date.now(),
       addresses: this.addresses
     };
 
@@ -209,7 +209,7 @@ export class AddressManager {
     const config = {
       network: this.networkInfo,
       contracts: this.addresses,
-      lastUpdated: Date.now()
+      lastUpdatedMs: Date.now()
     };
 
     const configFile = path.join(outputDir, `contracts-${this.network}.json`);
@@ -281,7 +281,7 @@ export class AddressManager {
       deployer: this.getDeployerFromAddresses(),
       version: '1.0.0',
       description: `RWA Lending Platform deployment on ${this.networkInfo.name}`,
-      timestamp: Date.now(),
+      generatedAtMs: Date.now(),
       contracts: this.addresses
     };
 

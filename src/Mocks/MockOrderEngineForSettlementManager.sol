@@ -9,7 +9,7 @@ import { IOrderEngine } from "../interfaces/IOrderEngine.sol";
 /// @title MockOrderEngineForSettlementManager
 /// @notice Minimal ORDER_ENGINE mock for SettlementManager integration tests.
 /// @dev Implements the two functions SettlementManager relies on:
-///      - _getLoanOrderForView(orderId)
+///      - getLoanOrderForView(orderId)
 ///      - repay(orderId, repayAmount)
 contract MockOrderEngineForSettlementManager {
     using SafeERC20 for IERC20;
@@ -53,7 +53,7 @@ contract MockOrderEngineForSettlementManager {
         unchecked { _nextOrderId = _nextOrderId + 1; }
 
         // Populate stored order; set start/maturity if caller left them as 0 (common in tests/libraries).
-        uint256 startTs = order.startTimestamp == 0 ? block.timestamp : order.startTimestamp;
+        uint256 startTs = order.startTimestamp == 0 ? block.number : order.startTimestamp;
         uint256 maturity = order.maturity == 0 ? startTs + order.term : order.maturity;
 
         _orders[orderId] = LoanOrder({
@@ -71,7 +71,7 @@ contract MockOrderEngineForSettlementManager {
         emit MockOrderCreated(orderId, order.borrower, order.lender, order.asset, order.principal, maturity);
     }
 
-    function _getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order) {
+    function getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order) {
         return _orders[orderId];
     }
 

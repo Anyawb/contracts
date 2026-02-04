@@ -35,14 +35,14 @@ async function tryGetVersionInfo(addr: string): Promise<{ api?: bigint; schema?:
   }
 }
 
-async function tryGetPriceOraclePrice(oracleAddr: string, asset: string): Promise<{ price: bigint; ts: bigint }> {
+async function tryGetPriceOraclePrice(oracleAddr: string, asset: string): Promise<{ price: bigint; blockNumber: bigint }> {
   const oracle = await ethers.getContractAt("PriceOracle", oracleAddr);
   try {
-    const [p, ts] = (await (oracle as any).getPrice(asset)) as [bigint, bigint, bigint];
-    return { price: p, ts };
+    const [p, blockNumber] = (await (oracle as any).getPrice(asset)) as [bigint, bigint, bigint];
+    return { price: p, blockNumber };
   } catch {
     // Unsupported asset may revert; treat as best-effort (0,0)
-    return { price: 0n, ts: 0n };
+    return { price: 0n, blockNumber: 0n };
   }
 }
 
@@ -52,9 +52,24 @@ export async function runViewPreflight(params: {
   adminSigner: any;
   assetForPriceCheck: string;
   print?: boolean;
+  /**
+   * Ensure core on-chain writers have ACTION_VIEW_PUSH.
+   * This eliminates best-effort CacheUpdateFailed/HealthPushFailed caused by MissingRole().
+   */
+  ensureViewPushRole?: boolean;
+  /** Extra addresses (EOA/contract) that must have ACTION_VIEW_PUSH. */
+  extraViewPushers?: string[];
+  /**
+   * Ensure health-push dependencies do not revert due to MissingRole().
+   * In particular, LendingEngineCore reads PositionView valuations (risk-gated).
+   */
+  ensureHealthPushDeps?: boolean;
 }) {
   const { registryAddr, acmAddr, adminSigner, assetForPriceCheck } = params;
   const print = params.print ?? true;
+  const ensureViewPushRole = params.ensureViewPushRole ?? true;
+  const extraViewPushers = params.extraViewPushers ?? [];
+  const ensureHealthPushDeps = params.ensureHealthPushDeps ?? true;
 
   const registry = (await ethers.getContractAt("Registry", registryAddr)) as any;
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddr)) as any;
@@ -64,11 +79,63 @@ export async function runViewPreflight(params: {
   const ROLE_VIEW_PRICE_DATA = key("VIEW_PRICE_DATA");
   const ROLE_VIEW_RISK_DATA = key("VIEW_RISK_DATA");
   const ROLE_VIEW_USER_DATA = key("VIEW_USER_DATA");
+  const ROLE_VIEW_PUSH = key("ACTION_VIEW_PUSH");
 
   assertOk(await acm.hasRole(ROLE_VIEW_SYSTEM_DATA, adminSigner.address), "preflight: missing VIEW_SYSTEM_DATA role");
   assertOk(await acm.hasRole(ROLE_VIEW_PRICE_DATA, adminSigner.address), "preflight: missing VIEW_PRICE_DATA role");
   assertOk(await acm.hasRole(ROLE_VIEW_RISK_DATA, adminSigner.address), "preflight: missing VIEW_RISK_DATA role");
   assertOk(await acm.hasRole(ROLE_VIEW_USER_DATA, adminSigner.address), "preflight: missing VIEW_USER_DATA role");
+
+  if (ensureViewPushRole) {
+    // Core pushers that perform best-effort view cache updates during ledger operations.
+    // NOTE: use getModule (not OrRevert) so the preflight remains usable across deployments.
+    const pusherKeys = ["VAULT_LENDING_ENGINE", "VAULT_ROUTER", "VAULT_CORE", "LIQUIDATION_MANAGER", "SETTLEMENT_MANAGER"];
+    const pushers: string[] = [];
+    for (const k of pusherKeys) {
+      try {
+        const addr = (await registry.getModule(key(k))) as string;
+        if (addr && addr !== ethers.ZeroAddress) pushers.push(addr);
+      } catch {
+        // ignore (older deployments may not register this key)
+      }
+    }
+    for (const addr of extraViewPushers) {
+      if (addr && addr !== ethers.ZeroAddress) pushers.push(addr);
+    }
+
+    for (const pusher of pushers) {
+      const ok = (await acm.hasRole(ROLE_VIEW_PUSH, pusher)) as boolean;
+      if (!ok) {
+        // grantRole is owner-gated; on localhost the deployer should be the owner.
+        try {
+          await (await acm.connect(adminSigner).grantRole(ROLE_VIEW_PUSH, pusher)).wait();
+          if (print) console.log(`  [preflight] granted ACTION_VIEW_PUSH to ${pusher}`);
+        } catch (e: any) {
+          throw new Error(
+            `preflight: missing ACTION_VIEW_PUSH for ${pusher} and failed to grantRole (are you ACM owner?): ${e?.message ?? String(e)}`
+          );
+        }
+      }
+
+      // Health push dependency: LendingEngineCore reads risk-gated valuation data from PositionView.
+      // If the caller (e.g., VaultLendingEngine) lacks VIEW_RISK_DATA, the read reverts MissingRole()
+      // and LendingEngineCore emits CacheUpdateFailed/HealthPushFailed. For strict localhost e2e,
+      // ensure the pusher has VIEW_RISK_DATA.
+      if (ensureHealthPushDeps) {
+        const hasRisk = (await acm.hasRole(ROLE_VIEW_RISK_DATA, pusher)) as boolean;
+        if (!hasRisk) {
+          try {
+            await (await acm.connect(adminSigner).grantRole(ROLE_VIEW_RISK_DATA, pusher)).wait();
+            if (print) console.log(`  [preflight] granted VIEW_RISK_DATA to ${pusher}`);
+          } catch (e: any) {
+            throw new Error(
+              `preflight: missing VIEW_RISK_DATA for ${pusher} and failed to grantRole (are you ACM owner?): ${e?.message ?? String(e)}`
+            );
+          }
+        }
+      }
+    }
+  }
 
   const systemViewAddr = (await registry.getModuleOrRevert(key("SYSTEM_VIEW"))) as string;
   const systemView = (await ethers.getContractAt("SystemView", systemViewAddr)) as any;
@@ -85,6 +152,7 @@ export async function runViewPreflight(params: {
     { fn: "routeReward", expected: "REWARD_VIEW" },
     { fn: "routeLiquidation", expected: "LIQUIDATION_VIEW" },
     { fn: "routeRisk", expected: "RISK_VIEW" },
+    { fn: "routeSystemRisk", expected: "SYSTEM_RISK_VIEW" },
     { fn: "routeUser", expected: "USER_VIEW" },
     { fn: "routePosition", expected: "POSITION_VIEW" },
     { fn: "routeBatch", expected: "BATCH_VIEW" },
@@ -124,19 +192,23 @@ export async function runViewPreflight(params: {
   assertOk(fallbackInfo.moduleKey.toLowerCase() === expectedFallbackKey.toLowerCase(), "preflight: routePrice.fallback moduleKey mismatch");
   assertOk(fallbackInfo.moduleAddr.toLowerCase() === expectedFallbackAddr.toLowerCase(), "preflight: routePrice.fallback moduleAddr mismatch");
 
-  // Fallback consistency (best-effort): ValuationOracleView wraps oracle calls and returns (0,0) on failure.
+  // Fallback consistency (best-effort): ValuationOracleView wraps oracle calls and returns (0,0,false) on failure.
   const vov = (await ethers.getContractAt("ValuationOracleView", primaryInfo.moduleAddr)) as any;
-  const [vp, vts] = (await vov.connect(adminSigner).getAssetPrice(assetForPriceCheck)) as [bigint, bigint];
+  const [vp, vBlock] = (await vov.connect(adminSigner).getAssetPrice(assetForPriceCheck)) as [
+    bigint,
+    bigint,
+    boolean,
+  ];
   const o = await tryGetPriceOraclePrice(fallbackInfo.moduleAddr, assetForPriceCheck);
   assertOk(vp === o.price, "preflight: PRICE_ORACLE fallback inconsistency (price mismatch)");
-  assertOk(vts === o.ts, "preflight: PRICE_ORACLE fallback inconsistency (timestamp mismatch)");
+  assertOk(vBlock === o.blockNumber, "preflight: PRICE_ORACLE fallback inconsistency (blockNumber mismatch)");
 
   if (print) {
     const viP = await tryGetVersionInfo(primaryInfo.moduleAddr);
     const verP = viP.api !== undefined ? `api=${viP.api} schema=${viP.schema} impl=${viP.impl}` : "versionInfo=n/a";
     console.log(`  [route] routePrice.primary -> VALUATION_ORACLE_VIEW @ ${primaryInfo.moduleAddr} (${verP})`);
     console.log(`  [route] routePrice.fallback -> PRICE_ORACLE @ ${fallbackInfo.moduleAddr} (versionInfo=n/a)`);
-    console.log(`  [check] price fallback asset=${assetForPriceCheck} price=${vp.toString()} ts=${vts.toString()}`);
+    console.log(`  [check] price fallback asset=${assetForPriceCheck} price=${vp.toString()} block=${vBlock.toString()}`);
     console.log("=== View Preflight done ===\n");
   }
 

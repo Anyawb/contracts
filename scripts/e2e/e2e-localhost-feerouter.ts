@@ -36,7 +36,10 @@ async function main() {
   // 获取已部署的合约
   const registry = await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry);
   const acm = await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager);
-  const feeRouter = await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter);
+  const feeRouter = (await ethers.getContractAt(
+    "src/Vault/FeeRouter.sol:FeeRouter",
+    CONTRACT_ADDRESSES.FeeRouter
+  )) as any;
   const usdc = await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC);
 
   console.log("📋 Contract Addresses:");
@@ -136,9 +139,16 @@ async function main() {
   // Assert distribution math (FeeRouter returns remaining to caller)
   const expectedPlatform = calcFee(distributeAmount, BigInt(platformFeeBps));
   const expectedEco = calcFee(distributeAmount, BigInt(ecosystemFeeBps));
-  expect(treasuryReceived).to.equal(expectedPlatform);
-  expect(ecoVaultReceived).to.equal(expectedEco);
-  expect(aliceSpent).to.equal(expectedPlatform + expectedEco);
+  if (platformTreasury.toLowerCase() === ecosystemVault.toLowerCase()) {
+    // When both fees go to the same address, the balance delta reflects the combined amount.
+    expect(treasuryReceived).to.equal(expectedPlatform + expectedEco);
+    expect(ecoVaultReceived).to.equal(treasuryReceived);
+    expect(aliceSpent).to.equal(expectedPlatform + expectedEco);
+  } else {
+    expect(treasuryReceived).to.equal(expectedPlatform);
+    expect(ecoVaultReceived).to.equal(expectedEco);
+    expect(aliceSpent).to.equal(expectedPlatform + expectedEco);
+  }
 
   // 验证事件
   const feeDistributedEvent = receipt?.logs.find((log: any) => {
@@ -262,10 +272,17 @@ async function main() {
   const expectedPlatformFee = calcFee(largeAmount, BigInt(platformFeeBps));
   const expectedEcoFee = calcFee(largeAmount, BigInt(ecosystemFeeBps));
 
-  console.log(`  Treasury received: ${ethers.formatUnits(treasuryFinalLarge - treasuryInitialLarge, 6)} USDC (expected: ${ethers.formatUnits(expectedPlatformFee, 6)})`);
-  console.log(`  EcoVault received: ${ethers.formatUnits(ecoVaultFinalLarge - ecoVaultInitialLarge, 6)} USDC (expected: ${ethers.formatUnits(expectedEcoFee, 6)})`);
-  expect(treasuryFinalLarge - treasuryInitialLarge).to.equal(expectedPlatformFee);
-  expect(ecoVaultFinalLarge - ecoVaultInitialLarge).to.equal(expectedEcoFee);
+  const treasuryDeltaLarge = treasuryFinalLarge - treasuryInitialLarge;
+  const ecoDeltaLarge = ecoVaultFinalLarge - ecoVaultInitialLarge;
+  console.log(`  Treasury received: ${ethers.formatUnits(treasuryDeltaLarge, 6)} USDC (expected: ${ethers.formatUnits(expectedPlatformFee, 6)})`);
+  console.log(`  EcoVault received: ${ethers.formatUnits(ecoDeltaLarge, 6)} USDC (expected: ${ethers.formatUnits(expectedEcoFee, 6)})`);
+  if (platformTreasury.toLowerCase() === ecosystemVault.toLowerCase()) {
+    expect(treasuryDeltaLarge).to.equal(expectedPlatformFee + expectedEcoFee);
+    expect(ecoDeltaLarge).to.equal(treasuryDeltaLarge);
+  } else {
+    expect(treasuryDeltaLarge).to.equal(expectedPlatformFee);
+    expect(ecoDeltaLarge).to.equal(expectedEcoFee);
+  }
 
   // ====== 7. 费率配置更新测试 ======
   console.log("\n=== 7. Fee Config Update Test ===");

@@ -54,20 +54,6 @@ async function mustRevertMissingRole(label: string, fn: () => Promise<unknown>) 
   throw new Error(`[FAIL] Expected MissingRole() revert, but succeeded: ${label}`);
 }
 
-async function expectRevert(label: string, fn: () => Promise<unknown>) {
-  try {
-    await fn();
-  } catch (e: any) {
-    const msg = fmtErr(e);
-    if (isMissingSelectorError(msg)) {
-      throw new Error(`${label}: call reverted due to missing function selector (deployment/ABI mismatch).`);
-    }
-    console.log(`  ✅ ${label} reverted (as expected): ${msg}`);
-    return;
-  }
-  throw new Error(`${label}: expected revert, but call succeeded`);
-}
-
 async function mustSucceed<T>(label: string, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
@@ -158,20 +144,12 @@ async function main() {
   await assertRouteInfo("routeReward", "REWARD_VIEW", await systemView.routeReward());
   await assertRouteInfo("routeLiquidation", "LIQUIDATION_VIEW", await systemView.routeLiquidation());
   await assertRouteInfo("routeRisk", "RISK_VIEW", await systemView.routeRisk());
+  await assertRouteInfo("routeSystemRisk", "SYSTEM_RISK_VIEW", await systemView.routeSystemRisk());
   await assertRouteInfo("routeUser", "USER_VIEW", await systemView.routeUser());
   await assertRouteInfo("routePosition", "POSITION_VIEW", await systemView.routePosition());
   await assertRouteInfo("routeBatch", "BATCH_VIEW", await systemView.routeBatch());
   await assertRouteInfo("routeDashboard", "DASHBOARD_VIEW", await systemView.routeDashboard());
   await assertRouteInfo("routePreview", "PREVIEW_VIEW", await systemView.routePreview());
-
-  // ====== Deprecated legacy getters ======
-  // Acceptance rule here: they may revert (compat debt), but MUST NOT be the only integration path.
-  // We assert: route* exists + returns consumable route info; then we only assert "reverts", not the revert string.
-  await expectRevert("DEPRECATED: getAssetPrice", async () => systemView.getAssetPrice(CONTRACT_ADDRESSES.MockUSDC));
-  await expectRevert("DEPRECATED: getTotalCollateral", async () => systemView.getTotalCollateral(CONTRACT_ADDRESSES.MockUSDC));
-  await expectRevert("DEPRECATED: getTotalDebt", async () => systemView.getTotalDebt(CONTRACT_ADDRESSES.MockUSDC));
-  await expectRevert("DEPRECATED: getRewardSystemView", async () => systemView.getRewardSystemView());
-  await expectRevert("DEPRECATED: getGuaranteeSystemView", async () => systemView.getGuaranteeSystemView());
 
   console.log("\n✅ SystemView routing acceptance PASSED");
 }

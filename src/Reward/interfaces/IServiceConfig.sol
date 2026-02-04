@@ -16,7 +16,7 @@ interface IServiceConfig {
     /// @notice 更新服务配置
     /// @param level 服务等级
     /// @param price 价格
-    /// @param duration 持续时间
+    /// @param duration 持续时间（区块数）
     /// @param isActive 是否激活
     function updateConfig(
         RewardTypes.ServiceLevel level,
@@ -26,11 +26,11 @@ interface IServiceConfig {
     ) external;
     
     /// @notice 获取服务冷却期
-    /// @return cooldown 冷却期 (秒)
+    /// @return cooldown 冷却期（区块数）
     function getCooldown() external view returns (uint256 cooldown);
     
     /// @notice 设置服务冷却期
-    /// @param cooldown 冷却期 (秒)
+    /// @param cooldown 冷却期（区块数）
     function setCooldown(uint256 cooldown) external;
     
     /// @notice 获取服务类型

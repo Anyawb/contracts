@@ -80,7 +80,6 @@ contract RegistryDynamicModuleKey is
     uint256 private constant _MAX_BATCH_SIZE = 20; // Max batch registration size.
     /// @notice Salt used to derive dynamic module keys.
     // NOTE: Keep this exact string for backwards-compatible key derivation.
-    // solhint-disable-next-line gas-small-strings
     bytes32 private constant _MODULE_KEY_SALT = keccak256("rwa.registry.dynamic.module.key.v1");
 
     // ============ State Variables ============

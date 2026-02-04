@@ -24,6 +24,7 @@
     "generate:module-keys": "ts-node --project ./tsconfig.scripts.json scripts/utils/generateModuleKeys.ts",
     "test:cache-refresh:localhost": "hardhat run scripts/tests/cache-refresh-local.ts --network localhost",
     "test:smoke:prodlike:localhost": "hardhat run scripts/tests/smoke-productionlike-local.ts --network localhost",
+    "test:smoke:prodlike:localhost:autonode": "ts-node --project ./tsconfig.scripts.json scripts/tests/smoke-productionlike-local.autonode.ts",
     "clean": "hardhat clean",
     "checks:run-all": "pnpm -s run checks:lockfiles && ts-node --project ./tsconfig.scripts.json scripts/checks/runAllChecks.ts",
     "checks:env": "ts-node --project ./tsconfig.scripts.json scripts/checks/check-env.ts",

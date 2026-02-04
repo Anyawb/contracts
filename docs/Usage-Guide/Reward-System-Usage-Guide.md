@@ -320,7 +320,7 @@ const getSystemStats = async () => {
 // 获取用户积分仪表板
 const getUserDashboard = async (userAddress: string) => {
   // 推荐：统一从 RewardView 查询（只读聚合 + 透传 RewardCore/RewardManagerCore 的必要视图）
-  const [balance, summary, recentActivities] = await Promise.all([
+  const [[balance], summary, recentActivities] = await Promise.all([
     rewardView.getUserBalance(userAddress),
     rewardView.getUserRewardSummary(userAddress),
     rewardView.getUserRecentActivities(userAddress, 0, 0, 20),
@@ -347,7 +347,7 @@ const purchaseService = async (serviceType: number, level: number) => {
     }
 
     // 2. 检查积分余额
-    const balance = await rewardView.getUserBalance(userAddress);
+    const [balance] = await rewardView.getUserBalance(userAddress);
     if (balance < config.price) {
       throw new Error('Insufficient points');
     }
@@ -385,18 +385,18 @@ const purchaseService = async (serviceType: number, level: number) => {
 // - 服务是否有效/何时过期，以 ConsumptionRecord.isActive + expirationTime 为准
 const checkPrivilegeStatus = async (userAddress: string, serviceType: number) => {
   const records = await rewardView.getUserConsumptions(userAddress); // 透传 RewardCore
-  const now = BigInt(Math.floor(Date.now() / 1000));
+  const nowBlock = BigInt(await provider.getBlockNumber());
   let latest: any | undefined;
 
   for (const r of records) {
     // ethers v6：enum 字段通常为 number/bigint（按 ABI 输出），这里按 number 处理示例
     if (Number(r.serviceType) !== serviceType) continue;
-    if (!latest || BigInt(r.timestamp) > BigInt(latest.timestamp)) latest = r;
+    if (!latest || BigInt(r.blockNumber) > BigInt(latest.blockNumber)) latest = r;
   }
 
   if (!latest) return { hasPrivilege: false, reason: 'No consumption record' };
   if (!latest.isActive) return { hasPrivilege: false, reason: 'Not active' };
-  if (BigInt(latest.expirationTime) <= now) return { hasPrivilege: false, reason: 'Expired' };
+  if (BigInt(latest.expirationTime) <= nowBlock) return { hasPrivilege: false, reason: 'Expired' };
 
   return {
     hasPrivilege: true,
@@ -448,7 +448,7 @@ class RewardSystem {
 
   // 获取用户仪表板
   async getUserDashboard(userAddress: string) {
-    const [balance, summary] = await Promise.all([
+    const [[balance], summary] = await Promise.all([
       this.rewardView.getUserBalance(userAddress),
       this.rewardView.getUserRewardSummary(userAddress),
     ]);
@@ -469,7 +469,7 @@ class RewardSystem {
     }
 
     const user = await this.rewardConsumption.signer.getAddress();
-    const balance = await this.rewardView.getUserBalance(user);
+    const [balance] = await this.rewardView.getUserBalance(user);
     if (balance < config.price) {
       throw new Error('Insufficient points');
     }
@@ -506,7 +506,7 @@ export const useReward = (userAddress: string) => {
       try {
         setLoading(true);
         
-        const [balance, summary] = await Promise.all([
+        const [[balance], summary] = await Promise.all([
           rewardView.getUserBalance(userAddress),
           rewardView.getUserRewardSummary(userAddress),
         ]);
@@ -710,8 +710,11 @@ function getUserPrivilege(address user) external view returns (UserPrivilege mem
 // 获取用户消费记录（在 RewardCore）
 function getUserConsumptions(address user) external view returns (ConsumptionRecord[] memory);
 
-// 获取用户最后消费时间（在 RewardCore）
-function getUserLastConsumption(address user, uint8 serviceType) external view returns (uint256);
+// 获取用户最后消费时间（前端推荐走 RewardView，返回带 meta）
+function getUserLastConsumption(address user, uint8 serviceType)
+  external
+  view
+  returns (uint256 consumption, uint256 blockNumber, bool isValid);
 ```
 
 ### ServiceConfig 主要方法
@@ -745,8 +748,11 @@ function getUserRewardSummary(address user) external view returns (
   uint256 totalVolume
 );
 
-function getUserBalance(address user) external view returns (uint256 balance);
-function getUserRecentActivities(address user, uint256 fromTs, uint256 toTs, uint256 limit) external view returns (tuple(uint8 kind,uint256 amount,uint256 ts)[] out);
+function getUserBalance(address user) external view returns (uint256 balance, uint256 blockNumber, bool isValid);
+function getUserRecentActivities(address user, uint256 fromTs, uint256 toTs, uint256 limit)
+  external
+  view
+  returns (tuple(uint8 kind,uint256 amount,uint256 blockNumber)[] out);
 function getSystemRewardStats() external view returns (uint256 totalBatchOps, uint256 totalCachedRewards, uint256 activeUsers);
 function getTopEarners() external view returns (address[] memory addrs, uint256[] memory amounts);
 ```
@@ -829,10 +835,10 @@ const setupEventListeners = () => {
   // 推荐：统一订阅 RewardView 的 DataPushed（REWARD_*）
   rewardView.on('DataPushed', (dataTypeHash, payload) => {
     if (dataTypeHash === DataPushTypes.DATA_TYPE_REWARD_EARNED) {
-      // payload = abi.encode(user, amount, reason, ts)
+      // payload = abi.encode(user, amount, reason, blockNumber)
     }
     if (dataTypeHash === DataPushTypes.DATA_TYPE_REWARD_BURNED) {
-      // payload = abi.encode(user, amount, reason, ts)
+      // payload = abi.encode(user, amount, reason, blockNumber)
     }
   });
 };
@@ -876,15 +882,16 @@ const debugContractState = async () => {
 
 ```typescript
 const debugUserState = async (userAddress: string) => {
-  const [points, level, privileges] = await Promise.all([
+  const [points, levelMeta, privileges] = await Promise.all([
     rewardPoints.balanceOf(userAddress),
-    rewardManager.getUserLevel(userAddress),
+    rewardView.getUserLevel(userAddress),
     rewardCore.getUserPrivilege(userAddress)
   ]);
+  const [level] = levelMeta;
 
   console.log('User state:', {
     points: points.toString(),
-    level: level.toNumber(),
+    level: Number(level),
     privileges
   });
 };

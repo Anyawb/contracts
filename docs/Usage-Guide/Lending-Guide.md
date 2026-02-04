@@ -65,16 +65,16 @@ console.log("✅ 借款成功");
 
 ```typescript
 // 查询抵押物
-const collateral = await vaultRouter.getUserCollateral(userAddress, usdcAddress);
+const [collateral] = await userView.getUserCollateral(userAddress, usdcAddress);
 console.log(`抵押物: ${ethers.formatUnits(collateral, 6)} USDC`);
 
 // 查询债务
-const debt = await vaultRouter.getUserDebt(userAddress, usdcAddress);
+const [debt] = await userView.getUserDebt(userAddress, usdcAddress);
 console.log(`债务: ${ethers.formatUnits(debt, 6)} USDC`);
 
 // 查询健康因子
-const healthFactor = await vaultRouter.getUserHealthFactor(userAddress);
-console.log(`健康因子: ${healthFactor.toString()}`);
+const [healthFactor, isValid] = await userView.getUserHealthFactor(userAddress);
+console.log(`健康因子: ${healthFactor.toString()} (valid=${isValid})`);
 ```
 
 #### 5. 还款
@@ -250,11 +250,11 @@ vaultCore.on("CollateralDeposited", (user, asset, amount, event) => {
  */
 async function borrowAsset(asset: string, amount: bigint) {
     // 1. 检查健康因子（借款前）
-    const healthFactorBefore = await vaultRouter.getUserHealthFactor(userAddress);
+    const [healthFactorBefore, isValidBefore] = await userView.getUserHealthFactor(userAddress);
     console.log(`借款前健康因子: ${healthFactorBefore.toString()}`);
     
     // 2. 检查可借额度
-    const maxBorrowable = await vaultRouter.getMaxBorrowable(userAddress, asset);
+    const [maxBorrowable] = await previewView.getMaxBorrowableWithMeta(userAddress, asset);
     if (amount > maxBorrowable) {
         throw new Error(`借款金额超过可借额度: ${maxBorrowable}`);
     }
@@ -264,7 +264,7 @@ async function borrowAsset(asset: string, amount: bigint) {
     const receipt = await tx.wait();
     
     // 4. 检查健康因子（借款后）
-    const healthFactorAfter = await vaultRouter.getUserHealthFactor(userAddress);
+    const [healthFactorAfter, isValidAfter] = await userView.getUserHealthFactor(userAddress);
     console.log(`借款后健康因子: ${healthFactorAfter.toString()}`);
     
     console.log(`✅ 借款成功: ${ethers.formatUnits(amount, decimals)}`);
@@ -291,10 +291,10 @@ async function borrowAsset(asset: string, amount: bigint) {
  */
 async function canBorrow(user: string, asset: string, amount: bigint): Promise<boolean> {
     // 1. 获取当前健康因子
-    const currentHF = await vaultRouter.getUserHealthFactor(user);
+    const [currentHF, currentValid] = await userView.getUserHealthFactor(user);
     
     // 2. 预览借款后的健康因子
-    const previewHF = await vaultRouter.previewBorrow(user, asset, amount);
+    const [previewHF] = await previewView.previewBorrow(user, asset, 0n, 0n, amount);
     
     // 3. 检查是否满足最小健康因子（110%）
     const minHF = 11000; // 110% in bps
@@ -316,7 +316,7 @@ async function canBorrow(user: string, asset: string, amount: bigint): Promise<b
  */
 async function repayDebt(asset: string, amount: bigint = 0n) {
     // 1. 查询当前债务
-    const currentDebt = await vaultRouter.getUserDebt(userAddress, asset);
+    const [currentDebt] = await userView.getUserDebt(userAddress, asset);
     
     // 2. 确定还款金额
     const repayAmount = amount === 0n ? currentDebt : amount;
@@ -339,7 +339,7 @@ async function repayDebt(asset: string, amount: bigint = 0n) {
     const receipt = await tx.wait();
     
     // 5. 查询剩余债务
-    const remainingDebt = await vaultRouter.getUserDebt(userAddress, asset);
+    const [remainingDebt] = await userView.getUserDebt(userAddress, asset);
     console.log(`✅ 还款成功，剩余债务: ${ethers.formatUnits(remainingDebt, decimals)}`);
     
     return receipt;
@@ -375,13 +375,13 @@ await vaultCore.repay(orderId, assetAddress, partialAmount);
  */
 async function withdrawCollateral(asset: string, amount: bigint) {
     // 1. 检查当前抵押物
-    const currentCollateral = await vaultRouter.getUserCollateral(userAddress, asset);
+    const [currentCollateral] = await userView.getUserCollateral(userAddress, asset);
     if (amount > currentCollateral) {
         throw new Error("提取金额超过抵押物");
     }
     
     // 2. 预览提取后的健康因子
-    const previewHF = await vaultRouter.previewWithdraw(userAddress, asset, amount);
+    const [previewHF] = await previewView.previewWithdraw(userAddress, asset, amount);
     const minHF = 11000; // 110%
     
     if (previewHF < minHF) {
@@ -419,7 +419,8 @@ async function withdrawCollateral(asset: string, amount: bigint) {
  * @returns 抵押物数量
  */
 async function getUserCollateral(user: string, asset: string): Promise<bigint> {
-    return await vaultRouter.getUserCollateral(user, asset);
+    const [collateral] = await userView.getUserCollateral(user, asset);
+    return collateral;
 }
 
 // 查询所有资产的抵押物
@@ -428,7 +429,7 @@ async function getAllUserCollateral(user: string) {
     const collateral: Record<string, bigint> = {};
     
     for (const asset of assets) {
-        collateral[asset] = await vaultRouter.getUserCollateral(user, asset);
+        [collateral[asset]] = await userView.getUserCollateral(user, asset);
     }
     
     return collateral;
@@ -445,7 +446,8 @@ async function getAllUserCollateral(user: string) {
  * @returns 债务数量
  */
 async function getUserDebt(user: string, asset: string): Promise<bigint> {
-    return await vaultRouter.getUserDebt(user, asset);
+    const [debt] = await userView.getUserDebt(user, asset);
+    return debt;
 }
 
 // 查询所有资产的债务
@@ -454,7 +456,7 @@ async function getAllUserDebt(user: string) {
     const debt: Record<string, bigint> = {};
     
     for (const asset of assets) {
-        debt[asset] = await vaultRouter.getUserDebt(user, asset);
+        [debt[asset]] = await userView.getUserDebt(user, asset);
     }
     
     return debt;
@@ -470,7 +472,8 @@ async function getAllUserDebt(user: string) {
  * @returns 总抵押物价值
  */
 async function getUserTotalCollateral(user: string): Promise<bigint> {
-    return await vaultRouter.getUserTotalCollateral(user);
+    const [totalCollateral] = await userView.getUserTotalCollateral(user);
+    return totalCollateral;
 }
 ```
 
@@ -483,7 +486,8 @@ async function getUserTotalCollateral(user: string): Promise<bigint> {
  * @returns 总债务价值
  */
 async function getUserTotalDebt(user: string): Promise<bigint> {
-    return await vaultRouter.getUserTotalDebt(user);
+    const [totalDebt] = await userView.getUserTotalDebt(user);
+    return totalDebt;
 }
 ```
 
@@ -497,13 +501,13 @@ async function getUserTotalDebt(user: string): Promise<bigint> {
  * @param user 用户地址
  * @returns {healthFactor, isValid}
  */
-async function getUserHealthFactor(user: string) {
+async function getUserHealthFactorWithMeta(user: string) {
     const healthView = await ethers.getContractAt(
         "HealthView",
         await getHealthViewAddress()
     );
     
-    const [healthFactor, isValid] = await healthView.getUserHealthFactor(user);
+    const [healthFactor, isValid] = await healthView.getUserHealthFactorWithMeta(user);
     
     return {
         healthFactor: healthFactor.toString(),
@@ -541,7 +545,8 @@ function getHealthFactorStatus(healthFactor: bigint): string {
  * @returns 最大可借金额
  */
 async function getMaxBorrowable(user: string, asset: string): Promise<bigint> {
-    return await vaultRouter.getMaxBorrowable(user, asset);
+    const [maxBorrowable] = await previewView.getMaxBorrowableWithMeta(user, asset);
+    return maxBorrowable;
 }
 ```
 
@@ -560,7 +565,8 @@ async function previewBorrow(
     asset: string,
     amount: bigint
 ): Promise<bigint> {
-    return await vaultRouter.previewBorrow(user, asset, amount);
+    const [newHF] = await previewView.previewBorrow(user, asset, 0n, 0n, amount);
+    return newHF;
 }
 
 /**
@@ -575,7 +581,8 @@ async function previewWithdraw(
     asset: string,
     amount: bigint
 ): Promise<bigint> {
-    return await vaultRouter.previewWithdraw(user, asset, amount);
+    const [hfAfter] = await previewView.previewWithdraw(user, asset, amount);
+    return hfAfter;
 }
 ```
 
@@ -622,7 +629,7 @@ async function batchDeposit(assets: string[], amounts: bigint[]) {
  */
 async function batchBorrow(assets: string[], amounts: bigint[]) {
     // 检查健康因子
-    const healthFactor = await vaultRouter.getUserHealthFactor(userAddress);
+    const [healthFactor, isValid] = await userView.getUserHealthFactor(userAddress);
     if (healthFactor < 11000n) {
         throw new Error("健康因子不足，无法借款");
     }
@@ -756,7 +763,7 @@ function monitorHealthFactor(
     
     const interval = setInterval(async () => {
         try {
-            const [healthFactor] = await vaultRouter.getUserHealthFactor(user);
+            const [healthFactor, isValid] = await userView.getUserHealthFactor(user);
             
             if (lastHF !== null && healthFactor !== lastHF) {
                 const status = getHealthFactorStatus(healthFactor);
@@ -791,7 +798,7 @@ const stopMonitoring = monitorHealthFactor(userAddress, (hf, status) => {
  * @param threshold 告警阈值（默认 110%）
  */
 async function setupRiskAlert(user: string, threshold: bigint = 11000n) {
-    const [healthFactor] = await vaultRouter.getUserHealthFactor(user);
+    const [healthFactor, isValid] = await userView.getUserHealthFactor(user);
     
     if (healthFactor < threshold) {
         // 发送告警通知
@@ -826,18 +833,18 @@ async function completeLendingFlow() {
     await depositCollateral(usdcAddress, depositAmount);
     
     // 2. 查询抵押物
-    const collateral = await vaultRouter.getUserCollateral(userAddress, usdcAddress);
+    const [collateral] = await userView.getUserCollateral(userAddress, usdcAddress);
     console.log(`   抵押物: ${ethers.formatUnits(collateral, 6)} USDC\n`);
     
     // 3. 查询可借额度
     console.log("2. 查询可借额度...");
-    const maxBorrowable = await vaultRouter.getMaxBorrowable(userAddress, wethAddress);
+    const [maxBorrowable] = await previewView.getMaxBorrowableWithMeta(userAddress, wethAddress);
     console.log(`   最大可借: ${ethers.formatUnits(maxBorrowable, 18)} WETH\n`);
     
     // 4. 预览借款
     console.log("3. 预览借款...");
     const borrowAmount = ethers.parseUnits("1", 18); // 1 WETH
-    const previewHF = await vaultRouter.previewBorrow(userAddress, wethAddress, borrowAmount);
+    const [previewHF] = await previewView.previewBorrow(userAddress, wethAddress, 0n, 0n, borrowAmount);
     console.log(`   预览健康因子: ${previewHF.toString()} (${Number(previewHF) / 100}%)\n`);
     
     // 5. 执行借款
@@ -852,9 +859,9 @@ async function completeLendingFlow() {
     
     // 6. 查询状态
     console.log("5. 查询当前状态...");
-    const [healthFactor] = await vaultRouter.getUserHealthFactor(userAddress);
-    const totalCollateral = await vaultRouter.getUserTotalCollateral(userAddress);
-    const totalDebt = await vaultRouter.getUserTotalDebt(userAddress);
+    const [healthFactor, isValid] = await userView.getUserHealthFactor(userAddress);
+    const [totalCollateral] = await userView.getUserTotalCollateral(userAddress);
+    const [totalDebt] = await userView.getUserTotalDebt(userAddress);
     
     console.log(`   健康因子: ${healthFactor.toString()} (${Number(healthFactor) / 100}%)`);
     console.log(`   总抵押物价值: $${ethers.formatUnits(totalCollateral, 8)}`);
@@ -908,7 +915,7 @@ export function useUserPosition(userAddress: string) {
                 const collateralAssets = await vaultRouter.getUserCollateralAssets(userAddress);
                 const collateral: Record<string, string> = {};
                 for (const asset of collateralAssets) {
-                    const amount = await vaultRouter.getUserCollateral(userAddress, asset);
+                    const [amount] = await userView.getUserCollateral(userAddress, asset);
                     collateral[asset] = ethers.formatUnits(amount, 6);
                 }
 
@@ -916,16 +923,16 @@ export function useUserPosition(userAddress: string) {
                 const debtAssets = await vaultRouter.getUserDebtAssets(userAddress);
                 const debt: Record<string, string> = {};
                 for (const asset of debtAssets) {
-                    const amount = await vaultRouter.getUserDebt(userAddress, asset);
+                    const [amount] = await userView.getUserDebt(userAddress, asset);
                     debt[asset] = ethers.formatUnits(amount, 6);
                 }
 
                 // 获取健康因子
-                const [healthFactor] = await vaultRouter.getUserHealthFactor(userAddress);
+                const [healthFactor, isValid] = await userView.getUserHealthFactor(userAddress);
                 
                 // 获取总价值
-                const totalCollateral = await vaultRouter.getUserTotalCollateral(userAddress);
-                const totalDebt = await vaultRouter.getUserTotalDebt(userAddress);
+                const [totalCollateral] = await userView.getUserTotalCollateral(userAddress);
+                const [totalDebt] = await userView.getUserTotalDebt(userAddress);
 
                 if (mounted) {
                     setPosition({
@@ -993,7 +1000,7 @@ export function useVaultOperations() {
             setError('');
             
             // 检查健康因子
-            const [healthFactor] = await vaultRouter.getUserHealthFactor(userAddress);
+            const [healthFactor, isValid] = await userView.getUserHealthFactor(userAddress);
             if (healthFactor < 11000n) {
                 throw new Error("健康因子不足，无法借款");
             }
@@ -1039,7 +1046,7 @@ export function useVaultOperations() {
             setError('');
             
             // 检查健康因子
-            const previewHF = await vaultRouter.previewWithdraw(userAddress, asset, amount);
+            const [previewHF] = await previewView.previewWithdraw(userAddress, asset, amount);
             if (previewHF < 11000n) {
                 throw new Error("提取后健康因子过低");
             }
@@ -1091,7 +1098,7 @@ async function preOperationCheck(operation: string, asset: string, amount: bigin
     
     // 3. 检查健康因子（借款/提取前）
     if (operation === "borrow" || operation === "withdraw") {
-        const [healthFactor] = await vaultRouter.getUserHealthFactor(userAddress);
+        const [healthFactor, isValid] = await userView.getUserHealthFactor(userAddress);
         const minHF = 11000n;
         
         if (healthFactor < minHF) {
@@ -1101,14 +1108,14 @@ async function preOperationCheck(operation: string, asset: string, amount: bigin
     
     // 4. 预览操作
     if (operation === "borrow") {
-        const previewHF = await vaultRouter.previewBorrow(userAddress, asset, amount);
+        const [previewHF] = await previewView.previewBorrow(userAddress, asset, 0n, 0n, amount);
         if (previewHF < 11000n) {
             throw new Error("借款后健康因子将低于安全阈值");
         }
     }
     
     if (operation === "withdraw") {
-        const previewHF = await vaultRouter.previewWithdraw(userAddress, asset, amount);
+        const [previewHF] = await previewView.previewWithdraw(userAddress, asset, amount);
         if (previewHF < 11000n) {
             throw new Error("提取后健康因子将低于安全阈值");
         }
@@ -1243,7 +1250,7 @@ if (!isAllowed) {
 **解决方案**：
 ```typescript
 // 1. 查询当前健康因子
-const [healthFactor] = await vaultRouter.getUserHealthFactor(userAddress);
+const [healthFactor, isValid] = await userView.getUserHealthFactor(userAddress);
 console.log(`当前健康因子: ${healthFactor}`);
 
 // 2. 增加抵押物
@@ -1262,7 +1269,7 @@ await vaultCore.borrow(assetAddress, reducedAmount);
 **解决方案**：
 ```typescript
 // 1. 查询当前抵押物
-const collateral = await vaultRouter.getUserCollateral(userAddress, assetAddress);
+const [collateral] = await userView.getUserCollateral(userAddress, assetAddress);
 console.log(`当前抵押物: ${ethers.formatUnits(collateral, decimals)}`);
 
 // 2. 调整提取金额
@@ -1279,7 +1286,7 @@ await vaultCore.withdraw(assetAddress, withdrawAmount);
 // 1. 检查余额
 const erc20 = await ethers.getContractAt("IERC20", assetAddress);
 const balance = await erc20.balanceOf(userAddress);
-const debt = await vaultRouter.getUserDebt(userAddress, assetAddress);
+const [debt] = await userView.getUserDebt(userAddress, assetAddress);
 
 console.log(`余额: ${ethers.formatUnits(balance, decimals)}`);
 console.log(`债务: ${ethers.formatUnits(debt, decimals)}`);
@@ -1303,25 +1310,25 @@ if (allowance < debt) {
 
 **排查步骤**：
 ```typescript
-// 1. 检查价格数据
-const priceOracle = await getPriceOracle();
-const [price, timestamp] = await priceOracle.getPrice(assetAddress);
-const isValid = await priceOracle.isPriceValid(assetAddress);
+// 1. 检查价格数据（View 层）
+const valuationOracleView = await getValuationOracleView();
+const [price, blockNumber] = await valuationOracleView.getAssetPrice(assetAddress);
+const [isValid, validTs] = await valuationOracleView.isPriceValid(assetAddress);
 
 if (!isValid) {
     console.error("价格数据无效或已过期");
 }
 
 // 2. 检查抵押物和债务
-const collateral = await vaultRouter.getUserCollateral(userAddress, assetAddress);
-const debt = await vaultRouter.getUserDebt(userAddress, assetAddress);
+const [collateral] = await userView.getUserCollateral(userAddress, assetAddress);
+const [debt] = await userView.getUserDebt(userAddress, assetAddress);
 
 console.log(`抵押物: ${collateral}`);
 console.log(`债务: ${debt}`);
 
 // 3. 手动计算健康因子
-const collateralValue = await vaultRouter.getUserTotalCollateral(userAddress);
-const debtValue = await vaultRouter.getUserTotalDebt(userAddress);
+const [collateralValue] = await userView.getUserTotalCollateral(userAddress);
+const [debtValue] = await userView.getUserTotalDebt(userAddress);
 const manualHF = (collateralValue * 10000n) / debtValue;
 
 console.log(`手动计算的健康因子: ${manualHF}`);

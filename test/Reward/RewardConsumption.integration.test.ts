@@ -118,7 +118,7 @@ describe('RewardConsumption ↔ RewardCore ↔ RewardPoints 集成（最小用�
       await acm.grantRole(ACTION_SET_PARAMETER, await governance.getAddress());
     }
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')), await acm.getAddress());
-    await featureUnlock.updateConfig(ServiceLevel.Basic, ethers.parseUnits('5', 18), 30 * 24 * 3600, true);
+    await featureUnlock.updateConfig(ServiceLevel.Basic, ethers.parseUnits('5', 18), (30 * 24 * 3600) / 2, true);
     // 将 FeatureUnlockConfig 注册到 ModuleKeys.KEY_FEATURE_UNLOCK_CONFIG
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('FEATURE_UNLOCK_CONFIG')), await featureUnlock.getAddress());
 

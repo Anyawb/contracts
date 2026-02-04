@@ -15,8 +15,8 @@ import {
     InvalidCaller,
     ExternalModuleRevertedRaw
 } from "../errors/StandardErrors.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 
@@ -56,7 +56,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     /// @notice 入口收紧引导错误（用于提示外部调用者应通过 RewardManager 调用）
     error RewardManagerCore__UseRewardManagerEntry();
     /// @notice DEPRECATED：检测到直接调用核心入口，将被拒绝
-    event DeprecatedDirectEntryAttempt(address indexed caller, uint256 timestamp);
+    event DeprecatedDirectEntryAttempt(address indexed caller, uint256 blockNumber);
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
@@ -85,17 +85,17 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     /// @notice 动态奖励参数
     uint256 private _dynamicRewardThreshold; // 触发动态奖励的阈值
     uint256 private _dynamicRewardMultiplier; // 动态奖励倍数 (BPS)
-    uint256 private _lastRewardResetTime; // 上次重置时间
+    uint256 private _lastRewardResetTime; // 上次重置区块号
     
     /// @notice 积分缓存系统
     struct PointCache {
         uint256 points;
-        uint256 timestamp;
+        uint256 blockNumber;
         bool isValid;
     }
     
     mapping(address => PointCache) private _pointCache;
-    uint256 private _cacheExpirationTime; // 缓存过期时间
+    uint256 private _cacheExpirationBlocks; // 缓存过期时间（区块数）
     
     /// @notice 批量操作统计
     uint256 private _totalBatchOperations;
@@ -121,8 +121,8 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     mapping(uint256 => address) private _lockedUserByOrderId;
     /// @dev 每个 orderId 的 maturity（用于提前/逾期判定与审计）
     mapping(uint256 => uint256) private _lockedMaturityByOrderId;
-    /// @notice 按期窗口（秒），默认 24 小时
-    uint256 private _onTimeWindow;
+    /// @notice 按期窗口（区块数），默认 24 小时
+    uint256 private _onTimeWindowBlocks;
     /// @notice 提前还款扣罚（BPS）默认 3% = 300
     uint256 private _earlyPenaltyBps;
     /// @notice 逾期还款扣罚（BPS）默认 5% = 500
@@ -142,7 +142,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         uint256 earlyRepayBonus,
         uint256 basePointPerEth,
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 用户等级更新事件
@@ -152,7 +152,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         uint8 oldLevel,
         uint8 newLevel,
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 动态奖励参数更新事件
@@ -161,7 +161,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         uint256 threshold,
         uint256 multiplier,
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 缓存参数更新事件
@@ -169,7 +169,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         bytes32 indexed actionKey,
         uint256 expirationTime,
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 惩罚积分扣除事件
@@ -179,7 +179,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         uint256 points,
         uint256 remainingDebt,
         address indexed deductedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 批量操作完成事件
@@ -188,7 +188,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         uint256 totalUsers,
         uint256 totalPoints,
         address indexed operator,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 初始化
@@ -217,7 +217,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         // 初始化动态奖励参数
         _dynamicRewardThreshold = 1000e18; // 1000积分阈值
         _dynamicRewardMultiplier = 12000; // 1.2x倍数
-        _lastRewardResetTime = block.timestamp;
+        _lastRewardResetTime = block.number;
         
         // 设置默认健康因子奖励为5%（500 BPS）
         if (_earlyRepayBonus == 0) {
@@ -225,9 +225,9 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         }
         
         // 初始化缓存过期时间
-        _cacheExpirationTime = 1 hours;
+        _cacheExpirationBlocks = 1 hours / 2 seconds;
         // 锁定/扣罚默认参数
-        _onTimeWindow = 1 days;
+        _onTimeWindowBlocks = 1 days / 2 seconds;
         // 与 Reward-System-Usage-Guide 对齐：提前还款不处罚；逾期默认 5%
         _earlyPenaltyBps = 0;
         _latePenaltyBps = 500;
@@ -266,7 +266,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) {
             // 使用自定义错误进行 DEPRECATED 引导，提示调用方改为通过 RewardManager
-            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.number);
             revert RewardManagerCore__UseRewardManagerEntry();
         }
         
@@ -288,7 +288,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             _eligibleLoanCount[user] += 1;
             _lockedPoints[user] += points;
             // 借款时以 duration 推导 maturity：取“最近一次”即可
-            _lockedMaturity[user] = block.timestamp + duration;
+            _lockedMaturity[user] = block.number + duration;
             return;
         }
 
@@ -309,7 +309,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                             debt,
                             0,
                             msg.sender,
-                            block.timestamp
+                            block.number
                         );
                     } else {
                         _penaltyLedger[user] = debt - toMint;
@@ -319,7 +319,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                             toMint,
                             _penaltyLedger[user],
                             msg.sender,
-                            block.timestamp
+                            block.number
                         );
                         toMint = 0;
                     }
@@ -327,7 +327,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
 
                 if (toMint > 0) {
                     try _getRewardToken().mintPoints(user, toMint) {
-                        emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
+                        emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.number);
                         _tryPushRewardEarned(user, toMint, "OnTimeRelease");
                     } catch {
                         revert ExternalModuleRevertedRaw("RewardPoints", "");
@@ -350,9 +350,9 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             uint256 m = _lockedMaturity[user];
             _lockedMaturity[user] = 0;
 
-            // 判定提前/逾期：按当前时间与 maturity 比较（容忍窗口）
-            uint256 nowTs = block.timestamp;
-            bool isEarly = (nowTs + _onTimeWindow < m);
+            // 判定提前/逾期：按当前区块与 maturity 比较（容忍窗口）
+            uint256 nowBlock = block.number;
+            bool isEarly = (nowBlock + _onTimeWindowBlocks < m);
             // 与使用指南对齐：提前还款不处罚（bps=0）；仅逾期按 latePenaltyBps 扣罚
             uint256 bps = isEarly ? 0 : _latePenaltyBps;
             if (bps > 0) {
@@ -369,7 +369,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                         0,
                         _penaltyLedger[user],
                         msg.sender,
-                        block.timestamp
+                        block.number
                     );
                     _tryPushPenaltyLedger(user, _penaltyLedger[user]);
                 }
@@ -390,7 +390,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     ) external onlyValidRegistry nonReentrant {
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) {
-            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.number);
             revert RewardManagerCore__UseRewardManagerEntry();
         }
 
@@ -401,6 +401,8 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         if (outcome == 0) {
             if (orderId == 0 && _lockedPointsByOrderId[orderId] != 0) {
                 // orderId=0 在本地测试可能存在；不做特殊处理，仅保证幂等
+                    uint256 noop = 0;
+                    noop;
             }
             if (_lockedPointsByOrderId[orderId] != 0) {
                 // 幂等：同一订单重复回调忽略
@@ -454,7 +456,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                         debt,
                         0,
                         msg.sender,
-                        block.timestamp
+                        block.number
                     );
                     _tryPushPenaltyLedger(user, 0);
                 } else {
@@ -465,7 +467,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                         toMint,
                         _penaltyLedger[user],
                         msg.sender,
-                        block.timestamp
+                        block.number
                     );
                     _tryPushPenaltyLedger(user, _penaltyLedger[user]);
                     toMint = 0;
@@ -474,7 +476,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
 
             if (toMint > 0) {
                 try _getRewardToken().mintPoints(user, toMint) {
-                    emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
+                    emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.number);
                     _tryPushRewardEarned(user, toMint, "OnTimeRelease");
                 } catch {
                     revert ExternalModuleRevertedRaw("RewardPoints", "");
@@ -509,7 +511,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                     0,
                     _penaltyLedger[user],
                     msg.sender,
-                    block.timestamp
+                    block.number
                 );
                 _tryPushPenaltyLedger(user, _penaltyLedger[user]);
             }
@@ -534,7 +536,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) {
             // 使用自定义错误进行 DEPRECATED 引导，提示调用方改为通过 RewardManager
-            emit DeprecatedDirectEntryAttempt(msg.sender, block.timestamp);
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.number);
             revert RewardManagerCore__UseRewardManagerEntry();
         }
         
@@ -564,7 +566,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                 uint256 points = 1e18;
                 _eligibleLoanCount[user] += 1;
                 _lockedPoints[user] += points;
-                _lockedMaturity[user] = block.timestamp + duration;
+                _lockedMaturity[user] = block.number + duration;
                 totalPoints += points;
                 continue;
             }
@@ -587,7 +589,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                             debt,
                             0,
                             msg.sender,
-                            block.timestamp
+                            block.number
                         );
                         _tryPushPenaltyLedger(user, 0);
                     } else {
@@ -598,7 +600,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                             toMint,
                             _penaltyLedger[user],
                             msg.sender,
-                            block.timestamp
+                            block.number
                         );
                         _tryPushPenaltyLedger(user, _penaltyLedger[user]);
                         toMint = 0;
@@ -607,7 +609,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
 
                 if (toMint > 0) {
                     try _getRewardToken().mintPoints(user, toMint) {
-                        emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.timestamp);
+                        emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.number);
                         _tryPushRewardEarned(user, toMint, "OnTimeRelease");
                     } catch {
                         revert ExternalModuleRevertedRaw("RewardPoints", "");
@@ -629,8 +631,8 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             uint256 m = _lockedMaturity[user];
             _lockedMaturity[user] = 0;
 
-            uint256 nowTs = block.timestamp;
-            bool isEarly = (nowTs + _onTimeWindow < m);
+            uint256 nowBlock = block.number;
+            bool isEarly = (nowBlock + _onTimeWindowBlocks < m);
             uint256 bps = isEarly ? 0 : _latePenaltyBps;
             if (bps > 0) {
                 uint256 penalty = (lockedPoints * bps) / 10000;
@@ -644,7 +646,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                         0,
                         _penaltyLedger[user],
                         msg.sender,
-                        block.timestamp
+                        block.number
                     );
                     _tryPushPenaltyLedger(user, _penaltyLedger[user]);
                 }
@@ -658,7 +660,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             users.length,
             totalPoints,
             msg.sender,
-            block.timestamp
+            block.number
         );
         _tryPushSystemStats(_totalBatchOperations, _totalCachedRewards);
     }
@@ -695,13 +697,13 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         } catch {
             // 如果积分不足，记录到惩罚账本
             _penaltyLedger[user] += points;
-            emit PenaltyPointsDeducted(
+                emit PenaltyPointsDeducted(
                 ActionKeys.ACTION_LIQUIDATE,
                 user,
                 0,
                 _penaltyLedger[user],
                 msg.sender,
-                block.timestamp
+                    block.number
             );
             _tryPushPenaltyLedger(user, _penaltyLedger[user]);
         }
@@ -738,15 +740,15 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             bonus,
             baseEth,
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
-    /// @notice 设置按期窗口（秒）
+    /// @notice 设置按期窗口（区块数）
     function setOnTimeWindow(uint256 newWindow) external onlyValidRegistry {
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) revert MissingRole();
-        _onTimeWindow = newWindow;
+        _onTimeWindowBlocks = newWindow;
     }
 
     /// @notice 设置提前/逾期扣罚（BPS）
@@ -778,7 +780,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             oldLevel,
             newLevel,
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -816,12 +818,12 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             newThreshold,
             newMultiplier,
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
     /// @notice 更新缓存过期时间
-    /// @param newExpirationTime 过期时间 (秒)
+    /// @param newExpirationTime 过期时间（区块数）
     function updateCacheExpirationTime(uint256 newExpirationTime) external onlyValidRegistry {
         // 检查调用者权限 - 只允许 RewardManager 调用
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
@@ -829,13 +831,13 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             revert MissingRole();
         }
         
-        _cacheExpirationTime = newExpirationTime;
+        _cacheExpirationBlocks = newExpirationTime;
         
         emit CacheParametersUpdated(
             ActionKeys.ACTION_SET_PARAMETER,
             newExpirationTime,
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -859,7 +861,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             revert MissingRole();
         }
         
-        _lastRewardResetTime = block.timestamp;
+        _lastRewardResetTime = block.number;
     }
 
     /// @notice 设置健康因子奖励
@@ -911,11 +913,11 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserCache(user) 查询。
     /// @param user 用户地址
     /// @return points 缓存积分
-    /// @return timestamp 缓存时间戳
+    /// @return blockNumber 缓存区块号（blockNumber）
     /// @return isValid 是否有效
-    function getUserCache(address user) external view onlyAllowedReader returns (uint256 points, uint256 timestamp, bool isValid) {
+    function getUserCache(address user) external view onlyAllowedReader returns (uint256 points, uint256 blockNumber, bool isValid) {
         PointCache storage cache = _pointCache[user];
-        return (cache.points, cache.timestamp, cache.isValid);
+        return (cache.points, cache.blockNumber, cache.isValid);
     }
 
     /// @notice 查询积分计算参数
@@ -937,7 +939,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     /// @notice 查询缓存过期时间
     /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getCacheExpirationTime() 查询。
     function getCacheExpirationTime() external view onlyAllowedReader returns (uint256) {
-        return _cacheExpirationTime;
+        return _cacheExpirationBlocks;
     }
 
     /// @notice 查询系统统计（批量操作与缓存命中次数）
@@ -984,7 +986,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     }
     /// @notice 计算示例积分（用于测试和验证）
     /// @param amount 借款金额 (USDT, 6位小数)
-    /// @param duration 借款期限 (秒)
+    /// @param duration 借款期限（区块数）
     /// @param hfHighEnough 健康因子是否足够
     /// @return basePoints 基础积分
     /// @return bonus 奖励积分
@@ -1007,15 +1009,15 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     /// @dev 计算积分（带缓存）
     function _calculatePointsWithCache(address user, uint256 amount, uint256 duration, bool hfHighEnough) internal returns (uint256) {
         PointCache storage cache = _pointCache[user];
-        if (cache.isValid && block.timestamp < cache.timestamp + _cacheExpirationTime) {
+        if (cache.isValid && block.number < cache.blockNumber + _cacheExpirationBlocks) {
             _totalCachedRewards++;
             return cache.points;
         }
         uint256 points = _calculatePoints(user, amount, duration, hfHighEnough);
         cache.points = points;
-        cache.timestamp = block.timestamp;
+        cache.blockNumber = block.number;
         cache.isValid = true;
-        emit RewardEvents.PerformanceMonitor("PointCacheUpdated", points, block.timestamp);
+        emit RewardEvents.PerformanceMonitor("PointCacheUpdated", points, block.number);
         return points;
     }
 
@@ -1057,7 +1059,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
 
     /// @dev 更新用户活跃度
     function _updateUserActivity(address user, uint256 amount) internal {
-        _userLastActivity[user] = block.timestamp;
+        _userLastActivity[user] = block.number;
         _userTotalLoans[user]++;
         _userTotalVolume[user] += amount;
         _autoUpgradeUserLevel(user);
@@ -1088,9 +1090,9 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                 currentLevel,
                 newLevel,
                 address(this),
-                block.timestamp
+                block.number
             );
-            emit RewardEvents.PerformanceMonitor("UserLevelUpgraded", newLevel, block.timestamp);
+            emit RewardEvents.PerformanceMonitor("UserLevelUpgraded", newLevel, block.number);
             _tryPushUserLevel(user, newLevel);
         }
     }

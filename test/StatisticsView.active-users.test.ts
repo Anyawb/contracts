@@ -33,29 +33,29 @@ describe('StatisticsView – 活跃用户与全局快照', function () {
   it('当仓位>0 视为活跃；归零后不活跃', async function () {
     const { stats, user } = await deployFixture();
 
-    let snap = await stats.getGlobalSnapshot();
+    let snap = (await stats.getGlobalSnapshotWithMeta())[0];
     expect(snap.activeUsers).to.equal(0n);
     expect(snap.totalCollateral).to.equal(0n);
     expect(snap.totalDebt).to.equal(0n);
 
     await stats.pushUserStatsUpdate(await user.getAddress(), ethers.parseUnits('100', 18), 0n, 0n, 0n);
-    snap = await stats.getGlobalSnapshot();
+    snap = (await stats.getGlobalSnapshotWithMeta())[0];
     expect(snap.totalCollateral).to.equal(ethers.parseUnits('100', 18));
     expect(snap.activeUsers).to.equal(1n);
 
     await stats.pushUserStatsUpdate(await user.getAddress(), 0n, ethers.parseUnits('100', 18), 0n, 0n);
-    snap = await stats.getGlobalSnapshot();
+    snap = (await stats.getGlobalSnapshotWithMeta())[0];
     expect(snap.totalCollateral).to.equal(0n);
     expect(snap.totalDebt).to.equal(0n);
     expect(snap.activeUsers).to.equal(0n);
 
     await stats.pushUserStatsUpdate(await user.getAddress(), 0n, 0n, ethers.parseUnits('50', 18), 0n);
-    snap = await stats.getGlobalSnapshot();
+    snap = (await stats.getGlobalSnapshotWithMeta())[0];
     expect(snap.totalDebt).to.equal(ethers.parseUnits('50', 18));
     expect(snap.activeUsers).to.equal(1n);
 
     await stats.pushUserStatsUpdate(await user.getAddress(), 0n, 0n, 0n, ethers.parseUnits('50', 18));
-    snap = await stats.getGlobalSnapshot();
+    snap = (await stats.getGlobalSnapshotWithMeta())[0];
     expect(snap.totalDebt).to.equal(0n);
     expect(snap.activeUsers).to.equal(0n);
 

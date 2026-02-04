@@ -54,7 +54,7 @@ describe('LoanNFT – ACM 集成测试', function () {
     
     // 部署 MockERC20 用于测试
     const MockERC20Factory = await ethers.getContractFactory('MockERC20');
-    const mockToken = await MockERC20Factory.deploy('Mock USDC', 'USDC', 6);
+    const mockToken = await MockERC20Factory.deploy('Mock USDC', 'USDC', 6, ethers.parseUnits('1000000', 6));
     await mockToken.waitForDeployment();
     
     // 注册 ACM 到 Registry，符合合约新的地址解析路径

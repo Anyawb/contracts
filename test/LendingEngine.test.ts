@@ -84,7 +84,7 @@ describe('LendingEngine – 贷款引擎测试', function () {
     await acm.grantRole(ACTION_BORROW, await lendingEngine.getAddress());
 
     // Token for repay tests (if needed later)
-    const mockToken = await (await ethers.getContractFactory('MockERC20')).deploy('Mock Token', 'MTK', ethers.parseEther('1000000'));
+    const mockToken = await (await ethers.getContractFactory('MockERC20')).deploy('Mock Token', 'MTK', 18, ethers.parseEther('1000000'));
     await mockToken.waitForDeployment();
     await mockToken.transfer(alice.address, ethers.parseEther('1000'));
     await mockToken.transfer(bob.address, ethers.parseEther('1000'));
@@ -96,7 +96,7 @@ describe('LendingEngine – 贷款引擎测试', function () {
   describe('初始化测试', function () {
     it('应该正确初始化代理合约并写入 registry', async function () {
       const { lendingEngine, registry } = await loadFixture(deployFixture);
-      expect(await lendingEngine._getRegistryForView()).to.equal(await registry.getAddress());
+      expect(await lendingEngine.getRegistryForView()).to.equal(await registry.getAddress());
     });
 
     it('应该拒绝重复初始化', async function () {
@@ -217,15 +217,15 @@ describe('LendingEngine – 贷款引擎测试', function () {
     it('应该正确设置匹配引擎角色', async function () {
       const { lendingEngine, acm, alice } = await loadFixture(deployFixture);
       await acm.grantRole(ACTION_ORDER_CREATE, alice.address);
-      expect(await lendingEngine._isMatchEngineForView(alice.address)).to.equal(true);
+      expect(await lendingEngine.isMatchEngineForView(alice.address)).to.equal(true);
 
       await acm.revokeRole(ACTION_ORDER_CREATE, alice.address);
-      expect(await lendingEngine._isMatchEngineForView(alice.address)).to.equal(false);
+      expect(await lendingEngine.isMatchEngineForView(alice.address)).to.equal(false);
     });
 
     it('应该正确查询贷款订单信息', async function () {
       const { lendingEngine, governance } = await loadFixture(deployFixture);
-      const order = await lendingEngine.connect(governance)._getLoanOrderForView(0);
+      const order = await lendingEngine.connect(governance).getLoanOrderForView(0);
       expect(order.borrower).to.equal(ZERO_ADDRESS);
       expect(order.principal).to.equal(0n);
     });

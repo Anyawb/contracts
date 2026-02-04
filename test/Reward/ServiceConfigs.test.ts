@@ -28,6 +28,8 @@ import type {
 } from '../../types/contracts';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+const BLOCKS_PER_DAY = 43_200n;
+const DURATION_30_DAYS = 30n * BLOCKS_PER_DAY;
 
 describe('ServiceConfigs – 服务配置合约测试', function () {
   async function deployFixture() {
@@ -85,7 +87,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         expect(await featureUnlockProxy.getServiceType()).to.equal(2); // FeatureUnlock
         
         // 验证冷却期
-        expect(await featureUnlockProxy.getCooldown()).to.equal(7 * 24 * 60 * 60); // 7 days
+        expect(await featureUnlockProxy.getCooldown()).to.equal((7 * 24 * 60 * 60) / 2); // 7 days (blocks)
       });
       
       it('应正确初始化所有服务等级配置', async function () {
@@ -94,7 +96,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 验证 Basic 等级
         const basicConfig = await featureUnlockProxy.getConfig(0); // ServiceLevel.Basic
         expect(basicConfig.price).to.equal(ethers.parseUnits('200', 18));
-        expect(basicConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(basicConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
         expect(basicConfig.isActive).to.be.true;
         expect(basicConfig.level).to.equal(0);
         expect(basicConfig.description).to.equal('Custom interest rate calculator');
@@ -102,7 +104,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 验证 Standard 等级
         const standardConfig = await featureUnlockProxy.getConfig(1); // ServiceLevel.Standard
         expect(standardConfig.price).to.equal(ethers.parseUnits('800', 18));
-        expect(standardConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(standardConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
         expect(standardConfig.isActive).to.be.true;
         expect(standardConfig.level).to.equal(1);
         expect(standardConfig.description).to.equal('Batch operation tools');
@@ -110,7 +112,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 验证 Premium 等级
         const premiumConfig = await featureUnlockProxy.getConfig(2); // ServiceLevel.Premium
         expect(premiumConfig.price).to.equal(ethers.parseUnits('1500', 18));
-        expect(premiumConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(premiumConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
         expect(premiumConfig.isActive).to.be.true;
         expect(premiumConfig.level).to.equal(2);
         expect(premiumConfig.description).to.equal('Advanced risk management tools');
@@ -118,7 +120,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 验证 VIP 等级
         const vipConfig = await featureUnlockProxy.getConfig(3); // ServiceLevel.VIP
         expect(vipConfig.price).to.equal(ethers.parseUnits('3000', 18));
-        expect(vipConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(vipConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
         expect(vipConfig.isActive).to.be.true;
         expect(vipConfig.level).to.equal(3);
         expect(vipConfig.description).to.equal('Full feature unlock');
@@ -130,7 +132,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const { featureUnlockProxy, alice } = await deployFixture();
         
         await expect(
-          featureUnlockProxy.connect(alice).updateConfig(0, ethers.parseUnits('500', 18), 60 * 60 * 24 * 30, true)
+          featureUnlockProxy.connect(alice).updateConfig(0, ethers.parseUnits('500', 18), (60 * 60 * 24 * 30) / 2, true)
         ).to.be.reverted;
       });
       
@@ -138,7 +140,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const { featureUnlockProxy, governance } = await deployFixture();
         
         const newPrice = ethers.parseUnits('500', 18);
-        const newDuration = 60 * 24 * 60 * 60; // 60 days
+        const newDuration = (60 * 24 * 60 * 60) / 2; // 60 days (blocks)
         
         await expect(
           featureUnlockProxy.connect(governance).updateConfig(0, newPrice, newDuration, true)
@@ -155,14 +157,14 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const { featureUnlockProxy, alice } = await deployFixture();
         
         await expect(
-          featureUnlockProxy.connect(alice).setCooldown(14 * 24 * 60 * 60)
+          featureUnlockProxy.connect(alice).setCooldown((14 * 24 * 60 * 60) / 2)
         ).to.be.reverted;
       });
       
       it('授权用户应能设置冷却期', async function () {
         const { featureUnlockProxy, governance } = await deployFixture();
         
-        const newCooldown = 14 * 24 * 60 * 60; // 14 days
+        const newCooldown = (14 * 24 * 60 * 60) / 2; // 14 days (blocks)
         
         await expect(
           featureUnlockProxy.connect(governance).setCooldown(newCooldown)
@@ -178,7 +180,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const { featureUnlockProxy, governance } = await deployFixture();
         
         await expect(
-          featureUnlockProxy.connect(governance).updateConfig(0, 0, 30 * 24 * 60 * 60, true)
+          featureUnlockProxy.connect(governance).updateConfig(0, 0, (30 * 24 * 60 * 60) / 2, true)
         ).to.not.be.reverted;
         
         const config = await featureUnlockProxy.getConfig(0);
@@ -202,7 +204,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const largePrice = ethers.parseUnits('1000000', 18);
         
         await expect(
-          featureUnlockProxy.connect(governance).updateConfig(0, largePrice, 30 * 24 * 60 * 60, true)
+          featureUnlockProxy.connect(governance).updateConfig(0, largePrice, (30 * 24 * 60 * 60) / 2, true)
         ).to.not.be.reverted;
         
         const config = await featureUnlockProxy.getConfig(0);
@@ -212,7 +214,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
       it('应能处理长时间持续时间配置', async function () {
         const { featureUnlockProxy, governance } = await deployFixture();
         
-        const longDuration = 365 * 24 * 60 * 60; // 1 year
+        const longDuration = (365 * 24 * 60 * 60) / 2; // 1 year (blocks)
         
         await expect(
           featureUnlockProxy.connect(governance).updateConfig(0, ethers.parseUnits('300', 18), longDuration, true)
@@ -266,7 +268,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         expect(await governanceAccessProxy.getServiceType()).to.equal(3); // GovernanceAccess
         
         // 验证冷却期
-        expect(await governanceAccessProxy.getCooldown()).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(await governanceAccessProxy.getCooldown()).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
       });
       
       it('应正确初始化所有服务等级配置', async function () {
@@ -275,7 +277,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 验证 Basic 等级
         const basicConfig = await governanceAccessProxy.getConfig(0); // ServiceLevel.Basic
         expect(basicConfig.price).to.equal(ethers.parseUnits('200', 18));
-        expect(basicConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(basicConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
         expect(basicConfig.isActive).to.be.true;
         expect(basicConfig.level).to.equal(0);
         expect(basicConfig.description).to.equal('Basic voting rights');
@@ -283,7 +285,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 验证 Standard 等级
         const standardConfig = await governanceAccessProxy.getConfig(1); // ServiceLevel.Standard
         expect(standardConfig.price).to.equal(ethers.parseUnits('1000', 18));
-        expect(standardConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(standardConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
         expect(standardConfig.isActive).to.be.true;
         expect(standardConfig.level).to.equal(1);
         expect(standardConfig.description).to.equal('Proposal creation rights');
@@ -291,7 +293,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 验证 Premium 等级
         const premiumConfig = await governanceAccessProxy.getConfig(2); // ServiceLevel.Premium
         expect(premiumConfig.price).to.equal(ethers.parseUnits('2500', 18));
-        expect(premiumConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(premiumConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
         expect(premiumConfig.isActive).to.be.true;
         expect(premiumConfig.level).to.equal(2);
         expect(premiumConfig.description).to.equal('Parameter adjustment suggestions');
@@ -299,7 +301,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 验证 VIP 等级
         const vipConfig = await governanceAccessProxy.getConfig(3); // ServiceLevel.VIP
         expect(vipConfig.price).to.equal(ethers.parseUnits('6000', 18));
-        expect(vipConfig.duration).to.equal(30 * 24 * 60 * 60); // 30 days
+        expect(vipConfig.duration).to.equal((30 * 24 * 60 * 60) / 2); // 30 days (blocks)
         expect(vipConfig.isActive).to.be.true;
         expect(vipConfig.level).to.equal(3);
         expect(vipConfig.description).to.equal('Core governance participation');
@@ -311,7 +313,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const { governanceAccessProxy, alice } = await deployFixture();
         
         await expect(
-          governanceAccessProxy.connect(alice).updateConfig(0, ethers.parseUnits('800', 18), 60 * 24 * 60 * 60, true)
+          governanceAccessProxy.connect(alice).updateConfig(0, ethers.parseUnits('800', 18), (60 * 24 * 60 * 60) / 2, true)
         ).to.be.reverted;
       });
       
@@ -319,7 +321,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const { governanceAccessProxy, governance } = await deployFixture();
         
         const newPrice = ethers.parseUnits('800', 18);
-        const newDuration = 60 * 24 * 60 * 60; // 60 days
+        const newDuration = (60 * 24 * 60 * 60) / 2; // 60 days (blocks)
         
         await expect(
           governanceAccessProxy.connect(governance).updateConfig(0, newPrice, newDuration, true)
@@ -336,14 +338,14 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const { governanceAccessProxy, alice } = await deployFixture();
         
         await expect(
-          governanceAccessProxy.connect(alice).setCooldown(14 * 24 * 60 * 60)
+          governanceAccessProxy.connect(alice).setCooldown((14 * 24 * 60 * 60) / 2)
         ).to.be.reverted;
       });
       
       it('授权用户应能设置冷却期', async function () {
         const { governanceAccessProxy, governance } = await deployFixture();
         
-        const newCooldown = 14 * 24 * 60 * 60; // 14 days
+        const newCooldown = (14 * 24 * 60 * 60) / 2; // 14 days (blocks)
         
         await expect(
           governanceAccessProxy.connect(governance).setCooldown(newCooldown)
@@ -359,7 +361,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const { governanceAccessProxy, governance } = await deployFixture();
         
         await expect(
-          governanceAccessProxy.connect(governance).updateConfig(0, 0, 30 * 24 * 60 * 60, true)
+          governanceAccessProxy.connect(governance).updateConfig(0, 0, (30 * 24 * 60 * 60) / 2, true)
         ).to.not.be.reverted;
         
         const config = await governanceAccessProxy.getConfig(0);
@@ -383,7 +385,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const largePrice = ethers.parseUnits('1000000', 18);
         
         await expect(
-          governanceAccessProxy.connect(governance).updateConfig(0, largePrice, 30 * 24 * 60 * 60, true)
+          governanceAccessProxy.connect(governance).updateConfig(0, largePrice, (30 * 24 * 60 * 60) / 2, true)
         ).to.not.be.reverted;
         
         const config = await governanceAccessProxy.getConfig(0);
@@ -393,7 +395,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
       it('应能处理长时间持续时间配置', async function () {
         const { governanceAccessProxy, governance } = await deployFixture();
         
-        const longDuration = 365 * 24 * 60 * 60; // 1 year
+        const longDuration = (365 * 24 * 60 * 60) / 2; // 1 year (blocks)
         
         await expect(
           governanceAccessProxy.connect(governance).updateConfig(0, ethers.parseUnits('500', 18), longDuration, true)
@@ -445,7 +447,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         // 这里测试重入防护，实际的重入攻击需要更复杂的合约
         // 主要验证合约使用了ReentrancyGuard
         await expect(
-          featureUnlockProxy.connect(governance).updateConfig(0, ethers.parseUnits('400', 18), 30 * 24 * 60 * 60, true)
+          featureUnlockProxy.connect(governance).updateConfig(0, ethers.parseUnits('400', 18), (30 * 24 * 60 * 60) / 2, true)
         ).to.not.be.reverted;
       });
     });
@@ -458,7 +460,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         const maxUint256 = ethers.MaxUint256;
         
         await expect(
-          featureUnlockProxy.connect(governance).updateConfig(0, maxUint256, 30 * 24 * 60 * 60, true)
+          featureUnlockProxy.connect(governance).updateConfig(0, maxUint256, (30 * 24 * 60 * 60) / 2, true)
         ).to.not.be.reverted;
         
         const config = await featureUnlockProxy.getConfig(0);
@@ -519,13 +521,13 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 2. 更新配置
         const newPrice = ethers.parseUnits('400', 18);
-        await featureUnlockProxy.connect(governance).updateConfig(0, newPrice, 30 * 24 * 60 * 60, true);
+        await featureUnlockProxy.connect(governance).updateConfig(0, newPrice, (30 * 24 * 60 * 60) / 2, true);
         
         config = await featureUnlockProxy.getConfig(0);
         expect(config.price).to.equal(newPrice);
         
         // 3. 更新冷却期
-        const newCooldown = 14 * 24 * 60 * 60;
+        const newCooldown = (14 * 24 * 60 * 60) / 2;
         await featureUnlockProxy.connect(governance).setCooldown(newCooldown);
         expect(await featureUnlockProxy.getCooldown()).to.equal(newCooldown);
         
@@ -535,7 +537,7 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         
         // 5. 更新治理访问配置
         const newGovPrice = ethers.parseUnits('600', 18);
-        await governanceAccessProxy.connect(governance).updateConfig(0, newGovPrice, 30 * 24 * 60 * 60, true);
+        await governanceAccessProxy.connect(governance).updateConfig(0, newGovPrice, (30 * 24 * 60 * 60) / 2, true);
         
         config = await governanceAccessProxy.getConfig(0);
         expect(config.price).to.equal(newGovPrice);
@@ -552,8 +554,8 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
         await acm.connect(governance).grantRole(setParameterRole, bob.address);
         
         // 并发更新不同等级
-        const tx1 = featureUnlockProxy.connect(alice).updateConfig(0, ethers.parseUnits('400', 18), 30 * 24 * 60 * 60, true);
-        const tx2 = featureUnlockProxy.connect(bob).updateConfig(1, ethers.parseUnits('900', 18), 30 * 24 * 60 * 60, true);
+        const tx1 = featureUnlockProxy.connect(alice).updateConfig(0, ethers.parseUnits('400', 18), DURATION_30_DAYS, true);
+        const tx2 = featureUnlockProxy.connect(bob).updateConfig(1, ethers.parseUnits('900', 18), DURATION_30_DAYS, true);
         
         await expect(Promise.all([tx1, tx2])).to.not.be.reverted;
         
@@ -569,6 +571,6 @@ describe('ServiceConfigs – 服务配置合约测试', function () {
 });
 
 // 辅助函数
-async function time(): Promise<number> {
-  return (await ethers.provider.getBlock('latest'))!.timestamp;
+async function time(): Promise<bigint> {
+  return BigInt(await ethers.provider.getBlockNumber());
 } 

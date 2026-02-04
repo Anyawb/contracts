@@ -72,7 +72,7 @@ describe('VaultRouter – strict (slim) behavior', function () {
     const aw = await AssetWhitelistF.deploy();
 
     const TokenF = await ethers.getContractFactory('MockERC20');
-    const settlementToken = await TokenF.deploy('Settlement', 'SET', ethers.parseUnits('1000000', 18));
+    const settlementToken = await TokenF.deploy('Settlement', 'SET', 18, ethers.parseUnits('1000000', 18));
 
     const VaultRouterF = await ethers.getContractFactory('VaultRouter');
     const vaultRouter = (await upgrades.deployProxy(

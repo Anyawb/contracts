@@ -9,7 +9,7 @@ const KEY_RISK_VIEW = ethers.keccak256(ethers.toUtf8Bytes('RISK_VIEW'));
 const KEY_PRICE_ORACLE = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
 const KEY_DEGRADATION_MONITOR = ethers.keccak256(ethers.toUtf8Bytes('DEGRADATION_MONITOR'));
 
-const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
+const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
 const ACTION_VIEW_PRICE_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_PRICE_DATA'));
 const ACTION_VIEW_SYSTEM_STATUS = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_SYSTEM_STATUS'));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
@@ -90,10 +90,10 @@ describe('BatchView', function () {
 
     // Grant roles
     await acm.grantRole(ACTION_ADMIN, admin.address);
-    await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
+    await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_PRICE_DATA, viewer.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_STATUS, viewer.address);
-    await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer2.address);
+    await acm.grantRole(ACTION_VIEW_USER_DATA, viewer2.address);
     await acm.grantRole(ACTION_VIEW_PRICE_DATA, viewer2.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_STATUS, viewer2.address);
 
@@ -153,9 +153,11 @@ describe('BatchView', function () {
       expect(items[0].user).to.equal(viewer.address);
       expect(items[0].healthFactor).to.equal(1500n);
       expect(items[0].isValid).to.equal(true);
+      expect(items[0].blockNumber).to.equal(0n);
       expect(items[1].user).to.equal(other.address);
       expect(items[1].healthFactor).to.equal(900n);
       expect(items[1].isValid).to.equal(false);
+      expect(items[1].blockNumber).to.equal(0n);
     });
 
     it('handles single user', async function () {
@@ -164,6 +166,7 @@ describe('BatchView', function () {
       expect(items.length).to.equal(1);
       expect(items[0].healthFactor).to.equal(1500n);
       expect(items[0].isValid).to.equal(true);
+      expect(items[0].blockNumber).to.equal(0n);
     });
 
     it('handles multiple users', async function () {
@@ -184,6 +187,7 @@ describe('BatchView', function () {
       expect(items[0].user).to.equal(ethers.ZeroAddress);
       expect(items[0].healthFactor).to.equal(0n);
       expect(items[0].isValid).to.equal(false);
+      expect(items[0].blockNumber).to.equal(0n);
     });
 
     it('handles maximum batch size', async function () {
@@ -210,10 +214,10 @@ describe('BatchView', function () {
       ).withArgs(101n, 100n);
     });
 
-    it('requires VIEW_RISK_DATA role', async function () {
+    it('requires VIEW_USER_DATA role', async function () {
       const { batchView, other, acm } = await loadFixture(deployFixture);
       await expect(batchView.connect(other).batchGetHealthFactors([other.address])).to.be.revertedWithCustomError(
-        acm,
+        batchView,
         'MissingRole',
       );
     });
@@ -226,6 +230,7 @@ describe('BatchView', function () {
       expect(items1[0].user).to.equal(items2[0].user);
       expect(items1[0].healthFactor).to.equal(items2[0].healthFactor);
       expect(items1[0].isValid).to.equal(items2[0].isValid);
+      expect(items1[0].blockNumber).to.equal(items2[0].blockNumber);
     });
   });
 
@@ -238,9 +243,13 @@ describe('BatchView', function () {
       expect(items[0].healthFactor).to.equal(1500n);
       expect(items[0].liquidatable).to.equal(false);
       expect(items[0].warningLevel).to.equal(0);
+      expect(items[0].isValid).to.equal(true);
+      expect(items[0].blockNumber).to.be.gt(0n);
       expect(items[1].user).to.equal(other.address);
       expect(items[1].liquidatable).to.equal(true);
       expect(items[1].warningLevel).to.equal(2);
+      expect(items[1].isValid).to.equal(true);
+      expect(items[1].blockNumber).to.be.gt(0n);
     });
 
     it('handles single user', async function () {
@@ -292,10 +301,10 @@ describe('BatchView', function () {
       ).withArgs(101n, 100n);
     });
 
-    it('requires VIEW_RISK_DATA role', async function () {
+    it('requires VIEW_USER_DATA role', async function () {
       const { batchView, other, acm } = await loadFixture(deployFixture);
       await expect(batchView.connect(other).batchGetRiskAssessments([other.address])).to.be.revertedWithCustomError(
-        acm,
+        batchView,
         'MissingRole',
       );
     });
@@ -400,8 +409,12 @@ describe('BatchView', function () {
       expect(stats.length).to.equal(2);
       expect(stats[0].isHealthy).to.equal(true);
       expect(stats[0].consecutiveFailures).to.equal(0);
+      expect(stats[0].isValid).to.equal(true);
+      expect(stats[0].blockNumber).to.equal(1234n);
       expect(stats[1].isHealthy).to.equal(false);
       expect(stats[1].consecutiveFailures).to.equal(3);
+      expect(stats[1].isValid).to.equal(true);
+      expect(stats[1].blockNumber).to.equal(5678n);
     });
 
     it('handles single module', async function () {
@@ -410,6 +423,7 @@ describe('BatchView', function () {
       const stats = await batchView.connect(viewer).batchGetModuleHealth(modules);
       expect(stats.length).to.equal(1);
       expect(stats[0].isHealthy).to.equal(true);
+      expect(stats[0].isValid).to.equal(true);
     });
 
     it('handles multiple modules', async function () {
@@ -429,6 +443,8 @@ describe('BatchView', function () {
       const modules = [ethers.ZeroAddress];
       const stats = await batchView.connect(viewer).batchGetModuleHealth(modules);
       expect(stats[0].module).to.equal(ethers.ZeroAddress);
+      expect(stats[0].isValid).to.equal(true);
+      expect(stats[0].blockNumber).to.equal(0n);
     });
 
     it('handles maximum batch size', async function () {
@@ -584,7 +600,7 @@ describe('BatchView', function () {
         kind: 'uups',
       });
 
-      await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
+      await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
 
       await expect(batchView.connect(viewer).batchGetHealthFactors([viewer.address])).to.be.revertedWith(
         'MockRegistry: module not found',
@@ -605,7 +621,7 @@ describe('BatchView', function () {
         kind: 'uups',
       });
 
-      await acm.grantRole(ACTION_VIEW_RISK_DATA, viewer.address);
+      await acm.grantRole(ACTION_VIEW_USER_DATA, viewer.address);
 
       await expect(batchView.connect(viewer).batchGetRiskAssessments([viewer.address])).to.be.revertedWith(
         'MockRegistry: module not found',
@@ -637,10 +653,11 @@ describe('BatchView', function () {
     it('batchGetHealthFactors matches individual queries', async function () {
       const { batchView, healthView, viewer } = await loadFixture(deployFixture);
       const batchItems = await batchView.connect(viewer).batchGetHealthFactors([viewer.address]);
-      const [directHf, directValid] = await healthView.getUserHealthFactor(viewer.address);
+      const [directHf, directValid, directTs] = await healthView.getUserHealthFactorWithMeta(viewer.address);
 
       expect(batchItems[0].healthFactor).to.equal(directHf);
       expect(batchItems[0].isValid).to.equal(directValid);
+      expect(batchItems[0].blockNumber).to.equal(directTs);
     });
 
     it('batchGetRiskAssessments matches individual queries', async function () {
@@ -651,6 +668,8 @@ describe('BatchView', function () {
       expect(batchItems[0].liquidatable).to.equal(directAssessment.liquidatable);
       expect(batchItems[0].healthFactor).to.equal(directAssessment.healthFactor);
       expect(batchItems[0].warningLevel).to.equal(directAssessment.warningLevel);
+      expect(batchItems[0].isValid).to.equal(directAssessment.isValid);
+      expect(batchItems[0].blockNumber).to.equal(directAssessment.blockNumber);
     });
 
     it('batchGetAssetPrices matches individual queries', async function () {

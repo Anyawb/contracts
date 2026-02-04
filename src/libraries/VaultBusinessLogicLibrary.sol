@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
 import { IGuaranteeFundManager } from "../interfaces/IGuaranteeFundManager.sol";
@@ -11,11 +11,11 @@ import { ActionKeys } from "../constants/ActionKeys.sol";
 import { GracefulDegradation } from "./GracefulDegradation.sol";
 
 /// @title VaultBusinessLogicLibrary
-/// @notice 业务逻辑库，提供VaultBusinessLogic的重复功能
-/// @dev 提取try/catch包装、批量操作、事件发出等重复逻辑
-/// @dev 支持优雅降级和错误处理
+/// @notice Business-logic helpers for VaultBusinessLogic (shared routines).
+/// @dev Extracts common try/catch wrappers, batch operations, and event emission.
+/// @dev Supports graceful degradation and error handling.
 /// @custom:security-contact security@example.com
-/// @notice 统计视图最小接口（由 StatisticsView 提供），用于推送用户统计更新
+/// @notice Minimal StatisticsView interface used for user stats pushes.
 interface IStatisticsViewMinimal {
     function pushUserStatsUpdate(
         address user,
@@ -26,7 +26,7 @@ interface IStatisticsViewMinimal {
     ) external;
 }
 
-/// @notice 统计视图最小接口（保证金聚合）
+/// @notice Minimal StatisticsView interface for guarantee aggregation.
 interface IStatisticsViewGuaranteeMinimal {
     function pushGuaranteeUpdate(
         address user,
@@ -40,15 +40,15 @@ library VaultBusinessLogicLibrary {
     using SafeERC20 for IERC20;
     using GracefulDegradation for *;
 
-    /* ============ Constants ============ */
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     uint256 private constant MAX_BATCH_SIZE = 50;
 
-    /* ============ Events ============ */
-    /// @notice 业务操作事件
-    /// @param operation 操作类型
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 金额
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    /// @notice Business operation event.
+    /// @param operation Operation label.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Amount.
     event BusinessOperation(
         string indexed operation,
         address indexed user,
@@ -56,13 +56,13 @@ library VaultBusinessLogicLibrary {
         uint256 amount
     );
 
-    // 已废弃：奖励相关事件与逻辑完全下沉至 LendingEngine（落账后触发）与 RewardManager 路径
+    // Deprecated: rewards are handled in LendingEngine/RewardManager after ledger updates.
 
-    /// @notice 优雅降级事件
-    /// @param asset 资产地址
-    /// @param reason 降级原因
-    /// @param fallbackValue 降级后的价值
-    /// @param usedFallback 是否使用了降级策略
+    /// @notice Graceful degradation event.
+    /// @param asset Asset address.
+    /// @param reason Degradation reason.
+    /// @param fallbackValue Fallback value used.
+    /// @param usedFallback Whether fallback strategy was used.
     event VaultBusinessLogicGracefulDegradation(
         address indexed asset,
         string reason,
@@ -70,24 +70,44 @@ library VaultBusinessLogicLibrary {
         bool usedFallback
     );
 
-    /// @notice 健康度检查事件
-    /// @param user 用户地址
-    /// @param healthFactor 健康度
-    /// @param isHealthy 是否健康
+    /// @notice Health factor check event.
+    /// @param user User address.
+    /// @param healthFactor Health factor.
+    /// @param isHealthy Whether healthy.
     event HealthFactorCheck(
         address indexed user,
         uint256 healthFactor,
         bool isHealthy
     );
 
-    /* ============ 安全调用函数 ============ */
+    /**
+     * @notice Canonical cache/view push failure event (V2) for offchain retry/audit.
+     * @dev This mirrors `src/Vault/CacheEvents.sol` (SSOT). Libraries cannot inherit interfaces, so we mirror the
+     *      signature here to allow emitting the same event from calling contracts.
+     */
+    event CacheUpdateFailedV2(
+        address indexed user,
+        address indexed asset,
+        bytes32 indexed requestId,
+        address viewAddr,
+        uint256 collateral,
+        uint256 debt,
+        bytes reason,
+        uint64 seq,
+        uint64 nextVersion
+    );
+
+    /*━━━━━━━━━━━━━━━ Safe Call Helpers ━━━━━━━━━━━━━━━*/
     
-    /// @notice 计算预计利息（年化利率bps + 天期）
-    /// @dev 纯计算，不读写状态，使用unchecked减少gas
-    /// @param principal 借款本金
-    /// @param annualRateBps 年化利率（bps，1e4=100%）
-    /// @param termDays 借款天数
-    /// @return interest 预计利息
+    /**
+     * @notice Calculate expected interest (annual bps + term days).
+     * @dev Pure computation; unchecked for gas efficiency.
+     *
+     * @param principal Principal amount.
+     * @param annualRateBps Annual rate in bps (10_000 = 100%).
+     * @param termDays Term length (days).
+     * @return interest Expected interest.
+     */
     function calculateExpectedInterest(
         uint256 principal,
         uint256 annualRateBps,
@@ -95,14 +115,14 @@ library VaultBusinessLogicLibrary {
     ) internal pure returns (uint256 interest) {
         unchecked {
             // interest = principal * annualRateBps/1e4 * termDays/365
-            // 为避免中途精度损失，按顺序进行整数除法
-            // 此处按业务口径：bps 与天期线性折算
             interest = (principal * annualRateBps * uint256(termDays)) / (365 * 1e4);
         }
     }
 
-    /// @notice 省gas版本：直接调用保证金锁定，不做try/catch降级
-    /// @dev 调用方需自行保证参数合法与权限正确
+    /**
+     * @notice Gas-optimized guarantee lock (no try/catch).
+     * @dev Caller must ensure parameter validity and permissions.
+     */
     function lockGuaranteeFast(
         address guaranteeManager,
         address user,
@@ -112,11 +132,13 @@ library VaultBusinessLogicLibrary {
         IGuaranteeFundManager(guaranteeManager).lockGuarantee(user, asset, amount);
     }
     
-    /// @notice 安全调用抵押物管理模块的存入功能
-    /// @param collateralManager 抵押物管理合约地址
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 存入金额
+    /**
+     * @notice Safely call CollateralManager.depositCollateral.
+     * @param collateralManager CollateralManager address.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Deposit amount.
+     */
     function safeDepositCollateral(
         address collateralManager,
         address user,
@@ -124,18 +146,21 @@ library VaultBusinessLogicLibrary {
         uint256 amount
     ) internal {
         try ICollateralManager(collateralManager).depositCollateral(user, asset, amount) {
-            // success
+            uint256 noop = 0;
+            noop;
         } catch (bytes memory lowLevelData) {
-            emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.number);
             revert ExternalModuleRevertedRaw("CollateralManager", lowLevelData);
         }
     }
 
-    /// @notice 安全调用抵押物管理模块的提取功能
-    /// @param collateralManager 抵押物管理合约地址
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 提取金额
+    /**
+     * @notice Safely call CollateralManager.withdrawCollateral.
+     * @param collateralManager CollateralManager address.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Withdraw amount.
+     */
     function safeWithdrawCollateral(
         address collateralManager,
         address user,
@@ -143,22 +168,25 @@ library VaultBusinessLogicLibrary {
         uint256 amount
     ) internal {
         try ICollateralManager(collateralManager).withdrawCollateral(user, asset, amount) {
-            // ok
+            uint256 noop = 0;
+            noop;
         } catch (bytes memory lowLevelData) {
-            emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.number);
             revert ExternalModuleRevertedRaw("CollateralManager", lowLevelData);
         }
     }
 
-    // 已删除：原业务层直写账本路径（safeRecordBorrow/safeRepay）
+    // Removed: legacy ledger write paths (safeRecordBorrow/safeRepay).
 
-    /// @notice 安全调用统计视图的用户统计更新功能
-    /// @param statsView 统计视图合约地址（StatisticsView）
-    /// @param user 用户地址
-    /// @param collateralAdd 增加的抵押物价值
-    /// @param collateralSub 减少的抵押物价值
-    /// @param debtAdd 增加的债务价值
-    /// @param debtSub 减少的债务价值
+    /**
+     * @notice Safely push user stats updates to StatisticsView.
+     * @param statsView StatisticsView address.
+     * @param user User address.
+     * @param collateralAdd Collateral increase.
+     * @param collateralSub Collateral decrease.
+     * @param debtAdd Debt increase.
+     * @param debtSub Debt decrease.
+     */
     function safeUpdateStats(
         address statsView,
         address user,
@@ -168,14 +196,26 @@ library VaultBusinessLogicLibrary {
         uint256 debtSub
     ) internal {
         try IStatisticsViewMinimal(statsView).pushUserStatsUpdate(user, collateralAdd, collateralSub, debtAdd, debtSub) {
-            // ok
+            uint256 noop = 0;
+            noop;
         } catch (bytes memory lowLevelData) {
-            emit SystemEvents.ExternalModuleReverted("StatisticsView", lowLevelData, block.timestamp);
-            revert ExternalModuleRevertedRaw("StatisticsView", lowLevelData);
+            emit SystemEvents.ExternalModuleReverted("StatisticsView", lowLevelData, block.number);
+            // Best-effort: do not revert primary flow; emit retryable failure event.
+            emit CacheUpdateFailedV2(
+                user,
+                address(0), // user-scoped stats push
+                bytes32(0), // no requestId context in legacy path
+                statsView,
+                collateralAdd,
+                debtAdd,
+                abi.encode(collateralAdd, collateralSub, debtAdd, debtSub, lowLevelData),
+                0,
+                0
+            );
         }
     }
 
-    /// @notice 安全推送保证金更新到统计视图
+    /// @notice Safely push guarantee updates to StatisticsView.
     function safeUpdateGuarantee(
         address statsView,
         address user,
@@ -185,18 +225,32 @@ library VaultBusinessLogicLibrary {
     ) internal {
         if (statsView == address(0)) return;
         try IStatisticsViewGuaranteeMinimal(statsView).pushGuaranteeUpdate(user, asset, amount, isLocked) {
-            // ok
+            uint256 noop = 0;
+            noop;
         } catch (bytes memory lowLevelData) {
-            emit SystemEvents.ExternalModuleReverted("StatisticsView", lowLevelData, block.timestamp);
-            // 不中断主流程
+            emit SystemEvents.ExternalModuleReverted("StatisticsView", lowLevelData, block.number);
+            emit CacheUpdateFailedV2(
+                user,
+                asset,
+                bytes32(0), // no requestId context in legacy path
+                statsView,
+                amount,
+                0,
+                abi.encode(isLocked, lowLevelData),
+                0,
+                0
+            );
+            // Best-effort: do not revert primary flow.
         }
     }
 
-    /// @notice 安全调用保证金管理模块的锁定功能
-    /// @param guaranteeManager 保证金管理合约地址
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 保证金金额
+    /**
+     * @notice Safely call GuaranteeFundManager.lockGuarantee.
+     * @param guaranteeManager GuaranteeFundManager address.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Guarantee amount.
+     */
     function safeLockGuarantee(
         address guaranteeManager,
         address user,
@@ -204,18 +258,21 @@ library VaultBusinessLogicLibrary {
         uint256 amount
     ) internal {
         try IGuaranteeFundManager(guaranteeManager).lockGuarantee(user, asset, amount) {
-            // success
+            uint256 noop = 0;
+            noop;
         } catch (bytes memory lowLevelData) {
-            emit SystemEvents.ExternalModuleReverted("GuaranteeFundManager", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("GuaranteeFundManager", lowLevelData, block.number);
             revert ExternalModuleRevertedRaw("GuaranteeFundManager", lowLevelData);
         }
     }
 
-    /// @notice 安全调用保证金管理模块的释放功能
-    /// @param guaranteeManager 保证金管理合约地址
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 释放金额
+    /**
+     * @notice Safely call GuaranteeFundManager.releaseGuarantee.
+     * @param guaranteeManager GuaranteeFundManager address.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Release amount.
+     */
     function safeReleaseGuarantee(
         address guaranteeManager,
         address user,
@@ -223,34 +280,39 @@ library VaultBusinessLogicLibrary {
         uint256 amount
     ) internal {
         try IGuaranteeFundManager(guaranteeManager).releaseGuarantee(user, asset, amount) {
-            // ok
+            uint256 noop = 0;
+            noop;
         } catch (bytes memory lowLevelData) {
-            emit SystemEvents.ExternalModuleReverted("GuaranteeFundManager", lowLevelData, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("GuaranteeFundManager", lowLevelData, block.number);
             revert ExternalModuleRevertedRaw("GuaranteeFundManager", lowLevelData);
         }
     }
 
-    // 奖励触发统一在 LendingEngine 落账成功后进行；本库不再包含任何奖励相关逻辑
+    // Rewards are handled after ledger updates in LendingEngine.
 
-    /* ============ 批量操作函数 ============ */
+    /*━━━━━━━━━━━━━━━ Batch Operations ━━━━━━━━━━━━━━━*/
     
-    /// @notice 验证批量操作参数
-    /// @param assets 资产地址数组
-    /// @param amounts 金额数组
+    /**
+     * @notice Validate batch parameters.
+     * @param assets Asset list.
+     * @param amounts Amount list.
+     */
     function validateBatchParams(address[] calldata assets, uint256[] calldata amounts) internal pure {
         if (assets.length != amounts.length) revert InvalidAmounts();
         if (assets.length == 0) revert AmountIsZero();
         if (assets.length > MAX_BATCH_SIZE) revert("Batch too large");
     }
 
-    /// @notice 批量存入单个操作（内部函数，避免重入）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 金额
-    /// @param collateralManager 抵押物管理合约地址
-    /// @param guaranteeManager 保证金管理合约地址
-    /// @param vaultStatistics 统计模块合约地址
-    /// @param settlementTokenAddr (deprecated) 保留签名兼容
+    /**
+     * @notice Batch deposit single operation (internal).
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Amount.
+     * @param collateralManager CollateralManager address.
+     * @param guaranteeManager GuaranteeFundManager address.
+     * @param vaultStatistics StatisticsView address.
+     * @param settlementTokenAddr Deprecated; kept for signature compatibility.
+     */
     function batchDepositSingle(
         address user,
         address asset,
@@ -263,33 +325,35 @@ library VaultBusinessLogicLibrary {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
         
-        // 价格/健康检查下沉到 LE + View 层；业务层批量不再触发
-        settlementTokenAddr; // silence unused (签名兼容)
+        // Price/health checks are handled in LE + View; not in batch logic.
+        settlementTokenAddr; // silence unused (compat).
         
-        // 转移代币到合约
+        // Transfer tokens into this contract.
         IERC20(asset).safeTransferFrom(user, address(this), amount);
         
-        // 存入抵押物
+        // Deposit collateral.
         safeDepositCollateral(collateralManager, user, asset, amount);
         
-        // 锁定保证金（如果需要）
+        // Lock guarantee (if needed).
         safeLockGuarantee(guaranteeManager, user, asset, amount);
-        // 同步统计视图的保证金聚合
+        // Sync guarantee aggregation.
         safeUpdateGuarantee(vaultStatistics, user, asset, amount, true);
         
-        // 更新统计
+        // Update stats.
         safeUpdateStats(vaultStatistics, user, amount, 0, 0, 0);
         
         emit BusinessOperation("deposit", user, asset, amount);
     }
 
-    /// @notice 批量借款单个操作（内部函数，避免重入）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 金额
-    /// @param _lendingEngine 借贷引擎合约地址（已废弃，仅保留签名兼容）
-    /// @param vaultStatistics 统计模块合约地址
-    /// @param _settlementTokenAddr 结算币地址（已废弃，仅保留签名兼容）
+    /**
+     * @notice Batch borrow single operation (internal).
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Amount.
+     * @param _lendingEngine Deprecated; kept for signature compatibility.
+     * @param vaultStatistics StatisticsView address.
+     * @param _settlementTokenAddr Deprecated; kept for signature compatibility.
+     */
     function batchBorrowSingle(
         address user,
         address asset,
@@ -301,27 +365,29 @@ library VaultBusinessLogicLibrary {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
         
-        // 价格/健康检查下沉到 LE + View 层
+        // Price/health checks are handled in LE + View.
         
-        // 账本更新由 VaultCore → LE 统一触发；批量业务层不再直连 LE
-        _lendingEngine; _settlementTokenAddr; // silence unused (签名兼容)
+        // Ledger updates flow through VaultCore → LE; no direct LE calls here.
+        _lendingEngine; _settlementTokenAddr; // silence unused (compat).
         
-        // 转移代币给用户
+        // Transfer tokens to user.
         IERC20(asset).safeTransfer(user, amount);
         
-        // 更新统计
+        // Update stats.
         safeUpdateStats(vaultStatistics, user, 0, 0, amount, 0);
         
         emit BusinessOperation("borrow", user, asset, amount);
     }
 
-    /// @notice 批量还款单个操作（内部函数，避免重入）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 金额
-    /// @param _lendingEngine 借贷引擎合约地址（已废弃，仅保留签名兼容）
-    /// @param vaultStatistics 统计模块合约地址
-    /// @param _settlementTokenAddr 结算币地址（已废弃，仅保留签名兼容）
+    /**
+     * @notice Batch repay single operation (internal).
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Amount.
+     * @param _lendingEngine Deprecated; kept for signature compatibility.
+     * @param vaultStatistics StatisticsView address.
+     * @param _settlementTokenAddr Deprecated; kept for signature compatibility.
+     */
     function batchRepaySingle(
         address user,
         address asset,
@@ -333,28 +399,30 @@ library VaultBusinessLogicLibrary {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
         
-        // 价格/健康检查下沉到 LE + View 层
+        // Price/health checks are handled in LE + View.
         
-        // 转移代币到合约
+        // Transfer tokens into this contract.
         IERC20(asset).safeTransferFrom(user, address(this), amount);
         
-        // 账本更新由 VaultCore → LE 统一触发；批量业务层不再直连 LE
-        _lendingEngine; _settlementTokenAddr; // silence unused (签名兼容)
+        // Ledger updates flow through VaultCore → LE; no direct LE calls here.
+        _lendingEngine; _settlementTokenAddr; // silence unused (compat).
         
-        // 更新统计
+        // Update stats.
         safeUpdateStats(vaultStatistics, user, 0, 0, 0, amount);
         
         emit BusinessOperation("repay", user, asset, amount);
     }
 
-    /// @notice 批量提取单个操作（内部函数，避免重入）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 金额
-    /// @param collateralManager 抵押物管理合约地址
-    /// @param guaranteeManager 保证金管理合约地址
-    /// @param vaultStatistics 统计模块合约地址
-    /// @param _settlementTokenAddr 结算币地址（已废弃，仅保留签名兼容）
+    /**
+     * @notice Batch withdraw single operation (internal).
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Amount.
+     * @param collateralManager CollateralManager address.
+     * @param guaranteeManager GuaranteeFundManager address.
+     * @param vaultStatistics StatisticsView address.
+     * @param _settlementTokenAddr Deprecated; kept for signature compatibility.
+     */
     function batchWithdrawSingle(
         address user,
         address asset,
@@ -368,34 +436,36 @@ library VaultBusinessLogicLibrary {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
         
-        // 价格/健康检查下沉到 LE + View 层
+        // Price/health checks are handled in LE + View.
         
-        // 提取抵押物
-        _settlementTokenAddr; // silence unused (签名兼容)
+        // Withdraw collateral.
+        _settlementTokenAddr; // silence unused (compat).
         safeWithdrawCollateral(collateralManager, user, asset, amount);
         
-        // 释放保证金（如果需要）
+        // Release guarantee (if needed).
         safeReleaseGuarantee(guaranteeManager, user, asset, amount);
-        // 同步统计视图的保证金聚合
+        // Sync guarantee aggregation.
         safeUpdateGuarantee(vaultStatistics, user, asset, amount, false);
         
-        // 转移代币给用户
+        // Transfer tokens to user.
         IERC20(asset).safeTransfer(user, amount);
         
-        // 更新统计
+        // Update stats.
         safeUpdateStats(vaultStatistics, user, 0, amount, 0, 0);
         
         emit BusinessOperation("withdraw", user, asset, amount);
     }
 
-    /* ============ 事件发出函数 ============ */
+    /*━━━━━━━━━━━━━━━ Event Emission ━━━━━━━━━━━━━━━*/
     
-    /// @notice 发出业务操作事件和标准化动作事件
-    /// @param operation 操作类型
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 金额
-    /// @param actionKey 动作键
+    /**
+     * @notice Emit business operation and standardized action events.
+     * @param operation Operation label.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param amount Amount.
+     * @param actionKey Action key.
+     */
     function emitBusinessEvents(
         string memory operation,
         address user,
@@ -409,23 +479,25 @@ library VaultBusinessLogicLibrary {
             actionKey,
             ActionKeys.getActionKeyString(actionKey),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
-    /* ============ 优雅降级函数 ============ */
+    /*━━━━━━━━━━━━━━━ Graceful Degradation ━━━━━━━━━━━━━━━*/
     
-    /// @notice 优雅降级处理函数
-    /// @param asset 资产地址
-    /// @param reason 降级原因
-    /// @param config 降级配置
-    /// @return fallbackValue 降级后的价值
+    /**
+     * @notice Handle graceful degradation for an asset.
+     * @param asset Asset address.
+     * @param reason Degradation reason.
+     * @param config Degradation config.
+     * @return fallbackValue Fallback value.
+     */
     function _gracefulDegradation(
         address asset,
         string memory reason,
         GracefulDegradation.DegradationConfig memory config
     ) internal returns (uint256 fallbackValue) {
-        // 使用GracefulDegradation库的默认策略
+        // Use GracefulDegradation default strategy.
         GracefulDegradation.PriceResult memory result =
             GracefulDegradation.getAssetValueWithFallback(asset, asset, 0, config);
         

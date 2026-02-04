@@ -7,8 +7,8 @@ import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ZeroAddress } from "../errors/StandardErrors.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 
 /// @title BaseServiceConfig - 服务配置基础抽象合约
@@ -35,7 +35,7 @@ abstract contract BaseServiceConfig is
     /// @notice 服务配置映射
     mapping(ServiceLevel => ServiceConfig) internal configs;
     
-    /// @notice 服务冷却期 (秒)
+    /// @notice 服务冷却期（区块数）
     uint256 internal cooldown;
 
     event ConfigUpdated(uint8 level, uint256 price, uint256 duration, bool isActive);
@@ -100,7 +100,7 @@ abstract contract BaseServiceConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -123,7 +123,7 @@ abstract contract BaseServiceConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -147,7 +147,7 @@ abstract contract BaseServiceConfig is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
@@ -171,7 +171,7 @@ abstract contract BaseServiceConfig is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
         
         // 发出模块地址更新事件
@@ -179,7 +179,7 @@ abstract contract BaseServiceConfig is
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
-            block.timestamp
+            block.number
         );
     }
 

@@ -66,12 +66,11 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
     /* ============ Structs ============ */
     /// @notice Bookkeeping info for an asset (not used for allowlist validation).
     /// @param isActive Whether the asset is currently allowed.
-    /// @param addedAt Timestamp when the asset was first added.
+    /// @param addedAt Block number when the asset was first added.
     /// @param addedBy Address that added the asset.
-    /// @param lastUpdated Timestamp of the last bookkeeping update.
+    /// @param lastUpdated Block number of the last bookkeeping update.
     /// @param updateCount Number of bookkeeping updates (including add/remove/info updates).
     // NOTE: Keep field order stable for upgrade-safe storage layout. Do not reorder for packing.
-    // solhint-disable-next-line gas-struct-packing
     struct AssetInfo {
         bool isActive;
         uint256 addedAt;
@@ -85,24 +84,24 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
     /// @param actionKey Action key used for authorization (ActionKeys.ACTION_ADD_WHITELIST).
     /// @param asset Asset address.
     /// @param addedBy Caller who performed the action.
-    /// @param timestamp Block timestamp when the event was emitted.
+    /// @param blockNumber Block number when the event was emitted.
     event AssetAdded(
         bytes32 indexed actionKey,
         address indexed asset, 
         address indexed addedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice Emitted when an asset is removed from the allowlist.
     /// @param actionKey Action key used for authorization (ActionKeys.ACTION_REMOVE_WHITELIST).
     /// @param asset Asset address.
     /// @param removedBy Caller who performed the action.
-    /// @param timestamp Block timestamp when the event was emitted.
+    /// @param blockNumber Block number when the event was emitted.
     event AssetRemoved(
         bytes32 indexed actionKey,
         address indexed asset, 
         address indexed removedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice Emitted after a batch add operation.
@@ -137,12 +136,12 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
     /// @param actionKey Action key used for authorization (ActionKeys.ACTION_SET_PARAMETER).
     /// @param asset Asset address.
     /// @param updatedBy Caller who performed the action.
-    /// @param timestamp Block timestamp when the event was emitted.
+    /// @param blockNumber Block number when the event was emitted.
     event AssetInfoUpdated(
         bytes32 indexed actionKey,
         address indexed asset, 
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /* ============ Constructor ============ */
@@ -171,8 +170,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         
         _registryAddr = initialRegistryAddr;
         
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 ts = block.number;
         // Record initialization (governance/audit trail).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -260,8 +258,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         if (asset == address(0)) revert ZeroAddress();
         if (_allowedAssets[asset]) revert AssetWhitelist__AssetAlreadyAllowed(asset);
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 ts = block.number;
         
         _allowedAssets[asset] = true;
         _assetList.push(asset);
@@ -309,8 +306,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         if (asset == address(0)) revert ZeroAddress();
         if (!_allowedAssets[asset]) revert AssetWhitelist__AssetNotAllowed(asset);
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 ts = block.number;
         
         _allowedAssets[asset] = false;
         _assetCount--;
@@ -367,8 +363,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
         if (assets.length == 0) revert AssetWhitelist__EmptyAssetsArray();
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 ts = block.number;
         
         uint256 addedCount = 0;
         for (uint256 i = 0; i < assets.length; ++i) {
@@ -430,8 +425,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         _requireRole(ActionKeys.ACTION_REMOVE_WHITELIST, msg.sender);
         if (assets.length == 0) revert AssetWhitelist__EmptyAssetsArray();
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 ts = block.number;
         
         uint256 removedCount = 0;
         for (uint256 i = 0; i < assets.length; ++i) {
@@ -499,8 +493,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         if (asset == address(0)) revert ZeroAddress();
         if (!_allowedAssets[asset]) revert AssetWhitelist__AssetNotAllowed(asset);
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 ts = block.number;
         
         _assetInfo[asset].lastUpdated = ts;
         _assetInfo[asset].updateCount++;
@@ -542,8 +535,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         if (newRegistryAddr == address(0)) revert ZeroAddress();
         if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 ts = block.number;
         
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
@@ -608,8 +600,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        uint256 ts = block.number;
         // Record upgrade authorization (governance/audit trail).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,

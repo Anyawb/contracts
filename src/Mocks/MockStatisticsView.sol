@@ -8,7 +8,15 @@ contract MockStatisticsView {
         uint256 activeUsers;
         uint256 totalCollateral;
         uint256 totalDebt;
-        uint256 timestamp;
+        uint256 updateBlock;
+    }
+
+    struct GlobalStatistics {
+        uint256 totalUsers;
+        uint256 activeUsers;
+        uint256 totalCollateral;
+        uint256 totalDebt;
+        uint256 lastUpdateBlock;
     }
 
     bool public shouldFail;
@@ -18,7 +26,7 @@ contract MockStatisticsView {
     uint256 public activeUsers;
     uint256 public totalCollateral;
     uint256 public totalDebt;
-    uint256 public lastUpdate;
+    uint256 public lastUpdateBlock;
 
     function setShouldFail(bool v) external {
         shouldFail = v;
@@ -60,16 +68,23 @@ contract MockStatisticsView {
             if (isActive) activeUsers += 1; else if (activeUsers > 0) activeUsers -= 1;
         }
 
-        lastUpdate = block.timestamp;
+        lastUpdateBlock = block.number;
     }
 
-    function getGlobalSnapshot() external view returns (GlobalSnapshot memory s) {
-        s = GlobalSnapshot({
+    function getGlobalStatisticsWithMeta()
+        external
+        view
+        returns (GlobalStatistics memory g, bool isValid, uint256 blockNumber)
+    {
+        g = GlobalStatistics({
+            totalUsers: 0,
             activeUsers: activeUsers,
             totalCollateral: totalCollateral,
             totalDebt: totalDebt,
-            timestamp: lastUpdate
+            lastUpdateBlock: lastUpdateBlock
         });
+        blockNumber = lastUpdateBlock;
+        isValid = blockNumber != 0;
     }
 }
 

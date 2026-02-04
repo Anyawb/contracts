@@ -229,7 +229,7 @@ interface DeploymentInfo {
   transactionHash: string;
   blockNumber: number;
   gasUsed: string;
-  timestamp: number;
+  deployedAtMs: number;
 }
 ```
 
@@ -519,7 +519,7 @@ interface VerificationConfig {
   constructorArgs?: unknown[];   // 构造函数参数
   apiKey?: string;              // API 密钥（可选）
   apiUrl?: string;              // API URL（可选）
-  timestamp?: number;           // 时间戳（可选）
+  verifiedAtMs?: number;        // 验证时间（可选）
 }
 ```
 

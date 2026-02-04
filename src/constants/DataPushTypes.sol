@@ -15,6 +15,9 @@ library DataPushTypes {
     /*━━━━━━━━━━━━━━━ COMMON ━━━━━━━━━━━━━━━*/
     bytes32 public constant DATA_TYPE_REGISTRY_UPDATED         = keccak256("REGISTRY_UPDATED");
     bytes32 public constant DATA_TYPE_MODULE_HEALTH            = keccak256("MODULE_HEALTH");
+    /// @dev Component/service health alert with human-readable details (string).
+    ///      payload = abi.encode(address component, string name, bool ok, string details, uint256 ts)
+    bytes32 public constant DATA_TYPE_COMPONENT_HEALTH         = keccak256("COMPONENT_HEALTH");
     /// @dev User-scoped degradation event (frontends can filter by user).
     bytes32 public constant DATA_TYPE_USER_DEGRADATION         = keccak256("USER_DEGRADATION");
 
@@ -105,9 +108,7 @@ library DataPushTypes {
     bytes32 public constant DATA_TYPE_GLOBAL_FEE_STATS     = keccak256("GLOBAL_FEE_STATS");
     bytes32 public constant DATA_TYPE_FEE_ROUTER_SYSTEM_CONFIG_UPDATED =
         keccak256("FEE_ROUTER_SYSTEM_CONFIG_UPDATED");
-    // solhint-disable-next-line gas-small-strings
     bytes32 public constant DATA_TYPE_FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED =
-        // solhint-disable-next-line gas-small-strings
         keccak256("FEE_ROUTER_GLOBAL_FEE_STATISTIC_UPDATED");
     bytes32 public constant DATA_TYPE_USER_POSITION_UPDATE     = keccak256("USER_POSITION_UPDATE");
     /// @dev StatisticsView user-scoped stats update (cache + global aggregates).
@@ -135,6 +136,9 @@ library DataPushTypes {
     /// @notice Penalty ledger update (user pending debt points).
     /// @dev payload = abi.encode(address user, uint256 pendingDebt, uint256 ts)
     bytes32 public constant DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED = keccak256("REWARD_PENALTY_LEDGER_UPDATED");
+    /// @notice Reward consumption record update.
+    /// @dev payload = abi.encode(address user, uint8 serviceType, uint8 serviceLevel, uint256 points, uint256 expirationTime, uint256 ts)
+    bytes32 public constant DATA_TYPE_REWARD_CONSUMPTION_RECORDED = keccak256("REWARD_CONSUMPTION_RECORDED");
 }
 
 

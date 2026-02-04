@@ -2,7 +2,7 @@ import { expect } from 'chai';
 import hardhat from 'hardhat';
 const { ethers } = hardhat;
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, mine } from '@nomicfoundation/hardhat-network-helpers';
 import type { RWAAutoLeveragedStrategy } from '../types/contracts/strategies/RWAAutoLeveragedStrategy';
 import { RWAAutoLeveragedStrategy__factory } from '../types/factories/contracts/strategies/RWAAutoLeveragedStrategy__factory';
 import type { MockERC20 } from '../../types/contracts/Mocks/MockERC20';
@@ -35,7 +35,7 @@ const MIN_LEVERAGE_RATIO = 100n; // 1x
 const MAX_LEVERAGE_RATIO = 300n; // 3x
 const TARGET_HEALTH_FACTOR = 150n;
 const REBALANCE_THRESHOLD = 20n;
-const COOLDOWN_PERIOD = 3600n; // 1 hour
+const COOLDOWN_PERIOD = 3600n / 2n; // 1 hour (blocks)
 
 describe('RWAAutoLeveragedStrategy', function () {
   // 状态变量 - 使用描述性名称
@@ -99,10 +99,10 @@ describe('RWAAutoLeveragedStrategy', function () {
 
     // 部署 MockERC20 代币
     const erc20Factory = (await ethers.getContractFactory('MockERC20')) as unknown as MockERC20__factory;
-    rwaTokenContract = await erc20Factory.deploy('RWA Token', 'RWA', INITIAL_SUPPLY);
+    rwaTokenContract = await erc20Factory.deploy('RWA Token', 'RWA', 18, INITIAL_SUPPLY);
     await rwaTokenContract.waitForDeployment();
 
-    settlementTokenContract = await erc20Factory.deploy('Settlement Token', 'SETTLE', INITIAL_SUPPLY);
+    settlementTokenContract = await erc20Factory.deploy('Settlement Token', 'SETTLE', 18, INITIAL_SUPPLY);
     await settlementTokenContract.waitForDeployment();
 
     // VaultCore 需要按升级代理模式部署并 initialize（constructor 禁用 initializer）
@@ -207,8 +207,8 @@ describe('RWAAutoLeveragedStrategy', function () {
 
   async function deployWithOpenedPositionFixtureAfterCooldown() {
     const fx = await deployWithOpenedPositionFixtureNoCooldown();
-    // 合约冷却期为 1h；推进时间后允许 close/rebalance
-    await time.increase(COOLDOWN_PERIOD + 1n);
+    // 合约冷却期为 1h；推进区块后允许 close/rebalance
+    await mine(Number(COOLDOWN_PERIOD + 1n));
     return fx;
   }
 
@@ -517,7 +517,7 @@ describe('RWAAutoLeveragedStrategy', function () {
         targetHealthFactor: 160n,
         rebalanceThreshold: 25n,
         maxPositionSize: ethers.parseEther('800'),
-        cooldownPeriod: 7200n // 2 hours
+        cooldownPeriod: 7200n / 2n // 2 hours (blocks)
       };
       
       await strategyContract.updateConfig(newConfig);
@@ -528,7 +528,7 @@ describe('RWAAutoLeveragedStrategy', function () {
       expect(config.targetHealthFactor).to.equal(160n);
       expect(config.rebalanceThreshold).to.equal(25n);
       expect(config.maxPositionSize).to.equal(ethers.parseEther('800'));
-      expect(config.cooldownPeriod).to.equal(7200n);
+      expect(config.cooldownPeriod).to.equal(7200n / 2n);
     });
 
     it('应该支持紧急平仓功能', async function () {
@@ -578,7 +578,7 @@ describe('RWAAutoLeveragedStrategy', function () {
           targetHealthFactor: 160n,
           rebalanceThreshold: 25n,
           maxPositionSize: ethers.parseEther('800'),
-          cooldownPeriod: 7200n
+          cooldownPeriod: 7200n / 2n
         })
       ).to.be.revertedWithCustomError(strategyContract, 'OwnableUnauthorizedAccount');
     });
@@ -627,7 +627,7 @@ describe('RWAAutoLeveragedStrategy', function () {
       expect(stats.totalPositions_).to.equal(1n);
       
       // 冷却期后再平仓
-      await time.increase(COOLDOWN_PERIOD + 1n);
+      await mine(Number(COOLDOWN_PERIOD + 1n));
 
       // 平仓
       await settlementTokenContract.connect(user1Signer).approve(await strategyContract.getAddress(), BORROW_AMOUNT);

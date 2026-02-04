@@ -47,6 +47,7 @@ describe('UserView', function () {
     const token = (await TokenF.deploy(
       'Test Token',
       'TEST',
+      18,
       ethers.parseUnits('1000000', 18)
     )) as unknown as MockERC20;
 
@@ -89,7 +90,7 @@ describe('UserView', function () {
   describe('position queries', function () {
     it('returns data from PositionView', async function () {
       const { userView, user, token } = await loadFixture(deployFixture);
-      const [c, d] = await userView.getUserPosition(user.address, await token.getAddress());
+      const [c, d] = await userView.getUserPositionWithMeta(user.address, await token.getAddress());
       expect(c).to.equal(ethers.parseUnits('100', 18));
       expect(d).to.equal(ethers.parseUnits('40', 18));
     });
@@ -97,7 +98,7 @@ describe('UserView', function () {
     it('returns zero when position module missing', async function () {
       const { userView, registry, user, token } = await loadFixture(deployFixture);
       await registry.setModule(KEY_POSITION_VIEW, ethers.ZeroAddress);
-      const [c, d] = await userView.getUserPosition(user.address, await token.getAddress());
+      const [c, d] = await userView.getUserPositionWithMeta(user.address, await token.getAddress());
       expect(c).to.equal(0n);
       expect(d).to.equal(0n);
     });
@@ -106,14 +107,14 @@ describe('UserView', function () {
   describe('health factor', function () {
     it('returns value from HealthView', async function () {
       const { userView, user } = await loadFixture(deployFixture);
-      const hf = await userView.getHealthFactor(user.address);
+      const [hf] = await userView.getHealthFactor(user.address);
       expect(hf).to.equal(12_000n);
     });
 
     it('returns zero when health module missing', async function () {
       const { userView, registry, user } = await loadFixture(deployFixture);
       await registry.setModule(KEY_HEALTH_VIEW, ethers.ZeroAddress);
-      const hf = await userView.getHealthFactor(user.address);
+      const [hf] = await userView.getHealthFactor(user.address);
       expect(hf).to.equal(0n);
     });
   });
@@ -121,7 +122,7 @@ describe('UserView', function () {
   describe('stats aggregation', function () {
     it('calculates stats using view modules', async function () {
       const { userView, user, token } = await loadFixture(deployFixture);
-      const stats = await userView.getUserStats(user.address, await token.getAddress());
+      const [stats] = await userView.getUserStats(user.address, await token.getAddress());
       expect(stats.collateral).to.equal(ethers.parseUnits('100', 18));
       expect(stats.debt).to.equal(ethers.parseUnits('40', 18));
       expect(stats.hf).to.equal(12_000n);
@@ -130,11 +131,12 @@ describe('UserView', function () {
   });
 
   describe('ARCH 4.7 UV-01: facade MUST NOT drop downstream validity/meta', function () {
-    it('getUserPositionWithMeta matches downstream PositionView meta (isValid/timestamp/version)', async function () {
+    it('getUserPositionWithMeta matches downstream PositionView meta (isValid/blockNumber/version)', async function () {
       const { userView, user, token, position } = await loadFixture(deployFixture);
 
       const blk = await ethers.provider.getBlock('latest');
-      const pTs = BigInt(blk!.timestamp) - 11n;
+      const base = BigInt(blk!.number);
+      const pBlockNumber = base > 11n ? base - 11n : base;
       const pVer = 42n;
 
       await position.setPositionWithMeta(
@@ -143,7 +145,7 @@ describe('UserView', function () {
         ethers.parseUnits('123', 18),
         ethers.parseUnits('45', 18),
         false,
-        pTs,
+        pBlockNumber,
         pVer
       );
 
@@ -157,8 +159,9 @@ describe('UserView', function () {
       const { userView, user, token, position, health } = await loadFixture(deployFixture);
 
       const blk = await ethers.provider.getBlock('latest');
-      const pTs = BigInt(blk!.timestamp) - 33n;
-      const hTs = BigInt(blk!.timestamp) - 22n;
+      const base = BigInt(blk!.number);
+      const pBlockNumber = base > 33n ? base - 33n : base;
+      const hBlockNumber = base > 22n ? base - 22n : base;
       const pVer = 9n;
 
       await position.setPositionWithMeta(
@@ -167,12 +170,12 @@ describe('UserView', function () {
         ethers.parseUnits('200', 18),
         ethers.parseUnits('50', 18),
         true,
-        pTs,
+        pBlockNumber,
         pVer
       );
-      await health.setHealthWithTimestamp(user.address, 11_000, false, hTs);
+      await health.setHealthWithTimestamp(user.address, 11_000, false, hBlockNumber);
 
-      const [stats, positionIsValid, positionTimestamp, positionVersion, healthIsValid, healthTimestamp] =
+      const [stats, positionIsValid, positionBlockNumber, positionVersion, healthIsValid, healthBlockNumber] =
         await userView.getUserStatsWithMeta(user.address, await token.getAddress());
 
       expect(stats.collateral).to.equal(ethers.parseUnits('200', 18));
@@ -181,28 +184,28 @@ describe('UserView', function () {
       expect(stats.ltv).to.be.greaterThan(0n);
 
       expect(positionIsValid).to.equal(true);
-      expect(positionTimestamp).to.equal(pTs);
+      expect(positionBlockNumber).to.equal(pBlockNumber);
       expect(positionVersion).to.equal(pVer);
       expect(healthIsValid).to.equal(false);
-      expect(healthTimestamp).to.equal(hTs);
+      expect(healthBlockNumber).to.equal(hBlockNumber);
     });
 
-    it('getUserTotalsWithMeta preserves StatisticsView meta (isValid/timestamp/version/seq)', async function () {
+    it('getUserTotalsWithMeta preserves StatisticsView meta (isValid/blockNumber/version/seq)', async function () {
       const { userView, user, stats } = await loadFixture(deployFixture);
 
       const blk = await ethers.provider.getBlock('latest');
-      const ts = BigInt(blk!.timestamp);
-      await stats.setUserSnapshot(user.address, 123n, 45n, 0n, 0n, ts, true, 7);
+      const blockNumber = BigInt(blk!.number);
+      await stats.setUserSnapshot(user.address, 123n, 45n, 0n, 0n, blockNumber, true, 7);
 
       const downstream = await stats.getUserSnapshotWithMeta(user.address);
-      const [s, v, seq, , isValid, timestamp] = downstream;
+      const [s, v, seq, , isValid, downstreamBlockNumber] = downstream;
 
-      const [tc, td, fValid, fTs, fVer, fSeq] = await userView.getUserTotalsWithMeta(user.address);
+      const [tc, td, fValid, fBlockNumber, fVer, fSeq] = await userView.getUserTotalsWithMeta(user.address);
 
       expect(tc).to.equal(s.collateral);
       expect(td).to.equal(s.debt);
       expect(fValid).to.equal(isValid);
-      expect(fTs).to.equal(timestamp);
+      expect(fBlockNumber).to.equal(downstreamBlockNumber);
       expect(fVer).to.equal(v);
       expect(fSeq).to.equal(seq);
     });
@@ -215,22 +218,24 @@ describe('UserView', function () {
       // Make PositionView missing to ensure totals still work (i.e. not calling getUserPosition(user, address(0))).
       await registry.setModule(KEY_POSITION_VIEW, ethers.ZeroAddress);
 
-      // Seed user snapshot in stats mock (ts = now)
+      // Seed user snapshot in stats mock (blockNumber = now)
       const blk = await ethers.provider.getBlock('latest');
-      const ts = BigInt(blk!.timestamp);
-      await stats.setUserSnapshot(user.address, 123n, 45n, 0n, 0n, ts, true, 7);
+      const blockNumber = BigInt(blk!.number);
+      await stats.setUserSnapshot(user.address, 123n, 45n, 0n, 0n, blockNumber, true, 7);
 
-      const [tc, td, isValid, timestamp, version, seq] = await userView.getUserTotalsWithMeta(user.address);
+      const [tc, td, isValid, blockNumberOut, version, seq] = await userView.getUserTotalsWithMeta(user.address);
       expect(tc).to.equal(123n);
       expect(td).to.equal(45n);
       expect(isValid).to.equal(true);
-      expect(timestamp).to.equal(ts);
+      expect(blockNumberOut).to.equal(blockNumber);
       expect(version).to.equal(7n);
       expect(seq).to.equal(0n);
 
       // Legacy helpers should forward to totals (no asset=0 semantics).
-      expect(await userView.getUserTotalCollateral(user.address)).to.equal(123n);
-      expect(await userView.getUserTotalDebt(user.address)).to.equal(45n);
+      const [totalCollateral] = await userView.getUserTotalCollateral(user.address);
+      const [totalDebt] = await userView.getUserTotalDebt(user.address);
+      expect(totalCollateral).to.equal(123n);
+      expect(totalDebt).to.equal(45n);
     });
   });
 
@@ -277,68 +282,47 @@ describe('UserView', function () {
       const previewIface = (await ethers.getContractFactory('PreviewView')).interface;
 
       // ---- PositionView selectors ----
-      expect(await harness.selGetUserPosition()).to.equal(sigSelector('getUserPosition(address,address)'));
-      expect(await harness.selGetUserPosition()).to.equal(positionIface.getFunction('getUserPosition').selector);
-
       expect(await harness.selGetUserPositionWithMeta()).to.equal(sigSelector('getUserPositionWithMeta(address,address)'));
-      expect(await harness.selGetUserPositionWithMeta()).to.equal(positionIface.getFunction('getUserPositionWithMeta').selector);
-
-      expect(await harness.selGetUserPositionWithValidity()).to.equal(
-        sigSelector('getUserPositionWithValidity(address,address)')
+      expect(await harness.selGetUserPositionWithMeta()).to.equal(
+        positionIface.getFunction('getUserPositionWithMeta')!.selector
       );
-      expect(await harness.selGetUserPositionWithValidity()).to.equal(
-        positionIface.getFunction('getUserPositionWithValidity').selector
-      );
-
-      expect(await harness.selGetPositionUpdatedAt()).to.equal(sigSelector('getPositionUpdatedAt(address,address)'));
-      expect(await harness.selGetPositionUpdatedAt()).to.equal(positionIface.getFunction('getPositionUpdatedAt').selector);
-
-      expect(await harness.selGetPositionVersion()).to.equal(sigSelector('getPositionVersion(address,address)'));
-      expect(await harness.selGetPositionVersion()).to.equal(positionIface.getFunction('getPositionVersion').selector);
-
-      expect(await harness.selBatchGetUserPositions()).to.equal(sigSelector('batchGetUserPositions(address[],address[])'));
       expect(await harness.selBatchGetUserPositions()).to.equal(
-        positionIface.getFunction('batchGetUserPositions').selector
+        sigSelector('batchGetUserPositionsWithMeta(address[],address[])')
+      );
+      expect(await harness.selBatchGetUserPositions()).to.equal(
+        positionIface.getFunction('batchGetUserPositionsWithMeta')!.selector
       );
 
       // ---- HealthView selectors ----
-      expect(await harness.selGetUserHealthFactor()).to.equal(sigSelector('getUserHealthFactor(address)'));
-      expect(await harness.selGetUserHealthFactor()).to.equal(healthIface.getFunction('getUserHealthFactor').selector);
-
       expect(await harness.selGetUserHealthFactorWithMeta()).to.equal(sigSelector('getUserHealthFactorWithMeta(address)'));
       expect(await harness.selGetUserHealthFactorWithMeta()).to.equal(
-        healthIface.getFunction('getUserHealthFactorWithMeta').selector
+        healthIface.getFunction('getUserHealthFactorWithMeta')!.selector
       );
-
-      expect(await harness.selBatchGetHealthFactors()).to.equal(sigSelector('batchGetHealthFactors(address[])'));
-      expect(await harness.selBatchGetHealthFactors()).to.equal(healthIface.getFunction('batchGetHealthFactors').selector);
-
       expect(await harness.selBatchGetHealthFactorsWithMeta()).to.equal(sigSelector('batchGetHealthFactorsWithMeta(address[])'));
       expect(await harness.selBatchGetHealthFactorsWithMeta()).to.equal(
-        healthIface.getFunction('batchGetHealthFactorsWithMeta').selector
+        healthIface.getFunction('batchGetHealthFactorsWithMeta')!.selector
       );
 
       // ---- StatisticsView selectors ----
-      expect(await harness.selGetUserSnapshot()).to.equal(sigSelector('getUserSnapshot(address)'));
-      expect(await harness.selGetUserSnapshot()).to.equal(statsIface.getFunction('getUserSnapshot').selector);
-
       expect(await harness.selGetUserSnapshotWithMeta()).to.equal(sigSelector('getUserSnapshotWithMeta(address)'));
-      expect(await harness.selGetUserSnapshotWithMeta()).to.equal(statsIface.getFunction('getUserSnapshotWithMeta').selector);
+      expect(await harness.selGetUserSnapshotWithMeta()).to.equal(
+        statsIface.getFunction('getUserSnapshotWithMeta')!.selector
+      );
 
       // ---- PreviewView selectors ----
       expect(await harness.selPreviewBorrow()).to.equal(
         sigSelector('previewBorrow(address,address,uint256,uint256,uint256)')
       );
-      expect(await harness.selPreviewBorrow()).to.equal(previewIface.getFunction('previewBorrow').selector);
+      expect(await harness.selPreviewBorrow()).to.equal(previewIface.getFunction('previewBorrow')!.selector);
 
       expect(await harness.selPreviewDeposit()).to.equal(sigSelector('previewDeposit(address,address,uint256)'));
-      expect(await harness.selPreviewDeposit()).to.equal(previewIface.getFunction('previewDeposit').selector);
+      expect(await harness.selPreviewDeposit()).to.equal(previewIface.getFunction('previewDeposit')!.selector);
 
       expect(await harness.selPreviewRepay()).to.equal(sigSelector('previewRepay(address,address,uint256)'));
-      expect(await harness.selPreviewRepay()).to.equal(previewIface.getFunction('previewRepay').selector);
+      expect(await harness.selPreviewRepay()).to.equal(previewIface.getFunction('previewRepay')!.selector);
 
       expect(await harness.selPreviewWithdraw()).to.equal(sigSelector('previewWithdraw(address,address,uint256)'));
-      expect(await harness.selPreviewWithdraw()).to.equal(previewIface.getFunction('previewWithdraw').selector);
+      expect(await harness.selPreviewWithdraw()).to.equal(previewIface.getFunction('previewWithdraw')!.selector);
 
       // ---- ERC20 selector ----
       expect(await harness.selBalanceOf()).to.equal(sigSelector('balanceOf(address)'));
@@ -359,20 +343,17 @@ describe('UserView', function () {
       const statsIface = (await ethers.getContractFactory('StatisticsView')).interface;
       const previewIface = (await ethers.getContractFactory('PreviewView')).interface;
 
-      const p1 = positionIface.encodeFunctionData('getUserPosition', [user, asset]).slice(0, 10);
-      expect(p1).to.equal(await harness.selGetUserPosition());
+      const p1 = positionIface.encodeFunctionData('getUserPositionWithMeta', [user, asset]).slice(0, 10);
+      expect(p1).to.equal(await harness.selGetUserPositionWithMeta());
 
-      const p2 = positionIface.encodeFunctionData('getUserPositionWithMeta', [user, asset]).slice(0, 10);
-      expect(p2).to.equal(await harness.selGetUserPositionWithMeta());
+      const p2 = positionIface.encodeFunctionData('batchGetUserPositionsWithMeta', [users, assets]).slice(0, 10);
+      expect(p2).to.equal(await harness.selBatchGetUserPositions());
 
-      const p3 = positionIface.encodeFunctionData('batchGetUserPositions', [users, assets]).slice(0, 10);
-      expect(p3).to.equal(await harness.selBatchGetUserPositions());
+      const h1 = healthIface.encodeFunctionData('getUserHealthFactorWithMeta', [user]).slice(0, 10);
+      expect(h1).to.equal(await harness.selGetUserHealthFactorWithMeta());
 
-      const h1 = healthIface.encodeFunctionData('getUserHealthFactor', [user]).slice(0, 10);
-      expect(h1).to.equal(await harness.selGetUserHealthFactor());
-
-      const h2 = healthIface.encodeFunctionData('batchGetHealthFactors', [users]).slice(0, 10);
-      expect(h2).to.equal(await harness.selBatchGetHealthFactors());
+      const h2 = healthIface.encodeFunctionData('batchGetHealthFactorsWithMeta', [users]).slice(0, 10);
+      expect(h2).to.equal(await harness.selBatchGetHealthFactorsWithMeta());
 
       const s1 = statsIface.encodeFunctionData('getUserSnapshotWithMeta', [user]).slice(0, 10);
       expect(s1).to.equal(await harness.selGetUserSnapshotWithMeta());
@@ -387,7 +368,8 @@ describe('UserView', function () {
       const { userView, user, token } = await loadFixture(deployFixture);
       // MockERC20 initial supply minted to deployer; transfer to user
       await token.transfer(user.address, 777n);
-      expect(await userView.getUserSettlementBalanceStrict(user.address)).to.equal(777n);
+      const [balance] = await userView.getUserSettlementBalanceStrict(user.address);
+      expect(balance).to.equal(777n);
     });
   });
 
@@ -433,7 +415,7 @@ describe('UserView', function () {
       const { userView, user, token } = await loadFixture(deployFixture);
       await expect(userView.batchGetUserPositions([user.address], [])).to.be.revertedWithCustomError(
         userView,
-        'UserView__LengthMismatch'
+        'ArrayLengthMismatch'
       );
     });
 
@@ -443,7 +425,7 @@ describe('UserView', function () {
       const assets = Array(MAX_BATCH_SIZE + 1).fill(await token.getAddress());
       await expect(userView.batchGetUserPositions(users, assets)).to.be.revertedWithCustomError(
         userView,
-        'UserView__BatchTooLarge'
+        'BatchTooLarge'
       );
     });
 
@@ -466,7 +448,7 @@ describe('UserView', function () {
       const users = Array(MAX_BATCH_SIZE + 1).fill(user.address);
       await expect(userView.batchGetUserHealthFactors(users)).to.be.revertedWithCustomError(
         userView,
-        'UserView__BatchTooLarge'
+        'BatchTooLarge'
       );
     });
   });
@@ -482,6 +464,68 @@ describe('UserView', function () {
       const { userView, admin } = await loadFixture(deployFixture);
       const impl = await (await ethers.getContractFactory('UserView')).deploy();
       await expect(userView.connect(admin).upgradeToAndCall(impl.target, '0x')).to.emit(userView, 'Upgraded');
+    });
+  });
+
+  describe('SSOT callsite assertions (trap ACM)', function () {
+    it('user-dimensional gate MUST use hasRole (must not call ACM.requireRole)', async function () {
+      const [, user, other] = await ethers.getSigners();
+
+      const RegistryF = await ethers.getContractFactory('MockRegistry');
+      const registry = await RegistryF.deploy();
+
+      const TrapACMF = await ethers.getContractFactory('MockAccessControlManagerTrapRequireRole');
+      const acm = await TrapACMF.deploy();
+
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+      const UserViewF = await ethers.getContractFactory('UserView');
+      const userView = await upgrades.deployProxy(UserViewF, [await registry.getAddress()]);
+
+      // non-self: should be rejected by UserView's Scheme U gate without invoking requireRole().
+      await expect(
+        userView.connect(other).getUserPositionWithMeta(user.address, ethers.Wallet.createRandom().address),
+      ).to.be.revertedWithCustomError(userView, 'MissingRole');
+    });
+
+    it('batch user gate MUST use hasRole and has no self-bypass (must not call ACM.requireRole)', async function () {
+      const [admin] = await ethers.getSigners();
+
+      const RegistryF = await ethers.getContractFactory('MockRegistry');
+      const registry = await RegistryF.deploy();
+
+      const TrapACMF = await ethers.getContractFactory('MockAccessControlManagerTrapRequireRole');
+      const acm = await TrapACMF.deploy();
+
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+      const UserViewF = await ethers.getContractFactory('UserView');
+      const userView = await upgrades.deployProxy(UserViewF, [await registry.getAddress()]);
+
+      // users[] batch: even if querying only self, caller must be ops/admin.
+      await expect(
+        userView.connect(admin).batchGetUserPositions([admin.address], [ethers.Wallet.createRandom().address]),
+      ).to.be.revertedWithCustomError(userView, 'MissingRole');
+    });
+
+    it('upgrade authorization MUST use requireRole (must not call ACM.hasRole)', async function () {
+      const [, other] = await ethers.getSigners();
+
+      const RegistryF = await ethers.getContractFactory('MockRegistry');
+      const registry = await RegistryF.deploy();
+
+      const ACMF = await ethers.getContractFactory('MockAccessControlManager');
+      const acm = await ACMF.deploy();
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+      const UserViewF = await ethers.getContractFactory('UserView');
+      const userView = await upgrades.deployProxy(UserViewF, [await registry.getAddress()]);
+
+      const impl = await (await ethers.getContractFactory('UserView')).deploy();
+      await expect(userView.connect(other).upgradeToAndCall(impl.target, '0x')).to.be.revertedWithCustomError(
+        userView,
+        'MissingRole',
+      );
     });
   });
 });

@@ -7,16 +7,14 @@ import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
 import { DegradationStorage } from "../../../monitor/DegradationStorage.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { BatchTooLarge, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import { BatchTooLarge, EmptyArray, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
 interface IHealthViewBatch {
-    // solhint-disable-next-line gas-struct-packing
     struct ModuleHealth {
         bool    isHealthy;
         bytes32 detailsHash;
@@ -24,22 +22,26 @@ interface IHealthViewBatch {
         uint32  consecutiveFailures;
     }
 
-    function getUserHealthFactor(address user)
+    function getUserHealthFactorWithMeta(address user)
         external
         view
-        returns (uint256 healthFactor, bool isValid, uint256 timestamp);
-    function getModuleHealth(address module) external view returns (ModuleHealth memory);
+        returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
+    function getModuleHealthWithMeta(address module)
+        external
+        view
+        returns (ModuleHealth memory moduleHealth, bool isValid, uint256 blockNumber);
 }
 
 interface IRiskViewBatch {
-    // solhint-disable-next-line gas-struct-packing
-    struct RiskAssessment {
+    struct RiskAssessmentWithMeta {
         bool liquidatable;
-        uint256 healthFactor;
+        bool isValid;
         uint8 warningLevel;
+        uint256 healthFactor;
+        uint256 blockNumber;
     }
 
-    function getUserRiskAssessment(address user) external view returns (RiskAssessment memory);
+    function getUserRiskAssessment(address user) external view returns (RiskAssessmentWithMeta memory);
 }
 
 interface IDegradationMonitorView {
@@ -75,19 +77,37 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
     // Packed to reduce memory footprint:
     // - slot0: address (20) + bool (1)
     // - slot1: uint256
-    struct HealthFactorItem { address user; bool isValid; uint256 healthFactor; }
+    struct HealthFactorItem {
+        address user;
+        bool isValid;
+        uint256 healthFactor;
+        uint256 blockNumber;
+    }
 
-    // Packed to reduce memory footprint:
-    // - slot0: address (20) + bool (1) + uint8 (1)
+    // Packed to reduce storage footprint if persisted:
+    // - slot0: address (20) + bool (1) + bool (1) + uint8 (1)
     // - slot1: uint256
-    struct RiskItem { address user; bool liquidatable; uint8 warningLevel; uint256 healthFactor; }
-    struct AssetPriceItem { address asset; uint256 price; }
+    // - slot2: uint256
+    struct RiskItem {
+        address user;
+        bool liquidatable;
+        bool isValid;
+        uint8 warningLevel;
+        uint256 healthFactor;
+        uint256 blockNumber;
+    }
+    struct AssetPriceItem {
+        address asset;
+        uint256 price;
+    }
     struct ModuleHealthItem {
         address module;
         uint32  lastCheckTime;
         uint32  consecutiveFailures;
         bool    isHealthy;
+        bool    isValid;
         bytes32 detailsHash;
+        uint256 blockNumber;
     }
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
@@ -98,8 +118,16 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     modifier onlyViewRole(bytes32 actionKey) {
-        address acm = _getACM();
-        IAccessControlManager(acm).requireRole(actionKey, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, msg.sender)) revert MissingRole();
+        _;
+    }
+
+    /// @dev Scheme U batch: no self-bypass; must have VIEW_USER_DATA or ADMIN.
+    modifier onlyUserBatchViewer() {
+        if (
+            !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+        ) revert MissingRole();
         _;
     }
 
@@ -123,20 +151,20 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - users is empty (see {EmptyArray})
      *      - users.length exceeds the maximum batch size (see {BatchTooLarge})
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks ACTION_VIEW_RISK_DATA (via ACM)
+     *      - caller lacks VIEW_USER_DATA or ADMIN (Scheme U batch)
      *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
+     * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
      * @param users Target user addresses
-     * @return arr Per-user health factor items (healthFactor/timestamp validity from HealthView)
+     * @return arr Per-user health factor items (healthFactor/isValid/blockNumber from HealthView)
      */
     function batchGetHealthFactors(address[] calldata users)
         public
         view
         onlyValidRegistry
-        onlyViewRole(ActionKeys.ACTION_VIEW_RISK_DATA)
+        onlyUserBatchViewer
         returns (HealthFactorItem[] memory arr)
     {
         arr = _collectHealthFactors(users);
@@ -148,7 +176,7 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - same as {batchGetHealthFactors}
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
+     * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
      * @param users Target user addresses
      * @return arr Per-user health factor items
@@ -157,7 +185,7 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
         external
         view
         onlyValidRegistry
-        onlyViewRole(ActionKeys.ACTION_VIEW_RISK_DATA)
+        onlyUserBatchViewer
         returns (HealthFactorItem[] memory arr)
     {
         arr = _collectHealthFactors(users);
@@ -169,11 +197,11 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - users is empty (see {EmptyArray})
      *      - users.length exceeds the maximum batch size (see {BatchTooLarge})
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks ACTION_VIEW_RISK_DATA (via ACM)
+     *      - caller lacks VIEW_USER_DATA or ADMIN (Scheme U batch)
      *      - Registry module resolution fails (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
+     * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
      * @param users Target user addresses
      * @return arr Per-user risk items
@@ -182,7 +210,7 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
         public
         view
         onlyValidRegistry
-        onlyViewRole(ActionKeys.ACTION_VIEW_RISK_DATA)
+        onlyUserBatchViewer
         returns (RiskItem[] memory arr)
     {
         arr = _collectRiskAssessments(users);
@@ -194,7 +222,7 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - same as {batchGetRiskAssessments}
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_RISK_DATA)
+     * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
      * @param users Target user addresses
      * @return arr Per-user risk items
@@ -203,7 +231,7 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
         external
         view
         onlyValidRegistry
-        onlyViewRole(ActionKeys.ACTION_VIEW_RISK_DATA)
+        onlyUserBatchViewer
         returns (RiskItem[] memory arr)
     {
         arr = _collectRiskAssessments(users);
@@ -271,13 +299,16 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
         IHealthViewBatch hv = _healthView();
         arr = new ModuleHealthItem[](len);
         for (uint256 i; i < len; ++i) {
-            IHealthViewBatch.ModuleHealth memory mh = hv.getModuleHealth(modules[i]);
+            (IHealthViewBatch.ModuleHealth memory mh, bool ok, uint256 blockNumber) =
+                hv.getModuleHealthWithMeta(modules[i]);
             arr[i] = ModuleHealthItem(
                 modules[i],
                 mh.lastCheckTime,
                 mh.consecutiveFailures,
                 mh.isHealthy,
-                mh.detailsHash
+                ok,
+                mh.detailsHash,
+                blockNumber
             );
         }
     }
@@ -345,8 +376,8 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
         IHealthViewBatch hv = _healthView();
         arr = new HealthFactorItem[](len);
         for (uint256 i; i < len; ++i) {
-            (uint256 hf, bool ok, ) = hv.getUserHealthFactor(users[i]);
-            arr[i] = HealthFactorItem(users[i], ok, hf);
+            (uint256 hf, bool ok, uint256 blockNumber) = hv.getUserHealthFactorWithMeta(users[i]);
+            arr[i] = HealthFactorItem(users[i], ok, hf, blockNumber);
         }
     }
 
@@ -363,8 +394,8 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
         IRiskViewBatch rv = _riskView();
         arr = new RiskItem[](len);
         for (uint256 i; i < len; ++i) {
-            IRiskViewBatch.RiskAssessment memory a = rv.getUserRiskAssessment(users[i]);
-            arr[i] = RiskItem(users[i], a.liquidatable, a.warningLevel, a.healthFactor);
+            IRiskViewBatch.RiskAssessmentWithMeta memory a = rv.getUserRiskAssessment(users[i]);
+            arr[i] = RiskItem(users[i], a.liquidatable, a.isValid, a.warningLevel, a.healthFactor, a.blockNumber);
         }
     }
 
@@ -436,7 +467,9 @@ contract BatchView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation contract address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert BatchView__ZeroImplementation();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }

@@ -6,8 +6,14 @@ import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
 /// @title MockLendingEngineReverting
 /// @notice Minimal mock that reverts on forceReduceDebt for testing atomicity
 contract MockLendingEngineReverting is ILendingEngineBasic {
-    function borrow(address, address, uint256, uint256, uint16) external pure override {}
-    function repay(address, address, uint256) external pure override {}
+    function borrow(address, address, uint256, uint256, uint16) external pure override {
+        uint256 noop = 0;
+        noop;
+    }
+    function repay(address, address, uint256) external pure override {
+        uint256 noop = 0;
+        noop;
+    }
     function getDebt(address, address) external pure override returns (uint256) { return 0; }
     function getTotalDebtByAsset(address) external pure override returns (uint256) { return 0; }
     function getUserTotalDebtValue(address) external pure override returns (uint256) { return 0; }

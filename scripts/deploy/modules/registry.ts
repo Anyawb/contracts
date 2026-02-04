@@ -5,8 +5,8 @@ export type DeployMap = Record<string, string>;
 export type DeployProxyFn = (name: string, args?: unknown[], opts?: Record<string, unknown>) => Promise<string>;
 
 export type RegistryDeployConfig = {
-  /** Minimum delay in seconds for timelocked operations */
-  minDelaySeconds: number;
+  /** Minimum delay in blocks for timelocked operations */
+  minDelayBlocks: number;
   /** Final governance owner (Timelock/Multisig) */
   initialOwner: string;
   /** Optional upgrade admin (extra upgrader; Registry keeps owner as ultimate authority) */
@@ -34,7 +34,7 @@ export async function deployRegistryStack(args: {
 
   if (!deployed.Registry) {
     deployed.Registry = await deployProxy("Registry", [
-      config.minDelaySeconds,
+      config.minDelayBlocks,
       config.upgradeAdmin,
       config.emergencyAdmin,
       config.initialOwner,

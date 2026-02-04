@@ -7,7 +7,14 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { Registry } from "../../../registry/Registry.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import {
+    ArrayLengthMismatch,
+    BatchTooLarge,
+    EmptyArray,
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
 import { RiskUtils } from "../../utils/RiskUtils.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
@@ -31,34 +38,12 @@ import {PreviewView} from "./PreviewView.sol";
  *
  * Security:
  * - Read-only facade: uses `staticcall` for downstream module calls
- * - UUPS upgrade is role-gated via `ViewAccessLib.requireRole(...)`
+ * - UUPS upgrade is role-gated (MissingRole on failure)
  *
  * @custom:security-contact security@example.com
  */
 contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-
-    /**
-     * @notice Batch size exceeds the configured maximum.
-     * @dev Reverts if:
-     *      - `size` is greater than `ViewConstants.MAX_BATCH_SIZE`
-     *
-     * Security:
-     * - Defensive input validation to bound gas/CPU for offchain callers
-     *
-     * @param size Number of items requested in the batch
-     */
-    error UserView__BatchTooLarge(uint256 size);
-
-    /**
-     * @notice Input array lengths do not match.
-     * @dev Reverts if:
-     *      - `users.length != assets.length`
-     *
-     * Security:
-     * - Defensive input validation
-     */
-    error UserView__LengthMismatch();
 
     /**
      * @notice A required module is missing from the Registry.
@@ -129,7 +114,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 debt;
         uint256 ltv;
         uint256 healthFactor;
-        uint256 timestamp;
+        uint256 blockNumber;
         bool isActive;
     }
 
@@ -139,22 +124,15 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
     uint256 internal constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
 
     /// @dev Function selectors for downstream `staticcall` payload encoding (derived from SSOT module contracts).
-    bytes4 internal constant _SEL_GET_USER_POSITION = PositionView.getUserPosition.selector;
     bytes4 internal constant _SEL_GET_USER_POSITION_WITH_META = PositionView.getUserPositionWithMeta.selector;
-    bytes4 internal constant _SEL_GET_USER_POSITION_WITH_VALIDITY = PositionView.getUserPositionWithValidity.selector;
-    bytes4 internal constant _SEL_GET_POSITION_UPDATED_AT = PositionView.getPositionUpdatedAt.selector;
-    bytes4 internal constant _SEL_GET_POSITION_VERSION = PositionView.getPositionVersion.selector;
     bytes4 internal constant _SEL_BALANCE_OF = IERC20.balanceOf.selector;
     bytes4 internal constant _SEL_GET_USER_SNAPSHOT_WITH_META = StatisticsView.getUserSnapshotWithMeta.selector;
-    bytes4 internal constant _SEL_GET_USER_SNAPSHOT = StatisticsView.getUserSnapshot.selector;
-    bytes4 internal constant _SEL_GET_USER_HEALTH_FACTOR = HealthView.getUserHealthFactor.selector;
     bytes4 internal constant _SEL_GET_USER_HEALTH_FACTOR_WITH_META = HealthView.getUserHealthFactorWithMeta.selector;
     bytes4 internal constant _SEL_PREVIEW_BORROW = PreviewView.previewBorrow.selector;
     bytes4 internal constant _SEL_PREVIEW_DEPOSIT = PreviewView.previewDeposit.selector;
     bytes4 internal constant _SEL_PREVIEW_REPAY = PreviewView.previewRepay.selector;
     bytes4 internal constant _SEL_PREVIEW_WITHDRAW = PreviewView.previewWithdraw.selector;
-    bytes4 internal constant _SEL_BATCH_GET_USER_POSITIONS = PositionView.batchGetUserPositions.selector;
-    bytes4 internal constant _SEL_BATCH_GET_HEALTH_FACTORS = HealthView.batchGetHealthFactors.selector;
+    bytes4 internal constant _SEL_BATCH_GET_USER_POSITIONS = PositionView.batchGetUserPositionsWithMeta.selector;
     bytes4 internal constant _SEL_BATCH_GET_HEALTH_FACTORS_WITH_META =
         HealthView.batchGetHealthFactorsWithMeta.selector;
 
@@ -164,6 +142,18 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
+        _;
+    }
+
+    /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
+    modifier onlyUserDim(address user) {
+        _checkUserAccess(user);
+        _;
+    }
+
+    /// @dev Scheme U batch: no self-bypass for `users[]` enumeration; requires VIEW_USER_DATA or ADMIN.
+    modifier onlyUserDimBatch() {
+        _checkBatchAccess();
         _;
     }
 
@@ -196,13 +186,17 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
             DataPushTypes.DATA_TYPE_USER_VIEW_INITIALIZED,
             abi.encode(
                 initialRegistryAddr,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
     }
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
+
+    /// @dev View-only block helper for meta outputs (not used for state changes).
+    function _now() internal view returns (uint256) {
+        return block.number;
+    }
 
     /**
      * @notice Resolve a module address from the Registry.
@@ -280,10 +274,81 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         return _getModule(ModuleKeys.KEY_SETTLEMENT_TOKEN);
     }
 
+    function _checkUserAccess(address user) internal view {
+        if (msg.sender == user) return;
+        bool ok =
+            ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ok) revert MissingRole();
+    }
+
+    function _checkBatchAccess() internal view {
+        bool ok =
+            ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ok) revert MissingRole();
+    }
+
+    function _getUserPositionInternal(address user, address asset)
+        internal
+        view
+        returns (uint256 collateral, uint256 debt)
+    {
+        address pv = _positionView();
+        if (pv == address(0)) return (0, 0);
+        (bool ok, bytes memory data) =
+            pv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_POSITION_WITH_META, user, asset));
+        if (!ok || data.length < 160) return (0, 0);
+        (collateral, debt, , , ) = abi.decode(data, (uint256, uint256, bool, uint256, uint64));
+        return (collateral, debt);
+    }
+
+    function _getUserPositionWithMetaInternal(address user, address asset)
+        internal
+        view
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
+    {
+        address pv = _positionView();
+        if (pv == address(0)) return (0, 0, false, 0, 0);
+
+        // Prefer the newest interface when available.
+        (bool ok, bytes memory data) = pv.staticcall(
+            abi.encodeWithSelector(_SEL_GET_USER_POSITION_WITH_META, user, asset)
+        );
+        if (ok && data.length >= 160) {
+            return abi.decode(data, (uint256, uint256, bool, uint256, uint64));
+        }
+    }
+
+    function _getHealthFactorInternal(address user) internal view returns (uint256 hf) {
+        address hv = _healthView();
+        if (hv == address(0)) return 0;
+        (bool ok, bytes memory data) =
+            hv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR_WITH_META, user));
+        if (!ok || data.length < 96) return 0;
+        (hf, , ) = abi.decode(data, (uint256, bool, uint256));
+    }
+
+    function _getHealthFactorWithMetaInternal(address user)
+        internal
+        view
+        returns (uint256 hf, bool isValid, uint256 blockNumber)
+    {
+        address hv = _healthView();
+        if (hv == address(0)) return (0, false, 0);
+
+        (bool ok, bytes memory data) = hv.staticcall(
+            abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR_WITH_META, user)
+        );
+        if (ok && data.length >= 96) {
+            return abi.decode(data, (uint256, bool, uint256));
+        }
+    }
+
     /*━━━━━━━━━━━━━━━ Position reads (delegates to PositionView) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get a user's collateral and debt for a given asset (best-effort).
+     * @notice Get a user's collateral and debt for a given asset, with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
@@ -294,19 +359,18 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset Asset address
      * @return collateral Collateral amount (token decimals depend on `asset`)
      * @return debt Debt amount (token decimals depend on `asset`)
+     * @return isValid Whether the downstream cache is valid (best-effort on fallback path)
+     * @return blockNumber Cache blockNumber (block.number; best-effort)
+     * @return version Cache version (best-effort)
      */
     function getUserPosition(address user, address asset)
         external
         view
         onlyValidRegistry
-        returns (uint256 collateral, uint256 debt)
+        onlyUserDim(user)
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
     {
-        address pv = _positionView();
-        if (pv == address(0)) return (0, 0);
-        (bool ok, bytes memory data) =
-            pv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_POSITION, user, asset));
-        if (!ok || data.length < 64) return (0, 0);
-        return abi.decode(data, (uint256, uint256));
+        return _getUserPositionWithMetaInternal(user, asset);
     }
 
     /**
@@ -322,38 +386,21 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return collateral Collateral amount (token decimals depend on `asset`)
      * @return debt Debt amount (token decimals depend on `asset`)
      * @return isValid Whether the downstream cache is valid (best-effort on fallback path)
-     * @return timestamp Cache timestamp (seconds since epoch; best-effort)
+     * @return blockNumber Cache blockNumber (block.number; best-effort)
      * @return version Cache version (best-effort)
      */
     function getUserPositionWithMeta(address user, address asset)
         external
         view
         onlyValidRegistry
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 timestamp, uint64 version)
+        onlyUserDim(user)
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
     {
-        address pv = _positionView();
-        if (pv == address(0)) return (0, 0, false, 0, 0);
-
-        // Prefer the newest interface when available.
-        (bool ok, bytes memory data) =
-            pv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_POSITION_WITH_META, user, asset));
-        if (ok && data.length >= 160) {
-            return abi.decode(data, (uint256, uint256, bool, uint256, uint64));
-        }
-
-        // Backward compatibility: fall back to legacy calls and reconstruct meta (best-effort).
-        (ok, data) = pv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_POSITION_WITH_VALIDITY, user, asset));
-        if (ok && data.length >= 96) {
-            (collateral, debt, isValid) = abi.decode(data, (uint256, uint256, bool));
-        }
-        (ok, data) = pv.staticcall(abi.encodeWithSelector(_SEL_GET_POSITION_UPDATED_AT, user, asset));
-        if (ok && data.length >= 32) timestamp = abi.decode(data, (uint256));
-        (ok, data) = pv.staticcall(abi.encodeWithSelector(_SEL_GET_POSITION_VERSION, user, asset));
-        if (ok && data.length >= 32) version = abi.decode(data, (uint64));
+        return _getUserPositionWithMetaInternal(user, asset);
     }
 
     /**
-     * @notice Service-friendly alias of `getUserPosition`.
+     * @notice Service-friendly alias of `getUserPosition`, with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
@@ -364,18 +411,22 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset Asset address
      * @return collateral Collateral amount (token decimals depend on `asset`)
      * @return debt Debt amount (token decimals depend on `asset`)
+     * @return isValid Whether the downstream cache is valid (best-effort on fallback path)
+     * @return blockNumber Cache blockNumber (block.number; best-effort)
+     * @return version Cache version (best-effort)
      */
     function getUserPositionService(address user, address asset)
         external
         view
         onlyValidRegistry
-        returns (uint256 collateral, uint256 debt)
+        onlyUserDim(user)
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
     {
-        return this.getUserPosition(user, asset);
+        return _getUserPositionWithMetaInternal(user, asset);
     }
 
     /**
-     * @notice Read a user's ERC20 balance for a given token.
+     * @notice Read a user's ERC20 balance for a given token, with metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
@@ -385,19 +436,23 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param user User address
      * @param token ERC20 token address
      * @return balance Token balance (token decimals depend on `token`)
+     * @return isValid Whether the balance was successfully read
+     * @return blockNumber Read blockNumber (block.number)
      */
     function getUserTokenBalance(address user, address token)
         external
         view
         onlyValidRegistry
-        returns (uint256 balance)
+        onlyUserDim(user)
+        returns (uint256 balance, bool isValid, uint256 blockNumber)
     {
         // Direct ERC20 `balanceOf` call; no module delegation required.
         (bool success, bytes memory data) = token.staticcall(
             abi.encodeWithSelector(_SEL_BALANCE_OF, user)
         );
-        if (!success || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
+        if (!success || data.length < 32) return (0, false, 0);
+        balance = abi.decode(data, (uint256));
+        return (balance, true, _now());
     }
 
     /**
@@ -420,7 +475,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
 
 
     /**
-     * @notice Read a user's settlement token balance via the authoritative path.
+     * @notice Read a user's settlement token balance via the authoritative path, with metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *      - settlement token module is missing in Registry (`UserView__ModuleMissing`)
@@ -431,19 +486,28 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user User address
      * @return balance Settlement token balance (token decimals depend on the settlement token)
+     * @return isValid Whether the balance was successfully read
+     * @return blockNumber Read blockNumber (block.number)
      */
-    function getUserSettlementBalanceStrict(address user) external view onlyValidRegistry returns (uint256 balance) {
+    function getUserSettlementBalanceStrict(address user)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 balance, bool isValid, uint256 blockNumber)
+    {
+        _checkUserAccess(user);
         address token = _settlementToken();
         if (token == address(0)) revert UserView__ModuleMissing(ModuleKeys.KEY_SETTLEMENT_TOKEN);
         (bool ok, bytes memory data) = token.staticcall(abi.encodeWithSelector(_SEL_BALANCE_OF, user));
         if (!ok || data.length < 32) {
             revert UserView__ExternalCallFailed(ModuleKeys.KEY_SETTLEMENT_TOKEN, _SEL_BALANCE_OF);
         }
-        return abi.decode(data, (uint256));
+        balance = abi.decode(data, (uint256));
+        return (balance, true, _now());
     }
 
     /**
-     * @notice Read the user's total collateral value (settlement-denominated).
+     * @notice Read the user's total collateral value (settlement-denominated), with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *      - StatisticsView is missing (`UserView__ModuleMissing`) via `getUserTotalsWithMeta`
@@ -454,14 +518,24 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user User address
      * @return totalValue Total collateral value (denomination depends on system settlement unit)
+     * @return isValid Whether the downstream cache is valid
+     * @return blockNumber Cache blockNumber (block.number)
+     * @return version Snapshot version (best-effort)
+     * @return seq Snapshot sequence (best-effort)
      */
-    function getUserTotalCollateral(address user) external view onlyValidRegistry returns (uint256 totalValue) {
+    function getUserTotalCollateral(address user)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 totalValue, bool isValid, uint256 blockNumber, uint64 version, uint64 seq)
+    {
+        _checkUserAccess(user);
         // Per ARCH 4.7: MUST NOT use asset=0 placeholder. Authority is StatisticsView user snapshot.
-        (totalValue, , , , , ) = this.getUserTotalsWithMeta(user);
+        (totalValue, , isValid, blockNumber, version, seq) = _getUserTotalsWithMetaInternal(user);
     }
 
     /**
-     * @notice Read the user's total debt value (settlement-denominated).
+     * @notice Read the user's total debt value (settlement-denominated), with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *      - StatisticsView is missing (`UserView__ModuleMissing`) via `getUserTotalsWithMeta`
@@ -472,9 +546,45 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user User address
      * @return totalValue Total debt value (denomination depends on system settlement unit)
+     * @return isValid Whether the downstream cache is valid
+     * @return blockNumber Cache blockNumber (block.number)
+     * @return version Snapshot version (best-effort)
+     * @return seq Snapshot sequence (best-effort)
      */
-    function getUserTotalDebt(address user) external view onlyValidRegistry returns (uint256 totalValue) {
-        (, totalValue, , , , ) = this.getUserTotalsWithMeta(user);
+    function getUserTotalDebt(address user)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 totalValue, bool isValid, uint256 blockNumber, uint64 version, uint64 seq)
+    {
+        _checkUserAccess(user);
+        (, totalValue, isValid, blockNumber, version, seq) = _getUserTotalsWithMetaInternal(user);
+    }
+
+    function _getUserTotalsWithMetaInternal(address user)
+        internal
+        view
+        returns (
+            uint256 totalCollateral,
+            uint256 totalDebt,
+            bool isValid,
+            uint256 blockNumber,
+            uint64 version,
+            uint64 seq
+        )
+    {
+        address sv = _statisticsView();
+        if (sv == address(0)) revert UserView__ModuleMissing(ModuleKeys.KEY_STATS);
+
+        // Prefer v2: getUserSnapshotWithMeta(address) -> (UserSnapshot, version, seq, requestId, isValid, blockNumber)
+        (bool ok, bytes memory data) = sv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_SNAPSHOT_WITH_META, user));
+        if (ok && data.length > 0) {
+            (StatsUserSnapshot memory s, uint64 v, uint64 sseq, bytes32 rid, bool vld, uint256 snapshotBlockNumber) =
+                abi.decode(data, (StatsUserSnapshot, uint64, uint64, bytes32, bool, uint256));
+            rid; // silence unused variable warning
+            return (s.collateral, s.debt, vld, snapshotBlockNumber, v, sseq);
+        }
+        revert UserView__ExternalCallFailed(ModuleKeys.KEY_STATS, _SEL_GET_USER_SNAPSHOT_WITH_META);
     }
 
     /**
@@ -491,7 +601,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return totalCollateral Total collateral (settlement-denominated)
      * @return totalDebt Total debt (settlement-denominated)
      * @return isValid Whether the returned values are within cache freshness window
-     * @return timestamp Snapshot timestamp (seconds since epoch)
+     * @return blockNumber Snapshot blockNumber (block.number)
      * @return version Snapshot schema/cache version (best-effort)
      * @return seq Snapshot sequence number (best-effort)
      */
@@ -499,42 +609,21 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         external
         view
         onlyValidRegistry
+        onlyUserDim(user)
         returns (
             uint256 totalCollateral,
             uint256 totalDebt,
             bool isValid,
-            uint256 timestamp,
+            uint256 blockNumber,
             uint64 version,
             uint64 seq
         )
     {
-        address sv = _statisticsView();
-        if (sv == address(0)) revert UserView__ModuleMissing(ModuleKeys.KEY_STATS);
-
-        // Prefer v2: getUserSnapshotWithMeta(address) -> (UserSnapshot, version, seq, requestId, isValid, timestamp)
-        (bool ok, bytes memory data) =
-            sv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_SNAPSHOT_WITH_META, user));
-        if (ok && data.length > 0) {
-            (StatsUserSnapshot memory s, uint64 v, uint64 sseq, bytes32 rid, bool vld, uint256 ts) =
-                abi.decode(data, (StatsUserSnapshot, uint64, uint64, bytes32, bool, uint256));
-            rid; // silence unused variable warning
-            return (s.collateral, s.debt, vld, ts, v, sseq);
-        }
-
-        // Fallback: getUserSnapshot(address) -> (UserSnapshot). Compute validity locally.
-        (ok, data) = sv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_SNAPSHOT, user));
-        if (!ok || data.length == 0) {
-            revert UserView__ExternalCallFailed(ModuleKeys.KEY_STATS, _SEL_GET_USER_SNAPSHOT_WITH_META);
-        }
-        StatsUserSnapshot memory s2 = abi.decode(data, (StatsUserSnapshot));
-        timestamp = s2.timestamp;
-        // solhint-disable-next-line not-rely-on-time
-        isValid = timestamp > 0 && block.timestamp - timestamp <= ViewConstants.CACHE_DURATION;
-        return (s2.collateral, s2.debt, isValid, timestamp, 0, 0);
+        return _getUserTotalsWithMetaInternal(user);
     }
 
     /**
-     * @notice Convenience helper: read collateral amount only.
+     * @notice Convenience helper: read collateral amount only, with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
@@ -544,18 +633,22 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param user User address
      * @param asset Asset address
      * @return collateral Collateral amount (token decimals depend on `asset`)
+     * @return isValid Whether the downstream cache is valid (best-effort on fallback path)
+     * @return blockNumber Cache blockNumber (block.number; best-effort)
+     * @return version Cache version (best-effort)
      */
     function getUserCollateral(address user, address asset)
         external
         view
         onlyValidRegistry
-        returns (uint256 collateral)
+        onlyUserDim(user)
+        returns (uint256 collateral, bool isValid, uint256 blockNumber, uint64 version)
     {
-        (collateral, ) = this.getUserPosition(user, asset);
+        (collateral, , isValid, blockNumber, version) = _getUserPositionWithMetaInternal(user, asset);
     }
 
     /**
-     * @notice Convenience helper: read debt amount only.
+     * @notice Convenience helper: read debt amount only, with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
@@ -565,15 +658,24 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param user User address
      * @param asset Asset address
      * @return debt Debt amount (token decimals depend on `asset`)
+     * @return isValid Whether the downstream cache is valid (best-effort on fallback path)
+     * @return blockNumber Cache blockNumber (block.number; best-effort)
+     * @return version Cache version (best-effort)
      */
-    function getUserDebt(address user, address asset) external view onlyValidRegistry returns (uint256 debt) {
-        (, debt) = this.getUserPosition(user, asset);
+    function getUserDebt(address user, address asset)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
+    {
+        _checkUserAccess(user);
+        (, debt, isValid, blockNumber, version) = _getUserPositionWithMetaInternal(user, asset);
     }
 
     /*━━━━━━━━━━━━━━━ Health reads (delegates to HealthView) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Read the user's current health factor (bps).
+     * @notice Read the user's current health factor (bps), with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
@@ -582,13 +684,17 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user User address
      * @return hf Health factor (bps, 1e4 = 100%)
+     * @return isValid Whether the downstream cache is valid (best-effort on fallback path)
+     * @return blockNumber Cache blockNumber (block.number; best-effort)
      */
-    function getHealthFactor(address user) external view onlyValidRegistry returns (uint256 hf) {
-        address hv = _healthView();
-        if (hv == address(0)) return 0;
-        (bool ok, bytes memory data) = hv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR, user));
-        if (!ok || data.length < 96) return 0;
-        (hf, , ) = abi.decode(data, (uint256, bool, uint256));
+    function getHealthFactor(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyUserDim(user)
+        returns (uint256 hf, bool isValid, uint256 blockNumber)
+    {
+        return _getHealthFactorWithMetaInternal(user);
     }
 
     /**
@@ -602,33 +708,20 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param user User address
      * @return hf Health factor (bps, 1e4 = 100%)
      * @return isValid Whether the downstream cache is valid (best-effort on fallback path)
-     * @return timestamp Cache timestamp (seconds since epoch; best-effort)
+     * @return blockNumber Cache blockNumber (block.number; best-effort)
      */
     function getHealthFactorWithMeta(address user)
         external
         view
         onlyValidRegistry
-        returns (uint256 hf, bool isValid, uint256 timestamp)
+        onlyUserDim(user)
+        returns (uint256 hf, bool isValid, uint256 blockNumber)
     {
-        address hv = _healthView();
-        if (hv == address(0)) return (0, false, 0);
-
-        // Prefer the newest interface when available.
-        (bool ok, bytes memory data) =
-            hv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR_WITH_META, user));
-        if (ok && data.length >= 96) {
-            return abi.decode(data, (uint256, bool, uint256));
-        }
-
-        // Backward compatibility: fall back to legacy call (best-effort).
-        (ok, data) = hv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR, user));
-        if (ok && data.length >= 96) {
-            (hf, isValid, timestamp) = abi.decode(data, (uint256, bool, uint256));
-        }
+        return _getHealthFactorWithMetaInternal(user);
     }
 
     /**
-     * @notice Alias of `getHealthFactor` for backward compatibility.
+     * @notice Alias of `getHealthFactor` for backward compatibility, with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
@@ -637,13 +730,21 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user User address
      * @return hf Health factor (bps, 1e4 = 100%)
+     * @return isValid Whether the downstream cache is valid (best-effort on fallback path)
+     * @return blockNumber Cache blockNumber (block.number; best-effort)
      */
-    function getUserHealthFactor(address user) external view onlyValidRegistry returns (uint256 hf) {
-        return this.getHealthFactor(user);
+    function getUserHealthFactor(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyUserDim(user)
+        returns (uint256 hf, bool isValid, uint256 blockNumber)
+    {
+        return _getHealthFactorWithMetaInternal(user);
     }
 
     /**
-     * @notice Aggregate user statistics for an asset (position + health + derived LTV).
+     * @notice Aggregate user statistics for an asset (position + health + derived LTV), with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
@@ -653,25 +754,38 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param user User address
      * @param asset Asset address
      * @return stats Aggregated stats (LTV/HF in bps)
+     * @return positionIsValid Whether the position cache is valid
+     * @return positionTimestamp Position cache block (block.number)
+     * @return positionVersion Position cache version
+     * @return healthIsValid Whether the health cache is valid
+     * @return healthTimestamp Health cache block (block.number)
      */
     function getUserStats(address user, address asset)
         external
         view
         onlyValidRegistry
-        returns (UserStats memory stats)
+        onlyUserDim(user)
+        returns (
+            UserStats memory stats,
+            bool positionIsValid,
+            uint256 positionTimestamp,
+            uint64 positionVersion,
+            bool healthIsValid,
+            uint256 healthTimestamp
+        )
     {
-        (uint256 collateral, uint256 debt) = this.getUserPosition(user, asset);
-        uint256 hf = this.getHealthFactor(user);
+        (uint256 collateral, uint256 debt, bool pValid, uint256 pTs, uint64 pVer) =
+            _getUserPositionWithMetaInternal(user, asset);
+        (uint256 hf, bool hValid, uint256 hTs) = _getHealthFactorWithMetaInternal(user);
 
-        // Compute LTV (loan-to-value ratio).
         uint256 ltv = RiskUtils.calculateLTV(debt, collateral);
+        stats = UserStats({ collateral: collateral, debt: debt, ltv: ltv, hf: hf });
 
-        stats = UserStats({
-            collateral: collateral,
-            debt: debt,
-            ltv: ltv,
-            hf: hf
-        });
+        positionIsValid = pValid;
+        positionTimestamp = pTs;
+        positionVersion = pVer;
+        healthIsValid = hValid;
+        healthTimestamp = hTs;
     }
 
     /**
@@ -686,15 +800,16 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset Asset address
      * @return stats Aggregated stats (LTV/HF in bps)
      * @return positionIsValid Whether the position cache is valid
-     * @return positionTimestamp Position cache timestamp (seconds since epoch)
+     * @return positionTimestamp Position cache block (block.number)
      * @return positionVersion Position cache version
      * @return healthIsValid Whether the health cache is valid
-     * @return healthTimestamp Health cache timestamp (seconds since epoch)
+     * @return healthTimestamp Health cache block (block.number)
      */
     function getUserStatsWithMeta(address user, address asset)
         external
         view
         onlyValidRegistry
+        onlyUserDim(user)
         returns (
             UserStats memory stats,
             bool positionIsValid,
@@ -705,8 +820,8 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         )
     {
         (uint256 collateral, uint256 debt, bool pValid, uint256 pTs, uint64 pVer) =
-            this.getUserPositionWithMeta(user, asset);
-        (uint256 hf, bool hValid, uint256 hTs) = this.getHealthFactorWithMeta(user);
+            _getUserPositionWithMetaInternal(user, asset);
+        (uint256 hf, bool hValid, uint256 hTs) = _getHealthFactorWithMetaInternal(user);
 
         uint256 ltv = RiskUtils.calculateLTV(debt, collateral);
         stats = UserStats({ collateral: collateral, debt: debt, ltv: ltv, hf: hf });
@@ -736,6 +851,9 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return newHF New health factor (bps)
      * @return newLTV New LTV (bps)
      * @return maxBorrowable Max borrowable amount (token decimals depend on system)
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache block (block.number)
+     * @return positionVersion PositionView cache version
      */
     function previewBorrow(
         address user,
@@ -743,9 +861,22 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 collateralIn,
         uint256 collateralAdded,
         uint256 borrowAmount
-    ) external view onlyValidRegistry returns (uint256 newHF, uint256 newLTV, uint256 maxBorrowable) {
+    )
+        external
+        view
+        onlyValidRegistry
+        onlyUserDim(user)
+        returns (
+            uint256 newHF,
+            uint256 newLTV,
+            uint256 maxBorrowable,
+            bool positionIsValid,
+            uint256 positionTimestamp,
+            uint64 positionVersion
+        )
+    {
         address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
-        if (previewViewAddr == address(0)) return (0, 0, 0);
+        if (previewViewAddr == address(0)) return (0, 0, 0, false, 0, 0);
         (bool success, bytes memory data) = previewViewAddr.staticcall(
             abi.encodeWithSelector(
                 _SEL_PREVIEW_BORROW,
@@ -756,8 +887,8 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
                 borrowAmount
             )
         );
-        if (!success || data.length < 96) return (0, 0, 0);
-        return abi.decode(data, (uint256, uint256, uint256));
+        if (!success || data.length < 192) return (0, 0, 0, false, 0, 0);
+        return abi.decode(data, (uint256, uint256, uint256, bool, uint256, uint64));
     }
 
     /**
@@ -773,20 +904,24 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param amount Collateral amount (token decimals depend on `asset`)
      * @return hfAfter Health factor after deposit (bps)
      * @return ok Whether the post-action state is considered safe by PreviewView
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache block (block.number)
+     * @return positionVersion PositionView cache version
      */
     function previewDeposit(address user, address asset, uint256 amount)
         external
         view
         onlyValidRegistry
-        returns (uint256 hfAfter, bool ok)
+        onlyUserDim(user)
+        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
     {
         address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
-        if (previewViewAddr == address(0)) return (0, false);
+        if (previewViewAddr == address(0)) return (0, false, false, 0, 0);
         (bool success, bytes memory data) = previewViewAddr.staticcall(
             abi.encodeWithSelector(_SEL_PREVIEW_DEPOSIT, user, asset, amount)
         );
-        if (!success || data.length < 64) return (0, false);
-        return abi.decode(data, (uint256, bool));
+        if (!success || data.length < 160) return (0, false, false, 0, 0);
+        return abi.decode(data, (uint256, bool, bool, uint256, uint64));
     }
 
     /**
@@ -802,20 +937,24 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param amount Repay amount (token decimals depend on system debt token for `asset`)
      * @return newHF Health factor after repayment (bps)
      * @return newLTV LTV after repayment (bps)
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache block (block.number)
+     * @return positionVersion PositionView cache version
      */
     function previewRepay(address user, address asset, uint256 amount)
         external
         view
         onlyValidRegistry
-        returns (uint256 newHF, uint256 newLTV)
+        onlyUserDim(user)
+        returns (uint256 newHF, uint256 newLTV, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
     {
         address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
-        if (previewViewAddr == address(0)) return (0, 0);
+        if (previewViewAddr == address(0)) return (0, 0, false, 0, 0);
         (bool success, bytes memory data) = previewViewAddr.staticcall(
             abi.encodeWithSelector(_SEL_PREVIEW_REPAY, user, asset, amount)
         );
-        if (!success || data.length < 64) return (0, 0);
-        return abi.decode(data, (uint256, uint256));
+        if (!success || data.length < 160) return (0, 0, false, 0, 0);
+        return abi.decode(data, (uint256, uint256, bool, uint256, uint64));
     }
 
     /**
@@ -831,20 +970,24 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param amount Withdraw amount (token decimals depend on `asset`)
      * @return newHF Health factor after withdrawal (bps)
      * @return ok Whether the post-action state is considered safe by PreviewView
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache block (block.number)
+     * @return positionVersion PositionView cache version
      */
     function previewWithdraw(address user, address asset, uint256 amount)
         external
         view
         onlyValidRegistry
-        returns (uint256 newHF, bool ok)
+        onlyUserDim(user)
+        returns (uint256 newHF, bool ok, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
     {
         address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
-        if (previewViewAddr == address(0)) return (0, false);
+        if (previewViewAddr == address(0)) return (0, false, false, 0, 0);
         (bool success, bytes memory data) = previewViewAddr.staticcall(
             abi.encodeWithSelector(_SEL_PREVIEW_WITHDRAW, user, asset, amount)
         );
-        if (!success || data.length < 64) return (0, false);
-        return abi.decode(data, (uint256, bool));
+        if (!success || data.length < 160) return (0, false, false, 0, 0);
+        return abi.decode(data, (uint256, bool, bool, uint256, uint64));
     }
 
     /*━━━━━━━━━━━━━━━ Batch reads ━━━━━━━━━━━━━━━*/
@@ -853,8 +996,8 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Batch read user positions (best-effort).
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
-     *      - `users.length != assets.length` (`UserView__LengthMismatch`)
-     *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`UserView__BatchTooLarge`)
+     *      - `users.length != assets.length` (`ArrayLengthMismatch`)
+     *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`BatchTooLarge`)
      *
      * Security:
      * - Read-only (`staticcall`)
@@ -867,10 +1010,11 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
     function batchGetUserPositions(
         address[] calldata users,
         address[] calldata assets
-    ) external view onlyValidRegistry returns (uint256[] memory collaterals, uint256[] memory debts) {
+    ) external view onlyValidRegistry onlyUserDimBatch returns (uint256[] memory collaterals, uint256[] memory debts) {
         uint256 len = users.length;
-        if (len != assets.length) revert UserView__LengthMismatch();
-        if (len > _MAX_BATCH_SIZE) revert UserView__BatchTooLarge(len);
+        if (len == 0) revert EmptyArray();
+        if (len != assets.length) revert ArrayLengthMismatch(len, assets.length);
+        if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
         address pv = _positionView();
         if (pv == address(0)) {
             collaterals = new uint256[](len);
@@ -879,19 +1023,20 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
         (bool ok, bytes memory data) =
             pv.staticcall(abi.encodeWithSelector(_SEL_BATCH_GET_USER_POSITIONS, users, assets));
-        if (!ok || data.length < 64) {
+        if (!ok || data.length < 160) {
             collaterals = new uint256[](len);
             debts = new uint256[](len);
             return (collaterals, debts);
         }
-        return abi.decode(data, (uint256[], uint256[]));
+        (collaterals, debts, , , ) = abi.decode(data, (uint256[], uint256[], bool[], uint256[], uint64[]));
+        return (collaterals, debts);
     }
     
     /**
      * @notice Batch read user health factors (bps) (best-effort).
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
-     *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`UserView__BatchTooLarge`)
+     *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`BatchTooLarge`)
      *
      * Security:
      * - Read-only (`staticcall`)
@@ -901,15 +1046,16 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function batchGetUserHealthFactors(
         address[] calldata users
-    ) external view onlyValidRegistry returns (uint256[] memory healthFactors) {
+    ) external view onlyValidRegistry onlyUserDimBatch returns (uint256[] memory healthFactors) {
         uint256 len = users.length;
-        if (len > _MAX_BATCH_SIZE) revert UserView__BatchTooLarge(len);
+        if (len == 0) revert EmptyArray();
+        if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
         address hv = _healthView();
         if (hv == address(0)) {
             return new uint256[](len);
         }
         (bool ok, bytes memory data) =
-            hv.staticcall(abi.encodeWithSelector(_SEL_BATCH_GET_HEALTH_FACTORS, users));
+            hv.staticcall(abi.encodeWithSelector(_SEL_BATCH_GET_HEALTH_FACTORS_WITH_META, users));
         if (!ok || data.length < 96) {
             return new uint256[](len);
         }
@@ -921,7 +1067,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Batch read user health factors (bps) with cache metadata.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
-     *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`UserView__BatchTooLarge`)
+     *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`BatchTooLarge`)
      *
      * Security:
      * - Read-only (`staticcall`)
@@ -929,40 +1075,35 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param users User addresses
      * @return healthFactors Health factors (bps)
      * @return validFlags Cache validity flags (best-effort on fallback path)
-     * @return timestamps Cache timestamps (seconds since epoch; best-effort)
+     * @return blockNumbers Cache blockNumbers (block.number; best-effort)
      */
     function batchGetUserHealthFactorsWithMeta(address[] calldata users)
         external
         view
         onlyValidRegistry
-        returns (uint256[] memory healthFactors, bool[] memory validFlags, uint256[] memory timestamps)
+        onlyUserDimBatch
+        returns (uint256[] memory healthFactors, bool[] memory validFlags, uint256[] memory blockNumbers)
     {
         uint256 len = users.length;
-        if (len > _MAX_BATCH_SIZE) revert UserView__BatchTooLarge(len);
+        if (len == 0) revert EmptyArray();
+        if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
         address hv = _healthView();
         if (hv == address(0)) {
             healthFactors = new uint256[](len);
             validFlags = new bool[](len);
-            timestamps = new uint256[](len);
-            return (healthFactors, validFlags, timestamps);
+            blockNumbers = new uint256[](len);
+            return (healthFactors, validFlags, blockNumbers);
         }
 
-        // Prefer the newest interface when available.
         (bool ok, bytes memory data) =
             hv.staticcall(abi.encodeWithSelector(_SEL_BATCH_GET_HEALTH_FACTORS_WITH_META, users));
         if (ok && data.length >= 96) {
             return abi.decode(data, (uint256[], bool[], uint256[]));
         }
-
-        // Backward compatibility: fall back to legacy call (best-effort).
-        (ok, data) = hv.staticcall(abi.encodeWithSelector(_SEL_BATCH_GET_HEALTH_FACTORS, users));
-        if (!ok || data.length < 96) {
-            healthFactors = new uint256[](len);
-            validFlags = new bool[](len);
-            timestamps = new uint256[](len);
-            return (healthFactors, validFlags, timestamps);
-        }
-        (healthFactors, validFlags, timestamps) = abi.decode(data, (uint256[], bool[], uint256[]));
+        healthFactors = new uint256[](len);
+        validFlags = new bool[](len);
+        blockNumbers = new uint256[](len);
+        return (healthFactors, validFlags, blockNumbers);
     }
 
     /*━━━━━━━━━━━━━━━ Upgrades ━━━━━━━━━━━━━━━*/
@@ -971,7 +1112,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Authorize UUPS upgrades.
      * @dev Reverts if:
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
-     *      - caller is missing `ActionKeys.ACTION_ADMIN` (`ViewAccessLib.requireRole`)
+     *      - caller is missing `ActionKeys.ACTION_ADMIN` (`MissingRole`)
      *      - `newImplementation` is the zero address (`ZeroAddress`)
      *      - `newImplementation` is not a contract (`NotAContract`)
      *
@@ -981,7 +1122,9 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }

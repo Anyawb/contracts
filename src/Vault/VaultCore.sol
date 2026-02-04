@@ -204,9 +204,10 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
-        // Timestamp is passed through for off-chain audit attribution; not used for business decisions.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): we do not use block-based time in seconds in this repo.
+        // The router interface parameter is a legacy *observability* field.
+        // We pass `block.number` as a monotonic chain freshness signal.
+        uint256 ts = block.number;
         IVaultRouter(_viewContractAddr).processUserOperation(
             msg.sender,
             ActionKeys.ACTION_DEPOSIT,
@@ -234,9 +235,9 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
 
-        // Timestamp is passed through for off-chain audit attribution; not used for business decisions.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): legacy param is used as observability only.
+        // Pass block.number (updateBlock) for a monotonic chain time axis.
+        uint256 ts = block.number;
         IVaultRouter(_viewContractAddr).processUserOperation(
             msg.sender,
             ActionKeys.ACTION_WITHDRAW,
@@ -361,9 +362,9 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
 
-        // Timestamp is passed through for off-chain audit attribution; not used for business decisions.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): legacy param is used as observability only.
+        // Pass block.number (updateBlock) for a monotonic chain time axis.
+        uint256 ts = block.number;
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i];
             uint256 amount = amounts[i];
@@ -468,9 +469,9 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         if (assets.length == 0) revert EmptyArray();
         if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
 
-        // Timestamp is passed through for off-chain audit attribution; not used for business decisions.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
+        // NOTE (Time-Dependency-Refactor): legacy param is used as observability only.
+        // Pass block.number (updateBlock) for a monotonic chain time axis.
+        uint256 ts = block.number;
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i];
             uint256 amount = amounts[i];

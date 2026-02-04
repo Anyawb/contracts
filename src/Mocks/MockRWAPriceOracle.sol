@@ -11,7 +11,8 @@ import { ZeroAddress } from "../errors/StandardErrors.sol";
 contract MockRWAPriceOracle is Ownable, IRWAPriceOracle {
     uint8 public immutable decimalsVar;
     mapping(address => uint256) private _prices;
-    mapping(address => uint256) private _timestamps;
+    // block number of last price update
+    mapping(address => uint256) private _priceBlocks;
     mapping(address => bool) private _isValid;
     mapping(address => RWAAssetConfig) private _assetConfigs;
     address[] private _supportedAssets;
@@ -25,9 +26,9 @@ contract MockRWAPriceOracle is Ownable, IRWAPriceOracle {
         if (token == address(0)) revert ZeroAddress();
         if (price == 0) revert("Invalid price");
         _prices[token] = price;
-        _timestamps[token] = block.timestamp;
+        _priceBlocks[token] = block.number;
         _isValid[token] = true;
-        emit PriceUpdated(token, price, block.timestamp);
+        emit PriceUpdated(token, price, block.number);
     }
 
     function getPriceUSD(address token) external view override returns (uint256 price, uint8 _decimals) {
@@ -40,7 +41,7 @@ contract MockRWAPriceOracle is Ownable, IRWAPriceOracle {
         if (token == address(0)) revert ZeroAddress();
         priceData = RWAPriceData({
             price: _prices[token],
-            timestamp: _timestamps[token],
+            blockNumber: _priceBlocks[token],
             decimals: decimalsVar,
             isValid: _isValid[token],
             assetType: _assetConfigs[token].assetType
@@ -79,38 +80,40 @@ contract MockRWAPriceOracle is Ownable, IRWAPriceOracle {
         return _supportedAssets.length;
     }
 
-    function updatePrice(address token, uint256 price, uint256 timestamp) external override onlyOwner {
+    /// @notice 更新价格（blockNumber 参数按 block number 语义）
+    function updatePrice(address token, uint256 price, uint256 blockNumber) external override onlyOwner {
         if (token == address(0)) revert ZeroAddress();
         if (price == 0) revert("Invalid price");
         
         _prices[token] = price;
-        _timestamps[token] = timestamp;
+        _priceBlocks[token] = blockNumber;
         _isValid[token] = true;
         
-        emit PriceUpdated(token, price, timestamp);
+        emit PriceUpdated(token, price, blockNumber);
     }
 
+    /// @notice 批量更新价格（blockNumbers 参数按 block number 语义）
     function updatePrices(
         address[] calldata tokens,
         uint256[] calldata prices,
-        uint256[] calldata timestamps
+        uint256[] calldata blockNumbers
     ) external override onlyOwner {
         uint256 length = tokens.length;
-        if (length != prices.length || length != timestamps.length) revert("Array length mismatch");
+        if (length != prices.length || length != blockNumbers.length) revert("Array length mismatch");
         
         for (uint256 i = 0; i < length; i++) {
             address token = tokens[i];
             uint256 price = prices[i];
-            uint256 timestamp = timestamps[i];
+            uint256 blockNumber = blockNumbers[i];
             
             if (token == address(0)) continue;
             if (price == 0) continue;
             
             _prices[token] = price;
-            _timestamps[token] = timestamp;
+            _priceBlocks[token] = blockNumber;
             _isValid[token] = true;
             
-            emit PriceUpdated(token, price, timestamp);
+            emit PriceUpdated(token, price, blockNumber);
         }
     }
 

@@ -148,8 +148,8 @@ describe("GracefulDegradation Library", function () {
         describe("4. 稳定币面值假设修复", function () {
             it("应该验证稳定币价格", async function () {
                 const stablecoin = settlementToken;
-                // getStablecoinPrice 返回 1（wei），所以 expectedPrice 也应该是 1
-                const expectedPrice = 1n;
+                // getStablecoinPrice 返回 1e18（ONE_USD），所以 expectedPrice 也应该是 1e18
+                const expectedPrice = ethers.parseEther("1");
                 const tolerance = 100; // 1%
 
                 // validateStablecoinPrice 是 pure 函数，它调用 getStablecoinPrice 获取实际价格
@@ -159,24 +159,24 @@ describe("GracefulDegradation Library", function () {
                     expectedPrice,
                     tolerance
                 );
-                // 由于 actualPrice = 1, expectedPrice = 1, tolerance = 1%
-                // minPrice = 1 * (10000 - 100) / 10000 = 0.99
-                // maxPrice = 1 * (10000 + 100) / 10000 = 1.01
+                // 由于 actualPrice = 1e18, expectedPrice = 1e18, tolerance = 1%
+                // minPrice = 1e18 * (10000 - 100) / 10000 = 0.99e18
+                // maxPrice = 1e18 * (10000 + 100) / 10000 = 1.01e18
                 // 1 >= 0.99 && 1 <= 1.01 = true
                 expect(isValid).to.be.true;
             });
 
             it("应该处理稳定币脱锚情况", async function () {
                 const stablecoin = settlementToken;
-                // getStablecoinPrice 返回 1，所以测试需要基于这个值
+                // getStablecoinPrice 返回 1e18，所以测试需要基于这个值
                 const tolerance = 100; // 1%
 
                 // 测试价格在容忍范围内的情况
-                // actualPrice = 1, expectedPrice = 1 (在容忍范围内)
-                // minPrice = 1 * (10000 - 100) / 10000 = 0.99
-                // maxPrice = 1 * (10000 + 100) / 10000 = 1.01
-                // 1 >= 0.99 && 1 <= 1.01 = true
-                const inRangePrice = 1n;
+                // actualPrice = 1e18, expectedPrice = 1e18 (在容忍范围内)
+                // minPrice = 1e18 * (10000 - 100) / 10000 = 0.99e18
+                // maxPrice = 1e18 * (10000 + 100) / 10000 = 1.01e18
+                // 1e18 >= 0.99e18 && 1e18 <= 1.01e18 = true
+                const inRangePrice = ethers.parseEther("1");
                 const isValidInRange = await gracefulDegradation.validateStablecoinPrice(
                     stablecoin,
                     inRangePrice,
@@ -185,11 +185,11 @@ describe("GracefulDegradation Library", function () {
                 expect(isValidInRange).to.be.true;
 
                 // 测试价格超出容忍范围的情况
-                // actualPrice = 1, expectedPrice = 3 (超出容忍范围)
-                // minPrice = 3 * (10000 - 100) / 10000 = 3 * 9900 / 10000 = 29700 / 10000 = 2 (整数除法)
-                // maxPrice = 3 * (10000 + 100) / 10000 = 3 * 10100 / 10000 = 30300 / 10000 = 3 (整数除法)
-                // 1 < 2，所以返回 false
-                const outOfRangePrice = 3n;
+                // actualPrice = 1e18, expectedPrice = 3e18 (超出容忍范围)
+                // minPrice = 3e18 * (10000 - 100) / 10000 = 2.97e18
+                // maxPrice = 3e18 * (10000 + 100) / 10000 = 3.03e18
+                // 1e18 < 2.97e18，所以返回 false
+                const outOfRangePrice = ethers.parseEther("3");
                 const isValidOutOfRange = await gracefulDegradation.validateStablecoinPrice(
                     stablecoin,
                     outOfRangePrice,

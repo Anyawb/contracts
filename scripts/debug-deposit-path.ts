@@ -52,7 +52,7 @@ async function main() {
   ];
 
   const amount = ethers.parseUnits("1000", 6);
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+  const blockNumber = await ethers.provider.getBlockNumber();
 
   // Step 0: probe VaultCore push selector that CollateralManager uses
   {
@@ -107,7 +107,7 @@ async function main() {
       ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT")),
       usdcAddr,
       amount,
-      now,
+      blockNumber,
     ]);
 
     try {

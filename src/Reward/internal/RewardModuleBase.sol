@@ -12,19 +12,19 @@ import { ZeroAddress } from "../../errors/StandardErrors.sol";
 /// @dev 仅提供 internal 能力；不暴露 external/public 接口，避免与现有合约产生签名冲突
 /// @dev RewardView 最小写入接口（统一合集，覆盖 RMCore 与 RewardCore 各自使用的子集）
 interface IRewardViewWriter {
-    function pushRewardEarned(address user, uint256 amount, string calldata reason, uint256 ts) external;
-    function pushPointsBurned(address user, uint256 amount, string calldata reason, uint256 ts) external;
-    function pushPenaltyLedger(address user, uint256 pendingDebt, uint256 ts) external;
-    function pushUserLevel(address user, uint8 newLevel, uint256 ts) external;
-    function pushUserPrivilege(address user, uint256 privilegePacked, uint256 ts) external;
-    function pushSystemStats(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 ts) external;
+    function pushRewardEarned(address user, uint256 amount, string calldata reason, uint256 blockNumber) external;
+    function pushPointsBurned(address user, uint256 amount, string calldata reason, uint256 blockNumber) external;
+    function pushPenaltyLedger(address user, uint256 pendingDebt, uint256 blockNumber) external;
+    function pushUserLevel(address user, uint8 newLevel, uint256 blockNumber) external;
+    function pushUserPrivilege(address user, uint256 privilegePacked, uint256 blockNumber) external;
+    function pushSystemStats(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 blockNumber) external;
     function pushConsumptionRecord(
         address user,
         uint8 serviceType,
         uint8 serviceLevel,
         uint256 points,
         uint256 expirationTime,
-        uint256 ts
+        uint256 blockNumber
     ) external;
 }
 
@@ -82,18 +82,18 @@ abstract contract RewardModuleBase {
 
     // ============ RewardView 推送工具（统一实现，尽力而为，不可回滚） ============
     address private _cachedRewardViewAddr;
-    uint256 private _cachedRewardViewTs;
-    uint256 private constant RV_CACHE_TTL = 1 hours;
+    uint256 private _cachedRewardViewBlock;
+    uint256 private constant RV_CACHE_TTL_BLOCKS = 1 hours / 2 seconds;
 
     /// @notice 解析并缓存 RewardView 地址（1 小时 TTL）
     function _getRewardViewCached() internal returns (address rv) {
-        if (_cachedRewardViewAddr != address(0) && block.timestamp < _cachedRewardViewTs + RV_CACHE_TTL) {
+        if (_cachedRewardViewAddr != address(0) && block.number < _cachedRewardViewBlock + RV_CACHE_TTL_BLOCKS) {
             return _cachedRewardViewAddr;
         }
         // 尝试解析：失败时返回 address(0)，调用方需忽略
         try Registry(_getRegistryAddr()).getModuleOrRevert(ModuleKeys.KEY_REWARD_VIEW) returns (address viewAddr) {
             _cachedRewardViewAddr = viewAddr;
-            _cachedRewardViewTs = block.timestamp;
+            _cachedRewardViewBlock = block.number;
             return viewAddr;
         } catch {
             return address(0);
@@ -103,12 +103,15 @@ abstract contract RewardModuleBase {
     /// @notice 推送：获得积分
     function _tryPushRewardEarned(address user, uint256 amount, string memory reason) internal {
         address rv = _getRewardViewCached();
-        bytes memory payload = abi.encode(user, amount, reason, block.timestamp);
+        bytes memory payload = abi.encode(user, amount, reason, block.number);
         if (rv == address(0)) {
             emit RewardViewPushFailed(user, rv, RV_OP_REWARD_EARNED, payload, bytes("rewardView unavailable"));
             return;
         }
-        try IRewardViewWriter(rv).pushRewardEarned(user, amount, reason, block.timestamp) { } catch (bytes memory err) {
+        try IRewardViewWriter(rv).pushRewardEarned(user, amount, reason, block.number) {
+            uint256 noop = 0;
+            noop;
+        } catch (bytes memory err) {
             emit RewardViewPushFailed(user, rv, RV_OP_REWARD_EARNED, payload, err);
         }
     }
@@ -116,12 +119,15 @@ abstract contract RewardModuleBase {
     /// @notice 推送：扣减积分
     function _tryPushPointsBurned(address user, uint256 amount, string memory reason) internal {
         address rv = _getRewardViewCached();
-        bytes memory payload = abi.encode(user, amount, reason, block.timestamp);
+        bytes memory payload = abi.encode(user, amount, reason, block.number);
         if (rv == address(0)) {
             emit RewardViewPushFailed(user, rv, RV_OP_POINTS_BURNED, payload, bytes("rewardView unavailable"));
             return;
         }
-        try IRewardViewWriter(rv).pushPointsBurned(user, amount, reason, block.timestamp) { } catch (bytes memory err) {
+        try IRewardViewWriter(rv).pushPointsBurned(user, amount, reason, block.number) {
+            uint256 noop = 0;
+            noop;
+        } catch (bytes memory err) {
             emit RewardViewPushFailed(user, rv, RV_OP_POINTS_BURNED, payload, err);
         }
     }
@@ -129,12 +135,15 @@ abstract contract RewardModuleBase {
     /// @notice 推送：惩罚账本（欠分）
     function _tryPushPenaltyLedger(address user, uint256 pendingDebt) internal {
         address rv = _getRewardViewCached();
-        bytes memory payload = abi.encode(user, pendingDebt, block.timestamp);
+        bytes memory payload = abi.encode(user, pendingDebt, block.number);
         if (rv == address(0)) {
             emit RewardViewPushFailed(user, rv, RV_OP_PENALTY_LEDGER, payload, bytes("rewardView unavailable"));
             return;
         }
-        try IRewardViewWriter(rv).pushPenaltyLedger(user, pendingDebt, block.timestamp) { } catch (bytes memory err) {
+        try IRewardViewWriter(rv).pushPenaltyLedger(user, pendingDebt, block.number) {
+            uint256 noop = 0;
+            noop;
+        } catch (bytes memory err) {
             emit RewardViewPushFailed(user, rv, RV_OP_PENALTY_LEDGER, payload, err);
         }
     }
@@ -142,12 +151,15 @@ abstract contract RewardModuleBase {
     /// @notice 推送：用户等级
     function _tryPushUserLevel(address user, uint8 newLevel) internal {
         address rv = _getRewardViewCached();
-        bytes memory payload = abi.encode(user, newLevel, block.timestamp);
+        bytes memory payload = abi.encode(user, newLevel, block.number);
         if (rv == address(0)) {
             emit RewardViewPushFailed(user, rv, RV_OP_USER_LEVEL, payload, bytes("rewardView unavailable"));
             return;
         }
-        try IRewardViewWriter(rv).pushUserLevel(user, newLevel, block.timestamp) { } catch (bytes memory err) {
+        try IRewardViewWriter(rv).pushUserLevel(user, newLevel, block.number) {
+            uint256 noop = 0;
+            noop;
+        } catch (bytes memory err) {
             emit RewardViewPushFailed(user, rv, RV_OP_USER_LEVEL, payload, err);
         }
     }
@@ -155,12 +167,15 @@ abstract contract RewardModuleBase {
     /// @notice 推送：用户特权（压缩位图）
     function _tryPushUserPrivilege(address user, uint256 privilegePacked) internal {
         address rv = _getRewardViewCached();
-        bytes memory payload = abi.encode(user, privilegePacked, block.timestamp);
+        bytes memory payload = abi.encode(user, privilegePacked, block.number);
         if (rv == address(0)) {
             emit RewardViewPushFailed(user, rv, RV_OP_USER_PRIVILEGE, payload, bytes("rewardView unavailable"));
             return;
         }
-        try IRewardViewWriter(rv).pushUserPrivilege(user, privilegePacked, block.timestamp) { } catch (bytes memory err) {
+        try IRewardViewWriter(rv).pushUserPrivilege(user, privilegePacked, block.number) {
+            uint256 noop = 0;
+            noop;
+        } catch (bytes memory err) {
             emit RewardViewPushFailed(user, rv, RV_OP_USER_PRIVILEGE, payload, err);
         }
     }
@@ -168,12 +183,15 @@ abstract contract RewardModuleBase {
     /// @notice 推送：系统统计
     function _tryPushSystemStats(uint256 totalBatchOps, uint256 totalCachedRewards) internal {
         address rv = _getRewardViewCached();
-        bytes memory payload = abi.encode(totalBatchOps, totalCachedRewards, block.timestamp);
+        bytes memory payload = abi.encode(totalBatchOps, totalCachedRewards, block.number);
         if (rv == address(0)) {
             emit RewardViewPushFailed(address(0), rv, RV_OP_SYSTEM_STATS, payload, bytes("rewardView unavailable"));
             return;
         }
-        try IRewardViewWriter(rv).pushSystemStats(totalBatchOps, totalCachedRewards, block.timestamp) { } catch (bytes memory err) {
+        try IRewardViewWriter(rv).pushSystemStats(totalBatchOps, totalCachedRewards, block.number) {
+            uint256 noop = 0;
+            noop;
+        } catch (bytes memory err) {
             emit RewardViewPushFailed(address(0), rv, RV_OP_SYSTEM_STATS, payload, err);
         }
     }
@@ -193,7 +211,10 @@ abstract contract RewardModuleBase {
             emit RewardViewPushFailed(user, rv, RV_OP_CONSUMPTION_RECORD, payload, bytes("rewardView unavailable"));
             return;
         }
-        try IRewardViewWriter(rv).pushConsumptionRecord(user, serviceType, serviceLevel, points, expirationTime, ts) { } catch (bytes memory err) {
+        try IRewardViewWriter(rv).pushConsumptionRecord(user, serviceType, serviceLevel, points, expirationTime, ts) {
+            uint256 noop = 0;
+            noop;
+        } catch (bytes memory err) {
             emit RewardViewPushFailed(user, rv, RV_OP_CONSUMPTION_RECORD, payload, err);
         }
     }

@@ -36,13 +36,16 @@ contract LiquidationConfigModule is LiquidationConfigManager {
     /// @notice Invalid liquidation threshold
     error LiquidationConfigModule__InvalidLiquidationThreshold();
 
+    /// @notice Invalid maximum LTV
+    error LiquidationConfigModule__InvalidMaxLtvBps();
+
     /**
      * @notice Liquidation threshold updated.
      * @param oldThreshold Old liquidation threshold (bps=1e4)
      * @param newThreshold New liquidation threshold (bps=1e4)
-     * @param timestamp Update timestamp (in seconds)
+     * @param blockNumber Legacy field name: update block number (block.number)
      */
-    event LiquidationThresholdUpdated(uint256 oldThreshold, uint256 newThreshold, uint256 timestamp);
+    event LiquidationThresholdUpdated(uint256 oldThreshold, uint256 newThreshold, uint256 blockNumber);
 
     /**
      * @notice Update liquidation threshold via LiquidationRiskManager (compatibility path).
@@ -71,8 +74,7 @@ contract LiquidationConfigModule is LiquidationConfigManager {
 
         uint256 old = liquidationThresholdVar;
         liquidationThresholdVar = newThreshold;
-        // solhint-disable-next-line not-rely-on-time
-        emit LiquidationThresholdUpdated(old, newThreshold, block.timestamp);
+        emit LiquidationThresholdUpdated(old, newThreshold, block.number);
     }
 
     /**
@@ -103,8 +105,37 @@ contract LiquidationConfigModule is LiquidationConfigManager {
 
         uint256 old = minHealthFactorVar;
         minHealthFactorVar = newMinHealthFactor;
-        // solhint-disable-next-line not-rely-on-time
-        emit MinHealthFactorUpdated(old, newMinHealthFactor, block.timestamp);
+        emit MinHealthFactorUpdated(old, newMinHealthFactor, block.number);
+    }
+
+    /**
+     * @notice Update maximum LTV via LiquidationRiskManager (compatibility path).
+     * @dev Reverts if:
+     *      - msg.sender is not the Registry-registered LiquidationRiskManager
+     *      - caller does not have ACTION_SET_PARAMETER role in ACM
+     *      - newMaxLtvBps is zero or > 10_000 bps
+     *
+     * Security:
+     * - Proxied caller semantics preserved: `caller` is role-checked, not msg.sender
+     * - Only callable by RiskManager module (Registry.KEY_LIQUIDATION_RISK_MANAGER)
+     *
+     * @param newMaxLtvBps New maximum LTV (bps=1e4)
+     * @param caller Original caller (EOA/governance) that initiated the update
+     */
+    function updateMaxLtvBpsFromRiskManager(uint256 newMaxLtvBps, address caller) external {
+        address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
+        if (msg.sender != rm) revert LiquidationConfigModule__UnauthorizedCaller();
+
+        // Preserve original caller semantics: validate the EOA/governance caller via global ACM.
+        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        IAccessControlManager(acm).requireRole(ActionKeys.ACTION_SET_PARAMETER, caller);
+        if (!LiquidationTypes.isValidMaxLtvBps(newMaxLtvBps)) {
+            revert LiquidationConfigModule__InvalidMaxLtvBps();
+        }
+
+        uint256 old = maxLtvBpsVar;
+        maxLtvBpsVar = newMaxLtvBps;
+        emit MaxLtvBpsUpdated(old, newMaxLtvBps, block.number);
     }
 }
 

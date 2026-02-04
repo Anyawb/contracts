@@ -1,3 +1,68 @@
+/**
+ * @file e2e-localhost-viewcache-acceptance.ts
+ * @notice ViewCache（ARCH 4.5）专项验收 E2E 测试脚本
+ * @dev 本脚本用于在本地 Hardhat 节点上验证 ViewCache 模块的对齐验收标准
+ *
+ * ## 测试目标（对应 ARCH-VIEW-ALIGNMENT-WORKGUIDE.md 4.5）
+ *
+ * ### VC-01: 读返回 staleness（有效性信息）
+ * - 调用 `getSystemStatus(asset)` 必须返回 `updateBlock` 且可用于判断 `isValid`
+ * - 未写入缓存时：`isValid=false`，`updateBlock=0`
+ * - 字段齐全；`updateBlock` 合理
+ *
+ * ### VC-02: 写入口权限
+ * - 无权限账号（无 `VIEW_SYSTEM_DATA` / `ACTION_ADMIN`）调用 `setSystemStatus` 必须 revert
+ * - 写入口必须被 gate（系统级推送权限/管理员）；无权限写入必须 revert
+ * - 错误口径：`MissingRole()`（断言 selector，不依赖 revert string）
+ * - 非法输入（如 `asset=0`）必须按实现 revert
+ *
+ * ### VC-03: 写入后可观测
+ * - 有权限写入后 `isValid=true` 且 updateBlock 更新
+ * - 必须出现 `DataPushed(SYSTEM_STATUS_CACHE, payload)`，payload 可 ABI 解码且与写入一致
+ * - 必须出现 `CacheUpdated` 事件
+ *
+ * ## 扩展验证（与架构公约一致）
+ *
+ * ### 批量读边界
+ * - `batchGetSystemStatus([])` 空数组必须 revert
+ * - `batchGetSystemStatus(oversized)` 超限（> MAX_BATCH_SIZE）必须 revert
+ *
+ * ### 每资产 updateBlock 独立（TTL 独立性）
+ * - 一个资产的写入不得刷新另一资产的 updateBlock
+ * - 使用挖块跨过 CACHE_DURATION_BLOCKS 后，过期资产 `isValid=false`，未过期资产仍 `isValid=true`
+ * - 过期后存储的 value/updateBlock 保留，仅 isValid 变为 false
+ *
+ * ### 批量读与单读一致性
+ * - `batchGetSystemStatus([assetA, assetB])` 的 `validFlags` 与分别调用 `getSystemStatus` 一致
+ * - 批量返回的 status 与单读一致
+ *
+ * ### clearSystemCache 行为
+ * - 仅 admin/系统权限可调用；无权限必须 `MissingRole()`
+ * - 清空后 `updateBlock=0`、存储值归零、`isValid=false`
+ * - 清空操作也必须触发 `CacheUpdated` 与 `DataPushed(SYSTEM_STATUS_CACHE, payload)`（payload 为清零后的数据）
+ *
+ * ## 运行方式
+ * ```bash
+ * npx hardhat run scripts/e2e/e2e-localhost-viewcache-acceptance.ts --network localhost
+ * ```
+ *
+ * ## 前置条件
+ * - 本地 Hardhat 节点已启动（`pnpm -s run node`）
+ * - 合约已部署到本地节点（`pnpm -s run deploy:localhost`）
+ * - 部署脚本已正确配置 `VIEW_CACHE` 模块注册到 Registry
+ *
+ * ## 验收标准
+ * - ✅ 读接口返回 `updateBlock` 与 `isValid`（或等效 staleness）
+ * - ✅ 无权限写入口必须 `revert MissingRole()`
+ * - ✅ 有权限写入后 `isValid=true`、updateBlock 更新、观察到 `DataPushed` 且 payload 可解码
+ * - ✅ 批量读空数组/超限必须 revert
+ * - ✅ 每资产 TTL 独立；过期后 `isValid=false` 且与单读/batch 一致
+ * - ✅ `clearSystemCache` 权限与可观测性符合上述约定
+ *
+ * @see ARCH-VIEW-ALIGNMENT-WORKGUIDE.md 4.5 ViewCache 测试矩阵
+ * @see scripts/e2e/README.md 4.5 章节说明
+ */
+
 import { ethers, network } from "hardhat";
 import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
 import { runViewPreflight } from "./utils/view-preflight";
@@ -6,20 +71,24 @@ function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
+const BLOCKS_PER_MINUTE = 30n;
+
+/** 断言条件为真，否则抛出错误 */
 function assertOk(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
 
+/** 从错误对象中提取可读的错误消息 */
 function fmtErr(e: any) {
   return e?.shortMessage ?? e?.message ?? String(e);
 }
 
+/** 检查错误消息是否表示函数选择器缺失（通常表示部署/ABI 不匹配） */
 function isMissingSelectorError(msg: string): boolean {
-  // Typical ethers v6 message when calling a function that doesn't exist on-chain
-  // (e.g. proxy points to old impl / wrong ABI).
   return msg.includes("function selector was not recognized");
 }
 
+/** 从异常对象中提取 revert data 的十六进制字符串，用于 MissingRole 等 selector 断言 */
 function extractRevertDataHex(e: any): string {
   const cands = [
     e?.data,
@@ -35,6 +104,7 @@ function extractRevertDataHex(e: any): string {
   return "";
 }
 
+/** 断言调用必须 revert；若成功则抛错，若因缺失 selector 而 revert 则提示部署/ABI 不匹配 */
 async function mustRevert(label: string, fn: () => Promise<unknown>) {
   try {
     await fn();
@@ -51,6 +121,7 @@ async function mustRevert(label: string, fn: () => Promise<unknown>) {
   throw new Error(`[FAIL] Expected revert, but succeeded: ${label}`);
 }
 
+/** 断言调用必须 revert 且错误为 MissingRole()（通过 selector/revert data 断言，不依赖 revert string） */
 async function mustRevertMissingRole(label: string, fn: () => Promise<unknown>) {
   const missingRoleSel = ethers.id("MissingRole()").slice(0, 10);
   try {
@@ -74,6 +145,7 @@ async function mustRevertMissingRole(label: string, fn: () => Promise<unknown>) 
   throw new Error(`[FAIL] Expected MissingRole() revert, but succeeded: ${label}`);
 }
 
+/** 执行调用并返回结果；若因缺失 selector 而 revert 则提示部署/ABI 不匹配，其它错误直接抛出 */
 async function mustSucceed<T>(label: string, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
@@ -88,14 +160,24 @@ async function mustSucceed<T>(label: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** 创建 EVM 快照（用于测试后恢复状态） */
 async function snapshot(): Promise<string> {
   return await network.provider.send("evm_snapshot", []);
 }
 
+/** 恢复到指定的 EVM 快照 */
 async function revertTo(id: string) {
   await network.provider.send("evm_revert", [id]);
 }
 
+/**
+ * E2E 主流程：ViewCache 验收（VC-01 / VC-02 / VC-03 + 扩展验证）
+ * 1. 预检 + 解析 ViewCache 地址，校验 version/registry
+ * 2. VC-01：未写入时读返回 updateBlock=0、isValid=false；写入后 updateBlock>0、isValid=true
+ * 3. VC-02：无权限 setSystemStatus → MissingRole；asset=0 → revert
+ * 4. VC-03：有权限写入后 DataPushed + CacheUpdated，payload 可解码且与写入一致
+ * 5. 扩展：batch 空数组/超限 revert；每资产 TTL 独立；batch 与单读一致；clearSystemCache 权限与可观测性
+ */
 async function main() {
   const snap = await snapshot();
   try {
@@ -136,16 +218,16 @@ async function main() {
     const assetA = CONTRACT_ADDRESSES.MockUSDC;
     const assetB = ethers.Wallet.createRandom().address;
 
-    // ====== MUST: read returns timestamp/isValid (or equivalent) ======
+    // --- VC-01: 读返回 staleness（未写入时 updateBlock=0、isValid=false）---
     const [s0, v0] = (await mustSucceed("ViewCache.getSystemStatus(assetA)", async () => vc.getSystemStatus(assetA))) as [
-      { timestamp: bigint },
+      { updateBlock: bigint },
       boolean,
     ];
-    assertOk(typeof s0.timestamp === "bigint", "SystemStatusCache.timestamp must be a bigint");
+    assertOk(typeof s0.updateBlock === "bigint", "SystemStatusCache.updateBlock must be a bigint");
     assertOk(v0 === false, "uncached system status must be invalid");
-    assertOk(s0.timestamp === 0n, "uncached system status timestamp must be 0");
+    assertOk(s0.updateBlock === 0n, "uncached system status updateBlock must be 0");
 
-    // ====== MUST: write gated by system-data push/admin (unified role) ======
+    // --- VC-02: 写入口权限（无权限 MissingRole；非法 asset revert）---
     // ViewCache uses ActionKeys.ACTION_VIEW_SYSTEM_DATA == keccak256("VIEW_SYSTEM_DATA")
     const ROLE_VIEW_SYSTEM_DATA = key("VIEW_SYSTEM_DATA");
     const ROLE_ADMIN = key("ACTION_ADMIN");
@@ -168,12 +250,12 @@ async function main() {
       vc.connect(deployer).setSystemStatus(ethers.ZeroAddress, 1n, 2n, 3n)
     );
 
-    // ====== MUST: batch reads have shape + enforce size limits ======
+    // --- 扩展：批量读边界（空数组/超限必须 revert）---
     await mustRevert("batchGetSystemStatus empty", async () => vc.batchGetSystemStatus([]));
     const oversized = new Array(101).fill(assetA);
     await mustRevert("batchGetSystemStatus oversized", async () => vc.batchGetSystemStatus(oversized));
 
-    // ====== MUST: successful write emits DataPushed + CacheUpdated and updates timestamp ======
+    // --- VC-03: 写入后可观测（DataPushed + CacheUpdated，payload 可解码且与写入一致）---
     const DATA_TYPE_SYSTEM_STATUS = key("SYSTEM_STATUS_CACHE");
     const tx1 = await mustSucceed("setSystemStatus(assetA) tx", async () =>
       vc.connect(deployer).setSystemStatus(assetA, 111n, 222n, 333n)
@@ -184,11 +266,11 @@ async function main() {
     const [s1, v1] = (await mustSucceed("ViewCache.getSystemStatus(assetA) after write", async () =>
       vc.getSystemStatus(assetA)
     )) as [
-      { timestamp: bigint; totalCollateral: bigint; totalDebt: bigint; utilizationRate: bigint; isValid: boolean },
+      { updateBlock: bigint; totalCollateral: bigint; totalDebt: bigint; utilizationRate: bigint; isValid: boolean },
       boolean,
     ];
     assertOk(v1 === true, "after write, isValid must be true");
-    assertOk(s1.timestamp > 0n, "after write, timestamp must be > 0");
+    assertOk(s1.updateBlock > 0n, "after write, updateBlock must be > 0");
     assertOk(s1.totalCollateral === 111n && s1.totalDebt === 222n && s1.utilizationRate === 333n, "stored values mismatch after write");
     assertOk(s1.isValid === true, "struct.isValid must be true after write");
 
@@ -213,12 +295,11 @@ async function main() {
     );
     assertOk((decoded[0] as string).toLowerCase() === assetA.toLowerCase(), "payload.asset mismatch");
     assertOk(decoded[1] === 111n && decoded[2] === 222n && decoded[3] === 333n, "payload fields mismatch");
-    assertOk(decoded[4] === s1.timestamp, "payload.timestamp must equal stored timestamp");
+    assertOk(decoded[4] === s1.updateBlock, "payload.blockNumber must equal stored updateBlock");
 
-    // ====== MUST: per-asset timestamps are independent (one asset write must not "refresh" the other) ======
+    // --- 扩展：每资产 updateBlock 独立（TTL 独立性；过期后 isValid=false，未过期仍 true）---
     // Write assetB 2 minutes later, then cross the 5-min TTL boundary for assetA only.
-    await network.provider.send("evm_increaseTime", [2 * 60]);
-    await network.provider.send("evm_mine", []);
+    await network.provider.send("hardhat_mine", [ethers.toBeHex(2n * BLOCKS_PER_MINUTE)]);
     const txB = await mustSucceed("setSystemStatus(assetB) tx", async () =>
       vc.connect(deployer).setSystemStatus(assetB, 444n, 555n, 666n)
     );
@@ -227,44 +308,52 @@ async function main() {
 
     const [aAfterB, aValidAfterB] = (await mustSucceed("ViewCache.getSystemStatus(assetA) post assetB write", async () =>
       vc.getSystemStatus(assetA)
-    )) as [{ timestamp: bigint }, boolean];
+    )) as [{ updateBlock: bigint }, boolean];
     const [b1, bValid1] = (await mustSucceed("ViewCache.getSystemStatus(assetB) post write", async () =>
       vc.getSystemStatus(assetB)
     )) as [
-      { timestamp: bigint; totalCollateral: bigint; totalDebt: bigint; utilizationRate: bigint; isValid: boolean },
+      { updateBlock: bigint; totalCollateral: bigint; totalDebt: bigint; utilizationRate: bigint; isValid: boolean },
       boolean,
     ];
     assertOk(aValidAfterB === true, "assetA should still be valid at ~2m");
-    assertOk(aAfterB.timestamp === s1.timestamp, "assetB write must not refresh assetA timestamp");
-    assertOk(bValid1 === true && b1.timestamp > 0n, "assetB must be valid after write");
+    assertOk(aAfterB.updateBlock === s1.updateBlock, "assetB write must not refresh assetA updateBlock");
+    assertOk(bValid1 === true && b1.updateBlock > 0n, "assetB must be valid after write");
 
-    await network.provider.send("evm_increaseTime", [4 * 60 + 2]); // now assetA age > 6m, assetB age ~4m
-    await network.provider.send("evm_mine", []);
+    await network.provider.send("hardhat_mine", [ethers.toBeHex(4n * BLOCKS_PER_MINUTE + 1n)]); // assetA age > 6m, assetB age ~4m
     const [aExp, aValidExp] = (await mustSucceed("ViewCache.getSystemStatus(assetA) expiry check", async () =>
       vc.getSystemStatus(assetA)
-    )) as [{ timestamp: bigint; totalCollateral: bigint }, boolean];
+    )) as [{ updateBlock: bigint; totalCollateral: bigint }, boolean];
     const [bOk, bValidOk] = (await mustSucceed("ViewCache.getSystemStatus(assetB) validity check", async () =>
       vc.getSystemStatus(assetB)
-    )) as [{ timestamp: bigint; totalCollateral: bigint }, boolean];
+    )) as [{ updateBlock: bigint; totalCollateral: bigint }, boolean];
     assertOk(aValidExp === false, "assetA should be expired after >5m");
-    assertOk(aExp.timestamp === s1.timestamp && aExp.totalCollateral === 111n, "assetA expiry must keep stored value+timestamp");
+    assertOk(
+      aExp.updateBlock === s1.updateBlock && aExp.totalCollateral === 111n,
+      "assetA expiry must keep stored value+updateBlock"
+    );
     assertOk(bValidOk === true, "assetB should still be valid (<5m)");
     assertOk(bOk.totalCollateral === 444n, "assetB value mismatch");
 
-    // ====== MUST: batch read returns validFlags aligned with single reads ======
+    // --- 扩展：批量读与单读一致性（validFlags / status 与单读一致）---
     const [statuses, validFlags] = (await mustSucceed("ViewCache.batchGetSystemStatus([assetA,assetB])", async () =>
       vc.batchGetSystemStatus([assetA, assetB])
     )) as [
-      Array<{ timestamp: bigint; totalCollateral: bigint; totalDebt: bigint; utilizationRate: bigint; isValid: boolean }>,
+      Array<{ updateBlock: bigint; totalCollateral: bigint; totalDebt: bigint; utilizationRate: bigint; isValid: boolean }>,
       boolean[],
     ];
     assertOk(statuses.length === 2 && validFlags.length === 2, "batch output length mismatch");
     assertOk(validFlags[0] === aValidExp, "batch validFlags[0] mismatch");
     assertOk(validFlags[1] === bValidOk, "batch validFlags[1] mismatch");
-    assertOk(statuses[0].timestamp === aExp.timestamp && statuses[0].totalCollateral === aExp.totalCollateral, "batch status[0] mismatch");
-    assertOk(statuses[1].timestamp === (b1 as any).timestamp && statuses[1].totalCollateral === bOk.totalCollateral, "batch status[1] mismatch");
+    assertOk(
+      statuses[0].updateBlock === aExp.updateBlock && statuses[0].totalCollateral === aExp.totalCollateral,
+      "batch status[0] mismatch"
+    );
+    assertOk(
+      statuses[1].updateBlock === (b1 as any).updateBlock && statuses[1].totalCollateral === bOk.totalCollateral,
+      "batch status[1] mismatch"
+    );
 
-    // ====== MUST: clearSystemCache is admin-gated and observable ======
+    // --- 扩展：clearSystemCache 行为（权限 gate + 清空后 updateBlock=0/isValid=false + CacheUpdated/DataPushed）---
     await mustRevertMissingRole("clearSystemCache from unauthorized signer", async () =>
       vc.connect(randomCaller).clearSystemCache(assetB)
     );
@@ -272,14 +361,14 @@ async function main() {
     const rcClear = await txClear.wait();
     assertOk(!!rcClear, "missing receipt for clearSystemCache");
 
-    // After clear: stored timestamp must be 0, isValid must be false
+    // After clear: stored updateBlock must be 0, isValid must be false
     const [bCleared, bClearedValid] = (await mustSucceed("ViewCache.getSystemStatus(assetB) after clear", async () =>
       vc.getSystemStatus(assetB)
-    )) as [{ timestamp: bigint; totalCollateral: bigint }, boolean];
-    assertOk(bCleared.timestamp === 0n && bCleared.totalCollateral === 0n, "clear should delete stored status");
+    )) as [{ updateBlock: bigint; totalCollateral: bigint }, boolean];
+    assertOk(bCleared.updateBlock === 0n && bCleared.totalCollateral === 0n, "clear should delete stored status");
     assertOk(bClearedValid === false, "after clear, isValid must be false");
 
-    // CacheUpdated + DataPushed must exist for clear too (payload timestamp is tx timestamp, not stored timestamp=0)
+    // CacheUpdated + DataPushed must exist for clear too (payload blockNumber is tx blockNumber, not stored updateBlock=0)
     const cuLogsC = rcClear.logs
       .filter((l: any) => l.address.toLowerCase() === vcAddr.toLowerCase())
       .filter((l: any) => l.topics?.[0] === cuTopic);

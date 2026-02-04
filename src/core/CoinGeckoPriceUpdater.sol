@@ -1,176 +1,228 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { ZeroAddress, ExternalModuleRevertedRaw, EmptyArray, ArrayLengthMismatch } from "../errors/StandardErrors.sol";
-import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import { ZeroAddress, EmptyArray, ArrayLengthMismatch } from "../errors/StandardErrors.sol";
 import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../constants/DataPushTypes.sol";
 
+/// @dev Minimal monitor interface for onPriceUpdate notifications.
+interface IPriceUpdateMonitor {
+    function onPriceUpdate(address asset, string calldata eventType, bytes calldata eventData) external;
+}
+
 /// @title CoinGeckoPriceUpdater
-/// @notice 从 CoinGecko API 获取价格并更新预言机的合约
-/// @dev 支持批量价格更新和自动重试机制
-/// @dev 与 Registry 系统集成，使用标准化的模块管理
-/// @dev 与 ACM 权限模块集成，使用 ActionKeys 进行标准化权限管理
-/// @dev 与 ActionKeys 和 ModuleKeys 集成，提供标准化的模块管理
-/// @dev 与 SystemEvents 集成，提供标准化的事件记录
-/// @dev 使用 StandardErrors 进行统一的错误处理
-/// @dev 集成 GracefulDegradation 库进行价格验证和健康检查
+/// @notice Updates on-chain oracle prices using CoinGecko IDs.
+/// @dev Integrates with Registry + ACM (ActionKeys) and emits SystemEvents/DataPush.
 /// @custom:security-contact security@example.com
 contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
-    using GracefulDegradation for *;
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
-    /* ============ Constants ============ */
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     
-    /// @notice 最大重试次数
-    uint256 private constant MAX_RETRY_COUNT = 3;
+    /// @notice Max retry count for update attempts.
+    uint256 private constant _MAX_RETRY_COUNT = 3;
     
-    /// @notice 价格更新间隔（秒）
-    uint256 private constant UPDATE_INTERVAL = 300; // 5分钟
+    /// @notice Price refresh interval (blocks).
+    /// @dev Chain-dependent. This is a best-effort local trigger hint (NOT a protocol gate).
+    uint256 private constant _UPDATE_INTERVAL_BLOCKS = 300;
     
-    /// @notice 价格验证阈值（百分比）
-    uint256 private constant PRICE_VALIDATION_THRESHOLD = 5000; // 50%
-    
-    /// @notice 最大价格偏差（百分比）
-    uint256 private constant MAX_PRICE_DEVIATION = 1000; // 10%
+    /// @notice Max price deviation (bps).
+    uint256 private constant _MAX_PRICE_DEVIATION = 1000; // 10%
 
-    /* ============ Storage ============ */
+    /// @notice Max reasonable price (8 decimals).
+    uint256 private constant _MAX_REASONABLE_PRICE = 1e12;
+
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     
-    /// @notice Registry 合约地址
+    /// @notice Registry contract address.
     address private _registryAddr;
     
-    /// @notice 资产到 CoinGecko ID 的映射
+    /// @notice Asset -> CoinGecko ID mapping.
     mapping(address => string) private _assetToCoingeckoId;
+
+    /// @notice Asset -> token decimals mapping (SSOT for valuation scaling).
+    /// @dev Must match the ERC20 token's `decimals()` for correct value computation:
+    ///      valueUSD8 = amount(token base units) * priceUSD8 / 10**assetDecimals
+    mapping(address => uint8) private _assetDecimals;
     
-    /// @notice 支持的资产列表
+    /// @notice Supported asset list (legacy; no longer maintained).
     address[] private _supportedAssets;
     
-    /// @notice 最后更新时间映射
-    mapping(address => uint256) private _lastUpdateTime;
+    /// @notice Last successful update block per asset.
+    mapping(address => uint256) private _lastUpdateBlock;
     
-    /// @notice 价格更新失败计数
+    /// @notice Failure count per asset.
     mapping(address => uint256) private _updateFailureCount;
     
-    /// @notice 资产最后有效价格
+    /// @notice Last valid price per asset.
     mapping(address => uint256) private _lastValidPrice;
     
-    /// @notice 是否启用自动更新
+    /// @notice Auto update flag.
     bool private _autoUpdateEnabled;
     
-    /// @notice 是否启用价格验证
+    /// @notice Price validation flag.
     bool private _priceValidationEnabled;
     
-    /// @notice 动态注册的监控合约映射
+    /// @notice Dynamic monitor registry.
     mapping(bytes32 => address) private _dynamicMonitors;
     
-    /// @notice 已注册的监控键列表
+    /// @notice Registered monitor keys.
     bytes32[] private _registeredMonitorKeys;
     
-    /// @notice 备用价格源映射
+    /// @notice Backup price sources.
     mapping(bytes32 => address) private _backupPriceSources;
     
-    /// @notice 已注册的备用价格源键列表
+    /// @notice Registered backup source keys.
     bytes32[] private _registeredBackupKeys;
     
-    /// @notice 监控服务状态映射
+    /// @notice Monitor active flag per address.
     mapping(address => bool) private _monitoringStatus;
     
     /// @dev Storage gap for future upgrades
-    uint256[42] private __gap;
+    uint256[50] private __gap;
 
-    /* ============ Errors ============ */
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when price is zero. Used by {updateAssetPrice}.
     error CoinGeckoPriceUpdater__InvalidPrice();
-    error CoinGeckoPriceUpdater__InvalidTimestamp();
+    /// @dev Reverts when blockNumber is in the future. Used by {updateAssetPrice}.
+    error CoinGeckoPriceUpdater__InvalidBlockNumber();
+    /// @dev Reverts when asset has no CoinGecko ID. Used by {updateAssetPrice,removeAsset}.
     error CoinGeckoPriceUpdater__AssetNotConfigured();
+    /// @dev Reverts when CoinGecko ID is empty. Used by {configureAsset}.
+    error CoinGeckoPriceUpdater__InvalidCoingeckoId();
+    /// @dev Reverts on invalid monitor contract. Used by legacy external hooks.
     error CoinGeckoPriceUpdater__InvalidMonitorContract();
+    /// @dev Reverts when monitor address has no code. Used by {registerMonitoring}.
     error CoinGeckoPriceUpdater__MonitorNotAContract(address monitorContract);
+    /// @dev Reverts when token decimals cannot be determined for an asset.
+    error CoinGeckoPriceUpdater__AssetDecimalsNotConfigured();
+    /// @dev Reverts when configured decimals are invalid (0 or too large for safe scaling).
+    error CoinGeckoPriceUpdater__InvalidAssetDecimals(uint256 decimals);
 
-    /* ============ Events ============ */
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     
-    /// @notice 价格更新成功事件
-    /// @param coingeckoId CoinGecko ID
+    /// @notice Emitted when a price update succeeds.
+    /// @dev Emitted by normal or emergency update flows.
+    /// @param asset Asset address.
+    /// @param coingeckoId CoinGecko ID.
+    /// @param price Price (8 decimals).
+    /// @param blockNumber Price blockNumber (blocks).
     event PriceUpdated(
         address indexed asset,
         string indexed coingeckoId,
         uint256 price,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
-    /// @notice 价格更新失败事件
-    /// @param coingeckoId CoinGecko ID
-    /// @param reasonCode 失败原因代码
+    /// @notice Emitted when a price update fails.
+    /// @dev Failure reason is encoded in reasonCode.
+    /// @param asset Asset address.
+    /// @param coingeckoId CoinGecko ID.
+    /// @param reasonCode Failure reason code.
     event PriceUpdateFailed(
         address indexed asset,
         string indexed coingeckoId,
         bytes32 reasonCode
     );
     
-    /// @notice 资产配置更新事件
+    /// @notice Emitted when an asset configuration changes.
+    /// @param asset Asset address.
+    /// @param coingeckoId CoinGecko ID.
+    /// @param isActive Whether the asset is active.
     event AssetConfigUpdated(address indexed asset, string indexed coingeckoId, bool isActive);
+
+    /// @notice Emitted when an asset's token decimals are configured/updated.
+    /// @param asset Asset address.
+    /// @param decimals Token decimals (ERC20 `decimals()`).
+    event AssetDecimalsUpdated(address indexed asset, uint8 decimals);
     
-    /// @notice 自动更新状态变更事件
+    /// @notice Emitted when auto-update is toggled.
+    /// @param enabled Whether auto-update is enabled.
     event AutoUpdateToggled(bool enabled);
 
-    /// @notice 价格验证失败事件
+    /// @notice Emitted when price validation fails.
+    /// @dev Emitted without reverting; update is skipped.
+    /// @param asset Asset address.
+    /// @param price Price (8 decimals).
+    /// @param reasonCode Failure reason code.
     event PriceValidationFailed(address indexed asset, uint256 price, bytes32 reasonCode);
 
-    /// @notice 价格验证开关切换事件
+    /// @notice Emitted when price validation is toggled.
+    /// @param enabled Whether validation is enabled.
     event PriceValidationToggled(bool enabled);
 
-    /// @notice Registry 地址更新事件
-    /// @param oldRegistry 旧 Registry 地址
-    /// @param newRegistry 新 Registry 地址
+    /// @notice Emitted when the Registry address is updated.
+    /// @param oldRegistry Previous Registry address.
+    /// @param newRegistry New Registry address.
     event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
-    /// @notice 监控服务注册事件
+    /// @notice Emitted when a monitor is registered.
+    /// @param monitorKey Monitor module key.
+    /// @param monitorContract Monitor contract address.
+    /// @param monitorName Monitor name.
     event MonitoringRegistered(bytes32 indexed monitorKey, address indexed monitorContract, string monitorName);
     
-    /// @notice 备用价格源注册事件
+    /// @notice Emitted when a backup price source is registered.
+    /// @param backupKey Backup source key.
+    /// @param backupSource Backup source address.
+    /// @param sourceName Source name.
     event BackupSourceRegistered(bytes32 indexed backupKey, address indexed backupSource, string sourceName);
 
-    /// @notice 健康检查失败事件
-    /// @param reasonCode 失败原因代码
+    /// @notice Emitted when a health check fails.
+    /// @param asset Asset address.
+    /// @param reasonCode Failure reason code.
     event HealthCheckFailed(
         address indexed asset,
         bytes32 reasonCode
     );
 
-    // ============ Reason codes ============
-    bytes32 private constant REASON_VALIDATION_FAILED = bytes32("VALIDATION_FAILED");
-    bytes32 private constant REASON_EXCEEDS_MAX_VALUE = bytes32("EXCEEDS_MAX_VALUE");
-    bytes32 private constant REASON_MONITOR_CALL_FAILED = bytes32("MONITOR_CALL_FAILED");
-    bytes32 private constant REASON_ORACLE_UNAVAILABLE = bytes32("ORACLE_UNAVAILABLE");
-    bytes32 private constant REASON_ORACLE_UPDATE_FAILED = bytes32("ORACLE_UPDATE_FAILED");
-
-    /* ============ DataPush: Unified data types moved to DataPushTypes ============ */
+    /*━━━━━━━━━━━━━━━ Reason Codes ━━━━━━━━━━━━━━━*/
+    bytes32 private constant _REASON_VALIDATION_FAILED = bytes32("VALIDATION_FAILED");
+    bytes32 private constant _REASON_EXCEEDS_MAX_VALUE = bytes32("EXCEEDS_MAX_VALUE");
+    bytes32 private constant _REASON_MONITOR_CALL_FAILED = bytes32("MONITOR_CALL_FAILED");
+    bytes32 private constant _REASON_ORACLE_UNAVAILABLE = bytes32("ORACLE_UNAVAILABLE");
+    bytes32 private constant _REASON_ORACLE_UPDATE_FAILED = bytes32("ORACLE_UPDATE_FAILED");
+    bytes32 private constant _REASON_DECIMALS_NOT_CONFIGURED = bytes32("DECIMALS_NOT_CONFIGURED");
     
-    /* ============ Modifiers ============ */
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
     
-    /// @notice 验证 Registry 地址
+    /// @notice Ensures Registry address is set.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         _;
     }
     
-    /// @notice 验证监控合约
+    /// @notice Ensures a monitor contract is valid.
     modifier validMonitorContract(address monitorContract) {
         if (monitorContract == address(0)) revert ZeroAddress();
         if (monitorContract.code.length == 0) revert CoinGeckoPriceUpdater__MonitorNotAContract(monitorContract);
         _;
     }
 
-    /* ============ Initializer ============ */
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
     
-    /// @notice 初始化合约
-    /// @param initialRegistryAddr Registry 合约地址
+    /**
+     * @notice Initializes the updater and binds the Registry address.
+     * @dev Reverts if:
+     *      - initialRegistryAddr == address(0) (see {ZeroAddress})
+     *
+     * Security:
+     * - UUPS initializer
+     *
+     * @param initialRegistryAddr Registry contract address
+     */
     function initialize(
         address initialRegistryAddr
     ) external initializer {
@@ -182,133 +234,240 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
         _autoUpdateEnabled = true;
         _priceValidationEnabled = true;
         
-        // 记录标准化动作事件
+        // Emit standardized action event.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 
-    /* ============ External Functions ============ */
+    /*━━━━━━━━━━━━━━━ External Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 更新单个资产价格
-    /// @dev 价格为 8 位小数
-    /// @dev 需要 ACTION_UPDATE_PRICE 权限，使用 ActionKeys 进行标准化事件记录
+    /**
+     * @notice Updates a single asset price and forwards to PriceOracle.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_UPDATE_PRICE (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *      - asset == address(0) (see {ZeroAddress})
+     *      - price == 0 (see {CoinGeckoPriceUpdater__InvalidPrice})
+     *      - asset has no CoinGecko ID (see {CoinGeckoPriceUpdater__AssetNotConfigured})
+     *
+     * Security:
+     * - Role-gated: ACTION_UPDATE_PRICE via ACM
+     * - Best-effort update: Registry/Oracle failures are caught; falls back to local update
+     *
+     * @param asset Asset address
+     * @param price Price (8 decimals)
+     * @param blockNumber Price blockNumber (blocks)
+     */
     function updateAssetPrice(
         address asset,
         uint256 price,
-        uint256 timestamp
+        uint256 blockNumber
     ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_UPDATE_PRICE, msg.sender);
         
         if (asset == address(0)) revert ZeroAddress();
         if (price == 0) revert CoinGeckoPriceUpdater__InvalidPrice();
-        if (timestamp > block.timestamp) revert CoinGeckoPriceUpdater__InvalidTimestamp();
+        // `blockNumber` is an informational/source marker only (legacy/compat).
+        // Do NOT compare it to any onchain wall-clock time or use it as an onchain gate.
         
         string memory coingeckoId = _assetToCoingeckoId[asset];
         if (bytes(coingeckoId).length == 0) revert CoinGeckoPriceUpdater__AssetNotConfigured();
         
-        // 价格验证
+        // Price validation.
         if (_priceValidationEnabled && !_validatePrice(asset, price)) {
-            emit PriceValidationFailed(asset, price, REASON_VALIDATION_FAILED);
+            emit PriceValidationFailed(asset, price, _REASON_VALIDATION_FAILED);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_PRICE_VALIDATION_FAILED,
-                abi.encode(asset, price, block.timestamp)
+                abi.encode(asset, price, block.number)
             );
             return;
         }
         
-        // 使用优雅降级进行价格更新（完全内联，零gas开销）
-        _updatePriceWithGracefulDegradation(asset, price, timestamp, coingeckoId);
+        _updatePriceWithFallback(asset, price, blockNumber, coingeckoId);
         
-        // 记录标准化动作事件
+        // Emit standardized action event.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
-    /// @notice 批量更新资产价格
-    /// @dev 需要 ACTION_UPDATE_PRICE 权限，使用 ActionKeys 进行标准化事件记录
+    /**
+     * @notice Updates multiple asset prices and forwards to PriceOracle.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_UPDATE_PRICE (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *      - assets is empty (see {EmptyArray})
+     *      - array lengths mismatch (see {ArrayLengthMismatch})
+     *
+     * Security:
+     * - Role-gated: ACTION_UPDATE_PRICE via ACM
+     * - Best-effort update: Registry/Oracle failures are caught; falls back to local update
+     *
+     * @param assets Asset address list
+     * @param prices Price list (8 decimals)
+     * @param blockNumbers BlockNumber list (blocks)
+     */
     function updateAssetPrices(
         address[] calldata assets,
         uint256[] calldata prices,
-        uint256[] calldata timestamps
+        uint256[] calldata blockNumbers
     ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_UPDATE_PRICE, msg.sender);
         
         uint256 length = assets.length;
         if (length == 0) revert EmptyArray();
         if (length != prices.length) revert ArrayLengthMismatch(length, prices.length);
-        if (length != timestamps.length) revert ArrayLengthMismatch(length, timestamps.length);
+        if (length != blockNumbers.length) revert ArrayLengthMismatch(length, blockNumbers.length);
         
-        // 使用优雅降级批量更新（完全内联，零gas开销）
-        _batchUpdatePriceWithGracefulDegradation(assets, prices, timestamps);
+        _batchUpdatePriceWithFallback(assets, prices, blockNumbers);
         
-        // 记录标准化动作事件
+        // Emit standardized action event.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
-    /// @notice 配置资产
-    /// @param coingeckoId CoinGecko ID
-    /// @dev 需要 ACTION_SET_PARAMETER 权限，使用 ActionKeys 进行标准化事件记录
+    /**
+     * @notice Configures an asset's CoinGecko ID and token decimals (SSOT).
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *      - asset == address(0) (see {ZeroAddress})
+     *      - coingeckoId is empty (see {CoinGeckoPriceUpdater__InvalidCoingeckoId})
+     *      - token decimals cannot be read or are invalid (see {CoinGeckoPriceUpdater__InvalidAssetDecimals})
+     *
+     * Security:
+     * - Role-gated: ACTION_SET_PARAMETER via ACM
+     *
+     * @param asset Asset address
+     * @param coingeckoId CoinGecko ID
+     */
     function configureAsset(address asset, string calldata coingeckoId) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         
         if (asset == address(0)) revert ZeroAddress();
-        if (bytes(coingeckoId).length == 0) revert("Invalid CoinGecko ID");
+        if (bytes(coingeckoId).length == 0) revert CoinGeckoPriceUpdater__InvalidCoingeckoId();
+
+        // Determine and store token decimals (SSOT). This avoids mispricing due to hardcoded scaling.
+        uint8 decimals = _readErc20Decimals(asset);
+        if (decimals == 0 || decimals > 77) revert CoinGeckoPriceUpdater__InvalidAssetDecimals(decimals);
+        _assetDecimals[asset] = decimals;
         
         _assetToCoingeckoId[asset] = coingeckoId;
-        // 移除 _supportedAssets 维护，改由映射判断是否配置
+        // _supportedAssets is deprecated; use mapping-based config instead.
         
         emit AssetConfigUpdated(asset, coingeckoId, true);
+        emit AssetDecimalsUpdated(asset, decimals);
         
-        // 记录标准化动作事件
+        // Emit standardized action event.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
+        );
+    }
+
+    /**
+     * @notice Configures an asset's CoinGecko ID and token decimals explicitly.
+     * @dev Use this for:
+     *      - non-standard tokens (no ERC20Metadata `decimals()`),
+     *      - assets whose decimals must be pinned by governance.
+     *
+     * Reverts if:
+     * - Registry is not set (see {ZeroAddress})
+     * - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     * - asset == address(0) (see {ZeroAddress})
+     * - coingeckoId is empty (see {CoinGeckoPriceUpdater__InvalidCoingeckoId})
+     * - decimals is 0 or too large for safe scaling (see {CoinGeckoPriceUpdater__InvalidAssetDecimals})
+     */
+    function configureAssetWithDecimals(
+        address asset,
+        string calldata coingeckoId,
+        uint8 decimals
+    ) external onlyValidRegistry {
+        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        if (asset == address(0)) revert ZeroAddress();
+        if (bytes(coingeckoId).length == 0) revert CoinGeckoPriceUpdater__InvalidCoingeckoId();
+        if (decimals == 0 || decimals > 77) revert CoinGeckoPriceUpdater__InvalidAssetDecimals(decimals);
+
+        _assetToCoingeckoId[asset] = coingeckoId;
+        _assetDecimals[asset] = decimals;
+
+        emit AssetConfigUpdated(asset, coingeckoId, true);
+        emit AssetDecimalsUpdated(asset, decimals);
+
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_SET_PARAMETER,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
+            msg.sender,
+            block.number
         );
     }
     
-    /// @notice 移除资产配置
-    /// @dev 需要 ACTION_SET_PARAMETER 权限，使用 ActionKeys 进行标准化事件记录
+    /**
+     * @notice Removes an asset's CoinGecko ID configuration.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *      - asset == address(0) (see {ZeroAddress})
+     *      - asset has no CoinGecko ID (see {CoinGeckoPriceUpdater__AssetNotConfigured})
+     *
+     * Security:
+     * - Role-gated: ACTION_SET_PARAMETER via ACM
+     *
+     * @param asset Asset address
+     */
     function removeAsset(address asset) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         
         if (asset == address(0)) revert ZeroAddress();
         
         string memory coingeckoId = _assetToCoingeckoId[asset];
-        if (bytes(coingeckoId).length == 0) revert("Asset not configured");
+        if (bytes(coingeckoId).length == 0) revert CoinGeckoPriceUpdater__AssetNotConfigured();
         
         delete _assetToCoingeckoId[asset];
+        delete _assetDecimals[asset];
         
-        // 不再维护支持列表数组，仅清除映射配置
+        // Do not maintain list; only clear mapping config.
         
         emit AssetConfigUpdated(asset, coingeckoId, false);
         
-        // 记录标准化动作事件
+        // Emit standardized action event.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
-    /// @notice 切换自动更新状态
-    /// @param enabled 是否启用
-    /// @dev 需要 ACTION_SET_PARAMETER 权限，使用 ActionKeys 进行标准化事件记录
+    /**
+     * @notice Toggles auto-update.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *
+     * Security:
+     * - Role-gated: ACTION_SET_PARAMETER via ACM
+     *
+     * @param enabled Whether auto-update is enabled
+     */
     function toggleAutoUpdate(bool enabled) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         
@@ -316,21 +475,30 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
         emit AutoUpdateToggled(enabled);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_AUTO_UPDATE_TOGGLED,
-            abi.encode(enabled, msg.sender, block.timestamp)
+            abi.encode(enabled, msg.sender, block.number)
         );
         
-        // 记录标准化动作事件
+        // Emit standardized action event.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
-    /// @notice 切换价格验证状态
-    /// @param enabled 是否启用
-    /// @dev 需要 ACTION_SET_PARAMETER 权限，使用 ActionKeys 进行标准化事件记录
+    /**
+     * @notice Toggles price validation.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *
+     * Security:
+     * - Role-gated: ACTION_SET_PARAMETER via ACM
+     *
+     * @param enabled Whether validation is enabled
+     */
     function togglePriceValidation(bool enabled) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         
@@ -338,47 +506,72 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
         emit PriceValidationToggled(enabled);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_PRICE_VALIDATION_TOGGLED,
-            abi.encode(enabled, msg.sender, block.timestamp)
+            abi.encode(enabled, msg.sender, block.number)
         );
         
-        // 记录标准化动作事件
+        // Emit standardized action event.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
-    /// @notice 更新 Registry 地址
-    /// @param newRegistryAddr 新 Registry 地址
+    /**
+     * @notice Updates the Registry address.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_UPGRADE_MODULE (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *      - newRegistryAddr == address(0) (see {ZeroAddress})
+     *
+     * Security:
+     * - Role-gated: ACTION_UPGRADE_MODULE via ACM
+     *
+     * @param newRegistryAddr New Registry address
+     */
     function updateRegistry(address newRegistryAddr) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
         
         address oldRegistry = _registryAddr;
         
-        // 更新Registry地址
+        // Update Registry address.
         _registryAddr = newRegistryAddr;
         
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_REGISTRY_UPDATED,
-            abi.encode(oldRegistry, newRegistryAddr, msg.sender, block.timestamp)
+            abi.encode(oldRegistry, newRegistryAddr, msg.sender, block.number)
         );
         
-        // 通知监控服务Registry升级（传送合约地址给优雅降级监控）
-        _notifyMonitors(address(0), "REGISTRY_UPGRADE", abi.encode(oldRegistry, newRegistryAddr, block.timestamp));
+        // Notify monitors about registry upgrade.
+        _notifyMonitors(address(0), "REGISTRY_UPGRADE", abi.encode(oldRegistry, newRegistryAddr, block.number));
     }
 
-    /* ============ Dynamic Registry Functions ============ */
+    /*━━━━━━━━━━━━━━━ Dynamic Registry Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 注册监控服务
+    /**
+     * @notice Registers a monitoring contract.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *      - monitorContract == address(0) (see {ZeroAddress})
+     *      - monitorContract has no code (see {CoinGeckoPriceUpdater__MonitorNotAContract})
+     *
+     * Security:
+     * - Role-gated: ACTION_SET_PARAMETER via ACM
+     *
+     * @param monitorContract Monitor contract address
+     * @param monitorName Monitor name
+     */
     function registerMonitoring(address monitorContract, string calldata monitorName) 
         external onlyValidRegistry validMonitorContract(monitorContract) {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         
-        // 模块键生成：保持确定性（不做链上缓存，避免额外存储与 stale 语义）
+        // Deterministic module key generation; no on-chain cache to avoid stale semantics.
         bytes32 monitorKey = _makeModuleKey("MONITOR", monitorName);
         _dynamicMonitors[monitorKey] = monitorContract;
         _registeredMonitorKeys.push(monitorKey);
@@ -387,11 +580,24 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
         emit MonitoringRegistered(monitorKey, monitorContract, monitorName);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_MONITORING_REGISTERED,
-            abi.encode(monitorKey, monitorContract, monitorName, msg.sender, block.timestamp)
+            abi.encode(monitorKey, monitorContract, monitorName, msg.sender, block.number)
         );
     }
     
-    /// @notice 注册备用价格源
+    /**
+     * @notice Registers a backup price source.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *      - backupSource == address(0) (see {ZeroAddress})
+     *
+     * Security:
+     * - Role-gated: ACTION_SET_PARAMETER via ACM
+     *
+     * @param backupSource Backup source address
+     * @param sourceName Backup source name
+     */
     function registerBackupPriceSource(address backupSource, string calldata sourceName) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (backupSource == address(0)) revert ZeroAddress();
@@ -403,14 +609,18 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
         emit BackupSourceRegistered(backupKey, backupSource, sourceName);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BACKUP_SOURCE_REGISTERED,
-            abi.encode(backupKey, backupSource, sourceName, msg.sender, block.timestamp)
+            abi.encode(backupKey, backupSource, sourceName, msg.sender, block.number)
         );
     }
     
-    /// @notice 通知所有监控服务
-    /// @param eventType 事件类型
-    /// @param eventData 事件数据
-    /// @dev 内部函数，在价格更新时调用
+    /**
+     * @notice Notifies all monitor contracts.
+     * @dev Best-effort; failures are swallowed and do not revert.
+     *
+     * @param asset Asset address
+     * @param eventType Event type (string)
+     * @param eventData Event data (ABI-encoded)
+     */
     function _notifyMonitors(
         address asset, 
         string memory eventType, 
@@ -420,329 +630,373 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
             bytes32 monitorKey = _registeredMonitorKeys[i];
             address monitorContract = _dynamicMonitors[monitorKey];
             if (monitorContract != address(0)) {
-                (bool success, ) = monitorContract.call(
-                    abi.encodeWithSignature(
-                        "onPriceUpdate(address,string,bytes)", 
-                        asset, 
-                        eventType, 
-                        eventData
-                    )
-                );
-                if (!success) {
-                    emit HealthCheckFailed(asset, REASON_MONITOR_CALL_FAILED);
+                try IPriceUpdateMonitor(monitorContract).onPriceUpdate(asset, eventType, eventData) {
+                    uint256 noop = 0;
+                    noop;
+                } catch {
+                    emit HealthCheckFailed(asset, _REASON_MONITOR_CALL_FAILED);
                 }
             }
         }
     }
 
-    /* ============ 基础查询功能 (保留在主文件) ============ */
+    /*━━━━━━━━━━━━━━━ View Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 检查资产是否需要更新
-    /// @return needsUpdate 是否需要更新
+    /**
+     * @notice Returns whether an asset needs a refresh.
+     * @dev Reverts if:
+     *      - None
+     *
+     * Security:
+     * - View-only; best-effort local check
+     *
+     * @param asset Asset address
+     * @return needsUpdate True if last update is older than UPDATE_INTERVAL
+     */
     function needsUpdate(address asset) external view returns (bool) {
         if (asset == address(0)) return false;
         if (!_autoUpdateEnabled) return false;
         
-        uint256 lastUpdate = _lastUpdateTime[asset];
-        return block.timestamp - lastUpdate > UPDATE_INTERVAL;
+        uint256 lastUpdate = _lastUpdateBlock[asset];
+        if (lastUpdate == 0 || lastUpdate > block.number) return true;
+        return (block.number - lastUpdate) > _UPDATE_INTERVAL_BLOCKS;
     }
-    
-    // 查询接口已下沉到 View 层（ValuationOracleView）。如需资产信息、健康检查、批量查询等，请使用 View 模块。
 
-    /* ============ 复杂查询功能 (委托View合约) ============ */
+    /*━━━━━━━━━━━━━━━ Internal Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 批量检查价格预言机健康状态
-    /// @return healthStatus 健康状态数组
-    /// @dev 委托给View合约处理复杂批量查询
-    // 批量健康检查等复杂查询功能请直接调用 View 层。
-
-    /* ============ Registry查询功能 (通过Registry调用) ============ */
-    
-    /// @notice 获取模块地址
-    /// @param moduleKey 模块键
-    /// @return 模块地址
-    // Registry 相关的通用查询，请通过专用 View/Registry 管理模块进行。
-
-    /* ============ Internal Functions ============ */
-    
-    /// @notice 验证价格是否合理（使用GracefulDegradation库，完全内联）
-    /// @return isValid 价格是否有效
+    /**
+     * @notice Validates whether a price is within bounds.
+     * @param asset Asset address
+     * @param price Price (8 decimals)
+     * @return isValid True if the price is valid
+     */
     function _validatePrice(address asset, uint256 price) internal view returns (bool isValid) {
         if (price == 0) return false;
         
-        // 使用 GracefulDegradation 库的价格验证标准（完全内联，零gas开销）
-        if (price > GracefulDegradation.MAX_REASONABLE_PRICE) return false;
+        if (price > _MAX_REASONABLE_PRICE) return false;
         
         uint256 lastPrice = _lastValidPrice[asset];
-        if (lastPrice == 0) return true; // 首次更新
+        if (lastPrice == 0) return true; // First update
         
-        // Solidity 0.8+ 自带溢出/下溢检查：直接使用运算符即可
+        // Solidity 0.8+ has built-in overflow/underflow checks.
         uint256 diff = price > lastPrice ? (price - lastPrice) : (lastPrice - price);
         uint256 deviation = diff * 10000 / lastPrice;
         
-        return deviation <= MAX_PRICE_DEVIATION;
+        return deviation <= _MAX_PRICE_DEVIATION;
     }
     
-    /// @notice 验证用户权限（带优雅降级）
-    /// @param actionKey 动作键
-    /// @param user 用户地址
+    /**
+     * @notice Checks caller authorization.
+     * @dev Reverts if:
+     *      - Registry is not set (see {ZeroAddress})
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *      - ACM.requireRole fails
+     *
+     * @param actionKey Action key
+     * @param user User address
+     */
     function _requireRole(bytes32 actionKey, address user) internal view {
         if (_registryAddr == address(0)) revert ZeroAddress();
         address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
     
-    /// @notice 正常价格更新流程
-    /// @param coingeckoId CoinGecko ID
+    /**
+     * @notice Normal price update flow (internal).
+     * @param asset Asset address
+     * @param price Price (8 decimals)
+     * @param blockNumber Price blockNumber (blocks)
+     * @param coingeckoId CoinGecko ID
+     */
     function _normalPriceUpdate(
         address asset,
         uint256 price,
-        uint256 timestamp,
+        uint256 blockNumber,
         string memory coingeckoId
-    ) external {
-        if (msg.sender != address(this)) revert CoinGeckoPriceUpdater__InvalidMonitorContract();
-        
-        // 通过 Registry 获取 PriceOracle 地址
+    ) internal {
+        // Resolve PriceOracle via Registry.
         address priceOracleAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
         
-        // 确保PriceOracle中已配置该资产
-        try IPriceOracle(priceOracleAddr).configureAsset(asset, coingeckoId, 8, 3600) {
-            // 配置成功，继续更新价格
+        // Ensure asset is configured in PriceOracle.
+        uint8 decimals = _assetDecimals[asset];
+        if (decimals == 0) {
+            emit PriceUpdateFailed(asset, coingeckoId, _REASON_DECIMALS_NOT_CONFIGURED);
+            DataPushLibrary._emitData(
+                DataPushTypes.DATA_TYPE_PRICE_UPDATE_FAILED,
+                abi.encode(asset, coingeckoId, _REASON_DECIMALS_NOT_CONFIGURED, block.number)
+            );
+            return;
+        }
+        try IPriceOracle(priceOracleAddr).configureAsset(asset, coingeckoId, decimals, 3600) {
+            assert(true);
         } catch {
-            // 如果配置失败，可能是已经配置过了，继续尝试更新价格
+            assert(true);
         }
         
-        IPriceOracle(priceOracleAddr).updatePrice(asset, price, timestamp);
-        _lastUpdateTime[asset] = block.timestamp;
+        IPriceOracle(priceOracleAddr).updatePrice(asset, price, blockNumber);
+        _lastUpdateBlock[asset] = block.number;
         _updateFailureCount[asset] = 0;
         _lastValidPrice[asset] = price;
         
-        emit PriceUpdated(asset, coingeckoId, price, timestamp);
+        emit PriceUpdated(asset, coingeckoId, price, blockNumber);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_PRICE_UPDATED,
-            abi.encode(asset, price, timestamp, coingeckoId, msg.sender, block.timestamp)
+            abi.encode(asset, price, blockNumber, coingeckoId, msg.sender, block.number)
         );
         
-        // 通知监控服务
+        // Notify monitors.
         _notifyMonitors(
             asset, 
             "PRICE_UPDATE_SUCCESS", 
-            abi.encode(price, timestamp, coingeckoId)
+            abi.encode(price, blockNumber, coingeckoId)
         );
     }
     
-    /// @notice 应急价格更新流程（当Registry或PriceOracle失败时）
-    /// @param coingeckoId CoinGecko ID
+    /**
+     * @notice Emergency price update flow (when Registry/Oracle is unavailable).
+     * @param asset Asset address
+     * @param price Price (8 decimals)
+     * @param blockNumber Price blockNumber (blocks)
+     * @param coingeckoId CoinGecko ID
+     */
     function _emergencyPriceUpdate(
         address asset,
         uint256 price,
-        uint256 timestamp,
+        uint256 blockNumber,
         string memory coingeckoId
-    ) external {
-        if (msg.sender != address(this)) revert CoinGeckoPriceUpdater__InvalidMonitorContract();
-        
-        // 应急模式：只更新本地记录，不依赖外部模块
-        _lastUpdateTime[asset] = block.timestamp;
+    ) internal {
+        // Emergency mode: local-only update.
+        _lastUpdateBlock[asset] = block.number;
         _updateFailureCount[asset] = 0;
         _lastValidPrice[asset] = price;
         
-        emit PriceUpdated(asset, coingeckoId, price, timestamp);
-        emit HealthCheckFailed(asset, REASON_ORACLE_UNAVAILABLE);
+        emit PriceUpdated(asset, coingeckoId, price, blockNumber);
+        emit HealthCheckFailed(asset, _REASON_ORACLE_UNAVAILABLE);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_PRICE_UPDATED,
-            abi.encode(asset, price, timestamp, coingeckoId, msg.sender, block.timestamp)
+            abi.encode(asset, price, blockNumber, coingeckoId, msg.sender, block.number)
         );
         DataPushLibrary._emitData(
-            DataPushTypes.DATA_TYPE_MODULE_HEALTH,
-            abi.encode(address(this), "PriceOracle", false, "Emergency mode: Oracle unavailable", block.timestamp)
+            DataPushTypes.DATA_TYPE_COMPONENT_HEALTH,
+            abi.encode(address(this), "PriceOracle", false, "Emergency mode: Oracle unavailable", block.number)
         );
         
-        // 在应急模式下不通知监控服务，避免级联失败
+        // Skip monitor notifications in emergency mode.
     }
     
-    /// @notice 价格更新带优雅降级（使用internal library，零gas开销）
-    /// @param coingeckoId CoinGecko ID
-    function _updatePriceWithGracefulDegradation(
+    /**
+     * @notice Price update flow with fallback to emergency update.
+     * @param asset Asset address
+     * @param price Price (8 decimals)
+     * @param blockNumber Price blockNumber (blocks)
+     * @param coingeckoId CoinGecko ID
+     */
+    function _updatePriceWithFallback(
         address asset,
         uint256 price,
-        uint256 timestamp,
+        uint256 blockNumber,
         string memory coingeckoId
     ) internal {
-        // 使用GracefulDegradation库验证价格合理性（完全内联）
-        if (price > GracefulDegradation.MAX_REASONABLE_PRICE) {
-            emit PriceValidationFailed(asset, price, REASON_EXCEEDS_MAX_VALUE);
+        if (price > _MAX_REASONABLE_PRICE) {
+            emit PriceValidationFailed(asset, price, _REASON_EXCEEDS_MAX_VALUE);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_PRICE_VALIDATION_FAILED,
-                abi.encode(asset, price, block.timestamp)
+                abi.encode(asset, price, block.number)
             );
             return;
         }
         
-        // 尝试正常价格更新
+        // Try normal update.
         if (_registryAddr != address(0)) {
-            try IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE) returns (address priceOracleAddr) {
-                // 使用GracefulDegradation库检查预言机健康状态（完全内联）
-                (bool isHealthy, string memory healthDetails) = GracefulDegradation.checkPriceOracleHealth(priceOracleAddr, asset);
-                
-                if (isHealthy) {
-                    if (_executeSingleNormalPriceUpdate(priceOracleAddr, asset, price, timestamp, coingeckoId)) {
-                        // 通知监控服务
-                        _notifyMonitors(
-                            asset, 
-                            "PRICE_UPDATE_SUCCESS", 
-                            abi.encode(price, timestamp, coingeckoId)
-                        );
-                        return; // 正常更新成功
-                    }
-                } else {
-                    emit HealthCheckFailed(asset, REASON_ORACLE_UNAVAILABLE);
-                    DataPushLibrary._emitData(
-                        DataPushTypes.DATA_TYPE_MODULE_HEALTH,
-                        abi.encode(priceOracleAddr, "PriceOracle", false, healthDetails, block.timestamp)
+            try IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE)
+                returns (address priceOracleAddr)
+            {
+                if (_executeSingleNormalPriceUpdate(priceOracleAddr, asset, price, blockNumber, coingeckoId)) {
+                    // Notify monitors.
+                    _notifyMonitors(
+                        asset, 
+                        "PRICE_UPDATE_SUCCESS", 
+                        abi.encode(price, blockNumber, coingeckoId)
                     );
+                    return; // Success
                 }
             } catch {
-                // Registry失败，继续到应急模式
+                assert(true);
             }
         }
         
-        // 应急模式：只更新本地记录
-        _executeSingleEmergencyPriceUpdate(asset, price, timestamp, coingeckoId);
+        // Emergency local update.
+        _executeSingleEmergencyPriceUpdate(asset, price, blockNumber, coingeckoId);
     }
     
-    /// @notice 批量价格更新带优雅降级（使用internal library，零gas开销）
-    function _batchUpdatePriceWithGracefulDegradation(
+    /**
+     * @notice Batch price update flow with fallback to emergency update.
+     * @param assets Asset address list
+     * @param prices Price list (8 decimals)
+     * @param blockNumbers BlockNumber list (blocks)
+     */
+    function _batchUpdatePriceWithFallback(
         address[] calldata assets,
         uint256[] calldata prices,
-        uint256[] calldata timestamps
+        uint256[] calldata blockNumbers
     ) internal {
         uint256 length = assets.length;
         address priceOracleAddr;
         bool oracleAvailable = false;
         
-        // 一次性检查Oracle可用性，优化gas消耗
+        // Resolve oracle once to reduce gas.
         if (_registryAddr != address(0)) {
             try IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE) returns (address oracle) {
                 priceOracleAddr = oracle;
                 oracleAvailable = true;
             } catch {
-                // Registry失败，使用应急模式
+                assert(true);
             }
         }
         
         for (uint256 i = 0; i < length; i++) {
             address asset = assets[i];
             uint256 price = prices[i];
-            uint256 timestamp = timestamps[i];
+            uint256 blockNumber = blockNumbers[i];
             
-            // 基本验证
-            if (asset == address(0) || price == 0 || timestamp > block.timestamp) continue;
+            // Basic validation.
+            if (asset == address(0) || price == 0) continue;
             
             string memory coingeckoId = _assetToCoingeckoId[asset];
             if (bytes(coingeckoId).length == 0) continue;
             
-            // 使用GracefulDegradation库验证价格合理性（完全内联）
-            if (price > GracefulDegradation.MAX_REASONABLE_PRICE) {
-                emit PriceValidationFailed(asset, price, REASON_EXCEEDS_MAX_VALUE);
+            if (price > _MAX_REASONABLE_PRICE) {
+                emit PriceValidationFailed(asset, price, _REASON_EXCEEDS_MAX_VALUE);
                 DataPushLibrary._emitData(
                     DataPushTypes.DATA_TYPE_PRICE_VALIDATION_FAILED,
-                    abi.encode(asset, price, block.timestamp)
+                    abi.encode(asset, price, block.number)
                 );
                 continue;
             }
             
-            // 尝试正常更新
+            // Try normal update.
             if (oracleAvailable) {
-                // 使用GracefulDegradation库检查预言机健康状态（完全内联）
-                (bool isHealthy,) = GracefulDegradation.checkPriceOracleHealth(priceOracleAddr, asset);
-                
-                if (isHealthy && _executeSingleNormalPriceUpdate(priceOracleAddr, asset, price, timestamp, coingeckoId)) {
-                    continue; // 正常更新成功
+                if (_executeSingleNormalPriceUpdate(priceOracleAddr, asset, price, blockNumber, coingeckoId)) {
+                    continue; // Success
                 }
             }
             
-            // 应急模式更新
-            _executeSingleEmergencyPriceUpdate(asset, price, timestamp, coingeckoId);
+            // Emergency update.
+            _executeSingleEmergencyPriceUpdate(asset, price, blockNumber, coingeckoId);
         }
     }
     
-    /// @notice 单个资产的正常价格更新（内联版本）
+    /**
+     * @notice Normal update for a single asset.
+     * @param priceOracleAddr PriceOracle address
+     * @param asset Asset address
+     * @param price Price (8 decimals)
+     * @param blockNumber Price blockNumber (blocks)
+     * @param coingeckoId CoinGecko ID
+     * @return success True if update succeeded
+     */
     function _executeSingleNormalPriceUpdate(
         address priceOracleAddr,
         address asset,
         uint256 price,
-        uint256 timestamp,
+        uint256 blockNumber,
         string memory coingeckoId
     ) internal returns (bool success) {
-        try IPriceOracle(priceOracleAddr).configureAsset(asset, coingeckoId, 8, 3600) {
-            // 配置成功
+        uint8 decimals = _assetDecimals[asset];
+        if (decimals == 0) return false;
+
+        try IPriceOracle(priceOracleAddr).configureAsset(asset, coingeckoId, decimals, 3600) {
+            assert(true);
         } catch {
-            // 可能已配置，继续
+            assert(true);
         }
         
-        try IPriceOracle(priceOracleAddr).updatePrice(asset, price, timestamp) {
-            _lastUpdateTime[asset] = block.timestamp;
+        try IPriceOracle(priceOracleAddr).updatePrice(asset, price, blockNumber) {
+            _lastUpdateBlock[asset] = block.number;
             _updateFailureCount[asset] = 0;
             _lastValidPrice[asset] = price;
             
-            emit PriceUpdated(asset, coingeckoId, price, timestamp);
+            emit PriceUpdated(asset, coingeckoId, price, blockNumber);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_PRICE_UPDATED,
-                abi.encode(asset, price, timestamp, coingeckoId, msg.sender, block.timestamp)
+                abi.encode(asset, price, blockNumber, coingeckoId, msg.sender, block.number)
             );
             return true;
         } catch (bytes memory error) {
-            emit SystemEvents.ExternalModuleReverted("PriceOracle", error, block.timestamp);
+            emit SystemEvents.ExternalModuleReverted("PriceOracle", error, block.number);
             _updateFailureCount[asset]++;
-            emit PriceUpdateFailed(asset, coingeckoId, REASON_ORACLE_UPDATE_FAILED);
+            emit PriceUpdateFailed(asset, coingeckoId, _REASON_ORACLE_UPDATE_FAILED);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_PRICE_UPDATE_FAILED,
-                abi.encode(asset, coingeckoId, error, block.timestamp)
+                abi.encode(asset, coingeckoId, error, block.number)
             );
             return false;
         }
     }
+
+    /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
+
+    /// @dev Best-effort read ERC20 decimals. Returns 0 if not readable.
+    function _readErc20Decimals(address asset) internal view returns (uint8 decimals) {
+        if (asset == address(0) || asset.code.length == 0) return 0;
+        try IERC20Metadata(asset).decimals() returns (uint8 d) {
+            return d;
+        } catch {
+            return 0;
+        }
+    }
     
-    /// @notice 单个资产的应急价格更新（内联版本）
+    /**
+     * @notice Emergency update for a single asset.
+     * @param asset Asset address
+     * @param price Price (8 decimals)
+     * @param blockNumber Price blockNumber (blocks)
+     * @param coingeckoId CoinGecko ID
+     */
     function _executeSingleEmergencyPriceUpdate(
         address asset,
         uint256 price,
-        uint256 timestamp,
+        uint256 blockNumber,
         string memory coingeckoId
     ) internal {
-        _lastUpdateTime[asset] = block.timestamp;
+        _lastUpdateBlock[asset] = block.number;
         _updateFailureCount[asset] = 0;
         _lastValidPrice[asset] = price;
         
-        emit PriceUpdated(asset, coingeckoId, price, timestamp);
-        emit HealthCheckFailed(asset, REASON_ORACLE_UNAVAILABLE);
+        emit PriceUpdated(asset, coingeckoId, price, blockNumber);
+        emit HealthCheckFailed(asset, _REASON_ORACLE_UNAVAILABLE);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_PRICE_UPDATED,
-            abi.encode(asset, price, timestamp, coingeckoId, msg.sender, block.timestamp)
+            abi.encode(asset, price, blockNumber, coingeckoId, msg.sender, block.number)
         );
         DataPushLibrary._emitData(
-            DataPushTypes.DATA_TYPE_MODULE_HEALTH,
-            abi.encode(address(this), "PriceOracle", false, "Emergency mode: Oracle unavailable", block.timestamp)
+            DataPushTypes.DATA_TYPE_COMPONENT_HEALTH,
+            abi.encode(address(this), "PriceOracle", false, "Emergency mode: Oracle unavailable", block.number)
         );
     }
 
-    /// @notice 验证用户是否有查看权限（VIEWER级别或更高）
-    /// @param user 用户地址
-    /// @dev 普通用户需要至少VIEWER权限，管理员及以上可查看所有信息
+    /// @notice Viewer/admin check was removed; use View modules instead.
+    /// @param user User address
+    /// @dev Kept as a comment for historical context.
     // Removed _requireViewerOrAdmin to reduce size; viewers should use View modules
 
-    // ============ Internal helpers ============
-    /// @notice 生成确定性的模块键
-    /// @dev 注意：历史上 key 使用 `keccak256(abi.encodePacked(prefix, name))`（不含 "_"），保持兼容。
+    /*━━━━━━━━━━━━━━━ Internal Helpers ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Generates a deterministic module key.
+     * @dev Uses keccak256(abi.encodePacked(prefix, name)) for backward compatibility.
+     * @param prefix Prefix string
+     * @param name Name string
+     * @return Module key
+     */
     function _makeModuleKey(string memory prefix, string memory name) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(prefix, name));
     }
-    
-    
-    
-    /// @notice 获取模块地址（通过Registry）
-    /// @param moduleKey 模块键
-    /// @return 模块地址
+     
+    /**
+     * @notice Returns a module address via Registry.
+     * @param moduleKey Module key
+     * @return Module address (address(0) on failure)
+     */
     function _getModule(bytes32 moduleKey) internal view returns (address) {
         if (_registryAddr == address(0)) return address(0);
         
@@ -753,19 +1007,25 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
         }
     }
 
-    /* ============ UUPS Upgradeable ============ */
-    /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
+    /*━━━━━━━━━━━━━━━ UUPS Upgradeable ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Authorizes UUPS upgrades.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_UPGRADE_MODULE (via ACM.requireRole)
+     *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
+     *
+     * Security:
+     * - Role-gated: ACTION_UPGRADE_MODULE via ACM
+     */
     function _authorizeUpgrade(address /* newImplementation */) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         
-        // 记录标准化动作事件
+        // Emit standardized action event.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 } 

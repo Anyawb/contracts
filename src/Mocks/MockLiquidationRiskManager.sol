@@ -12,6 +12,7 @@ contract MockLiquidationRiskManager is ILiquidationRiskManager {
     mapping(address => uint256) private _safetyMargin;
     uint256 private _liquidationThreshold;
     uint256 private _minHealthFactor;
+    uint256 private _maxLtvBps;
 
     // ===== Setter helpers for tests =====
     function setLiquidatable(address user, bool flag) external {
@@ -47,6 +48,10 @@ contract MockLiquidationRiskManager is ILiquidationRiskManager {
 
     function setMinHealthFactor(uint256 minHf) external {
         _minHealthFactor = minHf;
+    }
+
+    function setMaxLtvBps(uint256 maxLtvBps) external {
+        _maxLtvBps = maxLtvBps;
     }
 
     // ===== Interface implementations =====
@@ -105,6 +110,14 @@ contract MockLiquidationRiskManager is ILiquidationRiskManager {
 
     function updateMinHealthFactor(uint256 newMinHealthFactor) external override {
         _minHealthFactor = newMinHealthFactor;
+    }
+
+    function getMaxLtvBps() external view override returns (uint256 maxLtvBps) {
+        return _maxLtvBps;
+    }
+
+    function updateMaxLtvBps(uint256 newMaxLtvBps) external override {
+        _maxLtvBps = newMaxLtvBps;
     }
 
     function batchIsLiquidatable(address[] calldata users) external view override returns (bool[] memory liquidatableFlags) {

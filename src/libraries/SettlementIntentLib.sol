@@ -8,11 +8,15 @@ import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 /**
  * @title SettlementIntentLib
  * @notice Lightweight library for EIP-712 hashing, signature validation, and intent state checks (borrow/lend).
+ * @dev Reverts if:
+ *      - (none; see per-function notes)
+ *
+ * Security:
+ * - Stateless library; does not mutate state except via provided storage mappings.
  */
 library SettlementIntentLib {
     /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
     // NOTE: Field order is EIP-712 canonical and MUST match the type string in `hashBorrowIntent`.
-    // solhint-disable-next-line gas-struct-packing
     struct BorrowIntent {
         address borrower;
         address collateralAsset;
@@ -21,12 +25,12 @@ library SettlementIntentLib {
         uint256 amount;
         uint16 termDays;
         uint256 rateBps;
+        /// @dev Legacy field name. Semantics: **expireBlock** (block.number), not unix time.
         uint256 expireAt;
         bytes32 salt;
     }
 
     // NOTE: Field order is EIP-712 canonical and MUST match the type string in `hashLendIntent`.
-    // solhint-disable-next-line gas-struct-packing
     struct LendIntent {
         /**
          * @notice Lender intent signer (EOA / ERC-1271 smart wallet).
@@ -39,12 +43,13 @@ library SettlementIntentLib {
         uint16 minTermDays;
         uint16 maxTermDays;
         uint256 minRateBps;
+        /// @dev Legacy field name. Semantics: **expireBlock** (block.number), not unix time.
         uint256 expireAt;
         bytes32 salt;
     }
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
-    /// @notice Thrown when an intent has expired (block.timestamp > expireAt).
+    /// @notice Thrown when an intent has expired (block.number > expireAt).
     error SettlementIntentLib__IntentExpired();
     /// @notice Thrown when an intent hash is already marked as matched.
     error SettlementIntentLib__AlreadyMatched();
@@ -65,11 +70,8 @@ library SettlementIntentLib {
      */
     function hashBorrowIntent(BorrowIntent memory bi) internal pure returns (bytes32) {
         return keccak256(abi.encode(
-            // solhint-disable-next-line gas-small-strings
             keccak256(
-                // solhint-disable-next-line gas-small-strings
                 "BorrowIntent(address borrower,address collateralAsset,uint256 collateralAmount,address borrowAsset,"
-                // solhint-disable-next-line gas-small-strings
                 "uint256 amount,uint16 termDays,uint256 rateBps,uint256 expireAt,bytes32 salt)"
             ),
             bi.borrower,
@@ -97,11 +99,8 @@ library SettlementIntentLib {
      */
     function hashLendIntent(LendIntent memory li) internal pure returns (bytes32) {
         return keccak256(abi.encode(
-            // solhint-disable-next-line gas-small-strings
             keccak256(
-                // solhint-disable-next-line gas-small-strings
                 "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,"
-                // solhint-disable-next-line gas-small-strings
                 "uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
             ),
             li.lenderSigner,
@@ -137,7 +136,6 @@ library SettlementIntentLib {
     ) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
-                // solhint-disable-next-line gas-small-strings
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256(bytes(name)),
                 keccak256(bytes(version)),
@@ -206,23 +204,22 @@ library SettlementIntentLib {
     /**
      * @notice Validate an intent is open (not expired and not yet matched).
      * @dev Reverts if:
-     *      - block.timestamp > expireAt (SettlementIntentLib__IntentExpired)
+     *      - block.number > expireAt (SettlementIntentLib__IntentExpired)
      *      - matched[intentHash] is true (SettlementIntentLib__AlreadyMatched)
      *
      * Security:
-     * - Relies on block.timestamp for expiry checks (expected for intent validity windows).
+     * - Time-Dependency-Refactor SSOT: expiry windows are block-based; do NOT use time-in-seconds.
      *
      * @param matched Mapping of intentHash => matched flag (storage).
      * @param intentHash Intent hash identifier.
-     * @param expireAt Expiration timestamp (unix timestamp, seconds).
+     * @param expireAt Expiration block (block.number). Legacy name kept for EIP-712 compatibility.
      */
     function validateOpen(
         mapping(bytes32 => bool) storage matched,
         bytes32 intentHash,
         uint256 expireAt
     ) internal view {
-        // solhint-disable-next-line not-rely-on-time
-        if (block.timestamp > expireAt) revert SettlementIntentLib__IntentExpired();
+        if (block.number > expireAt) revert SettlementIntentLib__IntentExpired();
         if (matched[intentHash]) revert SettlementIntentLib__AlreadyMatched();
     }
 

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/extensions/AccessControlEnumerableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import { ERC20PermitUpgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
+import { AccessControlEnumerableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/extensions/AccessControlEnumerableUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title RewardPoints (Upgradeable & Pausable)
 /// @notice 平台积分代币，可升级、可暂停、支持 EIP-2612 Permit
@@ -44,8 +44,8 @@ contract RewardPoints is
     
     /// @notice 暂停状态变更事件
     /// @param paused 是否暂停
-    /// @param timestamp 时间戳
-    event PauseStatusChanged(bool paused, uint256 timestamp);
+    /// @param blockNumber 区块号（blockNumber）
+    event PauseStatusChanged(bool paused, uint256 blockNumber);
 
     // =================== 初始化 ===================
     /// @notice 初始化 – 仅可调用一次
@@ -109,14 +109,14 @@ contract RewardPoints is
     /// @dev 仅 DEFAULT_ADMIN_ROLE 可调用
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
-        emit PauseStatusChanged(true, block.timestamp);
+        emit PauseStatusChanged(true, block.number);
     }
 
     /// @notice 恢复合约功能
     /// @dev 仅 DEFAULT_ADMIN_ROLE 可调用
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
-        emit PauseStatusChanged(false, block.timestamp);
+        emit PauseStatusChanged(false, block.number);
     }
 
     // =================== Metadata ===================

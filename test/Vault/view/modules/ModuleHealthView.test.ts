@@ -8,6 +8,11 @@ const ACTION_VIEW_SYSTEM_STATUS = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VI
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 
 describe('ModuleHealthView', function () {
+  async function readStatus(view: any, moduleAddr: string) {
+    const [status] = await view.getModuleHealthStatus(moduleAddr);
+    return status;
+  }
+
   async function deployFixture() {
     const [admin, viewer, other] = await ethers.getSigners();
 
@@ -69,14 +74,14 @@ describe('ModuleHealthView', function () {
     const tx = await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
     await expect(tx).to.emit(moduleHealthView, 'ModuleHealthChecked').withArgs(await dummyModule.getAddress(), true, 0);
 
-    const status = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+    const status = await readStatus(moduleHealthView, await dummyModule.getAddress());
     expect(status.module).to.equal(await dummyModule.getAddress());
     expect(status.isHealthy).to.equal(true);
     expect(status.lastCheckTime).to.be.gt(0);
     expect(status.totalChecks).to.equal(1n);
     expect(status.successRate).to.equal(100n);
 
-    const cached = await healthView.getModuleHealth(await dummyModule.getAddress());
+    const [cached] = await healthView.getModuleHealthWithMeta(await dummyModule.getAddress());
     expect(cached.isHealthy).to.equal(true);
     expect(cached.detailsHash).to.equal(ethers.keccak256(ethers.toUtf8Bytes('Module is healthy')));
     expect(cached.lastCheckTime).to.be.gt(0);
@@ -90,11 +95,11 @@ describe('ModuleHealthView', function () {
     const randomEOA = ethers.Wallet.createRandom().address; // no code
     await moduleHealthView.connect(viewer).checkAndPushModuleHealth(randomEOA); // unhealthy
 
-    const status = await moduleHealthView.getModuleHealthStatus(randomEOA);
+    const status = await readStatus(moduleHealthView, randomEOA);
     expect(status.isHealthy).to.equal(false);
     expect(status.totalChecks).to.equal(1n); // separate cache per module
 
-    const healthyStatus = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+    const healthyStatus = await readStatus(moduleHealthView, await dummyModule.getAddress());
     expect(healthyStatus.successRate).to.equal(100n); // first module only successes
   });
 
@@ -124,7 +129,7 @@ describe('ModuleHealthView', function () {
   it('getModuleHealthStatus enforces role', async function () {
     const { moduleHealthView, other, dummyModule } = await deployFixture();
     await expect(
-      moduleHealthView.connect(other).getModuleHealthStatus(await dummyModule.getAddress()),
+      readStatus(moduleHealthView.connect(other), await dummyModule.getAddress()),
     ).to.be.revertedWithCustomError(moduleHealthView, 'MissingRole');
   });
 
@@ -152,13 +157,13 @@ describe('ModuleHealthView', function () {
 
       // First check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
-      const status1 = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+      const status1 = await readStatus(moduleHealthView, await dummyModule.getAddress());
       expect(status1.totalChecks).to.equal(1n);
       expect(status1.successRate).to.equal(100n);
 
       // Second check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
-      const status2 = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+      const status2 = await readStatus(moduleHealthView, await dummyModule.getAddress());
       expect(status2.totalChecks).to.equal(2n);
       expect(status2.successRate).to.equal(100n); // Still 100% since all checks passed
       expect(status2.lastCheckTime).to.be.gte(status1.lastCheckTime);
@@ -173,9 +178,9 @@ describe('ModuleHealthView', function () {
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await module2.getAddress());
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await module3.getAddress());
 
-      const status1 = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
-      const status2 = await moduleHealthView.getModuleHealthStatus(await module2.getAddress());
-      const status3 = await moduleHealthView.getModuleHealthStatus(await module3.getAddress());
+      const status1 = await readStatus(moduleHealthView, await dummyModule.getAddress());
+      const status2 = await readStatus(moduleHealthView, await module2.getAddress());
+      const status3 = await readStatus(moduleHealthView, await module3.getAddress());
 
       expect(status1.totalChecks).to.equal(1n);
       expect(status2.totalChecks).to.equal(1n);
@@ -191,13 +196,13 @@ describe('ModuleHealthView', function () {
 
       // First failure
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(noCodeAddr);
-      const status1 = await moduleHealthView.getModuleHealthStatus(noCodeAddr);
+      const status1 = await readStatus(moduleHealthView, noCodeAddr);
       expect(status1.consecutiveFailures).to.equal(1);
       expect(status1.isHealthy).to.equal(false);
 
       // Second failure
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(noCodeAddr);
-      const status2 = await moduleHealthView.getModuleHealthStatus(noCodeAddr);
+      const status2 = await readStatus(moduleHealthView, noCodeAddr);
       expect(status2.consecutiveFailures).to.equal(1); // Still 1 as per current logic (healthy=0, unhealthy=1)
       expect(status2.totalChecks).to.equal(2n);
     });
@@ -208,31 +213,31 @@ describe('ModuleHealthView', function () {
 
       // Healthy check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
-      let status = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+      let status = await readStatus(moduleHealthView, await dummyModule.getAddress());
       expect(status.successRate).to.equal(100n);
 
       // Unhealthy check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(noCodeAddr);
-      status = await moduleHealthView.getModuleHealthStatus(noCodeAddr);
+      status = await readStatus(moduleHealthView, noCodeAddr);
       expect(status.successRate).to.equal(0n); // 0% success rate
       expect(status.totalChecks).to.equal(1n);
     });
 
-    it('updates timestamp on each check', async function () {
+    it('updates blockNumber on each check', async function () {
       const { moduleHealthView, viewer, dummyModule } = await deployFixture();
 
       const tx1 = await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
       const receipt1 = await tx1.wait();
-      const status1 = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
-      const timestamp1 = status1.lastCheckTime;
+      const status1 = await readStatus(moduleHealthView, await dummyModule.getAddress());
+      const blockNumber1 = status1.lastCheckTime;
 
       // Wait a bit (in test, blocks advance)
       const tx2 = await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
       await tx2.wait();
-      const status2 = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
-      const timestamp2 = status2.lastCheckTime;
+      const status2 = await readStatus(moduleHealthView, await dummyModule.getAddress());
+      const blockNumber2 = status2.lastCheckTime;
 
-      expect(timestamp2).to.be.gte(timestamp1);
+      expect(blockNumber2).to.be.gte(blockNumber1);
     });
 
     it('handles zero address in checkModuleHealth', async function () {
@@ -261,8 +266,8 @@ describe('ModuleHealthView', function () {
       // Second: unhealthy
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(noCodeAddr);
 
-      const healthyStatus = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
-      const unhealthyStatus = await moduleHealthView.getModuleHealthStatus(noCodeAddr);
+      const healthyStatus = await readStatus(moduleHealthView, await dummyModule.getAddress());
+      const unhealthyStatus = await readStatus(moduleHealthView, noCodeAddr);
 
       expect(healthyStatus.successRate).to.equal(100n); // 1/1 = 100%
       expect(unhealthyStatus.successRate).to.equal(0n); // 0/1 = 0%
@@ -276,7 +281,7 @@ describe('ModuleHealthView', function () {
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
 
-      const status = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+      const status = await readStatus(moduleHealthView, await dummyModule.getAddress());
       expect(status.totalChecks).to.equal(3n);
       expect(status.successRate).to.equal(100n); // All successful
     });
@@ -296,9 +301,9 @@ describe('ModuleHealthView', function () {
       // Module 3: 1 failed check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(noCodeAddr);
 
-      const status1 = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
-      const status2 = await moduleHealthView.getModuleHealthStatus(await module2.getAddress());
-      const status3 = await moduleHealthView.getModuleHealthStatus(noCodeAddr);
+      const status1 = await readStatus(moduleHealthView, await dummyModule.getAddress());
+      const status2 = await readStatus(moduleHealthView, await module2.getAddress());
+      const status3 = await readStatus(moduleHealthView, noCodeAddr);
 
       expect(status1.successRate).to.equal(100n);
       expect(status2.successRate).to.equal(100n);
@@ -312,8 +317,8 @@ describe('ModuleHealthView', function () {
 
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
 
-      const localStatus = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
-      const healthViewStatus = await healthView.getModuleHealth(await dummyModule.getAddress());
+      const localStatus = await readStatus(moduleHealthView, await dummyModule.getAddress());
+      const [healthViewStatus] = await healthView.getModuleHealthWithMeta(await dummyModule.getAddress());
 
       expect(localStatus.isHealthy).to.equal(healthViewStatus.isHealthy);
       expect(localStatus.detailsHash).to.equal(healthViewStatus.detailsHash);
@@ -325,7 +330,7 @@ describe('ModuleHealthView', function () {
 
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
 
-      const cachedStatus = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+      const cachedStatus = await readStatus(moduleHealthView, await dummyModule.getAddress());
       const checkResult = await moduleHealthView.connect(viewer).checkModuleHealth(await dummyModule.getAddress());
 
       expect(cachedStatus.isHealthy).to.equal(checkResult[0]);
@@ -337,11 +342,11 @@ describe('ModuleHealthView', function () {
 
       // First check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
-      const status1 = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+      const status1 = await readStatus(moduleHealthView, await dummyModule.getAddress());
 
       // Second check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
-      const status2 = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+      const status2 = await readStatus(moduleHealthView, await dummyModule.getAddress());
 
       expect(status2.totalChecks).to.equal(status1.totalChecks + 1n);
       expect(status2.module).to.equal(status1.module);
@@ -441,14 +446,14 @@ describe('ModuleHealthView', function () {
 
       // Perform checks before upgrade
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
-      const statusBefore = await moduleHealthView.getModuleHealthStatus(await dummyModule.getAddress());
+      const statusBefore = await readStatus(moduleHealthView, await dummyModule.getAddress());
 
       // Upgrade
       const ModuleHealthViewFactory = await ethers.getContractFactory('ModuleHealthView');
       const upgraded = await upgrades.upgradeProxy(await moduleHealthView.getAddress(), ModuleHealthViewFactory.connect(admin));
 
       // Verify data preserved
-      const statusAfter = await upgraded.getModuleHealthStatus(await dummyModule.getAddress());
+      const statusAfter = await readStatus(upgraded, await dummyModule.getAddress());
       expect(statusAfter.module).to.equal(statusBefore.module);
       expect(statusAfter.isHealthy).to.equal(statusBefore.isHealthy);
       expect(statusAfter.totalChecks).to.equal(statusBefore.totalChecks);
@@ -464,7 +469,7 @@ describe('ModuleHealthView', function () {
 
       // Verify functionality
       await expect(upgraded.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress())).to.not.be.reverted;
-      const status = await upgraded.getModuleHealthStatus(await dummyModule.getAddress());
+      const status = await readStatus(upgraded, await dummyModule.getAddress());
       expect(status.isHealthy).to.equal(true);
     });
   });
@@ -475,7 +480,7 @@ describe('ModuleHealthView', function () {
 
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
 
-      const healthViewStatus = await healthView.getModuleHealth(await dummyModule.getAddress());
+      const [healthViewStatus] = await healthView.getModuleHealthWithMeta(await dummyModule.getAddress());
       expect(healthViewStatus.isHealthy).to.equal(true);
       expect(healthViewStatus.detailsHash).to.equal(ethers.keccak256(ethers.toUtf8Bytes('Module is healthy')));
       expect(healthViewStatus.consecutiveFailures).to.equal(0);
@@ -487,7 +492,7 @@ describe('ModuleHealthView', function () {
 
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(noCodeAddr);
 
-      const healthViewStatus = await healthView.getModuleHealth(noCodeAddr);
+      const [healthViewStatus] = await healthView.getModuleHealthWithMeta(noCodeAddr);
       expect(healthViewStatus.isHealthy).to.equal(false);
       expect(healthViewStatus.detailsHash).to.equal(ethers.keccak256(ethers.toUtf8Bytes('Module has no code')));
       expect(healthViewStatus.consecutiveFailures).to.equal(1);
@@ -498,15 +503,15 @@ describe('ModuleHealthView', function () {
 
       // First check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
-      const status1 = await healthView.getModuleHealth(await dummyModule.getAddress());
-      const timestamp1 = status1.lastCheckTime;
+      const [status1] = await healthView.getModuleHealthWithMeta(await dummyModule.getAddress());
+      const blockNumber1 = status1.lastCheckTime;
 
       // Second check
       await moduleHealthView.connect(viewer).checkAndPushModuleHealth(await dummyModule.getAddress());
-      const status2 = await healthView.getModuleHealth(await dummyModule.getAddress());
-      const timestamp2 = status2.lastCheckTime;
+      const [status2] = await healthView.getModuleHealthWithMeta(await dummyModule.getAddress());
+      const blockNumber2 = status2.lastCheckTime;
 
-      expect(timestamp2).to.be.gte(timestamp1);
+      expect(blockNumber2).to.be.gte(blockNumber1);
       expect(status2.isHealthy).to.equal(status1.isHealthy);
     });
   });

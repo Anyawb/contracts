@@ -15,13 +15,15 @@ import { ZeroAddress } from "../../errors/StandardErrors.sol";
 /// @dev 与 Registry 系统完全集成，使用标准化的模块管理
 /// @custom:security-contact security@example.com
 contract PriorityServiceConfig is BaseServiceConfig {
+    uint256 private constant _DEFAULT_DURATION_BLOCKS = 1_296_000; // 30 days @ 2s per block
+    uint256 private constant _DEFAULT_COOLDOWN_BLOCKS = 21_600; // 12 hours @ 2s per block
     
     // =================== 事件定义 ===================
     
     /// @notice 优先服务配置初始化事件
     event PriorityServiceConfigInitialized(
         address indexed governance,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice 优先服务配置更新事件
@@ -34,7 +36,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         bool oldIsActive,
         bool newIsActive,
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice 优先服务冷却期更新事件
@@ -42,7 +44,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         uint256 oldCooldown,
         uint256 newCooldown,
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice Registry 地址更新事件
@@ -66,14 +68,14 @@ contract PriorityServiceConfig is BaseServiceConfig {
         super._initialize(initialRegistryAddr);
         
         // 记录初始化事件
-        emit PriorityServiceConfigInitialized(registryAddr, block.timestamp);
+        emit PriorityServiceConfigInitialized(registryAddr, block.number);
         
         // 记录标准化动作事件
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -82,7 +84,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
     function _initializeConfigs() internal override {
         configs[ServiceLevel.Basic] = ServiceConfig({
             price: 200e18, // 200积分
-            duration: 30 days,
+            duration: _DEFAULT_DURATION_BLOCKS,
             isActive: true,
             level: ServiceLevel.Basic,
             description: "Priority loan processing (24h)"
@@ -90,7 +92,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         
         configs[ServiceLevel.Standard] = ServiceConfig({
             price: 500e18, // 500积分
-            duration: 30 days,
+            duration: _DEFAULT_DURATION_BLOCKS,
             isActive: true,
             level: ServiceLevel.Standard,
             description: "Dedicated customer service"
@@ -98,7 +100,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         
         configs[ServiceLevel.Premium] = ServiceConfig({
             price: 1000e18, // 1000积分
-            duration: 30 days,
+            duration: _DEFAULT_DURATION_BLOCKS,
             isActive: true,
             level: ServiceLevel.Premium,
             description: "Emergency transaction processing (4h)"
@@ -106,7 +108,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
         
         configs[ServiceLevel.VIP] = ServiceConfig({
             price: 2000e18, // 2000积分
-            duration: 30 days,
+            duration: _DEFAULT_DURATION_BLOCKS,
             isActive: true,
             level: ServiceLevel.VIP,
             description: "VIP exclusive manager service"
@@ -116,7 +118,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
     /// @dev 初始化冷却期
     /// @dev 设置服务升级的冷却时间为12小时
     function _initializeCooldown() internal override {
-        cooldown = 12 hours;
+        cooldown = _DEFAULT_COOLDOWN_BLOCKS;
     }
     
     /// @notice 获取服务类型
@@ -163,7 +165,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
             oldConfig.isActive,
             isActive,
             msg.sender,
-            block.timestamp
+            block.number
         );
         
         // 记录基类事件
@@ -174,7 +176,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -197,7 +199,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
             oldCooldown,
             _cooldown,
             msg.sender,
-            block.timestamp
+            block.number
         );
         
         // 记录基类事件
@@ -208,7 +210,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -258,7 +260,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
                 oldConfig.isActive,
                 isActives[i],
                 msg.sender,
-                block.timestamp
+                block.number
             );
             
             emit ConfigUpdated(uint8(levels[i]), prices[i], durations[i], isActives[i]);
@@ -269,7 +271,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -325,7 +327,7 @@ contract PriorityServiceConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     

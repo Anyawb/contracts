@@ -56,7 +56,7 @@ describe('CacheOptimizedView (read-only facade)', function () {
       activeUsers: 21,
       totalCollateral: 1_234_000n,
       totalDebt: 456_000n,
-      lastUpdateTime: 9999n,
+      lastUpdateBlock: 9999n,
     });
 
     // grant roles
@@ -114,47 +114,72 @@ describe('CacheOptimizedView (read-only facade)', function () {
   describe('user health factor queries', function () {
     it('returns single user health factor with validity flag', async function () {
       const { cacheOptimizedView, viewer } = await loadFixture(deployFixture);
-      const [hf, valid] = await cacheOptimizedView.connect(viewer).getUserHealthFactor(viewer.address);
+      const [hf, valid, blockNumber] = await cacheOptimizedView.connect(viewer).getUserHealthFactor(viewer.address);
       expect(hf).to.equal(1800n);
       expect(valid).to.equal(true);
+      expect(blockNumber).to.equal(0n);
     });
 
     it('returns invalid cache flag for user with invalid cache', async function () {
       const { cacheOptimizedView, other, viewer } = await loadFixture(deployFixture);
-      const [hf, valid] = await cacheOptimizedView.connect(viewer).getUserHealthFactor(other.address);
+      const [hf, valid, blockNumber] = await cacheOptimizedView.connect(viewer).getUserHealthFactor(other.address);
       expect(hf).to.equal(950n);
       expect(valid).to.equal(false);
+      expect(blockNumber).to.equal(0n);
     });
 
-    it('requires VIEW_RISK_DATA role', async function () {
-      const { cacheOptimizedView, other, acm } = await loadFixture(deployFixture);
-      await expect(cacheOptimizedView.connect(other).getUserHealthFactor(other.address)).to.be.revertedWithCustomError(
-        acm,
+    it('non-self requires VIEW_USER_DATA or ADMIN (Scheme U)', async function () {
+      const { cacheOptimizedView, other, viewer } = await loadFixture(deployFixture);
+      await expect(cacheOptimizedView.connect(other).getUserHealthFactor(viewer.address)).to.be.revertedWithCustomError(
+        cacheOptimizedView,
         'MissingRole',
       );
+    });
+
+    it('non-self is allowed with ADMIN role (Scheme U admin bypass)', async function () {
+      const { cacheOptimizedView, other, viewer, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_ADMIN, other.address);
+      await expect(cacheOptimizedView.connect(other).getUserHealthFactor(viewer.address)).to.not.be.reverted;
+    });
+
+    it('non-self is allowed with VIEW_USER_DATA role (Scheme U ops read)', async function () {
+      const { cacheOptimizedView, other, viewer, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
+      await expect(cacheOptimizedView.connect(other).getUserHealthFactor(viewer.address)).to.not.be.reverted;
     });
 
     it('batch query returns correct factors and flags', async function () {
       const { cacheOptimizedView, viewer, viewer2, other } = await loadFixture(deployFixture);
 
-      const [factors, flags] = await cacheOptimizedView
+      const [factors, flags, blockNumbers] = await cacheOptimizedView
         .connect(viewer)
         .batchGetUserHealthFactors([viewer.address, viewer2.address, other.address]);
 
       expect(factors.length).to.equal(3);
       expect(flags.length).to.equal(3);
+      expect(blockNumbers.length).to.equal(3);
       expect(factors[0]).to.equal(1800n);
       expect(flags[0]).to.equal(true);
+      expect(blockNumbers[0]).to.equal(0n);
       expect(factors[1]).to.equal(1200n);
       expect(flags[1]).to.equal(true);
+      expect(blockNumbers[1]).to.equal(0n);
       expect(factors[2]).to.equal(950n);
       expect(flags[2]).to.equal(false);
+      expect(blockNumbers[2]).to.equal(0n);
     });
 
     it('batch query enforces permissions', async function () {
       const { cacheOptimizedView, other, acm } = await loadFixture(deployFixture);
       await expect(
         cacheOptimizedView.connect(other).batchGetUserHealthFactors([other.address]),
+      ).to.be.revertedWithCustomError(acm, 'MissingRole');
+    });
+
+    it('batch has no self-bypass even if caller included (Scheme U batch)', async function () {
+      const { cacheOptimizedView, other, viewer, acm } = await loadFixture(deployFixture);
+      await expect(
+        cacheOptimizedView.connect(other).batchGetUserHealthFactors([other.address, viewer.address]),
       ).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
 
@@ -178,28 +203,31 @@ describe('CacheOptimizedView (read-only facade)', function () {
     it('batch query accepts maximum batch size', async function () {
       const { cacheOptimizedView, viewer } = await loadFixture(deployFixture);
       const maxList = new Array(50).fill(viewer.address);
-      const [factors, flags] = await cacheOptimizedView.connect(viewer).batchGetUserHealthFactors(maxList);
+      const [factors, flags, blockNumbers] = await cacheOptimizedView.connect(viewer).batchGetUserHealthFactors(maxList);
       expect(factors.length).to.equal(50);
       expect(flags.length).to.equal(50);
+      expect(blockNumbers.length).to.equal(50);
     });
 
     it('batch query handles single user', async function () {
       const { cacheOptimizedView, viewer } = await loadFixture(deployFixture);
-      const [factors, flags] = await cacheOptimizedView.connect(viewer).batchGetUserHealthFactors([viewer.address]);
+      const [factors, flags, blockNumbers] = await cacheOptimizedView.connect(viewer).batchGetUserHealthFactors([viewer.address]);
       expect(factors.length).to.equal(1);
       expect(factors[0]).to.equal(1800n);
       expect(flags[0]).to.equal(true);
+      expect(blockNumbers[0]).to.equal(0n);
     });
 
     it('batch query handles zero address user', async function () {
       const { cacheOptimizedView, viewer, healthView } = await loadFixture(deployFixture);
       // 设置零地址用户的健康因子
       await healthView.setUserHealth(ethers.ZeroAddress, 0n, false);
-      const [factors, flags] = await cacheOptimizedView
+      const [factors, flags, blockNumbers] = await cacheOptimizedView
         .connect(viewer)
         .batchGetUserHealthFactors([ethers.ZeroAddress]);
       expect(factors[0]).to.equal(0n);
       expect(flags[0]).to.equal(false);
+      expect(blockNumbers[0]).to.equal(0n);
     });
   });
 
@@ -309,7 +337,7 @@ describe('CacheOptimizedView (read-only facade)', function () {
   describe('user summary', function () {
     it('aggregates collateral/debt and returns health data', async function () {
       const { cacheOptimizedView, viewer, assetA, assetB } = await loadFixture(deployFixture);
-      const summary = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, [assetA, assetB]);
+      const [summary] = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, [assetA, assetB]);
       expect(summary.totalCollateral).to.equal(1_500n);
       expect(summary.totalDebt).to.equal(100n);
       expect(summary.healthFactor).to.equal(1800n);
@@ -318,7 +346,7 @@ describe('CacheOptimizedView (read-only facade)', function () {
 
     it('aggregates multiple assets correctly', async function () {
       const { cacheOptimizedView, viewer, assetA, assetB, assetC } = await loadFixture(deployFixture);
-      const summary = await cacheOptimizedView
+      const [summary] = await cacheOptimizedView
         .connect(viewer)
         .getUserSummary(viewer.address, [assetA, assetB, assetC]);
       expect(summary.totalCollateral).to.equal(1_700n); // 1000 + 500 + 200
@@ -327,7 +355,7 @@ describe('CacheOptimizedView (read-only facade)', function () {
 
     it('handles empty tracked assets array', async function () {
       const { cacheOptimizedView, viewer } = await loadFixture(deployFixture);
-      const summary = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, []);
+      const [summary] = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, []);
       expect(summary.totalCollateral).to.equal(0n);
       expect(summary.totalDebt).to.equal(0n);
       expect(summary.healthFactor).to.equal(1800n);
@@ -336,35 +364,42 @@ describe('CacheOptimizedView (read-only facade)', function () {
 
     it('handles user with invalid health cache', async function () {
       const { cacheOptimizedView, other, assetA, viewer } = await loadFixture(deployFixture);
-      const summary = await cacheOptimizedView.connect(viewer).getUserSummary(other.address, [assetA]);
+      const [summary] = await cacheOptimizedView.connect(viewer).getUserSummary(other.address, [assetA]);
       expect(summary.totalCollateral).to.equal(800n);
       expect(summary.totalDebt).to.equal(400n);
       expect(summary.healthFactor).to.equal(950n);
       expect(summary.cacheValid).to.equal(false);
     });
 
-    it('requires VIEW_USER_DATA role', async function () {
-      const { cacheOptimizedView, other, assetA, acm } = await loadFixture(deployFixture);
-      await expect(
-        cacheOptimizedView.connect(other).getUserSummary(other.address, [assetA]),
-      ).to.be.revertedWithCustomError(acm, 'MissingRole');
+    it('self-read requires no roles (Scheme U self-read)', async function () {
+      const { cacheOptimizedView, other, assetA } = await loadFixture(deployFixture);
+      await expect(cacheOptimizedView.connect(other).getUserSummary(other.address, [assetA])).to.not.be.reverted;
     });
 
-    it('also requires VIEW_RISK_DATA role (must not bypass downstream gate)', async function () {
-      const { cacheOptimizedView, other, acm } = await loadFixture(deployFixture);
-      // Grant only USER_DATA, but not RISK_DATA.
+    it('non-self requires VIEW_USER_DATA or ADMIN (Scheme U)', async function () {
+      const { cacheOptimizedView, other, viewer, assetA } = await loadFixture(deployFixture);
+      await expect(
+        cacheOptimizedView.connect(other).getUserSummary(viewer.address, [assetA]),
+      ).to.be.revertedWithCustomError(cacheOptimizedView, 'MissingRole');
+    });
+
+    it('non-self is allowed with ADMIN role (Scheme U admin bypass)', async function () {
+      const { cacheOptimizedView, other, viewer, acm } = await loadFixture(deployFixture);
+      await acm.grantRole(ACTION_ADMIN, other.address);
+      await expect(cacheOptimizedView.connect(other).getUserSummary(viewer.address, [])).to.not.be.reverted;
+    });
+
+    it('non-self is allowed with VIEW_USER_DATA role (Scheme U ops read)', async function () {
+      const { cacheOptimizedView, other, viewer, acm } = await loadFixture(deployFixture);
       await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
-      await expect(cacheOptimizedView.connect(other).getUserSummary(other.address, [])).to.be.revertedWithCustomError(
-        acm,
-        'MissingRole',
-      );
+      await expect(cacheOptimizedView.connect(other).getUserSummary(viewer.address, [])).to.not.be.reverted;
     });
 
     it('handles zero collateral and debt', async function () {
       const { cacheOptimizedView, viewer, positionView, assetA } = await loadFixture(deployFixture);
       const newAsset = ethers.Wallet.createRandom().address;
       await positionView.setPosition(viewer.address, newAsset, 0n, 0n);
-      const summary = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, [newAsset]);
+      const [summary] = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, [newAsset]);
       expect(summary.totalCollateral).to.equal(0n);
       expect(summary.totalDebt).to.equal(0n);
     });
@@ -373,9 +408,17 @@ describe('CacheOptimizedView (read-only facade)', function () {
       const { cacheOptimizedView, viewer, positionView, assetA } = await loadFixture(deployFixture);
       const largeAmount = ethers.parseEther('1000000');
       await positionView.setPosition(viewer.address, assetA, largeAmount, largeAmount / 2n);
-      const summary = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, [assetA]);
+      const [summary] = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, [assetA]);
       expect(summary.totalCollateral).to.equal(largeAmount);
       expect(summary.totalDebt).to.equal(largeAmount / 2n);
+    });
+
+    it('reverts when trackedAssets exceeds MAX_BATCH_SIZE', async function () {
+      const { cacheOptimizedView, viewer, assetA } = await loadFixture(deployFixture);
+      const assets = new Array(101).fill(assetA);
+      await expect(cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, assets))
+        .to.be.revertedWithCustomError(cacheOptimizedView, 'BatchTooLarge')
+        .withArgs(101n, 100n);
     });
   });
 
@@ -387,7 +430,7 @@ describe('CacheOptimizedView (read-only facade)', function () {
       expect(stats.activeUsers).to.equal(21n);
       expect(stats.totalCollateral).to.equal(1_234_000n);
       expect(stats.totalDebt).to.equal(456_000n);
-      expect(stats.lastUpdateTime).to.equal(9999n);
+      expect(stats.lastUpdateBlock).to.equal(9999n);
     });
 
     it('requires VIEW_SYSTEM_DATA role', async function () {
@@ -405,14 +448,14 @@ describe('CacheOptimizedView (read-only facade)', function () {
         activeUsers: 80,
         totalCollateral: 5_000_000n,
         totalDebt: 2_000_000n,
-        lastUpdateTime: 12345n,
+        lastUpdateBlock: 12345n,
       });
       const stats = await cacheOptimizedView.connect(viewer).getSystemStats();
       expect(stats.totalUsers).to.equal(100n);
       expect(stats.activeUsers).to.equal(80n);
       expect(stats.totalCollateral).to.equal(5_000_000n);
       expect(stats.totalDebt).to.equal(2_000_000n);
-      expect(stats.lastUpdateTime).to.equal(12345n);
+      expect(stats.lastUpdateBlock).to.equal(12345n);
     });
 
     it('handles zero statistics', async function () {
@@ -422,14 +465,14 @@ describe('CacheOptimizedView (read-only facade)', function () {
         activeUsers: 0,
         totalCollateral: 0n,
         totalDebt: 0n,
-        lastUpdateTime: 0n,
+        lastUpdateBlock: 0n,
       });
       const stats = await cacheOptimizedView.connect(viewer).getSystemStats();
       expect(stats.totalUsers).to.equal(0n);
       expect(stats.activeUsers).to.equal(0n);
       expect(stats.totalCollateral).to.equal(0n);
       expect(stats.totalDebt).to.equal(0n);
-      expect(stats.lastUpdateTime).to.equal(0n);
+      expect(stats.lastUpdateBlock).to.equal(0n);
     });
   });
 
@@ -533,7 +576,7 @@ describe('CacheOptimizedView (read-only facade)', function () {
   describe('data consistency', function () {
     it('getUserSummary matches individual position queries', async function () {
       const { cacheOptimizedView, viewer, assetA, assetB } = await loadFixture(deployFixture);
-      const summary = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, [assetA, assetB]);
+      const [summary] = await cacheOptimizedView.connect(viewer).getUserSummary(viewer.address, [assetA, assetB]);
 
       // 验证与单独查询一致
       const positions = await cacheOptimizedView
@@ -551,17 +594,18 @@ describe('CacheOptimizedView (read-only facade)', function () {
       const { cacheOptimizedView, viewer, assetA } = await loadFixture(deployFixture);
 
       // 单个查询
-      const [singleHf, singleValid] = await cacheOptimizedView
+      const [singleHf, singleValid, singleTs] = await cacheOptimizedView
         .connect(viewer)
         .getUserHealthFactor(viewer.address);
 
       // 批量查询
-      const [batchFactors, batchFlags] = await cacheOptimizedView
+      const [batchFactors, batchFlags, batchTs] = await cacheOptimizedView
         .connect(viewer)
         .batchGetUserHealthFactors([viewer.address]);
 
       expect(singleHf).to.equal(batchFactors[0]);
       expect(singleValid).to.equal(batchFlags[0]);
+      expect(singleTs).to.equal(batchTs[0]);
     });
   });
 
@@ -592,6 +636,50 @@ describe('CacheOptimizedView (read-only facade)', function () {
       const receipt = await txReq.wait();
       const hasDataPushed = receipt!.logs.some((l) => l.topics?.[0] === DATA_PUSH_TOPIC0);
       expect(hasDataPushed).to.equal(false);
+    });
+  });
+
+  describe('SSOT callsite assertions (trap ACM)', function () {
+    it('user-dimensional gate MUST use hasRole (must not call ACM.requireRole)', async function () {
+      const [, viewer, other] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManagerTrapRequireRole')).deploy();
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+      const CacheOptimizedViewFactory = await ethers.getContractFactory('CacheOptimizedView');
+      const cov = await upgrades.deployProxy(CacheOptimizedViewFactory, [await registry.getAddress()], { kind: 'uups' });
+
+      // non-self: should be rejected by CacheOptimizedView's Scheme U gate without invoking requireRole().
+      await expect(cov.connect(other).getUserSummary(viewer.address, [])).to.be.revertedWithCustomError(cov, 'MissingRole');
+    });
+
+    it('batch user gate MUST use hasRole and has no self-bypass (must not call ACM.requireRole)', async function () {
+      const [admin] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManagerTrapRequireRole')).deploy();
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+      const CacheOptimizedViewFactory = await ethers.getContractFactory('CacheOptimizedView');
+      const cov = await upgrades.deployProxy(CacheOptimizedViewFactory, [await registry.getAddress()], { kind: 'uups' });
+
+      // users[] batch: even if querying only self, caller must be ops/admin.
+      await expect(cov.connect(admin).batchGetUserPositions([admin.address], [ethers.Wallet.createRandom().address]))
+        .to.be.revertedWithCustomError(cov, 'MissingRole');
+    });
+
+    it('system gate MUST revert MissingRole (no role)', async function () {
+      const [, other] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+
+      const CacheOptimizedViewFactory = await ethers.getContractFactory('CacheOptimizedView');
+      const cov = await upgrades.deployProxy(CacheOptimizedViewFactory, [await registry.getAddress()], { kind: 'uups' });
+
+      await expect(cov.connect(other).getSystemStats()).to.be.revertedWithCustomError(cov, 'MissingRole');
     });
   });
 });

@@ -4,15 +4,24 @@ pragma solidity ^0.8.20;
 import { MathConstants } from "../constants/MathConstants.sol";
 
 /// @title HealthFactorLib
-/// @notice 健康因子与相关判定的纯函数库（无状态、可内联）
-/// @dev 仅提供最小必要API，供业务/清算模块高频直调（节省外部调用gas）
-///      约定：健康因子以基点（bps, 10000）表示
+/// @notice Pure library for health factor calculations and threshold checks.
+/// @dev Minimal API for high-frequency use in core and liquidation paths.
+///      Convention: health factor and ratios are expressed in basis points (bps, 1e4).
 library HealthFactorLib {
-    /// @notice 触发清算判定（推荐主路径使用：避免除法）
-    /// @param totalCollateral 抵押物总价值
-    /// @param totalDebt 债务总价值
-    /// @param minHealthFactor 最小健康因子阈值（bps）
-    /// @return undercollateralized 是否低于阈值（应触发清算）
+    /**
+     * @notice Check whether the position is under the minimum health factor threshold.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     * - Best-effort: if totalDebt == 0, returns false
+     *
+     * @param totalCollateral Total collateral value (value units defined by caller; consistent with totalDebt).
+     * @param totalDebt Total debt value (value units defined by caller; consistent with totalCollateral).
+     * @param minHealthFactor Minimum health factor threshold in bps (1e4 = 100%).
+     * @return undercollateralized True if below threshold and should be liquidatable.
+     */
     function isUnderCollateralized(
         uint256 totalCollateral,
         uint256 totalDebt,
@@ -25,19 +34,55 @@ library HealthFactorLib {
         }
     }
 
-    /// @notice 计算健康因子（仅在需要展示/缓存具体数值时调用）
+    /**
+     * @notice Calculate the health factor in bps.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     * - Best-effort: if totalDebt == 0, returns max uint256
+     *
+     * @param totalCollateral Total collateral value (value units defined by caller; consistent with totalDebt).
+     * @param totalDebt Total debt value (value units defined by caller; consistent with totalCollateral).
+     * @return healthFactorBps Health factor in bps (1e4 = 100%).
+     */
     function calcHealthFactor(uint256 totalCollateral, uint256 totalDebt) internal pure returns (uint256) {
         if (totalDebt == 0) return type(uint256).max;
         return (totalCollateral * MathConstants.BPS) / totalDebt;
     }
 
-    /// @notice 计算贷款价值比（LTV）
+    /**
+     * @notice Calculate the loan-to-value ratio (LTV) in bps.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     * - Best-effort: if collateral == 0, returns 0
+     *
+     * @param debt Total debt value (value units defined by caller; consistent with collateral).
+     * @param collateral Total collateral value (value units defined by caller; consistent with debt).
+     * @return ltvBps LTV in bps (1e4 = 100%).
+     */
     function calcLtv(uint256 debt, uint256 collateral) internal pure returns (uint256) {
         if (collateral == 0) return 0;
         return (debt * MathConstants.BPS) / collateral;
     }
 
-    /// @notice 计算排除保证金后的有效抵押
+    /**
+     * @notice Calculate effective collateral after excluding guarantee amount.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     * - Best-effort: clamps to zero if guarantee exceeds collateral
+     *
+     * @param totalCollateral Total collateral amount/value.
+     * @param guaranteeAmount Guarantee amount/value to exclude.
+     * @return effective Effective collateral after exclusion.
+     */
     function effectiveCollateral(uint256 totalCollateral, uint256 guaranteeAmount) internal pure returns (uint256) {
         return totalCollateral > guaranteeAmount ? totalCollateral - guaranteeAmount : 0;
     }

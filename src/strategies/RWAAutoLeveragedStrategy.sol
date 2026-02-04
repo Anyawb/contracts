@@ -2,15 +2,18 @@
 pragma solidity ^0.8.20;
 
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/math/Math.sol";
+import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {IVaultCore} from "../interfaces/IVaultCore.sol";
-import {ILendingEngineBasic} from "../interfaces/ILendingEngineBasic.sol";
-import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
-import {AmountIsZero} from "../errors/StandardErrors.sol";
+import { IVaultCore } from "../interfaces/IVaultCore.sol";
+import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
+import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
+import { AmountIsZero } from "../errors/StandardErrors.sol";
+import { ModuleKeys } from "../constants/ModuleKeys.sol";
+import { Registry } from "../registry/Registry.sol";
 
 /// @dev VaultBusinessLogic 最小接口：用于订单化 borrowWithRate 返回 orderId
 interface IVaultBusinessLogic {
@@ -24,14 +27,23 @@ interface IVaultBusinessLogic {
     ) external returns (uint256 orderId);
 }
 
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { Registry } from "../registry/Registry.sol";
 // Minimal interface to access VaultCore.getRegistry without changing IVaultCore
 interface IVaultCoreWithRegistry { function getRegistry() external view returns (address); }
 
 /// @dev HealthView read-only interface (per docs/Architecture-Guide.md)
 interface IHealthViewLite {
-    function getUserHealthFactor(address user) external view returns (uint256 healthFactor, bool isValid, uint256 timestamp);
+    function getUserHealthFactorWithMeta(address user)
+        external
+        view
+        returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
+}
+
+/// @dev PreviewView read-only interface for max borrowable.
+interface IPreviewViewLite {
+    function getMaxBorrowableWithMeta(address user, address asset)
+        external
+        view
+        returns (uint256 maxBorrowable, bool positionIsValid, uint256 positionBlockNumber, uint64 positionVersion);
 }
 
 /// @title RWAAutoLeveragedStrategy
@@ -51,8 +63,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         uint256 collateralAmount;      // 抵押物数量
         uint256 borrowedAmount;        // 借款数量
         uint256 leverageRatio;         // 杠杆倍数 (100 = 1x)
-        uint256 openTimestamp;         // 开仓时间
-        uint256 lastRebalanceTime;     // 最后再平衡时间
+        uint256 openBlock;             // 开仓区块号
+        uint256 lastRebalanceBlock;    // 最后再平衡区块号
         bool isActive;                 // 仓位是否活跃
     }
 
@@ -63,7 +75,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         uint256 targetHealthFactor;    // 目标健康因子
         uint256 rebalanceThreshold;    // 再平衡阈值
         uint256 maxPositionSize;       // 最大仓位大小
-        uint256 cooldownPeriod;        // 操作冷却期
+        uint256 cooldownPeriod;        // 操作冷却期（区块数）
     }
 
     /// @notice 资产配置信息
@@ -111,7 +123,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     // 支持的资产列表
     address[] public supportedAssets;
     
-    // 操作冷却期映射
+    // 操作冷却期映射（区块数）
     mapping(address => uint256) public lastOperationTime;
     
     // 统计信息
@@ -202,7 +214,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
             targetHealthFactor: 150, // 1.5x
             rebalanceThreshold: 20,  // 20% deviation
             maxPositionSize: 1000e18, // 1000 tokens
-            cooldownPeriod: 1 hours
+            cooldownPeriod: 1 hours / 2 seconds
         });
     }
 
@@ -228,7 +240,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         if (positions[msg.sender].isActive) revert PositionAlreadyExists();
         // 冷却期：仅在已有操作记录后启用（首次操作允许）
         uint256 lastOp = lastOperationTime[msg.sender];
-        if (lastOp != 0 && block.timestamp < lastOp + config.cooldownPeriod) {
+        if (lastOp != 0 && block.number < lastOp + config.cooldownPeriod) {
             revert CooldownNotExpired();
         }
         
@@ -267,8 +279,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
             collateralAmount: collateralAmount,
             borrowedAmount: borrowAmount,
             leverageRatio: leverageRatio,
-            openTimestamp: block.timestamp,
-            lastRebalanceTime: block.timestamp,
+            openBlock: block.number,
+            lastRebalanceBlock: block.number,
             isActive: true
         });
         
@@ -276,7 +288,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         totalPositions++;
         totalCollateralValue += collateralAmount;
         totalBorrowedValue += borrowAmount;
-        lastOperationTime[msg.sender] = block.timestamp;
+        lastOperationTime[msg.sender] = block.number;
         
         // 转移借款给用户
         settlementToken.safeTransfer(msg.sender, borrowAmount);
@@ -296,7 +308,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         if (asset != position.collateralAsset) revert Strategy__AssetMismatch();
         if (repayAmount == 0) revert AmountIsZero();
         uint256 lastOp = lastOperationTime[msg.sender];
-        if (lastOp != 0 && block.timestamp < lastOp + config.cooldownPeriod) {
+        if (lastOp != 0 && block.number < lastOp + config.cooldownPeriod) {
             revert CooldownNotExpired();
         }
         
@@ -336,7 +348,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
             emit PositionClosed(msg.sender, position.collateralAsset, 0, repayAmount);
         }
         
-        lastOperationTime[msg.sender] = block.timestamp;
+        lastOperationTime[msg.sender] = block.number;
     }
     
     /// @notice 再平衡仓位
@@ -353,7 +365,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         }
         if (newLeverageRatio > assetConfigs[asset].maxLeverage) revert InvalidLeverage();
         uint256 lastOp = lastOperationTime[msg.sender];
-        if (lastOp != 0 && block.timestamp < lastOp + config.cooldownPeriod) {
+        if (lastOp != 0 && block.number < lastOp + config.cooldownPeriod) {
             revert CooldownNotExpired();
         }
         
@@ -384,8 +396,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         }
         
         position.leverageRatio = newLeverageRatio;
-        position.lastRebalanceTime = block.timestamp;
-        lastOperationTime[msg.sender] = block.timestamp;
+        position.lastRebalanceBlock = block.number;
+        lastOperationTime[msg.sender] = block.number;
         
         emit PositionRebalanced(msg.sender, asset, oldLeverage, newLeverageRatio, 0);
     }
@@ -438,7 +450,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
         if (reg == address(0)) return 0;
         address hv = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
-        (healthFactor, , ) = IHealthViewLite(hv).getUserHealthFactor(user);
+        (healthFactor, , ) = IHealthViewLite(hv).getUserHealthFactorWithMeta(user);
     }
     
     /// @notice 检查用户是否处于清算风险
@@ -455,10 +467,10 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @return maxBorrowable 最大可借金额
-    function getMaxBorrowable(address user, address asset) external pure returns (uint256 maxBorrowable) {
-        // 架构：最大可借金额属于 RiskView/估值路径，本合约不做链上估算（留空返回 0）。
-        user; asset;
-        return 0;
+    function getMaxBorrowable(address user, address asset) external view returns (uint256 maxBorrowable) {
+        address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
+        address previewView = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_PREVIEW_VIEW);
+        (maxBorrowable, , , ) = IPreviewViewLite(previewView).getMaxBorrowableWithMeta(user, asset);
     }
     
     /// @notice 获取策略统计信息

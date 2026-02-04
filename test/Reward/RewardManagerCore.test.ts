@@ -279,7 +279,7 @@ describe('RewardManagerCore – 积分计算逻辑测试', function () {
       const newLevel = 3;
       await rewardManager.updateUserLevel(alice.address, newLevel);
 
-      const userLevel = await rewardView.connect(alice).getUserLevel(alice.address);
+      const [userLevel] = await rewardView.connect(alice).getUserLevel(alice.address);
       expect(userLevel).to.equal(newLevel);
     });
 

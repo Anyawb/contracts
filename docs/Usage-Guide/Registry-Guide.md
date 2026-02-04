@@ -343,7 +343,7 @@ Registry 会记录所有模块的升级历史（最多保留 100 条）：
 uint256 historyCount = registry.getUpgradeHistoryCount(ModuleKeys.KEY_VAULT_CORE);
 
 // 获取特定索引的升级历史
-(address oldAddr, address newAddr, uint256 timestamp, address executor) = 
+(address oldAddr, address newAddr, uint256 blockNumber, address executor) = 
     registry.getUpgradeHistory(ModuleKeys.KEY_VAULT_CORE, 0);  // 获取第一条历史
 
 // 获取所有升级历史（返回编码后的数据）
@@ -381,7 +381,7 @@ bool isReady = registry.isUpgradeReady(ModuleKeys.KEY_VAULT_CORE);
 uint256 count = registry.getUpgradeHistoryCount(ModuleKeys.KEY_VAULT_CORE);
 
 // 获取特定升级历史
-(address oldAddr, address newAddr, uint256 timestamp, address executor) = 
+(address oldAddr, address newAddr, uint256 blockNumber, address executor) = 
     registry.getUpgradeHistory(ModuleKeys.KEY_VAULT_CORE, index);
 ```
 
@@ -587,14 +587,14 @@ for (uint256 i = 0; i < historyCount; i++) {
     (
         address oldAddr,
         address newAddr,
-        uint256 timestamp,
+        uint256 blockNumber,
         address executor
     ) = registry.getUpgradeHistory(moduleKey, i);
     
     console.log("Upgrade #%d:", i);
     console.log("  Old Address:", oldAddr);
     console.log("  New Address:", newAddr);
-    console.log("  Timestamp:", timestamp);
+    console.log("  Block:", blockNumber);
     console.log("  Executor:", executor);
 }
 ```
@@ -686,12 +686,12 @@ registry.scheduleModuleUpgrade(moduleKey, newModuleAddress);
     registry.getPendingUpgrade(moduleKey);
 
 if (hasPending) {
-    if (block.timestamp >= executeAfter) {
+    if (block.number >= executeAfter) {
         // 可以执行升级
         registry.executeModuleUpgrade(moduleKey);
     } else {
         // 还需要等待
-        uint256 remaining = executeAfter - block.timestamp;
+        uint256 remaining = executeAfter - block.number;
         console.log("Upgrade pending, remaining:", remaining);
     }
 }

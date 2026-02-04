@@ -30,12 +30,12 @@ library LiquidationRiskQueryLib {
      * Security:
      * - View function (read-only).
      * - Best-effort: falls back to Registry if cache is stale or missing.
-     * - Time rollback tolerant: treats cache as valid if block.timestamp < cached timestamp.
+ * - Time-Dependency-Refactor SSOT: cache staleness is block-based (block.number), and rollback is irrelevant.
      *
      * @param registryAddr Registry contract address (for fallback resolution)
      * @param moduleCache Module cache storage reference
      * @param key Module key identifier
-     * @param maxCacheAge Maximum cache age in seconds (0 = cache always valid)
+ * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
      * @return moduleAddr Module address (address(0) if not found)
      */
     function _getModuleView(
@@ -46,15 +46,12 @@ library LiquidationRiskQueryLib {
     ) private view returns (address moduleAddr) {
         // 1) Prefer cache if present and not stale.
         moduleAddr = moduleCache.moduleAddresses[key];
-        uint256 ts = moduleCache.cacheTimestamps[key];
-        if (moduleAddr != address(0) && ts != 0) {
+        uint256 cacheBlock = moduleCache.cacheBlocks[key];
+        if (moduleAddr != address(0) && cacheBlock != 0) {
             // If maxCacheAge == 0, treat cache as always valid.
             if (maxCacheAge == 0) return moduleAddr;
-            // Safe time rollback handling: if time goes backwards, treat cache as valid to avoid underflow.
-            // solhint-disable-next-line not-rely-on-time
-            if (block.timestamp < ts) return moduleAddr;
-            // solhint-disable-next-line not-rely-on-time
-            if (block.timestamp - ts <= maxCacheAge) return moduleAddr;
+            // block.number is monotonic; treat cache as valid if within age blocks.
+            if (block.number - cacheBlock <= maxCacheAge) return moduleAddr;
         }
 
         // 2) Fallback to Registry (view-only) to avoid reverting due to cache staleness.
@@ -76,7 +73,7 @@ library LiquidationRiskQueryLib {
      * @param user User address to query
      * @param registryAddr Registry contract address for module resolution
      * @param moduleCache Module cache storage reference
-     * @param maxCacheAge Maximum cache age in seconds (0 = cache always valid)
+ * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
      * @return collateralValue Total collateral value (settlement token denominated, scaled by 1e18, 0 if query fails)
      * @return debtValue Total debt value (settlement token denominated, scaled by 1e18, 0 if query fails)
      */

@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
@@ -30,14 +27,6 @@ import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM)
  */
 contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
-    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-
-    /// @notice Legacy error kept for backward compatibility.
-    error LendingEngineView__ZeroAddress();
-
-    /// @notice Legacy error kept for backward compatibility; new paths revert `MissingRole()`.
-    error LendingEngineView__Unauthorized();
-
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
     /// @notice Registry contract address (internal use only).
@@ -115,15 +104,20 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyValidRegistry
         returns (IOrderEngine.LoanOrder memory order)
     {
-        // Strict permission alignment: allow borrower/lender access, or ops/admin (VIEW_USER_DATA / ADMIN).
+        // Permission alignment: allow borrower/lender access, or ops/admin (VIEW_USER_DATA / ADMIN).
         bool isOps = ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
             || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
-        if (!isOps && !_engine()._canAccessLoanOrderForView(orderId, msg.sender)) revert MissingRole();
-        return _engine()._getLoanOrderForView(orderId);
+
+        // Treat adapter as a data source; enforce borrower/lender access at the view boundary.
+        order = _engine().getLoanOrderForView(orderId);
+        bool isBorrower = order.borrower != address(0) && msg.sender == order.borrower;
+        bool isLender = order.lender != address(0) && msg.sender == order.lender;
+        if (!isOps && !isBorrower && !isLender) revert MissingRole();
+        return order;
     }
 
     /**
-     * @notice Get the number of loan orders for a given user.
+     * @notice Get the number of loan orders for a given user, with metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyAuthorizedUser)
@@ -133,15 +127,18 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @return count Number of orders for the user
+     * @return isValid Whether the read succeeded
+     * @return blockNumber Read block number (block.number)
      */
     function getUserLoanCount(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedUser(user)
-        returns (uint256 count)
+        returns (uint256 count, bool isValid, uint256 blockNumber)
     {
-        return _engine()._getUserLoanCountForView(user);
+        count = _engine().getUserLoanCountForView(user);
+        return (count, true, _now());
     }
 
     /**
@@ -163,7 +160,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyOps
         returns (uint256 feeAmount)
     {
-        return _engine()._getFailedFeeAmountForView(orderId);
+        return _engine().getFailedFeeAmountForView(orderId);
     }
 
     /**
@@ -185,11 +182,11 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyOps
         returns (uint256 retryCount)
     {
-        return _engine()._getNftRetryCountForView(orderId);
+        return _engine().getNftRetryCountForView(orderId);
     }
 
     /**
-     * @notice Check whether a user can access a given loan order.
+     * @notice Check whether a user can access a given loan order, with metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyAuthorizedUser)
@@ -200,15 +197,21 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param orderId Engine order identifier
      * @param user Target user address
      * @return hasAccess Whether the user is allowed to view the order
+     * @return isValid Whether the read succeeded
+     * @return blockNumber Read block number (block.number)
      */
     function canAccessLoanOrder(uint256 orderId, address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedUser(user)
-        returns (bool hasAccess)
+        returns (bool hasAccess, bool isValid, uint256 blockNumber)
     {
-        return _engine()._canAccessLoanOrderForView(orderId, user);
+        if (user == address(0)) return (false, true, _now());
+        IOrderEngine.LoanOrder memory order = _engine().getLoanOrderForView(orderId);
+        hasAccess = (order.borrower != address(0) && user == order.borrower)
+            || (order.lender != address(0) && user == order.lender);
+        return (hasAccess, true, _now());
     }
 
     /**
@@ -230,7 +233,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyOps
         returns (bool isMatch)
     {
-        return _engine()._isMatchEngineForView(account);
+        return _engine().isMatchEngineForView(account);
     }
 
     /**
@@ -251,7 +254,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyOps
         returns (address registry)
     {
-        return _engine()._getRegistryForView();
+        return _engine().getRegistryForView();
     }
 
     /**
@@ -282,14 +285,20 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
+    /// @dev View-only block helper for meta outputs (not used for state changes).
+    function _now() internal view returns (uint256) {
+        return block.number;
+    }
+
     function _engine() internal view returns (IOrderEngineViewAdapter) {
         address engineAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
         return IOrderEngineViewAdapter(engineAddr);
     }
 
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acm).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }

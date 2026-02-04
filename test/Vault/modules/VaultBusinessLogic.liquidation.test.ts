@@ -5,7 +5,12 @@ import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 describe("VaultBusinessLogic - liquidation entry is deprecated", function () {
   async function deployFixture() {
     const registry = await (await ethers.getContractFactory("MockRegistry")).deploy();
-    const settlementToken = await (await ethers.getContractFactory("MockERC20")).deploy("Settlement Token", "SET", 0);
+    const settlementToken = await (await ethers.getContractFactory("MockERC20")).deploy(
+      "Settlement Token",
+      "SET",
+      18,
+      ethers.parseUnits("1000000", 18)
+    );
 
     const VBL = await ethers.getContractFactory("VaultBusinessLogic");
     const vbl = await upgrades.deployProxy(VBL, [await registry.getAddress(), await settlementToken.getAddress()], {

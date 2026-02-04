@@ -102,7 +102,7 @@
 
 - 这是 **best-effort** 设计决策
 - `0` 表示 “unknown/failed” 而不是合法业务值（若确实可能是合法值，必须说明区分方式）
-- 集成方必须如何处理（例如：遇到 `timestamp == 0` 视为无效）
+- 集成方必须如何处理（例如：遇到 `blockNumber == 0` 视为无效）
 
 ### 2) 注释中的名词必须与系统 SSOT 对齐
 
@@ -146,7 +146,7 @@ error ContractName__SomeError(<args>);
 ```solidity
 /// @notice Emitted when <action happened>.
 /// @dev <who emits / under what conditions / indexing rationale if needed>.
-event SomethingHappened(address indexed user, uint256 amount, uint256 timestamp);
+event SomethingHappened(address indexed user, uint256 amount, uint256 blockNumber);
 ```
 
 ---
@@ -195,7 +195,7 @@ event SomethingHappened(address indexed user, uint256 amount, uint256 timestamp)
 
 推荐句式：
 
-- “Best-effort call: returns (0,0) if oracle call fails; callers MUST treat timestamp==0 as invalid.”
+- “Best-effort call: returns (0,0) if oracle call fails; callers MUST treat blockNumber==0 as invalid.”
 
 ### B) 升级授权（UUPS）
 
@@ -252,7 +252,7 @@ pnpm -s exec solhint "src/<path>/<contract>.sol"
 
 - 用测试/集成输出确认：
   - 价格精度是否统一（如 1e18）
-  - timestamp 语义是否为 seconds
+  - blockNumber 语义是否为 block height
   - “0/空值”是否可能为合法值（若可能，必须明确区分方案）
 
 ### 4) 外部依赖与降级语义校准

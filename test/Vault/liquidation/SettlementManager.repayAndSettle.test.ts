@@ -15,7 +15,7 @@ describe('SettlementManager – repayAndSettle (SSOT)', function () {
     await registry.waitForDeployment();
 
     const MockERC20 = await ethers.getContractFactory('MockERC20');
-    const debtToken = await MockERC20.deploy('DebtToken', 'DEBT', ethers.parseUnits('1000000', 18));
+    const debtToken = await MockERC20.deploy('DebtToken', 'DEBT', 18, ethers.parseUnits('1000000', 18));
     await debtToken.waitForDeployment();
 
     const MockCollateralManager = await ethers.getContractFactory('MockCollateralManager');

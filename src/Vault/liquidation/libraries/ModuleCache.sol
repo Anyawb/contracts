@@ -8,7 +8,7 @@ pragma solidity ^0.8.20;
  *         enumerability, and version control.
  * @dev Security:
  * - Library contains internal/view helpers; callers must gate privileged writes at the module level.
- * - Cache timestamps rely on block.timestamp; this is for freshness checks, not for critical security decisions.
+ * - Time-Dependency-Refactor SSOT: cache freshness is block-based (block.number), NOT time-in-seconds.
  *
  * Architecture alignment:
  * - Centralizes module address resolution for liquidation modules.
@@ -35,8 +35,8 @@ library ModuleCache {
     
     /// @notice Cache expired error - Triggered when cache exceeds maximum validity period
     /// @param moduleKey Module key (bytes32)
-    /// @param cacheAge Cache age (seconds since cache timestamp)
-    /// @param maxAge Maximum validity period (seconds)
+    /// @param cacheAge Cache age (blocks since cache update block)
+    /// @param maxAge Maximum validity period (blocks)
     error ModuleCache__CacheExpired(bytes32 moduleKey, uint256 cacheAge, uint256 maxAge);
     
     /// @notice Duplicate set error - Triggered when trying to set same address
@@ -56,14 +56,9 @@ library ModuleCache {
     error ModuleCache__UnauthorizedOperation(string operation, address caller);
     
     /// @notice Time rollback error - Triggered when time rollback is detected and not allowed
-    /// @param currentTime Current block timestamp (seconds)
-    /// @param cachedTime Cached timestamp (seconds)
+    /// @param currentTime Current block number
+    /// @param cachedTime Cached update block number
     error ModuleCache__TimeRollbackDetected(uint256 currentTime, uint256 cachedTime);
-    
-    /// @notice Batch operation failed error - Triggered when batch operation partially fails
-    /// @param failedKeys Array of failed keys (bytes32[])
-    /// @param failureReasons Array of failure reasons (string[])
-    error ModuleCache__BatchOperationFailed(bytes32[] failedKeys, string[] failureReasons);
 
     /* ============ Events ============ */
     
@@ -71,13 +66,13 @@ library ModuleCache {
     /// @param moduleKey Module key (bytes32)
     /// @param moduleAddr Module address
     /// @param version Version number (uint256, increments on each update)
-    /// @param timestamp Cache timestamp (Unix timestamp in seconds)
+    /// @param cacheBlock Cache update block number (block.number)
     /// @param callerAddr Caller address
     event ModuleCached(
         bytes32 indexed moduleKey, 
         address indexed moduleAddr, 
         uint256 version, 
-        uint256 timestamp,
+        uint256 cacheBlock,
         address indexed callerAddr
     );
     
@@ -127,12 +122,12 @@ library ModuleCache {
     /* ============ Structs ============ */
     
     /**
-     * @notice Module cache storage structure - Stores module addresses, timestamps, versions and key collection.
+     * @notice Module cache storage structure - Stores module addresses, blocks, versions and key collection.
      * @dev Uses specific naming to improve code readability.
      */
     struct ModuleCacheStorage {
         mapping(bytes32 => address) moduleAddresses;      // Module address mapping
-        mapping(bytes32 => uint256) cacheTimestamps;      // Cache timestamp mapping
+        mapping(bytes32 => uint256) cacheBlocks;          // Cache update block mapping
         mapping(bytes32 => uint256) moduleVersions;       // Module version mapping
         bytes32[] moduleKeys;                             // Module keys collection
         mapping(bytes32 => uint256) keyIndexes;           // Key index mapping
@@ -191,7 +186,7 @@ library ModuleCache {
      * - Access control enforced via _checkAccessControl
      * - Prevents duplicate setting of same address
      * - Updates global version on each set operation
-     * - Records block.timestamp for expiration checking
+     * - Records block.number for expiration checking
      *
      * @param self Cache storage structure
      * @param moduleKey Module key (bytes32, must not be bytes32(0))
@@ -236,12 +231,10 @@ library ModuleCache {
         
         // Set module information
         self.moduleAddresses[moduleKey] = moduleAddr;
-        // solhint-disable-next-line not-rely-on-time
-        self.cacheTimestamps[moduleKey] = block.timestamp;
+        self.cacheBlocks[moduleKey] = block.number;
         self.moduleVersions[moduleKey] = self.globalVersion;
         
-        // solhint-disable-next-line not-rely-on-time
-        emit ModuleCached(moduleKey, moduleAddr, self.globalVersion, block.timestamp, callerAddr);
+        emit ModuleCached(moduleKey, moduleAddr, self.globalVersion, block.number, callerAddr);
     }
 
     /**
@@ -249,18 +242,18 @@ library ModuleCache {
      * @dev Reverts if:
      *      - moduleKey is bytes32(0)
      *      - moduleAddr is address(0) (module not found)
-     *      - cache timestamp is 0 (module not found)
+     *      - cache block is 0 (module not found)
      *      - time rollback detected and allowTimeRollback is false
      *      - cacheAge > maxAge (cache expired)
      *
      * Security:
      * - View function (read-only)
-     * - Time rollback detection (reverts if block.timestamp < cached timestamp and rollback not allowed)
+     * - Time rollback detection (reverts if block.number < cached update block and rollback not allowed)
      * - Cache expiration enforcement (reverts if cache age exceeds maxAge)
      *
      * @param self Cache storage structure
      * @param moduleKey Module key (bytes32, must not be bytes32(0))
-     * @param maxAge Maximum cache age (seconds, cache expires if age > maxAge)
+     * @param maxAge Maximum cache age (blocks, cache expires if age > maxAge)
      * @return Module address (reverts if not found or expired)
      */
     function get(
@@ -279,25 +272,22 @@ library ModuleCache {
         }
         
         // Check if cache is expired
-        uint256 timestamp = self.cacheTimestamps[moduleKey];
-        if (timestamp == 0) {
+        uint256 cacheBlock = self.cacheBlocks[moduleKey];
+        if (cacheBlock == 0) {
             revert ModuleCache__ModuleNotFound(moduleKey);
         }
         
         // Time rollback detection
-        // solhint-disable-next-line not-rely-on-time
-        if (block.timestamp < timestamp) {
+        if (block.number < cacheBlock) {
             if (!self.allowTimeRollback) {
-                // solhint-disable-next-line not-rely-on-time
-                revert ModuleCache__TimeRollbackDetected(block.timestamp, timestamp);
+                revert ModuleCache__TimeRollbackDetected(block.number, cacheBlock);
             }
             // Return directly when time rollback is allowed to avoid potential underflow in subtraction
             return moduleAddr;
         }
         
-        // After the above branch, ensure block.timestamp >= timestamp before subtraction to avoid underflow panic
-        // solhint-disable-next-line not-rely-on-time
-        uint256 cacheAge = block.timestamp - timestamp;
+        // After the above branch, ensure block.number >= cacheBlock before subtraction to avoid underflow panic
+        uint256 cacheAge = block.number - cacheBlock;
         if (cacheAge > maxAge) {
             revert ModuleCache__CacheExpired(moduleKey, cacheAge, maxAge);
         }
@@ -316,7 +306,7 @@ library ModuleCache {
      *
      * @param self Cache storage structure
      * @param moduleKey Module key (bytes32, must not be bytes32(0))
-     * @param maxAge Maximum cache age (seconds, cache expires if age > maxAge)
+     * @param maxAge Maximum cache age (blocks, cache expires if age > maxAge)
      * @return Module address (reverts if not found or expired)
      */
     function getModule(
@@ -443,7 +433,7 @@ library ModuleCache {
         
         // Clean up storage
         delete self.moduleAddresses[moduleKey];
-        delete self.cacheTimestamps[moduleKey];
+        delete self.cacheBlocks[moduleKey];
         delete self.moduleVersions[moduleKey];
         delete self.keyIndexes[moduleKey];
         
@@ -585,7 +575,7 @@ library ModuleCache {
      *
      * @param self Cache storage structure
      * @param moduleKey Module key (bytes32, returns false if bytes32(0) or not exists)
-     * @param maxAge Maximum cache age (seconds, cache is invalid if age > maxAge)
+     * @param maxAge Maximum cache age (blocks, cache is invalid if age > maxAge)
      * @return Whether cache is valid (true if exists, not expired, and time rollback allowed if detected)
      */
     function isValid(
@@ -596,21 +586,19 @@ library ModuleCache {
         if (moduleKey == bytes32(0)) return false;
         if (!exists(self, moduleKey)) return false;
         
-        uint256 timestamp = self.cacheTimestamps[moduleKey];
-        if (timestamp == 0) return false;
+        uint256 cacheBlock = self.cacheBlocks[moduleKey];
+        if (cacheBlock == 0) return false;
         
         // Time rollback handling
-        // solhint-disable-next-line not-rely-on-time
-        if (block.timestamp < timestamp) {
+        if (block.number < cacheBlock) {
             return self.allowTimeRollback;
         }
         
-        // solhint-disable-next-line not-rely-on-time
-        return (block.timestamp - timestamp) <= maxAge;
+        return (block.number - cacheBlock) <= maxAge;
     }
 
     /**
-     * @notice Get cache timestamp for specified module.
+     * @notice Get cache block for specified module.
      * @dev Reverts if:
      *      - None (view function, returns 0 for invalid inputs)
      *
@@ -619,11 +607,11 @@ library ModuleCache {
      *
      * @param self Cache storage structure
      * @param moduleKey Module key (bytes32, returns 0 if bytes32(0) or not cached)
-     * @return Cache timestamp (Unix timestamp in seconds, 0 if not cached)
+     * @return Cache update block (block.number, 0 if not cached)
      */
-    function getTimestamp(ModuleCacheStorage storage self, bytes32 moduleKey) internal view returns (uint256) {
+    function getCacheBlock(ModuleCacheStorage storage self, bytes32 moduleKey) internal view returns (uint256) {
         if (moduleKey == bytes32(0)) return 0;
-        return self.cacheTimestamps[moduleKey];
+        return self.cacheBlocks[moduleKey];
     }
 
     /**
@@ -637,8 +625,8 @@ library ModuleCache {
      *
      * @param self Cache storage structure
      * @param moduleKey Module key (bytes32, returns 0 if bytes32(0) or not exists)
-     * @param maxAge Maximum cache age (seconds)
-     * @return Remaining validity period (seconds, 0 if expired or not cached,
+     * @param maxAge Maximum cache age (blocks)
+     * @return Remaining validity period (blocks, 0 if expired or not cached,
      *        maxAge if time rollback detected and allowed)
      */
     function getRemainingValidity(
@@ -649,17 +637,15 @@ library ModuleCache {
         if (moduleKey == bytes32(0)) return 0;
         if (!exists(self, moduleKey)) return 0;
         
-        uint256 timestamp = self.cacheTimestamps[moduleKey];
-        if (timestamp == 0) return 0;
+        uint256 cacheBlock = self.cacheBlocks[moduleKey];
+        if (cacheBlock == 0) return 0;
         
         // Time rollback handling
-        // solhint-disable-next-line not-rely-on-time
-        if (block.timestamp < timestamp) {
+        if (block.number < cacheBlock) {
             return self.allowTimeRollback ? maxAge : 0;
         }
         
-        // solhint-disable-next-line not-rely-on-time
-        uint256 elapsed = block.timestamp - timestamp;
+        uint256 elapsed = block.number - cacheBlock;
         return elapsed >= maxAge ? 0 : maxAge - elapsed;
     }
 
@@ -815,7 +801,7 @@ library ModuleCache {
         for (uint256 i = 0; i < self.moduleKeys.length; i++) {
             bytes32 moduleKey = self.moduleKeys[i];
             delete self.moduleAddresses[moduleKey];
-            delete self.cacheTimestamps[moduleKey];
+            delete self.cacheBlocks[moduleKey];
             delete self.moduleVersions[moduleKey];
             delete self.keyIndexes[moduleKey];
         }
@@ -865,7 +851,7 @@ library ModuleCache {
             self.moduleKeys.pop();
             
             delete self.moduleAddresses[moduleKey];
-            delete self.cacheTimestamps[moduleKey];
+            delete self.cacheBlocks[moduleKey];
             delete self.moduleVersions[moduleKey];
             delete self.keyIndexes[moduleKey];
             

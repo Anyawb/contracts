@@ -73,7 +73,7 @@ describe('AdvancedAnalyticsConfig – 高级数据分析服务配置', function 
       // 验证基础等级配置
       const basicConfig = await config.getConfig(0);
       expect(basicConfig.price).to.equal(ethers.parseUnits('200', 18));
-      expect(basicConfig.duration).to.equal(30 * 24 * 3600);
+      expect(basicConfig.duration).to.equal((30 * 24 * 3600) / 2);
       expect(basicConfig.isActive).to.be.true;
       expect(basicConfig.level).to.equal(0);
     });
@@ -89,7 +89,7 @@ describe('AdvancedAnalyticsConfig – 高级数据分析服务配置', function 
       const { config } = await deployConfigWithProxy();
       
       const cooldown = await config.getCooldown();
-      expect(cooldown).to.equal(24 * 3600); // 1 day
+      expect(cooldown).to.equal((24 * 3600) / 2); // 1 day (blocks)
     });
 
     it('应防止重复初始化', async function () {
@@ -106,7 +106,7 @@ describe('AdvancedAnalyticsConfig – 高级数据分析服务配置', function 
       const { config } = await deployConfigWithProxy();
       
       await expect(
-        config.connect(bob).updateConfig(0, ONE_ETH, 30 * 24 * 3600, true)
+        config.connect(bob).updateConfig(0, ONE_ETH, (30 * 24 * 3600) / 2, true)
       ).to.be.reverted; // 使用通用断言，不指定具体错误类型
     });
 
@@ -127,7 +127,7 @@ describe('AdvancedAnalyticsConfig – 高级数据分析服务配置', function 
       const { config } = await deployConfigWithProxy();
       
       const newPrice = ethers.parseUnits('150', 18);
-      const newDuration = 60 * 24 * 3600; // 60 days
+      const newDuration = (60 * 24 * 3600) / 2; // 60 days (blocks)
       
       await config.connect(alice).updateConfig(0, newPrice, newDuration, false);
       
@@ -141,7 +141,7 @@ describe('AdvancedAnalyticsConfig – 高级数据分析服务配置', function 
       const { config } = await deployConfigWithProxy();
       
       await expect(
-        config.connect(alice).updateConfig(0, 0, 30 * 24 * 3600, true)
+        config.connect(alice).updateConfig(0, 0, (30 * 24 * 3600) / 2, true)
       ).to.be.reverted;
     });
 

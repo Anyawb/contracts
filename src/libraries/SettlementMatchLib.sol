@@ -23,6 +23,12 @@ interface IVaultCoreBorrowFor {
  * @title SettlementMatchLib
  * @notice Atomic settlement orchestration for funding + accounting + order creation.
  * @dev This library is intended to be called by a trusted orchestration entrypoint (e.g., VaultBusinessLogic).
+ *
+ * Reverts if:
+ * - (none; see per-function notes)
+ *
+ * Security:
+ * - Stateless library; external calls occur in helpers and entrypoints.
  */
 library SettlementMatchLib {
     using SafeERC20 for IERC20;
@@ -36,6 +42,16 @@ library SettlementMatchLib {
     error SettlementMatchLib__AssetNotAllowed();
     /// @notice Thrown when a collateral top-up is attempted during matching (forbidden in strict architecture).
     error SettlementMatchLib__CollateralTopUpNotSupported();
+
+    /*━━━━━━━━━━━━━━━ TIME AXIS (SSOT: blocks) ━━━━━━━━━━━━━━━*/
+    /// @dev Baseline blocks-per-day used across this repo (assumes ~12s/block).
+    ///      Frontend/keeper should do ETA mapping offchain.
+    uint256 private constant BLOCKS_PER_DAY = 7200;
+
+    /// @dev Convert a term in days to blocks (SSOT: block-based term).
+    function _termDaysToBlocks(uint16 termDays) private pure returns (uint256) {
+        return uint256(termDays) * BLOCKS_PER_DAY;
+    }
 
     /*━━━━━━━━━━━━━━━ INTERNAL HELPERS ━━━━━━━━━━━━━━━*/
     function _requireRole(address registry, bytes32 actionKey, address user) private view {
@@ -124,7 +140,8 @@ library SettlementMatchLib {
         IOrderEngine.LoanOrder memory order = IOrderEngine.LoanOrder({
             principal: amount,
             rate: rateBps,
-            term: uint256(termDays) * 1 days,
+            // SSOT (time refactor): term is measured in blocks, not seconds.
+            term: _termDaysToBlocks(termDays),
             borrower: borrower,
             lender: lender,
             asset: borrowAsset,
@@ -202,7 +219,8 @@ library SettlementMatchLib {
         IOrderEngine.LoanOrder memory order = IOrderEngine.LoanOrder({
             principal: amount,
             rate: rateBps,
-            term: uint256(termDays) * 1 days,
+            // SSOT (time refactor): term is measured in blocks, not seconds.
+            term: _termDaysToBlocks(termDays),
             borrower: borrower,
             lender: lender,
             asset: borrowAsset,

@@ -161,7 +161,7 @@ function updateLiquidationThreshold(uint256 newThreshold) external override {
 
     liquidationThresholdVar = newThreshold;
     emit LiquidationTypes.LiquidationThresholdUpdated(
-        liquidationThresholdVar, newThreshold, block.timestamp
+        liquidationThresholdVar, newThreshold, block.number
     );
 }
 ```
@@ -176,7 +176,7 @@ function updateLiquidationThreshold(uint256 newThreshold) external override {
 event LiquidationThresholdUpdated(
     uint256 oldThreshold,
     uint256 newThreshold,
-    uint256 timestamp
+    uint256 blockNumber
 );
 ```
 
@@ -235,9 +235,9 @@ console.log("当前清算阈值：", currentThreshold / 100, "%");
 
 ### **检查用户清算状态**
 ```solidity
-// 检查用户是否可被清算
-bool liquidatable = liquidationRiskManager.isLiquidatable(userAddress);
-if (liquidatable) {
+// 检查用户是否可被清算（View 返回带 meta）
+(bool liquidatable, bool isValid, uint256 blockNumber) = liquidationRiskView.isLiquidatable(userAddress);
+if (liquidatable && isValid) {
     console.log("用户可被清算");
 } else {
     console.log("用户健康，无需清算");
@@ -246,16 +246,18 @@ if (liquidatable) {
 
 ### **获取用户健康因子**
 ```solidity
-// 获取用户健康因子
-uint256 healthFactor = liquidationRiskManager.getUserHealthFactor(userAddress);
-console.log("用户健康因子：", healthFactor / 100, "%");
+// 获取用户健康因子（带 meta）
+(uint256 healthFactor, bool isValid, uint256 blockNumber) =
+    healthView.getUserHealthFactorWithMeta(userAddress);
+console.log("用户健康因子：", healthFactor / 100, "%", "valid=", isValid, "block=", blockNumber);
 ```
 
 ### **批量查询**
 ```solidity
-// 批量检查多个用户
+// 批量检查多个用户（View 返回带 meta）
 address[] memory users = [user1, user2, user3];
-bool[] memory liquidatableFlags = liquidationRiskManager.batchIsLiquidatable(users);
+(bool[] memory liquidatableFlags, bool batchValid, uint256 batchTs) =
+    liquidationRiskView.batchIsLiquidatable(users);
 
 for (uint256 i = 0; i < users.length; i++) {
     console.log("用户", i, "可清算：", liquidatableFlags[i]);

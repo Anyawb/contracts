@@ -473,7 +473,7 @@ describe('RewardManager – 集成测试', function () {
         );
 
       // 罚分 5% 的 1 分 = 0.05 分，因余额不足应进入欠分账本
-      const penaltyDebt = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
+      const [penaltyDebt] = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
       expect(penaltyDebt).to.equal(50_000_000_000_000_000n); // 0.05 * 1e18
       expect(await rewardPoints.balanceOf(alice.address)).to.equal(0n);
     });
@@ -525,7 +525,7 @@ describe('RewardManager – 集成测试', function () {
       // 罚分 5%：余额足够则直接 burn
       const balAfter = await rewardPoints.balanceOf(alice.address);
       expect(balBefore - balAfter).to.equal(50_000_000_000_000_000n); // 0.05 分被烧
-      const penaltyDebt = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
+      const [penaltyDebt] = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
       expect(penaltyDebt).to.equal(0n);
     });
 
@@ -578,7 +578,7 @@ describe('RewardManager – 集成测试', function () {
 
       const balFinal = await rewardPoints.balanceOf(alice.address);
       expect(balFinal).to.equal(950_000_000_000_000_000n);
-      const penaltyDebt = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
+      const [penaltyDebt] = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
       expect(penaltyDebt).to.equal(0n);
     });
 
@@ -844,7 +844,7 @@ describe('RewardManager – 集成测试', function () {
           3
         );
 
-      let penaltyDebt = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
+      let [penaltyDebt] = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
       expect(penaltyDebt).to.equal(50_000_000_000_000_000n); // 0.05 分
 
       // 订单19：借款并按期还款，应优先抵扣欠分
@@ -866,7 +866,7 @@ describe('RewardManager – 集成测试', function () {
         );
 
       // 欠分应被抵扣，余额应为 0.95 分（1 - 0.05）
-      penaltyDebt = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
+      [penaltyDebt] = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
       expect(penaltyDebt).to.equal(0n);
       expect(await rewardPoints.balanceOf(alice.address)).to.equal(950_000_000_000_000_000n);
     });
@@ -918,7 +918,7 @@ describe('RewardManager – 集成测试', function () {
         );
 
       // 欠分应累积为 0.1 分（0.05 + 0.05）
-      const penaltyDebt = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
+      const [penaltyDebt] = await rewardView.connect(governance).getUserPenaltyDebt(alice.address);
       expect(penaltyDebt).to.equal(100_000_000_000_000_000n); // 0.1 分
     });
 
@@ -1235,7 +1235,8 @@ describe('RewardManager – 集成测试', function () {
   describe('查询接口测试', function () {
     it('应正确查询用户等级', async function () {
       // onlyAuthorizedFor：本人可查，无需依赖 MockRegistry + ViewAccessLib 权限路径
-      expect(await rewardView.connect(alice).getUserLevel(alice.address)).to.equal(BigInt(0)); // 默认等级
+      const [aliceLevel] = await rewardView.connect(alice).getUserLevel(alice.address);
+      expect(aliceLevel).to.equal(BigInt(0)); // 默认等级
     });
 
     it('应正确查询等级倍数', async function () {
@@ -1262,7 +1263,8 @@ describe('RewardManager – 集成测试', function () {
     });
 
     it('应正确查询不存在的用户等级', async function () {
-      expect(await rewardView.connect(bob).getUserLevel(bob.address)).to.equal(BigInt(0)); // 默认等级
+      const [bobLevel] = await rewardView.connect(bob).getUserLevel(bob.address);
+      expect(bobLevel).to.equal(BigInt(0)); // 默认等级
     });
 
     it('应正确查询不存在的等级倍数', async function () {
@@ -1277,7 +1279,8 @@ describe('RewardManager – 集成测试', function () {
     });
 
     it('应正确查询用户惩罚债务', async function () {
-      expect(await rewardView.connect(alice).getUserPenaltyDebt(alice.address)).to.equal(BigInt(0));
+      const [penaltyDebt] = await rewardView.connect(alice).getUserPenaltyDebt(alice.address);
+      expect(penaltyDebt).to.equal(BigInt(0));
     });
 
     it('应正确查询积分缓存', async function () {
@@ -1321,14 +1324,14 @@ describe('RewardManager – 集成测试', function () {
       await rewardManager.connect(lendingEngine)['onLoanEvent(address,uint256,uint256,bool)'](alice.address, amount, duration, true);
       // 2) 提前/逾期导致扣罚进入欠分
       await rewardManager.connect(lendingEngine)['onLoanEvent(address,uint256,uint256,bool)'](alice.address, amount, 0, false);
-      const debtAfterPenalty = await rewardView.connect(alice).getUserPenaltyDebt(alice.address);
+      const [debtAfterPenalty] = await rewardView.connect(alice).getUserPenaltyDebt(alice.address);
       // 与使用指南/当前实现对齐：提前还款不处罚（bps=0），因此欠分应为 0
       expect(debtAfterPenalty).to.equal(0n);
       // 3) 再次借款（锁定积分），随后按期释放，期望优先抵扣欠分
       await rewardManager.connect(lendingEngine)['onLoanEvent(address,uint256,uint256,bool)'](alice.address, amount, duration, true);
       await rewardManager.connect(lendingEngine)['onLoanEvent(address,uint256,uint256,bool)'](alice.address, amount, 0, true);
       // 欠分应被清零
-      const debtAfterRelease = await rewardView.connect(alice).getUserPenaltyDebt(alice.address);
+      const [debtAfterRelease] = await rewardView.connect(alice).getUserPenaltyDebt(alice.address);
       expect(debtAfterRelease).to.equal(BigInt(0));
     });
   });
@@ -1457,8 +1460,10 @@ describe('RewardManager – 集成测试', function () {
       expect(await rewardView.getTotalBatchOperations()).to.equal(BigInt(1));
       
       // 3. 验证用户等级
-      expect(await rewardView.connect(alice).getUserLevel(alice.address)).to.equal(BigInt(0));
-      expect(await rewardView.connect(bob).getUserLevel(bob.address)).to.equal(BigInt(0));
+      const [aliceLevel] = await rewardView.connect(alice).getUserLevel(alice.address);
+      const [bobLevel] = await rewardView.connect(bob).getUserLevel(bob.address);
+      expect(aliceLevel).to.equal(BigInt(0));
+      expect(bobLevel).to.equal(BigInt(0));
     });
 
     it('自动升级（次数+金额+履约）应达成2级（当前实现为最佳努力）', async function () {
@@ -1474,7 +1479,7 @@ describe('RewardManager – 集成测试', function () {
       // 第3笔：借款（触发 autoUpgrade 判断），随后按期释放
       await rewardManager.connect(lendingEngine)['onLoanEvent(address,uint256,uint256,bool)'](alice.address, each, dur, true);
       // 当前实现未强制升级到 2 级，验证不低于默认等级
-      const lvlBeforeRepay = await rewardView.connect(alice).getUserLevel(alice.address);
+      const [lvlBeforeRepay] = await rewardView.connect(alice).getUserLevel(alice.address);
       expect(lvlBeforeRepay).to.be.gte(0);
       await rewardManager.connect(lendingEngine)['onLoanEvent(address,uint256,uint256,bool)'](alice.address, each, 0, true);
     });

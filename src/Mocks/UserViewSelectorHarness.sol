@@ -10,24 +10,8 @@ import {UserView} from "../Vault/view/modules/UserView.sol";
  *      to assert selector constants match canonical signatures and SSOT module ABIs.
  */
 contract UserViewSelectorHarness is UserView {
-    function selGetUserPosition() external pure returns (bytes4) {
-        return _SEL_GET_USER_POSITION;
-    }
-
     function selGetUserPositionWithMeta() external pure returns (bytes4) {
         return _SEL_GET_USER_POSITION_WITH_META;
-    }
-
-    function selGetUserPositionWithValidity() external pure returns (bytes4) {
-        return _SEL_GET_USER_POSITION_WITH_VALIDITY;
-    }
-
-    function selGetPositionUpdatedAt() external pure returns (bytes4) {
-        return _SEL_GET_POSITION_UPDATED_AT;
-    }
-
-    function selGetPositionVersion() external pure returns (bytes4) {
-        return _SEL_GET_POSITION_VERSION;
     }
 
     function selBalanceOf() external pure returns (bytes4) {
@@ -36,14 +20,6 @@ contract UserViewSelectorHarness is UserView {
 
     function selGetUserSnapshotWithMeta() external pure returns (bytes4) {
         return _SEL_GET_USER_SNAPSHOT_WITH_META;
-    }
-
-    function selGetUserSnapshot() external pure returns (bytes4) {
-        return _SEL_GET_USER_SNAPSHOT;
-    }
-
-    function selGetUserHealthFactor() external pure returns (bytes4) {
-        return _SEL_GET_USER_HEALTH_FACTOR;
     }
 
     function selGetUserHealthFactorWithMeta() external pure returns (bytes4) {
@@ -68,10 +44,6 @@ contract UserViewSelectorHarness is UserView {
 
     function selBatchGetUserPositions() external pure returns (bytes4) {
         return _SEL_BATCH_GET_USER_POSITIONS;
-    }
-
-    function selBatchGetHealthFactors() external pure returns (bytes4) {
-        return _SEL_BATCH_GET_HEALTH_FACTORS;
     }
 
     function selBatchGetHealthFactorsWithMeta() external pure returns (bytes4) {

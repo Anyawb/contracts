@@ -227,13 +227,13 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     await mockLiquidationManager.waitForDeployment();
 
     mockERC20Factory = await ethers.getContractFactory('MockERC20');
-    mockERC20 = await mockERC20Factory.deploy('Test Token 1', 'TT1', ethers.parseUnits('1000000', 18)) as MockERC20;
+    mockERC20 = await mockERC20Factory.deploy('Test Token 1', 'TT1', 18, ethers.parseUnits('1000000', 18)) as MockERC20;
     await mockERC20.waitForDeployment();
-    mockERC20_2 = await mockERC20Factory.deploy('Test Token 2', 'TT2', ethers.parseUnits('1000000', 18)) as MockERC20;
+    mockERC20_2 = await mockERC20Factory.deploy('Test Token 2', 'TT2', 18, ethers.parseUnits('1000000', 18)) as MockERC20;
     await mockERC20_2.waitForDeployment();
-    mockERC20_3 = await mockERC20Factory.deploy('Test Token 3', 'TT3', ethers.parseUnits('1000000', 18)) as MockERC20;
+    mockERC20_3 = await mockERC20Factory.deploy('Test Token 3', 'TT3', 18, ethers.parseUnits('1000000', 18)) as MockERC20;
     await mockERC20_3.waitForDeployment();
-    mockSettlementToken = await mockERC20Factory.deploy('Settlement Token', 'SETTLE', ethers.parseUnits('1000000', 18)) as MockERC20;
+    mockSettlementToken = await mockERC20Factory.deploy('Settlement Token', 'SETTLE', 18, ethers.parseUnits('1000000', 18)) as MockERC20;
     await mockSettlementToken.waitForDeployment();
 
     // 部署 MockRegistry（简化测试设置）

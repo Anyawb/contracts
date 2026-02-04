@@ -21,6 +21,10 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { NotAContract } from "../../errors/StandardErrors.sol";
 
+interface IStatisticsPushManagerMinimal {
+    function notifyUserStats(address user) external;
+}
+
 /// @title CollateralManager
 /// @notice Collateral ledger + custody module (direct-to-ledger writes).
 /// @dev Architecture-Guide SSOT:
@@ -76,13 +80,21 @@ contract CollateralManager is
      * @param user User address
      * @param asset Collateral asset address
      * @param amount Amount deposited (token decimals)
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Legacy field: emission time axis marker (treated as blockNumber in this repo)
      */
     event DepositProcessed(
         address indexed user,
         address indexed asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
+    );
+
+    /// @notice Explicit block-based companion event for DepositProcessed.
+    event DepositProcessedV2(
+        address indexed user,
+        address indexed asset,
+        uint256 amount,
+        uint256 blockNumber
     );
     
     /**
@@ -96,13 +108,21 @@ contract CollateralManager is
      * @param user User address
      * @param asset Collateral asset address
      * @param amount Amount withdrawn (token decimals)
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Legacy field: emission time axis marker (treated as blockNumber in this repo)
      */
     event WithdrawProcessed(
         address indexed user,
         address indexed asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
+    );
+
+    /// @notice Explicit block-based companion event for WithdrawProcessed.
+    event WithdrawProcessedV2(
+        address indexed user,
+        address indexed asset,
+        uint256 amount,
+        uint256 blockNumber
     );
     
     /**
@@ -115,13 +135,16 @@ contract CollateralManager is
      *
      * @param user User address
      * @param operationCount Number of attempted operations
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Legacy field: emission time axis marker (treated as blockNumber in this repo)
      */
     event BatchDepositProcessed(
         address indexed user,
         uint256 operationCount,
-        uint256 timestamp
+        uint256 blockNumber
     );
+
+    /// @notice Explicit block-based companion event for BatchDepositProcessed.
+    event BatchDepositProcessedV2(address indexed user, uint256 operationCount, uint256 blockNumber);
     
     /**
      * @notice Emitted after a batch withdraw is processed.
@@ -133,13 +156,16 @@ contract CollateralManager is
      *
      * @param user User address
      * @param operationCount Number of attempted operations
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Legacy field: emission time axis marker (treated as blockNumber in this repo)
      */
     event BatchWithdrawProcessed(
         address indexed user,
         uint256 operationCount,
-        uint256 timestamp
+        uint256 blockNumber
     );
+
+    /// @notice Explicit block-based companion event for BatchWithdrawProcessed.
+    event BatchWithdrawProcessedV2(address indexed user, uint256 operationCount, uint256 blockNumber);
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
     
@@ -250,6 +276,17 @@ contract CollateralManager is
     function _requireRole(bytes32 actionKey, address caller) internal view {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, caller);
+    }
+
+    /// @dev Best-effort notify the single Statistics push orchestrator (strict B+).
+    ///      This ledger module MUST NOT call StatisticsView directly.
+    function _tryNotifyStatsPushManager(address user) internal {
+        address mgr = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS_PUSH_MANAGER);
+        if (mgr == address(0) || mgr.code.length == 0) return;
+        try IStatisticsPushManagerMinimal(mgr).notifyUserStats(user) {
+        } catch {
+            // Best-effort: do not revert; failure observability is handled by the push manager.
+        }
     }
 
     /*━━━━━━━━━━━━━━━ Construction & initialization ━━━━━━━━━━━━━━━*/
@@ -383,15 +420,17 @@ contract CollateralManager is
         }
         
         // 4) Emit business event.
-        // solhint-disable-next-line not-rely-on-time
-        emit DepositProcessed(user, asset, received, block.timestamp);
+        emit DepositProcessed(user, asset, received, block.number);
+        emit DepositProcessedV2(user, asset, received, block.number);
         
         // 5) Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_DEPOSIT_PROCESSED,
-            // solhint-disable-next-line not-rely-on-time
-            abi.encode(user, asset, received, block.timestamp)
+            abi.encode(user, asset, received, block.number)
         );
+
+        // 6) Best-effort notify stats push orchestrator (strict B+).
+        _tryNotifyStatsPushManager(user);
     }
     
     /**
@@ -525,14 +564,13 @@ contract CollateralManager is
         }
         
         // Emit batch business event.
-        // solhint-disable-next-line not-rely-on-time
-        emit BatchDepositProcessed(user, assets.length, block.timestamp);
+        emit BatchDepositProcessed(user, assets.length, block.number);
+        emit BatchDepositProcessedV2(user, assets.length, block.number);
         
         // Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_DEPOSIT_PROCESSED,
-            // solhint-disable-next-line not-rely-on-time
-            abi.encode(user, assets.length, block.timestamp)
+            abi.encode(user, assets.length, block.number)
         );
     }
     
@@ -568,14 +606,13 @@ contract CollateralManager is
         }
         
         // Emit batch business event.
-        // solhint-disable-next-line not-rely-on-time
-        emit BatchWithdrawProcessed(user, assets.length, block.timestamp);
+        emit BatchWithdrawProcessed(user, assets.length, block.number);
+        emit BatchWithdrawProcessedV2(user, assets.length, block.number);
         
         // Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_WITHDRAW_PROCESSED,
-            // solhint-disable-next-line not-rely-on-time
-            abi.encode(user, assets.length, block.timestamp)
+            abi.encode(user, assets.length, block.number)
         );
     }
      
@@ -759,13 +796,15 @@ contract CollateralManager is
         IERC20(asset).safeTransfer(receiver, amount);
 
         // 4) Emit business event + generic data bus event.
-        // solhint-disable-next-line not-rely-on-time
-        emit WithdrawProcessed(user, asset, amount, block.timestamp);
+        emit WithdrawProcessed(user, asset, amount, block.number);
+        emit WithdrawProcessedV2(user, asset, amount, block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_WITHDRAW_PROCESSED,
-            // solhint-disable-next-line not-rely-on-time
-            abi.encode(user, asset, amount, block.timestamp)
+            abi.encode(user, asset, amount, block.number)
         );
+
+        // 5) Best-effort notify stats push orchestrator (strict B+).
+        _tryNotifyStatsPushManager(user);
     }
      
      /*━━━━━━━━━━━━━━━ Read-only (compat) ━━━━━━━━━━━━━━━━*/

@@ -47,6 +47,8 @@ const ModuleKeys = {
 
 const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
 const ACTION_VIEW_PUSH = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_PUSH'));
+const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
+const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
 
 describe('VaultLendingEngine – dual entry invariants', function () {
   async function deployDualEntryFixture() {
@@ -78,7 +80,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     await lrm.waitForDeployment();
 
     const ERC20 = await ethers.getContractFactory('MockERC20');
-    const settlementToken = (await ERC20.deploy('Settlement', 'ST', ethers.parseEther('1000000'))) as MockERC20;
+    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as MockERC20;
     await settlementToken.waitForDeployment();
 
     const AssetWhitelist = await ethers.getContractFactory('MockAssetWhitelist');
@@ -153,6 +155,11 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     // View push roles (docs/Architecture-Guide.md): writers must have ACTION_VIEW_PUSH
     await acm.grantRole(ACTION_VIEW_PUSH, await lending.getAddress());
     await acm.grantRole(ACTION_VIEW_PUSH, await vaultRouter.getAddress());
+    // Health push valuation reads PositionView collateral value (risk-gated)
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, await lending.getAddress());
+    // Test runner needs to read HealthView/PositionView directly in assertions
+    await acm.grantRole(ACTION_VIEW_RISK_DATA, vaultCore.address);
+    await acm.grantRole(ACTION_VIEW_USER_DATA, vaultCore.address);
 
     // Roles: liquidation actors
     await acm.grantRole(ACTION_LIQUIDATE, liquidator.address);
@@ -213,7 +220,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
         .and.to.emit(positionView, 'UserPositionCachedV2')
         .withArgs(user.address, debtAsset, 200, 50, anyValue, anyValue);
 
-      const [hfAfterBorrow, isValidAfterBorrow] = await healthView.getUserHealthFactor(user.address);
+      const [hfAfterBorrow, isValidAfterBorrow] = await healthView.getUserHealthFactorWithMeta(user.address);
       expect(isValidAfterBorrow).to.equal(true);
       expect(hfAfterBorrow).to.be.gt(0);
       expect(await lending.getDebt(user.address, debtAsset)).to.equal(50);
@@ -226,7 +233,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
         .and.to.emit(positionView, 'UserPositionCachedV2')
         .withArgs(user.address, debtAsset, 200, 30, anyValue, anyValue);
 
-      const [hfAfterRepay, isValidAfterRepay] = await healthView.getUserHealthFactor(user.address);
+      const [hfAfterRepay, isValidAfterRepay] = await healthView.getUserHealthFactorWithMeta(user.address);
       expect(isValidAfterRepay).to.equal(true);
       expect(hfAfterRepay).to.be.gt(0);
       expect(await lending.getDebt(user.address, debtAsset)).to.equal(30);
@@ -528,7 +535,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       // PositionView.getUserTotalCollateralValue() falls back to 0 when CM reads fail,
       // so health push should still succeed and cache a 0 health-factor (bps) for non-zero debt.
       await expect(tx).to.emit(healthView, 'HealthFactorCached');
-      const [hf, valid] = await healthView.getUserHealthFactor(liquidationManager.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(liquidationManager.address);
       expect(valid).to.equal(true);
       expect(hf).to.equal(0);
     });
@@ -613,7 +620,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
       await lending.connect(liquidationManager).forceReduceDebt(liquidationManager.address, debtAsset, 20);
 
-      const [, viewDebt] = await positionView.getUserPosition(liquidationManager.address, debtAsset);
+      const [, viewDebt] = await positionView.getUserPositionWithMeta(liquidationManager.address, debtAsset);
       expect(viewDebt).to.equal(40);
       expect(await lending.getDebt(liquidationManager.address, debtAsset)).to.equal(40);
     });
@@ -628,22 +635,22 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       await lending.connect(liquidationManager).forceReduceDebt(user.address, debtAsset, 30);
 
       expect(await lending.getDebt(user.address, debtAsset)).to.equal(40);
-      const [, viewDebt] = await positionView.getUserPosition(user.address, debtAsset);
+      const [, viewDebt] = await positionView.getUserPositionWithMeta(user.address, debtAsset);
       expect(viewDebt).to.equal(40);
     });
 
-    it('should emit health cache update with timestamp on liquidation', async function () {
+    it('should emit health cache update with blockNumber on liquidation', async function () {
       const { vaultCoreModule, liquidationManager, lending, debtAsset, healthView } = await loadFixture(deployDualEntryFixture);
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset, 35, 0, 0);
 
-      const beforeTs = await healthView.getCacheTimestamp(liquidationManager.address);
+      const [, , beforeBlockNumber] = await healthView.getUserHealthFactorWithMeta(liquidationManager.address);
 
       await expect(
         lending.connect(liquidationManager).forceReduceDebt(liquidationManager.address, debtAsset, 10)
       ).to.emit(healthView, 'HealthFactorCached');
 
-      const afterTs = await healthView.getCacheTimestamp(liquidationManager.address);
-      expect(afterTs).to.be.gt(beforeTs);
+      const [, , afterBlockNumber] = await healthView.getUserHealthFactorWithMeta(liquidationManager.address);
+      expect(afterBlockNumber).to.be.gt(beforeBlockNumber);
     });
 
     it('should revert forceReduceDebt when amount is zero', async function () {
@@ -664,7 +671,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
       expect(await lending.getDebt(liquidationManager.address, debtAsset)).to.equal(50);
       expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(50);
-      const [, viewDebt] = await positionView.getUserPosition(liquidationManager.address, debtAsset);
+      const [, viewDebt] = await positionView.getUserPositionWithMeta(liquidationManager.address, debtAsset);
       expect(viewDebt).to.equal(50);
     });
 
@@ -681,10 +688,10 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       expect(await lending.getDebt(liquidationManager.address, unusedAsset)).to.equal(0);
       expect(await lending.getTotalDebtByAsset(unusedAsset)).to.equal(0);
       expect(await lending.getTotalDebtValue()).to.equal(beforeTotal);
-      const [, viewDebt] = await positionView.getUserPosition(liquidationManager.address, unusedAsset);
+      const [, viewDebt] = await positionView.getUserPositionWithMeta(liquidationManager.address, unusedAsset);
       expect(viewDebt).to.equal(0);
       // NOTE: forceReduceDebt always pushes HealthView cache. With zero debt, health factor should be "infinite" (MaxUint256).
-      const [hf, valid] = await healthView.getUserHealthFactor(liquidationManager.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(liquidationManager.address);
       expect(valid).to.equal(true);
       expect(hf).to.equal(ethers.MaxUint256);
     });
@@ -705,14 +712,14 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
       expect(await lending.getDebt(liquidationManager.address, debtAsset)).to.equal(15);
       expect(await lending.getDebt(liquidationManager.address, debtAsset2)).to.equal(60);
-      const [, viewDebt1] = await positionView.getUserPosition(liquidationManager.address, debtAsset);
-      const [, viewDebt2] = await positionView.getUserPosition(liquidationManager.address, debtAsset2);
+      const [, viewDebt1] = await positionView.getUserPositionWithMeta(liquidationManager.address, debtAsset);
+      const [, viewDebt2] = await positionView.getUserPositionWithMeta(liquidationManager.address, debtAsset2);
       expect(viewDebt1).to.equal(15);
       expect(viewDebt2).to.equal(60);
 
       const totalAfter = await lending.getTotalDebtValue();
       expect(totalAfter).to.be.lt(totalBefore);
-      const [hf, valid] = await healthView.getUserHealthFactor(liquidationManager.address);
+      const [hf, valid] = await healthView.getUserHealthFactorWithMeta(liquidationManager.address);
       expect(valid).to.equal(true);
       expect(hf).to.be.gt(0);
     });
@@ -727,15 +734,15 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       await vaultCoreModule.borrow(userB, debtAsset, 40, 0, 0);
 
       const bDebtBefore = await lending.getDebt(userB, debtAsset);
-      const [, bViewBefore] = await positionView.getUserPosition(userB, debtAsset);
-      const [bHFBefore, bValidBefore] = await healthView.getUserHealthFactor(userB);
+      const [, bViewBefore] = await positionView.getUserPositionWithMeta(userB, debtAsset);
+      const [bHFBefore, bValidBefore] = await healthView.getUserHealthFactorWithMeta(userB);
 
       await lending.connect(liquidationManager).forceReduceDebt(liquidationManager.address, debtAsset, 30);
 
       expect(await lending.getDebt(userB, debtAsset)).to.equal(bDebtBefore);
-      const [, bViewAfter] = await positionView.getUserPosition(userB, debtAsset);
+      const [, bViewAfter] = await positionView.getUserPositionWithMeta(userB, debtAsset);
       expect(bViewAfter).to.equal(bViewBefore);
-      const [bHFAfter, bValidAfter] = await healthView.getUserHealthFactor(userB);
+      const [bHFAfter, bValidAfter] = await healthView.getUserHealthFactorWithMeta(userB);
       expect(bValidAfter).to.equal(bValidBefore);
       expect(bHFAfter).to.equal(bHFBefore);
     });

@@ -28,14 +28,22 @@ async function main() {
   {
     const cfg = await po.getAssetConfig(usdc.target);
     if (!cfg.isActive) {
-      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600);
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
     }
   }
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
-  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 6), now);
+  const blockNumber = await ethers.provider.getBlockNumber();
+  // SSOT: price is USD-8 ($1.00 = 100000000)
+  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), blockNumber);
 
+  // Optional (legacy): enable router testing mode if supported by deployed VaultRouter.
   await ensureRole(ACTION_SET_PARAMETER, deployer.address);
-  await vr.connect(deployer).setTestingMode(true);
+  if (typeof (vr as any).setTestingMode === "function") {
+    await vr.connect(deployer).setTestingMode(true);
+    console.log("ℹ️  VaultRouter.setTestingMode(true) enabled");
+  } else {
+    console.log("ℹ️  VaultRouter.setTestingMode not found on this deployment; skipping");
+  }
 
   await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("10000", 6));
   await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, ethers.MaxUint256);

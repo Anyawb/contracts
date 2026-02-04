@@ -35,7 +35,7 @@ describe('Funds Flow Architecture (SSOT)', function () {
     const aw = await AssetWhitelistF.deploy();
 
     const TokenF = await ethers.getContractFactory('MockERC20');
-    const settlementToken = await TokenF.deploy('Settlement', 'SET', ethers.parseUnits('1000000', 18));
+    const settlementToken = await TokenF.deploy('Settlement', 'SET', 18, ethers.parseUnits('1000000', 18));
 
     const VaultRouterF = await ethers.getContractFactory('VaultRouter');
     const vaultRouter = await upgrades.deployProxy(
@@ -175,7 +175,7 @@ describe('Funds Flow Architecture (SSOT)', function () {
     );
 
     const TokenF = await ethers.getContractFactory('MockERC20');
-    const token = await TokenF.deploy('Token', 'TKN', ethers.parseUnits('1000000', 18));
+    const token = await TokenF.deploy('Token', 'TKN', 18, ethers.parseUnits('1000000', 18));
 
     await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, acm.target);
     await acm.grantRole(ActionKeys.ACTION_DEPOSIT_FEE, owner.address);

@@ -8,175 +8,185 @@ import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title GracefulDegradation
-/// @notice 优雅降级库，提供通用的价格获取和错误处理功能
-/// @dev 用于处理价格预言机失败时的备用策略
-/// @dev 支持多种降级策略：保守估值、缓存价格、稳定币面值等
-/// @dev 修复了价格操纵风险、精度验证不足、溢出检查不完整等安全问题
-/// @dev 缓存使用说明：
-/// @dev - view 函数：只能读取缓存，不能写入
-/// @dev - non-view 函数：可以读取和写入缓存
-/// @dev - 使用 getAssetValueWithFallbackAndCache 进行缓存写入
-/// @dev - 使用 getAssetValueWithFallback 进行只读操作
-/// @dev 精度验证规则：
-/// @dev - 最小精度：6（支持常见稳定币和主流加密货币）
-/// @dev - 最大精度：18（符合ERC20标准）
-/// @dev - 防止价格单位错乱和计算错误
-/// @dev 配置设计：
-/// @dev - GlobalDegradationConfig：平台级别配置（全局设置）
-/// @dev - CallContextConfig：单次调用级别配置（用户交易时）
-/// @dev - 支持配置合并和验证
-/// @dev SafeMath 使用：
-/// @dev - 兼容 OpenZeppelin SafeMath 库
-/// @dev - 提供安全的数学运算函数
-/// @dev - 防止溢出和下溢错误
+/// @notice Library for best-effort asset valuation with fallback strategies.
+/// @dev Tolerates oracle failures by returning conservative values, cached values, or stablecoin face-value logic.
+///      Cache usage:
+///      - View functions read cache only (no writes).
+///      - Non-view functions may read and write cache.
+///      - Use {getAssetValueWithFallbackAndCache} for cache writes.
+///      - Use {getAssetValueWithFallback} for read-only pricing.
+///      Decimals validation:
+///      - Minimum decimals: 6 (supports common stablecoins).
+///      - Maximum decimals: 18 (ERC-20 standard).
+///      Configuration:
+///      - GlobalDegradationConfig: platform-wide settings.
+///      - CallContextConfig: per-call overrides.
+///      Price precision:
+///      - Price units depend on the underlying oracle and MUST NOT be assumed 1e18.
 library GracefulDegradation {
 
-    /* ============ Constants ============ */
-    /// @notice 最大价格年龄（1小时）
-    uint256 private constant MAX_PRICE_AGE = 3600;
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
+    /// @notice Default maximum staleness in blocks (chain-dependent).
+    uint256 private constant MAX_PRICE_AGE_BLOCKS = 300;
     
-    /// @notice 最小精度值（修复：防止价格单位错乱）
-    /// @dev 设置为6，支持常见稳定币（USDC、USDT）和主流加密货币
+    /// @notice Minimum supported decimals (prevents unit mismatch).
+    /// @dev Set to 6 to support common stablecoins (e.g., USDC/USDT).
     uint256 private constant MIN_DECIMALS = 6;
     
-    /// @notice 最大精度值
+    /// @notice Maximum supported decimals.
     uint256 private constant MAX_DECIMALS = 18;
     
-    /// @notice 稳定币价格容忍度（基点，默认1%）
+    /// @notice Stablecoin price tolerance (bps, default 1%).
     uint256 private constant STABLECOIN_TOLERANCE = 100;
     
-    /// @notice 价格合理性检查的最小历史价格数量
+    /// @notice Minimum historical price points for reasonableness checks.
     uint256 private constant MIN_HISTORICAL_PRICES = 3;
     
-    /// @notice 最大合理价格（向后兼容常量）
+    /// @notice Maximum reasonable price (backward-compatible constant).
     uint256 internal constant MAX_REASONABLE_PRICE = 1e12;
 
-    /* ============ 语义化常量定义 ============ */
-    /// @notice 1 USD 价格（18位精度）
+    /*━━━━━━━━━━━━━━━ Semantic Constants ━━━━━━━━━━━━━━━*/
+    /// @notice $1.00 in 18-decimal precision.
     uint256 private constant ONE_USD = 1e18;
     
-    /// @notice 基点除数（100% = 10000基点）
+    /// @notice Basis-point divisor (100% = 10_000 bps).
     uint256 private constant BASIS_POINT_DIVISOR = 10000;
     
-    /// @notice 100% 基点值
+    /// @notice 100% in basis points.
     uint256 private constant BASIS_POINT_100_PERCENT = 10000;
     
-    /// @notice 默认最大合理价格（1e12）
+    /// @notice Default maximum reasonable price (1e12).
     uint256 private constant DEFAULT_MAX_REASONABLE_PRICE = 1e12;
     
-    /// @notice 默认保守估值比例（50%）
+    /// @notice Default conservative valuation ratio (50%).
     uint256 private constant DEFAULT_CONSERVATIVE_RATIO = 5000;
     
-    /// @notice 默认价格更新阈值（5分钟）
+    /// @notice Default price update threshold (blocks; chain-dependent).
     uint256 private constant DEFAULT_PRICE_UPDATE_THRESHOLD = 300;
     
-    /// @notice 默认最大价格倍数（150%）
+    /// @notice Default max price multiplier (150%).
     uint256 private constant DEFAULT_MAX_PRICE_MULTIPLIER = 15000;
     
-    /// @notice 默认最小价格倍数（50%）
+    /// @notice Default min price multiplier (50%).
     uint256 private constant DEFAULT_MIN_PRICE_MULTIPLIER = 5000;
     
-    /// @notice 默认重试配置常量
+    /// @notice Default retry configuration.
     uint256 private constant DEFAULT_MAX_RETRY_COUNT = 1;
-    uint256 private constant DEFAULT_RETRY_DELAY = 0; // 立即重试
-    uint256 private constant DEFAULT_MAX_GAS_LIMIT = 500000; // 50万 gas
+    uint256 private constant DEFAULT_RETRY_DELAY = 0; // Immediate retry.
+    uint256 private constant DEFAULT_MAX_GAS_LIMIT = 500000; // 500k gas.
 
-    /* ============ Structs ============ */
-    /// @notice 价格获取结果
+    /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
+    /// @notice Price retrieval result.
     struct PriceResult {
-        uint256 value;           // 计算出的价值
-        bool isValid;            // 是否有效
-        string reason;           // 结果原因
-        bool usedFallback;       // 是否使用了降级策略
-        uint256 timestamp;       // 价格时间戳
-        uint256 priceAge;        // 价格年龄
+        /// @notice Computed value.
+        uint256 value;
+        /// @notice Whether the result is considered valid.
+        bool isValid;
+        /// @notice Reason string for the outcome.
+        string reason;
+        /// @notice Whether a fallback strategy was used.
+        bool usedFallback;
+        /// @notice Price update block (block.number).
+        uint256 updateBlock;
+        /// @notice Price age in blocks.
+        uint256 ageBlocks;
     }
 
-    /// @notice 平台级别降级配置（全局设置）
+    /// @notice Platform-level degradation configuration (global settings).
     struct GlobalDegradationConfig {
-        address settlementToken;      // 结算币地址
-        PriceValidationConfig priceValidation; // 价格验证配置
-        StablecoinConfig stablecoinConfig; // 稳定币配置
-        bool enablePriceCache;        // 是否启用价格缓存
-        uint256 maxPriceAge;          // 最大价格年龄
-        uint256 conservativeRatio;    // 保守估值比例（基点，默认50%）
+        address settlementToken;      // Settlement token address.
+        PriceValidationConfig priceValidation; // Price validation config.
+        StablecoinConfig stablecoinConfig; // Stablecoin config.
+        bool enablePriceCache;        // Whether price cache is enabled.
+        uint256 maxPriceAgeBlocks;    // Max price age in blocks.
+        uint256 conservativeRatio;    // Conservative ratio (bps, default 50%).
     }
 
-    /// @notice 单次调用级别配置（用户交易时）
+    /// @notice Per-call configuration (transaction-level overrides).
     struct CallContextConfig {
-        bool useStablecoinFaceValue;  // 是否对稳定币使用面值
-        bool enableHistoricalValidation; // 是否启用历史价格验证
-        uint256 customConservativeRatio; // 自定义保守估值比例（可选，0表示使用全局设置）
-        bool useCustomPriceValidation;   // 是否使用自定义价格验证
-        PriceValidationConfig customPriceValidation; // 自定义价格验证配置
+        bool useStablecoinFaceValue;  // Whether to use face value for stablecoins.
+        bool enableHistoricalValidation; // Whether to enable historical validation.
+        uint256 customConservativeRatio; // Custom conservative ratio (0 uses global).
+        bool useCustomPriceValidation;   // Whether to use custom validation.
+        PriceValidationConfig customPriceValidation; // Custom validation config.
     }
 
-    /// @notice 降级策略配置（向后兼容）
+    /// @notice Degradation configuration (backward-compatible).
     struct DegradationConfig {
-        uint256 conservativeRatio;    // 保守估值比例（基点，默认50%）
-        bool useStablecoinFaceValue;  // 是否对稳定币使用面值
-        bool enablePriceCache;        // 是否启用价格缓存
-        address settlementToken;      // 结算币地址
-        PriceValidationConfig priceValidation; // 价格验证配置
-        StablecoinConfig stablecoinConfig; // 稳定币配置
-        RetryConfig retryConfig;      // 重试配置
+        uint256 conservativeRatio;    // Conservative ratio (bps, default 50%).
+        bool useStablecoinFaceValue;  // Whether to use face value for stablecoins.
+        bool enablePriceCache;        // Whether price cache is enabled.
+        address settlementToken;      // Settlement token address.
+        PriceValidationConfig priceValidation; // Price validation config.
+        StablecoinConfig stablecoinConfig; // Stablecoin config.
+        RetryConfig retryConfig;      // Retry config.
     }
 
-    /// @notice 价格验证配置（修复：替换硬编码常量）
+    /// @notice Price validation configuration.
     struct PriceValidationConfig {
-        uint256 maxPriceMultiplier;  // 相对于历史价格的最大倍数（基点）
-        uint256 minPriceMultiplier;  // 相对于历史价格的最小倍数（基点）
-        uint256 priceUpdateThreshold; // 价格更新阈值
-        uint256 maxPriceAge;         // 最大价格年龄
-        uint256 maxReasonablePrice;  // 最大合理价格（动态）
-        bool enableHistoricalValidation; // 是否启用历史价格验证
+        uint256 maxPriceMultiplier;  // Max multiplier vs historical price (bps).
+        uint256 minPriceMultiplier;  // Min multiplier vs historical price (bps).
+        uint256 priceUpdateThreshold; // Price update threshold (blocks).
+        uint256 maxPriceAgeBlocks;   // Max price age in blocks.
+        uint256 maxReasonablePrice;  // Max reasonable price (dynamic).
+        bool enableHistoricalValidation; // Whether historical validation is enabled.
     }
-
-    /// @notice 稳定币验证配置
+    /// @notice Stablecoin validation configuration.
     struct StablecoinConfig {
-        address stablecoin;          // 稳定币地址
-        uint256 expectedPrice;       // 期望价格（通常是1）
-        uint256 tolerance;           // 容忍度（基点）
-        bool isWhitelisted;          // 是否在白名单中
-        bool enableDepegDetection;   // 是否启用脱锚检测
+        address stablecoin;          // Stablecoin address.
+        uint256 expectedPrice;       // Expected price (typically 1).
+        uint256 tolerance;           // Tolerance (bps).
+        bool isWhitelisted;          // Whether whitelisted.
+        bool enableDepegDetection;   // Whether to detect depeg.
     }
 
-    /// @notice 价格缓存结构
+    /// @notice Price cache entry.
     struct PriceCache {
         uint256 price;
-        uint256 timestamp;
-        uint256 decimals;
+        uint256 updateBlock;
+        uint256 assetDecimals;
         bool isValid;
     }
 
-    /// @notice 重试配置
+    /// @notice Retry configuration.
     struct RetryConfig {
-        bool enableRetry;             // 是否启用重试
-        uint256 maxRetryCount;        // 最大重试次数
-        uint256 retryDelay;           // 重试延迟（秒）
-        uint256 maxGasLimit;          // 最大 gas 限制
-        bool retryOnNetworkError;     // 是否在网络错误时重试
-        bool retryOnTimeout;          // 是否在超时时重试
+        bool enableRetry;             // Whether retry is enabled.
+        uint256 maxRetryCount;        // Max retry count.
+        uint256 retryDelay;           // Retry delay (blocks; informational).
+        uint256 maxGasLimit;          // Max gas limit.
+        bool retryOnNetworkError;     // Retry on network error.
+        bool retryOnTimeout;          // Retry on timeout.
     }
 
-    /// @notice 缓存存储结构（用于调用合约）
+    /// @notice Cache storage used by calling contracts.
     struct CacheStorage {
         mapping(address => PriceCache) priceCache;
         mapping(address => uint256) nonces;
     }
 
-    /* ============ Events ============ */
-    // 注意：库文件不发出事件，事件应该在调用合约中发出
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    // Note: Libraries do not emit events; events should be emitted by calling contracts.
 
-    /* ============ Core Functions ============ */
+    /*━━━━━━━━━━━━━━━ Core Functions ━━━━━━━━━━━━━━━*/
 
-    /// @notice 获取资产价值（带优雅降级）- 修复版本
-    /// @param priceOracleAddr 价格预言机地址
-    /// @param assetAddr 资产地址
-    /// @param amountValue 资产数量
-    /// @param config 降级配置
-    /// @param cacheStorage 缓存存储（可选）
-    /// @return result 价格获取结果
+    /**
+     * @notice Get asset value with graceful degradation (cache read only).
+     * @dev Reverts if:
+     *      - (none; best-effort, oracle failures are caught and return fallback values)
+     *      - (does not revert for invalid inputs; see fallback semantics)
+     *
+     * Security:
+     * - View-only; MUST NOT mutate cache storage
+     * - Best-effort: failures return fallback values and set result.usedFallback = true
+     * - updateBlock == 0 indicates unknown update block (oracle query failed)
+     *
+     * @param priceOracleAddr Price oracle address.
+     * @param assetAddr Asset address.
+     * @param amountValue Asset amount (token decimals).
+     * @param config Degradation configuration.
+     * @param cacheStorage Cache storage (read-only).
+     * @return result Price retrieval result (value units depend on oracle price precision).
+     */
     function getAssetValueWithFallback(
         address priceOracleAddr,
         address assetAddr,
@@ -189,8 +199,8 @@ library GracefulDegradation {
             result.isValid = true;
             result.reason = "Zero amount";
             result.usedFallback = false;
-            result.timestamp = block.timestamp;
-            result.priceAge = 0;
+            result.updateBlock = 0;
+            result.ageBlocks = 0;
             return result;
         }
         
@@ -202,62 +212,63 @@ library GracefulDegradation {
             return _applyFallbackStrategy(assetAddr, amountValue, "Invalid asset address", config);
         }
 
-        // 使用重试机制获取价格
-        (uint256 price, uint256 timestamp, uint256 decimals, bool success, string memory errorReason) = _getPriceWithRetry(
+        // Use retry helper to fetch price.
+        (uint256 price, , uint256 assetDecimals, bool success, string memory errorReason) = _getPriceWithRetry(
             priceOracleAddr,
             assetAddr,
             config.retryConfig
         );
         
         if (!success) {
-            // 处理获取价格失败的情况
+            // Handle price fetch failure.
             if (config.enablePriceCache) {
                 PriceCache memory cachedPrice = _getCachedPrice(assetAddr, cacheStorage);
-                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.timestamp, config.priceValidation.maxPriceAge)) {
-                    uint256 cachedCalculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.decimals);
+                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.updateBlock, config.priceValidation.maxPriceAgeBlocks)) {
+                    uint256 cachedCalculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.assetDecimals);
                     if (cachedCalculatedValue > 0) {
                         result.value = cachedCalculatedValue;
                         result.isValid = true;
                         result.reason = string(abi.encodePacked("Used cached price after retry failure: ", errorReason));
                         result.usedFallback = true;
-                        result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp - cachedPrice.timestamp;
+                        result.updateBlock = cachedPrice.updateBlock;
+                        result.ageBlocks = (cachedPrice.updateBlock > 0 && cachedPrice.updateBlock <= block.number)
+                            ? (block.number - cachedPrice.updateBlock)
+                            : 0;
                         return result;
                     }
                 }
             }
             
-            // 使用降级策略
+            // Apply fallback strategy.
             return _applyFallbackStrategy(assetAddr, amountValue, string(abi.encodePacked("Price oracle retry failed: ", errorReason)), config);
         }
         
-        // 验证精度参数（修复：添加最小精度验证）
-        if (!validateDecimals(decimals)) {
+        // Validate decimals (min precision guard).
+        if (!validateDecimals(assetDecimals)) {
             return _applyFallbackStrategy(assetAddr, amountValue, "Invalid decimals", config);
         }
 
-        // 验证资产精度合理性
-        if (!validateAssetDecimals(assetAddr, decimals)) {
+        // Validate asset decimals reasonableness.
+        if (!validateAssetDecimals(assetAddr, assetDecimals)) {
             return _applyFallbackStrategy(assetAddr, amountValue, "Invalid asset decimals", config);
         }
 
-        // 验证价格有效性
+        // Validate price non-zero.
         if (price == 0) {
             return _applyFallbackStrategy(assetAddr, amountValue, "Zero price", config);
         }
 
-        // 检查价格是否过期
-        uint256 priceAge = block.timestamp - timestamp;
-        if (priceAge > config.priceValidation.maxPriceAge) {
-            return _applyFallbackStrategy(assetAddr, amountValue, "Stale price", config);
-        }
+        // NOTE: staleness is enforced by the oracle contract itself (see {IPriceOracle.getPrice}).
+        // This library does not re-implement age checks or rely on wall-clock time.
+        uint256 updateBlock = _tryGetUpdateBlock(priceOracleAddr, assetAddr);
+        uint256 ageBlocks = (updateBlock > 0 && updateBlock <= block.number) ? (block.number - updateBlock) : 0;
 
-        // 验证价格合理性（修复：使用动态价格验证）
+        // Validate price reasonableness (dynamic rules).
         if (!validatePriceReasonableness(price, assetAddr, config.priceValidation, cacheStorage)) {
             return _applyFallbackStrategy(assetAddr, amountValue, "Unreasonable price", config);
         }
 
-        // 验证稳定币价格（如果适用）
+        // Validate stablecoin price (if applicable).
         if (config.stablecoinConfig.enableDepegDetection && 
             assetAddr == config.stablecoinConfig.stablecoin) {
             if (!validateStablecoinPrice(assetAddr, config.stablecoinConfig.expectedPrice, config.stablecoinConfig.tolerance)) {
@@ -265,8 +276,8 @@ library GracefulDegradation {
             }
         }
 
-        // 计算价值（修复：使用 SafeMath 的完整检查）
-        uint256 calculatedValue = calculateAssetValue(amountValue, price, decimals);
+        // Compute value (safe arithmetic).
+        uint256 calculatedValue = calculateAssetValue(amountValue, price, assetDecimals);
         if (calculatedValue == 0) {
             // Best-effort: allow 0 value (rounding) without reverting; mark as valid.
             // Downstream callers may treat 0 as acceptable for tiny amounts.
@@ -274,29 +285,38 @@ library GracefulDegradation {
             result.isValid = true;
             result.reason = "Price calculation successful (rounded to zero)";
             result.usedFallback = false;
-            result.timestamp = timestamp;
-            result.priceAge = priceAge;
+            result.updateBlock = updateBlock;
+            result.ageBlocks = ageBlocks;
             return result;
         }
 
-        // 注意：缓存写入功能已移至单独的 non-view 函数
-        // 当前 view 函数只进行缓存读取，不进行写入操作
+        // Note: cache writes are performed only in non-view functions.
 
-        // 成功获取价格
+        // Successful price computation.
         result.value = calculatedValue;
         result.isValid = true;
         result.reason = "Price calculation successful";
         result.usedFallback = false;
-        result.timestamp = timestamp;
-        result.priceAge = priceAge;
+        result.updateBlock = updateBlock;
+        result.ageBlocks = ageBlocks;
     }
 
-    /// @notice 获取资产价值（带优雅降级）- 向后兼容版本
-    /// @param priceOracleAddr 价格预言机地址
-    /// @param assetAddr 资产地址
-    /// @param amountValue 资产数量
-    /// @param config 降级配置
-    /// @return result 价格获取结果
+    /**
+     * @notice Get asset value with graceful degradation (backward-compatible overload).
+     * @dev Reverts if:
+     *      - (none; best-effort, oracle failures are caught and return fallback values)
+     *      - (does not revert for invalid inputs; see fallback semantics)
+     *
+     * Security:
+     * - View-only; does not write cache
+     * - Best-effort: failures return fallback values and set result.usedFallback = true
+     *
+     * @param priceOracleAddr Price oracle address.
+     * @param assetAddr Asset address.
+     * @param amountValue Asset amount (token decimals).
+     * @param config Degradation configuration.
+     * @return result Price retrieval result (value units depend on oracle price precision).
+     */
     function getAssetValueWithFallback(
         address priceOracleAddr,
         address assetAddr,
@@ -308,8 +328,8 @@ library GracefulDegradation {
             result.isValid = true;
             result.reason = "Zero amount";
             result.usedFallback = false;
-            result.timestamp = block.timestamp;
-            result.priceAge = 0;
+            result.updateBlock = 0;
+            result.ageBlocks = 0;
             return result;
         }
         
@@ -321,35 +341,32 @@ library GracefulDegradation {
             return _applyFallbackStrategy(assetAddr, amountValue, "Invalid asset address", config);
         }
 
-        // 尝试从价格预言机适配器获取价格
-        try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 timestamp, uint256 decimals) {
-            // 验证精度参数（修复：添加最小精度验证）
-            if (!validateDecimals(decimals)) {
+        // Try the onchain oracle directly (staleness is enforced by the oracle contract).
+        try IPriceOracle(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 /* sourceTimestamp */, uint256 assetDecimals) {
+            // Validate decimals (min precision guard).
+            if (!validateDecimals(assetDecimals)) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Invalid decimals", config);
             }
 
-            // 验证资产精度合理性
-            if (!validateAssetDecimals(assetAddr, decimals)) {
+            // Validate asset decimals reasonableness.
+            if (!validateAssetDecimals(assetAddr, assetDecimals)) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Invalid asset decimals", config);
             }
 
-            // 验证价格有效性
+            // Validate price non-zero.
             if (price == 0) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Zero price", config);
             }
 
-            // 检查价格是否过期
-            uint256 priceAge = block.timestamp - timestamp;
-            if (priceAge > config.priceValidation.maxPriceAge) {
-                return _applyFallbackStrategy(assetAddr, amountValue, "Stale price", config);
-            }
+            uint256 updateBlock = _tryGetUpdateBlock(priceOracleAddr, assetAddr);
+            uint256 ageBlocks = (updateBlock > 0 && updateBlock <= block.number) ? (block.number - updateBlock) : 0;
 
-            // 验证价格合理性（简化版本，不依赖缓存）
+            // Validate price reasonableness (simple check; no cache).
             if (price > config.priceValidation.maxReasonablePrice) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Unreasonable price", config);
             }
 
-            // 验证稳定币价格（如果适用）
+            // Validate stablecoin price (if applicable).
             if (config.stablecoinConfig.enableDepegDetection && 
                 assetAddr == config.stablecoinConfig.stablecoin) {
                 if (!validateStablecoinPrice(assetAddr, config.stablecoinConfig.expectedPrice, config.stablecoinConfig.tolerance)) {
@@ -357,35 +374,45 @@ library GracefulDegradation {
                 }
             }
 
-            // 计算价值（修复：使用 SafeMath 的完整检查）
-            uint256 calculatedValue = calculateAssetValue(amountValue, price, decimals);
+            // Compute value (safe arithmetic).
+            uint256 calculatedValue = calculateAssetValue(amountValue, price, assetDecimals);
 
-            // 成功获取价格
+            // Successful price computation.
             result.value = calculatedValue;
             result.isValid = true;
             result.reason = "Price calculation successful";
             result.usedFallback = false;
-            result.timestamp = timestamp;
-            result.priceAge = priceAge;
+            result.updateBlock = updateBlock;
+            result.ageBlocks = ageBlocks;
 
         } catch Error(string memory reason) {
-            // 处理 revert 错误（带有错误信息）
+            // Handle revert with reason.
             return _applyFallbackStrategy(assetAddr, amountValue, string(abi.encodePacked("Price oracle error: ", reason)), config);
         } catch (bytes memory lowLevelData) {
-            // 处理低级错误（panic、自定义错误等）
+            // Handle low-level error (panic/custom error).
             string memory errorMessage = _decodeLowLevelError(lowLevelData);
             return _applyFallbackStrategy(assetAddr, amountValue, string(abi.encodePacked("Price oracle low-level error: ", errorMessage)), config);
         }
     }
 
-    /// @notice 获取资产价值并缓存价格（non-view 版本）
-    /// @dev 此函数可以写入缓存，只能在 non-view 函数中调用
-    /// @param priceOracleAddr 价格预言机地址
-    /// @param assetAddr 资产地址
-    /// @param amountValue 资产数量
-    /// @param config 降级配置
-    /// @param cacheStorage 缓存存储
-    /// @return result 价格获取结果
+    /**
+     * @notice Get asset value and write price cache (non-view).
+     * @dev Reverts if:
+     *      - priceOracleAddr == address(0) (require with string "Invalid price oracle address")
+     *      - assetAddr == address(0) (require with string "Invalid asset address")
+     *      - amountValue == 0 (require with string "Amount must be greater than zero")
+     *
+     * Security:
+     * - Writes cache storage; MUST be called from non-view contexts
+     * - Best-effort: oracle failures return fallback values; cache writes happen only on success
+     *
+     * @param priceOracleAddr Price oracle address.
+     * @param assetAddr Asset address.
+     * @param amountValue Asset amount (token decimals).
+     * @param config Degradation configuration.
+     * @param cacheStorage Cache storage (writes enabled).
+     * @return result Price retrieval result (value units depend on oracle price precision).
+     */
     function getAssetValueWithFallbackAndCache(
         address priceOracleAddr,
         address assetAddr,
@@ -393,7 +420,7 @@ library GracefulDegradation {
         DegradationConfig memory config,
         CacheStorage storage cacheStorage
     ) internal returns (PriceResult memory result) {
-        // 验证输入参数
+        // Validate inputs.
         require(priceOracleAddr != address(0), "Invalid price oracle address");
         require(assetAddr != address(0), "Invalid asset address");
         require(amountValue > 0, "Amount must be greater than zero");
@@ -403,40 +430,37 @@ library GracefulDegradation {
             result.isValid = true;
             result.reason = "Zero amount";
             result.usedFallback = false;
-            result.timestamp = block.timestamp;
-            result.priceAge = 0;
+            result.updateBlock = 0;
+            result.ageBlocks = 0;
             return result;
         }
 
-        // 尝试从价格预言机适配器获取价格
-        try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 timestamp, uint256 decimals) {
-            // 验证精度参数
-            if (!validateDecimals(decimals)) {
+        // Try the onchain oracle directly (staleness is enforced by the oracle contract).
+        try IPriceOracle(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 /* sourceTimestamp */, uint256 assetDecimals) {
+            // Validate decimals.
+            if (!validateDecimals(assetDecimals)) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Invalid decimals", config);
             }
 
-            // 验证资产精度合理性
-            if (!validateAssetDecimals(assetAddr, decimals)) {
+            // Validate asset decimals reasonableness.
+            if (!validateAssetDecimals(assetAddr, assetDecimals)) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Invalid asset decimals", config);
             }
 
-            // 验证价格有效性
+            // Validate price non-zero.
             if (price == 0) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Zero price", config);
             }
 
-            // 检查价格是否过期
-            uint256 priceAge = block.timestamp - timestamp;
-            if (priceAge > config.priceValidation.maxPriceAge) {
-                return _applyFallbackStrategy(assetAddr, amountValue, "Stale price", config);
-            }
+            uint256 updateBlock = _tryGetUpdateBlock(priceOracleAddr, assetAddr);
+            uint256 ageBlocks = (updateBlock > 0 && updateBlock <= block.number) ? (block.number - updateBlock) : 0;
 
-            // 验证价格合理性
+            // Validate price reasonableness.
             if (!validatePriceReasonableness(price, assetAddr, config.priceValidation, cacheStorage)) {
                 return _applyFallbackStrategy(assetAddr, amountValue, "Unreasonable price", config);
             }
 
-            // 验证稳定币价格（如果适用）
+            // Validate stablecoin price (if applicable).
             if (config.stablecoinConfig.enableDepegDetection && 
                 assetAddr == config.stablecoinConfig.stablecoin) {
                 if (!validateStablecoinPrice(assetAddr, config.stablecoinConfig.expectedPrice, config.stablecoinConfig.tolerance)) {
@@ -444,75 +468,90 @@ library GracefulDegradation {
                 }
             }
 
-            // 计算价值
-            uint256 calculatedValue = calculateAssetValue(amountValue, price, decimals);
+            // Compute value.
+            uint256 calculatedValue = calculateAssetValue(amountValue, price, assetDecimals);
 
-            // 如果启用缓存，写入缓存
+            // Write cache if enabled.
             if (config.enablePriceCache) {
-                cachePrice(assetAddr, price, timestamp, decimals, cacheStorage);
+                cachePrice(assetAddr, price, updateBlock, assetDecimals, cacheStorage);
             }
 
-            // 成功获取价格
+            // Successful price computation.
             result.value = calculatedValue;
             result.isValid = true;
             result.reason = "Price calculation successful";
             result.usedFallback = false;
-            result.timestamp = timestamp;
-            result.priceAge = priceAge;
+            result.updateBlock = updateBlock;
+            result.ageBlocks = ageBlocks;
 
         } catch Error(string memory reason) {
-            // 处理 revert 错误（带有错误信息）
+            // Handle revert with reason.
             if (config.enablePriceCache) {
                 PriceCache memory cachedPrice = _getCachedPrice(assetAddr, cacheStorage);
-                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.timestamp, config.priceValidation.maxPriceAge)) {
-                    uint256 calculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.decimals);
+                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.updateBlock, config.priceValidation.maxPriceAgeBlocks)) {
+                    uint256 calculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.assetDecimals);
                     if (calculatedValue > 0) {
                         result.value = calculatedValue;
                         result.isValid = true;
                         result.reason = string(abi.encodePacked("Used cached price after error: ", reason));
                         result.usedFallback = true;
-                        result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp - cachedPrice.timestamp;
+                        result.updateBlock = cachedPrice.updateBlock;
+                        result.ageBlocks = (cachedPrice.updateBlock > 0 && cachedPrice.updateBlock <= block.number)
+                            ? (block.number - cachedPrice.updateBlock)
+                            : 0;
                         return result;
                     }
                 }
             }
             
-            // 使用降级策略
+            // Apply fallback strategy.
             return _applyFallbackStrategy(assetAddr, amountValue, string(abi.encodePacked("Price oracle error: ", reason)), config);
         } catch (bytes memory lowLevelData) {
-            // 处理低级错误（panic、自定义错误等）
+            // Handle low-level error (panic/custom error).
             string memory errorMessage = _decodeLowLevelError(lowLevelData);
             
             if (config.enablePriceCache) {
                 PriceCache memory cachedPrice = _getCachedPrice(assetAddr, cacheStorage);
-                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.timestamp, config.priceValidation.maxPriceAge)) {
-                    uint256 calculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.decimals);
+                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.updateBlock, config.priceValidation.maxPriceAgeBlocks)) {
+                    uint256 calculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.assetDecimals);
                     if (calculatedValue > 0) {
                         result.value = calculatedValue;
                         result.isValid = true;
                         result.reason = string(abi.encodePacked("Used cached price after low-level error: ", errorMessage));
                         result.usedFallback = true;
-                        result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp - cachedPrice.timestamp;
+                        result.updateBlock = cachedPrice.updateBlock;
+                        result.ageBlocks = (cachedPrice.updateBlock > 0 && cachedPrice.updateBlock <= block.number)
+                            ? (block.number - cachedPrice.updateBlock)
+                            : 0;
                         return result;
                     }
                 }
             }
             
-            // 使用降级策略
+            // Apply fallback strategy.
             return _applyFallbackStrategy(assetAddr, amountValue, string(abi.encodePacked("Price oracle low-level error: ", errorMessage)), config);
         }
     }
 
-    /// @notice 获取资产价值（带优雅降级）- 新版本（使用分离的配置）
-    /// @param priceOracleAddr 价格预言机地址
-    /// @param assetAddr 资产地址
-    /// @param amountValue 资产数量
-    /// @param globalConfig 全局配置
-    /// @param callConfig 调用上下文配置
-    /// @param cacheStorage 缓存存储（可选）
-    /// @return result 价格获取结果
+    /**
+     * @notice Get asset value with graceful degradation (new config split).
+     * @dev Reverts if:
+     *      - priceOracleAddr == address(0) (require with string "Invalid price oracle address")
+     *      - assetAddr == address(0) (require with string "Invalid asset address")
+     *      - amountValue == 0 (require with string "Amount must be greater than zero")
+     *
+     * Security:
+     * - View-only; cache storage is read-only
+     * - Best-effort: oracle failures return fallback values and set result.usedFallback = true
+     *
+     * @param priceOracleAddr Price oracle address.
+     * @param assetAddr Asset address.
+     * @param amountValue Asset amount (token decimals).
+     * @param globalConfig Global degradation config.
+     * @param callConfig Per-call overrides.
+     * @param cacheStorage Cache storage (read-only).
+     * @return result Price retrieval result (value units depend on oracle price precision).
+     */
     function getAssetValueWithFallbackNew(
         address priceOracleAddr,
         address assetAddr,
@@ -521,7 +560,7 @@ library GracefulDegradation {
         CallContextConfig memory callConfig,
         CacheStorage storage cacheStorage
     ) internal view returns (PriceResult memory result) {
-        // 验证输入参数
+        // Validate inputs.
         require(priceOracleAddr != address(0), "Invalid price oracle address");
         require(assetAddr != address(0), "Invalid asset address");
         require(amountValue > 0, "Amount must be greater than zero");
@@ -531,12 +570,12 @@ library GracefulDegradation {
             result.isValid = true;
             result.reason = "Zero amount";
             result.usedFallback = false;
-            result.timestamp = block.timestamp;
-            result.priceAge = 0;
+            result.updateBlock = 0;
+            result.ageBlocks = 0;
             return result;
         }
 
-        // 确定使用的配置
+        // Determine effective configuration.
         uint256 effectiveConservativeRatio = callConfig.customConservativeRatio > 0 
             ? callConfig.customConservativeRatio 
             : globalConfig.conservativeRatio;
@@ -545,35 +584,32 @@ library GracefulDegradation {
             ? callConfig.customPriceValidation
             : globalConfig.priceValidation;
 
-        // 尝试从价格预言机适配器获取价格
-        try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 timestamp, uint256 decimals) {
-            // 验证精度参数
-            if (!validateDecimals(decimals)) {
+        // Try the onchain oracle directly (staleness is enforced by the oracle contract).
+        try IPriceOracle(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 /* sourceTimestamp */, uint256 assetDecimals) {
+            // Validate decimals.
+            if (!validateDecimals(assetDecimals)) {
                 return _applyFallbackStrategyNew(assetAddr, amountValue, "Invalid decimals", globalConfig, effectiveConservativeRatio);
             }
 
-            // 验证资产精度合理性
-            if (!validateAssetDecimals(assetAddr, decimals)) {
+            // Validate asset decimals reasonableness.
+            if (!validateAssetDecimals(assetAddr, assetDecimals)) {
                 return _applyFallbackStrategyNew(assetAddr, amountValue, "Invalid asset decimals", globalConfig, effectiveConservativeRatio);
             }
 
-            // 验证价格有效性
+            // Validate price non-zero.
             if (price == 0) {
                 return _applyFallbackStrategyNew(assetAddr, amountValue, "Zero price", globalConfig, effectiveConservativeRatio);
             }
 
-            // 检查价格是否过期
-            uint256 priceAge = block.timestamp - timestamp;
-            if (priceAge > globalConfig.maxPriceAge) {
-                return _applyFallbackStrategyNew(assetAddr, amountValue, "Stale price", globalConfig, effectiveConservativeRatio);
-            }
+            uint256 updateBlock = _tryGetUpdateBlock(priceOracleAddr, assetAddr);
+            uint256 ageBlocks = (updateBlock > 0 && updateBlock <= block.number) ? (block.number - updateBlock) : 0;
 
-            // 验证价格合理性
+            // Validate price reasonableness.
             if (!validatePriceReasonableness(price, assetAddr, effectivePriceValidation, cacheStorage)) {
                 return _applyFallbackStrategyNew(assetAddr, amountValue, "Unreasonable price", globalConfig, effectiveConservativeRatio);
             }
 
-            // 验证稳定币价格（如果适用）
+            // Validate stablecoin price (if applicable).
             if (globalConfig.stablecoinConfig.enableDepegDetection && 
                 assetAddr == globalConfig.stablecoinConfig.stablecoin) {
                 if (!validateStablecoinPrice(assetAddr, globalConfig.stablecoinConfig.expectedPrice, globalConfig.stablecoinConfig.tolerance)) {
@@ -581,96 +617,106 @@ library GracefulDegradation {
                 }
             }
 
-            // 计算价值
-            uint256 calculatedValue = calculateAssetValue(amountValue, price, decimals);
+            // Compute value.
+            uint256 calculatedValue = calculateAssetValue(amountValue, price, assetDecimals);
             if (calculatedValue == 0) {
                 // Best-effort: allow 0 value (rounding) without reverting.
                 result.value = 0;
                 result.isValid = true;
                 result.reason = "Price calculation successful (rounded to zero)";
                 result.usedFallback = false;
-                result.timestamp = timestamp;
-                result.priceAge = priceAge;
+                result.updateBlock = updateBlock;
+                result.ageBlocks = ageBlocks;
                 return result;
             }
 
-            // 成功获取价格
+            // Successful price computation.
             result.value = calculatedValue;
             result.isValid = true;
             result.reason = "Price calculation successful";
             result.usedFallback = false;
-            result.timestamp = timestamp;
-            result.priceAge = priceAge;
+            result.updateBlock = updateBlock;
+            result.ageBlocks = ageBlocks;
 
         } catch Error(string memory reason) {
-            // 处理 revert 错误（带有错误信息）
+            // Handle revert with reason.
             if (globalConfig.enablePriceCache) {
                 PriceCache memory cachedPrice = _getCachedPrice(assetAddr, cacheStorage);
-                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.timestamp, globalConfig.maxPriceAge)) {
-                    uint256 calculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.decimals);
+                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.updateBlock, globalConfig.maxPriceAgeBlocks)) {
+                    uint256 calculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.assetDecimals);
                     if (calculatedValue > 0) {
                         result.value = calculatedValue;
                         result.isValid = true;
                         result.reason = string(abi.encodePacked("Used cached price after error: ", reason));
                         result.usedFallback = true;
-                        result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp - cachedPrice.timestamp;
+                        result.updateBlock = cachedPrice.updateBlock;
+                        result.ageBlocks = (cachedPrice.updateBlock > 0 && cachedPrice.updateBlock <= block.number)
+                            ? (block.number - cachedPrice.updateBlock)
+                            : 0;
                         return result;
                     }
                 }
             }
             
-            // 使用降级策略
+            // Apply fallback strategy.
             return _applyFallbackStrategyNew(assetAddr, amountValue, string(abi.encodePacked("Price oracle error: ", reason)), globalConfig, effectiveConservativeRatio);
         } catch (bytes memory lowLevelData) {
-            // 处理低级错误（panic、自定义错误等）
+            // Handle low-level error (panic/custom error).
             string memory errorMessage = _decodeLowLevelError(lowLevelData);
             
             if (globalConfig.enablePriceCache) {
                 PriceCache memory cachedPrice = _getCachedPrice(assetAddr, cacheStorage);
-                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.timestamp, globalConfig.maxPriceAge)) {
-                    uint256 calculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.decimals);
+                if (cachedPrice.isValid && !_isCacheExpired(cachedPrice.updateBlock, globalConfig.maxPriceAgeBlocks)) {
+                    uint256 calculatedValue = calculateAssetValue(amountValue, cachedPrice.price, cachedPrice.assetDecimals);
                     if (calculatedValue > 0) {
                         result.value = calculatedValue;
                         result.isValid = true;
                         result.reason = string(abi.encodePacked("Used cached price after low-level error: ", errorMessage));
                         result.usedFallback = true;
-                        result.timestamp = cachedPrice.timestamp;
-                        result.priceAge = block.timestamp - cachedPrice.timestamp;
+                        result.updateBlock = cachedPrice.updateBlock;
+                        result.ageBlocks = (cachedPrice.updateBlock > 0 && cachedPrice.updateBlock <= block.number)
+                            ? (block.number - cachedPrice.updateBlock)
+                            : 0;
                         return result;
                     }
                 }
             }
             
-            // 使用降级策略
+            // Apply fallback strategy.
             return _applyFallbackStrategyNew(assetAddr, amountValue, string(abi.encodePacked("Price oracle low-level error: ", errorMessage)), globalConfig, effectiveConservativeRatio);
         }
     }
 
-    /// @notice 检查价格预言机健康状态 - 修复版本
-    /// @param priceOracleAddr 价格预言机地址
-    /// @param assetAddr 资产地址
-    /// @param config 价格验证配置
-    /// @param cacheStorage 缓存存储（可选）
-    /// @return isHealthy 是否健康
-    /// @return details 详细信息
+    /**
+     * @notice Check price oracle health (config-aware).
+     * @dev Reverts if:
+     *      - (none; best-effort, oracle errors are caught and returned in details)
+     *
+     * Security:
+     * - View-only
+     * - Best-effort: returns (false, <reason>) on oracle failure
+     *
+     * @param priceOracleAddr Price oracle address.
+     * @param assetAddr Asset address.
+     * @param config Price validation config.
+     * @param cacheStorage Cache storage (read-only).
+     * @return isHealthy True if healthy, otherwise false.
+     * @return details Human-readable details (non-empty on failure).
+     */
     function checkPriceOracleHealth(
         address priceOracleAddr,
         address assetAddr,
         PriceValidationConfig memory config,
         CacheStorage storage cacheStorage
     ) internal view returns (bool isHealthy, string memory details) {
-        try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 timestamp, uint256 decimals) {
+        try IPriceOracle(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 /* sourceTimestamp */, uint256 assetDecimals) {
             if (price == 0) {
                 return (false, "Zero price returned");
-            }
-            if (block.timestamp - timestamp > config.maxPriceAge) {
-                return (false, "Stale price");
             }
             if (!validatePriceReasonableness(price, assetAddr, config, cacheStorage)) {
                 return (false, "Unreasonable price");
             }
-            if (!validateDecimals(decimals)) {
+            if (!validateDecimals(assetDecimals)) {
                 return (false, "Invalid decimals");
             }
             return (true, "Healthy");
@@ -682,31 +728,30 @@ library GracefulDegradation {
         }
     }
 
-    /// @notice 检查价格预言机健康状态（向后兼容版本）
-    /// @param priceOracleAddr 价格预言机地址
-    /// @param assetAddr 资产地址
-    /// @return isHealthy 是否健康
-    /// @return details 详细信息
+    /**
+     * @notice Check price oracle health (legacy overload).
+     * @dev Reverts if:
+     *      - (none; best-effort, oracle errors are caught and returned in details)
+     *
+     * Security:
+     * - View-only
+     * - Best-effort: returns (false, <reason>) on oracle failure
+     *
+     * @param priceOracleAddr Price oracle address.
+     * @param assetAddr Asset address.
+     * @return isHealthy True if healthy, otherwise false.
+     * @return details Human-readable details (non-empty on failure).
+     */
     function checkPriceOracleHealth(
         address priceOracleAddr,
         address assetAddr
     ) internal view returns (bool isHealthy, string memory details) {
-        // 使用默认配置进行健康检查
-        PriceValidationConfig memory defaultConfig = createPriceValidationConfig(
-            DEFAULT_MAX_PRICE_MULTIPLIER, // 150%
-            DEFAULT_MIN_PRICE_MULTIPLIER,  // 50%
-            DEFAULT_MAX_REASONABLE_PRICE   // 1e12
-        );
-        
-        // 对于向后兼容版本，我们使用一个简单的实现，不依赖缓存
-        try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 timestamp, uint256 decimals) {
+        // Legacy path: simple checks without cache use.
+        try IPriceOracle(priceOracleAddr).getPrice(assetAddr) returns (uint256 price, uint256 /* sourceTimestamp */, uint256 assetDecimals) {
             if (price == 0) {
                 return (false, "Zero price returned");
             }
-            if (block.timestamp - timestamp > defaultConfig.maxPriceAge) {
-                return (false, "Stale price");
-            }
-            if (!validateDecimals(decimals)) {
+            if (!validateDecimals(assetDecimals)) {
                 return (false, "Invalid decimals");
             }
             return (true, "Healthy");
@@ -718,20 +763,26 @@ library GracefulDegradation {
         }
     }
 
-    /* ============ 修复：新增安全函数 ============ */
+    /*━━━━━━━━━━━━━━━ Added Safety Helpers ━━━━━━━━━━━━━━━*/
 
-    /// @notice 验证精度参数（修复：增强精度验证）
-    /// @param decimalsValue 精度值
-    /// @return isValid 是否有效
-    /// @dev 最小精度为6，支持常见稳定币和主流加密货币
-    /// @dev 最大精度为18，符合ERC20标准
+    /**
+     * @notice Validate decimals range.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param decimalsValue Token decimals value.
+     * @return isValid True if within [MIN_DECIMALS, MAX_DECIMALS].
+     */
     function validateDecimals(uint256 decimalsValue) internal pure returns (bool isValid) {
-        // 检查最小精度（防止价格单位错乱）
+        // Enforce minimum decimals to avoid unit mismatch.
         if (decimalsValue < MIN_DECIMALS) {
             return false;
         }
         
-        // 检查最大精度（符合ERC20标准）
+        // Enforce maximum decimals (ERC-20 standard).
         if (decimalsValue > MAX_DECIMALS) {
             return false;
         }
@@ -739,11 +790,18 @@ library GracefulDegradation {
         return true;
     }
 
-    /// @notice 验证精度参数并返回详细错误信息
-    /// @param decimalsValue 精度值
-    /// @return isValid 是否有效
-    /// @return errorMessage 错误信息（如果无效）
-    /// @dev 提供详细的精度验证错误信息，便于调试
+    /**
+     * @notice Validate decimals and return error details.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param decimalsValue Token decimals value.
+     * @return isValid True if valid.
+     * @return errorMessage Error message if invalid; empty string on success.
+     */
     function validateDecimalsWithError(uint256 decimalsValue) internal pure returns (bool isValid, string memory errorMessage) {
         if (decimalsValue < MIN_DECIMALS) {
             return (false, string(abi.encodePacked("Decimals too low: ", _uint256ToString(decimalsValue), " (minimum: ", _uint256ToString(MIN_DECIMALS), ")")));
@@ -756,38 +814,48 @@ library GracefulDegradation {
         return (true, "");
     }
 
-    /// @notice 检查资产精度是否合理
-    /// @param assetAddr 资产地址
-    /// @param decimalsValue 精度值
-    /// @return isValid 是否合理
-    /// @dev 根据资产类型进行精度验证
+    /**
+     * @notice Validate asset decimals reasonableness.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param assetAddr Asset address (may be used for asset-specific rules).
+     * @param decimalsValue Token decimals value.
+     * @return isValid True if reasonable.
+     */
     function validateAssetDecimals(address assetAddr, uint256 decimalsValue) internal pure returns (bool isValid) {
-        // 基础精度验证
+        // Basic decimals validation.
         if (!validateDecimals(decimalsValue)) {
             return false;
         }
         
-        // 对于已知的稳定币，进行额外的精度验证
-        // 这里可以根据实际需要添加特定资产的精度检查
-        // 例如：USDC、USDT 应该是 6 位精度
+        // Optional: add asset-specific rules (e.g., stablecoins at 6 decimals).
         
-        // 验证资产地址不为零
+        // Ensure asset address is non-zero.
         if (assetAddr == address(0)) {
             return false;
         }
         
-        // 对于特定资产类型，进行额外的精度验证
-        // 这里可以添加已知资产的精度验证逻辑
-        // 例如：检查是否为已知的稳定币地址，验证其精度是否符合预期
+        // Optional: add asset-specific decimals validation (e.g., stablecoins).
         
         return true;
     }
 
-    /// @notice 安全的幂运算（使用 SafeMath）
-    /// @param base 底数
-    /// @param exponent 指数
-    /// @return result 结果
-    /// @dev 防止幂运算溢出
+    /**
+     * @notice Safe exponentiation with overflow guard.
+     * @dev Reverts if:
+     *      - exponent exceeds MAX_DECIMALS (require with string "Exponent too high for safe calculation")
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param base Base value.
+     * @param exponent Exponent.
+     * @return result Power result.
+     */
     function safePow(uint256 base, uint256 exponent) internal pure returns (uint256 result) {
         require(exponent <= MAX_DECIMALS, "Exponent too high for safe calculation");
         
@@ -812,29 +880,38 @@ library GracefulDegradation {
         return result;
     }
 
-    /// @notice 验证价格合理性（修复：动态价格验证）
-    /// @param currentPriceValue 当前价格
-    /// @param assetAddr 资产地址
-    /// @param config 价格验证配置
-    /// @param cacheStorage 缓存存储（可选）
-    /// @return isValid 是否合理
+    /**
+     * @notice Validate price reasonableness (dynamic checks).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     * - Best-effort: returns false if historical price is missing or out of range
+     *
+     * @param currentPriceValue Current price (oracle precision).
+     * @param assetAddr Asset address.
+     * @param config Price validation config.
+     * @param cacheStorage Cache storage (read-only).
+     * @return isValid True if reasonable.
+     */
     function validatePriceReasonableness(
         uint256 currentPriceValue,
         address assetAddr,
         PriceValidationConfig memory config,
         CacheStorage storage cacheStorage
     ) internal view returns (bool isValid) {
-        // 基础检查：价格不能为零
+        // Basic check: price must be non-zero.
         if (currentPriceValue == 0) {
             return false;
         }
 
-        // 检查最大合理价格（动态）
+        // Check max reasonable price.
         if (currentPriceValue > config.maxReasonablePrice) {
             return false;
         }
 
-        // 如果启用历史价格验证，进行历史价格对比
+        // Optionally validate against historical price.
         if (config.enableHistoricalValidation) {
             uint256 historicalPrice = getHistoricalPrice(assetAddr, cacheStorage);
             if (historicalPrice > 0) {
@@ -850,11 +927,20 @@ library GracefulDegradation {
         return true;
     }
 
-    /// @notice 安全计算资产价值（修复：增强精度验证和溢出检查）
-    /// @param amountValue 资产数量
-    /// @param priceValue 价格
-    /// @param decimalsValue 精度
-    /// @return calculatedValue 计算出的价值
+    /**
+     * @notice Safely compute asset value.
+     * @dev Reverts if:
+     *      - (none; returns 0 on invalid decimals or overflow guards)
+     *
+     * Security:
+     * - Pure function
+     * - Best-effort: returns 0 when decimals are invalid or scaling overflows
+     *
+     * @param amountValue Asset amount (token decimals).
+     * @param priceValue Price (oracle precision).
+     * @param decimalsValue Token decimals.
+     * @return calculatedValue Computed value (price precision * amount scaled by decimals).
+     */
     function calculateAssetValue(
         uint256 amountValue,
         uint256 priceValue,
@@ -869,91 +955,149 @@ library GracefulDegradation {
         return calculatedValue;
     }
 
-    /// @notice 验证稳定币价格（修复：稳定币面值假设）
-    /// @param stablecoinAddr 稳定币地址
-    /// @param expectedPriceValue 期望价格
-    /// @param toleranceValue 容忍度
-    /// @return isValid 是否有效
+    /**
+     * @notice Validate stablecoin price vs expected value.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param stablecoinAddr Stablecoin address.
+     * @param expectedPriceValue Expected price (oracle precision).
+     * @param toleranceValue Tolerance in bps (1e4 = 100%).
+     * @return isValid True if within tolerance.
+     */
     function validateStablecoinPrice(
         address stablecoinAddr,
         uint256 expectedPriceValue,
         uint256 toleranceValue
     ) internal pure returns (bool isValid) {
-        // 基础验证：期望价格不能为零
+        // Expected price must be non-zero.
         if (expectedPriceValue == 0) {
             return false;
         }
         
-        // 容忍度验证：容忍度不能超过100%
+        // Tolerance must not exceed 100%.
         if (toleranceValue > BASIS_POINT_100_PERCENT) {
             return false;
         }
         
-        // 获取稳定币实际价格
+        // Fetch actual stablecoin price.
         uint256 actualPrice = getStablecoinPrice(stablecoinAddr);
         
-        // 检查价格是否在容忍范围内
+        // Check price within tolerance bounds.
         uint256 minPrice = expectedPriceValue * (BASIS_POINT_100_PERCENT - toleranceValue) / BASIS_POINT_DIVISOR;
         uint256 maxPrice = expectedPriceValue * (BASIS_POINT_100_PERCENT + toleranceValue) / BASIS_POINT_DIVISOR;
         
         return actualPrice >= minPrice && actualPrice <= maxPrice;
     }
 
-    /// @notice 获取历史价格（改进实现）
-    /// @param assetAddr 资产地址
-    /// @param cacheStorage 缓存存储
-    /// @return historicalPrice 历史价格
+    /**
+     * @notice Get historical price from cache (best-effort).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     * - Best-effort: returns 0 if cache is missing or invalid
+     *
+     * @param assetAddr Asset address.
+     * @param cacheStorage Cache storage (read-only).
+     * @return historicalPrice Historical price (0 if unavailable).
+     */
     function getHistoricalPrice(address assetAddr, CacheStorage storage cacheStorage) internal view returns (uint256 historicalPrice) {
-        // 尝试从缓存获取历史价格
+        // Try to read historical price from cache.
         PriceCache memory cachedPrice = _getCachedPrice(assetAddr, cacheStorage);
         if (cachedPrice.isValid) {
             return cachedPrice.price;
         }
         
-        // 如果没有缓存，返回0（表示没有历史价格数据）
+        // No cache: return 0.
         return 0;
     }
 
-    /// @notice 获取稳定币价格（改进实现）
-    /// @param stablecoinAddr 稳定币地址
-    /// @return price 稳定币价格
+    /**
+     * @notice Get stablecoin price (placeholder).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     * - Placeholder: returns face value (1e18) and MUST NOT be used for production pricing
+     *
+     * @param stablecoinAddr Stablecoin address.
+     * @return price Stablecoin price (USD-18 face value).
+     */
     function getStablecoinPrice(address stablecoinAddr) internal pure returns (uint256 price) {
-        // 这里应该实现从价格预言机获取稳定币价格的逻辑
-        // 暂时返回1，表示面值
-        // 在实际实现中，应该调用价格预言机
-        // 使用 stablecoinAddr 参数避免未使用警告
+        // Placeholder: returns face value. Replace with oracle call in production.
         if (stablecoinAddr == address(0)) {
             return 0;
         }
-        return 1;
+        return ONE_USD;
     }
 
 
 
-    /// @notice 获取缓存价格
-    /// @param assetAddr 资产地址
-    /// @param cacheStorage 缓存存储
-    /// @return cachedPrice 缓存价格
+    /**
+     * @notice Get cached price.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param assetAddr Asset address.
+     * @param cacheStorage Cache storage (read-only).
+     * @return cachedPrice Cached price entry (isValid indicates usability).
+     */
     function _getCachedPrice(address assetAddr, CacheStorage storage cacheStorage) internal view returns (PriceCache memory cachedPrice) {
         return cacheStorage.priceCache[assetAddr];
     }
 
-    /// @notice 检查缓存是否过期
-    /// @param timestampValue 时间戳
-    /// @param maxAgeValue 最大年龄
-    /// @return isExpired 是否过期
-    function _isCacheExpired(uint256 timestampValue, uint256 maxAgeValue) internal view returns (bool isExpired) {
-        return block.timestamp - timestampValue > maxAgeValue;
+    /// @dev Best-effort read of the oracle's update block. Returns 0 on failure.
+    function _tryGetUpdateBlock(address priceOracleAddr, address assetAddr) internal view returns (uint256 updateBlock) {
+        try IPriceOracle(priceOracleAddr).getPriceUpdateBlock(assetAddr) returns (uint256 b) {
+            return b;
+        } catch {
+            return 0;
+        }
     }
 
-    /* ============ Internal Functions ============ */
+    /**
+     * @notice Check whether cache entry is expired.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param updateBlockValue Update block number.
+     * @param maxAgeBlocks Maximum age in blocks.
+     * @return isExpired True if expired.
+     */
+    function _isCacheExpired(uint256 updateBlockValue, uint256 maxAgeBlocks) internal view returns (bool isExpired) {
+        if (updateBlockValue == 0 || updateBlockValue > block.number) return true;
+        return (block.number - updateBlockValue) > maxAgeBlocks;
+    }
 
-    /// @notice 应用降级策略 - 修复版本
-    /// @param assetAddr 资产地址
-    /// @param amountValue 资产数量
-    /// @param reason 降级原因
-    /// @param config 降级配置
-    /// @return result 降级结果
+    /*━━━━━━━━━━━━━━━ Internal Functions ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Apply fallback strategy (legacy config).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     * - Best-effort: always returns a value, even on invalid inputs
+     *
+     * @param assetAddr Asset address.
+     * @param amountValue Asset amount (token decimals).
+     * @param reason Fallback reason.
+     * @param config Degradation config.
+     * @return result Fallback result (value may be conservative).
+     */
     function _applyFallbackStrategy(
         address assetAddr,
         uint256 amountValue,
@@ -962,43 +1106,52 @@ library GracefulDegradation {
     ) internal pure returns (PriceResult memory result) {
         uint256 fallbackValue = 0;
 
-        // 策略1：如果是稳定币，验证价格后使用面值（修复：添加稳定币价格验证）
+        // Strategy 1: stablecoin face value (optionally with depeg detection).
         if (config.useStablecoinFaceValue && assetAddr == config.settlementToken) {
-            // 验证稳定币价格
+            // Validate stablecoin price.
             if (config.stablecoinConfig.enableDepegDetection) {
                 if (validateStablecoinPrice(assetAddr, config.stablecoinConfig.expectedPrice, config.stablecoinConfig.tolerance)) {
                     fallbackValue = amountValue;
                 } else {
-                    // 稳定币脱锚，使用保守估值
+                    // Depeg detected: use conservative valuation.
                     fallbackValue = amountValue * config.conservativeRatio / BASIS_POINT_DIVISOR;
                 }
             } else {
-                // 不进行脱锚检测，直接使用面值
+                // No depeg detection: use face value.
                 fallbackValue = amountValue;
             }
         }
-        // 策略2：使用保守估值
+        // Strategy 2: conservative valuation.
         else {
-            fallbackValue = amountValue * config.conservativeRatio / BASIS_POINT_DIVISOR; // 基点计算
+            fallbackValue = amountValue * config.conservativeRatio / BASIS_POINT_DIVISOR; // Bps calculation.
         }
 
         result.value = fallbackValue;
         result.isValid = true;
         result.reason = reason;
         result.usedFallback = true;
-        result.timestamp = 0; // 在 pure 函数中不能使用 block.timestamp
-        result.priceAge = 0;
+        result.updateBlock = 0;
+        result.ageBlocks = 0;
 
         return result;
     }
 
-    /// @notice 应用降级策略 - 新版本（使用分离的配置）
-    /// @param assetAddr 资产地址
-    /// @param amountValue 资产数量
-    /// @param reason 降级原因
-    /// @param globalConfig 全局配置
-    /// @param conservativeRatio 保守估值比例
-    /// @return result 降级结果
+    /**
+     * @notice Apply fallback strategy (new config split).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     * - Best-effort: always returns a value, even on invalid inputs
+     *
+     * @param assetAddr Asset address.
+     * @param amountValue Asset amount (token decimals).
+     * @param reason Fallback reason.
+     * @param globalConfig Global config.
+     * @param conservativeRatio Conservative ratio (bps).
+     * @return result Fallback result (value may be conservative).
+     */
     function _applyFallbackStrategyNew(
         address assetAddr,
         uint256 amountValue,
@@ -1008,40 +1161,48 @@ library GracefulDegradation {
     ) internal pure returns (PriceResult memory result) {
         uint256 fallbackValue = 0;
 
-        // 策略1：如果是稳定币，使用面值
+        // Strategy 1: stablecoin face value.
         if (assetAddr == globalConfig.settlementToken) {
-            // 验证稳定币价格
+            // Validate stablecoin price.
             if (globalConfig.stablecoinConfig.enableDepegDetection) {
                 if (validateStablecoinPrice(assetAddr, globalConfig.stablecoinConfig.expectedPrice, globalConfig.stablecoinConfig.tolerance)) {
                     fallbackValue = amountValue;
                 } else {
-                    // 稳定币脱锚，使用保守估值
+                    // Depeg detected: use conservative valuation.
                     fallbackValue = amountValue * conservativeRatio / BASIS_POINT_DIVISOR;
                 }
             } else {
-                // 不进行脱锚检测，直接使用面值
+                // No depeg detection: use face value.
                 fallbackValue = amountValue;
             }
         }
-        // 策略2：使用保守估值
+        // Strategy 2: conservative valuation.
         else {
-            fallbackValue = amountValue * conservativeRatio / BASIS_POINT_DIVISOR; // 基点计算
+            fallbackValue = amountValue * conservativeRatio / BASIS_POINT_DIVISOR; // Bps calculation.
         }
 
         result.value = fallbackValue;
         result.isValid = true;
         result.reason = reason;
         result.usedFallback = true;
-        result.timestamp = 0; // 在 pure 函数中不能使用 block.timestamp
-        result.priceAge = 0;
+        result.updateBlock = 0;
+        result.ageBlocks = 0;
 
         return result;
     }
 
-    /// @notice 合并全局配置和调用上下文配置
-    /// @param globalConfig 全局配置
-    /// @param callConfig 调用上下文配置
-    /// @return mergedConfig 合并后的配置
+    /**
+     * @notice Merge global config with per-call overrides.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param globalConfig Global config.
+     * @param callConfig Per-call overrides.
+     * @return mergedConfig Merged config.
+     */
     function mergeConfigs(
         GlobalDegradationConfig memory globalConfig,
         CallContextConfig memory callConfig
@@ -1053,102 +1214,150 @@ library GracefulDegradation {
             : globalConfig.conservativeRatio;
         mergedConfig.useStablecoinFaceValue = callConfig.useStablecoinFaceValue;
         
-        // 合并价格验证配置
+        // Merge price validation config.
         if (callConfig.useCustomPriceValidation) {
             mergedConfig.priceValidation = callConfig.customPriceValidation;
         } else {
             mergedConfig.priceValidation = globalConfig.priceValidation;
         }
         
-        // 合并稳定币配置
+        // Merge stablecoin config.
         mergedConfig.stablecoinConfig = globalConfig.stablecoinConfig;
     }
 
-    /// @notice 验证全局配置的有效性
-    /// @param globalConfig 全局配置
-    /// @return isValid 是否有效
+    /**
+     * @notice Validate global config.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param globalConfig Global config.
+     * @return isValid True if valid.
+     */
     function validateGlobalConfig(GlobalDegradationConfig memory globalConfig) internal pure returns (bool isValid) {
         if (globalConfig.settlementToken == address(0)) return false;
         if (globalConfig.conservativeRatio == 0 || globalConfig.conservativeRatio > BASIS_POINT_100_PERCENT) return false;
-        if (globalConfig.maxPriceAge == 0) return false;
+        if (globalConfig.maxPriceAgeBlocks == 0) return false;
         return true;
     }
 
-    /// @notice 验证调用上下文配置的有效性
-    /// @param callConfig 调用上下文配置
-    /// @return isValid 是否有效
+    /**
+     * @notice Validate call-context config.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param callConfig Call-context config.
+     * @return isValid True if valid.
+     */
     function validateCallContextConfig(CallContextConfig memory callConfig) internal pure returns (bool isValid) {
         if (callConfig.customConservativeRatio > BASIS_POINT_100_PERCENT) return false;
         return true;
     }
 
-    /// @notice 创建默认全局降级配置（平台级别）
-    /// @param settlementTokenAddr 结算币地址
-    /// @return config 全局配置
+    /**
+     * @notice Create default global degradation config.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param settlementTokenAddr Settlement token address.
+     * @return config Global config.
+     */
     function createDefaultGlobalConfig(address settlementTokenAddr) internal pure returns (GlobalDegradationConfig memory config) {
         config.settlementToken = settlementTokenAddr;
-        config.enablePriceCache = false; // 默认禁用缓存写入
-        config.maxPriceAge = MAX_PRICE_AGE;
-        config.conservativeRatio = DEFAULT_CONSERVATIVE_RATIO; // 50%
+        config.enablePriceCache = false; // Default: cache writes disabled.
+        config.maxPriceAgeBlocks = MAX_PRICE_AGE_BLOCKS;
+        config.conservativeRatio = DEFAULT_CONSERVATIVE_RATIO; // 50%.
         
-        // 设置默认价格验证配置
-        config.priceValidation.maxPriceMultiplier = DEFAULT_MAX_PRICE_MULTIPLIER; // 150%
-        config.priceValidation.minPriceMultiplier = DEFAULT_MIN_PRICE_MULTIPLIER;  // 50%
-        config.priceValidation.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // 5分钟
-        config.priceValidation.maxPriceAge = MAX_PRICE_AGE;
-        config.priceValidation.maxReasonablePrice = DEFAULT_MAX_REASONABLE_PRICE; // 动态设置
-        config.priceValidation.enableHistoricalValidation = false; // 默认禁用
+        // Default price validation config.
+        config.priceValidation.maxPriceMultiplier = DEFAULT_MAX_PRICE_MULTIPLIER; // 150%.
+        config.priceValidation.minPriceMultiplier = DEFAULT_MIN_PRICE_MULTIPLIER;  // 50%.
+        config.priceValidation.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // ~5 minutes.
+        config.priceValidation.maxPriceAgeBlocks = MAX_PRICE_AGE_BLOCKS;
+        config.priceValidation.maxReasonablePrice = DEFAULT_MAX_REASONABLE_PRICE; // Default cap.
+        config.priceValidation.enableHistoricalValidation = false; // Disabled by default.
         
-        // 设置默认稳定币配置
+        // Default stablecoin config.
         config.stablecoinConfig.stablecoin = settlementTokenAddr;
-        config.stablecoinConfig.expectedPrice = ONE_USD; // 1 USD
+        config.stablecoinConfig.expectedPrice = ONE_USD; // 1 USD.
         config.stablecoinConfig.tolerance = STABLECOIN_TOLERANCE;
         config.stablecoinConfig.isWhitelisted = true;
-        config.stablecoinConfig.enableDepegDetection = true;
+        config.stablecoinConfig.enableDepegDetection = false;
     }
 
-    /// @notice 创建默认调用上下文配置（单次调用级别）
-    /// @return config 调用上下文配置
+    /**
+     * @notice Create default call-context config.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @return config Call-context config.
+     */
     function createDefaultCallContextConfig() internal pure returns (CallContextConfig memory config) {
         config.useStablecoinFaceValue = true;
-        config.enableHistoricalValidation = false; // 默认禁用历史验证
-        config.customConservativeRatio = 0; // 0表示使用全局设置
-        config.useCustomPriceValidation = false; // 默认使用全局价格验证
+        config.enableHistoricalValidation = false; // Disabled by default.
+        config.customConservativeRatio = 0; // 0 uses global settings.
+        config.useCustomPriceValidation = false; // Use global validation by default.
     }
 
-    /// @notice 创建默认降级配置 - 修复版本（向后兼容）
-    /// @param settlementTokenAddr 结算币地址
-    /// @return config 默认配置
+    /**
+     * @notice Create default degradation config (legacy).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param settlementTokenAddr Settlement token address.
+     * @return config Default config.
+     */
     function createDefaultConfig(address settlementTokenAddr) internal pure returns (DegradationConfig memory config) {
-        config.conservativeRatio = DEFAULT_CONSERVATIVE_RATIO; // 50%
+        config.conservativeRatio = DEFAULT_CONSERVATIVE_RATIO; // 50%.
         config.useStablecoinFaceValue = true;
-        config.enablePriceCache = false; // 默认禁用缓存写入，需要时使用 getAssetValueWithFallbackAndCache
+        config.enablePriceCache = false; // Default: cache writes disabled.
         config.settlementToken = settlementTokenAddr;
         
-        // 设置默认价格验证配置
-        config.priceValidation.maxPriceMultiplier = DEFAULT_MAX_PRICE_MULTIPLIER; // 150%
-        config.priceValidation.minPriceMultiplier = DEFAULT_MIN_PRICE_MULTIPLIER;  // 50%
-        config.priceValidation.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // 5分钟
-        config.priceValidation.maxPriceAge = MAX_PRICE_AGE;
-        config.priceValidation.maxReasonablePrice = DEFAULT_MAX_REASONABLE_PRICE; // 动态设置
-        config.priceValidation.enableHistoricalValidation = false; // 默认禁用
+        // Default price validation config.
+        config.priceValidation.maxPriceMultiplier = DEFAULT_MAX_PRICE_MULTIPLIER; // 150%.
+        config.priceValidation.minPriceMultiplier = DEFAULT_MIN_PRICE_MULTIPLIER;  // 50%.
+        config.priceValidation.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // ~5 minutes.
+        config.priceValidation.maxPriceAgeBlocks = MAX_PRICE_AGE_BLOCKS;
+        config.priceValidation.maxReasonablePrice = DEFAULT_MAX_REASONABLE_PRICE; // Default cap.
+        config.priceValidation.enableHistoricalValidation = false; // Disabled by default.
         
-        // 设置默认稳定币配置
+        // Default stablecoin config.
         config.stablecoinConfig.stablecoin = settlementTokenAddr;
-        config.stablecoinConfig.expectedPrice = ONE_USD; // 1 USD
+        config.stablecoinConfig.expectedPrice = ONE_USD; // 1 USD.
         config.stablecoinConfig.tolerance = STABLECOIN_TOLERANCE;
         config.stablecoinConfig.isWhitelisted = true;
-        config.stablecoinConfig.enableDepegDetection = true;
+        config.stablecoinConfig.enableDepegDetection = false;
         
-        // 设置默认重试配置
+        // Default retry config.
         config.retryConfig = createDefaultRetryConfig();
     }
 
-    /// @notice 创建价格验证配置
-    /// @param maxPriceMultiplierValue 最大价格倍数（基点）
-    /// @param minPriceMultiplierValue 最小价格倍数（基点）
-    /// @param maxReasonablePriceValue 最大合理价格
-    /// @return config 价格验证配置
+    /**
+     * @notice Create price validation config.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param maxPriceMultiplierValue Max price multiplier (bps).
+     * @param minPriceMultiplierValue Min price multiplier (bps).
+     * @param maxReasonablePriceValue Max reasonable price (oracle precision).
+     * @return config Price validation config.
+     */
     function createPriceValidationConfig(
         uint256 maxPriceMultiplierValue,
         uint256 minPriceMultiplierValue,
@@ -1156,17 +1365,25 @@ library GracefulDegradation {
     ) internal pure returns (PriceValidationConfig memory config) {
         config.maxPriceMultiplier = maxPriceMultiplierValue;
         config.minPriceMultiplier = minPriceMultiplierValue;
-        config.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // 5分钟
-        config.maxPriceAge = MAX_PRICE_AGE;
+        config.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // ~5 minutes.
+        config.maxPriceAgeBlocks = MAX_PRICE_AGE_BLOCKS;
         config.maxReasonablePrice = maxReasonablePriceValue;
-        config.enableHistoricalValidation = false; // 默认禁用
+        config.enableHistoricalValidation = false; // Disabled by default.
     }
 
-    /// @notice 创建稳定币配置
-    /// @param stablecoinAddr 稳定币地址
-    /// @param expectedPriceValue 期望价格
-    /// @param toleranceValue 容忍度（基点）
-    /// @return config 稳定币配置
+    /**
+     * @notice Create stablecoin config.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param stablecoinAddr Stablecoin address.
+     * @param expectedPriceValue Expected price (oracle precision).
+     * @param toleranceValue Tolerance (bps).
+     * @return config Stablecoin config.
+     */
     function createStablecoinConfig(
         address stablecoinAddr,
         uint256 expectedPriceValue,
@@ -1179,70 +1396,119 @@ library GracefulDegradation {
         config.enableDepegDetection = true;
     }
 
-    /// @notice 清除价格缓存
-    /// @param assetAddr 资产地址
-    /// @param cacheStorage 缓存存储
+    /**
+     * @notice Clear price cache for an asset.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Writes cache storage
+     *
+     * @param assetAddr Asset address.
+     * @param cacheStorage Cache storage (writes enabled).
+     */
     function clearPriceCache(address assetAddr, CacheStorage storage cacheStorage) internal {
         delete cacheStorage.priceCache[assetAddr];
     }
 
-    /// @notice 检查缓存是否存在且有效
-    /// @param assetAddr 资产地址
-    /// @param cacheStorage 缓存存储
-    /// @return exists 是否存在有效缓存
+    /**
+     * @notice Check whether a valid cache entry exists.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param assetAddr Asset address.
+     * @param cacheStorage Cache storage (read-only).
+     * @return exists True if valid cache exists.
+     */
     function hasValidCache(address assetAddr, CacheStorage storage cacheStorage) internal view returns (bool exists) {
         PriceCache memory cachedPrice = _getCachedPrice(assetAddr, cacheStorage);
-        return cachedPrice.isValid && !_isCacheExpired(cachedPrice.timestamp, MAX_PRICE_AGE);
+        return cachedPrice.isValid && !_isCacheExpired(cachedPrice.updateBlock, MAX_PRICE_AGE_BLOCKS);
     }
 
-    /// @notice 获取缓存价格信息
-    /// @param assetAddr 资产地址
-    /// @param cacheStorage 缓存存储
-    /// @return price 价格
-    /// @return timestamp 时间戳
-    /// @return decimals 精度
-    /// @return isValid 是否有效
+    /**
+     * @notice Get cached price info.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param assetAddr Asset address.
+     * @param cacheStorage Cache storage (read-only).
+     * @return price Cached price (oracle precision).
+     * @return updateBlock Update block number (block.number).
+     * @return assetDecimals Asset decimals (for valuation scaling).
+     * @return isValid Whether cache entry is valid.
+     */
     function getCachedPriceInfo(
-        address assetAddr, 
+        address assetAddr,
         CacheStorage storage cacheStorage
-    ) internal view returns (uint256 price, uint256 timestamp, uint256 decimals, bool isValid) {
+    ) internal view returns (uint256 price, uint256 updateBlock, uint256 assetDecimals, bool isValid) {
         PriceCache memory cachedPrice = _getCachedPrice(assetAddr, cacheStorage);
-        return (cachedPrice.price, cachedPrice.timestamp, cachedPrice.decimals, cachedPrice.isValid);
+        return (cachedPrice.price, cachedPrice.updateBlock, cachedPrice.assetDecimals, cachedPrice.isValid);
     }
 
-    /// @notice 获取 nonce（用于重放保护）
-    /// @param signerAddr 签名者地址
-    /// @param cacheStorage 缓存存储
-    /// @return nonce 当前 nonce
+    /**
+     * @notice Get nonce (replay protection).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only
+     *
+     * @param signerAddr Signer address.
+     * @param cacheStorage Cache storage (read-only).
+     * @return nonce Current nonce.
+     */
     function _getNonce(address signerAddr, CacheStorage storage cacheStorage) internal view returns (uint256 nonce) {
         return cacheStorage.nonces[signerAddr];
     }
 
-    /// @notice 增加 nonce（用于重放保护）
-    /// @param signerAddr 签名者地址
-    /// @param cacheStorage 缓存存储
+    /**
+     * @notice Increment nonce (replay protection).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Writes cache storage
+     *
+     * @param signerAddr Signer address.
+     * @param cacheStorage Cache storage (writes enabled).
+     */
     function _incrementNonce(address signerAddr, CacheStorage storage cacheStorage) internal {
         cacheStorage.nonces[signerAddr]++;
     }
 
-    /// @notice 解码低级错误数据
-    /// @param lowLevelData 低级错误数据
-    /// @return errorMessage 解码后的错误信息
+    /**
+     * @notice Decode low-level error data into a string.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     * - Best-effort: returns a hex-encoded string if decoding fails
+     *
+     * @param lowLevelData Low-level error data.
+     * @return errorMessage Decoded error message.
+     */
     function _decodeLowLevelError(bytes memory lowLevelData) internal pure returns (string memory errorMessage) {
         if (lowLevelData.length == 0) {
             return "Unknown low-level error";
         }
         
-        // 检查是否是 panic 错误（前4字节是 panic 选择器）
+        // Check for panic selector.
         if (lowLevelData.length >= 4) {
-            bytes4 panicSelector = bytes4(0x4e487b71); // panic(uint256) 选择器
+            bytes4 panicSelector = bytes4(0x4e487b71); // panic(uint256) selector.
             bytes4 dataSelector;
             assembly {
                 dataSelector := mload(add(lowLevelData, 4))
             }
             
             if (dataSelector == panicSelector && lowLevelData.length >= 36) {
-                // 解码 panic 错误码
+                // Decode panic code.
                 uint256 panicCode;
                 assembly {
                     panicCode := mload(add(lowLevelData, 36))
@@ -1251,16 +1517,16 @@ library GracefulDegradation {
             }
         }
         
-        // 尝试解码为字符串错误
+        // Attempt to decode Error(string).
         if (lowLevelData.length >= 4) {
-            bytes4 errorSelector = bytes4(0x08c379a0); // Error(string) 选择器
+            bytes4 errorSelector = bytes4(0x08c379a0); // Error(string) selector.
             bytes4 dataSelector;
             assembly {
                 dataSelector := mload(add(lowLevelData, 4))
             }
             
             if (dataSelector == errorSelector && lowLevelData.length >= 68) {
-                // 解码字符串错误
+                // Decode string error.
                 uint256 stringLength;
                 assembly {
                     stringLength := mload(add(lowLevelData, 36))
@@ -1276,13 +1542,21 @@ library GracefulDegradation {
             }
         }
         
-        // 如果无法解码，返回十六进制数据
+        // Fallback: return hex-encoded data.
         return string(abi.encodePacked("Low-level error: 0x", _bytesToHex(lowLevelData)));
     }
 
-    /// @notice 获取 panic 错误描述
-    /// @param panicCode panic 错误码
-    /// @return description 错误描述
+    /**
+     * @notice Get panic error description.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param panicCode Panic code.
+     * @return description Human-readable description.
+     */
     function _getPanicDescription(uint256 panicCode) internal pure returns (string memory description) {
         if (panicCode == 0x00) return "Generic panic";
         if (panicCode == 0x01) return "Assertion failed";
@@ -1297,9 +1571,17 @@ library GracefulDegradation {
         return string(abi.encodePacked("Unknown panic code: ", _uint256ToString(panicCode)));
     }
 
-    /// @notice 将字节数组转换为十六进制字符串
-    /// @param data 字节数组
-    /// @return hexString 十六进制字符串
+    /**
+     * @notice Convert bytes to hex string.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param data Byte array.
+     * @return hexString Hex string.
+     */
     function _bytesToHex(bytes memory data) internal pure returns (string memory hexString) {
         bytes memory hexChars = "0123456789abcdef";
         bytes memory result = new bytes(data.length * 2);
@@ -1312,9 +1594,17 @@ library GracefulDegradation {
         return string(result);
     }
 
-    /// @notice 将 uint256 转换为字符串
-    /// @param value uint256 值
-    /// @return stringValue 字符串值
+    /**
+     * @notice Convert uint256 to string.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param value uint256 value.
+     * @return stringValue String value.
+     */
     function _uint256ToString(uint256 value) internal pure returns (string memory stringValue) {
         if (value == 0) {
             return "0";
@@ -1337,32 +1627,47 @@ library GracefulDegradation {
         return string(buffer);
     }
 
-    /// @notice 缓存价格（仅用于 non-view 函数）
-    /// @dev 此函数只能在 non-view 函数中调用，用于写入缓存
-    /// @param assetAddr 资产地址
-    /// @param priceValue 价格
-    /// @param timestampValue 时间戳
-    /// @param decimalsValue 精度
-    /// @param cacheStorage 缓存存储
+    /**
+     * @notice Cache price (non-view only).
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Writes cache storage
+     *
+     * @param assetAddr Asset address.
+     * @param priceValue Price value (oracle precision).
+     * @param updateBlockValue Update block number.
+     * @param decimalsValue Asset decimals.
+     * @param cacheStorage Cache storage (writes enabled).
+     */
     function cachePrice(
         address assetAddr,
         uint256 priceValue,
-        uint256 timestampValue,
+        uint256 updateBlockValue,
         uint256 decimalsValue,
         CacheStorage storage cacheStorage
     ) internal {
         cacheStorage.priceCache[assetAddr] = PriceCache({
             price: priceValue,
-            timestamp: timestampValue,
-            decimals: decimalsValue,
+            updateBlock: updateBlockValue,
+            assetDecimals: decimalsValue,
             isValid: true
         });
     }
 
-    /* ============ 重试机制函数 ============ */
+    /*━━━━━━━━━━━━━━━ Retry Helpers ━━━━━━━━━━━━━━━*/
 
-    /// @notice 创建默认重试配置
-    /// @return config 默认重试配置
+    /**
+     * @notice Create default retry config.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @return config Default retry config.
+     */
     function createDefaultRetryConfig() internal pure returns (RetryConfig memory config) {
         return RetryConfig({
             enableRetry: true,
@@ -1374,16 +1679,24 @@ library GracefulDegradation {
         });
     }
 
-    /// @notice 检查是否应该重试
-    /// @param errorReason 错误原因
-    /// @param retryConfig 重试配置
-    /// @return shouldRetry 是否应该重试
+    /**
+     * @notice Check whether retry should be attempted.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param errorReason Error reason string.
+     * @param retryConfig Retry config.
+     * @return shouldRetry True if retry should be attempted.
+     */
     function _shouldRetry(string memory errorReason, RetryConfig memory retryConfig) internal pure returns (bool shouldRetry) {
         if (!retryConfig.enableRetry) {
             return false;
         }
         
-        // 检查是否是网络相关错误
+        // Network-related error checks.
         if (retryConfig.retryOnNetworkError) {
             if (_containsString(errorReason, "network") || 
                 _containsString(errorReason, "timeout") ||
@@ -1393,7 +1706,7 @@ library GracefulDegradation {
             }
         }
         
-        // 检查是否是超时错误
+        // Timeout-related error checks.
         if (retryConfig.retryOnTimeout) {
             if (_containsString(errorReason, "timeout") ||
                 _containsString(errorReason, "gas") ||
@@ -1405,10 +1718,18 @@ library GracefulDegradation {
         return false;
     }
 
-    /// @notice 检查字符串是否包含子字符串
-    /// @param source 源字符串
-    /// @param search 搜索字符串
-    /// @return contains 是否包含
+    /**
+     * @notice Check whether a string contains a substring.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure function
+     *
+     * @param source Source string.
+     * @param search Search substring.
+     * @return contains True if contains.
+     */
     function _containsString(string memory source, string memory search) internal pure returns (bool contains) {
         bytes memory sourceBytes = bytes(source);
         bytes memory searchBytes = bytes(search);
@@ -1433,44 +1754,52 @@ library GracefulDegradation {
         return false;
     }
 
-    /// @notice 带重试的价格获取函数
-    /// @param priceOracleAddr 价格预言机地址
-    /// @param assetAddr 资产地址
-    /// @param retryConfig 重试配置
-    /// @return price 价格
-    /// @return timestamp 时间戳
-    /// @return decimals 精度
-    /// @return success 是否成功
-    /// @return errorReason 错误原因
+    /**
+     * @notice Fetch price with retry logic.
+     * @dev Reverts if:
+     *      - (none; returns success=false on failure)
+     *
+     * Security:
+     * - View-only
+     * - Best-effort: does not bubble oracle errors; returns success=false and errorReason
+     *
+     * @param priceOracleAddr Price oracle address.
+     * @param assetAddr Asset address.
+     * @param retryConfig Retry config.
+     * @return price Price value (oracle precision).
+     * @return sourceTimestamp Source blockNumber (informational).
+     * @return assetDecimals Asset decimals (for valuation scaling).
+     * @return success True if successful.
+     * @return errorReason Error reason string.
+     */
     function _getPriceWithRetry(
         address priceOracleAddr,
         address assetAddr,
         RetryConfig memory retryConfig
     ) internal view returns (
         uint256 price,
-        uint256 timestamp,
-        uint256 decimals,
+        uint256 sourceTimestamp,
+        uint256 assetDecimals,
         bool success,
         string memory errorReason
     ) {
         uint256 retryCount = 0;
         
         while (retryCount <= retryConfig.maxRetryCount) {
-            // 检查 gas 限制
+            // Enforce gas guard.
             if (gasleft() < retryConfig.maxGasLimit) {
                 return (0, 0, 0, false, "Insufficient gas for retry");
             }
             
-            try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 p, uint256 ts, uint256 dec) {
-                return (p, ts, dec, true, "");
+            try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 p, uint256 ts, uint256 dAsset) {
+                return (p, ts, dAsset, true, "");
             } catch Error(string memory reason) {
                 errorReason = reason;
                 
-                // 检查是否应该重试
+                // Check whether to retry.
                 if (retryCount < retryConfig.maxRetryCount && _shouldRetry(reason, retryConfig)) {
                     retryCount++;
-                    // 在实际实现中，这里可以添加延迟逻辑
-                    // 但由于是 view 函数，我们只能立即重试
+                    // Note: view function cannot delay; retries happen immediately.
                     continue;
                 }
                 
@@ -1479,7 +1808,7 @@ library GracefulDegradation {
                 string memory decodedError = _decodeLowLevelError(lowLevelData);
                 errorReason = decodedError;
                 
-                // 检查是否应该重试
+                // Check whether to retry.
                 if (retryCount < retryConfig.maxRetryCount && _shouldRetry(decodedError, retryConfig)) {
                     retryCount++;
                     continue;

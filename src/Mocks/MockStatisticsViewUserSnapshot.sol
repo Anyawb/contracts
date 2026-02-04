@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import { ViewConstants } from "../Vault/view/ViewConstants.sol";
+
 /// @title MockStatisticsViewUserSnapshot
 /// @notice Minimal StatisticsView-like mock for UserView unit tests.
 contract MockStatisticsViewUserSnapshot {
@@ -9,7 +11,7 @@ contract MockStatisticsViewUserSnapshot {
         uint256 debt;
         uint256 ltv;
         uint256 healthFactor;
-        uint256 timestamp;
+        uint256 blockNumber;
         bool isActive;
     }
 
@@ -22,7 +24,7 @@ contract MockStatisticsViewUserSnapshot {
         uint256 debt,
         uint256 ltv,
         uint256 healthFactor,
-        uint256 timestamp,
+        uint256 blockNumber,
         bool isActive,
         uint64 version_
     ) external {
@@ -31,28 +33,28 @@ contract MockStatisticsViewUserSnapshot {
             debt: debt,
             ltv: ltv,
             healthFactor: healthFactor,
-            timestamp: timestamp,
+            blockNumber: blockNumber,
             isActive: isActive
         });
         _version[user] = version_;
     }
 
-    function getUserSnapshot(address user) external view returns (UserSnapshot memory s) {
-        return _snap[user];
-    }
-
     function getUserSnapshotWithMeta(address user)
         external
         view
-        returns (UserSnapshot memory s, uint64 version, uint64 seq, bytes32 lastAppliedRequestId, bool isValid, uint256 timestamp)
+        returns (UserSnapshot memory s, uint64 version, uint64 seq, bytes32 lastAppliedRequestId, bool isValid, uint256 blockNumber)
     {
         s = _snap[user];
         version = _version[user];
         seq = 0;
         lastAppliedRequestId = bytes32(0);
-        timestamp = s.timestamp;
-        // Align with ViewConstants.CACHE_DURATION (5 minutes)
-        isValid = timestamp > 0 && block.timestamp - timestamp <= 5 minutes;
+        blockNumber = s.blockNumber;
+        // Align with ViewConstants.CACHE_DURATION_BLOCKS.
+        if (blockNumber == 0 || blockNumber > block.number) {
+            isValid = false;
+        } else {
+            isValid = block.number - blockNumber <= ViewConstants.CACHE_DURATION_BLOCKS;
+        }
     }
 }
 

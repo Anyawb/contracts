@@ -165,6 +165,8 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     SystemView: 'SYSTEM_VIEW',
     // Canonical Registry key for StatisticsView (ModuleKeys.KEY_STATS)
     StatisticsView: 'VAULT_STATISTICS',
+    // Strict B+ (snapshot + single-entry orchestrator)
+    StatisticsPushManager: 'STATISTICS_PUSH_MANAGER',
     PositionView: 'POSITION_VIEW',
     PreviewView: 'PREVIEW_VIEW',
     DashboardView: 'DASHBOARD_VIEW',
@@ -173,6 +175,7 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     AccessControlView: 'ACCESS_CONTROL_VIEW',
     CacheOptimizedView: 'CACHE_OPTIMIZED_VIEW',
     RiskView: 'RISK_VIEW',
+    SystemRiskView: 'SYSTEM_RISK_VIEW',
     ViewCache: 'VIEW_CACHE',
     EventHistoryManager: 'EVENT_HISTORY_MANAGER',
     RewardView: 'REWARD_VIEW',
@@ -228,6 +231,7 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     'HealthView',
     'SystemView',
     'StatisticsView',
+    'StatisticsPushManager',
     'PositionView',
     'PreviewView',
     'DashboardView',
@@ -236,6 +240,7 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     'AccessControlView',
     'CacheOptimizedView',
     'RiskView',
+    'SystemRiskView',
     'ViewCache',
     'EventHistoryManager',
     'RewardPoints',
@@ -417,8 +422,8 @@ async function main() {
   // Keep deploy/init side-effects grouped. Do NOT rely on full Registry key bindings here (that's Phase B).
   const phaseADeployAndInit = async () => {
     // 1) 部署 Registry（Scheme A：单一入口，Registry 本身提供 setModule）
-    // 建议最小延迟 1 小时（本地可设为 1 分钟方便调试）
-    const MIN_DELAY = 60; // seconds (local dev)
+    // 建议最小延迟 1 小时（本地可设为 ~60 blocks 方便调试）
+    const MIN_DELAY_BLOCKS = 60; // blocks (local dev)
 
     await deployRegistryStack({
       ethers,
@@ -426,7 +431,7 @@ async function main() {
       save,
       deployProxy,
       config: {
-        minDelaySeconds: MIN_DELAY,
+        minDelayBlocks: MIN_DELAY_BLOCKS,
         initialOwner: deployer.address,
         upgradeAdmin: deployer.address,
         emergencyAdmin: deployer.address,
@@ -488,6 +493,8 @@ async function main() {
       'ACTION_ADMIN',
       // 本地可配置参数（用于 setTestingMode / StatisticsView.pushUserStatsUpdate 等）
       'SET_PARAMETER',
+      // 运维/重试入口（Strict B+）
+      'ACTION_VIEW_PUSH',
       // 读权限（全量覆盖）
       'VIEW_SYSTEM_DATA',
       'VIEW_USER_DATA',
@@ -547,8 +554,10 @@ async function main() {
 
   // 代币（Settlement）
   if (!deployed.MockUSDC) {
-    const billion = ethers.parseUnits('1000000000', 18);
-    deployed.MockUSDC = await deployRegular('MockERC20', 'USDC', 'USDC', billion);
+    // SSOT (Architecture-Guide): use a USDC-like token with 6 decimals on localhost.
+    const usdcDecimals = 6;
+    const billion = ethers.parseUnits('1000000000', usdcDecimals);
+    deployed.MockUSDC = await deployRegular('MockERC20', 'USDC', 'USDC', usdcDecimals, billion);
     save(deployed);
   }
 
@@ -764,13 +773,52 @@ async function main() {
   if (!deployed.StatisticsView) {
     try { deployed.StatisticsView = await deployProxy('StatisticsView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ StatisticsView deployment failed:', error); }
   }
+
+  // Strict B+ (snapshot + single-entry orchestrator): StatisticsPushManager
+  if (!deployed.StatisticsPushManager) {
+    try {
+      deployed.StatisticsPushManager = await deployProxy(
+        'src/Vault/modules/StatisticsPushManager.sol:StatisticsPushManager',
+        [deployed.Registry]
+      );
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ StatisticsPushManager deployment failed:', error);
+    }
+  }
+
+  // Grant required read roles to StatisticsPushManager (strict B+ snapshot orchestrator).
+  // - VIEW_PRICE_DATA: needed to read PositionView USD-8 valuations.
+  // - VIEW_SYSTEM_DATA: kept for backward compatibility with older helpers/scripts (not strictly required by Scheme B).
+  try {
+    if (deployed.StatisticsPushManager && deployed.AccessControlManager) {
+      const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+      const VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+      const VIEW_PRICE_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_PRICE_DATA'));
+      const already = await acm.hasRole(VIEW_SYSTEM_DATA, deployed.StatisticsPushManager);
+      if (!already) {
+        await (await acm.grantRole(VIEW_SYSTEM_DATA, deployed.StatisticsPushManager)).wait();
+        console.log('🔑 Granted VIEW_SYSTEM_DATA to StatisticsPushManager');
+      } else {
+        console.log('✅ StatisticsPushManager has VIEW_SYSTEM_DATA (verified)');
+      }
+
+      const alreadyPrice = await acm.hasRole(VIEW_PRICE_DATA, deployed.StatisticsPushManager);
+      if (!alreadyPrice) {
+        await (await acm.grantRole(VIEW_PRICE_DATA, deployed.StatisticsPushManager)).wait();
+        console.log('🔑 Granted VIEW_PRICE_DATA to StatisticsPushManager');
+      } else {
+        console.log('✅ StatisticsPushManager has VIEW_PRICE_DATA (verified)');
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Grant roles to StatisticsPushManager skipped/failed:', e);
+  }
   if (!deployed.PositionView) {
     try {
-      // 部署但不执行 initialize，避免 Registry 模块尚未注册导致 _refreshModuleCache 失败
       deployed.PositionView = await deployProxy(
         'src/Vault/view/modules/PositionView.sol:PositionView',
-        [],
-        { initializer: false }
+        [deployed.Registry]
       );
       save(deployed);
     } catch (error) { console.log('⚠️ PositionView deployment failed:', error); }
@@ -800,6 +848,14 @@ async function main() {
   }
   if (!deployed.RiskView) {
     try { deployed.RiskView = await deployProxy('RiskView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RiskView deployment failed:', error); }
+  }
+  if (!deployed.SystemRiskView) {
+    try {
+      deployed.SystemRiskView = await deployProxy('SystemRiskView', [deployed.Registry]);
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ SystemRiskView deployment failed:', error);
+    }
   }
   if (!deployed.ViewCache) {
     try { deployed.ViewCache = await deployProxy('ViewCache', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ ViewCache deployment failed:', error); }
@@ -883,8 +939,8 @@ async function main() {
   try {
     const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
     const grants: Array<{ role: string; to?: string; label: string }> = [
-      // BatchView calls HealthView/RiskView/ValuationOracleView-like sources
-      { role: 'VIEW_RISK_DATA', to: deployed.BatchView, label: 'BatchView' },
+      // BatchView calls HealthView (public) / RiskView (Scheme U) / ValuationOracleView
+      { role: 'VIEW_USER_DATA', to: deployed.BatchView, label: 'BatchView' },
       { role: 'VIEW_PRICE_DATA', to: deployed.BatchView, label: 'BatchView' },
       { role: 'ACTION_VIEW_SYSTEM_STATUS', to: deployed.BatchView, label: 'BatchView' },
 
@@ -902,11 +958,16 @@ async function main() {
       { role: 'VIEW_RISK_DATA', to: deployed.UserView, label: 'UserView' },
       { role: 'VIEW_SYSTEM_DATA', to: deployed.UserView, label: 'UserView' },
 
-      // RiskView internally calls HealthView + PositionView valuation
-      { role: 'VIEW_RISK_DATA', to: deployed.RiskView, label: 'RiskView' },
+      // RiskView internally calls PositionView valuation (Scheme U)
+      { role: 'VIEW_USER_DATA', to: deployed.RiskView, label: 'RiskView' },
 
       // PreviewView internally calls PositionView for user positions
       { role: 'VIEW_USER_DATA', to: deployed.PreviewView, label: 'PreviewView' },
+      // PreviewView also calls SystemRiskView (minHF/maxLTV) for previews.
+      { role: 'VIEW_RISK_DATA', to: deployed.PreviewView, label: 'PreviewView' },
+
+      // HealthView calls SystemRiskView (minHealthFactor) during best-effort liquidation checks.
+      { role: 'VIEW_RISK_DATA', to: deployed.HealthView, label: 'HealthView' },
 
       // LendingEngineView calls ORDER_ENGINE view-adapter methods (order/user data + ops diagnostics)
       { role: 'VIEW_USER_DATA', to: deployed.LendingEngineView, label: 'LendingEngineView' },
@@ -923,6 +984,18 @@ async function main() {
       if (already) continue;
       await (await acm.grantRole(role, g.to)).wait();
       console.log(`🔑 Granted ${g.role} to ${g.label}`);
+    }
+
+    // Explicit verification: PreviewView must be granted VIEW_USER_DATA to call PositionView internally.
+    if (deployed.PreviewView) {
+      const VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
+      const ok = await acm.hasRole(VIEW_USER_DATA, deployed.PreviewView);
+      if (!ok) {
+        await (await acm.grantRole(VIEW_USER_DATA, deployed.PreviewView)).wait();
+        console.log('🔑 Granted VIEW_USER_DATA to PreviewView (explicit verification)');
+      } else {
+        console.log('✅ PreviewView has VIEW_USER_DATA (verified)');
+      }
     }
   } catch (e) {
     console.log('⚠️ Grant view roles to aggregator/view modules skipped/failed:', e);
@@ -1174,7 +1247,7 @@ async function main() {
     console.log('⚠️ Grant ACTION_LIQUIDATE to SettlementManager skipped/failed:', e);
   }
 
-  // 2.99.1.2) 授权 SettlementManager 执行订单级还款与只读查询（ORDER_ENGINE.repay / _getLoanOrderForView）
+  // 2.99.1.2) 授权 SettlementManager 执行订单级还款与只读查询（ORDER_ENGINE.repay / getLoanOrderForView）
   try {
     if (deployed.AccessControlManager && deployed.SettlementManager) {
       const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);

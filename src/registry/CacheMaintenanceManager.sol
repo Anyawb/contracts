@@ -78,7 +78,6 @@ contract CacheMaintenanceManager {
     event CacheRefreshBatchCompleted(uint256 total, uint256 okCount, uint256 failedCount);
 
     /// @notice Registry address (authoritative module registry).
-    // solhint-disable-next-line immutable-vars-naming
     address private immutable _registryAddr;
 
     /**

@@ -10,8 +10,14 @@ import { IVaultAdmin } from "./IVaultAdmin.sol";
  * @notice Convenience aggregate interface for Vault modules.
  * @dev This interface is a compile-time/type-generation convenience only.
  *      Implementations SHOULD NOT rely on this as an architectural coupling point.
+ *
+ * Reverts if:
+ * - (none)
+ *
+ * Security:
+ * - Read-only type aggregation; no stateful behavior.
  */
 // solhint-disable-next-line no-empty-blocks
 interface IVaultModules is IVaultCore, IVaultRouter, IVaultAdmin {
     // Inherits all functions from the sub-interfaces.
-} 
+}

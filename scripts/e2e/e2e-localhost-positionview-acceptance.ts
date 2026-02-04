@@ -6,6 +6,8 @@ function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
+const BLOCKS_PER_MINUTE = 30n;
+
 function fmtErr(e: any) {
   return e?.shortMessage ?? e?.message ?? String(e);
 }
@@ -16,6 +18,20 @@ function assertOk(cond: unknown, msg: string): asserts cond {
 
 function isMissingSelectorError(msg: string): boolean {
   return String(msg).includes("function selector was not recognized");
+}
+
+async function mustSucceed<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e: any) {
+    const msg = fmtErr(e);
+    if (isMissingSelectorError(String(msg))) {
+      throw new Error(
+        `[FAIL] ${label}: missing function selector on-chain (deployment/ABI mismatch). Re-run compile + deploy:localhost.`
+      );
+    }
+    throw e;
+  }
 }
 
 function extractRevertDataHex(e: any): string {
@@ -104,22 +120,10 @@ async function main() {
       "missing ACTION_VIEW_PUSH for VaultRouter (re-run deploy:localhost)"
     );
 
-    // Read gate: PositionView.getUserPositionWithMeta requires VIEW_USER_DATA and must revert MissingRole() otherwise.
+    // Read gate: Scheme U
     const VIEW_USER_DATA = key("VIEW_USER_DATA");
     assertOk(await acm.hasRole(VIEW_USER_DATA, deployer.address), "missing VIEW_USER_DATA for deployer/admin");
-    const unauthorizedReader = ethers.Wallet.createRandom().connect(ethers.provider);
-    assertOk(!(await acm.hasRole(VIEW_USER_DATA, unauthorizedReader.address)), "unexpected VIEW_USER_DATA for unauthorizedReader");
     const missingRoleSel = ethers.id("MissingRole()").slice(0, 10);
-    await mustRevertWithSelector(
-      "unauthorized getUserPositionWithMeta",
-      missingRoleSel,
-      async () => {
-        await positionView
-          .connect(unauthorizedReader)
-          .getUserPositionWithMeta(unauthorizedReader.address, CONTRACT_ADDRESSES.MockUSDC);
-      },
-      { expectedName: "MissingRole()" }
-    );
 
     // Impersonate VaultRouter so msg.sender is an allowed business contract and has the role.
     await network.provider.send("hardhat_impersonateAccount", [vaultRouterAddr]);
@@ -128,7 +132,12 @@ async function main() {
 
     // --- Setup 2 assets so we can validate (user,asset) validity independence ---
     const MockERC20 = await ethers.getContractFactory("MockERC20");
-    const altToken = await MockERC20.connect(deployer).deploy("Alt USD", "aUSD", ethers.parseUnits("1000000", 18));
+    const altToken = await MockERC20.connect(deployer).deploy(
+      "Alt USD",
+      "aUSD",
+      18,
+      ethers.parseUnits("1000000", 18)
+    );
     await altToken.waitForDeployment();
 
     const assetA = CONTRACT_ADDRESSES.MockUSDC; // 6 decimals mock, deployed by deploylocal
@@ -148,7 +157,31 @@ async function main() {
 
     // Use a fresh user to avoid dirty-state interference (PositionView version may be non-zero for default signers).
     const user = ethers.Wallet.createRandom().connect(ethers.provider);
+    const outsider = ethers.Wallet.createRandom().connect(ethers.provider);
     await deployer.sendTransaction({ to: user.address, value: ethers.parseEther("10") });
+    await deployer.sendTransaction({ to: outsider.address, value: ethers.parseEther("10") });
+
+    // self read without roles should succeed
+    await mustSucceed("self getUserPositionWithMeta (no role)", async () =>
+      positionView.connect(user).getUserPositionWithMeta(user.address, CONTRACT_ADDRESSES.MockUSDC)
+    );
+    // non-self outsider should revert MissingRole()
+    await mustRevertWithSelector(
+      "non-self outsider getUserPositionWithMeta",
+      missingRoleSel,
+      async () => {
+        await positionView.connect(outsider).getUserPositionWithMeta(user.address, CONTRACT_ADDRESSES.MockUSDC);
+      },
+      { expectedName: "MissingRole()" }
+    );
+    // ops with VIEW_USER_DATA should succeed
+    const opsSigner = (await ethers.getSigners())[1];
+    if (!(await acm.hasRole(VIEW_USER_DATA, opsSigner.address))) {
+      await (await acm.connect(deployer).grantRole(VIEW_USER_DATA, opsSigner.address)).wait();
+    }
+    await mustSucceed("ops getUserPositionWithMeta", async () =>
+      positionView.connect(opsSigner).getUserPositionWithMeta(user.address, CONTRACT_ADDRESSES.MockUSDC)
+    );
 
     // Fund user for both assets.
     const usdc = (await ethers.getContractAt("MockERC20", assetA)) as any;
@@ -162,14 +195,14 @@ async function main() {
 
     // Helper to get current meta
     async function getMeta(user: string, asset: string) {
-      const [c, d, isValid, ts, v] = (await positionView.getUserPositionWithMeta(user, asset)) as [
+      const [c, d, isValid, blockNumber, v] = (await positionView.getUserPositionWithMeta(user, asset)) as [
         bigint,
         bigint,
         boolean,
         bigint,
         bigint,
       ];
-      return { c, d, isValid, ts, v };
+      return { c, d, isValid, blockNumber, v };
     }
 
     // ============ Step 1: Write assetA position cache with strict nextVersion ============
@@ -211,7 +244,7 @@ async function main() {
     assertOk(m1.c === depA && m1.d === 0n, "meta values mismatch after tx1");
     assertOk(m1.isValid === true, "expected isValid=true after tx1");
     assertOk(m1.v === nextV1, `expected version=${nextV1} after tx1, got ${m1.v}`);
-    assertOk(m1.ts > 0n, "expected timestamp > 0 after tx1");
+    assertOk(m1.blockNumber > 0n, "expected blockNumber > 0 after tx1");
     console.log("  ✅ assetA: version increment + DataPushed payload verified");
 
     // Wrong nextVersion must revert (strict optimistic concurrency)
@@ -233,8 +266,7 @@ async function main() {
     });
 
     // ============ Step 2: Write assetB position cache later, verify (user,asset) validity independence ============
-    await network.provider.send("evm_increaseTime", [2 * 60]);
-    await network.provider.send("evm_mine", []);
+    await network.provider.send("hardhat_mine", [ethers.toBeHex(2n * BLOCKS_PER_MINUTE)]);
 
     const depB = ethers.parseUnits("500", 18);
     await vaultCore.connect(user).deposit(assetB, depB);
@@ -254,18 +286,17 @@ async function main() {
     assertOk(m2a.isValid === true, "assetA should still be valid at t=~2m");
     assertOk(m2b.isValid === true, "assetB should be valid after tx2");
 
-    // Move time forward so assetA expires (>5m since its write), but assetB stays valid (<5m since its write).
-    await network.provider.send("evm_increaseTime", [4 * 60]);
-    await network.provider.send("evm_mine", []);
+    // Move blocks forward so assetA expires (>5m since its write), but assetB stays valid (<5m since its write).
+    await network.provider.send("hardhat_mine", [ethers.toBeHex(4n * BLOCKS_PER_MINUTE)]);
 
     const m3a = await getMeta(user.address, assetA);
     const m3b = await getMeta(user.address, assetB);
     // In some integrated stacks, business modules may proactively refresh multiple assets for the user.
     // We enforce the MUST property that each (user,asset) reports its own meta and validity; we only hard-assert
-    // that the recently updated assetB is still valid here. We also print timestamps to help spot unexpected refreshes.
+    // that the recently updated assetB is still valid here. We also print blockNumbers to help spot unexpected refreshes.
     assertOk(m3b.isValid === true, "assetB should remain valid after ~4m since its write");
-    if (m3a.ts === m3b.ts) {
-      console.log("  ⚠️ Note: assetA/meta timestamp equals assetB timestamp (stack may refresh multiple assets).");
+    if (m3a.blockNumber === m3b.blockNumber) {
+      console.log("  ⚠️ Note: assetA/meta blockNumber equals assetB blockNumber (stack may refresh multiple assets).");
     }
     console.log(`  ✅ validity check: assetB isValid=true; assetA isValid=${m3a.isValid}`);
 

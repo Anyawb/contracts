@@ -94,7 +94,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       await vaultCore.borrow(asset, borrowAmount);
       
       // 查询健康因子
-      const healthFactor = await healthView.getUserHealthFactor(user);
+      const [healthFactor, isValid] = await healthView.getUserHealthFactorWithMeta(user);
       expect(healthFactor).to.be.gt(0);
       
       // 验证风险状态
@@ -400,7 +400,8 @@ await token.mint(user.address, sufficientAmount);
 ```typescript
 console.log('User collateral:', await collateralManager.getCollateral(user, asset));
 console.log('User debt:', await lendingEngine.getDebt(user, asset));
-console.log('Health factor:', await healthView.getUserHealthFactor(user));
+const [healthFactor, isValid] = await healthView.getUserHealthFactorWithMeta(user);
+console.log('Health factor:', healthFactor, 'valid=', isValid);
 ```
 
 2. **使用 hardhat console**:

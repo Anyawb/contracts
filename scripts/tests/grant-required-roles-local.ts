@@ -10,10 +10,14 @@ async function main() {
 
   const acmAddr = (CONTRACT_ADDRESSES as any)?.AccessControlManager as string | undefined;
   const settlementManagerAddr = (CONTRACT_ADDRESSES as any)?.SettlementManager as string | undefined;
+  const liquidationRiskManagerAddr = (CONTRACT_ADDRESSES as any)?.LiquidationRiskManager as string | undefined;
   const vaultBusinessLogicAddr = (CONTRACT_ADDRESSES as any)?.VaultBusinessLogic as string | undefined;
   if (!acmAddr) throw new Error("[Config] Missing CONTRACT_ADDRESSES.AccessControlManager (run deploy:localhost first).");
   if (!settlementManagerAddr) {
     throw new Error("[Config] Missing CONTRACT_ADDRESSES.SettlementManager (run deploy:localhost first).");
+  }
+  if (!liquidationRiskManagerAddr) {
+    throw new Error("[Config] Missing CONTRACT_ADDRESSES.LiquidationRiskManager (run deploy:localhost first).");
   }
   if (!vaultBusinessLogicAddr) {
     throw new Error("[Config] Missing CONTRACT_ADDRESSES.VaultBusinessLogic (run deploy:localhost first).");
@@ -34,6 +38,8 @@ async function main() {
   const ACTION_LIQUIDATE = key("LIQUIDATE");
   const ACTION_REPAY = key("REPAY");
   const ACTION_VIEW_SYSTEM_DATA = key("VIEW_SYSTEM_DATA");
+  const ACTION_VIEW_USER_DATA = key("VIEW_USER_DATA");
+  const ACTION_VIEW_RISK_DATA = key("VIEW_RISK_DATA");
   const ACTION_ORDER_CREATE = key("ORDER_CREATE");
   const ACTION_DEPOSIT = key("DEPOSIT");
   const ACTION_BORROW = key("BORROW");
@@ -53,6 +59,10 @@ async function main() {
     { role: ACTION_LIQUIDATE, who: keeper.address, label: "keeper ACTION_LIQUIDATE" },
     { role: ACTION_REPAY, who: settlementManagerAddr, label: "settlementManager ACTION_REPAY" },
     { role: ACTION_VIEW_SYSTEM_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_SYSTEM_DATA" },
+    { role: ACTION_VIEW_USER_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_USER_DATA" },
+    { role: ACTION_VIEW_RISK_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_RISK_DATA" },
+    { role: ACTION_VIEW_RISK_DATA, who: liquidationRiskManagerAddr, label: "LiquidationRiskManager ACTION_VIEW_RISK_DATA" },
+    { role: ACTION_VIEW_USER_DATA, who: liquidationRiskManagerAddr, label: "LiquidationRiskManager ACTION_VIEW_USER_DATA" },
   ];
 
   console.log("=== Grant required roles (localhost) ===\n");

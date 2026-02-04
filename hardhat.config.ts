@@ -44,7 +44,9 @@ const config: HardhatUserConfig = {
       chainId: 1337,
     },
     localhost: {
-      url: 'http://127.0.0.1:8545',
+      // Allow smoke runners to point localhost at an ephemeral fresh node.
+      // (Network name remains "localhost" so existing scripts keep working.)
+      url: process.env.LOCALHOST_RPC_URL || 'http://127.0.0.1:8545',
     },
     arbitrum: {
       url: process.env.ARBITRUM_RPC_URL || '',

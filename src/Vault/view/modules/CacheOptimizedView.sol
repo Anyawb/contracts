@@ -7,16 +7,17 @@ import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import {
     ArrayLengthMismatch,
     BatchTooLarge,
     EmptyArray,
+    MissingRole,
     NotAContract,
     ZeroAddress
 } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 
 /*━━━━━━━━━━━━━━━ Selector SSOT (B方案) ━━━━━━━━━━━━━━━*/
 // Selectors are derived from the canonical module contracts in this repository (SSOT),
@@ -25,14 +26,17 @@ import { HealthView } from "./HealthView.sol";
 import { PositionView } from "./PositionView.sol";
 
 interface IHealthViewLite {
-    function getUserHealthFactor(address user)
+    function getUserHealthFactorWithMeta(address user)
         external
         view
-        returns (uint256 healthFactor, bool isValid, uint256 timestamp);
+        returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
 }
 
 interface IPositionViewLite {
-    function getUserPosition(address user, address asset) external view returns (uint256 collateral, uint256 debt);
+    function getUserPositionWithMeta(address user, address asset)
+        external
+        view
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version);
 }
 
 interface IStatisticsViewLite {
@@ -41,10 +45,13 @@ interface IStatisticsViewLite {
         uint256 activeUsers;
         uint256 totalCollateral;
         uint256 totalDebt;
-        uint256 lastUpdateTime;
+        uint256 lastUpdateBlock;
     }
 
-    function getGlobalStatistics() external view returns (GlobalStatistics memory);
+    function getGlobalStatisticsWithMeta()
+        external
+        view
+        returns (GlobalStatistics memory g, bool isValid, uint256 blockNumber);
 }
 
 /// @title CacheOptimizedView
@@ -52,16 +59,21 @@ interface IStatisticsViewLite {
 /// @dev This module is upgradeable (UUPS) and stores only the Registry address. It does not persist business state;
 ///      all values are sourced from modules resolved via {Registry.getModuleOrRevert}
 ///      (e.g. PositionView/HealthView/StatisticsView).
+///
+///      IMPORTANT (Architecture-Guide / Workguide alignment):
+///      - Some downstream modules (notably `HealthView`) may be **public read-only** by default to support
+///        permissionless `eth_call` for frontends/keepers.
+///      - This facade is a **user-dimensional view** and therefore enforces **Scheme U** on all `user/users[]`
+///        reads (self-read allowed; non-self requires `ACTION_VIEW_USER_DATA` or `ACTION_ADMIN`; batch has
+///        no self-bypass).
+///      - If an integration requires permissionless reads, it SHOULD call the downstream module directly
+///        (e.g. `HealthView.getUserHealthFactorWithMeta`) instead of routing through this facade.
 contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
 
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     /// @dev Function selectors for downstream `staticcall` payload encoding (derived from SSOT module contracts).
     bytes4 private constant _SEL_GET_USER_POSITION_WITH_META = PositionView.getUserPositionWithMeta.selector;
-    bytes4 private constant _SEL_GET_USER_POSITION_WITH_VALIDITY = PositionView.getUserPositionWithValidity.selector;
-    bytes4 private constant _SEL_GET_USER_POSITION = PositionView.getUserPosition.selector;
-    bytes4 private constant _SEL_GET_POSITION_UPDATED_AT = PositionView.getPositionUpdatedAt.selector;
-    bytes4 private constant _SEL_GET_POSITION_VERSION = PositionView.getPositionVersion.selector;
     bytes4 private constant _SEL_GET_USER_HEALTH_FACTOR_WITH_META = HealthView.getUserHealthFactorWithMeta.selector;
 
     address private _registryAddr;
@@ -78,7 +90,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @notice Per-asset user position entry with PositionView cache metadata (best-effort).
     /// @dev `positionIsValid/positionTimestamp/positionVersion` are sourced from PositionView meta APIs when available;
-    ///      missing fields may return default values (e.g. timestamp==0) when older APIs are used.
+    ///      missing fields may return default values (e.g. blockNumber==0) when older APIs are used.
     struct UserPositionItemMeta {
         address user;
         uint64 positionVersion;
@@ -101,12 +113,32 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 activeUsers;
         uint256 totalCollateral;
         uint256 totalDebt;
-        uint256 lastUpdateTime;
+        uint256 lastUpdateBlock;
     }
 
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
+        _;
+    }
+
+    /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
+    modifier onlyUserDim(address user) {
+        if (msg.sender != user) {
+            bool ok =
+                ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                    || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+            if (!ok) revert MissingRole();
+        }
+        _;
+    }
+
+    /// @dev Scheme U batch: no self-bypass for `users[]` enumeration; requires VIEW_USER_DATA or ADMIN.
+    modifier onlyUserDimBatch() {
+        bool ok =
+            ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ok) revert MissingRole();
         _;
     }
 
@@ -150,137 +182,107 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ User queries ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Returns a user's health factor as reported by HealthView, plus a cache validity flag.
+     * @notice Returns a user's health factor as reported by HealthView, plus cache validity and blockNumber.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks `ACTION_VIEW_RISK_DATA` (reverts in {IAccessControlManager.requireRole})
+     *      - caller is not authorized to read `user` (Scheme U; see {onlyUserDim})
      *      - Registry missing `ModuleKeys.KEY_HEALTH_VIEW` (reverts in {Registry.getModuleOrRevert})
      *      - HealthView call reverts (propagated)
      *
+     * Notes:
+     * - Even if `HealthView` is configured as public read-only, this facade enforces Scheme U because it is a
+     *   user-dimensional view module.
+     *
      * Security:
-     * - Role-gated via AccessControlManager.
+     * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
      * - Read-only; performs an external view call into HealthView.
      *
      * @param user The account to query.
      * @return healthFactor The health factor value (unit/precision defined by HealthView).
      * @return cacheValid True if HealthView indicates the value is valid (e.g. not stale/invalid).
+     * @return blockNumber HealthView cache update blockNumber (block.number).
      */
     function getUserHealthFactor(address user)
         external
         view
         onlyValidRegistry
-        returns (uint256 healthFactor, bool cacheValid)
+        onlyUserDim(user)
+        returns (uint256 healthFactor, bool cacheValid, uint256 blockNumber)
     {
-        // Strict permission alignment: health factor is risk data.
-        _requireRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
-        (healthFactor, cacheValid, ) = _healthView().getUserHealthFactor(user);
+        (healthFactor, cacheValid, blockNumber) = _healthView().getUserHealthFactorWithMeta(user);
     }
 
     /**
      * @notice Returns health factors for multiple users, as reported by HealthView.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks `ACTION_VIEW_RISK_DATA` (reverts in {IAccessControlManager.requireRole})
+     *      - caller is not authorized to enumerate `users[]` (Scheme U batch; see {onlyUserDimBatch})
      *      - `users` is empty (see {EmptyArray})
      *      - `users.length` exceeds `ViewConstants.MAX_BATCH_SIZE` (see {BatchTooLarge})
      *      - Registry missing `ModuleKeys.KEY_HEALTH_VIEW` (reverts in {Registry.getModuleOrRevert})
      *      - HealthView call reverts (propagated)
      *
+     * Notes:
+     * - Batch reads are considered enumeration; this facade does not allow self-bypass for `users[]`.
+     * - If an integration requires permissionless reads, call `HealthView.batchGetHealthFactorsWithMeta` (or
+     *   equivalent canonical HealthView batch API) directly.
+     *
      * Security:
-     * - Role-gated via AccessControlManager.
+     * - Scheme U batch read policy (no self-bypass; requires VIEW_USER_DATA or ADMIN).
      * - Read-only; performs per-user external view calls into HealthView.
      *
      * @param users The accounts to query. Length must be \(1..MAX_BATCH_SIZE\).
      * @return factors Health factors for each user, in the same order as `users`.
      * @return validFlags Cache-validity flags for each user, in the same order as `users`.
+     * @return blockNumbers Cache update blockNumbers for each user, in the same order as `users`.
      */
     function batchGetUserHealthFactors(address[] calldata users)
         external
         view
         onlyValidRegistry
-        returns (uint256[] memory factors, bool[] memory validFlags)
+        onlyUserDimBatch
+        returns (uint256[] memory factors, bool[] memory validFlags, uint256[] memory blockNumbers)
     {
-        // Strict permission alignment: health factor is risk data.
-        _requireRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
         uint256 len = users.length;
         _validateBatchLength(len);
 
         IHealthViewLite hv = _healthView();
         factors = new uint256[](len);
         validFlags = new bool[](len);
+        blockNumbers = new uint256[](len);
         for (uint256 i; i < len; ++i) {
-            (uint256 hf, bool ok, ) = hv.getUserHealthFactor(users[i]);
+            (uint256 hf, bool ok, uint256 blockNumber) = hv.getUserHealthFactorWithMeta(users[i]);
             factors[i] = hf;
             validFlags[i] = ok;
+            blockNumbers[i] = blockNumber;
         }
     }
 
     /**
-     * @notice Returns per-asset positions for multiple (user, asset) pairs.
+     * @notice Returns per-asset positions for multiple (user, asset) pairs, with cache metadata.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks `ACTION_VIEW_USER_DATA` (reverts in {IAccessControlManager.requireRole})
-     *      - `users` is empty (see {EmptyArray})
-     *      - `users.length != assets.length` (see {ArrayLengthMismatch})
-     *      - `users.length` exceeds `ViewConstants.MAX_BATCH_SIZE` (see {BatchTooLarge})
-     *      - Registry missing `ModuleKeys.KEY_POSITION_VIEW` (reverts in {Registry.getModuleOrRevert})
-     *      - PositionView call reverts (propagated)
-     *
-     * Security:
-     * - Role-gated via AccessControlManager.
-     * - Read-only; performs per-item external view calls into PositionView.
-     *
-     * @param users The users to query. Must match `assets.length`.
-     * @param assets The assets to query. Must match `users.length`.
-     * @return positions Position entries in the same order as the input pairs.
-     */
-    function batchGetUserPositions(address[] calldata users, address[] calldata assets)
-        external
-        view
-        onlyValidRegistry
-        returns (UserPositionItem[] memory positions)
-    {
-        _requireRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
-        uint256 len = users.length;
-        if (len == 0) revert EmptyArray();
-        if (len != assets.length) revert ArrayLengthMismatch(len, assets.length);
-        _validateBatchLength(len);
-
-        IPositionViewLite pv = _positionView();
-        positions = new UserPositionItem[](len);
-        for (uint256 i; i < len; ++i) {
-            (uint256 collateral, uint256 debt) = pv.getUserPosition(users[i], assets[i]);
-            positions[i] = UserPositionItem({ user: users[i], asset: assets[i], collateral: collateral, debt: debt });
-        }
-    }
-
-    /**
-     * @notice Returns per-asset positions for multiple (user, asset) pairs, including PositionView cache metadata.
-     * @dev Reverts if:
-     *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks `ACTION_VIEW_USER_DATA` (reverts in {IAccessControlManager.requireRole})
+     *      - caller is not authorized to enumerate `users[]` (Scheme U batch; see {onlyUserDimBatch})
      *      - `users` is empty (see {EmptyArray})
      *      - `users.length != assets.length` (see {ArrayLengthMismatch})
      *      - `users.length` exceeds `ViewConstants.MAX_BATCH_SIZE` (see {BatchTooLarge})
      *      - Registry missing `ModuleKeys.KEY_POSITION_VIEW` (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated via AccessControlManager.
-     * - Best-effort metadata: uses `staticcall` to probe multiple PositionView APIs. API mismatch/reverts are swallowed
-     *   (ok==false) and metadata fields may fall back to default values.
-     * - Callers SHOULD treat `positionTimestamp == 0` as "unknown/unavailable" and handle accordingly.
+     * - Scheme U batch read policy (no self-bypass; requires VIEW_USER_DATA or ADMIN).
+     * - Best-effort metadata: uses `staticcall` to probe PositionView meta APIs.
      *
      * @param users The users to query. Must match `assets.length`.
      * @param assets The assets to query. Must match `users.length`.
      * @return positions Position entries (with metadata) in the same order as the input pairs.
      */
-    function batchGetUserPositionsWithMeta(address[] calldata users, address[] calldata assets)
+    function batchGetUserPositions(address[] calldata users, address[] calldata assets)
         external
         view
         onlyValidRegistry
+        onlyUserDimBatch
         returns (UserPositionItemMeta[] memory positions)
     {
-        _requireRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
         if (len != assets.length) revert ArrayLengthMismatch(len, assets.length);
@@ -304,76 +306,80 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Returns a coarse user summary by summing positions across `trackedAssets` and attaching HealthView data.
+     * @notice Returns per-asset positions for multiple (user, asset) pairs, including PositionView cache metadata.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks `ACTION_VIEW_USER_DATA` (reverts in {IAccessControlManager.requireRole})
-     *      - caller lacks `ACTION_VIEW_RISK_DATA` (reverts in {IAccessControlManager.requireRole})
-     *      - Registry missing `ModuleKeys.KEY_HEALTH_VIEW` or `ModuleKeys.KEY_POSITION_VIEW`
-     *        (reverts in {Registry.getModuleOrRevert})
-     *      - HealthView/PositionView call reverts (propagated)
+     *      - caller is not authorized to enumerate `users[]` (Scheme U batch; see {onlyUserDimBatch})
+     *      - `users` is empty (see {EmptyArray})
+     *      - `users.length != assets.length` (see {ArrayLengthMismatch})
+     *      - `users.length` exceeds `ViewConstants.MAX_BATCH_SIZE` (see {BatchTooLarge})
+     *      - Registry missing `ModuleKeys.KEY_POSITION_VIEW` (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Role-gated via AccessControlManager.
+     * - Scheme U batch read policy (no self-bypass; requires VIEW_USER_DATA or ADMIN).
+     * - Best-effort metadata: uses `staticcall` to probe multiple PositionView APIs. API mismatch/reverts are swallowed
+     *   (ok==false) and metadata fields may fall back to default values.
+     * - Callers SHOULD treat `positionTimestamp == 0` as "unknown/unavailable" and handle accordingly.
+     *
+     * @param users The users to query. Must match `assets.length`.
+     * @param assets The assets to query. Must match `users.length`.
+     * @return positions Position entries (with metadata) in the same order as the input pairs.
+     */
+    function batchGetUserPositionsWithMeta(address[] calldata users, address[] calldata assets)
+        external
+        view
+        onlyValidRegistry
+        onlyUserDimBatch
+        returns (UserPositionItemMeta[] memory positions)
+    {
+        uint256 len = users.length;
+        if (len == 0) revert EmptyArray();
+        if (len != assets.length) revert ArrayLengthMismatch(len, assets.length);
+        _validateBatchLength(len);
+
+        address pvAddr = _getModule(ModuleKeys.KEY_POSITION_VIEW);
+        positions = new UserPositionItemMeta[](len);
+        for (uint256 i; i < len; ++i) {
+            (uint256 collateral, uint256 debt, bool posValid, uint256 posTs, uint64 posVer) =
+                _readUserPositionWithMeta(pvAddr, users[i], assets[i]);
+            positions[i] = UserPositionItemMeta({
+                user: users[i],
+                asset: assets[i],
+                collateral: collateral,
+                debt: debt,
+                positionIsValid: posValid,
+                positionTimestamp: posTs,
+                positionVersion: posVer
+            });
+        }
+    }
+
+    /**
+     * @notice Returns a user summary plus PositionView/HealthView cache metadata.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller is not authorized to read `user` (Scheme U; see {onlyUserDim})
+     *      - `trackedAssets.length` exceeds `ViewConstants.MAX_BATCH_SIZE` (see {BatchTooLarge})
+     *      - Registry missing `ModuleKeys.KEY_HEALTH_VIEW` or `ModuleKeys.KEY_POSITION_VIEW`
+     *        (reverts in {Registry.getModuleOrRevert})
+     *
+     * Security:
+     * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
      * - Read-only; performs external view calls into HealthView and PositionView.
      *
      * @param user The user to summarize.
-     * @param trackedAssets The assets to aggregate. This function does not enforce a max length; callers should keep it
-     * reasonable.
-     * @return summary Aggregated totals plus health factor and its cache-valid flag.
+     * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\).
+     * @return summary Aggregated totals plus health factor and cache-valid flag.
+     * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
+     * @return positionTimestamps Per-asset update blockNumbers (best-effort; 0 may mean unknown).
+     * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
+     * @return healthTimestamp HealthView blockNumber (or per HealthView semantics).
      */
     function getUserSummary(address user, address[] calldata trackedAssets)
         external
         view
         onlyValidRegistry
-        returns (UserSummary memory summary)
-    {
-        // Mix of user-scoped positions (USER_DATA) + health factor (RISK_DATA).
-        _requireRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
-        _requireRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
-        IHealthViewLite hv = _healthView();
-        (summary.healthFactor, summary.cacheValid, ) = hv.getUserHealthFactor(user);
-
-        IPositionViewLite pv = _positionView();
-        uint256 totalCollateral;
-        uint256 totalDebt;
-        for (uint256 i; i < trackedAssets.length; ++i) {
-            (uint256 collateral, uint256 debt) = pv.getUserPosition(user, trackedAssets[i]);
-            totalCollateral += collateral;
-            totalDebt += debt;
-        }
-        summary.totalCollateral = totalCollateral;
-        summary.totalDebt = totalDebt;
-    }
-
-    /**
-     * @notice Returns a user summary plus per-asset PositionView metadata and the HealthView timestamp.
-     * @dev Reverts if:
-     *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks `ACTION_VIEW_USER_DATA` (reverts in {IAccessControlManager.requireRole})
-     *      - caller lacks `ACTION_VIEW_RISK_DATA` (reverts in {IAccessControlManager.requireRole})
-     *      - `trackedAssets.length` exceeds `ViewConstants.MAX_BATCH_SIZE` (see {BatchTooLarge})
-     *      - Registry missing `ModuleKeys.KEY_HEALTH_VIEW` or `ModuleKeys.KEY_POSITION_VIEW`
-     *        (reverts in {Registry.getModuleOrRevert})
-     *      - HealthView call reverts (propagated)
-     *
-     * Security:
-     * - Role-gated via AccessControlManager.
-     * - Best-effort metadata: per-asset metadata is retrieved via `staticcall` probes into PositionView. Missing fields
-     *   may return default values; callers SHOULD treat `positionTimestamps[i] == 0` as "unknown/unavailable".
-     *
-     * @param user The user to summarize.
-     * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\). May be zero.
-     * @return summary Aggregated totals plus health factor and cache-valid flag.
-     * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
-     * @return positionTimestamps Per-asset update timestamps in seconds (best-effort; 0 may mean unknown).
-     * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
-     * @return healthTimestamp HealthView timestamp in seconds (or per HealthView semantics).
-     */
-    function getUserSummaryWithMeta(address user, address[] calldata trackedAssets)
-        external
-        view
-        onlyValidRegistry
+        onlyUserDim(user)
         returns (
             UserSummary memory summary,
             bool[] memory positionValidFlags,
@@ -382,9 +388,59 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
             uint256 healthTimestamp
         )
     {
-        // Mix of user-scoped positions (USER_DATA) + health factor (RISK_DATA).
-        _requireRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
-        _requireRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
+        return _getUserSummaryWithMeta(user, trackedAssets);
+    }
+
+    /**
+     * @notice Returns a user summary plus per-asset PositionView metadata and the HealthView blockNumber.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
+     *      - caller is not authorized to read `user` (Scheme U; see {onlyUserDim})
+     *      - `trackedAssets.length` exceeds `ViewConstants.MAX_BATCH_SIZE` (see {BatchTooLarge})
+     *      - Registry missing `ModuleKeys.KEY_HEALTH_VIEW` or `ModuleKeys.KEY_POSITION_VIEW`
+     *        (reverts in {Registry.getModuleOrRevert})
+     *      - HealthView call reverts (propagated)
+     *
+     * Security:
+     * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
+     * - Best-effort metadata: per-asset metadata is retrieved via `staticcall` probes into PositionView. Missing fields
+     *   may return default values; callers SHOULD treat `positionTimestamps[i] == 0` as "unknown/unavailable".
+     *
+     * @param user The user to summarize.
+     * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\). May be zero.
+     * @return summary Aggregated totals plus health factor and cache-valid flag.
+     * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
+     * @return positionTimestamps Per-asset update blockNumbers (best-effort; 0 may mean unknown).
+     * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
+     * @return healthTimestamp HealthView blockNumber (or per HealthView semantics).
+     */
+    function getUserSummaryWithMeta(address user, address[] calldata trackedAssets)
+        external
+        view
+        onlyValidRegistry
+        onlyUserDim(user)
+        returns (
+            UserSummary memory summary,
+            bool[] memory positionValidFlags,
+            uint256[] memory positionTimestamps,
+            uint64[] memory positionVersions,
+            uint256 healthTimestamp
+        )
+    {
+        return _getUserSummaryWithMeta(user, trackedAssets);
+    }
+
+    function _getUserSummaryWithMeta(address user, address[] calldata trackedAssets)
+        internal
+        view
+        returns (
+            UserSummary memory summary,
+            bool[] memory positionValidFlags,
+            uint256[] memory positionTimestamps,
+            uint64[] memory positionVersions,
+            uint256 healthTimestamp
+        )
+    {
         uint256 len = trackedAssets.length;
         if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
 
@@ -416,7 +472,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Returns system-wide statistics as reported by StatisticsView.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks `ACTION_VIEW_SYSTEM_DATA` (reverts in {IAccessControlManager.requireRole})
+     *      - caller lacks `ACTION_VIEW_SYSTEM_DATA` (MissingRole)
      *      - Registry missing `ModuleKeys.KEY_STATS` (reverts in {Registry.getModuleOrRevert})
      *      - StatisticsView call reverts (propagated)
      *
@@ -433,13 +489,13 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (SystemStats memory stats)
     {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
-        IStatisticsViewLite.GlobalStatistics memory g = _statisticsView().getGlobalStatistics();
+        (IStatisticsViewLite.GlobalStatistics memory g, , ) = _statisticsView().getGlobalStatisticsWithMeta();
         stats = SystemStats({
             totalUsers: g.totalUsers,
             activeUsers: g.activeUsers,
             totalCollateral: g.totalCollateral,
             totalDebt: g.totalDebt,
-            lastUpdateTime: g.lastUpdateTime
+            lastUpdateBlock: g.lastUpdateBlock
         });
     }
 
@@ -461,12 +517,8 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         return Registry(_registryAddr).getModuleOrRevert(key);
     }
 
-    function _acm() internal view returns (address) {
-        return _getModule(ModuleKeys.KEY_ACCESS_CONTROL);
-    }
-
     function _requireRole(bytes32 actionKey, address user) internal view {
-        IAccessControlManager(_acm()).requireRole(actionKey, user);
+        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, user)) revert MissingRole();
     }
 
     function _validateBatchLength(uint256 len) internal pure {
@@ -478,7 +530,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Authorizes a UUPS upgrade.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller lacks `ACTION_ADMIN` (reverts in {IAccessControlManager.requireRole})
+     *      - caller lacks `ACTION_ADMIN` (MissingRole)
      *      - `newImplementation` is zero (see {CacheOptimizedView__ZeroImplementation})
      *      - `newImplementation` is not a contract (see {NotAContract})
      *
@@ -498,52 +550,30 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     function _readUserPositionWithMeta(address pvAddr, address user, address asset)
         internal
         view
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 timestamp, uint64 version)
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
     {
         if (pvAddr == address(0)) return (0, 0, false, 0, 0);
 
-        // Prefer the unified meta API.
         (bool ok, bytes memory data) =
             pvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_USER_POSITION_WITH_META, user, asset));
         if (ok && data.length >= 160) {
             return abi.decode(data, (uint256, uint256, bool, uint256, uint64));
         }
-
-        // Backward compatible fallback: validity + timestamp/version best-effort.
-        (ok, data) = pvAddr.staticcall(
-            abi.encodeWithSelector(_SEL_GET_USER_POSITION_WITH_VALIDITY, user, asset)
-        );
-        if (ok && data.length >= 96) {
-            (collateral, debt, isValid) = abi.decode(data, (uint256, uint256, bool));
-        } else {
-            (ok, data) = pvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_USER_POSITION, user, asset));
-            if (ok && data.length >= 64) (collateral, debt) = abi.decode(data, (uint256, uint256));
-        }
-
-        (ok, data) = pvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_POSITION_UPDATED_AT, user, asset));
-        if (ok && data.length >= 32) timestamp = abi.decode(data, (uint256));
-
-        (ok, data) = pvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_POSITION_VERSION, user, asset));
-        if (ok && data.length >= 32) version = abi.decode(data, (uint64));
     }
 
     function _readHealthFactorWithMeta(address user)
         internal
         view
-        returns (uint256 healthFactor, bool isValid, uint256 timestamp)
+        returns (uint256 healthFactor, bool isValid, uint256 blockNumber)
     {
         address hvAddr = _getModule(ModuleKeys.KEY_HEALTH_VIEW);
         if (hvAddr == address(0)) return (0, false, 0);
 
-        // Prefer the unified meta API.
         (bool ok, bytes memory data) =
             hvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR_WITH_META, user));
         if (ok && data.length >= 96) {
             return abi.decode(data, (uint256, bool, uint256));
         }
-
-        // Backward compatible fallback: call canonical API directly.
-        (healthFactor, isValid, timestamp) = _healthView().getUserHealthFactor(user);
     }
 
     /*━━━━━━━━━━━━━━━ Versioning ━━━━━━━━━━━━━━━*/

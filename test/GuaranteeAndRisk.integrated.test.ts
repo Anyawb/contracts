@@ -91,7 +91,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
 
     // 3. Mock 子模块
     const MockERC20F = await ethers.getContractFactory('MockERC20');
-    erc20 = (await MockERC20F.deploy('Mock', 'MOCK', ethers.parseUnits('100000000', 18))) as unknown as MockERC20;
+    erc20 = (await MockERC20F.deploy('Mock', 'MOCK', 18, ethers.parseUnits('100000000', 18))) as unknown as MockERC20;
     await erc20.waitForDeployment();
 
     const CollateralF = await ethers.getContractFactory('MockCollateralManager');
@@ -150,8 +150,12 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     // 5. 权限（ActionKeys 常量字符串）
     const SET_PARAMETER_ROLE = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
     const UPGRADE_MODULE_ROLE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
+    const VIEW_RISK_DATA_ROLE = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
+    const VIEW_USER_DATA_ROLE = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
     await acm.grantRole(SET_PARAMETER_ROLE, await owner.getAddress());
     await acm.grantRole(UPGRADE_MODULE_ROLE, await owner.getAddress());
+    // RiskView read APIs are Scheme U: VIEW_USER_DATA or ACTION_ADMIN
+    await acm.grantRole(VIEW_USER_DATA_ROLE, await owner.getAddress());
 
     // 6. 资金准备：MockERC20 构造已向部署者铸造初始供应，这里从 owner 转给 user
     await erc20.transfer(await user.getAddress(), TEST_AMOUNT * 10n);
@@ -754,7 +758,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
 
   describe('RiskView – 排除保证金的健康因子', function () {
     it('calculateHealthFactorExcludingGuarantee 可调用且返回 uint', async function () {
-      const hf = await riskView.calculateHealthFactorExcludingGuarantee(await user.getAddress(), erc20.target);
+      const [hf] = await riskView.calculateHealthFactorExcludingGuarantee(await user.getAddress(), erc20.target);
       expect(hf).to.be.a('bigint');
     });
 
@@ -763,7 +767,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       await ethers.provider.send("hardhat_setBalance", [vaultCore.target as string, "0x3635C9ADC5DEA00000"]);
       await guaranteeFund.connect(vaultCoreSigner).lockGuarantee(await user.getAddress(), erc20.target, ONE_ETH);
       
-      const hf = await riskView.calculateHealthFactorExcludingGuarantee(await user.getAddress(), erc20.target);
+      const [hf] = await riskView.calculateHealthFactorExcludingGuarantee(await user.getAddress(), erc20.target);
       expect(hf).to.be.a('bigint');
     });
   });
@@ -790,7 +794,8 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       const users = Array(101).fill(await user.getAddress());
       await expect(
         riskView.batchGetRiskAssessments(users)
-      ).to.be.revertedWithCustomError(riskView, 'RiskView__BatchTooLarge');
+      )
+        .to.be.revertedWithCustomError(riskView, 'BatchTooLarge');
     });
 
     it('健康因子小于1.0时应标记为可清算', async function () {
@@ -908,7 +913,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       
       [user2] = await ethers.getSigners();
       const MockERC20F = await ethers.getContractFactory('MockERC20');
-      asset2 = (await MockERC20F.deploy('Asset2', 'AST2', ethers.parseUnits('100000000', 18))) as unknown as MockERC20;
+      asset2 = (await MockERC20F.deploy('Asset2', 'AST2', 18, ethers.parseUnits('100000000', 18))) as unknown as MockERC20;
       await asset2.waitForDeployment();
       
       await asset2.transfer(await user.getAddress(), TEST_AMOUNT * 10n);
@@ -948,8 +953,8 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       await guaranteeFund.connect(vaultCoreSigner).lockGuarantee(await user.getAddress(), erc20.target, ONE_ETH);
       await guaranteeFund.connect(vaultCoreSigner).lockGuarantee(await user.getAddress(), asset2.target, ONE_ETH);
       
-      const hf1 = await riskView.calculateHealthFactorExcludingGuarantee(await user.getAddress(), erc20.target);
-      const hf2 = await riskView.calculateHealthFactorExcludingGuarantee(await user.getAddress(), asset2.target);
+      const [hf1] = await riskView.calculateHealthFactorExcludingGuarantee(await user.getAddress(), erc20.target);
+      const [hf2] = await riskView.calculateHealthFactorExcludingGuarantee(await user.getAddress(), asset2.target);
       
       expect(hf1).to.be.a('bigint');
       expect(hf2).to.be.a('bigint');

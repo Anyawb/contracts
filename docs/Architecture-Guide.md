@@ -38,6 +38,20 @@
 - **系统级缓存快照 (ViewCache.sol)**：集中存储按资产聚合的系统总量数据，减少冗余映射，支持批量查询
 - **查询接口**：前端通过view函数免费查询缓存数据
 
+### 📚 核心库与使用边界（SSOT）
+- **HealthFactorLib**：健康因子计算与阈值判定（`calcHealthFactor`/`isUnderCollateralized`），保持 bps 口径统一。
+- **ViewAccessLib**：仅用于 `view` 读权限判断（0 gas、无事件），所有 View 模块优先使用。
+- **AccessControlLibrary**：用于**非 view 写路径**的权限检查与审计事件（内部依赖 `ModuleAccessLibrary` + `EventLibrary`）。
+- **ModuleAccessLibrary**：Registry 模块解析与访问审计事件（供 `AccessControlLibrary` 等内部使用）。
+- **EventLibrary**：权限/模块访问等统一事件定义（避免重复事件定义）。
+- **DataPushLibrary**：统一 DataPush 事件发射（参见“Unified DataPush Interface”章节）。
+- **ProxyIntrospectionLib**：代理实现地址自省工具（用于升级场景的实现地址定位）。
+
+**库选择指南（必须遵循）**
+- **view 只读函数**：使用 `ViewAccessLib`（不发事件、不改状态）。
+- **写入/可变更函数**：使用 `AccessControlLibrary`（带事件审计）。
+- **例外说明**：`ViewCache` 存在写路径，因此使用 `AccessControlLibrary`。
+
 ### 缓存：分类、统一策略与指南入口（必读）
 
 > 结论：**只统一 A 类（模块地址缓存刷新）**；B/C 类不做“统一刷新入口”，只按事件推送/幂等/有效性标识的规范对齐。
@@ -49,7 +63,7 @@
     - **统一策略（已落地）**：`ICacheRefreshable.refreshModuleCache()` + `CacheMaintenanceManager.batchRefresh()`（单入口 + best-effort + 审计）
   - **B 类：View 业务快照缓存（Business Snapshot Cache）**  
     - 典型：`PositionView/HealthView/StatisticsView/AccessControlView/...`  
-    - **策略**：写入成功后由业务模块 best-effort push；失败发事件 + 链下重试；读接口提供 `isValid/timestamp` 等有效性标识
+    - **策略**：写入成功后由业务模块 best-effort push；失败发事件 + 链下重试；读接口提供 `isValid/blockNumber` 等有效性标识
   - **C 类：业务内部缓存/工具缓存（Internal / Utility Cache）**  
     - 典型：`RewardManagerCore` 的积分缓存、`GracefulDegradation` 的价格缓存、`RegistrySignatureManager` 的 domain separator 缓存等  
     - **策略**：不纳入统一刷新入口（语义差异大、权限面扩大、不利于审计）
@@ -61,7 +75,8 @@
 
 ### 缓存推送失败与手动重试（新增要求 & 已实施）
 - 推送失败不做链上自动重试，避免 gas 暴涨/重复失败；采用“事件告警 + 链下人工重放”。
-- 在推送 try/catch 中发事件 `CacheUpdateFailed(address user, address asset, address view, uint256 collateral, uint256 debt, bytes reason)`；当 view 地址解析为零也要触发，payload 建议携带期望写入的数值。
+- 在推送 try/catch 中发事件 `CacheUpdateFailed(...)` 或 **`CacheUpdateFailedV2(...)`**；当 view 地址解析为零也要触发，payload 建议携带期望写入的数值。
+- **`CacheUpdateFailedV2`** 必须覆盖 `requestId/seq/nextVersion` 上下文，便于链下重放与并发诊断；`CacheUpdateFailed` 可保留作兼容。
 - 健康推送失败补充事件：`HealthPushFailed(address user, address healthView, uint256 totalCollateral, uint256 totalDebt, bytes reason)`（最佳努力不回滚，用于链下重试/告警）。
 - 链下监听事件写入重试队列（含 tx hash、block time、payload）；人工核查原因后重放：先重新读取最新账本，数据一致或可接受才推送，可设置最小间隔/去重，同一 (user, asset, view) 避免并发轰击。
 - 链下重试同一 (user, asset, view) 连续多次失败时，将该条目标记为“死亡信箱”并告警，链上不再尝试；重试成功后清理队列/提示。
@@ -91,7 +106,7 @@
 > 说明：以下为“查询/缓存/事件聚合”视图层模块。**写入账本不经 View**；业务模块写入成功后，以“推送快照/发事件”为主更新 View 层缓存。
 
 #### **A) 核心 View（建议部署，前端/机器人常用）**
-- **PositionView.sol**：用户仓位查询 + 缓存（`getUserPosition/isUserCacheValid/batchGetUserPositions` 等）
+- **PositionView.sol**：用户仓位查询 + 缓存（`getUserPositionWithMeta/getUserCacheStatusWithMeta/batchGetUserPositionsWithMeta` 等）
 - **UserView.sol**：用户维度只读聚合与便捷查询（与 Position/Health/Reward 等模块协作）
 - **HealthView.sol**：健康因子/风险状态缓存与批量读取（写路径由风控/账本模块推送）
 - **StatisticsView.sol**：系统级统计聚合缓存（活跃用户/全局抵押债务/保证金聚合/降级统计等）
@@ -105,7 +120,7 @@
 - **DashboardView.sol**：前端仪表盘聚合视图（聚合 Position/Health/奖励/活跃度等，减少 RPC 次数）
 - **PreviewView.sol**：预览类查询门面（deposit/withdraw/borrow/repay 的预估接口；可作为前端入口，但权威实现以 UserView/PositionView 为准）
 - **RiskView.sol**：风险评估视图（基于 HealthView 缓存与派生计算，提供 liquidatable/warningLevel 等）
-- **ValuationOracleView.sol**：价格/预言机查询视图（封装 PriceOracle，提供批量价格、健康检查、审计事件）
+- **ValuationOracleView.sol**：价格/预言机只读门面（封装 `PriceOracle` 的价格读取；**健康检查走 `GracefulDegradation.checkPriceOracleHealth(...)`**，不要求 oracle 合约实现额外 health 方法；对外明确 **Value Unit SSOT=USD-8**，并暴露 `assetDecimals` 用于 ERC-20 amount→value 换算；提供批量价格与可观测性输出）
 - **FeeRouterView.sol**：费用数据只读镜像（由 FeeRouter 推送更新，支持低成本查询）
 - **LendingEngineView.sol**：借贷引擎只读查询适配层（订单/重试/访问控制等运维与前端查询）
 - **ModuleHealthView.sol**：模块健康检查与缓存（轻量检查 + 结果集中推送到 HealthView/供链下监控）
@@ -113,7 +128,35 @@
 
 #### **C) 清算风险相关的只读补充**
 - **LiquidatorView.sol**：清算数据权威只读入口（清算相关指标、榜单、DataPush 单点推送）
-- **LiquidationRiskView.sol**：清算风险只读视图（批量计算/缓存读取等接口；与 LiquidationRiskManager/HealthView/RiskView 能力存在重叠，主要用于兼容/扩展）
+- **SystemRiskView.sol**：system-scoped risk（仅全局阈值/系统参数，只读；**不得**包含任何 `user/users[]` 维度接口；阈值/最小健康因子等以此为权威入口）
+  - 默认（推荐）：公开只读，便于任意前端/机器人 `eth_call` 获取阈值/参数
+  - 可选增强（MAY）：若未来将 system-scoped risk 视为敏感数据，可对只读入口增加 `ActionKeys.ACTION_VIEW_RISK_DATA` gate（无权限 `revert MissingRole()`）
+- **LiquidationRiskView.sol**：清算风险只读视图（批量计算/缓存读取等接口；与 LiquidationRiskManager/HealthView/RiskView 能力存在重叠，主要用于兼容/扩展；system-only 风险参数接口已移除，权威入口为 `SystemRiskView`）
+
+---
+
+## ⏱️ 时间依赖改造原则（重要）
+
+> 本节给出架构级口径：**链上“门槛/窗口/有效性”不得依赖秒级时间**。需要墙钟时间展示时，统一交给链下做 ETA 映射与调度。
+>
+> **详细执行清单与改造模式决策表（SSOT）**：[`docs/Usage-Guide/Time-Dependency-Refactor-Guide.md`](Usage-Guide/Time-Dependency-Refactor-Guide.md)
+
+### 核心规则（必须遵守）
+- **严禁**：任何影响资金动作/清算/估值门槛的逻辑，使用秒级时间或“秒差比较”。
+- **允许但必须标注为观测字段**：ABI/事件/返回值里仍叫 `blockNumber` 的字段，只能表示“观测时间/数据源时间/缓存写入时点”，不得作为门槛；并优先补充 `...Block` / `...Blocks` 口径字段。
+- **推荐落点**：门槛语义统一迁移为 `...Block` / `...Blocks`；前端与 keeper 用“平均出块时间”做 ETA 展示与调度（链上不保留 `executeAfterTimestamp` / `expireAtTimestamp` 等门槛字段）。
+
+### A/B/C/D：时间改造模式（简表）
+> 注意：这里的 **A/B/C/D** 是“时间依赖改造模式”，与本文上文“缓存分类 A/B/C”不是同一套字母含义。
+
+- **A（秒→块）**：把 `CACHE_DURATION / SYNC_INTERVAL / cooldown / maturity / expireAt` 等“秒窗口”迁移为 `...Blocks`，并用 `block.number - updateBlock` 做 age/validity 判定。
+- **B（边界强制过期：集中 SSOT）**：将“过期/新鲜度”的权威判断集中在单一入口（典型：`IPriceOracle.getPrice`），调用方只接受结果，不在各处复制 blockNumber 门槛逻辑。
+- **C（epoch/round）**：对“按周期结算/按轮次统计/治理窗口”等，更适合用单调 epoch/round 计数器表达，而不是用秒差。
+- **D（单调性：兼容）**：当外部仍传入 `blockNumber`（历史 ABI/事件/跨系统对接）时，只允许做**单调不回退**约束（或改为 `seq/nonce`），不得与 `block.number` 做门槛比较。
+
+### 测试与运维口径（简述）
+- 测试中避免 `evm_increaseTime`；优先 `hardhat_mine` / advancing blocks，并断言 block-based age/validity。
+- 链下调度（keeper/服务）基于 block 高度与平均出块时间估算 ETA；链上仅保存 block/epoch/seq 口径。
 
 ---
 
@@ -154,7 +197,7 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @dev 极简实现：只验证基础参数，传送数据至View层
     function deposit(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.timestamp);
+        IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.number);
     }
     
     /// @notice 借款操作 - 传送数据至View层
@@ -183,7 +226,7 @@ contract VaultCore is Initializable, UUPSUpgradeable {
     /// @dev 极简实现：只验证基础参数，传送数据至View层
     function withdraw(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
-        IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_WITHDRAW, asset, amount, block.timestamp);
+        IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_WITHDRAW, asset, amount, block.number);
     }
     
     // ============ Registry 基础升级能力 ============ ✅ 已完成
@@ -268,7 +311,7 @@ contract VaultRouter is ReentrancyGuard, Pausable {
         bytes32 operationType,
         address asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
     ) external override nonReentrant whenNotPaused onlyValidRegistry onlyVaultCore {
         // 仅路由 deposit/withdraw 到 CollateralManager
         // borrow/repay 由 VaultCore 直接调用 LendingEngine（符合"写入不经 View"原则）
@@ -279,7 +322,7 @@ contract VaultRouter is ReentrancyGuard, Pausable {
         } else {
             revert VaultRouter__UnsupportedOperation(operationType);
         }
-        emit VaultAction(operationType, user, amount, 0, asset, timestamp);
+        emit VaultAction(operationType, user, amount, 0, asset, blockNumber);
     }
     
     // ============ 数据推送接口（事件驱动架构）========== ✅ 已实现
@@ -295,7 +338,7 @@ contract VaultRouter is ReentrancyGuard, Pausable {
         uint64 nextVersion
     ) external override onlyValidRegistry onlyVaultCore {
         IPositionView(pv).pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, nextVersion);
-        emit UserPositionPushed(user, asset, collateral, debt, block.timestamp, requestId, seq);
+        emit UserPositionPushed(user, asset, collateral, debt, block.number, requestId, seq);
     }
     
     function pushAssetStatsUpdate(
@@ -306,14 +349,21 @@ contract VaultRouter is ReentrancyGuard, Pausable {
         bytes32 requestId,
         uint64 seq
     ) external override onlyValidRegistry onlyVaultCore {
-        emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, block.timestamp, requestId, seq);
+        emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, block.number, requestId, seq);
     }
     
     // ============ 向后兼容查询（直接查询账本，无缓存）========== ✅ 已实现
-    function getUserCollateral(address user, address asset) external view onlyValidRegistry returns (uint256) {
+    function getUserCollateral(address user, address asset)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 collateral, bool isValid, uint256 blockNumber)
+    {
         // 直接查询 CollateralManager，不维护缓存
         address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
-        return ICollateralManager(cm).getCollateral(user, asset);
+        collateral = ICollateralManager(cm).getCollateral(user, asset);
+        isValid = true;
+        blockNumber = block.number;
     }
 }
 ```
@@ -329,18 +379,18 @@ contract VaultRouter is ReentrancyGuard, Pausable {
 
 #### **❌ 已移除的功能（已迁移到独立 View 模块）**
 - [x] ~~View层业务数据缓存~~ → 已迁移到 `PositionView.sol`
-- [x] ~~getUserPosition~~ → 已迁移到 `PositionView.sol`
+- [x] ~~getUserPosition~~ → 已迁移到 `PositionView.getUserPositionWithMeta()`
 - [x] ~~getUserDebt~~ → 已迁移到 `PositionView.sol`
-- [x] ~~isUserCacheValid~~ → 已迁移到 `PositionView.sol`
+- [x] ~~isUserCacheValid~~ → 已迁移到 `PositionView.getUserCacheStatusWithMeta()`
 - [x] ~~batchGetUserPositions~~ → 已迁移到 `PositionView.sol` / `CacheOptimizedView.sol`
 - [x] ~~缓存管理功能~~ → 已迁移到 `PositionView.sol`
 
 #### **📝 查询功能位置**
 所有查询功能现在由独立的 View 模块提供：
-- **用户仓位查询**：`PositionView.getUserPosition()` / `UserView.getUserPosition()`
-- **缓存有效性**：`PositionView.isUserCacheValid()`
-- **批量查询**：`PositionView.batchGetUserPositions()` / `CacheOptimizedView.batchGetUserPositions()`
-- **健康因子查询**：`HealthView.getUserHealthFactor()`
+- **用户仓位查询**：`PositionView.getUserPositionWithMeta()` / `UserView.getUserPositionWithMeta()`
+- **缓存有效性**：`PositionView.getUserCacheStatusWithMeta()`
+- **批量查询**：`PositionView.batchGetUserPositionsWithMeta()` / `CacheOptimizedView.batchGetUserPositionsWithMeta()`
+- **健康因子查询**：`HealthView.getUserHealthFactorWithMeta()`（当前按 Scheme U 收口：self 放行；non-self 需 `VIEW_USER_DATA/ADMIN`；batch 无 self-bypass）
 - **统计聚合查询**：`StatisticsView.*`
 
 ### **3. AccessControlView - 双架构权限控制 ✅ 完全实现**
@@ -362,8 +412,8 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
         bool hasPermission
     ) external onlyValidRegistry onlyACM {
         _userPermissionsCache[user][actionKey] = hasPermission;
-        _cacheTimestamps[user] = block.timestamp;
-        emit PermissionDataUpdated(user, actionKey, hasPermission, block.timestamp);
+        _cacheTimestamps[user] = block.number;
+        emit PermissionDataUpdated(user, actionKey, hasPermission, block.number);
         // 统一数据推送
         DataPushLibrary._emitData(DATA_TYPE_PERMISSION_BIT_UPDATE, abi.encode(user, actionKey, hasPermission));
     }
@@ -373,34 +423,52 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
         IAccessControlManager.PermissionLevel newLevel
     ) external onlyValidRegistry onlyACM {
         _userPermissionLevelCache[user] = newLevel;
-        _cacheTimestamps[user] = block.timestamp;
-        emit PermissionLevelUpdated(user, newLevel, block.timestamp);
+        _cacheTimestamps[user] = block.number;
+        emit PermissionLevelUpdated(user, newLevel, block.number);
         // 统一数据推送
         DataPushLibrary._emitData(DATA_TYPE_PERMISSION_LEVEL_UPDATE, abi.encode(user, newLevel));
     }
     
     // ============ 查询接口（免费查询）========== ✅ 已实现
-    function getUserPermission(address user, bytes32 actionKey) 
-        external view onlyValidRegistry onlyAuthorizedFor(user) returns (bool hasPermission, bool isValid) {
+    function getUserPermissionWithMeta(address user, bytes32 actionKey)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (bool hasPermission, bool isValid, uint256 blockNumber)
+    {
+        blockNumber = _cacheTimestamps[user];
         hasPermission = _userPermissionsCache[user][actionKey];
-        isValid = _isCacheValid(_cacheTimestamps[user]);
+        isValid = _isCacheValid(blockNumber);
     }
     
-    function isUserAdmin(address user) 
-        external view onlyValidRegistry onlyAuthorizedFor(user) returns (bool isAdmin, bool isValid) {
+    function isUserAdminWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (bool isAdmin, bool isValid, uint256 blockNumber)
+    {
+        blockNumber = _cacheTimestamps[user];
         isAdmin = _userPermissionsCache[user][ActionKeys.ACTION_ADMIN];
-        isValid = _isCacheValid(_cacheTimestamps[user]);
+        isValid = _isCacheValid(blockNumber);
     }
     
-    function getUserPermissionLevel(address user) 
-        external view onlyValidRegistry onlyAuthorizedFor(user) returns (IAccessControlManager.PermissionLevel level, bool isValid) {
+    function getUserPermissionLevelWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (IAccessControlManager.PermissionLevel level, bool isValid, uint256 blockNumber)
+    {
+        blockNumber = _cacheTimestamps[user];
         level = _userPermissionLevelCache[user];
-        isValid = _isCacheValid(_cacheTimestamps[user]);
+        isValid = _isCacheValid(blockNumber);
     }
     
     // ============ 事件定义 ============ ✅ 已实现
-    event PermissionDataUpdated(address indexed user, bytes32 indexed actionKey, bool hasPermission, uint256 timestamp);
-    event PermissionLevelUpdated(address indexed user, IAccessControlManager.PermissionLevel newLevel, uint256 timestamp);
+    event PermissionDataUpdated(address indexed user, bytes32 indexed actionKey, bool hasPermission, uint256 blockNumber);
+    event PermissionLevelUpdated(address indexed user, IAccessControlManager.PermissionLevel newLevel, uint256 blockNumber);
     
     // ============ 统一数据推送常量 ============ ✅ 已实现
     bytes32 public constant DATA_TYPE_PERMISSION_BIT_UPDATE = keccak256("PERMISSION_BIT_UPDATE");
@@ -411,13 +479,13 @@ contract AccessControlView is Initializable, UUPSUpgradeable {
 #### **✅ 已完全实现的功能**
 - [x] View层缓存数据（用户权限缓存、权限级别缓存、时间戳缓存）
 - [x] 数据推送接口（权限位更新、权限级别更新）
-- [x] 免费查询接口（3个view函数，0 gas）
+- [x] 免费查询接口（3个 view 函数，0 gas，统一 meta 输出）
 - [x] 事件驱动架构（2个事件 + 统一数据推送）
 - [x] 统一事件库使用（DataPushLibrary）
 - [x] 权限验证（onlyACM、onlyAuthorizedFor）
 - [x] 缓存有效性检查（_isCacheValid）
 - [x] 命名规范（完全符合标准）
-- [x] 错误处理（AccessControlView__ZeroAddress、AccessControlView__Unauthorized）
+- [x] 错误处理（AccessControlView__ZeroAddress、MissingRole）
 - [x] 合约升级支持（UUPS）
 ```
 
@@ -461,7 +529,7 @@ contract LendingEngine {
         IVaultRouter(viewContractAddrVar).pushUserPositionUpdate(user, asset, currentCollateral, newDebt);
         
         // 发出事件
-        emit BorrowProcessed(user, asset, amount, block.timestamp);
+        emit BorrowProcessed(user, asset, amount, block.number);
     }
 }
 ```
@@ -502,13 +570,14 @@ contract LendingEngine {
   - 业务层 `VaultBusinessLogic` 不再计算健康因子或推送健康事件，避免重复与噪音（迁移自业务层 → LE + View 层）。
 - 推送与缓存
   - 统一由风险相关模块（如 `LendingEngine`、`LiquidationRiskManager` 等）在账本/风控计算后调用 `HealthView.pushRiskStatus(user, hfBps, minHFBps, under, ts)` 推送。
-  - 可批量推送：`HealthView.pushRiskStatusBatch(...)`；前端读取 `getUserHealthFactor` 或 `batchGetHealthFactors`，0 gas 查询。
-  - 读权限策略（默认公开，推荐暂不加 Role Gate）：
-    - **默认（当前推荐 & 与本指南主线一致）**：`HealthView.getUserHealthFactor/batchGetHealthFactors` 保持公开只读（不强制 `ACTION_VIEW_RISK_DATA`），便于任意前端/机器人直接 `eth_call` 免费查询缓存。
-    - **可选增强（暂不实施）**：若出于隐私/商业策略，希望“风险数据仅授权调用者可读”，可在上述只读接口上增加 `ACM.requireRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender)` 或等效 gate。
-    - **影响说明（启用可选增强前必须评估）**：
-      - 前端/机器人将必须使用“已授予 `VIEW_RISK_DATA` 的地址”发起 `eth_call`，否则查询会 revert；这会改变既有集成假设与可用性（尤其是公开页面/无需登录的钱包）。
-      - 需要同步更新：前端权限提示、服务端代理/签名查询方案、以及相关测试用例（例如批量查询与风控机器人）。
+  - 可批量推送：`HealthView.pushRiskStatusBatch(...)`；前端读取 `getUserHealthFactorWithMeta` 或 `batchGetHealthFactorsWithMeta`，0 gas 查询。
+  - 读权限策略（当前口径：Scheme U 收口，非公开）：
+    - **单用户读取（Scheme U）**：`HealthView.getUserHealthFactorWithMeta(user)` / `HealthView.isUserLiquidatableWithMeta(user)`
+      - self read：`msg.sender == user` 允许（无需 role）
+      - non-self：caller 必须具备 `ActionKeys.ACTION_VIEW_USER_DATA` 或 `ActionKeys.ACTION_ADMIN`（否则 `revert MissingRole()`）
+    - **批量读取（users[]，枚举能力，无 self-bypass）**：`HealthView.batchGetHealthFactorsWithMeta(users)`
+      - caller 必须具备 `ActionKeys.ACTION_VIEW_USER_DATA` 或 `ActionKeys.ACTION_ADMIN`（否则 `revert MissingRole()`）
+    - **说明**：该策略用于隐私强化与统一用户维度读权限；如需恢复“公开只读”，必须同步更新：前端调用方、链下机器人假设、以及相关测试断言。
 - 计算口径
   - 使用 `libraries/HealthFactorLib.sol`：
     - `isUnderCollateralized(totalCollateral, totalDebt, minHFBps)` 进行阈值判定（推荐主路径，避免除法）；
@@ -516,7 +585,16 @@ contract LendingEngine {
 
 ### 2) 预言机路径（Price Oracle）与优雅降级（Graceful Degradation）
 - 统一库
-  - 由 `libraries/GracefulDegradation.sol` 提供完整的价格获取、重试、价格/精度/合理性校验、稳定币面值与脱锚检测、缓存（非 view 写入）与保守估值回退等能力。
+  - 唯一实现位于 `src/libraries/GracefulDegradation.sol`，提供完整的价格获取、重试、价格/精度/合理性校验、稳定币面值与脱锚检测、缓存（非 view 写入）与保守估值回退等能力。
+- 关键口径（避免 “decimals=price 精度” 误解）
+  - `IPriceOracle.getPrice(asset)` 返回 `(priceUsd8, blockNumber, assetDecimals)`：
+    - `price`：**USD-8**（例如 $1.00 = `100000000`）
+    - `assetDecimals`：**token decimals**，用于将 ERC-20 的 `amount(token base units)` 归一到 “1 token” 后做估值：
+      \[
+      \text{valueUSD8}=\frac{\text{amount(token base units)}\times\text{price(USD-8 per 1 token)}}{10^{\text{assetDecimals}}}
+      \]
+      **注意**：这里的 `assetDecimals` 不是 price 的精度；price 精度固定为 USD-8。
+  - 统一口径 SSOT（建议所有新代码/文档引用）：`docs/Units-And-Conversions-SSOT.md`
 - 估值调用位置
   - 只在 `VaultLendingEngine` 的估值路径中使用（如计算用户/系统债务价值、`calculateDebtValue`、`getUserTotalDebtValue` 等）。
   - 业务层不再做预言机健康检查与降级处理；避免重复事件与分叉逻辑。
@@ -836,7 +914,10 @@ jobs:
 
 
 ### 统计模块迁移说明（重要）
-- 阶段一（当前）：保留 `KEY_STATS`（**Registry 注册键标签为 `VAULT_STATISTICS`**），并将其映射到 `StatisticsView`。`StatisticsView` 在 View 层承接“全局统计”的状态存储与写接口（`pushUserStatsUpdate`、`pushGuaranteeUpdate`、`recordSnapshot`），提供只读聚合（`getGlobalSnapshot`）。
+- 阶段一（当前）：保留 `KEY_STATS`（**Registry 注册键标签为 `VAULT_STATISTICS`**），并将其映射到 `StatisticsView`。  
+  - `StatisticsView` 作为 **B 类缓存** 承接“全局统计/用户统计/保证金统计”的状态存储，并提供只读聚合（`getGlobalStatisticsWithMeta` / `getGlobalSnapshotWithMeta`）。  
+  - **写入口径（Scheme B / Strict B+）**：`StatisticsView` 的 `push*` 写入口必须收敛为 **单一链上入口编排器** `StatisticsPushManager`（或 `ACTION_ADMIN` 紧急旁路），避免多写入口导致版本/seq 冲突与口径漂移。  
+  - **单位口径（Value Unit SSOT）**：跨资产聚合的 `collateral/debt` 必须统一为 **USD-8 value**，由 `PositionView.getUserTotalCollateralValue(user)` 与 `LendingEngine.getUserTotalDebtValue(user)` 提供估值 SSOT，再由 `StatisticsPushManager` 推送 snapshot。
 - 活跃用户计数规则：严格以“仓位>0（collateral>0 或 debt>0）”为活跃判定。
 - 兼容性：为便于平滑迁移，`StatisticsView` 暴露与旧接口兼容的 `updateUserStats`/`updateGuaranteeStats`，内部转调新 `push*` 接口。
 - 阶段二（后续）：统一地址解析到 `KEY_VAULT_CORE -> viewContractAddrVar()`，逐步去除对 `KEY_STATS` 的依赖；清理 `VaultStatistics.sol` 与 `IVaultStatistics.sol` 遗留。
@@ -861,153 +942,21 @@ address public immutable vaultManagerAddr;
 // 函数参数：camelCase，语义化前缀
 function initialize(address initialRegistryAddr)
 function pushPermissionUpdate(address user, bytes32 actionKey, bool hasPermission)
-function getUserPermission(address user, bytes32 actionKey)
+function getUserPermissionWithMeta(address user, bytes32 actionKey)
 
 // 事件名：PascalCase，过去时态
-event PermissionDataUpdated(address indexed user, bytes32 indexed actionKey, bool hasPermission, uint256 timestamp);
-event UserOperation(address indexed user, bytes32 indexed operationType, address asset, uint256 amount, uint256 timestamp);
+event PermissionDataUpdated(address indexed user, bytes32 indexed actionKey, bool hasPermission, uint256 blockNumber);
+event UserOperation(address indexed user, bytes32 indexed operationType, address asset, uint256 amount, uint256 blockNumber);
 
-// 错误名：PascalCase with __ 前缀
+// 错误名：优先使用自定义 error；权限失败建议统一 MissingRole()
 error AccessControlView__ZeroAddress();
-error AccessControlView__UnauthorizedAccess();
+error MissingRole();
 ```
 
 ---
 
 ## 📝 NatSpec 注释规范（必须）
-
-> 目标：让所有对外接口（尤其是写入入口）的“语义、回滚条件、安全属性、参数单位”可被链下与审计工具直接消费，避免口径分叉。
-
-### 适用范围
-- **必须**：所有 `public/external` 的函数与错误/事件（尤其是会写状态、转账、升级、权限校验、跨模块调用的入口）。
-- **建议**：关键 `internal` 逻辑（状态机分支、金额计算、精度/单位转换、外部调用封装）。
-
-### 统一模板（推荐顺序，禁止乱序）
-> 说明：`@dev` 中的 “Reverts if / Security” 采用固定小节标题，便于团队与工具一致解析。
->
-> **风格基线（SSOT）**：本仓库以 `src/registry/` 目录下的实现作为 NatSpec 书写风格的权威参考（英文、结构化小节、与 `error`/权限语义强一致）。
-
-```solidity
-/**
- * @notice <一句话说明：做什么、对谁/哪条路径生效>
- * @dev Reverts if:
- *      - <回滚条件 1>
- *      - <回滚条件 2>
- *
- * Security:
- * - <安全属性 1：例如 Non-reentrant>
- * - <安全属性 2：例如 Signature is single-use / onlyVaultCore / role-gated>
- *
- * @param <name> <参数语义 + 单位/精度/取值范围（如 6 decimals / bps / seconds）>
- * @return <name> <返回值语义 + 单位/精度（如有）>
- */
-```
-
-### 写法要求（强制）
-- **`@notice`**：必须是“可对外公开的业务语义”，避免实现细节；用一句话讲清楚“做什么 + 影响对象/路径”。
-- **`@dev`**
-  - **Reverts if**：列出**所有可预期的回滚原因**（含权限、签名、白名单、状态机不匹配、金额/精度、过期、重复使用等）。  
-    - 每条用 `- ` 开头；条件尽量与代码中的 `error`/`revert` 保持同名或同义，避免“文档写 A、代码回滚 B”。
-  - **Security**：显式标注本函数依赖的安全属性/假设（如 `nonReentrant`、`onlyVaultCore`、`ACM.requireRole(...)`、签名单次使用、nonce/uid 绑定、跨模块调用边界等）。
-- **`@param/@return`**：必须写清楚**单位与精度**（例如 USDT 6 decimals、bps=1e4、时间=seconds、价格精度等）；涉及“内部 ID / 外部地址”的必须区分含义（如 `uid` vs `user`）。
-- **一致性**：注释中的“唯一入口/权威路径/SSOT”描述必须与本指南其它章节一致；不一致时以本指南为准并立即修订注释或章节说明。
-- **分区标题分隔符（强制统一样式）**：对合约内主要分区（Storage/Errors/Modifiers/Initializer/View/Core/Upgrade 等）的块注释分隔符，**必须**使用本仓库 SSOT 风格：
-  - ✅ `/*━━━━━━━━━━━━━━━ <Section> ━━━━━━━━━━━━━━━*/`（参考 `src/Vault/modules/EarlyRepaymentGuaranteeManager.sol` 的 `Storage gap`）
-  - ❌ 禁止使用 `/* ============ <Section> ============ */` 或任何 `=` 分隔风格，避免团队口径分叉与审计噪声
-
-### 检测方式（强制）
-> 目标：把“注释规范 + 关键风格约束”变成可重复、可自动化的检查步骤，避免靠人工肉眼抽查。
-
-#### 1) 编译级校验（必须）
-- **目的**：确保 NatSpec/代码改动不会引入语法、依赖、类型问题。
-
-```bash
-pnpm -s run compile
-```
-
-#### 2) 单文件/目录级 Solhint（必须）
-- **目的**：强制 `NatSpec` 结构化输出、禁止全局 import、限制行宽、禁止 `require/revert("...")` 等不一致模式。
-- **推荐**：改动某个文件时先跑单文件；合并前对目标目录跑一次。
-
-```bash
-# 单文件检查
-pnpm -s exec solhint "src/Vault/liquidation/modules/LiquidationManager.sol"
-
-# 目录检查（示例：liquidation libraries）
-pnpm -s exec solhint "src/Vault/liquidation/libraries/*.sol"
-```
-
-#### 2.1) Solhint 规则分层（推荐：安全/一致性必过 + Gas 持续优化 + 文档不刷屏）
-> 背景：Solhint 新版本会引入更多“建议型”规则。为避免信噪比过低，本项目将规则分为三档。
-
-- **A. 安全/一致性（必须为 error）**：阻断合并/上线，确保链上安全与一致性。
-  - 示例：`avoid-tx-origin`、`avoid-low-level-calls`、`reentrancy`、`no-inline-assembly`、`not-rely-on-time`、`gas-custom-errors`、`no-global-import`、`max-line-length`、`compiler-version`。
-- **B. Gas 优化（建议为 warn，持续可见）**：不影响功能正确性，但能在现有框架下持续降低 gas。
-  - 示例：`gas-increment-by-one`（循环 `++i`）、`gas-strict-inequalities`（用严格不等）、`gas-indexed-events`（合理增加 indexed）。
-- **C. 文档/可读性（建议按需启用）**：避免大量文档告警淹没真正问题；建议在“文档完善阶段”再启用。
-  - 示例：`use-natspec`、`function-max-lines`。
-
-#### 2.2) “极致 gas/审计模式”（可选）
-> 目标：在不阻塞日常开发的前提下，提供一次性“更严格”的检查入口，用于上线前/审计前集中清理。
-
-- **推荐方式**：在仓库中保留一份更严格的 solhint 配置（例如 `.solhint.perfection.json`），将 **B 类 gas 规则提升为 error**，并按需打开 **C 类文档规则**。
-- **运行示例**：
-
-```bash
-pnpm -s exec solhint --config ".solhint.perfection.json" "src/Vault/liquidation/libraries/*.sol"
-```
-
-#### 3) 关键路径测试（必须，至少选一条“最贴近改动”的用例集）
-- **目的**：验证回滚条件/原子性/权限/事件等行为与 NatSpec 描述一致。
-
-```bash
-# 示例：清算相关 failure & edge scenarios
-pnpm -s exec hardhat test "test/Vault/liquidation/Liquidation.failure-scenarios.test.ts"
-```
-
-#### 4) 允许的“最小范围规则豁免”（仅用于通过工具误报/缓存场景）
-> 原则：**能重构消除就不要 disable**；必须 disable 时，**只对单行**使用 `solhint-disable-next-line`，并说明理由。
-
-- **`not-rely-on-time`**：业务决策不得依赖时间；但“写入/上报时间戳”属于可接受的审计信息记录。
-
-```solidity
-// solhint-disable-next-line not-rely-on-time
-record.timestamp = block.timestamp;
-```
-
-- **`no-inline-assembly`**：默认禁止内联汇编；仅在“无法用 Solidity 等价实现且可审计”的极少数场景允许。
-
-```solidity
-// solhint-disable-next-line no-inline-assembly
-assembly {
-    // ... minimal, well-audited assembly ...
-}
-```
-
-### 示例：带签名授权的 USDT 代存（标准样式）
-```solidity
-/**
- * @notice Deposit USDT on behalf of a user.
- * @dev Reverts if:
- *      - token != USDT
- *      - signature is invalid
- *      - uid is not bound
- *
- * Security:
- * - Non-reentrant
- * - Signature is single-use
- *
- * @param uid Internal user identifier
- * @param amount Amount of USDT to deposit (6 decimals)
- * @param signature Backend-signed authorization
- */
-function deposit(
-    uint256 uid,
-    uint256 amount,
-    bytes calldata signature
-) external nonReentrant {
-    // ...
-}
+参考文件：/Volumes/AI-hosts/contracts/docs/Usage-Guide/Audit-Grade-NatSpec-Guide.md
 ```
 
 ## Unified DataPush Interface
@@ -1052,6 +1001,26 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 - **读权限策略（原则）**：
   - **默认推荐**：关键查询接口保持 0 gas 可读以服务前端/机器人。
   - **可选增强**：出于隐私/商业策略可对部分只读接口加 role gate，但应在实施前评估对前端/机器人 `eth_call` 的影响（详见“健康因子”章节中的读权限策略说明）。
+
+### 用户维度 View：统一读权限（方案 U，强制）
+
+> 目标：将“所有用户维度 view”统一为**真正面向用户的读接口**，避免出现“用户读取自己数据也必须先拿 VIEW 角色”的割裂体验；同时为 ops/admin 保留可审计的非本人读取通道。
+
+#### 定义（适用范围）
+- **用户维度 view（User-dimensional view）**：对外提供“按用户维度返回数据”的 View 接口（例如 `getUser*` / `*WithMeta(user, ...)` / 接收 `user` 或 `users[]` 参数的只读接口）。
+- **非用户维度**：系统级/全局快照、模块注册查询、纯计算等不在本规则范围内。
+
+#### 统一规则（必须）
+- **Self read 必须允许**：当目标用户为 `user` 时，`msg.sender == user` 必须允许读取，无需任何角色。
+- **Non-self read 必须受控**：当 `msg.sender != user` 时，必须具备：
+  - `ActionKeys.ACTION_VIEW_USER_DATA` **或**
+  - `ActionKeys.ACTION_ADMIN`
+  否则必须 `revert MissingRole()`（断言 selector，不依赖 revert string）。
+- **Batch user reads（涉及 users[]）必须更严格**：批量读取通常视为“枚举能力”，不得提供 self-bypass；应要求 `VIEW_USER_DATA` 或 `ADMIN`。
+
+#### 实施指南（SSOT）
+- 详细的实现模板、迁移步骤、批量口径、以及验收用例清单见：
+  - [`docs/Usage-Guide/User-Dimensional-View-Read-Policy-Guide.md`](Usage-Guide/User-Dimensional-View-Read-Policy-Guide.md)
 
 ## Reward 模块架构与路径
 
@@ -1117,7 +1086,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 - 本金门槛：`RewardManagerCore` 已在 `onLoanEvent / onLoanEventV2` 强制 `amount < 1000 USDC` 不计分/不锁定；如需调整，请同步修改合约与测试并更新说明。
 - `RewardManagerCore.onLoanEvent` 与 `onBatchLoanEvents` 不再接受外部直接调用：
   - 调用白名单仅限 `RewardManager`；否则将触发自定义错误 `RewardManagerCore__UseRewardManagerEntry`；
-  - 同时发出 `DeprecatedDirectEntryAttempt(caller,timestamp)` 事件用于链下审计迁移；
+  - 同时发出 `DeprecatedDirectEntryAttempt(caller,blockNumber)` 事件用于链下审计迁移；
   - 旧入口 `RewardManager.onLoanEvent(address,int256,int256)`：**已移除**，全局入口统一为 `RewardManager.onLoanEvent(address,uint256,uint256,bool)`。
 
 ### 迁移说明（对脚本/测试的影响）
@@ -1212,7 +1181,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 ### Gas 与体积优化（已实施）
 - 生成键：使用常量盐 + `abi.encodePacked`，避免拼接歧义并降低 gas/字节码。
 - 规范化与校验：合并为单次遍历 `_normalizeAndValidate`，一次完成 trim/小写/校验；移除冗余双重循环。
-- 事件精简：`ModuleKeyRegistered` 去除 `timestamp` 与动态字符串 `name`；`ModuleKeyUnregistered` 去除 `timestamp`、保留 `name` 便于链下快速消费。
+- 事件精简：`ModuleKeyRegistered` 去除 `blockNumber` 与动态字符串 `name`；`ModuleKeyUnregistered` 去除 `blockNumber`、保留 `name` 便于链下快速消费。
 - 错误参数收敛：移除动态 `string` 参数与冗余 `caller` 参数，失败路径更省 gas。
 - 循环优化：缓存长度、`unchecked` 自增；`_removeFromList` 私有化以便内联。
 - 清理未用导入与未用函数，减小字节码。
@@ -1405,7 +1374,7 @@ rg "_disableInitializers\\(\\)" src -g"*.sol"
 **设计目标**：VaultRouter 作为"双架构智能协调器"，包含所有功能：
 - ✅ 用户操作路由
 - ✅ View 层业务数据缓存（`_userCollateral`, `_userDebt`, `_cacheTimestamps`）
-- ✅ 查询接口（`getUserPosition`, `isUserCacheValid`, `batchGetUserPositions` 等）
+- ✅ 查询接口（`getUserPositionWithMeta`, `getUserCacheStatusWithMeta`, `batchGetUserPositionsWithMeta` 等）
 - ✅ 数据推送接口
 
 **问题**：
@@ -1420,10 +1389,10 @@ rg "_disableInitializers\\(\\)" src -g"*.sol"
 
 **迁移内容**：
 - ✅ 查询功能迁移到独立 View 模块：
-  - `getUserPosition` → `PositionView.getUserPosition()`
-  - `getUserDebt` → `PositionView.getUserPosition()` (返回 debt)
-  - `isUserCacheValid` → `PositionView.isUserCacheValid()`
-  - `batchGetUserPositions` → `PositionView.batchGetUserPositions()` / `CacheOptimizedView.batchGetUserPositions()`
+  - `getUserPosition` → `PositionView.getUserPositionWithMeta()`
+  - `getUserDebt` → `PositionView.getUserPositionWithMeta()` (返回 debt)
+  - `isUserCacheValid` → `PositionView.getUserCacheStatusWithMeta()`
+  - `batchGetUserPositions` → `PositionView.batchGetUserPositionsWithMeta()` / `CacheOptimizedView.batchGetUserPositionsWithMeta()`
 - ✅ 业务数据缓存迁移到 `PositionView.sol`
 - ✅ VaultRouter 仅保留路由和数据推送功能
 

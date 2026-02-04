@@ -24,7 +24,7 @@ import type { ERC1967Proxy } from '../../types/@openzeppelin/contracts/proxy/ERC
 describe('Registry – 核心功能测试', function () {
   // 测试常量定义
   const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-  const TEST_MIN_DELAY = 1 * 60 * 60; // 1 hour for testing
+  const TEST_MIN_DELAY = (1 * 60 * 60) / 2; // 1 hour in blocks (2s)
   const MAX_BATCH_SIZE = 50;
   
   // 测试账户
@@ -146,7 +146,7 @@ describe('Registry – 核心功能测试', function () {
           initData
         )
       ).to.be.revertedWithCustomError(newImplementation, 'Registry__DelayTooLong')
-        .withArgs(ethers.MaxUint256, 604800);
+        .withArgs(ethers.MaxUint256, 7 * 24 * 60 * 60 / 2);
     });
   });
 
@@ -363,9 +363,10 @@ describe('Registry – 核心功能测试', function () {
       await registry.setModule(KEY_LE, mockLendingEngine.target);
       await registry.scheduleModuleUpgrade(KEY_LE, mockCollateralManager.target);
       
-      // Advance time by minDelay to make upgrade executable
-      await (hardhat as any).network.provider.send('evm_increaseTime', [TEST_MIN_DELAY + 1]);
-      await (hardhat as any).network.provider.send('evm_mine');
+      // Advance blocks by minDelay to make upgrade executable
+      await (hardhat as any).network.provider.send('hardhat_mine', [
+        `0x${(TEST_MIN_DELAY + 1).toString(16)}`
+      ]);
 
       await expect(
         registry.executeModuleUpgrade(KEY_LE)
@@ -451,9 +452,9 @@ describe('Registry – 核心功能测试', function () {
       await expect(
         registry.pause()
       ).to.emit(registry, 'EmergencyActionExecuted')
-        .withArgs(0, owner.address, (timestamp: bigint) => {
-          // 验证时间戳是正数且在合理范围内
-          return timestamp > BigInt(0) && timestamp < BigInt(2 ** 32);
+        .withArgs(0, owner.address, (blockNumber: bigint) => {
+          // 验证区块号是正数且在合理范围内
+          return blockNumber > BigInt(0) && blockNumber < BigInt(2 ** 32);
         });
     });
   });

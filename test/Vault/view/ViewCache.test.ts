@@ -3,13 +3,33 @@ import * as hardhat from 'hardhat';
 import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 const { ethers, upgrades } = hardhat;
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
+import { mine } from '@nomicfoundation/hardhat-network-helpers';
 import type { ViewCache, MockAccessControlManager, MockRegistry } from '../../../types';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
+const DATA_TYPE_SYSTEM_STATUS = ethers.keccak256(ethers.toUtf8Bytes('SYSTEM_STATUS_CACHE'));
 const MAX_BATCH_SIZE = 100n; // ViewConstants.MAX_BATCH_SIZE
-const CACHE_DURATION = 5 * 60; // ViewConstants.CACHE_DURATION = 5 minutes
+const CACHE_DURATION_BLOCKS = 150; // ViewConstants.CACHE_DURATION_BLOCKS (5 minutes @2s)
+const DATA_PUSH_IFACE = new ethers.Interface(['event DataPushed(bytes32 indexed dataTypeHash, bytes payload)']);
+
+function getDataPushedEvents(receipt: any) {
+  const topic0 = ethers.id('DataPushed(bytes32,bytes)').toLowerCase();
+  const logs = (receipt?.logs ?? []) as Array<{ topics: string[]; data: string }>;
+  const out: Array<{ dataTypeHash: string; payload: string }> = [];
+  for (const log of logs) {
+    if (!log?.topics?.length) continue;
+    if ((log.topics[0] ?? '').toLowerCase() !== topic0) continue;
+    try {
+      const parsed = DATA_PUSH_IFACE.parseLog({ topics: log.topics, data: log.data });
+      out.push({ dataTypeHash: (parsed?.args?.dataTypeHash as string) ?? '', payload: (parsed?.args?.payload as string) ?? '' });
+    } catch {
+      // ignore
+    }
+  }
+  return out;
+}
 
 describe('ViewCache – system snapshot cache (view layer)', function () {
   let owner: SignerWithAddress;
@@ -54,9 +74,31 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       );
     });
 
+    it('应拒绝非合约 registry 初始化', async function () {
+      const ViewCacheF = await ethers.getContractFactory('ViewCache');
+      const eoa = ethers.Wallet.createRandom().address;
+      await expect(upgrades.deployProxy(ViewCacheF, [eoa], { kind: 'uups' })).to.be.revertedWithCustomError(ViewCacheF, 'NotAContract');
+    });
+
     it('应记录 registry 地址且 getter 一致', async function () {
       expect(await viewCache.registryAddr()).to.equal(await registry.getAddress());
       expect(await viewCache.registryAddrVar()).to.equal(await registry.getAddress());
+    });
+  });
+
+  describe('VC-01 职责边界（无 push*，写入口明确）', function () {
+    it('ABI 中不得出现 push* 函数；只读函数应为 view/pure', async function () {
+      const abiFrags = viewCache.interface.fragments.filter((f: any) => f.type === 'function');
+      const fnNames = abiFrags.map((f: any) => f.name);
+      expect(fnNames.filter((n: string) => n.startsWith('push')).length).to.equal(0);
+
+      // get/batch/registry getters should be view; set/clear/upgrade are nonpayable.
+      const mustBeView = new Set(['registryAddr', 'registryAddrVar', 'getSystemStatus', 'batchGetSystemStatus', 'apiVersion', 'schemaVersion']);
+      for (const f of abiFrags as any[]) {
+        if (mustBeView.has(f.name)) {
+          expect(['view', 'pure'].includes(f.stateMutability)).to.equal(true, `expected ${f.name} to be view/pure`);
+        }
+      }
     });
   });
 
@@ -122,7 +164,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       const receipt = await tx.wait();
       const block = await ethers.provider.getBlock(receipt!.blockNumber);
       const [status] = await viewCache.getSystemStatus(ASSET);
-      expect(status.timestamp).to.equal(block!.timestamp);
+      expect(status.updateBlock).to.equal(BigInt(block!.number));
     });
 
     it('应正确设置 isValid 标志', async function () {
@@ -135,16 +177,14 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
   describe('缓存有效期', function () {
     it('超过 CACHE_DURATION 后应被视为无效', async function () {
       await viewCache.connect(owner).setSystemStatus(ASSET, 1, 2, 3);
-      await ethers.provider.send('evm_increaseTime', [CACHE_DURATION + 1]);
-      await ethers.provider.send('evm_mine', []);
+      await mine(CACHE_DURATION_BLOCKS + 1);
       const [, isValid] = await viewCache.getSystemStatus(ASSET);
       expect(isValid).to.equal(false);
     });
 
     it('正好在 CACHE_DURATION 边界应仍有效', async function () {
       await viewCache.connect(owner).setSystemStatus(ASSET, 1, 2, 3);
-      await ethers.provider.send('evm_increaseTime', [CACHE_DURATION]);
-      await ethers.provider.send('evm_mine', []);
+      await mine(CACHE_DURATION_BLOCKS);
       const [, isValid] = await viewCache.getSystemStatus(ASSET);
       expect(isValid).to.equal(true);
     });
@@ -155,7 +195,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       expect(status.totalCollateral).to.equal(0n);
       expect(status.totalDebt).to.equal(0n);
       expect(status.utilizationRate).to.equal(0n);
-      expect(status.timestamp).to.equal(0n);
+      expect(status.updateBlock).to.equal(0n);
       expect(status.isValid).to.equal(false);
       expect(isValid).to.equal(false);
     });
@@ -206,7 +246,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       const block = await ethers.provider.getBlock(receipt!.blockNumber);
       const [status] = await viewCache.getSystemStatus(ASSET);
       // 清理后时间戳应该被删除（为0），但事件中会记录清理时间
-      expect(status.timestamp).to.equal(0n);
+      expect(status.updateBlock).to.equal(0n);
     });
   });
 
@@ -271,8 +311,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       const asset2 = ethers.Wallet.createRandom().address;
       await viewCache.connect(owner).setSystemStatus(asset1, 100n, 50n, 1000n);
       // 让 asset1 过期
-      await ethers.provider.send('evm_increaseTime', [CACHE_DURATION + 1]);
-      await ethers.provider.send('evm_mine', []);
+      await mine(CACHE_DURATION_BLOCKS + 1);
       // asset2 在时间推进后写入，所以仍然有效
       await viewCache.connect(owner).setSystemStatus(asset2, 200n, 100n, 2000n);
       const [statuses, validFlags] = await viewCache.connect(owner).batchGetSystemStatus([asset1, asset2]);
@@ -290,8 +329,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       await viewCache.connect(owner).setSystemStatus(asset1, 100n, 50n, 1000n);
       await viewCache.connect(owner).setSystemStatus(asset2, 200n, 100n, 2000n);
       // asset3 不设置，asset2 过期
-      await ethers.provider.send('evm_increaseTime', [CACHE_DURATION + 1]);
-      await ethers.provider.send('evm_mine', []);
+      await mine(CACHE_DURATION_BLOCKS + 1);
       const [statuses, validFlags] = await viewCache.connect(owner).batchGetSystemStatus([asset1, asset2, asset3]);
       expect(validFlags[0]).to.equal(false); // asset1 过期
       expect(validFlags[1]).to.equal(false); // asset2 过期
@@ -340,7 +378,72 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       const block = await ethers.provider.getBlock(receipt!.blockNumber);
       await expect(tx)
         .to.emit(viewCache, 'CacheUpdated')
-        .withArgs(ASSET, owner.address, block!.timestamp);
+        .withArgs(ASSET, owner.address, BigInt(block!.number));
+    });
+
+    it('setSystemStatus 应发出 DataPushed（可解码 payload）', async function () {
+      const tx = await viewCache.connect(owner).setSystemStatus(ASSET, 100n, 50n, 123n);
+      const receipt = await tx.wait();
+      const block = await ethers.provider.getBlock(receipt!.blockNumber);
+
+      const evs = getDataPushedEvents(receipt);
+      expect(evs.length).to.be.greaterThan(0);
+      const e0 = evs.find((e) => e.dataTypeHash.toLowerCase() === DATA_TYPE_SYSTEM_STATUS.toLowerCase());
+      expect(!!e0).to.equal(true);
+
+      const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+        ['address', 'uint256', 'uint256', 'uint256', 'uint256'],
+        e0!.payload
+      );
+      expect((decoded[0] as string).toLowerCase()).to.equal(ASSET.toLowerCase());
+      expect(decoded[1]).to.equal(100n);
+      expect(decoded[2]).to.equal(50n);
+      expect(decoded[3]).to.equal(123n);
+      expect(decoded[4]).to.equal(BigInt(block!.number));
+    });
+
+    it('clearSystemCache 应发出 DataPushed（清空 payload）', async function () {
+      await viewCache.connect(owner).setSystemStatus(ASSET, 1n, 2n, 3n);
+      const tx = await viewCache.connect(owner).clearSystemCache(ASSET);
+      const receipt = await tx.wait();
+      const block = await ethers.provider.getBlock(receipt!.blockNumber);
+
+      const evs = getDataPushedEvents(receipt);
+      const e0 = evs.find((e) => e.dataTypeHash.toLowerCase() === DATA_TYPE_SYSTEM_STATUS.toLowerCase());
+      expect(!!e0).to.equal(true);
+
+      const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+        ['address', 'uint256', 'uint256', 'uint256', 'uint256'],
+        e0!.payload
+      );
+      expect((decoded[0] as string).toLowerCase()).to.equal(ASSET.toLowerCase());
+      expect(decoded[1]).to.equal(0n);
+      expect(decoded[2]).to.equal(0n);
+      expect(decoded[3]).to.equal(0n);
+      expect(decoded[4]).to.equal(BigInt(block!.number));
+    });
+  });
+
+  describe('VC-06 UUPS upgrade 权限', function () {
+    it('非 ADMIN 调用 upgradeToAndCall 必须拒绝', async function () {
+      const ViewCacheF = await ethers.getContractFactory('ViewCache');
+      const newImpl = await ViewCacheF.deploy();
+      await expect(viewCache.connect(alice).upgradeToAndCall(await newImpl.getAddress(), '0x')).to.be.revertedWithCustomError(
+        viewCache,
+        'MissingRole'
+      );
+    });
+
+    it('ADMIN 升级到 zero impl 必须 ViewCache__ZeroImplementation', async function () {
+      await expect(viewCache.connect(owner).upgradeToAndCall(ethers.ZeroAddress, '0x')).to.be.revertedWithCustomError(
+        viewCache,
+        'ViewCache__ZeroImplementation'
+      );
+    });
+
+    it('ADMIN 升级到 EOA 必须 NotAContract', async function () {
+      const eoa = ethers.Wallet.createRandom().address;
+      await expect(viewCache.connect(owner).upgradeToAndCall(eoa, '0x')).to.be.revertedWithCustomError(viewCache, 'NotAContract');
     });
   });
 
@@ -381,8 +484,8 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       expect(status.totalCollateral).to.equal(collateral);
       expect(status.totalDebt).to.equal(debt);
       expect(status.utilizationRate).to.equal(utilization);
-      expect(status.timestamp).to.be.a('bigint');
-      expect(status.timestamp).to.be.gt(0n);
+      expect(status.updateBlock).to.be.a('bigint');
+      expect(status.updateBlock).to.be.gt(0n);
       expect(status.isValid).to.equal(true);
     });
 
@@ -495,8 +598,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
         await viewCache.connect(owner).setSystemStatus(assets[i], BigInt(i + 1) * 100n, BigInt(i + 1) * 50n, BigInt(i + 1) * 10n);
       }
       // 推进时间，让前3个资产过期
-      await ethers.provider.send('evm_increaseTime', [CACHE_DURATION + 1]);
-      await ethers.provider.send('evm_mine', []);
+      await mine(CACHE_DURATION_BLOCKS + 1);
       // 更新后2个资产，使其仍然有效
       await viewCache.connect(owner).setSystemStatus(assets[3], 400n, 200n, 4000n);
       await viewCache.connect(owner).setSystemStatus(assets[4], 500n, 250n, 5000n);
@@ -597,8 +699,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
       let [status, isValid] = await viewCache.getSystemStatus(asset);
       expect(isValid).to.equal(true);
       // 推进时间使缓存过期
-      await ethers.provider.send('evm_increaseTime', [CACHE_DURATION + 1]);
-      await ethers.provider.send('evm_mine', []);
+      await mine(CACHE_DURATION_BLOCKS + 1);
       [status, isValid] = await viewCache.getSystemStatus(asset);
       expect(isValid).to.equal(false);
       // 重新写入使缓存有效
@@ -718,8 +819,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
         await viewCache.connect(owner).setSystemStatus(assets[i], BigInt(i + 1) * 100n, BigInt(i + 1) * 50n, BigInt(i + 1) * 10n);
       }
       // 推进时间
-      await ethers.provider.send('evm_increaseTime', [CACHE_DURATION + 1]);
-      await ethers.provider.send('evm_mine', []);
+      await mine(CACHE_DURATION_BLOCKS + 1);
       // 写入后5个资产（仍然有效）
       for (let i = 5; i < 10; i++) {
         await viewCache.connect(owner).setSystemStatus(assets[i], BigInt(i + 1) * 100n, BigInt(i + 1) * 50n, BigInt(i + 1) * 10n);

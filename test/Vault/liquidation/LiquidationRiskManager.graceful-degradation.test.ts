@@ -14,6 +14,8 @@ import { ModuleKeys } from "../contracts/constants/ModuleKeys";
  */
 describe("LiquidationRiskManager - Valuation Centralization", function () {
     const ACTION_VIEW_PUSH = ethers.id("ACTION_VIEW_PUSH");
+    const ACTION_VIEW_RISK_DATA = ethers.id("VIEW_RISK_DATA");
+    const ACTION_VIEW_USER_DATA = ethers.id("VIEW_USER_DATA");
 
     const deployFixture = async () => {
         const [deployer, alice, bob] = await ethers.getSigners();
@@ -22,7 +24,7 @@ describe("LiquidationRiskManager - Valuation Centralization", function () {
         const Registry = await ethers.getContractFactory("Registry");
         const registry = await upgrades.deployProxy(
             Registry,
-            [7 * 24 * 60 * 60, deployer.address, deployer.address, deployer.address],
+            [(7 * 24 * 60 * 60) / 2, deployer.address, deployer.address, deployer.address],
             { kind: "uups" }
         );
         await registry.waitForDeployment();
@@ -57,8 +59,13 @@ describe("LiquidationRiskManager - Valuation Centralization", function () {
         await priceOracle.waitForDeployment();
 
         const MockERC20 = await ethers.getContractFactory("MockERC20");
-        const settlementToken = await MockERC20.deploy("Settlement Token", "SETT", 6);
-        const testAsset = await MockERC20.deploy("Test Asset", "TEST", 18);
+        const settlementToken = await MockERC20.deploy(
+          "Settlement Token",
+          "SETT",
+          6,
+          ethers.parseUnits("1000000", 6)
+        );
+        const testAsset = await MockERC20.deploy("Test Asset", "TEST", 18, ethers.parseUnits("1000000", 18));
         await settlementToken.waitForDeployment();
         await testAsset.waitForDeployment();
 
@@ -86,6 +93,14 @@ describe("LiquidationRiskManager - Valuation Centralization", function () {
         );
         await liquidationRiskManager.waitForDeployment();
 
+        // LiquidationRiskManager reads HF from HealthView via external call.
+        // HealthView is risk-gated by VIEW_RISK_DATA (msg.sender is the RiskManager contract),
+        // so grant the role to the RiskManager address.
+        await accessControl.connect(alice).grantRole(ACTION_VIEW_RISK_DATA, await liquidationRiskManager.getAddress());
+        // HealthView user-dimensional reads follow Scheme U, so RiskManager also needs VIEW_USER_DATA
+        // to read other users' cached health factors.
+        await accessControl.connect(alice).grantRole(ACTION_VIEW_USER_DATA, await liquidationRiskManager.getAddress());
+
         return {
             liquidationRiskManager,
             healthView,
@@ -106,8 +121,8 @@ describe("LiquidationRiskManager - Valuation Centralization", function () {
         await collateralManager.setUserCollateral(alice.address, await testAsset.getAddress(), ethers.parseUnits("1000", 18));
         await lendingEngine.setUserDebt(alice.address, await settlementToken.getAddress(), ethers.parseUnits("500", 18));
 
-        // Seed HealthView cache (timestamp=0 => use block.timestamp)
-        // Granting roles is outside scope here; HealthView push is not role-gated in this minimal test environment.
+        // Seed HealthView cache (blockNumber=0 => use block.number)
+        // NOTE: pushRiskStatus is role-gated by ACTION_VIEW_PUSH; deployer has that role in fixture.
         await healthView.pushRiskStatus(alice.address, 20_000, 10_000, false, 0);
 
         expect(await liquidationRiskManager.isLiquidatable(alice.address)).to.equal(false);

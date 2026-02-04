@@ -27,7 +27,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         uint256 duration,
         bool isActive,
         string description,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice 高级数据分析服务激活状态变更事件
@@ -35,7 +35,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
     event AdvancedAnalyticsServiceToggled(
         uint8 indexed level,
         bool isActive,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice 高级数据分析服务价格更新事件
@@ -44,7 +44,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         uint8 indexed level,
         uint256 oldPrice,
         uint256 newPrice,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice 高级数据分析服务时长更新事件
@@ -53,7 +53,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         uint8 indexed level,
         uint256 oldDuration,
         uint256 newDuration,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice Registry 地址更新事件
@@ -93,7 +93,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -117,7 +117,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -135,7 +135,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         // 基础等级配置
         configs[ServiceLevel.Basic] = ServiceConfig({
             price: 200e18, // 200积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Basic,
             description: "Basic data analysis report with market trends"
@@ -144,7 +144,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         // 标准等级配置
         configs[ServiceLevel.Standard] = ServiceConfig({
             price: 500e18, // 500积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Standard,
             description: "Deep risk assessment with portfolio analysis"
@@ -153,7 +153,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         // 高级等级配置
         configs[ServiceLevel.Premium] = ServiceConfig({
             price: 1000e18, // 1000积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.Premium,
             description: "Personalized investment advice with AI insights"
@@ -162,7 +162,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         // VIP等级配置
         configs[ServiceLevel.VIP] = ServiceConfig({
             price: 2000e18, // 2000积分
-            duration: 30 days,
+            duration: 30 days / 2 seconds,
             isActive: true,
             level: ServiceLevel.VIP,
             description: "VIP exclusive analyst service with 24/7 support"
@@ -178,7 +178,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
     /// @dev 初始化冷却期
     /// @dev 设置服务使用的冷却期，防止频繁调用
     function _initializeCooldown() internal override {
-        cooldown = 1 days;
+        cooldown = 1 days / 2 seconds;
     }
     
     // ============ 服务类型 ============
@@ -232,7 +232,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             duration,
             isActive,
             serviceDescriptions[level],
-            block.timestamp
+            block.number
         );
         
         // 发出价格变更事件
@@ -241,7 +241,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
                 uint8(level),
                 oldPrice,
                 price,
-                block.timestamp
+                block.number
             );
         }
         
@@ -251,7 +251,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
                 uint8(level),
                 oldDuration,
                 duration,
-                block.timestamp
+                block.number
             );
         }
         
@@ -260,7 +260,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             emit AdvancedAnalyticsServiceToggled(
                 uint8(level),
                 isActive,
-                block.timestamp
+                block.number
             );
         }
         
@@ -269,7 +269,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -293,7 +293,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             configs[level].duration,
             configs[level].isActive,
             description,
-            block.timestamp
+            block.number
         );
         
         // 记录标准化动作事件
@@ -301,7 +301,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -317,7 +317,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
         emit AdvancedAnalyticsServiceToggled(
             uint8(level),
             isActive,
-            block.timestamp
+            block.number
         );
         
         // 记录标准化动作事件
@@ -325,7 +325,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -347,7 +347,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_CONSUME_POINTS,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_CONSUME_POINTS),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -428,7 +428,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
                 uint8(levels[i]),
                 oldPrice,
                 prices[i],
-                block.timestamp
+                block.number
             );
         }
         
@@ -437,7 +437,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -456,7 +456,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             emit AdvancedAnalyticsServiceToggled(
                 uint8(levels[i]),
                 isActive,
-                block.timestamp
+                block.number
             );
         }
         
@@ -465,7 +465,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -484,7 +484,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
                 emit AdvancedAnalyticsServiceToggled(
                     i,
                     false,
-                    block.timestamp
+                    block.number
                 );
             }
         }
@@ -494,7 +494,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_PAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_PAUSE_SYSTEM),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -511,7 +511,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
                 emit AdvancedAnalyticsServiceToggled(
                     i,
                     true,
-                    block.timestamp
+                    block.number
                 );
             }
         }
@@ -521,7 +521,7 @@ contract AdvancedAnalyticsConfig is BaseServiceConfig {
             ActionKeys.ACTION_UNPAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UNPAUSE_SYSTEM),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 } 

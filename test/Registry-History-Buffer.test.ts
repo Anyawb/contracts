@@ -74,7 +74,7 @@ describe('Registry History Buffer', function () {
       expect(history[0].oldAddress).to.equal(ZERO_ADDRESS);
       expect(history[0].newAddress).to.equal(testAddress);
       expect(history[0].executor).to.equal(await owner.getAddress());
-      expect(history[0].timestamp).to.be.gt(0);
+      expect(history[0].blockNumber).to.be.gt(0);
     });
 
     it('Should handle multiple history records', async function () {
@@ -148,9 +148,9 @@ describe('Registry History Buffer', function () {
       const history = await registry.getAllUpgradeHistory(key);
       expect(history.length).to.equal(10);
             
-      // 验证时间戳按升序排列
+      // 验证区块号按升序排列
       for (let i = 1; i < history.length; i++) {
-        expect(Number(history[i].timestamp)).to.be.gte(Number(history[i-1].timestamp));
+        expect(Number(history[i].blockNumber)).to.be.gte(Number(history[i - 1].blockNumber));
       }
             
       console.log('Rapid updates test passed');
@@ -252,7 +252,7 @@ describe('Registry History Buffer', function () {
       expect(history0.newAddress).to.be.a('string');
       expect(history0.oldAddress).to.be.a('string');
       expect(history0.executor).to.equal(await owner.getAddress());
-      expect(history0.timestamp).to.be.gt(0);
+      expect(history0.blockNumber).to.be.gt(0);
     });
 
     it('Should handle single history record correctly', async function () {
@@ -268,7 +268,7 @@ describe('Registry History Buffer', function () {
       expect(history[0].oldAddress).to.equal(ZERO_ADDRESS);
       expect(history[0].newAddress).to.equal(testAddress);
       expect(history[0].executor).to.equal(await owner.getAddress());
-      expect(history[0].timestamp).to.be.gt(0);
+      expect(history[0].blockNumber).to.be.gt(0);
     });
   });
 }); 

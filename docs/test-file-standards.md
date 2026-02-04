@@ -242,13 +242,13 @@ await expect(tx)
 ```typescript
 // ❌ 错误 - 使用 any
 function validateEventData(data: any) {
-  return data && data.hash && data.timestamp;
+  return data && data.hash && data.blockNumber;
 }
 
 // ✅ 正确 - 使用接口定义
 interface EventData {
   hash: string;
-  timestamp: bigint;
+  blockNumber: bigint;
   executor: string;
 }
 
@@ -257,7 +257,7 @@ function validateEventData(data: unknown): data is EventData {
     typeof data === 'object' &&
     data !== null &&
     'hash' in data &&
-    'timestamp' in data &&
+    'blockNumber' in data &&
     'executor' in data
   );
 }
@@ -319,7 +319,7 @@ function processData(data: unknown) {
 interface UpgradeHistory {
   oldAddress: string;
   newAddress: string;
-  timestamp: bigint;
+  blockNumber: bigint;
   executor: string;
   txHash: string;
 }
@@ -331,7 +331,7 @@ function validateUpgradeHistory(data: unknown): data is UpgradeHistory {
     data !== null &&
     'oldAddress' in data &&
     'newAddress' in data &&
-    'timestamp' in data &&
+    'blockNumber' in data &&
     'executor' in data &&
     'txHash' in data
   );
@@ -361,9 +361,9 @@ await expect(tx)
   .withArgs((name: unknown) => {
     // 验证模块名称是索引的哈希值
     return name && typeof name === 'object' && 'hash' in name;
-  }, ZERO_ADDRESS, testModule3, (timestamp: bigint) => {
-    // 验证时间戳是正数且在合理范围内
-    return timestamp > BigInt(0) && timestamp < BigInt(2 ** 32);
+  }, ZERO_ADDRESS, testModule3, (blockNumber: bigint) => {
+    // 验证区块号是正数且在合理范围内
+    return blockNumber > BigInt(0) && blockNumber < BigInt(2 ** 32);
   });
 ```
 
@@ -1332,7 +1332,7 @@ function validateEventData(data: unknown) {
 // ✅ 正确 - 使用接口定义
 interface EventData {
   property: string;
-  timestamp: bigint;
+  blockNumber: bigint;
 }
 
 function validateEventData(data: unknown): data is EventData {
@@ -1340,7 +1340,7 @@ function validateEventData(data: unknown): data is EventData {
     typeof data === 'object' &&
     data !== null &&
     'property' in data &&
-    'timestamp' in data
+    'blockNumber' in data
   );
 }
 ```

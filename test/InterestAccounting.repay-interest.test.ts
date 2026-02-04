@@ -82,6 +82,7 @@ describe('Interest Accounting – full repay posts interest', function () {
     const token = await (await ethers.getContractFactory('MockERC20')).deploy(
       'DebtToken',
       'DEBT',
+      18,
       ethers.parseEther('1'),
     );
     await token.waitForDeployment();
@@ -141,7 +142,7 @@ describe('Interest Accounting – full repay posts interest', function () {
     expect(engineBalAfter - engineBalBefore).to.equal(fee);
 
     // Bookkeeping: repaidAmount must include interest.
-    const ord = await orderEngine.connect(governance)._getLoanOrderForView(orderId);
+    const ord = await orderEngine.connect(governance).getLoanOrderForView(orderId);
     expect(ord.principal).to.equal(principal);
     expect(ord.rate).to.equal(rateBps);
     expect(ord.term).to.equal(termSec);

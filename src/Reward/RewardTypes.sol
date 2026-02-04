@@ -35,18 +35,18 @@ abstract contract RewardTypes {
     /// @dev 用于记录用户积分消费历史（Spend 侧），供 RewardCore/RewardView 缓存与只读查询
     struct ConsumptionRecord {
         uint256 points;           // 消费积分数量
-        uint256 timestamp;        // 消费时间戳
+        uint256 blockNumber;      // 消费区块号（block.number 口径）
         ServiceType serviceType;  // 服务类型
         ServiceLevel serviceLevel; // 服务等级
         bool isActive;            // 是否激活
-        uint256 expirationTime;   // 过期时间
+        uint256 expirationTime;   // 过期区块号（block.number 口径）
     }
     
     /// @notice 服务配置结构
     /// @dev 由各服务配置子模块提供（实现 IServiceConfig），通过 Registry 动态解析
     struct ServiceConfig {
         uint256 price;           // 服务价格（积分）
-        uint256 duration;        // 服务时长（秒）
+        uint256 duration;        // 服务时长（区块数）
         bool isActive;           // 是否激活
         ServiceLevel level;      // 服务等级
         string description;      // 服务描述

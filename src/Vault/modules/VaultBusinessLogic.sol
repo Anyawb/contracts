@@ -86,14 +86,23 @@ contract VaultBusinessLogic is
      * @param lenderSigner Lender signer / fund owner.
      * @param asset ERC20 asset address.
      * @param amount Amount reserved (token native decimals).
-     * @param timestamp Block timestamp when created (seconds).
+     * @param blockNumber Legacy field: emit time axis marker (treated as blockNumber in this repo).
      */
     event LendReserveCreated(
         bytes32 indexed lendIntentHash,
         address indexed lenderSigner,
         address indexed asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
+    );
+
+    /// @notice Explicit block-based companion event for LendReserveCreated.
+    event LendReserveCreatedV2(
+        bytes32 indexed lendIntentHash,
+        address indexed lenderSigner,
+        address indexed asset,
+        uint256 amount,
+        uint256 blockNumber
     );
 
     /**
@@ -102,14 +111,23 @@ contract VaultBusinessLogic is
      * @param lenderSigner Lender signer / fund owner (canceller).
      * @param asset ERC20 asset address.
      * @param amount Amount returned (token native decimals).
-     * @param timestamp Block timestamp when cancelled (seconds).
+     * @param blockNumber Legacy field: emit time axis marker (treated as blockNumber in this repo).
      */
     event LendReserveCancelled(
         bytes32 indexed lendIntentHash,
         address indexed lenderSigner,
         address indexed asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
+    );
+
+    /// @notice Explicit block-based companion event for LendReserveCancelled.
+    event LendReserveCancelledV2(
+        bytes32 indexed lendIntentHash,
+        address indexed lenderSigner,
+        address indexed asset,
+        uint256 amount,
+        uint256 blockNumber
     );
 
     /**
@@ -118,14 +136,23 @@ contract VaultBusinessLogic is
      * @param lenderSigner Lender signer / fund owner.
      * @param asset ERC20 asset address.
      * @param amount Amount consumed (token native decimals).
-     * @param timestamp Block timestamp when consumed (seconds).
+     * @param blockNumber Legacy field: emit time axis marker (treated as blockNumber in this repo).
      */
     event LendReserveConsumed(
         bytes32 indexed lendIntentHash,
         address indexed lenderSigner,
         address indexed asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
+    );
+
+    /// @notice Explicit block-based companion event for LendReserveConsumed.
+    event LendReserveConsumedV2(
+        bytes32 indexed lendIntentHash,
+        address indexed lenderSigner,
+        address indexed asset,
+        uint256 amount,
+        uint256 blockNumber
     );
 
     // This module no longer emits health-related events; they are handled by LendingEngine (LE) + View layer.
@@ -247,13 +274,11 @@ contract VaultBusinessLogic is
         _settlementTokenAddr = initialSettlementTokenAddr;
         
         // Emit a standardized action event for off-chain observability.
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -413,12 +438,11 @@ contract VaultBusinessLogic is
         IERC20(asset).safeTransferFrom(lenderSigner, pool, amount);
         // Record the reserve in storage.
         _lendReserves.reserve(lenderSigner, asset, amount, lendIntentHash);
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
-        emit LendReserveCreated(lendIntentHash, lenderSigner, asset, amount, ts);
+        emit LendReserveCreated(lendIntentHash, lenderSigner, asset, amount, block.number);
+        emit LendReserveCreatedV2(lendIntentHash, lenderSigner, asset, amount, block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_RESERVE_FOR_LENDING,
-            abi.encode(lendIntentHash, lenderSigner, asset, amount, ts)
+            abi.encode(lendIntentHash, lenderSigner, asset, amount, block.number)
         );
         VaultBusinessLogicLibrary.emitBusinessEvents(
             "reserveForLending",
@@ -450,12 +474,11 @@ contract VaultBusinessLogic is
             address pool = _getModuleAddress(ModuleKeys.KEY_LENDER_POOL_VAULT);
             ILenderPoolVault(pool).transferOut(asset, msg.sender, amount);
         }
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
-        emit LendReserveCancelled(lendIntentHash, msg.sender, asset, amount, ts);
+        emit LendReserveCancelled(lendIntentHash, msg.sender, asset, amount, block.number);
+        emit LendReserveCancelledV2(lendIntentHash, msg.sender, asset, amount, block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_CANCEL_RESERVE,
-            abi.encode(lendIntentHash, msg.sender, asset, amount, ts)
+            abi.encode(lendIntentHash, msg.sender, asset, amount, block.number)
         );
         VaultBusinessLogicLibrary.emitBusinessEvents(
             "cancelReserve",
@@ -506,6 +529,7 @@ contract VaultBusinessLogic is
         );
         // Validate borrow intent state (expired / already matched)
         bytes32 bHash = SettlementIntentLib.hashBorrowIntent(borrowIntent);
+        // NOTE (Time-Dependency-Refactor): `expireAt` is a legacy field name; semantics are expireBlock (block.number).
         SettlementIntentLib.validateOpen(_matchedIntents, bHash, borrowIntent.expireAt);
         // Verify borrower signature (EOA or ERC-1271)
         bytes32 bDigest = SettlementIntentLib.toTypedDataHash(domain, bHash);
@@ -534,12 +558,11 @@ contract VaultBusinessLogic is
             total += amount;
 
             // Observe consumption for off-chain accounting and retries.
-            // solhint-disable-next-line not-rely-on-time
-            uint256 ts = block.timestamp;
-            emit LendReserveConsumed(lHash, lendIntents[i].lenderSigner, asset, amount, ts);
+            emit LendReserveConsumed(lHash, lendIntents[i].lenderSigner, asset, amount, block.number);
+            emit LendReserveConsumedV2(lHash, lendIntents[i].lenderSigner, asset, amount, block.number);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_RESERVE_CONSUMED,
-                abi.encode(lHash, lendIntents[i].lenderSigner, asset, amount, ts)
+                abi.encode(lHash, lendIntents[i].lenderSigner, asset, amount, block.number)
             );
         }
 
@@ -844,13 +867,11 @@ contract VaultBusinessLogic is
         if (newImplementation == address(0)) revert ZeroAddress();
         
         // Emit a standardized action event for off-chain observability.
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 } 

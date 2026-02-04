@@ -161,10 +161,11 @@ async function main() {
     );
 
     // Self access should succeed even without VIEW_USER_DATA role (self is allowed).
-    const [hfAfter, ok] = (await mustSucceed("Self: previewDeposit", async () =>
+    const [hfAfter, ok, isValid, ts] = (await mustSucceed("Self: previewDeposit", async () =>
       preview.connect(borrower).previewDeposit(borrower.address, CONTRACT_ADDRESSES.MockUSDC, 1n)
-    )) as [bigint, boolean];
+    )) as [bigint, boolean, boolean, bigint, bigint];
     assertOk(typeof hfAfter === "bigint" && typeof ok === "boolean", "previewDeposit return types mismatch");
+    assertOk(typeof isValid === "boolean" && typeof ts === "bigint", "previewDeposit meta types mismatch");
 
     // Invalid input should revert with its custom error
     await mustRevertWithSelector(

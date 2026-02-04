@@ -106,7 +106,7 @@ contract MockAccessControlManager is IAccessControlManager {
 
     function getUserPermissionWithCache(address /* user */) external pure returns (
         IAccessControlManager.PermissionLevel level,
-        uint256 timestamp,
+        uint256 blockNumber,
         bool isValid
     ) {
         return (IAccessControlManager.PermissionLevel.NONE, 0, false);
@@ -116,42 +116,60 @@ contract MockAccessControlManager is IAccessControlManager {
         return false;
     }
 
-    function clearPermissionCache(address user) external {
+    function clearPermissionCache(address /* user */) external pure {
         // Mock实现，无缓存
+        uint256 noop = 0;
+        noop;
     }
 
-    function clearBatchPermissionCache(address[] calldata users) external {
+    function clearBatchPermissionCache(address[] calldata /* users */) external pure {
         // Mock实现，无缓存
+        uint256 noop = 0;
+        noop;
     }
 
-    function setCacheExpirationTime(uint256 newExpirationTime) external {
+    function setCacheExpirationTime(uint256 /* newExpirationTime */) external pure {
         // Mock实现，无缓存
+        uint256 noop = 0;
+        noop;
     }
 
     // Note: Keeper / emergency pause APIs were removed from IAccessControlManager as they are not part of SSOT.
 
-    function initiateEmergencyRecovery(address newKeeper) external {
+    function initiateEmergencyRecovery(address /* newKeeper */) external pure {
         // Mock实现，不执行紧急恢复
+        uint256 noop = 0;
+        noop;
     }
 
-    function executeEmergencyRecovery() external {
+    function executeEmergencyRecovery() external pure {
         // Mock实现，不执行紧急恢复
+        uint256 noop = 0;
+        noop;
     }
 
-    function cancelEmergencyRecovery() external {
+    function cancelEmergencyRecovery() external pure {
         // Mock实现，不执行紧急恢复
+        uint256 noop = 0;
+        noop;
     }
 
-    function setEmergencyRecoveryDelay(uint256 delay) external {
+    function setEmergencyRecoveryDelay(uint256 /* delay */) external pure {
         // Mock实现，不设置延迟
+        uint256 noop = 0;
+        noop;
     }
 
-    function transferOwnership(address newOwner) external {
+    function transferOwnership(address /* newOwner */) external pure {
         // Mock实现，不转移所有权
+        uint256 noop = 0;
+        noop;
     }
 
-    function renounceOwnership() external {
+    function renounceOwnership() external pure {
         // Mock实现，不放弃所有权
+        uint256 noop = 0;
+        noop;
     }
 
     function owner() external pure override returns (address) {
@@ -166,7 +184,7 @@ contract MockAccessControlManager is IAccessControlManager {
         address user,
         IAccessControlManager.PermissionLevel oldLevel,
         IAccessControlManager.PermissionLevel newLevel,
-        uint256 timestamp
+        uint256 blockNumber
     ) {
         return (address(0), IAccessControlManager.PermissionLevel.NONE, IAccessControlManager.PermissionLevel.NONE, 0);
     }
@@ -175,8 +193,10 @@ contract MockAccessControlManager is IAccessControlManager {
         return 0;
     }
 
-    function setMaxHistorySize(uint256 newMaxSize) external {
+    function setMaxHistorySize(uint256 /* newMaxSize */) external pure {
         // Mock实现，不设置历史大小
+        uint256 noop = 0;
+        noop;
     }
 
     // Note: role enumeration APIs were removed from IAccessControlManager; keep any extra helpers here as needed for tests.

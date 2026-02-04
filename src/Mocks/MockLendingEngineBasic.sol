@@ -198,7 +198,7 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
             _totalValue = _totalValue > reducedAmount ? _totalValue - reducedAmount : 0;
             
             // 发出债务减少事件
-            emit DebtReduced(liquidator, user, asset, reducedAmount, block.timestamp);
+            emit DebtReduced(liquidator, user, asset, reducedAmount, block.number);
         }
         
         return reducedAmount;
@@ -210,7 +210,7 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         address indexed user,
         address indexed asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 设置成功标志（测试用）

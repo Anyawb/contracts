@@ -33,6 +33,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     const token = await (await ethers.getContractFactory('MockERC20')).deploy(
       'TestToken',
       'TT',
+      18,
       ethers.parseUnits('100000000', 18)
     );
     await token.waitForDeployment();
@@ -265,7 +266,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     expect(await ergm.hasActiveGuarantee(borrower.address, token.target)).to.equal(false);
 
     // keep a no-op read of orderEngine to ensure it is wired (silence unused)
-    await orderEngine._getLoanOrderForView(orderId);
+    await orderEngine.getLoanOrderForView(orderId);
   });
 });
 

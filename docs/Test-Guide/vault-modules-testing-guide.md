@@ -16,7 +16,7 @@ test/
 └── Vault/modules/
     ├── CollateralManagerOptimized.test.ts   # 抵押管理器优化测试
     ├── GuaranteeFundManager.test.ts         # 保证金管理器测试
-    ├── ValuationOracleAdapter.test.ts       # 估值预言机适配器测试
+    ├── ValuationOracleAdapter.test.ts       # DEPRECATED：估值已迁移到 PositionView + PriceOracle（该文件仅保留作为架构迁移记录）
     └── VaultBusinessLogic.test.ts           # 业务逻辑测试
 ```
 
@@ -112,9 +112,10 @@ describe('CollateralManager – 抵押管理器测试', function () {
 
   it('应该正确计算抵押物价值', async function () {
     await collateralManager.depositCollateral(user, asset, amount);
-    const value = await collateralManager.getCollateralValue(user, asset);
-    const expectedValue = amount * price / 1e18;
-    expect(value).to.equal(expectedValue);
+    // NOTE(Architecture-Guide): 抵押估值不再由 CollateralManager 提供，已迁移到 View 层（PositionView）：
+    // valueUSD8 = amount(token base units) * price(USD-8) / 10**assetDecimals
+    const valueUSD8 = await positionView.getAssetValue(asset, amount);
+    expect(valueUSD8).to.be.a('bigint');
   });
 });
 ```
@@ -145,15 +146,15 @@ npx hardhat test test/Vault/modules/GuaranteeFundManager.test.ts
 **文件**: `ValuationOracleAdapter.test.ts`
 
 **测试目标**:
-- 资产估值功能
-- 价格获取和验证
-- 优雅降级处理
-- 批量估值
+- （DEPRECATED）迁移记录：原 ValuationOracleAdapter 已移除；估值 SSOT 为 `PositionView`（抵押）与 `VaultLendingEngine`（债务），价格读取来自 `PriceOracle`。
 
 **运行命令**:
 ```bash
 npx hardhat test test/Vault/modules/ValuationOracleAdapter.test.ts
 ```
+
+> 如需验证“价格读取/健康检查”的只读门面行为，请运行：
+> - `npx hardhat test test/Vault/view/ValuationOracleView.test.ts`
 
 ### 5. 统计集成测试
 
@@ -387,7 +388,8 @@ await vaultBusinessLogic.repay(asset, repayAmount);
 ```typescript
 console.log('Collateral:', await collateralManager.getCollateral(user, asset));
 console.log('Debt:', await lendingEngine.getDebt(user, asset));
-console.log('Health factor:', await healthView.getUserHealthFactor(user));
+const [healthFactor, isValid] = await healthView.getUserHealthFactorWithMeta(user);
+console.log('Health factor:', healthFactor, 'valid=', isValid);
 ```
 
 2. **使用 hardhat console**:

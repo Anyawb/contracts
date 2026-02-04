@@ -40,10 +40,16 @@
   - **routePrice fallback 一致性（PRICE_ORACLE）**  
     - `routePrice.primary` 必须是 `VALUATION_ORACLE_VIEW`，`fallback` 必须是 `PRICE_ORACLE`（两者地址都要与 Registry 对齐）
     - 对同一资产（脚本一般用 `MockUSDC`）：  
-      - `ValuationOracleView.getAssetPrice(asset)` 与 `PriceOracle.getPrice(asset)` 的 `(price,timestamp)` 必须一致  
+      - `ValuationOracleView.getAssetPrice(asset)` 与 `PriceOracle.getPrice(asset)` 的 `(price,blockNumber)` 必须一致（`isValid` 不影响一致性校验）  
       - 若 `PriceOracle.getPrice(asset)` 因“未配置/不支持” revert，则按 best-effort 语义视为 `(0,0)`，并要求 `ValuationOracleView` 返回也为 `(0,0)`（避免语义分叉）
   - **角色前置（硬失败）**  
     - 运行 preflight 的 admin/deployer 必须具备：`VIEW_SYSTEM_DATA`、`VIEW_PRICE_DATA`、`VIEW_RISK_DATA`、`VIEW_USER_DATA`（避免脚本靠临时 grant 混过）
+
+### 1.1) View 扫描工具（ViewScan）
+
+- **用途**：在 acceptance 启动阶段扫描 View 模块 ABI/路由/版本信息（用于快速发现“代理指向旧实现 / ABI 不匹配 / 缺模块注册”等硬错误）。
+- **实现**：`scripts/e2e/utils/view-scan.ts`
+- **说明**：ViewScan 主要作为 “preflight 的内部能力/工具库”；不要把它当作单独的验收脚本入口。
 
 ### 2) 严格失败策略（避免“假阳性”）
 
@@ -108,6 +114,12 @@
   - `RewardView`: 奖励查询
 - 验证 View 层缓存是否正确更新
 - 验证多个 View 模块的数据一致性
+- **Reward 严格断言（新增）**：
+  - 通过 `RewardPoints.balanceOf` 与 `RewardView.getUserRewardSummary.totalEarned` 做 **delta 断言**（不依赖“链是否干净”）
+  - 当脚本使用的借款本金 < `MIN_ELIGIBLE_PRINCIPAL(1000e6)` 时，要求 **delta 必须为 0**，且 repay tx 中 **不得出现** `RewardView.DataPushed`
+- **Artifacts 输出（新增）**：
+  - 运行结束会写入 `scripts/e2e/artifacts/full-with-views.<blockNumber>.json`
+  - 包含模块地址快照、`RewardView.getVersionInfo()`、以及 RewardView `DataPushed` 按 `dataTypeHash` 的计数统计
 
 ### 4.1 `e2e-localhost-reward-privacy.ts` ⭐
 **Reward 隐私 + Read-Gate 专项验收**
@@ -123,12 +135,12 @@
   - `SystemView.route*()` 必须返回可消费的 `moduleKey/moduleAddr`（前端/SDK 可下一跳直连专属 View）
   - `route*()` 返回地址必须与 `Registry.getModuleOrRevert(key)` 一致
   - `VIEW_SYSTEM_DATA` 统一口径权限：无权限调用者对 `SystemView.getModule* / route*` 必须被 gate 拦截
-  - deprecated getter（如 `getAssetPrice/getTotalDebt/...`）允许 revert，但测试 **不解析也不依赖** revert 文本
+  - 旧 getter 已删除；ABI 中不应存在历史读入口
 
 ### 4.3 `e2e-localhost-positionview-acceptance.ts` ⭐
 **PositionView（ARCH 4.2）专项验收：version/nextVersion/requestId/seq/DataPush + (user,asset) validity**
 - 覆盖场景：
-  - 读取 `getUserPositionWithMeta()` 必须返回 `collateral/debt + isValid + timestamp + version`
+  - 读取 `getUserPositionWithMeta()` 必须返回 `collateral/debt + isValid + blockNumber + version`
   - `nextVersion` 严格并发：`currentVersion -> push(nextVersion=current+1) -> version 递增`；错误版本必须 revert
   - `requestId` 幂等：同 `requestId` 且 `nextVersion==currentVersion` 的重放应被忽略（不递增、不重复 DataPushed）
   - `seq` 顺序：非幂等场景下 `seq` 必须严格递增，否则 revert
@@ -136,22 +148,30 @@
   - (user,asset) 缓存有效性：一个资产的 push 不应给另一个资产“续命”
 
 ### 4.4 `e2e-localhost-healthview-acceptance.ts` ⭐
-**HealthView（ARCH 4.3）专项验收：读路径公开 + batch 限制 + push gate + DataPushed + timestamp/validity**
+**HealthView（ARCH 4.3）专项验收：Scheme U 读收口 + batch 限制 + push gate + DataPushed + blockNumber/validity**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.3）：
+  - **Scheme U 读权限（非公开）**：
+    - `getUserHealthFactorWithMeta(user)`：self 放行；non-self 需 `VIEW_USER_DATA/ADMIN`（否则 `MissingRole()`）
+    - `batchGetHealthFactorsWithMeta(users)`：users[] 枚举能力，无 self-bypass，需 `VIEW_USER_DATA/ADMIN`
+  - **push 入口权限**：`pushRiskStatus/pushBatchRiskStatus` 必须 `ACTION_VIEW_PUSH` gate；无权限必须 `MissingRole()`
+  - **DataPushed 可观测性**：成功 push 后必须出现 `DataPushed(DATA_TYPE_RISK_STATUS/_BATCH, payload)` 且 payload 可 ABI 解码
+  - **批量边界**：`batchGetHealthFactorsWithMeta` 空数组必须 `revert EmptyArray()`；超限必须 `revert BatchTooLarge(len,max)`
+  - **缓存有效性**：读取返回 `isValid/blockNumber`；TTL 过期后（CACHE_DURATION=5m）`isValid=false`（blockNumber 不变）
 
 ### 4.5 `e2e-localhost-viewcache-acceptance.ts` ⭐
-**ViewCache（ARCH 4.5）专项验收：系统级快照 isValid/timestamp + 写入口 gate + DataPushed**
+**ViewCache（ARCH 4.5）专项验收：系统级快照 isValid/blockNumber + 写入口 gate + DataPushed**
 - 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.5）：
-  - 读 `getSystemStatus(asset)` 必须返回 `timestamp` 且可用于判断 `isValid`
+  - 读 `getSystemStatus(asset)` 必须返回 `blockNumber` 且可用于判断 `isValid`
   - 无权限账号调用 `setSystemStatus` 必须 revert
-  - 有权限写入后 `isValid=true` 且 timestamp 更新，并出现 `DataPushed(SYSTEM_STATUS_CACHE, payload)`
+  - 有权限写入后 `isValid=true` 且 blockNumber 更新，并出现 `DataPushed(SYSTEM_STATUS_CACHE, payload)`
 
 ### 4.6 `e2e-localhost-accesscontrolview-acceptance.ts` ⭐
 **AccessControlView（ARCH 4.6）专项验收：onlyACM push + DataPushed(type/payload) + 读带有效性 + TTL 过期**
 - 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.6）：
   - 只能由 `AccessControlManager` 推送缓存（EOA 调用 `push*` 必须 revert）
   - 权限位/权限级别更新后必须出现 `DataPushed`，且 `dataTypeHash` 分别为 `PERMISSION_BIT_UPDATE` / `PERMISSION_LEVEL_UPDATE`，payload 可 ABI 解码
-  - push 后立即可读：`getUserPermissionWithMeta/getUserPermissionLevelWithMeta` 返回 `isValid=true` 且 `timestamp` 合理
-  - 超过 TTL 后 `isValid` 变为 false（值与 timestamp 保留）
+  - push 后立即可读：`getUserPermissionWithMeta/getUserPermissionLevelWithMeta` 返回 `isValid=true` 且 `blockNumber` 合理
+  - 超过 TTL 后 `isValid` 变为 false（值与 blockNumber 保留）
 
 ### 4.7 `e2e-localhost-userview-acceptance.ts` ⭐
 **UserView（ARCH 4.7）专项验收：纯 façade + meta 透传 + 聚合一致性 + 禁止 asset=0 总量语义**
@@ -174,13 +194,13 @@
 - 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.9）：
   - 非 FeeRouter 地址调用任意 `push*` 必须 revert（writer SSOT：`FEE_ROUTER`）
   - FeeRouter 调用 `pushGlobalStatsUpdate` 后：
-    - `getSyncStatus()` 返回 `lastSyncTimestamp == tx block.timestamp`
+    - `getSyncStatus()` 返回 `lastSyncBlock == tx block.number`
     - `needsSync=false` 且 `isValid=true`
     - 必须出现 `DataPushed(GLOBAL_FEE_STATS, payload)`，payload 可 ABI 解码
-  - 超过 `SYNC_INTERVAL` 后 `needsSync=true` 且 `isValid=false`（`lastSyncTimestamp` 不变）
+  - 超过 `SYNC_INTERVAL` 后 `needsSync=true` 且 `isValid=false`（`lastSyncBlock` 不变）
 
 ### 4.10 `e2e-localhost-liquidatorview-acceptance.ts` ⭐
-**LiquidatorView / LiquidationView（ARCH 4.10）专项验收：单点 push + DataPushed + 权限口径不混用**
+**LiquidatorView（ARCH 4.10）专项验收：单点 push + DataPushed + 权限口径不混用**
 - 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.10）：
   - **单点推送（writer gating）**：
     - 非 `LIQUIDATION_MANAGER` 调用 `pushLiquidationUpdate/pushBatchLiquidationUpdate` 必须 `revert InvalidCaller()`
@@ -226,12 +246,12 @@
   - 输入校验（asset=0）按实现 revert（`PreviewView__InvalidInput()`）
 
 ### 4.14 `e2e-localhost-modulehealthview-acceptance.ts` ⭐
-**ModuleHealthView（ARCH 4.15）专项验收：运维/监控扩展 View + DataPush(MODULE_HEALTH) + 缓存 meta（isValid/timestamp）**
+**ModuleHealthView（ARCH 4.15）专项验收：运维/监控扩展 View + DataPush(MODULE_HEALTH) + 缓存 meta（isValid/blockNumber）**
 - 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.15）：
   - `unauthorized` 调用 `checkAndPushModuleHealth/getModuleHealthStatus/getModuleHealthStatusWithMeta/checkModuleHealth` 必须 `MissingRole()`
   - `operator`（具备 `ACTION_VIEW_SYSTEM_STATUS`）调用 `checkAndPushModuleHealth` 必须成功
   - 成功后必须出现 `DataPushed(MODULE_HEALTH, payload)` 且 payload 可 ABI 解码
-  - `getModuleHealthStatusWithMeta` 返回 `timestamp/isValid`，TTL 过期后 `isValid=false`（timestamp 不变）
+  - `getModuleHealthStatusWithMeta` 返回 `blockNumber/isValid`，TTL 过期后 `isValid=false`（blockNumber 不变）
 
 ### 4.15 `e2e-localhost-eventhistorymanager-acceptance.ts` ⭐
 **EventHistoryManager（ARCH 4.16）专项验收：events-only + recordEvent 权限 gate + DataPushed(EVENT_HISTORY) 可解码**
@@ -240,6 +260,21 @@
   - 有权限账号调用 `recordEvent` 必须成功
   - 成功后必须同时观察到 `HistoryRecorded` 与 `DataPushed(EVENT_HISTORY, payload)`
   - `DataPushed` 的 payload 必须可 ABI 解码回 `eventType/user/asset/amount/extraData`
+
+### 4.16 `e2e-localhost-rewardview-acceptance.ts` ⭐
+**RewardView（ARCH 4.14）专项验收：写入口白名单 + DataPushed + 用户私域读权限（Scheme U）+ B 类缓存有效性**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.14）：
+  - **写入口白名单**：非 writer（既不是 `RewardManagerCore` 也不是 `RewardConsumption`）调用任意 `push*` 必须 revert
+  - **DataPush 可观测性**：每个 `pushRewardEarned/pushPointsBurned/pushPenaltyLedger/pushUserLevel/pushUserPrivilege/pushSystemStats` 成功必须出现 `DataPushed`，且 `dataTypeHash` 来自集中常量口径
+  - **用户私域读权限（Scheme U）**：非本人读取 Reward 私域数据必须 `MissingRole()`；本人/ops/admin 可读
+  - **B 类缓存有效性**：`getUserRewardSummary` 返回值必须包含 `isValid/blockNumber`；blockNumber 单调推进；过期后 `isValid=false`
+
+### 4.17 `e2e-localhost-statisticsview-acceptance.ts` ⭐
+**StatisticsView（ARCH 4.4）专项验收：系统聚合只读 + push 后单调推进 + 并发/幂等（nextVersion/requestId/seq）**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.4）：
+  - **系统聚合只读**：`getGlobalStatistics/getGlobalStatisticsWithMeta` 返回 `totalUsers/activeUsers/totalCollateral/totalDebt/lastUpdateBlock` + `(isValid,blockNumber)`
+  - **推送后单调推进**：`pushUserStatsUpdate` 后总量按增量变化，`lastUpdateBlock` 单调；必须出现 `DataPushed(DATA_TYPE_USER_STATS_UPDATE, payload)`
+  - **并发/幂等**：错误 `nextVersion` 必须 `revert StatisticsView__StaleUserStatsVersion`；同 `requestId` 重放不得 emit `DataPushed` 且版本不变；乱序 `seq` 必须 `revert StatisticsView__OutOfOrderSeq`
 
 ### 5. `e2e-localhost-batch-10-users.ts`
 **10 用户批量撮合借贷（5 组 borrower+lender）+ 总数验收**
@@ -257,11 +292,50 @@
 - Reward（新增）：按 `Architecture-Guide.md` 的唯一路径（LE 落账后触发）对 **积分/RewardView** 做最小端到端断言：
   - 输出 **人类可读积分**（`RewardPoints.decimals()`）与 raw 值
   - 断言 repay 后 `RewardPoints.balanceOf` 与 `RewardView.getUserRewardSummary.totalEarned` 的 **delta == 1.0**
+- Read-gate（补强）：EOA 直连 `RewardManagerCore.get*` 必须按 selector 失败（不得绕过 RewardView）
+- Artifacts（新增）：运行结束写入 `scripts/e2e/artifacts/batch-10-users.<blockNumber>.json`，包含模块快照、`RewardView.getVersionInfo()`、以及 `DataPushed` 按 `dataTypeHash` 的计数统计
 - “样本 borrower”可配置：
   - **env**：`E2E_SAMPLE_BORROWER_INDEX=0..4`（默认 0）
   - **task/argv**：`npx hardhat e2e:batch-10-users --sample-borrower-index 0..4`（task 定义在 `scripts/tasks/e2e-batch-10-users.ts`，并已在 `hardhat.config.ts` 引入）
 
-### 6. `e2e-localhost-batch-advanced-10-users.ts` ⭐
+### 6. `e2e-localhost-attack-suite.ts` ⭐
+**安全攻击场景测试套件：权限提升/重入/升级攻击防御验证**
+- 覆盖场景：
+  - **Registry owner-only 调用**：非 owner 调用 `setModule` 必须 revert
+  - **AccessControl 权限提升尝试**：非 admin 尝试 `grantRole` 必须 revert
+  - **VaultCore/VBL 受限入口点**：非授权调用者尝试 `borrowFor/repayFor/processUserOperation/depositCollateral/liquidate` 必须 revert
+  - **Oracle 操纵尝试**：非授权调用者尝试 `updatePrice/configureAsset/setAssetActive` 必须 revert
+  - **LiquidationManager admin 调用**：非 admin 尝试 `pause/unpause` 必须 revert
+  - **UUPS 升级攻击尝试**：对关键 UUPS 合约尝试非法升级必须 revert
+  - **重入攻击防御**：通过恶意 view callback 尝试重入必须被防御
+
+### 7. `e2e-localhost-feerouter.ts`
+**FeeRouter 业务逻辑 E2E 测试：费率初始化/费用分发/动态费率/权限控制**
+- 覆盖场景：
+  - **费率初始化正确性**：验证费率配置与读取一致性
+  - **费用分发功能**：验证费用正确分发到 Treasury/EcoVault 等目标地址
+  - **动态费率设置**：验证费率动态更新与生效
+  - **权限控制验证**：验证费率设置权限控制
+  - **批量费用分发**：验证批量场景下的费用分发正确性
+  - **费用统计功能**：验证费用统计数据的准确性
+  - **大金额处理**：验证大金额场景下的费用计算正确性
+  - **事件验证**：验证费用相关事件的正确触发
+
+### 8. `e2e-localhost-scenario-matrix.ts` ⭐
+**E2E 场景矩阵（ARCH 5.1.3）：多用户资金流回放 + 推送失败模拟 + 批量边界**
+- 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 5.1.3）：
+  - **E2E-01 多用户资金流回放**：N 用户 deposit/borrow/repay/withdraw 交错执行；每步后用 `DashboardView/CacheOptimizedView/BatchView` 批量拉取；验证数据一致性与有效性信息不丢
+  - **E2E-02 推送失败模拟与链下重试**：故意触发 push 失败 → 监听失败事件 → 链下重试 push；验证失败可观测且可重放；无链上循环重试
+  - **E2E-03 批量边界与性能**：接近 `MAX_BATCH_SIZE` 的批量调用 + 超限调用；验证不 OOG；超限一致失败
+  - **验收证据输出**：模块地址快照、关键 View 的 `getVersionInfo()`、`DataPushed` 按 `dataTypeHash` 计数统计、失败事件计数
+
+### 9. `e2e-localhost.ts`
+**基础 E2E 流程测试（简化版）**
+- 测试简单的 deposit → borrow → repay 流程
+- 验证核心业务逻辑（VaultCore, CollateralManager, VaultLendingEngine）
+- 适合做快速 smoke test（**不做严格 View/Stats 断言**）
+
+### 10. `e2e-localhost-batch-advanced-10-users.ts` ⭐
 **高级批量测试：部分还款 / 逾期还款 / 多 lender 拆单 + 每步 View 断言**
 - 10 个 signer：5 个 borrower + 5 个 lender
 - 覆盖场景：
@@ -277,7 +351,15 @@
 - ViewScan（新增）：同上
   - 默认：随 strict 策略（本脚本中 strict 默认开启）
   - 关闭 strict：`E2E_STRICT_VIEWS=0`
-- Reward（新增）：同上
+- Reward（升级为严格一致性）：
+  - 通过 `RewardPoints.decimals()` 输出 **人类可读积分**与 raw 值
+  - 通过 `RewardPoints.balanceOf` 与 `RewardView.getUserRewardSummary.totalEarned` 做 **delta 断言**：
+    - 若本金 \(\ge 1000e6\)（eligible），按期全额还款应满足 **delta == 1 point**
+    - 若本金 \(< 1000e6\)（ineligible），必须满足 **delta == 0**
+  - Read-gate（补强）：EOA 直连 `RewardManagerCore.get*` 必须按 selector 失败（不得绕过 RewardView）
+- **Artifacts 输出（新增）**：
+  - 运行结束会写入 `scripts/e2e/artifacts/batch-advanced-10-users.<blockNumber>.json`
+  - 包含模块地址快照、`RewardView.getVersionInfo()`、以及全链路 `DataPushed` 按 `dataTypeHash` 的计数统计（含 reward/system/liquidation 等）
 - “样本 borrower”可配置：
   - **env**：`E2E_SAMPLE_BORROWER_INDEX=0..4`（默认 0）
   - **task/argv**：`npx hardhat e2e:batch-advanced --sample-borrower-index 0..4`（task 定义在 `scripts/tasks/e2e-batch-advanced.ts`，并已在 `hardhat.config.ts` 引入）
@@ -345,6 +427,25 @@ hardhat run scripts/deploy/deploylocal.ts --network localhost
 
 ### 运行测试脚本
 
+3. **Registry 对齐预处理（推荐）**：运行全量 E2E 前先对齐 Registry 与本地配置。
+```bash
+npx hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network localhost
+```
+
+4. **Registry 对齐验收（必须）**：全量 E2E 结束后输出对齐表并确认 `mismatches=0`。
+```bash
+npx hardhat run scripts/e2e/utils/registry-alignment-report.ts --network localhost
+```
+
+#### 全量 E2E 一键命令（推荐）
+```bash
+npx hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network localhost && for f in scripts/e2e/*.ts; do echo "\n=== Running $f ==="; npx hardhat run "$f" --network localhost || exit $?; done && npx hardhat run scripts/e2e/utils/registry-alignment-report.ts --network localhost
+```
+或使用 `pnpm exec` 版本：
+```bash
+pnpm -s exec hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network localhost && for f in scripts/e2e/*.ts; do echo "\n=== Running $f ==="; pnpm -s exec hardhat run "$f" --network localhost || exit $?; done && pnpm -s exec hardhat run scripts/e2e/utils/registry-alignment-report.ts --network localhost
+```
+
 #### 基础业务流测试
 ```bash
 npx hardhat run scripts/e2e/e2e-localhost-run.ts --network localhost
@@ -385,10 +486,27 @@ npx hardhat run scripts/e2e/e2e-localhost-positionview-acceptance.ts --network l
 npx hardhat run scripts/e2e/e2e-localhost-healthview-acceptance.ts --network localhost
 ```
 
+#### RewardView（ARCH 4.14）专项验收 ⭐
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-rewardview-acceptance.ts --network localhost
+```
+
+#### StatisticsView（ARCH 4.4）专项验收 ⭐
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-statisticsview-acceptance.ts --network localhost
+```
+
 #### Reward Edge Cases（多订单/partial repay/提前-按期-逾期/penaltyLedger）⭐
 ```bash
 npx hardhat e2e:reward-edgecases --network localhost
 ```
+- 脚本：`scripts/e2e/e2e-localhost-reward-edgecases.ts`
+- 覆盖场景：
+  - **多订单场景**：同一用户创建多个订单，验证积分累计正确性
+  - **部分还款**：同一订单分多次还款，验证积分计算与 penaltyLedger 更新
+  - **提前/按期/逾期还款**：验证不同还款时机的积分语义（按期 +1；提前 +0；逾期扣 5%）
+  - **penaltyLedger 更新**：验证逾期还款后 penaltyDebt 的正确记录与查询
+  - **DataPushed 可观测性**：验证所有 Reward 相关 push 操作都触发对应的 `DataPushed` 事件
 
 #### 10 用户批量撮合借贷（推荐用于压测/一致性验收）
 ```bash
@@ -406,6 +524,26 @@ E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-10-u
 
 ```bash
 pnpm -s exec hardhat e2e:batch-10-users --network localhost --sample-borrower-index 2
+```
+
+#### 安全攻击场景测试套件 ⭐
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-attack-suite.ts --network localhost
+```
+
+#### FeeRouter 业务逻辑 E2E 测试
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-feerouter.ts --network localhost
+```
+
+#### E2E 场景矩阵（ARCH 5.1.3）⭐
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-scenario-matrix.ts --network localhost
+```
+
+#### 基础 E2E 流程测试（简化版）
+```bash
+npx hardhat run scripts/e2e/e2e-localhost.ts --network localhost
 ```
 
 #### 高级批量测试（部分还款/逾期/拆单 + 每步 View 断言）⭐
@@ -449,6 +587,13 @@ pnpm -s exec hardhat e2e:batch-advanced --network localhost --sample-borrower-in
 ```
 
 ## 输出说明
+
+### Artifacts（验收证据 JSON）
+部分严格 E2E 脚本会把验收证据落盘到 `scripts/e2e/artifacts/`，用于 CI/回归对比：
+- 模块地址快照（Registry keys → addr）
+- 关键 View 的 `getVersionInfo()`（api/schema/implementation）
+- `DataPushed` 按 `dataTypeHash` 的计数统计（与 `DataPushTypes` 口径对齐）
+
 
 ### `e2e-localhost-full-with-views.ts` 输出示例
 
@@ -507,6 +652,10 @@ pnpm -s exec hardhat e2e:batch-advanced --network localhost --sample-borrower-in
 4. **权限设置**：脚本会自动设置所需的权限，但确保部署脚本正确配置了所有模块的 Registry 绑定。
 
 5. **资产白名单和价格**：脚本会自动将 USDC 添加到资产白名单并设置价格。
+
+6. **Registry 对齐检查（E2E 必须项）**：全量 E2E 结束后，必须核对 Registry 的所有模块地址与 `frontend-config/contracts-localhost.ts` 一致。  
+   - 目的：避免测试脚本临时写入导致 Registry 漂移（尤其是 `VAULT_BUSINESS_LOGIC`）。
+   - 建议流程：先执行 `scripts/e2e/utils/registry-rebind-from-config.ts` 纠偏，再运行全量 E2E，最后运行 `scripts/e2e/utils/registry-alignment-report.ts` 输出对齐表。
 
 ## 故障排查
 

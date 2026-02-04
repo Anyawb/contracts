@@ -10,12 +10,18 @@ import { RewardTypes } from "../../../Reward/RewardTypes.sol";
 import { IServiceConfig } from "../../../Reward/interfaces/IServiceConfig.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 import { ViewConstants } from "../ViewConstants.sol";
+
+/**
+ * @dev Minimal interface for RewardCore consumption-side read helpers.
+ *      RewardView uses this strictly for selector derivation and best-effort reads.
+ */
+interface IRewardCoreConsumptionReads {
+    function getUserLastConsumption(address user, uint8 serviceType) external view returns (uint256);
+}
 
 /**
  * @title RewardView
@@ -27,7 +33,7 @@ import { ViewConstants } from "../ViewConstants.sol";
  *
  * Security:
  * - Role-gated writes: only RewardManagerCore and RewardConsumption (resolved via Registry) can push updates.
- * - Some reads are role-gated for ops/admin visibility (VIEW_USER_DATA / ADMIN), as these can reveal user reward data.
+ * - Some reads are role-gated for ops/admin visibility (VIEW_SYSTEM_DATA / ADMIN), as these are system-level outputs.
  * - Unified DataPush: push* functions emit DataPushed events via DataPushLibrary for off-chain indexing.
  */
 contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
@@ -53,7 +59,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     mapping(address => UserSummary) private _userSummary;
-    mapping(address => uint256) private _userCacheTimestamps;
+    mapping(address => uint256) private _userCacheBlocks;
 
     /*━━━━━━━━━━━━━━━ Local activity cache (RewardView-only) ━━━━━━━━━━━━━━━*/
 
@@ -62,17 +68,21 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     struct Activity {
         uint8 kind;
         uint256 amount;
-        uint256 ts;
+        uint256 blockNumber;
     }
 
     mapping(address => Activity[]) private _activities;
     uint256 private constant _MAX_ACTIVITY_SCAN = 500;
-    uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION;
+    uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION_BLOCKS;
 
     /*━━━━━━━━━━━━━━━ Consumption-side cache (RewardView-only) ━━━━━━━━━━━━━━━*/
 
     mapping(address => RewardTypes.ConsumptionRecord[]) private _consumptions;
     mapping(address => mapping(RewardTypes.ServiceType => uint256)) private _lastConsumption;
+
+    // RewardCore.getUserLastConsumption(address,uint8)
+    bytes4 private constant _SEL_GET_USER_LAST_CONSUMPTION =
+        IRewardCoreConsumptionReads.getUserLastConsumption.selector;
     mapping(RewardTypes.ServiceType => uint256) private _serviceUsage;
     
     /*━━━━━━━━━━━━━━━ Top earners cache (fixed length) ━━━━━━━━━━━━━━━*/
@@ -89,6 +99,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     SystemStats private _systemStats;
+    uint256 private _systemCacheTimestamp;
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
@@ -108,18 +119,22 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         _;
     }
 
-    /// @dev Gate: caller must be the user, or have VIEW_USER_DATA.
+    /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyAuthorizedFor(address user) {
-        if (msg.sender != user && !_hasViewUserDataRole(msg.sender)) {
+        if (
+            msg.sender != user
+                && !_hasViewUserDataRole(msg.sender)
+                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+        ) {
             revert MissingRole();
         }
         _;
     }
 
-    /// @dev Gate: caller must have VIEW_USER_DATA or ADMIN.
+    /// @dev Gate: caller must have VIEW_SYSTEM_DATA or ADMIN.
     modifier onlyOps() {
         if (
-            !_hasViewUserDataRole(msg.sender)
+            !_hasViewSystemDataRole(msg.sender)
                 && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
         ) {
             revert MissingRole();
@@ -165,7 +180,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Update the Registry address.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_ADMIN (MissingRole via ViewAccessLib.requireRole)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
      *      - newRegistry is zero (ZeroAddress)
      *      - newRegistry is not a contract (NotAContract)
      *
@@ -175,7 +190,9 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newRegistry New Registry contract address
      */
     function setRegistry(address newRegistry) external onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newRegistry == address(0)) revert ZeroAddress();
         if (newRegistry.code.length == 0) revert NotAContract(newRegistry);
         _registryAddr = newRegistry;
@@ -192,25 +209,25 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - onlyWriter (RewardManagerCore / RewardConsumption)
-     * - Emits DataPushed(DATA_TYPE_REWARD_EARNED, abi.encode(user, amount, reason, ts))
+     * - Emits DataPushed(DATA_TYPE_REWARD_EARNED, abi.encode(user, amount, reason, blockNumber))
      *
      * @param user User address
      * @param amount Earned points amount (points units, system-defined)
      * @param reason Short reason string (off-chain display only)
-     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     * @param blockNumber Business blockNumber (block number; writer-defined)
      */
-    function pushRewardEarned(address user, uint256 amount, string calldata reason, uint256 ts)
+    function pushRewardEarned(address user, uint256 amount, string calldata reason, uint256 blockNumber)
         external
         onlyWriter
     {
         UserSummary storage s = _userSummary[user];
         s.totalEarned += amount;
-        if (ts > s.lastActivity) s.lastActivity = ts;
+        if (blockNumber > s.lastActivity) s.lastActivity = blockNumber;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
-        _activities[user].push(Activity({ kind: 1, amount: amount, ts: ts }));
+        _activities[user].push(Activity({ kind: 1, amount: amount, blockNumber: blockNumber }));
         _updateTopEarners(user, s.totalEarned);
         _touchUserCache(user);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_EARNED, abi.encode(user, amount, reason, ts));
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_EARNED, abi.encode(user, amount, reason, blockNumber));
     }
 
     /**
@@ -220,31 +237,31 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - onlyWriter (RewardManagerCore / RewardConsumption)
-     * - Emits DataPushed(DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, ts))
+     * - Emits DataPushed(DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, blockNumber))
      *
      * @param user User address
      * @param amount Burned points amount (points units, system-defined)
      * @param reason Short reason string (off-chain display only)
-     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     * @param blockNumber Business blockNumber (block number; writer-defined)
      */
-    function pushPointsBurned(address user, uint256 amount, string calldata reason, uint256 ts)
+    function pushPointsBurned(address user, uint256 amount, string calldata reason, uint256 blockNumber)
         external
         onlyWriter
     {
         UserSummary storage s = _userSummary[user];
         s.totalBurned += amount;
-        if (ts > s.lastActivity) s.lastActivity = ts;
+        if (blockNumber > s.lastActivity) s.lastActivity = blockNumber;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
-        _activities[user].push(Activity({ kind: 2, amount: amount, ts: ts }));
+        _activities[user].push(Activity({ kind: 2, amount: amount, blockNumber: blockNumber }));
         _touchUserCache(user);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, ts));
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, blockNumber));
     }
 
     /**
      * @notice Admin retry helper: replay a "points burned" push (manual recovery).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_ADMIN (MissingRole via ViewAccessLib.requireRole)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
      *
      * Security:
      * - Role-gated: ACTION_ADMIN
@@ -253,20 +270,22 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param user User address
      * @param amount Burned points amount
      * @param reason Short reason string
-     * @param ts Business timestamp (seconds since epoch; admin-defined)
+     * @param blockNumber Business blockNumber (block number; admin-defined)
      */
-    function retryPushPointsBurned(address user, uint256 amount, string calldata reason, uint256 ts)
+    function retryPushPointsBurned(address user, uint256 amount, string calldata reason, uint256 blockNumber)
         external
         onlyValidRegistry
     {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         UserSummary storage s = _userSummary[user];
         s.totalBurned += amount;
-        if (ts > s.lastActivity) s.lastActivity = ts;
+        if (blockNumber > s.lastActivity) s.lastActivity = blockNumber;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
-        _activities[user].push(Activity({ kind: 2, amount: amount, ts: ts }));
+        _activities[user].push(Activity({ kind: 2, amount: amount, blockNumber: blockNumber }));
         _touchUserCache(user);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, ts));
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, blockNumber));
     }
 
     /**
@@ -276,23 +295,23 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - onlyWriter (RewardManagerCore / RewardConsumption)
-     * - Emits DataPushed(DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED, abi.encode(user, pendingDebt, ts))
+     * - Emits DataPushed(DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED, abi.encode(user, pendingDebt, blockNumber))
      *
      * @param user User address
      * @param pendingDebt Pending points debt (points units, system-defined)
-     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     * @param blockNumber Business blockNumber (block number; writer-defined)
      */
-    function pushPenaltyLedger(address user, uint256 pendingDebt, uint256 ts) external onlyWriter {
+    function pushPenaltyLedger(address user, uint256 pendingDebt, uint256 blockNumber) external onlyWriter {
         UserSummary storage s = _userSummary[user];
         s.pendingPenalty = pendingDebt;
-        if (ts > s.lastActivity) s.lastActivity = ts;
+        if (blockNumber > s.lastActivity) s.lastActivity = blockNumber;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
-        _activities[user].push(Activity({ kind: 3, amount: pendingDebt, ts: ts }));
+        _activities[user].push(Activity({ kind: 3, amount: pendingDebt, blockNumber: blockNumber }));
         _touchUserCache(user);
         // penaltyLedger uses a dedicated dataTypeHash to avoid payload ambiguity with REWARD_STATS_UPDATED.
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED,
-            abi.encode(user, pendingDebt, ts)
+            abi.encode(user, pendingDebt, blockNumber)
         );
     }
 
@@ -303,17 +322,17 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - onlyWriter (RewardManagerCore / RewardConsumption)
-     * - Emits DataPushed(DATA_TYPE_REWARD_LEVEL_UPDATED, abi.encode(user, newLevel, ts))
+     * - Emits DataPushed(DATA_TYPE_REWARD_LEVEL_UPDATED, abi.encode(user, newLevel, blockNumber))
      *
      * @param user User address
      * @param newLevel New level (system-defined; not range-validated here)
-     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     * @param blockNumber Business blockNumber (block number; writer-defined)
      */
-    function pushUserLevel(address user, uint8 newLevel, uint256 ts) external onlyWriter {
+    function pushUserLevel(address user, uint8 newLevel, uint256 blockNumber) external onlyWriter {
         _userSummary[user].level = newLevel;
-        if (ts > _userSummary[user].lastActivity) _userSummary[user].lastActivity = ts;
+        if (blockNumber > _userSummary[user].lastActivity) _userSummary[user].lastActivity = blockNumber;
         _touchUserCache(user);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_LEVEL_UPDATED, abi.encode(user, newLevel, ts));
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_LEVEL_UPDATED, abi.encode(user, newLevel, blockNumber));
     }
 
     /**
@@ -323,19 +342,19 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - onlyWriter (RewardManagerCore / RewardConsumption)
-     * - Emits DataPushed(DATA_TYPE_REWARD_PRIVILEGE_UPDATED, abi.encode(user, privilegePacked, ts))
+     * - Emits DataPushed(DATA_TYPE_REWARD_PRIVILEGE_UPDATED, abi.encode(user, privilegePacked, blockNumber))
      *
      * @param user User address
      * @param privilegePacked Packed privilege bitmap (uint256)
-     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     * @param blockNumber Business blockNumber (block number; writer-defined)
      */
-    function pushUserPrivilege(address user, uint256 privilegePacked, uint256 ts) external onlyWriter {
+    function pushUserPrivilege(address user, uint256 privilegePacked, uint256 blockNumber) external onlyWriter {
         _userSummary[user].privilegesPacked = privilegePacked;
-        if (ts > _userSummary[user].lastActivity) _userSummary[user].lastActivity = ts;
+        if (blockNumber > _userSummary[user].lastActivity) _userSummary[user].lastActivity = blockNumber;
         _touchUserCache(user);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_REWARD_PRIVILEGE_UPDATED,
-            abi.encode(user, privilegePacked, ts)
+            abi.encode(user, privilegePacked, blockNumber)
         );
     }
 
@@ -343,7 +362,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Admin retry helper: replay a "user privilege" push (manual recovery).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_ADMIN (MissingRole via ViewAccessLib.requireRole)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
      *
      * Security:
      * - Role-gated: ACTION_ADMIN
@@ -351,19 +370,21 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user User address
      * @param privilegePacked Packed privilege bitmap
-     * @param ts Business timestamp (seconds since epoch; admin-defined)
+     * @param blockNumber Business blockNumber (block number; admin-defined)
      */
-    function retryPushUserPrivilege(address user, uint256 privilegePacked, uint256 ts)
+    function retryPushUserPrivilege(address user, uint256 privilegePacked, uint256 blockNumber)
         external
         onlyValidRegistry
     {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         _userSummary[user].privilegesPacked = privilegePacked;
-        if (ts > _userSummary[user].lastActivity) _userSummary[user].lastActivity = ts;
+        if (blockNumber > _userSummary[user].lastActivity) _userSummary[user].lastActivity = blockNumber;
         _touchUserCache(user);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_REWARD_PRIVILEGE_UPDATED,
-            abi.encode(user, privilegePacked, ts)
+            abi.encode(user, privilegePacked, blockNumber)
         );
     }
 
@@ -377,14 +398,15 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - onlyWriter (and additionally restricted to RewardConsumption)
-     * - Does NOT emit DataPushed to avoid duplicating semantics with REWARD_BURNED / REWARD_PRIVILEGE_UPDATED.
+     * - Emits DataPushed(DATA_TYPE_REWARD_CONSUMPTION_RECORDED,
+     *   abi.encode(user, serviceType, serviceLevel, points, expirationTime, blockNumber))
      *
      * @param user User address
      * @param serviceType Service type (RewardTypes.ServiceType)
      * @param serviceLevel Service level (RewardTypes.ServiceLevel)
      * @param points Points spent (points units)
-     * @param expirationTime Expiration time (seconds since epoch; service-defined)
-     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     * @param expirationTime Expiration time (block number; service-defined)
+     * @param blockNumber Business blockNumber (block number; writer-defined)
      */
     function pushConsumptionRecord(
         address user,
@@ -392,7 +414,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         RewardTypes.ServiceLevel serviceLevel,
         uint256 points,
         uint256 expirationTime,
-        uint256 ts
+        uint256 blockNumber
     ) external onlyWriter {
         address rc = _getModule(ModuleKeys.KEY_REWARD_CONSUMPTION);
         if (msg.sender != rc) revert RewardView__UnauthorizedWriter();
@@ -400,23 +422,27 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         _consumptions[user].push(
             RewardTypes.ConsumptionRecord({
                 points: points,
-                timestamp: ts,
+                blockNumber: blockNumber,
                 serviceType: serviceType,
                 serviceLevel: serviceLevel,
                 isActive: true,
                 expirationTime: expirationTime
             })
         );
-        _lastConsumption[user][serviceType] = ts;
+        _lastConsumption[user][serviceType] = blockNumber;
         unchecked { _serviceUsage[serviceType] += 1; }
         _touchUserCache(user);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_CONSUMPTION_RECORDED,
+            abi.encode(user, serviceType, serviceLevel, points, expirationTime, blockNumber)
+        );
     }
 
     /**
      * @notice Admin retry helper: replay a "consumption record" push (manual recovery).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_ADMIN (MissingRole via ViewAccessLib.requireRole)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
      *
      * Security:
      * - Role-gated: ACTION_ADMIN
@@ -426,8 +452,8 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param serviceType Service type
      * @param serviceLevel Service level
      * @param points Points spent (points units)
-     * @param expirationTime Expiration time (seconds)
-     * @param ts Business timestamp (seconds)
+     * @param expirationTime Expiration time (block number)
+     * @param blockNumber Business blockNumber (block number)
      */
     function retryPushConsumptionRecord(
         address user,
@@ -435,22 +461,28 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         RewardTypes.ServiceLevel serviceLevel,
         uint256 points,
         uint256 expirationTime,
-        uint256 ts
+        uint256 blockNumber
     ) external onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         _consumptions[user].push(
             RewardTypes.ConsumptionRecord({
                 points: points,
-                timestamp: ts,
+                blockNumber: blockNumber,
                 serviceType: serviceType,
                 serviceLevel: serviceLevel,
                 isActive: true,
                 expirationTime: expirationTime
             })
         );
-        _lastConsumption[user][serviceType] = ts;
+        _lastConsumption[user][serviceType] = blockNumber;
         unchecked { _serviceUsage[serviceType] += 1; }
         _touchUserCache(user);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_CONSUMPTION_RECORDED,
+            abi.encode(user, serviceType, serviceLevel, points, expirationTime, blockNumber)
+        );
     }
 
     /**
@@ -460,76 +492,31 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - onlyWriter (RewardManagerCore / RewardConsumption)
-     * - Emits DataPushed(DATA_TYPE_REWARD_STATS_UPDATED, abi.encode(totalBatchOps, totalCachedRewards, ts))
+     * - Emits DataPushed(DATA_TYPE_REWARD_STATS_UPDATED, abi.encode(totalBatchOps, totalCachedRewards, blockNumber))
      *
      * @param totalBatchOps Total batch operations count (writer-defined)
      * @param totalCachedRewards Total cache-hit count (writer-defined)
-     * @param ts Business timestamp (seconds since epoch; writer-defined)
+     * @param blockNumber Business blockNumber (block number; writer-defined)
      */
-    function pushSystemStats(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 ts)
+    function pushSystemStats(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 blockNumber)
         external
         onlyWriter
     {
         _systemStats.totalBatchOps = totalBatchOps;
         _systemStats.totalCachedRewards = totalCachedRewards;
+        _systemCacheTimestamp = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_REWARD_STATS_UPDATED,
-            abi.encode(totalBatchOps, totalCachedRewards, ts)
+            abi.encode(totalBatchOps, totalCachedRewards, blockNumber)
         );
     }
 
     /*━━━━━━━━━━━━━━━ Read APIs (0-gas views) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get a user's reward summary from RewardView local cache.
+     * @notice Get a user's reward summary plus local cache metadata (blockNumber + TTL validity).
      * @dev Reverts if:
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @param user Target user address
-     * @return totalEarned Total earned points (points units)
-     * @return totalBurned Total burned points (points units)
-     * @return pendingPenalty Pending penalty debt (points units)
-     * @return level User level (system-defined)
-     * @return privilegesPacked Packed privilege bitmap (uint256)
-     * @return lastActivity Last activity timestamp (seconds since epoch; writer-defined)
-     * @return totalLoans Reserved (currently not maintained)
-     * @return totalVolume Reserved (currently not maintained)
-     */
-    function getUserRewardSummary(address user)
-        external
-        view
-        onlyAuthorizedFor(user)
-        returns (
-            uint256 totalEarned,
-            uint256 totalBurned,
-            uint256 pendingPenalty,
-            uint8 level,
-            uint256 privilegesPacked,
-            uint256 lastActivity,
-            uint256 totalLoans,
-            uint256 totalVolume
-        )
-    {
-        UserSummary storage s = _userSummary[user];
-        return (
-            s.totalEarned,
-            s.totalBurned,
-            s.pendingPenalty,
-            s.level,
-            s.privilegesPacked,
-            s.lastActivity,
-            s.totalLoans,
-            s.totalVolume
-        );
-    }
-
-    /**
-     * @notice Get a user's reward summary plus local cache metadata (timestamp + TTL validity).
-     * @dev Reverts if:
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
@@ -540,10 +527,10 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return pendingPenalty Pending penalty debt
      * @return level User level
      * @return privilegesPacked Packed privilege bitmap
-     * @return lastActivity Last activity timestamp (seconds; writer-defined)
+     * @return lastActivity Last activity blockNumber (block number; writer-defined)
      * @return totalLoans Reserved (currently not maintained)
      * @return totalVolume Reserved (currently not maintained)
-     * @return timestamp RewardView local cache last-write time (block.timestamp, seconds)
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
      * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserRewardSummaryWithMeta(address user)
@@ -559,13 +546,13 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
             uint256 lastActivity,
             uint256 totalLoans,
             uint256 totalVolume,
-            uint256 timestamp,
+            uint256 blockNumber,
             bool isValid
         )
     {
         UserSummary storage s = _userSummary[user];
-        timestamp = _userCacheTimestamps[user];
-        isValid = _isUserCacheValid(timestamp);
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
         return (
             s.totalEarned,
             s.totalBurned,
@@ -575,16 +562,16 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
             s.lastActivity,
             s.totalLoans,
             s.totalVolume,
-            timestamp,
+            blockNumber,
             isValid
         );
     }
 
     /**
-     * @notice Get system-level reward stats from RewardView local cache.
+     * @notice Get system-level reward stats from RewardView local cache, with cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyOps)
+     *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
      *
      * Security:
      * - Read-only
@@ -592,15 +579,27 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return totalBatchOps Total batch operations count (writer-defined)
      * @return totalCachedRewards Total cache-hit count (writer-defined)
      * @return activeUsers Active user count (RewardView-local)
+     * @return blockNumber RewardView system cache blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
-    function getSystemRewardStats()
+    function getSystemRewardStatsWithMeta()
         external
         view
         onlyValidRegistry
         onlyOps
-        returns (uint256 totalBatchOps, uint256 totalCachedRewards, uint256 activeUsers)
+        returns (
+            uint256 totalBatchOps,
+            uint256 totalCachedRewards,
+            uint256 activeUsers,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
-        return (_systemStats.totalBatchOps, _systemStats.totalCachedRewards, _systemStats.activeUsers);
+        totalBatchOps = _systemStats.totalBatchOps;
+        totalCachedRewards = _systemStats.totalCachedRewards;
+        activeUsers = _systemStats.activeUsers;
+        blockNumber = _systemCacheTimestamp;
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
@@ -620,34 +619,40 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Extended read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get a user's recent reward activities from local cache (reverse scan with window filters).
+     * @notice Get a user's recent reward activities from local cache, with cache metadata.
      * @dev Reverts if:
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
      *
      * @param user Target user address
-     * @param fromTs Inclusive start timestamp filter (seconds). 0 means no lower bound.
-     * @param toTs Inclusive end timestamp filter (seconds). 0 means no upper bound.
+     * @param fromTs Inclusive start blockNumber filter (block number). 0 means no lower bound.
+     * @param toTs Inclusive end blockNumber filter (block number). 0 means no upper bound.
      * @param limit Maximum number of entries to return (0 returns empty)
      * @return out Activity array (most recent first). Scan is capped by _MAX_ACTIVITY_SCAN.
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
-    function getUserRecentActivities(address user, uint256 fromTs, uint256 toTs, uint256 limit)
+    function getUserRecentActivitiesWithMeta(address user, uint256 fromTs, uint256 toTs, uint256 limit)
         external
         view
         onlyAuthorizedFor(user)
-        returns (Activity[] memory out)
+        returns (Activity[] memory out, uint256 blockNumber, bool isValid)
     {
         Activity[] storage arr = _activities[user];
-        if (arr.length == 0 || limit == 0) return new Activity[](0);
+        if (arr.length == 0 || limit == 0) {
+            blockNumber = _userCacheBlocks[user];
+            isValid = _isUserCacheValid(blockNumber);
+            return (new Activity[](0), blockNumber, isValid);
+        }
         uint256 count;
         uint256 scanned;
         // Reverse scan from the end, capped by _MAX_ACTIVITY_SCAN.
         for (uint256 i = arr.length; i > 0 && scanned < _MAX_ACTIVITY_SCAN && count < limit; i--) {
             Activity storage a = arr[i - 1];
             scanned++;
-            if ((fromTs == 0 || a.ts >= fromTs) && (toTs == 0 || a.ts <= toTs)) {
+            if ((fromTs == 0 || a.blockNumber >= fromTs) && (toTs == 0 || a.blockNumber <= toTs)) {
                 count++;
             }
         }
@@ -657,30 +662,34 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         for (uint256 i = arr.length; i > 0 && scanned < _MAX_ACTIVITY_SCAN && idx < count; i--) {
             Activity storage a2 = arr[i - 1];
             scanned++;
-            if ((fromTs == 0 || a2.ts >= fromTs) && (toTs == 0 || a2.ts <= toTs)) {
+            if ((fromTs == 0 || a2.blockNumber >= fromTs) && (toTs == 0 || a2.blockNumber <= toTs)) {
                 out[idx++] = a2;
             }
         }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get the Top-N earners from RewardView local cache.
+     * @notice Get the Top-N earners from RewardView local cache, with cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyOps)
+     *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
      *
      * Security:
      * - Read-only
      *
      * @return addrs Top-N user addresses (fixed length)
      * @return amounts Top-N earned totals (fixed length)
+     * @return blockNumber RewardView system cache blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
-    function getTopEarners()
+    function getTopEarnersWithMeta()
         external
         view
         onlyValidRegistry
         onlyOps
-        returns (address[] memory addrs, uint256[] memory amounts)
+        returns (address[] memory addrs, uint256[] memory amounts, uint256 blockNumber, bool isValid)
     {
         // Return fixed _TOP_N list from local cache.
         uint256 n = _TOP_N;
@@ -690,6 +699,8 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
             addrs[i] = _topEarners[i];
             amounts[i] = _topEarnedAmounts[i];
         }
+        blockNumber = _systemCacheTimestamp;
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
@@ -719,25 +730,29 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Additional read APIs (pass-through + local cache) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get a user's consumption records from RewardView local cache.
+     * @notice Get a user's consumption records from RewardView local cache, with cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
      *
      * @param user Target user address
      * @return records Consumption records (RewardTypes.ConsumptionRecord[])
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
-    function getUserConsumptions(address user)
+    function getUserConsumptionsWithMeta(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (RewardTypes.ConsumptionRecord[] memory records)
+        returns (RewardTypes.ConsumptionRecord[] memory records, uint256 blockNumber, bool isValid)
     {
-        return _consumptions[user];
+        records = _consumptions[user];
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
@@ -773,17 +788,16 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
             return cfg;
         } catch {
             // Best-effort passthrough: return default config on failure.
-            // solhint-disable-next-line no-unused-vars
             config = config; // no-op to satisfy no-empty-blocks
         }
         return config;
     }
 
     /**
-     * @notice Get a user's RewardPoints balance (best-effort passthrough).
+     * @notice Get a user's RewardPoints balance with RewardView cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
@@ -791,17 +805,56 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @return balance RewardPoints balance (points units)
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserBalance(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 balance)
+        returns (uint256 balance, uint256 blockNumber, bool isValid)
     {
         address rp = _getModule(ModuleKeys.KEY_REWARD_POINTS);
-        if (rp == address(0)) return 0;
-        return IRewardPointsMinimal(rp).balanceOf(user);
+        if (rp == address(0)) {
+            balance = 0;
+        } else {
+            balance = IRewardPointsMinimal(rp).balanceOf(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
+    }
+
+    /**
+     * @notice Get a user's RewardPoints balance, with RewardView cache metadata.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardPoints module is missing.
+     *
+     * @param user Target user address
+     * @return balance RewardPoints balance (points units)
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+     */
+    function getUserBalanceWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 balance, uint256 blockNumber, bool isValid)
+    {
+        address rp = _getModule(ModuleKeys.KEY_REWARD_POINTS);
+        if (rp == address(0)) {
+            balance = 0;
+        } else {
+            balance = IRewardPointsMinimal(rp).balanceOf(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
@@ -832,10 +885,42 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the user's last consumption timestamp for a service type.
+     * @notice Get service usage stats with RewardView cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: if RewardCore is present and callable, returns its value; otherwise returns local cache.
+     *
+     * @param serviceType Service type
+     * @return usage Usage count (implementation-defined)
+     * @return blockNumber RewardView system cache blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+     */
+    function getServiceUsageWithMeta(RewardTypes.ServiceType serviceType)
+        external
+        view
+        onlyValidRegistry
+        returns (uint256 usage, uint256 blockNumber, bool isValid)
+    {
+        address core = _getModule(ModuleKeys.KEY_REWARD_CORE);
+        if (core != address(0)) {
+            (bool ok, uint256 val) =
+                _staticCallUint(core, abi.encodeWithSignature("getServiceUsage(uint8)", uint8(serviceType)));
+            usage = ok ? val : _serviceUsage[serviceType];
+        } else {
+            usage = _serviceUsage[serviceType];
+        }
+        blockNumber = _systemCacheTimestamp;
+        isValid = _isUserCacheValid(blockNumber);
+    }
+
+    /**
+     * @notice Get the user's last consumption blockNumber for a service type, with cache metadata.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
@@ -843,44 +928,98 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @param serviceType Service type
-     * @return timestamp Timestamp (seconds since epoch), 0 if unknown
+     * @return lastConsumption Timestamp (block number), 0 if unknown
+     * @return cacheBlock RewardView local cache last-write time (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserLastConsumption(address user, RewardTypes.ServiceType serviceType)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 timestamp)
+        returns (uint256 lastConsumption, uint256 cacheBlock, bool isValid)
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_CORE);
         if (core != address(0)) {
             (bool ok, uint256 val) = _staticCallUint(
                 core,
-                abi.encodeWithSignature("getUserLastConsumption(address,uint8)", user, uint8(serviceType))
+                abi.encodeWithSelector(_SEL_GET_USER_LAST_CONSUMPTION, user, uint8(serviceType))
             );
-            if (ok) return val;
+            if (ok) {
+                lastConsumption = val;
+            } else {
+                lastConsumption = _lastConsumption[user][serviceType];
+            }
+        } else {
+            lastConsumption = _lastConsumption[user][serviceType];
         }
-        return _lastConsumption[user][serviceType];
+        cacheBlock = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(cacheBlock);
     }
 
     /**
-     * @notice Get a user's packed privilege bitmap from RewardView local cache.
+     * @notice Get a user's last consumption blockNumber for a service type, with RewardView cache metadata.
      * @dev Reverts if:
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: if RewardCore is present and callable, returns its value; otherwise returns local cache.
+     *
+     * @param user Target user address
+     * @param serviceType Service type
+     * @return lastConsumption Timestamp (block number), 0 if unknown
+     * @return cacheBlock RewardView local cache last-write time (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+     */
+    function getUserLastConsumptionWithMeta(address user, RewardTypes.ServiceType serviceType)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 lastConsumption, uint256 cacheBlock, bool isValid)
+    {
+        address core = _getModule(ModuleKeys.KEY_REWARD_CORE);
+        if (core != address(0)) {
+            (bool ok, uint256 val) = _staticCallUint(
+                core,
+                abi.encodeWithSelector(_SEL_GET_USER_LAST_CONSUMPTION, user, uint8(serviceType))
+            );
+            if (ok) {
+                lastConsumption = val;
+            } else {
+                lastConsumption = _lastConsumption[user][serviceType];
+            }
+        } else {
+            lastConsumption = _lastConsumption[user][serviceType];
+        }
+        cacheBlock = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(cacheBlock);
+    }
+
+    /**
+     * @notice Get a user's packed privilege bitmap from RewardView local cache, with cache metadata.
+     * @dev Reverts if:
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
      *
      * @param user Target user address
      * @return privilegePacked Packed privilege bitmap (uint256)
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
-    function getUserPrivilegePacked(address user)
+    function getUserPrivilegePackedWithMeta(address user)
         external
         view
         onlyAuthorizedFor(user)
-        returns (uint256 privilegePacked)
+        returns (uint256 privilegePacked, uint256 blockNumber, bool isValid)
     {
-        return _userSummary[user].privilegesPacked;
+        privilegePacked = _userSummary[user].privilegesPacked;
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /*━━━━━━━━━━━━━━━ RewardManagerCore passthrough reads (preferred external query path) ━━━━━━━━━━━━━━━*/
@@ -941,7 +1080,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Get user points cache from RewardManagerCore (authoritative passthrough).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
@@ -949,7 +1088,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @return points Cached points (points units)
-     * @return timestamp Cache timestamp (seconds; RewardManagerCore-defined)
+     * @return blockNumber Cache blockNumber (block number; RewardManagerCore-defined)
      * @return isValid Cache validity flag (RewardManagerCore-defined)
      */
     function getUserCache(address user)
@@ -957,7 +1096,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 points, uint256 timestamp, bool isValid)
+        returns (uint256 points, uint256 blockNumber, bool isValid)
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0, false);
@@ -974,7 +1113,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @return points See {getUserCache}
-     * @return timestamp See {getUserCache}
+     * @return blockNumber See {getUserCache}
      * @return isValid See {getUserCache}
      */
     function getUserCacheView(address user)
@@ -982,7 +1121,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 points, uint256 timestamp, bool isValid)
+        returns (uint256 points, uint256 blockNumber, bool isValid)
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return (0, 0, false);
@@ -998,7 +1137,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Read-only
      * - Best-effort: returns 0 if RewardManagerCore module is missing.
      *
-     * @return expirationTime Cache expiration time (seconds; RewardManagerCore-defined), or 0 on failure
+     * @return expirationTime Cache expiration time (block number; RewardManagerCore-defined), or 0 on failure
      */
     function getCacheExpirationTime() external view onlyValidRegistry returns (uint256 expirationTime) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
@@ -1054,9 +1193,9 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Read-only
      * - Best-effort: returns 0 if RewardManagerCore module is missing.
      *
-     * @return timestamp Last reset timestamp (seconds), or 0 on failure
+     * @return blockNumber Last reset blockNumber (block number), or 0 on failure
      */
-    function getLastRewardResetTimeView() external view onlyValidRegistry returns (uint256 timestamp) {
+    function getLastRewardResetTimeView() external view onlyValidRegistry returns (uint256 blockNumber) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getLastRewardResetTime();
@@ -1071,19 +1210,19 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Read-only
      * - Best-effort: returns 0 if RewardManagerCore module is missing.
      *
-     * @return timestamp Last reset timestamp (seconds), or 0 on failure
+     * @return blockNumber Last reset blockNumber (block number), or 0 on failure
      */
-    function getLastRewardResetTime() external view onlyValidRegistry returns (uint256 timestamp) {
+    function getLastRewardResetTime() external view onlyValidRegistry returns (uint256 blockNumber) {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         if (core == address(0)) return 0;
         return IRewardManagerCoreView(core).getLastRewardResetTime();
     }
 
     /**
-     * @notice Get user level from RewardManagerCore (authoritative passthrough).
+     * @notice Get user level from RewardManagerCore, with RewardView cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
@@ -1092,21 +1231,60 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @return level User level (system-defined), or 0 on failure
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserLevel(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint8)
+        returns (uint8 level, uint256 blockNumber, bool isValid)
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
-        if (core == address(0)) return 0;
-        return IRewardManagerCoreView(core).getUserLevel(user);
+        if (core == address(0)) {
+            level = 0;
+        } else {
+            level = IRewardManagerCoreView(core).getUserLevel(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Legacy alias for {getUserLevel}.
+     * @notice Get user level from RewardManagerCore, with RewardView cache metadata.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @param user Target user address
+     * @return level User level (system-defined), or 0 on failure
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+     */
+    function getUserLevelWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint8 level, uint256 blockNumber, bool isValid)
+    {
+        address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
+        if (core == address(0)) {
+            level = 0;
+        } else {
+            level = IRewardManagerCoreView(core).getUserLevel(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
+    }
+
+    /**
+     * @notice Legacy alias for {getUserLevel}, with cache metadata.
      * @dev Reverts if:
      *      - see {getUserLevel}
      *
@@ -1115,17 +1293,24 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @return level See {getUserLevel}
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserLevelView(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint8 level)
+        returns (uint8 level, uint256 blockNumber, bool isValid)
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
-        if (core == address(0)) return 0;
-        return IRewardManagerCoreView(core).getUserLevel(user);
+        if (core == address(0)) {
+            level = 0;
+        } else {
+            level = IRewardManagerCoreView(core).getUserLevel(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
@@ -1164,34 +1349,91 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get user activity info from RewardManagerCore.
+     * @notice Get user activity info from RewardManagerCore, with RewardView cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
      * - Best-effort: returns (0,0,0) if RewardManagerCore module is missing.
      *
      * @param user Target user address
-     * @return lastActivity Last activity timestamp (seconds)
+     * @return lastActivity Last activity blockNumber (block number)
      * @return totalLoans Total loans (RewardManagerCore-defined)
      * @return totalVolume Total volume (RewardManagerCore-defined)
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserActivity(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume)
+        returns (
+            uint256 lastActivity,
+            uint256 totalLoans,
+            uint256 totalVolume,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
-        if (core == address(0)) return (0, 0, 0);
-        return IRewardManagerCoreView(core).getUserActivity(user);
+        if (core == address(0)) {
+            lastActivity = 0;
+            totalLoans = 0;
+            totalVolume = 0;
+        } else {
+            (lastActivity, totalLoans, totalVolume) = IRewardManagerCoreView(core).getUserActivity(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Legacy alias for {getUserActivity}.
+     * @notice Get user activity from RewardManagerCore, with RewardView cache metadata.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns (0,0,0) if RewardManagerCore module is missing.
+     *
+     * @param user Target user address
+     * @return lastActivity Last activity blockNumber (block number)
+     * @return totalLoans Total loans (RewardManagerCore-defined)
+     * @return totalVolume Total volume (RewardManagerCore-defined)
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+     */
+    function getUserActivityWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (
+            uint256 lastActivity,
+            uint256 totalLoans,
+            uint256 totalVolume,
+            uint256 blockNumber,
+            bool isValid
+        )
+    {
+        address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
+        if (core == address(0)) {
+            lastActivity = 0;
+            totalLoans = 0;
+            totalVolume = 0;
+        } else {
+            (lastActivity, totalLoans, totalVolume) = IRewardManagerCoreView(core).getUserActivity(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
+    }
+
+    /**
+     * @notice Legacy alias for {getUserActivity}, with cache metadata.
      * @dev Reverts if:
      *      - see {getUserActivity}
      *
@@ -1202,24 +1444,39 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return lastActivity See {getUserActivity}
      * @return totalLoans See {getUserActivity}
      * @return totalVolume See {getUserActivity}
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserActivityView(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume)
+        returns (
+            uint256 lastActivity,
+            uint256 totalLoans,
+            uint256 totalVolume,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
-        if (core == address(0)) return (0, 0, 0);
-        return IRewardManagerCoreView(core).getUserActivity(user);
+        if (core == address(0)) {
+            lastActivity = 0;
+            totalLoans = 0;
+            totalVolume = 0;
+        } else {
+            (lastActivity, totalLoans, totalVolume) = IRewardManagerCoreView(core).getUserActivity(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Get user's penalty debt from RewardManagerCore (authoritative passthrough).
+     * @notice Get user's penalty debt from RewardManagerCore, with RewardView cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the user and lacks VIEW_USER_DATA (MissingRole via onlyAuthorizedFor)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
      * - Read-only
@@ -1228,21 +1485,60 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @return debt Pending penalty debt (points units), or 0 on failure
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserPenaltyDebt(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 debt)
+        returns (uint256 debt, uint256 blockNumber, bool isValid)
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
-        if (core == address(0)) return 0;
-        return IRewardManagerCoreView(core).getUserPenaltyDebt(user);
+        if (core == address(0)) {
+            debt = 0;
+        } else {
+            debt = IRewardManagerCoreView(core).getUserPenaltyDebt(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
-     * @notice Legacy alias for {getUserPenaltyDebt}.
+     * @notice Get user's penalty debt from RewardManagerCore, with RewardView cache metadata.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
+     *
+     * Security:
+     * - Read-only
+     * - Best-effort: returns 0 if RewardManagerCore module is missing.
+     *
+     * @param user Target user address
+     * @return debt Pending penalty debt (points units), or 0 on failure
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+     */
+    function getUserPenaltyDebtWithMeta(address user)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 debt, uint256 blockNumber, bool isValid)
+    {
+        address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
+        if (core == address(0)) {
+            debt = 0;
+        } else {
+            debt = IRewardManagerCoreView(core).getUserPenaltyDebt(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
+    }
+
+    /**
+     * @notice Legacy alias for {getUserPenaltyDebt}, with cache metadata.
      * @dev Reverts if:
      *      - see {getUserPenaltyDebt}
      *
@@ -1251,17 +1547,24 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param user Target user address
      * @return debt See {getUserPenaltyDebt}
+     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
+     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
      */
     function getUserPenaltyDebtView(address user)
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 debt)
+        returns (uint256 debt, uint256 blockNumber, bool isValid)
     {
         address core = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
-        if (core == address(0)) return 0;
-        return IRewardManagerCoreView(core).getUserPenaltyDebt(user);
+        if (core == address(0)) {
+            debt = 0;
+        } else {
+            debt = IRewardManagerCoreView(core).getUserPenaltyDebt(user);
+        }
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
     }
 
     /**
@@ -1352,19 +1655,22 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     function _touchUserCache(address user) internal {
-        // solhint-disable-next-line not-rely-on-time
-        _userCacheTimestamps[user] = block.timestamp;
+        _userCacheBlocks[user] = block.number;
+        _systemCacheTimestamp = block.number;
     }
 
-    function _isUserCacheValid(uint256 ts) internal view returns (bool) {
-        // solhint-disable-next-line not-rely-on-time
-        return ts > 0 && block.timestamp - ts <= _CACHE_DURATION;
+    function _isUserCacheValid(uint256 blockNumber) internal view returns (bool) {
+        return blockNumber > 0 && block.number - blockNumber <= _CACHE_DURATION;
     }
 
     /*━━━━━━━━━━━━━━━ Access helpers ━━━━━━━━━━━━━━━*/
 
     function _hasViewUserDataRole(address user) internal view returns (bool) {
         return ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, user);
+    }
+
+    function _hasViewSystemDataRole(address user) internal view returns (bool) {
+        return ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, user);
     }
 
     function _getModule(bytes32 key) internal view returns (address moduleAddr) {
@@ -1411,7 +1717,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Authorize a UUPS upgrade.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_ADMIN (reverts in ViewAccessLib.requireRole)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
      *      - newImplementation is zero (ZeroAddress)
      *      - newImplementation is not a contract (NotAContract)
      *
@@ -1421,7 +1727,9 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
@@ -1471,7 +1779,7 @@ interface IRewardManagerCoreView {
         external
         view
         returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth);
-    function getUserCache(address user) external view returns (uint256 points, uint256 timestamp, bool isValid);
+    function getUserCache(address user) external view returns (uint256 points, uint256 blockNumber, bool isValid);
     function getCacheExpirationTime() external view returns (uint256);
     function getDynamicRewardParameters() external view returns (uint256 threshold, uint256 multiplier);
     function getLastRewardResetTime() external view returns (uint256);

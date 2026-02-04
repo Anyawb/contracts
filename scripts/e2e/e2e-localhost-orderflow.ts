@@ -1,16 +1,16 @@
 import { ethers } from "hardhat";
 import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
 
-const ONE_DAY = 24n * 60n * 60n;
+const BLOCKS_PER_DAY = 7_200n;
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
-function calcTotalDue(principal: bigint, rateBps: bigint, termSec: bigint) {
-  // interest = principal * rate / 1e4 * term / 365 days
-  const denom = 365n * ONE_DAY * 10_000n;
-  const interest = (principal * rateBps * termSec) / denom;
+function calcTotalDue(principal: bigint, rateBps: bigint, termBlocks: bigint) {
+  // interest = principal * rate / 1e4 * term / 365 days (block-based)
+  const denom = 365n * BLOCKS_PER_DAY * 10_000n;
+  const interest = (principal * rateBps * termBlocks) / denom;
   return principal + interest;
 }
 
@@ -22,6 +22,7 @@ async function main() {
   const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
+  const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
 
   // Resolve modules from registry to avoid name confusion
   const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
@@ -69,11 +70,12 @@ async function main() {
   {
     const cfg = await po.getAssetConfig(usdc.target);
     if (!cfg.isActive) {
-      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600);
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
     }
   }
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
-  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 6), now);
+  const blockNumber = await ethers.provider.getBlockNumber();
+  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), blockNumber);
 
   // Fund users
   await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("10000", 6));
@@ -84,7 +86,7 @@ async function main() {
   await usdc.connect(lender).transfer(borrower.address, principal);
 
   // Create loan order
-  const term = 5n * ONE_DAY; // must match DUR_5D
+  const term = 5n * BLOCKS_PER_DAY; // must match DUR_5D (block-based)
   const rateBps = 1000n; // 10%
 
   const borrowerTokensBefore = await loanNft.getUserTokens(borrower.address);
@@ -94,7 +96,7 @@ async function main() {
     rate: rateBps,
     term,
     borrower: borrower.address,
-    lenderSigner: lender.address,
+    lender: CONTRACT_ADDRESSES.LenderPoolVault,
     asset: usdc.target,
     startTimestamp: 0,
     maturity: 0,
@@ -122,6 +124,12 @@ async function main() {
   console.log("borrower LoanNFT tokens before/after", borrowerTokensBefore.length, borrowerTokensAfter.length);
   const newTokenId = borrowerTokensAfter.find((t) => !borrowerTokensBefore.includes(t));
   console.log("minted tokenId", newTokenId?.toString());
+
+  // Ensure debt ledger is populated before repay (VaultCore path).
+  const collateralAmt = ethers.parseUnits("1000", 6);
+  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt);
+  await vaultCore.connect(borrower).deposit(usdc.target, collateralAmt);
+  await vaultCore.connect(borrower).borrow(usdc.target, principal);
 
   // Repay full
   const totalDue = calcTotalDue(principal, rateBps, term);

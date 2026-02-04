@@ -23,10 +23,12 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
   let acm: MockAccessControlManager;
   let priceOracle: MockPriceOracle;
   let ASSET: string;
+  let BASE_TS: bigint;
 
   async function deployFixture() {
     [owner, alice] = await ethers.getSigners();
     ASSET = ethers.Wallet.createRandom().address;
+    BASE_TS = BigInt((await ethers.provider.getBlock('latest')).number);
 
     const MockAccessControlManagerF = await ethers.getContractFactory('MockAccessControlManager');
     acm = await MockAccessControlManagerF.deploy();
@@ -36,7 +38,7 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
 
     const MockPriceOracleF = await ethers.getContractFactory('MockPriceOracle');
     priceOracle = await MockPriceOracleF.deploy();
-    await priceOracle.setPrice(ASSET, 1_234_567n, 1111n, 8);
+    await priceOracle.setPrice(ASSET, 1_234_567n, BASE_TS, 8);
     await priceOracle.configureAsset(ASSET, 'asset', 8, 3600);
 
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
@@ -96,19 +98,40 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
   });
 
   describe('价格查询', function () {
-    it('应返回单资产价格与时间戳', async function () {
-      const [price, timestamp] = await valuationOracleView.connect(owner).getAssetPrice(ASSET);
+    it('应返回单资产价格与区块号', async function () {
+      const [price, blockNumber, isValid] = await valuationOracleView.connect(owner).getAssetPrice(ASSET);
       expect(price).to.equal(1_234_567n);
-      expect(timestamp).to.equal(1111n);
+      expect(blockNumber).to.equal(BASE_TS);
+      expect(isValid).to.equal(true);
+    });
+
+    it('应返回单资产价格 + token decimals', async function () {
+      const [price, blockNumber, decimals, isValid] = await valuationOracleView.connect(owner).getAssetPriceWithDecimals(ASSET);
+      expect(price).to.equal(1_234_567n);
+      expect(blockNumber).to.equal(BASE_TS);
+      expect(decimals).to.equal(8n);
+      expect(isValid).to.equal(true);
+    });
+
+    it('应将 amount(token base units) 换算为 USD-8 value', async function () {
+      // In this test setup, MockPriceOracle is configured with price=1_234_567 (USD-8) and decimals=8.
+      // amount=1e8 (1 token) => valueUsd8 should equal price.
+      const amount = 100_000_000n;
+      const [valueUsd8, blockNumber, ok] = await valuationOracleView.connect(owner).getAssetValueUsd8(ASSET, amount);
+      expect(ok).to.equal(true);
+      expect(blockNumber).to.equal(BASE_TS);
+      expect(valueUsd8).to.equal(1_234_567n);
     });
 
     it('应返回批量价格并校验长度', async function () {
       const assets = [ASSET, ethers.Wallet.createRandom().address];
       await priceOracle.setPrice(assets[1], 9_999n, 2222n, 8);
-      const [prices, timestamps] = await valuationOracleView.connect(owner).getAssetPrices(assets);
+      const [prices, blockNumbers, validFlags] = await valuationOracleView.connect(owner).getAssetPrices(assets);
       expect(prices[0]).to.equal(1_234_567n);
       expect(prices[1]).to.equal(9_999n);
-      expect(timestamps[1]).to.equal(2222n);
+      expect(blockNumbers[1]).to.equal(2222n);
+      expect(validFlags[0]).to.equal(true);
+      expect(validFlags[1]).to.equal(true);
     });
 
     it('空数组应 revert', async function () {
@@ -128,39 +151,42 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
 
     it('Oracle 回退路径：预言机报错时返回零值', async function () {
       await priceOracle.setShouldFail(true);
-      const [price, timestamp] = await valuationOracleView.connect(owner).getAssetPrice(ASSET);
+      const [price, blockNumber, isValid] = await valuationOracleView.connect(owner).getAssetPrice(ASSET);
       expect(price).to.equal(0n);
-      expect(timestamp).to.equal(0n);
-
-      const [prices, timestamps] = await valuationOracleView.connect(owner).getAssetPrices([ASSET]);
-      expect(prices[0]).to.equal(0n);
-      expect(timestamps[0]).to.equal(0n);
-
-      const isValid = await valuationOracleView.connect(owner).isPriceValid(ASSET);
+      expect(blockNumber).to.equal(0n);
       expect(isValid).to.equal(false);
+
+      const [prices, blockNumbers, validFlags] = await valuationOracleView.connect(owner).getAssetPrices([ASSET]);
+      expect(prices[0]).to.equal(0n);
+      expect(blockNumbers[0]).to.equal(0n);
+      expect(validFlags[0]).to.equal(false);
+
+      const [isValidFlag, validBlock] = await valuationOracleView.connect(owner).isPriceValid(ASSET);
+      expect(isValidFlag).to.equal(false);
+      expect(validBlock).to.equal(0n);
     });
 
     it('应处理零地址资产的价格查询', async function () {
-      const [price, timestamp] = await valuationOracleView.connect(owner).getAssetPrice(ethers.ZeroAddress);
+      const [price, blockNumber] = await valuationOracleView.connect(owner).getAssetPrice(ethers.ZeroAddress);
       // 零地址资产通常没有价格，应该返回零值或由预言机处理
       expect(price).to.be.a('bigint');
-      expect(timestamp).to.be.a('bigint');
+      expect(blockNumber).to.be.a('bigint');
     });
 
     it('应处理未配置资产的价格查询', async function () {
       const unconfiguredAsset = ethers.Wallet.createRandom().address;
-      const [price, timestamp] = await valuationOracleView.connect(owner).getAssetPrice(unconfiguredAsset);
+      const [price, blockNumber] = await valuationOracleView.connect(owner).getAssetPrice(unconfiguredAsset);
       // 未配置资产可能返回零值
       expect(price).to.be.a('bigint');
-      expect(timestamp).to.be.a('bigint');
+      expect(blockNumber).to.be.a('bigint');
     });
 
     it('应处理价格为零的资产', async function () {
       const zeroPriceAsset = ethers.Wallet.createRandom().address;
       await priceOracle.setPrice(zeroPriceAsset, 0n, 9999n, 8);
-      const [price, timestamp] = await valuationOracleView.connect(owner).getAssetPrice(zeroPriceAsset);
+      const [price, blockNumber] = await valuationOracleView.connect(owner).getAssetPrice(zeroPriceAsset);
       expect(price).to.equal(0n);
-      expect(timestamp).to.equal(9999n);
+      expect(blockNumber).to.equal(9999n);
     });
 
     it('批量查询应处理最大边界值（100个资产）', async function () {
@@ -169,11 +195,12 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       for (let i = 0; i < maxAssets.length; i++) {
         await priceOracle.setPrice(maxAssets[i], BigInt(i + 1) * 1000n, BigInt(i + 1000), 8);
       }
-      const [prices, timestamps] = await valuationOracleView.connect(owner).getAssetPrices(maxAssets);
+      const [prices, blockNumbers, validFlags] = await valuationOracleView.connect(owner).getAssetPrices(maxAssets);
       expect(prices.length).to.equal(Number(MAX_BATCH_SIZE));
-      expect(timestamps.length).to.equal(Number(MAX_BATCH_SIZE));
+      expect(blockNumbers.length).to.equal(Number(MAX_BATCH_SIZE));
       expect(prices[0]).to.equal(1000n);
-      expect(timestamps[0]).to.equal(1000n);
+      expect(blockNumbers[0]).to.equal(1000n);
+      expect(validFlags[0]).to.equal(true);
     });
 
     it('批量查询应处理部分成功场景', async function () {
@@ -181,62 +208,67 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       const asset2 = ethers.Wallet.createRandom().address;
       await priceOracle.setPrice(asset1, 1000n, 2000n, 8);
       // asset2 不设置价格，可能返回零值
-      const [prices, timestamps] = await valuationOracleView.connect(owner).getAssetPrices([asset1, asset2]);
+      const [prices, blockNumbers] = await valuationOracleView.connect(owner).getAssetPrices([asset1, asset2]);
       expect(prices.length).to.equal(2);
       expect(prices[0]).to.equal(1000n);
-      expect(timestamps[0]).to.equal(2000n);
+      expect(blockNumbers[0]).to.equal(2000n);
     });
 
     it('批量查询应处理全部失败场景', async function () {
       await priceOracle.setShouldFail(true);
       const assets = [ASSET, ethers.Wallet.createRandom().address];
-      const [prices, timestamps] = await valuationOracleView.connect(owner).getAssetPrices(assets);
+      const [prices, blockNumbers, validFlags] = await valuationOracleView.connect(owner).getAssetPrices(assets);
       expect(prices.length).to.equal(2);
-      expect(timestamps.length).to.equal(2);
+      expect(blockNumbers.length).to.equal(2);
       expect(prices[0]).to.equal(0n);
       expect(prices[1]).to.equal(0n);
+      expect(validFlags[0]).to.equal(false);
+      expect(validFlags[1]).to.equal(false);
     });
 
     it('价格有效性检查：有效价格应返回 true', async function () {
-      const isValid = await valuationOracleView.connect(owner).isPriceValid(ASSET);
+      const [isValid] = await valuationOracleView.connect(owner).isPriceValid(ASSET);
       expect(isValid).to.equal(true);
     });
 
     it('价格有效性检查：零价格应返回 false', async function () {
       const zeroPriceAsset = ethers.Wallet.createRandom().address;
       await priceOracle.setPrice(zeroPriceAsset, 0n, 9999n, 8);
-      const isValid = await valuationOracleView.connect(owner).isPriceValid(zeroPriceAsset);
+      const [isValid] = await valuationOracleView.connect(owner).isPriceValid(zeroPriceAsset);
       expect(isValid).to.equal(false);
     });
 
     it('价格有效性检查：未配置资产应返回 false', async function () {
       const unconfiguredAsset = ethers.Wallet.createRandom().address;
-      const isValid = await valuationOracleView.connect(owner).isPriceValid(unconfiguredAsset);
+      const [isValid] = await valuationOracleView.connect(owner).isPriceValid(unconfiguredAsset);
       expect(isValid).to.equal(false);
     });
   });
 
   describe('健康检查', function () {
     it('应返回健康检查结果', async function () {
-      const [healthy, details] = await valuationOracleView.connect(owner).checkPriceOracleHealth(ASSET);
+      const [healthy, details, blockNumber] = await valuationOracleView.connect(owner).checkPriceOracleHealth(ASSET);
       expect(healthy).to.equal(true);
       expect(details).to.equal('Healthy');
+      expect(blockNumber).to.not.equal(0n);
     });
 
     it('批量健康检查应遵守长度限制并容忍失败', async function () {
       const assets = [ASSET, ethers.Wallet.createRandom().address];
-      const [statuses, details] = await valuationOracleView.connect(owner).batchCheckPriceOracleHealth(assets);
+      const [statuses, details, blockNumbers] = await valuationOracleView.connect(owner).batchCheckPriceOracleHealth(assets);
       expect(statuses.length).to.equal(2);
       expect(details.length).to.equal(2);
       expect(statuses[0]).to.equal(true);
       expect(statuses[1]).to.equal(false);
+      expect(blockNumbers.length).to.equal(2);
     });
 
     it('预言机报错时批量健康检查应返回失败标记', async function () {
       await priceOracle.setShouldFail(true);
-      const [statuses, details] = await valuationOracleView.connect(owner).batchCheckPriceOracleHealth([ASSET]);
+      const [statuses, details, blockNumbers] = await valuationOracleView.connect(owner).batchCheckPriceOracleHealth([ASSET]);
       expect(statuses[0]).to.equal(false);
       expect(details[0]).to.equal('oracle call failed');
+      expect(blockNumbers[0]).to.equal(0n);
     });
 
     it('应处理零地址资产的健康检查', async function () {
@@ -256,7 +288,7 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       const maxAssets = Array(Number(MAX_BATCH_SIZE)).fill(null).map(() => ethers.Wallet.createRandom().address);
       // 为部分资产设置价格
       for (let i = 0; i < 50; i++) {
-        await priceOracle.setPrice(maxAssets[i], BigInt(i + 1) * 1000n, BigInt(i + 1000), 8);
+        await priceOracle.setPrice(maxAssets[i], BigInt(i + 1) * 1000n, BASE_TS, 8);
         await priceOracle.configureAsset(maxAssets[i], `asset${i}`, 8, 3600);
       }
       const [statuses, details] = await valuationOracleView.connect(owner).batchCheckPriceOracleHealth(maxAssets);
@@ -269,7 +301,7 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
     it('批量健康检查应处理部分成功场景', async function () {
       const asset1 = ethers.Wallet.createRandom().address;
       const asset2 = ethers.Wallet.createRandom().address;
-      await priceOracle.setPrice(asset1, 1000n, 2000n, 8);
+      await priceOracle.setPrice(asset1, 1000n, BASE_TS, 8);
       await priceOracle.configureAsset(asset1, 'asset1', 8, 3600);
       // asset2 不配置
       const [statuses, details] = await valuationOracleView.connect(owner).batchCheckPriceOracleHealth([asset1, asset2]);
@@ -362,12 +394,12 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       const ACTION_UPGRADE_MODULE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
       
       // owner 没有升级权限
-      let hasPermission = await valuationOracleView.connect(owner).hasUpgradePermission(owner.address);
+      let [hasPermission] = await valuationOracleView.connect(owner).hasUpgradePermission(owner.address);
       expect(hasPermission).to.equal(false);
 
       // 授予升级权限
       await acm.grantRole(ACTION_UPGRADE_MODULE, owner.address);
-      hasPermission = await valuationOracleView.connect(owner).hasUpgradePermission(owner.address);
+      [hasPermission] = await valuationOracleView.connect(owner).hasUpgradePermission(owner.address);
       expect(hasPermission).to.equal(true);
     });
 
@@ -375,12 +407,12 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       const ACTION_UPGRADE_MODULE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
       
       // alice 没有升级权限
-      let hasPermission = await valuationOracleView.connect(owner).hasUpgradePermission(alice.address);
+      let [hasPermission] = await valuationOracleView.connect(owner).hasUpgradePermission(alice.address);
       expect(hasPermission).to.equal(false);
 
       // 授予 alice 升级权限
       await acm.grantRole(ACTION_UPGRADE_MODULE, alice.address);
-      hasPermission = await valuationOracleView.connect(owner).hasUpgradePermission(alice.address);
+      [hasPermission] = await valuationOracleView.connect(owner).hasUpgradePermission(alice.address);
       expect(hasPermission).to.equal(true);
     });
   });
@@ -408,24 +440,24 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
     it('应正确处理多个资产的价格查询', async function () {
       const assets = [];
       const expectedPrices = [];
-      const expectedTimestamps = [];
+      const expectedBlockNumbers = [];
 
       for (let i = 0; i < 10; i++) {
         const asset = ethers.Wallet.createRandom().address;
         const price = BigInt(i + 1) * 1000000n;
-        const timestamp = BigInt(1000 + i);
+        const blockNumber = BigInt(1000 + i);
         assets.push(asset);
         expectedPrices.push(price);
-        expectedTimestamps.push(timestamp);
-        await priceOracle.setPrice(asset, price, timestamp, 8);
+        expectedBlockNumbers.push(blockNumber);
+        await priceOracle.setPrice(asset, price, blockNumber, 8);
       }
 
-      const [prices, timestamps] = await valuationOracleView.connect(owner).getAssetPrices(assets);
+      const [prices, blockNumbers] = await valuationOracleView.connect(owner).getAssetPrices(assets);
       expect(prices.length).to.equal(10);
-      expect(timestamps.length).to.equal(10);
+      expect(blockNumbers.length).to.equal(10);
       for (let i = 0; i < 10; i++) {
         expect(prices[i]).to.equal(expectedPrices[i]);
-        expect(timestamps[i]).to.equal(expectedTimestamps[i]);
+        expect(blockNumbers[i]).to.equal(expectedBlockNumbers[i]);
       }
     });
 
@@ -438,7 +470,7 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
         const asset = ethers.Wallet.createRandom().address;
         assets.push(asset);
         expectedStatuses.push(true);
-        await priceOracle.setPrice(asset, BigInt(i + 1) * 1000n, BigInt(1000 + i), 8);
+        await priceOracle.setPrice(asset, BigInt(i + 1) * 1000n, BASE_TS, 8);
         await priceOracle.configureAsset(asset, `asset${i}`, 8, 3600);
       }
 

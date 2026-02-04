@@ -30,19 +30,19 @@ describe('StatisticsView – 保证金聚合（pushGuaranteeUpdate）', function
     const DATA_TYPE_GUARANTEE_STATS_UPDATE = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_STATS_UPDATE'));
     const tx1 = await stats.pushGuaranteeUpdate(await user.getAddress(), asset, ethers.parseUnits('30', 18), true);
     await expect(tx1).to.emit(stats, 'DataPushed').withArgs(DATA_TYPE_GUARANTEE_STATS_UPDATE, anyValue);
-    const s1 = await stats.getGlobalSnapshot();
-    expect(s1.timestamp).to.be.greaterThan(0n);
+    const [s1] = await stats.getGlobalSnapshotWithMeta();
+    expect(s1.blockNumber).to.be.greaterThan(0n);
 
     const tx2 = await stats.pushGuaranteeUpdate(await user.getAddress(), asset, ethers.parseUnits('10', 18), false);
     await expect(tx2).to.emit(stats, 'DataPushed').withArgs(DATA_TYPE_GUARANTEE_STATS_UPDATE, anyValue);
-    const s2 = await stats.getGlobalSnapshot();
-    expect(s2.timestamp).to.be.greaterThanOrEqual(s1.timestamp);
+    const [s2] = await stats.getGlobalSnapshotWithMeta();
+    expect(s2.blockNumber).to.be.greaterThanOrEqual(s1.blockNumber);
 
     // meta reads should expose freshness
-    const [total, isValid, ts] = await stats.getTotalGuaranteeByAssetWithMeta(asset);
+    const [total, isValid, blockNumber] = await stats.getTotalGuaranteeByAssetWithMeta(asset);
     expect(total).to.equal(ethers.parseUnits('20', 18));
-    expect(ts).to.be.greaterThan(0n);
-    // In hardhat tests, timestamp is "fresh" by default
+    expect(blockNumber).to.be.greaterThan(0n);
+    // In hardhat tests, blockNumber is "fresh" by default
     expect(isValid).to.equal(true);
   });
 });

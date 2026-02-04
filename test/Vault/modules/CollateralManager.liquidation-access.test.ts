@@ -60,7 +60,7 @@ describe("CollateralManager - liquidation caller access", function () {
 
     // Seed user collateral using a real ERC20 token (CM pulls from user via transferFrom)
     const Token = await ethers.getContractFactory("MockERC20");
-    const token = await Token.deploy("Test Token", "TST", ethers.parseUnits("1000000", 18));
+    const token = await Token.deploy("Test Token", "TST", 18, ethers.parseUnits("1000000", 18));
     await token.waitForDeployment();
     const asset = await token.getAddress();
     await token.mint(user.address, 1000n);

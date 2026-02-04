@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
@@ -35,7 +31,7 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @notice Registry contract address (internal use only).
     address private _registryAddr;
 
-    uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION;
+    uint256 private constant _CACHE_DURATION_BLOCKS = ViewConstants.CACHE_DURATION_BLOCKS;
 
     /*━━━━━━━━━━━━━━━ Pre-defined health detail hashes ━━━━━━━━━━━━━━━*/
 
@@ -51,7 +47,7 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param module Module address
      * @param isHealthy Whether the module is considered healthy
      * @param detailsHash Detail hash describing the latest status
-     * @param lastCheckTime Last check timestamp (seconds since epoch)
+     * @param lastCheckTime Last check block (block.number)
      * @param consecutiveFailures Consecutive failure count (implementation-defined)
      * @param totalChecks Total checks executed (local cache)
      * @param successRate Success rate percentage (0-100)
@@ -115,7 +111,9 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /**
      * @notice Emitted after a module health check is pushed to HealthView.
-     * @dev Timestamp is intentionally not included; off-chain consumers should use the log's block timestamp.
+     * @dev BlockNumber is intentionally not included; off-chain consumers should use the log's block number.
+     * @dev IMPORTANT (Workguide alignment): this module MUST NOT emit `DataPushTypes.DATA_TYPE_MODULE_HEALTH`
+     *      to avoid duplicate DataPush consumption. `HealthView.pushModuleHealth` is the single DataPush emitter.
      * @param module Module address checked
      * @param isHealthy Whether the module is considered healthy
      * @param failures Consecutive failure count (implementation-defined)
@@ -133,7 +131,7 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Role-gated (system health viewer)
-     * - Emits a unified DataPush event for off-chain consumers
+     * - Pushes module health into HealthView (which emits unified DataPushed)
      *
      * @param module Module address to check
      * @return isHealthy Whether the module is considered healthy (non-zero code size)
@@ -150,7 +148,6 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         // Lightweight check: code size.
         uint256 size;
-        // solhint-disable-next-line no-inline-assembly
         assembly {
             size := extcodesize(module)
         }
@@ -177,9 +174,8 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         s.module = module;
         s.isHealthy = isHealthy;
         s.detailsHash = details;
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
-        s.lastCheckTime = ts;
+        uint256 blockNumber = block.number;
+        s.lastCheckTime = blockNumber;
         s.consecutiveFailures = failures;
         s.totalChecks += 1;
         s.successRate = s.totalChecks == 0
@@ -188,18 +184,12 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
                 (s.successRate * (s.totalChecks - 1) + (isHealthy ? 100 : 0))
                     / s.totalChecks
             );
-
-        // Unified DataPush (off-chain consumers should subscribe to DataPushed)
-        DataPushLibrary._emitData(
-            DataPushTypes.DATA_TYPE_MODULE_HEALTH,
-            abi.encode(module, isHealthy, details, failures, ts)
-        );
     }
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the cached module health status (legacy-compatible).
+     * @notice Get the cached module health status with validity metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks required role (MissingRole via onlySystemHealthViewer)
@@ -208,16 +198,20 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Read-only
      *
      * @param module Module address to query
-     * @return healthStatus Cached status struct
+     * @return healthStatus Cached status struct (legacy-compatible)
+     * @return blockNumber Last cache write blockNumber (block.number)
+     * @return isValid Whether the cache is valid under TTL (ViewConstants.CACHE_DURATION_BLOCKS)
      */
     function getModuleHealthStatus(address module)
         external
         view
         onlyValidRegistry
         onlySystemHealthViewer
-        returns (ModuleHealthStatus memory healthStatus)
+        returns (ModuleHealthStatus memory healthStatus, uint256 blockNumber, bool isValid)
     {
         healthStatus = _moduleHealth[module];
+        blockNumber = healthStatus.lastCheckTime;
+        isValid = _isCacheValid(blockNumber);
     }
 
     /**
@@ -231,19 +225,19 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param module Module address to query
      * @return healthStatus Cached status struct (legacy-compatible)
-     * @return timestamp Last cache write timestamp (seconds since epoch)
-     * @return isValid Whether the cache is valid under TTL (ViewConstants.CACHE_DURATION)
+     * @return blockNumber Last cache write blockNumber (block.number)
+     * @return isValid Whether the cache is valid under TTL (ViewConstants.CACHE_DURATION_BLOCKS)
      */
     function getModuleHealthStatusWithMeta(address module)
         external
         view
         onlyValidRegistry
         onlySystemHealthViewer
-        returns (ModuleHealthStatus memory healthStatus, uint256 timestamp, bool isValid)
+        returns (ModuleHealthStatus memory healthStatus, uint256 blockNumber, bool isValid)
     {
         healthStatus = _moduleHealth[module];
-        timestamp = healthStatus.lastCheckTime;
-        isValid = _isCacheValid(timestamp);
+        blockNumber = healthStatus.lastCheckTime;
+        isValid = _isCacheValid(blockNumber);
     }
 
     /**
@@ -272,7 +266,6 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
 
         uint256 size;
-        // solhint-disable-next-line no-inline-assembly
         assembly {
             size := extcodesize(module)
         }
@@ -316,16 +309,18 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         return ViewAccessLib.hasRole(_registryAddr, actionKey, user);
     }
 
-    function _isCacheValid(uint256 timestamp) internal view returns (bool) {
+    function _isCacheValid(uint256 updateBlock) internal view returns (bool) {
         // TTL validity is metadata for off-chain UX; it is not used for business-critical decisions.
-        // solhint-disable-next-line not-rely-on-time
-        return timestamp > 0 && block.timestamp - timestamp <= _CACHE_DURATION;
+        if (updateBlock == 0 || updateBlock > block.number) return false;
+        return block.number - updateBlock <= _CACHE_DURATION_BLOCKS;
     }
 
     /*━━━━━━━━━━━━━━━ UUPS upgradeability ━━━━━━━━━━━━━━━*/
 
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
@@ -333,7 +328,8 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
 
     function apiVersion() public pure override returns (uint256) {
-        // v2: add DataPush(MODULE_HEALTH) + getModuleHealthStatusWithMeta() (timestamp/isValid)
+        // v2: add canonical meta-read (blockNumber/isValid) and align to single DataPush emitter:
+        // HealthView.pushModuleHealth emits DataPushed(DATA_TYPE_MODULE_HEALTH); ModuleHealthView MUST NOT emit it.
         return 2;
     }
 

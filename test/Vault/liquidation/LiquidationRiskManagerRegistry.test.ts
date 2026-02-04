@@ -21,7 +21,7 @@ describe("LiquidationRiskManager Registry Upgrade", function () {
         const Registry = await ethers.getContractFactory("Registry");
         registry = await upgrades.deployProxy(
             Registry,
-            [7 * 24 * 60 * 60, owner.address, owner.address, owner.address], // 7天延时
+            [(7 * 24 * 60 * 60) / 2, owner.address, owner.address, owner.address], // 7天延时（blocks）
             { kind: "uups" }
         );
         await registry.waitForDeployment();
@@ -48,7 +48,7 @@ describe("LiquidationRiskManager Registry Upgrade", function () {
 
         // 部署 Mock SettlementToken（ERC20）
         const MockERC20 = await ethers.getContractFactory("MockERC20");
-        mockSettlementToken = await MockERC20.deploy("MockSettlement", "MSET", 18);
+        mockSettlementToken = await MockERC20.deploy("MockSettlement", "MSET", 18, ethers.parseUnits("1000000", 18));
         await mockSettlementToken.waitForDeployment();
 
         // 部署 HealthView（UUPS Proxy）

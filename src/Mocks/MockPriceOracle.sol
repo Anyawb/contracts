@@ -9,11 +9,12 @@ import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
 /// @dev 实现 IPriceOracle 接口的所有方法
 contract MockPriceOracle is Ownable, IPriceOracle {
     mapping(address => uint256) private _prices;
-    mapping(address => uint256) private _timestamps;
-    mapping(address => uint256) private _decimals;
+    mapping(address => uint256) private _priceBlocks;
+    mapping(address => uint256) private _updateBlocks;
+    mapping(address => uint256) private _assetDecimals;
     mapping(address => string) private _coingeckoIds;
     mapping(address => bool) private _isActive;
-    mapping(address => uint256) private _maxPriceAge;
+    mapping(address => uint256) private _maxPriceAgeBlocks;
     address[] private _supportedAssets;
 
     bool public shouldFail; // flag to simulate failure path in tests
@@ -27,50 +28,70 @@ contract MockPriceOracle is Ownable, IPriceOracle {
     }
 
     /// @notice 设置价格（仅测试合约，无权限控制）
-    /// @notice 设置价格（含时间戳）
-    function setPrice(address token, uint256 price, uint256 timestamp, uint256 decimals) external onlyOwner {
-        _setPrice(token, price, timestamp, decimals);
+    /// @notice 设置价格（含区块号）
+    function setPrice(address token, uint256 price, uint256 blockNumber, uint256 assetDecimals) external onlyOwner {
+        _setPrice(token, price, blockNumber, assetDecimals);
     }
 
-    function _setPrice(address token, uint256 price, uint256 timestamp, uint256 decimals) internal {
+    function _setPrice(address token, uint256 price, uint256 blockNumber, uint256 assetDecimals) internal {
         if (shouldFail) revert MockFailure();
         _prices[token] = price;
-        _timestamps[token] = timestamp;
-        _decimals[token] = decimals;
+        _priceBlocks[token] = blockNumber;
+        _updateBlocks[token] = blockNumber;
+        _assetDecimals[token] = assetDecimals;
     }
 
-    function getPrice(address token) external view override returns (uint256 price, uint256 timestamp, uint256 decimals) {
+    function getPrice(address token) external view override returns (uint256 price, uint256 blockNumber, uint256 assetDecimals) {
         if (shouldFail) revert MockFailure();
         price = _prices[token];
-        timestamp = _timestamps[token];
-        decimals = _decimals[token];
+        blockNumber = _priceBlocks[token];
+        assetDecimals = _assetDecimals[token];
     }
 
     function getPriceData(address token) external view override returns (PriceData memory priceData) {
         if (shouldFail) revert MockFailure();
         priceData = PriceData({
             price: _prices[token],
-            timestamp: _timestamps[token],
-            decimals: _decimals[token],
+            blockNumber: _priceBlocks[token],
+            assetDecimals: _assetDecimals[token],
             isValid: _prices[token] > 0
         });
     }
 
+    function getPriceUpdateBlock(address token) external view override returns (uint256 updateBlock) {
+        if (shouldFail) revert MockFailure();
+        return _updateBlocks[token];
+    }
+
+    function getPriceUpdateBlocks(address[] calldata tokens)
+        external
+        view
+        override
+        returns (uint256[] memory updateBlocks)
+    {
+        if (shouldFail) revert MockFailure();
+        uint256 length = tokens.length;
+        updateBlocks = new uint256[](length);
+        for (uint256 i = 0; i < length; i++) {
+            updateBlocks[i] = _updateBlocks[tokens[i]];
+        }
+    }
+
     function getPrices(address[] calldata tokens) external view override returns (
         uint256[] memory prices,
-        uint256[] memory timestamps,
-        uint256[] memory decimalsArray
+        uint256[] memory blockNumbers,
+        uint256[] memory assetDecimalsArray
     ) {
         if (shouldFail) revert MockFailure();
         uint256 length = tokens.length;
         prices = new uint256[](length);
-        timestamps = new uint256[](length);
-        decimalsArray = new uint256[](length);
+        blockNumbers = new uint256[](length);
+        assetDecimalsArray = new uint256[](length);
         
         for (uint256 i = 0; i < length; i++) {
             prices[i] = _prices[tokens[i]];
-            timestamps[i] = _timestamps[tokens[i]];
-            decimalsArray[i] = _decimals[tokens[i]];
+            blockNumbers[i] = _priceBlocks[tokens[i]];
+            assetDecimalsArray[i] = _assetDecimals[tokens[i]];
         }
     }
 
@@ -88,9 +109,9 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         if (shouldFail) revert MockFailure();
         config = AssetConfig({
             coingeckoId: _coingeckoIds[token],
-            decimals: _decimals[token],
+            assetDecimals: _assetDecimals[token],
             isActive: _isActive[token],
-            maxPriceAge: _maxPriceAge[token]
+            maxPriceAgeBlocks: _maxPriceAgeBlocks[token]
         });
     }
 
@@ -104,35 +125,37 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         return _supportedAssets.length;
     }
 
-    function updatePrice(address asset, uint256 price, uint256 timestamp) external override onlyOwner {
+    function updatePrice(address asset, uint256 price, uint256 blockNumber) external override onlyOwner {
         if (shouldFail) revert MockFailure();
         _prices[asset] = price;
-        _timestamps[asset] = timestamp;
+        _priceBlocks[asset] = blockNumber;
+        _updateBlocks[asset] = blockNumber;
     }
 
     function updatePrices(
         address[] calldata assets,
         uint256[] calldata prices,
-        uint256[] calldata timestamps
+        uint256[] calldata blockNumbers
     ) external override onlyOwner {
         if (shouldFail) revert MockFailure();
         uint256 length = assets.length;
         for (uint256 i = 0; i < length; i++) {
             _prices[assets[i]] = prices[i];
-            _timestamps[assets[i]] = timestamps[i];
+            _priceBlocks[assets[i]] = blockNumbers[i];
+            _updateBlocks[assets[i]] = blockNumbers[i];
         }
     }
 
     function configureAsset(
         address asset,
         string calldata coingeckoId,
-        uint256 decimals,
-        uint256 maxPriceAge
+        uint256 assetDecimals,
+        uint256 maxPriceAgeBlocks
     ) external override onlyOwner {
         if (shouldFail) revert MockFailure();
         _coingeckoIds[asset] = coingeckoId;
-        _decimals[asset] = decimals;
-        _maxPriceAge[asset] = maxPriceAge;
+        _assetDecimals[asset] = assetDecimals;
+        _maxPriceAgeBlocks[asset] = maxPriceAgeBlocks;
         _isActive[asset] = true;
         
         // 添加到支持资产列表

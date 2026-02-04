@@ -58,6 +58,13 @@ library ModuleKeys {
     /// @dev Used by Registry to store the VaultStatistics (or StatisticsView) contract address.
     /// @dev Hash: keccak256("VAULT_STATISTICS")
     bytes32 internal constant KEY_STATS = keccak256("VAULT_STATISTICS");
+
+    /// @notice Statistics push orchestrator module key (strict B+).
+    /// @dev Used by Registry to store the StatisticsPushManager (a.k.a. ViewPushOrchestrator) contract address.
+    ///      This module is the single on-chain entrypoint responsible for generating `seq/requestId/nextVersion`,
+    ///      reading SSOT snapshots, and pushing snapshots into StatisticsView.
+    /// @dev Hash: keccak256("STATISTICS_PUSH_MANAGER")
+    bytes32 internal constant KEY_STATS_PUSH_MANAGER = keccak256("STATISTICS_PUSH_MANAGER");
     
     /// @notice Degradation core monitoring module identifier
     /// @dev Hash: keccak256("DEGRADATION_CORE")
@@ -151,7 +158,6 @@ library ModuleKeys {
     /// @dev Used by Registry to store the EarlyRepaymentGuaranteeManager contract address.
     /// @dev Hash: keccak256("EARLY_REPAYMENT_GUARANTEE_MANAGER")
     // Reason: Module key string must match deployed constant; cannot be shortened without breaking compatibility.
-    // solhint-disable-next-line gas-small-strings
     bytes32 internal constant KEY_EARLY_REPAYMENT_GUARANTEE = keccak256("EARLY_REPAYMENT_GUARANTEE_MANAGER");
     
     /// @notice Keeper registry module key.
@@ -328,6 +334,10 @@ library ModuleKeys {
     /// @dev Used by Registry to store the RiskView contract address.
     /// @dev Hash: keccak256("RISK_VIEW")
     bytes32 internal constant KEY_RISK_VIEW = keccak256("RISK_VIEW");
+    /// @notice SystemRiskView module key.
+    /// @dev Used by Registry to store the SystemRiskView contract address.
+    /// @dev Hash: keccak256("SYSTEM_RISK_VIEW")
+    bytes32 internal constant KEY_SYSTEM_RISK_VIEW = keccak256("SYSTEM_RISK_VIEW");
     /// @notice SystemView module key.
     /// @dev Used by Registry to store the SystemView contract address.
     /// @dev Hash: keccak256("SYSTEM_VIEW")
@@ -430,7 +440,7 @@ library ModuleKeys {
      */
     function getAllKeys() internal pure returns (bytes32[] memory) {
         // NOTE: Keep this list dense (no holes) and in sync with getAllKeyStrings().
-        bytes32[] memory keys = new bytes32[](71);
+        bytes32[] memory keys = new bytes32[](73);
 
         // ===== Core Modules =====
         keys[0] = KEY_CM;
@@ -539,6 +549,10 @@ library ModuleKeys {
         keys[69] = KEY_LENDER_POOL_VAULT;
         // CacheMaintenanceManager (governance ops: batch refresh module caches)
         keys[70] = KEY_CACHE_MAINTENANCE_MANAGER;
+        // SystemRiskView (system-only risk reads)
+        keys[71] = KEY_SYSTEM_RISK_VIEW;
+        // Statistics push orchestrator (strict B+)
+        keys[72] = KEY_STATS_PUSH_MANAGER;
 
         return keys;
     }
@@ -555,7 +569,7 @@ library ModuleKeys {
      */
     function getAllKeyStrings() internal pure returns (string[] memory) {
         // NOTE: Keep this list dense (no holes) and in sync with getAllKeys().
-        string[] memory names = new string[](71);
+        string[] memory names = new string[](73);
 
         // ===== Core Modules =====
         names[0] = "KEY_CM";
@@ -659,6 +673,8 @@ library ModuleKeys {
         names[68] = "KEY_SETTLEMENT_MANAGER";
         names[69] = "KEY_LENDER_POOL_VAULT";
         names[70] = "KEY_CACHE_MAINTENANCE_MANAGER";
+        names[71] = "KEY_SYSTEM_RISK_VIEW";
+        names[72] = "KEY_STATS_PUSH_MANAGER";
 
         return names;
     }
@@ -771,7 +787,9 @@ library ModuleKeys {
         if (key == KEY_DASHBOARD_VIEW) return "dashboardView";
         if (key == KEY_PREVIEW_VIEW) return "previewView";
         if (key == KEY_LIQUIDATION_VIEW) return "liquidationView";
+        if (key == KEY_SYSTEM_RISK_VIEW) return "systemRiskView";
         if (key == KEY_CACHE_MAINTENANCE_MANAGER) return "cacheMaintenanceManager";
+        if (key == KEY_STATS_PUSH_MANAGER) return "statisticsPushManager";
         return "";
     }
     
@@ -854,6 +872,8 @@ library ModuleKeys {
         if (key == KEY_BATCH_VIEW) return "KEY_BATCH_VIEW";
         if (key == KEY_EARLY_REPAYMENT_GUARANTEE) return "KEY_EARLY_REPAYMENT_GUARANTEE";
         if (key == KEY_CACHE_MAINTENANCE_MANAGER) return "KEY_CACHE_MAINTENANCE_MANAGER";
+        if (key == KEY_SYSTEM_RISK_VIEW) return "KEY_SYSTEM_RISK_VIEW";
+        if (key == KEY_STATS_PUSH_MANAGER) return "KEY_STATS_PUSH_MANAGER";
         
         revert ModuleKeys__UnknownModuleKey(key);
     }
@@ -935,6 +955,7 @@ library ModuleKeys {
         // DEPRECATED alias: prefer "liquidationView"
         if (nameHash == keccak256(abi.encodePacked("liquidatorView"))) return KEY_LIQUIDATION_VIEW;
         if (nameHash == keccak256(abi.encodePacked("rewardView"))) return KEY_REWARD_VIEW;
+        if (nameHash == keccak256(abi.encodePacked("systemRiskView"))) return KEY_SYSTEM_RISK_VIEW;
         if (nameHash == keccak256(abi.encodePacked("vaultLendingEngine"))) return KEY_VAULT_LENDING_ENGINE;
         if (nameHash == keccak256(abi.encodePacked("degradationStorage"))) return KEY_DEGRADATION_STORAGE;
         if (nameHash == keccak256(abi.encodePacked("moduleHealthView"))) return KEY_MODULE_HEALTH_VIEW;
@@ -943,6 +964,7 @@ library ModuleKeys {
             return KEY_EARLY_REPAYMENT_GUARANTEE;
         }
         if (nameHash == keccak256(abi.encodePacked("cacheMaintenanceManager"))) return KEY_CACHE_MAINTENANCE_MANAGER;
+        if (nameHash == keccak256(abi.encodePacked("statisticsPushManager"))) return KEY_STATS_PUSH_MANAGER;
         
         return bytes32(0);
     }

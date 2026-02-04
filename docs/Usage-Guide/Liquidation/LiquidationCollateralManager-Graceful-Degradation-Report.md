@@ -11,7 +11,7 @@
 ## 🔧 主要改动
 
 - **职责收敛**：抵押扣押/划转仅做账本写入（`withdrawCollateralTo`），不挂载 `GracefulDegradation`、不直接调用预言机、不过度缓存。
-- **估值归口**：价格与降级仅在 `LendingEngine` 估值路径执行（如 `getAssetValueWithFallback*`）；只读/预览由 `LiquidationView` 调用 `LendingEngine` 只读估值接口完成。
+- **估值归口**：价格与降级仅在 `LendingEngine` 估值路径执行（如 `getAssetValueWithFallback*`）；只读/预览由清算只读聚合层（例如 `LiquidationRiskManager` / 相关 View façade）调用 `LendingEngine` 只读估值接口完成。
 - **事件单点**：清算写入成功后，仅通过 `LiquidatorView.pushLiquidationUpdate/Batch` 推送事件/DataPush，避免在 `CollateralManager` 重复发事件。
 - **权限与命名**：账本层内部做权限校验（如 `ACM.requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender)`）；存储命名遵循统一规范（`s`、`moduleCache` 等）。
 

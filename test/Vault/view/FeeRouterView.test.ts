@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 import { ethers, upgrades } from 'hardhat';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
@@ -11,6 +11,11 @@ const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM
 
 const DATA_TYPE_USER_FEE = ethers.keccak256(ethers.toUtf8Bytes('USER_FEE'));
 const DATA_TYPE_GLOBAL_FEE_STATS = ethers.keccak256(ethers.toUtf8Bytes('GLOBAL_FEE_STATS'));
+
+async function mineBlocks(count: number) {
+  // Hardhat JSON-RPC: hardhat_mine expects a hex quantity string.
+  await ethers.provider.send('hardhat_mine', [ethers.toBeHex(BigInt(count))]);
+}
 
 describe('FeeRouterView', function () {
   async function deployFixture() {
@@ -72,7 +77,6 @@ describe('FeeRouterView', function () {
 
       const tx = await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 100n, 250n);
       const receipt = await tx.wait();
-      const block = await ethers.provider.getBlock(receipt!.blockNumber!);
 
       const abiCoder = ethers.AbiCoder.defaultAbiCoder();
       const payload = abiCoder.encode(['address', 'bytes32', 'uint256', 'uint256'], [user.address, feeType, 100n, 250n]);
@@ -80,10 +84,11 @@ describe('FeeRouterView', function () {
       await expect(tx).to.emit(feeRouterView, 'UserDataPushed');
       await expect(tx).to.emit(feeRouterView, 'DataPushed').withArgs(DATA_TYPE_USER_FEE, payload);
 
-      const stats = await feeRouterView.connect(user).getUserStats(user.address);
+      const [stats] = await feeRouterView.connect(user).getUserStatsWithMeta(user.address);
       expect(stats.totalFeePaid).to.equal(100n);
       expect(stats.transactionCount).to.equal(1n);
-      expect(stats.lastActivityTime).to.equal(block!.timestamp);
+      // Time-Dependency-Refactor: view uses block.number as the onchain time axis marker.
+      expect(stats.lastActivityBlock).to.equal(BigInt(receipt!.blockNumber!));
     });
 
     it('accumulates multiple fee updates', async function () {
@@ -94,10 +99,10 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 50n, 250n);
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 25n, 250n);
 
-      const amount = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType);
+      const [amount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType);
       expect(amount).to.equal(175n); // 100 + 50 + 25
 
-      const stats = await feeRouterView.connect(user).getUserStats(user.address);
+      const [stats] = await feeRouterView.connect(user).getUserStatsWithMeta(user.address);
       expect(stats.totalFeePaid).to.equal(175n);
       expect(stats.transactionCount).to.equal(3n);
     });
@@ -108,10 +113,10 @@ describe('FeeRouterView', function () {
 
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 0n, 100n);
 
-      const amount = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType);
+      const [amount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType);
       expect(amount).to.equal(0n);
 
-      const stats = await feeRouterView.connect(user).getUserStats(user.address);
+      const [stats] = await feeRouterView.connect(user).getUserStatsWithMeta(user.address);
       expect(stats.transactionCount).to.equal(1n); // Transaction count still increments
     });
 
@@ -122,7 +127,7 @@ describe('FeeRouterView', function () {
 
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, largeAmount, 100n);
 
-      const amount = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType);
+      const [amount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType);
       expect(amount).to.equal(largeAmount);
     });
 
@@ -134,13 +139,13 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType1, 100n, 200n);
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType2, 300n, 400n);
 
-      const amount1 = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType1);
-      const amount2 = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType2);
+      const [amount1] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType1);
+      const [amount2] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType2);
       expect(amount1).to.equal(100n);
       expect(amount2).to.equal(300n);
 
-      const fee1 = await feeRouterView.connect(user).getUserDynamicFee(user.address, feeType1);
-      const fee2 = await feeRouterView.connect(user).getUserDynamicFee(user.address, feeType2);
+      const [fee1] = await feeRouterView.connect(user).getUserDynamicFeeWithMeta(user.address, feeType1);
+      const [fee2] = await feeRouterView.connect(user).getUserDynamicFeeWithMeta(user.address, feeType2);
       expect(fee1).to.equal(200n);
       expect(fee2).to.equal(400n);
     });
@@ -167,8 +172,20 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('MINT'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 200n, 300n);
 
-      const amount = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType);
+      const [amount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType);
       expect(amount).to.equal(200n);
+    });
+
+    it('allows user to read own stats without VIEW_USER_DATA role (Scheme U self-read)', async function () {
+      const { feeRouterView, feeRouter, user, acm } = await loadFixture(deployFixture);
+      const feeType = ethers.keccak256(ethers.toUtf8Bytes('SELF_NO_ROLE'));
+      await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 123n, 456n);
+
+      // Remove the role; self-read must still be allowed.
+      await acm.revokeRole(ACTION_VIEW_USER_DATA, user.address);
+
+      const [amount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType);
+      expect(amount).to.equal(123n);
     });
 
     it('blocks other users without admin role', async function () {
@@ -177,8 +194,19 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 50n, 100n);
 
       await expect(
-        feeRouterView.connect(other).getUserFeeStatistics(user.address, feeType),
-      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__UnauthorizedAccess');
+        feeRouterView.connect(other).getUserFeeStatisticsWithMeta(user.address, feeType),
+      ).to.be.revertedWithCustomError(feeRouterView, 'MissingRole');
+    });
+
+    it('allows other user with VIEW_USER_DATA role to read non-self stats (Scheme U ops read)', async function () {
+      const { feeRouterView, feeRouter, user, other, acm } = await loadFixture(deployFixture);
+      const feeType = ethers.keccak256(ethers.toUtf8Bytes('OPS_NON_SELF'));
+      await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 77n, 88n);
+
+      await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
+
+      const [value] = await feeRouterView.connect(other).getUserFeeStatisticsWithMeta(user.address, feeType);
+      expect(value).to.equal(77n);
     });
 
     it('allows admin to read any user data', async function () {
@@ -186,7 +214,7 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('REDEEM'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 75n, 80n);
 
-      const value = await feeRouterView.connect(admin).getUserFeeStatistics(user.address, feeType);
+      const [value] = await feeRouterView.connect(admin).getUserFeeStatisticsWithMeta(user.address, feeType);
       expect(value).to.equal(75n);
     });
 
@@ -195,7 +223,7 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('DYNAMIC_FEE'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 100n, 500n);
 
-      const fee = await feeRouterView.connect(user).getUserDynamicFee(user.address, feeType);
+      const [fee] = await feeRouterView.connect(user).getUserDynamicFeeWithMeta(user.address, feeType);
       expect(fee).to.equal(500n);
     });
 
@@ -203,16 +231,15 @@ describe('FeeRouterView', function () {
       const { feeRouterView, feeRouter, user } = await loadFixture(deployFixture);
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('STATS_TEST'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 100n, 200n);
-      await time.increase(60);
+      await mineBlocks(10);
 
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 50n, 200n);
       const receipt = await (await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 25n, 200n)).wait();
-      const block = await ethers.provider.getBlock(receipt!.blockNumber!);
 
-      const stats = await feeRouterView.connect(user).getUserStats(user.address);
+      const [stats] = await feeRouterView.connect(user).getUserStatsWithMeta(user.address);
       expect(stats.totalFeePaid).to.equal(175n);
       expect(stats.transactionCount).to.equal(3n);
-      expect(stats.lastActivityTime).to.equal(block!.timestamp);
+      expect(stats.lastActivityBlock).to.equal(BigInt(receipt!.blockNumber!));
     });
 
     it('getUserFeeConfig returns correct configuration', async function () {
@@ -220,7 +247,7 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('CONFIG_TEST'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 100n, 250n);
 
-      const config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      const [config] = await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address);
       expect(config.totalFeePaid).to.equal(100n);
       expect(config.transactionCount).to.equal(1n);
       expect(config.vipStatus).to.equal(false); // Less than 1000 ether
@@ -233,7 +260,7 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeTypes[0], 10n, 0n);
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeTypes[1], 20n, 0n);
 
-      const analytics = await feeRouterView.connect(user).getUserFeeAnalytics(user.address, feeTypes);
+      const [analytics] = await feeRouterView.connect(user).getUserFeeAnalyticsWithMeta(user.address, feeTypes);
       expect(analytics.totalPaidFees).to.equal(30n);
       expect(analytics.transactionCount).to.equal(2n);
       expect(analytics.feeAmounts[0]).to.equal(10n);
@@ -251,9 +278,9 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType2, 200n, 300n);
       // feeType3 has no update, should return 0
 
-      const amounts = await feeRouterView
+      const [amounts] = await feeRouterView
         .connect(user)
-        .batchGetUserFeeStatistics(user.address, [feeType1, feeType2, feeType3]);
+        .batchGetUserFeeStatisticsWithMeta(user.address, [feeType1, feeType2, feeType3]);
       expect(amounts.length).to.equal(3);
       expect(amounts[0]).to.equal(100n);
       expect(amounts[1]).to.equal(200n);
@@ -262,8 +289,9 @@ describe('FeeRouterView', function () {
 
     it('batchGetUserFeeStatistics handles empty array', async function () {
       const { feeRouterView, user } = await loadFixture(deployFixture);
-      const amounts = await feeRouterView.connect(user).batchGetUserFeeStatistics(user.address, []);
-      expect(amounts.length).to.equal(0);
+      await expect(
+        feeRouterView.connect(user).batchGetUserFeeStatisticsWithMeta(user.address, []),
+      ).to.be.revertedWithCustomError(feeRouterView, 'EmptyArray');
     });
 
     it('batchGetUserFeeStatistics handles maximum batch size', async function () {
@@ -271,7 +299,7 @@ describe('FeeRouterView', function () {
       const feeTypes = Array.from({ length: 100 }, (_, i) =>
         ethers.zeroPadValue(ethers.toBeHex(BigInt(i + 1)), 32),
       );
-      const amounts = await feeRouterView.connect(user).batchGetUserFeeStatistics(user.address, feeTypes);
+      const [amounts] = await feeRouterView.connect(user).batchGetUserFeeStatisticsWithMeta(user.address, feeTypes);
       expect(amounts.length).to.equal(100);
     });
 
@@ -281,8 +309,8 @@ describe('FeeRouterView', function () {
         ethers.zeroPadValue(ethers.toBeHex(BigInt(i + 1)), 32),
       );
       await expect(
-        feeRouterView.connect(user).batchGetUserFeeStatistics(user.address, feeTypes),
-      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__BatchSizeTooLarge');
+        feeRouterView.connect(user).batchGetUserFeeStatisticsWithMeta(user.address, feeTypes),
+      ).to.be.revertedWithCustomError(feeRouterView, 'BatchTooLarge');
     });
 
     it('getUserFeeAnalytics calculates average fee rate correctly', async function () {
@@ -291,7 +319,7 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 100n, 0n);
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 200n, 0n);
 
-      const analytics = await feeRouterView.connect(user).getUserFeeAnalytics(user.address, [feeType]);
+      const [analytics] = await feeRouterView.connect(user).getUserFeeAnalyticsWithMeta(user.address, [feeType]);
       // Formula: (totalFees * 10000) / transactionCount = (300 * 10000) / 2 = 1500000
       expect(analytics.averageFeeRate).to.equal(1500000n);
     });
@@ -299,7 +327,7 @@ describe('FeeRouterView', function () {
     it('getUserFeeAnalytics handles zero transaction count', async function () {
       const { feeRouterView, user } = await loadFixture(deployFixture);
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('ZERO_TX'));
-      const analytics = await feeRouterView.connect(user).getUserFeeAnalytics(user.address, [feeType]);
+      const [analytics] = await feeRouterView.connect(user).getUserFeeAnalyticsWithMeta(user.address, [feeType]);
       expect(analytics.transactionCount).to.equal(0n);
       expect(analytics.averageFeeRate).to.equal(0n);
     });
@@ -354,52 +382,51 @@ describe('FeeRouterView', function () {
     });
   });
 
-  describe('ARCH 4.9 FRV-02: staleness output (timestamp/isValid/needsSync)', function () {
+  describe('ARCH 4.9 FRV-02: staleness output (blockNumber/isValid/needsSync)', function () {
     it('getSyncStatus is valid initially and flips to stale after SYNC_INTERVAL', async function () {
       const { feeRouterView } = await loadFixture(deployFixture);
 
-      const [isValid0, ts0, needs0] = await feeRouterView.getSyncStatus();
-      expect(ts0).to.be.greaterThan(0n);
+      const [isValid0, block0, needs0] = await feeRouterView.getSyncStatus();
+      expect(block0).to.be.greaterThan(0n);
       expect(needs0).to.equal(false);
       expect(isValid0).to.equal(true);
 
-      await time.increase(301);
-      const [isValid1, ts1, needs1] = await feeRouterView.getSyncStatus();
-      expect(ts1).to.equal(ts0);
+      // Time-Dependency-Refactor: SYNC is block-based (ViewConstants.CACHE_DURATION_BLOCKS = 150).
+      await mineBlocks(151);
+      const [isValid1, block1, needs1] = await feeRouterView.getSyncStatus();
+      expect(block1).to.equal(block0);
       expect(needs1).to.equal(true);
       expect(isValid1).to.equal(false);
     });
 
-    it('FeeRouter push refreshes sync status, emits DataPushed, and timestamp is monotonic', async function () {
+    it('FeeRouter push refreshes sync status, emits DataPushed, and blockNumber is monotonic', async function () {
       const { feeRouterView, feeRouter } = await loadFixture(deployFixture);
 
-      const [, ts0, needs0] = await feeRouterView.getSyncStatus();
+      const [, block0, needs0] = await feeRouterView.getSyncStatus();
       expect(needs0).to.equal(false);
 
-      await time.increase(301);
-      const [isValidStale, tsStale, needsStale] = await feeRouterView.getSyncStatus();
-      expect(tsStale).to.equal(ts0);
+      await mineBlocks(151);
+      const [isValidStale, blockStale, needsStale] = await feeRouterView.getSyncStatus();
+      expect(blockStale).to.equal(block0);
       expect(needsStale).to.equal(true);
       expect(isValidStale).to.equal(false);
 
       const tx1 = await feeRouterView.connect(feeRouter).pushGlobalStatsUpdate(5n, 500n);
       const receipt1 = await tx1.wait();
-      const block1 = await ethers.provider.getBlock(receipt1!.blockNumber!);
 
-      const [isValid1, ts1, needs1] = await feeRouterView.getSyncStatus();
+      const [isValid1, block1, needs1] = await feeRouterView.getSyncStatus();
       expect(needs1).to.equal(false);
       expect(isValid1).to.equal(true);
-      expect(ts1).to.equal(BigInt(block1!.timestamp));
-      expect(ts1).to.be.greaterThan(ts0);
+      expect(block1).to.equal(BigInt(receipt1!.blockNumber!));
+      expect(block1).to.be.greaterThan(block0);
 
-      await time.increase(1);
+      await mineBlocks(1);
       const tx2 = await feeRouterView.connect(feeRouter).pushGlobalStatsUpdate(6n, 600n);
       const receipt2 = await tx2.wait();
-      const block2 = await ethers.provider.getBlock(receipt2!.blockNumber!);
 
-      const [, ts2] = await feeRouterView.getSyncStatus();
-      expect(ts2).to.equal(BigInt(block2!.timestamp));
-      expect(ts2).to.be.greaterThan(ts1);
+      const [, block2] = await feeRouterView.getSyncStatus();
+      expect(block2).to.equal(BigInt(receipt2!.blockNumber!));
+      expect(block2).to.be.greaterThan(block1);
     });
   });
 
@@ -411,9 +438,9 @@ describe('FeeRouterView', function () {
       const payload = abiCoder.encode(['uint256', 'uint256'], [5n, 500n]);
       await expect(tx).to.emit(feeRouterView, 'DataPushed').withArgs(DATA_TYPE_GLOBAL_FEE_STATS, payload);
 
-      const stats = await feeRouterView.connect(admin).getGlobalOperationStats();
-      expect(stats[0]).to.equal(5n);
-      expect(stats[1]).to.equal(500n);
+      const [distributions, totalAmount] = await feeRouterView.connect(admin).getGlobalOperationStatsWithMeta();
+      expect(distributions).to.equal(5n);
+      expect(totalAmount).to.equal(500n);
     });
 
     it('pushGlobalFeeStatistic updates mapping', async function () {
@@ -421,7 +448,7 @@ describe('FeeRouterView', function () {
       const token = ethers.Wallet.createRandom().address;
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('DIST'));
       await feeRouterView.connect(feeRouter).pushGlobalFeeStatistic(token, feeType, 1_000n);
-      const value = await feeRouterView.connect(admin).getGlobalFeeStatistics(token, feeType);
+      const [value] = await feeRouterView.connect(admin).getGlobalFeeStatisticsWithMeta(token, feeType);
       expect(value).to.equal(1_000n);
     });
 
@@ -435,7 +462,7 @@ describe('FeeRouterView', function () {
         .connect(feeRouter)
         .pushSystemConfigUpdate(platformTreasury, ecosystemVault, 200n, 100n, tokens);
 
-      const config = await feeRouterView.connect(admin).getSystemConfig();
+      const [config] = await feeRouterView.connect(admin).getSystemConfigWithMeta();
       expect(config.platformTreasury).to.equal(platformTreasury);
       expect(config.ecosystemVault).to.equal(ecosystemVault);
       expect(config.platformFeeBps).to.equal(200n);
@@ -454,7 +481,7 @@ describe('FeeRouterView', function () {
         .pushSystemConfigUpdate(platformTreasury, ecosystemVault, 200n, 100n, tokens);
       await feeRouterView.connect(feeRouter).pushGlobalStatsUpdate(10n, 1_000_000n);
 
-      const analytics = await feeRouterView.connect(admin).getSystemFeeAnalytics();
+      const [analytics] = await feeRouterView.connect(admin).getSystemFeeAnalyticsWithMeta();
       expect(analytics.distributionCount).to.equal(10n);
       expect(analytics.totalVolume).to.equal(1_000_000n);
       expect(analytics.totalFees).to.equal(30_000n); // 1_000_000 * (200 + 100) / 10000
@@ -473,9 +500,9 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushGlobalFeeStatistic(token1, feeType1, 100n);
       await feeRouterView.connect(feeRouter).pushGlobalFeeStatistic(token2, feeType2, 200n);
 
-      const values = await feeRouterView
+      const [values] = await feeRouterView
         .connect(admin)
-        .batchGetGlobalFeeStatistics([token1, token2], [feeType1, feeType2]);
+        .batchGetGlobalFeeStatisticsWithMeta([token1, token2], [feeType1, feeType2]);
       expect(values.length).to.equal(2);
       expect(values[0]).to.equal(100n);
       expect(values[1]).to.equal(200n);
@@ -487,16 +514,16 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('DIST'));
       await feeRouterView.connect(feeRouter).pushGlobalFeeStatistic(token, feeType, 123n);
 
-      const values = await feeRouterView.connect(admin).batchGetGlobalFeeStatistics([token], [feeType]);
+      const [values] = await feeRouterView.connect(admin).batchGetGlobalFeeStatisticsWithMeta([token], [feeType]);
       expect(values[0]).to.equal(123n);
 
       await expect(
-        feeRouterView.connect(admin).batchGetGlobalFeeStatistics([token], []),
-      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__ArrayLengthMismatch');
+        feeRouterView.connect(admin).batchGetGlobalFeeStatisticsWithMeta([token], []),
+      ).to.be.revertedWithCustomError(feeRouterView, 'ArrayLengthMismatch');
 
       await expect(
-        feeRouterView.connect(admin).batchGetGlobalFeeStatistics([], [feeType]),
-      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__ArrayLengthMismatch');
+        feeRouterView.connect(admin).batchGetGlobalFeeStatisticsWithMeta([], [feeType]),
+      ).to.be.revertedWithCustomError(feeRouterView, 'EmptyArray');
     });
 
     it('batchGetGlobalFeeStatistics enforces batch size limit', async function () {
@@ -507,8 +534,8 @@ describe('FeeRouterView', function () {
       );
 
       await expect(
-        feeRouterView.connect(admin).batchGetGlobalFeeStatistics(tokens, feeTypes),
-      ).to.be.revertedWithCustomError(feeRouterView, 'FeeRouterView__BatchSizeTooLarge');
+        feeRouterView.connect(admin).batchGetGlobalFeeStatisticsWithMeta(tokens, feeTypes),
+      ).to.be.revertedWithCustomError(feeRouterView, 'BatchTooLarge');
     });
 
     it('requires admin role for admin queries', async function () {
@@ -516,13 +543,13 @@ describe('FeeRouterView', function () {
       const token = ethers.Wallet.createRandom().address;
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('ADMIN_ONLY'));
 
-      await expect(feeRouterView.connect(user).getGlobalFeeStatistics(token, feeType)).to.be.revertedWithCustomError(
+      await expect(feeRouterView.connect(user).getGlobalFeeStatisticsWithMeta(token, feeType)).to.be.revertedWithCustomError(
         acm,
         'MissingRole',
       );
-      await expect(feeRouterView.connect(user).getGlobalOperationStats()).to.be.revertedWithCustomError(acm, 'MissingRole');
-      await expect(feeRouterView.connect(user).getSystemConfig()).to.be.revertedWithCustomError(acm, 'MissingRole');
-      await expect(feeRouterView.connect(user).getSystemFeeAnalytics()).to.be.revertedWithCustomError(acm, 'MissingRole');
+      await expect(feeRouterView.connect(user).getGlobalOperationStatsWithMeta()).to.be.revertedWithCustomError(acm, 'MissingRole');
+      await expect(feeRouterView.connect(user).getSystemConfigWithMeta()).to.be.revertedWithCustomError(acm, 'MissingRole');
+      await expect(feeRouterView.connect(user).getSystemFeeAnalyticsWithMeta()).to.be.revertedWithCustomError(acm, 'MissingRole');
     });
   });
 
@@ -538,15 +565,15 @@ describe('FeeRouterView', function () {
         tokens,
       );
 
-      const config = await feeRouterView.connect(admin).getSystemConfig();
+      const [config] = await feeRouterView.connect(admin).getSystemConfigWithMeta();
       expect(config.supportedTokens.length).to.equal(2);
-      const supported = await feeRouterView.batchCheckTokenSupport(tokens);
+      const [supported] = await feeRouterView.batchCheckTokenSupportWithMeta(tokens);
       expect(supported[0]).to.equal(true);
       expect(supported[1]).to.equal(true);
 
-      await expect(feeRouterView.batchCheckTokenSupport([])).to.be.revertedWithCustomError(
+      await expect(feeRouterView.batchCheckTokenSupportWithMeta([])).to.be.revertedWithCustomError(
         feeRouterView,
-        'FeeRouterView__EmptyArray',
+        'EmptyArray',
       );
     });
 
@@ -564,8 +591,8 @@ describe('FeeRouterView', function () {
         [oldToken1, oldToken2],
       );
 
-      expect(await feeRouterView.isTokenSupported(oldToken1)).to.equal(true);
-      expect(await feeRouterView.isTokenSupported(oldToken2)).to.equal(true);
+      expect((await feeRouterView.isTokenSupportedWithMeta(oldToken1))[0]).to.equal(true);
+      expect((await feeRouterView.isTokenSupportedWithMeta(oldToken2))[0]).to.equal(true);
 
       await feeRouterView.connect(feeRouter).pushSystemConfigUpdate(
         ethers.Wallet.createRandom().address,
@@ -575,9 +602,9 @@ describe('FeeRouterView', function () {
         [newToken],
       );
 
-      expect(await feeRouterView.isTokenSupported(oldToken1)).to.equal(false);
-      expect(await feeRouterView.isTokenSupported(oldToken2)).to.equal(false);
-      expect(await feeRouterView.isTokenSupported(newToken)).to.equal(true);
+      expect((await feeRouterView.isTokenSupportedWithMeta(oldToken1))[0]).to.equal(false);
+      expect((await feeRouterView.isTokenSupportedWithMeta(oldToken2))[0]).to.equal(false);
+      expect((await feeRouterView.isTokenSupportedWithMeta(newToken))[0]).to.equal(true);
     });
 
     it('handles empty token list', async function () {
@@ -590,7 +617,7 @@ describe('FeeRouterView', function () {
         [],
       );
 
-      const config = await feeRouterView.connect(admin).getSystemConfig();
+      const [config] = await feeRouterView.connect(admin).getSystemConfigWithMeta();
       expect(config.supportedTokens.length).to.equal(0);
     });
 
@@ -608,7 +635,7 @@ describe('FeeRouterView', function () {
         [token1, token2],
       );
 
-      const supported = await feeRouterView.batchCheckTokenSupport([token1, token2, token3]);
+      const [supported] = await feeRouterView.batchCheckTokenSupportWithMeta([token1, token2, token3]);
       expect(supported.length).to.equal(3);
       expect(supported[0]).to.equal(true);
       expect(supported[1]).to.equal(true);
@@ -619,21 +646,21 @@ describe('FeeRouterView', function () {
       const { feeRouterView } = await loadFixture(deployFixture);
       const tokens = Array.from({ length: 101 }, () => ethers.Wallet.createRandom().address);
 
-      await expect(feeRouterView.batchCheckTokenSupport(tokens)).to.be.revertedWithCustomError(
+      await expect(feeRouterView.batchCheckTokenSupportWithMeta(tokens)).to.be.revertedWithCustomError(
         feeRouterView,
-        'FeeRouterView__BatchSizeTooLarge',
+        'BatchTooLarge',
       );
     });
 
     it('isTokenSupported returns false for unsupported token', async function () {
       const { feeRouterView } = await loadFixture(deployFixture);
       const unsupportedToken = ethers.Wallet.createRandom().address;
-      expect(await feeRouterView.isTokenSupported(unsupportedToken)).to.equal(false);
+      expect((await feeRouterView.isTokenSupportedWithMeta(unsupportedToken))[0]).to.equal(false);
     });
 
     it('getSupportedTokens returns empty array initially', async function () {
       const { feeRouterView } = await loadFixture(deployFixture);
-      const tokens = await feeRouterView.getSupportedTokens();
+      const [tokens] = await feeRouterView.getSupportedTokensWithMeta();
       expect(tokens.length).to.equal(0);
     });
   });
@@ -644,7 +671,7 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('LOW_FEE'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, ethers.parseEther('50'), 100n);
 
-      const config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      const [config] = await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address);
       expect(config.discountLevel).to.equal(0n);
       expect(config.vipStatus).to.equal(false);
     });
@@ -654,7 +681,7 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('LEVEL_1'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, ethers.parseEther('100'), 100n);
 
-      const config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      const [config] = await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address);
       expect(config.discountLevel).to.equal(1n);
       expect(config.vipStatus).to.equal(false);
     });
@@ -664,7 +691,7 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('LEVEL_2'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, ethers.parseEther('500'), 100n);
 
-      const config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      const [config] = await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address);
       expect(config.discountLevel).to.equal(2n);
       expect(config.vipStatus).to.equal(false);
     });
@@ -675,7 +702,7 @@ describe('FeeRouterView', function () {
       // Contract uses > 1000 ether, so need to push more than 1000
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, ethers.parseEther('1001'), 100n);
 
-      const config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      const [config] = await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address);
       expect(config.discountLevel).to.equal(3n);
       expect(config.vipStatus).to.equal(true); // totalFeePaid > 1000 ether
     });
@@ -685,7 +712,7 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('LEVEL_4'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, ethers.parseEther('5000'), 100n);
 
-      const config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      const [config] = await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address);
       expect(config.discountLevel).to.equal(4n);
       expect(config.vipStatus).to.equal(true);
     });
@@ -695,7 +722,7 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('LEVEL_5'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, ethers.parseEther('10000'), 100n);
 
-      const config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      const [config] = await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address);
       expect(config.discountLevel).to.equal(5n);
       expect(config.vipStatus).to.equal(true);
     });
@@ -707,12 +734,12 @@ describe('FeeRouterView', function () {
 
       // Exactly 100 ether - should be level 1
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType1, ethers.parseEther('100'), 100n);
-      let config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      let config = (await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address))[0];
       expect(config.discountLevel).to.equal(1n);
 
       // Add 901 more to reach 1001 total (exceeds 1000) - should be level 3 and VIP
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType2, ethers.parseEther('901'), 100n);
-      config = await feeRouterView.connect(user).getUserFeeConfig(user.address);
+      config = (await feeRouterView.connect(user).getUserFeeConfigWithMeta(user.address))[0];
       expect(config.discountLevel).to.equal(3n);
       expect(config.vipStatus).to.equal(true); // totalFeePaid > 1000 ether (1001)
     });
@@ -721,23 +748,24 @@ describe('FeeRouterView', function () {
   describe('needsSync helper', function () {
     it('returns false initially', async function () {
       const { feeRouterView } = await loadFixture(deployFixture);
-      expect(await feeRouterView.needsSync()).to.equal(false);
+      const [, , needsSync] = await feeRouterView.getSyncStatus();
+      expect(needsSync).to.equal(false);
     });
 
     it('returns true when sync interval exceeded', async function () {
       const { feeRouterView } = await loadFixture(deployFixture);
-      expect(await feeRouterView.needsSync()).to.equal(false);
-      await time.increase(301);
-      expect(await feeRouterView.needsSync()).to.equal(true);
+      expect((await feeRouterView.getSyncStatus())[2]).to.equal(false);
+      await mineBlocks(151);
+      expect((await feeRouterView.getSyncStatus())[2]).to.equal(true);
     });
 
     it('returns false after sync update', async function () {
       const { feeRouterView, feeRouter } = await loadFixture(deployFixture);
-      await time.increase(301);
-      expect(await feeRouterView.needsSync()).to.equal(true);
+      await mineBlocks(151);
+      expect((await feeRouterView.getSyncStatus())[2]).to.equal(true);
 
       await feeRouterView.connect(feeRouter).pushGlobalStatsUpdate(1n, 100n);
-      expect(await feeRouterView.needsSync()).to.equal(false);
+      expect((await feeRouterView.getSyncStatus())[2]).to.equal(false);
     });
   });
 
@@ -798,8 +826,8 @@ describe('FeeRouterView', function () {
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('CONSISTENCY'));
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 123n, 456n);
 
-      const amount = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType);
-      const fee = await feeRouterView.connect(user).getUserDynamicFee(user.address, feeType);
+      const [amount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType);
+      const [fee] = await feeRouterView.connect(user).getUserDynamicFeeWithMeta(user.address, feeType);
       expect(amount).to.equal(123n);
       expect(fee).to.equal(456n);
     });
@@ -812,11 +840,11 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType1, 100n, 200n);
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType2, 300n, 400n);
 
-      const batchAmounts = await feeRouterView
+      const [batchAmounts] = await feeRouterView
         .connect(user)
-        .batchGetUserFeeStatistics(user.address, [feeType1, feeType2]);
-      const individual1 = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType1);
-      const individual2 = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType2);
+        .batchGetUserFeeStatisticsWithMeta(user.address, [feeType1, feeType2]);
+      const [individual1] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType1);
+      const [individual2] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType2);
 
       expect(batchAmounts[0]).to.equal(individual1);
       expect(batchAmounts[1]).to.equal(individual2);
@@ -830,9 +858,9 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType1, 100n, 0n);
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType2, 200n, 0n);
 
-      const stats = await feeRouterView.connect(user).getUserStats(user.address);
-      const amount1 = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType1);
-      const amount2 = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType2);
+      const [stats] = await feeRouterView.connect(user).getUserStatsWithMeta(user.address);
+      const [amount1] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType1);
+      const [amount2] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType2);
 
       expect(stats.totalFeePaid).to.equal(amount1 + amount2);
       expect(stats.transactionCount).to.equal(2n);
@@ -844,7 +872,7 @@ describe('FeeRouterView', function () {
       const { feeRouterView, admin } = await loadFixture(deployFixture);
       const feeType = ethers.keccak256(ethers.toUtf8Bytes('ZERO_USER'));
       // Admin can query any user, including zero address
-      const amount = await feeRouterView.connect(admin).getUserFeeStatistics(ethers.ZeroAddress, feeType);
+      const [amount] = await feeRouterView.connect(admin).getUserFeeStatisticsWithMeta(ethers.ZeroAddress, feeType);
       expect(amount).to.equal(0n);
     });
 
@@ -852,7 +880,7 @@ describe('FeeRouterView', function () {
       const { feeRouterView, feeRouter, user } = await loadFixture(deployFixture);
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, ethers.ZeroHash, 100n, 200n);
 
-      const amount = await feeRouterView.connect(user).getUserFeeStatistics(user.address, ethers.ZeroHash);
+      const [amount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, ethers.ZeroHash);
       expect(amount).to.equal(100n);
     });
 
@@ -862,7 +890,7 @@ describe('FeeRouterView', function () {
       const maxUint256 = ethers.MaxUint256;
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, maxUint256, 100n);
 
-      const amount = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType);
+      const [amount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType);
       expect(amount).to.equal(maxUint256);
     });
 
@@ -872,8 +900,8 @@ describe('FeeRouterView', function () {
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 100n, 200n);
       await feeRouterView.connect(feeRouter).pushUserFeeUpdate(other.address, feeType, 300n, 400n);
 
-      const userAmount = await feeRouterView.connect(user).getUserFeeStatistics(user.address, feeType);
-      const otherAmount = await feeRouterView.connect(admin).getUserFeeStatistics(other.address, feeType);
+      const [userAmount] = await feeRouterView.connect(user).getUserFeeStatisticsWithMeta(user.address, feeType);
+      const [otherAmount] = await feeRouterView.connect(admin).getUserFeeStatisticsWithMeta(other.address, feeType);
       expect(userAmount).to.equal(100n);
       expect(otherAmount).to.equal(300n);
     });
@@ -882,6 +910,57 @@ describe('FeeRouterView', function () {
       const { feeRouterView, feeRouter, registry } = await loadFixture(deployFixture);
       const feeRouterAddr = await feeRouterView.getFeeRouter();
       expect(feeRouterAddr).to.equal(feeRouter.address);
+    });
+  });
+
+  describe('SSOT callsite assertions (trap ACM)', function () {
+    it('user-dimensional gate MUST use hasRole (must not call ACM.requireRole)', async function () {
+      const [admin, user, other, feeRouter] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManagerTrapRequireRole')).deploy();
+
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+      await registry.setModule(KEY_FEE_ROUTER, feeRouter.address);
+
+      const FeeRouterViewFactory = await ethers.getContractFactory('FeeRouterView');
+      const feeRouterView = await upgrades.deployProxy(FeeRouterViewFactory, [await registry.getAddress()], {
+        kind: 'uups',
+      });
+
+      // Push some data so the read path is meaningful (push gate is FeeRouter-only, not ACM-based).
+      const feeType = ethers.keccak256(ethers.toUtf8Bytes('TRAP'));
+      await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 1n, 1n);
+
+      // Non-self without roles should be rejected by the view's Scheme U gate.
+      // If someone refactors to use ViewAccessLib.requireRole here, the trap ACM will revert RequireRoleCalled().
+      await expect(feeRouterView.connect(other).getUserFeeStatisticsWithMeta(user.address, feeType)).to.be.revertedWithCustomError(
+        feeRouterView,
+        'MissingRole',
+      );
+    });
+
+    it('admin gate MUST revert MissingRole (no role)', async function () {
+      const [admin, , other, feeRouter] = await ethers.getSigners();
+
+      const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+      const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
+
+      await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
+      await registry.setModule(KEY_FEE_ROUTER, feeRouter.address);
+
+      const FeeRouterViewFactory = await ethers.getContractFactory('FeeRouterView');
+      const feeRouterView = await upgrades.deployProxy(FeeRouterViewFactory, [await registry.getAddress()], {
+        kind: 'uups',
+      });
+
+      // Ensure someone (admin) does have admin so we know roles can be granted in this mock.
+      await acm.grantRole(ACTION_ADMIN, admin.address);
+
+      await expect(feeRouterView.connect(other).getGlobalOperationStatsWithMeta()).to.be.revertedWithCustomError(
+        feeRouterView,
+        'MissingRole',
+      );
     });
   });
 });

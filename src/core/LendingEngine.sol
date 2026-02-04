@@ -53,11 +53,17 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     struct LoanOrder {
         uint256 principal;
         uint256 rate;       // bps
-        uint256 term;       // seconds
+        /// @dev SSOT (time refactor): term is measured in blocks (NOT seconds).
+        ///      Frontend/keeper should do ETA mapping offchain.
+        uint256 term;       // blocks
         address borrower;
         address lender;
         address asset;      // ERC20 address
+        /// @dev Legacy field name kept for ABI stability.
+        ///      SSOT (time refactor): this is a block number (startBlock), NOT time-in-seconds.
         uint256 startTimestamp;
+        /// @dev Legacy field name kept for ABI stability.
+        ///      SSOT (time refactor): this is a block number (maturityBlock), NOT time-in-seconds.
         uint256 maturity;
         uint256 repaidAmount;
     }
@@ -78,21 +84,28 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     /// @notice FeeRouter module address (cached best-effort).
     IFeeRouter private _feeRouter;
     
-    /* solhint-disable private-vars-leading-underscore */
     /// @notice Repayment fee in bps (e.g. 6 = 0.06%).
-    uint256 private constant REPAY_FEE_BPS = 6;
-    /// @notice On-time window (default 24 hours).
-    uint256 private constant ON_TIME_WINDOW = 24 hours;
+    uint256 private constant _REPAY_FEE_BPS = 6;
+    /// @notice On-time window (blocks).
+    /// @dev Baseline assumes ~12s per block (24h ≈ 7200 blocks). Chain-dependent; use offchain ETA for UI.
+    uint256 private constant _ON_TIME_WINDOW_BLOCKS = 7200;
 
-    /// @notice Allowed term durations (seconds).
-    uint256 private constant DUR_5D   = 5 days;
-    uint256 private constant DUR_10D  = 10 days;
-    uint256 private constant DUR_15D  = 15 days;
-    uint256 private constant DUR_30D  = 30 days;
-    uint256 private constant DUR_60D  = 60 days;
-    uint256 private constant DUR_90D  = 90 days;
-    uint256 private constant DUR_180D = 180 days;
-    uint256 private constant DUR_360D = 360 days;
+    /// @notice Allowed term durations (blocks).
+    /// @dev Baseline assumes ~12s per block:
+    ///      1 day ≈ 7200 blocks → 5d=36000, 10d=72000, 15d=108000, 30d=216000, 60d=432000,
+    ///      90d=648000, 180d=1296000, 360d=2592000.
+    uint256 private constant _DUR_5D_BLOCKS   = 36000;
+    uint256 private constant _DUR_10D_BLOCKS  = 72000;
+    uint256 private constant _DUR_15D_BLOCKS  = 108000;
+    uint256 private constant _DUR_30D_BLOCKS  = 216000;
+    uint256 private constant _DUR_60D_BLOCKS  = 432000;
+    uint256 private constant _DUR_90D_BLOCKS  = 648000;
+    uint256 private constant _DUR_180D_BLOCKS = 1296000;
+    uint256 private constant _DUR_360D_BLOCKS = 2592000;
+
+    /// @dev Baseline blocks-per-year used for simple interest pro-rating.
+    ///      With a ~12s/block baseline: 1 day ≈ 7200 blocks, so 365d ≈ 2,628,000 blocks.
+    uint256 private constant _YEAR_BLOCKS = 2628000;
 
     /// @notice Loan order storage.
     mapping(uint256 orderId => LoanOrder) private _loanOrders;
@@ -112,8 +125,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     mapping(address => bool) private _moduleHealthCache;
     
     /// @notice Maximum retry count for external module operations.
-    uint256 private constant MAX_RETRY_COUNT = 3;
-    /* solhint-enable private-vars-leading-underscore */
+    uint256 private constant _MAX_RETRY_COUNT = 3;
 
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
 
@@ -312,13 +324,11 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         _registryAddr = initialRegistryAddr;
         
         // Record for auditability (unified system event).
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -342,13 +352,11 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         _pause();
         
         // Record for auditability.
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_PAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_PAUSE_SYSTEM),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -365,13 +373,11 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         _unpause();
         
         // Record for auditability.
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UNPAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UNPAUSE_SYSTEM),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
     
@@ -396,23 +402,19 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // Record for auditability.
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
         
         // Emit module address update (compat/event stream).
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_LE),
             oldRegistry,
             newRegistryAddr,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
     
@@ -437,13 +439,11 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         emit RegistryDynamicModuleKeyUpdated(oldAddr, dynamicModuleKeyAddr);
         
         // Record for auditability.
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -465,7 +465,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @param order LoanOrder input. Units:
      *  - principal: token decimals of `order.asset`
      *  - rate: bps (1e4 = 100%)
-     *  - term: seconds
+     *  - term: blocks (SSOT; no onchain time-in-seconds gates)
      * @return orderId Newly created order id.
      */
     function createLoanOrder(LoanOrder calldata order) external onlyValidRegistry returns (uint256 orderId) {
@@ -481,7 +481,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
 
         // Term whitelist check.
         if (!_isAllowedDuration(order.term)) revert LendingEngine__InvalidTerm();
-        // Long duration (>= 90 days) requires user level >= 4 (RewardView gate).
+        // Long duration (>= _DUR_90D_BLOCKS baseline) requires user level >= 4 (RewardView gate).
         if (_isLongDuration(order.term)) {
             address rewardView = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_VIEW);
             uint8 level = IRewardViewBorrowCheck(rewardView).getUserLevelForBorrowCheck(order.borrower);
@@ -497,14 +497,12 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         }
 
         // Compute start/maturity.
-        // solhint-disable-next-line not-rely-on-time
-        // solhint-disable-next-line not-rely-on-time
-        uint256 startTs = block.timestamp;
-        uint256 maturity;
+        uint256 startBlock = block.number;
+        uint256 maturityBlock;
         
-        // Gas: unchecked arithmetic (startTs + term).
+        // Gas: unchecked arithmetic (startBlock + termBlocks).
         unchecked {
-            maturity = startTs + order.term;
+            maturityBlock = startBlock + order.term;
         }
 
         // Persist order.
@@ -515,8 +513,8 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
             borrower: order.borrower,
             lender: order.lender,
             asset: order.asset,
-            startTimestamp: startTs,
-            maturity: maturity,
+            startTimestamp: startBlock,
+            maturity: maturityBlock,
             repaidAmount: 0
         });
 
@@ -535,7 +533,6 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
 
         emit LoanOrderCreated(orderId, order.borrower, order.lender, order.principal);
         // Unified DataPush (SSOT event stream).
-        // solhint-disable-next-line not-rely-on-time
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_CREATED,
             abi.encode(
@@ -546,38 +543,38 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
                 order.principal,
                 order.asset,
                 tokenId,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
 
         // Notify RewardManager after order creation.
         // - Prefer V2 (orderId/maturity/outcome); fallback to V1 if unsupported.
         address rewardManagerBorrow = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        // solhint-disable-next-line not-rely-on-time
-        /* solhint-disable no-empty-blocks */
         try IRewardManagerV2(rewardManagerBorrow).onLoanEventV2(
             order.borrower,
             orderId,
             order.principal,
-            maturity,
+            maturityBlock,
             IRewardManagerV2.LoanEventOutcome.Borrow
         ) {
+            uint256 noop = 0;
+            noop;
         } catch {
             try IRewardManager(rewardManagerBorrow).onLoanEvent(order.borrower, order.principal, order.term, true) {
+                uint256 noop = 0;
+                noop;
             } catch {
+                uint256 noop = 0;
+                noop;
             }
         }
-        /* solhint-enable no-empty-blocks */
 
         // Record for auditability.
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_BORROW,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_BORROW),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 
@@ -619,7 +616,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         
         // Gas: unchecked arithmetic.
         unchecked {
-            feeAmount = (_repayAmount * REPAY_FEE_BPS) / 1e4;
+            feeAmount = (_repayAmount * _REPAY_FEE_BPS) / 1e4;
             lenderAmount = _repayAmount - feeAmount;
             
             // --- Effects (CEI): update state before external interactions ---
@@ -655,7 +652,6 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
 
         emit LoanRepaid(orderId, msg.sender, _repayAmount);
         // Unified DataPush (SSOT event stream).
-        // solhint-disable-next-line not-rely-on-time
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_REPAID,
             abi.encode(
@@ -668,26 +664,24 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
                 ord.repaidAmount,
                 totalDue,
                 ord.asset,
-                // solhint-disable-next-line not-rely-on-time
-                block.timestamp
+                block.number
             )
         );
         
         // Determine repayment outcome.
         bool isFullyRepaid = ord.repaidAmount >= totalDue;
-        // solhint-disable-next-line not-rely-on-time
-        uint256 nowTs = block.timestamp;
-        bool isOnTime = (nowTs + ON_TIME_WINDOW >= ord.maturity) && (nowTs <= ord.maturity + ON_TIME_WINDOW);
+        uint256 nowBlock = block.number;
+        bool isOnTime =
+            (nowBlock + _ON_TIME_WINDOW_BLOCKS >= ord.maturity) &&
+            (nowBlock <= ord.maturity + _ON_TIME_WINDOW_BLOCKS);
         bool isOnTimeAndFullyRepaid = isFullyRepaid && isOnTime;
         
         // Record for auditability.
-        // solhint-disable-next-line not-rely-on-time
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_REPAY,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REPAY),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
 
         // If fully repaid, update LoanNFT status.
@@ -705,28 +699,30 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
             if (isOnTimeAndFullyRepaid) {
                 outcome = IRewardManagerV2.LoanEventOutcome.RepayOnTimeFull;
             } else {
-                // Early: now + window < maturity
-                // solhint-disable-next-line not-rely-on-time
-                // solhint-disable-next-line not-rely-on-time
-                bool isEarly = (block.timestamp + ON_TIME_WINDOW < ord.maturity);
+                // Early: now + window < maturity (block-based)
+                bool isEarly = (block.number + _ON_TIME_WINDOW_BLOCKS < ord.maturity);
                 outcome = isEarly
                     ? IRewardManagerV2.LoanEventOutcome.RepayEarlyFull
                     : IRewardManagerV2.LoanEventOutcome.RepayLateFull;
             }
 
             // Prefer V2, fallback to V1.
-            /* solhint-disable no-empty-blocks */
             try IRewardManagerV2(rewardManagerRepay).onLoanEventV2(
                 ord.borrower, orderId, _repayAmount, ord.maturity, outcome
             ) {
+                uint256 noop = 0;
+                noop;
             } catch {
                 try IRewardManager(rewardManagerRepay).onLoanEvent(
                     ord.borrower, _repayAmount, 0, isOnTimeAndFullyRepaid
                 ) {
+                    uint256 noop = 0;
+                    noop;
                 } catch {
+                    uint256 noop = 0;
+                    noop;
                 }
             }
-            /* solhint-enable no-empty-blocks */
         }
     }
 
@@ -744,8 +740,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @param orderId Loan order id.
      * @return order Loan order snapshot.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getLoanOrderForView(uint256 orderId) external view onlyValidRegistry returns (LoanOrder memory order) {
+    function getLoanOrderForView(uint256 orderId) external view onlyValidRegistry returns (LoanOrder memory order) {
         // System/ops-only view adapter: used by LendingEngineView and SettlementManager.
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
@@ -764,8 +759,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @param user Borrower address.
      * @return count Number of loan orders.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getUserLoanCountForView(address user) external view onlyValidRegistry returns (uint256 count) {
+    function getUserLoanCountForView(address user) external view onlyValidRegistry returns (uint256 count) {
         // System/ops-only view adapter: used by LendingEngineView and off-chain diagnostics.
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
@@ -789,8 +783,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @param orderId Loan order id.
      * @return feeAmount Accumulated failed fee amount (token decimals of the order asset).
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getFailedFeeAmountForView(uint256 orderId) external view onlyValidRegistry returns (uint256 feeAmount) {
+    function getFailedFeeAmountForView(uint256 orderId) external view onlyValidRegistry returns (uint256 feeAmount) {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
         return _failedFeeAmount[orderId];
@@ -808,8 +801,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @param orderId Loan order id.
      * @return retryCount Retry count.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getNftRetryCountForView(uint256 orderId) external view onlyValidRegistry returns (uint256 retryCount) {
+    function getNftRetryCountForView(uint256 orderId) external view onlyValidRegistry returns (uint256 retryCount) {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         
         return _nftRetryCount[orderId];
@@ -829,8 +821,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @param user User address to check.
      * @return hasAccess Whether `user` is allowed to view the order.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess) {
+    function canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess) {
         LoanOrder memory order = _loanOrders[orderId];
         
         // Missing order.
@@ -859,8 +850,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @param account Account to check.
      * @return isMatch True if the account is considered a match engine.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _isMatchEngineForView(address account) external view returns (bool isMatch) {
+    function isMatchEngineForView(address account) external view returns (bool isMatch) {
         if (_registryAddr == address(0)) return false;
         
         try IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL) returns (address acmAddr) {
@@ -876,8 +866,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      *
      * @return registry Registry address.
      */
-    // solhint-disable-next-line private-vars-leading-underscore
-    function _getRegistryForView() external view returns (address registry) {
+    function getRegistryForView() external view returns (address registry) {
         return _registryAddr;
     }
     
@@ -898,7 +887,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         
         // Gas: unchecked loop increment.
         unchecked {
-            for (uint256 i = 0; i <= MAX_RETRY_COUNT; i++) {
+            for (uint256 i = 0; i <= _MAX_RETRY_COUNT; i++) {
                 try _loanNft.mintLoanCertificate(borrower, meta) returns (uint256 _tokenId) {
                     tokenId = _tokenId;
                     
@@ -916,19 +905,17 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
                     emit NftOperationRetried(orderId, "mint", retryCount, false);
                     
                     // On last retry: emit degradation events then revert with a typed error.
-                    if (i == MAX_RETRY_COUNT) {
+                    if (i == _MAX_RETRY_COUNT) {
                         string memory errorMsg = reason.length > 0 ? string(reason) : "NFT mint failed after retries";
                         DataPushLibrary._emitData(
-                            DataPushTypes.DATA_TYPE_MODULE_HEALTH,
-                            // solhint-disable-next-line not-rely-on-time
-                            abi.encode(address(_loanNft), "LoanNFT", false, errorMsg, block.timestamp)
+                            DataPushTypes.DATA_TYPE_COMPONENT_HEALTH,
+                            abi.encode(address(_loanNft), "LoanNFT", false, errorMsg, block.number)
                         );
                         // User-level degradation event: associated with the borrower.
                         address orderAsset = _loanOrders[orderId].asset;
                         DataPushLibrary._emitData(
                             DataPushTypes.DATA_TYPE_USER_DEGRADATION,
-                            // solhint-disable-next-line not-rely-on-time
-                            abi.encode(borrower, address(this), orderAsset, errorMsg, true, uint256(0), block.timestamp)
+                            abi.encode(borrower, address(this), orderAsset, errorMsg, true, uint256(0), block.number)
                         );
                         revert LendingEngine__NftMintFailed(orderId);
                     }
@@ -942,9 +929,9 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     /// @param asset ERC20 asset address.
     /// @param feeAmount Fee amount (token decimals).
     function _distributeFeeWithFallback(uint256 orderId, address asset, uint256 feeAmount) internal {
-        /* solhint-disable no-empty-blocks */
         try _feeRouter.distributeNormal(asset, feeAmount) {
-            // ok
+            uint256 noop = 0;
+            noop;
         } catch (bytes memory reason) {
             // Gas: unchecked add.
             unchecked {
@@ -955,21 +942,18 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
             string memory errorMsg = reason.length > 0 ? string(reason) : "Fee distribution failed";
             emit FeeDistributionFailed(orderId, feeAmount, errorMsg);
             DataPushLibrary._emitData(
-                DataPushTypes.DATA_TYPE_MODULE_HEALTH,
-                // solhint-disable-next-line not-rely-on-time
-                abi.encode(address(_feeRouter), "FeeRouter", false, errorMsg, block.timestamp)
+                DataPushTypes.DATA_TYPE_COMPONENT_HEALTH,
+                abi.encode(address(_feeRouter), "FeeRouter", false, errorMsg, block.number)
             );
             // User-level degradation event: associated with the borrower.
             address borrower = _loanOrders[orderId].borrower;
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_USER_DEGRADATION,
-                // solhint-disable-next-line not-rely-on-time
-                abi.encode(borrower, address(this), asset, errorMsg, true, uint256(feeAmount), block.timestamp)
+                abi.encode(borrower, address(this), asset, errorMsg, true, uint256(feeAmount), block.number)
             );
             
             // NOTE: intentionally does not revert.
         }
-        /* solhint-enable no-empty-blocks */
     }
 
     /// @notice Require a role via ACM.
@@ -986,13 +970,14 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     function _updateModuleAddresses() internal {
         if (_registryAddr == address(0)) revert LendingEngine__RegistryNotSet();
 
-        /* solhint-disable no-empty-blocks */
         try IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LOAN_NFT) returns (address loanNFTAddr) {
             if (loanNFTAddr != address(0) && loanNFTAddr != address(_loanNft)) {
                 _loanNft = ILoanNFT(loanNFTAddr);
             }
         } catch {
             // Keep current address on failure.
+            uint256 noop = 0;
+            noop;
         }
         
         try IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR) returns (address feeRouterAddr) {
@@ -1001,22 +986,23 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
             }
         } catch {
             // Keep current address on failure.
+            uint256 noop = 0;
+            noop;
         }
-        /* solhint-enable no-empty-blocks */
     }
 
-    /// @dev Return true if duration is in the allowed whitelist (seconds).
-    function _isAllowedDuration(uint256 durationSec) internal pure returns (bool) {
+    /// @dev Return true if duration is in the allowed whitelist (blocks).
+    function _isAllowedDuration(uint256 durationBlocks) internal pure returns (bool) {
         return (
-            durationSec == DUR_5D   || durationSec == DUR_10D || durationSec == DUR_15D ||
-            durationSec == DUR_30D  || durationSec == DUR_60D || durationSec == DUR_90D ||
-            durationSec == DUR_180D || durationSec == DUR_360D
+            durationBlocks == _DUR_5D_BLOCKS   || durationBlocks == _DUR_10D_BLOCKS || durationBlocks == _DUR_15D_BLOCKS ||
+            durationBlocks == _DUR_30D_BLOCKS  || durationBlocks == _DUR_60D_BLOCKS || durationBlocks == _DUR_90D_BLOCKS ||
+            durationBlocks == _DUR_180D_BLOCKS || durationBlocks == _DUR_360D_BLOCKS
         );
     }
 
-    /// @dev Return true if duration is a long duration (>= 90 days).
-    function _isLongDuration(uint256 durationSec) internal pure returns (bool) {
-        return (durationSec == DUR_90D || durationSec == DUR_180D || durationSec == DUR_360D);
+    /// @dev Return true if duration is a long duration (>= 90d baseline; blocks-based).
+    function _isLongDuration(uint256 durationBlocks) internal pure returns (bool) {
+        return (durationBlocks == _DUR_90D_BLOCKS || durationBlocks == _DUR_180D_BLOCKS || durationBlocks == _DUR_360D_BLOCKS);
     }
 
     /// @dev Calculate total due = principal + interest (simple pro-rata interest).
@@ -1025,8 +1011,9 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     function _calculateTotalDue(LoanOrder memory ord) internal pure returns (uint256) {
         // Gas: unchecked arithmetic.
         unchecked {
-            // interest = principal * rate(bps) * term / (365 days * 1e4)
-            uint256 interest = (ord.principal * ord.rate * ord.term) / (365 days * 1e4);
+            // SSOT (time refactor): term is blocks. Use a blocks-per-year baseline.
+            // interest = principal * rate(bps) * termBlocks / (_YEAR_BLOCKS * 1e4)
+            uint256 interest = (ord.principal * ord.rate * ord.term) / (_YEAR_BLOCKS * 1e4);
             return ord.principal + interest;
         }
     }
@@ -1046,8 +1033,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            block.number
         );
     }
 

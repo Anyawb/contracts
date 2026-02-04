@@ -207,8 +207,8 @@ PENALTY_RATE = 100; // 100 basis points = 1%
 
 ### **查询惩罚债务**
 ```solidity
-// 查询用户的惩罚债务
-uint256 penaltyDebt = rewardManager.getUserPenaltyDebt(user);
+// 查询用户的惩罚债务（RewardView 返回带 meta）
+(uint256 penaltyDebt, , ) = rewardView.getUserPenaltyDebt(user);
 ```
 
 ### **管理员监控**
@@ -218,7 +218,7 @@ event LiquidationPenaltyApplied(
     address indexed user,
     uint256 penaltyPoints,
     uint256 debtValue,
-    uint256 timestamp
+    uint256 blockNumber
 );
 ```
 
@@ -230,7 +230,7 @@ event LiquidationPenaltyApplied(
     address indexed user,
     uint256 penaltyPoints,
     uint256 debtValue,
-    uint256 timestamp
+    uint256 blockNumber
 );
 ```
 
@@ -242,7 +242,7 @@ event PenaltyPointsDeducted(
     uint256 points,
     uint256 remainingDebt,
     address indexed deductedBy,
-    uint256 timestamp
+    uint256 blockNumber
 );
 ```
 

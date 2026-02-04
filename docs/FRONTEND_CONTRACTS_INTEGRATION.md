@@ -19,7 +19,8 @@
 11. [接口变更与迁移指南（2025-09）](#接口变更与迁移指南2025-09)
 12. [缓存推送失败重试（CacheUpdateFailed）前端配合](#缓存推送失败重试cacheupdatefailed前端配合)
 13. [资金链（Funds Flow / SSOT）前端配合（2026-01）](#资金链funds-flow--ssot前端配合2026-01)
-14. [AI Credits 计费规范（按次计费：链上购买 + 链下扣次 + 多租户对账）](#ai-credits-计费规范按次计费链上购买--链下扣次--多租户对账)
+14. [Block-based Deadline 与 ETA 映射（前端/keeper 必须遵守）](#block-based-deadline-与-eta-映射前端keeper-必须遵守)
+15. [AI Credits 计费规范（按次计费：链上购买 + 链下扣次 + 多租户对账）](#ai-credits-计费规范按次计费链上购买--链下扣次--多租户对账)
 
 ## 🔧 环境准备
 
@@ -160,7 +161,7 @@ npm run script checks all
 #### 第三批：预言机与价格系统
 - **PriceOracle**（价格预言机）
 - **CoinGeckoPriceUpdater**（价格更新器）
-- **ValuationOracleAdapter**（如有）
+- **ValuationOracleView**（价格只读门面；健康检查走 `GracefulDegradation`，不要求 oracle 合约实现额外 health 方法）
 
 #### 第四批：核心业务与奖励系统
 - **FeeRouter**（手续费路由，建议用代理部署）
@@ -169,7 +170,7 @@ npm run script checks all
 - **RewardConfig** 及其子模块（如 AdvancedAnalyticsConfig 等）
 
 #### 第五批：Vault 相关
-- **CollateralManager**、**LendingEngine**、**HealthFactorCalculator**、**StatisticsView（替代 VaultStatistics）**、**GuaranteeFundManager**（均建议用代理部署）
+- **CollateralManager**、**LendingEngine / VaultLendingEngine**、**HealthView**、**StatisticsView（替代 VaultStatistics）**、**GuaranteeFundManager**（均建议用代理部署）
 - **VaultStorage**（需要前面所有模块的地址，建议用代理部署）
 - **VaultBusinessLogic**（如有）
 - **VaultCore**（需要 VaultStorage 和业务逻辑模块地址，建议用代理部署）
@@ -188,7 +189,8 @@ npm run script checks all
 
 #### 3. 预言机系统
 - 先部署 PriceOracle，再部署 CoinGeckoPriceUpdater，并初始化二者的互相关联。
-- ValuationOracleAdapter 依赖 PriceOracle。
+- **ValuationOracleView** 依赖 `Registry(KEY_PRICE_ORACLE)`，作为前端/运维的价格只读门面；
+  其 oracle 健康检查通过 `GracefulDegradation.checkPriceOracleHealth(...)` 实现（不要求 `PriceOracle` 提供额外 health 方法）。
 
 #### 4. 奖励系统
 - 先部署 RewardPoints（积分Token），再部署 RewardManagerCore、RewardManager。
@@ -196,7 +198,7 @@ npm run script checks all
 - RewardConfig 及其子模块（如 AdvancedAnalyticsConfig、PriorityServiceConfig 等）可并行部署，最后 RewardConfig 需要设置各子模块地址。
 
 #### 5. Vault 相关
-- 先部署 CollateralManager、LendingEngine、HealthFactorCalculator、StatisticsView（替代 VaultStatistics）、GuaranteeFundManager（这些都需要 Registry 地址）。
+- 先部署 CollateralManager、LendingEngine/VaultLendingEngine、HealthView、StatisticsView（替代 VaultStatistics）、GuaranteeFundManager（这些都需要 Registry 地址）。
 - 部署 VaultStorage 时，需要传入上述所有模块的地址，以及 RWA Token、结算Token地址。
 - 部署 VaultBusinessLogic（如有）。
 - 部署 VaultCore 时，需要 VaultStorage 和业务逻辑模块的地址。
@@ -266,7 +268,7 @@ graph TD
   Registry --> RewardManager
   Registry --> CollateralManager
   Registry --> LendingEngine
-  Registry --> HealthFactorCalculator
+  Registry --> HealthView
   Registry --> StatisticsView
   Registry --> GuaranteeFundManager
   Registry --> VaultStorage
@@ -277,7 +279,7 @@ graph TD
   PriceOracle --> CoinGeckoPriceUpdater
   VaultStorage --> CollateralManager
   VaultStorage --> LendingEngine
-  VaultStorage --> HealthFactorCalculator
+  VaultStorage --> HealthView
   VaultStorage --> StatisticsView
   VaultStorage --> FeeRouter
   VaultStorage --> RewardManager
@@ -504,17 +506,17 @@ async function getVaultInfo() {
   return info;
 }
 
-// 获取用户余额
+// 获取用户余额（RewardView）
 async function getUserBalance(userAddress: string) {
-  const vaultCore = await contractManager.getVaultCore();
-  const balance = await vaultCore.getUserBalance(userAddress);
+  const rewardView = await contractManager.getRewardView();
+  const [balance] = await rewardView.getUserBalance(userAddress);
   return balance;
 }
 
-// 获取健康因子
+// 获取健康因子（UserView）
 async function getHealthFactor(userAddress: string) {
-  const vaultCore = await contractManager.getVaultCore();
-  const healthFactor = await vaultCore.getHealthFactor(userAddress);
+  const userView = await contractManager.getUserView();
+  const [healthFactor] = await userView.getHealthFactor(userAddress);
   return healthFactor;
 }
 
@@ -638,8 +640,8 @@ async function settleOrLiquidate(orderId: bigint) {
 async function listenToDepositEvents() {
   const vaultCore = await contractManager.getVaultCore();
   
-  vaultCore.on('Deposit', (user, amount, timestamp) => {
-    console.log(`User ${user} deposited ${amount} at ${timestamp}`);
+  vaultCore.on('Deposit', (user, amount, blockNumber) => {
+    console.log(`User ${user} deposited ${amount} at block ${blockNumber}`);
     // 更新 UI
   });
 }
@@ -648,8 +650,8 @@ async function listenToDepositEvents() {
 async function listenToBorrowEvents() {
   const vaultCore = await contractManager.getVaultCore();
   
-  vaultCore.on('Borrow', (user, amount, timestamp) => {
-    console.log(`User ${user} borrowed ${amount} at ${timestamp}`);
+  vaultCore.on('Borrow', (user, amount, blockNumber) => {
+    console.log(`User ${user} borrowed ${amount} at block ${blockNumber}`);
     // 更新 UI
   });
 }
@@ -917,7 +919,7 @@ export const useRegistryEvents = (registryContract: ethers.Contract) => {
       key: string,
       oldAddr: string,
       newAddr: string,
-      timestamp: number,
+      blockNumber: number,
       event: any
     ) => {
       // 解码模块键
@@ -928,8 +930,7 @@ export const useRegistryEvents = (registryContract: ethers.Contract) => {
         moduleName, // 解码后的可读名称
         oldAddress: oldAddr,
         newAddress: newAddr,
-        timestamp: new Date(timestamp * 1000),
-        blockNumber: event.blockNumber,
+        blockNumber,
         transactionHash: event.transactionHash
       };
       
@@ -951,7 +952,6 @@ export const useRegistryEvents = (registryContract: ethers.Contract) => {
         oldAddress: oldAddresses[index],
         newAddress: newAddresses[index],
         executor,
-        timestamp: new Date(event.blockTimestamp * 1000),
         blockNumber: event.blockNumber,
         transactionHash: event.transactionHash
       }));
@@ -976,7 +976,6 @@ interface ModuleUpdateEvent {
   moduleName: string;
   oldAddress: string;
   newAddress: string;
-  timestamp: Date;
   blockNumber: number;
   transactionHash: string;
 }
@@ -1008,7 +1007,7 @@ export const ModuleUpdateHistory: React.FC = () => {
             <span className="new-addr">新地址: {event.newAddress}</span>
           </div>
           <div className="metadata">
-            <span>时间: {event.timestamp.toLocaleString()}</span>
+            <span>区块: {event.blockNumber}</span>
             <a href={`https://arbiscan.io/tx/${event.transactionHash}`} target="_blank">
               查看交易
             </a>
@@ -1266,22 +1265,23 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
 - `VaultRouter` 仅对外暴露 **4 个写入/路由函数**，全部为 `non-view` 调用：
   | 函数 | 调用方(合约) | 说明 |
   | --- | --- | --- |
-  | `processUserOperation(user, operationType, asset, amount, timestamp)` | 前端 → 业务合约（转发） | 用户发起的 DEPOSIT / BORROW / REPAY / WITHDRAW 操作由前端直接调用业务模块；同时业务模块应调用本函数写链上事件，供离线索引与监听。 |
+  | `processUserOperation(user, operationType, asset, amount, blockNumber)` | 前端 → 业务合约（转发） | 用户发起的 DEPOSIT / BORROW / REPAY / WITHDRAW 操作由前端直接调用业务模块；同时业务模块应调用本函数写链上事件，供离线索引与监听。 |
   | `pushUserPositionUpdate(user, asset, collateral, debt)` | CollateralManager / LendingEngine | 业务模块更新完抵押/债务后推送最新快照；前端 **不会** 直接调用。 |
-  | `pushUserHealthFactorUpdate(user, healthFactor)` | HealthFactorCalculator | 健康因子更新；前端不调用。 |
+  | `HealthView.pushRiskStatus(user, hfBps, minHFBps, under, blockNumber)` | LendingEngine / LiquidationRiskManager 等 | 健康因子/风险状态推送；前端不调用（best-effort + 链下重试）。 |
   | `pushAssetStatsUpdate(asset, totalCollateral, totalDebt, price)` | VaultStatistics | 资产聚合数据推送；前端不调用。 |
 
 ### 2. 前端应调用的查询接口
-- **用户数据**：`UserView` ⇒ `getUserPosition`, `getHealthFactor`, `getUserStats`, `previewBorrow/Deposit/...` 等。
+- **用户数据**：`UserView` ⇒ `getUserPositionWithMeta`, `getHealthFactorWithMeta`, `getUserStats`, `previewBorrow/Deposit/...` 等。
 - **系统数据（更新）**：
-  - `ValuationOracleView` ⇒ `getAssetPrice/getAssetPrices/isPriceValid`（价格/预言机，返回 [price, ts]）
-  - `HealthView` ⇒ `getUserHealthFactor/batchGetHealthFactors`；系统健康/降级读取由 `HealthView` 提供
+  - `ValuationOracleView` ⇒ `getAssetPrice/getAssetPrices/isPriceValid`（价格/预言机，返回 [price, blockNumber]）
+  - `HealthView` ⇒ `getUserHealthFactorWithMeta/batchGetHealthFactors`；系统健康/降级读取由 `HealthView` 提供
+  - `SystemRiskView` ⇒ `getLiquidationThreshold/getMinHealthFactor`（system-only 风险参数；**公开只读**）
   - `StatisticsView` ⇒ 全局统计聚合
   - `BatchView` ⇒ `batchGetAssetPrices/batchGetModuleHealth` 等批量查询
   - `RegistryView` ⇒ 模块键枚举/反查/分页
   - `SystemView` ⇒ **系统级只读聚合门面（推荐可选）**：用于“一次性系统总览查询/兼容旧调用”。对性能敏感或需要更细粒度数据时，仍建议直接调用上述专属 View。
 - **清算数据（更新）**：`LiquidatorView` ⇒ `getLiquidatorProfitView`, `getGlobalLiquidationView`, `batchGetLiquidatorProfitViews`, `getLiquidatorLeaderboard`, `getLiquidatorTempDebt`, `getLiquidatorProfitRate`。
-- **权限数据**：`AccessControlView` ⇒ `getUserPermission`, `getUserPermissionLevel` 等。
+- **权限数据**：`AccessControlView` ⇒ `getUserPermissionWithMeta`, `getUserPermissionLevelWithMeta` 等。
 - **系统级快照(可选)**：`ViewCache` ⇒ `getSystemStatus` / `batchGetSystemStatus`。
   （用户维度缓存已并入 `UserView`，前端无需单独调用 ViewCache 获取用户缓存。）
 
@@ -1317,18 +1317,65 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
   - **缺点**：需要为每个用户地址单独 grant；用户换钱包/多端同步成本高；不适合大规模用户
   - **适用**：内部工具、少量白名单用户
 
+#### 2.1.2.1 权限 Preflight（可复制；推荐前端/后端都实现）
+
+目标：在发起大量 `eth_call` 之前，先判断“当前调用方（钱包或后端 Read Service）是否具备读取能力”，并把“权限缺失/缓存未就绪”的状态以产品语义展示给用户。
+
+**推荐数据源：`AccessControlView`（权限缓存）**
+
+- `AccessControlView` 提供 user-dim 权限缓存读取（Scheme U：self read 允许；非 self 需要 `VIEW_USER_DATA/ADMIN`）。
+- 返回值包含 `isValid/blockNumber`（缓存 TTL 以 `ViewConstants.CACHE_DURATION` 为准），前端需按 meta 语义降级处理。
+
+可复制代码（ethers v6 + TypeChain）：
+
+```ts
+import { AccessControlView__factory } from '@/types/factories';
+import { ActionKeys } from '@/types/ActionKeys'; // 由类型生成或手工维护 bytes32 常量
+
+export async function preflightPermissions(provider: any, accessControlViewAddr: string) {
+  const signer = await provider.getSigner();
+  const caller = await signer.getAddress();
+
+  const acv = AccessControlView__factory.connect(accessControlViewAddr, provider);
+
+  // 只检查“当前调用方自己的权限位”：self-read 永远允许，不会因为 Scheme U 被拒绝。
+  const [canViewUser, userMetaValid] = await Promise.all([
+    acv.getUserPermissionWithMeta(caller, ActionKeys.ACTION_VIEW_USER_DATA),
+    acv.getUserPermissionWithMeta(caller, ActionKeys.ACTION_VIEW_SYSTEM_DATA),
+  ]);
+
+  // 统一 meta 口径：isValid=false 视为“未知”，UI 应提示“权限缓存尚未就绪/可能延迟”
+  return {
+    caller,
+    canViewUserData: canViewUser[0],
+    canViewSystemData: userMetaValid[0],
+    // 注意：tuple 为 (hasPermission, isValid, blockNumber)
+    meta: {
+      userData: { isValid: canViewUser[1], blockNumber: canViewUser[2] },
+      systemData: { isValid: userMetaValid[1], blockNumber: userMetaValid[2] },
+    },
+  };
+}
+```
+
+> 实操建议：  
+> - 若 `AccessControlView` meta `isValid=false`：先提示“权限缓存未就绪”，并在真正调用 View 时依然捕获 `MissingRole()` 做兜底。  
+> - 生产推荐走“方案 A（后端 Read Service）”：前端 preflight 只用于 UI 告知“当前钱包直连是否可用”，避免误导。
+
 前端需要明确知道（并在 UI 中处理）以下只读权限键（见 `src/constants/ActionKeys.sol`）：
-- `VIEW_USER_DATA`：用户私域（Position/User/Preview 等）
-- `VIEW_RISK_DATA`：风险/健康（Health/Risk 等）
+- `VIEW_USER_DATA`：用户私域（Position/User/Preview/RiskView（user-scope）等；Scheme U）
+- `VIEW_RISK_DATA`：风险/健康的**系统级/运维侧**读权限（HealthView system APIs、Liquidation/Risk 运维视图等）
 - `VIEW_PRICE_DATA`：价格（ValuationOracleView/BatchView prices 等）
-- `VIEW_SYSTEM_DATA`：系统级信息（SystemView/RegistryView/部分 stats）
+- `VIEW_SYSTEM_DATA`：系统级信息（SystemView/RegistryView/RewardView system stats 等）
+> 说明：`SystemRiskView` 的 system-only 风险参数默认公开只读（不要求 `VIEW_RISK_DATA`）。
+> 说明：`RewardView.getSystemRewardStats*` 为 system-only 读取，需 `VIEW_SYSTEM_DATA` 或 `ACTION_ADMIN`。
 
 > **强制要求**：同一类数据，无论走“聚合器入口”还是“专属 View 入口”，权限行为必须一致（见 `scripts/e2e/e2e-localhost-batch-aggregators-acceptance.ts` 的验收口径）。
 
 #### 2.1.3 三类聚合器：Dashboard / CacheOptimized / Batch 的“分工”与前端推荐用法
 
 - **DashboardView（UI 聚合 + meta）**
-  - 适合：用户资产总览页、资产 breakdown 卡片、需要 `positionIsValid/timestamp/version` 的 UI
+  - 适合：用户资产总览页、资产 breakdown 卡片、需要 `positionIsValid/blockNumber/version` 的 UI
   - 典型调用：`getUserOverviewWithMeta(user, trackedAssets[])`、`getUserAssetBreakdownWithMeta(user, assets[])`
 
 - **CacheOptimizedView（批量 + 最少 RPC 次数）**
@@ -1336,21 +1383,148 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
   - 典型调用：`batchGetUserPositionsWithMeta(users[], assets[])`、`getSystemStats()`
 
 - **BatchView（轻量 batch：risk/price/system-status）**
-  - 适合：批量 healthFactor、批量风险评估、批量价格、模块健康/系统降级历史
-  - 典型调用：`batchGetHealthFactors(users[])`、`batchGetAssetPrices(assets[])`
+  - 适合：批量 healthFactor、批量风险评估（含 meta）、批量价格、模块健康/系统降级历史
+  - 典型调用：`batchGetHealthFactors(users[])`、`batchGetRiskAssessments(users[])`、`batchGetAssetPrices(assets[])`
 
-#### 2.1.4 有效性字段（meta）是“产品需求”：UI 必须展示/处理 `isValid/timestamp/version`
+#### 2.1.4 有效性字段（meta）是“产品需求”：UI 必须展示/处理 `isValid/blockNumber/version`
 
-对前端来说，`isValid/timestamp/version` 不是“调试信息”，而是**是否可信/是否陈旧**的产品语义：
+对前端来说，`isValid/blockNumber/version` 不是“调试信息”，而是**是否可信/是否陈旧**的产品语义：
 - **当 `isValid=false`**：
-  - UI 必须提示“数据可能延迟/陈旧”，并显示 `timestamp`（若有）用于用户判断
+  - UI 必须提示“数据可能延迟/陈旧”，并显示 `blockNumber`（若有）用于用户判断
   - 不要静默把 0 值当成真实值（尤其是 price/healthFactor/统计总量）
-- **当 `timestamp` 不单调/为 0**：
+- **当 `blockNumber` 不单调/为 0**：
   - 视为“不可用/未知”，UI 需降级（隐藏某些字段、提示需要刷新或等待索引）
 - **当 `version` 存在**：
   - 可用于前端/后端做幂等去重、比对“是否读到了新快照”
 
+> 说明：`PreviewView.preview*` 已透传 `PositionView` 的 `isValid/blockNumber/version`，请与 PositionView 的 meta 语义一致处理。
+>
+> 必须授权：`PreviewView` 合约地址在部署时**必须**授予 `ACTION_VIEW_USER_DATA`，用于其内部调用 `PositionView.getUserPositionWithMeta`。
+> 否则外部调用 `preview*` 会因内部读权限失败而回滚（`MissingRole()`）。
+
 > TTL/过期窗口以链上 `ViewConstants.CACHE_DURATION` 为准（当前为 5 minutes）；前端不要自行硬编码另一个 TTL。
+
+##### View push 失败重试（`CacheUpdateFailedV2`，严格 B+（Snapshot + 单入口编排器））
+
+> 适用对象：**后端 Read Service / 运维重试服务**（前端钱包通常不执行 push）。  
+> 目标：做到 “失败可观测 → 可重放 → 版本冲突可自愈”，避免 View 缓存长期陈旧。
+
+- **监听事件（MUST）**：`CacheEvents.CacheUpdateFailedV2`
+  - 对于 `StatisticsView` 的 user-scope 推送：`asset == address(0)` 表示“user-scoped stats”。
+  - **在严格 B+ 中**：`CacheUpdateFailedV2` 的 `(collateral, debt)` 字段承载“期望写入的 snapshot”（不是 delta）。
+- **重试策略（推荐默认）**：
+  - **不要重放 delta**。应调用单入口编排器 **重算 SSOT 快照后再推**：
+    - `StatisticsPushManager.retryUserStats(user)`
+    - `StatisticsPushManager.retryGuarantee(user, asset)`
+  - 若失败原因包含 `StatisticsView__OutOfOrderSeq`：通常是上游乱序或并发 bug，优先告警人工处理（默认不自动重试）。
+- **权限要求（部署必须配置）**：
+  - 重试服务地址需要具备 `ActionKeys.ACTION_VIEW_PUSH`（用于调用 `StatisticsPushManager.retry*`）
+  - `StatisticsPushManager` 合约地址需要具备 `ActionKeys.ACTION_VIEW_PRICE_DATA`（用于读取 `PositionView` 的 USD-8 估值快照；B+ 链路以 USD-8 作为 value unit SSOT）
+
+> 实施清单与验收脚本建议见：  
+> `docs/Usage-Guide/StatisticsView-Strict-B-Push-Pipeline-Implementation-Checklist.md`
+
+**部署侧提醒（本地/生产都适用）**
+
+- **Registry 绑定（SSOT）**：
+  - `ModuleKeys.KEY_STATS` → `StatisticsView`
+  - `ModuleKeys.KEY_STATS_PUSH_MANAGER` → `StatisticsPushManager`
+- **前端/后端拿地址的方式**：
+  - 若你们做后端 Read/Retry Service：建议用 `Registry.getModuleOrRevert(ModuleKeys.KEY_STATS_PUSH_MANAGER)` 获取编排器地址
+  - 本地开发：`scripts/deploy/deploylocal.ts` 会输出到 `frontend-config/contracts-localhost.ts`（将来前端可以直接导入）
+
+#### 2.1.4.1 前端 API 清单（meta-first，2026-01）
+
+以下接口已按“user-dim 必须携带 meta”的严格口径统一，前端需按新返回值解包并展示/降级处理。
+
+> ⚠️ ABI 强约束：下方列出的 struct 字段顺序即 ABI tuple 顺序。未来前端必须使用最新 ABI/TypeChain 重新生成类型；
+> 严禁按旧字段顺序做手工 `abi.decode`/跨语言解码。
+
+**UserView（用户维度）**
+- `getUserPosition(user, asset)` → `(collateral, debt, isValid, blockNumber, version)`
+- `getUserPositionService(user, asset)` → `(collateral, debt, isValid, blockNumber, version)`
+- `getUserCollateral(user, asset)` → `(collateral, isValid, blockNumber, version)`
+- `getUserDebt(user, asset)` → `(debt, isValid, blockNumber, version)`
+- `getUserTotalCollateral(user)` → `(totalCollateral, isValid, blockNumber, version, seq)`
+- `getUserTotalDebt(user)` → `(totalDebt, isValid, blockNumber, version, seq)`
+- `getHealthFactor(user)` → `(healthFactor, isValid, blockNumber)`
+- `getUserHealthFactor(user)` → `(healthFactor, isValid, blockNumber)`
+- `getUserStats(user, asset)` → `(stats, isValid, blockNumber)`
+- `previewBorrow/previewDeposit/previewRepay/previewWithdraw(...)` →
+  `(newHF, newLTV, maxBorrowable, positionIsValid, positionBlockNumber, positionVersion)`
+
+**DashboardView（用户聚合）**
+- `getUserOverview(user, assets[])` →
+  `(overview, positionValidFlags[], positionBlockNumbers[], positionVersions[], healthBlockNumber)`
+- `getUserAssetBreakdown(user, assets[])` → `UserAssetOverviewMeta[]`（每项包含 `positionIsValid/positionBlockNumber/positionVersion`）
+
+**CacheOptimizedView（批量用户维度）**
+- `batchGetUserPositions(users[], assets[])` → `UserPositionItemMeta[]`
+- `getUserSummary(user, assets[])` →
+  `(summary, positionValidFlags[], positionBlockNumbers[], positionVersions[], healthBlockNumber)`
+
+**RiskView（用户维度风险评估）**
+- `getUserRiskAssessment(user)` → `RiskAssessmentWithMeta`
+- `batchGetRiskAssessments(users[])` → `RiskAssessmentWithMeta[]`
+- `RiskAssessmentWithMeta` 字段（顺序固定）：
+  - `liquidatable`：`bool`（当 `isValid=true` 且 `healthFactor < 10_000` 时为 true）
+  - `isValid`：`bool`（来自 `HealthView` cache validity）
+  - `warningLevel`：`uint8`（枚举：`NONE=0`、`WARNING=1`、`CRITICAL=2`）
+  - `healthFactor`：`uint256`（bps；`10_000=100%`；当 `isValid=false` 时为 best-effort fallback）
+  - `blockNumber`：`uint256`（`HealthView` cache block；`0` 视为未知/不可用）
+
+**BatchView（轻量 batch：risk / system-status）**
+- `batchGetRiskAssessments(users[])` → `RiskItem[]`
+- `batchGetModuleHealth(modules[])` → `ModuleHealthItem[]`
+- `RiskItem` 字段（顺序固定）：
+  - `user`：`address`
+  - `liquidatable`：`bool`
+  - `isValid`：`bool`
+  - `warningLevel`：`uint8`（同 RiskView 的枚举含义）
+  - `healthFactor`：`uint256`（bps；`10_000=100%`）
+  - `blockNumber`：`uint256`（来自 RiskView/HealthView 的 meta）
+- `ModuleHealthItem` 字段（顺序固定）：
+  - `module`：`address`
+  - `lastCheckTime`：`uint32`
+  - `consecutiveFailures`：`uint32`
+  - `isHealthy`：`bool`
+  - `isValid`：`bool`
+  - `detailsHash`：`bytes32`（诊断摘要，供 UI/监控展示或链下映射）
+  - `blockNumber`：`uint256`（模块健康快照区块；`0` 视为未知/不可用）
+
+**LiquidatorView（用户维度）**
+- `getUserLiquidationStats(user)` → `(stats, blockNumber, isValid)`
+- `batchGetLiquidationStats(users[])` → `(stats[], blockNumber, isValid)`
+- `getSeizableCollateralAmount(user, asset)` → `(amount, blockNumber, isValid)`
+- `getSeizableCollaterals(user)` → `(assets[], amounts[], blockNumber, isValid)`
+- `getUserTotalCollateralValue(user)` → `(totalValue, blockNumber, isValid)`
+
+**RewardView（用户维度）**
+- `getUserBalance(user)` → `(balance, blockNumber, isValid)`
+- `getUserLastConsumption(user, serviceType)` → `(consumption, blockNumber, isValid)`
+- `getUserLevel(user)` → `(level, blockNumber, isValid)`
+- `getUserLevelView(user)` → `(levelView, blockNumber, isValid)`
+- `getUserActivity(user)` → `(lastActivity, totalLoans, totalVolume, blockNumber, isValid)`
+- `getUserActivityView(user)` → `(lastActivity, totalLoans, totalVolume, blockNumber, isValid)`
+- `getUserPenaltyDebt(user)` → `(debt, blockNumber, isValid)`
+- `getUserPenaltyDebtView(user)` → `(debtView, blockNumber, isValid)`
+
+**非缓存 user-dim（同样要求 meta）**
+- `UserView.getUserTokenBalance(user, token)` → `(balance, isValid, blockNumber)`
+- `UserView.getUserSettlementBalanceStrict(user)` → `(balance, isValid, blockNumber)`
+- `LendingEngineView.getUserLoanCount(user)` → `(count, isValid, blockNumber)`
+- `LendingEngineView.canAccessLoanOrder(orderId, user)` → `(hasAccess, isValid, blockNumber)`
+- `RiskView.calculateHealthFactorExcludingGuarantee(user, asset)` → `(healthFactor, isValid, blockNumber)`
+- `ValuationOracleView.hasUpgradePermission(user)` → `(hasPermission, isValid, blockNumber)`
+- `LiquidationRiskView.isLiquidatable(user)` → `(liquidatable, isValid, blockNumber)`
+- `LiquidationRiskView.isLiquidatable(user, collateral, debt, asset)` → `(liquidatable, isValid, blockNumber)`
+- `LiquidationRiskView.getLiquidationRiskScore(user)` → `(riskScore, isValid, blockNumber)`
+- `LiquidationRiskView.batchIsLiquidatable(users[])` → `(flags[], isValid, blockNumber)`
+- `LiquidationRiskView.batchGetLiquidationRiskScores(users[])` → `(scores[], isValid, blockNumber)`
+
+**FeeRouterView（批量空数组严格校验）**
+- `batchGetUserFeeStatisticsWithMeta(users[])` / `batchGetGlobalFeeStatisticsWithMeta(tokens[], feeTypes[])` /
+  `getUserFeeAnalyticsWithMeta(user, feeTypes[])`：空数组必定 `revert EmptyArray()`。
 
 #### 2.1.5 批量边界（MAX_BATCH_SIZE）与错误口径：必须 chunk + 识别 `BatchTooLarge`
 
@@ -1373,6 +1547,34 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
 > - `scripts/e2e/e2e-localhost-batch-aggregators-acceptance.ts`（三聚合器职责/权限/超限）
 > - `scripts/e2e/e2e-localhost-scenario-matrix.ts`（ARCH 5.1.3：E2E-01/02/03，包含“失败注入→重试→统计”闭环）
 
+#### 2.1.7 前端与合约配合要点（写入/估值/权限）
+
+**A) 地址与配置对齐（必须）**
+- 启动时使用 `Registry.getModuleOrRevert(key)` 作为地址 SSOT；`SystemView.route*()` 仅做校验。
+- 代币列表以 `FeeRouter.getSupportedTokens()` 为准，前端不要硬编码 symbol → address。
+- 代币精度使用 `ERC20.decimals()`，不要假设 USDC=6 或 18。
+
+**B) 估值与价格**
+- 前端展示的“债务总值”应来自 `UserView/HealthView/PositionView` 的估值口径，而不是本地加总。
+- 当 `isValid=false` 或 `blockNumber==0` 时必须降级展示（避免误导）。
+- 如果引入新资产，确保链上已完成：
+  - `AssetWhitelist.addAllowedAsset`
+  - `PriceOracle.configureAsset + updatePrice`
+  - `FeeRouter.addSupportedToken`
+
+**C) 写入路径与权限**
+- 业务写入走 `VaultCore` / `VaultBusinessLogic`；前端不要调用只读 View 作为写入入口。
+- 读接口是 `VIEW_*_DATA` gated；生产建议使用后端 Read Service 代持角色。
+
+**D) Guarantee Extension（如启用）**
+- 若 `EarlyRepaymentGuaranteeManager` 对某资产启用：
+  - `finalizeMatch` 期间会从 borrower 拉取保证金。
+  - 前端需对 `GuaranteeFundManager` 预先 `approve` 足额的 promisedInterest，否则会报 `ERC20InsufficientAllowance`。
+
+**E) 清算相关（Liquidation）**
+- 前端只读使用 `LiquidatorView`；实际清算入口为 `SettlementManager.settleOrLiquidate`（keeper/权限方调用）。
+- 若遇到 `MissingRole()`，需要检查 `ACTION_LIQUIDATE` 与 `VIEW_RISK_DATA` 是否授予给执行方与 SettlementManager。
+
 ### 3. 实现示例（TypeScript / Ethers v6）
 ```ts
 import { ethers } from 'ethers';
@@ -1383,12 +1585,15 @@ const vaultRouter = VaultRouter__factory.connect(addresses.VaultRouter, signer);
 
 // 用户存款操作
 export async function deposit(asset: string, amount: bigint) {
+  // 注意：本项目的“到期/过期/门槛语义”统一基于 block.number（见下方 Block-based Deadline 章节）。
+  // 这里传入的 blockNumber 仅用于链下审计/可观测性（observability），不得被业务逻辑用于资金门槛判断。
+  const clientObservedBlock = await provider.getBlockNumber();
   const tx = await vaultRouter.processUserOperation(
     await signer.getAddress(),
     utils.id('DEPOSIT'),  // bytes32("DEPOSIT")
     asset,
     amount,
-    Math.floor(Date.now() / 1000)
+    clientObservedBlock
   );
   await tx.wait();
 }
@@ -1429,6 +1634,62 @@ export async function deposit(asset: string, amount: bigint) {
 ## 💸 资金链（Funds Flow / SSOT）前端配合（2026-01）
 
 > 本节是 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 的前端落地版：只写“前端需要做什么”，不重复合约内部实现细节。
+
+## Block-based Deadline 与 ETA 映射（前端/keeper 必须遵守）
+
+> 对齐文档：`docs/Usage-Guide/Time-Dependency-Refactor-Guide.md`（本项目强约束：链上门槛统一用 `block.number/epoch/round`，链下做墙钟映射与调度）。
+
+### 核心约束（必须理解为产品语义，而不是“实现细节”）
+
+- **链上只认 block**：
+  - `maturityBlock` / `deadlineBlock` / `maxAgeBlocks` 等字段，都是**区块高度口径**
+  - 任何“是否到期/是否过期/是否可清算/是否允许动作”的判断都必须基于 `block.number`（或 round/epoch 单调性）
+- **前端展示的是 ETA（估计值）**：
+  - UI 展示的“到期时间/截止时间”只能是 **ETA**（estimated time of arrival）
+  - ETA 可能在拥堵/停摆时漂移：这是链的现实约束，不能用“更精准的本地时间”解决
+- **keeper 的计算机时间只用于调度**：
+  - keeper/机器人可以用 NTP 对齐“什么时候发交易”
+  - 但**链上判定永远不使用** keeper 的计算机时间
+
+### 推荐实现：用平均出块时间估算 ETA
+
+公式：
+
+- `ETA = now + (deadlineBlock - currentBlock) * avgBlockTimeSeconds`
+
+建议：
+
+- `avgBlockTimeSeconds` 作为**网络配置**（例如 Arbitrum/Arbitrum Sepolia），可在运行时按最近 N 个 block 采样做平滑更新。
+
+可复制示例（ethers v6）：
+
+```ts
+import { ethers } from "ethers";
+
+export async function estimateEtaFromDeadlineBlock(
+  provider: ethers.Provider,
+  deadlineBlock: bigint,
+  avgBlockTimeSeconds: number
+) {
+  const currentBlock = BigInt(await provider.getBlockNumber());
+  const nowMs = Date.now();
+  if (deadlineBlock <= currentBlock) {
+    return { currentBlock, deadlineBlock, etaMs: nowMs };
+  }
+
+  const blocksLeft = deadlineBlock - currentBlock;
+  const etaMs = nowMs + Number(blocksLeft) * avgBlockTimeSeconds * 1000;
+  return { currentBlock, deadlineBlock, etaMs };
+}
+```
+
+### UI 文案建议（避免“blockNumber=deadline”的误导）
+
+- 推荐展示：
+  - “预计在约 \(N\) 个区块后到期（ETA：yyyy-mm-dd hh:mm，估计值）”
+  - 当网络拥堵/停摆时：加提示 “ETA 会随区块速度变化”
+- 不要展示：
+  - “到期时间戳：xxxxx” 作为门槛语义
 
 ## 🧾 AI Credits 计费规范（按次计费：链上购买 + 链下扣次 + 多租户对账）
 
@@ -1514,8 +1775,8 @@ export async function deposit(asset: string, amount: bigint) {
 - **先查账本是否有抵押（数量口径）**（不依赖价格）：
   - `CollateralManager.getUserCollateralAssets(user)` + `CollateralManager.getCollateral(user, asset)`
 - **再查价格是否可用（价格口径）**：
-  - 推荐：`ValuationOracleView.isPriceValid(asset)`（或 `BatchView.batchGetAssetPrices` 批量查）
-  - 同时展示 `getAssetPrice` 返回的 timestamp（提示 stale）
+  - 推荐：`ValuationOracleView.isPriceValid(asset)`（返回 `isValid, blockNumber`；或 `BatchView.batchGetAssetPrices` 批量查）
+  - 同时展示 `getAssetPrice` 返回的 blockNumber（提示 stale）
 - **最后给出 UI 提示文案**（建议）：
   - “清算失败：系统无法对抵押资产估值（价格可能过期或未配置）。请刷新价格/检查预言机状态后重试。”
 
@@ -1667,7 +1928,7 @@ export async function fetchLiquidatorStats(provider: any, addr: string, user: st
 
 ### 2) 批量资产价格查询请使用 BatchView
 - 批量资产价格：`BatchView.batchGetAssetPrices(assets[])`。
-- 单资产价格：`ValuationOracleView.getAssetPrice(asset)`。
+- 单资产价格：`ValuationOracleView.getAssetPrice(asset)`（返回 `price, blockNumber, isValid`）。
 
 示例：
 ```ts
@@ -1683,17 +1944,57 @@ export async function batchFetchPrices(provider: any, batchViewAddr: string, ass
 
 迁移建议：
 ```ts
-// 旧（示意）：await systemView.getRegistry()  // 已移除
-// 新：
 const registryAddr = await systemView.registryAddrVar();
 const registryAddr2 = await batchView.registryAddrVar(); // 推荐
 ```
+
+### 3) SystemRiskView（system-only 风险参数入口）
+- `SystemRiskView` 是 system-only 风险参数的**权威入口**：  
+  - `getLiquidationThreshold()`  
+  - `getMinHealthFactor()`  
+- `LiquidationRiskView` 已移除上述 system-only 接口；前端不得再调用旧入口。
 
 ### 4) UUPS _authorizeUpgrade 与前端
 - `_authorizeUpgrade` 为合约内部升级授权逻辑，不面向前端调用，无需在前端做任何适配。
 
 - SystemView 为系统级聚合门面（可选）：可用于统一入口/兼容旧调用；但清算仍以 `LiquidatorView` 为权威入口，健康用 `HealthView`，价格用 `ValuationOracleView`，注册表用 `RegistryView`，统计用 `StatisticsView`，批量用 `BatchView`。
 - 本文档示例基于 ethers v6 与自动生成的 TypeChain 工厂类（`@/types/factories`）。
+
+## 🔄 接口变更与迁移指南（2026-01 · Breaking Changes）
+
+本次升级对前端是 **破坏性变更**，请务必同步更新 TypeChain/ABI 与解包逻辑：
+
+1. **UserView 用户维度新增 meta**
+   - `getUserPosition/getUserPositionService/getUserCollateral/getUserDebt/getUserTotalCollateral/getUserTotalDebt`
+   - `getHealthFactor/getUserHealthFactor/getUserStats`
+   - `previewBorrow/previewDeposit/previewRepay/previewWithdraw`
+   - `getUserTokenBalance/getUserSettlementBalanceStrict`（非缓存也统一返回 meta）
+
+2. **DashboardView / CacheOptimizedView 返回结构调整**
+   - `DashboardView.getUserOverview` → 追加 `positionValidFlags/positionTimestamps/positionVersions/healthTimestamp`
+   - `DashboardView.getUserAssetBreakdown` → 返回 `UserAssetOverviewMeta[]`（每项含 position meta）
+   - `CacheOptimizedView.batchGetUserPositions` → `UserPositionItemMeta[]`
+   - `CacheOptimizedView.getUserSummary` → 返回 `(summary, positionValidFlags, positionTimestamps, positionVersions, healthTimestamp)`
+
+3. **LiquidatorView / RewardView 用户读接口统一 meta**
+   - `LiquidatorView.getUserLiquidationStats/getSeizableCollateralAmount/getSeizableCollaterals/getUserTotalCollateralValue`
+   - `LiquidatorView.batchGetLiquidationStats`（返回 stats + meta）
+   - `RewardView.getUserBalance/getUserLastConsumption/getUserLevel/getUserLevelView/getUserActivity/getUserActivityView/getUserPenaltyDebt/getUserPenaltyDebtView`
+
+4. **LendingEngineView / RiskView / ValuationOracleView / LiquidationRiskView（Scheme A）**
+   - `getUserLoanCount/canAccessLoanOrder` → 增加 `isValid/blockNumber`
+   - `calculateHealthFactorExcludingGuarantee` → 增加 `isValid/blockNumber`
+   - `hasUpgradePermission` → 增加 `isValid/blockNumber`
+  - `getAssetPrice/getAssetPrices/isPriceValid/checkPriceOracleHealth/batchCheckPriceOracleHealth` → 增加 `isValid/blockNumber`（或 `validFlags[]/blockNumbers[]`）
+   - `LiquidationRiskView` 用户读与 batch 读均增加 `isValid/blockNumber`
+
+5. **FeeRouterView 批量空数组必须 revert**
+   - `batchGetUserFeeStatisticsWithMeta` / `batchGetGlobalFeeStatisticsWithMeta` / `getUserFeeAnalyticsWithMeta`
+   - 空数组统一 `revert EmptyArray()`；长度不匹配仍 `ArrayLengthMismatch`
+
+前端迁移建议：
+- 先更新 TypeChain/ABI，再逐处替换解包（例如 `const [value] = await view.fn(...)`）。
+- UI 必须处理 `isValid=false` / `blockNumber=0` 的降级展示（详见 §2.1.4）。
 
 ## 📦 监控相关新模块 (2025-08 升级)
 
@@ -1703,6 +2004,20 @@ const registryAddr2 = await batchView.registryAddrVar(); // 推荐
 | `KEY_DEGRADATION_MONITOR` | `DegradationMonitor` | `contracts/core/monitor/DegradationMonitor.sol` |
 
 > ⚠️ 旧的 `GracefulDegradation*` 模块已迁移到 `core/monitor/` 路径，名称保持兼容，但前端应尽快切换到上表新 Key。 
+
+## 🧾 EventHistoryManager（前端协作：历史/活动流的权威事件入口）
+
+`EventHistoryManager` 是 **events-only** 的“历史记录入口”：链上不存储历史列表，所有历史/活动都应通过事件与 `DataPushed` 供链下索引服务消费。
+
+- **写入侧（链上模块/后端）**：
+  - `recordEvent(eventType, user, asset, amount, extraData)`（需要 `ACTION_MANAGE_EVENT_HISTORY`）
+  - 触发事件：`HistoryRecorded(eventType, user, asset, amount, extraData, blockNumber)`
+  - 同时发出 Unified DataPush：`DataPushed(DATA_TYPE_HISTORY, abi.encode(...))`
+
+- **前端协作要点**：
+  - **前端不应尝试“链上查询历史”**：合约没有 `getHistory(...)` 之类的读接口。
+  - 前端应依赖 **链下 Indexer / Read Service**（订阅 `DataPushed` 或 `HistoryRecorded`）提供分页/筛选。
+  - `eventType` 建议统一用 `keccak256("UPPER_SNAKE_CASE")`，并在前端/后端共享映射表（可与 `DataPushTypes` 统一管理）。
 
 ### 9. Unified DataPush Integration (v1)
 
@@ -1727,17 +2042,24 @@ provider.on({ topics: [iface.getEvent("DataPushed").topic] }, (log) => {
 |--------------|----------|-----------------|
 | `USER_FEE` | `FeeRouterView` | `(address user, bytes32 feeType, uint256 amount, uint256 personalFeeBps)` |
 | `GLOBAL_FEE_STATS` | `FeeRouterView` | `(uint256 totalDistributions, uint256 totalAmount)` |
-| `DEPOSIT_PROCESSED` | `CollateralManager` | `(address user, address asset, uint256 amount, uint256 timestamp)` |
-| `WITHDRAW_PROCESSED` | `CollateralManager` | `(address user, address asset, uint256 amount, uint256 timestamp)` |
-| `BATCH_DEPOSIT_PROCESSED` | `CollateralManager` | `(address user, uint256 operationCount, uint256 timestamp)` |
-| `BATCH_WITHDRAW_PROCESSED` | `CollateralManager` | `(address user, uint256 operationCount, uint256 timestamp)` |
-| `USER_DEGRADATION` | `CollateralManager` / `LendingEngine` / `PriceOracle` | `(address user, address module, address asset, string reason, bool usedFallback, uint256 value, uint256 timestamp)` |
-| `MODULE_HEALTH` | `DegradationAdminView` | `(address module, ModuleHealthStatusMirror)` |
+| `REWARD_EARNED` | `RewardView` | `(address user, uint256 amount, string reason, uint256 ts)` |
+| `REWARD_BURNED` | `RewardView` | `(address user, uint256 amount, string reason, uint256 ts)` |
+| `REWARD_LEVEL_UPDATED` | `RewardView` | `(address user, uint8 level, uint256 ts)` |
+| `REWARD_PRIVILEGE_UPDATED` | `RewardView` | `(address user, uint256 packedPrivileges, uint256 ts)` |
+| `REWARD_STATS_UPDATED` | `RewardView` | `(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 ts)` |
+| `REWARD_PENALTY_LEDGER_UPDATED` | `RewardView` | `(address user, uint256 pendingDebt, uint256 ts)` |
+| `REWARD_CONSUMPTION_RECORDED` | `RewardView` | `(address user, uint8 serviceType, uint8 serviceLevel, uint256 points, uint256 expirationTime, uint256 ts)` |
+| `DEPOSIT_PROCESSED` | `CollateralManager` | `(address user, address asset, uint256 amount, uint256 blockNumber)` |
+| `WITHDRAW_PROCESSED` | `CollateralManager` | `(address user, address asset, uint256 amount, uint256 blockNumber)` |
+| `BATCH_DEPOSIT_PROCESSED` | `CollateralManager` | `(address user, uint256 operationCount, uint256 blockNumber)` |
+| `BATCH_WITHDRAW_PROCESSED` | `CollateralManager` | `(address user, uint256 operationCount, uint256 blockNumber)` |
+| `USER_DEGRADATION` | `CollateralManager` / `LendingEngine` / `PriceOracle` | `(address user, address module, address asset, string reason, bool usedFallback, uint256 value, uint256 blockNumber)` |
+| `MODULE_HEALTH` | `ModuleHealthView` | `(address module, bool ok, bytes32 detailsHash, uint32 failures, uint256 ts)` |
 | `SYSTEM_STATUS_CACHE` | `ViewCache` | `(address asset, uint256 collateral, uint256 debt, uint256 util, uint256 ts)` |
 | `USER_DATA_UPDATE` | `CacheOptimizedView` | `(address user, uint256 healthFactor, uint256 totalCollateral, uint256 totalDebt)` |
 | `POSITION_DATA_UPDATE` | `CacheOptimizedView` | `(address user, address asset, uint256 collateral, uint256 debt)` |
 | `GLOBAL_STATS_UPDATE` | `CacheOptimizedView` | `(bytes32 dataKey, uint256 value)` |
-| `GLOBAL_DEGRADATION` | `DegradationAdminView` | `(GlobalDegradationStatsMirror)` |
+| `GLOBAL_DEGRADATION` | `DegradationMonitor` / `DegradationCore` | `(implementation-defined; see core/monitor)` |
 | `ASSET_WHITELIST_ADDED` | `AssetWhitelist` | `(address asset, address actor, uint256 ts)` |
 | `ASSET_WHITELIST_REMOVED` | `AssetWhitelist` | `(address asset, address actor, uint256 ts)` |
 | `ASSET_WHITELIST_BATCH_ADDED` | `AssetWhitelist` | `(address[] assets, address actor, uint256 addedCount, uint256 totalCount, uint256 ts)` |
@@ -1763,7 +2085,7 @@ provider.on({ topics: [iface.getEvent("DataPushed").topic] }, (log) => {
   - `actor` (address)
   - `addedCount/removedCount/totalCount` (uint256, nullable)
   - `oldRegistry/newRegistry` (address, nullable)
-  - `ts` (uint256)
+  - `blockNumber` (uint256)
   - `blockNumber` / `txHash` / `logIndex`（用于幂等与回溯）
 
 解码要点：
@@ -1787,7 +2109,7 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
   const parsed = iface.parseLog(log);
   const { dataTypeHash, payload } = parsed.args as { dataTypeHash: string; payload: string };
   if (dataTypeHash !== USER_DEGRADATION) return;
-  const [user, module, asset, reason, usedFallback, value, ts] =
+  const [user, module, asset, reason, usedFallback, value, blockNumber] =
     AbiCoder.defaultAbiCoder().decode([
       "address",
       "address",
@@ -1801,7 +2123,7 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
   // 仅展示当前登录用户
   if (user.toLowerCase() !== connectedAddress.toLowerCase()) return;
   // 渲染到“我的降级记录”页签
-  addUserDegradation({ user, module, asset, reason, usedFallback, value, timestamp: Number(ts) });
+  addUserDegradation({ user, module, asset, reason, usedFallback, value, blockNumber: Number(blockNumber) });
 });
 ```
 
@@ -1816,7 +2138,13 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
 > 前端需针对“有事件可观测”的场景做提示与交互闭环。
 
 #### 11.1 事件监听
-- 订阅 `CacheUpdateFailed`（主要来自 PositionView guarded 路径；以及部分 best-effort 推送模块如 `LendingEngineCore`/`LiquidationManager` 的推送失败事件；用 `contract_address` 区分来源）：
+- 订阅 `CacheUpdateFailed` **与** `CacheUpdateFailedV2`：
+  - `CacheUpdateFailed`：兼容事件，字段为 `(user, asset, viewAddr, collateral, debt, reason)`
+  - `CacheUpdateFailedV2`：新增上下文字段 `(requestId, seq, nextVersion)`，用于并发/幂等诊断
+- 主要来源：
+  - `PositionView` 的 guarded 读取失败
+  - 部分 best-effort 推送模块（如 `LendingEngineCore`/`LiquidationManager`）
+  - 使用 `contract_address` 区分来源
   - 过滤当前登录用户：`args.user.toLowerCase() === connectedAddress.toLowerCase()`
   - 记录 `asset` / `viewAddr` / `reason` / `blockNumber` / `logIndex`，作为重试幂等键
 - 可选：在同一监听服务中并入 `DataPushed`，便于统一管道
@@ -1825,6 +2153,7 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
 - 当用户/资产存在未清理的失败记录：
   - 在资产卡/仓位页显示 “缓存更新失败，已排队人工处理”
   - 展示最近失败时间、原因摘要（截断 bytes reason）
+  - 若来自 `CacheUpdateFailedV2`，可展示 `requestId/seq/nextVersion` 作为诊断信息
   - 标记缓存数据“可能陈旧”，提示刷新时间
 - 若后端提供重试 API，则提供“请求重试”按钮（前端不直接持有 admin）
 

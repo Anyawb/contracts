@@ -16,16 +16,6 @@ import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/
 import { IPositionView } from "../interfaces/IPositionView.sol";
 import { ICacheRefreshable } from "../interfaces/ICacheRefreshable.sol";
 
-interface IStatisticsViewMinimal {
-    function pushUserStatsUpdate(
-        address user,
-        uint256 collateralIn,
-        uint256 collateralOut,
-        uint256 borrow,
-        uint256 repay
-    ) external;
-}
-
 /**
  * @title VaultRouter
  * @notice Dual-architecture router that routes deposit/withdraw and forwards push updates to View modules.
@@ -49,8 +39,10 @@ contract VaultRouter is
     ICacheRefreshable
 {
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
-    /// @dev Module address cache expiry (A-class cache).
-    uint256 private constant _CACHE_EXPIRY_TIME = 1 hours;
+    /// @dev Module address cache expiry (A-class cache), expressed in blocks.
+    /// NOTE (Time-Dependency-Refactor): legacy "seconds" TTLs are migrated to block-based TTLs.
+    /// We keep the numeric value parity (1 hours = 3600), but the unit is now "blocks".
+    uint256 private constant _CACHE_EXPIRY_BLOCKS = 3600;
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     /// @dev Registry address used to resolve module addresses (proxy-friendly: NOT immutable).
@@ -62,8 +54,8 @@ contract VaultRouter is
     /// @dev Cached CollateralManager address (gas optimization).
     address private _cachedCmAddr;
 
-    /// @dev Last cache refresh timestamp (seconds since epoch).
-    uint256 private _lastCacheUpdate;
+    /// @dev Last cache refresh block number (monotonic).
+    uint256 private _lastCacheUpdateBlock;
 
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     /**
@@ -83,7 +75,8 @@ contract VaultRouter is
      * @param amount1 Primary amount (token decimals)
      * @param amount2 Secondary amount (reserved; currently 0)
      * @param asset Asset address
-     * @param timestamp Timestamp supplied by VaultCore (seconds)
+     * @param blockNumber Legacy field: the time axis marker supplied by VaultCore.
+     *                  NOTE: in this repo, this is treated as `blockNumber` (observability only).
      */
     event VaultAction(
         bytes32 indexed action, 
@@ -91,7 +84,17 @@ contract VaultRouter is
         uint256 amount1, 
         uint256 amount2, 
         address indexed asset,
-        uint256 timestamp
+        uint256 blockNumber
+    );
+
+    /// @notice Explicit block-based companion event for VaultAction.
+    event VaultActionV2(
+        bytes32 indexed action,
+        address indexed user,
+        uint256 amount1,
+        uint256 amount2,
+        address indexed asset,
+        uint256 blockNumber
     );
 
     /**
@@ -100,7 +103,7 @@ contract VaultRouter is
      * @param asset Asset address
      * @param collateral Collateral amount (token decimals)
      * @param debt Debt amount (token decimals)
-     * @param timestamp Block timestamp recorded by VaultRouter (seconds)
+     * @param blockNumber Legacy field: emitted time axis marker (treated as blockNumber in this repo)
      * @param requestId Idempotency key (optional; may be 0x0)
      * @param seq Monotonic sequence (optional; may be 0)
      */
@@ -109,7 +112,18 @@ contract VaultRouter is
         address indexed asset,
         uint256 collateral,
         uint256 debt,
-        uint256 timestamp,
+        uint256 blockNumber,
+        bytes32 requestId,
+        uint64 seq
+    );
+
+    /// @notice Explicit block-based companion event for UserPositionPushed.
+    event UserPositionPushedV2(
+        address indexed user,
+        address indexed asset,
+        uint256 collateral,
+        uint256 debt,
+        uint256 blockNumber,
         bytes32 requestId,
         uint64 seq
     );
@@ -120,7 +134,7 @@ contract VaultRouter is
      * @param asset Asset address
      * @param collateralDelta Collateral delta (token decimals; signed)
      * @param debtDelta Debt delta (token decimals; signed)
-     * @param timestamp Block timestamp recorded by VaultRouter (seconds)
+     * @param blockNumber Legacy field: emitted time axis marker (treated as blockNumber in this repo)
      * @param requestId Idempotency key (optional; may be 0x0)
      * @param seq Monotonic sequence (optional; may be 0)
      */
@@ -129,23 +143,20 @@ contract VaultRouter is
         address indexed asset,
         int256 collateralDelta,
         int256 debtDelta,
-        uint256 timestamp,
+        uint256 blockNumber,
         bytes32 requestId,
         uint64 seq
     );
 
-    /**
-     * @notice Emitted when a best-effort user stats push to StatisticsView fails.
-     * @dev Must not revert core flows; used for off-chain alerting / retry.
-     */
-    event UserStatsPushFailed(
+    /// @notice Explicit block-based companion event for UserPositionDeltaPushed.
+    event UserPositionDeltaPushedV2(
         address indexed user,
-        address indexed statsView,
-        uint256 collateralIn,
-        uint256 collateralOut,
-        uint256 borrow,
-        uint256 repay,
-        bytes reason
+        address indexed asset,
+        int256 collateralDelta,
+        int256 debtDelta,
+        uint256 blockNumber,
+        bytes32 requestId,
+        uint64 seq
     );
 
     /**
@@ -154,7 +165,7 @@ contract VaultRouter is
      * @param totalCollateral Total collateral (token decimals)
      * @param totalDebt Total debt (token decimals)
      * @param price Asset price (precision defined by upstream oracle/view)
-     * @param timestamp Block timestamp recorded by VaultRouter (seconds)
+     * @param blockNumber Legacy field: emitted time axis marker (treated as blockNumber in this repo)
      * @param requestId Idempotency key (optional; may be 0x0)
      * @param seq Monotonic sequence (optional; may be 0)
      */
@@ -163,16 +174,30 @@ contract VaultRouter is
         uint256 totalCollateral,
         uint256 totalDebt,
         uint256 price,
-        uint256 timestamp,
+        uint256 blockNumber,
+        bytes32 requestId,
+        uint64 seq
+    );
+
+    /// @notice Explicit block-based companion event for AssetStatsPushed.
+    event AssetStatsPushedV2(
+        address indexed asset,
+        uint256 totalCollateral,
+        uint256 totalDebt,
+        uint256 price,
+        uint256 blockNumber,
         bytes32 requestId,
         uint64 seq
     );
 
     /**
      * @notice Emitted when A-class module address cache is refreshed.
-     * @param timestamp Refresh timestamp (seconds)
+     * @param updateBlock Legacy field: refresh time axis marker (treated as updateBlock in this repo)
      */
-    event ModuleCacheRefreshed(uint256 timestamp);
+    event ModuleCacheRefreshed(uint256 updateBlock);
+
+    /// @notice Explicit block-based companion event for ModuleCacheRefreshed.
+    event ModuleCacheRefreshedV2(uint256 updateBlock);
 
     /*━━━━━━━━━━━━━━━ Custom errors ━━━━━━━━━━━━━━━*/
     /// @notice Thrown when caller is not authorized for the operation.
@@ -262,14 +287,9 @@ contract VaultRouter is
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
-    /**
-     * @dev Return the current block timestamp in seconds.
-     *      This repo's Solhint configuration forbids time-based logic by default; VaultRouter
-     *      uses timestamps only for cache bookkeeping / observability, not for business decisions.
-     */
+    /// @dev Return the current block number (monotonic chain time axis).
     function _now() internal view returns (uint256) {
-        // solhint-disable-next-line not-rely-on-time
-        return block.timestamp;
+        return block.number;
     }
 
     /// @dev Helper to avoid "no-empty-blocks" in intentionally empty branches.
@@ -318,11 +338,11 @@ contract VaultRouter is
         // If the Registry module address changed since our last refresh, we MUST NOT continue routing to the old
         // cached address (silent wrong route). Governance must refresh A-class caches via CacheMaintenanceManager.
         address current = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
-        uint256 nowTs = _now();
+        uint256 nowBlock = _now();
         // Uninitialized or expired cache: refresh to current.
-        if (_cachedCmAddr == address(0) || nowTs > _lastCacheUpdate + _CACHE_EXPIRY_TIME) {
+        if (_cachedCmAddr == address(0) || nowBlock > _lastCacheUpdateBlock + _CACHE_EXPIRY_BLOCKS) {
             _cachedCmAddr = current;
-            _lastCacheUpdate = nowTs;
+            _lastCacheUpdateBlock = nowBlock;
             return current;
         }
         // Cache is within expiry: reject if Registry changed to avoid silent wrong route.
@@ -331,7 +351,7 @@ contract VaultRouter is
     }
 
     /**
-     * @dev Emit a VaultAction event using the current block timestamp.
+     * @dev Emit a VaultAction event using the current block number.
      * @param action Action key (see ActionKeys)
      * @param user User address
      * @param amount1 Amount1 (token decimals)
@@ -345,7 +365,8 @@ contract VaultRouter is
         uint256 amount2,
         address asset
     ) internal {
-        emit VaultAction(action, user, amount1, amount2, asset, _now());
+        emit VaultAction(action, user, amount1, amount2, asset, block.number);
+        emit VaultActionV2(action, user, amount1, amount2, asset, block.number);
     }
 
     /*━━━━━━━━━━━━━━━ Core routing ━━━━━━━━━━━━━━━*/
@@ -368,14 +389,14 @@ contract VaultRouter is
      * @param operationType Action key (see ActionKeys)
      * @param asset Asset address
      * @param amount Amount (token decimals)
-     * @param timestamp Timestamp supplied by VaultCore (seconds)
+     * @param blockNumber Block number supplied by VaultCore
      */
     function processUserOperation(
         address user,
         bytes32 operationType,
         address asset,
         uint256 amount,
-        uint256 timestamp
+        uint256 blockNumber
     ) external override whenNotPaused onlyValidRegistry onlyVaultCore nonReentrant {
         // Basic validation
         _validateAsset(asset);
@@ -393,7 +414,8 @@ contract VaultRouter is
             revert VaultRouter__UnsupportedOperation(operationType);
         }
 
-        emit VaultAction(operationType, user, amount, 0, asset, timestamp);
+        emit VaultAction(operationType, user, amount, 0, asset, blockNumber);
+        emit VaultActionV2(operationType, user, amount, 0, asset, blockNumber);
     }
 
     /**
@@ -431,7 +453,8 @@ contract VaultRouter is
     ) external override onlyValidRegistry onlyVaultCore {
         address pv = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
         IPositionView(pv).pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, nextVersion);
-        emit UserPositionPushed(user, asset, collateral, debt, _now(), requestId, seq);
+        emit UserPositionPushed(user, asset, collateral, debt, block.number, requestId, seq);
+        emit UserPositionPushedV2(user, asset, collateral, debt, block.number, requestId, seq);
     }
 
     /**
@@ -476,44 +499,8 @@ contract VaultRouter is
             seq,
             nextVersion
         );
-        _tryPushUserStatsUpdateFromDelta(user, collateralDelta, debtDelta);
-        emit UserPositionDeltaPushed(user, asset, collateralDelta, debtDelta, _now(), requestId, seq);
-    }
-
-    function _tryPushUserStatsUpdateFromDelta(address user, int256 collateralDelta, int256 debtDelta) internal {
-        // StatisticsView is push-based; keep best-effort and never block core flows.
-        address stats = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
-        if (stats == address(0)) return;
-        if (stats.code.length == 0) {
-            emit UserStatsPushFailed(user, stats, 0, 0, 0, 0, abi.encodeWithSelector(NotAContract.selector, stats));
-            return;
-        }
-
-        uint256 collateralIn = 0;
-        uint256 collateralOut = 0;
-        uint256 borrow = 0;
-        uint256 repay = 0;
-
-        if (collateralDelta > 0) {
-            collateralIn = uint256(collateralDelta);
-        } else if (collateralDelta < 0) {
-            collateralOut = _absToUint(collateralDelta);
-        }
-
-        if (debtDelta > 0) {
-            borrow = uint256(debtDelta);
-        } else if (debtDelta < 0) {
-            repay = _absToUint(debtDelta);
-        }
-
-        if (collateralIn == 0 && collateralOut == 0 && borrow == 0 && repay == 0) return;
-
-        // Best-effort: ignore failures (e.g., missing permissions on StatisticsView).
-        try IStatisticsViewMinimal(stats).pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay) {
-            _noop();
-        } catch (bytes memory reason) {
-            emit UserStatsPushFailed(user, stats, collateralIn, collateralOut, borrow, repay, reason);
-        }
+        emit UserPositionDeltaPushed(user, asset, collateralDelta, debtDelta, block.number, requestId, seq);
+        emit UserPositionDeltaPushedV2(user, asset, collateralDelta, debtDelta, block.number, requestId, seq);
     }
 
     function _absToUint(int256 x) internal pure returns (uint256) {
@@ -558,7 +545,8 @@ contract VaultRouter is
         bytes32 requestId,
         uint64 seq
     ) internal {
-        emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, _now(), requestId, seq);
+        emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, block.number, requestId, seq);
+        emit AssetStatsPushedV2(asset, totalCollateral, totalDebt, price, block.number, requestId, seq);
     }
 
     /*━━━━━━━━━━━━━━━ Governance ━━━━━━━━━━━━━━━*/
@@ -623,16 +611,17 @@ contract VaultRouter is
         address maint = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER);
         if (msg.sender != maint) revert VaultRouter__UnauthorizedAccess();
         _cachedCmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
-        _lastCacheUpdate = _now();
-        emit ModuleCacheRefreshed(_lastCacheUpdate);
+        _lastCacheUpdateBlock = _now();
+        emit ModuleCacheRefreshed(_lastCacheUpdateBlock);
+        emit ModuleCacheRefreshedV2(_lastCacheUpdateBlock);
     }
 
     /**
      * @notice Returns true if module cache is initialized and not expired.
-     * @return isValid True if cache timestamp is within CACHE_EXPIRY_TIME window
+     * @return isValid True if cache blockNumber is within CACHE_EXPIRY_BLOCKS window
      */
     function isModuleCacheValid() external view returns (bool) {
-        return _lastCacheUpdate != 0 && _now() <= _lastCacheUpdate + _CACHE_EXPIRY_TIME;
+        return _lastCacheUpdateBlock != 0 && _now() <= _lastCacheUpdateBlock + _CACHE_EXPIRY_BLOCKS;
     }
 
     /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/

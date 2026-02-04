@@ -32,7 +32,7 @@ import {RegistryCompatQuery} from "./RegistryCompatQueryLibrary.sol";
  * Security:
  * - UUPS upgrade authorization is gated by upgradeAdmin / emergencyAdmin / owner
  * - Governance and module writes are owner-gated and pause-aware
- * - Timelocked module upgrades rely on block.timestamp by design (for scheduling/execution)
+ * - Timelocked module upgrades rely on block.number by design (for scheduling/execution)
  */
 contract Registry is 
     IRegistry,
@@ -51,14 +51,14 @@ contract Registry is
 
     /**
      * @notice The provided delay exceeds the maximum allowed delay.
-     * @param provided The provided delay (seconds).
-     * @param max The maximum allowed delay (seconds).
+     * @param provided The provided delay (blocks).
+     * @param max The maximum allowed delay (blocks).
      */
     error Registry__DelayTooLong(uint256 provided, uint256 max);
 
     /**
      * @notice The provided delay value is invalid.
-     * @param delay The provided delay (seconds).
+     * @param delay The provided delay (blocks).
      */
     error Registry__InvalidDelayValue(uint256 delay);
 
@@ -140,8 +140,8 @@ contract Registry is
     error Registry__MigratorFailed(address migrator, bytes reason);
 
     // ============ Constants ============
-    /// @notice Maximum delay window (7 days).
-    uint256 private constant _MAX_DELAY = 7 days;
+    /// @notice Maximum delay window (blocks, ~7 days with ~2s blocks).
+    uint256 private constant _MAX_DELAY = 7 days / 2 seconds;
     /// @notice Upgrade history ring size cap.
     uint256 private constant _MAX_UPGRADE_HISTORY = 100;
     /// @notice Batch size cap (tests/safety).
@@ -175,7 +175,7 @@ contract Registry is
     /**
      * @notice Initializes the Registry and configures governance and upgrade authority.
      * @dev Reverts if:
-     *      - minDelaySeconds > MAX_DELAY()
+     *      - minDelayBlocks > MAX_DELAY()
      *      - upgradeAdmin == address(0)
      *      - emergencyAdmin == address(0)
      *      - initialOwner == address(0)
@@ -184,16 +184,16 @@ contract Registry is
      * - Single-use initializer (Initializable)
      * - Sets governance owner/admin to initialOwner (not msg.sender)
      *
-     * @param minDelaySeconds Minimum delay window for timelocked module upgrades (seconds).
+     * @param minDelayBlocks Minimum delay window for timelocked module upgrades (blocks).
      * @param upgradeAdmin Address authorized to perform UUPS upgrades.
      * @param emergencyAdmin Address authorized to pause/cancel upgrades in emergencies.
      * @param initialOwner Initial governance owner/admin address.
      */
-    function initialize(uint256 minDelaySeconds, address upgradeAdmin, address emergencyAdmin, address initialOwner)
+    function initialize(uint256 minDelayBlocks, address upgradeAdmin, address emergencyAdmin, address initialOwner)
         external
         initializer
     {
-        if (minDelaySeconds > _MAX_DELAY) revert Registry__DelayTooLong(minDelaySeconds, _MAX_DELAY);
+        if (minDelayBlocks > _MAX_DELAY) revert Registry__DelayTooLong(minDelayBlocks, _MAX_DELAY);
         if (upgradeAdmin == address(0)) revert Registry__ZeroAddress();
         if (emergencyAdmin == address(0)) revert Registry__ZeroAddress();
         if (initialOwner == address(0)) revert Registry__ZeroAddress();
@@ -209,14 +209,14 @@ contract Registry is
         // Governance/admin (compat) should follow the explicit initial owner, not the initializer caller.
         layout.admin = initialOwner;
         layout.pendingAdmin = address(0);
-        layout.minDelay = uint64(minDelaySeconds);
+        layout.minDelay = uint64(minDelayBlocks);
         
         _upgradeAdmin = upgradeAdmin;
         _emergencyAdmin = emergencyAdmin;
         
         emit RegistryEvents.RegistryInitialized(
             initialOwner,
-            minDelaySeconds,
+            minDelayBlocks,
             msg.sender
         );
     }
@@ -387,7 +387,7 @@ contract Registry is
      * Security:
      * - Read-only
      *
-     * @return The minimum delay window (seconds).
+     * @return The minimum delay window (blocks).
      */
     function minDelay() external view override returns (uint256) {
         return RegistryStorage.layout().minDelay;
@@ -595,9 +595,8 @@ contract Registry is
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.PAUSE),
             msg.sender,
-            // Timestamp is emitted for off-chain auditing; not used for business decisions.
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            // Block number is emitted for off-chain auditing; not used for business decisions.
+            block.number
         );
     }
 
@@ -616,9 +615,8 @@ contract Registry is
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.UNPAUSE),
             msg.sender,
-            // Timestamp is emitted for off-chain auditing; not used for business decisions.
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            // Block number is emitted for off-chain auditing; not used for business decisions.
+            block.number
         );
     }
 
@@ -877,9 +875,8 @@ contract Registry is
         RegistryStorage.UpgradeHistory memory history = RegistryStorage.UpgradeHistory({
             oldAddress: oldAddr,
             newAddress: newAddr,
-            // Timestamp is stored for off-chain auditing/forensics; not used for business decisions.
-            // solhint-disable-next-line not-rely-on-time
-            timestamp: block.timestamp,
+            // Block number is stored for off-chain auditing/forensics; not used for business decisions.
+            blockNumber: block.number,
             executor: executor
         });
         uint256 currentIndex = layout.historyIndex[key];
@@ -903,7 +900,7 @@ contract Registry is
      * Security:
      * - onlyOwner
      * - whenNotPaused
-     * - Uses block.timestamp for timelock scheduling by design
+     * - Uses block.number for timelock scheduling by design
      *
      * @param key The module key.
      * @param newAddr The new module address.
@@ -913,9 +910,8 @@ contract Registry is
         if (newAddr == address(0)) revert Registry__ZeroAddress();
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         address oldAddress = layout.modules[key];
-        // Timelock scheduling relies on block.timestamp by design.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 executeAfter = block.timestamp + uint256(layout.minDelay);
+        // Timelock scheduling relies on block.number by design.
+        uint256 executeAfter = block.number + uint256(layout.minDelay);
         layout.pendingUpgrades[key] = RegistryStorage.PendingUpgrade({
             newAddr: newAddr,
             executeAfter: executeAfter,
@@ -956,14 +952,14 @@ contract Registry is
      * @dev Reverts if:
      *      - storage version is incompatible (compat gate)
      *      - no pending upgrade exists for key
-     *      - block.timestamp < executeAfter (timelock not elapsed)
+     *      - block.number < executeAfter (timelock not elapsed)
      *      - Registry is paused
      *
      * Security:
      * - onlyOwner
      * - whenNotPaused
      * - nonReentrant
-     * - Uses block.timestamp for timelock checks by design
+     * - Uses block.number for timelock checks by design
      *
      * @param key The module key.
      */
@@ -972,9 +968,8 @@ contract Registry is
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[key];
         if (p.newAddr == address(0)) revert ModuleUpgradeNotFound(key);
-        // Timelock execution relies on block.timestamp by design.
-        // solhint-disable-next-line not-rely-on-time
-        if (block.timestamp < p.executeAfter) revert ModuleUpgradeNotReady(key, p.executeAfter, block.timestamp);
+        // Timelock execution relies on block.number by design.
+        if (block.number < p.executeAfter) revert ModuleUpgradeNotReady(key, p.executeAfter, block.number);
         address oldAddress = layout.modules[key];
         address newAddr = p.newAddr;
         layout.modules[key] = newAddr;
@@ -1029,9 +1024,8 @@ contract Registry is
         emit RegistryEvents.EmergencyActionExecuted(
             uint8(RegistryEvents.EmergencyAction.EMERGENCY_RECOVERY),
             msg.sender,
-            // Timestamp is emitted for off-chain auditing; not used for business decisions.
-            // solhint-disable-next-line not-rely-on-time
-            block.timestamp
+            // Block number is emitted for off-chain auditing; not used for business decisions.
+            block.number
         );
     }
 
@@ -1045,7 +1039,7 @@ contract Registry is
      *
      * @param key The module key.
      * @return newAddr The pending new module address.
-     * @return executeAfter The earliest execution time (unix seconds).
+     * @return executeAfter The earliest execution block (block.number).
      * @return hasPendingUpgrade True if a pending upgrade exists.
      */
     function getPendingUpgrade(bytes32 key) external view override returns (
@@ -1063,16 +1057,15 @@ contract Registry is
      *
      * Security:
      * - Read-only
-     * - Uses block.timestamp for readiness checks by design
+     * - Uses block.number for readiness checks by design
      *
      * @param key The module key.
      * @return True if ready.
      */
     function isUpgradeReady(bytes32 key) external view override returns (bool) {
         RegistryStorage.PendingUpgrade memory p = RegistryStorage.layout().pendingUpgrades[key];
-        // Timelock readiness check relies on block.timestamp by design.
-        // solhint-disable-next-line not-rely-on-time
-        return p.newAddr != address(0) && block.timestamp >= p.executeAfter;
+        // Timelock readiness check relies on block.number by design.
+        return p.newAddr != address(0) && block.number >= p.executeAfter;
     }
 
     /* ============ Query helpers (tests/compat) ============ */
@@ -1170,19 +1163,19 @@ contract Registry is
      * @param index The history index (0-based).
      * @return oldAddress Old module address.
      * @return newAddress New module address.
-     * @return timestamp Upgrade timestamp (unix seconds).
+     * @return blockNumber Upgrade block number (block.number).
      * @return executor Upgrade executor address.
      */
     function getUpgradeHistory(bytes32 key, uint256 index) external view returns (
         address oldAddress,
         address newAddress,
-        uint256 timestamp,
+        uint256 blockNumber,
         address executor
     ) {
         RegistryStorage.UpgradeHistory[] storage history = RegistryStorage.layout().upgradeHistory[key];
         if (index >= history.length) revert IndexOutOfBounds(index, history.length);
         RegistryStorage.UpgradeHistory storage h = history[index];
-        return (h.oldAddress, h.newAddress, h.timestamp, h.executor);
+        return (h.oldAddress, h.newAddress, h.blockNumber, h.executor);
     }
 
     /**
@@ -1203,7 +1196,7 @@ contract Registry is
             out[i] = IRegistry.UpgradeHistory({
                 oldAddress: h.oldAddress,
                 newAddress: h.newAddress,
-                timestamp: h.timestamp,
+                blockNumber: h.blockNumber,
                 executor: h.executor
             });
         }
@@ -1221,7 +1214,7 @@ contract Registry is
      * Security:
      * - onlyOwner
      *
-     * @param newDelay New delay window (seconds).
+     * @param newDelay New delay window (blocks).
      */
     function setMinDelay(uint256 newDelay) external override onlyOwner {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
@@ -1272,7 +1265,6 @@ contract Registry is
         // Perform migration (data move/init) via delegatecall; keep STORAGE_SLOT unchanged.
         bytes memory data = abi.encodeWithSelector(IRegistryStorageMigrator.migrate.selector, fromVersion, toVersion);
         // delegatecall is required for storage migration with a fixed STORAGE_SLOT.
-        // solhint-disable-next-line avoid-low-level-calls
         (bool ok, bytes memory reason) = migrator.delegatecall(data);
         if (!ok) revert Registry__MigratorFailed(migrator, reason);
 
@@ -1318,10 +1310,9 @@ contract Registry is
      * Security:
      * - Read-only (pure)
      *
-     * @return Maximum delay window (seconds).
+     * @return Maximum delay window (blocks).
      */
     // Interface requires MAX_DELAY() (legacy UPPER_SNAKE_CASE naming).
-    // solhint-disable-next-line func-name-mixedcase
     function MAX_DELAY() external pure override returns (uint256) {
         return _MAX_DELAY;
     }

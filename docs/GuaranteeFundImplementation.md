@@ -101,14 +101,14 @@ event GuaranteeLocked(
     address indexed user,
     address indexed asset,
     uint256 amount,
-    uint256 timestamp
+    uint256 blockNumber
 );
 
 event GuaranteeReleased(
     address indexed user,
     address indexed asset,
     uint256 amount,
-    uint256 timestamp
+    uint256 blockNumber
 );
 
 event GuaranteeForfeited(
@@ -116,7 +116,7 @@ event GuaranteeForfeited(
     address indexed asset,
     uint256 amount,
     address indexed feeReceiver,
-    uint256 timestamp
+    uint256 blockNumber
 );
 ```
 
@@ -133,7 +133,7 @@ event GuaranteeLocked(
     uint256 startTime,
     uint256 maturityTime,
     uint256 earlyRepayPenaltyDays,
-    uint256 timestamp
+    uint256 blockNumber
 );
 
 event EarlyRepaymentProcessed(
@@ -145,7 +145,7 @@ event EarlyRepaymentProcessed(
     uint256 refundToBorrower,
     uint256 platformFee,
     uint256 actualInterestPaid,
-    uint256 timestamp
+    uint256 blockNumber
 );
 ```
 
@@ -502,8 +502,8 @@ const riskView = await ethers.getContractAt(
     riskViewAddress
 );
 
-// 计算排除保证金后的健康因子
-const healthFactor = await riskView.calculateHealthFactorExcludingGuarantee(
+// 计算排除保证金后的健康因子（新版返回带 meta）
+const [healthFactor] = await riskView.calculateHealthFactorExcludingGuarantee(
     userAddress,
     assetAddress
 );

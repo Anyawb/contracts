@@ -20,7 +20,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         uint256 debtAmount,
         address liquidator,
         uint256 bonus,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     event MockBatchLiquidationEventPushed(
@@ -31,7 +31,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         uint256[] debtAmounts,
         address liquidator,
         uint256[] bonuses,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /// @notice 推送单笔清算更新
@@ -42,7 +42,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
     /// @param debtAmount 债务清偿数量
     /// @param liquidator 清算人
     /// @param bonus 实得清算奖励
-    /// @param timestamp 区块时间戳
+    /// @param blockNumber 区块号（block.number）
     function pushLiquidationUpdate(
         address user,
         address collateralAsset,
@@ -51,7 +51,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         uint256 debtAmount,
         address liquidator,
         uint256 bonus,
-        uint256 timestamp
+        uint256 blockNumber
     ) external override {
         _userLiquidationCount[user]++;
         _liquidatorTotalBonus[liquidator] += bonus;
@@ -65,7 +65,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
             debtAmount,
             liquidator,
             bonus,
-            timestamp
+            blockNumber
         );
     }
 
@@ -77,7 +77,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
     /// @param debtAmounts 债务清偿数量数组
     /// @param liquidator 清算人
     /// @param bonuses 奖励数组
-    /// @param timestamp 区块时间戳
+    /// @param blockNumber 区块号（block.number）
     function pushBatchLiquidationUpdate(
         address[] calldata users,
         address[] calldata collateralAssets,
@@ -86,7 +86,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         uint256[] calldata debtAmounts,
         address liquidator,
         uint256[] calldata bonuses,
-        uint256 timestamp
+        uint256 blockNumber
     ) external override {
         for (uint256 i = 0; i < users.length; i++) {
             _userLiquidationCount[users[i]]++;
@@ -102,7 +102,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
             debtAmounts,
             liquidator,
             bonuses,
-            timestamp
+            blockNumber
         );
     }
 
@@ -118,8 +118,10 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         uint256,
         uint256,
         uint256
-    ) external override {
+    ) external pure override {
         // no-op for mock
+        uint256 noop = 0;
+        noop;
     }
 
     // 测试辅助函数

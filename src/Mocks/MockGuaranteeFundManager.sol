@@ -22,7 +22,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         if (!mockSuccess) revert("MockGuaranteeFundManager: lock failed");
         _userGuarantees[user][asset] += amount;
         _totalByAsset[asset] += amount;
-        emit GuaranteeLocked(user, asset, amount, block.timestamp);
+        emit GuaranteeLocked(user, asset, amount, block.number);
     }
     
     /// @notice 释放保证金
@@ -34,7 +34,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         require(_userGuarantees[user][asset] >= amount, "Insufficient guarantee");
         _userGuarantees[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
-        emit GuaranteeReleased(user, asset, amount, block.timestamp);
+        emit GuaranteeReleased(user, asset, amount, block.number);
     }
     
     /// @notice 没收保证金
@@ -46,7 +46,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         if (amount > 0) {
             _userGuarantees[user][asset] = 0;
             _totalByAsset[asset] -= amount;
-            emit GuaranteeForfeited(user, asset, amount, feeReceiver, block.timestamp);
+            emit GuaranteeForfeited(user, asset, amount, feeReceiver, block.number);
         }
     }
 
@@ -68,9 +68,9 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         _userGuarantees[user][asset] = 0;
         _totalByAsset[asset] -= total;
 
-        if (refundToBorrower > 0) emit GuaranteeReleased(user, asset, refundToBorrower, block.timestamp);
-        if (penaltyToLender > 0) emit GuaranteeForfeited(user, asset, penaltyToLender, lender, block.timestamp);
-        if (platformFee > 0) emit GuaranteeForfeited(user, asset, platformFee, platform, block.timestamp);
+        if (refundToBorrower > 0) emit GuaranteeReleased(user, asset, refundToBorrower, block.number);
+        if (penaltyToLender > 0) emit GuaranteeForfeited(user, asset, penaltyToLender, lender, block.number);
+        if (platformFee > 0) emit GuaranteeForfeited(user, asset, platformFee, platform, block.number);
     }
 
     /// @notice Partial forfeiture (mock).
@@ -79,7 +79,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         require(_userGuarantees[user][asset] >= amount, "Insufficient guarantee");
         _userGuarantees[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
-        emit GuaranteeForfeited(user, asset, amount, receiver, block.timestamp);
+        emit GuaranteeForfeited(user, asset, amount, receiver, block.number);
     }
 
     /// @notice Multi-receiver default settlement (mock).
@@ -102,7 +102,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         _totalByAsset[asset] -= total;
         for (uint256 i = 0; i < receivers.length; i++) {
             if (amounts[i] == 0) continue;
-            emit GuaranteeForfeited(user, asset, amounts[i], receivers[i], block.timestamp);
+            emit GuaranteeForfeited(user, asset, amounts[i], receivers[i], block.number);
         }
     }
     
@@ -150,7 +150,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         for (uint256 i = 0; i < assets.length; i++) {
             _userGuarantees[user][assets[i]] += amounts[i];
             _totalByAsset[assets[i]] += amounts[i];
-            emit GuaranteeLocked(user, assets[i], amounts[i], block.timestamp);
+            emit GuaranteeLocked(user, assets[i], amounts[i], block.number);
         }
     }
     
@@ -168,7 +168,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
             require(_userGuarantees[user][assets[i]] >= amounts[i], "Insufficient guarantee");
             _userGuarantees[user][assets[i]] -= amounts[i];
             _totalByAsset[assets[i]] -= amounts[i];
-            emit GuaranteeReleased(user, assets[i], amounts[i], block.timestamp);
+            emit GuaranteeReleased(user, assets[i], amounts[i], block.number);
         }
     }
     

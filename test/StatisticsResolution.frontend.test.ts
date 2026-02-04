@@ -36,9 +36,9 @@ describe('Frontend-style resolution via KEY_STATS and KEY_VAULT_CORE', function 
     expect(resolved).to.equal(await stats.getAddress());
 
     // Read snapshot
-    let snap = await stats.getGlobalSnapshot();
-    expect(snap.totalCollateral).to.equal(ethers.parseUnits('100', 18));
-    expect(snap.activeUsers).to.equal(1n);
+    const [globalStats] = await stats.getGlobalStatisticsWithMeta();
+    expect(globalStats.totalCollateral).to.equal(ethers.parseUnits('100', 18));
+    expect(globalStats.activeUsers).to.equal(1n);
 
     // 2) Fallback: clear KEY_STATS and use KEY_VAULT_CORE -> viewContractAddrVar
     await registry.setModule(KEY_STATS, ZERO_ADDRESS);

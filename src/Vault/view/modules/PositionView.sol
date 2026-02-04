@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
 import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
@@ -19,6 +17,7 @@ import {
     ArrayLengthMismatch,
     BatchTooLarge,
     EmptyArray,
+    MissingRole,
     NotAContract,
     ZeroAddress
 } from "../../../errors/StandardErrors.sol";
@@ -46,7 +45,9 @@ interface IVaultCoreViewAddr {
  *
  * Security:
  * - Cache writes are restricted to configured business modules + ACTION_VIEW_PUSH role checks.
- * - Read entrypoints are role-gated via ViewAccessLib to prevent unauthorized data access (per architecture).
+ * - User-dimensional reads follow Scheme U (self read allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN).
+ * - Batch user reads (users[]) are treated as enumeration capabilities: no self-bypass; requires
+ *   ACTION_VIEW_USER_DATA or ACTION_ADMIN.
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  *
  * @custom:security-contact security@example.com
@@ -60,14 +61,14 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @param asset Asset address
      * @param collateral Cached collateral amount (asset decimals)
      * @param debt Cached debt amount (asset decimals)
-     * @param ts Cache update timestamp (seconds since epoch)
+     * @param blockNumber Legacy field: cache update marker (treated as updateBlock in this repo)
      */
     event UserPositionCached(
         address indexed user,
         address indexed asset,
         uint256 collateral,
         uint256 debt,
-        uint256 ts
+        uint256 blockNumber
     );
 
     /**
@@ -78,7 +79,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @param collateral Cached collateral amount (asset decimals)
      * @param debt Cached debt amount (asset decimals)
      * @param version Position version (monotonic per (user, asset))
-     * @param ts Cache update timestamp (seconds since epoch)
+     * @param blockNumber Legacy field: cache update marker (treated as updateBlock in this repo)
      */
     event UserPositionCachedV2(
         address indexed user,
@@ -86,7 +87,17 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint256 collateral,
         uint256 debt,
         uint64 version,
-        uint256 ts
+        uint256 blockNumber
+    );
+
+    /// @notice Explicit block-based companion event for UserPositionCachedV2.
+    event UserPositionCachedV3(
+        address indexed user,
+        address indexed asset,
+        uint256 collateral,
+        uint256 debt,
+        uint64 version,
+        uint256 updateBlock
     );
     // NOTE: CacheUpdateFailed is declared in CacheEvents (SSOT) and is inherited here.
 
@@ -110,9 +121,6 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
     /// @notice Pushed values do not match the ledger values.
     error PositionView__LedgerMismatch();
-
-    /// @notice Latest ledger read failed (best-effort paths may emit CacheUpdateFailed instead).
-    error PositionView__LedgerReadFailed();
 
     /// @notice Incoming version is stale or violates monotonic ordering.
     error PositionView__StaleVersion(uint64 currentVersion, uint64 incomingVersion);
@@ -138,10 +146,10 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     // user => asset => collateral|debt
     mapping(address => mapping(address => uint256)) private _collateralCache;
     mapping(address => mapping(address => uint256)) private _debtCache;
-    mapping(address => uint256)                         private _cacheTimestamps;
+    mapping(address => uint256)                         private _cacheBlocks;
     // user => asset => version (单调递增)
     mapping(address => mapping(address => uint64))      private _positionVersion;
-    // user => asset => last updated timestamp
+    // user => asset => last updated blockNumber
     mapping(address => mapping(address => uint256))     private _positionUpdatedAt;
     // user-level manual invalidation barrier (clearing cache should invalidate all (user,asset) cached entries)
     mapping(address => uint256)                         private _userInvalidatedAt;
@@ -151,7 +159,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     mapping(address => mapping(address => bytes32))     private _lastAppliedRequestId;
 
     // constants via ViewConstants
-    uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION;
+    uint256 private constant _CACHE_DURATION_BLOCKS = ViewConstants.CACHE_DURATION_BLOCKS;
     uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
@@ -161,13 +169,33 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         _;
     }
 
-    modifier onlyUserViewer() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
+    /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
+    modifier onlyAuthorizedFor(address user) {
+        if (msg.sender != user) {
+            bool ok =
+                _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) || _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
+            if (!ok) revert MissingRole();
+        }
         _;
     }
 
-    modifier onlyRiskViewer() {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender);
+    /// @dev Scheme U batch: no self-bypass; requires VIEW_USER_DATA or ADMIN.
+    modifier onlyOpsOrAdmin() {
+        bool ok =
+            _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+                || _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ok) revert MissingRole();
+        _;
+    }
+
+    /// @dev Gate for valuation helpers used by risk/liquidation flows.
+    ///      These reads are treated as risk-scoped data (not raw oracle price feeds).
+    ///      Access policy: ACTION_VIEW_RISK_DATA with ACTION_ADMIN bypass.
+    modifier onlyValuationViewerOrAdmin() {
+        if (
+            !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
+                && !_hasRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender)
+        ) revert MissingRole();
         _;
     }
 
@@ -186,7 +214,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     }
 
     function _requireRole(bytes32 actionKey, address user) internal view {
-        ViewAccessLib.requireRole(_registryAddr, actionKey, user);
+        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, user)) revert MissingRole();
     }
 
     function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
@@ -486,7 +514,10 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
             user,
             asset,
             collateral,
-            debt
+            debt,
+            requestId,
+            seq,
+            nextVersion
         );
         if (!ok) {
             // Ledger read failed: CacheUpdateFailed was emitted; skip cache write.
@@ -502,16 +533,14 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         _collateralCache[user][asset] = collateral;
         _debtCache[user][asset]       = debt;
-        // solhint-disable-next-line not-rely-on-time
-        _cacheTimestamps[user]        = block.timestamp;
-        // solhint-disable-next-line not-rely-on-time
-        _positionUpdatedAt[user][asset] = block.timestamp;
+        _cacheBlocks[user]        = block.number;
+        _positionUpdatedAt[user][asset] = block.number;
         _positionVersion[user][asset] = newVersion;
 
-        // solhint-disable-next-line not-rely-on-time
-        emit UserPositionCached(user, asset, collateral, debt, block.timestamp);
-        // solhint-disable-next-line not-rely-on-time
-        emit UserPositionCachedV2(user, asset, collateral, debt, newVersion, block.timestamp);
+        uint256 updateBlock = block.number;
+        emit UserPositionCached(user, asset, collateral, debt, updateBlock);
+        emit UserPositionCachedV2(user, asset, collateral, debt, newVersion, updateBlock);
+        emit UserPositionCachedV3(user, asset, collateral, debt, newVersion, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
             abi.encode(user, asset, collateral, debt)
@@ -555,16 +584,14 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
             if (requestId != bytes32(0)) _lastAppliedRequestId[user][asset] = requestId;
             _collateralCache[user][asset] = baseCollateral;
             _debtCache[user][asset]       = baseDebt;
-            // solhint-disable-next-line not-rely-on-time
-            _cacheTimestamps[user]        = block.timestamp;
-            // solhint-disable-next-line not-rely-on-time
-            _positionUpdatedAt[user][asset] = block.timestamp;
+            _cacheBlocks[user]        = block.number;
+            _positionUpdatedAt[user][asset] = block.number;
             _positionVersion[user][asset] = newVersionSync;
 
-            // solhint-disable-next-line not-rely-on-time
-            emit UserPositionCached(user, asset, baseCollateral, baseDebt, block.timestamp);
-            // solhint-disable-next-line not-rely-on-time
-            emit UserPositionCachedV2(user, asset, baseCollateral, baseDebt, newVersionSync, block.timestamp);
+            uint256 updateBlockSync = block.number;
+            emit UserPositionCached(user, asset, baseCollateral, baseDebt, updateBlockSync);
+            emit UserPositionCachedV2(user, asset, baseCollateral, baseDebt, newVersionSync, updateBlockSync);
+            emit UserPositionCachedV3(user, asset, baseCollateral, baseDebt, newVersionSync, updateBlockSync);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
                 abi.encode(user, asset, baseCollateral, baseDebt)
@@ -586,16 +613,14 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         _collateralCache[user][asset] = newCollateral;
         _debtCache[user][asset]       = newDebt;
-        // solhint-disable-next-line not-rely-on-time
-        _cacheTimestamps[user]        = block.timestamp;
-        // solhint-disable-next-line not-rely-on-time
-        _positionUpdatedAt[user][asset] = block.timestamp;
+        _cacheBlocks[user]        = block.number;
+        _positionUpdatedAt[user][asset] = block.number;
         _positionVersion[user][asset] = newVersion;
 
-        // solhint-disable-next-line not-rely-on-time
-        emit UserPositionCached(user, asset, newCollateral, newDebt, block.timestamp);
-        // solhint-disable-next-line not-rely-on-time
-        emit UserPositionCachedV2(user, asset, newCollateral, newDebt, newVersion, block.timestamp);
+        uint256 updateBlockDelta = block.number;
+        emit UserPositionCached(user, asset, newCollateral, newDebt, updateBlockDelta);
+        emit UserPositionCachedV2(user, asset, newCollateral, newDebt, newVersion, updateBlockDelta);
+        emit UserPositionCachedV3(user, asset, newCollateral, newDebt, newVersion, updateBlockDelta);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
             abi.encode(user, asset, newCollateral, newDebt)
@@ -618,7 +643,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     function retryUserPositionUpdate(address user, address asset) external onlyAdmin {
         if (user == address(0) || asset == address(0)) revert PositionView__InvalidInput();
 
-        (bool ok, uint256 collateral, uint256 debt) = _fetchLatestPositionGuarded(user, asset, 0, 0);
+        (bool ok, uint256 collateral, uint256 debt) = _fetchLatestPositionGuarded(
+            user,
+            asset,
+            0,
+            0,
+            bytes32(0),
+            0,
+            0
+        );
         if (!ok) {
             // CacheUpdateFailed was emitted in _fetchLatestPositionGuarded.
             return;
@@ -628,16 +661,14 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         _collateralCache[user][asset] = collateral;
         _debtCache[user][asset]       = debt;
-        // solhint-disable-next-line not-rely-on-time
-        _cacheTimestamps[user]        = block.timestamp;
-        // solhint-disable-next-line not-rely-on-time
-        _positionUpdatedAt[user][asset] = block.timestamp;
+        _cacheBlocks[user]        = block.number;
+        _positionUpdatedAt[user][asset] = block.number;
         _positionVersion[user][asset] = newVersion;
 
-        // solhint-disable-next-line not-rely-on-time
-        emit UserPositionCached(user, asset, collateral, debt, block.timestamp);
-        // solhint-disable-next-line not-rely-on-time
-        emit UserPositionCachedV2(user, asset, collateral, debt, newVersion, block.timestamp);
+        uint256 updateBlock = block.number;
+        emit UserPositionCached(user, asset, collateral, debt, updateBlock);
+        emit UserPositionCachedV2(user, asset, collateral, debt, newVersion, updateBlock);
+        emit UserPositionCachedV3(user, asset, collateral, debt, newVersion, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
             abi.encode(user, asset, collateral, debt)
@@ -646,107 +677,94 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Get a user's collateral/debt position for an asset.
+     * @notice Get a user's position with cache validity, blockNumber, and version (B-class unified output).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_USER_DATA permission (via onlyUserViewer / ViewAccessLib)
+     *      - caller is not the target user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via Scheme U)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_USER_DATA
-     * - Best-effort fallback: if the cache is invalid, values are read directly from the ledger.
-     *
-     * @param user Target user address
-     * @param asset Asset address
-     * @return collateral Collateral amount (asset decimals)
-     * @return debt Debt amount (asset decimals)
-     */
-    function getUserPosition(address user, address asset)
-        external
-        view
-        onlyValidRegistry
-        onlyUserViewer
-        returns (uint256 collateral, uint256 debt)
-    {
-        (collateral, debt) = _getCachedOrLatestPosition(user, asset);
-    }
-
-    /**
-     * @notice Get a user's collateral/debt position for an asset, with cache validity.
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_USER_DATA permission (via onlyUserViewer / ViewAccessLib)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_USER_DATA
+     * - Scheme U user-dimensional read (self allowed; ops/admin can read; outsider non-self reverts MissingRole)
      *
      * @param user Target user address
      * @param asset Asset address
      * @return collateral Collateral amount (asset decimals)
      * @return debt Debt amount (asset decimals)
      * @return isValid Whether the cache is valid for (user, asset)
-     */
-    function getUserPositionWithValidity(address user, address asset)
-        external
-        view
-        onlyValidRegistry
-        onlyUserViewer
-        returns (uint256 collateral, uint256 debt, bool isValid)
-    {
-        (collateral, debt, isValid) = _getCachedOrLatestPositionWithValidity(user, asset);
-    }
-
-    /**
-     * @notice Get a user's position with cache validity, timestamp, and version (B-class unified output).
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_USER_DATA permission (via onlyUserViewer / ViewAccessLib)
-     *
-     * Security:
-     * - Role-gated via ACTION_VIEW_USER_DATA
-     *
-     * @param user Target user address
-     * @param asset Asset address
-     * @return collateral Collateral amount (asset decimals)
-     * @return debt Debt amount (asset decimals)
-     * @return isValid Whether the cache is valid for (user, asset)
-     * @return timestamp Last cache write timestamp for (user, asset) (seconds since epoch)
+     * @return blockNumber Legacy field: last cache write marker for (user, asset) (treated as blockNumber)
      * @return version Position version for (user, asset) (0 if never written)
      */
     function getUserPositionWithMeta(address user, address asset)
         external
         view
         onlyValidRegistry
-        onlyUserViewer
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 timestamp, uint64 version)
+        onlyAuthorizedFor(user)
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
     {
         (collateral, debt, isValid) = _getCachedOrLatestPositionWithValidity(user, asset);
-        timestamp = _positionUpdatedAt[user][asset];
+        blockNumber = _positionUpdatedAt[user][asset];
         version = _positionVersion[user][asset];
     }
 
     /**
-     * @notice Batch query user positions (best-effort per pair).
+     * @notice Get a user's position with explicit block-based metadata (recommended).
+     * @dev Same access policy as `getUserPositionWithMeta`.
+     *
+     * @return collateral Collateral amount (asset decimals)
+     * @return debt Debt amount (asset decimals)
+     * @return isValid Whether the cache is valid for (user, asset)
+     * @return updateBlock Last cache write block for (user, asset)
+     * @return ageBlocks Number of blocks since update (0 if never written)
+     * @return version Position version for (user, asset)
+     */
+    function getUserPositionWithMetaV2(address user, address asset)
+        external
+        view
+        onlyValidRegistry
+        onlyAuthorizedFor(user)
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 updateBlock, uint256 ageBlocks, uint64 version)
+    {
+        (collateral, debt, isValid) = _getCachedOrLatestPositionWithValidity(user, asset);
+        updateBlock = _positionUpdatedAt[user][asset];
+        version = _positionVersion[user][asset];
+        if (updateBlock == 0 || updateBlock > block.number) {
+            ageBlocks = 0;
+        } else {
+            ageBlocks = block.number - updateBlock;
+        }
+    }
+
+    /**
+     * @notice Batch query user positions with cache validity, blockNumbers, and versions.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_USER_DATA permission (via onlyUserViewer / ViewAccessLib)
+     *      - caller lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole; batch user reads have no self-bypass)
      *      - users is empty (EmptyArray)
      *      - users.length != assets.length (ArrayLengthMismatch)
      *      - batch size exceeds _MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_USER_DATA
+     * - Scheme U batch user-dimensional read: enumeration capability (no self-bypass; ops/admin only)
      *
      * @param users User addresses
      * @param assets Asset addresses
      * @return collaterals Collateral amounts (asset decimals)
      * @return debts Debt amounts (asset decimals)
+     * @return validFlags Cache validity flags
+     * @return blockNumbers Legacy field: cache markers (treated as blockNumber)
+     * @return versions Position versions
      */
-    function batchGetUserPositions(address[] calldata users, address[] calldata assets)
+    function batchGetUserPositionsWithMeta(address[] calldata users, address[] calldata assets)
         external
         view
         onlyValidRegistry
-        onlyUserViewer
-        returns (uint256[] memory collaterals, uint256[] memory debts)
+        onlyOpsOrAdmin
+        returns (
+            uint256[] memory collaterals,
+            uint256[] memory debts,
+            bool[] memory validFlags,
+            uint256[] memory blockNumbers,
+            uint64[] memory versions
+        )
     {
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
@@ -755,29 +773,37 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         collaterals = new uint256[](len);
         debts       = new uint256[](len);
+        validFlags  = new bool[](len);
+        blockNumbers  = new uint256[](len);
+        versions    = new uint64[](len);
         for (uint256 i; i < len; ++i) {
-            (collaterals[i], debts[i]) = _getCachedOrLatestPosition(users[i], assets[i]);
+            (collaterals[i], debts[i], validFlags[i]) = _getCachedOrLatestPositionWithValidity(
+                users[i],
+                assets[i]
+            );
+            blockNumbers[i] = _positionUpdatedAt[users[i]][assets[i]];
+            versions[i]   = _positionVersion[users[i]][assets[i]];
         }
     }
 
     /**
-     * @notice Get user's total collateral value (settlement token units).
+     * @notice Get user's total collateral value (USD-8 value).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission (via onlyRiskViewer / ViewAccessLib)
+     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin (MissingRole via onlyValuationViewerOrAdmin)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
+     * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
      * - Best-effort: returns 0 if dependent modules are unavailable or external calls fail.
      *
      * @param user Target user address
-     * @return totalValue Total collateral value (settlement token decimals, as defined by the oracle)
+     * @return totalValue Total collateral value (USD-8 value)
      */
     function getUserTotalCollateralValue(address user)
         external
         view
         onlyValidRegistry
-        onlyRiskViewer
+        onlyValuationViewerOrAdmin
         returns (uint256 totalValue)
     {
         if (user == address(0)) revert ZeroAddress();
@@ -805,7 +831,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
             }
             if (amount == 0) continue;
 
-            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*timestamp*/, uint256 decimals) {
+            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*blockNumber*/, uint256 decimals) {
                 if (price == 0) continue;
                 // 10**decimals must not overflow uint256
                 if (decimals > 77) continue;
@@ -820,18 +846,18 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     }
 
     /**
-     * @notice Get system total collateral value (settlement token units).
+     * @notice Get system total collateral value (USD-8 value).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission (via onlyRiskViewer / ViewAccessLib)
+     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin (MissingRole via onlyValuationViewerOrAdmin)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
+     * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
      * - Best-effort: returns 0 if dependent modules are unavailable or external calls fail.
      *
-     * @return totalValue Total collateral value (settlement token decimals, as defined by the oracle)
+     * @return totalValue Total collateral value (USD-8 value)
      */
-    function getTotalCollateralValue() external view onlyValidRegistry onlyRiskViewer returns (uint256 totalValue) {
+    function getTotalCollateralValue() external view onlyValidRegistry onlyValuationViewerOrAdmin returns (uint256 totalValue) {
         (address cm,, address oracle) = _resolveCollateralAndOracle();
 
         address[] memory assets;
@@ -856,7 +882,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
             }
             if (totalAmount == 0) continue;
 
-            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*timestamp*/, uint256 decimals) {
+            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*blockNumber*/, uint256 decimals) {
                 if (price == 0) continue;
                 if (decimals > 77) continue;
                 uint256 scale = 10 ** decimals;
@@ -869,30 +895,30 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     }
 
     /**
-     * @notice Get value of an asset amount (settlement token units).
+     * @notice Get value of an asset amount (USD-8 value).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission (via onlyRiskViewer / ViewAccessLib)
+     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin (MissingRole via onlyValuationViewerOrAdmin)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_RISK_DATA
+     * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
      * - Best-effort: returns 0 if the oracle call fails.
      *
      * @param asset Asset address
      * @param amount Asset amount (asset decimals)
-     * @return value Value in settlement token units (oracle-defined decimals)
+     * @return value Value in USD-8
      */
     function getAssetValue(address asset, uint256 amount)
         external
         view
         onlyValidRegistry
-        onlyRiskViewer
+        onlyValuationViewerOrAdmin
         returns (uint256 value)
     {
         if (asset == address(0) || amount == 0) return 0;
         (, , address oracle) = _resolveCollateralAndOracle();
 
-        try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*timestamp*/, uint256 decimals) {
+        try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*blockNumber*/, uint256 decimals) {
             if (price == 0) return 0;
             if (decimals > 77) return 0;
             uint256 scale = 10 ** decimals;
@@ -906,22 +932,42 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     /*━━━━━━━━━━━━━━━ Cache helpers ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Check whether a user's cache is valid (legacy user-level timestamp check).
-     * @dev Reverts if:
-     *      - (none)
+     * @notice Return the user-level cache freshness marker with metadata.
+     * @dev Reverts if: (never)
      *
      * Security:
      * - Read-only
      *
      * @param user Target user address
      * @return isValid Whether the user-level cache marker is valid
+     * @return cacheBlock User-level cache marker block (block.number)
      */
-    function isUserCacheValid(address user) external view returns (bool isValid) {
-        uint256 ts = _cacheTimestamps[user];
-        if (ts == 0) return false;
-        if (ts <= _userInvalidatedAt[user]) return false;
-        // solhint-disable-next-line not-rely-on-time
-        return block.timestamp - ts <= _CACHE_DURATION;
+    function getUserCacheStatusWithMeta(address user) external view returns (bool isValid, uint256 cacheBlock) {
+        cacheBlock = _cacheBlocks[user];
+        if (cacheBlock == 0) return (false, 0);
+        if (cacheBlock <= _userInvalidatedAt[user]) return (false, cacheBlock);
+        isValid = block.number >= cacheBlock && (block.number - cacheBlock <= _CACHE_DURATION_BLOCKS);
+    }
+
+    /**
+     * @notice Return user-level cache marker with explicit block-based metadata (recommended).
+     * @dev Reverts if: (never)
+     */
+    function getUserCacheStatusWithMetaV2(address user)
+        external
+        view
+        returns (bool isValid, uint256 updateBlock, uint256 ageBlocks)
+    {
+        updateBlock = _cacheBlocks[user];
+        if (updateBlock == 0) return (false, 0, 0);
+        if (updateBlock <= _userInvalidatedAt[user]) {
+            // invalidated after this marker
+            if (updateBlock > block.number) return (false, updateBlock, 0);
+            return (false, updateBlock, block.number - updateBlock);
+        }
+        if (updateBlock > block.number) return (false, updateBlock, 0);
+        ageBlocks = block.number - updateBlock;
+        isValid = ageBlocks <= _CACHE_DURATION_BLOCKS;
     }
 
     /**
@@ -937,9 +983,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     function clearUserCache(address user) external onlyUserOrStrictAdmin(user) {
         // Invalidate all cached entries for this user without iterating mappings.
         // We keep per-(user,asset) cached values in storage, but mark them invalid via a user-level barrier.
-        // solhint-disable-next-line not-rely-on-time
-        _userInvalidatedAt[user] = block.timestamp;
-        delete _cacheTimestamps[user];
+        _userInvalidatedAt[user] = block.number;
+        delete _cacheBlocks[user];
     }
 
     /**
@@ -959,7 +1004,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     }
 
     /**
-     * @notice Get the last cache write timestamp for (user, asset).
+     * @notice Get the last cache write marker for (user, asset).
      * @dev Reverts if:
      *      - (none)
      *
@@ -968,20 +1013,20 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      *
      * @param user Target user address
      * @param asset Asset address
-     * @return timestamp Last update timestamp (seconds since epoch; 0 if never written)
+     * @return blockNumber Legacy field: last update marker (treated as blockNumber; 0 if never written)
      */
-    function getPositionUpdatedAt(address user, address asset) external view returns (uint256 timestamp) {
+    function getPositionUpdatedAt(address user, address asset) external view returns (uint256 blockNumber) {
         return _positionUpdatedAt[user][asset];
     }
 
     /*━━━━━━━━━━━━━━━ Internal ━━━━━━━━━━━━━━━*/
     function _isValidPosition(address user, address asset) internal view returns (bool) {
-        uint256 ts = _positionUpdatedAt[user][asset];
-        if (ts == 0) return false;
+        uint256 updateBlock = _positionUpdatedAt[user][asset];
+        if (updateBlock == 0) return false;
         // if user cleared cache after this position was written, treat as invalid
-        if (ts <= _userInvalidatedAt[user]) return false;
-        // solhint-disable-next-line not-rely-on-time
-        return block.timestamp - ts <= _CACHE_DURATION;
+        if (updateBlock <= _userInvalidatedAt[user]) return false;
+        if (updateBlock > block.number) return false;
+        return block.number - updateBlock <= _CACHE_DURATION_BLOCKS;
     }
 
     function _getCachedOrLatestPosition(address user, address asset)
@@ -1022,7 +1067,10 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         address user,
         address asset,
         uint256 expectedCollateral,
-        uint256 expectedDebt
+        uint256 expectedDebt,
+        bytes32 requestId,
+        uint64 seq,
+        uint64 nextVersion
     ) internal returns (bool ok, uint256 collateral, uint256 debt) {
         (address cm, address le) = _resolveLedgerModules();
 
@@ -1031,10 +1079,32 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
                 return (true, ledgerCollateral, ledgerDebt);
             } catch (bytes memory reason) {
                 emit CacheUpdateFailed(user, asset, address(this), expectedCollateral, expectedDebt, reason);
+                emit CacheUpdateFailedV2(
+                    user,
+                    asset,
+                    requestId,
+                    address(this),
+                    expectedCollateral,
+                    expectedDebt,
+                    reason,
+                    seq,
+                    nextVersion
+                );
                 return (false, 0, 0);
             }
         } catch (bytes memory reason) {
             emit CacheUpdateFailed(user, asset, address(this), expectedCollateral, expectedDebt, reason);
+            emit CacheUpdateFailedV2(
+                user,
+                asset,
+                requestId,
+                address(this),
+                expectedCollateral,
+                expectedDebt,
+                reason,
+                seq,
+                nextVersion
+            );
             return (false, 0, 0);
         }
     }
@@ -1056,7 +1126,9 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @param newImplementation New implementation contract address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert PositionView__ZeroImplementation();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }

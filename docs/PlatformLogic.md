@@ -247,7 +247,11 @@ contract LoanNFT {
 
 #### 🔧 **权限推断实现**
 ```solidity
-function getUserPermission(address user) external view returns (PermissionLevel level) {
+function getUserPermissionWithMeta(address user)
+    external
+    view
+    returns (PermissionLevel level, bool isValid, uint256 blockNumber)
+{
     if (user == address(0)) return PermissionLevel.NONE;
     
     // 检查是否拥有管理员角色
@@ -278,14 +282,14 @@ function getUserPermission(address user) external view returns (PermissionLevel 
 #### 📝 **标准化事件**
 ```solidity
 // 权限变更事件
-event PermissionUpdated(address indexed user, PermissionLevel oldLevel, PermissionLevel newLevel, uint256 timestamp);
+event PermissionUpdated(address indexed user, PermissionLevel oldLevel, PermissionLevel newLevel, uint256 blockNumber);
 
 // 角色变更事件
 event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
 event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
 
 // 动作执行事件
-event ActionExecuted(bytes32 indexed actionKey, string actionName, address indexed executor, uint256 timestamp);
+event ActionExecuted(bytes32 indexed actionKey, string actionName, address indexed executor, uint256 blockNumber);
 ```
 
 #### 🔧 **事件使用**
@@ -295,7 +299,7 @@ emit SystemEvents.ActionExecuted(
     ActionKeys.ACTION_DEPOSIT,
     ActionKeys.getActionKeyString(ActionKeys.ACTION_DEPOSIT),
     msg.sender,
-    block.timestamp
+    block.number
 );
 ```
 
@@ -350,7 +354,7 @@ function processUserOperation(
     bytes32 operationType,
     address asset,
     uint256 amount,
-    uint256 timestamp
+    uint256 blockNumber
 ) external onlyAuthorizedContract
 
 // 数据推送接口（由业务模块调用）
@@ -367,19 +371,24 @@ function pushSystemStateUpdate(
     uint256 totalDebt
 ) external onlyBusinessContract
 
-// 查询接口（免费查询，0 gas）
-function getUserPosition(address user, address asset) external view 
-    returns (uint256 collateral, uint256 debt)
-function getUserCollateral(address user, address asset) external view returns (uint256)
-function getUserDebt(address user, address asset) external view returns (uint256)
-function isUserCacheValid(address user) external view returns (bool)
-// 注意：健康因子查询已移至 HealthView 模块
-
+// 查询接口（免费查询，0 gas）已迁移到 View 模块
+// - PositionView/UserView：仓位与用户聚合（均返回 meta）
+// - HealthView：健康因子（返回 isValid/blockNumber）
+// - ValuationOracleView/BatchView：价格（返回 isValid/blockNumber 或 validFlags）
+//
+// 示例（UserView）：
+// function getUserPosition(address user, address asset) external view
+//     returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
+// function getUserCollateral(address user, address asset) external view
+//     returns (uint256 collateral, bool isValid, uint256 blockNumber, uint64 version)
+// function getUserDebt(address user, address asset) external view
+//     returns (uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
+//
 // 批量查询
-function batchGetUserPositions(address[] calldata users, address[] calldata assets) 
-    external view returns (UserPosition[] memory)
-function batchGetAssetPrices(address[] calldata assets) external view returns (uint256[] memory)
-// 注意：健康因子批量查询已移至 HealthView 模块
+// function batchGetUserPositions(address[] calldata users, address[] calldata assets)
+//     external view returns (UserPositionItemMeta[] memory)
+// function batchGetAssetPrices(address[] calldata assets)
+//     external view returns (AssetPriceItem[] memory)
 
 // 缓存管理
 function clearExpiredCache(address user) external onlyAdmin
@@ -567,7 +576,7 @@ function getAssetInfo(address asset) external view returns (AssetInfo memory)
 ### 3.8 AccessControlManager（统一权限控制中心）
 
 #### 📋 **核心功能**
-- **权限级别（推断）**：`getUserPermission` 按角色动态推断（NONE / VIEWER / OPERATOR / ADMIN）
+- **权限级别（推断）**：`getUserPermissionWithMeta` 按角色动态推断（NONE / VIEWER / OPERATOR / ADMIN）
 - **角色管理系统（SSOT）**：基于 ActionKeys 的标准化角色管理（`grantRole/revokeRole/hasRole/requireRole`）
 - **事件审计**：`RoleGranted/RoleRevoked` 用于链下审计与权限盘点
 - **职责边界（SSOT）**：系统暂停/恢复由 `VaultRouter` 收敛（`ACTION_PAUSE_SYSTEM` / `ACTION_UNPAUSE_SYSTEM`），ACM 不维护“暂停状态机”
@@ -575,7 +584,7 @@ function getAssetInfo(address asset) external view returns (AssetInfo memory)
 #### 🔧 **主要函数**
 ```solidity
 // 权限级别查询（动态推断）
-function getUserPermission(address user) external view returns (PermissionLevel)
+function getUserPermissionWithMeta(address user) external view returns (PermissionLevel, bool, uint256)
 // 注意：权限级别根据角色动态推断，不支持直接设置
 
 // 角色管理
@@ -768,7 +777,7 @@ try ICollateralManager(collateralManager).depositCollateral(user, asset, amount)
     // 成功处理
 } catch (bytes memory lowLevelData) {
     // 错误处理
-    emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.timestamp);
+    emit SystemEvents.ExternalModuleReverted("CollateralManager", lowLevelData, block.number);
     revert ExternalModuleRevertedRaw("CollateralManager", lowLevelData);
 }
 ```
@@ -862,20 +871,20 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         
         _assetInfo[asset] = AssetInfo({
             isActive: true,
-            addedAt: block.timestamp,
+            addedAt: block.number,
             addedBy: msg.sender,
-            lastUpdated: block.timestamp,
+            lastUpdated: block.number,
             updateCount: 1
         });
         
-        emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, block.timestamp);
+        emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, block.number);
         
         // 记录标准化动作事件
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 }
@@ -900,9 +909,9 @@ function batchAddAllowedAssets(address[] calldata assets) external onlyValidRegi
             
             _assetInfo[asset] = AssetInfo({
                 isActive: true,
-                addedAt: block.timestamp,
+                addedAt: block.number,
                 addedBy: msg.sender,
-                lastUpdated: block.timestamp,
+                lastUpdated: block.number,
                 updateCount: 1
             });
             
@@ -923,7 +932,7 @@ function batchAddAllowedAssets(address[] calldata assets) external onlyValidRegi
         ActionKeys.ACTION_ADD_WHITELIST,
         ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
         msg.sender,
-        block.timestamp
+        block.number
     );
 }
 ```
@@ -943,7 +952,7 @@ function batchRemoveAllowedAssets(address[] calldata assets) external onlyValidR
             
             // 更新资产信息
             _assetInfo[asset].isActive = false;
-            _assetInfo[asset].lastUpdated = block.timestamp;
+            _assetInfo[asset].lastUpdated = block.number;
             _assetInfo[asset].updateCount++;
             
             // 从数组中移除（优化实现）
@@ -973,7 +982,7 @@ function batchRemoveAllowedAssets(address[] calldata assets) external onlyValidR
         ActionKeys.ACTION_REMOVE_WHITELIST,
         ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
         msg.sender,
-        block.timestamp
+        block.number
     );
 }
 ```
@@ -983,9 +992,9 @@ function batchRemoveAllowedAssets(address[] calldata assets) external onlyValidR
 #### 📊 **资产详细信息**
 系统维护每个资产的详细信息，包括：
 - **isActive**：资产是否激活
-- **addedAt**：添加时间戳
+- **addedAt**：添加区块
 - **addedBy**：添加者地址
-- **lastUpdated**：最后更新时间戳
+- **lastUpdated**：最后更新区块
 - **updateCount**：更新次数
 
 #### 🔧 **查询功能**
@@ -1011,14 +1020,14 @@ function updateAssetInfo(address asset) external onlyValidRegistry {
     if (asset == address(0)) revert ZeroAddress();
     if (!_allowedAssets[asset]) revert AmountIsZero();
     
-    _assetInfo[asset].lastUpdated = block.timestamp;
+    _assetInfo[asset].lastUpdated = block.number;
     _assetInfo[asset].updateCount++;
     
     emit AssetInfoUpdated(
         ActionKeys.ACTION_SET_PARAMETER,
         asset,
         msg.sender,
-        block.timestamp
+        block.number
     );
 }
 ```
@@ -1252,9 +1261,15 @@ sequenceDiagram
 
 #### 🔧 **清算检查**
 ```solidity
-function isLiquidatable(address user) external view returns (bool) {
-    uint256 healthFactor = getUserHealthFactor(user);
-    return healthFactor < minHealthFactor;
+function isLiquidatable(address user)
+    external
+    view
+    returns (bool liquidatable, bool isValid, uint256 blockNumber)
+{
+    (uint256 healthFactor, , ) = getUserHealthFactorWithMeta(user);
+    liquidatable = healthFactor < minHealthFactor;
+    isValid = true;
+    blockNumber = block.number;
 }
 ```
 
@@ -1306,32 +1321,32 @@ PriceOracle 是一个基于 CoinGecko API 的多资产价格预言机系统，�
 ```solidity
 interface IPriceOracle {
     // 价格查询
-    function getPrice(address asset) external view returns (uint256 price, uint256 timestamp, uint256 decimals);
-    function getPrices(address[] calldata assets) external view returns (uint256[] memory prices, uint256[] memory timestamps, uint256[] memory decimalsArray);
-    function isPriceValid(address asset) external view returns (bool);
+    function getPrice(address asset) external view returns (uint256 price, uint256 blockNumber, uint256 assetDecimals);
+    function getPrices(address[] calldata assets) external view returns (uint256[] memory prices, uint256[] memory blockNumbers, uint256[] memory assetDecimalsArray);
+    function isPriceValid(address asset) external view returns (bool isValid);
     
     // 资产配置
-    function configureAsset(address asset, string calldata coingeckoId, uint256 decimals, uint256 maxPriceAge) external;
+    function configureAsset(address asset, string calldata coingeckoId, uint256 assetDecimals, uint256 maxPriceAge) external;
     function getAssetConfig(address asset) external view returns (AssetConfig memory);
     
     // 价格更新（需要 ACTION_UPDATE_PRICE 权限）
-    function updatePrice(address asset, uint256 price, uint256 timestamp) external;
-    function updatePrices(address[] calldata assets, uint256[] calldata prices, uint256[] calldata timestamps) external;
+    function updatePrice(address asset, uint256 price, uint256 blockNumber) external;
+    function updatePrices(address[] calldata assets, uint256[] calldata prices, uint256[] calldata blockNumbers) external;
 }
 ```
 
 #### 📊 **数据结构**
 ```solidity
 struct PriceData {
-    uint256 price;        // 价格（8位精度）
-    uint256 timestamp;    // 价格更新时间戳
-    uint256 decimals;     // 价格精度
+    uint256 price;        // 价格（SSOT: USD-8；例如 $1.00 = 100000000）
+    uint256 blockNumber;    // 价格更新区块
+    uint256 assetDecimals; // 资产精度（token decimals；用于 amount(base units) → valueUSD8 换算；不是 price 精度）
     bool isValid;         // 价格是否有效
 }
 
 struct AssetConfig {
     string coingeckoId;   // CoinGecko 资产 ID
-    uint256 decimals;     // 资产精度
+    uint256 assetDecimals; // 资产精度（token decimals；用于估值缩放；不是 price 精度）
     bool isActive;        // 资产是否激活
     uint256 maxPriceAge;  // 最大价格年龄（秒）
 }
@@ -1542,7 +1557,7 @@ contract VaultBusinessLogic is
             ActionKeys.ACTION_PAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_PAUSE_SYSTEM),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -1554,7 +1569,7 @@ contract VaultBusinessLogic is
             ActionKeys.ACTION_UNPAUSE_SYSTEM,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UNPAUSE_SYSTEM),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -1598,7 +1613,7 @@ contract VaultBusinessLogic is UUPSUpgradeable {
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
 }

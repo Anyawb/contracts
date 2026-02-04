@@ -37,8 +37,8 @@ export class Logger {
   private constructor() {}
 
   private formatMessage(level: string, message: string): string {
-    const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    return `[${chalk.gray(timestamp)}] ${level} ${message}`;
+    const logTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    return `[${chalk.gray(logTime)}] ${level} ${message}`;
   }
   
 

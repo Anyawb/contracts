@@ -56,31 +56,31 @@ contract MockLendingEngineViewAdapter {
 
     /* ------------------------------- View API ------------------------------ */
 
-    function _getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order) {
+    function getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order) {
         return _orders[orderId];
     }
 
-    function _getUserLoanCountForView(address user) external view returns (uint256 count) {
+    function getUserLoanCountForView(address user) external view returns (uint256 count) {
         return _userLoanCount[user];
     }
 
-    function _getFailedFeeAmountForView(uint256 orderId) external view returns (uint256 feeAmount) {
+    function getFailedFeeAmountForView(uint256 orderId) external view returns (uint256 feeAmount) {
         return _failedFeeAmount[orderId];
     }
 
-    function _getNftRetryCountForView(uint256 orderId) external view returns (uint256 retryCount) {
+    function getNftRetryCountForView(uint256 orderId) external view returns (uint256 retryCount) {
         return _nftRetryCount[orderId];
     }
 
-    function _canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess) {
+    function canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess) {
         return _orderAccess[orderId][user];
     }
 
-    function _isMatchEngineForView(address account) external view returns (bool isMatch) {
+    function isMatchEngineForView(address account) external view returns (bool isMatch) {
         return _matchEngine[account];
     }
 
-    function _getRegistryForView() external view returns (address registry) {
+    function getRegistryForView() external view returns (address registry) {
         return _registryAddr;
     }
 }

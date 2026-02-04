@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-// solhint-disable-next-line no-global-import
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
@@ -13,6 +11,14 @@ import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/Standard
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { RiskUtils } from "../../utils/RiskUtils.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
+
+/**
+ * @notice Minimal SystemRiskView interface (system-scoped SSOT for risk parameters).
+ */
+interface ISystemRiskViewLite {
+    function getMinHealthFactor() external view returns (uint256 minHealthFactor);
+    function getMaxLtvBps() external view returns (uint256 maxLtvBps);
+}
 
 /**
  * @notice Minimal PositionView read interface.
@@ -32,7 +38,10 @@ interface IPositionViewRead {
      * @return collateral Collateral amount (PositionView-defined units/decimals)
      * @return debt Debt amount (PositionView-defined units/decimals)
      */
-    function getUserPosition(address user, address asset) external view returns (uint256, uint256);
+    function getUserPositionWithMeta(address user, address asset)
+        external
+        view
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version);
 }
 
 /**
@@ -50,27 +59,19 @@ interface IPositionViewRead {
  */
 contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-
-    /// @notice Legacy error kept for backward compatibility; new paths revert `MissingRole()`.
-    error PreviewView__Unauthorized();
     
     /// @notice Invalid input parameters.
     /// @dev Reverts when `asset` is the zero address.
     ///      Used by: previewDeposit/previewWithdraw/previewBorrow/previewRepay.
     error PreviewView__InvalidInput();
 
+    /// @notice Invalid system-scoped risk parameter from SSOT.
+    error PreviewView__InvalidRiskParameter();
+
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
     /// @notice Registry contract address (internal use only).
     address private _registryAddr;
-
-    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
-
-    /// @dev Minimum health factor threshold in basis points (bps=1e4). 10_000 = 100%.
-    uint256 private constant _MIN_HF_BPS = 10_000;
-    
-    /// @dev Maximum LTV in basis points (bps=1e4). 7_500 = 75%.
-    uint256 private constant _MAX_LTV_BPS = 7_500;
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
@@ -88,7 +89,6 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
             !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
         ) {
             // Strict permission alignment across view modules.
-            // solhint-disable-next-line custom-errors
             revert MissingRole();
         }
         _;
@@ -137,19 +137,26 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param amount Amount to add to collateral (PositionView-defined units/decimals)
      * @return hfAfter Health factor after the deposit (bps=1e4). Returns max uint256 if debt is zero.
      * @return ok Whether hfAfter >= MIN threshold
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionVersion PositionView cache version
      */
     function previewDeposit(address user, address asset, uint256 amount)
         external
         view
         onlyValidRegistry
         onlyUserOrViewer(user)
-        returns (uint256 hfAfter, bool ok)
+        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
     {
         if (asset == address(0)) revert PreviewView__InvalidInput();
-        (uint256 collateral, uint256 debt) = _getPosition(user, asset);
+        (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version) =
+            _getPositionWithMeta(user, asset);
         uint256 newCollateral = collateral + amount;
         hfAfter = _calcHF(newCollateral, debt);
-        ok = hfAfter >= _MIN_HF_BPS;
+        ok = hfAfter >= _minHealthFactorBps();
+        positionIsValid = isValid;
+        positionTimestamp = blockNumber;
+        positionVersion = version;
     }
 
     /**
@@ -168,19 +175,26 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param amount Amount to remove from collateral (PositionView-defined units/decimals)
      * @return hfAfter Health factor after the withdrawal (bps=1e4). Returns max uint256 if debt is zero.
      * @return ok Whether hfAfter >= MIN threshold
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionVersion PositionView cache version
      */
     function previewWithdraw(address user, address asset, uint256 amount)
         external
         view
         onlyValidRegistry
         onlyUserOrViewer(user)
-        returns (uint256 hfAfter, bool ok)
+        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
     {
         if (asset == address(0)) revert PreviewView__InvalidInput();
-        (uint256 collateral, uint256 debt) = _getPosition(user, asset);
+        (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version) =
+            _getPositionWithMeta(user, asset);
         uint256 newCollateral = collateral > amount ? collateral - amount : 0;
         hfAfter = _calcHF(newCollateral, debt);
-        ok = hfAfter >= _MIN_HF_BPS;
+        ok = hfAfter >= _minHealthFactorBps();
+        positionIsValid = isValid;
+        positionTimestamp = blockNumber;
+        positionVersion = version;
     }
 
     /**
@@ -202,6 +216,9 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return newHF Health factor after the borrow (bps=1e4). Returns max uint256 if debt is zero.
      * @return newLTV Loan-to-value ratio after the borrow (bps=1e4). Returns 0 if collateral==0 or debt==0.
      * @return maxBorrowable Remaining borrowable headroom under MAX LTV (0 if already at/above max)
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionVersion PositionView cache version
      */
     function previewBorrow(
         address user,
@@ -214,11 +231,19 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyUserOrViewer(user)
-        returns (uint256 newHF, uint256 newLTV, uint256 maxBorrowable)
+        returns (
+            uint256 newHF,
+            uint256 newLTV,
+            uint256 maxBorrowable,
+            bool positionIsValid,
+            uint256 positionTimestamp,
+            uint64 positionVersion
+        )
     {
         if (asset == address(0)) revert PreviewView__InvalidInput();
         collateralIn; // reserved/ignored (backward compatibility)
-        (uint256 collateral, uint256 debt) = _getPosition(user, asset);
+        (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version) =
+            _getPositionWithMeta(user, asset);
 
         uint256 newCollateral = collateral + collateralAdd;
         uint256 newDebt = debt + borrowAmount;
@@ -226,12 +251,55 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         newHF = _calcHF(newCollateral, newDebt);
         newLTV = _calcLTV(newCollateral, newDebt);
 
-        uint256 maxDebt = (newCollateral * _MAX_LTV_BPS) / 10_000;
+        uint256 maxDebt = (newCollateral * _maxLtvBps()) / 10_000;
         if (newDebt >= maxDebt) {
             maxBorrowable = 0;
         } else {
             maxBorrowable = maxDebt - newDebt;
         }
+        positionIsValid = isValid;
+        positionTimestamp = blockNumber;
+        positionVersion = version;
+    }
+
+    /**
+     * @notice Return the current max borrowable headroom for a user/asset, with cache metadata.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyUserOrViewer)
+     *      - asset is zero address (PreviewView__InvalidInput)
+     *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
+     *
+     * Security:
+     * - Read-only
+     *
+     * @param user Target user address
+     * @param asset Asset address
+     * @return maxBorrowable Remaining borrowable headroom under MAX LTV (0 if already at/above max)
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionVersion PositionView cache version
+     */
+    function getMaxBorrowableWithMeta(address user, address asset)
+        external
+        view
+        onlyValidRegistry
+        onlyUserOrViewer(user)
+        returns (
+            uint256 maxBorrowable,
+            bool positionIsValid,
+            uint256 positionTimestamp,
+            uint64 positionVersion
+        )
+    {
+        if (asset == address(0)) revert PreviewView__InvalidInput();
+        (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version) =
+            _getPositionWithMeta(user, asset);
+        uint256 maxDebt = (collateral * _maxLtvBps()) / 10_000;
+        maxBorrowable = debt >= maxDebt ? 0 : (maxDebt - debt);
+        positionIsValid = isValid;
+        positionTimestamp = blockNumber;
+        positionVersion = version;
     }
 
     /**
@@ -250,19 +318,26 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param amount Amount to reduce from debt (PositionView-defined units/decimals)
      * @return newHF Health factor after the repay (bps=1e4). Returns max uint256 if debt becomes zero.
      * @return newLTV Loan-to-value ratio after the repay (bps=1e4). Returns 0 if collateral==0 or debt==0.
+     * @return positionIsValid Whether the PositionView cache is valid
+     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionVersion PositionView cache version
      */
     function previewRepay(address user, address asset, uint256 amount)
         external
         view
         onlyValidRegistry
         onlyUserOrViewer(user)
-        returns (uint256 newHF, uint256 newLTV)
+        returns (uint256 newHF, uint256 newLTV, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
     {
         if (asset == address(0)) revert PreviewView__InvalidInput();
-        (uint256 collateral, uint256 debt) = _getPosition(user, asset);
+        (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version) =
+            _getPositionWithMeta(user, asset);
         uint256 newDebt = amount >= debt ? 0 : debt - amount;
         newHF = _calcHF(collateral, newDebt);
         newLTV = _calcLTV(collateral, newDebt);
+        positionIsValid = isValid;
+        positionTimestamp = blockNumber;
+        positionVersion = version;
     }
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
@@ -271,8 +346,26 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         return IPositionViewRead(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW));
     }
 
-    function _getPosition(address user, address asset) internal view returns (uint256 collateral, uint256 debt) {
-        return _positionView().getUserPosition(user, asset);
+    function _systemRiskView() internal view returns (ISystemRiskViewLite) {
+        return ISystemRiskViewLite(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_SYSTEM_RISK_VIEW));
+    }
+
+    function _minHealthFactorBps() internal view returns (uint256 minHealthFactor) {
+        minHealthFactor = _systemRiskView().getMinHealthFactor();
+        if (minHealthFactor == 0) revert PreviewView__InvalidRiskParameter();
+    }
+
+    function _maxLtvBps() internal view returns (uint256 maxLtvBps) {
+        maxLtvBps = _systemRiskView().getMaxLtvBps();
+        if (maxLtvBps == 0) revert PreviewView__InvalidRiskParameter();
+    }
+
+    function _getPositionWithMeta(address user, address asset)
+        internal
+        view
+        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
+    {
+        return _positionView().getUserPositionWithMeta(user, asset);
     }
 
     function _calcHF(uint256 collateral, uint256 debt) internal pure returns (uint256) {
@@ -293,7 +386,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Authorize a UUPS upgrade.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_ADMIN (reverts in ViewAccessLib.requireRole)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
      *      - newImplementation is zero (ZeroAddress)
      *      - newImplementation is not a contract (NotAContract)
      *
@@ -303,7 +396,9 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param newImplementation New implementation address
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }

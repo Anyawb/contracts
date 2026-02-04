@@ -189,44 +189,45 @@ library SystemUtils {
     }
     
     /**
-     * @notice Return whether a cache entry is expired.
+     * @notice Return whether a cache entry is expired (block-based).
      * @dev Reverts if:
-     *      - cacheTimestamp > block.timestamp would underflow (Solidity ^0.8.x)
+     *      - cacheBlock > block.number would underflow (Solidity ^0.8.x)
      *
      * Security:
-     * - Reads block timestamp; do not use for critical security decisions.
+     * - Reads block number; do not use for critical security decisions.
      *
-     * @param cacheTimestamp Cache timestamp (seconds).
-     * @param maxAge Maximum allowed age (seconds).
-     * @return isExpired True if (block.timestamp - cacheTimestamp) > maxAge.
+     * @param cacheBlock Cache update block (block.number).
+     * @param maxAgeBlocks Maximum allowed age (blocks).
+     * @return isExpired True if (block.number - cacheBlock) > maxAgeBlocks.
      */
-    function isCacheExpired(uint256 cacheTimestamp, uint256 maxAge) internal view returns (bool isExpired) {
-        // solhint-disable-next-line not-rely-on-time
-        return block.timestamp - cacheTimestamp > maxAge;
+    function isCacheExpiredBlocks(uint256 cacheBlock, uint256 maxAgeBlocks) internal view returns (bool isExpired) {
+        if (cacheBlock == 0 || cacheBlock > block.number) return true;
+        return (block.number - cacheBlock) > maxAgeBlocks;
     }
-    
+
     /**
-     * @notice Get the remaining cache time before expiration.
+     * @notice Get the remaining cache age before expiration (block-based).
      * @dev Reverts if:
-     *      - cacheTimestamp > block.timestamp would underflow (Solidity ^0.8.x)
+     *      - cacheBlock > block.number would underflow (Solidity ^0.8.x)
      *
      * Security:
-     * - Reads block timestamp; do not use for critical security decisions.
+     * - Reads block number; do not use for critical security decisions.
      *
-     * @param cacheTimestamp Cache timestamp (seconds).
-     * @param maxAge Maximum allowed age (seconds).
-     * @return remainingTime Remaining time in seconds; returns 0 if already expired.
+     * @param cacheBlock Cache update block (block.number).
+     * @param maxAgeBlocks Maximum allowed age (blocks).
+     * @return remainingBlocks Remaining blocks; returns 0 if already expired.
      */
-    function getCacheRemainingTime(uint256 cacheTimestamp, uint256 maxAge)
+    function getCacheRemainingBlocks(uint256 cacheBlock, uint256 maxAgeBlocks)
         internal
         view
-        returns (uint256 remainingTime)
+        returns (uint256 remainingBlocks)
     {
-        // solhint-disable-next-line not-rely-on-time
-        if (block.timestamp - cacheTimestamp >= maxAge) {
+        if (cacheBlock == 0 || cacheBlock > block.number) {
             return 0;
         }
-        // solhint-disable-next-line not-rely-on-time
-        return maxAge - (block.timestamp - cacheTimestamp);
+        if (block.number - cacheBlock >= maxAgeBlocks) {
+            return 0;
+        }
+        return maxAgeBlocks - (block.number - cacheBlock);
     }
 } 

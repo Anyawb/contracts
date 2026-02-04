@@ -9,7 +9,8 @@
 
 ## 步骤
 1) **新增 View 估值接口**
-   - 在 `PositionView` 增加 `getUserTotalCollateralValue`, `getTotalCollateralValue`, `getAssetValue`（使用同一预言机/精度逻辑，含批量上限/回退策略）。
+   - 在 `PositionView` 增加 `getUserTotalCollateralValue`, `getTotalCollateralValue`, `getAssetValue`。
+   - **Value Unit SSOT（必须）**：这些接口输出的 value 统一为 **USD-8**（见 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 的 Value Unit SSOT）。
 
 2) **路由调用方到 View**
    - `VaultRouter`：改为调用 `PositionView` 估值接口。

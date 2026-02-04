@@ -276,7 +276,7 @@ acm.grantRole(role, adminAddress);
 - `ConfigUpdated(uint8 level, uint256 price, uint256 duration, bool isActive)`
 - `CooldownUpdated(uint256 cooldown)`
 - `RegistryUpdated(address oldRegistry, address newRegistry)`
-- `ActionExecuted(bytes32 actionKey, string actionKeyString, address executor, uint256 timestamp)`
+- `ActionExecuted(bytes32 actionKey, string actionKeyString, address executor, uint256 blockNumber)`
 
 ### 特定事件
 

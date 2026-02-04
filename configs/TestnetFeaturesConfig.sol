@@ -30,10 +30,10 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
     
     /// @notice 测试网功能配置初始化事件
     /// @param acmAddr ACM权限管理合约地址
-    /// @param timestamp 初始化时间戳
+    /// @param blockNumber 初始化区块号（block.number）
     event TestnetFeaturesConfigInitialized(
         address indexed acmAddr,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice 测试网功能配置更新事件
@@ -43,7 +43,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
     /// @param oldDuration 旧持续时间
     /// @param newDuration 新持续时间
     /// @param updatedBy 更新者地址
-    /// @param timestamp 更新时间戳
+    /// @param blockNumber 更新区块号（block.number）
     event TestnetFeaturesConfigUpdated(
         ServiceLevel indexed level,
         uint256 oldPrice,
@@ -51,19 +51,19 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         uint256 oldDuration,
         uint256 newDuration,
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice 测试网功能冷却期更新事件
     /// @param oldCooldown 旧冷却期
     /// @param newCooldown 新冷却期
     /// @param updatedBy 更新者地址
-    /// @param timestamp 更新时间戳
+    /// @param blockNumber 更新区块号（block.number）
     event TestnetFeaturesCooldownUpdated(
         uint256 oldCooldown,
         uint256 newCooldown,
         address indexed updatedBy,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     /// @notice Registry 地址更新事件
@@ -76,13 +76,21 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
     /// @dev 用于版本控制和升级追踪
     uint256 public configVersion;
     
-    /// @notice 最后配置更新时间
-    /// @dev 用于审计和监控
-    uint256 public lastConfigUpdateTime;
+    /// @notice 最后配置更新区块号
+    /// @dev 用于审计和监控（block-based）
+    uint256 public lastConfigUpdateBlock;
     
     /// @notice 配置更新者记录
     /// @dev 记录最后一次配置更新的操作者
     address public lastConfigUpdater;
+
+    // ============ 常量（块数口径） ============
+
+    /// @notice 默认服务时长（约 7 天，按 2s/block 估算）
+    uint256 private constant _DEFAULT_DURATION_BLOCKS = 302_400;
+
+    /// @notice 默认冷却期（约 1 小时，按 2s/block 估算）
+    uint256 private constant _DEFAULT_COOLDOWN_BLOCKS = 1_800;
     
     // ============ 构造函数 ============
     
@@ -102,17 +110,17 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         
         // 初始化版本信息
         configVersion = 1;
-        lastConfigUpdateTime = block.timestamp;
+        lastConfigUpdateBlock = block.number;
         lastConfigUpdater = address(0); // 初始化时没有更新者
         
-        emit TestnetFeaturesConfigInitialized(registryAddr, block.timestamp);
+        emit TestnetFeaturesConfigInitialized(registryAddr, block.number);
         
         // 记录标准化动作事件
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -121,7 +129,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
     /// @notice 更新测试网功能配置（重写父类方法）
     /// @param level 服务等级
     /// @param price 价格（积分）
-    /// @param duration 持续时间（秒）
+    /// @param duration 持续时间（区块数）
     /// @param isActive 是否激活
     /// @dev 需要ACTION_TESTNET_CONFIG权限
     /// @dev 记录详细的配置变更历史
@@ -148,7 +156,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         
         // 更新状态变量
         configVersion++;
-        lastConfigUpdateTime = block.timestamp;
+        lastConfigUpdateBlock = block.number;
         lastConfigUpdater = msg.sender;
         
         // 发出详细的事件
@@ -159,7 +167,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
             oldConfig.duration,
             duration,
             msg.sender,
-            block.timestamp
+            block.number
         );
         
         // 发出父类事件
@@ -170,12 +178,12 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
     /// @notice 设置测试网功能冷却期（重写父类方法）
-    /// @param _cooldown 冷却期（秒）
+    /// @param _cooldown 冷却期（区块数）
     /// @dev 需要ACTION_TESTNET_CONFIG权限
     /// @dev 记录冷却期变更历史
     function setCooldown(uint256 _cooldown) external override {
@@ -190,7 +198,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         
         // 更新状态变量
         configVersion++;
-        lastConfigUpdateTime = block.timestamp;
+        lastConfigUpdateBlock = block.number;
         lastConfigUpdater = msg.sender;
         
         // 发出详细的事件
@@ -198,7 +206,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
             oldCooldown,
             _cooldown,
             msg.sender,
-            block.timestamp
+            block.number
         );
         
         // 发出父类事件
@@ -209,7 +217,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -260,7 +268,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
                 oldConfig.duration,
                 durations[i],
                 msg.sender,
-                block.timestamp
+                block.number
             );
             
             emit ConfigUpdated(uint8(levels[i]), prices[i], durations[i], isActives[i]);
@@ -268,7 +276,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         
         // 更新状态变量
         configVersion++;
-        lastConfigUpdateTime = block.timestamp;
+        lastConfigUpdateBlock = block.number;
         lastConfigUpdater = msg.sender;
         
         // 记录标准化动作事件
@@ -276,7 +284,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -288,10 +296,15 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         return configVersion;
     }
     
-    /// @notice 获取最后配置更新时间
-    /// @return 最后更新时间戳
+    /// @notice 获取最后配置更新区块号
+    /// @return 最后更新区块号
+    function getLastConfigUpdateBlock() external view returns (uint256) {
+        return lastConfigUpdateBlock;
+    }
+
+    /// @notice 兼容入口：返回最后更新区块号（legacy 名称）
     function getLastConfigUpdateTime() external view returns (uint256) {
-        return lastConfigUpdateTime;
+        return lastConfigUpdateBlock;
     }
     
     /// @notice 获取最后配置更新者
@@ -302,18 +315,18 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
     
     /// @notice 获取测试网功能配置摘要
     /// @return version 配置版本
-    /// @return lastUpdateTime 最后更新时间
+    /// @return lastUpdateBlock 最后更新区块号
     /// @return lastUpdater 最后更新者
     /// @return cooldown 冷却期
     function getConfigSummary() external view returns (
         uint256 version,
-        uint256 lastUpdateTime,
+        uint256 lastUpdateBlock,
         address lastUpdater,
         uint256 cooldown
     ) {
         return (
             configVersion,
-            lastConfigUpdateTime,
+            lastConfigUpdateBlock,
             lastConfigUpdater,
             cooldown
         );
@@ -334,7 +347,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
     function _initializeConfigs() internal override {
         configs[ServiceLevel.Basic] = ServiceConfig({
             price: 100e18,
-            duration: 7 days,
+            duration: _DEFAULT_DURATION_BLOCKS,
             isActive: true,
             level: ServiceLevel.Basic,
             description: "Simulate large loans (testnet)"
@@ -342,7 +355,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         
         configs[ServiceLevel.Standard] = ServiceConfig({
             price: 300e18,
-            duration: 7 days,
+            duration: _DEFAULT_DURATION_BLOCKS,
             isActive: true,
             level: ServiceLevel.Standard,
             description: "Stress testing tools"
@@ -350,7 +363,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         
         configs[ServiceLevel.Premium] = ServiceConfig({
             price: 800e18,
-            duration: 7 days,
+            duration: _DEFAULT_DURATION_BLOCKS,
             isActive: true,
             level: ServiceLevel.Premium,
             description: "Advanced debugging features"
@@ -358,7 +371,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
         
         configs[ServiceLevel.VIP] = ServiceConfig({
             price: 1500e18,
-            duration: 7 days,
+            duration: _DEFAULT_DURATION_BLOCKS,
             isActive: true,
             level: ServiceLevel.VIP,
             description: "Full testnet permissions"
@@ -368,7 +381,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
     /// @dev 初始化冷却期
     /// @dev 设置测试网功能的默认冷却期
     function _initializeCooldown() internal override {
-        cooldown = 1 hours;
+        cooldown = _DEFAULT_COOLDOWN_BLOCKS;
     }
     
     // ============ 服务类型函数 ============
@@ -444,7 +457,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
                     configs[level].duration,
                     configs[level].duration,
                     msg.sender,
-                    block.timestamp
+                    block.number
                 );
             }
         }
@@ -454,7 +467,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
             ActionKeys.ACTION_TESTNET_PAUSE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_PAUSE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -478,7 +491,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
                     configs[level].duration,
                     configs[level].duration,
                     msg.sender,
-                    block.timestamp
+                    block.number
                 );
             }
         }
@@ -488,7 +501,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
             ActionKeys.ACTION_TESTNET_ACTIVATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_ACTIVATE),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     
@@ -512,7 +525,7 @@ contract TestnetFeaturesConfig is BaseServiceConfig {
             ActionKeys.ACTION_TESTNET_CONFIG,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_TESTNET_CONFIG),
             msg.sender,
-            block.timestamp
+            block.number
         );
     }
     

@@ -25,11 +25,21 @@ function errorSelector(sig: string): string {
 function extractRevertData(e: any): string | undefined {
   // Try common hardhat/ethers error shapes first
   const candidates: Array<unknown> = [
-    e?.data,
     e?.error?.data,
     e?.error?.error?.data,
+    e?.error?.data?.data,
+    e?.error?.error?.data?.data,
+    e?.error?.data?.result,
+    e?.error?.error?.data?.result,
     e?.info?.error?.data,
     e?.info?.error?.error?.data,
+    e?.info?.error?.data?.data,
+    e?.info?.error?.error?.data?.data,
+    e?.info?.error?.data?.result,
+    e?.info?.error?.error?.data?.result,
+    e?.data?.data,
+    e?.data?.result,
+    e?.data,
     e?.receipt?.revertReason,
   ];
   for (const c of candidates) {
@@ -84,6 +94,26 @@ async function mustRevertWithSelector(label: string, fn: () => Promise<unknown>,
       const sig = extractCustomErrorSigFromMessage(e);
       if (sig) sel = errorSelector(sig).toLowerCase();
     }
+    assertOk(!!sel, `${label}: missing revert data (cannot validate selector)`);
+    assertOk(sel === expectedSel.toLowerCase(), `${label}: unexpected error selector ${sel}, expected ${expectedSel}`);
+    console.log(`  ✅ [revert selector ok] ${label}: ${sel}`);
+    return;
+  }
+  throw new Error(`[FAIL] Expected revert, but succeeded: ${label}`);
+}
+
+async function mustRevertWithSelectorRaw(label: string, to: string, data: string, expectedSel: string) {
+  try {
+    await ethers.provider.call({ to, data });
+  } catch (e: any) {
+    const msg = fmtErr(e);
+    if (isMissingSelectorError(String(msg))) {
+      throw new Error(
+        `[FAIL] ${label}: call reverted due to missing function selector (deployment/ABI mismatch). Re-run compile + deploy:localhost.`
+      );
+    }
+    const raw = extractRevertData(e);
+    const sel = raw && raw.startsWith("0x") && raw.length >= 10 ? raw.slice(0, 10).toLowerCase() : undefined;
     assertOk(!!sel, `${label}: missing revert data (cannot validate selector)`);
     assertOk(sel === expectedSel.toLowerCase(), `${label}: unexpected error selector ${sel}, expected ${expectedSel}`);
     console.log(`  ✅ [revert selector ok] ${label}: ${sel}`);
@@ -180,9 +210,12 @@ async function main() {
     // Authorized caller must have VIEW_PRICE_DATA (deploylocal usually grants it to deployer).
     assertOk(await acm.hasRole(ROLE_VIEW_PRICE_DATA, deployer.address), "deployer missing VIEW_PRICE_DATA role");
 
-    const [p1, ts1] = (await mustSucceed("Authorized: VOV.getAssetPrice", async () => vov.connect(deployer).getAssetPrice(asset))) as [
+    const [p1, block1] = (await mustSucceed("Authorized: VOV.getAssetPrice", async () =>
+      vov.connect(deployer).getAssetPrice(asset)
+    )) as [
       bigint,
       bigint,
+      boolean,
     ];
     const items = (await mustSucceed("Authorized: BatchView.batchGetAssetPrices", async () =>
       batch.connect(deployer).batchGetAssetPrices([asset])
@@ -191,17 +224,17 @@ async function main() {
     assertOk(items.length === 1, "batchGetAssetPrices length mismatch");
     assertOk(items[0].asset.toLowerCase() === asset.toLowerCase(), "batchGetAssetPrices.asset mismatch");
     assertOk(items[0].price === p1, "price mismatch between ValuationOracleView and BatchView");
-    assertOk(typeof ts1 === "bigint", "ValuationOracleView timestamp must be bigint");
+    assertOk(typeof block1 === "bigint", "ValuationOracleView blockNumber must be bigint");
 
     // Mixed list: element-wise price alignment (semantic consistency).
     const unknown = ethers.Wallet.createRandom().address;
-    const [prices, timestamps] = (await mustSucceed("Authorized: VOV.getAssetPrices([known,unknown])", async () =>
+    const [prices, blockNumbers] = (await mustSucceed("Authorized: VOV.getAssetPrices([known,unknown])", async () =>
       vov.connect(deployer).getAssetPrices([asset, unknown])
-    )) as [bigint[], bigint[]];
+    )) as [bigint[], bigint[], boolean[]];
     const items2 = (await mustSucceed("Authorized: BatchView.batchGetAssetPrices([known,unknown])", async () =>
       batch.connect(deployer).batchGetAssetPrices([asset, unknown])
     )) as Array<{ asset: string; price: bigint }>;
-    assertOk(prices.length === 2 && timestamps.length === 2, "VOV mixed list output length mismatch");
+    assertOk(prices.length === 2 && blockNumbers.length === 2, "VOV mixed list output length mismatch");
     assertOk(items2.length === 2, "BatchView mixed list output length mismatch");
     assertOk(items2[0].asset.toLowerCase() === asset.toLowerCase(), "BatchView[0].asset mismatch");
     assertOk(items2[1].asset.toLowerCase() === unknown.toLowerCase(), "BatchView[1].asset mismatch");
@@ -215,9 +248,11 @@ async function main() {
       async () => vov.connect(deployer).getAssetPrices(oversized),
       errorSelector("BatchTooLarge(uint256,uint256)")
     );
-    await mustRevertWithSelector(
+    const batchOversizedData = batch.interface.encodeFunctionData("batchGetAssetPrices", [oversized]);
+    await mustRevertWithSelectorRaw(
       "Oversized: BatchView.batchGetAssetPrices",
-      async () => batch.connect(deployer).batchGetAssetPrices(oversized),
+      await batch.getAddress(),
+      batchOversizedData,
       errorSelector("BatchTooLarge(uint256,uint256)")
     );
 

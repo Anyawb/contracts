@@ -34,7 +34,7 @@ describe('StatisticsView (VaultStatistics 替代)', function () {
     it('应正确初始化（proxy）', async function () {
       const { stats, registry } = await deployFixture();
       expect(await stats.registryAddr()).to.equal(await registry.getAddress());
-      const global = await stats.getGlobalStatistics();
+      const [global] = await stats.getGlobalStatisticsWithMeta();
       expect(global.totalCollateral).to.equal(0n);
     });
 
@@ -57,7 +57,7 @@ describe('StatisticsView (VaultStatistics 替代)', function () {
   describe('只读函数', function () {
     it('getGlobalStatistics 返回零值基线', async function () {
       const { stats } = await deployFixture();
-      const global = await stats.getGlobalStatistics();
+      const [global] = await stats.getGlobalStatisticsWithMeta();
       expect(global.totalCollateral).to.equal(0n);
       expect(global.totalDebt).to.equal(0n);
       expect(global.activeUsers).to.equal(0n);
@@ -73,7 +73,8 @@ describe('StatisticsView (VaultStatistics 替代)', function () {
       const { stats } = await deployFixture();
       const user = ethers.Wallet.createRandom().address;
       const asset = ethers.Wallet.createRandom().address;
-      expect(await stats.getUserGuaranteeBalance(user, asset)).to.equal(0n);
+      const [amount] = await stats.getUserGuaranteeBalanceWithMeta(user, asset);
+      expect(amount).to.equal(0n);
     });
   });
 

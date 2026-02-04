@@ -8,13 +8,10 @@
  * - localhost node running: pnpm -s run node
  * - deployed addresses exist: pnpm -s run deploy:localhost
  */
-import { readFileSync } from "fs";
-import path from "path";
+import { envBool, loadAddressMap, resolveAddress } from "./_addressResolver";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const hre = require("hardhat");
 const { ethers, network } = hre;
-
-type DeployMap = Record<string, string>;
 
 function requireEnv(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
@@ -25,45 +22,55 @@ function selector(signature: string): string {
   return ethers.id(signature).slice(0, 10);
 }
 
-function loadDeployments(): DeployMap {
-  const p = path.join(__dirname, "..", "deployments", "localhost.json");
-  const raw = readFileSync(p, "utf8");
-  return JSON.parse(raw) as DeployMap;
-}
-
 async function main() {
   console.log(`[cache-refresh-local] network=${network.name}`);
-  requireEnv(network.name === "localhost", "This script must run with --network localhost");
+  const addressMap = loadAddressMap(network.name);
+  const registryAddr = resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
+  const registry = await ethers.getContractAt("Registry", registryAddr);
+  const enableWrite = envBool("ENABLE_WRITE", network.name === "localhost");
 
-  const deployed = loadDeployments();
-  requireEnv(deployed.Registry, "Missing Registry in scripts/deployments/localhost.json");
-  requireEnv(deployed.CacheMaintenanceManager, "Missing CacheMaintenanceManager in scripts/deployments/localhost.json");
-  requireEnv(deployed.VaultRouter, "Missing VaultRouter in scripts/deployments/localhost.json");
-  requireEnv(deployed.LiquidationRiskManager, "Missing LiquidationRiskManager in scripts/deployments/localhost.json");
+  const maintAddr =
+    resolveAddress({ name: "CacheMaintenanceManager", map: addressMap, required: false }) ||
+    (await registry.getModule(ethers.keccak256(ethers.toUtf8Bytes("CACHE_MAINTENANCE_MANAGER"))));
+  const lrmAddr =
+    resolveAddress({ name: "LiquidationRiskManager", map: addressMap, required: false }) ||
+    (await registry.getModule(ethers.keccak256(ethers.toUtf8Bytes("LIQUIDATION_RISK_MANAGER"))));
+  const vrAddr = resolveAddress({ name: "VaultRouter", map: addressMap, envVar: "VAULT_ROUTER_ADDRESS" });
 
-  const registry = await ethers.getContractAt("Registry", deployed.Registry);
+  requireEnv(maintAddr && maintAddr !== ethers.ZeroAddress, "Missing CacheMaintenanceManager address");
+  requireEnv(lrmAddr && lrmAddr !== ethers.ZeroAddress, "Missing LiquidationRiskManager address");
+  requireEnv(vrAddr && vrAddr !== ethers.ZeroAddress, "Missing VaultRouter address");
+
   const maint = await ethers.getContractAt(
     "src/registry/CacheMaintenanceManager.sol:CacheMaintenanceManager",
-    deployed.CacheMaintenanceManager
+    maintAddr
   );
-  const vr = await ethers.getContractAt("src/Vault/VaultRouter.sol:VaultRouter", deployed.VaultRouter);
+  const vr = await ethers.getContractAt("src/Vault/VaultRouter.sol:VaultRouter", vrAddr);
   const lrm = await ethers.getContractAt(
     "src/Vault/liquidation/modules/LiquidationRiskManager.sol:LiquidationRiskManager",
-    deployed.LiquidationRiskManager
+    lrmAddr
   );
 
   // 1) Registry binding sanity check
   const key = ethers.keccak256(ethers.toUtf8Bytes("CACHE_MAINTENANCE_MANAGER"));
   const bound = await registry.getModule(key);
-  if (bound.toLowerCase() !== deployed.CacheMaintenanceManager.toLowerCase()) {
+  if (bound.toLowerCase() !== maintAddr.toLowerCase()) {
     throw new Error(
-      `Registry binding mismatch: CACHE_MAINTENANCE_MANAGER=${bound}, expected=${deployed.CacheMaintenanceManager}`
+      `Registry binding mismatch: CACHE_MAINTENANCE_MANAGER=${bound}, expected=${maintAddr}`
     );
   }
   console.log(`[ok] registry bound CACHE_MAINTENANCE_MANAGER -> ${bound}`);
 
+  if (!enableWrite) {
+    console.log("[info] ENABLE_WRITE=0: skipping cache refresh tx.");
+    const valid = await vr.isModuleCacheValid();
+    console.log(`[ok] VaultRouter module cache valid=${valid}`);
+    console.log("\n✅ cache refresh (read-only) PASSED\n");
+    return;
+  }
+
   // 2) Execute batch refresh
-  const tx = await maint.batchRefresh([deployed.VaultRouter, deployed.LiquidationRiskManager]);
+  const tx = await maint.batchRefresh([vrAddr, lrmAddr]);
   const rc = await tx.wait();
   requireEnv(rc, "No receipt returned");
   console.log(`[ok] batchRefresh mined tx=${rc.hash} block=${rc.blockNumber}`);
@@ -93,7 +100,7 @@ async function main() {
     const reason = (e.args[2] as string) || "0x";
     attemptedByTarget.set(target, { ok, reason });
   }
-  for (const t of [deployed.VaultRouter, deployed.LiquidationRiskManager]) {
+  for (const t of [vrAddr, lrmAddr]) {
     const v = attemptedByTarget.get(t.toLowerCase());
     if (!v) throw new Error(`Missing CacheRefreshAttempted for target=${t}`);
     if (!v.ok) throw new Error(`Refresh failed for target=${t}, reason=${v.reason}`);

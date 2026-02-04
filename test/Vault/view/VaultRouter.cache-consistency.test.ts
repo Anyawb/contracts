@@ -10,7 +10,7 @@
 import { expect } from 'chai';
 import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 import { ethers, upgrades } from 'hardhat';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, mine } from '@nomicfoundation/hardhat-network-helpers';
 
 import type {
   MockAccessControlManager,
@@ -62,7 +62,7 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
     const assetWhitelist = await AssetWhitelistFactory.deploy();
 
     const ERC20Factory = await ethers.getContractFactory('MockERC20');
-    const settlementToken = await ERC20Factory.deploy('Settlement Token', 'SETTLE', ethers.parseUnits('1000000', 18));
+    const settlementToken = await ERC20Factory.deploy('Settlement Token', 'SETTLE', 18, ethers.parseUnits('1000000', 18));
 
     // Deploy VaultRouter (slim; initializer keeps signature but ignores oracle/token in strict mode)
     const VaultRouterFactory = await ethers.getContractFactory('VaultRouter');
@@ -135,7 +135,8 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
       .to.emit(vaultRouter, 'UserPositionPushed')
       .withArgs(userAddr, asset, 100, 50, anyValue, requestId, seq);
 
-    const [collateral, debt, isValid] = await positionView.getUserPositionWithValidity(userAddr, asset);
+    // Scheme U: self-read should not require VIEW_USER_DATA or ADMIN.
+    const [collateral, debt, isValid] = await positionView.connect(user).getUserPositionWithMeta(userAddr, asset);
     expect(isValid).to.equal(true);
     expect(collateral).to.equal(100);
     expect(debt).to.equal(50);
@@ -155,10 +156,11 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
     await cm.depositCollateral(userAddr, asset, 10); // collateral: 20
     await le.borrow(userAddr, asset, 15, 0, 0); // debt: 20
 
-    // CACHE_DURATION is 5 minutes in ViewConstants
-    await time.increase(301);
+    // CACHE_DURATION is 150 blocks in ViewConstants
+    await mine(151);
 
-    const [collateral, debt, isValid] = await positionView.getUserPositionWithValidity(userAddr, asset);
+    // Scheme U: self-read should not require VIEW_USER_DATA or ADMIN.
+    const [collateral, debt, isValid] = await positionView.connect(user).getUserPositionWithMeta(userAddr, asset);
     expect(isValid).to.equal(false);
     expect(collateral).to.equal(20);
     expect(debt).to.equal(20);
@@ -172,7 +174,8 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
     await cm.depositCollateral(userAddr, asset, 9);
     await le.borrow(userAddr, asset, 4, 0, 0);
 
-    const [collateral, debt, isValid] = await positionView.getUserPositionWithValidity(userAddr, asset);
+    // Scheme U: self-read should not require VIEW_USER_DATA or ADMIN.
+    const [collateral, debt, isValid] = await positionView.connect(user).getUserPositionWithMeta(userAddr, asset);
     expect(isValid).to.equal(false);
     expect(collateral).to.equal(9);
     expect(debt).to.equal(4);

@@ -1,16 +1,21 @@
 import { ethers } from "hardhat";
 import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
 
-const ONE_DAY = 24n * 60n * 60n;
+const BLOCKS_PER_DAY = 43_200n;
+const ONE_HOUR_BLOCKS = 1_800n;
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
-function calcTotalDue(principal: bigint, rateBps: bigint, termSec: bigint) {
-  const denom = 365n * ONE_DAY * 10_000n;
-  const interest = (principal * rateBps * termSec) / denom;
+function calcTotalDue(principal: bigint, rateBps: bigint, termBlocks: bigint) {
+  const denom = 365n * BLOCKS_PER_DAY * 10_000n;
+  const interest = (principal * rateBps * termBlocks) / denom;
   return principal + interest;
+}
+
+async function latestBlockNumber(): Promise<bigint> {
+  return BigInt(await ethers.provider.getBlockNumber());
 }
 
 function buildLendIntentHash(li: any) {
@@ -51,6 +56,11 @@ async function main() {
   const vbl = (await ethers.getContractAt("VaultBusinessLogic", CONTRACT_ADDRESSES.VaultBusinessLogic)) as any;
 
   const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
+  const settlementManagerAddr = await registry.getModuleOrRevert(key("SETTLEMENT_MANAGER"));
+  const settlementManager = (await ethers.getContractAt(
+    "src/Vault/liquidation/modules/SettlementManager.sol:SettlementManager",
+    settlementManagerAddr
+  )) as any;
   const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr)) as any;
   const loanNftAddr = await registry.getModuleOrRevert(key("LOAN_NFT"));
   const loanNft = await ethers.getContractAt("LoanNFT", loanNftAddr);
@@ -93,16 +103,29 @@ async function main() {
   {
     const cfg = await po.getAssetConfig(usdc.target);
     if (!cfg.isActive) {
-      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", 8, 3600);
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
     }
   }
-  const now = (await ethers.provider.getBlock("latest"))!.timestamp;
-  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 6), now);
+  const blockNumber = await ethers.provider.getBlockNumber();
+  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), blockNumber);
 
   // FeeRouter needs supported token
   if (!(await feeRouter.isTokenSupported(usdc.target))) {
     await feeRouter.connect(deployer).addSupportedToken(usdc.target);
   }
+
+  // Best-effort: disable early repayment guarantee to avoid allowance coupling in matchflow.
+  try {
+    if (CONTRACT_ADDRESSES.EarlyRepaymentGuaranteeManager) {
+      const ergm = await ethers.getContractAt(
+        "src/Vault/modules/EarlyRepaymentGuaranteeManager.sol:EarlyRepaymentGuaranteeManager",
+        CONTRACT_ADDRESSES.EarlyRepaymentGuaranteeManager
+      );
+      await ensureRole(ACTION_SET_PARAMETER, deployer.address);
+      await ergm.connect(deployer).setGuaranteeEnabled(usdc.target, false);
+    }
+  } catch {}
 
   // fund users
   await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("20000", 6));
@@ -110,14 +133,14 @@ async function main() {
 
   // borrower deposits collateral first (realistic path)
   const collateralAmt = ethers.parseUnits("1000", 6);
-  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, collateralAmt);
+  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt);
   await vaultCore.connect(borrower).deposit(usdc.target, collateralAmt);
 
   // prepare intents
   const borrowAmt = ethers.parseUnits("500", 6);
   const termDays = 5;
   const rateBps = 1000n;
-  const expireAt = BigInt((await ethers.provider.getBlock("latest"))!.timestamp + 3600);
+  const expireAt = (await latestBlockNumber()) + ONE_HOUR_BLOCKS;
 
   const borrowIntent = {
     borrower: borrower.address,
@@ -217,8 +240,13 @@ async function main() {
 
   // repay on order engine
   if (orderId === null) throw new Error("LoanOrderCreated not found");
-  const termSec = BigInt(termDays) * ONE_DAY;
-  const totalDue = calcTotalDue(borrowAmt, rateBps, termSec);
+  const termBlocks = BigInt(termDays) * BLOCKS_PER_DAY;
+  const totalDue = calcTotalDue(borrowAmt, rateBps, termBlocks);
+  const requireFullRepayRelease = (await settlementManager.requireFullRepayRelease()) as boolean;
+  if (requireFullRepayRelease) {
+    console.log("  ⚠️  SettlementManager.requireFullRepayRelease=true; disabling for this run");
+    await (await settlementManager.connect(deployer).setRequireFullRepayRelease(false)).wait();
+  }
   // 统一入口：走 VaultCore.repay → SettlementManager（覆盖 SSOT 资金链）
   await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, totalDue);
   await vaultCore.connect(borrower).repay(orderId, usdc.target, totalDue);

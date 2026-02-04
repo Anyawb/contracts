@@ -8,7 +8,7 @@ const KEY_LE = ethers.keccak256(ethers.toUtf8Bytes("LENDING_ENGINE"));
 const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes("POSITION_VIEW"));
 const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes("GUARANTEE_FUND_MANAGER"));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes("ACTION_ADMIN"));
-const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes("VIEW_RISK_DATA"));
+const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes("VIEW_USER_DATA"));
 
 describe("RiskView", function () {
   async function deployFixture() {
@@ -38,7 +38,7 @@ describe("RiskView", function () {
     await registry.setModule(KEY_GUARANTEE_FUND, await gf.getAddress());
 
     await acm.grantRole(ACTION_ADMIN, admin.address);
-    await acm.grantRole(ACTION_VIEW_RISK_DATA, admin.address);
+    await acm.grantRole(ACTION_VIEW_USER_DATA, admin.address);
 
     const RiskView = await ethers.getContractFactory("RiskView");
     const rv = await upgrades.deployProxy(RiskView, [await registry.getAddress()], { kind: "uups" });
@@ -60,6 +60,7 @@ describe("RiskView", function () {
     const res = await rv.getUserRiskAssessment(user.address);
     expect(res.liquidatable).to.equal(true);
     expect(res.warningLevel).to.equal(2);
+    expect(res.isValid).to.equal(true);
   });
 
   it("getUserRiskAssessment returns warning when HF between 100% and 110%", async function () {
@@ -68,6 +69,7 @@ describe("RiskView", function () {
     const res = await rv.getUserRiskAssessment(user.address);
     expect(res.liquidatable).to.equal(false);
     expect(res.warningLevel).to.equal(1);
+    expect(res.isValid).to.equal(true);
   });
 
   it("getUserRiskAssessment returns none when HF >= 110%", async function () {
@@ -76,6 +78,7 @@ describe("RiskView", function () {
     const res = await rv.getUserRiskAssessment(user.address);
     expect(res.liquidatable).to.equal(false);
     expect(res.warningLevel).to.equal(0);
+    expect(res.isValid).to.equal(true);
   });
 
   it("getUserRiskAssessment falls back to default when invalid", async function () {
@@ -84,12 +87,14 @@ describe("RiskView", function () {
     const res = await rv.getUserRiskAssessment(user.address);
     expect(res.healthFactor).to.equal(10_000);
     expect(res.liquidatable).to.equal(false);
+    expect(res.isValid).to.equal(false);
+    expect(res.blockNumber).to.equal(0n);
   });
 
   it("batchGetRiskAssessments enforces max batch size", async function () {
     const { rv } = await loadFixture(deployFixture);
     const tooMany = Array.from({ length: 101 }, () => ethers.Wallet.createRandom().address);
-    await expect(rv.batchGetRiskAssessments(tooMany)).to.be.revertedWithCustomError(rv, "RiskView__BatchTooLarge");
+    await expect(rv.batchGetRiskAssessments(tooMany)).to.be.revertedWithCustomError(rv, "BatchTooLarge");
   });
 
   it("calculateHealthFactorExcludingGuarantee uses totals and guarantee", async function () {
@@ -98,7 +103,7 @@ describe("RiskView", function () {
     await pv.setTotal(user.address, 200); // collateral
     const asset = ethers.Wallet.createRandom().address;
     await gf.setLocked(user.address, asset, 50); // guarantee
-    const hf = await rv.calculateHealthFactorExcludingGuarantee(user.address, asset);
+    const [hf] = await rv.calculateHealthFactorExcludingGuarantee(user.address, asset);
     expect(hf).to.equal(15000);
   });
 
@@ -131,22 +136,28 @@ describe("RiskView", function () {
     it("RV-02: batch upper bound is enforced", async function () {
       const { rv } = await loadFixture(deployFixture);
       const tooMany = Array.from({ length: 101 }, () => ethers.Wallet.createRandom().address);
-      await expect(rv.batchGetRiskAssessments(tooMany)).to.be.revertedWithCustomError(rv, "RiskView__BatchTooLarge");
+      await expect(rv.batchGetRiskAssessments(tooMany)).to.be.revertedWithCustomError(rv, "BatchTooLarge");
     });
 
-    it("RV-03: unauthorized callers cannot bypass RiskView read gate", async function () {
-      const { rv, acm, user, other } = await loadFixture(deployFixture);
+    it("RV-03: Scheme U gates (self allowed; non-self and batch require VIEW_USER_DATA/ADMIN)", async function () {
+      const { rv, user, other, acm } = await loadFixture(deployFixture);
 
+      // self-read allowed without roles
+      await expect(rv.connect(other).getUserRiskAssessment(other.address)).to.not.be.reverted;
+
+      // non-self should revert MissingRole()
       await expect(rv.connect(other).getUserRiskAssessment(user.address)).to.be.revertedWithCustomError(
-        acm,
-        "MissingRole"
-      );
-      await expect(rv.connect(other).batchGetRiskAssessments([user.address])).to.be.revertedWithCustomError(
-        acm,
+        rv,
         "MissingRole"
       );
 
-      await acm.grantRole(ACTION_VIEW_RISK_DATA, other.address);
+      // batch has no self-bypass
+      await expect(rv.connect(other).batchGetRiskAssessments([other.address])).to.be.revertedWithCustomError(
+        rv,
+        "MissingRole"
+      );
+
+      await acm.grantRole(ACTION_VIEW_USER_DATA, other.address);
 
       const a = await rv.connect(other).getUserRiskAssessment(user.address);
       expect(a.healthFactor).to.be.a("bigint");

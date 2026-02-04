@@ -23,7 +23,7 @@ interface IHealthViewMinimal {
         uint256 healthFactorBps,
         uint256 minHealthFactorBps,
         bool undercollateralized,
-        uint256 timestamp
+        uint256 blockNumber
     ) external;
 }
 
@@ -366,9 +366,10 @@ library LendingEngineCore {
         }
 
         // Best-effort: push to HealthView; failures emit events and do NOT revert.
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
-        try IHealthViewMinimal(hv).pushRiskStatus(user, hfBps, minHFBps, under, ts) {
+        // NOTE (Time-Dependency-Refactor): `blockNumber` is the field name in the HealthView push API.
+        // Semantics in this repo: treat it as a time-axis marker (blockNumber), NOT unix time.
+        uint256 blockNumber = block.number;
+        try IHealthViewMinimal(hv).pushRiskStatus(user, hfBps, minHFBps, under, blockNumber) {
             user; // silence empty block
         } catch (bytes memory reason) {
             emit CacheEvents.CacheUpdateFailed(user, address(0), hv, totalCollateral, totalDebt, reason);

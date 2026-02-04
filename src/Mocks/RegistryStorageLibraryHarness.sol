@@ -12,13 +12,13 @@ contract RegistryStorageLibraryHarness {
     function setPendingUpgradeDirect(
         bytes32 key,
         address newAddr,
-        uint256 executeAfter,
+        uint256 executeAfterBlock,
         address proposer,
         uint256 minDelaySnapshot
     ) external {
         RegistryStorage.layout().pendingUpgrades[key] = RegistryStorage.PendingUpgrade({
             newAddr: newAddr,
-            executeAfter: executeAfter,
+            executeAfter: executeAfterBlock,
             proposer: proposer,
             minDelaySnapshot: minDelaySnapshot
         });
@@ -28,14 +28,14 @@ contract RegistryStorageLibraryHarness {
         bytes32 key,
         address oldAddress,
         address newAddress,
-        uint256 timestamp,
+        uint256 blockNumber,
         address executor
     ) external {
         RegistryStorage.layout().upgradeHistory[key].push(
             RegistryStorage.UpgradeHistory({
                 oldAddress: oldAddress,
                 newAddress: newAddress,
-                timestamp: timestamp,
+                blockNumber: blockNumber,
                 executor: executor
             })
         );

@@ -82,6 +82,7 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
     const KEY_REWARD_VIEW = ethers.keccak256(ethers.toUtf8Bytes('REWARD_VIEW'));
     const KEY_LIQUIDATION_VIEW = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_VIEW'));
     const KEY_RISK_VIEW = ethers.keccak256(ethers.toUtf8Bytes('RISK_VIEW'));
+    const KEY_SYSTEM_RISK_VIEW = ethers.keccak256(ethers.toUtf8Bytes('SYSTEM_RISK_VIEW'));
     const KEY_USER_VIEW = ethers.keccak256(ethers.toUtf8Bytes('USER_VIEW'));
     const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW'));
     const KEY_BATCH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('BATCH_VIEW'));
@@ -103,6 +104,7 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
     await registry.setModule(KEY_REWARD_VIEW, await rewardManager.getAddress());
     await registry.setModule(KEY_LIQUIDATION_VIEW, await guaranteeFundManager.getAddress());
     await registry.setModule(KEY_RISK_VIEW, await lendingEngine.getAddress());
+    await registry.setModule(KEY_SYSTEM_RISK_VIEW, await priceOracle.getAddress());
     await registry.setModule(KEY_USER_VIEW, await collateralManager.getAddress());
     await registry.setModule(KEY_POSITION_VIEW, await collateralManager.getAddress());
     await registry.setModule(KEY_BATCH_VIEW, await statisticsView.getAddress());
@@ -196,18 +198,6 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
   });
 
   describe('资产与价格查询（已拆分至专属 View）', function () {
-    it('DEPRECATED: getTotalCollateral 应 revert（不依赖 revert 文本）', async function () {
-      await expect(systemView.connect(owner).getTotalCollateral(ZERO_ADDRESS)).to.be.reverted;
-    });
-
-    it('DEPRECATED: getTotalDebt 应 revert（不依赖 revert 文本）', async function () {
-      await expect(systemView.connect(owner).getTotalDebt(ZERO_ADDRESS)).to.be.reverted;
-    });
-
-    it('DEPRECATED: getAssetPrice 应 revert（不依赖 revert 文本）', async function () {
-      await expect(systemView.connect(owner).getAssetPrice(ZERO_ADDRESS)).to.be.reverted;
-    });
-
     it('不再暴露 batchGetAssetStatus（由 BatchView 承担）', async function () {
       expect((systemView as any).batchGetAssetStatus).to.equal(undefined);
     });
@@ -237,6 +227,7 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
         { label: 'routeReward', fn: () => systemView.connect(owner).routeReward(), key: 'REWARD_VIEW' },
         { label: 'routeLiquidation', fn: () => systemView.connect(owner).routeLiquidation(), key: 'LIQUIDATION_VIEW' },
         { label: 'routeRisk', fn: () => systemView.connect(owner).routeRisk(), key: 'RISK_VIEW' },
+        { label: 'routeSystemRisk', fn: () => systemView.connect(owner).routeSystemRisk(), key: 'SYSTEM_RISK_VIEW' },
         { label: 'routeUser', fn: () => systemView.connect(owner).routeUser(), key: 'USER_VIEW' },
         { label: 'routePosition', fn: () => systemView.connect(owner).routePosition(), key: 'POSITION_VIEW' },
         { label: 'routeBatch', fn: () => systemView.connect(owner).routeBatch(), key: 'BATCH_VIEW' },
@@ -255,40 +246,19 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
     });
   });
 
-  describe('聚合统计视图', function () {
-    it('应获取全局统计视图', async function () {
-      const result = await systemView.connect(owner).getGlobalStatisticsView();
-      expect(result.totalUsers).to.be.a('bigint');
-      expect(result.activeUsers).to.be.a('bigint');
-      expect(result.totalCollateral).to.be.a('bigint');
-      expect(result.totalDebt).to.be.a('bigint');
-      expect(result.lastUpdateTime).to.be.a('bigint');
-    });
-
-    it('DEPRECATED: getRewardSystemView 应 revert（不依赖 revert 文本）', async function () {
-      await expect(systemView.connect(owner).getRewardSystemView()).to.be.reverted;
-    });
-
-    it('DEPRECATED: getGuaranteeSystemView 应 revert（不依赖 revert 文本）', async function () {
-      await expect(systemView.connect(owner).getGuaranteeSystemView()).to.be.reverted;
-    });
-  });
-
   describe('权限与边界', function () {
-    it('无 VIEW_SYSTEM_DATA 权限的账户应被拒绝（调用仍在 SystemView 维护的接口）', async function () {
-      await expect(systemView.connect(alice).getGlobalStatisticsView()).to.be.revertedWithCustomError(acm, 'MissingRole');
+    it('无 VIEW_SYSTEM_DATA 权限的账户应被拒绝（路由接口）', async function () {
+      await expect(systemView.connect(alice).routeStatistics()).to.be.revertedWithCustomError(systemView, 'MissingRole');
     });
 
-    it('有权限账户可以查询（调用仍在 SystemView 维护的接口）', async function () {
-      const result = await systemView.connect(owner).getGlobalStatisticsView();
-      expect(result.totalCollateral).to.be.a('bigint');
+    it('有权限账户可以查询（路由接口）', async function () {
+      const expectedKey = ethers.keccak256(ethers.toUtf8Bytes('VAULT_STATISTICS'));
+      const expectedAddr = await registry.getModule(expectedKey);
+      const r = await systemView.connect(owner).routeStatistics();
+      expect(r.moduleKey).to.equal(expectedKey);
+      expect(r.moduleAddr).to.equal(expectedAddr);
     });
 
-    it('模块健康检查零地址返回默认信息', async function () {
-      const result = await systemView.connect(owner).checkModuleHealth(ZERO_ADDRESS);
-      expect(result[0]).to.be.a('boolean');
-      expect(result[1]).to.be.a('string');
-    });
   });
 });
 

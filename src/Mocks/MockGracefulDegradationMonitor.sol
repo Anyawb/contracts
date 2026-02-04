@@ -10,7 +10,7 @@ contract MockGracefulDegradationMonitor {
         string reason,
         uint256 fallbackValue,
         bool usedFallback,
-        uint256 timestamp
+        uint256 blockNumber
     );
     
     event GracefulDegradationStatsUpdated(
@@ -22,6 +22,7 @@ contract MockGracefulDegradationMonitor {
     
     // 统计数据
     uint256 public totalDegradations;
+    // block number of last degradation (kept name for compatibility)
     uint256 public lastDegradationTime;
     address public lastDegradedModule;
     string public lastDegradationReason;
@@ -29,7 +30,7 @@ contract MockGracefulDegradationMonitor {
     uint256 public totalFallbackValue;
     uint256 public averageFallbackValue;
     
-    /// @notice 记录降级事件
+    /// @notice 记录降级事件（时间口径为 block number）
     /// @param module 降级的模块地址
     /// @param reason 降级原因
     /// @param fallbackValue 使用的降级值
@@ -41,7 +42,7 @@ contract MockGracefulDegradationMonitor {
         bool usedFallback
     ) external {
         totalDegradations++;
-        lastDegradationTime = block.timestamp;
+        lastDegradationTime = block.number;
         lastDegradedModule = module;
         lastDegradationReason = reason;
         
@@ -51,7 +52,7 @@ contract MockGracefulDegradationMonitor {
             averageFallbackValue = totalFallbackValue / totalDegradations;
         }
         
-        emit DegradationEventRecorded(module, reason, fallbackValue, usedFallback, block.timestamp);
+        emit DegradationEventRecorded(module, reason, fallbackValue, usedFallback, block.number);
         emit GracefulDegradationStatsUpdated(
             totalDegradations,
             lastDegradationTime,
@@ -62,7 +63,7 @@ contract MockGracefulDegradationMonitor {
     
     /// @notice 设置统计数据（用于测试）
     /// @param _totalDegradations 总降级次数
-    /// @param _lastDegradationTime 最后降级时间
+    /// @param _lastDegradationTime 最后降级时间（block number）
     /// @param _lastDegradedModule 最后降级的模块
     /// @param _lastDegradationReason 最后降级原因
     /// @param _fallbackValueUsed 使用的降级值
@@ -88,7 +89,7 @@ contract MockGracefulDegradationMonitor {
     
     /// @notice 获取优雅降级统计信息
     /// @return _totalDegradations 总降级次数
-    /// @return _lastDegradationTime 最后降级时间
+    /// @return _lastDegradationTime 最后降级时间（block number）
     /// @return _lastDegradedModule 最后降级的模块
     /// @return _lastDegradationReason 最后降级原因
     /// @return _fallbackValueUsed 使用的降级值

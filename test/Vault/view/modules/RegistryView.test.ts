@@ -11,6 +11,34 @@ const KEY_DYNAMIC_MODULE_REGISTRY = ethers.id("DYNAMIC_MODULE_REGISTRY");
 const ACTION_ADMIN = ethers.id("ACTION_ADMIN");
 const MAX_BATCH = 100n; // 来自 ViewConstants.MAX_BATCH_SIZE
 
+function extractRevertData(e: any): string | undefined {
+  const roots: Array<unknown> = [
+    e?.info?.error?.data,
+    e?.info?.error?.error?.data,
+    e?.error?.data,
+    e?.error?.error?.data,
+    e?.data,
+  ];
+  for (const v of roots) {
+    if (typeof v === "string" && v.startsWith("0x")) return v;
+  }
+  return undefined;
+}
+
+async function expectMissingRole(p: Promise<unknown>) {
+  const selMissingRole = ethers.id("MissingRole()").slice(0, 10).toLowerCase();
+  try {
+    await p;
+  } catch (e: any) {
+    const data = extractRevertData(e);
+    const sel = data && data.length >= 10 ? data.slice(0, 10).toLowerCase() : "";
+    // Accept either selector match or a message fallback.
+    expect(sel === selMissingRole || String(e?.message ?? "").includes("MissingRole")).to.eq(true);
+    return;
+  }
+  throw new Error("Expected MissingRole revert, but succeeded");
+}
+
 describe("RegistryView", function () {
   async function deployFixture() {
     const [admin, user] = await ethers.getSigners();
@@ -46,10 +74,48 @@ describe("RegistryView", function () {
       ).to.be.revertedWithCustomError(RegistryView, "ZeroAddress");
     });
 
+    it("reverts on non-contract registry", async function () {
+      const RegistryView = await ethers.getContractFactory("RegistryView");
+      const eoa = ethers.Wallet.createRandom().address;
+      await expect(upgrades.deployProxy(RegistryView, [eoa], { kind: "uups" })).to.be.revertedWithCustomError(
+        RegistryView,
+        "NotAContract"
+      );
+    });
+
     it("sets registry address", async function () {
       const { registry, rv } = await loadFixture(deployFixture);
       expect(await rv.registryAddr()).to.equal(await registry.getAddress());
       expect(await rv.getRegistry()).to.equal(await registry.getAddress());
+    });
+  });
+
+  describe("RV-01 static interface constraints", function () {
+    it("has no push* functions; non-upgrade APIs are view/pure", async function () {
+      const { rv } = await loadFixture(deployFixture);
+      const abiFrags = rv.interface.fragments.filter((f: any) => f.type === "function");
+      const fnNames = abiFrags.map((f: any) => f.name);
+
+      expect(fnNames.filter((n: string) => n.startsWith("push")).length).to.eq(0);
+
+      // UUPS entrypoints are expected to be nonpayable; everything else should be view/pure.
+      const allowedNonView = new Set(["upgradeToAndCall", "initialize"]);
+      for (const f of abiFrags as any[]) {
+        if (allowedNonView.has(f.name)) continue;
+        expect(["view", "pure"].includes(f.stateMutability)).to.eq(true, `expected ${f.name} to be view/pure`);
+      }
+    });
+  });
+
+  describe("RV-02 onlyValidRegistry (uninitialized)", function () {
+    it("reverts on read APIs when registry not initialized", async function () {
+      const RegistryView = await ethers.getContractFactory("RegistryView");
+      const impl = await RegistryView.deploy();
+      await expect(impl.getAllModuleKeys()).to.be.revertedWithCustomError(impl, "ZeroAddress");
+      await expect(impl.checkModulesExist([KEY_ACM])).to.be.revertedWithCustomError(impl, "ZeroAddress");
+      // Legacy getters should not revert.
+      expect(await impl.registryAddr()).to.equal(ethers.ZeroAddress);
+      expect(await impl.registryAddrVar()).to.equal(ethers.ZeroAddress);
     });
   });
 
@@ -75,10 +141,20 @@ describe("RegistryView", function () {
   });
 
   describe("existence checks with batch limits", function () {
+    it("checkModulesExist rejects empty array", async function () {
+      const { rv } = await loadFixture(deployFixture);
+      await expect(rv.checkModulesExist([])).to.be.revertedWithCustomError(rv, "EmptyArray");
+    });
+
+    it("batchFindModuleKeysByAddresses rejects empty array", async function () {
+      const { rv } = await loadFixture(deployFixture);
+      await expect(rv.batchFindModuleKeysByAddresses([], 0)).to.be.revertedWithCustomError(rv, "EmptyArray");
+    });
+
     it("checkModulesExist respects batch limit", async function () {
       const { rv } = await loadFixture(deployFixture);
       const oversized = Array.from({ length: Number(MAX_BATCH) + 1 }, (_, i) => ethers.id("KEY" + i));
-      await expect(rv.checkModulesExist(oversized)).to.be.revertedWithCustomError(rv, "RegistryView__BatchTooLarge");
+      await expect(rv.checkModulesExist(oversized)).to.be.revertedWithCustomError(rv, "BatchTooLarge");
     });
 
     it("batchFindModuleKeysByAddresses respects batch limit", async function () {
@@ -86,7 +162,7 @@ describe("RegistryView", function () {
       const oversized = Array.from({ length: Number(MAX_BATCH) + 1 }, () => ethers.Wallet.createRandom().address);
       await expect(rv.batchFindModuleKeysByAddresses(oversized, 0)).to.be.revertedWithCustomError(
         rv,
-        "RegistryView__BatchTooLarge"
+        "BatchTooLarge"
       );
     });
 
@@ -94,7 +170,7 @@ describe("RegistryView", function () {
       const { rv } = await loadFixture(deployFixture);
       await expect(rv.getRegisteredModuleKeysPaginated(0, Number(MAX_BATCH) + 1)).to.be.revertedWithCustomError(
         rv,
-        "RegistryView__BatchTooLarge"
+        "BatchTooLarge"
       );
     });
 
@@ -162,11 +238,7 @@ describe("RegistryView", function () {
     it("没有动态模块键注册表时只返回静态键", async function () {
       const { rv } = await loadFixture(deployFixture);
       const allKeys = await rv.getAllModuleKeys();
-      // 应该只包含静态键
       expect(allKeys.length).to.be.gt(0);
-      // 验证不包含动态键（通过检查键的格式）
-      const hasDynamicKey = allKeys.some((key: string) => key.startsWith("0x") && key.length === 66);
-      // 静态键应该都是预定义的
       expect(allKeys).to.include(KEY_ACM);
     });
 
@@ -221,9 +293,12 @@ describe("RegistryView", function () {
     });
 
     it("动态键查询失败时回退到静态键", async function () {
-      const [admin] = await ethers.getSigners();
       const Registry = await ethers.getContractFactory("MockRegistry");
       const registry = await Registry.deploy();
+
+      const DynRevert = await ethers.getContractFactory("MockRegistryDynamicModuleKeyRevert");
+      const dynRevert = await DynRevert.deploy();
+      await registry.setModule(KEY_DYNAMIC_MODULE_REGISTRY, await dynRevert.getAddress());
 
       const RegistryView = await ethers.getContractFactory("RegistryView");
       const rv = await upgrades.deployProxy(
@@ -233,18 +308,15 @@ describe("RegistryView", function () {
       );
 
       // 先获取不包含动态键注册表时的键列表（应该只有静态键）
-      const staticKeysOnly = await rv.getAllModuleKeys();
-      expect(staticKeysOnly).to.include(KEY_ACM);
-      expect(staticKeysOnly.length).to.be.gt(0);
+      const Registry2 = await ethers.getContractFactory("MockRegistry");
+      const registry2 = await Registry2.deploy();
+      const rv2 = await upgrades.deployProxy(RegistryView, [await registry2.getAddress()], { kind: "uups" });
+      const staticKeysOnly = await rv2.getAllModuleKeys();
 
-      // 设置一个无效的动态键注册表地址（不是合约，会导致调用失败）
-      // 使用零地址而不是 admin.address，因为零地址更安全
-      await registry.setModule(KEY_DYNAMIC_MODULE_REGISTRY, ethers.ZeroAddress);
-
-      // 应该只返回静态键（因为动态键注册表地址为零，会直接返回静态键）
+      // dyn registry reverts: should NOT revert, should fall back to static keys only
       const allKeys = await rv.getAllModuleKeys();
       expect(allKeys).to.include(KEY_ACM);
-      expect(allKeys.length).to.equal(staticKeysOnly.length); // 应该与只有静态键时相同
+      expect(allKeys.length).to.equal(staticKeysOnly.length);
     });
 
     it("getAllRegisteredModuleKeys 包含动态键中已注册的模块", async function () {
@@ -428,8 +500,8 @@ describe("RegistryView", function () {
       
       // 验证可以获取真实 Registry 的 MAX_DELAY
       const maxDelay = await rv.maxDelay();
-      // MAX_DELAY 应该是 7 days (604800 秒)
-      expect(maxDelay).to.equal(7 * 24 * 60 * 60);
+      // MAX_DELAY 应该是 7 days (blocks, 2s/block)
+      expect(maxDelay).to.equal((7 * 24 * 60 * 60) / 2);
     });
 
     it("应该能够处理真实 Registry 的动态模块键注册表", async function () {
@@ -449,6 +521,32 @@ describe("RegistryView", function () {
       
       // 验证至少包含已知的静态键
       expect(allKeys).to.include(KEY_ACM);
+    });
+  });
+
+  describe("RV-06 UUPS upgrade authorization", function () {
+    it("reverts upgradeTo for non-admin caller", async function () {
+      const { rv, user } = await loadFixture(deployFixture);
+      const RegistryView = await ethers.getContractFactory("RegistryView");
+      const newImpl = await RegistryView.deploy();
+      await expectMissingRole(rv.connect(user).upgradeToAndCall(await newImpl.getAddress(), "0x"));
+    });
+
+    it("reverts on zero/EOA newImplementation (after role check)", async function () {
+      const { rv, admin } = await loadFixture(deployFixture);
+      await expect(rv.connect(admin).upgradeToAndCall(ethers.ZeroAddress, "0x")).to.be.revertedWithCustomError(
+        rv,
+        "ZeroAddress"
+      );
+      const eoa = ethers.Wallet.createRandom().address;
+      await expect(rv.connect(admin).upgradeToAndCall(eoa, "0x")).to.be.revertedWithCustomError(rv, "NotAContract");
+    });
+
+    it("allows upgradeTo for admin with contract implementation", async function () {
+      const { rv, admin } = await loadFixture(deployFixture);
+      const RegistryView = await ethers.getContractFactory("RegistryView");
+      const newImpl = await RegistryView.deploy();
+      await expect(rv.connect(admin).upgradeToAndCall(await newImpl.getAddress(), "0x")).to.not.be.reverted;
     });
   });
 });

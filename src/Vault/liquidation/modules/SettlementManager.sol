@@ -63,8 +63,9 @@ contract SettlementManager is
     ISettlementManager
 {
     using SafeERC20 for IERC20;
-    /// @dev Keep in sync with ORDER_ENGINE's ON_TIME_WINDOW baseline (currently 24 hours).
-    uint256 private constant _ON_TIME_WINDOW = 24 hours;
+    /// @dev Keep in sync with ORDER_ENGINE's ON_TIME_WINDOW baseline (blocks-based).
+    ///      Baseline assumes ~12s/block: 24h ≈ 7200 blocks.
+    uint256 private constant _ON_TIME_WINDOW_BLOCKS = 7200;
     /// @notice Registry address for module resolution and access control.
     /// @dev Stored privately; exposed via explicit getter `registryAddrVar()` (no public state variable).
     address private _registryAddr;
@@ -183,7 +184,7 @@ contract SettlementManager is
      * @param repayAmount Repay amount (token decimals of `debtAsset`)
      * @param orderId Order/position id (SSOT; ORDER_ENGINE-generated)
      * @param releasedAllCollateral True if collateral was fully released
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Emission blockNumber (blocks)
      */
     event RepayAndSettleProcessed(
         address indexed user,
@@ -191,7 +192,7 @@ contract SettlementManager is
         uint256 repayAmount,
         uint256 indexed orderId,
         bool releasedAllCollateral,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /**
@@ -205,13 +206,13 @@ contract SettlementManager is
      * @param user Borrower address
      * @param collateralAsset Collateral asset address
      * @param collateralAmount Released amount (token decimals of `collateralAsset`)
-     * @param timestamp Emission timestamp (seconds)
+     * @param blockNumber Emission blockNumber (blocks)
      */
     event CollateralReleased(
         address indexed user,
         address indexed collateralAsset,
         uint256 collateralAmount,
-        uint256 timestamp
+        uint256 blockNumber
     );
 
     /**
@@ -308,14 +309,14 @@ contract SettlementManager is
         if (user == address(0) || debtAsset == address(0)) revert ZeroAddress();
         if (repayAmount == 0) revert AmountIsZero();
         // NOTE: orderId can be 0 (current ORDER_ENGINE / LoanNFT minting starts from 0).
-        // Existence is validated below via ORDER_ENGINE._getLoanOrderForView(orderId).
+        // Existence is validated below via ORDER_ENGINE.getLoanOrderForView(orderId).
 
         address le = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
         address cm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
         address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
 
         // 0) Cross-validation: orderId must belong to this user, and debtAsset must match the order
-        IOrderEngine.LoanOrder memory ord = IOrderEngineViewAdapter(orderEngine)._getLoanOrderForView(orderId);
+        IOrderEngine.LoanOrder memory ord = IOrderEngineViewAdapter(orderEngine).getLoanOrderForView(orderId);
         if (ord.borrower == address(0) || ord.asset == address(0)) revert ZeroAddress();
         if (ord.borrower != user || ord.asset != debtAsset) revert SettlementManager__OrderMismatch();
 
@@ -340,8 +341,7 @@ contract SettlementManager is
                 if (bal > 0) {
                     // Unified exit entry: receiver==user means return to user (Architecture-Guide.md §640-646)
                     ICollateralManager(cm).withdrawCollateralTo(user, assets[i], bal, user);
-                    // solhint-disable-next-line not-rely-on-time
-                    uint256 tsCollateral = block.timestamp;
+                    uint256 tsCollateral = block.number;
                     emit CollateralReleased(user, assets[i], bal, tsCollateral);
                     DataPushLibrary._emitData(
                         DataPushTypes.DATA_TYPE_COLLATERAL_RELEASED,
@@ -361,8 +361,8 @@ contract SettlementManager is
         //
         // NOTE: ERGM enforces its own per-asset enable switch; if not enabled, this is a no-op.
         if (releasedAllCollateral) {
-            // solhint-disable-next-line not-rely-on-time
-            bool isEarly = (block.timestamp + _ON_TIME_WINDOW < ord.maturity);
+            // SSOT (time refactor): ord.maturity is a maturityBlock (legacy field name).
+            bool isEarly = (block.number + _ON_TIME_WINDOW_BLOCKS < ord.maturity);
             if (isEarly) {
                 address ergm = Registry(_registryAddr).getModule(ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE);
                 if (ergm != address(0)) {
@@ -377,12 +377,11 @@ contract SettlementManager is
             }
         }
 
-        // solhint-disable-next-line not-rely-on-time
-        uint256 ts = block.timestamp;
-        emit RepayAndSettleProcessed(user, debtAsset, repayAmount, orderId, releasedAllCollateral, ts);
+        uint256 blockNumber = block.number;
+        emit RepayAndSettleProcessed(user, debtAsset, repayAmount, orderId, releasedAllCollateral, blockNumber);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_REPAY_AND_SETTLE,
-            abi.encode(user, debtAsset, repayAmount, orderId, releasedAllCollateral, ts)
+            abi.encode(user, debtAsset, repayAmount, orderId, releasedAllCollateral, blockNumber)
         );
     }
 
@@ -420,7 +419,7 @@ contract SettlementManager is
      */
     function settleOrLiquidate(uint256 orderId) external override onlyValidRegistry whenNotPaused nonReentrant {
         // NOTE: orderId can be 0 (current ORDER_ENGINE / LoanNFT minting starts from 0).
-        // Existence is validated below via ORDER_ENGINE._getLoanOrderForView(orderId).
+        // Existence is validated below via ORDER_ENGINE.getLoanOrderForView(orderId).
         _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
 
         address le = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
@@ -430,7 +429,7 @@ contract SettlementManager is
         address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
         address loanNft = Registry(_registryAddr).getModule(ModuleKeys.KEY_LOAN_NFT);
 
-        IOrderEngine.LoanOrder memory ord = IOrderEngineViewAdapter(orderEngine)._getLoanOrderForView(orderId);
+        IOrderEngine.LoanOrder memory ord = IOrderEngineViewAdapter(orderEngine).getLoanOrderForView(orderId);
         if (ord.borrower == address(0) || ord.asset == address(0)) revert ZeroAddress();
 
         address targetUser = ord.borrower;
@@ -446,8 +445,8 @@ contract SettlementManager is
         // Architecture (Architecture-Guide.md §647-652): liquidation is not a standalone external entry;
         // SettlementManager enters liquidation branch when trigger conditions are met.
         //
-        // solhint-disable-next-line not-rely-on-time
-        bool overdue = (block.timestamp > ord.maturity) && (ILendingEngineBasic(le).getDebt(targetUser, debtAsset) > 0);
+        // SSOT (time refactor): ord.maturity is a maturityBlock (legacy field name).
+        bool overdue = (block.number > ord.maturity) && (ILendingEngineBasic(le).getDebt(targetUser, debtAsset) > 0);
         bool riskLiquidatable = ILiquidationRiskManager(risk).isLiquidatable(targetUser);
         if (!overdue && !riskLiquidatable) revert SettlementManager__NotLiquidatable();
 
@@ -607,14 +606,12 @@ contract SettlementManager is
                     }
                 } catch {
                     // Best-effort: ignore single token failure.
-                    // Keep a no-op statement to satisfy solhint no-empty-blocks.
                     tokenId = tokenId;
                 }
                 unchecked { ++i; }
             }
         } catch {
             // Best-effort: ignore LoanNFT failures.
-            // Keep a no-op statement to satisfy solhint no-empty-blocks.
             maxScan = maxScan;
         }
     }

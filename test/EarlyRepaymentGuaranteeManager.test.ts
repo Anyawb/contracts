@@ -6,7 +6,7 @@
  */
 import { expect } from 'chai';
 import { ethers, upgrades } from 'hardhat';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, mine } from '@nomicfoundation/hardhat-network-helpers';
 import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 
@@ -27,6 +27,7 @@ const PRINCIPAL = ethers.parseEther('1000');
 const PROMISED_INTEREST = ethers.parseEther('100');
 const TERM_DAYS = 30;
 const PLATFORM_FEE_RATE = 100; // 1% (bps)
+const BLOCKS_PER_DAY = 7200;
 
 interface DeploymentFixture {
   registry: Registry;
@@ -180,7 +181,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
           anyValue, // startTime
           anyValue, // maturityTime
           2n, // DEFAULT_EARLY_REPAY_PENALTY_DAYS
-          anyValue // timestamp
+          anyValue // blockNumber
         );
 
       const record = await ergm.getGuaranteeRecord(expectedId);
@@ -218,7 +219,8 @@ describe('EarlyRepaymentGuaranteeManager', function () {
       const { ergm, vaultCore, borrower, lender, testAsset } = await loadFixture(deploySystemFixture);
       await lockGuarantee(ergm, vaultCore, borrower.address, lender.address, testAsset);
 
-      await time.increase(10 * 24 * 60 * 60);
+      // Time-Dependency-Refactor: advance by blocks (not wall-clock seconds).
+      await mine(10 * BLOCKS_PER_DAY);
 
       await expect(
         ergm
@@ -235,7 +237,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
           anyValue, // refundToBorrower
           anyValue, // platformFee
           anyValue, // actualInterestPaid
-          anyValue // timestamp
+          anyValue // blockNumber
         );
 
       expect(await ergm.hasActiveGuarantee(borrower.address, testAsset)).to.equal(false);

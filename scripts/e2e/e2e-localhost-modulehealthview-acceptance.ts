@@ -6,6 +6,8 @@ function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
+const BLOCKS_PER_MINUTE = 30n;
+
 function assertOk(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
@@ -67,9 +69,11 @@ async function main() {
 
     const mhvAddr = (await registry.getModuleOrRevert(key("MODULE_HEALTH_VIEW"))) as string;
     const mhv = (await ethers.getContractAt("ModuleHealthView", mhvAddr)) as any;
+    const hvAddr = (await registry.getModuleOrRevert(key("HEALTH_VIEW"))) as string;
 
     console.log("  Registry:", CONTRACT_ADDRESSES.Registry);
     console.log("  ModuleHealthView:", mhvAddr);
+    console.log("  HealthView:", hvAddr);
 
     // ====== Roles ======
     const ROLE_SYSTEM_STATUS = key("ACTION_VIEW_SYSTEM_STATUS");
@@ -105,19 +109,28 @@ async function main() {
     // ====== MUST: operator can call checkAndPush + read ======
     const tx = await mhv.connect(operator).checkAndPushModuleHealth(targetModule);
     const receipt = await tx.wait();
-    assertOk(!!receipt, "missing receipt for checkAndPushModuleHealth");
+    if (!receipt) {
+      throw new Error("missing receipt for checkAndPushModuleHealth");
+    }
 
-    // Verify DataPushed(DATA_TYPE_MODULE_HEALTH, payload) emitted by ModuleHealthView
+    // Verify DataPushed(DATA_TYPE_MODULE_HEALTH, payload) emitted by HealthView
     const dpIface = new ethers.Interface(["event DataPushed(bytes32 indexed dataTypeHash, bytes payload)"]);
-    const dpTopic = dpIface.getEvent("DataPushed").topicHash;
+    const dpEvent = dpIface.getEvent("DataPushed");
+    if (!dpEvent) {
+      throw new Error("missing DataPushed event signature");
+    }
+    const dpTopic = dpEvent.topicHash;
     const logs = receipt.logs
-      .filter((l: any) => l.address?.toLowerCase() === mhvAddr.toLowerCase())
+      .filter((l: any) => l.address?.toLowerCase() === hvAddr.toLowerCase())
       .filter((l: any) => l.topics?.[0] === dpTopic);
-    assertOk(logs.length >= 1, "expected DataPushed from ModuleHealthView");
+    assertOk(logs.length >= 1, "expected DataPushed from HealthView");
     const parsed = dpIface.parseLog({ topics: logs[0].topics, data: logs[0].data });
+    if (!parsed) {
+      throw new Error("failed to parse DataPushed log");
+    }
     assertOk(parsed.args.dataTypeHash === DATA_TYPE_MODULE_HEALTH, "unexpected dataTypeHash for module health");
 
-    const [m, ok, detailsHash, failures, ts] = ethers.AbiCoder.defaultAbiCoder().decode(
+    const [m, ok, detailsHash, failures, blockNumber] = ethers.AbiCoder.defaultAbiCoder().decode(
       ["address", "bool", "bytes32", "uint32", "uint256"],
       parsed.args.payload
     ) as unknown as [string, boolean, string, bigint, bigint];
@@ -125,25 +138,24 @@ async function main() {
     assertOk(ok === true, "payload.ok must be true for a real contract");
     assertOk(detailsHash.toLowerCase() === DETAILS_HEALTHY_HASH.toLowerCase(), "payload.detailsHash mismatch");
     assertOk(failures === 0n, "payload.failures must be 0 for healthy module");
-    assertOk(ts > 0n, "payload.ts must be non-zero");
+    assertOk(blockNumber > 0n, "payload.blockNumber must be non-zero");
 
-    const [status, ts2, isValid] = (await mhv
+    const [status, blockNumber2, isValid] = (await mhv
       .connect(operator)
       .getModuleHealthStatusWithMeta(targetModule)) as [{ lastCheckTime: bigint; isHealthy: boolean; detailsHash: string }, bigint, boolean];
-    assertOk(ts2 === status.lastCheckTime, "meta.timestamp must equal status.lastCheckTime");
+    assertOk(blockNumber2 === status.lastCheckTime, "meta.blockNumber must equal status.lastCheckTime");
     assertOk(isValid === true, "fresh cache must be valid");
     assertOk(status.isHealthy === true, "status.isHealthy must be true");
     assertOk(status.detailsHash.toLowerCase() === DETAILS_HEALTHY_HASH.toLowerCase(), "status.detailsHash mismatch");
 
-    // ====== MUST: TTL expiry flips isValid=false but preserves timestamp ======
+    // ====== MUST: TTL expiry flips isValid=false but preserves blockNumber ======
     // ViewConstants.CACHE_DURATION = 5 minutes
-    await network.provider.send("evm_increaseTime", [5 * 60 + 1]);
-    await network.provider.send("evm_mine", []);
+    await network.provider.send("hardhat_mine", [ethers.toBeHex(5n * BLOCKS_PER_MINUTE + 1n)]);
 
-    const [, ts3, isValid3] = (await mhv
+    const [, blockNumber3, isValid3] = (await mhv
       .connect(operator)
       .getModuleHealthStatusWithMeta(targetModule)) as [unknown, bigint, boolean];
-    assertOk(ts3 === ts2, "timestamp must not change without a new push");
+    assertOk(blockNumber3 === blockNumber2, "blockNumber must not change without a new push");
     assertOk(isValid3 === false, "after TTL, cache must be invalid");
 
     console.log("\n✅ ModuleHealthView acceptance checks passed.");

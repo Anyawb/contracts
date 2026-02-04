@@ -1,16 +1,28 @@
+/**
+ * SystemView 路由断言工具（e2e 用）
+ *
+ * 校验 SystemView 各 route* 返回的模块地址与 Registry 中绑定一致，
+ * 并校验 routePrice 的 primary/fallback 与 ValuationOracleView/PriceOracle 价格一致性。
+ * 供 e2e 脚本（如 systemview-routing、attack-suite）复用。
+ */
 import { ethers } from "hardhat";
 
+/** 将字符串转为 Registry 使用的 keccak256 模块 key */
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
+/** 断言为真，否则抛错（用于类型收窄） */
 function assertOk(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
 
+/** 路由信息：支持具名 (moduleKey/moduleAddr) 或元组 [0]/[1] 两种 ABI 解码结果 */
 type RouteInfoLike = { moduleKey?: string; moduleAddr?: string; 0?: string; 1?: string };
+/** 主/备路由：routePrice() 返回 primaryRoute + fallbackRoute */
 type RouteHintLike = { primaryRoute?: RouteInfoLike; fallbackRoute?: RouteInfoLike; 0?: RouteInfoLike; 1?: RouteInfoLike };
 
+/** 从 RouteInfoLike 解码出 moduleKey、moduleAddr */
 function readRouteInfo(x: RouteInfoLike): { moduleKey: string; moduleAddr: string } {
   const moduleKey = (x.moduleKey ?? x[0]) as string | undefined;
   const moduleAddr = (x.moduleAddr ?? x[1]) as string | undefined;
@@ -18,6 +30,7 @@ function readRouteInfo(x: RouteInfoLike): { moduleKey: string; moduleAddr: strin
   return { moduleKey, moduleAddr };
 }
 
+/** 从 RouteHintLike 解码出 primary、fallback 两条路由 */
 function readRouteHint(x: RouteHintLike): { primary: RouteInfoLike; fallback: RouteInfoLike } {
   const primary = (x.primaryRoute ?? x[0]) as RouteInfoLike | undefined;
   const fallback = (x.fallbackRoute ?? x[1]) as RouteInfoLike | undefined;
@@ -25,12 +38,14 @@ function readRouteHint(x: RouteHintLike): { primary: RouteInfoLike; fallback: Ro
   return { primary, fallback };
 }
 
+/** 若 who 没有 roleKey，则用 adminSigner 授予（便于本地 e2e 自举） */
 async function ensureRole(acm: any, adminSigner: any, roleKey: string, who: string) {
   if (!(await acm.hasRole(roleKey, who))) {
     await acm.connect(adminSigner).grantRole(roleKey, who);
   }
 }
 
+/** 断言 routeInfo 的 moduleKey/moduleAddr 与 Registry 中 expectedKeyString 对应模块一致 */
 async function assertRouteEqualsRegistry(registry: any, label: string, expectedKeyString: string, routeInfo: RouteInfoLike) {
   const expectedKey = key(expectedKeyString);
   const expectedAddr = (await registry.getModuleOrRevert(expectedKey)) as string;
@@ -41,6 +56,7 @@ async function assertRouteEqualsRegistry(registry: any, label: string, expectedK
 }
 
 /**
+ * 校验 SystemView.routePrice 的主/备路由与 Registry 一致，并校验价格回源一致性。
  * Ensure SystemView route addresses align with Registry, and validate PRICE_ORACLE fallback consistency.
  *
  * - Requires caller (adminSigner) can grant roles if missing.
@@ -129,6 +145,9 @@ export async function assertSystemViewRoute(params: {
   await assertRouteEqualsRegistry(registry, routeFn, expectedKeyString, routeInfo);
 }
 
+/**
+ * 断言 SystemView.viewCacheAddrVar() 与 Registry 中 VIEW_CACHE 模块地址一致。
+ */
 export async function assertViewCacheAddrAligned(params: {
   registryAddr: string;
   systemViewAddr: string;
@@ -147,8 +166,9 @@ export async function assertViewCacheAddrAligned(params: {
 }
 
 /**
+ * 断言 SystemView.getModuleOptional(key) 与 Registry.getModuleOrRevert(key) 一致。
+ * 用于没有单独 route* 方法的模块。
  * Assert SystemView.getModuleOptional(key) aligns with Registry.getModuleOrRevert(key).
- * This is used for modules without a dedicated route* helper.
  */
 export async function assertSystemViewGetModuleOptionalAligned(params: {
   registryAddr: string;

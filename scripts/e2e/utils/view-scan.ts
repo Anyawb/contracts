@@ -1,21 +1,32 @@
+/**
+ * View 模块扫描脚本（e2e 用）
+ *
+ * 从 Registry 解析所有 View 相关模块地址，逐合约调用 getVersionInfo() 校验 api/schema 与预期一致，
+ * 可选做轻量健全性调用（如 HealthView.getUserHealthFactorWithMeta、ViewCache.getSystemStatus）。
+ * 供 e2e（如 attack-suite 收尾的 ViewScan）复用；strict 模式下任一失败即抛错。
+ */
 import { ethers } from "hardhat";
 
+/** View 合约 getVersionInfo() 返回结构 */
 type VersionInfo = {
   apiVersion: bigint;
   schemaVersion: bigint;
   implementation: string;
 };
 
+/** 扫描时的可选参数：资产地址/样本用户用于健全性调用，strict 控制失败是否抛错 */
 export type ViewScanOptions = {
   assetAddr?: string;
   sampleUser?: string;
   strict?: boolean;
 };
 
+/** 将字符串转为 Registry 的 keccak256 模块 key */
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
+/** 从环境变量解析布尔值，支持 1/0、true/false、yes/no、y/n */
 function envBool(name: string, defaultValue = false): boolean {
   const raw = process.env[name];
   if (raw === undefined) return defaultValue;
@@ -25,6 +36,7 @@ function envBool(name: string, defaultValue = false): boolean {
   return defaultValue;
 }
 
+/** 执行异步调用，失败时打印 label；strict 为 true 时重新抛出，否则返回 undefined */
 async function safeCall<T>(label: string, fn: () => Promise<T>, strict: boolean): Promise<T | undefined> {
   try {
     return await fn();
@@ -36,11 +48,16 @@ async function safeCall<T>(label: string, fn: () => Promise<T>, strict: boolean)
   }
 }
 
+/** 从 View 合约读取 getVersionInfo() 并转为 VersionInfo */
 async function getVersionInfo(view: any): Promise<VersionInfo> {
   const [apiVersion, schemaVersion, implementation] = (await view.getVersionInfo()) as [bigint, bigint, string];
   return { apiVersion, schemaVersion, implementation };
 }
 
+/**
+ * 按 Registry 中绑定的 View 模块 key 解析地址，校验 VersionInfo（api/schema），可选执行健全性调用。
+ * strict 可由 opts.strict 或环境变量 E2E_VIEW_STRICT 控制。
+ */
 export async function scanViewModules(registryAddr: string, opts?: ViewScanOptions) {
   const strict = opts?.strict ?? envBool("E2E_VIEW_STRICT", false);
   const registry = await ethers.getContractAt("Registry", registryAddr);
@@ -48,7 +65,7 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
   console.log("=== ViewScan (Registry-driven) ===");
   console.log(`  strict=${strict}`);
 
-  // View modules deployed by deploylocal.ts (keys are UPPER_SNAKE_CASE strings as bound in Registry)
+  // deploylocal 部署的 View 模块列表，key 与 Registry 中绑定一致（UPPER_SNAKE_CASE）
   const modules: Array<{
     key: string;
     name: string;
@@ -85,7 +102,7 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
     { key: "REWARD_VIEW", name: "RewardView", expectedApi: 2n, expectedSchema: 1n },
   ];
 
-  // Resolve all module addresses first.
+  // 第一步：从 Registry 解析所有模块地址（解析失败在 strict 下会抛错）
   const resolved: Array<{ key: string; name: string; addr: string; expectedApi: bigint; expectedSchema: bigint }> = [];
   for (const m of modules) {
     const addr = await safeCall(
@@ -97,7 +114,7 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
     resolved.push({ key: m.key, name: m.name, addr, expectedApi: m.expectedApi ?? 1n, expectedSchema: m.expectedSchema });
   }
 
-  // VersionInfo scan (C baseline).
+  // 第二步：逐模块调用 getVersionInfo，校验 api/schema 与预期一致
   for (const r of resolved) {
     const view = await ethers.getContractAt(r.name, r.addr);
     const vi = await safeCall(`getVersionInfo ${r.key}`, async () => getVersionInfo(view), strict);
@@ -117,7 +134,7 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
     }
   }
 
-  // Lightweight sanity calls (best-effort; strict mode will fail fast).
+  // 第三步（可选）：轻量健全性调用，strict 下失败会抛错
   const assetAddr = opts?.assetAddr;
   const sampleUser = opts?.sampleUser;
   if (sampleUser) {

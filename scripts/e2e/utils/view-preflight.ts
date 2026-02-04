@@ -1,16 +1,28 @@
+/**
+ * View 预检脚本（e2e 用）
+ *
+ * 在跑 View 相关 e2e 前执行：校验 admin 具备 VIEW_SYSTEM_DATA/VIEW_PRICE_DATA/VIEW_RISK_DATA/VIEW_USER_DATA，
+ * 可选为链上“写 View 缓存”的模块（VaultLendingEngine、VaultRouter 等）授予 ACTION_VIEW_PUSH 与 VIEW_RISK_DATA，
+ * 校验 SystemView 各 route* 与 Registry 一致、routePrice 主/备与价格回源一致，并打印各 View 的 VersionInfo。
+ */
 import { ethers } from "hardhat";
 
+/** 将字符串转为 Registry 使用的 keccak256 模块 key */
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
 }
 
+/** 断言为真，否则抛错 */
 function assertOk(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
 
+/** 路由信息：支持具名或元组 ABI 解码结果 */
 type RouteInfoLike = { moduleKey?: string; moduleAddr?: string; 0?: string; 1?: string };
+/** 主/备路由（routePrice 返回结构） */
 type RouteHintLike = { primaryRoute?: RouteInfoLike; fallbackRoute?: RouteInfoLike; 0?: RouteInfoLike; 1?: RouteInfoLike };
 
+/** 从 RouteInfoLike 解码 moduleKey、moduleAddr */
 function readRouteInfo(x: RouteInfoLike): { moduleKey: string; moduleAddr: string } {
   const moduleKey = (x.moduleKey ?? x[0]) as string | undefined;
   const moduleAddr = (x.moduleAddr ?? x[1]) as string | undefined;
@@ -18,6 +30,7 @@ function readRouteInfo(x: RouteInfoLike): { moduleKey: string; moduleAddr: strin
   return { moduleKey, moduleAddr };
 }
 
+/** 从 RouteHintLike 解码 primary、fallback */
 function readRouteHint(x: RouteHintLike): { primary: RouteInfoLike; fallback: RouteInfoLike } {
   const primary = (x.primaryRoute ?? x[0]) as RouteInfoLike | undefined;
   const fallback = (x.fallbackRoute ?? x[1]) as RouteInfoLike | undefined;
@@ -25,6 +38,7 @@ function readRouteHint(x: RouteHintLike): { primary: RouteInfoLike; fallback: Ro
   return { primary, fallback };
 }
 
+/** 尝试读取 View 合约的 getVersionInfo()，失败返回空对象 */
 async function tryGetVersionInfo(addr: string): Promise<{ api?: bigint; schema?: bigint; impl?: string }> {
   const c = await ethers.getContractAt("ViewVersioned", addr);
   try {
@@ -35,6 +49,7 @@ async function tryGetVersionInfo(addr: string): Promise<{ api?: bigint; schema?:
   }
 }
 
+/** 尝试读取 PriceOracle.getPrice(asset)，不支持则返回 (0,0) */
 async function tryGetPriceOraclePrice(oracleAddr: string, asset: string): Promise<{ price: bigint; blockNumber: bigint }> {
   const oracle = await ethers.getContractAt("PriceOracle", oracleAddr);
   try {
@@ -46,6 +61,9 @@ async function tryGetPriceOraclePrice(oracleAddr: string, asset: string): Promis
   }
 }
 
+/**
+ * 执行 View 预检：角色校验、可选授 ACTION_VIEW_PUSH/VIEW_RISK_DATA、SystemView 路由表与 routePrice 主/备一致性、VersionInfo 打印。
+ */
 export async function runViewPreflight(params: {
   registryAddr: string;
   acmAddr: string;
@@ -137,6 +155,7 @@ export async function runViewPreflight(params: {
     }
   }
 
+  // 解析 SystemView 地址并绑定合约
   const systemViewAddr = (await registry.getModuleOrRevert(key("SYSTEM_VIEW"))) as string;
   const systemView = (await ethers.getContractAt("SystemView", systemViewAddr)) as any;
 
@@ -212,6 +231,10 @@ export async function runViewPreflight(params: {
     console.log("=== View Preflight done ===\n");
   }
 
-  return { systemViewAddr, valuationOracleViewAddr: primaryInfo.moduleAddr, priceOracleAddr: fallbackInfo.moduleAddr };
+  return {
+    systemViewAddr,
+    valuationOracleViewAddr: primaryInfo.moduleAddr,
+    priceOracleAddr: fallbackInfo.moduleAddr,
+  };
 }
 

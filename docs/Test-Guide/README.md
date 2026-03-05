@@ -6,6 +6,10 @@
 
 ## 📚 测试指南列表
 
+0. **[上线/合并验收标准（E2E / Smoke / CI）](./release-acceptance-standard.md)**
+   - 发布/合并前必须通过的闸门清单
+   - 本地 E2E（strict）+ prod-like smoke runner + real-chain CI
+
 ### 核心架构测试
 
 1. **[VaultRouter 测试指南](./vaultview-testing-guide.md)**

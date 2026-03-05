@@ -196,9 +196,9 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\).
      * @return overview Aggregated totals plus health factor validity and a derived `isRisky` flag.
      * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
-     * @return positionTimestamps Per-asset update blockNumbers (best-effort; 0 may mean unknown).
+     * @return positionUpdateBlocks Per-asset update blockNumbers (best-effort; 0 may mean unknown).
      * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
-     * @return healthTimestamp HealthView blockNumber (or per HealthView semantics).
+     * @return healthUpdateBlock HealthView blockNumber (or per HealthView semantics).
      */
     function getUserOverview(address user, address[] calldata trackedAssets)
         external
@@ -208,9 +208,9 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             UserOverview memory overview,
             bool[] memory positionValidFlags,
-            uint256[] memory positionTimestamps,
+            uint256[] memory positionUpdateBlocks,
             uint64[] memory positionVersions,
-            uint256 healthTimestamp
+            uint256 healthUpdateBlock
         )
     {
         return _getUserOverviewWithMeta(user, trackedAssets);
@@ -232,16 +232,16 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
      * - Best-effort metadata: PositionView and HealthView meta are probed via `staticcall` using SSOT selectors. Older
      *   interfaces are supported via fallback probes; missing fields may return default values.
-     * - Callers SHOULD treat `positionTimestamps[i] == 0` or `healthTimestamp == 0` as "unknown/unavailable".
+     * - Callers SHOULD treat `positionUpdateBlocks[i] == 0` or `healthUpdateBlock == 0` as "unknown/unavailable".
      * - Uses system-scoped risk parameters from SystemRiskView (SSOT) to derive `isRisky` (no hardcoded threshold).
      *
      * @param user The user to summarize.
      * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\).
      * @return overview Aggregated totals plus health factor validity and a derived `isRisky` flag.
      * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
-     * @return positionTimestamps Per-asset update blockNumbers (best-effort; 0 may mean unknown).
+     * @return positionUpdateBlocks Per-asset update blockNumbers (best-effort; 0 may mean unknown).
      * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
-     * @return healthTimestamp HealthView blockNumber (or per HealthView semantics).
+     * @return healthUpdateBlock HealthView blockNumber (or per HealthView semantics).
      */
     function getUserOverviewWithMeta(address user, address[] calldata trackedAssets)
         external
@@ -251,9 +251,9 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             UserOverview memory overview,
             bool[] memory positionValidFlags,
-            uint256[] memory positionTimestamps,
+            uint256[] memory positionUpdateBlocks,
             uint64[] memory positionVersions,
-            uint256 healthTimestamp
+            uint256 healthUpdateBlock
         )
     {
         return _getUserOverviewWithMeta(user, trackedAssets);
@@ -323,9 +323,9 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             UserOverview memory overview,
             bool[] memory positionValidFlags,
-            uint256[] memory positionTimestamps,
+            uint256[] memory positionUpdateBlocks,
             uint64[] memory positionVersions,
-            uint256 healthTimestamp
+            uint256 healthUpdateBlock
         )
     {
         if (trackedAssets.length > _MAX_BATCH_SIZE) revert BatchTooLarge(trackedAssets.length, _MAX_BATCH_SIZE);
@@ -333,7 +333,7 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         address pvAddr = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         uint256 len = trackedAssets.length;
         positionValidFlags = new bool[](len);
-        positionTimestamps = new uint256[](len);
+        positionUpdateBlocks = new uint256[](len);
         positionVersions = new uint64[](len);
 
         uint256 totalColl;
@@ -344,12 +344,12 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
             totalColl += c;
             totalDebt += d;
             positionValidFlags[i] = v;
-            positionTimestamps[i] = blockNumber;
+            positionUpdateBlocks[i] = blockNumber;
             positionVersions[i] = ver;
         }
 
         (uint256 hf, bool hfValid, uint256 hfTs) = _readHealthFactorWithMeta(user);
-        healthTimestamp = hfTs;
+        healthUpdateBlock = hfTs;
 
         uint256 minHf = _systemRiskView().getMinHealthFactor();
         if (minHf == 0) revert DashboardView__InvalidMinHealthFactor();

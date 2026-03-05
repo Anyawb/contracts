@@ -57,6 +57,7 @@ describe('SettlementManager – repayAndSettle (SSOT)', function () {
     // Seed user balances and approvals
     await debtToken.mint(user.address, ethers.parseUnits('1000', 18));
     await debtToken.connect(user).approve(vaultCore.target, ethers.parseUnits('1000', 18));
+    await debtToken.mint(cm.target, ethers.parseUnits('1000', 18));
 
     return { registry, debtToken, cm, le, orderEngine, settlementManager, vaultCore, deployer, user };
   }

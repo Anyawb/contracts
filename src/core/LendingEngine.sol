@@ -19,7 +19,7 @@ import { NotAContract, PausedSystem } from "../errors/StandardErrors.sol";
 import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
 import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../constants/DataPushTypes.sol";
-import { IRewardManager, IRewardManagerV2 } from "../interfaces/IRewardManager.sol";
+import { IRewardManager, IRewardManagerByOrder, IRewardManagerByOrderWithLender } from "../interfaces/IRewardManager.sol";
 // NOTE:
 // - This contract is the ORDER_ENGINE in the Architecture-Guide.
 // - The debt ledger engine is KEY_LE (VaultLendingEngine).
@@ -27,6 +27,18 @@ import { IRewardManager, IRewardManagerV2 } from "../interfaces/IRewardManager.s
 /// @dev Minimal typed VaultCore interface for debt-ledger sync.
 interface IVaultCoreRepayFor {
     function repayFor(address borrower, address asset, uint256 amount) external;
+}
+
+/// @dev Minimal typed LoanFlowPushManager notify interface (best-effort).
+interface ILoanFlowPushManagerNotify {
+    function notifyBorrow(address user, address asset, uint256 amountBaseUnits, uint256 orderId) external;
+    function notifyRepay(
+        address user,
+        address asset,
+        uint256 amountBaseUnits,
+        uint256 orderId,
+        uint256 repaidAmountAfter
+    ) external;
 }
 
 /**
@@ -84,16 +96,14 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     /// @notice FeeRouter module address (cached best-effort).
     IFeeRouter private _feeRouter;
     
-    /// @notice Repayment fee in bps (e.g. 6 = 0.06%).
-    uint256 private constant _REPAY_FEE_BPS = 6;
+    /// @notice Repayment fee in bps (e.g. 30 = 0.30%).
+    uint256 private constant _REPAY_FEE_BPS = 30;
     /// @notice On-time window (blocks).
-    /// @dev Baseline assumes ~12s per block (24h ≈ 7200 blocks). Chain-dependent; use offchain ETA for UI.
+    /// @dev Block-based SSOT. Chain-dependent; UI/keepers MUST use offchain ETA mapping for wallclock display.
     uint256 private constant _ON_TIME_WINDOW_BLOCKS = 7200;
 
     /// @notice Allowed term durations (blocks).
-    /// @dev Baseline assumes ~12s per block:
-    ///      1 day ≈ 7200 blocks → 5d=36000, 10d=72000, 15d=108000, 30d=216000, 60d=432000,
-    ///      90d=648000, 180d=1296000, 360d=2592000.
+    /// @dev Block-based SSOT. See `TermBlocksLib.termDaysToBlocks` for the legacy bucket mapping.
     uint256 private constant _DUR_5D_BLOCKS   = 36000;
     uint256 private constant _DUR_10D_BLOCKS  = 72000;
     uint256 private constant _DUR_15D_BLOCKS  = 108000;
@@ -104,7 +114,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     uint256 private constant _DUR_360D_BLOCKS = 2592000;
 
     /// @dev Baseline blocks-per-year used for simple interest pro-rating.
-    ///      With a ~12s/block baseline: 1 day ≈ 7200 blocks, so 365d ≈ 2,628,000 blocks.
+    ///      Block-based SSOT; chain-dependent and MUST NOT be interpreted as an on-chain wallclock year.
     uint256 private constant _YEAR_BLOCKS = 2628000;
 
     /// @notice Loan order storage.
@@ -317,6 +327,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert LendingEngine__ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         __Pausable_init();
@@ -395,6 +406,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     function updateRegistry(address newRegistryAddr) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (newRegistryAddr == address(0)) revert LendingEngine__ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
         
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
@@ -547,19 +559,56 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
             )
         );
 
+        // Best-effort notify LoanFlowPushManager (protocol loan-flow cache).
+        // MUST NOT revert order creation; failures are observable via CacheUpdateFailedWithContext in the push manager.
+        {
+            address loanFlowPM = IRegistry(_registryAddr).getModule(ModuleKeys.KEY_LOAN_FLOW_PUSH_MANAGER);
+            if (loanFlowPM != address(0) && loanFlowPM.code.length != 0) {
+                try ILoanFlowPushManagerNotify(loanFlowPM).notifyBorrow(order.borrower, order.asset, order.principal, orderId) {
+                    uint256 noop = 0;
+                    noop;
+                } catch {
+                    uint256 noop = 0;
+                    noop;
+                }
+            }
+        }
+
         // Notify RewardManager after order creation.
-        // - Prefer V2 (orderId/maturity/outcome); fallback to V1 if unsupported.
+        // - Prefer order-based callback (orderId/maturity/outcome); fallback to legacy onLoanEvent if unsupported.
         address rewardManagerBorrow = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        try IRewardManagerV2(rewardManagerBorrow).onLoanEventV2(
+        bool rewardNotified = false;
+        try IRewardManagerByOrderWithLender(rewardManagerBorrow).onLoanEventByOrderWithLender(
             order.borrower,
+            order.lender,
+            order.asset,
             orderId,
             order.principal,
             maturityBlock,
-            IRewardManagerV2.LoanEventOutcome.Borrow
+            IRewardManagerByOrder.LoanEventOutcome.Borrow
         ) {
+            rewardNotified = true;
+        } catch {
             uint256 noop = 0;
             noop;
-        } catch {
+        }
+
+        if (!rewardNotified) {
+            try IRewardManagerByOrder(rewardManagerBorrow).onLoanEventByOrder(
+                order.borrower,
+                orderId,
+                order.principal,
+                maturityBlock,
+                IRewardManagerByOrder.LoanEventOutcome.Borrow
+            ) {
+                rewardNotified = true;
+            } catch {
+                uint256 noop = 0;
+                noop;
+            }
+        }
+
+        if (!rewardNotified) {
             try IRewardManager(rewardManagerBorrow).onLoanEvent(order.borrower, order.principal, order.term, true) {
                 uint256 noop = 0;
                 noop;
@@ -667,6 +716,23 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
                 block.number
             )
         );
+
+        // Best-effort notify LoanFlowPushManager (protocol loan-flow cache).
+        // MUST NOT revert repayment (ledger SSOT already synced via VaultCore.repayFor).
+        {
+            address loanFlowPM = IRegistry(_registryAddr).getModule(ModuleKeys.KEY_LOAN_FLOW_PUSH_MANAGER);
+            if (loanFlowPM != address(0) && loanFlowPM.code.length != 0) {
+                try ILoanFlowPushManagerNotify(loanFlowPM).notifyRepay(
+                    ord.borrower, ord.asset, _repayAmount, orderId, ord.repaidAmount
+                ) {
+                    uint256 noop = 0;
+                    noop;
+                } catch {
+                    uint256 noop = 0;
+                    noop;
+                }
+            }
+        }
         
         // Determine repayment outcome.
         bool isFullyRepaid = ord.repaidAmount >= totalDue;
@@ -694,25 +760,47 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         if (isFullyRepaid) {
             address rewardManagerRepay = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
 
-            // V2 outcome (order-based).
-            IRewardManagerV2.LoanEventOutcome outcome;
+            // Order-based outcome.
+            IRewardManagerByOrder.LoanEventOutcome outcome;
             if (isOnTimeAndFullyRepaid) {
-                outcome = IRewardManagerV2.LoanEventOutcome.RepayOnTimeFull;
+                outcome = IRewardManagerByOrder.LoanEventOutcome.RepayOnTimeFull;
             } else {
                 // Early: now + window < maturity (block-based)
                 bool isEarly = (block.number + _ON_TIME_WINDOW_BLOCKS < ord.maturity);
                 outcome = isEarly
-                    ? IRewardManagerV2.LoanEventOutcome.RepayEarlyFull
-                    : IRewardManagerV2.LoanEventOutcome.RepayLateFull;
+                    ? IRewardManagerByOrder.LoanEventOutcome.RepayEarlyFull
+                    : IRewardManagerByOrder.LoanEventOutcome.RepayLateFull;
             }
 
-            // Prefer V2, fallback to V1.
-            try IRewardManagerV2(rewardManagerRepay).onLoanEventV2(
-                ord.borrower, orderId, _repayAmount, ord.maturity, outcome
+            // Prefer order-based callback with lender/asset, fallback to legacy.
+            bool repayNotified = false;
+            try IRewardManagerByOrderWithLender(rewardManagerRepay).onLoanEventByOrderWithLender(
+                ord.borrower,
+                ord.lender,
+                ord.asset,
+                orderId,
+                ord.principal,
+                ord.maturity,
+                outcome
             ) {
+                repayNotified = true;
+            } catch {
                 uint256 noop = 0;
                 noop;
-            } catch {
+            }
+
+            if (!repayNotified) {
+                try IRewardManagerByOrder(rewardManagerRepay).onLoanEventByOrder(
+                    ord.borrower, orderId, ord.principal, ord.maturity, outcome
+                ) {
+                    repayNotified = true;
+                } catch {
+                    uint256 noop = 0;
+                    noop;
+                }
+            }
+
+            if (!repayNotified) {
                 try IRewardManager(rewardManagerRepay).onLoanEvent(
                     ord.borrower, _repayAmount, 0, isOnTimeAndFullyRepaid
                 ) {

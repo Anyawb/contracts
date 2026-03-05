@@ -81,11 +81,11 @@ library VaultBusinessLogicLibrary {
     );
 
     /**
-     * @notice Canonical cache/view push failure event (V2) for offchain retry/audit.
+     * @notice Canonical cache/view push failure event (with context) for offchain retry/audit.
      * @dev This mirrors `src/Vault/CacheEvents.sol` (SSOT). Libraries cannot inherit interfaces, so we mirror the
      *      signature here to allow emitting the same event from calling contracts.
      */
-    event CacheUpdateFailedV2(
+    event CacheUpdateFailedWithContext(
         address indexed user,
         address indexed asset,
         bytes32 indexed requestId,
@@ -201,7 +201,7 @@ library VaultBusinessLogicLibrary {
         } catch (bytes memory lowLevelData) {
             emit SystemEvents.ExternalModuleReverted("StatisticsView", lowLevelData, block.number);
             // Best-effort: do not revert primary flow; emit retryable failure event.
-            emit CacheUpdateFailedV2(
+            emit CacheUpdateFailedWithContext(
                 user,
                 address(0), // user-scoped stats push
                 bytes32(0), // no requestId context in legacy path
@@ -229,7 +229,7 @@ library VaultBusinessLogicLibrary {
             noop;
         } catch (bytes memory lowLevelData) {
             emit SystemEvents.ExternalModuleReverted("StatisticsView", lowLevelData, block.number);
-            emit CacheUpdateFailedV2(
+            emit CacheUpdateFailedWithContext(
                 user,
                 asset,
                 bytes32(0), // no requestId context in legacy path

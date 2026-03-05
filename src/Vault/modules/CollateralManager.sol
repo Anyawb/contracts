@@ -90,7 +90,7 @@ contract CollateralManager is
     );
 
     /// @notice Explicit block-based companion event for DepositProcessed.
-    event DepositProcessedV2(
+    event DepositProcessedAtBlock(
         address indexed user,
         address indexed asset,
         uint256 amount,
@@ -118,7 +118,7 @@ contract CollateralManager is
     );
 
     /// @notice Explicit block-based companion event for WithdrawProcessed.
-    event WithdrawProcessedV2(
+    event WithdrawProcessedAtBlock(
         address indexed user,
         address indexed asset,
         uint256 amount,
@@ -144,7 +144,7 @@ contract CollateralManager is
     );
 
     /// @notice Explicit block-based companion event for BatchDepositProcessed.
-    event BatchDepositProcessedV2(address indexed user, uint256 operationCount, uint256 blockNumber);
+    event BatchDepositProcessedAtBlock(address indexed user, uint256 operationCount, uint256 blockNumber);
     
     /**
      * @notice Emitted after a batch withdraw is processed.
@@ -165,7 +165,7 @@ contract CollateralManager is
     );
 
     /// @notice Explicit block-based companion event for BatchWithdrawProcessed.
-    event BatchWithdrawProcessedV2(address indexed user, uint256 operationCount, uint256 blockNumber);
+    event BatchWithdrawProcessedAtBlock(address indexed user, uint256 operationCount, uint256 blockNumber);
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
     
@@ -310,6 +310,7 @@ contract CollateralManager is
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert CollateralManager__ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
@@ -335,6 +336,7 @@ contract CollateralManager is
         address /*acm*/
     ) external initializer {
         if (initialRegistryAddr == address(0)) revert CollateralManager__ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         _registryAddr = initialRegistryAddr;
@@ -421,7 +423,7 @@ contract CollateralManager is
         
         // 4) Emit business event.
         emit DepositProcessed(user, asset, received, block.number);
-        emit DepositProcessedV2(user, asset, received, block.number);
+        emit DepositProcessedAtBlock(user, asset, received, block.number);
         
         // 5) Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
@@ -565,7 +567,7 @@ contract CollateralManager is
         
         // Emit batch business event.
         emit BatchDepositProcessed(user, assets.length, block.number);
-        emit BatchDepositProcessedV2(user, assets.length, block.number);
+        emit BatchDepositProcessedAtBlock(user, assets.length, block.number);
         
         // Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
@@ -607,7 +609,7 @@ contract CollateralManager is
         
         // Emit batch business event.
         emit BatchWithdrawProcessed(user, assets.length, block.number);
-        emit BatchWithdrawProcessedV2(user, assets.length, block.number);
+        emit BatchWithdrawProcessedAtBlock(user, assets.length, block.number);
         
         // Emit generic data bus event (DataPushed).
         DataPushLibrary._emitData(
@@ -797,7 +799,7 @@ contract CollateralManager is
 
         // 4) Emit business event + generic data bus event.
         emit WithdrawProcessed(user, asset, amount, block.number);
-        emit WithdrawProcessedV2(user, asset, amount, block.number);
+        emit WithdrawProcessedAtBlock(user, asset, amount, block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_WITHDRAW_PROCESSED,
             abi.encode(user, asset, amount, block.number)

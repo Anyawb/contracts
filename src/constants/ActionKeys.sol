@@ -78,15 +78,10 @@ library ActionKeys {
     /// @dev 哈希值：keccak256("CLAIM_REWARD")
     bytes32 public constant ACTION_CLAIM_REWARD = keccak256("CLAIM_REWARD");
     
-    /// @notice 消费积分操作的标识符
+    /// @notice 消费 Easy 代币操作的标识符
     /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("CONSUME_POINTS")
-    bytes32 public constant ACTION_CONSUME_POINTS = keccak256("CONSUME_POINTS");
-    
-    /// @notice 升级服务等级操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("UPGRADE_SERVICE")
-    bytes32 public constant ACTION_UPGRADE_SERVICE = keccak256("UPGRADE_SERVICE");
+    /// @dev 哈希值：keccak256("CONSUME_EASY")
+    bytes32 public constant ACTION_CONSUME_EASY = keccak256("CONSUME_EASY");
 
     // ============ 系统管理动作 Key ============
     /// @notice 更新价格操作的标识符
@@ -244,6 +239,13 @@ library ActionKeys {
     /// @dev 用于事件记录和权限验证
     /// @dev 哈希值：keccak256("ACTION_ADMIN")
     bytes32 public constant ACTION_ADMIN = keccak256("ACTION_ADMIN");
+
+    /// @notice RewardConfig 配置紧急旁路（break-glass）操作的标识符（可撤销）
+    /// @dev 用于 RewardConfig / 配置子模块的强约束旁路：
+    ///      - 默认只允许治理写入口（如 `Registry[KEY_REWARD_CONFIG]`）调用；
+    ///      - 若授予该角色，则允许具备该角色的地址直接调用（用于早期调试/救火）。
+    /// @dev 哈希值：keccak256("ACTION_REWARD_CONFIG_EMERGENCY")
+    bytes32 public constant ACTION_REWARD_CONFIG_EMERGENCY = keccak256("ACTION_REWARD_CONFIG_EMERGENCY");
     
     /// @notice 设置升级管理员操作的标识符
     /// @dev 用于事件记录和权限验证
@@ -308,8 +310,7 @@ library ActionKeys {
         if (key == ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE) return "lockEarlyRepaymentGuarantee";
         if (key == ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE) return "settleEarlyRepaymentGuarantee";
         if (key == ACTION_CLAIM_REWARD) return "claimReward";
-        if (key == ACTION_CONSUME_POINTS) return "consumePoints";
-        if (key == ACTION_UPGRADE_SERVICE) return "upgradeService";
+        if (key == ACTION_CONSUME_EASY) return "consumeEasy";
         if (key == ACTION_UPDATE_PRICE) return "updatePrice";
         if (key == ACTION_SET_PARAMETER) return "setParameter";
         if (key == ACTION_UPGRADE_MODULE) return "upgradeModule";
@@ -339,6 +340,7 @@ library ActionKeys {
         if (key == ACTION_VIEW_DEGRADATION_DATA) return "viewDegradationData";
         if (key == ACTION_VIEW_PUSH) return "actionViewPush";
         if (key == ACTION_ADMIN) return "actionAdmin";
+        if (key == ACTION_REWARD_CONFIG_EMERGENCY) return "actionRewardConfigEmergency";
         if (key == ACTION_MODIFY_USER_DATA) return "actionModifyUserData";
         if (key == ACTION_SET_UPGRADE_ADMIN) return "setUpgradeAdmin";
         if (key == ACTION_EMERGENCY_SET_PARAMETER) return "emergencySetParameter";
@@ -361,47 +363,47 @@ library ActionKeys {
         keys[5] = ACTION_LIQUIDATE_PARTIAL;
         keys[6] = ACTION_LIQUIDATE_GUARANTEE;
         keys[7] = ACTION_CLAIM_REWARD;
-        keys[8] = ACTION_CONSUME_POINTS;
-        keys[9] = ACTION_UPGRADE_SERVICE;
-        keys[10] = ACTION_UPDATE_PRICE;
-        keys[11] = ACTION_SET_PARAMETER;
-        keys[12] = ACTION_UPGRADE_MODULE;
-        keys[13] = ACTION_PAUSE_SYSTEM;
-        keys[14] = ACTION_UNPAUSE_SYSTEM;
-        keys[15] = ACTION_CREATE_PROPOSAL;
-        keys[16] = ACTION_VOTE;
-        keys[17] = ACTION_EXECUTE_PROPOSAL;
-        keys[18] = ACTION_CROSS_CHAIN_VOTE;
-        keys[19] = ACTION_GRANT_ROLE;
-        keys[20] = ACTION_REVOKE_ROLE;
-        keys[21] = ACTION_ADD_WHITELIST;
-        keys[22] = ACTION_REMOVE_WHITELIST;
-        keys[23] = ACTION_BATCH_DEPOSIT;
-        keys[24] = ACTION_BATCH_BORROW;
-        keys[25] = ACTION_BATCH_REPAY;
-        keys[26] = ACTION_BATCH_WITHDRAW;
-        keys[27] = ACTION_TESTNET_CONFIG;
-        keys[28] = ACTION_TESTNET_ACTIVATE;
-        keys[29] = ACTION_TESTNET_PAUSE;
-        keys[30] = ACTION_VIEW_USER_DATA;
-        keys[31] = ACTION_VIEW_RISK_DATA;
-        keys[32] = ACTION_VIEW_SYSTEM_DATA;
-        keys[33] = ACTION_VIEW_LIQUIDATION_DATA;
-        keys[34] = ACTION_VIEW_CACHE_DATA;
-        keys[35] = ACTION_VIEW_PRICE_DATA;
-        keys[36] = ACTION_VIEW_DEGRADATION_DATA;
-        keys[37] = ACTION_ADMIN;
-        keys[38] = ACTION_SET_UPGRADE_ADMIN;
-        keys[39] = ACTION_EMERGENCY_SET_PARAMETER;
-        keys[40] = ACTION_MODIFY_USER_DATA;
-        keys[41] = ACTION_VIEW_SYSTEM_STATUS;
-        keys[42] = ACTION_QUERY_MANAGER;
-        keys[43] = ACTION_ORDER_CREATE;
-        keys[44] = ACTION_VIEW_PUSH;
-        keys[45] = ACTION_RESERVE_FOR_LENDING;
-        keys[46] = ACTION_CANCEL_RESERVE;
-        keys[47] = ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE;
-        keys[48] = ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE;
+        keys[8] = ACTION_CONSUME_EASY;
+        keys[9] = ACTION_UPDATE_PRICE;
+        keys[10] = ACTION_SET_PARAMETER;
+        keys[11] = ACTION_UPGRADE_MODULE;
+        keys[12] = ACTION_PAUSE_SYSTEM;
+        keys[13] = ACTION_UNPAUSE_SYSTEM;
+        keys[14] = ACTION_CREATE_PROPOSAL;
+        keys[15] = ACTION_VOTE;
+        keys[16] = ACTION_EXECUTE_PROPOSAL;
+        keys[17] = ACTION_CROSS_CHAIN_VOTE;
+        keys[18] = ACTION_GRANT_ROLE;
+        keys[19] = ACTION_REVOKE_ROLE;
+        keys[20] = ACTION_ADD_WHITELIST;
+        keys[21] = ACTION_REMOVE_WHITELIST;
+        keys[22] = ACTION_BATCH_DEPOSIT;
+        keys[23] = ACTION_BATCH_BORROW;
+        keys[24] = ACTION_BATCH_REPAY;
+        keys[25] = ACTION_BATCH_WITHDRAW;
+        keys[26] = ACTION_TESTNET_CONFIG;
+        keys[27] = ACTION_TESTNET_ACTIVATE;
+        keys[28] = ACTION_TESTNET_PAUSE;
+        keys[29] = ACTION_VIEW_USER_DATA;
+        keys[30] = ACTION_VIEW_RISK_DATA;
+        keys[31] = ACTION_VIEW_SYSTEM_DATA;
+        keys[32] = ACTION_VIEW_LIQUIDATION_DATA;
+        keys[33] = ACTION_VIEW_CACHE_DATA;
+        keys[34] = ACTION_VIEW_PRICE_DATA;
+        keys[35] = ACTION_VIEW_DEGRADATION_DATA;
+        keys[36] = ACTION_ADMIN;
+        keys[37] = ACTION_SET_UPGRADE_ADMIN;
+        keys[38] = ACTION_EMERGENCY_SET_PARAMETER;
+        keys[39] = ACTION_MODIFY_USER_DATA;
+        keys[40] = ACTION_VIEW_SYSTEM_STATUS;
+        keys[41] = ACTION_QUERY_MANAGER;
+        keys[42] = ACTION_ORDER_CREATE;
+        keys[43] = ACTION_VIEW_PUSH;
+        keys[44] = ACTION_RESERVE_FOR_LENDING;
+        keys[45] = ACTION_CANCEL_RESERVE;
+        keys[46] = ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE;
+        keys[47] = ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE;
+        keys[48] = ACTION_REWARD_CONFIG_EMERGENCY;
         return keys;
     }
 } 

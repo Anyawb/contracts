@@ -132,7 +132,7 @@
 
 ### 2.4 推送失败与链下重试（MUST）（✅ 已确认：已具备可自动化验收覆盖）
 实现目标：对所有 best-effort push 点做到**可观测、可重放、可去重**（链下可形成稳定重试闭环）。
-- **MUST**：push 失败必须发出失败事件（架构指南所述 `CacheUpdateFailed` / `CacheUpdateFailedV2` / `HealthPushFailed` 或等效事件），payload 必须足以定位与重放，至少包含：
+- **MUST**：push 失败必须发出失败事件（架构指南所述 `CacheUpdateFailed` / `CacheUpdateFailedWithContext` / `HealthPushFailed` 或等效事件），payload 必须足以定位与重放，至少包含：
   - key：`user/asset/view`（或等价的唯一 key）
   - snapshot：期望写入的数据快照（用于链下对账/重放）
   - reason：失败原因 bytes（来自 revert reason/custom error 编码）
@@ -143,9 +143,9 @@
 > 注意：推送失败的发起方通常是业务模块或路由器；View 模块自身如果做外部 staticcall 组合，也要 best-effort。
 >
 > ✅ 已补齐可自动化验收覆盖（核心链路）：
-> - `PositionView`: 账本读取失败 emit `CacheUpdateFailedV2`，且 `retryUserPositionUpdate` 在账本仍失败时 best-effort 返回（不 revert）
+> - `PositionView`: 账本读取失败 emit `CacheUpdateFailedWithContext`，且 `retryUserPositionUpdate` 在账本仍失败时 best-effort 返回（不 revert）
 >   - `test/Vault/view/PositionView.cache-validity.test.blockNumber`
-> - `StatisticsPushManager`: 依赖缺失/权限缺失等内部失败 emit `CacheUpdateFailedV2`（best-effort），并可通过修复配置后 retry 自愈
+> - `StatisticsPushManager`: 依赖缺失/权限缺失等内部失败 emit `CacheUpdateFailedWithContext`（best-effort），并可通过修复配置后 retry 自愈
 >   - `test/StatisticsPushManager.usd8.snapshot.test.blockNumber`
 
 ### 2.5 并发/幂等（MUST）（✅ 已确认：PositionView/StatisticsView 已实现 nextVersion + requestId + seq）
@@ -201,7 +201,7 @@
   - **MUST**：关键缓存写入入口（至少 `PositionView`、`StatisticsView`；以及任何会在高频路径被并发推送的缓存）支持 `nextVersion` 严格并发。
   - **SHOULD**：支持 `requestId`（O(1) lastAppliedRequestId）以实现幂等重放；如启用 `seq`，必须遵循 §2.5 的一致策略。
 - 推送失败：
-- **MUST**：push 失败路径发出失败事件（`CacheUpdateFailed`/`CacheUpdateFailedV2`/`HealthPushFailed` 或等效），payload 满足 §2.4 的可重放要求。
+- **MUST**：push 失败路径发出失败事件（`CacheUpdateFailed`/`CacheUpdateFailedWithContext`/`HealthPushFailed` 或等效），payload 满足 §2.4 的可重放要求。
   - **MUST**：业务交易路径不得链上循环重试；失败闭环由链下重试完成。
 - offchain 聚合类 View（如清算榜单/统计类）：
   - **SHOULD**：对“链下为权威来源”的输出，接口层必须提供 staleness/版本化信息（例如 `blockNumber`/`isValid`/`schemaVersion`），以便链下/前端识别新鲜度。
@@ -369,7 +369,7 @@
     - `debtValueUSD8`：通过 `KEY_LE → ILendingEngineBasic.getUserTotalDebtValue(user)` 读取（USD-8）。
     - `push`：仍沿用 `StatisticsView.pushUserStatsSnapshot` 的 “global - old + new” 聚合逻辑（输入为 USD-8 snapshot）。
   - **权限/部署注意（必须）**：
-    - `StatisticsPushManager` 需要具备 `ActionKeys.ACTION_VIEW_PRICE_DATA`，否则会在读取 `PositionView` 估值时触发 `MissingRole()` 并走 `CacheUpdateFailedV2`（best-effort）。
+  - `StatisticsPushManager` 需要具备 `ActionKeys.ACTION_VIEW_PRICE_DATA`，否则会在读取 `PositionView` 估值时触发 `MissingRole()` 并走 `CacheUpdateFailedWithContext`（best-effort）。
     - 本仓库已在部署脚本中补齐该授权（`scripts/deploy/deploylocal.blockNumber` / `scripts/deploy/deploy-arbitrum*.blockNumber`）。
 
 **E. 落地状态与变更摘要（本节对应）**
@@ -501,7 +501,7 @@
 - **职责边界**：ABI 中不存在 `push*`；除 `initialize/upgradeTo*` 外无非 `view/pure` 外部函数。
 - **权限**：
   - `getLoanOrder(orderId)`：仅订单相关方（borrower/lender）可读；或 ops/admin（具备 `VIEW_USER_DATA` 或 admin）可读；否则 `MissingRole()`
-  - `getUserLoanCount(user)` / `canAccessLoanOrder(orderId,user)`：仅 `user` 本人或 ops/admin 可读，否则 `MissingRole()`
+  - `LoanNFTView.getUserLoanCount(user)` / `LendingEngineView.canAccessLoanOrder(orderId,user)`：仅 `user` 本人或 ops/admin 可读，否则 `MissingRole()`
   - `getFailedFeeAmount(orderId)` / `getNftRetryCount(orderId)` / `isMatchEngine(account)` / `getRegistryFromEngine()`：仅 ops/admin 可读，否则 `MissingRole()`
 - **脚本断言**：
   - 用 `unauthorized` 调用上述接口全部 revert 且 selector 为 `MissingRole()`
@@ -526,8 +526,8 @@
 
 ### 4.14 `RewardView`（✅ 已确认）
 - **脚本**：`scripts/e2e/e2e-localhost-reward-edgecases.ts`
-- **MUST**：作为 Reward 系统对外的只读聚合与缓存加速层，外部消费者（前端/索引/机器人）应仅依赖 `RewardView` 的只读接口，不应直接调用 `RewardManagerCore/RewardCore` 的查询接口（除“协议内硬约束校验”入口外）。
-- **MUST**：写入口（`push*`）必须严格白名单（writer allowlist），仅允许架构指南指定的写入方（当前口径：`RewardManagerCore` / `RewardConsumption`）调用。
+- **MUST**：作为 Reward 系统对外的只读聚合与缓存加速层，外部消费者（前端/索引/机器人）应仅依赖 `RewardView` 的只读接口，不应直接调用 `RewardManagerCore` 的查询接口（除“协议内硬约束校验”入口外）。
+- **MUST**：写入口（`push*`）必须严格白名单（writer allowlist），仅允许架构指南指定的写入方调用（当前口径：`RewardManagerCore` / `EasyConsumption` / `EasyRecycleDistributor` / `EasyEmissionController` / `EasyEmissionConfig` / `EasyStaking`）。
 - **MUST**：所有写入口必须触发统一 DataPush：`DataPushLibrary._emitData(...)`，`dataTypeHash` 使用集中常量口径（推荐 `DataPushTypes`）。
 - **MUST**：作为 B 类缓存模块，对外读取必须返回缓存有效性信息：至少 `isValid` + `blockNumber`（并发敏感时附带 `version`）。不得仅返回业务字段而缺失有效性元信息（Facade 也不得丢失）。
 - **MUST**：对外权限策略必须遵循“用户私域口径”：用户本人可读；非本人读需具备 `ACTION_VIEW_USER_DATA` 或 admin，失败必须 `MissingRole()`（不得 revert string / 自定义 Unauthorized 分叉）。
@@ -535,7 +535,7 @@
 
 **验证（MUST，可验收）**
 - **写入口权限**：
-  - 非 writer（既不是 `RewardManagerCore` 也不是 `RewardConsumption`）调用任意 `push*` 必须 revert（推荐 `RewardView__UnauthorizedWriter()` 或等效）。
+  - 非 writer（例如既不是 `RewardManagerCore` 也不是 `EasyConsumption/EasyRecycleDistributor` 等白名单模块）调用任意 `push*` 必须 revert（推荐 `RewardView__UnauthorizedWriter()` 或等效）。
 - **DataPush 可观测性**：
   - 任意一次成功 `pushRewardEarned/pushPointsBurned/pushPenaltyLedger/pushUserLevel/pushUserPrivilege/pushSystemStats`，必须能观察到对应的 `DataPushed` 事件，且 `dataTypeHash` 与架构指南/常量表一致。
 - **B 类缓存有效性输出**：
@@ -605,7 +605,7 @@
   - 准备至少 3 类测试账户：`admin`（具备管理员/升级/推送能力）、`operator`（具备必要的 push 权限或被授权模块身份）、`user`（普通用户）；另备 `unauthorized`（无任何权限）。
   - 能从交易回执中抓取事件并断言：
     - `DataPushed`（由 `DataPushLibrary._emitData(...)` 发出）
-  - 失败事件（`CacheUpdateFailed` / `CacheUpdateFailedV2` / `HealthPushFailed` 或等效事件）
+  - 失败事件（`CacheUpdateFailed` / `CacheUpdateFailedWithContext` / `HealthPushFailed` 或等效事件）
 - **常量（MUST）**
   - 批量接口统一以 `ViewConstants.MAX_BATCH_SIZE` 作为上限（超限行为口径一致）。
 
@@ -757,7 +757,7 @@
 | LEV-01 职责边界（只读、无 push\*） | 无 | 对 ABI/源代码做静态检查；并在运行时枚举外部函数 selector（按测试骨架能力） | 无 `DataPushed` | N/A | ABI 中不存在 `push*`；除 `initialize/upgradeTo*` 外不存在 non-view 外部函数；不得写入业务状态 |
 | LEV-02 订单私域：相关方可读 | 存在可查询的 `orderId`，并已知 `borrower/lender/outsider` | `borrower` 调用 `getLoanOrder(orderId)`；`lender` 调用同接口 | 无 | `LoanOrder`（按实现） | `borrower` 与 `lender` 均成功；返回值与账本一致（如可对照 LendingEngine/LoanNFT 的只读口径） |
 | LEV-03 订单私域：非相关方必须拒绝（MissingRole） | 同 LEV-02，`outsider` 无任何角色 | `outsider` 调用 `getLoanOrder(orderId)` | 无 | N/A | 必须 `revert MissingRole()`（断言 selector，不依赖 revert string） |
-| LEV-04 用户统计私域：仅本人或 ops/admin | `user` 存在订单；准备 `unauthorized` 与 `ops`（具备 `VIEW_USER_DATA` 或 admin） | `user` 调用 `getUserLoanCount(user)`；`unauthorized` 调用 `getUserLoanCount(user)`；`ops` 调用 `getUserLoanCount(user)` | 无 | `count`（按实现） | `user/ops` 成功；`unauthorized` 必须 `MissingRole()`；若接口为 `canAccessLoanOrder(orderId,user)` 同样口径 |
+| LEV-04 用户统计私域：仅本人或 ops/admin | `user` 存在订单；准备 `unauthorized` 与 `ops`（具备 `VIEW_USER_DATA` 或 admin） | `user` 调用 `LoanNFTView.getUserLoanCount(user)`；`unauthorized` 调用 `LoanNFTView.getUserLoanCount(user)`；`ops` 调用 `LoanNFTView.getUserLoanCount(user)` | 无 | `count`（按实现） | `user/ops` 成功；`unauthorized` 必须 `MissingRole()`；同时 `LendingEngineView.canAccessLoanOrder(orderId,user)` 同样口径 |
 | LEV-05 运维/诊断只允许 ops/admin | `orderId` 可用；准备 `ops/admin` 与 `unauthorized/outsider` | 调用 `getFailedFeeAmount(orderId)` / `getNftRetryCount(orderId)` / `isMatchEngine(account)` / `getRegistryFromEngine()` | 无 | N/A（或返回值按实现） | `ops/admin` 成功；其余 caller 必须 `MissingRole()`；不得出现 revert string / 自定义 Unauthorized 分叉 |
 
 **自动化脚本（推荐，可直接验收）**
@@ -783,8 +783,8 @@
 - **脚本**：`scripts/e2e/e2e-localhost-reward-edgecases.ts`
 | 用例 | 前置条件 | 操作 | 期望事件 | 期望返回字段 | 断言 |
 |---|---|---|---|---|---|
-| RV-01 写入口白名单（writer allowlist） | `RewardManagerCore` 与 `RewardConsumption` 已部署；`unauthorized` 非 writer | `unauthorized` 调用任一 `push*`（`pushRewardEarned/pushPointsBurned/pushPenaltyLedger/pushUserLevel/pushUserPrivilege/pushSystemStats`） | 无成功 `DataPushed` | N/A | 必须 revert（推荐 `RewardView__UnauthorizedWriter()` 或等效）；不得用 `MissingRole()` 混淆读权限与写白名单 |
-| RV-02 写入成功必须 DataPush（type 统一） | 调用方为 writer（`RewardManagerCore` 或 `RewardConsumption`） | 逐个调用上述 `push*`（每次至少 1 个有效样本） | 必须 `DataPushed(dataTypeHash,payload)` | N/A | 每个 push 成功都必须观察到 `DataPushed`；`dataTypeHash` 必须来自集中常量口径（推荐 `DataPushTypes.*`），且语义可唯一定位 |
+| RV-01 写入口白名单（writer allowlist） | `RewardManagerCore` 与 Easy 系列 writer 已部署；`unauthorized` 非 writer | `unauthorized` 调用任一 `push*`（`pushRewardEarned/pushPointsBurned/pushPenaltyLedger/pushUserLevel/pushUserPrivilege/pushSystemStats`） | 无成功 `DataPushed` | N/A | 必须 revert（推荐 `RewardView__UnauthorizedWriter()` 或等效）；不得用 `MissingRole()` 混淆读权限与写白名单 |
+| RV-02 写入成功必须 DataPush（type 统一） | 调用方为 writer（例如 `RewardManagerCore` / `EasyConsumption` 等） | 逐个调用上述 `push*`（每次至少 1 个有效样本） | 必须 `DataPushed(dataTypeHash,payload)` | N/A | 每个 push 成功都必须观察到 `DataPushed`；`dataTypeHash` 必须来自集中常量口径（推荐 `DataPushTypes.*`），且语义可唯一定位 |
 | RV-03 私域读权限：非本人必须 MissingRole | `userA/userB`；`unauthorized` 无 `ACTION_VIEW_USER_DATA` | `unauthorized` 读取 `userA` 的 Reward 私域主查询（如 `getUserRewardSummary(userA)`） | 无 | N/A | 必须 `revert MissingRole()`（断言 selector） |
 | RV-04 私域读权限：本人/ops 可读 | `userA`；`ops/admin` 具备 `ACTION_VIEW_USER_DATA` 或 admin | `userA` 读取自身；`ops` 读取 `userA` | 无 | 返回值必须包含 `isValid/blockNumber`（并发敏感时含 `version`） | 均成功；有效性信息不缺失（Facade 也不得丢失） |
 | RV-05 B 类缓存有效性：blockNumber 单调 & isValid 语义正确 | 已至少 push 一次；可推进时间（按测试工具能力） | `writer` push → 读 `getUserRewardSummary`（或等效）→ 再次 push → 再读 | `DataPushed`（push 时） | `isValid/blockNumber` | blockNumber 单调推进；`isValid` 与缓存窗口/实现一致（过期后变 false 或等效表达），且可脚本断言 |
@@ -1178,7 +1178,7 @@ B：无权限 caller 必须 MissingRole()；有 ACTION_VIEW_RISK_DATA 必须成�
 这是工程上最容易回归的跨模块约束：新增/改动 push 点时很容易漏掉失败事件或 payload 不完整。要变 ✅ 必须把“防回归”变成可自动化验收。
 如何消除（推荐做法）
 增加一个 统一的 e2e/测试矩阵覆盖：对每个关键 best-effort push 点都能稳定触发失败并断言：
-必须出现 CacheUpdateFailedV2（或约定的失败事件）
+必须出现 CacheUpdateFailedWithContext（或约定的失败事件）
 包含 key + snapshot + reason + requestId/seq/nextVersion（若该入口支持）
 把 Workguide 中“核心链路已落地”的描述改为 ✅，并附带“已由哪些脚本/测试覆盖”。
 验收标准：

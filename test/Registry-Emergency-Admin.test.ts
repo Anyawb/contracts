@@ -41,6 +41,7 @@ describe('Registry 紧急管理员测试', function () {
       await implementation.getAddress(),
       implementation.interface.encodeFunctionData('initialize', [
         BigInt(3600),
+        BigInt(302400),
         await owner.getAddress(),
         await owner.getAddress(),
         await owner.getAddress(),

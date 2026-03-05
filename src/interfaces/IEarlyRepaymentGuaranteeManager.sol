@@ -17,7 +17,7 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 startTime;
         /// @dev Legacy field name. Semantics in this repo: maturityBlock (block.number), NOT unix time.
         uint256 maturityTime;
-        /// @notice Early repayment penalty in days (block-based time axis in implementation).
+        /// @dev Legacy field name. Semantics in this repo: penaltyBlocks (block.number axis), NOT days.
         uint256 earlyRepayPenaltyDays;
         /// @notice Whether the guarantee is active.
         bool isActive;

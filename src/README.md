@@ -149,28 +149,24 @@ address vaultCore = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
 
 ### 3. Reward 系统 (`Reward/`)
 
-**核心功能**：奖励积分系统，管理用户积分、消费和特权
+**核心功能**：奖励系统，围绕 EasyToken 的发放、消费和特权
 
 **主要合约**：
-- `RewardPoints.sol` - 奖励积分代币（ERC20）
-- `RewardCore.sol` - 奖励核心逻辑
-- `RewardManager.sol` - 奖励管理器
-- `RewardManagerCore.sol` - 奖励管理核心
-- `RewardConfig.sol` - 奖励配置
-- `RewardConsumption.sol` - 奖励消费
-
-**服务配置** (`configs/`)：
-- `AdvancedAnalyticsConfig.sol` - 高级数据分析配置
-- `FeatureUnlockConfig.sol` - 功能解锁配置
-- `GovernanceAccessConfig.sol` - 治理访问配置
-- `PriorityServiceConfig.sol` - 优先服务配置
-- `TestnetFeaturesConfig.sol` - 测试网功能配置
+- `EasyToken.sol` - 平台治理与生态通证（也是 Reward 系统的唯一通证）
+- `RewardManager.sol` - 奖励管理器（legacy 入口，逐步收敛到 core）
+- `RewardManagerCore.sol` - 奖励管理核心（主要写入口）
+- `RewardConfig.sol` - 奖励配置（等级/发放/风控等）
+- `EasyEmissionConfig.sol` - Easy 发放参数配置
+- `EasyEmissionController.sol` - Easy 发放控制器
+- `EasyConsumption.sol` - Easy 消费（spend）入口
+- `EasyRecycleDistributor.sol` - Easy 回收分配器（按固定比例分配）
+- `EasyStaking.sol` - Easy 质押
+- `RewardView.sol` - Reward 观测与 DataPush（链下对账/监控）
 
 **关键特性**：
-- 积分奖励和消费
-- 用户特权管理
-- 服务配置管理
-- 批量操作支持
+- EasyToken-only 资产口径（18 decimals）
+- 标准化的 consume → recycle 分配路径
+- 统一的 DataPush 可观测性（便于链下对账与监控）
 
 ---
 
@@ -253,8 +249,6 @@ address vaultCore = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
 - `ActionKeys.sol` - 动作键常量
   - 所有操作的 bytes32 标识符
   - 用于权限验证和事件记录
-  
-- `BaseServiceConfig.sol` - 服务配置基类
 - `DataPushTypes.sol` - 数据推送类型
 - `DataPushLibrary.sol` - 数据推送库
 
@@ -364,9 +358,8 @@ if (amount == 0) revert AmountIsZero();
 **核心功能**：代币合约
 
 **主要合约**：
-- `RewardPoints.sol` - 奖励积分代币
+- `EasyToken.sol` - 平台治理与生态通证
 - `RWAToken.sol` - RWA 代币
-- `RWAAutoLeveragedStrategy.sol` - RWA 自动杠杆策略
 
 ---
 
@@ -441,7 +434,7 @@ acm.requireRole(ActionKeys.ACTION_DEPOSIT, msg.sender);
 
 | 模式 | 合约 | 说明 |
 |------|------|------|
-| **UUPS** | Registry, VaultCore, RewardCore 等 | 可升级代理合约 |
+| **UUPS** | Registry, VaultCore, RewardManagerCore 等 | 可升级代理合约 |
 | **Regular** | AccessControlManager | 普通合约（不可升级） |
 | **Library** | VaultMath, EventLibrary 等 | 库合约（无状态） |
 
@@ -526,8 +519,6 @@ test/
 ├── Vault/
 │   ├── VaultCore.test.ts
 │   └── VaultRouter.test.ts
-├── Reward/
-│   └── RewardCore.test.ts
 └── registry/
     └── Registry.test.ts
 ```

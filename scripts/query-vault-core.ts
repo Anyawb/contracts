@@ -1,5 +1,5 @@
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../frontend-config/contracts-localhost.ts";
 
 async function main() {
   const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;

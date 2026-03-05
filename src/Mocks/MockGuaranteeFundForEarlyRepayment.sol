@@ -9,7 +9,6 @@ contract MockGuaranteeFundForEarlyRepayment {
         address indexed borrower,
         address indexed asset,
         address indexed lender,
-        address platform,
         uint256 refundToBorrower,
         uint256 penaltyToLender,
         uint256 platformFee
@@ -26,12 +25,11 @@ contract MockGuaranteeFundForEarlyRepayment {
         address borrower,
         address asset,
         address lender,
-        address platform,
         uint256 refundToBorrower,
         uint256 penaltyToLender,
         uint256 platformFee
     ) external returns (bool) {
-        emit Settled(borrower, asset, lender, platform, refundToBorrower, penaltyToLender, platformFee);
+        emit Settled(borrower, asset, lender, refundToBorrower, penaltyToLender, platformFee);
         return true;
     }
 

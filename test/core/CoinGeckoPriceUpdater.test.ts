@@ -380,12 +380,14 @@ describe('CoinGeckoPriceUpdater – 价格更新器测试', function () {
   describe('Registry 更新测试', function () {
     it('应允许更新 Registry 地址', async function () {
       const { coinGeckoUpdater, governance, registry } = await deployFixture();
-      const newRegistry = ethers.Wallet.createRandom().address;
+      const registryFactory = await ethers.getContractFactory('MockRegistry');
+      const newRegistry = await registryFactory.connect(governance).deploy();
+      await newRegistry.waitForDeployment();
 
       await expect(
-        coinGeckoUpdater.connect(governance).updateRegistry(newRegistry)
+        coinGeckoUpdater.connect(governance).updateRegistry(await newRegistry.getAddress())
       ).to.emit(coinGeckoUpdater, 'RegistryUpdated')
-       .withArgs(await registry.getAddress(), newRegistry);
+       .withArgs(await registry.getAddress(), await newRegistry.getAddress());
     });
 
     it('应拒绝零地址 Registry 更新', async function () {

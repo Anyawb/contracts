@@ -63,8 +63,7 @@ contract SettlementManager is
     ISettlementManager
 {
     using SafeERC20 for IERC20;
-    /// @dev Keep in sync with ORDER_ENGINE's ON_TIME_WINDOW baseline (blocks-based).
-    ///      Baseline assumes ~12s/block: 24h ≈ 7200 blocks.
+    /// @dev Keep in sync with ORDER_ENGINE's ON_TIME_WINDOW (block-based SSOT).
     uint256 private constant _ON_TIME_WINDOW_BLOCKS = 7200;
     /// @notice Registry address for module resolution and access control.
     /// @dev Stored privately; exposed via explicit getter `registryAddrVar()` (no public state variable).
@@ -244,6 +243,7 @@ contract SettlementManager is
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         __Pausable_init();

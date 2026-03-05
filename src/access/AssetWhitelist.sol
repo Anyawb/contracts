@@ -170,13 +170,13 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         
         _registryAddr = initialRegistryAddr;
         
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         // Record initialization (governance/audit trail).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -258,7 +258,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         if (asset == address(0)) revert ZeroAddress();
         if (_allowedAssets[asset]) revert AssetWhitelist__AssetAlreadyAllowed(asset);
 
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         
         _allowedAssets[asset] = true;
         _assetList.push(asset);
@@ -267,16 +267,16 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         
         _assetInfo[asset] = AssetInfo({
             isActive: true,
-            addedAt: ts,
+            addedAt: blockNumber,
             addedBy: msg.sender,
-            lastUpdated: ts,
+            lastUpdated: blockNumber,
             updateCount: 1
         });
         
-        emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, ts);
+        emit AssetAdded(ActionKeys.ACTION_ADD_WHITELIST, asset, msg.sender, blockNumber);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_ASSET_WHITELIST_ADDED,
-            abi.encode(asset, msg.sender, ts)
+            abi.encode(asset, msg.sender, blockNumber)
         );
         
         // Record standardized action event.
@@ -284,7 +284,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -306,14 +306,14 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         if (asset == address(0)) revert ZeroAddress();
         if (!_allowedAssets[asset]) revert AssetWhitelist__AssetNotAllowed(asset);
 
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         
         _allowedAssets[asset] = false;
         _assetCount--;
         
         // Update bookkeeping info.
         _assetInfo[asset].isActive = false;
-        _assetInfo[asset].lastUpdated = ts;
+        _assetInfo[asset].lastUpdated = blockNumber;
         _assetInfo[asset].updateCount++;
         
         // Remove from list in O(1) by swapping with the last element.
@@ -330,11 +330,11 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
             ActionKeys.ACTION_REMOVE_WHITELIST,
             asset, 
             msg.sender,
-            ts
+            blockNumber
         );
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_ASSET_WHITELIST_REMOVED,
-            abi.encode(asset, msg.sender, ts)
+            abi.encode(asset, msg.sender, blockNumber)
         );
         
         // Record standardized action event.
@@ -342,7 +342,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
             ActionKeys.ACTION_REMOVE_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -363,7 +363,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
         if (assets.length == 0) revert AssetWhitelist__EmptyAssetsArray();
 
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         
         uint256 addedCount = 0;
         for (uint256 i = 0; i < assets.length; ++i) {
@@ -377,9 +377,9 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
                 
                 _assetInfo[asset] = AssetInfo({
                     isActive: true,
-                    addedAt: ts,
+                    addedAt: blockNumber,
                     addedBy: msg.sender,
-                    lastUpdated: ts,
+                    lastUpdated: blockNumber,
                     updateCount: 1
                 });
                 
@@ -396,7 +396,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         );
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_ASSET_WHITELIST_BATCH_ADDED,
-            abi.encode(assets, msg.sender, addedCount, assets.length, ts)
+            abi.encode(assets, msg.sender, addedCount, assets.length, blockNumber)
         );
         
         // Record standardized action event.
@@ -404,7 +404,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -425,7 +425,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         _requireRole(ActionKeys.ACTION_REMOVE_WHITELIST, msg.sender);
         if (assets.length == 0) revert AssetWhitelist__EmptyAssetsArray();
 
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         
         uint256 removedCount = 0;
         for (uint256 i = 0; i < assets.length; ++i) {
@@ -437,7 +437,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
                 
                 // Update bookkeeping info.
                 _assetInfo[asset].isActive = false;
-                _assetInfo[asset].lastUpdated = ts;
+                _assetInfo[asset].lastUpdated = blockNumber;
                 _assetInfo[asset].updateCount++;
                 
                 // Remove from list in O(1) by swapping with the last element.
@@ -463,7 +463,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         );
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_ASSET_WHITELIST_BATCH_REMOVED,
-            abi.encode(assets, msg.sender, removedCount, assets.length, ts)
+            abi.encode(assets, msg.sender, removedCount, assets.length, blockNumber)
         );
         
         // Record standardized action event.
@@ -471,7 +471,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
             ActionKeys.ACTION_REMOVE_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -493,20 +493,20 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         if (asset == address(0)) revert ZeroAddress();
         if (!_allowedAssets[asset]) revert AssetWhitelist__AssetNotAllowed(asset);
 
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         
-        _assetInfo[asset].lastUpdated = ts;
+        _assetInfo[asset].lastUpdated = blockNumber;
         _assetInfo[asset].updateCount++;
         
         emit AssetInfoUpdated(
             ActionKeys.ACTION_SET_PARAMETER,
             asset, 
             msg.sender,
-            ts
+            blockNumber
         );
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_ASSET_WHITELIST_INFO_UPDATED,
-            abi.encode(asset, msg.sender, ts)
+            abi.encode(asset, msg.sender, blockNumber)
         );
         
         // Record standardized action event.
@@ -514,7 +514,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -535,13 +535,13 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         if (newRegistryAddr == address(0)) revert ZeroAddress();
         if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
 
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_ASSET_WHITELIST_REGISTRY_UPDATED,
-            abi.encode(oldRegistry, newRegistryAddr, msg.sender, ts)
+            abi.encode(oldRegistry, newRegistryAddr, msg.sender, blockNumber)
         );
         
         // Record standardized action event.
@@ -549,7 +549,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            ts
+            blockNumber
         );
         
         // Emit module address update event for observers.
@@ -557,7 +557,7 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
-            ts
+            blockNumber
         );
     }
 
@@ -600,13 +600,13 @@ contract AssetWhitelist is Initializable, UUPSUpgradeable, IAssetWhitelist {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
 
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         // Record upgrade authorization (governance/audit trail).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 

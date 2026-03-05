@@ -3,14 +3,17 @@ pragma solidity ^0.8.20;
 
 /// @title RewardEvents
 /// @notice Reward-domain events shared across Reward modules.
-/// @dev Keeps Reward-specific events out of the Vault/global event hub.
+/// @dev DEPRECATED for offchain subscriptions:
+///      offchain/indexer consumers must use RewardView.DataPushed(DATA_TYPE_REWARD_*) as the only SSOT.
+///      Events in this library are kept for debug/legacy compatibility only.
+///      This keeps Reward-specific events out of the Vault/global event hub.
 library RewardEvents {
-    /// @notice Emitted when reward points are earned/minted for a user.
+    /// @notice Emitted when EasyToken is earned/minted for a user.
     /// @param user User address
-    /// @param points Points minted (token decimals)
+    /// @param easyAmount EasyToken amount minted (reward units)
     /// @param reason Human-readable reason (short string)
     /// @param blockNumber Emission block number (block.number)
-    event RewardEarned(address indexed user, uint256 points, string reason, uint256 blockNumber);
+    event RewardEarned(address indexed user, uint256 easyAmount, string reason, uint256 blockNumber);
 
     /// @notice Emitted for lightweight performance/metric tracking in Reward flows.
     /// @param operation Operation name

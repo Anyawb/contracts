@@ -1748,7 +1748,7 @@ address[] memory targets = new address[](1);
 targets[0] = registryAddress;
 
 uint256 proposalId = governance.createProposal(
-    "Upgrade VaultBusinessLogic to v2.0",
+    "Upgrade VaultBusinessLogic to the new implementation",
     actions,
     targets,
     7 days  // 投票期7天

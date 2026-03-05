@@ -1,6 +1,6 @@
 import { ethers, network } from "hardhat";
 import { spawnSync } from "child_process";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
 
 function envBool(name: string, defaultValue = false): boolean {
   const raw = process.env[name];
@@ -138,6 +138,7 @@ async function main() {
   const RUN_SSOT_VERIFY = envBool("RUN_SSOT_VERIFY", true);
   const RUN_VIEW_SMOKE = envBool("RUN_VIEW_SMOKE", true);
   const RUN_VIEWCACHE_SMOKE = envBool("RUN_VIEWCACHE_SMOKE", true);
+  const RUN_REWARD_SMOKE = envBool("RUN_REWARD_SMOKE", true);
   const RUN_LE_SMOKE = envBool("RUN_LE_SMOKE", false);
   const RUN_FUNDS = envBool("RUN_FUNDS", true);
   const RUN_ATTACK = envBool("RUN_ATTACK", true);
@@ -146,7 +147,7 @@ async function main() {
   console.log(`  network=${network.name}`);
   console.log(`  MODE=${mode}`);
   console.log(
-    `  steps: deploy=${RUN_DEPLOY} grant=${RUN_GRANT} preconfig=${RUN_PRECONFIG} cacheRefresh=${RUN_CACHE_REFRESH} ssot=${RUN_SSOT_VERIFY} viewSmoke=${RUN_VIEW_SMOKE} viewCacheSmoke=${RUN_VIEWCACHE_SMOKE} leSmoke=${RUN_LE_SMOKE} funds=${RUN_FUNDS} attack=${RUN_ATTACK}`
+    `  steps: deploy=${RUN_DEPLOY} grant=${RUN_GRANT} preconfig=${RUN_PRECONFIG} cacheRefresh=${RUN_CACHE_REFRESH} ssot=${RUN_SSOT_VERIFY} viewSmoke=${RUN_VIEW_SMOKE} viewCacheSmoke=${RUN_VIEWCACHE_SMOKE} rewardSmoke=${RUN_REWARD_SMOKE} leSmoke=${RUN_LE_SMOKE} funds=${RUN_FUNDS} attack=${RUN_ATTACK}`
   );
 
   // Fresh-mode guard: "fresh" means the node itself is fresh (restart hardhat node).
@@ -180,6 +181,9 @@ async function main() {
   }
   if (RUN_VIEWCACHE_SMOKE) {
     runHardhatScript("viewcache-smoke-local (system cache)", "scripts/tests/viewcache-smoke-local.ts");
+  }
+  if (RUN_REWARD_SMOKE) {
+    runHardhatScript("reward-smoke-local (RewardManager/RewardView/EasyToken)", "scripts/tests/reward-smoke-local.ts");
   }
   if (RUN_LE_SMOKE) {
     runHardhatScript("lendingengine-smoke-local (LendingEngineView focused)", "scripts/tests/lendingengine-smoke-local.ts");

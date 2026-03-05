@@ -15,6 +15,8 @@
 1) **清算写路径（默认入口为 SSOT）**：keeper/机器人通过 `SettlementManager.settleOrLiquidate(orderId)` 触发处置；进入清算分支后执行 `CM.withdrawCollateralTo → LE.forceReduceDebt → LiquidatorView.push*`（内部可选经 `LiquidationManager` 执行器转调）。目前该链路**不包含**“积分惩罚/清算奖励”的链上结算逻辑。  
 2) **积分系统（Reward）**主线写入口由 `ORDER_ENGINE(core/LendingEngine)` 在借/还落账后调用 `RewardManager.onLoanEvent*`；清算默认不触发。
 
+> 术语说明（避免误解）：本文所称“积分”在资产语义上等同于**奖励通证 / EasyToken**（SSOT = `Registry[KEY_EASY_TOKEN]`）。
+
 > 口径补充：当前架构下清算不再作为独立对外写入口；**统一由 `SettlementManager` 承接写入口**，当进入清算分支时才执行 `CM.withdrawCollateralTo + LE.forceReduceDebt` 并由 `LiquidatorView.push*` 单点推送。本文在描述“清算写路径”时，默认指该清算分支的直达账本写路径。
 
 为避免误解：本文所称“清算写路径”应理解为：
@@ -65,19 +67,19 @@ penaltyPoints = (debtValue * 100) / 10000; // 1% = 100 basis points
 
 #### 2. **RewardManager** - 奖励管理器
 ```solidity
-function applyPenalty(address user, uint256 points) external {
+function applyPenalty(address user, uint256 amount) external {
     // 权限验证：只允许清算模块调用
     address guaranteeFundManager = registry.getModule(ModuleKeys.KEY_GUARANTEE_FUND);
     if (msg.sender != guaranteeFundManager) revert MissingRole();
     
     // 调用核心合约的惩罚功能
-    rewardManagerCore.deductPoints(user, points);
+    rewardManagerCore.deductPoints(user, amount);
 }
 ```
 
 #### 3. **RewardManagerCore** - 奖励核心逻辑
 ```solidity
-function deductPoints(address user, uint256 points) external nonReentrant {
+function deductPoints(address user, uint256 amount) external nonReentrant {
     // 权限检查
     address guaranteeFundManager = registry.getModule(ModuleKeys.KEY_GUARANTEE_FUND);
     address rewardManager = registry.getModule(ModuleKeys.KEY_RM);
@@ -85,12 +87,12 @@ function deductPoints(address user, uint256 points) external nonReentrant {
         revert MissingRole();
     }
     
-    // 尝试扣除积分
-    try RewardPoints(registry.getModule(ModuleKeys.KEY_REWARD_POINTS)).burnPoints(user, points) {
+    // 尝试扣除积分（奖励通证 SSOT：Registry[KEY_EASY_TOKEN]）
+    try EasyToken(registry.getModuleOrRevert(ModuleKeys.KEY_EASY_TOKEN)).burn(user, amount) {
         // 成功扣除积分
     } catch {
         // 如果积分不足，记录到惩罚账本
-        penaltyLedger[user] += points;
+        penaltyLedger[user] += amount;
     }
 }
 ```
@@ -102,12 +104,12 @@ function deductPoints(address user, uint256 points) external nonReentrant {
 // 当用户获得新积分时，优先抵扣惩罚债务
 uint256 debt = penaltyLedger[user];
 if (debt > 0) {
-    if (points >= debt) {
-        points -= debt;
+    if (amount >= debt) {
+        amount -= debt;
         penaltyLedger[user] = 0;
     } else {
-        penaltyLedger[user] = debt - points;
-        points = 0;
+        penaltyLedger[user] = debt - amount;
+        amount = 0;
     }
 }
 ```
@@ -207,8 +209,9 @@ PENALTY_RATE = 100; // 100 basis points = 1%
 
 ### **查询惩罚债务**
 ```solidity
-// 查询用户的惩罚债务（RewardView 返回带 meta）
-(uint256 penaltyDebt, , ) = rewardView.getUserPenaltyDebt(user);
+// 查询用户的惩罚债务（RewardView summary 返回带 meta）
+// pendingPenalty 即“欠分账本”的可视化聚合字段
+(,, uint256 pendingPenalty,,,,,) = rewardView.getUserRewardSummaryWithMeta(user);
 ```
 
 ### **管理员监控**

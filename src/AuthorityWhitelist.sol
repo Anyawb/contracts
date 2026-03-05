@@ -9,7 +9,7 @@ import { IAccessControlManager } from "./interfaces/IAccessControlManager.sol";
 import { ActionKeys } from "./constants/ActionKeys.sol";
 import { ModuleKeys } from "./constants/ModuleKeys.sol";
 import { SystemEvents } from "./Vault/SystemEvents.sol";
-import { ZeroAddress } from "./errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress } from "./errors/StandardErrors.sol";
 import { Registry } from "./registry/Registry.sol";
 
 // ======== Custom Errors ========
@@ -32,6 +32,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
     /// @notice 验证Registry地址有效性
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
@@ -52,6 +53,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         __UUPSUpgradeable_init();
         
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         
         _registryAddr = initialRegistryAddr;
         
@@ -127,6 +129,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
         
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;

@@ -41,6 +41,7 @@ describe('Registry Admin Events', function () {
       await implementation.getAddress(),
       implementation.interface.encodeFunctionData('initialize', [
         3600,
+        302400,
         await owner.getAddress(),
         await owner.getAddress(),
         await owner.getAddress(),

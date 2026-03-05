@@ -296,8 +296,10 @@ registry.scheduleModuleUpgrade(
 (address newAddr, uint256 executeAfter, bool hasPending) = 
     registry.getPendingUpgrade(ModuleKeys.KEY_VAULT_CORE);
     
-// executeAfter 是执行时间戳（当前时间 + minDelay）
-// 在 executeAfter 之前无法执行升级
+// Time-Dependency-Refactor SSOT:
+// - executeAfter 的语义是 executeAfterBlock（区块高度门槛），不是 unix timestamp。
+// - 它通常由 Registry 在 schedule 时设置为：executeAfter = currentBlock + minDelayBlocks。
+// - 在 block.number < executeAfter 之前无法执行升级。
 ```
 
 #### 步骤 2：等待延时
@@ -370,7 +372,7 @@ bool isRegistered = registry.isModuleRegistered(ModuleKeys.KEY_VAULT_CORE);
 ### 升级相关查询
 
 ```solidity
-// 获取待升级信息
+// 获取待升级信息（executeAfter = executeAfterBlock）
 (address newAddr, uint256 executeAfter, bool hasPending) = 
     registry.getPendingUpgrade(ModuleKeys.KEY_VAULT_CORE);
 
@@ -472,8 +474,8 @@ require(registeredAddr == address(newVaultCore), "Registration failed");
 ### 示例 2：延时升级流程
 
 ```solidity
-// 1. 部署新版本
-VaultCoreV2 newVaultCore = new VaultCoreV2();
+// 1. 部署新实现
+VaultCore newVaultCore = new VaultCore();
 newVaultCore.initialize(registryAddress, ...);
 
 // 2. 计划升级（需要等待 minDelay 时间）
@@ -681,7 +683,7 @@ registry.scheduleModuleUpgrade(moduleKey, newModuleAddress);
 ### 7. 监控升级计划
 
 ```solidity
-// 定期检查升级计划状态
+// 定期检查升级计划状态（executeAfter = executeAfterBlock）
 (address newAddr, uint256 executeAfter, bool hasPending) = 
     registry.getPendingUpgrade(moduleKey);
 
@@ -691,8 +693,8 @@ if (hasPending) {
         registry.executeModuleUpgrade(moduleKey);
     } else {
         // 还需要等待
-        uint256 remaining = executeAfter - block.number;
-        console.log("Upgrade pending, remaining:", remaining);
+        uint256 remainingBlocks = executeAfter - block.number;
+        console.log("Upgrade pending, remainingBlocks:", remainingBlocks);
     }
 }
 ```
@@ -707,7 +709,7 @@ Registry 地址通常在系统部署时确定，并存储在部署产物/前端�
 
 ```solidity
 // 说明：生产环境通常通过 OZ Upgrades 部署 UUPS Proxy 并在同交易初始化。
-// Registry.initialize(minDelaySeconds, upgradeAdmin, emergencyAdmin, initialOwner)
+// Registry.initialize(minDelayBlocks, maxDelayBlocks, upgradeAdmin, emergencyAdmin, initialOwner)
 
 // 在模块初始化时
 VaultCore vaultCore = new VaultCore();

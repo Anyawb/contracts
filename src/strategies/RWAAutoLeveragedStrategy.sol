@@ -6,11 +6,8 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IVaultCore } from "../interfaces/IVaultCore.sol";
-import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
-import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
 import { AmountIsZero } from "../errors/StandardErrors.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { Registry } from "../registry/Registry.sol";
@@ -51,7 +48,6 @@ interface IPreviewViewLite {
 /// @dev 集成完整的DeFi协议，提供专业级杠杆交易体验
 contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     using SafeERC20 for IERC20;
-    using Math for uint256;
 
     /* ============ STRUCTS ============ */
     
@@ -75,7 +71,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         uint256 targetHealthFactor;    // 目标健康因子
         uint256 rebalanceThreshold;    // 再平衡阈值
         uint256 maxPositionSize;       // 最大仓位大小
-        uint256 cooldownPeriod;        // 操作冷却期（区块数）
+        uint256 cooldownPeriod;        // 操作冷却期（区块数，SSOT=blocks，禁止 seconds 口径）
     }
 
     /// @notice 资产配置信息
@@ -87,11 +83,9 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     }
 
     /* ============ STATE VARIABLES ============ */
-    /// @dev 兼容旧版“非订单化借还”路径的占位 orderId。
-    /// TODO（SSOT）：将该策略升级为订单化流程：openPosition/closePosition/rebalance 绑定真实 orderId 并透传到 VaultCore.repay。
-    uint256 internal constant _LEGACY_ORDER_ID = 1;
-    
     IVaultCore public immutable vault;
+    /// @dev Registry is the SSOT for module address resolution (cached once).
+    Registry public immutable registry;
     IERC20 public immutable rwaToken;
     IERC20 public immutable settlementToken;
     
@@ -105,6 +99,9 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     error Strategy__OrderConfigNotSet();
     error Strategy__LeverageIncreaseNotSupportedInOrderMode();
     error Strategy__AssetMismatch();
+    error Strategy__InvalidAddress();
+    error Strategy__InvalidLeverageRange();
+    error Strategy__CollateralTooSmall(uint256 provided, uint256 minRequired);
 
     /// @notice 设置订单化借款参数（仅 owner）
     function setDefaultOrderConfig(address lender, uint256 annualRateBps, uint16 termDays) external onlyOwner {
@@ -123,7 +120,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     // 支持的资产列表
     address[] public supportedAssets;
     
-    // 操作冷却期映射（区块数）
+    // 操作冷却期映射（区块数，值为 lastOperationBlock；保留旧字段名避免破坏外部读取）
     mapping(address => uint256) public lastOperationTime;
     
     // 统计信息
@@ -195,17 +192,17 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         uint256 _minLeverage,
         uint256 _maxLeverage
     ) Ownable(msg.sender) {
-        require(_vault != address(0), "Invalid vault address");
-        require(_rwaToken != address(0), "Invalid RWA token address");
-        require(_minLeverage >= 100, "Min leverage must be >= 1x");
-        require(_maxLeverage <= 500, "Max leverage must be <= 5x");
-        require(_minLeverage <= _maxLeverage, "Invalid leverage range");
+        if (_vault == address(0) || _rwaToken == address(0)) revert Strategy__InvalidAddress();
+        if (_minLeverage < 100 || _maxLeverage > 500) revert Strategy__InvalidLeverageRange();
+        if (_minLeverage > _maxLeverage) revert Strategy__InvalidLeverageRange();
         
         vault = IVaultCore(_vault);
         rwaToken = IERC20(_rwaToken);
-        // Architecture-Guide alignment: settlement token SSOT is Registry[KEY_SETTLEMENT_TOKEN].
+        // Architecture-Guide alignment: module addresses SSOT is Registry.
         address reg = IVaultCoreWithRegistry(_vault).getRegistry();
-        address st = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_SETTLEMENT_TOKEN);
+        if (reg == address(0)) revert Strategy__InvalidAddress();
+        registry = Registry(reg);
+        address st = registry.getModuleOrRevert(ModuleKeys.KEY_SETTLEMENT_TOKEN);
         settlementToken = IERC20(st);
         
         config = StrategyConfig({
@@ -214,7 +211,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
             targetHealthFactor: 150, // 1.5x
             rebalanceThreshold: 20,  // 20% deviation
             maxPositionSize: 1000e18, // 1000 tokens
-            cooldownPeriod: 1 hours / 2 seconds
+            // Time-Dependency-Refactor: SSOT=blocks (chain-dependent; wallclock display must be offchain ETA).
+            cooldownPeriod: 1_800
         });
     }
 
@@ -236,7 +234,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
             revert InvalidLeverage();
         }
         if (leverageRatio > assetConfigs[asset].maxLeverage) revert InvalidLeverage();
-        if (collateralAmount < assetConfigs[asset].minCollateral) revert AmountIsZero();
+        uint256 minCol = assetConfigs[asset].minCollateral;
+        if (collateralAmount < minCol) revert Strategy__CollateralTooSmall(collateralAmount, minCol);
         if (positions[msg.sender].isActive) revert PositionAlreadyExists();
         // 冷却期：仅在已有操作记录后启用（首次操作允许）
         uint256 lastOp = lastOperationTime[msg.sender];
@@ -254,14 +253,13 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         IERC20(asset).safeTransferFrom(msg.sender, address(this), collateralAmount);
         
         // 存入抵押物到Vault（注意：CM 才是 pull 资金的 spender，因此需要 approve CM）
-        address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
-        address cm = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_CM);
+        address cm = registry.getModuleOrRevert(ModuleKeys.KEY_CM);
         IERC20(asset).forceApprove(cm, collateralAmount);
         vault.deposit(asset, collateralAmount);
 
         // 订单化借款：走 VaultBusinessLogic.borrowWithRate → SettlementMatchLib.finalizeAtomic → (账本落地 + 订单创建) 返回 orderId
         if (defaultLenderVar == address(0) || defaultTermDaysVar == 0) revert Strategy__OrderConfigNotSet();
-        address vbl = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
+        address vbl = registry.getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
         uint256 orderId = IVaultBusinessLogic(vbl).borrowWithRate(
             address(this),
             defaultLenderVar,
@@ -360,6 +358,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     ) external whenNotPaused nonReentrant {
         Position storage position = positions[msg.sender];
         if (!position.isActive) revert PositionNotFound();
+        if (asset != position.collateralAsset) revert Strategy__AssetMismatch();
         if (newLeverageRatio < config.minLeverage || newLeverageRatio > config.maxLeverage) {
             revert InvalidLeverage();
         }
@@ -408,6 +407,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     function emergencyClosePosition(address user, address asset) external onlyOwner {
         Position storage position = positions[user];
         if (!position.isActive) revert PositionNotFound();
+        if (asset != position.collateralAsset) revert Strategy__AssetMismatch();
         
         // cache before delete (storage reference)
         address collateralAsset = position.collateralAsset;
@@ -415,8 +415,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
         uint256 borrowedAmount = position.borrowedAmount;
 
         // 强制提取所有抵押物
-        vault.withdraw(asset, collateralAmount);
-        IERC20(asset).safeTransfer(user, collateralAmount);
+        vault.withdraw(collateralAsset, collateralAmount);
+        IERC20(collateralAsset).safeTransfer(user, collateralAmount);
         
         // 更新统计信息
         totalPositions--;
@@ -447,9 +447,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     function getHealthFactor(address user, address asset) external view returns (uint256 healthFactor) {
         // 架构：健康因子来自 HealthView（按 user 维度），不做按资产细分。
         asset; // reserved for future per-asset health
-        address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
-        if (reg == address(0)) return 0;
-        address hv = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
+        address hv = registry.getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
         (healthFactor, , ) = IHealthViewLite(hv).getUserHealthFactorWithMeta(user);
     }
     
@@ -468,8 +466,7 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     /// @param asset 资产地址
     /// @return maxBorrowable 最大可借金额
     function getMaxBorrowable(address user, address asset) external view returns (uint256 maxBorrowable) {
-        address reg = IVaultCoreWithRegistry(address(vault)).getRegistry();
-        address previewView = Registry(reg).getModuleOrRevert(ModuleKeys.KEY_PREVIEW_VIEW);
+        address previewView = registry.getModuleOrRevert(ModuleKeys.KEY_PREVIEW_VIEW);
         (maxBorrowable, , , ) = IPreviewViewLite(previewView).getMaxBorrowableWithMeta(user, asset);
     }
     
@@ -490,9 +487,8 @@ contract RWAAutoLeveragedStrategy is ReentrancyGuard, Pausable, Ownable {
     /// @notice 更新策略配置
     /// @param _config 新配置
     function updateConfig(StrategyConfig calldata _config) external onlyOwner {
-        require(_config.minLeverage >= 100, "Min leverage must be >= 1x");
-        require(_config.maxLeverage <= 500, "Max leverage must be <= 5x");
-        require(_config.minLeverage <= _config.maxLeverage, "Invalid leverage range");
+        if (_config.minLeverage < 100 || _config.maxLeverage > 500) revert Strategy__InvalidLeverageRange();
+        if (_config.minLeverage > _config.maxLeverage) revert Strategy__InvalidLeverageRange();
         require(_config.targetHealthFactor >= 110, "Target HF must be >= 1.1x");
         
         config = _config;

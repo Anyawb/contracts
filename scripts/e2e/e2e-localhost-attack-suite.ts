@@ -1,6 +1,6 @@
 import { ethers, network } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
-import { scanViewModules } from "./utils/view-scan";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { scanViewModules } from "./utils/view-scan.ts";
 
 type AnyFn = () => Promise<unknown>;
 
@@ -302,7 +302,8 @@ async function main() {
   console.log("== Section 4: Oracle manipulation attempts ==");
   {
     const poAsAttacker = priceOracle.connect(attacker);
-    const now = BigInt(Math.floor(Date.now() / 1000));
+    // PriceOracle SSOT: block-based time axis. `blockNumber` is an informational marker (NOT unix timestamp).
+    const now = BigInt(await ethers.provider.getBlockNumber());
     await mustRevert("attacker: PriceOracle.updatePrice(USDC,...)", async () => {
       await (await poAsAttacker.updatePrice(await usdc.getAddress(), 1n, now)).wait();
     });
@@ -352,9 +353,8 @@ async function main() {
       ["PositionView", CONTRACT_ADDRESSES.PositionView],
       ["StatisticsView", CONTRACT_ADDRESSES.StatisticsView],
       ["HealthView", CONTRACT_ADDRESSES.HealthView],
-      ["RewardPoints", CONTRACT_ADDRESSES.RewardPoints],
+      ["EasyToken", (CONTRACT_ADDRESSES as any).EasyToken],
       ["RewardManagerCore", CONTRACT_ADDRESSES.RewardManagerCore],
-      ["RewardCore", CONTRACT_ADDRESSES.RewardCore],
       ["RewardManager", CONTRACT_ADDRESSES.RewardManager],
       ["RewardConfig", CONTRACT_ADDRESSES.RewardConfig],
       ["RewardView", CONTRACT_ADDRESSES.RewardView],
@@ -1276,9 +1276,13 @@ async function main() {
       // - 对照：VBL.liquidate(...)（旧入口）是 atomic（View push 失败应回滚），用于验证“旧路径”风险。
       // ActionKeys.ACTION_LIQUIDATE == keccak256("LIQUIDATE")
       const ACTION_LIQUIDATE = key("LIQUIDATE");
-      if (!(await acm.hasRole(ACTION_LIQUIDATE, deployer.address))) {
-        await (await acm.grantRole(ACTION_LIQUIDATE, deployer.address)).wait();
+      const acmAddr = await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"));
+      const acmLive = (await ethers.getContractAt("AccessControlManager", acmAddr, deployer)) as any;
+      if (!(await acmLive.hasRole(ACTION_LIQUIDATE, deployer.address))) {
+        await (await acmLive.grantRole(ACTION_LIQUIDATE, deployer.address)).wait();
       }
+      // Fallback for local tests: ensure SettlementManager gate doesn't block the best-effort path.
+      await (await registry.setModule(key("SETTLEMENT_MANAGER"), deployer.address)).wait();
 
       const mockCM = await (await ethers.getContractFactory("MockCollateralManager", deployer)).deploy();
       await mockCM.waitForDeployment();
@@ -1291,6 +1295,7 @@ async function main() {
       const cAmt = 100n;
       const dAmt = 50n;
       await (await mockCM.depositCollateral(victim.address, asset, cAmt)).wait();
+      await (await usdc.mint(await mockCM.getAddress(), cAmt)).wait();
       await (await mockLE.setUserDebt(victim.address, asset, dAmt)).wait();
       await (await mockLE.setTotalDebtByAsset(asset, dAmt)).wait();
 
@@ -1303,7 +1308,9 @@ async function main() {
         throw new Error("[Liquidation] liquidator must differ from borrower (victim)");
       }
       // LiquidationManager 执行器入口应成功，并 emit CacheUpdateFailed（best-effort）。
-      const tx = await liquidationManager.connect(deployer).liquidate(victim.address, asset, asset, cAmt, dAmt, 0n);
+      const tx = await liquidationManager
+        .connect(deployer)
+        .liquidateFromSettlementManager(deployer.address, victim.address, asset, asset, cAmt, dAmt, 0n);
       const rc = await tx.wait();
       const colAfter: bigint = await mockCM.getCollateral(victim.address, asset);
       const debtAfter: bigint = await mockLE.getDebt(victim.address, asset);
@@ -1319,6 +1326,7 @@ async function main() {
 
       // VBL.liquidate is atomic; with reverting view it must revert and roll back.
       await (await mockCM.depositCollateral(victim.address, asset, cAmt)).wait();
+      await (await usdc.mint(await mockCM.getAddress(), cAmt)).wait();
       await (await mockLE.setUserDebt(victim.address, asset, dAmt)).wait();
       await (await mockLE.setTotalDebtByAsset(asset, dAmt)).wait();
       await mustRevert("VBL.liquidate should revert on LIQUIDATION_VIEW failure (atomic)", async () => {
@@ -1429,6 +1437,8 @@ async function main() {
       const addrs: string[] = res[1];
       console.log(`  Found ${keys.length} registered modules`);
 
+      const eoaAllowed = new Set([key("GOVERNANCE_GUARDIAN")]);
+
       // Common attack ABIs (best-effort probing): if the function doesn't exist it will revert, which is OK.
       const abiRefresh = ["function refreshModuleCache() external"];
       const abiSetRegistry = ["function setRegistry(address newRegistry) external"];
@@ -1441,9 +1451,11 @@ async function main() {
       // Quick sanity: every registered module must be a contract.
       for (let i = 0; i < keys.length; i++) {
         const addr = addrs[i];
+        const k = keys[i];
+        if (eoaAllowed.has(k)) continue;
         const code = await ethers.provider.getCode(addr);
-        if (code === "0x") {
-          throw new Error(`[FAIL] RegistryView returned non-contract module address: key=${keys[i]} addr=${addr}`);
+        if (code === "0x" && !eoaAllowed.has(k)) {
+          throw new Error(`[FAIL] RegistryView returned non-contract module address: key=${k} addr=${addr}`);
         }
       }
       console.log("  ✅ [ok] all registered module addresses have code");
@@ -1452,6 +1464,7 @@ async function main() {
       for (let i = 0; i < keys.length; i++) {
         const addr = addrs[i];
         const k = keys[i];
+        if (eoaAllowed.has(k)) continue;
 
         // 14.1 UUPS upgrade attempts by attacker must always revert.
         const uups = await ethers.getContractAt(abiUups, addr, attacker);

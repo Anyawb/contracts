@@ -105,7 +105,7 @@ async function main() {
     const assetAddr = (await reg.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
     const viewCache = (await ethers.getContractAt("ViewCache", viewCacheAddr)) as any;
 
-    console.log("=== ViewCache smoke (localhost) ===");
+    console.log(`=== ViewCache smoke (${network.name}) ===`);
     console.log(`  ViewCache: ${viewCacheAddr}`);
     console.log(`  Asset:     ${assetAddr}`);
 
@@ -195,7 +195,11 @@ async function main() {
     console.log("\n✅ ViewCache smoke PASSED\n");
   } finally {
     if (USE_SNAPSHOT) {
-      await ethers.provider.send("evm_revert", [snap]);
+      try {
+        await ethers.provider.send("evm_revert", [snap]);
+      } catch {
+        // ignore on live networks
+      }
     }
   }
 }

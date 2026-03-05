@@ -2,6 +2,8 @@
 pragma solidity ^0.8.20;
 
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface IPositionViewPush {
     function pushUserPositionUpdate(address user, address asset, uint256 collateral, uint256 debt) external;
@@ -10,6 +12,7 @@ interface IPositionViewPush {
 /// @title MockCollateralManager
 /// @notice 抵押物管理器的Mock实现，用于测试
 contract MockCollateralManager is ICollateralManager {
+    using SafeERC20 for IERC20;
     // 用户抵押物映射
     mapping(address => mapping(address => uint256)) private _userCollateral;
     mapping(address => uint256) private _totalByAsset;
@@ -47,11 +50,13 @@ contract MockCollateralManager is ICollateralManager {
     }
 
     function withdrawCollateralTo(address user, address asset, uint256 amount, address receiver) external override {
-        receiver; // mock: ignore receiver (no real ERC20 transfer)
         if (shouldFail) revert("MockCollateralManager: withdraw failed");
         require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
         _userCollateral[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
+        if (asset.code.length > 0) {
+            IERC20(asset).safeTransfer(receiver, amount);
+        }
         emit CollateralWithdrawn(user, asset, amount);
     }
 

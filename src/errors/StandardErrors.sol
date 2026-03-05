@@ -106,7 +106,6 @@ error Registry__ModuleAlreadyExists();
 // Reward 相关
 error RewardManager__ZeroAddress();
 error RewardManager__MissingMinterRole();
-error RewardConsumption__ZeroAddress();
 error RewardManagerCore__ZeroAddress();
 
 // AccessControl 相关

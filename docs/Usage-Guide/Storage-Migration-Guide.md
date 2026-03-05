@@ -107,9 +107,9 @@ pragma solidity ^0.8.20;
 import { IRegistryStorageMigrator } from "../interfaces/IRegistryStorageMigrator.sol";
 import { RegistryStorage } from "../registry/RegistryStorageLibrary.sol";
 
-/// @title RegistryStorageMigratorV1ToV2
-/// @notice 将存储从版本 1 迁移到版本 2
-contract RegistryStorageMigratorV1ToV2 is IRegistryStorageMigrator {
+/// @title RegistryStorageMigratorExample
+/// @notice 存储迁移示例（从 fromVersion 迁移到 toVersion）
+contract RegistryStorageMigratorExample is IRegistryStorageMigrator {
     
     /// @inheritdoc IRegistryStorageMigrator
     function migrate(uint256 fromVersion, uint256 toVersion) external override {
@@ -206,13 +206,13 @@ contract RegistryStorageMigratorReorganize is IRegistryStorageMigrator {
 为迁移合约编写完整的测试：
 
 ```typescript
-describe('RegistryStorageMigratorV1ToV2', function () {
+describe('RegistryStorageMigratorExample', function () {
   it('应当成功迁移存储', async function () {
     const fromVersion = await registry.getStorageVersion();
     expect(fromVersion).to.equal(1n);
     
     // 部署迁移器
-    const MigratorFactory = await ethers.getContractFactory('RegistryStorageMigratorV1ToV2');
+    const MigratorFactory = await ethers.getContractFactory('RegistryStorageMigratorExample');
     const migrator = await MigratorFactory.deploy();
     await migrator.waitForDeployment();
     
@@ -650,7 +650,7 @@ struct PackedData {
 #### 迁移文档模板
 
 ```markdown
-## 迁移 v1 -> v2
+## 迁移 版本 1 -> 版本 2
 
 ### 变更内容
 - 添加 `maxModules` 字段

@@ -30,6 +30,23 @@ library SettlementIntentLib {
         bytes32 salt;
     }
 
+    // NOTE (Time-Dependency-Refactor / blocks-term intent):
+    // - `termDays` is legacy and is treated as a bucket id in the legacy intent.
+    // - This intent uses `termBlocks` as the SSOT duration input (block.number axis), provided fully off-chain.
+    // - Field order is EIP-712 canonical and MUST match the type string in `hashBorrowIntentBlocks`.
+    struct BorrowIntentBlocks {
+        address borrower;
+        address collateralAsset;
+        uint256 collateralAmount;
+        address borrowAsset;
+        uint256 amount;
+        uint256 termBlocks;
+        uint256 rateBps;
+        /// @dev Legacy field name kept for signing compatibility. Semantics: **expireBlock** (block.number).
+        uint256 expireAt;
+        bytes32 salt;
+    }
+
     // NOTE: Field order is EIP-712 canonical and MUST match the type string in `hashLendIntent`.
     struct LendIntent {
         /**
@@ -44,6 +61,21 @@ library SettlementIntentLib {
         uint16 maxTermDays;
         uint256 minRateBps;
         /// @dev Legacy field name. Semantics: **expireBlock** (block.number), not unix time.
+        uint256 expireAt;
+        bytes32 salt;
+    }
+
+    // NOTE (Time-Dependency-Refactor / blocks-term intent):
+    // - Uses explicit blocks-based bounds, and avoids any on-chain "days <-> blocks" conversion.
+    // - Field order is EIP-712 canonical and MUST match the type string in `hashLendIntentBlocks`.
+    struct LendIntentBlocks {
+        address lenderSigner;
+        address asset;
+        uint256 amount;
+        uint256 minTermBlocks;
+        uint256 maxTermBlocks;
+        uint256 minRateBps;
+        /// @dev Legacy field name kept for signing compatibility. Semantics: **expireBlock** (block.number).
         uint256 expireAt;
         bytes32 salt;
     }
@@ -87,6 +119,31 @@ library SettlementIntentLib {
     }
 
     /**
+     * @notice Compute the EIP-712 struct hash for a BorrowIntentBlocks (termBlocks SSOT).
+     * @dev Reverts if: (none)
+     *
+     * @param bi Borrow intent (blocks-term) payload.
+     * @return structHash EIP-712 struct hash for BorrowIntentBlocks.
+     */
+    function hashBorrowIntentBlocks(BorrowIntentBlocks memory bi) internal pure returns (bytes32) {
+        return keccak256(abi.encode(
+            keccak256(
+                "BorrowIntentBlocks(address borrower,address collateralAsset,uint256 collateralAmount,address borrowAsset,"
+                "uint256 amount,uint256 termBlocks,uint256 rateBps,uint256 expireAt,bytes32 salt)"
+            ),
+            bi.borrower,
+            bi.collateralAsset,
+            bi.collateralAmount,
+            bi.borrowAsset,
+            bi.amount,
+            bi.termBlocks,
+            bi.rateBps,
+            bi.expireAt,
+            bi.salt
+        ));
+    }
+
+    /**
      * @notice Compute the EIP-712 struct hash for a LendIntent.
      * @dev Reverts if:
      *      - (none)
@@ -108,6 +165,30 @@ library SettlementIntentLib {
             li.amount,
             li.minTermDays,
             li.maxTermDays,
+            li.minRateBps,
+            li.expireAt,
+            li.salt
+        ));
+    }
+
+    /**
+     * @notice Compute the EIP-712 struct hash for a LendIntentBlocks (termBlocks bounds).
+     * @dev Reverts if: (none)
+     *
+     * @param li Lend intent (blocks-term) payload.
+     * @return structHash EIP-712 struct hash for LendIntentBlocks.
+     */
+    function hashLendIntentBlocks(LendIntentBlocks memory li) internal pure returns (bytes32) {
+        return keccak256(abi.encode(
+            keccak256(
+                "LendIntentBlocks(address lenderSigner,address asset,uint256 amount,uint256 minTermBlocks,"
+                "uint256 maxTermBlocks,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+            ),
+            li.lenderSigner,
+            li.asset,
+            li.amount,
+            li.minTermBlocks,
+            li.maxTermBlocks,
             li.minRateBps,
             li.expireAt,
             li.salt

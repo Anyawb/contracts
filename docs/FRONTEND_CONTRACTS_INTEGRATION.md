@@ -165,9 +165,10 @@ npm run script checks all
 
 #### 第四批：核心业务与奖励系统
 - **FeeRouter**（手续费路由，建议用代理部署）
-- **RewardPoints**（积分Token，建议用代理部署）
+- **RewardToken**（奖励通证；SSOT = `Registry[KEY_EASY_TOKEN]`（EasyToken））
 - **RewardManagerCore**、**RewardManager**（奖励管理，建议用代理部署）
-- **RewardConfig** 及其子模块（如 AdvancedAnalyticsConfig 等）
+- **RewardConfig**（治理写入口聚合，如需）
+- **EarnConfig / EasyEmissionConfig / FeatureRegistry / GovernanceGate**（Reward 子模块；通过 Registry 解析）
 
 #### 第五批：Vault 相关
 - **CollateralManager**、**LendingEngine / VaultLendingEngine**、**HealthView**、**StatisticsView（替代 VaultStatistics）**、**GuaranteeFundManager**（均建议用代理部署）
@@ -193,9 +194,11 @@ npm run script checks all
   其 oracle 健康检查通过 `GracefulDegradation.checkPriceOracleHealth(...)` 实现（不要求 `PriceOracle` 提供额外 health 方法）。
 
 #### 4. 奖励系统
-- 先部署 RewardPoints（积分Token），再部署 RewardManagerCore、RewardManager。
-- RewardManager 需要 Registry、RewardPoints、RewardManagerCore 的地址。
-- RewardConfig 及其子模块（如 AdvancedAnalyticsConfig、PriorityServiceConfig 等）可并行部署，最后 RewardConfig 需要设置各子模块地址。
+- 先部署奖励通证（SSOT = `Registry[KEY_EASY_TOKEN]`（EasyToken）），再部署 RewardManagerCore、RewardManager。
+- RewardManager/RewardManagerCore 均以 **Registry** 作为唯一依赖入口（`initialize(registry)`）：
+  - RewardToken / RewardManagerCore 等模块地址通过 `Registry.getModuleOrRevert(ModuleKeys.*)` 解析（避免在构造/initialize 里传入多地址导致指针漂移）。
+  - 部署后务必在 Registry 中绑定 `KEY_EASY_TOKEN`、`KEY_REWARD_MANAGER_CORE` 等必要模块，否则写路径会因 `ModuleNotRegistered` revert。
+- RewardConfig（如启用）可用于聚合治理写入口；EarnConfig、EasyEmissionConfig 等参数模块建议先部署并注册到 Registry。
 
 #### 5. Vault 相关
 - 先部署 CollateralManager、LendingEngine/VaultLendingEngine、HealthView、StatisticsView（替代 VaultStatistics）、GuaranteeFundManager（这些都需要 Registry 地址）。
@@ -263,7 +266,7 @@ graph TD
   Registry --> AssetWhitelist
   Registry --> PriceOracle
   Registry --> FeeRouter
-  Registry --> RewardPoints
+  Registry --> RewardToken
   Registry --> RewardManagerCore
   Registry --> RewardManager
   Registry --> CollateralManager
@@ -509,7 +512,7 @@ async function getVaultInfo() {
 // 获取用户余额（RewardView）
 async function getUserBalance(userAddress: string) {
   const rewardView = await contractManager.getRewardView();
-  const [balance] = await rewardView.getUserBalance(userAddress);
+  const [balance] = await rewardView.getUserBalanceWithMeta(userAddress);
   return balance;
 }
 
@@ -527,22 +530,29 @@ async function getRewardView(provider: ethers.Provider, address: string) {
   return RewardView__factory.connect(address, provider);
 }
 
-// 查询积分参数（统一从 RewardView）
-async function getRewardParameters(viewAddr: string, provider: ethers.Provider) {
+// 查询用户汇总（唯一推荐入口：RewardView）
+async function getUserRewardSummary(viewAddr: string, provider: ethers.Provider, user: string) {
   const rv = await getRewardView(provider, viewAddr);
-  return rv.getRewardParametersView();
+  return rv.getUserRewardSummaryWithMeta(user);
 }
 
-// 查询用户积分缓存
-async function getUserRewardCache(viewAddr: string, provider: ethers.Provider, user: string) {
+// 查询最近活动（block 口径过滤）
+async function getUserRecentActivities(
+  viewAddr: string,
+  provider: ethers.Provider,
+  user: string,
+  fromBlock: bigint,
+  toBlock: bigint,
+  limit: bigint
+) {
   const rv = await getRewardView(provider, viewAddr);
-  return rv.getUserCacheView(user);
+  return rv.getUserRecentActivitiesWithMeta(user, fromBlock, toBlock, limit);
 }
 
-// 查询动态奖励参数
-async function getDynamicRewardParams(viewAddr: string, provider: ethers.Provider) {
+// 查询用户消费记录
+async function getUserConsumptions(viewAddr: string, provider: ethers.Provider, user: string) {
   const rv = await getRewardView(provider, viewAddr);
-  return rv.getDynamicRewardParametersView();
+  return rv.getUserConsumptionsWithMeta(user);
 }
 ```
 
@@ -568,13 +578,105 @@ async function withdraw(asset: string, amount: bigint) {
   return tx;
 }
 
-// 借款（直达账本：LendingEngine，权威入口）
-async function borrow(asset: string, amount: bigint) {
-  const vaultCore = await contractManager.getVaultCore();
-  const tx = await vaultCore.borrow(asset, amount);
-  await tx.wait();
-  return tx;
-}
+// 借款（SSOT：撮合/订单化路径）
+//
+// ⚠️ 当前架构已**移除** `VaultCore.borrow(asset, amount)`（直达账本会绕开 orderId/费用/Reward 编排）。
+// 借款必须由撮合/keeper 走（推荐：订单化撮合主路径）：
+//   `VaultBusinessLogic.finalizeMatch(...) -> SettlementMatchLib.finalizeAtomicFull(...)`
+// 并在内部完成债务账本写入与订单创建（orderId 为 SSOT，由 ORDER_ENGINE 生成/管理）。
+//
+// 兼容期（legacy）仍可能存在：
+//   `VaultBusinessLogic.finalizeMatch(...) -> SettlementMatchLib.finalizeAtomicFull(...) -> VaultCore.borrowFor(..., termDays)`
+//
+// 前端通常只负责：
+// - borrower/lenderSigner 的意向签名（EIP-712）
+// - 展示撮合结果与 orderId
+// - 还款时携带 orderId 调用 `VaultCore.repay(orderId, ...)`
+
+/**
+ * ===========================
+ * termBlocks SSOT（按区块期限）撮合签名要点
+ * ===========================
+ *
+ * 对齐文档：
+ * - `docs/Usage-Guide/Time-Dependency-Refactor-Guide.md` 的 “termBlocks SSOT 完整迁移：Matchflow / Intent / Guarantee”
+ *
+ * 核心结论（必须）：
+ * - termDays 仅可作为 UX bucket（legacy）；**签名与撮合必须使用 termBlocks**
+ * - `expireAt` 字段名保留，但语义是 **expireBlock**（block.number），不是 unix timestamp
+ * - EIP-712 verifyingContract 必须是 **VaultBusinessLogic 地址**（撮合入口），不是 library 地址
+ *
+ * EIP-712 结构体（字段顺序强约束；与 `SettlementIntentLib` 保持一致）：
+ * - BorrowIntentBlocks: borrower, collateralAsset, collateralAmount, borrowAsset, amount, termBlocks, rateBps, expireAt, salt
+ * - LendIntentBlocks: lenderSigner, asset, amount, minTermBlocks, maxTermBlocks, minRateBps, expireAt, salt
+ *
+ * 对齐 `SettlementIntentLib` 的 type string（用于 struct hash；必须一字不差）：
+ * - BorrowIntentBlocks(address borrower,address collateralAsset,uint256 collateralAmount,address borrowAsset,uint256 amount,uint256 termBlocks,uint256 rateBps,uint256 expireAt,bytes32 salt)
+ * - LendIntentBlocks(address lenderSigner,address asset,uint256 amount,uint256 minTermBlocks,uint256 maxTermBlocks,uint256 minRateBps,uint256 expireAt,bytes32 salt)
+ *
+ * termBlocks 显式映射（SSOT，示例；以链上 TermBlocksLib 为准）：
+ * - 5d => 36000, 10d => 72000, 15d => 108000, 30d => 216000, 60d => 432000, 90d => 648000, 180d => 1296000, 360d => 2592000
+ *
+ * 重要（生产推荐）：
+ * - termBlocks 的 SSOT 应来自链下 “TermBlocks 映射快照”（可按日校正、带版本），前端不要自行用“秒/天”推导。
+ * - TermBlocksLib 的表仅作为 baseline/兼容参考；blocks-term intent 的 termBlocks 以快照为准，并被签名固化。
+ */
+
+// 可复制示例：ethers v6 生成 blocks-term digest 并签名（仅展示核心）
+//
+// import { ethers } from "ethers";
+// const domain = {
+//   name: "RwaLending",
+//   version: "1",
+//   chainId: await signer.provider!.getNetwork().then(n => n.chainId),
+//   verifyingContract: vaultBusinessLogicAddr, // 关键：撮合入口
+// };
+//
+// const types = {
+//   BorrowIntentBlocks: [
+//     { name: "borrower", type: "address" },
+//     { name: "collateralAsset", type: "address" },
+//     { name: "collateralAmount", type: "uint256" },
+//     { name: "borrowAsset", type: "address" },
+//     { name: "amount", type: "uint256" },
+//     { name: "termBlocks", type: "uint256" },
+//     { name: "rateBps", type: "uint256" },
+//     { name: "expireAt", type: "uint256" }, // 语义：expireBlock
+//     { name: "salt", type: "bytes32" },
+//   ],
+//   LendIntentBlocks: [
+//     { name: "lenderSigner", type: "address" },
+//     { name: "asset", type: "address" },
+//     { name: "amount", type: "uint256" },
+//     { name: "minTermBlocks", type: "uint256" },
+//     { name: "maxTermBlocks", type: "uint256" },
+//     { name: "minRateBps", type: "uint256" },
+//     { name: "expireAt", type: "uint256" }, // 语义：expireBlock
+//     { name: "salt", type: "bytes32" },
+//   ],
+// };
+//
+// 推荐：直接用 signTypedData（EIP-712 标准签名；合约侧 recover(digest, sig) 即可验证）
+// const sigBorrower = await borrowerSigner.signTypedData(domain, types, borrowIntentBlocks);
+//
+// const sigLender = await lenderSigner.signTypedData(domain, types, lendIntentBlocks);
+//
+// 如需“可复现/可审计”的 digest（用于日志/排障/对账），再计算：
+// const borrowDigest = ethers.TypedDataEncoder.hash(domain, types, borrowIntentBlocks);
+// const lendDigest = ethers.TypedDataEncoder.hash(domain, types, lendIntentBlocks);
+//
+// ⚠️ reserve/cancel/consume 使用的是 “struct hash”（不是 digest）：
+// - borrowStructHash = keccak256(abi.encode(typeHashBorrow, ...fields))
+// - lendStructHash   = keccak256(abi.encode(typeHashLend, ...fields))
+//
+// ethers v6 可直接用 ABI 编码复现（示例：lendStructHash）：
+// const typeHashLend = ethers.keccak256(ethers.toUtf8Bytes(
+//   "LendIntentBlocks(address lenderSigner,address asset,uint256 amount,uint256 minTermBlocks,uint256 maxTermBlocks,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+// ));
+// const lendStructHash = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+//   ["bytes32","address","address","uint256","uint256","uint256","uint256","uint256","bytes32"],
+//   [typeHashLend, lendIntentBlocks.lenderSigner, lendIntentBlocks.asset, lendIntentBlocks.amount, lendIntentBlocks.minTermBlocks, lendIntentBlocks.maxTermBlocks, lendIntentBlocks.minRateBps, lendIntentBlocks.expireAt, lendIntentBlocks.salt]
+// ));
 
 // 还款/结算（唯一入口：SettlementManager 由 VaultCore 代为转入并调用）
 async function repay(orderId: bigint, debtAsset: string, amount: bigint) {
@@ -1404,14 +1506,14 @@ export async function preflightPermissions(provider: any, accessControlViewAddr:
 
 > TTL/过期窗口以链上 `ViewConstants.CACHE_DURATION` 为准（当前为 5 minutes）；前端不要自行硬编码另一个 TTL。
 
-##### View push 失败重试（`CacheUpdateFailedV2`，严格 B+（Snapshot + 单入口编排器））
+##### View push 失败重试（`CacheUpdateFailedWithContext`，严格 B+（Snapshot + 单入口编排器））
 
 > 适用对象：**后端 Read Service / 运维重试服务**（前端钱包通常不执行 push）。  
 > 目标：做到 “失败可观测 → 可重放 → 版本冲突可自愈”，避免 View 缓存长期陈旧。
 
-- **监听事件（MUST）**：`CacheEvents.CacheUpdateFailedV2`
+- **监听事件（MUST）**：`CacheEvents.CacheUpdateFailedWithContext`
   - 对于 `StatisticsView` 的 user-scope 推送：`asset == address(0)` 表示“user-scoped stats”。
-  - **在严格 B+ 中**：`CacheUpdateFailedV2` 的 `(collateral, debt)` 字段承载“期望写入的 snapshot”（不是 delta）。
+  - **在严格 B+ 中**：`CacheUpdateFailedWithContext` 的 `(collateral, debt)` 字段承载“期望写入的 snapshot”（不是 delta）。
 - **重试策略（推荐默认）**：
   - **不要重放 delta**。应调用单入口编排器 **重算 SSOT 快照后再推**：
     - `StatisticsPushManager.retryUserStats(user)`
@@ -1500,19 +1602,63 @@ export async function preflightPermissions(provider: any, accessControlViewAddr:
 - `getUserTotalCollateralValue(user)` → `(totalValue, blockNumber, isValid)`
 
 **RewardView（用户维度）**
-- `getUserBalance(user)` → `(balance, blockNumber, isValid)`
-- `getUserLastConsumption(user, serviceType)` → `(consumption, blockNumber, isValid)`
-- `getUserLevel(user)` → `(level, blockNumber, isValid)`
-- `getUserLevelView(user)` → `(levelView, blockNumber, isValid)`
-- `getUserActivity(user)` → `(lastActivity, totalLoans, totalVolume, blockNumber, isValid)`
-- `getUserActivityView(user)` → `(lastActivity, totalLoans, totalVolume, blockNumber, isValid)`
-- `getUserPenaltyDebt(user)` → `(debt, blockNumber, isValid)`
-- `getUserPenaltyDebtView(user)` → `(debtView, blockNumber, isValid)`
+- `getUserBalanceWithMeta(user)` → `(balance, cacheBlock, isValid)`
+- `getUserRewardSummaryWithMeta(user)` → `(totalEarned, totalBurned, pendingPenalty, level, lastActivity, blockNumber, isValid)`
+- `getUserEasyEarnedWithMeta(user)` → `(easyEarned, blockNumber, isValid)`
+- `getUserEasyStakedWithMeta(user)` → `(easyStaked, blockNumber, isValid)`
+- `getUserEasySpentWithMeta(user)` → `(easySpent, blockNumber, isValid)`
+- `getUserRecentActivitiesWithMeta(user, fromBlock, toBlock, limit)` → `(activities[], cacheBlock, isValid)`
+
+**Reward 前端配合（必做）**
+- 展示口径建议：
+  - `walletPoints = getUserBalanceWithMeta(user).balance`
+  - `pendingPenalty = getUserRewardSummaryWithMeta(user).pendingPenalty`
+  - `availablePoints = max(walletPoints - pendingPenalty, 0)`（用于“可消费”展示）
+- 关键语义：当存在 `pendingPenalty` 时，后续奖励入账会先抵扣欠分，再增加钱包积分；因此“本次赚取”不一定等于“钱包净增”。
+- 事件联动（推荐最小集合）：
+  - 订阅 `REWARD_EARNED`、`REWARD_BURNED`、`REWARD_PENALTY_LEDGER_UPDATED`、`EASY_SPENT`、`EASY_RECYCLED_SPLIT`
+  - 收到事件后刷新 `getUserBalanceWithMeta` + `getUserRewardSummaryWithMeta`，不要只本地累加/相减
+- 写前校验（消费前）：
+  - 必须先读 `availablePoints`，不足则前端直接拦截并提示“存在待抵扣 penalty 或余额不足”
+  - 交易前再做一次 quick-refresh，降低并发下 UI 误判
+- 本地环境排障（dev/qa）：
+  - 若奖励写路径报 `ModuleNotRegistered(REWARD_EARN_CONFIG)`，优先检查 Registry 是否绑定了 `REWARD_EARN_CONFIG -> EarnConfig`
+  - 该项缺失会导致奖励参数写入（如 level multiplier / dynamic params）失败，进而影响前端联调结果
+
+**治理投票权（stEASY / Gate / CrossChainGovernance）前端配合（集成必读）**
+
+> 目标：把“投票权 token / 委托激活 / gate 资格判断 / CrossChainGovernance SSOT 绑定”一次讲清楚，避免出现“有余额但投票权为 0”或“绑定漂移导致治理交易 revert”。
+
+- **投票权 token（SSOT）**：`EasyStaking (stEASY)`（`ERC20Votes` / `IVotes`）。
+- **委托激活（非常重要）**：`ERC20Votes` 需要 delegate 才会产生 checkpoints；因此可能出现 `balanceOf > 0` 但 `getVotes/getPastVotes == 0`。
+  - 前端建议在用户进入治理页时检查 `stEASY.getVotes(user)`，若为 0 则引导执行一次 `stEASY.delegate(user)`（自委托）。
+- **Gate 资格判断（UI/预检建议）**：
+  - 从 Registry 解析 `GOVERNANCE_GATE` 地址（若未绑定则表示“未启用 gate 门控”）。
+  - 调用 `GovernanceGate.isEligibleToPropose/ isEligibleToVote(user, snapshotBlock, votesToken)`：
+    - `snapshotBlock` 建议用 `currentBlock - 1`（或与提案快照对齐：`proposal.startBlock - 1`）
+    - `votesToken` 使用 stEASY 地址（`Registry[KEY_EASY_STAKING]`）
+- **CrossChainGovernance 的 SSOT 绑定（Scheme B：缓存 + 强约束）**：
+  - `CrossChainGovernance` 初始化口径：`initialize(admin, registry)`（registry 必填）
+  - 治理 token 的唯一 SSOT 是 `Registry[KEY_EASY_STAKING]`
+  - 合约内部会缓存 `governanceToken`，但关键路径会强校验一致性；若 Registry 更新了 `KEY_EASY_STAKING` 且未同步缓存，`createProposal/vote` 会 revert
+  - 运维要求：Registry 更新 `KEY_EASY_STAKING` 后，应调用 `CrossChainGovernance.syncGovernanceTokenFromRegistry()` 刷新缓存
+
+**AICreditsVault（AI Credits SSOT）**
+- Registry key：`AI_CREDITS_VAULT`（`keccak256("AI_CREDITS_VAULT")`）
+- 余额只读：`creditsBalance(tenantId, user)`（单位：credit，1=1次）
+- 链上购买/充值入口：`buyCredits(...)`（以当前 AICreditsVault 合约实现为准）
+
+**LoanFlowView（协议借贷流量，USD-8 SSOT）**
+- `getUserLoanFlowWithMeta(user)` → `(borrowVolumeUsd8, repayVolumeUsd8, borrowCount, repayCount, version, seq, lastAppliedRequestId, isValid, blockNumber)`
+  - 口径：**protocol-level** borrow+repay flow（USD-8）
+  - 访问：用户本人可读；非本人需 `VIEW_USER_DATA` / `ACTION_ADMIN`
+- `getGlobalLoanFlowWithMeta()` → `(totalBorrowVolumeUsd8, totalRepayVolumeUsd8, totalBorrowCount, totalRepayCount, isValid, blockNumber)`
+  - 访问：**公开只读**（适合前端公开展示“协议总量”类指标；如需敏感化可在后续版本再加 gate）
 
 **非缓存 user-dim（同样要求 meta）**
 - `UserView.getUserTokenBalance(user, token)` → `(balance, isValid, blockNumber)`
 - `UserView.getUserSettlementBalanceStrict(user)` → `(balance, isValid, blockNumber)`
-- `LendingEngineView.getUserLoanCount(user)` → `(count, isValid, blockNumber)`
+- `LoanNFTView.getUserLoanCount(user)` → `(count, isValid, blockNumber)`
 - `LendingEngineView.canAccessLoanOrder(orderId, user)` → `(hasAccess, isValid, blockNumber)`
 - `RiskView.calculateHealthFactorExcludingGuarantee(user, asset)` → `(healthFactor, isValid, blockNumber)`
 - `ValuationOracleView.hasUpgradePermission(user)` → `(hasPermission, isValid, blockNumber)`
@@ -1568,12 +1714,14 @@ export async function preflightPermissions(provider: any, accessControlViewAddr:
 
 **D) Guarantee Extension（如启用）**
 - 若 `EarlyRepaymentGuaranteeManager` 对某资产启用：
-  - `finalizeMatch` 期间会从 borrower 拉取保证金。
+  - `finalizeMatch` 期间会从 borrower 拉取保证金（期限语义以 block 口径为准；若启用 termBlocks 方案，则 termBlocks 为 SSOT）。
   - 前端需对 `GuaranteeFundManager` 预先 `approve` 足额的 promisedInterest，否则会报 `ERC20InsufficientAllowance`。
+  - **平台费路由**：提前还款 `platformFee` 会先转入 `FeeRouter` 再 `distributePrepaid` 分发（feeType = `FEE_TYPE_EARLY_REPAYMENT_PLATFORM`）。
 
 **E) 清算相关（Liquidation）**
 - 前端只读使用 `LiquidatorView`；实际清算入口为 `SettlementManager.settleOrLiquidate`（keeper/权限方调用）。
 - 若遇到 `MissingRole()`，需要检查 `ACTION_LIQUIDATE` 与 `VIEW_RISK_DATA` 是否授予给执行方与 SettlementManager。
+  - **平台份额路由**：清算残值中的 platform share 先进入 `FeeRouter` 再分发（feeType = `FEE_TYPE_LIQUIDATION_PLATFORM`）。
 
 ### 3. 实现示例（TypeScript / Ethers v6）
 ```ts
@@ -1651,6 +1799,22 @@ export async function deposit(asset: string, amount: bigint) {
   - keeper/机器人可以用 NTP 对齐“什么时候发交易”
   - 但**链上判定永远不使用** keeper 的计算机时间
 
+### 接口/返回值配合（避免误用）
+
+> 对齐文档：`docs/Usage-Guide/Time-Dependency-Refactor-Guide.md` 的“命名规范（强制）”。
+
+- **字段命名必须 block 化**：
+  - 必须：`...Block` / `...Blocks`（门槛语义）
+  - 必须：`updateBlock` / `cacheBlock`（观测/元数据）
+  - 禁止：`timestamp` / `daysSince` / `hoursSince` / `secondsSince`（墙钟语义）
+- **展示字段（可选）**：
+  - 如果 UI 需要做“年龄/剩余时间”展示，合约侧**只需要返回** `updateBlock`（以及必要时的 `deadlineBlock`）
+  - 前端自行计算 `ageBlocks = currentBlock - updateBlock`，再映射为“约 X 分钟/天（估计值）”
+  - **坚决禁止**合约返回 `approxDays/approxHours` 之类字段（哪怕标注“仅展示”也容易被误用）
+- **关于事件中的 `ts` 字段（历史遗留）**：
+  - 在部分 `DataPushed` schema 里仍会出现 `ts`（时间戳）字段——它只能用于链下索引/活动流展示
+  - UI/keeper **不得**把 `ts` 当作任何 deadline/门槛语义；门槛语义只能来自 `...Block/...Blocks`
+
 ### 推荐实现：用平均出块时间估算 ETA
 
 公式：
@@ -1660,6 +1824,14 @@ export async function deposit(asset: string, amount: bigint) {
 建议：
 
 - `avgBlockTimeSeconds` 作为**网络配置**（例如 Arbitrum/Arbitrum Sepolia），可在运行时按最近 N 个 block 采样做平滑更新。
+
+#### 同一套 ETA 映射也适用于 “ageBlocks”（缓存/快照年龄展示）
+
+- `ageBlocks = currentBlock - updateBlock`
+- `ageSecondsApprox = ageBlocks * avgBlockTimeSeconds`
+- UI 推荐展示：
+  - “更新于约 \(ageBlocks\) 个区块前（约 X 分钟，估计值）”
+  - 若 `updateBlock==0` 或 `updateBlock>currentBlock`：展示 “更新区块未知/不可用”，不要硬算 ETA
 
 可复制示例（ethers v6）：
 
@@ -1681,6 +1853,20 @@ export async function estimateEtaFromDeadlineBlock(
   const etaMs = nowMs + Number(blocksLeft) * avgBlockTimeSeconds * 1000;
   return { currentBlock, deadlineBlock, etaMs };
 }
+
+export async function estimateAgeApproxFromUpdateBlock(
+  provider: ethers.Provider,
+  updateBlock: bigint,
+  avgBlockTimeSeconds: number
+) {
+  const currentBlock = BigInt(await provider.getBlockNumber());
+  if (updateBlock === 0n || updateBlock > currentBlock) {
+    return { currentBlock, updateBlock, ageBlocks: 0n, ageSecondsApprox: null as number | null };
+  }
+  const ageBlocks = currentBlock - updateBlock;
+  const ageSecondsApprox = Number(ageBlocks) * avgBlockTimeSeconds;
+  return { currentBlock, updateBlock, ageBlocks, ageSecondsApprox };
+}
 ```
 
 ### UI 文案建议（避免“blockNumber=deadline”的误导）
@@ -1690,6 +1876,44 @@ export async function estimateEtaFromDeadlineBlock(
   - 当网络拥堵/停摆时：加提示 “ETA 会随区块速度变化”
 - 不要展示：
   - “到期时间戳：xxxxx” 作为门槛语义
+
+### 兼容迁移清单（legacy 字段名：`blockNumber` / `ts` 等）
+
+> 目标：在不立即破坏旧 ABI/旧前端的情况下，把所有“门槛/有效性”语义收敛到 `...Block/...Blocks`，并把遗留字段**降级为观测/索引字段**，防止被误用成 deadline。
+
+#### 1) 先做“字段语义归类”：新增字段 vs 保留字段
+
+| 遗留字段名（示例） | 是否允许保留 | 正确语义（必须写清） | 推荐新增字段（SSOT） | 前端/keeper处理要点 |
+| --- | --- | --- | --- | --- |
+| `event.blockNumber`（日志元数据） | ✅ 保留 | **链上日志所在区块高度**（权威、不可伪造） | 无 | 可用于 UI 显示“发生于某区块”、用于索引幂等键。 |
+| 入参叫 `blockNumber`（例如“客户端观测块高/链下来源块高”） | ✅ 保留（但语义必须降级） | **观测字段**：caller 观测到的块高/数据源块高；只允许做“单调不回退/审计” | 若有门槛语义：`deadlineBlock` / `maturityBlock` / `executeAfterBlock` | 不能把该 `blockNumber` 当 deadline；更不能与 `block.number` 做“是否过期”比较。 |
+| 返回值/struct 里叫 `blockNumber`（例如 `(value, isValid, blockNumber)`） | ✅ 保留（常见，短期难以改 ABI） | **meta 口径的 cache/update block**：表示该快照写入/更新发生的区块 | `updateBlock` / `cacheBlock`（推荐作为新字段名） | 前端解包后请立刻重命名本地变量：`cacheBlock`/`updateBlock`，避免与 deadline 混淆。 |
+| `ts` / `timestamp`（常见于 `DataPushed` payload schema） | ✅ 仅限索引/展示 | **仅用于活动流/索引排序/展示**，不参与任何门槛语义 | 若有门槛语义：一律用 `...Block/...Blocks` | UI/keeper 不得用 `ts` 推导“是否到期/是否可执行”；必须用 `deadlineBlock/currentBlock`。 |
+| `daysSince` / `hoursSince` / `secondsSince` | ❌ 禁止 | 墙钟口径的“已过去时间”容易被误用成门槛 | `updateBlock`（链上）+ `ageBlocks`（链下计算） | 只返回 blocks 信息；“约 X 天/小时”由前端 ETA 映射计算并标注估计值。 |
+
+#### 2) 推荐新增字段（门槛/有效性 SSOT）
+
+- **门槛类（必须）**：`deadlineBlock`、`maturityBlock`、`executeAfterBlock`、`cooldownBlocks`、`maxAgeBlocks`
+- **meta 类（强烈推荐）**：`updateBlock`（或 `cacheBlock`）、`isValid`
+- **派生值（链下计算，禁止链上输出“天/小时”）**：
+  - `currentBlock = provider.getBlockNumber()`
+  - `ageBlocks = currentBlock - updateBlock`
+  - `blocksLeft = deadlineBlock - currentBlock`
+  - 然后用 `avgBlockTimeSeconds` 做 ETA 映射并标注“估计值”
+
+#### 3) 前端/keeper 兼容改造 checklist（可复制到迁移 PR）
+
+- [ ] **解包即重命名**：对所有返回 tuple/struct 中的 `blockNumber`，在本地变量名改成 `cacheBlock` / `updateBlock`（避免误用）。
+- [ ] **门槛只看 blocks**：所有“是否到期/是否过期/是否可执行/是否可清算”的判断只使用 `...Block/...Blocks` 与 `currentBlock`。
+- [ ] **`ts` 只用于展示/索引**：UI/keeper 禁止用 `ts/timestamp` 做门槛判断或调度判定。
+- [ ] **UI 展示统一走 ETA 映射**：对 `deadlineBlock` 或 `ageBlocks` 展示“约 X 分钟/天”时，必须标注“估计值”，并在拥堵/停摆时提示 ETA 漂移。
+- [ ] **兼容期双读**（如果同时存在新旧字段）：优先使用 `...Block/...Blocks`；旧字段仅用于观测展示或 debug。
+
+#### 4) ABI 演进建议（不破坏旧前端的最小策略）
+
+- **不要在同一个 struct/tuple 里重排字段**（ABI tuple 顺序是强约束；重排会让旧前端 silent wrong decode）。
+- **推荐做法**：保留旧函数/旧字段（标注 deprecated），新增 `*AtBlock/*WithBlockMeta` 函数返回“命名正确”的新字段（`...Block/...Blocks`）。
+- **清理时机**：只在明确的 breaking release 里删除 legacy 字段/旧函数，并要求前端同步更新 TypeChain。
 
 ## 🧾 AI Credits 计费规范（按次计费：链上购买 + 链下扣次 + 多租户对账）
 
@@ -1735,12 +1959,81 @@ export async function estimateEtaFromDeadlineBlock(
   - 负责生成/展示 `lendHash` 与签名信息（幂等键）
   - 对账口径：资金真实托管在 `KEY_LENDER_POOL_VAULT (LenderPoolVault)`
 
+> termBlocks 约定（termBlocks SSOT）：  
+> `lendHash` 必须是 **LendIntentBlocks 的 EIP-712 struct hash**（不是 digest），并且其 `expireAt` 语义为 expireBlock。  
+> 即：链下按 `SettlementIntentLib.hashLendIntentBlocks(LendIntentBlocks)` 等价的 type string/字段顺序计算 struct hash，用于：
+> - `reserveForLending(..., lendHash)` 的幂等键
+> - 撮合入口里与签名一起复现校验
+
+#### TermBlocks 快照 SSOT（前端/keeper 集成规范）
+
+目标：在“链上只认 blocks”的前提下，让 `termDays` 的 UX 更贴近墙钟天数，同时保证 borrower/lender 使用**同一版本映射**，避免撮合失败。
+
+- **SSOT 发布者（推荐）**：撮合服务/keeper（中心化服务可用；关键是要可审计、可复现）
+- **快照频率**：建议每日 1 次（或每 N 小时一次，但不要过频导致版本碎片化）
+- **前端原则**：
+  - 只消费快照，不自行推导 `days -> blocks`
+  - UI 必须同时展示：
+    - `termBlocks` / `maturityBlock` / `blocksLeft`（确定值）
+    - ETA（估计值，基于快照里的 `avgBlockTimeSeconds` 或前端采样值）
+
+**推荐 API 结构（示例）**：
+
+```json
+{
+  "chainId": 42161,
+  "snapshotId": "arb1-2026-02-07",
+  "window": { "fromBlock": 312345678, "toBlock": 312355678, "method": "EMA", "alpha": 0.2 },
+  "avgBlockTimeSeconds": 0.26,
+  "termBuckets": [
+    { "termDays": 5, "termBlocks": 166000 },
+    { "termDays": 10, "termBlocks": 332000 }
+  ],
+  "generatedAtBlock": 312355700
+}
+```
+
+**缓存/失败处理（必须）**：
+
+- **缓存键**：`(chainId, snapshotId)`
+- **取快照失败**：
+  - 不建议继续签名新 intent（否则 borrower/lender 可能用不同版本）
+  - 可允许用户“继续使用本地缓存的上一版快照”签名，但 UI 必须强提示“使用旧快照，可能降低撮合成功率”
+
+**把 snapshotId 绑定进 `salt`（强烈推荐，便于审计与复现）**：
+
+- 因为合约结构体里没有 `snapshotId` 字段，最简单的做法是把它编码进 `salt`，让“使用了哪个快照”可从签名材料复现出来。
+
+示例（ethers v6，salt 构造）：
+
+```ts
+import { ethers } from "ethers";
+
+export function buildSaltWithSnapshot(snapshotId: string, userNonce: bigint) {
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["string", "uint256"],
+      [snapshotId, userNonce]
+    )
+  );
+}
+```
+
 ### 3) 撮合放款（Finalize Match / Borrow Disbursement）
 
-- **典型模式**：由撮合服务/keeper 调 `VaultBusinessLogic.finalizeMatch(...)` 完成原子撮合（前端只负责签名与展示状态）。
+- **典型模式（推荐）**：由撮合服务/keeper 调 `VaultBusinessLogic.finalizeMatch(...)` 完成原子撮合（前端只负责签名与展示状态）。
+- **兼容模式（legacy）**：仍可调 `VaultBusinessLogic.finalizeMatch(...)`（termDays bucket），但不再推荐；termBlocks 迁移后应尽快停用。
+- **如何判断是否已启用 termBlocks 方案**：
+  - 你的前端 ABI/TypeChain 若找不到 blocks-term 的结构体/签名（例如 `BorrowIntentBlocks/LendIntentBlocks`），说明当前部署仍在 legacy；需要先升级合约再切 termBlocks 签名与调用。
 - **前端需要保证**：
   - borrower 与 lenders 的签名数据可复现（用于追责与排障）
   - UI 上明确展示：`LoanOrder.lender` 口径是 **资金池地址**（`LenderPoolVault`），不是 `lenderSigner`
+
+termBlocks 方案必须满足：
+
+- **BorrowIntentBlocks.termBlocks** 来自链下显式映射表（不要链上推导）
+- **BorrowIntentBlocks/LendIntentBlocks.expireAt** 语义为 expireBlock（`block.number > expireAt` 过期）
+- EIP-712 域：`name="RwaLending"`, `version="1"`, `chainId`, `verifyingContract=VaultBusinessLogic`
 
 ### 4) 还款/结算（Repay → Settle）
 
@@ -1838,6 +2131,7 @@ export function decodeCustomError(e: any) {
 ### 6) 费用与分账（Fee Flow）
 
 - **写入侧 SSOT**：费用类资金统一由 `FeeRouter` 路由与分发（前端通常不直接调用写入口）
+- **预存分发**：清算/保证金等路径使用 `FeeRouter.distributePrepaid`；前端同样以 `FeeDistributed`/`FeeRouterView` 作为唯一拆分口径
 - **读侧（推荐）**：`FeeRouterView` + 订阅 `DataPushed`
 
 #### 6.1 重要：`platformTreasury` 与 `ecosystemVault` 可能相同（dirty state / 部署配置差异）
@@ -1971,15 +2265,15 @@ const registryAddr2 = await batchView.registryAddrVar(); // 推荐
    - `getUserTokenBalance/getUserSettlementBalanceStrict`（非缓存也统一返回 meta）
 
 2. **DashboardView / CacheOptimizedView 返回结构调整**
-   - `DashboardView.getUserOverview` → 追加 `positionValidFlags/positionTimestamps/positionVersions/healthTimestamp`
+   - `DashboardView.getUserOverview` → 追加 `positionValidFlags/positionBlockNumbers/positionVersions/healthBlockNumber`
    - `DashboardView.getUserAssetBreakdown` → 返回 `UserAssetOverviewMeta[]`（每项含 position meta）
    - `CacheOptimizedView.batchGetUserPositions` → `UserPositionItemMeta[]`
-   - `CacheOptimizedView.getUserSummary` → 返回 `(summary, positionValidFlags, positionTimestamps, positionVersions, healthTimestamp)`
+   - `CacheOptimizedView.getUserSummary` → 返回 `(summary, positionValidFlags, positionBlockNumbers, positionVersions, healthBlockNumber)`
 
 3. **LiquidatorView / RewardView 用户读接口统一 meta**
    - `LiquidatorView.getUserLiquidationStats/getSeizableCollateralAmount/getSeizableCollaterals/getUserTotalCollateralValue`
    - `LiquidatorView.batchGetLiquidationStats`（返回 stats + meta）
-   - `RewardView.getUserBalance/getUserLastConsumption/getUserLevel/getUserLevelView/getUserActivity/getUserActivityView/getUserPenaltyDebt/getUserPenaltyDebtView`
+   - `RewardView.getUserBalanceWithMeta/getUserRewardSummaryWithMeta/getUserRecentActivitiesWithMeta/getUserLastConsumptionWithMeta/getUserPrivilegePackedWithMeta`
 
 4. **LendingEngineView / RiskView / ValuationOracleView / LiquidationRiskView（Scheme A）**
    - `getUserLoanCount/canAccessLoanOrder` → 增加 `isValid/blockNumber`
@@ -2005,6 +2299,17 @@ const registryAddr2 = await batchView.registryAddrVar(); // 推荐
 
 > ⚠️ 旧的 `GracefulDegradation*` 模块已迁移到 `core/monitor/` 路径，名称保持兼容，但前端应尽快切换到上表新 Key。 
 
+补充说明（重要）：
+- **写路径 SSOT（单入口协调器）**：
+  - 系统级降级事件记录应统一从 `DegradationMonitor` 进入（如 `recordDegradationEvent*`），由其协调写入 `DegradationCore`（聚合统计）与 `DegradationStorage`（ring-buffer 历史）。
+  - 子模块写入默认允许 `msg.sender == Registry[KEY_DEGRADATION_MONITOR]`，避免给 Monitor 合约授 `ACTION_ADMIN`（最小权限）。
+- **趋势查询 `getSystemDegradationTrends()` 的 SSOT/口径**：
+  - 若 `DegradationMonitor` 配置了 analytics 子模块（`_analyticsModuleAddr != 0` 且有代码），则趋势读取为 **O(1)**，直接转发至 analytics。
+  - 若 analytics **未配置/为空**（本仓库默认；历史实现已移除），则 `DegradationMonitor` 会采用 **方案 A**（read-time 计算）：
+    - `recentEvents` / `mostFrequentModule`：从 `DegradationStorage` 的环形缓冲区（最多 **100** 条）扫描计算。
+    - `totalEvents` / `averageFallbackValue`：优先读取 `DegradationCore` 的聚合统计（生命周期累计）；若 Core 不可用则退化为缓冲区窗口统计。
+  - `recentEvents` 的“最近窗口”以 **block 口径**定义：`ViewConstants.CACHE_DURATION_BLOCKS`（链无关；不要用 seconds）。
+
 ## 🧾 EventHistoryManager（前端协作：历史/活动流的权威事件入口）
 
 `EventHistoryManager` 是 **events-only** 的“历史记录入口”：链上不存储历史列表，所有历史/活动都应通过事件与 `DataPushed` 供链下索引服务消费。
@@ -2022,6 +2327,8 @@ const registryAddr2 = await batchView.registryAddrVar(); // 推荐
 ### 9. Unified DataPush Integration (v1)
 
 所有前端监听服务应仅订阅 `DataPushed(bytes32 indexed dataTypeHash, bytes payload)`。
+
+> 术语说明（Reward 相关，避免误解）：下表中 `REWARD_EARNED/REWARD_BURNED` 的 `amount`、以及 `REWARD_CONSUMPTION_RECORDED` 的 `points`，在资产语义上都表示**奖励通证 / reward token**的数量（SSOT = `Registry[KEY_EASY_TOKEN]`（EasyToken）；18 decimals）。字段名 `points` 仅为字段名，不影响资产语义。
 
 ```ts
 // ethers v6 – example
@@ -2042,13 +2349,13 @@ provider.on({ topics: [iface.getEvent("DataPushed").topic] }, (log) => {
 |--------------|----------|-----------------|
 | `USER_FEE` | `FeeRouterView` | `(address user, bytes32 feeType, uint256 amount, uint256 personalFeeBps)` |
 | `GLOBAL_FEE_STATS` | `FeeRouterView` | `(uint256 totalDistributions, uint256 totalAmount)` |
-| `REWARD_EARNED` | `RewardView` | `(address user, uint256 amount, string reason, uint256 ts)` |
-| `REWARD_BURNED` | `RewardView` | `(address user, uint256 amount, string reason, uint256 ts)` |
-| `REWARD_LEVEL_UPDATED` | `RewardView` | `(address user, uint8 level, uint256 ts)` |
-| `REWARD_PRIVILEGE_UPDATED` | `RewardView` | `(address user, uint256 packedPrivileges, uint256 ts)` |
-| `REWARD_STATS_UPDATED` | `RewardView` | `(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 ts)` |
-| `REWARD_PENALTY_LEDGER_UPDATED` | `RewardView` | `(address user, uint256 pendingDebt, uint256 ts)` |
-| `REWARD_CONSUMPTION_RECORDED` | `RewardView` | `(address user, uint8 serviceType, uint8 serviceLevel, uint256 points, uint256 expirationTime, uint256 ts)` |
+| `REWARD_EARNED` | `RewardView` | `(address user, uint256 amount, string reason, uint256 blockNumber)` |
+| `REWARD_BURNED` | `RewardView` | `(address user, uint256 amount, string reason, uint256 blockNumber)` |
+| `REWARD_LEVEL_UPDATED` | `RewardView` | `(address user, uint8 level, uint256 blockNumber)` |
+| `REWARD_STATS_UPDATED` | `RewardView` | `(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 blockNumber)` |
+| `REWARD_PENALTY_LEDGER_UPDATED` | `RewardView` | `(address user, uint256 pendingDebt, uint256 blockNumber)` |
+| `EASY_SPENT` | `RewardView` | `(address user, uint8 spendType, uint256 amount, uint256 blockNumber)` |
+| `EASY_RECYCLED_SPLIT` | `RewardView` | `(address payer, uint256 amount, uint256 burnAmount, uint256 teamAmount, uint256 ecoAmount, uint8 spendType, uint256 blockNumber)` |
 | `DEPOSIT_PROCESSED` | `CollateralManager` | `(address user, address asset, uint256 amount, uint256 blockNumber)` |
 | `WITHDRAW_PROCESSED` | `CollateralManager` | `(address user, address asset, uint256 amount, uint256 blockNumber)` |
 | `BATCH_DEPOSIT_PROCESSED` | `CollateralManager` | `(address user, uint256 operationCount, uint256 blockNumber)` |
@@ -2138,9 +2445,9 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
 > 前端需针对“有事件可观测”的场景做提示与交互闭环。
 
 #### 11.1 事件监听
-- 订阅 `CacheUpdateFailed` **与** `CacheUpdateFailedV2`：
+- 订阅 `CacheUpdateFailed` **与** `CacheUpdateFailedWithContext`：
   - `CacheUpdateFailed`：兼容事件，字段为 `(user, asset, viewAddr, collateral, debt, reason)`
-  - `CacheUpdateFailedV2`：新增上下文字段 `(requestId, seq, nextVersion)`，用于并发/幂等诊断
+  - `CacheUpdateFailedWithContext`：新增上下文字段 `(requestId, seq, nextVersion)`，用于并发/幂等诊断
 - 主要来源：
   - `PositionView` 的 guarded 读取失败
   - 部分 best-effort 推送模块（如 `LendingEngineCore`/`LiquidationManager`）
@@ -2153,7 +2460,7 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
 - 当用户/资产存在未清理的失败记录：
   - 在资产卡/仓位页显示 “缓存更新失败，已排队人工处理”
   - 展示最近失败时间、原因摘要（截断 bytes reason）
-  - 若来自 `CacheUpdateFailedV2`，可展示 `requestId/seq/nextVersion` 作为诊断信息
+  - 若来自 `CacheUpdateFailedWithContext`，可展示 `requestId/seq/nextVersion` 作为诊断信息
   - 标记缓存数据“可能陈旧”，提示刷新时间
 - 若后端提供重试 API，则提供“请求重试”按钮（前端不直接持有 admin）
 

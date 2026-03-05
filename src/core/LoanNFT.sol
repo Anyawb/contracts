@@ -145,6 +145,7 @@ contract LoanNFT is
         address initialRegistryAddr
     ) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __ERC721_init(name_, symbol_);
         __ERC721Enumerable_init();
@@ -650,6 +651,7 @@ contract LoanNFT is
      */
     function _setRegistry(address newRegistryAddr) internal {
         if (newRegistryAddr == address(0)) revert ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
         
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;

@@ -97,7 +97,7 @@ contract VaultBusinessLogic is
     );
 
     /// @notice Explicit block-based companion event for LendReserveCreated.
-    event LendReserveCreatedV2(
+    event LendReserveCreatedAtBlock(
         bytes32 indexed lendIntentHash,
         address indexed lenderSigner,
         address indexed asset,
@@ -122,7 +122,7 @@ contract VaultBusinessLogic is
     );
 
     /// @notice Explicit block-based companion event for LendReserveCancelled.
-    event LendReserveCancelledV2(
+    event LendReserveCancelledAtBlock(
         bytes32 indexed lendIntentHash,
         address indexed lenderSigner,
         address indexed asset,
@@ -147,7 +147,7 @@ contract VaultBusinessLogic is
     );
 
     /// @notice Explicit block-based companion event for LendReserveConsumed.
-    event LendReserveConsumedV2(
+    event LendReserveConsumedAtBlock(
         bytes32 indexed lendIntentHash,
         address indexed lenderSigner,
         address indexed asset,
@@ -263,6 +263,11 @@ contract VaultBusinessLogic is
      * @param initialSettlementTokenAddr Settlement token address used for graceful degradation config.
      */
     function initialize(address initialRegistryAddr, address initialSettlementTokenAddr) external initializer {
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialSettlementTokenAddr == address(0)) revert ZeroAddress();
+        if (initialSettlementTokenAddr.code.length == 0) revert NotAContract(initialSettlementTokenAddr);
+
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -439,7 +444,7 @@ contract VaultBusinessLogic is
         // Record the reserve in storage.
         _lendReserves.reserve(lenderSigner, asset, amount, lendIntentHash);
         emit LendReserveCreated(lendIntentHash, lenderSigner, asset, amount, block.number);
-        emit LendReserveCreatedV2(lendIntentHash, lenderSigner, asset, amount, block.number);
+        emit LendReserveCreatedAtBlock(lendIntentHash, lenderSigner, asset, amount, block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_RESERVE_FOR_LENDING,
             abi.encode(lendIntentHash, lenderSigner, asset, amount, block.number)
@@ -475,7 +480,7 @@ contract VaultBusinessLogic is
             ILenderPoolVault(pool).transferOut(asset, msg.sender, amount);
         }
         emit LendReserveCancelled(lendIntentHash, msg.sender, asset, amount, block.number);
-        emit LendReserveCancelledV2(lendIntentHash, msg.sender, asset, amount, block.number);
+        emit LendReserveCancelledAtBlock(lendIntentHash, msg.sender, asset, amount, block.number);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_CANCEL_RESERVE,
             abi.encode(lendIntentHash, msg.sender, asset, amount, block.number)
@@ -559,7 +564,7 @@ contract VaultBusinessLogic is
 
             // Observe consumption for off-chain accounting and retries.
             emit LendReserveConsumed(lHash, lendIntents[i].lenderSigner, asset, amount, block.number);
-            emit LendReserveConsumedV2(lHash, lendIntents[i].lenderSigner, asset, amount, block.number);
+            emit LendReserveConsumedAtBlock(lHash, lendIntents[i].lenderSigner, asset, amount, block.number);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_RESERVE_CONSUMED,
                 abi.encode(lHash, lendIntents[i].lenderSigner, asset, amount, block.number)
@@ -617,25 +622,6 @@ contract VaultBusinessLogic is
             SettlementIntentLib.markMatched(_matchedIntents, lHash);
         }
         // Events and data pushes are handled by LendingEngine + LoanNFT; this module no longer emits match events.
-    }
-
-    /**
-     * @notice DEPRECATED: Borrow must go through VaultCore/LendingEngine/Settlement (SSOT).
-     * @dev Reverts if:
-     *      - always (VaultBusinessLogic__UseVaultCoreEntry)
-     *
-     * Security:
-     * - N/A (function is permanently disabled)
-     *
-     * @param user User address (unused).
-     * @param asset ERC20 asset address (unused).
-     * @param amount Borrow amount (token native decimals; unused).
-     */
-    function borrow(address user, address asset, uint256 amount) external onlyValidRegistry whenNotPaused nonReentrant {
-        // Strict SSOT: borrowing must go through VaultCore/LendingEngine/Settlement SSOT paths.
-        // This legacy entrypoint is permanently disabled to prevent parallel accounting and fund-flow paths.
-        user; asset; amount; // silence
-        revert VaultBusinessLogic__UseVaultCoreEntry();
     }
 
     /* ============ Liquidation Orchestration removed: use LiquidationManager ============ */

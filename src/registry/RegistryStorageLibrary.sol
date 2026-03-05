@@ -5,7 +5,6 @@ import {
     ZeroAddress, 
     AlreadyInitialized, 
     MinDelayOverflow, 
-    MinDelayTooLarge,
     NotInitialized,
     InvalidStorageVersion,
     NotGovernance
@@ -28,10 +27,10 @@ library RegistryStorage {
     error RegistryStorage__IncompatibleStorageVersion(uint256 expected, uint256 actual);
 
     // ============ Constants ============
-    /// @notice Maximum allowed minDelay (blocks) for Registry timelock.
-    /// @dev Must stay consistent with Registry.MAX_DELAY() / Registry initialization constraints.
-    ///      Default assumes ~2s blocks: 7 days ~= 302,400 blocks.
-    uint256 internal constant MAX_MIN_DELAY_BLOCKS = 7 days / 2 seconds;
+    // NOTE (Time-Dependency-Refactor / Strategy A):
+    // - This library intentionally does NOT hardcode "days/seconds" conversions (e.g., `X days / Y seconds`).
+    // - Any policy cap for `minDelay` MUST be enforced by the Registry contract via an explicit `maxDelayBlocks`
+    //   configuration (deployment/governance), not by embedding a per-block-seconds assumption in Solidity.
     struct Layout {
         // ============ Storage versioning ============
         uint256 storageVersion; // Storage layout version marker (prevents incompatible upgrades)
@@ -45,7 +44,7 @@ library RegistryStorage {
         uint64 minDelay; // Minimum timelock delay (blocks); stored as uint64 for packing
         // Storage packing notes:
         // - paused(uint8) + minDelay(uint64) share one storage slot (gas-efficient).
-        // - Although uint64 supports extremely large values, the protocol policy caps minDelay to MAX_MIN_DELAY_BLOCKS.
+        // - Although uint64 supports extremely large values, protocol policy SHOULD cap minDelay in Registry logic.
 
         // ============ Module mapping ============
         mapping(bytes32 => address) modules; // moduleKey => moduleAddress
@@ -148,8 +147,6 @@ library RegistryStorage {
 
         // Prevent uint64 truncation on assignment.
         if (minDelay_ > type(uint64).max) revert MinDelayOverflow(minDelay_);
-        // Keep consistent with Registry's max delay policy.
-        if (minDelay_ > MAX_MIN_DELAY_BLOCKS) revert MinDelayTooLarge(minDelay_, MAX_MIN_DELAY_BLOCKS);
 
         layout_.storageVersion = CURRENT_STORAGE_VERSION;
         layout_.admin = admin_;
@@ -332,12 +329,7 @@ library RegistryStorage {
         Layout storage layout_ = layout();
         if (layout_.storageVersion == 0) revert NotInitialized();
         if (layout_.admin == address(0)) revert ZeroAddress();
-        
-        // Optional but useful safety check (must match Registry policy).
-        if (layout_.minDelay > MAX_MIN_DELAY_BLOCKS) {
-            revert MinDelayTooLarge(layout_.minDelay, MAX_MIN_DELAY_BLOCKS);
-        }
-        
+
         // If you want to enforce presence of critical modules, add checks here.
         // Be careful: enabling such checks can break deployment flows where modules are registered later.
     }

@@ -1,6 +1,6 @@
 import { ethers, network } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
-import { runViewPreflight } from "./utils/view-preflight";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { runViewPreflight } from "./utils/view-preflight.ts";
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -289,10 +289,10 @@ async function main() {
     );
 
     // ====== MUST: “freshness fields exist” for off-chain aggregated outputs ======
-    // Placeholders should be internally consistent: lastLiquidationTime==0 => daysSinceLastLiquidation==0
+    // Placeholders should be internally consistent: lastLiquidationBlock==0 => blocksSinceLastLiquidation==0
     const pv = await mustSucceed("getLiquidatorProfitView", async () => liqView.connect(deployer).getLiquidatorProfitView(liq1));
-    assertOk(pv.lastLiquidationTime === 0n, "placeholder lastLiquidationTime expected 0");
-    assertOk(pv.daysSinceLastLiquidation === 0n, "daysSinceLastLiquidation must be 0 when lastLiquidationTime==0");
+    assertOk(pv.lastLiquidationBlock === 0n, "placeholder lastLiquidationBlock expected 0");
+    assertOk(pv.blocksSinceLastLiquidation === 0n, "blocksSinceLastLiquidation must be 0 when lastLiquidationBlock==0");
 
     await network.provider.send("hardhat_stopImpersonatingAccount", [liqMgrAddr]);
     await network.provider.send("hardhat_stopImpersonatingAccount", [payoutMgrAddr]);

@@ -43,7 +43,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     event CacheUpdated(address indexed asset, address indexed updater, uint256 blockNumber);
 
     /// @notice Explicit block-based companion event for CacheUpdated.
-    event CacheUpdatedV2(address indexed asset, address indexed updater, uint256 updateBlock);
+    event CacheUpdatedAtBlock(address indexed asset, address indexed updater, uint256 updateBlock);
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
@@ -173,7 +173,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         _systemCacheUpdateBlocks[asset] = updateBlock;
 
         emit CacheUpdated(asset, msg.sender, updateBlock);
-        emit CacheUpdatedV2(asset, msg.sender, updateBlock);
+        emit CacheUpdatedAtBlock(asset, msg.sender, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
             abi.encode(asset, totalCollateral, totalDebt, utilizationRate, updateBlock)
@@ -199,7 +199,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
 
         uint256 updateBlock = block.number;
         emit CacheUpdated(asset, msg.sender, updateBlock);
-        emit CacheUpdatedV2(asset, msg.sender, updateBlock);
+        emit CacheUpdatedAtBlock(asset, msg.sender, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
             abi.encode(asset, uint256(0), uint256(0), uint256(0), updateBlock)
@@ -238,7 +238,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return updateBlock The block number when the snapshot was last written (0 if never written).
      * @return ageBlocks The number of blocks since update (0 if updateBlock==0 or in the future).
      */
-    function getSystemStatusWithMetaV2(address asset)
+    function getSystemStatusWithBlockMeta(address asset)
         external
         view
         returns (SystemStatusCache memory status, bool isValid, uint256 updateBlock, uint256 ageBlocks)

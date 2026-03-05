@@ -81,7 +81,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @param version Position version (monotonic per (user, asset))
      * @param blockNumber Legacy field: cache update marker (treated as updateBlock in this repo)
      */
-    event UserPositionCachedV2(
+    event UserPositionCachedWithVersion(
         address indexed user,
         address indexed asset,
         uint256 collateral,
@@ -90,7 +90,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint256 blockNumber
     );
 
-    /// @notice Explicit block-based companion event for UserPositionCachedV2.
+    /// @notice Explicit block-based companion event for UserPositionCachedWithVersion.
     event UserPositionCachedV3(
         address indexed user,
         address indexed asset,
@@ -539,7 +539,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         uint256 updateBlock = block.number;
         emit UserPositionCached(user, asset, collateral, debt, updateBlock);
-        emit UserPositionCachedV2(user, asset, collateral, debt, newVersion, updateBlock);
+        emit UserPositionCachedWithVersion(user, asset, collateral, debt, newVersion, updateBlock);
         emit UserPositionCachedV3(user, asset, collateral, debt, newVersion, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
@@ -590,7 +590,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
             uint256 updateBlockSync = block.number;
             emit UserPositionCached(user, asset, baseCollateral, baseDebt, updateBlockSync);
-            emit UserPositionCachedV2(user, asset, baseCollateral, baseDebt, newVersionSync, updateBlockSync);
+            emit UserPositionCachedWithVersion(user, asset, baseCollateral, baseDebt, newVersionSync, updateBlockSync);
             emit UserPositionCachedV3(user, asset, baseCollateral, baseDebt, newVersionSync, updateBlockSync);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
@@ -619,7 +619,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         uint256 updateBlockDelta = block.number;
         emit UserPositionCached(user, asset, newCollateral, newDebt, updateBlockDelta);
-        emit UserPositionCachedV2(user, asset, newCollateral, newDebt, newVersion, updateBlockDelta);
+        emit UserPositionCachedWithVersion(user, asset, newCollateral, newDebt, newVersion, updateBlockDelta);
         emit UserPositionCachedV3(user, asset, newCollateral, newDebt, newVersion, updateBlockDelta);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
@@ -667,7 +667,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         uint256 updateBlock = block.number;
         emit UserPositionCached(user, asset, collateral, debt, updateBlock);
-        emit UserPositionCachedV2(user, asset, collateral, debt, newVersion, updateBlock);
+        emit UserPositionCachedWithVersion(user, asset, collateral, debt, newVersion, updateBlock);
         emit UserPositionCachedV3(user, asset, collateral, debt, newVersion, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
@@ -716,7 +716,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @return ageBlocks Number of blocks since update (0 if never written)
      * @return version Position version for (user, asset)
      */
-    function getUserPositionWithMetaV2(address user, address asset)
+    function getUserPositionWithBlockMeta(address user, address asset)
         external
         view
         onlyValidRegistry
@@ -953,7 +953,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @notice Return user-level cache marker with explicit block-based metadata (recommended).
      * @dev Reverts if: (never)
      */
-    function getUserCacheStatusWithMetaV2(address user)
+    function getUserCacheStatusWithBlockMeta(address user)
         external
         view
         returns (bool isValid, uint256 updateBlock, uint256 ageBlocks)
@@ -1079,7 +1079,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
                 return (true, ledgerCollateral, ledgerDebt);
             } catch (bytes memory reason) {
                 emit CacheUpdateFailed(user, asset, address(this), expectedCollateral, expectedDebt, reason);
-                emit CacheUpdateFailedV2(
+                emit CacheUpdateFailedWithContext(
                     user,
                     asset,
                     requestId,
@@ -1094,7 +1094,7 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
             }
         } catch (bytes memory reason) {
             emit CacheUpdateFailed(user, asset, address(this), expectedCollateral, expectedDebt, reason);
-            emit CacheUpdateFailedV2(
+            emit CacheUpdateFailedWithContext(
                 user,
                 asset,
                 requestId,
@@ -1246,7 +1246,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @return schemaVersion_ Schema version
      */
     function schemaVersion() public pure override returns (uint256 schemaVersion_) {
-        // V2: emits UserPositionCachedV2 (adds `version`) and maintains version/idempotency metadata.
+        // Schema includes versioned cache metadata: emits UserPositionCachedWithVersion (adds `version`) and maintains
+        // idempotency/version metadata for off-chain consumers.
         return 2;
     }
 }

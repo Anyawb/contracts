@@ -14,6 +14,7 @@ import { ZeroAddress, NotAContract, UpgradeNotAuthorized } from "../errors/Stand
 import { DegradationCore } from "./DegradationCore.sol";
 import { DegradationStorage } from "./DegradationStorage.sol";
 import { ModuleHealthView } from "../Vault/view/modules/ModuleHealthView.sol";
+import { ViewConstants } from "../Vault/view/ViewConstants.sol";
 // DegradationAnalytics and DegradationAdmin implementations have been removed.
 // Provide lightweight interfaces for backward compatibility.
 
@@ -105,8 +106,9 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
     /// @notice Upgrade window end block.
     uint256 private _upgradeEnabledUntil;
     
-    /// @notice Upgrade window duration in blocks (assumes ~2s/block).
-    uint256 private constant UPGRADE_WINDOW_BLOCKS = 24 hours / 2 seconds;
+    /// @notice Upgrade window duration in blocks (explicit blocks, Strategy A).
+    /// @dev Must be configured at deployment (initializer) or by governance.
+    uint256 private _upgradeWindowBlocks;
 
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     /**
@@ -149,6 +151,7 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
     error ZeroImplementationAddress();
     error ModuleNotInitialized(string moduleType);
     error ModuleCallFailed(string moduleType,string operation);
+    error InvalidUpgradeWindowBlocks(uint256 provided);
 
     /*━━━━━━━━━━━━━━━ Modifiers & Helpers ━━━━━━━━━━━━━━━*/
     /**
@@ -247,10 +250,20 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
      * @param initialAnalytics Initial analytics module address.
      * @param initialAdmin Initial admin module address.
      */
-    function initialize(address initialRegistryAddr,address initialUpgradeAdmin,address initialCore,address initialStorage,address initialHealth,address initialAnalytics,address initialAdmin) external initializer {
+    function initialize(
+        address initialRegistryAddr,
+        address initialUpgradeAdmin,
+        address initialCore,
+        address initialStorage,
+        address initialHealth,
+        address initialAnalytics,
+        address initialAdmin,
+        uint256 initialUpgradeWindowBlocks
+    ) external initializer {
         if(initialRegistryAddr==address(0)) revert ZeroAddress();
         if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         if(initialUpgradeAdmin==address(0)) revert InvalidUpgradeAdmin();
+        if (initialUpgradeWindowBlocks == 0) revert InvalidUpgradeWindowBlocks(initialUpgradeWindowBlocks);
         _registryAddr = initialRegistryAddr;
         _upgradeAdmin = initialUpgradeAdmin;
         _coreModuleAddr = initialCore; 
@@ -258,6 +271,7 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
         _healthModuleAddr = initialHealth; 
         _analyticsModuleAddr = initialAnalytics; 
         _adminModuleAddr = initialAdmin;
+        _upgradeWindowBlocks = initialUpgradeWindowBlocks;
         __UUPSUpgradeable_init();
     }
 
@@ -316,7 +330,6 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
     function recordDegradationEvent(address module,string memory reason,uint256 fallbackValue,bool usedFallback) external onlyValidRegistry onlyAdmin {
         if(_coreModuleAddr==address(0)) revert ModuleNotInitialized("Core");
         if(_storageModuleAddr==address(0)) revert ModuleNotInitialized("Storage");
-        if(_analyticsModuleAddr==address(0)) revert ModuleNotInitialized("Analytics");
         
         // 1) Record in core module.
         try DegradationCore(_coreModuleAddr).adminRecordDegradation(module,reason,fallbackValue,usedFallback){ 
@@ -341,11 +354,15 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
         }        
         
         // 3) Update analytics module.
-        try IDegradationAnalytics(_analyticsModuleAddr).updateModuleDegradationCount(module){ 
-            emit ModuleCoordination("Analytics",_analyticsModuleAddr,true,"ok");
-        } catch { 
-            emit ModuleCoordination("Analytics",_analyticsModuleAddr,false,"fail");
-        }    
+        if (_analyticsModuleAddr != address(0) && _analyticsModuleAddr.code.length != 0) {
+            try IDegradationAnalytics(_analyticsModuleAddr).updateModuleDegradationCount(module){ 
+                emit ModuleCoordination("Analytics",_analyticsModuleAddr,true,"ok");
+            } catch { 
+                emit ModuleCoordination("Analytics",_analyticsModuleAddr,false,"fail");
+            }
+        } else {
+            emit ModuleCoordination("Analytics",_analyticsModuleAddr,false,"unset");
+        }
     }
 
     /**
@@ -370,7 +387,6 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
     ) external onlyValidRegistry onlyRegisteredModule(ModuleKeys.KEY_PRICE_ORACLE) {
         if(_coreModuleAddr==address(0)) revert ModuleNotInitialized("Core");
         if(_storageModuleAddr==address(0)) revert ModuleNotInitialized("Storage");
-        if(_analyticsModuleAddr==address(0)) revert ModuleNotInitialized("Analytics");
         
         address module = msg.sender; // Guaranteed by onlyRegisteredModule (PriceOracle).
         
@@ -397,11 +413,15 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
         }        
         
         // 3) Update analytics module.
-        try IDegradationAnalytics(_analyticsModuleAddr).updateModuleDegradationCount(module){ 
-            emit ModuleCoordination("Analytics",_analyticsModuleAddr,true,"ok");
-        } catch { 
-            emit ModuleCoordination("Analytics",_analyticsModuleAddr,false,"fail");
-        }    
+        if (_analyticsModuleAddr != address(0) && _analyticsModuleAddr.code.length != 0) {
+            try IDegradationAnalytics(_analyticsModuleAddr).updateModuleDegradationCount(module){ 
+                emit ModuleCoordination("Analytics",_analyticsModuleAddr,true,"ok");
+            } catch { 
+                emit ModuleCoordination("Analytics",_analyticsModuleAddr,false,"fail");
+            }
+        } else {
+            emit ModuleCoordination("Analytics",_analyticsModuleAddr,false,"unset");
+        }
     }
 
     /**
@@ -437,11 +457,22 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
      * @param limit Max records to return.
      * @return history Degradation event history.
      */
-    function getSystemDegradationHistory(uint256 limit) external view returns (DegradationStorage.DegradationEvent[] memory history){
+    function getSystemDegradationHistory(uint256 limit)
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (DegradationStorage.DegradationEvent[] memory history)
+    {
         if(_storageModuleAddr==address(0) || limit==0){ 
             return new DegradationStorage.DegradationEvent[](0); 
         }
-        ( ,uint256 actualCount,,) = DegradationStorage(_storageModuleAddr).getCircularBufferStats();
+        uint256 actualCount;
+        try DegradationStorage(_storageModuleAddr).getCircularBufferStats() returns (uint256, uint256 ac, uint256, bool) {
+            actualCount = ac;
+        } catch {
+            return new DegradationStorage.DegradationEvent[](0);
+        }
         uint256 count = limit > actualCount ? actualCount : limit;
         history = new DegradationStorage.DegradationEvent[](count);
         for(uint256 i=0;i<count;i++){
@@ -467,15 +498,25 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
      * @return isHealthy True if healthy, otherwise false.
      * @return details Human-readable details.
      */
-    function checkModuleHealth(address module) external view returns(bool isHealthy,string memory details){
+    function checkModuleHealth(address module)
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns(bool isHealthy,string memory details)
+    {
         if(_healthModuleAddr==address(0)) return (false,"Health monitor not set");
-        return ModuleHealthView(_healthModuleAddr).checkModuleHealth(module);
+        try ModuleHealthView(_healthModuleAddr).checkModuleHealth(module) returns (bool ok, string memory d) {
+            return (ok, d);
+        } catch {
+            return (false, "Health check failed");
+        }
     }
 
     /**
      * @notice Get system degradation trends.
      * @dev Reverts if:
-     *      - (none; best-effort, returns zeros if analytics module is unset)
+     *      - (none; best-effort fallback when analytics is unset)
      *
      * Security:
      * - View-only
@@ -485,9 +526,102 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
      * @return mostFrequentModule Most frequently degraded module.
      * @return averageFallbackValue Average fallback value.
      */
-    function getSystemDegradationTrends() external view returns(uint256 totalEvents,uint256 recentEvents,address mostFrequentModule,uint256 averageFallbackValue){
-        if(_analyticsModuleAddr==address(0)) return (0,0,address(0),0);
-        return IDegradationAnalytics(_analyticsModuleAddr).getSystemDegradationTrends();
+    function getSystemDegradationTrends()
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns(uint256 totalEvents,uint256 recentEvents,address mostFrequentModule,uint256 averageFallbackValue)
+    {
+        // If an analytics module is configured, use it (O(1) read).
+        if (_analyticsModuleAddr != address(0) && _analyticsModuleAddr.code.length != 0) {
+            return IDegradationAnalytics(_analyticsModuleAddr).getSystemDegradationTrends();
+        }
+
+        // Scheme A fallback (no analytics module):
+        // - totalEvents / averageFallbackValue: prefer DegradationCore aggregated stats (lifetime) if available.
+        // - recentEvents / mostFrequentModule: compute from DegradationStorage ring-buffer (window, up to 100 events).
+        uint256 coreTotal = 0;
+        uint256 coreAvgFallback = 0;
+        if (_coreModuleAddr != address(0) && _coreModuleAddr.code.length != 0) {
+            try DegradationCore(_coreModuleAddr).getDegradationStats() returns (DegradationCore.DegradationStats memory s) {
+                coreTotal = s.totalDegradations;
+                coreAvgFallback = s.averageFallbackValue;
+            } catch {
+                // ignore
+            }
+        }
+
+        // Storage window scan (bounded).
+        if (_storageModuleAddr == address(0) || _storageModuleAddr.code.length == 0) {
+            // No storage available: return core-derived values only.
+            return (coreTotal, 0, address(0), coreAvgFallback);
+        }
+
+        uint256 actualCount;
+        try DegradationStorage(_storageModuleAddr).getCircularBufferStats() returns (uint256, uint256 ac, uint256, bool) {
+            actualCount = ac;
+        } catch {
+            return (coreTotal, 0, address(0), coreAvgFallback);
+        }
+        if (actualCount == 0) {
+            return (coreTotal, 0, address(0), coreAvgFallback);
+        }
+
+        // Recent window: use view-layer cache duration as the standard "recent" horizon (block-based, chain-agnostic).
+        uint256 recentWindowBlocks = ViewConstants.CACHE_DURATION_BLOCKS;
+        uint256 minRecentBlock = block.number > recentWindowBlocks ? (block.number - recentWindowBlocks) : 0;
+
+        address[] memory modules = new address[](actualCount);
+        uint256[] memory counts = new uint256[](actualCount);
+        uint256 unique = 0;
+        uint256 maxCount = 0;
+        address maxModule = address(0);
+        uint256 sumFallback = 0;
+
+        for (uint256 i = 0; i < actualCount; i++) {
+            DegradationStorage.DegradationEvent memory evt;
+            try DegradationStorage(_storageModuleAddr).getEventFromCircularBuffer(i) returns (DegradationStorage.DegradationEvent memory e) {
+                evt = e;
+            } catch {
+                continue;
+            }
+
+            sumFallback += evt.fallbackValue;
+            if (evt.blockNumber >= minRecentBlock) {
+                recentEvents += 1;
+            }
+
+            // Count frequency per module (bounded by ring-buffer size: <= 100).
+            bool found = false;
+            for (uint256 j = 0; j < unique; j++) {
+                if (modules[j] == evt.module) {
+                    uint256 c = counts[j] + 1;
+                    counts[j] = c;
+                    found = true;
+                    if (c > maxCount) {
+                        maxCount = c;
+                        maxModule = evt.module;
+                    }
+                    break;
+                }
+            }
+            if (!found) {
+                modules[unique] = evt.module;
+                counts[unique] = 1;
+                unique += 1;
+                if (maxCount == 0) {
+                    maxCount = 1;
+                    maxModule = evt.module;
+                }
+            }
+        }
+
+        // totalEvents: prefer lifetime from core; fallback to storage window count.
+        totalEvents = coreTotal != 0 ? coreTotal : actualCount;
+        mostFrequentModule = maxModule;
+        // averageFallbackValue: prefer lifetime avg from core if available; otherwise use window avg.
+        averageFallbackValue = coreAvgFallback != 0 ? coreAvgFallback : (sumFallback / actualCount);
     }
 
     /**
@@ -533,18 +667,20 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
      * @param newAddr New module address.
      */
     function updateSubModule(string memory moduleType,address newAddr) external onlyValidRegistry onlyAdmin {
-        require(newAddr!=address(0),"zero");
         bytes32 h = keccak256(bytes(moduleType));
         address old;
         if(h==keccak256("Core")){ 
+            require(newAddr!=address(0),"zero");
             old=_coreModuleAddr; 
             _coreModuleAddr=newAddr; 
         }
         else if(h==keccak256("Storage")){ 
+            require(newAddr!=address(0),"zero");
             old=_storageModuleAddr; 
             _storageModuleAddr=newAddr; 
         }
         else if(h==keccak256("Health")){ 
+            require(newAddr!=address(0),"zero");
             old=_healthModuleAddr; 
             _healthModuleAddr=newAddr; 
         }
@@ -607,7 +743,8 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
      */
     function enableUpgradeWindow() external onlyValidRegistry onlyAdmin { 
         _upgradeEnabled=true; 
-        _upgradeEnabledUntil=block.number+UPGRADE_WINDOW_BLOCKS; 
+        if (_upgradeWindowBlocks == 0) revert InvalidUpgradeWindowBlocks(_upgradeWindowBlocks);
+        _upgradeEnabledUntil=block.number+_upgradeWindowBlocks; 
         emit UpgradeWindowChanged(true,_upgradeEnabledUntil,msg.sender);
     }    
     
@@ -640,6 +777,22 @@ contract DegradationMonitor is Initializable, UUPSUpgradeable {
      */
     function getUpgradeWindowStatus() external view returns(bool enabled,uint256 enabledUntil,bool isActive){ 
         return (_upgradeEnabled,_upgradeEnabledUntil, _upgradeEnabled && block.number<=_upgradeEnabledUntil); 
+    }
+
+    /**
+     * @notice Returns the configured upgrade window duration (blocks).
+     */
+    function getUpgradeWindowBlocks() external view returns (uint256 upgradeWindowBlocks) {
+        return _upgradeWindowBlocks;
+    }
+
+    /**
+     * @notice Updates the upgrade window duration (blocks).
+     * @dev Strategy A: explicit blocks configuration; no seconds→blocks conversion in Solidity.
+     */
+    function setUpgradeWindowBlocks(uint256 newUpgradeWindowBlocks) external onlyValidRegistry onlyAdmin {
+        if (newUpgradeWindowBlocks == 0) revert InvalidUpgradeWindowBlocks(newUpgradeWindowBlocks);
+        _upgradeWindowBlocks = newUpgradeWindowBlocks;
     }
 
     /**

@@ -24,7 +24,8 @@ import type { ERC1967Proxy } from '../../types/@openzeppelin/contracts/proxy/ERC
 describe('Registry – 核心功能测试', function () {
   // 测试常量定义
   const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-  const TEST_MIN_DELAY = (1 * 60 * 60) / 2; // 1 hour in blocks (2s)
+  const TEST_MIN_DELAY = BigInt((1 * 60 * 60) / 2); // 1 hour in blocks (2s)
+  const TEST_MAX_DELAY = BigInt((7 * 24 * 60 * 60) / 2); // 7 days in blocks (2s) - explicit blocks cap
   const MAX_BATCH_SIZE = 50;
   
   // 测试账户
@@ -62,7 +63,7 @@ describe('Registry – 核心功能测试', function () {
     const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
     const initData = registryImplementation.interface.encodeFunctionData(
       'initialize',
-      [TEST_MIN_DELAY, owner.address, owner.address, owner.address]
+      [TEST_MIN_DELAY, TEST_MAX_DELAY, owner.address, owner.address, owner.address]
     );
     registryProxy = await ProxyFactory.deploy(
       registryImplementation.target,
@@ -125,7 +126,7 @@ describe('Registry – 核心功能测试', function () {
 
     it('Registry – 应该拒绝重复初始化', async function () {
       await expect(
-        registry.initialize(TEST_MIN_DELAY, owner.address, owner.address, owner.address)
+        registry.initialize(TEST_MIN_DELAY, TEST_MAX_DELAY, owner.address, owner.address, owner.address)
       ).to.be.revertedWithCustomError(registry, 'InvalidInitialization');
     });
 
@@ -137,7 +138,7 @@ describe('Registry – 核心功能测试', function () {
       const newProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
       const initData = newImplementation.interface.encodeFunctionData(
         'initialize',
-        [ethers.MaxUint256, owner.address, owner.address, owner.address]
+        [TEST_MAX_DELAY + 1n, TEST_MAX_DELAY, owner.address, owner.address, owner.address]
       );
       
       await expect(
@@ -146,7 +147,7 @@ describe('Registry – 核心功能测试', function () {
           initData
         )
       ).to.be.revertedWithCustomError(newImplementation, 'Registry__DelayTooLong')
-        .withArgs(ethers.MaxUint256, 7 * 24 * 60 * 60 / 2);
+        .withArgs(TEST_MAX_DELAY + 1n, TEST_MAX_DELAY);
     });
   });
 
@@ -365,7 +366,7 @@ describe('Registry – 核心功能测试', function () {
       
       // Advance blocks by minDelay to make upgrade executable
       await (hardhat as any).network.provider.send('hardhat_mine', [
-        `0x${(TEST_MIN_DELAY + 1).toString(16)}`
+        `0x${(TEST_MIN_DELAY + 1n).toString(16)}`
       ]);
 
       await expect(

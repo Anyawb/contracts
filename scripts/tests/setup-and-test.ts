@@ -1,5 +1,5 @@
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
 
 async function main() {
   console.log("=== 前置条件设置 ===\n");

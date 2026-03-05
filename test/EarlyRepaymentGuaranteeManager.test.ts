@@ -48,6 +48,7 @@ async function deployRegistryProxy(
   emergencyAdmin: string,
   initialOwner: string
 ): Promise<Registry> {
+  const MAX_DELAY_BLOCKS = 302_400; // 7 days in blocks (2s baseline) - explicit cap
   const RegistryFactory = await ethers.getContractFactory('Registry');
   const registryImpl = await RegistryFactory.deploy();
   await registryImpl.waitForDeployment();
@@ -55,6 +56,7 @@ async function deployRegistryProxy(
   const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
   const initData = registryImpl.interface.encodeFunctionData('initialize', [
     minDelay,
+    MAX_DELAY_BLOCKS,
     upgradeAdmin,
     emergencyAdmin,
     initialOwner,
@@ -180,7 +182,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
           PROMISED_INTEREST,
           anyValue, // startTime
           anyValue, // maturityTime
-          2n, // DEFAULT_EARLY_REPAY_PENALTY_DAYS
+          14400n, // DEFAULT_EARLY_REPAY_PENALTY_BLOCKS (legacy field name: earlyRepayPenaltyDays)
           anyValue // blockNumber
         );
 

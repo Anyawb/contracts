@@ -441,7 +441,8 @@ describe("RegistryView", function () {
       const registryImplementation = await RegistryFactory.deploy();
       await registryImplementation.waitForDeployment();
       
-      const minDelay = 24 * 60 * 60; // 1 day in seconds
+      const minDelay = BigInt((24 * 60 * 60) / 2); // 1 day in blocks (2s baseline)
+      const maxDelay = BigInt((7 * 24 * 60 * 60) / 2); // cap = 7 days in blocks
       const upgradeAdmin = admin.address;
       const emergencyAdmin = admin.address;
 
@@ -450,7 +451,7 @@ describe("RegistryView", function () {
         await registryImplementation.getAddress(),
         registryImplementation.interface.encodeFunctionData(
           "initialize",
-          [minDelay, upgradeAdmin, emergencyAdmin, admin.address]
+          [minDelay, maxDelay, upgradeAdmin, emergencyAdmin, admin.address]
         )
       );
       await registryProxy.waitForDeployment();

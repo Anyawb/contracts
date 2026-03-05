@@ -55,7 +55,6 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         address user,
         address asset,
         address lender,
-        address platform,
         uint256 refundToBorrower,
         uint256 penaltyToLender,
         uint256 platformFee
@@ -70,7 +69,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
 
         if (refundToBorrower > 0) emit GuaranteeReleased(user, asset, refundToBorrower, block.number);
         if (penaltyToLender > 0) emit GuaranteeForfeited(user, asset, penaltyToLender, lender, block.number);
-        if (platformFee > 0) emit GuaranteeForfeited(user, asset, platformFee, platform, block.number);
+        if (platformFee > 0) emit GuaranteeForfeited(user, asset, platformFee, address(0), block.number);
     }
 
     /// @notice Partial forfeiture (mock).

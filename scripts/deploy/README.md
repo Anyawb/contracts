@@ -164,17 +164,16 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 43. **DegradationMonitor** - 降级监控器
 
 ### 阶段 8: 奖励系统
-44. **RewardPoints** - 奖励积分代币
+44. **EasyToken** - 奖励通证（唯一通证）
 45. **RewardManagerCore** - 奖励管理核心
-46. **RewardCore** - 奖励核心
-47. **RewardConsumption** - 奖励消费
-48. **RewardManager** - 奖励管理器
-49. **RewardConfig** - 奖励配置
-50. **RewardView** - 奖励视图
+46. **RewardManager** - 奖励管理器
+47. **RewardConfig** - 奖励配置
+48. **EarnConfig** - Earn 参数配置
+49. **RewardView** - 奖励视图
 
 ### 阶段 9: 其他模块
-51. **LoanNFT** - 贷款 NFT
-52. **MockUSDC** - Mock USDC（仅本地网络）
+50. **LoanNFT** - 贷款 NFT
+51. **MockUSDC** - Mock USDC（仅本地网络）
 
 ### 阶段 10: 模块注册
 - 将所有已部署的模块注册到 Registry
@@ -183,7 +182,7 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 
 ### 阶段 11: 权限配置
 - 为部署者授予必要的权限
-- 配置 RewardPoints 的 MINTER_ROLE
+- 配置 EasyToken 的 MINTER_ROLE
 - 配置预言机系统权限
 
 ### 阶段 12: 前端配置生成

@@ -41,7 +41,7 @@ contract VaultRouter is
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     /// @dev Module address cache expiry (A-class cache), expressed in blocks.
     /// NOTE (Time-Dependency-Refactor): legacy "seconds" TTLs are migrated to block-based TTLs.
-    /// We keep the numeric value parity (1 hours = 3600), but the unit is now "blocks".
+    /// We keep numeric parity for backwards compatibility, but the unit is "blocks" (do NOT interpret as seconds).
     uint256 private constant _CACHE_EXPIRY_BLOCKS = 3600;
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
@@ -88,7 +88,7 @@ contract VaultRouter is
     );
 
     /// @notice Explicit block-based companion event for VaultAction.
-    event VaultActionV2(
+    event VaultActionAtBlock(
         bytes32 indexed action,
         address indexed user,
         uint256 amount1,
@@ -118,7 +118,7 @@ contract VaultRouter is
     );
 
     /// @notice Explicit block-based companion event for UserPositionPushed.
-    event UserPositionPushedV2(
+    event UserPositionPushedAtBlock(
         address indexed user,
         address indexed asset,
         uint256 collateral,
@@ -149,7 +149,7 @@ contract VaultRouter is
     );
 
     /// @notice Explicit block-based companion event for UserPositionDeltaPushed.
-    event UserPositionDeltaPushedV2(
+    event UserPositionDeltaPushedAtBlock(
         address indexed user,
         address indexed asset,
         int256 collateralDelta,
@@ -180,7 +180,7 @@ contract VaultRouter is
     );
 
     /// @notice Explicit block-based companion event for AssetStatsPushed.
-    event AssetStatsPushedV2(
+    event AssetStatsPushedAtBlock(
         address indexed asset,
         uint256 totalCollateral,
         uint256 totalDebt,
@@ -197,7 +197,7 @@ contract VaultRouter is
     event ModuleCacheRefreshed(uint256 updateBlock);
 
     /// @notice Explicit block-based companion event for ModuleCacheRefreshed.
-    event ModuleCacheRefreshedV2(uint256 updateBlock);
+    event ModuleCacheRefreshedAtBlock(uint256 updateBlock);
 
     /*━━━━━━━━━━━━━━━ Custom errors ━━━━━━━━━━━━━━━*/
     /// @notice Thrown when caller is not authorized for the operation.
@@ -366,7 +366,7 @@ contract VaultRouter is
         address asset
     ) internal {
         emit VaultAction(action, user, amount1, amount2, asset, block.number);
-        emit VaultActionV2(action, user, amount1, amount2, asset, block.number);
+        emit VaultActionAtBlock(action, user, amount1, amount2, asset, block.number);
     }
 
     /*━━━━━━━━━━━━━━━ Core routing ━━━━━━━━━━━━━━━*/
@@ -415,7 +415,7 @@ contract VaultRouter is
         }
 
         emit VaultAction(operationType, user, amount, 0, asset, blockNumber);
-        emit VaultActionV2(operationType, user, amount, 0, asset, blockNumber);
+        emit VaultActionAtBlock(operationType, user, amount, 0, asset, blockNumber);
     }
 
     /**
@@ -454,7 +454,7 @@ contract VaultRouter is
         address pv = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
         IPositionView(pv).pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, nextVersion);
         emit UserPositionPushed(user, asset, collateral, debt, block.number, requestId, seq);
-        emit UserPositionPushedV2(user, asset, collateral, debt, block.number, requestId, seq);
+        emit UserPositionPushedAtBlock(user, asset, collateral, debt, block.number, requestId, seq);
     }
 
     /**
@@ -500,7 +500,7 @@ contract VaultRouter is
             nextVersion
         );
         emit UserPositionDeltaPushed(user, asset, collateralDelta, debtDelta, block.number, requestId, seq);
-        emit UserPositionDeltaPushedV2(user, asset, collateralDelta, debtDelta, block.number, requestId, seq);
+        emit UserPositionDeltaPushedAtBlock(user, asset, collateralDelta, debtDelta, block.number, requestId, seq);
     }
 
     function _absToUint(int256 x) internal pure returns (uint256) {
@@ -546,7 +546,7 @@ contract VaultRouter is
         uint64 seq
     ) internal {
         emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, block.number, requestId, seq);
-        emit AssetStatsPushedV2(asset, totalCollateral, totalDebt, price, block.number, requestId, seq);
+        emit AssetStatsPushedAtBlock(asset, totalCollateral, totalDebt, price, block.number, requestId, seq);
     }
 
     /*━━━━━━━━━━━━━━━ Governance ━━━━━━━━━━━━━━━*/
@@ -613,7 +613,7 @@ contract VaultRouter is
         _cachedCmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
         _lastCacheUpdateBlock = _now();
         emit ModuleCacheRefreshed(_lastCacheUpdateBlock);
-        emit ModuleCacheRefreshedV2(_lastCacheUpdateBlock);
+        emit ModuleCacheRefreshedAtBlock(_lastCacheUpdateBlock);
     }
 
     /**

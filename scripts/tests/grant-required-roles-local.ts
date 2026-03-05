@@ -1,5 +1,5 @@
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
 
 function key(name: string): string {
   return ethers.keccak256(ethers.toUtf8Bytes(name));
@@ -11,6 +11,8 @@ async function main() {
   const acmAddr = (CONTRACT_ADDRESSES as any)?.AccessControlManager as string | undefined;
   const settlementManagerAddr = (CONTRACT_ADDRESSES as any)?.SettlementManager as string | undefined;
   const liquidationRiskManagerAddr = (CONTRACT_ADDRESSES as any)?.LiquidationRiskManager as string | undefined;
+  const liquidationManagerAddr = (CONTRACT_ADDRESSES as any)?.LiquidationManager as string | undefined;
+  const guaranteeFundManagerAddr = (CONTRACT_ADDRESSES as any)?.GuaranteeFundManager as string | undefined;
   const vaultBusinessLogicAddr = (CONTRACT_ADDRESSES as any)?.VaultBusinessLogic as string | undefined;
   if (!acmAddr) throw new Error("[Config] Missing CONTRACT_ADDRESSES.AccessControlManager (run deploy:localhost first).");
   if (!settlementManagerAddr) {
@@ -18,6 +20,12 @@ async function main() {
   }
   if (!liquidationRiskManagerAddr) {
     throw new Error("[Config] Missing CONTRACT_ADDRESSES.LiquidationRiskManager (run deploy:localhost first).");
+  }
+  if (!liquidationManagerAddr) {
+    throw new Error("[Config] Missing CONTRACT_ADDRESSES.LiquidationManager (run deploy:localhost first).");
+  }
+  if (!guaranteeFundManagerAddr) {
+    throw new Error("[Config] Missing CONTRACT_ADDRESSES.GuaranteeFundManager (run deploy:localhost first).");
   }
   if (!vaultBusinessLogicAddr) {
     throw new Error("[Config] Missing CONTRACT_ADDRESSES.VaultBusinessLogic (run deploy:localhost first).");
@@ -57,6 +65,8 @@ async function main() {
     { role: ACTION_DEPOSIT, who: vaultBusinessLogicAddr, label: "VaultBusinessLogic ACTION_DEPOSIT" },
     { role: ACTION_BORROW, who: orderEngineAddr, label: "OrderEngine ACTION_BORROW (LoanNFT minter)" },
     { role: ACTION_LIQUIDATE, who: keeper.address, label: "keeper ACTION_LIQUIDATE" },
+    { role: ACTION_DEPOSIT, who: liquidationManagerAddr, label: "LiquidationManager ACTION_DEPOSIT" },
+    { role: ACTION_DEPOSIT, who: guaranteeFundManagerAddr, label: "GuaranteeFundManager ACTION_DEPOSIT" },
     { role: ACTION_REPAY, who: settlementManagerAddr, label: "settlementManager ACTION_REPAY" },
     { role: ACTION_VIEW_SYSTEM_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_SYSTEM_DATA" },
     { role: ACTION_VIEW_USER_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_USER_DATA" },
@@ -72,6 +82,8 @@ async function main() {
   console.log("  keeper:", keeper.address);
   console.log("  settlementManager:", settlementManagerAddr);
   console.log("  vaultBusinessLogic:", vaultBusinessLogicAddr);
+  console.log("  liquidationManager:", liquidationManagerAddr);
+  console.log("  guaranteeFundManager:", guaranteeFundManagerAddr);
   console.log("  orderEngine:", orderEngineAddr);
   console.log("");
 

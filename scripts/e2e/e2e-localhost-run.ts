@@ -1,5 +1,58 @@
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { runRewardManagerGovernance } from "./e2e-localhost-rewardmanager-governance";
+// Optional: cross-chain governance veto acceptance is not always present.
+
+const BLOCKS_PER_DAY = 7_200n;
+const ONE_HOUR_BLOCKS = 1_800n;
+
+function calcTotalDue(principal: bigint, rateBps: bigint, termBlocks: bigint) {
+  const denom = 365n * BLOCKS_PER_DAY * 10_000n;
+  const interest = (principal * rateBps * termBlocks) / denom;
+  return principal + interest;
+}
+
+async function latestBlockNumber(): Promise<bigint> {
+  const block = await ethers.provider.getBlock("latest");
+  return BigInt(block!.number);
+}
+
+function buildLendIntentHash(li: any) {
+  const typeHash = ethers.keccak256(
+    ethers.toUtf8Bytes(
+      "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+    )
+  );
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  return ethers.keccak256(
+    coder.encode(
+      ["bytes32", "address", "address", "uint256", "uint16", "uint16", "uint256", "uint256", "bytes32"],
+      [
+        typeHash,
+        li.lenderSigner,
+        li.asset,
+        li.amount,
+        li.minTermDays,
+        li.maxTermDays,
+        li.minRateBps,
+        li.expireAt,
+        li.salt,
+      ]
+    )
+  );
+}
+
+function inferOrderIdFromReceipt(orderEngine: any, receipt: any): bigint {
+  for (const log of receipt?.logs ?? []) {
+    try {
+      const parsed = orderEngine.interface.parseLog({ topics: log.topics as string[], data: log.data });
+      if (parsed?.name === "LoanOrderCreated") return parsed.args.orderId as bigint;
+    } catch {
+      // ignore
+    }
+  }
+  throw new Error("LoanOrderCreated not found; cannot infer orderId");
+}
 
 async function main() {
   const [deployer, borrower, lender] = await ethers.getSigners();
@@ -21,6 +74,7 @@ async function main() {
   const vr = (await ethers.getContractAt("VaultRouter", VR)) as any;
   const vc = (await ethers.getContractAt("VaultCore", VC)) as any;
   const cm = (await ethers.getContractAt("CollateralManager", CM)) as any;
+  const vbl = (await ethers.getContractAt("VaultBusinessLogic", (CONTRACT_ADDRESSES as any).VaultBusinessLogic)) as any;
   // ORDER_ENGINE in src/core/LendingEngine.sol (see Architecture-Guide SSOT)
   const le = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", LE)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", USDC)) as any;
@@ -44,9 +98,14 @@ async function main() {
     await ensureRole(r, VR);
     await ensureRole(r, VC);
   }
-  // Borrower needs order/repay permissions for LendingEngine
-  await ensureRole(ACTION_ORDER_CREATE, borrower.address);
-  await ensureRole(ACTION_REPAY, borrower.address);
+  // Funds-flow SSOT: orchestrator + settlement manager roles
+  await ensureRole(ACTION_ORDER_CREATE, vbl.target);
+  await ensureRole(ACTION_DEPOSIT, vbl.target); // FeeRouter.distributeNormal permission
+  const settlementManagerAddr = await (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)).getModuleOrRevert(
+    ethers.keccak256(ethers.toUtf8Bytes("SETTLEMENT_MANAGER"))
+  );
+  await ensureRole(ACTION_REPAY, settlementManagerAddr);
+  await ensureRole(ACTION_BORROW, LE); // OrderEngine mints/updates LoanNFT
 
   // Allow asset + price
   if (!(await aw.isAssetAllowed(usdc.target))) {
@@ -79,7 +138,7 @@ async function main() {
   await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("10000", 6));
   await usdc.connect(deployer).transfer(lender.address, ethers.parseUnits("10000", 6));
   await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.CollateralManager, ethers.MaxUint256);
-  await usdc.connect(lender).approve(le.target, ethers.MaxUint256);
+  await usdc.connect(lender).approve(vbl.target, ethers.MaxUint256);
 
   // 1) Deposit
   const depositAmt = ethers.parseUnits("1000", 6);
@@ -87,18 +146,97 @@ async function main() {
   const col = await cm.getCollateral(borrower.address, usdc.target);
   console.log("Collateral after deposit:", col.toString());
 
-  // 2) Borrow (simple path via LendingEngine core — may rely on ACTION_ORDER_CREATE)
-  const borrowAmt = ethers.parseUnits("500", 6);
-  await vc.connect(borrower).borrow(usdc.target, borrowAmt);
-  console.log("Borrow done");
+  // 2) Borrow via SSOT matchflow (finalizeMatch -> borrowFor -> createLoanOrder)
+  const principal = ethers.parseUnits("500", 6);
+  const termDays = 5;
+  const rateBps = 1000n;
+  const expireAt = (await latestBlockNumber()) + ONE_HOUR_BLOCKS;
 
-  // 3) Repay
-  // NOTE: this demo path uses VaultCore.borrow (no ORDER_ENGINE orderId).
-  // Skip repay here to avoid mismatched orderId on ORDER_ENGINE.
-  console.log("Repay skipped (no ORDER_ENGINE orderId in this path)");
+  const borrowIntent = {
+    borrower: borrower.address,
+    collateralAsset: usdc.target,
+    collateralAmount: depositAmt,
+    borrowAsset: usdc.target,
+    amount: principal,
+    termDays,
+    rateBps,
+    expireAt,
+    salt: ethers.keccak256(ethers.toUtf8Bytes("borrow-salt-e2e-localhost-run")),
+  };
+  const lendIntent = {
+    lenderSigner: lender.address,
+    asset: usdc.target,
+    amount: principal,
+    minTermDays: 1,
+    maxTermDays: 30,
+    minRateBps: 0n,
+    expireAt,
+    salt: ethers.keccak256(ethers.toUtf8Bytes("lend-salt-e2e-localhost-run")),
+  };
+
+  const lendHash = buildLendIntentHash(lendIntent);
+  await vbl.connect(lender).reserveForLending(lender.address, usdc.target, principal, lendHash);
+
+  const domain = {
+    name: "RwaLending",
+    version: "1",
+    chainId: Number((await ethers.provider.getNetwork()).chainId),
+    verifyingContract: (CONTRACT_ADDRESSES as any).VaultBusinessLogic,
+  } as const;
+  const typesBorrow = {
+    BorrowIntent: [
+      { name: "borrower", type: "address" },
+      { name: "collateralAsset", type: "address" },
+      { name: "collateralAmount", type: "uint256" },
+      { name: "borrowAsset", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "termDays", type: "uint16" },
+      { name: "rateBps", type: "uint256" },
+      { name: "expireAt", type: "uint256" },
+      { name: "salt", type: "bytes32" },
+    ],
+  };
+  const typesLend = {
+    LendIntent: [
+      { name: "lenderSigner", type: "address" },
+      { name: "asset", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "minTermDays", type: "uint16" },
+      { name: "maxTermDays", type: "uint16" },
+      { name: "minRateBps", type: "uint256" },
+      { name: "expireAt", type: "uint256" },
+      { name: "salt", type: "bytes32" },
+    ],
+  };
+  const sigBorrower = await borrower.signTypedData(domain, typesBorrow as any, borrowIntent as any);
+  const sigLender = await lender.signTypedData(domain, typesLend as any, lendIntent as any);
+
+  const tx = await vbl.connect(deployer).finalizeMatch(borrowIntent, [lendIntent], sigBorrower, [sigLender]);
+  const receipt = await tx.wait();
+  const orderId = inferOrderIdFromReceipt(le, receipt);
+  console.log("Borrow finalized, orderId:", orderId.toString());
+
+  // 3) Repay via SSOT settlement path
+  const termBlocks = BigInt(termDays) * BLOCKS_PER_DAY;
+  const totalDue = calcTotalDue(principal, rateBps, termBlocks);
+  await usdc.connect(borrower).approve(VC, totalDue);
+  await vc.connect(borrower).repay(orderId, usdc.target, totalDue);
+  console.log("Repay done");
 
   const colAfter = await cm.getCollateral(borrower.address, usdc.target);
-  console.log("Collateral after repay (should be unchanged):", colAfter.toString());
+  console.log("Collateral after repay:", colAfter.toString());
+
+  // RewardManager governance/permission sanity (best-effort, local only)
+  await runRewardManagerGovernance();
+
+  try {
+    const mod = await import("./e2e-localhost-crosschaingov-gate-veto");
+    if (typeof mod.runCrossChainGovernanceGateVeto === "function") {
+      await mod.runCrossChainGovernanceGateVeto();
+    }
+  } catch {
+    console.log("ℹ️  CrossChainGovernance gate/veto script not found; skipping");
+  }
 }
 
 main().catch((e) => {

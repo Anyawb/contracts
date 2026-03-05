@@ -1,6 +1,6 @@
 import { ethers, network } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
-import { runViewPreflight } from "./utils/view-preflight";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { runViewPreflight } from "./utils/view-preflight.ts";
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -131,7 +131,7 @@ async function main() {
       bigint,
       boolean,
     ];
-    assertOk(lastSync0 >= 0n, "lastSyncTimestamp must be non-negative");
+    assertOk(lastSync0 >= 0n, "lastSyncBlock must be non-negative");
     assertOk(valid0 === (lastSync0 > 0n && !needsSync0), "isValid must be derived from lastSync/needsSync");
 
     // ====== MUST: non-FeeRouter caller cannot push ======
@@ -182,7 +182,7 @@ async function main() {
     const mineBlocks = Number(syncInterval + 1n);
     await network.provider.send("hardhat_mine", [ethers.toBeHex(mineBlocks)]);
     const [validExp, lastSyncExp, needsSyncExp] = (await frv.getSyncStatus()) as [boolean, bigint, boolean];
-    assertOk(lastSyncExp === lastSync1, "staleness check must not mutate lastSyncTimestamp");
+    assertOk(lastSyncExp === lastSync1, "staleness check must not mutate lastSyncBlock");
     assertOk(needsSyncExp === true, "needsSync must be true after SYNC_INTERVAL elapsed");
     assertOk(validExp === false, "isValid must be false when needsSync is true");
 

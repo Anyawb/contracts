@@ -14,7 +14,6 @@ import './scripts/tasks/compile-filter-warnings';
 import './scripts/tasks/utils-tasks';
 import './scripts/tasks/e2e-batch-advanced';
 import './scripts/tasks/e2e-batch-10-users';
-import './scripts/tasks/e2e-reward-edgecases';
 
 const config: HardhatUserConfig = {
   solidity: {

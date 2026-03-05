@@ -1,6 +1,6 @@
-import { ethers } from "hardhat";
+import { ethers, network } from "hardhat";
 import type { Interface } from "ethers";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { envBool, loadAddressMap, resolveAddress } from "./_addressResolver";
 
 function key(name: string): string {
   return ethers.keccak256(ethers.toUtf8Bytes(name));
@@ -225,6 +225,65 @@ async function tryExecAs(
   }
 }
 
+async function tryCallRawAs(
+  from: string,
+  to: string,
+  data: string
+): Promise<{ ok: true; decoded: string } | { ok: false; selector: string; decoded: string; raw: string | null }> {
+  try {
+    const res = await callAs(from, to, data);
+    return { ok: true, decoded: res };
+  } catch (e: any) {
+    const raw = extractRevertData(e);
+    const { selector, decoded } = decodeRevert(raw);
+    if (decoded === "<empty revert data>" && typeof e?.message === "string") {
+      const match = e.message.match(/reverted with custom error '([^']+)'/i);
+      if (match?.[1]) {
+        return { ok: false, selector: "<message>", decoded: `${match[1]}()`, raw };
+      }
+      const msg = e.message.match(/reverted with reason string '([^']+)'/i);
+      if (msg?.[1]) {
+        return { ok: false, selector: "<message>", decoded: `Error("${msg[1]}")`, raw };
+      }
+    }
+    return { ok: false, selector, decoded, raw };
+  }
+}
+
+async function tryExecRawAs(
+  from: string,
+  to: string,
+  data: string,
+  sendTx: boolean
+): Promise<{ ok: true; decoded: any } | { ok: false; selector: string; decoded: string; raw: string | null }> {
+  if (!sendTx) {
+    return await tryCallRawAs(from, to, data);
+  }
+  try {
+    if (from === ethers.ZeroAddress) {
+      throw new Error("sendTx requires a signer address");
+    }
+    const signer = await ethers.getSigner(from);
+    const tx = await signer.sendTransaction({ to, data });
+    const receipt = await tx.wait();
+    return { ok: true, decoded: receipt };
+  } catch (e: any) {
+    const raw = extractRevertData(e);
+    const { selector, decoded } = decodeRevert(raw);
+    if (decoded === "<empty revert data>" && typeof e?.message === "string") {
+      const match = e.message.match(/reverted with custom error '([^']+)'/i);
+      if (match?.[1]) {
+        return { ok: false, selector: "<message>", decoded: `${match[1]}()`, raw };
+      }
+      const msg = e.message.match(/reverted with reason string '([^']+)'/i);
+      if (msg?.[1]) {
+        return { ok: false, selector: "<message>", decoded: `Error("${msg[1]}")`, raw };
+      }
+    }
+    return { ok: false, selector, decoded, raw };
+  }
+}
+
 function parseEnvBigint(name: string, fallback: bigint): bigint {
   const raw = process.env[name];
   if (!raw || raw.trim() === "") return fallback;
@@ -239,6 +298,14 @@ function requireOk<T>(
   const selector = res.selector ?? "<unknown>";
   const raw = res.raw ?? "<no revert data>";
   throw new Error(`[StrictCheck] ${label} failed: ${res.decoded} (selector=${selector}, raw=${raw})`);
+}
+
+function requireFail(
+  res: { ok: true; decoded: any } | { ok: false; selector: string; decoded: string; raw: string | null },
+  label: string
+): { selector: string; decoded: string; raw: string | null } {
+  if (!res.ok) return res;
+  throw new Error(`[StrictCheck] ${label} expected revert but succeeded`);
 }
 
 async function requireCode(address: string, label: string) {
@@ -257,19 +324,21 @@ async function main() {
     String(process.env.STRICT_TX ?? "") === "1" || String(process.env.REAL_TX ?? "") === "1";
   const allowAggregatedDebt = String(process.env.ALLOW_AGGREGATED_DEBT ?? "") === "1";
 
-  const registryAddr =
+  const readOnly = envBool("READ_ONLY", network.name !== "localhost");
+  const enableWrite = envBool("ENABLE_WRITE", !readOnly);
+
+  const addressMap = loadAddressMap(network.name);
+  const registryAddrRaw =
     process.env.REGISTRY_ADDR ??
     process.env.REGISTRY ??
-    (CONTRACT_ADDRESSES as any)?.Registry ??
+    process.env.REGISTRY_ADDRESS ??
     "";
-  if (!registryAddr) {
-    throw new Error(
-      `[Config] Missing REGISTRY_ADDR. Provide env REGISTRY_ADDR=<registry> ` +
-        `or ensure frontend-config/contracts-localhost.ts is up to date.`
-    );
-  }
+  const registryAddr =
+    registryAddrRaw ||
+    resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
 
-  console.log("=== Funds Flow Smoke (localhost) ===\n");
+  console.log(`=== Funds Flow Smoke (${network.name}) ===\n`);
+  console.log(`  Config: READ_ONLY=${readOnly} ENABLE_WRITE=${enableWrite}`);
   console.log("  Registry:", registryAddr);
   console.log("  Deployer:", deployer.address);
   console.log("  Keeper:", keeper.address);
@@ -330,6 +399,13 @@ async function main() {
       "[Config] Registry.KEY_ACCESS_CONTROL_MANAGER is zero. " +
         "Bind AccessControlManager before running this smoke test."
     );
+  }
+
+  if (readOnly || !enableWrite) {
+    console.log("  ℹ️  [skip] write-heavy keeper-path scenario in read-only mode.");
+    console.log("      To run the full scenario, use --network localhost and set ENABLE_WRITE=1.");
+    console.log("\n✅ Funds Flow Smoke (read-only) PASSED\n");
+    return;
   }
   await requireCode(accessControlAddr, "AccessControlManager");
 
@@ -1206,15 +1282,21 @@ async function main() {
     );
     requireOk(cmWithdrawRes, "CM.withdrawCollateral (onlyVaultRouter)");
 
-    const coreBorrowRes = await tryExecAs(
+    // VaultCore.borrow is intentionally removed: borrowing must be orchestrated via SSOT matchflow
+    // (VaultBusinessLogic.finalizeMatch / borrowWithRate -> VaultCore.borrowFor -> ORDER_ENGINE).
+    // Therefore a raw call to the legacy selector MUST revert (unknown selector).
+    const borrowSelector = ethers.id("borrow(address,uint256)").slice(0, 10);
+    const borrowArgs = ethers.AbiCoder.defaultAbiCoder()
+      .encode(["address", "uint256"], [debtAsset, strictBorrowAmount])
+      .slice(2);
+    const coreBorrowRawRes = await tryExecRawAs(
       order.borrower,
       vaultCoreAddr,
-      vaultCoreIface,
-      "borrow",
-      [debtAsset, strictBorrowAmount],
+      borrowSelector + borrowArgs,
       strictTx
     );
-    requireOk(coreBorrowRes, `VaultCore.borrow (${strictTx ? "tx" : "static"})`);
+    const fail = requireFail(coreBorrowRawRes, `VaultCore.borrow removed (${strictTx ? "tx" : "static"})`);
+    console.log(`  - VaultCore.borrow removed (${strictTx ? "tx" : "static"}): reverted as expected (${fail.decoded})`);
 
     const debtAllowanceRes = await tryCallAs(
       ethers.ZeroAddress,

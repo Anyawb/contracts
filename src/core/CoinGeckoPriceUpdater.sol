@@ -10,7 +10,7 @@ import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { ZeroAddress, EmptyArray, ArrayLengthMismatch } from "../errors/StandardErrors.sol";
+import { NotAContract, ZeroAddress, EmptyArray, ArrayLengthMismatch } from "../errors/StandardErrors.sol";
 import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../constants/DataPushTypes.sol";
 
@@ -198,9 +198,10 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
     
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
     
-    /// @notice Ensures Registry address is set.
+    /// @notice Ensures Registry address is set and is a contract.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
+        if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
     
@@ -229,6 +230,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
         __UUPSUpgradeable_init();
         
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         
         _registryAddr = initialRegistryAddr;
         _autoUpdateEnabled = true;
@@ -534,6 +536,7 @@ contract CoinGeckoPriceUpdater is Initializable, UUPSUpgradeable {
     function updateRegistry(address newRegistryAddr) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
         
         address oldRegistry = _registryAddr;
         

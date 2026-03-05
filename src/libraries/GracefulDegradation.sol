@@ -1279,7 +1279,7 @@ library GracefulDegradation {
         // Default price validation config.
         config.priceValidation.maxPriceMultiplier = DEFAULT_MAX_PRICE_MULTIPLIER; // 150%.
         config.priceValidation.minPriceMultiplier = DEFAULT_MIN_PRICE_MULTIPLIER;  // 50%.
-        config.priceValidation.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // ~5 minutes.
+        config.priceValidation.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // block-based; chain-dependent.
         config.priceValidation.maxPriceAgeBlocks = MAX_PRICE_AGE_BLOCKS;
         config.priceValidation.maxReasonablePrice = DEFAULT_MAX_REASONABLE_PRICE; // Default cap.
         config.priceValidation.enableHistoricalValidation = false; // Disabled by default.
@@ -1329,7 +1329,7 @@ library GracefulDegradation {
         // Default price validation config.
         config.priceValidation.maxPriceMultiplier = DEFAULT_MAX_PRICE_MULTIPLIER; // 150%.
         config.priceValidation.minPriceMultiplier = DEFAULT_MIN_PRICE_MULTIPLIER;  // 50%.
-        config.priceValidation.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // ~5 minutes.
+        config.priceValidation.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // block-based; chain-dependent.
         config.priceValidation.maxPriceAgeBlocks = MAX_PRICE_AGE_BLOCKS;
         config.priceValidation.maxReasonablePrice = DEFAULT_MAX_REASONABLE_PRICE; // Default cap.
         config.priceValidation.enableHistoricalValidation = false; // Disabled by default.
@@ -1365,7 +1365,7 @@ library GracefulDegradation {
     ) internal pure returns (PriceValidationConfig memory config) {
         config.maxPriceMultiplier = maxPriceMultiplierValue;
         config.minPriceMultiplier = minPriceMultiplierValue;
-        config.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // ~5 minutes.
+        config.priceUpdateThreshold = DEFAULT_PRICE_UPDATE_THRESHOLD; // block-based; chain-dependent.
         config.maxPriceAgeBlocks = MAX_PRICE_AGE_BLOCKS;
         config.maxReasonablePrice = maxReasonablePriceValue;
         config.enableHistoricalValidation = false; // Disabled by default.
@@ -1767,7 +1767,7 @@ library GracefulDegradation {
      * @param assetAddr Asset address.
      * @param retryConfig Retry config.
      * @return price Price value (oracle precision).
-     * @return sourceTimestamp Source blockNumber (informational).
+     * @return sourceBlockNumber Source blockNumber (informational).
      * @return assetDecimals Asset decimals (for valuation scaling).
      * @return success True if successful.
      * @return errorReason Error reason string.
@@ -1778,7 +1778,7 @@ library GracefulDegradation {
         RetryConfig memory retryConfig
     ) internal view returns (
         uint256 price,
-        uint256 sourceTimestamp,
+        uint256 sourceBlockNumber,
         uint256 assetDecimals,
         bool success,
         string memory errorReason
@@ -1791,8 +1791,8 @@ library GracefulDegradation {
                 return (0, 0, 0, false, "Insufficient gas for retry");
             }
             
-            try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 p, uint256 ts, uint256 dAsset) {
-                return (p, ts, dAsset, true, "");
+            try IPriceOracleAdapter(priceOracleAddr).getPrice(assetAddr) returns (uint256 p, uint256 sourceBlock, uint256 dAsset) {
+                return (p, sourceBlock, dAsset, true, "");
             } catch Error(string memory reason) {
                 errorReason = reason;
                 

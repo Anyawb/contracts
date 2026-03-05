@@ -301,7 +301,7 @@ describe('EarlyRepaymentGuaranteeManager – 安全审计测试', function () {
           mockToken.target,
           TEST_AMOUNT,
           TEST_INTEREST,
-          1 // 1天
+          5 // 最短支持的 legacy term bucket（SSOT: blocks; 5d -> 36,000 blocks）
         );
 
         // 立即尝试提前还款

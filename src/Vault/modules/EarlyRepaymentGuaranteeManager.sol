@@ -61,9 +61,9 @@ contract EarlyRepaymentGuaranteeManager is
     IEarlyRepaymentGuaranteeManager
 {
     /*━━━━━━━━━━━━━━━ TIME AXIS (SSOT: blocks) ━━━━━━━━━━━━━━━*/
-    /// @dev Baseline blocks-per-day used across this repo (assumes ~12s/block).
-    ///      Frontend/keeper should do ETA mapping offchain.
-    uint256 private constant _BLOCKS_PER_DAY = 7200;
+    /// @dev NOTE (Time-Dependency-Refactor):
+    /// - Avoid any onchain seconds/days arithmetic or implicit blocks-per-day conversions.
+    /// - Term buckets (legacy `termDays`) are mapped to explicit block durations via {TermBlocksLib}.
 
     /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
     // NOTE: Structs/events are defined in `IEarlyRepaymentGuaranteeManager` and used here to ensure
@@ -87,7 +87,9 @@ contract EarlyRepaymentGuaranteeManager is
     address private _platformFeeReceiverAddr;
     
     /// @notice Default early repayment penalty days.
-    uint256 internal constant _DEFAULT_EARLY_REPAY_PENALTY_DAYS = 2;
+    /// @dev Legacy name kept in {IEarlyRepaymentGuaranteeManager.GuaranteeRecord.earlyRepayPenaltyDays};
+    ///      semantics in this repo are **penaltyBlocks** (block.number axis), not days.
+    uint256 internal constant _DEFAULT_EARLY_REPAY_PENALTY_BLOCKS = 14_400;
     
     /// @notice Platform fee rate (bps).
     uint256 private _platformFeeRate;
@@ -107,6 +109,23 @@ contract EarlyRepaymentGuaranteeManager is
     error EarlyRepaymentGuaranteeManager__OnlyAuthorizedOrchestrator();
     /// @notice Guarantee feature is disabled for the given asset.
     error EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
+
+    /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
+    /// @dev Map a legacy `termDays` bucket to explicit blocks, and normalize reverts to {InvalidGuaranteeTerm}.
+    function _mapTermDaysToBlocks(uint256 termDays) internal pure returns (uint256) {
+        if (termDays == 0 || termDays > type(uint16).max) revert InvalidGuaranteeTerm();
+        uint16 td = uint16(termDays);
+        // Inline mapping to keep error surface stable (revert InvalidGuaranteeTerm, not TermBlocksLib's error).
+        if (td == 5) return 36_000;
+        if (td == 10) return 72_000;
+        if (td == 15) return 108_000;
+        if (td == 30) return 216_000;
+        if (td == 60) return 432_000;
+        if (td == 90) return 648_000;
+        if (td == 180) return 1_296_000;
+        if (td == 360) return 2_592_000;
+        revert InvalidGuaranteeTerm();
+    }
 
     /*━━━━━━━━━━━━━━━ Construction & initialization ━━━━━━━━━━━━━━━*/
 
@@ -570,7 +589,8 @@ contract EarlyRepaymentGuaranteeManager is
         
         // Business rule validation.
         if (borrower == lender) revert BorrowerCannotBeLender();
-        if (termDays > 365 * 10) revert InvalidGuaranteeTerm(); // max 10 years
+        // NOTE: termDays is a legacy term bucket identifier; only supported buckets are allowed.
+        uint256 termBlocks = _mapTermDaysToBlocks(termDays);
         if (promisedInterest > principal * 2) revert GuaranteeInterestTooHigh(); // capped at 2x principal
         
         // Ensure there is no active guarantee for (borrower, asset).
@@ -594,10 +614,10 @@ contract EarlyRepaymentGuaranteeManager is
         record.promisedInterest = promisedInterest;
         // NOTE (Time-Dependency-Refactor):
         // - `startTime/maturityTime` are legacy field names; semantics are startBlock/maturityBlock (block.number).
-        // - termDays is converted to blocks using the repo baseline blocks-per-day.
+        // - maturity is expressed in explicit blocks (no days/seconds arithmetic onchain).
         record.startTime = blockNumber;
-        record.maturityTime = blockNumber + (termDays * _BLOCKS_PER_DAY);
-        record.earlyRepayPenaltyDays = _DEFAULT_EARLY_REPAY_PENALTY_DAYS;
+        record.maturityTime = blockNumber + termBlocks;
+        record.earlyRepayPenaltyDays = _DEFAULT_EARLY_REPAY_PENALTY_BLOCKS;
         record.isActive = true;
         record.lender = lender;
         record.asset = asset;
@@ -679,7 +699,6 @@ contract EarlyRepaymentGuaranteeManager is
             borrower,
             asset,
             record.lender,
-            _platformFeeReceiverAddr,
             result.refundToBorrower,
             result.penaltyToLender,
             result.platformFee
@@ -912,6 +931,7 @@ contract EarlyRepaymentGuaranteeManager is
     {
         uint256 blockNumber = block.number;
         _validateModuleAddress(newRegistryAddr);
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
         
@@ -947,25 +967,25 @@ contract EarlyRepaymentGuaranteeManager is
     ) internal view returns (EarlyRepaymentResult memory result) {
         // Validate time bounds.
         if (currentTimestamp < record.startTime) revert InvalidGuaranteeId();
-        
-        // Compute elapsed days (block-based time axis).
-        uint256 actualDays = (currentTimestamp - record.startTime) / _BLOCKS_PER_DAY;
-        
-        // Compute total days.
-        uint256 totalDays = (record.maturityTime - record.startTime) / _BLOCKS_PER_DAY;
-        if (totalDays == 0) totalDays = 1; // prevent div-by-zero
-        // Clamp to maturity.
-        if (actualDays > totalDays) {
-            actualDays = totalDays;
-        }
-        
-        // Use mulDiv to avoid overflow: promisedInterest * actualDays / totalDays.
-        result.actualInterestPaid = Math.mulDiv(record.promisedInterest, actualDays, totalDays);
-        
-        // Compute penalty (extra N days interest), capped by the remaining guarantee.
-        uint256 penaltyDays = record.earlyRepayPenaltyDays;
-        uint256 dailyInterest = record.promisedInterest / totalDays;
-        uint256 penaltyInterest = dailyInterest * penaltyDays;
+
+        // NOTE (Time-Dependency-Refactor):
+        // - Treat block.number as the only time axis.
+        // - Avoid blocks<->days conversions; compute pro-rata directly in blocks.
+        uint256 startBlock = record.startTime;
+        uint256 maturityBlock = record.maturityTime;
+        uint256 totalBlocks = maturityBlock > startBlock ? (maturityBlock - startBlock) : 0;
+        if (totalBlocks == 0) totalBlocks = 1; // prevent div-by-zero on malformed/legacy records
+
+        uint256 elapsedBlocks = currentTimestamp - startBlock;
+        if (elapsedBlocks > totalBlocks) elapsedBlocks = totalBlocks; // clamp to maturity
+
+        // promisedInterest * elapsedBlocks / totalBlocks
+        result.actualInterestPaid = Math.mulDiv(record.promisedInterest, elapsedBlocks, totalBlocks);
+
+        // Compute penalty (extra N blocks interest), capped by the remaining guarantee.
+        // Legacy field name: `earlyRepayPenaltyDays` but semantics are penaltyBlocks.
+        uint256 penaltyBlocks = record.earlyRepayPenaltyDays;
+        uint256 penaltyInterest = Math.mulDiv(record.promisedInterest, penaltyBlocks, totalBlocks);
         
         // Ensure penalty does not exceed remaining guarantee.
         uint256 remainingGuarantee = record.promisedInterest - result.actualInterestPaid;

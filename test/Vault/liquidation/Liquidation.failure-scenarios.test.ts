@@ -9,18 +9,32 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
   const KEY_LIQUIDATION_MANAGER = ethers.id("LIQUIDATION_MANAGER");
   const KEY_LIQUIDATION_VIEW = ethers.id("LIQUIDATION_VIEW");
   const KEY_LIQUIDATION_PAYOUT_MANAGER = ethers.id("LIQUIDATION_PAYOUT_MANAGER");
+  const KEY_FR = ethers.id("FEE_ROUTER");
 
   // Keep consistent with most mocks in this repo
   const ACTION_LIQUIDATE = ethers.id("LIQUIDATE");
+  const ACTION_DEPOSIT = ethers.id("DEPOSIT");
+  const ACTION_SET_PARAMETER = ethers.id("SET_PARAMETER");
 
   async function deployFixture() {
     const [admin, liquidator, user] = await ethers.getSigners();
-    const asset = ethers.Wallet.createRandom().address;
+
+    const mockErc20Factory = await ethers.getContractFactory("MockERC20");
+    const mockErc20 = await mockErc20Factory.deploy("Mock", "MOCK", 18, ethers.parseUnits("1000000", 18));
+    await mockErc20.waitForDeployment();
+    const asset = await mockErc20.getAddress();
 
     const registry = await (await ethers.getContractFactory("MockRegistry")).deploy();
     const access = await (await ethers.getContractFactory("MockAccessControlManager")).deploy();
     const collateral = await (await ethers.getContractFactory("MockCollateralManager")).deploy();
     const lending = await (await ethers.getContractFactory("MockLendingEngineBasic")).deploy();
+    const feeRouterFactory = await ethers.getContractFactory("FeeRouter");
+    const feeRouter = await upgrades.deployProxy(
+      feeRouterFactory,
+      [await registry.getAddress(), admin.address, admin.address, 1, 0],
+      { kind: "uups" },
+    );
+    await feeRouter.waitForDeployment();
 
     const eventsView = await (await ethers.getContractFactory("MockLiquidationEventsView")).deploy();
     const revertingView = await (await ethers.getContractFactory("RevertingLiquidationEventsView")).deploy();
@@ -59,15 +73,20 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
     await registry.setModule(KEY_LIQUIDATION_VIEW, await eventsView.getAddress());
     await registry.setModule(KEY_LIQUIDATION_PAYOUT_MANAGER, await payoutManager.getAddress());
     await registry.setModule(KEY_LIQUIDATION_MANAGER, await liquidationManager.getAddress());
+    await registry.setModule(KEY_FR, await feeRouter.getAddress());
 
     // Roles:
     // - external liquidator must have ACTION_LIQUIDATE (LiquidationManager checks caller)
     // - LiquidationManager itself must have ACTION_LIQUIDATE (LendingEngine/CM may check msg.sender)
     await access.grantRole(ACTION_LIQUIDATE, liquidator.address);
     await access.grantRole(ACTION_LIQUIDATE, await liquidationManager.getAddress());
+    await access.grantRole(ACTION_SET_PARAMETER, admin.address);
+    await access.grantRole(ACTION_DEPOSIT, await liquidationManager.getAddress());
+    await feeRouter.connect(admin).addSupportedToken(asset);
 
     // Seed ledger state
     await collateral.depositCollateral(user.address, asset, 100n);
+    await mockErc20.mint(await collateral.getAddress(), 100n);
     await lending.borrow(user.address, asset, 80n, 0n, 0);
     // Ensure ledger aggregate matches mock expectations to avoid underflow/panic
     await lending.setTotalDebtByAsset(asset, 80n);
@@ -229,9 +248,15 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
 
     const dataPushLogs = receipt!.logs.filter((l) => l.topics?.[0] === DATA_PUSH_TOPIC0);
 
-    // There should be exactly one LIQUIDATION_UPDATE and one LIQUIDATION_PAYOUT, and both must come from LiquidatorView.
+    // There should be exactly one LIQUIDATION_UPDATE and one LIQUIDATION_PAYOUT, both from LiquidatorView.
+    const trackedTypes = new Set([
+      TYPE_LIQUIDATION_UPDATE.toLowerCase(),
+      TYPE_LIQUIDATION_PAYOUT.toLowerCase(),
+    ]);
+    const trackedLogs = dataPushLogs.filter((l) => trackedTypes.has(l.topics[1]!.toLowerCase()));
+
     const counts: Record<string, number> = {};
-    for (const l of dataPushLogs) {
+    for (const l of trackedLogs) {
       expect(l.address).to.equal(await liquidatorView.getAddress());
       const t = l.topics[1]!.toLowerCase();
       counts[t] = (counts[t] ?? 0) + 1;
@@ -241,8 +266,8 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
 
     // Decode and assert payloads so we don't accidentally accept duplicate/mis-typed pushes.
     const abiCoder = ethers.AbiCoder.defaultAbiCoder();
-    const updateLog = dataPushLogs.find((l) => l.topics[1]!.toLowerCase() === TYPE_LIQUIDATION_UPDATE.toLowerCase())!;
-    const payoutLog = dataPushLogs.find((l) => l.topics[1]!.toLowerCase() === TYPE_LIQUIDATION_PAYOUT.toLowerCase())!;
+    const updateLog = trackedLogs.find((l) => l.topics[1]!.toLowerCase() === TYPE_LIQUIDATION_UPDATE.toLowerCase())!;
+    const payoutLog = trackedLogs.find((l) => l.topics[1]!.toLowerCase() === TYPE_LIQUIDATION_PAYOUT.toLowerCase())!;
 
     const updatePayload: string = abiCoder.decode(["bytes"], updateLog.data)[0];
     const [

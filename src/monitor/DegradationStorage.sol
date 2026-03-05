@@ -151,6 +151,13 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @dev Reverts if caller lacks ACTION_ADMIN and ACTION_VIEW_SYSTEM_STATUS.
      */
     modifier onlySystemHealthViewer(){
+        // Allow the Registry-registered DegradationMonitor to read storage without granting it viewer roles.
+        // Rationale: DegradationMonitor is the coordinator and should be able to query its own submodules.
+        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        if (mon != address(0) && msg.sender == mon) {
+            _;
+            return;
+        }
         require(_hasRole(ActionKeys.ACTION_ADMIN,msg.sender)||_hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS,msg.sender),"DegradationStorage: no permission"); 
         _; 
     }
@@ -234,14 +241,23 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @notice Add an event to the circular buffer.
      * @dev Reverts if:
      *      - registry is invalid (ZeroAddress / NotAContract)
-     *      - caller lacks ACTION_ADMIN
+     *      - caller lacks ACTION_ADMIN AND caller is not Registry[KEY_DEGRADATION_MONITOR]
      *
      * Security:
-     * - Role-gated (ACTION_ADMIN)
+     * - Role-gated (ACTION_ADMIN) OR DegradationMonitor single-entry (Registry[KEY_DEGRADATION_MONITOR])
+     * - Rationale: DegradationMonitor is the write-path coordinator; Storage should accept writes from the
+     *   registry-bound monitor without requiring the monitor contract itself to hold ACTION_ADMIN.
      *
      * @param degradationEvent Event to store.
      */
-    function addEventToCircularBuffer(DegradationEvent memory degradationEvent) external onlyValidRegistry onlyAdmin {
+    function addEventToCircularBuffer(DegradationEvent memory degradationEvent) external onlyValidRegistry {
+        // Allow DegradationMonitor (Registry-bound) as single-entry coordinator.
+        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        if (mon == address(0) || msg.sender != mon) {
+            // Fallback: allow direct admin writes (legacy / maintenance).
+            IAccessControlManager(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL))
+                .requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        }
         uint256 pos = _currentEventIndex % MAX_DEGRADATION_EVENTS;
         bool overwrite = _actualEventCount >= MAX_DEGRADATION_EVENTS;
         _circularEvents[pos] = degradationEvent;

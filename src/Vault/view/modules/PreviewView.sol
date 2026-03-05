@@ -138,7 +138,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return hfAfter Health factor after the deposit (bps=1e4). Returns max uint256 if debt is zero.
      * @return ok Whether hfAfter >= MIN threshold
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
      * @return positionVersion PositionView cache version
      */
     function previewDeposit(address user, address asset, uint256 amount)
@@ -146,7 +146,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyUserOrViewer(user)
-        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
+        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionUpdateBlock, uint64 positionVersion)
     {
         if (asset == address(0)) revert PreviewView__InvalidInput();
         (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version) =
@@ -155,7 +155,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         hfAfter = _calcHF(newCollateral, debt);
         ok = hfAfter >= _minHealthFactorBps();
         positionIsValid = isValid;
-        positionTimestamp = blockNumber;
+        positionUpdateBlock = blockNumber;
         positionVersion = version;
     }
 
@@ -176,7 +176,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return hfAfter Health factor after the withdrawal (bps=1e4). Returns max uint256 if debt is zero.
      * @return ok Whether hfAfter >= MIN threshold
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
      * @return positionVersion PositionView cache version
      */
     function previewWithdraw(address user, address asset, uint256 amount)
@@ -184,7 +184,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyUserOrViewer(user)
-        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
+        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionUpdateBlock, uint64 positionVersion)
     {
         if (asset == address(0)) revert PreviewView__InvalidInput();
         (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version) =
@@ -193,7 +193,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         hfAfter = _calcHF(newCollateral, debt);
         ok = hfAfter >= _minHealthFactorBps();
         positionIsValid = isValid;
-        positionTimestamp = blockNumber;
+        positionUpdateBlock = blockNumber;
         positionVersion = version;
     }
 
@@ -217,7 +217,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return newLTV Loan-to-value ratio after the borrow (bps=1e4). Returns 0 if collateral==0 or debt==0.
      * @return maxBorrowable Remaining borrowable headroom under MAX LTV (0 if already at/above max)
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
      * @return positionVersion PositionView cache version
      */
     function previewBorrow(
@@ -236,7 +236,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
             uint256 newLTV,
             uint256 maxBorrowable,
             bool positionIsValid,
-            uint256 positionTimestamp,
+            uint256 positionUpdateBlock,
             uint64 positionVersion
         )
     {
@@ -258,7 +258,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
             maxBorrowable = maxDebt - newDebt;
         }
         positionIsValid = isValid;
-        positionTimestamp = blockNumber;
+        positionUpdateBlock = blockNumber;
         positionVersion = version;
     }
 
@@ -277,7 +277,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset Asset address
      * @return maxBorrowable Remaining borrowable headroom under MAX LTV (0 if already at/above max)
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
      * @return positionVersion PositionView cache version
      */
     function getMaxBorrowableWithMeta(address user, address asset)
@@ -288,7 +288,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             uint256 maxBorrowable,
             bool positionIsValid,
-            uint256 positionTimestamp,
+            uint256 positionUpdateBlock,
             uint64 positionVersion
         )
     {
@@ -298,7 +298,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 maxDebt = (collateral * _maxLtvBps()) / 10_000;
         maxBorrowable = debt >= maxDebt ? 0 : (maxDebt - debt);
         positionIsValid = isValid;
-        positionTimestamp = blockNumber;
+        positionUpdateBlock = blockNumber;
         positionVersion = version;
     }
 
@@ -319,7 +319,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return newHF Health factor after the repay (bps=1e4). Returns max uint256 if debt becomes zero.
      * @return newLTV Loan-to-value ratio after the repay (bps=1e4). Returns 0 if collateral==0 or debt==0.
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache blockNumber (blocks)
+     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
      * @return positionVersion PositionView cache version
      */
     function previewRepay(address user, address asset, uint256 amount)
@@ -327,7 +327,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyUserOrViewer(user)
-        returns (uint256 newHF, uint256 newLTV, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
+        returns (uint256 newHF, uint256 newLTV, bool positionIsValid, uint256 positionUpdateBlock, uint64 positionVersion)
     {
         if (asset == address(0)) revert PreviewView__InvalidInput();
         (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version) =
@@ -336,7 +336,7 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
         newHF = _calcHF(collateral, newDebt);
         newLTV = _calcLTV(collateral, newDebt);
         positionIsValid = isValid;
-        positionTimestamp = blockNumber;
+        positionUpdateBlock = blockNumber;
         positionVersion = version;
     }
 

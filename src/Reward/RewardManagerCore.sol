@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { RewardPoints } from "../Token/RewardPoints.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { Registry } from "../registry/Registry.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { SystemEvents } from "../Vault/SystemEvents.sol";
 import { RewardEvents } from "./RewardEvents.sol";
-import { ViewConstants } from "../Vault/view/ViewConstants.sol";
 import {
     ZeroAddress,
+    NotAContract,
     MissingRole,
     InvalidCaller,
     ExternalModuleRevertedRaw
@@ -19,6 +16,25 @@ import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
+import { RewardFormulaLib } from "./libraries/RewardFormulaLib.sol";
+
+/// @dev Minimal LoanFlowView read adapter used by RewardManagerCore.
+interface ILoanFlowViewRewardRead {
+    function getUserBorrowFlowForReward(address user)
+        external
+        view
+        returns (uint256 borrowVolumeUsd8, uint256 borrowCount, bool isValid, uint256 blockNumber);
+}
+
+/// @dev Minimal EarnConfig read adapter (governance params SSOT).
+interface IEarnConfigRewardRead {
+    function getDynamicRewardParams()
+        external
+        view
+        returns (uint256 thresholdEasy, uint256 multiplierBps, uint256 updateBlock);
+
+    function getLevelMultiplierBps(uint8 level) external view returns (uint256 multiplierBps);
+}
 
 /// @title RewardManagerCore - 积分管理核心业务逻辑
 /// @notice 处理积分计算、发放和批量操作的核心逻辑
@@ -29,30 +45,11 @@ import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 /// @dev 通过 Registry 进行模块地址获取，确保架构一致性
 /// @dev 现行链上基线（见 docs/Usage-Guide/Reward-System-Usage-Guide.md）：
 /// @dev - borrow(duration>0)：锁定 1 积分（不铸币）
-/// @dev - repay(duration==0 且 hfHighEnough==true)：释放锁定积分并铸币
-/// @dev - repay(hfHighEnough==false)：不释放，并按参数走扣罚/欠分账本
+/// @dev - repay(duration==0 且 isOnTimeAndFullyRepaid==true)：释放锁定积分并铸币
+/// @dev - repay(isOnTimeAndFullyRepaid==false)：不释放，并按提前/逾期规则走扣罚/欠分账本
+/// @dev   说明：V1 入口的 `hfHighEnough` 为历史遗留命名；当前语义是 `isOnTimeAndFullyRepaid`（按期且足额还清），不要按旧名误解为 HealthFactor。
 
 contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, RewardModuleBase {
-    // ========== Read-gate (privacy hardening) ==========
-    /// @notice 读取权限被拒绝（read-gate 开启时，只有白名单 reader 可读取 RMCore 的 get* 查询）
-    error RewardManagerCore__UnauthorizedReader(address caller);
-
-    /// @notice 是否开启 read-gate（默认开启：true）
-    bool private _readGateEnabled;
-
-    /// @notice 额外 reader 白名单（可选：例如运维/风控模块）
-    mapping(address => bool) private _extraReaders;
-
-    modifier onlyAllowedReader() {
-        if (_readGateEnabled) {
-            // B 策略：默认仅允许 RewardView 读取（统一只读入口）
-            address rewardView = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_VIEW);
-            if (msg.sender != rewardView && !_extraReaders[msg.sender]) {
-                revert RewardManagerCore__UnauthorizedReader(msg.sender);
-            }
-        }
-        _;
-    }
     /// @notice 入口收紧引导错误（用于提示外部调用者应通过 RewardManager 调用）
     error RewardManagerCore__UseRewardManagerEntry();
     /// @notice DEPRECATED：检测到直接调用核心入口，将被拒绝
@@ -65,58 +62,34 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     /// @notice Registry 合约地址（私有存储，提供显式 getter）
     address private _registryAddr;
 
-    /// @notice 基础积分权重参数（私有存储，提供显式 getter）
-    uint256 private _basePointPerHundredUsd; // 每 100 USD 稳定币借款基础分
-    uint256 private _durationPointPerDay;  // 每借款 1 天的积分
-    uint256 private _earlyRepayBonus;      // Bonus BPS (0–10000)，默认 500 (=5%)
-    uint256 private _basePointPerEth;      // 每 1 ETH 借款的基础分（保留兼容性）
+    // NOTE (strict read boundary):
+    // RewardManagerCore exposes NO external/public view getters for frontends/off-chain consumers.
+    // External reads MUST go through RewardView.
 
     /// @notice 欠分账本：记录用户被扣但余额不足的积分（私有存储）
     mapping(address => uint256) private _penaltyLedger;
 
-    // ========== 新增高级功能 ==========
-    
+    // ========== Level system (protocol/borrow gating) ==========
     /// @notice 用户等级系统 (1-5级，5级最高)
     mapping(address => uint8) private _userLevels;
-    
-    /// @notice 等级对应的积分倍数 (BPS, 10000 = 1x)
-    mapping(uint8 => uint256) private _levelMultipliers;
-    
-    /// @notice 动态奖励参数
-    uint256 private _dynamicRewardThreshold; // 触发动态奖励的阈值
-    uint256 private _dynamicRewardMultiplier; // 动态奖励倍数 (BPS)
-    uint256 private _lastRewardResetTime; // 上次重置区块号
-    
-    /// @notice 积分缓存系统
-    struct PointCache {
-        uint256 points;
-        uint256 blockNumber;
-        bool isValid;
-    }
-    
-    mapping(address => PointCache) private _pointCache;
-    uint256 private _cacheExpirationBlocks; // 缓存过期时间（区块数）
-    
-    /// @notice 批量操作统计
-    uint256 private _totalBatchOperations;
-    uint256 private _totalCachedRewards;
-    
-    /// @notice 用户活跃度追踪
-    mapping(address => uint256) private _userLastActivity;
-    mapping(address => uint256) private _userTotalLoans;
-    mapping(address => uint256) private _userTotalVolume;
+
     /// @notice 最低计分本金：1000 USDC（6 decimals），低于该值不计分/不锁定
     uint256 private constant MIN_ELIGIBLE_PRINCIPAL = 1_000e6;
+    /// @notice Earn-side baseline Easy per order (18 decimals).
+    uint256 private constant _BASE_LOCK_EASY = 1e18;
+    /// @dev MUST match OrderEngine's `_ON_TIME_WINDOW_BLOCKS` (see `src/core/LendingEngine.sol`)
+    ///      so "early vs late" classification is consistent across SSOT and reward penalty logic.
+    uint256 private constant _DEFAULT_ON_TIME_WINDOW_BLOCKS = 7_200; // block-based SSOT default (deployment/governance may override)
 
     // ========== 锁定-释放 与 扣罚参数 ==========
-    /// @notice 用户锁定积分余额（按用户汇总，最小化改动）
-    mapping(address => uint256) private _lockedPoints;
+    /// @notice 用户锁定 Easy 余额（按用户汇总，最小化改动；虚拟锁定/未铸币）
+    mapping(address => uint256) private _lockedEasy;
     /// @notice 用户当前锁定的目标到期时间（以最近一次借款为准，最小化改动）
     mapping(address => uint256) private _lockedMaturity;
 
-    // ========== V2：按订单锁定（解决多订单错判） ==========
-    /// @dev 每个 orderId 对应的锁定积分（默认 1e18），0 表示未锁定/已处理
-    mapping(uint256 => uint256) private _lockedPointsByOrderId;
+    // ========== 按订单维度：锁定（解决多订单错判） ==========
+    /// @dev 每个 orderId 对应的锁定 Easy（默认 1e18），0 表示未锁定/已处理
+    mapping(uint256 => uint256) private _lockedEasyByOrderId;
     /// @dev 每个 orderId 对应的 borrower（用于一致性校验）
     mapping(uint256 => address) private _lockedUserByOrderId;
     /// @dev 每个 orderId 的 maturity（用于提前/逾期判定与审计）
@@ -132,19 +105,7 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
     /// @notice 按期履约计数
     mapping(address => uint256) private _onTimeRepayCount;
 
-    // ========== 事件定义 ==========
-    
-    /// @notice 积分参数更新事件
-    event RewardParametersUpdated(
-        bytes32 indexed actionKey,
-        uint256 basePointPerHundredUsd,
-        uint256 durationPointPerDay,
-        uint256 earlyRepayBonus,
-        uint256 basePointPerEth,
-        address indexed updatedBy,
-        uint256 blockNumber
-    );
-
+    // ========== Events ==========
     /// @notice 用户等级更新事件
     event UserLevelUpdated(
         bytes32 indexed actionKey,
@@ -155,108 +116,41 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         uint256 blockNumber
     );
 
-    /// @notice 动态奖励参数更新事件
-    event DynamicRewardParametersUpdated(
-        bytes32 indexed actionKey,
-        uint256 threshold,
-        uint256 multiplier,
-        address indexed updatedBy,
-        uint256 blockNumber
-    );
-
-    /// @notice 缓存参数更新事件
-    event CacheParametersUpdated(
-        bytes32 indexed actionKey,
-        uint256 expirationTime,
-        address indexed updatedBy,
-        uint256 blockNumber
-    );
-
-    /// @notice 惩罚积分扣除事件
-    event PenaltyPointsDeducted(
+    /// @notice 惩罚 Easy 扣除事件
+    event PenaltyEasyDeducted(
         bytes32 indexed actionKey,
         address indexed user,
-        uint256 points,
+        uint256 easyAmount,
         uint256 remainingDebt,
         address indexed deductedBy,
         uint256 blockNumber
     );
 
-    /// @notice 批量操作完成事件
-    event BatchOperationCompleted(
-        bytes32 indexed actionKey,
-        uint256 totalUsers,
-        uint256 totalPoints,
-        address indexed operator,
-        uint256 blockNumber
-    );
-
     /// @notice 初始化
     /// @param initialRegistryAddr Registry 合约地址
-    /// @param baseUsd 基础分/100 USD
-    /// @param perDay 每天积分
-    /// @param bonus 健康因子奖励 (BPS, 默认500=5%)
-    /// @param baseEth 基础分/ETH（保留兼容性）
-    function initialize(address initialRegistryAddr, uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth) external initializer {
+    function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         _registryAddr = initialRegistryAddr;
-        _basePointPerHundredUsd = baseUsd;
-        _durationPointPerDay = perDay;
-        _earlyRepayBonus = bonus;
-        _basePointPerEth = baseEth;
-
-        // 初始化等级倍数
-        _levelMultipliers[1] = 10000; // 1x
-        _levelMultipliers[2] = 11000; // 1.1x
-        _levelMultipliers[3] = 12500; // 1.25x
-        _levelMultipliers[4] = 15000; // 1.5x
-        _levelMultipliers[5] = 20000; // 2x
-        
-        // 初始化动态奖励参数
-        _dynamicRewardThreshold = 1000e18; // 1000积分阈值
-        _dynamicRewardMultiplier = 12000; // 1.2x倍数
-        _lastRewardResetTime = block.number;
-        
-        // 设置默认健康因子奖励为5%（500 BPS）
-        if (_earlyRepayBonus == 0) {
-            _earlyRepayBonus = 500; // 5% = 500 BPS
-        }
-        
-        // 初始化缓存过期时间
-        _cacheExpirationBlocks = 1 hours / 2 seconds;
         // 锁定/扣罚默认参数
-        _onTimeWindowBlocks = 1 days / 2 seconds;
+        _onTimeWindowBlocks = _DEFAULT_ON_TIME_WINDOW_BLOCKS;
         // 与 Reward-System-Usage-Guide 对齐：提前还款不处罚；逾期默认 5%
         _earlyPenaltyBps = 0;
         _latePenaltyBps = 500;
 
-        // 隐私强化：默认开启 read-gate（仅 RewardView/白名单可读取 RMCore 的 get* 查询）
-        _readGateEnabled = true;
-
         // RMCore 不发 ActionExecuted，避免与业务入口/治理入口产生重复语义；参数变更以专用事件为准。
     }
 
-    // ========== 修饰符 ==========
-
-    /// @dev 验证Registry地址有效性（由基类 onlyValidRegistry 提供）
-
-    // ========== 权限管理 ==========
-
-    /// @dev 权限校验内部函数（由基类 _requireRole 提供）
-
-    // ========== 内部模块获取 ==========
-
-    /// @dev 获取积分代币合约（由基类 _getRewardToken 提供）
-
     // ========== 公共接口 ==========
 
-    /// @notice LendingEngine 在 borrow 或 repay 后调用此函数
+    /// @notice RewardManager 在 borrow 或 repay 后调用此函数（V1 兼容入口）
     /// @param user 用户地址
     /// @param amount 借款金额
-    /// @param duration 借款时长
-    /// @param hfHighEnough 健康因子是否足够
+    /// @param duration 借款时长（区块数）；borrow 推荐传订单 term；repay 固定传 0
+    /// @param hfHighEnough 历史遗留命名；当前语义为 `isOnTimeAndFullyRepaid`（按期且足额还清，由 LendingEngine 计算并传入；主要在 repay 场景有意义）。
+    ///        注意：**不要**将其按旧名误解为“健康因子足够（HealthFactor）”。
     function onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough)
         external
         onlyValidRegistry
@@ -265,17 +159,23 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         // 收紧入口：仅允许 RewardManager 调用，统一路径为 LE -> RM -> RMCore
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) {
-            // 使用自定义错误进行 DEPRECATED 引导，提示调用方改为通过 RewardManager
             emit DeprecatedDirectEntryAttempt(msg.sender, block.number);
-            revert RewardManagerCore__UseRewardManagerEntry();
+            // IMPORTANT:
+            // - We must not revert here, otherwise the audit event is discarded.
+            // - "Reject" semantics are implemented as a no-op: no state changes, no mint/burn.
+            return;
         }
         
+        // 语义归一：V1 入口参数名为 hfHighEnough（legacy），实际语义为“按期且足额还清”。
+        bool isOnTimeAndFullyRepaid = hfHighEnough;
+
         // 业务设定（本地/测试基线）：只要成功借贷（借款事件），即可获得 1 积分。
         // - 借款（duration>0）：锁定 1 积分
-        // - 还款（duration=0 且 hfHighEnough=true）：释放锁定的 1 积分（mint）
+        // - 还款（duration=0 且 isOnTimeAndFullyRepaid=true）：释放锁定的 1 积分（不在 RMCore 里铸币；发行由 EasyEmissionController 统一处理）
         //
         // 说明：此处保持“借款锁定、还款释放”的架构语义不变，但将积分计算简化为固定 1。
-        //      amount/duration 仍用于活动统计、到期判断（惩罚路径）等。
+        //      其中“协议借款总量/次数”等 activity 统计不再由 RMCore 计算，而是优先从 LoanFlowView(USD-8 SSOT)读取并镜像到 RewardView。
+        //      amount/duration 仍用于本次事件的资格判断（如 MIN_ELIGIBLE_PRINCIPAL）与到期判断（惩罚路径）等。
         _updateUserActivity(user, amount);
 
         // 本金不足 1000 USDC 不计分（不锁定、不计合格借款）
@@ -284,26 +184,26 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         }
 
         if (duration > 0) {
-            uint256 points = 1e18; // 1 point with RewardPoints.decimals() == 18
+            uint256 easyAmount = 1e18; // 1 Easy with reward token decimals == 18
             _eligibleLoanCount[user] += 1;
-            _lockedPoints[user] += points;
+            _lockedEasy[user] += easyAmount;
             // 借款时以 duration 推导 maturity：取“最近一次”即可
             _lockedMaturity[user] = block.number + duration;
             return;
         }
 
-        // 还款：根据 hfHighEnough（按期且足额）决定释放或扣罚
-        if (hfHighEnough) {
-            uint256 locked = _lockedPoints[user];
+        // 还款：根据 isOnTimeAndFullyRepaid（按期且足额）决定释放或扣罚
+        if (isOnTimeAndFullyRepaid) {
+            uint256 locked = _lockedEasy[user];
             if (locked > 0) {
                 // 先抵扣欠分
                 uint256 debt = _penaltyLedger[user];
-                uint256 toMint = locked;
+                uint256 toOffset = locked;
                 if (debt > 0) {
-                    if (toMint >= debt) {
-                        toMint -= debt;
+                    if (toOffset >= debt) {
+                        toOffset -= debt;
                         _penaltyLedger[user] = 0;
-                        emit PenaltyPointsDeducted(
+                        emit PenaltyEasyDeducted(
                             ActionKeys.ACTION_CLAIM_REWARD,
                             user,
                             debt,
@@ -312,30 +212,25 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                             block.number
                         );
                     } else {
-                        _penaltyLedger[user] = debt - toMint;
-                        emit PenaltyPointsDeducted(
+                        _penaltyLedger[user] = debt - toOffset;
+                        emit PenaltyEasyDeducted(
                             ActionKeys.ACTION_CLAIM_REWARD,
                             user,
-                            toMint,
+                            toOffset,
                             _penaltyLedger[user],
                             msg.sender,
                             block.number
                         );
-                        toMint = 0;
+                        toOffset = 0;
                     }
                 }
 
-                if (toMint > 0) {
-                    try _getRewardToken().mintPoints(user, toMint) {
-                        emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.number);
-                        _tryPushRewardEarned(user, toMint, "OnTimeRelease");
-                    } catch {
-                        revert ExternalModuleRevertedRaw("RewardPoints", "");
-                    }
-                }
+                // NOTE: Token minting is handled by EasyEmissionController per WhitePaper.
+                // RMCore keeps the lock/ledger semantics and offsets penalty ledger best-effort,
+                // but does not mint the reward token to avoid double issuance.
 
                 // 清空锁定并增加履约计数
-                _lockedPoints[user] = 0;
+                _lockedEasy[user] = 0;
                 _lockedMaturity[user] = 0;
                 _onTimeRepayCount[user] += 1;
             }
@@ -343,10 +238,10 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         }
 
         // 非按期足额：作废锁定并扣罚（提前或逾期）
-        uint256 lockedPoints = _lockedPoints[user];
-        if (lockedPoints > 0) {
+        uint256 lockedEasy = _lockedEasy[user];
+        if (lockedEasy > 0) {
             // 清空锁定
-            _lockedPoints[user] = 0;
+            _lockedEasy[user] = 0;
             uint256 m = _lockedMaturity[user];
             _lockedMaturity[user] = 0;
 
@@ -356,14 +251,14 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             // 与使用指南对齐：提前还款不处罚（bps=0）；仅逾期按 latePenaltyBps 扣罚
             uint256 bps = isEarly ? 0 : _latePenaltyBps;
             if (bps > 0) {
-                uint256 penalty = (lockedPoints * bps) / 10000;
+                uint256 penalty = (lockedEasy * bps) / 10000;
                 // 尝试直接烧分；不足则记入欠分账本
-                try _getRewardToken().burnPoints(user, penalty) {
-                    _tryPushPointsBurned(user, penalty, isEarly ? "EarlyPenalty" : "LatePenalty");
+                try _getRewardToken().burn(user, penalty) {
+                        _tryPushEasyBurned(user, penalty, isEarly ? "EarlyPenalty" : "LatePenalty");
                 } catch {
                     // 记录欠分
                     _penaltyLedger[user] += penalty;
-                    emit PenaltyPointsDeducted(
+                        emit PenaltyEasyDeducted(
                         ActionKeys.ACTION_LIQUIDATE,
                         user,
                         0,
@@ -377,11 +272,11 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         }
     }
 
-    /// @notice LendingEngine 在 borrow/repay(足额) 后调用（V2：按订单）
+    /// @notice LendingEngine 在 borrow/repay(足额) 后调用（按订单维度）
     /// @dev
     /// - outcome: 0=Borrow,1=RepayOnTimeFull,2=RepayEarlyFull,3=RepayLateFull
     /// - 仅 RewardManager 可调用（统一入口：LE -> RM -> RMCore）
-    function onLoanEventV2(
+    function onLoanEventByOrder(
         address user,
         uint256 orderId,
         uint256 amount,
@@ -391,20 +286,16 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
         if (msg.sender != rewardManager) {
             emit DeprecatedDirectEntryAttempt(msg.sender, block.number);
-            revert RewardManagerCore__UseRewardManagerEntry();
+            // See legacy entry: do not revert, otherwise the audit event is discarded.
+            return;
         }
 
-        // 复用统计口径：记录活跃与总量（amount 精度为“最小单位”，仅用于展示/统计，不参与发分主逻辑）
+        // 记录活跃（协议统计 SSOT：LoanFlowView；RMCore 不做跨资产价值推导/镜像）
         _updateUserActivity(user, amount);
 
         // Borrow：为该订单锁定 1 积分（按订单维度）
         if (outcome == 0) {
-            if (orderId == 0 && _lockedPointsByOrderId[orderId] != 0) {
-                // orderId=0 在本地测试可能存在；不做特殊处理，仅保证幂等
-                    uint256 noop = 0;
-                    noop;
-            }
-            if (_lockedPointsByOrderId[orderId] != 0) {
+            if (_lockedEasyByOrderId[orderId] != 0) {
                 // 幂等：同一订单重复回调忽略
                 return;
             }
@@ -412,18 +303,37 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             if (amount < MIN_ELIGIBLE_PRINCIPAL) {
                 return;
             }
-            uint256 points = 1e18;
-            _eligibleLoanCount[user] += 1;
-            _lockedPoints[user] += points;
+            uint8 level = _userLevels[user];
+            if (level < 1) level = 1;
 
-            _lockedPointsByOrderId[orderId] = points;
+            // Read earn-config params best-effort; never revert the main path.
+            (uint256 levelMultiplierBps, uint256 dynThresholdEasy, uint256 dynMultiplierBps) =
+                _readEarnConfigBestEffort(level);
+
+            // lockedEasy = BASE_EASY * levelMultiplierBps / 10000
+            uint256 easyAmount = (_BASE_LOCK_EASY * levelMultiplierBps) / 10000;
+            if (easyAmount == 0) {
+                // Defensive fallback: keep baseline semantics.
+                easyAmount = _BASE_LOCK_EASY;
+            }
+
+            // Optional dynamic reward:
+            // if enabled (bps>0) and easyAmount >= threshold => easyAmount += easyAmount*bps/10000
+            if (dynMultiplierBps != 0 && dynThresholdEasy != 0 && easyAmount >= dynThresholdEasy) {
+                easyAmount += (easyAmount * dynMultiplierBps) / 10000;
+            }
+
+            _eligibleLoanCount[user] += 1;
+            _lockedEasy[user] += easyAmount;
+
+            _lockedEasyByOrderId[orderId] = easyAmount;
             _lockedUserByOrderId[orderId] = user;
             _lockedMaturityByOrderId[orderId] = maturity;
             return;
         }
 
         // Repay：必须能找到该 orderId 的锁定记录；若已处理/未锁定则幂等忽略
-        uint256 locked = _lockedPointsByOrderId[orderId];
+        uint256 locked = _lockedEasyByOrderId[orderId];
         if (locked == 0) {
             return;
         }
@@ -431,26 +341,26 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         if (lockedUser != user) revert InvalidCaller();
 
         // 清除订单锁定（防重放）
-        delete _lockedPointsByOrderId[orderId];
+        delete _lockedEasyByOrderId[orderId];
         delete _lockedUserByOrderId[orderId];
         delete _lockedMaturityByOrderId[orderId];
 
         // 同步扣减用户聚合锁定（与旧实现字段兼容）
-        if (_lockedPoints[user] >= locked) {
-            _lockedPoints[user] -= locked;
+        if (_lockedEasy[user] >= locked) {
+            _lockedEasy[user] -= locked;
         } else {
-            _lockedPoints[user] = 0;
+            _lockedEasy[user] = 0;
         }
 
         // outcome == 1：按期足额 → 释放并铸币（先抵扣欠分）
         if (outcome == 1) {
             uint256 debt = _penaltyLedger[user];
-            uint256 toMint = locked;
+            uint256 toOffset = locked;
             if (debt > 0) {
-                if (toMint >= debt) {
-                    toMint -= debt;
+                if (toOffset >= debt) {
+                    toOffset -= debt;
                     _penaltyLedger[user] = 0;
-                    emit PenaltyPointsDeducted(
+                    emit PenaltyEasyDeducted(
                         ActionKeys.ACTION_CLAIM_REWARD,
                         user,
                         debt,
@@ -460,28 +370,22 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                     );
                     _tryPushPenaltyLedger(user, 0);
                 } else {
-                    _penaltyLedger[user] = debt - toMint;
-                    emit PenaltyPointsDeducted(
+                    _penaltyLedger[user] = debt - toOffset;
+                    emit PenaltyEasyDeducted(
                         ActionKeys.ACTION_CLAIM_REWARD,
                         user,
-                        toMint,
+                        toOffset,
                         _penaltyLedger[user],
                         msg.sender,
                         block.number
                     );
                     _tryPushPenaltyLedger(user, _penaltyLedger[user]);
-                    toMint = 0;
+                    toOffset = 0;
                 }
             }
 
-            if (toMint > 0) {
-                try _getRewardToken().mintPoints(user, toMint) {
-                    emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.number);
-                    _tryPushRewardEarned(user, toMint, "OnTimeRelease");
-                } catch {
-                    revert ExternalModuleRevertedRaw("RewardPoints", "");
-                }
-            }
+            // NOTE: Token minting is handled by EasyEmissionController per WhitePaper.
+            // We keep only the ledger offset + observability pushes here.
             _onTimeRepayCount[user] += 1;
             return;
         }
@@ -501,11 +405,11 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             if (penalty == 0) {
                 return;
             }
-            try _getRewardToken().burnPoints(user, penalty) {
-                _tryPushPointsBurned(user, penalty, "LatePenalty");
+            try _getRewardToken().burn(user, penalty) {
+                _tryPushEasyBurned(user, penalty, "LatePenalty");
             } catch {
                 _penaltyLedger[user] += penalty;
-                emit PenaltyPointsDeducted(
+                emit PenaltyEasyDeducted(
                     ActionKeys.ACTION_LIQUIDATE,
                     user,
                     0,
@@ -521,168 +425,10 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         // 未知 outcome：忽略（保持向后兼容，避免硬 revert 导致主流程失败）
     }
 
-    /// @notice 批量处理借贷事件
-    /// @param users 用户地址数组
-    /// @param amounts 借款金额数组
-    /// @param durations 借款时长数组
-    /// @param hfHighEnoughs 健康因子是否足够数组
-    function onBatchLoanEvents(
-        address[] calldata users,
-        uint256[] calldata amounts,
-        uint256[] calldata durations,
-        bool[] calldata hfHighEnoughs
-    ) external onlyValidRegistry nonReentrant {
-        // 收紧入口：仅允许 RewardManager 调用，统一路径为 LE -> RM -> RMCore
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            // 使用自定义错误进行 DEPRECATED 引导，提示调用方改为通过 RewardManager
-            emit DeprecatedDirectEntryAttempt(msg.sender, block.number);
-            revert RewardManagerCore__UseRewardManagerEntry();
-        }
-        
-        if (users.length == 0 || users.length > ViewConstants.MAX_BATCH_SIZE) revert InvalidCaller();
-        if (users.length != amounts.length || users.length != durations.length || users.length != hfHighEnoughs.length) {
-            revert InvalidCaller();
-        }
-        
-        // 与单笔 onLoanEvent 对齐：batch 也必须遵循“borrow 锁定、repay 才释放/mint”的语义。
-        // 允许同一批次中混合 borrow(duration>0) 与 repay(duration==0) 事件。
-        uint256 totalPoints = 0; // 统计口径：本批次处理的“点数变更规模”（borrow=锁定，repay=释放/扣罚涉及的点数）
-
-        for (uint256 i = 0; i < users.length; i++) {
-            address user = users[i];
-            uint256 amount = amounts[i];
-            uint256 duration = durations[i];
-            bool flag = hfHighEnoughs[i]; // 当前语义：按期且足额还清（由 LendingEngine 计算并传入）
-
-            _updateUserActivity(user, amount);
-
-            // borrow：锁定 1 积分（不铸币）
-            if (duration > 0) {
-                // 本金不足 1000 USDC 不计分/不锁定
-                if (amount < MIN_ELIGIBLE_PRINCIPAL) {
-                    continue;
-                }
-                uint256 points = 1e18;
-                _eligibleLoanCount[user] += 1;
-                _lockedPoints[user] += points;
-                _lockedMaturity[user] = block.number + duration;
-                totalPoints += points;
-                continue;
-            }
-
-            // repay：按 flag 释放/扣罚（与单笔逻辑一致）
-            if (flag) {
-                uint256 locked = _lockedPoints[user];
-                if (locked == 0) continue;
-
-                // 先抵扣欠分
-                uint256 debt = _penaltyLedger[user];
-                uint256 toMint = locked;
-                if (debt > 0) {
-                    if (toMint >= debt) {
-                        toMint -= debt;
-                        _penaltyLedger[user] = 0;
-                        emit PenaltyPointsDeducted(
-                            ActionKeys.ACTION_CLAIM_REWARD,
-                            user,
-                            debt,
-                            0,
-                            msg.sender,
-                            block.number
-                        );
-                        _tryPushPenaltyLedger(user, 0);
-                    } else {
-                        _penaltyLedger[user] = debt - toMint;
-                        emit PenaltyPointsDeducted(
-                            ActionKeys.ACTION_CLAIM_REWARD,
-                            user,
-                            toMint,
-                            _penaltyLedger[user],
-                            msg.sender,
-                            block.number
-                        );
-                        _tryPushPenaltyLedger(user, _penaltyLedger[user]);
-                        toMint = 0;
-                    }
-                }
-
-                if (toMint > 0) {
-                    try _getRewardToken().mintPoints(user, toMint) {
-                        emit RewardEvents.RewardEarned(user, toMint, "OnTimeRelease", block.number);
-                        _tryPushRewardEarned(user, toMint, "OnTimeRelease");
-                    } catch {
-                        revert ExternalModuleRevertedRaw("RewardPoints", "");
-                    }
-                }
-
-                // 清空锁定并增加履约计数
-                _lockedPoints[user] = 0;
-                _lockedMaturity[user] = 0;
-                _onTimeRepayCount[user] += 1;
-                totalPoints += locked;
-                continue;
-            }
-
-            // 非按期足额：作废锁定并扣罚（提前或逾期）
-            uint256 lockedPoints = _lockedPoints[user];
-            if (lockedPoints == 0) continue;
-            _lockedPoints[user] = 0;
-            uint256 m = _lockedMaturity[user];
-            _lockedMaturity[user] = 0;
-
-            uint256 nowBlock = block.number;
-            bool isEarly = (nowBlock + _onTimeWindowBlocks < m);
-            uint256 bps = isEarly ? 0 : _latePenaltyBps;
-            if (bps > 0) {
-                uint256 penalty = (lockedPoints * bps) / 10000;
-                try _getRewardToken().burnPoints(user, penalty) {
-                    _tryPushPointsBurned(user, penalty, isEarly ? "EarlyPenalty" : "LatePenalty");
-                } catch {
-                    _penaltyLedger[user] += penalty;
-                    emit PenaltyPointsDeducted(
-                        ActionKeys.ACTION_LIQUIDATE,
-                        user,
-                        0,
-                        _penaltyLedger[user],
-                        msg.sender,
-                        block.number
-                    );
-                    _tryPushPenaltyLedger(user, _penaltyLedger[user]);
-                }
-                totalPoints += penalty;
-            }
-        }
-        
-        _totalBatchOperations++;
-        emit BatchOperationCompleted(
-            ActionKeys.ACTION_CLAIM_REWARD,
-            users.length,
-            totalPoints,
-            msg.sender,
-            block.number
-        );
-        _tryPushSystemStats(_totalBatchOperations, _totalCachedRewards);
-    }
-
-    /// @notice 积分销毁代理（消费侧调用），保持 MINTER_ROLE 仅授予 RMCore
-    /// @dev 仅允许 RewardConsumption / RewardCore 调用；用于消费/升级时扣减积分
-    function burnPointsFor(address user, uint256 points) external onlyValidRegistry nonReentrant {
-        if (user == address(0)) revert ZeroAddress();
-        address rewardConsumption = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONSUMPTION);
-        // RewardConsumption 作为外部统一入口；RewardCore 为内部业务模块（仅能被 RewardConsumption 调用）
-        // 允许 RewardCore 触发 burn，保持架构闭环，同时不开放给任意外部调用者
-        address rewardCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CORE);
-        if (msg.sender != rewardConsumption && msg.sender != rewardCore) {
-            revert RewardManagerCore__UseRewardManagerEntry();
-        }
-        _getRewardToken().burnPoints(user, points);
-    }
-
-    /// @notice 扣除用户积分（仅清算/惩罚模块可调用）
+    /// @notice 扣除用户 Easy（仅清算/惩罚模块可调用）
     /// @param user 用户地址
-    /// @param points 扣除积分数量
-    function deductPoints(address user, uint256 points) external onlyValidRegistry nonReentrant {
+    /// @param easyAmount 扣除 Easy 数量
+    function deductEasy(address user, uint256 easyAmount) external onlyValidRegistry nonReentrant {
         // 检查调用者权限 - 只允许清算/惩罚模块或 RewardManager 调用
         address guaranteeFundManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_GUARANTEE_FUND);
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
@@ -690,14 +436,14 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             revert MissingRole();
         }
         
-        if (points == 0) revert InvalidCaller();
+        if (easyAmount == 0) revert InvalidCaller();
         
-        try _getRewardToken().burnPoints(user, points) {
-            _tryPushPointsBurned(user, points, "Penalty Burn");
+        try _getRewardToken().burn(user, easyAmount) {
+            _tryPushEasyBurned(user, easyAmount, "Penalty Burn");
         } catch {
             // 如果积分不足，记录到惩罚账本
-            _penaltyLedger[user] += points;
-                emit PenaltyPointsDeducted(
+            _penaltyLedger[user] += easyAmount;
+                emit PenaltyEasyDeducted(
                 ActionKeys.ACTION_LIQUIDATE,
                 user,
                 0,
@@ -707,41 +453,6 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             );
             _tryPushPenaltyLedger(user, _penaltyLedger[user]);
         }
-    }
-
-    // ========== 管理接口 ==========
-
-    /// @notice 更新积分参数
-    /// @param baseUsd 基础分/100 USD
-    /// @param perDay 每天积分
-    /// @param bonus 健康因子奖励 (BPS)
-    /// @param baseEth 基础分/ETH（保留兼容性）
-    function updateRewardParameters(
-        uint256 baseUsd,
-        uint256 perDay,
-        uint256 bonus,
-        uint256 baseEth
-    ) external onlyValidRegistry {
-        // 检查调用者权限 - 只允许 RewardManager 调用
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            revert MissingRole();
-        }
-        
-        _basePointPerHundredUsd = baseUsd;
-        _durationPointPerDay = perDay;
-        _earlyRepayBonus = bonus;
-        _basePointPerEth = baseEth;
-        
-        emit RewardParametersUpdated(
-            ActionKeys.ACTION_SET_PARAMETER,
-            baseUsd,
-            perDay,
-            bonus,
-            baseEth,
-            msg.sender,
-            block.number
-        );
     }
 
     /// @notice 设置按期窗口（区块数）
@@ -757,6 +468,30 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
         if (msg.sender != rewardManager) revert MissingRole();
         _earlyPenaltyBps = earlyBps;
         _latePenaltyBps = lateBps;
+    }
+
+    // ========== RewardView governance observability pushes (best-effort; no revert) ==========
+
+    /// @notice Best-effort push: dynamic reward params (governance observability) into RewardView cache.
+    /// @dev Only RewardManager can call; push failures do not revert (RewardModuleBase emits RewardViewPushFailed).
+    function pushDynamicRewardParamsToView(uint256 thresholdEasy, uint256 multiplierBps) external onlyValidRegistry {
+        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
+        if (msg.sender != rewardManager) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.number);
+            return;
+        }
+        _tryPushDynamicRewardParams(thresholdEasy, multiplierBps, block.number);
+    }
+
+    /// @notice Best-effort push: level multiplier (governance observability) into RewardView cache.
+    /// @dev Only RewardManager can call; push failures do not revert (RewardModuleBase emits RewardViewPushFailed).
+    function pushLevelMultiplierToView(uint8 level, uint256 multiplierBps) external onlyValidRegistry {
+        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
+        if (msg.sender != rewardManager) {
+            emit DeprecatedDirectEntryAttempt(msg.sender, block.number);
+            return;
+        }
+        _tryPushLevelMultiplier(level, multiplierBps, block.number);
     }
 
     /// @notice 更新用户等级
@@ -782,304 +517,104 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
             msg.sender,
             block.number
         );
-    }
 
-    /// @notice 更新等级倍数
-    /// @param level 等级 (1-5)
-    /// @param newMultiplier 倍数 (BPS)
-    function updateLevelMultiplier(uint8 level, uint256 newMultiplier) external onlyValidRegistry {
-        // 检查调用者权限 - 只允许 RewardManager 调用
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            revert MissingRole();
-        }
-        
-        if (level < 1 || level > 5) revert InvalidCaller();
-        if (newMultiplier == 0) revert InvalidCaller();
-        
-        _levelMultipliers[level] = newMultiplier;
-    }
-
-    /// @notice 更新动态奖励参数
-    /// @param newThreshold 触发阈值
-    /// @param newMultiplier 奖励倍数 (BPS)
-    function updateDynamicRewardParameters(uint256 newThreshold, uint256 newMultiplier) external onlyValidRegistry {
-        // 检查调用者权限 - 只允许 RewardManager 调用
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            revert MissingRole();
-        }
-        
-        _dynamicRewardThreshold = newThreshold;
-        _dynamicRewardMultiplier = newMultiplier;
-        
-        emit DynamicRewardParametersUpdated(
-            ActionKeys.ACTION_SET_PARAMETER,
-            newThreshold,
-            newMultiplier,
-            msg.sender,
-            block.number
-        );
-    }
-
-    /// @notice 更新缓存过期时间
-    /// @param newExpirationTime 过期时间（区块数）
-    function updateCacheExpirationTime(uint256 newExpirationTime) external onlyValidRegistry {
-        // 检查调用者权限 - 只允许 RewardManager 调用
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            revert MissingRole();
-        }
-        
-        _cacheExpirationBlocks = newExpirationTime;
-        
-        emit CacheParametersUpdated(
-            ActionKeys.ACTION_SET_PARAMETER,
-            newExpirationTime,
-            msg.sender,
-            block.number
-        );
-    }
-
-    /// @notice 清除用户积分缓存
-    /// @param user 用户地址
-    function clearUserCache(address user) external onlyValidRegistry {
-        // 检查调用者权限 - 只允许 RewardManager 调用
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            revert MissingRole();
-        }
-        
-        delete _pointCache[user];
-    }
-
-    /// @notice 重置动态奖励时间
-    function resetDynamicRewardTime() external onlyValidRegistry {
-        // 检查调用者权限 - 只允许 RewardManager 调用
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            revert MissingRole();
-        }
-        
-        _lastRewardResetTime = block.number;
-    }
-
-    /// @notice 设置健康因子奖励
-    /// @param newBonus 健康因子奖励 (BPS, 500 = 5%)
-    function setHealthFactorBonus(uint256 newBonus) external onlyValidRegistry {
-        // 检查调用者权限 - 只允许 RewardManager 调用
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) {
-            revert MissingRole();
-        }
-        
-        _earlyRepayBonus = newBonus;
-    }
-
-    // ========== 查询接口 ==========
-    // NOTE: 外部只读查询请统一走 RewardView（docs/Architecture-Guide.md）。
-    // 这里保留最小查询接口用于：
-    // - 协议内其它模块（如 LendingEngine）进行链上校验（例如长周期借款等级门槛）
-    // - RewardView 透传/兼容老脚本（逐步迁移中）
-    // 因此这些接口应视为“DEPRECATED for external consumers”。
-
-    /// @notice 查询用户等级
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserLevel(user) 查询。
-    /// @param user 用户地址
-    /// @return level 用户等级
-    function getUserLevel(address user) external view onlyAllowedReader returns (uint8 level) {
-        return _userLevels[user];
-    }
-
-    /// @notice 查询等级倍数
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getLevelMultiplier(level) 查询。
-    /// @param level 等级
-    /// @return multiplier 倍数
-    function getLevelMultiplier(uint8 level) external view onlyAllowedReader returns (uint256 multiplier) {
-        return _levelMultipliers[level];
-    }
-
-    /// @notice 查询用户活跃度信息
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserActivity(user) 查询。
-    /// @param user 用户地址
-    /// @return lastActivity 最后活跃时间
-    /// @return totalLoans 总借款次数
-    /// @return totalVolume 总借款金额
-    function getUserActivity(address user) external view onlyAllowedReader returns (uint256 lastActivity, uint256 totalLoans, uint256 totalVolume) {
-        return (_userLastActivity[user], _userTotalLoans[user], _userTotalVolume[user]);
-    }
-
-    /// @notice 查询用户积分缓存
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserCache(user) 查询。
-    /// @param user 用户地址
-    /// @return points 缓存积分
-    /// @return blockNumber 缓存区块号（blockNumber）
-    /// @return isValid 是否有效
-    function getUserCache(address user) external view onlyAllowedReader returns (uint256 points, uint256 blockNumber, bool isValid) {
-        PointCache storage cache = _pointCache[user];
-        return (cache.points, cache.blockNumber, cache.isValid);
-    }
-
-    /// @notice 查询积分计算参数
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getRewardParameters() 查询。
-    /// @return baseUsd 基础分/100 USD
-    /// @return perDay 每天积分
-    /// @return bonus 健康因子奖励 (BPS)
-    /// @return baseEth 基础分/ETH
-    function getRewardParameters() external view onlyAllowedReader returns (uint256 baseUsd, uint256 perDay, uint256 bonus, uint256 baseEth) {
-        return (_basePointPerHundredUsd, _durationPointPerDay, _earlyRepayBonus, _basePointPerEth);
-    }
-
-    /// @notice 查询用户欠分
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getUserPenaltyDebt(user) 查询。
-    function getUserPenaltyDebt(address user) external view onlyAllowedReader returns (uint256) {
-        return _penaltyLedger[user];
-    }
-
-    /// @notice 查询缓存过期时间
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getCacheExpirationTime() 查询。
-    function getCacheExpirationTime() external view onlyAllowedReader returns (uint256) {
-        return _cacheExpirationBlocks;
-    }
-
-    /// @notice 查询系统统计（批量操作与缓存命中次数）
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getTotalBatchOperations() 查询。
-    function getTotalBatchOperations() external view onlyAllowedReader returns (uint256) {
-        return _totalBatchOperations;
-    }
-
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getTotalCachedRewards() 查询。
-    function getTotalCachedRewards() external view onlyAllowedReader returns (uint256) {
-        return _totalCachedRewards;
-    }
-
-    /// @notice 查询最后重置时间
-    /// @dev DEPRECATED（外部/前端/链下）：请统一改用 RewardView.getLastRewardResetTime() 查询。
-    function getLastRewardResetTime() external view onlyAllowedReader returns (uint256) {
-        return _lastRewardResetTime;
-    }
-
-    // ========== Read-gate admin (via RewardManager governance) ==========
-    /// @notice 查询：read-gate 是否开启
-    function isReadGateEnabled() external view returns (bool) {
-        return _readGateEnabled;
-    }
-
-    /// @notice 设置 read-gate（仅 RewardManager 可调用，治理通过 RewardManager 入口转发）
-    function setReadGateEnabled(bool enabled) external onlyValidRegistry {
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) revert MissingRole();
-        _readGateEnabled = enabled;
-    }
-
-    /// @notice 设置额外 reader 白名单（仅 RewardManager 可调用）
-    function setExtraReader(address reader, bool allowed) external onlyValidRegistry {
-        address rewardManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
-        if (msg.sender != rewardManager) revert MissingRole();
-        if (reader == address(0)) revert ZeroAddress();
-        _extraReaders[reader] = allowed;
-    }
-
-    /// @notice 查询额外 reader 是否允许
-    function isExtraReaderAllowed(address reader) external view returns (bool) {
-        return _extraReaders[reader];
-    }
-    /// @notice 计算示例积分（用于测试和验证）
-    /// @param amount 借款金额 (USDT, 6位小数)
-    /// @param duration 借款期限（区块数）
-    /// @param hfHighEnough 健康因子是否足够
-    /// @return basePoints 基础积分
-    /// @return bonus 奖励积分
-    /// @return totalPoints 总积分
-    function calculateExamplePoints(uint256 amount, uint256 duration, bool hfHighEnough) external pure returns (uint256 basePoints, uint256 bonus, uint256 totalPoints) {
-        // 本地/测试设定：borrow(duration>0) 固定 1 积分；repay(duration==0) 不计算（释放逻辑使用 lockedPoints）。
-        amount; hfHighEnough; // keep signature stable
-        if (duration > 0) return (1e18, 0, 1e18);
-        return (0, 0, 0);
-    }
-
-    /// @notice 获取Registry地址
-    /// @return registry 当前Registry地址
-    function getRegistry() external view returns (address registry) {
-        return _registryAddr;
+        // Best-effort: mirror level into RewardView (external reads must use RewardView).
+        _tryPushUserLevel(user, newLevel);
     }
 
     // ========== 内部函数 ==========
 
-    /// @dev 计算积分（带缓存）
-    function _calculatePointsWithCache(address user, uint256 amount, uint256 duration, bool hfHighEnough) internal returns (uint256) {
-        PointCache storage cache = _pointCache[user];
-        if (cache.isValid && block.number < cache.blockNumber + _cacheExpirationBlocks) {
-            _totalCachedRewards++;
-            return cache.points;
-        }
-        uint256 points = _calculatePoints(user, amount, duration, hfHighEnough);
-        cache.points = points;
-        cache.blockNumber = block.number;
-        cache.isValid = true;
-        emit RewardEvents.PerformanceMonitor("PointCacheUpdated", points, block.number);
-        return points;
+    // NOTE (Audit / readability):
+    // - 主路径已收敛为“borrow 锁定 / repay(按期足额) 释放”的 1 积分基线（见 onLoanEvent/onLoanEventByOrder）。
+    // - 过去的“公式计分 + 缓存计算”内部函数容易让读者误判主路径依赖公式，因此已从 RMCore 主体中移除。
+    // - 如需未来引入公式计分，请以“独立模块/库 + 显式入口”的方式落地（避免与主路径混杂）。
+
+    /// @dev Example-only: formula-based EasyToken calculation is intentionally isolated in RewardFormulaLib.
+    ///      Current baseline does NOT call this helper.
+    function _calculateBorrowEasyTokenExample(
+        uint256 amount,
+        uint256 durationBlocks,
+        uint8 userLevel,
+        uint256 levelMultiplierBps,
+        uint256 dynamicThresholdEasy,
+        uint256 dynamicMultiplierBps
+    ) internal pure returns (uint256 easyTokenAmount) {
+        userLevel; // reserved for future rule extensions (e.g., different level curves)
+        return RewardFormulaLib.calculateBorrowEasyTokenExample(
+            amount, durationBlocks, levelMultiplierBps, dynamicThresholdEasy, dynamicMultiplierBps
+        );
     }
 
-    /// @dev 计算积分
-    /// @dev 按照公式：BasePoints = 金额_USDT ÷ 100 × 期限_天 ÷ 5
-    /// @dev Bonus = BasePoints × 5%（当且仅当借款全过程 HealthFactor ≥ 1.5）
-    /// @dev Total = BasePoints + Bonus
-    function _calculatePoints(address user, uint256 amount, uint256 duration, bool hfHighEnough) internal view returns (uint256) {
-        if (amount == 0) return 0;
-        
-        // BasePoints = 金额_USDT ÷ 100 × 期限_天 ÷ 5
-        uint256 basePoints = (amount / 100) * (duration / 5);
-        
-        // 应用基础积分权重
-        basePoints = (basePoints * _basePointPerHundredUsd) / 1e18;
-        
-        // 应用用户等级倍数
-        uint8 userLevel = _userLevels[user];
-        if (userLevel > 0) {
-            uint256 multiplier = _levelMultipliers[userLevel];
-            basePoints = (basePoints * multiplier) / 10000;
+    /// @dev Best-effort: observe protocol flow (USD-8 SSOT) and auto-upgrade level.
+    function _updateUserActivity(address user, uint256 /* amount */) internal {
+        // SSOT boundary:
+        // - Protocol borrow statistics MUST come from LoanFlowView (USD-8 SSOT).
+        // - RewardManagerCore may read those values for gating/level logic,
+        //   without attempting to re-derive cross-asset value locally.
+        (bool ok, uint256 borrowCount, uint256 borrowVolumeUsd8) = _readBorrowFlowUsd8BestEffort(user);
+        if (!ok) {
+            // Deliberately do NOT fabricate protocol flow stats inside RMCore.
+            // If LoanFlowView is unavailable/invalid, activity totals remain unchanged.
+            // (OrderEngine -> LoanFlowPushManager is the SSOT pipeline for these fields.)
+            return;
         }
-        
-        // Bonus = BasePoints × 5%（当且仅当借款全过程 HealthFactor ≥ 1.5）
-        uint256 totalPoints = basePoints;
-        if (hfHighEnough && _earlyRepayBonus > 0) {
-            uint256 bonus = (basePoints * _earlyRepayBonus) / 10000;
-            totalPoints += bonus;
-        }
-        
-        // 动态奖励（可选，当积分达到阈值时）
-        if (totalPoints >= _dynamicRewardThreshold) {
-            uint256 dynamicBonus = (totalPoints * _dynamicRewardMultiplier) / 10000;
-            totalPoints += dynamicBonus;
-        }
-        
-        return totalPoints;
+
+        borrowCount; // silence unused-variable warning (kept for potential future rule changes)
+        _autoUpgradeUserLevelFromLoanFlowUsd8(user, borrowVolumeUsd8);
     }
 
-    /// @dev 更新用户活跃度
-    function _updateUserActivity(address user, uint256 amount) internal {
-        _userLastActivity[user] = block.number;
-        _userTotalLoans[user]++;
-        _userTotalVolume[user] += amount;
-        _autoUpgradeUserLevel(user);
+    /// @dev Best-effort read: EarnConfig parameters.
+    ///      IMPORTANT: Reward is post-ledger; do NOT let missing/misconfigured configs break the main path.
+    function _readEarnConfigBestEffort(uint8 level)
+        internal
+        view
+        returns (uint256 levelMultiplierBps, uint256 dynThresholdEasy, uint256 dynMultiplierBps)
+    {
+        // Defaults: 1x multiplier, dynamic disabled.
+        levelMultiplierBps = 10000;
+        dynThresholdEasy = 0;
+        dynMultiplierBps = 0;
+
+        address earnCfg = Registry(_registryAddr).getModule(ModuleKeys.KEY_REWARD_EARN_CONFIG);
+        if (earnCfg == address(0) || earnCfg.code.length == 0) {
+            return (levelMultiplierBps, dynThresholdEasy, dynMultiplierBps);
+        }
+
+        // Dynamic params.
+        try IEarnConfigRewardRead(earnCfg).getDynamicRewardParams() returns (
+            uint256 thresholdEasy,
+            uint256 multiplierBps,
+            uint256 /* updateBlock */
+        ) {
+            dynThresholdEasy = thresholdEasy;
+            // Safety cap (defense-in-depth); EarnConfig already caps at 100000.
+            if (multiplierBps <= 100000) dynMultiplierBps = multiplierBps;
+        } catch {
+            // ignore
+        }
+
+        // Level multiplier.
+        try IEarnConfigRewardRead(earnCfg).getLevelMultiplierBps(level) returns (uint256 bps) {
+            if (bps != 0 && bps <= 100000) levelMultiplierBps = bps;
+        } catch {
+            // ignore
+        }
     }
 
-    /// @dev 自动升级用户等级
-    function _autoUpgradeUserLevel(address user) internal {
+    /// @dev 自动升级用户等级（LoanFlowView / USD-8 SSOT）
+    function _autoUpgradeUserLevelFromLoanFlowUsd8(address user, uint256 borrowVolumeUsd8) internal {
         uint8 currentLevel = _userLevels[user];
-        uint256 totalVolume = _userTotalVolume[user]; // USDT 6 位精度
         uint256 eligibleLoans = _eligibleLoanCount[user];
         uint256 onTimeCount = _onTimeRepayCount[user];
         uint8 newLevel = currentLevel;
-        // 阈值使用 USDT 6 位：10000/50000/100000/500000
-        if (totalVolume >= 10000 * 1e6 && eligibleLoans >= 3 && onTimeCount >= 1 && currentLevel < 2) {
+        // Thresholds are in USD-8 (SSOT): 10k/50k/100k/500k USD.
+        if (borrowVolumeUsd8 >= 10000 * 1e8 && eligibleLoans >= 3 && onTimeCount >= 1 && currentLevel < 2) {
             newLevel = 2;
-        } else if (totalVolume >= 50000 * 1e6 && eligibleLoans >= 10 && onTimeCount >= 5 && currentLevel < 3) {
+        } else if (borrowVolumeUsd8 >= 50000 * 1e8 && eligibleLoans >= 10 && onTimeCount >= 5 && currentLevel < 3) {
             newLevel = 3;
-        } else if (totalVolume >= 100000 * 1e6 && eligibleLoans >= 20 && onTimeCount >= 10 && currentLevel < 4) {
+        } else if (borrowVolumeUsd8 >= 100000 * 1e8 && eligibleLoans >= 20 && onTimeCount >= 10 && currentLevel < 4) {
             newLevel = 4;
-        } else if (totalVolume >= 500000 * 1e6 && eligibleLoans >= 50 && onTimeCount >= 30 && currentLevel < 5) {
+        } else if (borrowVolumeUsd8 >= 500000 * 1e8 && eligibleLoans >= 50 && onTimeCount >= 30 && currentLevel < 5) {
             newLevel = 5;
         }
         if (newLevel != currentLevel) {
@@ -1092,20 +627,41 @@ contract RewardManagerCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpg
                 address(this),
                 block.number
             );
+            // Debug/legacy metric only. Offchain indexing should rely on RewardView.DataPushed streams.
             emit RewardEvents.PerformanceMonitor("UserLevelUpgraded", newLevel, block.number);
             _tryPushUserLevel(user, newLevel);
         }
     }
 
-    /// @notice 动态奖励参数返回结构
-    struct DynamicRewardParams { uint256 threshold; uint256 multiplier; }
+    /// @dev Best-effort read: borrow-only protocol flow from LoanFlowView (USD-8 SSOT).
+    function _readBorrowFlowUsd8BestEffort(address user)
+        internal
+        view
+        returns (bool ok, uint256 borrowCount, uint256 borrowVolumeUsd8)
+    {
+        address viewAddr;
+        try Registry(_registryAddr).getModule(ModuleKeys.KEY_LOAN_FLOW_VIEW) returns (address a) {
+            viewAddr = a;
+        } catch {
+            return (false, 0, 0);
+        }
+        if (viewAddr == address(0) || viewAddr.code.length == 0) return (false, 0, 0);
 
-    /// @notice 查询动态奖励参数
-    /// @return params 包含阈值与倍数（BPS）
-    function getDynamicRewardParameters() external view returns (DynamicRewardParams memory params) {
-        params.threshold = _dynamicRewardThreshold;
-        params.multiplier = _dynamicRewardMultiplier;
+        try ILoanFlowViewRewardRead(viewAddr).getUserBorrowFlowForReward(user) returns (
+            uint256 volUsd8,
+            uint256 cnt,
+            bool isValid,
+            uint256 /* blockNumber */
+        ) {
+            if (!isValid) return (false, 0, 0);
+            return (true, cnt, volUsd8);
+        } catch {
+            return (false, 0, 0);
+        }
     }
+
+    // NOTE: dynamic reward parameters are governance-controlled and consumed internally.
+    // Any external observability must be provided via RewardView (push-based) if needed.
 
     /// @notice 升级授权函数
     /// @dev 升级权限遵循双轨治理：由 ACM(ActionKeys.ACTION_UPGRADE_MODULE) 控制

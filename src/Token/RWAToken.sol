@@ -7,10 +7,22 @@ import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * @title RWAToken
  * @dev RWA (Real World Asset) Token - ERC20 implementation
- * @notice 用于抵押借贷的 RWA 代币，支持 mint 和 burn 功能
+ * @notice 用于抵押借贷/清算示例的 RWA 资产代币（与 EasyToken 不同），支持 mint 和 burn 功能
+ * @dev IMPORTANT:
+ *      - 该合约是“示例资产 token”，不属于 Reward/EasyToken 体系，也不是治理投票权 token。
+ *      - 若要用于生产环境的资产铸造/销毁，请使用更严格的权限与发行策略（例如多签/timelock，或基于 Registry+ACM 的受控模块）。
  */
 contract RWAToken is ERC20, Ownable {
-    
+    // =================== 自定义错误 ===================
+    error RWAToken__InvalidAddress(address addr);
+    error RWAToken__ZeroAmount();
+
+    /// @notice Mint 事件（示例资产 token）
+    event TokensMinted(address indexed to, uint256 amount);
+
+    /// @notice Burn 事件（示例资产 token）
+    event TokensBurned(address indexed from, uint256 amount);
+
     /**
      * @dev 构造函数
      * @param name_ 代币名称
@@ -28,10 +40,10 @@ contract RWAToken is ERC20, Ownable {
      * @notice 只有 owner 可以调用
      */
     function mint(address to, uint256 amount) external onlyOwner {
-        require(to != address(0), "RWAToken: cannot mint to zero address");
-        require(amount > 0, "RWAToken: cannot mint zero amount");
-        
+        if (to == address(0)) revert RWAToken__InvalidAddress(to);
+        if (amount == 0) revert RWAToken__ZeroAmount();
         _mint(to, amount);
+        emit TokensMinted(to, amount);
     }
     
     /**
@@ -41,11 +53,10 @@ contract RWAToken is ERC20, Ownable {
      * @notice 只有 owner 可以调用
      */
     function burn(address from, uint256 amount) external onlyOwner {
-        require(from != address(0), "RWAToken: cannot burn from zero address");
-        require(amount > 0, "RWAToken: cannot burn zero amount");
-        require(balanceOf(from) >= amount, "RWAToken: insufficient balance to burn");
-        
+        if (from == address(0)) revert RWAToken__InvalidAddress(from);
+        if (amount == 0) revert RWAToken__ZeroAmount();
         _burn(from, amount);
+        emit TokensBurned(from, amount);
     }
     
     /**
@@ -53,9 +64,8 @@ contract RWAToken is ERC20, Ownable {
      * @param amount 销毁数量
      */
     function burn(uint256 amount) external {
-        require(amount > 0, "RWAToken: cannot burn zero amount");
-        require(balanceOf(msg.sender) >= amount, "RWAToken: insufficient balance to burn");
-        
+        if (amount == 0) revert RWAToken__ZeroAmount();
         _burn(msg.sender, amount);
+        emit TokensBurned(msg.sender, amount);
     }
 } 

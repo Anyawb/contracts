@@ -4,18 +4,41 @@ pragma solidity ^0.8.20;
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { RewardTypes } from "./RewardTypes.sol";
-import { IServiceConfig } from "./interfaces/IServiceConfig.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
 import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { ZeroAddress } from "../errors/StandardErrors.sol";
+import { ZeroAddress, NotAContract } from "../errors/StandardErrors.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
 
-/// @title RewardConfig - 积分系统配置管理
-/// @notice 管理服务配置、价格和冷却期设置
+interface IEarnConfigGovernance {
+    function setDynamicRewardParams(uint256 thresholdEasy, uint256 multiplierBps) external;
+    function setLevelMultiplier(uint8 level, uint256 multiplierBps) external;
+}
+
+interface IFeatureRegistryGovernance {
+    function setFeature(bytes32 featureKey, uint8 minLevel, bool enabled, string calldata nameOrUri) external;
+    function batchSetFeatures(
+        bytes32[] calldata keys,
+        uint8[] calldata minLevels,
+        bool[] calldata enableds,
+        string[] calldata uris
+    ) external;
+}
+
+interface IGovernanceGateGovernance {
+    function setGovernanceGateParams(
+        bool enabled,
+        uint8 minLevelToVote,
+        uint8 minLevelToPropose,
+        uint256 minVotesToVote,
+        uint256 minVotesToPropose
+    ) external;
+}
+
+/// @title RewardConfig - Reward 子系统配置管理
+/// @notice Reward 子系统的治理写入口聚合：Earn 参数、FeatureRegistry、GovernanceGate 等
 /// @dev 遵循 docs/SmartContractStandard.md 注释规范
-/// @dev 使用模块化架构，每个服务类型对应一个子配置合约
 /// @dev 与 Registry 系统完全集成，使用标准化的模块管理
 contract RewardConfig is 
     Initializable, 
@@ -24,10 +47,6 @@ contract RewardConfig is
     RewardModuleBase
 {
     // ============ Errors ============
-    error RewardConfig__InvalidServiceType(uint8 serviceType);
-    error RewardConfig__InvalidServiceLevel(uint8 level);
-    error RewardConfig__ServiceConfigModuleNotFound(uint8 serviceType);
-    error RewardConfig__InvalidConfigModuleAddress();
     
     /// @notice Registry 合约地址（私有存储）
     address private _registryAddr;
@@ -35,18 +54,12 @@ contract RewardConfig is
     /* ============ Modifiers ============ */
     // onlyValidRegistry 由基类提供
     
-    /// @notice 服务配置模块映射（私有存储）
-    mapping(ServiceType => IServiceConfig) private _serviceConfigModules;
-    
-    /// @notice 特权升级费用倍数 (BPS)
-    uint256 private _upgradeMultiplier;
-    
-    /// @notice 测试网模式
-    bool private _isTestnetMode;
+    /// @dev Module key literal for EarnConfig.
+    /// IMPORTANT: Must match `ModuleKeys.KEY_REWARD_EARN_CONFIG` (keccak256("REWARD_EARN_CONFIG")).
+    /// We keep a local literal here to avoid editor/LSP symbol drift while preserving the canonical key value.
+    bytes32 private constant _KEY_REWARD_EARN_CONFIG = keccak256("REWARD_EARN_CONFIG");
 
-    event ServiceConfigModuleUpdated(uint8 serviceType, address configModule);
-    event UpgradeMultiplierUpdated(uint256 multiplier);
-    event TestnetModeUpdated(bool isTestnet);
+    event EarnConfigUpdated(bytes32 indexed kind, uint256 v0, uint256 v1, uint256 blockNumber);
     
     /// @notice Registry 地址更新事件
     /// @dev 记录 Registry 地址的变更
@@ -61,13 +74,10 @@ contract RewardConfig is
     /// @param initialRegistryAddr Registry 合约地址
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
-        
-        // 初始化默认值
-        _upgradeMultiplier = 15000; // 1.5x
-        _isTestnetMode = true;
         
         // 记录初始化动作
         emit SystemEvents.ActionExecuted(
@@ -86,52 +96,79 @@ contract RewardConfig is
         return _registryAddr;
     }
 
-    /// @notice 兼容：读取服务配置模块地址
-    function serviceConfigModules(ServiceType serviceType) external view returns (address) {
-        return address(_serviceConfigModules[serviceType]);
-    }
-
-    /// @notice 兼容：读取测试网模式开关
-    function isTestnetMode() external view returns (bool) {
-        return _isTestnetMode;
-    }
-
-    /// @notice 兼容：读取升级倍数（BPS）
-    function upgradeMultiplier() external view returns (uint256) {
-        return _upgradeMultiplier;
-    }
-    
     // 权限验证由基类 _requireRole 提供
-    
-    // ========== 公共接口 ==========
 
-    /// @notice 查询服务配置
-    /// @param serviceType 服务类型
-    /// @param level 服务等级
-    /// @return config 服务配置
-    function getServiceConfig(ServiceType serviceType, ServiceLevel level) external view onlyValidRegistry returns (ServiceConfig memory config) {
-        IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
-        return configModule.getConfig(level);
+    // ========== Earn config governance (SSOT: RewardConfig -> EarnConfig module) ==========
+
+    /// @notice Update dynamic reward parameters (earn path governance).
+    /// @dev Writes go through EarnConfig (Registry[KEY_REWARD_EARN_CONFIG]).
+    function setDynamicRewardParams(uint256 thresholdEasy, uint256 multiplierBps) external onlyValidRegistry {
+        _requireEarnGovernanceCaller(msg.sender);
+        address earnCfg = IRegistry(_registryAddr).getModuleOrRevert(_KEY_REWARD_EARN_CONFIG);
+        IEarnConfigGovernance(earnCfg).setDynamicRewardParams(thresholdEasy, multiplierBps);
+        emit EarnConfigUpdated(keccak256("DYNAMIC_REWARD_PARAMS"), thresholdEasy, multiplierBps, block.number);
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_SET_PARAMETER,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
+            msg.sender,
+            block.number
+        );
     }
 
-    /// @notice 更新服务配置
-    /// @param serviceType 服务类型
-    /// @param level 服务等级
-    /// @param price 价格
-    /// @param duration 持续时间（区块数）
-    /// @param isActive 是否激活
-    function updateServiceConfig(
-        ServiceType serviceType,
-        ServiceLevel level,
-        uint256 price,
-        uint256 duration,
-        bool isActive
+    /// @notice Update a level multiplier (BPS, 10000=1x).
+    /// @dev Writes go through EarnConfig (Registry[KEY_REWARD_EARN_CONFIG]).
+    function setLevelMultiplier(uint8 level, uint256 multiplierBps) external onlyValidRegistry {
+        _requireEarnGovernanceCaller(msg.sender);
+        address earnCfg = IRegistry(_registryAddr).getModuleOrRevert(_KEY_REWARD_EARN_CONFIG);
+        IEarnConfigGovernance(earnCfg).setLevelMultiplier(level, multiplierBps);
+        emit EarnConfigUpdated(keccak256("LEVEL_MULTIPLIER"), uint256(level), multiplierBps, block.number);
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_SET_PARAMETER,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
+            msg.sender,
+            block.number
+        );
+    }
+
+    /// @dev Governance caller for earn-side parameters.
+    ///      Primary path: RewardManager (gateway) calls into RewardConfig after role check.
+    ///      Optional fallback: allow direct governance callers with ACTION_SET_PARAMETER.
+    function _requireEarnGovernanceCaller(address caller) internal view {
+        address rm = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_RM);
+        if (caller == rm) return;
+        _requireRole(ActionKeys.ACTION_SET_PARAMETER, caller);
+    }
+
+    // ============ Feature registry (SSOT: RewardConfig -> FeatureRegistry) ============
+
+    function setFeature(bytes32 featureKey, ServiceLevel minLevel, bool enabled, string calldata nameOrUri)
+        external
+        onlyValidRegistry
+    {
+        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        address fr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FEATURE_REGISTRY);
+        IFeatureRegistryGovernance(fr).setFeature(featureKey, uint8(minLevel), enabled, nameOrUri);
+        emit SystemEvents.ActionExecuted(
+            ActionKeys.ACTION_SET_PARAMETER,
+            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
+            msg.sender,
+            block.number
+        );
+    }
+
+    function batchSetFeatures(
+        bytes32[] calldata keys,
+        ServiceLevel[] calldata minLevels,
+        bool[] calldata enableds,
+        string[] calldata uris
     ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
-        configModule.updateConfig(level, price, duration, isActive);
-        
-        // 记录标准化动作事件
+        address fr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FEATURE_REGISTRY);
+        uint8[] memory levels = new uint8[](minLevels.length);
+        for (uint256 i = 0; i < minLevels.length; i++) {
+            levels[i] = uint8(minLevels[i]);
+        }
+        IFeatureRegistryGovernance(fr).batchSetFeatures(keys, levels, enableds, uris);
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
@@ -140,23 +177,24 @@ contract RewardConfig is
         );
     }
 
-    /// @notice 获取服务冷却期
-    /// @param serviceType 服务类型
-    /// @return cooldown 冷却期（区块数）
-    function serviceCooldowns(ServiceType serviceType) external view onlyValidRegistry returns (uint256 cooldown) {
-        IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
-        return configModule.getCooldown();
-    }
+    // ============ Governance gate params (SSOT: RewardConfig -> GovernanceGate) ============
 
-    /// @notice 更新服务冷却期
-    /// @param serviceType 服务类型
-    /// @param cooldown 冷却期（区块数）
-    function setServiceCooldown(ServiceType serviceType, uint256 cooldown) external onlyValidRegistry {
+    function setGovernanceGateParams(
+        bool enabled_,
+        ServiceLevel minLevelToVote_,
+        ServiceLevel minLevelToPropose_,
+        uint256 minVotesToVote_,
+        uint256 minVotesToPropose_
+    ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        IServiceConfig configModule = _getServiceConfigModuleOrRevert(serviceType);
-        configModule.setCooldown(cooldown);
-        
-        // 记录标准化动作事件
+        address gg = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_GOVERNANCE_GATE);
+        IGovernanceGateGovernance(gg).setGovernanceGateParams(
+            enabled_,
+            uint8(minLevelToVote_),
+            uint8(minLevelToPropose_),
+            minVotesToVote_,
+            minVotesToPropose_
+        );
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
@@ -165,56 +203,12 @@ contract RewardConfig is
         );
     }
 
-    /// @notice 设置服务配置模块
-    /// @param serviceType 服务类型
-    /// @param configModule 配置模块地址
-    function setServiceConfigModule(ServiceType serviceType, IServiceConfig configModule) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        if (uint8(serviceType) > uint8(ServiceType.TestnetFeatures)) revert RewardConfig__InvalidServiceType(uint8(serviceType));
-        if (address(configModule) == address(0)) revert RewardConfig__InvalidConfigModuleAddress();
-        _serviceConfigModules[serviceType] = configModule;
-        emit ServiceConfigModuleUpdated(uint8(serviceType), address(configModule));
-        
-        // 记录标准化动作事件
-        emit SystemEvents.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.number
-        );
+    // ============ 基类抽象实现 ============
+    function _getRegistryAddr() internal view override returns (address) {
+        return _registryAddr;
     }
 
-    /// @notice 更新升级倍数
-    /// @param multiplier 新倍数 (BPS)
-    function setUpgradeMultiplier(uint256 multiplier) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        _upgradeMultiplier = multiplier;
-        emit UpgradeMultiplierUpdated(multiplier);
-        
-        // 记录标准化动作事件
-        emit SystemEvents.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.number
-        );
-    }
-
-    /// @notice 设置测试网模式
-    /// @param isTestnet 是否为测试网模式
-    function setTestnetMode(bool isTestnet) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        _isTestnetMode = isTestnet;
-        emit TestnetModeUpdated(isTestnet);
-        
-        // 记录标准化动作事件
-        emit SystemEvents.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.number
-        );
-    }
+    // ============ UUPS Upgrade & Registry Management (keep at bottom) ============
 
     /// @notice 升级授权函数
     /// @dev onlyRole modifier 已经足够验证权限
@@ -232,86 +226,27 @@ contract RewardConfig is
         );
     }
 
-    // ============ 基类抽象实现 ============
-    function _getRegistryAddr() internal view override returns (address) {
-        return _registryAddr;
-    }
-
-    // ============ Internals ============
-    /// @dev 解析服务配置模块：优先使用 RewardConfig 内部映射（用于“可选聚合入口”），否则回退到 Registry 的 ModuleKeys（避免地址漂移）
-    function _getServiceConfigModuleOrRevert(ServiceType serviceType) internal view returns (IServiceConfig configModule) {
-        if (uint8(serviceType) > uint8(ServiceType.TestnetFeatures)) revert RewardConfig__InvalidServiceType(uint8(serviceType));
-
-        // 1) 优先读取 RewardConfig 内部映射（向后兼容：RewardConfig.test.ts & 既有部署脚本）
-        configModule = _serviceConfigModules[serviceType];
-        if (address(configModule) != address(0)) return configModule;
-
-        // 2) 回退到 Registry（架构一致性：Registry 为唯一真实来源）
-        bytes32 moduleKey;
-        if (serviceType == ServiceType.AdvancedAnalytics) {
-            moduleKey = ModuleKeys.KEY_ADVANCED_ANALYTICS_CONFIG;
-        } else if (serviceType == ServiceType.PriorityService) {
-            moduleKey = ModuleKeys.KEY_PRIORITY_SERVICE_CONFIG;
-        } else if (serviceType == ServiceType.FeatureUnlock) {
-            moduleKey = ModuleKeys.KEY_FEATURE_UNLOCK_CONFIG;
-        } else if (serviceType == ServiceType.GovernanceAccess) {
-            moduleKey = ModuleKeys.KEY_GOVERNANCE_ACCESS_CONFIG;
-        } else if (serviceType == ServiceType.TestnetFeatures) {
-            moduleKey = ModuleKeys.KEY_TESTNET_FEATURES_CONFIG;
-        } else {
-            // defensive, should be unreachable due to first check
-            revert RewardConfig__InvalidServiceType(uint8(serviceType));
-        }
-
-        address cfg = IRegistry(_registryAddr).getModuleOrRevert(moduleKey);
-        if (cfg == address(0)) revert RewardConfig__ServiceConfigModuleNotFound(uint8(serviceType));
-        return IServiceConfig(cfg);
-    }
-
-    // ============ UUPS storage gap ============
-    uint256[50] private __gap;
-
-    /// @notice 更新Registry地址
-    /// @param newRegistryAddr 新的Registry地址
-    /// @dev Registry地址不能为零地址
-    function setRegistry(address newRegistryAddr) external onlyValidRegistry {
+    /// @notice 更新 Registry 地址
+    /// @param newRegistryAddr 新的 Registry 地址
+    /// @dev 需要 ACTION_SET_PARAMETER 权限
+    function updateRegistry(address newRegistryAddr) public onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
+        
         if (newRegistryAddr == address(0)) revert ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
         
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
         
-        // 记录标准化动作事件
-        emit SystemEvents.ActionExecuted(
-            ActionKeys.ACTION_SET_PARAMETER,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
-            msg.sender,
-            block.number
-        );
-        
-        // 发出模块地址更新事件
+        emit RegistryUpdated(oldRegistry, newRegistryAddr);
+
+        // Keep a standardized module-address update marker for off-chain consumers.
         emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
             oldRegistry,
             newRegistryAddr,
             block.number
         );
-    }
-    
-    // ============ Registry 管理 ============
-    
-    /// @notice 更新 Registry 地址
-    /// @param newRegistryAddr 新的 Registry 地址
-    /// @dev 需要 ACTION_SET_PARAMETER 权限
-    function updateRegistry(address newRegistryAddr) external {
-        _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        
-        if (newRegistryAddr == address(0)) revert ZeroAddress();
-        
-        address oldRegistry = _registryAddr;
-        _registryAddr = newRegistryAddr;
-        
-        emit RegistryUpdated(oldRegistry, newRegistryAddr);
         
         // 记录标准化动作事件
         emit SystemEvents.ActionExecuted(
@@ -321,6 +256,9 @@ contract RewardConfig is
             block.number
         );
     }
-    
+
+    // ============ UUPS storage gap (must be last) ============
+    uint256[50] private __gap;
+
 
 } 

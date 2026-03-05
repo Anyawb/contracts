@@ -103,11 +103,12 @@ describe('VaultLendingEngine – dual entry invariants', function () {
     await vaultRouter.waitForDeployment();
 
     // Configure oracle price (ensure within GracefulDegradation limit)
-    const nowTs = Math.floor(Date.now() / 1000);
+    // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
+    const nowBlock = await ethers.provider.getBlockNumber();
     const priceValue = ethers.parseUnits('1', 8);
     const debtAsset = ethers.Wallet.createRandom().address;
-    await priceOracle.connect(vaultCore).setPrice(await settlementToken.getAddress(), priceValue, nowTs, 8);
-    await priceOracle.connect(vaultCore).setPrice(debtAsset, priceValue, nowTs, 8);
+    await priceOracle.connect(vaultCore).setPrice(await settlementToken.getAddress(), priceValue, nowBlock, 8);
+    await priceOracle.connect(vaultCore).setPrice(debtAsset, priceValue, nowBlock, 8);
 
     // Deploy LendingEngine
     const LendingEngine = await ethers.getContractFactory('VaultLendingEngine');
@@ -217,7 +218,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
         // Architecture-Guide: LendingEngine pushes DEBT DELTA through VaultCoreDataPush (best-effort)
         .to.emit(vaultRouter, 'UserPositionDeltaPushed')
         .withArgs(user.address, debtAsset, 0, 50, anyValue, anyValue, anyValue)
-        .and.to.emit(positionView, 'UserPositionCachedV2')
+        .and.to.emit(positionView, 'UserPositionCachedWithVersion')
         .withArgs(user.address, debtAsset, 200, 50, anyValue, anyValue);
 
       const [hfAfterBorrow, isValidAfterBorrow] = await healthView.getUserHealthFactorWithMeta(user.address);
@@ -230,7 +231,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       )
         .to.emit(vaultRouter, 'UserPositionDeltaPushed')
         .withArgs(user.address, debtAsset, 0, -20, anyValue, anyValue, anyValue)
-        .and.to.emit(positionView, 'UserPositionCachedV2')
+        .and.to.emit(positionView, 'UserPositionCachedWithVersion')
         .withArgs(user.address, debtAsset, 200, 30, anyValue, anyValue);
 
       const [hfAfterRepay, isValidAfterRepay] = await healthView.getUserHealthFactorWithMeta(user.address);
@@ -486,9 +487,9 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       } = await loadFixture(deployDualEntryFixture);
 
       const debtAsset2 = ethers.Wallet.createRandom().address;
-      const nowTs = Math.floor(Date.now() / 1000);
+      const nowBlock = await ethers.provider.getBlockNumber();
       const priceValue = ethers.parseUnits('1', 8);
-      await priceOracle.setPrice(debtAsset2, priceValue, nowTs, 8);
+      await priceOracle.setPrice(debtAsset2, priceValue, nowBlock, 8);
 
       await cm.depositCollateral(liquidationManager.address, debtAsset2, 180);
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset2, 50, 0, 0);
@@ -552,8 +553,8 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       } = await loadFixture(deployDualEntryFixture);
 
       const debtAsset2 = ethers.Wallet.createRandom().address;
-      const nowTs = Math.floor(Date.now() / 1000);
-      await priceOracle.setPrice(debtAsset2, ethers.parseUnits('1', 8), nowTs, 8);
+      const nowBlock = await ethers.provider.getBlockNumber();
+      await priceOracle.setPrice(debtAsset2, ethers.parseUnits('1', 8), nowBlock, 8);
 
       await cm.depositCollateral(liquidationManager.address, debtAsset2, 160);
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset, 30, 0, 0);
@@ -587,8 +588,8 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       } = await loadFixture(deployDualEntryFixture);
 
       const debtAsset2 = ethers.Wallet.createRandom().address;
-      const nowTs = Math.floor(Date.now() / 1000);
-      await priceOracle.setPrice(debtAsset2, ethers.parseUnits('1', 8), nowTs, 8);
+      const nowBlock = await ethers.provider.getBlockNumber();
+      await priceOracle.setPrice(debtAsset2, ethers.parseUnits('1', 8), nowBlock, 8);
 
       await cm.depositCollateral(liquidationManager.address, debtAsset2, 140);
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset, 35, 0, 0);
@@ -700,8 +701,8 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       const { vaultCoreModule, liquidationManager, lending, healthView, debtAsset, priceOracle, vaultCore, positionView } =
         await loadFixture(deployDualEntryFixture);
       const debtAsset2 = ethers.Wallet.createRandom().address;
-      const nowTs = Math.floor(Date.now() / 1000);
-      await priceOracle.connect(vaultCore).setPrice(debtAsset2, ethers.parseEther('1'), nowTs, 18);
+      const nowBlock = await ethers.provider.getBlockNumber();
+      await priceOracle.connect(vaultCore).setPrice(debtAsset2, ethers.parseEther('1'), nowBlock, 18);
 
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset, 40, 0, 0);
       await vaultCoreModule.borrow(liquidationManager.address, debtAsset2, 60, 0, 0);

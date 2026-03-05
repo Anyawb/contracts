@@ -140,8 +140,9 @@ contract Registry is
     error Registry__MigratorFailed(address migrator, bytes reason);
 
     // ============ Constants ============
-    /// @notice Maximum delay window (blocks, ~7 days with ~2s blocks).
-    uint256 private constant _MAX_DELAY = 7 days / 2 seconds;
+    /// @notice Maximum delay window (blocks).
+    /// @dev Strategy A: this is an explicit blocks policy configured at deployment (no seconds→blocks conversion).
+    uint256 private _maxDelayBlocks;
     /// @notice Upgrade history ring size cap.
     uint256 private constant _MAX_UPGRADE_HISTORY = 100;
     /// @notice Batch size cap (tests/safety).
@@ -189,11 +190,18 @@ contract Registry is
      * @param emergencyAdmin Address authorized to pause/cancel upgrades in emergencies.
      * @param initialOwner Initial governance owner/admin address.
      */
-    function initialize(uint256 minDelayBlocks, address upgradeAdmin, address emergencyAdmin, address initialOwner)
+    function initialize(
+        uint256 minDelayBlocks,
+        uint256 maxDelayBlocks,
+        address upgradeAdmin,
+        address emergencyAdmin,
+        address initialOwner
+    )
         external
         initializer
     {
-        if (minDelayBlocks > _MAX_DELAY) revert Registry__DelayTooLong(minDelayBlocks, _MAX_DELAY);
+        if (maxDelayBlocks == 0) revert Registry__InvalidDelayValue(maxDelayBlocks);
+        if (minDelayBlocks > maxDelayBlocks) revert Registry__DelayTooLong(minDelayBlocks, maxDelayBlocks);
         if (upgradeAdmin == address(0)) revert Registry__ZeroAddress();
         if (emergencyAdmin == address(0)) revert Registry__ZeroAddress();
         if (initialOwner == address(0)) revert Registry__ZeroAddress();
@@ -210,6 +218,8 @@ contract Registry is
         layout.admin = initialOwner;
         layout.pendingAdmin = address(0);
         layout.minDelay = uint64(minDelayBlocks);
+
+        _maxDelayBlocks = maxDelayBlocks;
         
         _upgradeAdmin = upgradeAdmin;
         _emergencyAdmin = emergencyAdmin;
@@ -1218,7 +1228,7 @@ contract Registry is
      */
     function setMinDelay(uint256 newDelay) external override onlyOwner {
         RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (newDelay > _MAX_DELAY) revert Registry__DelayTooLong(newDelay, _MAX_DELAY);
+        if (newDelay > _maxDelayBlocks) revert Registry__DelayTooLong(newDelay, _maxDelayBlocks);
         if (newDelay == 0) revert Registry__InvalidDelayValue(newDelay);
         uint256 oldDelay = RegistryStorage.layout().minDelay;
         RegistryStorage.layout().minDelay = uint64(newDelay);
@@ -1313,8 +1323,8 @@ contract Registry is
      * @return Maximum delay window (blocks).
      */
     // Interface requires MAX_DELAY() (legacy UPPER_SNAKE_CASE naming).
-    function MAX_DELAY() external pure override returns (uint256) {
-        return _MAX_DELAY;
+    function MAX_DELAY() external view override returns (uint256) {
+        return _maxDelayBlocks;
     }
 
     /**

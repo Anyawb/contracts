@@ -44,6 +44,61 @@
 **定义**：Reward 内部 address cache、积分计算缓存、GracefulDegradation 的价格缓存、Registry 签名域分隔符缓存等。  
 这类缓存语义强、形态多，强行纳入统一 refresh 会扩大权限面、混淆语义，违背“职责分离”。
 
+### D 类：链下索引 / 数据库读模型（Off-chain Index + DB Read Model）✅ **统一接口契约（分页/幂等/重组）**
+
+**定义**：链下“浏览器能力”层。它不是链上 cache，而是通过 **链上事件/日志** 派生出的可查询数据库（用于历史/搜索/跨用户聚合/排行榜/审计）。
+
+**为什么要单列（以及为什么前端不该直扫 RPC）**：
+- 链上 View 擅长“当前状态 + meta（isValid/blockNumber/version）”，但不适合做长历史范围的检索。
+- 区块浏览器能力（按地址查历史、按订单查全生命周期、全局筛选）必须依赖链下索引与数据库二级索引。
+
+**与本仓库 A/B/C 的关系**：
+- A 类（模块地址缓存）与 B 类（View 快照缓存）解决的是“降低链上读成本 / 减少 RPC 次数”。
+- D 类解决的是“把链上不可直接高效查询的历史与聚合问题”迁移到链下，用分页 API 提供给前端/运营。
+- B 类推送失败事件（如 `CacheUpdateFailed*`）应作为 D 类队列/重试系统的输入信号之一（可观测 → 可重放）。
+
+**统一要求（接口契约）**：
+1) **天然幂等键**：每条链上日志以 `(chainId, txHash, logIndex)` 唯一。
+  - 该键应直接映射为链下幂等 key（参见 SaaS 指南中的 `chain:{chainId}:{txHash}:log-{logIndex}` 口径）。
+2) **重组（reorg）处理**：
+  - 索引表应至少存 `blockNumber + blockHash`，并支持把“未最终确定”的窗口内事件标记为 `PENDING/CONFIRMED/REORGED`。
+3) **分页规范**：
+  - 时间序列/历史查询建议优先 cursor（按 `timestamp` 或 `(blockNumber, logIndex)` 游标）而不是无限 offset。
+  - 若使用 offset，必须限制 `limit` 上限（建议 ≤ 100），并对大查询做服务端索引与速率限制。
+4) **权限与多租户**：
+  - D 类 API 是 SaaS 面向前端/运营的主要入口，必须走租户隔离（`tenant_id`）与权限控制（与链上 `VIEW_*_DATA` 口径一致）。
+
+#### D.1 命名对齐（建议默认值，可直接落地）
+
+> 目标：让“索引器 / API / 前端”三方只靠命名就能对齐，不再出现一堆 `history/records/list` 的口径分叉。
+
+**表命名（PostgreSQL / Prisma）**
+- `chain_sync_cursors`：索引进度（每条链/每个 cursorName 一行）
+- `chain_events`：原始事实表（按 `(chainId, txHash, logIndex)` 幂等写入）
+- `loan_orders`：派生读模型（给前端分页/筛选/列表用）
+
+**幂等键命名**
+- `chainEventId = "c{chainId}:{txHash}:log-{logIndex}"`
+
+**游标命名（cursorName）**
+- `vault_router_datapushed`
+- `loan_nft_transfers`
+- `lending_engine_loan_order_created`
+
+**API 路由命名（当前后端已落地；统一挂在 `/api` 下）**
+- `/api/portfolio/*`：用户仓位快照/历史（offset 分页）
+- `/api/rewards/*`：积分余额/账本/AI 使用记录
+- `/api/ai-credits/balance`：AI Credits 余额
+- `/api/cache-retry/*`：View cache 重试入口
+- `/api/contracts/*`：合约配置/ABI（JWT）
+
+> 说明：`/api/explorer/*`（链上事件浏览器能力）当前**尚未落地**，需要新增索引器与读模型后再加。
+
+**分页约束（统一口径）**
+- `limit`：1–100（默认 50）
+- `cursor`：不透明字符串（建议 base64 编码的 `(blockNumber, logIndex)` 或时间戳）
+- 返回：`{ items, pageSize, nextCursor }`
+
 ---
 
 ## 2) 统一入口（A 类）已落地的合约与接口
@@ -72,8 +127,8 @@
 | `src/Vault/view/modules/StatisticsView.sol` | `_globalSnapshot/_userSnapshots/_userStatsVersion/_userGuarantees` 等 | 无统一 TTL（以快照 `blockNumber` 为准） | 业务模块推送（系统统计/降级统计） | 写：系统状态/管理员 role；读：view | 以事件/快照覆盖为主；可链下重推 | ❌ |
 | `src/Vault/view/modules/AccessControlView.sol` | `_userPermissionsCache/_userPermissionLevelCache/_cacheTimestamps[user]` | `ViewConstants.CACHE_DURATION` | AccessControlManager（`onlyACM`） | 写：onlyACM；读：本人或 ADMIN | 依赖 ACM 再 push；无统一重试入口 | ❌ |
 | `src/Vault/view/modules/ViewCache.sol` | `_systemStatusCache[asset]` + `isValid` + `blockNumber` | `CACHE_DURATION` + `struct.isValid` | 具备 `ACTION_VIEW_SYSTEM_DATA` 的写入方 | 写：`ACTION_VIEW_SYSTEM_DATA`；清理：`ACTION_ADMIN` | 可重复覆盖/清理，无链上重试模型 | ❌ |
-| `src/Vault/view/modules/FeeRouterView.sol` | `_userFeeStatistics/_userDynamicFees/_globalFeeStatistics/_systemConfig/_lastSyncTimestamp` | 无 TTL；`SYNC_INTERVAL` 用于“同步节奏/观测” | FeeRouter（`onlyFeeRouter`） | 写：onlyFeeRouter；读：本人/ADMIN（部分系统数据 onlyAdmin） | 失败主要来自上游未推送；可由 FeeRouter 再推 | ❌ |
-| `src/Vault/view/modules/RewardView.sol` | `_userSummary/_activities/_consumptions/_systemStats` | 无 TTL（镜像聚合） | RewardManagerCore/RewardConsumption（`onlyWriter`） | 写：onlyWriter；读：本人或 VIEW_USER_DATA/ADMIN；系统榜单 onlyOps | 推送失败：见 `RewardViewPushFailed`（RewardModuleBase）；链上提供 `retryPush*`（ADMIN） | ❌ |
+| `src/Vault/view/modules/FeeRouterView.sol` | `_userFeeStatistics/_userDynamicFees/_globalFeeStatistics/_systemConfig/_lastSyncBlock` | 无 TTL；`SYNC_INTERVAL` 用于“同步节奏/观测” | FeeRouter（`onlyFeeRouter`） | 写：onlyFeeRouter；读：本人/ADMIN（部分系统数据 onlyAdmin） | 失败主要来自上游未推送；可由 FeeRouter 再推 | ❌ |
+| `src/Vault/view/modules/RewardView.sol` | `_userSummary/_activities/_consumptions/_systemStats` | 无 TTL（镜像聚合） | RewardManagerCore/EasyConsumption/EasyRecycleDistributor 等（`onlyWriter`） | 写：onlyWriter；读：本人或 VIEW_USER_DATA/ADMIN；系统榜单 onlyOps | 推送失败：见 `RewardViewPushFailed`（RewardModuleBase）；链上提供 `retryPush*`（ADMIN） | ❌ |
 | `src/Vault/view/modules/ModuleHealthView.sol` | `_moduleHealth[module]`（健康状态快照） | 无 TTL（按 `lastCheckTime`） | `checkAndPushModuleHealth()` 自身检查 + push 到 HealthView | 仅系统健康 viewer 可检查/读 | 失败一般为 Registry/HealthView 不可用；链下可复查 | ❌ |
 
 ### 3.2 B 类“推送失败事件”归口（供链下队列）
@@ -97,7 +152,6 @@
 | `src/core/CoinGeckoPriceUpdater.sol` | 无“模块地址/权限地址缓存”（统一从 Registry 解析 ACM/模块）；内部仅保留业务必要状态（如 `_lastValidPrice`） | N/A | 合约自身 | `ActionKeys` 权限体系（每次从 Registry 解析 ACM） | 无统一失败模型 | ❌ |
 | `src/Reward/RewardManagerCore.sol` | `_pointCache[user]` + `_cacheExpirationTime` | `_cacheExpirationTime`（默认 1h） | RMCore 业务逻辑内部 | 治理通过 RewardManager 调参 | 非推送失败模型 | ❌ |
 | `src/Reward/internal/RewardModuleBase.sol` | `_cachedRewardViewAddr/_cachedRewardViewTs` | `RV_CACHE_TTL = 1 hours` | Reward 模块内部 | internal | 推送失败 emit `RewardViewPushFailed` | ❌ |
-| `src/Reward/BaseServiceConfig.sol` | 无本地 ACM 地址缓存（权限统一从 Registry 解析） | N/A | N/A | `ACTION_SET_PARAMETER/ACTION_UPGRADE_MODULE` 等 | N/A | ❌ |
 | `src/libraries/GracefulDegradation.sol` | `CacheStorage.priceCache[asset]` | `maxPriceAge` + `PriceCache.isValid` | 调用方在 non-view 路径写入 | 取决于调用合约 | 降级回退 + 监控事件 | ❌ |
 | `src/Vault/FeeRouter.sol` | `_feeCache[token][feeType]` | 无 TTL（手动清理） | FeeRouter 业务逻辑 | `clearFeeCache`: `ACTION_SET_PARAMETER` | 清理/重算由业务治理决定 | ❌ |
 | `[REMOVED] src/Vault/liquidation/libraries/LiquidationRiskCacheLib.sol` | 旧 risk cache helper（无统一 TTL/失败模型） | N/A | N/A | N/A | N/A | N/A |
@@ -152,7 +206,7 @@
 | `src/Vault/view/modules/PositionView.sol` | B | user/asset 快照：collateral/debt + `blockNumber/isValid` + `version/seq` | `ViewConstants.CACHE_DURATION` + `isValid` | CM/LE/VaultCore（推送） | 写：`ACTION_VIEW_PUSH`；读：view | 推送失败事件 + 链下重试 + admin retry | ❌ | ❌ |
 | `src/Vault/view/modules/HealthView.sol` | B | user HF 缓存 + `cacheTimestamps`；模块健康快照 | user: `CACHE_DURATION`；模块健康按 `lastCheckTime` | 风控/引擎推送；健康检查由系统模块 push | 写：`ACTION_VIEW_PUSH`/系统状态；读：view | `HealthPushFailed`（上游）+ 链下重试 | ❌ | ❌ |
 | `src/Vault/view/modules/StatisticsView.sol` | B | 系统/用户统计快照（带 `blockNumber/lastUpdateTime`） | 以快照时间为准（无统一 TTL） | 统计写入方（系统模块） | 写：系统状态类 role；读：view | 失败按事件/链下补推 | ❌ | ❌ |
-| `src/Vault/view/modules/FeeRouterView.sol` | B | 用户/全局 fee 统计镜像；`_lastSyncTimestamp`（观测） | 无 TTL；`SYNC_INTERVAL` 仅用于节奏/观测 | FeeRouter | 写：onlyFeeRouter；读：用户/ADMIN/系统 viewer | 上游再推/链下补推 | ❌ | ❌ |
+| `src/Vault/view/modules/FeeRouterView.sol` | B | 用户/全局 fee 统计镜像；`_lastSyncBlock`（观测） | 无 TTL；`SYNC_INTERVAL` 仅用于节奏/观测 | FeeRouter | 写：onlyFeeRouter；读：用户/ADMIN/系统 viewer | 上游再推/链下补推 | ❌ | ❌ |
 | `src/Vault/view/modules/RewardView.sol` | B | 奖励聚合镜像（用户摘要/活动/系统榜单） | 无 TTL（镜像聚合） | Reward 模块 writer | 写：onlyWriter；读：用户/ADMIN/ops | `RewardViewPushFailed` + 链下重试/ADMIN retry | ❌ | ❌ |
 | `src/Vault/view/modules/AccessControlView.sol` | B | 用户权限快照 + `cacheTimestamps[user]` | `ViewConstants.CACHE_DURATION` | ACM | 写：onlyACM；读：本人/ADMIN | ACM 再 push/链下补推 | ❌ | ❌ |
 | `src/Vault/view/modules/ViewCache.sol` | B | 系统状态缓存（`isValid/blockNumber`） | `CACHE_DURATION` + `isValid` | 系统写入方 | 写：`ACTION_VIEW_SYSTEM_DATA`；清理：ADMIN | 可重复覆盖/清理 | ❌ | ❌ |
@@ -164,7 +218,6 @@
 | `src/registry/RegistrySignatureManager.sol` | C | `_domainSeparatorValue/_cachedChainId` | chainId 变化时动态重算 | 合约自身 | 管理员升级体系 | 无运维刷新必要 | ❌ | ❌ |
 | `src/core/CoinGeckoPriceUpdater.sol` | C（业务内部） | `_lastValidPrice/_lastUpdateTime/_updateFailureCount`（业务内“最近值/状态”，不属于模块地址缓存） | 由业务流程覆盖更新 | 合约自身 | 内部写；外部写入口需 `ACTION_*` | N/A | ❌ | ❌ |
 | `src/libraries/GracefulDegradation.sol` | C | `priceCache[asset]` | `maxPriceAge` + `isValid` | 调用方写入 | 取决于调用合约 | 降级回退 + 监控 | ❌ | ❌ |
-| `src/Reward/BaseServiceConfig.sol` | None（无缓存） | N/A | N/A | N/A | N/A | N/A | ❌ | ❌ |
 | `[REMOVED] src/Vault/liquidation/libraries/LiquidationRiskCacheLib.sol` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | `src/Vault/view/modules/SystemView.sol` | None（门面） | `_viewCache` 存储字段保留（存储布局兼容）；getter 动态从 Registry 读 | N/A（动态读取，无 stale 风险） | initialize | 读：system viewer；写：无 | N/A | ❌ | ❌ |
 | `src/Vault/view/modules/RegistryView.sol` | None（门面） | 无持久化缓存（实时从 Registry 枚举/分页） | N/A | N/A | 读：view | N/A | ❌ | ❌ |
@@ -195,4 +248,25 @@
 - [ ] 推送失败发事件（至少包含 user/viewAddr/payload/reason）
 - [ ] 关键缓存读接口返回 `isValid` 或等价标识
 - [ ] 并发场景：优先使用 `nextVersion` + 可选 `requestId/seq`
+
+---
+
+## 统一验收清单（同款模板）
+
+- [ ] View 读路径：Registry 能解析到正确的 View 地址（含 `LOAN_NFT_VIEW` 等），且 `apiVersion()/schemaVersion()` 预检通过
+- [ ] 浏览器直读：前端对所有 View 返回的 `isValid/blockNumber/version` 做降级展示（不会 silent wrong）
+- [ ] 分页边界：所有批量/分页接口遵守链上 `MAX_BATCH_SIZE`（默认 100），超限会分片或拒绝
+- [ ] 后端读模型：历史/搜索 API 走 DB，具备 cursor 分页与必要索引（不扫 RPC）
+- [ ] 幂等与重试：链上事件写库按 `(chainId, txHash, logIndex)` 幂等；失败可观测并可重放
+- [ ] 权限与多租户：Scheme U/系统权限边界清晰；后端 API 做租户隔离与鉴权（不能靠 `eth_call from` 冒充）
+
+## 上线前统一 Checklist（DB/Redis/Feature Flag/Routes/Pagination/Idempotency/Reorg）
+
+- [ ] DB 就绪：迁移已跑完；关键表/索引存在；读写账号最小权限；RLS/tenant 规则（如有）已启用
+- [ ] Redis 就绪：连接/ACL/TTL 策略明确；幂等锁前缀包含 `tenantId`；监控命中率与容量
+- [ ] Feature Flag：新读路径（View/Explorer API）有开关；支持按租户/环境灰度；默认关闭可回退
+- [ ] 生效路由：`/api/portfolio/*`、`/api/rewards/*`、`/api/ai-credits/balance`、`/api/cache-retry/*`、`/api/contracts/*` 已注册并纳入鉴权/限流（含相应开关）
+- [ ] 分页边界：`limit` 默认/上限固定；`cursor/offset` 越界返回空列表而非 500；排序稳定（按 `(blockNumber, logIndex)`）
+- [ ] 幂等键约定：跨服务透传 `X-Idempotency-Key`；链上事件幂等键格式固定为 `chain:c{chainId}:{txHash}:log-{logIndex}`
+- [ ] 重组窗口约定：明确 `finalityDepth`（如 64 blocks）与状态（`PENDING/CONFIRMED/REORGED`）；窗口内数据可回滚重算
 

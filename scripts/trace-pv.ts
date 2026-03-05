@@ -1,6 +1,6 @@
 import hre from "hardhat";
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../frontend-config/contracts-localhost.ts";
 
 function norm(h: string) {
   return h.startsWith("0x") ? h : "0x" + h;

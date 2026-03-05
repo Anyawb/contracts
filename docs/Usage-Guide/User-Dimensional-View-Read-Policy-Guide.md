@@ -77,7 +77,7 @@ modifier onlyUserOrViewer(address user) {
 示例：
 - `getUserPositionWithMeta(user, asset)`
 - `getUserRewardSummary(user)` / `getUserRewardSummaryWithMeta(user)`
-- `getUserLoanCount(user)`（返回 `count, isValid, blockNumber`）
+- `LoanNFTView.getUserLoanCount(user)`（返回 `count, isValid, blockNumber`）
 - `getUserFeeAnalytics(user)` / `getUserFeeConfig(user)`
 - 等等
 

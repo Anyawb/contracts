@@ -17,8 +17,10 @@ import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol
 import { ILiquidationEventsView } from "../../../interfaces/ILiquidationEventsView.sol";
 import { ILiquidationManager } from "../../../interfaces/ILiquidationManager.sol";
 import { ILiquidationPayoutManager } from "../../../interfaces/ILiquidationPayoutManager.sol";
-import { ZeroAddress, AmountIsZero, ArrayLengthMismatch, EmptyArray } from "../../../errors/StandardErrors.sol";
+import { IFeeRouter } from "../../../interfaces/IFeeRouter.sol";
+import { NotAContract, ZeroAddress, AmountIsZero, ArrayLengthMismatch, EmptyArray } from "../../../errors/StandardErrors.sol";
 import { CacheEvents } from "../../CacheEvents.sol";
+import { FeeTypes } from "../../../constants/FeeTypes.sol";
 
 /**
  * @title LiquidationManager
@@ -121,6 +123,7 @@ contract LiquidationManager is
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -716,7 +719,14 @@ contract LiquidationManager is
             ILiquidationPayoutManager(payout).getRecipients();
 
         if (platformShare > 0) {
-            ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, platformShare, recipients.platform);
+            address feeRouter = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
+            ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, platformShare, feeRouter);
+            IFeeRouter(feeRouter).distributePrepaid(
+                collateralAsset,
+                platformShare,
+                FeeTypes.FEE_TYPE_LIQUIDATION_PLATFORM,
+                user
+            );
         }
         if (reserveShare > 0) {
             ICollateralManager(cm).withdrawCollateralTo(user, collateralAsset, reserveShare, recipients.reserve);

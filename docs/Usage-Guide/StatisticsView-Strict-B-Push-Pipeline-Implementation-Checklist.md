@@ -17,7 +17,7 @@
 - **Key 维度**
   - **user stats key**：`(user)`（collateralTotal + debtTotal）
   - **guarantee key**：`(user, asset)`（userBalance + totalByAsset）
-- **事件口径（SSOT）**：失败统一 `CacheEvents.CacheUpdateFailedV2`（含 `requestId/seq/nextVersion`）。
+- **事件口径（SSOT）**：失败统一 `CacheEvents.CacheUpdateFailedWithContext`（含 `requestId/seq/nextVersion`）。
 
 ---
 
@@ -35,7 +35,7 @@
   - 成功后 emit `DataPushed(DATA_TYPE_USER_STATS_UPDATE, payload)`，payload 可解码对账
 
 - `pushGuaranteeSnapshot(user, asset, userBalance, totalByAsset, requestId, seq, nextVersion)`
-  - `CacheUpdateFailedV2` 的 `(collateral, debt)` 字段在该类失败中承载 `(userBalance, totalByAsset)`，用于稳定重放
+  - `CacheUpdateFailedWithContext` 的 `(collateral, debt)` 字段在该类失败中承载 `(userBalance, totalByAsset)`，用于稳定重放
 
 并提供 pusher 专用版本读取（role-gated）：
 
@@ -61,7 +61,7 @@
   - guarantee：`GuaranteeFundManager.getLockedGuarantee/getTotalGuaranteeByAsset`
 - **try/catch push（MUST）**
   - 成功：由 `StatisticsView` 发 `DataPushed`
-  - 失败：编排器统一 emit `CacheUpdateFailedV2(...)`（包含 snapshot payload + requestId/seq/nextVersion）
+  - 失败：编排器统一 emit `CacheUpdateFailedWithContext(...)`（包含 snapshot payload + requestId/seq/nextVersion）
 - **best-effort（MUST）**：notify/retry 均不应 revert 上游账本流程
 
 #### 1.3 核心 3：重试入口做成“重算快照后再推”
@@ -103,7 +103,7 @@
 - 给 keeper/后端重试服务地址授权：
   - `ActionKeys.ACTION_VIEW_PUSH`（用于调用 `StatisticsPushManager.retry*`）
 
-> 若权限缺失：编排器会 emit `CacheUpdateFailedV2` 并返回，不会卡主流程，但链路无法自愈。
+> 若权限缺失：编排器会 emit `CacheUpdateFailedWithContext` 并返回，不会卡主流程，但链路无法自愈。
 
 ---
 
@@ -112,7 +112,7 @@
 #### 4.1 监听与入队
 
 监听：
-- `CacheEvents.CacheUpdateFailedV2`
+- `CacheEvents.CacheUpdateFailedWithContext`
 
 入队字段：
 - `user`, `asset`, `viewAddr`
@@ -140,7 +140,7 @@
 #### 5.2 失败与自愈
 
 - 制造一次 push 失败（例如撤销 `StatisticsPushManager` 的 `ACTION_VIEW_PRICE_DATA`，使其无法读取估值快照）：
-  - 必须出现 `CacheUpdateFailedV2`
+  - 必须出现 `CacheUpdateFailedWithContext`
   - 恢复权限后调用 `retryUserStats/retryGuarantee` 可自愈（出现新的 `DataPushed`）
 
 ---
@@ -157,7 +157,7 @@
 | MUST | **UUPS + 初始化安全**（实现合约禁用 initializer；proxy initializer 做 registry 校验；保留 storage gap） | `src/Vault/view/modules/StatisticsView.sol:208-241`（constructor+initialize）；`src/Vault/view/modules/StatisticsView.sol:156-158`（`__gap`） | ✅ | - |
 | MUST | **View 模块统一版本信息入口 `getVersionInfo()`** | `src/Vault/view/ViewVersioned.sol:15-28`（`getVersionInfo`）；`src/Vault/view/modules/StatisticsView.sol:31`（继承 `ViewVersioned`） | ✅ | - |
 | MUST | **DataPush 统一常量口径**（优先 `DataPushTypes`） | `src/constants/DataPushTypes.sol:115-121`（stats types）；`src/Vault/view/modules/StatisticsView.sol:1064-1077`（emit `DATA_TYPE_GUARANTEE_STATS_UPDATE`）；`src/Vault/view/modules/StatisticsView.sol:1079-1085`（emit `DATA_TYPE_USER_STATS_UPDATE`） | ✅ | - |
-| MUST | **失败可观测：push 失败必须能被链下捕捉并重试**（`CacheUpdateFailedV2` 含 requestId/seq/nextVersion） | `src/Vault/CacheEvents.sol:43-53`（事件 SSOT）；`src/Vault/modules/StatisticsPushManager.sol:135-189`（失败 emit V2） | ✅ | - |
+| MUST | **失败可观测：push 失败必须能被链下捕捉并重试**（`CacheUpdateFailedWithContext` 含 requestId/seq/nextVersion） | `src/Vault/CacheEvents.sol:43-53`（事件 SSOT）；`src/Vault/modules/StatisticsPushManager.sol:135-189`（失败 emit with context） | ✅ | - |
 | MUST | **并发控制：`nextVersion` 严格乐观并发**（`incoming == current + 1`） | `src/Vault/view/modules/StatisticsView.sol:670-685`（user snapshot strict）；`src/Vault/view/modules/StatisticsView.sol:1044-1047`（guarantee snapshot strict） | ✅ | - |
 | MUST | **幂等/顺序：支持 `requestId`（O(1) lastApplied）与 `seq`（可选但一致策略）** | `src/Vault/view/modules/StatisticsView.sol:814-837`（user snapshot idempotency + seq）；`src/Vault/view/modules/StatisticsView.sol:1028-1052`（guarantee snapshot idempotency + seq） | ✅ | - |
 | MUST | **写入语义：B+ 主路径应使用 snapshot（而非 delta）** | `src/Vault/view/modules/StatisticsView.sol:645-685`（`pushUserStatsSnapshot`）；`src/Vault/view/modules/StatisticsView.sol:986-1077`（`pushGuaranteeSnapshot`） | ✅ | - |
@@ -167,6 +167,6 @@
 | MUST | **调用方改造：CM/LE/GFM 写入成功后只做 notify（best-effort）** | `src/Vault/modules/CollateralManager.sol:262-268`（notifyUserStats）；`src/Vault/modules/VaultLendingEngine.sol:189-195`（notifyUserStats）；`src/Vault/modules/GuaranteeFundManager.sol:240-246`（notifyGuarantee） | ✅ | - |
 | MUST | **保证金 key 维度为 (user,asset)**（meta 不得被“同 asset 的别的用户更新”污染） | `src/Vault/view/modules/StatisticsView.sol:117-123`（`_guaranteeLastUpdate[user][asset]`）；`src/Vault/view/modules/StatisticsView.sol:1167-1177`（user-guarantee meta blockNumber） | ✅ | - |
 | MUST | **本地 e2e 验收脚本不得依赖已不存在的 ABI（避免 selector not recognized）** | `scripts/e2e/e2e-localhost-statisticsview-acceptance.ts:106-216`（仅使用 `getGlobalStatisticsWithMeta` + `StatisticsPushManager.retry*`） | ✅ | - |
-| SHOULD | **验收应覆盖“失败→自愈”闭环**（撤销权限触发 `CacheUpdateFailedV2`，恢复后 retry 成功） | 本清单：`docs/Usage-Guide/StatisticsView-Strict-B-Push-Pipeline-Implementation-Checklist.md:140-145`（要求）；当前脚本未覆盖“撤权→失败事件”分支 | ⚠️ | 建议在 `e2e-localhost-statisticsview-acceptance.ts` 补一段：临时撤销 `StatisticsPushManager` 的 `VIEW_PRICE_DATA`（或将 `POSITION_VIEW` registry key 指向 0 地址以模拟依赖缺失）→ 断言 `CacheUpdateFailedV2` → 恢复后 retry 再断言 `DataPushed`。 |
+| SHOULD | **验收应覆盖“失败→自愈”闭环**（撤销权限触发 `CacheUpdateFailedWithContext`，恢复后 retry 成功） | 本清单：`docs/Usage-Guide/StatisticsView-Strict-B-Push-Pipeline-Implementation-Checklist.md:140-145`（要求）；当前脚本未覆盖“撤权→失败事件”分支 | ⚠️ | 建议在 `e2e-localhost-statisticsview-acceptance.ts` 补一段：临时撤销 `StatisticsPushManager` 的 `VIEW_PRICE_DATA`（或将 `POSITION_VIEW` registry key 指向 0 地址以模拟依赖缺失）→ 断言 `CacheUpdateFailedWithContext` → 恢复后 retry 再断言 `DataPushed`。 |
 | SHOULD | **删除/标记 legacy helper，避免新代码误用旧 delta 推送路径** | `src/libraries/VaultBusinessLogicLibrary.sol:18-37`（legacy stats interfaces）；`src/libraries/VaultBusinessLogicLibrary.sol:172-234`（`safeUpdateStats/safeUpdateGuarantee` 直接调用 delta push） | ⚠️ | 建议：明确标记 `DEPRECATED` 并在注释中指向 `StatisticsPushManager.notify*/retry*`；或在业务合约中完全移除引用，防回归。 |
 | MUST | **统计口径（SSOT）：collateral/debt 必须是跨资产统一的 value（USD-8）** | `src/Vault/modules/StatisticsPushManager.sol`：`_readUserTotalsValueUSD8()` 通过 `PositionView.getUserTotalCollateralValue(user)` + `LendingEngine.getUserTotalDebtValue(user)` 推送 snapshot；`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`：Value Unit SSOT（USD-8） | ✅ | 已统一为 USD-8；禁止再以 token base units 做跨资产累加。 |

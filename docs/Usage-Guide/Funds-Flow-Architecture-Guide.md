@@ -92,7 +92,7 @@
 
 #### 1.3.1 角色与职责（严格架构）
 
-- **VaultCore（用户写入口 SSOT）**：用户写入口只在 `VaultCore`，且 borrow/repay 的账本写入不经过 View。
+- **VaultCore（用户写入口 SSOT）**：用户写入口只在 `VaultCore`（deposit/withdraw/repay）；借款不提供 direct user `VaultCore.borrow`，由撮合/订单化路径编排；账本写入不经 View。
 - **VaultRouter（slim router）**：
   - 仅负责 `processUserOperation` 的 deposit/withdraw 路由；
   - 仅负责接收来自 `VaultCore` 的 `push*` 推送，并转发到 View 模块（例如 `PositionView`）；
@@ -101,7 +101,7 @@
 
 #### 1.3.2 仓位推送链路（SSOT，best-effort）
 
-写入账本成功后（例如 **债务账本 `VaultLendingEngine`（`KEY_LE`）** 的 borrow/repay/forceReduceDebt、或抵押账本 `CollateralManager` 的抵押变化），业务模块会走如下链路更新 View：
+写入账本成功后（例如 **债务账本 `VaultLendingEngine`（`KEY_LE`）** 的 borrowFor/repay/forceReduceDebt、或抵押账本 `CollateralManager` 的抵押变化），业务模块会走如下链路更新 View：
 
 `业务/账本模块（如 VaultLendingEngine / CollateralManager / SettlementManager） → VaultCore.pushUserPositionUpdate* / pushUserPositionUpdateDelta* → VaultRouter.push* → PositionView.push*`
 
@@ -119,7 +119,7 @@
   - `UserPositionDeltaPushed(user, asset, collateralDelta, debtDelta, blockNumber, requestId, seq)`：增量仓位推送（forward 到 PositionView；同时 best-effort 推动统计）
   - `ModuleCacheRefreshed(blockNumber)`：A 类模块地址缓存刷新（仅 `CacheMaintenanceManager` 可调用）
 - **缓存层（PositionView）**：
-  - `UserPositionCachedV2(user, asset, collateral, debt, version, ts)`：仓位缓存落地（带版本，推荐对账订阅）
+  - `UserPositionCachedWithVersion(user, asset, collateral, debt, version, blockNumber)`：仓位缓存落地（带版本，推荐对账订阅）
   - `CacheUpdateFailed(...)` / `IdempotentRequestIgnored(...)`：推送失败与幂等重放观测
 
 > ✅ 结论：**前端/链下的“仓位读取”应以 `PositionView` 为准；不要从 `VaultRouter` 读取任何仓位数据（已不再提供查询）。**
@@ -135,7 +135,7 @@
 
 - **VaultCore（用户入口 SSOT，最小校验）**
   - **参数校验**：`asset != address(0)`，`amount != 0`
-  - **重入保护**：用户写入口为 `nonReentrant`（例如 `deposit/withdraw/borrow/repay` 及 batch 入口）
+  - **重入保护**：用户写入口为 `nonReentrant`（例如 `deposit/withdraw/repay` 及 batch 入口）
   - **注意**：`VaultCore` **不承担**资产白名单校验与暂停校验（这是刻意的“极简入口/权威入口”设计）；但对“模块编排/回调类入口”（如 `borrowFor/repayFor/push*`）会做 caller 限制（`onlyBusinessModule/onlyOrderEngine`），避免被非模块调用。
 
 - **VaultRouter（路由层：暂停 + 白名单 + 入口权限的收敛点）**
@@ -230,10 +230,13 @@
       1) `LenderPoolVault.transferOut(borrowAsset, VaultBusinessLogic, amount)`：将成交金额拨付到撮合合约（只在本交易中短暂停留）
       2) `VaultBusinessLogic.approve(FeeRouter, amount)` → `FeeRouter.distributeNormal(borrowAsset, amount)`：
          - FeeRouter 从撮合合约拉取 `amount`，按配置分发到 `platformTreasury/ecosystemVault`，并将 **remaining** 返还给撮合合约
+        - 经济口径：总费率按白皮书记为“借/贷双方各承担千分之三”，链上实现为 **借款侧** 计入 FeeRouter 分发（不做链上双向结算）
       3) 撮合合约将 FeeRouter 返还的 **remaining（即净额）** 转给 borrower（净额以“真实返还结果”为准，避免按 bps 复算造成舍入漂移）
   - **(D) 账本落地与订单创建（写入不经 View）**
     - 债务账本写入：通过 `VaultCore.borrowFor(borrower, borrowAsset, amount, termDays)` 统一入口触达 **`VaultLendingEngine`（`KEY_LE`，`ILendingEngineBasic`）**（`onlyVaultCore`）
     - 订单创建：`ORDER_ENGINE(LendingEngine).createLoanOrder(order)` 创建 `orderId`，并由 `LoanNFT`/`LendingEngine` 发出 `LOAN_*`/NFT/DataPush 等事件
+    - （best-effort，协议统计缓存）`ORDER_ENGINE` 在创建订单成功后调用 `LoanFlowPushManager.notifyBorrow(borrower, asset, principal, orderId)`，
+      由其计算 **USD-8** 并推送 `LoanFlowView`（并发出 `DataPushed(LOAN_FLOW_UPDATED, ...)`；失败不回滚主流程，链下按 `CacheUpdateFailedWithContext` 重试）
   - **关键口径（必须）**：`LoanOrder.lender` 固定写 `LenderPoolVault` 地址（资金池），不写 `lenderSigner`
 
 #### 权限 / 白名单 / 暂停边界（撮合落地）
@@ -279,15 +282,17 @@
 在同一条链路内完成：
 
 - **债务记账（orderId SSOT）**：`ORDER_ENGINE(LendingEngine).repay(orderId, repayAmount)`（由 `SettlementManager` 作为调用方触发；资金已由 `VaultCore` 先转入 `SettlementManager`）
+- （best-effort，协议统计缓存）`ORDER_ENGINE` 在 `repay` 成功后调用 `LoanFlowPushManager.notifyRepay(borrower, asset, repayAmount, orderId, repaidAmountAfter)`，
+  由其计算 **USD-8** 并推送 `LoanFlowView`（`DataPushed(LOAN_FLOW_UPDATED, ...)`；失败不回滚主流程）
 - **抵押释放/返还（当前实现口径）**：当 `VaultLendingEngine.getUserTotalDebtValue(user) == 0` 时，`SettlementManager` 会遍历用户的抵押资产列表，并逐一调用 `CollateralManager.withdrawCollateralTo(user, asset, bal, user)` 将抵押直接返还到 borrower 钱包（无需二次 withdraw）
 - **费用/罚金（如有）**：统一走 `FeeRouter` 路由到 `platformTreasury` 等接收方
 
 #### “按时/提前/逾期”判定口径（以代码实现为准）
 
 - **判定位置（SSOT）**：订单维度的 on-time/early/late 判定目前发生在 `ORDER_ENGINE(LendingEngine).repay` 内（用于奖励 outcome / NFT 更新等），`SettlementManager.repayAndSettle` 本身不依赖该判定做分支（其“释放抵押”当前仅取决于用户总债务是否归零）。
-- **判定窗口（当前实现）**：`ON_TIME_WINDOW = 24 hours`
-  - **按时（on-time）**：`now + window >= maturity` 且 `now <= maturity + window`
-  - **提前（early）**：`now + window < maturity`（仅在“足额还清”时用于 outcome）
+- **判定窗口（当前实现，时间口径 SSOT=blocks）**：`ON_TIME_WINDOW_BLOCKS = 7200` blocks（\(\approx\) 24h，仅用于理解/展示；链上判定以 blocks 为准）
+  - **按时（on-time）**：`nowBlock + windowBlocks >= maturityBlock` 且 `nowBlock <= maturityBlock + windowBlocks`
+  - **提前（early）**：`nowBlock + windowBlocks < maturityBlock`（仅在“足额还清”时用于 outcome）
   - **逾期（late）**：不满足上述 on-time 且已足额还清（仅在“足额还清”时用于 outcome）
 
 #### 权限 / 白名单 / 暂停边界（还款/结算链路）
@@ -311,7 +316,9 @@
   - `DataPushed(REPAY_AND_SETTLE, abi.encode(...))`
   - `DataPushed(COLLATERAL_RELEASED, abi.encode(...))`
 - **OrderEngine（订单侧）**
-  - `DataPushed(LOAN_REPAID, ...)` /（若足额还清）NFT 状态更新相关事件/DataPush
+  - `DataPushed(LOAN_CREATED, ...)` / `DataPushed(LOAN_REPAID, ...)`
+  - `DataPushed(LOAN_FLOW_UPDATED, ...)`（由 `LoanFlowView` 发出；写入由 `LoanFlowPushManager` best-effort 推送）
+  - （若足额还清）NFT 状态更新相关事件/DataPush
 
 #### 代码落点（相关合约 / 接口路径，后续逐个文件修复用）
 
@@ -343,8 +350,9 @@
 - **启用条件（建议）**：按产品/资产/功能开关启用（例如仅某些借款资产或某类订单启用）。
 - **模块前置（必须）**：
   - Registry 必须注册：`KEY_GUARANTEE_FUND`（`GuaranteeFundManager`）与 `KEY_EARLY_REPAYMENT_GUARANTEE`（`EarlyRepaymentGuaranteeManager`）
-  - **平台费路由（与架构指南一致，推荐）**：保证金相关的 `platformFee` 视为“费用类资金”，建议统一走 `FeeRouter` 的分发口径（平台金库/下游地址由 `FeeRouter` 治理配置）。
-    - **兼容现状（若当前实现仍为直转）**：`EarlyRepaymentGuaranteeManager` 仍需配置 `platformFeeReceiver` 与 `platformFeeRate`；此时建议将 `platformFeeReceiver` 配置为 `FeeRouter` 的 `platformTreasury`（或其下游金库/路由地址），避免费用体系口径分叉。
+  - **平台费路由（实现口径）**：保证金相关的 `platformFee` 视为“费用类资金”，由 `GuaranteeFundManager` 先转入 `FeeRouter`，再通过 `FeeRouter.distributePrepaid` 分发到平台金库/生态金库。
+  - **权限要求（必须）**：`GuaranteeFundManager` 调用 `FeeRouter.distributePrepaid` 需具备 `ActionKeys.ACTION_DEPOSIT`（ACM 授权）。
+  - `platformFeeReceiver` 仅作为历史配置字段保留（不再作为实际转账接收方）。
 - **注意（SSOT 边界）**：
   - “提前/按时/逾期”等**订单语义判定的 SSOT** 以 `ORDER_ENGINE(LendingEngine)` 为准（当前在 `ORDER_ENGINE.repay(...)` 过程中完成判定，用于奖励 outcome / NFT 更新等）。
   - `SettlementManager` 作为 **主资金链唯一对外写入口（SSOT）**，在 `repayAndSettle` 中以订单状态/判定结果为依据触发保证金处理。
@@ -379,7 +387,7 @@
 - **提前还款（Early Repay）**：保证金（通常为 `promisedInterest` 口径）按结果拆分为：
   - **refundToBorrower**：返还 borrower
   - **penaltyToLender**：支付 lender 的罚金/补偿
-  - **platformFee**：平台手续费（**推荐**：按费用体系口径走 `FeeRouter`；**兼容**：若仍直转，则转给 `platformFeeReceiver`，且建议该地址配置为 `FeeRouter` 平台金库或其下游金库/路由地址）
+  - **platformFee**：平台手续费（实现为 **先转入 `FeeRouter`，再 `distributePrepaid` 分发**；feeType = `FEE_TYPE_EARLY_REPAYMENT_PLATFORM`）
   - **一致性约束（SSOT）**：三项之和必须等于 `GuaranteeFundManager` 中该用户该资产的托管余额，否则应回滚（避免对账漂移）。
 - **违约（Default）**：
   - 当前实现：没收金额为 `promisedInterest`，并转给 lender（可按产品规则调整）。
@@ -422,7 +430,7 @@
 
 - **SSOT 配置**：`LiquidationPayoutManager`（recipients/rates/shares 计算；整数分配，舍入余量归 liquidator）
 - **执行（真实转账）**：`LiquidationManager` 调用 `CollateralManager.withdrawCollateralTo` 按份额转给：
-  - `recipients.platform`（平台份额）
+  - `FeeRouter`（平台份额，随后由 `FeeRouter.distributePrepaid` 分发；feeType = `FEE_TYPE_LIQUIDATION_PLATFORM`）
   - `recipients.reserve`（风险准备金/生态金库）
   - `recipients.lenderCompensation`（出借人补偿池/地址）
   - `liquidator`（keeper；默认也承接舍入余量）
@@ -436,7 +444,8 @@
 - **receiver / liquidator 精确口径**
   - `liquidator`：**触发 `SettlementManager.settleOrLiquidate` 的 keeper**（`msg.sender`），会被透传到 `LiquidationManager`，并作为 `liquidatorShare` 的接收者，同时写入 `PayoutExecuted`/DataPush 事件中
   - `receiver`：每笔 `withdrawCollateralTo` 的接收者为 `LiquidationPayoutManager.getRecipients()` 返回的 `platform/reserve/lenderCompensation` + `liquidator`
-- **与 FeeRouter 的关系（当前实现口径）**：清算残值分配 **不经过 `FeeRouter`**；平台份额直接转给 `recipients.platform`（如需纳入费用体系，可将 `recipients.platform` 配置为平台金库/或 FeeRouter 下游地址）
+- **与 FeeRouter 的关系（当前实现口径）**：清算平台份额 **先进入 `FeeRouter` 再分发**；`recipients.platform` 仅用于配置/展示，真实转账由 `FeeRouter` 完成。
+- **权限要求（必须）**：`LiquidationManager` 调用 `FeeRouter.distributePrepaid` 需具备 `ActionKeys.ACTION_DEPOSIT`（ACM 授权）。
 
 #### 代码落点（相关合约 / 接口路径，后续逐个文件修复用）
 
@@ -462,12 +471,20 @@
 - **入口**（由业务模块触发，不对用户开放）：
   - 常规费率：`FeeRouter.distributeNormal(token, amount)`
   - 动态费率：`FeeRouter.distributeDynamic(token, amount, feeType)`
+  - 预存分发：`FeeRouter.distributePrepaid(token, amount, feeType, payer)`（用于清算/保证金等“已在 FeeRouter 托管”的资金）
   - 批量分发：`FeeRouter.batchDistribute(token, amounts[], feeTypes[])`
 - **分发语义（当前实现）**：
-  - `FeeRouter` 会从 **调用者** `transferFrom(msg.sender, FeeRouter, totalAmount)` 拉取费用金额（因此调用者需提前 `approve(FeeRouter)`）
+  - `distributeNormal/distributeDynamic/batchDistribute`：`FeeRouter` 会从 **调用者** `transferFrom(msg.sender, FeeRouter, totalAmount)` 拉取费用金额（因此调用者需提前 `approve(FeeRouter)`）
+  - `distributePrepaid`：费用金额已在 `FeeRouter` 托管，直接按平台/生态比例分发（不会再 `transferFrom`）
   - 将 `platformAmt` 转给 `platformTreasury`，将 `ecoAmt` 转给 `ecosystemVault`
   - `remaining`（即 `amount - platformAmt - ecoAmt`）**返还给调用者**（通常是资金池/编排合约）
 - **token 白名单**：只有 `supportedTokens` 内的 token 才允许分发，否则 `TokenNotSupported`（上线前必须把 settlementToken 等加入支持列表）
+
+### 7.1.1 费用口径与对账建议（借/贷归因）
+
+- **经济口径**：平台总费率为 **千分之六**，其中借款侧与还款侧各计 **千分之三**
+- **链上实现**：借款侧费用通过 `FeeRouter.distributeNormal` 收口；还款侧费用通过 `LendingEngine.repay` 内置的费率收口
+- **可选对账增强**：若需链上可审计的“借/贷分开统计”，可将借款/还款分别走 `distributeDynamic(token, amount, feeType)` 并使用不同 `feeType` 标识
 
 ### 7.2 配置（recipients / rates）与权限边界
 
@@ -478,7 +495,7 @@
   - `addSupportedToken(token)` / `removeSupportedToken(token)`：维护支持 token 列表
   - `clearFeeCache(token, feeType)`：清理缓存（运维/治理工具）
 - **分发入口权限**：
-  - `distributeNormal/distributeDynamic/batchDistribute`：调用者需具备 `ActionKeys.ACTION_DEPOSIT`（例如 `VaultBusinessLogic`）
+  - `distributeNormal/distributeDynamic/distributePrepaid/batchDistribute`：调用者需具备 `ActionKeys.ACTION_DEPOSIT`（例如 `VaultBusinessLogic` / `GuaranteeFundManager` / `LiquidationManager`）
 - **暂停边界**：
   - `pause/unpause`：`onlyRole(ActionKeys.ACTION_PAUSE_SYSTEM / ACTION_UNPAUSE_SYSTEM)`；分发逻辑内部受 `whenNotPaused` 保护
 

@@ -1,58 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { RewardTypes } from "../Reward/RewardTypes.sol";
-
-contract MockRewardCoreView {
-    mapping(address => RewardTypes.ConsumptionRecord[]) private _records;
-    mapping(RewardTypes.ServiceType => uint256) private _serviceUsage;
-    mapping(address => mapping(RewardTypes.ServiceType => uint256)) private _lastConsumption;
-    mapping(RewardTypes.ServiceType => mapping(RewardTypes.ServiceLevel => RewardTypes.ServiceConfig)) private _configs;
-
-    function setUserConsumptions(address user, RewardTypes.ConsumptionRecord[] calldata records) external {
-        delete _records[user];
-        for (uint256 i; i < records.length; i++) {
-            _records[user].push(records[i]);
-        }
-    }
-
-    function getUserConsumptions(address user) external view returns (RewardTypes.ConsumptionRecord[] memory) {
-        return _records[user];
-    }
-
-    function setServiceUsage(RewardTypes.ServiceType serviceType, uint256 usage) external {
-        _serviceUsage[serviceType] = usage;
-    }
-
-    function getServiceUsage(RewardTypes.ServiceType serviceType) external view returns (uint256) {
-        return _serviceUsage[serviceType];
-    }
-
-    function setUserLastConsumption(address user, RewardTypes.ServiceType serviceType, uint256 blockNumber) external {
-        _lastConsumption[user][serviceType] = blockNumber;
-    }
-
-    function getUserLastConsumption(address user, RewardTypes.ServiceType serviceType) external view returns (uint256) {
-        return _lastConsumption[user][serviceType];
-    }
-
-    function setServiceConfig(
-        RewardTypes.ServiceType serviceType,
-        RewardTypes.ServiceLevel level,
-        RewardTypes.ServiceConfig calldata cfg
-    ) external {
-        _configs[serviceType][level] = cfg;
-    }
-
-    function getServiceConfig(RewardTypes.ServiceType serviceType, RewardTypes.ServiceLevel level)
-        external
-        view
-        returns (RewardTypes.ServiceConfig memory)
-    {
-        return _configs[serviceType][level];
-    }
-}
-
 contract MockRewardManagerCoreView {
     struct UserCache {
         uint256 points;
@@ -60,8 +8,6 @@ contract MockRewardManagerCoreView {
         bool isValid;
         uint8 level;
         uint256 lastActivity;
-        uint256 totalLoans;
-        uint256 totalVolume;
         uint256 penaltyDebt;
     }
 
@@ -73,7 +19,7 @@ contract MockRewardManagerCoreView {
     uint256 public cacheExpirationTime;
     uint256 public dynamicThreshold;
     uint256 public dynamicMultiplier;
-    uint256 public lastRewardResetTime;
+    uint256 public lastRewardResetBlock;
 
     mapping(uint8 => uint256) public levelMultiplier;
     mapping(address => UserCache) public userCache;
@@ -98,11 +44,9 @@ contract MockRewardManagerCoreView {
         bool isValid,
         uint8 level_,
         uint256 lastAct,
-        uint256 loans,
-        uint256 volume,
         uint256 penalty
     ) external {
-        userCache[user] = UserCache(points, blockNumber, isValid, level_, lastAct, loans, volume, penalty);
+        userCache[user] = UserCache(points, blockNumber, isValid, level_, lastAct, penalty);
     }
 
     function getUserCache(address user) external view returns (uint256, uint256, bool) {
@@ -125,10 +69,10 @@ contract MockRewardManagerCoreView {
         return (dynamicThreshold, dynamicMultiplier);
     }
 
-    function setLastRewardResetTime(uint256 blockNumber) external { lastRewardResetTime = blockNumber; }
+    function setLastRewardResetBlock(uint256 blockNumber) external { lastRewardResetBlock = blockNumber; }
 
-    function getLastRewardResetTime() external view returns (uint256) {
-        return lastRewardResetTime;
+    function getLastRewardResetBlock() external view returns (uint256) {
+        return lastRewardResetBlock;
     }
 
     function setUserLevel(address user, uint8 level_) external {
@@ -143,17 +87,6 @@ contract MockRewardManagerCoreView {
 
     function getLevelMultiplier(uint8 level_) external view returns (uint256) {
         return levelMultiplier[level_];
-    }
-
-    function setUserActivity(address user, uint256 lastActivity, uint256 totalLoans, uint256 totalVolume) external {
-        userCache[user].lastActivity = lastActivity;
-        userCache[user].totalLoans = totalLoans;
-        userCache[user].totalVolume = totalVolume;
-    }
-
-    function getUserActivity(address user) external view returns (uint256, uint256, uint256) {
-        UserCache memory c = userCache[user];
-        return (c.lastActivity, c.totalLoans, c.totalVolume);
     }
 
     function setUserPenaltyDebt(address user, uint256 debt) external {
@@ -178,7 +111,7 @@ contract MockRewardManagerCoreView {
     }
 }
 
-contract MockRewardPointsMinimal {
+contract MockEasyTokenMinimal {
     mapping(address => uint256) public balances;
 
     function setBalance(address user, uint256 amount) external {

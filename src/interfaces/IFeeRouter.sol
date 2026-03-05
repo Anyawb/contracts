@@ -110,6 +110,22 @@ interface IFeeRouter {
     function distributeDynamic(address token, uint256 amount, bytes32 feeType) external;
 
     /**
+     * @notice Distribute a prepaid fee amount already held by FeeRouter.
+     * @dev Reverts if:
+     *      - implementation-defined (authorization/validation/paused/token support)
+     *      - FeeRouter balance is insufficient for the prepaid amount
+     *
+     * Security:
+     * - Role-gated in implementation
+     *
+     * @param token ERC20 token address
+     * @param amount Prepaid fee amount already transferred to FeeRouter
+     * @param feeType Fee type identifier
+     * @param payer Payer address for fee statistics attribution
+     */
+    function distributePrepaid(address token, uint256 amount, bytes32 feeType, address payer) external;
+
+    /**
      * @notice Batch distribute multiple fee items for a token (gas-optimized).
      * @dev Reverts if:
      *      - implementation-defined (authorization/validation/paused/token support)

@@ -126,6 +126,13 @@ contract DegradationCore is Initializable, UUPSUpgradeable {
      * @dev Reverts if caller lacks ACTION_ADMIN and ACTION_VIEW_SYSTEM_STATUS.
      */
     modifier onlySystemHealthViewer() {
+        // Allow the Registry-registered DegradationMonitor to read core stats without granting it viewer roles.
+        // Rationale: DegradationMonitor is the coordinator and should be able to query its own submodules.
+        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        if (mon != address(0) && msg.sender == mon) {
+            _;
+            return;
+        }
         address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         require(
             IAccessControlManager(acm).hasRole(ActionKeys.ACTION_ADMIN,msg.sender) ||
@@ -286,17 +293,26 @@ contract DegradationCore is Initializable, UUPSUpgradeable {
      * @notice Admin entrypoint to record a degradation event.
      * @dev Reverts if:
      *      - registry is invalid (ZeroAddress / NotAContract)
-     *      - caller lacks ACTION_ADMIN (via ACM.requireRole)
+     *      - caller lacks ACTION_ADMIN (via ACM.requireRole) AND caller is not Registry[KEY_DEGRADATION_MONITOR]
      *
      * Security:
-     * - Role-gated (ACTION_ADMIN)
+     * - Role-gated (ACTION_ADMIN) OR DegradationMonitor single-entry (Registry[KEY_DEGRADATION_MONITOR])
+     * - Rationale: DegradationMonitor is the write-path coordinator; Core should accept writes from the
+     *   registry-bound monitor without requiring the monitor contract itself to hold ACTION_ADMIN.
      *
      * @param module Module address that degraded.
      * @param reason Reason string.
      * @param fallbackVal Fallback value used.
      * @param usedFallback Whether a fallback strategy was used.
      */
-    function adminRecordDegradation(address module,string calldata reason,uint256 fallbackVal,bool usedFallback) external onlyValidRegistry onlyAdmin {
+    function adminRecordDegradation(address module,string calldata reason,uint256 fallbackVal,bool usedFallback) external onlyValidRegistry {
+        // Allow DegradationMonitor (Registry-bound) as single-entry coordinator.
+        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        if (mon == address(0) || msg.sender != mon) {
+            // Fallback: allow direct admin writes (legacy / maintenance).
+            IAccessControlManager(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL))
+                .requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        }
         _recordEvent(module,reason,fallbackVal,usedFallback);
     }
 }

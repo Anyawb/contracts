@@ -52,17 +52,14 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     address private _legacySystemViewAddr;
 
     /*━━━━━━━━━━━━━━━ Local Types (formerly LiquidationViewTypes) ━━━━━━━━━━━━━━━*/
-    /// @dev Baseline blocks-per-day used for placeholder analytics (assumes ~12s/block).
-    uint256 private constant _BLOCKS_PER_DAY = 7200;
-
     struct LiquidatorProfitView {
         address liquidator;
         uint256 totalProfit;
         uint256 totalLiquidations;
-        uint256 lastLiquidationTime;
+        uint256 lastLiquidationBlock;
         uint256 totalProfitValue;
         uint256 averageProfitPerLiquidation;
-        uint256 daysSinceLastLiquidation;
+        uint256 blocksSinceLastLiquidation;
     }
 
     struct GlobalLiquidationView {
@@ -70,7 +67,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         uint256 totalProfitDistributed;
         uint256 totalLiquidators;
         uint256 averageProfitPerLiquidation;
-        uint256 lastLiquidationTime;
+        uint256 lastLiquidationBlock;
         uint256 liquidationSuccessRate;
     }
     
@@ -894,14 +891,14 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     struct UserLiquidationStats {
         uint256 totalLiquidations;
         uint256 totalSeizedValue;
-        uint256 lastLiquidationTime;
+        uint256 lastLiquidationBlock;
     }
 
     struct SystemLiquidationSnapshot {
         uint256 totalLiquidations;
         uint256 totalProfitDistributed;
         uint256 totalLiquidators;
-        uint256 lastUpdateTime;
+        uint256 lastUpdateBlock;
     }
 
     // Asset/period statistics are aggregated off-chain; do not expose on-chain interfaces here.
@@ -1017,7 +1014,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             totalLiquidations: 0,
             totalProfitDistributed: 0,
             totalLiquidators: 0,
-            lastUpdateTime: 0
+            lastUpdateBlock: 0
         });
     }
 
@@ -1040,7 +1037,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             totalLiquidations: 0,
             totalProfitDistributed: 0,
             totalLiquidators: 0,
-            lastUpdateTime: 0
+            lastUpdateBlock: 0
         });
         (blockNumber, isValid) = _defaultMeta();
     }
@@ -1434,7 +1431,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         s = UserLiquidationStats({
             totalLiquidations: 0,
             totalSeizedValue: 0,
-            lastLiquidationTime: 0
+            lastLiquidationBlock: 0
         });
     }
 
@@ -1444,19 +1441,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (LiquidatorProfitView memory profitView)
     {
         // Aggregated off-chain; return zero placeholders on-chain.
-        (uint256 totalProfit, uint256 liquidationCount, uint256 lastTs) = (0, 0, 0);
+        (uint256 totalProfit, uint256 liquidationCount, uint256 lastUpdateBlock) = (0, 0, 0);
         uint256 avg = liquidationCount > 0 ? totalProfit / liquidationCount : 0;
         // Time-Dependency-Refactor SSOT: use block number as time axis marker.
-        uint256 daysSince = lastTs > 0 && block.number > lastTs ? (block.number - lastTs) / _BLOCKS_PER_DAY : 0;
+        uint256 blocksSince =
+            lastUpdateBlock > 0 && block.number > lastUpdateBlock ? (block.number - lastUpdateBlock) : 0;
 
         profitView = LiquidatorProfitView({
             liquidator: liquidator,
             totalProfit: totalProfit,
             totalLiquidations: liquidationCount,
-            lastLiquidationTime: lastTs,
+            lastLiquidationBlock: lastUpdateBlock,
             totalProfitValue: totalProfit,
             averageProfitPerLiquidation: avg,
-            daysSinceLastLiquidation: daysSince
+            blocksSinceLastLiquidation: blocksSince
         });
     }
 
@@ -1469,7 +1467,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         uint256 totalLiquidations = 0;
         uint256 totalProfit = 0;
         uint256 activeLiquidators = 0;
-        uint256 lastUpdateTime = 0;
+        uint256 lastUpdateBlock = 0;
 
         uint256 avg = totalLiquidations > 0 ? totalProfit / totalLiquidations : 0;
 
@@ -1478,7 +1476,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             totalProfitDistributed: totalProfit,
             totalLiquidators: activeLiquidators,
             averageProfitPerLiquidation: avg,
-            lastLiquidationTime: lastUpdateTime,
+            lastLiquidationBlock: lastUpdateBlock,
             liquidationSuccessRate: 0
         });
     }

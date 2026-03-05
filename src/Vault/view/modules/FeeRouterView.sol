@@ -91,7 +91,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     uint256 private _lastSyncBlock;
     
     /// @notice Sync interval expressed in blocks (SSOT for time-dependency refactor).
-    /// @dev Default aligns with `ViewConstants.CACHE_DURATION_BLOCKS` (5 minutes ~= 150 blocks on ~2s chains).
+    /// @dev Default aligns with `ViewConstants.CACHE_DURATION_BLOCKS` (block-based; chain-dependent).
     uint256 public constant SYNC_INTERVAL_BLOCKS = ViewConstants.CACHE_DURATION_BLOCKS;
     
     /*━━━━━━━━━━━━━━━ TYPES ━━━━━━━━━━━━━━━*/
@@ -423,17 +423,17 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * - Block-based heuristic using block.number via {needsSync}
      *
      * @return isValid True if cache is considered valid by the time heuristic
-     * @return lastSyncTimestamp Legacy field: last sync marker (treated as blockNumber)
+     * @return lastSyncBlock Last sync marker (blockNumber axis)
      * @return needsSyncFlag True if cache is considered stale by the time heuristic
      */
     function getSyncStatus()
         external
         view
-        returns (bool isValid, uint256 lastSyncTimestamp, bool needsSyncFlag)
+        returns (bool isValid, uint256 lastSyncBlock, bool needsSyncFlag)
     {
-        lastSyncTimestamp = _lastSyncBlock;
+        lastSyncBlock = _lastSyncBlock;
         needsSyncFlag = _needsSync();
-        isValid = lastSyncTimestamp > 0 && !needsSyncFlag;
+        isValid = lastSyncBlock > 0 && !needsSyncFlag;
     }
 
     /**

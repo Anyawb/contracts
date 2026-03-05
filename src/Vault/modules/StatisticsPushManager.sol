@@ -47,7 +47,7 @@ interface IStatisticsViewSnapshotMinimal {
  * Core properties (Workguide intent):
  * - **Snapshot semantics**: always push SSOT-derived authoritative snapshots (no delta guessing).
  * - **Single on-chain entrypoint**: only this contract calls `StatisticsView.push*Snapshot(...)`.
- * - **Context completeness**: generates `seq/requestId/nextVersion` deterministically, emits `CacheUpdateFailedV2`.
+ * - **Context completeness**: generates `seq/requestId/nextVersion` deterministically, emits `CacheUpdateFailedWithContext`.
  * - **Best-effort**: never blocks ledger SSOT writes; failures are observable and retryable.
  *
  * Notes:
@@ -91,7 +91,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
     /*━━━━━━━━━━━━━━━ Public notify APIs (best-effort) ━━━━━━━━━━━━━━━*/
     /**
      * @notice Best-effort notify that a user's debt/collateral ledger changed and StatisticsView should be updated.
-     * @dev MUST NOT revert the caller's flow; emits CacheUpdateFailedV2 on internal failures and returns.
+     * @dev MUST NOT revert the caller's flow; emits CacheUpdateFailedWithContext on internal failures and returns.
      *
      * Security:
      * - Restricted to SSOT ledger/orchestrator modules (see `_requireNotifier()`).
@@ -103,7 +103,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
 
     /**
      * @notice Best-effort notify that a (user, asset) guarantee balance changed and StatisticsView should be updated.
-     * @dev MUST NOT revert the caller's flow; emits CacheUpdateFailedV2 on internal failures and returns.
+     * @dev MUST NOT revert the caller's flow; emits CacheUpdateFailedWithContext on internal failures and returns.
      *
      * Security:
      * - Restricted to SSOT ledger/orchestrator modules (see `_requireNotifier()`).
@@ -116,7 +116,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
     /*━━━━━━━━━━━━━━━ Retry APIs (role-gated) ━━━━━━━━━━━━━━━*/
     /**
      * @notice Retry user stats snapshot push by recomputing SSOT snapshot, then pushing with strict versioning.
-     * @dev Intended for keepers/offchain retry services. This call may emit CacheUpdateFailedV2 and return.
+     * @dev Intended for keepers/offchain retry services. This call may emit CacheUpdateFailedWithContext and return.
      */
     function retryUserStats(address user) external onlyValidRegistry nonReentrant {
         _requireRole(ActionKeys.ACTION_VIEW_PUSH, msg.sender);
@@ -125,7 +125,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
 
     /**
      * @notice Retry guarantee snapshot push by recomputing SSOT snapshot, then pushing with strict versioning.
-     * @dev Intended for keepers/offchain retry services. This call may emit CacheUpdateFailedV2 and return.
+     * @dev Intended for keepers/offchain retry services. This call may emit CacheUpdateFailedWithContext and return.
      */
     function retryGuarantee(address user, address asset) external onlyValidRegistry nonReentrant {
         _requireRole(ActionKeys.ACTION_VIEW_PUSH, msg.sender);
@@ -135,7 +135,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
     /*━━━━━━━━━━━━━━━ Internal: SSOT snapshot read + push (best-effort) ━━━━━━━━━━━━━━━*/
     function _pushUserStatsSnapshotBestEffort(address user) internal {
         if (user == address(0)) {
-            emit CacheUpdateFailedV2(address(0), address(0), bytes32(0), address(0), 0, 0, abi.encode("user=0"), 0, 0);
+            emit CacheUpdateFailedWithContext(address(0), address(0), bytes32(0), address(0), 0, 0, abi.encode("user=0"), 0, 0);
             return;
         }
 
@@ -148,15 +148,15 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
         address pvAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_POSITION_VIEW);
 
         if (statsViewAddr == address(0) || statsViewAddr.code.length == 0) {
-            emit CacheUpdateFailedV2(user, address(0), requestId, statsViewAddr, 0, 0, abi.encode("statsView missing"), seq, 0);
+            emit CacheUpdateFailedWithContext(user, address(0), requestId, statsViewAddr, 0, 0, abi.encode("statsView missing"), seq, 0);
             return;
         }
         if (leAddr == address(0) || leAddr.code.length == 0) {
-            emit CacheUpdateFailedV2(user, address(0), requestId, statsViewAddr, 0, 0, abi.encode("lendingEngine missing"), seq, 0);
+            emit CacheUpdateFailedWithContext(user, address(0), requestId, statsViewAddr, 0, 0, abi.encode("lendingEngine missing"), seq, 0);
             return;
         }
         if (pvAddr == address(0) || pvAddr.code.length == 0) {
-            emit CacheUpdateFailedV2(user, address(0), requestId, statsViewAddr, 0, 0, abi.encode("positionView missing"), seq, 0);
+            emit CacheUpdateFailedWithContext(user, address(0), requestId, statsViewAddr, 0, 0, abi.encode("positionView missing"), seq, 0);
             return;
         }
 
@@ -168,7 +168,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
         (uint256 collateralTotal, uint256 debtTotal, bytes memory snapErr) =
             _readUserTotalsValueUSD8(pvAddr, leAddr, user);
         if (snapErr.length != 0) {
-            emit CacheUpdateFailedV2(user, address(0), requestId, statsViewAddr, collateralTotal, debtTotal, snapErr, seq, 0);
+            emit CacheUpdateFailedWithContext(user, address(0), requestId, statsViewAddr, collateralTotal, debtTotal, snapErr, seq, 0);
             return;
         }
 
@@ -177,7 +177,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
         try IStatisticsViewSnapshotMinimal(statsViewAddr).getUserStatsVersionForPusher(user) returns (uint64 cur) {
             nextVersion = cur + 1;
         } catch (bytes memory reason) {
-            emit CacheUpdateFailedV2(
+            emit CacheUpdateFailedWithContext(
                 user, address(0), requestId, statsViewAddr, collateralTotal, debtTotal, reason, seq, 0
             );
             return;
@@ -188,7 +188,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
         ) {
             // ok
         } catch (bytes memory reason) {
-            emit CacheUpdateFailedV2(
+            emit CacheUpdateFailedWithContext(
                 user, address(0), requestId, statsViewAddr, collateralTotal, debtTotal, reason, seq, nextVersion
             );
         }
@@ -196,7 +196,7 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
 
     function _pushGuaranteeSnapshotBestEffort(address user, address asset) internal {
         if (user == address(0) || asset == address(0)) {
-            emit CacheUpdateFailedV2(user, asset, bytes32(0), address(0), 0, 0, abi.encode("user/asset=0"), 0, 0);
+            emit CacheUpdateFailedWithContext(user, asset, bytes32(0), address(0), 0, 0, abi.encode("user/asset=0"), 0, 0);
             return;
         }
 
@@ -206,11 +206,11 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
         address statsViewAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS);
         address gfmAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_GUARANTEE_FUND);
         if (statsViewAddr == address(0) || statsViewAddr.code.length == 0) {
-            emit CacheUpdateFailedV2(user, asset, requestId, statsViewAddr, 0, 0, abi.encode("statsView missing"), seq, 0);
+            emit CacheUpdateFailedWithContext(user, asset, requestId, statsViewAddr, 0, 0, abi.encode("statsView missing"), seq, 0);
             return;
         }
         if (gfmAddr == address(0) || gfmAddr.code.length == 0) {
-            emit CacheUpdateFailedV2(user, asset, requestId, statsViewAddr, 0, 0, abi.encode("guaranteeFund missing"), seq, 0);
+            emit CacheUpdateFailedWithContext(user, asset, requestId, statsViewAddr, 0, 0, abi.encode("guaranteeFund missing"), seq, 0);
             return;
         }
 
@@ -219,13 +219,13 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
         try IGuaranteeFundManager(gfmAddr).getLockedGuarantee(user, asset) returns (uint256 b) {
             userBal = b;
         } catch (bytes memory reason) {
-            emit CacheUpdateFailedV2(user, asset, requestId, statsViewAddr, 0, 0, reason, seq, 0);
+            emit CacheUpdateFailedWithContext(user, asset, requestId, statsViewAddr, 0, 0, reason, seq, 0);
             return;
         }
         try IGuaranteeFundManager(gfmAddr).getTotalGuaranteeByAsset(asset) returns (uint256 t) {
             totalByAsset = t;
         } catch (bytes memory reason) {
-            emit CacheUpdateFailedV2(user, asset, requestId, statsViewAddr, userBal, 0, reason, seq, 0);
+            emit CacheUpdateFailedWithContext(user, asset, requestId, statsViewAddr, userBal, 0, reason, seq, 0);
             return;
         }
 
@@ -233,18 +233,18 @@ contract StatisticsPushManager is Initializable, UUPSUpgradeable, ReentrancyGuar
         try IStatisticsViewSnapshotMinimal(statsViewAddr).getGuaranteeVersionForPusher(user, asset) returns (uint64 cur) {
             nextVersion = cur + 1;
         } catch (bytes memory reason) {
-            emit CacheUpdateFailedV2(user, asset, requestId, statsViewAddr, userBal, totalByAsset, reason, seq, 0);
+            emit CacheUpdateFailedWithContext(user, asset, requestId, statsViewAddr, userBal, totalByAsset, reason, seq, 0);
             return;
         }
 
-        // For guarantee snapshots, we place (userBalance, totalByAsset) into (collateral, debt) fields of CacheUpdateFailedV2
+        // For guarantee snapshots, we place (userBalance, totalByAsset) into (collateral, debt) fields of CacheUpdateFailedWithContext
         // to keep the event replayable with only two scalar slots.
         try IStatisticsViewSnapshotMinimal(statsViewAddr).pushGuaranteeSnapshot(
             user, asset, userBal, totalByAsset, requestId, seq, nextVersion
         ) {
             // ok
         } catch (bytes memory reason) {
-            emit CacheUpdateFailedV2(user, asset, requestId, statsViewAddr, userBal, totalByAsset, reason, seq, nextVersion);
+            emit CacheUpdateFailedWithContext(user, asset, requestId, statsViewAddr, userBal, totalByAsset, reason, seq, nextVersion);
         }
     }
 

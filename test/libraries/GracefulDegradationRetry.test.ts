@@ -45,10 +45,11 @@ describe('GracefulDegradation – 重试机制测试', function () {
 
     // 设置测试价格数据（MockPriceOracle 的 setPrice 需要 owner 权限）
     const testPrice = ethers.parseUnits('1', 8); // 1 USD
-    const testTimestamp = Math.floor(Date.now() / 1000);
+    // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
+    const testBlock = await ethers.provider.getBlockNumber();
     const testDecimals = 8;
     
-    await mockPriceOracle.connect(owner).setPrice(TEST_ASSET, testPrice, testTimestamp, testDecimals);
+    await mockPriceOracle.connect(owner).setPrice(TEST_ASSET, testPrice, testBlock, testDecimals);
 
     return {
       gracefulDegradation,

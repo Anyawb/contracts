@@ -5,6 +5,12 @@ import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import { IVotes } from "@openzeppelin/contracts/governance/utils/IVotes.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+
+import { IRegistry } from "../interfaces/IRegistry.sol";
+import { ModuleKeys } from "../constants/ModuleKeys.sol";
+import { ZeroAddress, NotAContract } from "../errors/StandardErrors.sol";
 
 error CrossChainGovernance__InvalidProposal();
 error CrossChainGovernance__ProposalNotActive();
@@ -13,6 +19,25 @@ error CrossChainGovernance__InvalidChainId();
 error CrossChainGovernance__ExecutionFailed();
 error CrossChainGovernance__InsufficientVotes();
 error CrossChainGovernance__InvalidExecutor();
+error CrossChainGovernance__InvalidGovernanceToken(address token);
+error CrossChainGovernance__GovernanceTokenOutOfSync(address cached, address expected);
+error CrossChainGovernance__ProposalCanceled();
+error CrossChainGovernance__GovernanceGateRejected(bytes32 reason);
+error CrossChainGovernance__GuardianNotSet();
+error CrossChainGovernance__NotGuardian(address caller, address guardian);
+error CrossChainGovernance__RegistryNotSet();
+
+interface IGovernanceGateRead {
+    function isEligibleToVote(address user, uint256 snapshotBlock, address votesToken)
+        external
+        view
+        returns (bool ok, bytes32 reason);
+
+    function isEligibleToPropose(address user, uint256 snapshotBlock, address votesToken)
+        external
+        view
+        returns (bool ok, bytes32 reason);
+}
 
 /// @title CrossChainGovernance - 跨链治理投票系统
 /// @notice 支持多链投票、提案管理、跨链执行的治理系统
@@ -24,8 +49,11 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @notice 执行者角色
     bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
 
-    /// @notice 默认区块时间假设（~2s/block），用于将天数映射到区块数
-    uint256 private constant _BLOCKS_PER_DAY = 43_200;
+    /// @notice 提案参数默认值（显式 blocks；避免任何链上 days/seconds 换算）
+    /// @dev 这些值是默认配置；治理可通过 `updateGovernanceParameters` 覆盖（SSOT：block.number 轴）。
+    uint256 private constant _DEFAULT_MIN_PROPOSAL_BLOCKS = 43_200;
+    uint256 private constant _DEFAULT_MAX_PROPOSAL_BLOCKS = 1_296_000;
+    uint256 private constant _DEFAULT_EXECUTION_DELAY_BLOCKS = 86_400;
     
     /// @notice 提案状态枚举
     enum ProposalState {
@@ -96,24 +124,40 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     
     /// @notice 提案计数器
     uint256 public proposalCount;
-    
-    /// @notice 投票权重映射
-    mapping(address => uint256) public votingPower;
+
+    /// @notice Governance voting token (IVotes).
+    /// @dev Scheme B (cached + strong invariant):
+    ///      - `governanceToken` is cached for gas efficiency and ABI convenience.
+    ///      - ALL security/consensus-relevant paths MUST enforce:
+    ///        governanceToken == Registry[KEY_EASY_STAKING]
+    ///      - Use `syncGovernanceTokenFromRegistry()` to refresh the cache after Registry updates.
+    ///
+    /// IMPORTANT (ERC20Votes):
+    /// - Users must delegate (usually self-delegate) to activate checkpoints.
+    ///   Otherwise `getPastVotes` can return 0 even when balance > 0.
+    address public governanceToken;
+
+    /// @notice Registry address (module-address SSOT).
+    /// @dev Required. Used as SSOT for:
+    ///      - governanceToken: Registry[KEY_EASY_STAKING]
+    ///      - gate: Registry[KEY_GOVERNANCE_GATE]
+    ///      - guardian (veto): Registry[KEY_GOVERNANCE_GUARDIAN]
+    address public registry;
     
     /// @notice 最小提案时间（区块）
-    uint256 public minProposalBlocks = 1 * _BLOCKS_PER_DAY;
+    uint256 public minProposalBlocks;
     
     /// @notice 最大提案时间（区块）
-    uint256 public maxProposalBlocks = 30 * _BLOCKS_PER_DAY;
+    uint256 public maxProposalBlocks;
     
     /// @notice 执行延迟时间（区块）
-    uint256 public executionDelayBlocks = 2 * _BLOCKS_PER_DAY;
+    uint256 public executionDelayBlocks;
     
     /// @notice 法定人数比例 (BPS)
-    uint256 public quorumBPS = 4000; // 40%
+    uint256 public quorumBPS;
     
     /// @notice 投票阈值比例 (BPS)
-    uint256 public voteThresholdBPS = 6000; // 60%
+    uint256 public voteThresholdBPS;
     
     /// @notice 跨链验证器
     mapping(address => bool) public crossChainValidators;
@@ -127,6 +171,9 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     event CrossChainVoteReceived(uint256 indexed proposalId, uint256 indexed chainId, uint256 forVotes, uint256 againstVotes, uint256 abstainVotes);
     event CrossChainExecution(uint256 indexed proposalId, uint256 indexed chainId, bytes32 messageHash);
     event GovernanceParametersUpdated(uint256 minProposalBlocks, uint256 maxProposalBlocks, uint256 executionDelayBlocks, uint256 quorumBPS, uint256 voteThresholdBPS);
+    event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry, uint256 blockNumber);
+    event ProposalVetoed(uint256 indexed proposalId, address indexed guardian, uint256 blockNumber);
+    event GovernanceTokenSynced(address indexed oldToken, address indexed newToken, address indexed registry, uint256 blockNumber);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -135,7 +182,8 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
 
     /// @notice 初始化合约
     /// @param admin 管理员地址
-    function initialize(address admin, address /* governanceToken */) external initializer {
+    /// @param registry_ Registry address (SSOT).
+    function initialize(address admin, address registry_) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
@@ -143,12 +191,54 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(GOVERNANCE_ROLE, admin);
         _grantRole(EXECUTOR_ROLE, admin);
+
+        // Registry is REQUIRED (SSOT). Used for governanceToken + gate + guardian.
+        if (registry_ == address(0)) revert CrossChainGovernance__RegistryNotSet();
+        if (registry_.code.length == 0) revert NotAContract(registry_);
+        registry = registry_;
+        emit RegistryUpdated(address(0), registry_, block.number);
+
+    // OZ UUPS upgrade-safety: never rely on inline initialization for storage vars.
+    // Set governance parameter defaults explicitly in initializer.
+    minProposalBlocks = _DEFAULT_MIN_PROPOSAL_BLOCKS;
+    maxProposalBlocks = _DEFAULT_MAX_PROPOSAL_BLOCKS;
+    executionDelayBlocks = _DEFAULT_EXECUTION_DELAY_BLOCKS;
+    quorumBPS = 4000; // 40%
+    voteThresholdBPS = 6000; // 60%
+
+        // Initialize cached governance token from Registry SSOT.
+        // NOTE: deployment order can bind KEY_EASY_STAKING after this module is deployed.
+        // We keep the invariant enforcement in security-critical paths, but we don't want
+        // initializer to hard-revert just because the key isn't registered yet.
+        address expected = IRegistry(registry_).getModule(ModuleKeys.KEY_EASY_STAKING);
+        if (expected != address(0) && expected.code.length != 0) {
+            governanceToken = expected;
+            emit GovernanceTokenSynced(address(0), expected, registry, block.number);
+        }
         
         // 初始化支持的链
         supportedChains[1] = true;    // Ethereum
         supportedChains[42161] = true; // Arbitrum
         supportedChains[137] = true;   // Polygon
         supportedChains[56] = true;    // BSC
+    }
+
+    /// @notice Sets (or replaces) Registry address (SSOT for gate + guardian).
+    function setRegistry(address registry_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (registry_ == address(0)) revert ZeroAddress();
+        if (registry_.code.length == 0) revert NotAContract(registry_);
+        address old = registry;
+        registry = registry_;
+        emit RegistryUpdated(old, registry_, block.number);
+        // Keep token cache in sync with new registry SSOT.
+        _syncGovernanceTokenFromRegistry();
+    }
+
+    /// @notice Syncs cached governanceToken from Registry[KEY_EASY_STAKING].
+    /// @dev Admin-only. This is Scheme B's explicit "cache refresh" hook.
+    ///      Any Registry update to KEY_EASY_STAKING should be followed by calling this.
+    function syncGovernanceTokenFromRegistry() external onlyRole(DEFAULT_ADMIN_ROLE) returns (address expected, bool changed) {
+        (expected, changed) = _syncGovernanceTokenFromRegistry();
     }
 
     /// @notice 创建提案
@@ -161,7 +251,15 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         bytes[] calldata actions,
         address[] calldata targets,
         uint256 votingPeriod
-    ) external onlyRole(GOVERNANCE_ROLE) returns (uint256 proposalId) {
+    ) external returns (uint256 proposalId) {
+        _requireGovernanceTokenInSync();
+        // Backward-compatible: if GovernanceGate is not configured, keep legacy role gating.
+        address gate = _getGovernanceGate();
+        if (gate == address(0)) {
+            _checkRole(GOVERNANCE_ROLE, msg.sender);
+        } else {
+            _requireGateEligibleToPropose(gate, msg.sender);
+        }
         if (votingPeriod < minProposalBlocks || votingPeriod > maxProposalBlocks) {
             revert CrossChainGovernance__InvalidProposal();
         }
@@ -198,11 +296,14 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @param proposalId 提案ID
     /// @param option 投票选项
     function vote(uint256 proposalId, VoteOption option) external {
+        _requireGovernanceTokenInSync();
         Proposal storage proposal = proposals[proposalId];
         
         if (proposal.state != ProposalState.Active) {
             revert CrossChainGovernance__ProposalNotActive();
         }
+
+        if (proposal.canceled) revert CrossChainGovernance__ProposalCanceled();
         
         if (block.number < proposal.startBlock || block.number > proposal.endBlock) {
             revert CrossChainGovernance__ProposalNotActive();
@@ -213,7 +314,16 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
             revert CrossChainGovernance__AlreadyVoted();
         }
         
-        uint256 weight = votingPower[msg.sender];
+        // Snapshot voting power at (startBlock - 1) to avoid `getPastVotes` restrictions in the same block.
+        uint256 snapshotBlock = proposal.startBlock == 0 ? 0 : proposal.startBlock - 1;
+
+        // GovernanceGate SSOT check (if configured).
+        address gate = _getGovernanceGate();
+        if (gate != address(0)) {
+            _requireGateEligibleToVote(gate, msg.sender, snapshotBlock);
+        }
+
+        uint256 weight = IVotes(governanceToken).getPastVotes(msg.sender, snapshotBlock);
         if (weight == 0) {
             revert CrossChainGovernance__InsufficientVotes();
         }
@@ -242,8 +352,10 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         if (proposal.executed) {
             revert CrossChainGovernance__ExecutionFailed();
         }
+
+        if (proposal.canceled) revert CrossChainGovernance__ExecutionFailed();
         
-        if (proposal.state != ProposalState.Succeeded) {
+        if (_computeProposalState(proposal) != ProposalState.Succeeded) {
             revert CrossChainGovernance__ExecutionFailed();
         }
         
@@ -337,6 +449,7 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         if (!proposal.executed) {
             revert CrossChainGovernance__ExecutionFailed();
         }
+        if (proposal.canceled) revert CrossChainGovernance__ExecutionFailed();
         
         bytes32 crossChainMessageHash = keccak256(abi.encodePacked(
             proposalId,
@@ -352,30 +465,6 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         executedCrossChainMessages[crossChainMessageHash] = true;
         
         emit CrossChainExecution(proposalId, targetChainId, crossChainMessageHash);
-    }
-
-    /// @notice 更新投票权重
-    /// @param user 用户地址
-    /// @param weight 新权重
-    function updateVotingPower(address user, uint256 weight) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
-        votingPower[user] = weight;
-    }
-
-    /// @notice 批量更新投票权重
-    /// @param users 用户地址数组
-    /// @param weights 权重数组
-    function batchUpdateVotingPower(address[] calldata users, uint256[] calldata weights)
-        external
-        onlyRole(GOVERNANCE_ROLE)
-        nonReentrant
-    {
-        if (users.length != weights.length) {
-            revert CrossChainGovernance__InvalidProposal();
-        }
-        
-        for (uint256 i = 0; i < users.length; i++) {
-            votingPower[users[i]] = weights[i];
-        }
     }
 
     /// @notice 更新治理参数
@@ -429,19 +518,49 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     /// @return state 提案状态
     function getProposalState(uint256 proposalId) external view returns (ProposalState state) {
         Proposal storage proposal = proposals[proposalId];
-        
-        if (proposal.executed) {
-            return ProposalState.Executed;
-        }
-        
-        if (proposal.canceled) {
-            return ProposalState.Defeated;
-        }
-        
-        if (block.number < proposal.startBlock) {
-            return ProposalState.Pending;
-        }
-        
+        return _computeProposalState(proposal);
+    }
+
+    /// @notice Foundation veto (guardian) cancels a proposal before execution.
+    /// @dev Guardian address is resolved from Registry[KEY_GOVERNANCE_GUARDIAN].
+    function vetoProposal(uint256 proposalId) external nonReentrant {
+        if (registry == address(0)) revert CrossChainGovernance__RegistryNotSet();
+        address guardian = IRegistry(registry).getModule(ModuleKeys.KEY_GOVERNANCE_GUARDIAN);
+        if (guardian == address(0)) revert CrossChainGovernance__GuardianNotSet();
+        if (msg.sender != guardian) revert CrossChainGovernance__NotGuardian(msg.sender, guardian);
+
+        Proposal storage proposal = proposals[proposalId];
+        if (proposal.proposalId == 0) revert CrossChainGovernance__InvalidProposal();
+        if (proposal.executed) revert CrossChainGovernance__ExecutionFailed();
+
+        proposal.canceled = true;
+        emit ProposalVetoed(proposalId, guardian, block.number);
+    }
+
+    // ============ Gate helpers ============
+
+    function _getGovernanceGate() internal view returns (address) {
+        if (registry == address(0)) return address(0);
+        return IRegistry(registry).getModule(ModuleKeys.KEY_GOVERNANCE_GATE);
+    }
+
+    function _requireGateEligibleToPropose(address gate, address proposer) internal view {
+        uint256 snapshotBlock = block.number - 1;
+        (bool ok, bytes32 reason) = IGovernanceGateRead(gate).isEligibleToPropose(proposer, snapshotBlock, governanceToken);
+        if (!ok) revert CrossChainGovernance__GovernanceGateRejected(reason);
+    }
+
+    function _requireGateEligibleToVote(address gate, address voter, uint256 snapshotBlock) internal view {
+        (bool ok, bytes32 reason) = IGovernanceGateRead(gate).isEligibleToVote(voter, snapshotBlock, governanceToken);
+        if (!ok) revert CrossChainGovernance__GovernanceGateRejected(reason);
+    }
+
+    // ============ Proposal state ============
+
+    function _computeProposalState(Proposal storage proposal) internal view returns (ProposalState) {
+        if (proposal.executed) return ProposalState.Executed;
+        if (proposal.canceled) return ProposalState.Defeated;
+        if (block.number < proposal.startBlock) return ProposalState.Pending;
         if (block.number > proposal.endBlock) {
             uint256 totalVotes = proposal.forVotes + proposal.againstVotes + proposal.abstainVotes;
             if (totalVotes >= proposal.quorum && proposal.forVotes > proposal.againstVotes) {
@@ -450,7 +569,6 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
                 return ProposalState.Defeated;
             }
         }
-        
         return ProposalState.Active;
     }
 
@@ -490,13 +608,45 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
         return (crossChainVote.forVotes, crossChainVote.againstVotes, crossChainVote.abstainVotes, crossChainVote.totalWeight, crossChainVote.isVerified);
     }
 
+    // ============ Scheme B: governance token invariant (Registry SSOT) ============
+
+    /// @notice Returns the expected governanceToken address from Registry SSOT.
+    /// @dev Reverts if Registry is unset or KEY_EASY_STAKING is missing.
+    function expectedGovernanceToken() external view returns (address) {
+        return _expectedGovernanceTokenFromRegistry();
+    }
+
+    function _expectedGovernanceTokenFromRegistry() internal view returns (address expected) {
+        if (registry == address(0)) revert CrossChainGovernance__RegistryNotSet();
+        expected = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_EASY_STAKING);
+        if (expected.code.length == 0) revert CrossChainGovernance__InvalidGovernanceToken(expected);
+        return expected;
+    }
+
+    function _requireGovernanceTokenInSync() internal view {
+        address expected = _expectedGovernanceTokenFromRegistry();
+        if (governanceToken != expected) {
+            revert CrossChainGovernance__GovernanceTokenOutOfSync(governanceToken, expected);
+        }
+    }
+
+    function _syncGovernanceTokenFromRegistry() internal returns (address expected, bool changed) {
+        expected = _expectedGovernanceTokenFromRegistry();
+        address old = governanceToken;
+        if (old == expected) return (expected, false);
+        governanceToken = expected;
+        emit GovernanceTokenSynced(old, expected, registry, block.number);
+        return (expected, true);
+    }
+
     /// @notice 计算法定人数
     /// @return quorum 法定人数
     function _calculateQuorum() internal view returns (uint256 quorum) {
-        // 这里应该基于治理代币的总供应量计算
-        // 简化版本，实际需要查询治理代币合约
-        uint256 totalSupply = 1000000e18; // 假设总供应量
-        return (totalSupply * quorumBPS) / 10000;
+        if (quorumBPS == 0) return 0;
+
+        uint256 snapshotBlock = block.number > 0 ? block.number - 1 : 0;
+        uint256 baseSupply = IVotes(governanceToken).getPastTotalSupply(snapshotBlock);
+        return Math.mulDiv(baseSupply, quorumBPS, 10000);
     }
 
     /// @notice 升级授权函数
@@ -508,5 +658,5 @@ contract CrossChainGovernance is Initializable, AccessControlUpgradeable, Reentr
     }
 
     // ============ Storage Gap ============
-    uint256[50] private __gap;
+    uint256[49] private __gap;
 } 

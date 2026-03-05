@@ -524,10 +524,14 @@ describe('LoanNFT – ACM 集成测试', function () {
     });
 
     it('治理角色应能更新 Registry 地址', async function () {
-      const { loanNFT, governance, bob } = await deployFixture();
-      
-      await loanNFT.connect(governance).setRegistry(bob.address);
-      expect(await loanNFT.getRegistry()).to.equal(bob.address);
+      const { loanNFT, governance } = await deployFixture();
+
+      const RegistryFactory = await ethers.getContractFactory('MockRegistry');
+      const newRegistry = await RegistryFactory.connect(governance).deploy();
+      await newRegistry.waitForDeployment();
+
+      await loanNFT.connect(governance).setRegistry(await newRegistry.getAddress());
+      expect(await loanNFT.getRegistry()).to.equal(await newRegistry.getAddress());
     });
 
     it('治理角色应能授予和撤销铸造角色', async function () {

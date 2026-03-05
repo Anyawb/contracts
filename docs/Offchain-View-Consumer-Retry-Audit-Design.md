@@ -132,7 +132,7 @@
 
 直接采用 `docs/Cache-Push-Manual-Retry.md` 的表结构建议，并补充两点落地约束：
 - **唯一键/幂等**：建议强制唯一 `(chain_id, tx_hash, log_index)`（或 `(user, asset, view, block_number, log_index)`）避免重复入队。
-- **与 Phase3/nextVersion 对齐**：重试成功的“完成标志”应以 **链上 `UserPositionCachedV2` 事件**（含 version）作为最终确认信号，而不是仅以“发起了重试交易”作为成功。
+- **与 Phase3/nextVersion 对齐**：重试成功的“完成标志”应以 **链上 `UserPositionCachedWithVersion` 事件**（含 version）作为最终确认信号，而不是仅以“发起了重试交易”作为成功。
 
 ---
 
@@ -140,11 +140,11 @@
 
 ### 5.1 作为“写入发生”的权威信号（推荐）
 优先订阅 `PositionView` 的：
-- `UserPositionCachedV2(user, asset, collateral, debt, version, blockNumber)`
+- `UserPositionCachedWithVersion(user, asset, collateral, debt, version, blockNumber)`
 - `IdempotentRequestIgnored(user, asset, requestId, seq)`（用于监控重复重放与链下队列健康）
 
 原因：
-- `UserPositionCachedV2` 是链上缓存真实写入后的事件，包含 **version** 与最终值，链下物化视图可以直接按事件落库。
+- `UserPositionCachedWithVersion` 是链上缓存真实写入后的事件，包含 **version** 与最终值，链下物化视图可以直接按事件落库。
 - `VaultRouter` 的 `UserPositionPushed/UserPositionDeltaPushed` 更像“请求已发起/路由已调用”的轨迹事件，**不等价于已写入成功**（写入可能在下游 revert）。
 
 ### 5.2 用于“可观测/追踪/链下重放输入”的辅助信号（建议订阅）
@@ -153,7 +153,7 @@
 - `AssetStatsPushed(...)`（如需要链下做统计镜像）
 
 用途：
-- 将 `requestId/seq` 与 `UserPositionCachedV2.version` 关联，形成可审计链路。
+- 将 `requestId/seq` 与 `UserPositionCachedWithVersion.version` 关联，形成可审计链路。
 - 若未来要做“链下强一致 replay（在链上拒写时自动重试）”，router 事件可作为输入候选。
 
 ### 5.3 失败/告警事件（必须订阅）
@@ -177,8 +177,8 @@
 
 | 合约 | Event | Canonical Signature | Indexed（topics） | 非 indexed（data） | 链下建议 |
 |:---|:---|:---|:---|:---|:---|
-| `PositionView`<br/>`src/Vault/view/modules/PositionView.sol` | `UserPositionCached` | `UserPositionCached(address,address,uint256,uint256,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`blockNumber: uint256` | **旧事件**；建议优先用 `UserPositionCachedV2`（含 version）落库。 |
-| `PositionView` | `UserPositionCachedV2` | `UserPositionCachedV2(address,address,uint256,uint256,uint64,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`version: uint64`<br/>`blockNumber: uint256` | **权威写入成功信号**：物化视图按该事件 upsert，并用 `version` 做单调校验。 |
+| `PositionView`<br/>`src/Vault/view/modules/PositionView.sol` | `UserPositionCached` | `UserPositionCached(address,address,uint256,uint256,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`blockNumber: uint256` | **旧事件**；建议优先用 `UserPositionCachedWithVersion`（含 version）落库。 |
+| `PositionView` | `UserPositionCachedWithVersion` | `UserPositionCachedWithVersion(address,address,uint256,uint256,uint64,uint256)` | `user: address`<br/>`asset: address` | `collateral: uint256`<br/>`debt: uint256`<br/>`version: uint64`<br/>`blockNumber: uint256` | **权威写入成功信号**：物化视图按该事件 upsert，并用 `version` 做单调校验。 |
 | `PositionView` | `IdempotentRequestIgnored` | `IdempotentRequestIgnored(address,address,bytes32,uint64)` | `user: address`<br/>`asset: address`<br/>`requestId: bytes32` | `seq: uint64` | 用于监控重复重放/队列健康；链下可与 `requestId/seq` 关联审计。 |
 | `PositionView` | `CacheUpdateFailed` | `CacheUpdateFailed(address,address,address,uint256,uint256,bytes)` | `user: address`<br/>`asset: address` | `viewAddr: address`<br/>`collateral: uint256`<br/>`debt: uint256`<br/>`reason: bytes` | 失败入队来源之一（同名事件也在其他模块出现）；`reason` 建议枚举化/截断展示。 |
 
@@ -282,7 +282,7 @@
   - 最简单策略：只在 `N confirmations` 后写 `position_cache_mirror`，在此之前仅写 `chain_events/view_apply_log`
 
 ### 6.2 物化视图更新逻辑（以 PositionView 事件为准）
-当收到 `UserPositionCachedV2(user, asset, collateral, debt, version, blockNumber)`：
+当收到 `UserPositionCachedWithVersion(user, asset, collateral, debt, version, blockNumber)`：
 - upsert `position_cache_mirror(user, asset)`：
   - 若 `incoming.version <= current.version`：标为 `ignored/duplicate`（理论上不应出现；出现则告警）
   - 否则更新 collateral/debt/version/last_chain_* 等字段
@@ -311,7 +311,7 @@
 - `PositionView.retryUserPositionUpdate(user, asset)`
 
 理由：
-- 该入口会“重读账本（CM/LE）→ 写缓存 → 发出 `UserPositionCachedV2`”
+- 该入口会“重读账本（CM/LE）→ 写缓存 → 发出 `UserPositionCachedWithVersion`”
 - 链下不用自己计算 delta/版本，减少复杂度与覆盖风险
 
 ### 7.3 重试前置检查（必须）
@@ -321,8 +321,8 @@
 
 ### 7.4 成功判定（必须用链上事件确认）
 - 发起重试 tx **不等于成功**
-- 以链上 `UserPositionCachedV2(user, asset, ...)` 到达并被 consumer 落库为成功信号：
-  - worker 可轮询链上/或订阅 indexer 回调，匹配 `(user, asset, block>=retry_tx_block)` 的 `UserPositionCachedV2`
+- 以链上 `UserPositionCachedWithVersion(user, asset, ...)` 到达并被 consumer 落库为成功信号：
+  - worker 可轮询链上/或订阅 indexer 回调，匹配 `(user, asset, block>=retry_tx_block)` 的 `UserPositionCachedWithVersion`
   - 成功后将 job 标为 `succeeded`
 
 ### 7.5 失败处理与死信

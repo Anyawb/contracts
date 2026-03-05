@@ -76,8 +76,8 @@
  */
 
 import { ethers, network } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
-import { runViewPreflight } from "./utils/view-preflight";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { runViewPreflight } from "./utils/view-preflight.ts";
 
 const ONE_HOUR_BLOCKS = 1_800n;
 const BLOCKS_PER_DAY = 7_200n;
@@ -285,21 +285,37 @@ async function main() {
 
     await runViewPreflight({
       registryAddr: CONTRACT_ADDRESSES.Registry,
-      acmAddr: CONTRACT_ADDRESSES.AccessControlManager,
+      acmAddr: (await (async () => {
+        const reg = await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry);
+        return reg.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"));
+      })()),
       adminSigner: deployer,
-      assetForPriceCheck: CONTRACT_ADDRESSES.MockUSDC,
+      assetForPriceCheck: (await (async () => {
+        const reg = await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry);
+        return reg.getModuleOrRevert(key("SETTLEMENT_TOKEN"));
+      })()),
     });
 
     const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
-    const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-    const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
-    const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
-    const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter)) as any;
-    const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
-    const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
-    const vbl = (await ethers.getContractAt("VaultBusinessLogic", CONTRACT_ADDRESSES.VaultBusinessLogic)) as any;
+    const acmAddrFromRegistry = (await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"))) as string;
+    const assetWhitelistAddrFromRegistry = (await registry.getModuleOrRevert(key("ASSET_WHITELIST"))) as string;
+    const priceOracleAddrFromRegistry = (await registry.getModuleOrRevert(key("PRICE_ORACLE"))) as string;
+    const feeRouterAddrFromRegistry = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
+    const settlementTokenAddrFromRegistry = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
+    const vaultCoreFromRegistryAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
+    const vblAddrFromRegistry = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
+    const cmAddrFromRegistry = (await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"))) as string;
+    const gfmAddrFromRegistry = (await registry.getModule(key("GUARANTEE_FUND_MANAGER"))) as string;
 
-    const cm = (await ethers.getContractAt("CollateralManager", CONTRACT_ADDRESSES.CollateralManager)) as any;
+    const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
+    const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+    const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
+    const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddrFromRegistry)) as any;
+    const usdc = (await ethers.getContractAt("MockERC20", settlementTokenAddrFromRegistry)) as any;
+    const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreFromRegistryAddr)) as any;
+    const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddrFromRegistry)) as any;
+
+    const cm = (await ethers.getContractAt("CollateralManager", cmAddrFromRegistry)) as any;
     // Registry key is keccak256("LENDING_ENGINE") (ModuleKeys.KEY_LE).
     const leAddr = await registry.getModuleOrRevert(key("LENDING_ENGINE"));
     const le = (await ethers.getContractAt("src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine", leAddr)) as any;
@@ -393,8 +409,8 @@ async function main() {
     await ensureRole(ACTION_SET_PARAMETER, deployer.address);
 
     // VBL orchestration permissions
-    await ensureRole(ACTION_ORDER_CREATE, CONTRACT_ADDRESSES.VaultBusinessLogic);
-    await ensureRole(ACTION_DEPOSIT, CONTRACT_ADDRESSES.VaultBusinessLogic);
+    await ensureRole(ACTION_ORDER_CREATE, vblAddrFromRegistry);
+    await ensureRole(ACTION_DEPOSIT, vblAddrFromRegistry);
 
     // ORDER_ENGINE needs BORROW for LoanNFT mint/update
     await ensureRole(ACTION_BORROW, orderEngineAddr);
@@ -434,7 +450,7 @@ async function main() {
     if (unauth) {
       await mustRevertWithSelector(
         "Unauthorized: PreviewView.previewDeposit(non-self) must revert MissingRole()",
-        async () => preview.connect(unauth).previewDeposit(borrowerA.address, usdc.target, 0n),
+        async () => preview.connect(unauth).previewDeposit(borrowerA.address, settlementTokenAddrFromRegistry, 0n),
         SEL_MISSING_ROLE
       );
     } else {
@@ -442,24 +458,24 @@ async function main() {
     }
 
     // whitelist + price
-    if (!(await aw.isAssetAllowed(usdc.target))) {
-      await aw.connect(deployer).addAllowedAsset(usdc.target);
+    if (!(await aw.isAssetAllowed(settlementTokenAddrFromRegistry))) {
+      await aw.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
     }
     {
-      const cfg = await po.getAssetConfig(usdc.target);
+      const cfg = await po.getAssetConfig(settlementTokenAddrFromRegistry);
       if (!cfg.isActive) {
         const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
-        await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
+        await po.connect(deployer).configureAsset(settlementTokenAddrFromRegistry, "usd-coin", usdcDecimals, 3600);
       }
     }
     {
       const blockNumber = await ethers.provider.getBlockNumber();
-      await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), blockNumber);
+      await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), blockNumber);
     }
 
     // FeeRouter needs supported token for matchflow
-    if (!(await feeRouter.isTokenSupported(usdc.target))) {
-      await feeRouter.connect(deployer).addSupportedToken(usdc.target);
+    if (!(await feeRouter.isTokenSupported(settlementTokenAddrFromRegistry))) {
+      await feeRouter.connect(deployer).addSupportedToken(settlementTokenAddrFromRegistry);
     }
 
     // Fund users + approve
@@ -470,17 +486,19 @@ async function main() {
     // - deposit/withdraw use VaultCore, which routes to CM pulling from user; approve CM directly.
     // - VBL.reserveForLending pulls from lender; approve VBL.
     // - VaultCore.repay pulls from borrower; approve VaultCore.
-    await usdc.connect(borrowerA).approve(CONTRACT_ADDRESSES.CollateralManager, ethers.MaxUint256);
-    await usdc.connect(borrowerB).approve(CONTRACT_ADDRESSES.CollateralManager, ethers.MaxUint256);
+    await usdc.connect(borrowerA).approve(cmAddrFromRegistry, ethers.MaxUint256);
+    await usdc.connect(borrowerB).approve(cmAddrFromRegistry, ethers.MaxUint256);
     // Extension flow: EarlyRepaymentGuarantee may lock interest into GuaranteeFundManager at borrow-time.
-    await usdc.connect(borrowerA).approve(CONTRACT_ADDRESSES.GuaranteeFundManager, ethers.MaxUint256);
-    await usdc.connect(borrowerB).approve(CONTRACT_ADDRESSES.GuaranteeFundManager, ethers.MaxUint256);
-    await usdc.connect(lenderA).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, ethers.MaxUint256);
-    await usdc.connect(lenderB).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, ethers.MaxUint256);
-    await usdc.connect(borrowerA).approve(CONTRACT_ADDRESSES.VaultCore, ethers.MaxUint256);
-    await usdc.connect(borrowerB).approve(CONTRACT_ADDRESSES.VaultCore, ethers.MaxUint256);
+    if (gfmAddrFromRegistry && gfmAddrFromRegistry !== ethers.ZeroAddress) {
+      await usdc.connect(borrowerA).approve(gfmAddrFromRegistry, ethers.MaxUint256);
+      await usdc.connect(borrowerB).approve(gfmAddrFromRegistry, ethers.MaxUint256);
+    }
+    await usdc.connect(lenderA).approve(vblAddrFromRegistry, ethers.MaxUint256);
+    await usdc.connect(lenderB).approve(vblAddrFromRegistry, ethers.MaxUint256);
+    await usdc.connect(borrowerA).approve(vaultCoreFromRegistryAddr, ethers.MaxUint256);
+    await usdc.connect(borrowerB).approve(vaultCoreFromRegistryAddr, ethers.MaxUint256);
 
-    const assetAddr = usdc.target as string;
+    const assetAddr = settlementTokenAddrFromRegistry;
     const users = [borrowerA.address, borrowerB.address];
     const assetsForPairs = [assetAddr, assetAddr];
     const signerByAddr = new Map<string, any>([
@@ -538,7 +556,7 @@ async function main() {
       assertOk(positionsMeta.length === users.length, `${stepLabel}: cacheOpt positions length mismatch`);
 
       const getPosBlock = (p: any): bigint =>
-        (p?.positionBlockNumber ?? p?.positionTimestamp ?? 0n) as bigint;
+        (p?.positionBlockNumber ?? p?.positionUpdateBlock ?? 0n) as bigint;
 
       for (let i = 0; i < users.length; i++) {
         const p = positionsMeta[i];
@@ -671,7 +689,7 @@ async function main() {
         name: "RwaLending",
         version: "1",
         chainId: Number((await ethers.provider.getNetwork()).chainId),
-        verifyingContract: CONTRACT_ADDRESSES.VaultBusinessLogic,
+        verifyingContract: vblAddrFromRegistry,
       } as const;
 
       const typesBorrow = {

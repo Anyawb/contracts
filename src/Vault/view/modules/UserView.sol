@@ -102,7 +102,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 healthFactor;
         uint256 lastActiveTime;
         uint256 guaranteeBalance;
-        uint256 rewardPoints;
+        uint256 easyTokenBalance;
         uint256 activityScore;
         bool isActive;
         uint8 userLevel;
@@ -576,7 +576,8 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         address sv = _statisticsView();
         if (sv == address(0)) revert UserView__ModuleMissing(ModuleKeys.KEY_STATS);
 
-        // Prefer v2: getUserSnapshotWithMeta(address) -> (UserSnapshot, version, seq, requestId, isValid, blockNumber)
+        // Prefer the meta snapshot interface:
+        // getUserSnapshotWithMeta(address) -> (UserSnapshot, version, seq, requestId, isValid, blockNumber)
         (bool ok, bytes memory data) = sv.staticcall(abi.encodeWithSelector(_SEL_GET_USER_SNAPSHOT_WITH_META, user));
         if (ok && data.length > 0) {
             (StatsUserSnapshot memory s, uint64 v, uint64 sseq, bytes32 rid, bool vld, uint256 snapshotBlockNumber) =
@@ -755,10 +756,10 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset Asset address
      * @return stats Aggregated stats (LTV/HF in bps)
      * @return positionIsValid Whether the position cache is valid
-     * @return positionTimestamp Position cache block (block.number)
+     * @return positionUpdateBlock Position cache update block (block.number)
      * @return positionVersion Position cache version
      * @return healthIsValid Whether the health cache is valid
-     * @return healthTimestamp Health cache block (block.number)
+     * @return healthUpdateBlock Health cache update block (block.number)
      */
     function getUserStats(address user, address asset)
         external
@@ -768,10 +769,10 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             UserStats memory stats,
             bool positionIsValid,
-            uint256 positionTimestamp,
+            uint256 positionUpdateBlock,
             uint64 positionVersion,
             bool healthIsValid,
-            uint256 healthTimestamp
+            uint256 healthUpdateBlock
         )
     {
         (uint256 collateral, uint256 debt, bool pValid, uint256 pTs, uint64 pVer) =
@@ -782,10 +783,10 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         stats = UserStats({ collateral: collateral, debt: debt, ltv: ltv, hf: hf });
 
         positionIsValid = pValid;
-        positionTimestamp = pTs;
+        positionUpdateBlock = pTs;
         positionVersion = pVer;
         healthIsValid = hValid;
-        healthTimestamp = hTs;
+        healthUpdateBlock = hTs;
     }
 
     /**
@@ -800,10 +801,10 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset Asset address
      * @return stats Aggregated stats (LTV/HF in bps)
      * @return positionIsValid Whether the position cache is valid
-     * @return positionTimestamp Position cache block (block.number)
+     * @return positionUpdateBlock Position cache update block (block.number)
      * @return positionVersion Position cache version
      * @return healthIsValid Whether the health cache is valid
-     * @return healthTimestamp Health cache block (block.number)
+     * @return healthUpdateBlock Health cache update block (block.number)
      */
     function getUserStatsWithMeta(address user, address asset)
         external
@@ -813,10 +814,10 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             UserStats memory stats,
             bool positionIsValid,
-            uint256 positionTimestamp,
+            uint256 positionUpdateBlock,
             uint64 positionVersion,
             bool healthIsValid,
-            uint256 healthTimestamp
+            uint256 healthUpdateBlock
         )
     {
         (uint256 collateral, uint256 debt, bool pValid, uint256 pTs, uint64 pVer) =
@@ -827,10 +828,10 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         stats = UserStats({ collateral: collateral, debt: debt, ltv: ltv, hf: hf });
 
         positionIsValid = pValid;
-        positionTimestamp = pTs;
+        positionUpdateBlock = pTs;
         positionVersion = pVer;
         healthIsValid = hValid;
-        healthTimestamp = hTs;
+        healthUpdateBlock = hTs;
     }
 
     /*━━━━━━━━━━━━━━━ Previews (delegates to PreviewView) ━━━━━━━━━━━━━━━*/
@@ -852,7 +853,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return newLTV New LTV (bps)
      * @return maxBorrowable Max borrowable amount (token decimals depend on system)
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache block (block.number)
+     * @return positionUpdateBlock PositionView cache update block (block.number)
      * @return positionVersion PositionView cache version
      */
     function previewBorrow(
@@ -871,7 +872,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
             uint256 newLTV,
             uint256 maxBorrowable,
             bool positionIsValid,
-            uint256 positionTimestamp,
+            uint256 positionUpdateBlock,
             uint64 positionVersion
         )
     {
@@ -905,7 +906,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return hfAfter Health factor after deposit (bps)
      * @return ok Whether the post-action state is considered safe by PreviewView
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache block (block.number)
+     * @return positionUpdateBlock PositionView cache update block (block.number)
      * @return positionVersion PositionView cache version
      */
     function previewDeposit(address user, address asset, uint256 amount)
@@ -913,7 +914,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyUserDim(user)
-        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
+        returns (uint256 hfAfter, bool ok, bool positionIsValid, uint256 positionUpdateBlock, uint64 positionVersion)
     {
         address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
         if (previewViewAddr == address(0)) return (0, false, false, 0, 0);
@@ -938,7 +939,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return newHF Health factor after repayment (bps)
      * @return newLTV LTV after repayment (bps)
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache block (block.number)
+     * @return positionUpdateBlock PositionView cache update block (block.number)
      * @return positionVersion PositionView cache version
      */
     function previewRepay(address user, address asset, uint256 amount)
@@ -946,7 +947,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyUserDim(user)
-        returns (uint256 newHF, uint256 newLTV, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
+        returns (uint256 newHF, uint256 newLTV, bool positionIsValid, uint256 positionUpdateBlock, uint64 positionVersion)
     {
         address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
         if (previewViewAddr == address(0)) return (0, 0, false, 0, 0);
@@ -971,7 +972,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return newHF Health factor after withdrawal (bps)
      * @return ok Whether the post-action state is considered safe by PreviewView
      * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionTimestamp PositionView cache block (block.number)
+     * @return positionUpdateBlock PositionView cache update block (block.number)
      * @return positionVersion PositionView cache version
      */
     function previewWithdraw(address user, address asset, uint256 amount)
@@ -979,7 +980,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyUserDim(user)
-        returns (uint256 newHF, bool ok, bool positionIsValid, uint256 positionTimestamp, uint64 positionVersion)
+        returns (uint256 newHF, bool ok, bool positionIsValid, uint256 positionUpdateBlock, uint64 positionVersion)
     {
         address previewViewAddr = _getModule(ModuleKeys.KEY_PREVIEW_VIEW);
         if (previewViewAddr == address(0)) return (0, false, false, 0, 0);

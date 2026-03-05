@@ -1,6 +1,98 @@
-# 本地资金流冒烟测试（严格模式）
+# Smoke / Acceptance 脚本运行指南（默认按 Arbitrum 真链模式）
 
-本 README 列出准备与运行严格冒烟测试所需的完整 CLI 步骤。
+本 README 列出准备与运行 smoke / acceptance 脚本所需的完整 CLI 步骤，并将“真实网络（如 Arbitrum）”的运行约束写成默认口径：
+
+- **默认 read-only（推荐）**：不写链、不依赖 Hardhat 本地 RPC（无 `evm_snapshot/impersonate/hardhat_mine`）
+- **地址解析 SSOT**：优先从 `deployments/addresses.<network>.json` 或环境变量 `REGISTRY_ADDRESS` 解析 Registry
+- **写入模式（可选，谨慎）**：仅在你明确需要“真链写入验收”时开启 `ENABLE_WRITE=1`（会消耗 gas 并改变链上状态）
+
+> 说明：部分脚本本质是 localhost 写入型（用于确定性回归/CI），它们在真实网络上会自动降级为只读校验并跳过写入步骤（确保“Arbitrum 模式”可运行）。
+
+---
+
+## Arbitrum 模式（默认推荐）
+
+### 通用约定（所有 smoke 脚本统一口径）
+
+- **READ_ONLY**
+  - 默认：`READ_ONLY=1`（当 `--network != localhost` 时）
+  - 行为：只做读取/selector gate/staticCall 校验；不发送交易；不使用 hardhat 专用 RPC
+- **ENABLE_WRITE**
+  - 默认：`ENABLE_WRITE=0`（当 `READ_ONLY=1` 时）
+  - 行为：允许发送交易（仅当你真的希望在测试网/真链上写入验收）
+- **REGISTRY_ADDRESS**
+  - 推荐：在真实网络上显式提供 `REGISTRY_ADDRESS=<your_registry>`
+  - 也可通过 `deployments/addresses.<network>.json` 自动解析（见 `scripts/tests/_addressResolver.ts`）
+
+### 示例：在 Arbitrum Sepolia 只读跑 smoke
+
+```bash
+READ_ONLY=1 pnpm -s exec hardhat run scripts/tests/view-schemeu-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 pnpm -s exec hardhat run scripts/tests/viewcache-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 pnpm -s exec hardhat run scripts/tests/ai-credits-exchange-idempotency-smoke.ts --network arbitrumSepolia
+```
+
+### 一键命令清单（Arbitrum / Arbitrum Sepolia）
+
+> 下方命令分两套：**只读验收（推荐）** 和 **可写验收（谨慎）**。  
+> 如果地址文件未配置，请先导出：`export REGISTRY_ADDRESS=<your_registry_address>`。
+
+#### A) 只读验收（推荐，复制即跑）
+
+**Arbitrum 主网**
+
+```bash
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/preconfig-strict-smoke-local.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/view-schemeu-smoke-local.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/viewcache-smoke-local.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/lendingengine-smoke-local.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/reward-smoke-local.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/ai-credits-exchange-idempotency-smoke.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-create-order.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-conservation.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-local.ts --network arbitrum
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-invariants-suite.ts --network arbitrum
+```
+
+**Arbitrum Sepolia**
+
+```bash
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/preconfig-strict-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/view-schemeu-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/viewcache-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/lendingengine-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/reward-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/ai-credits-exchange-idempotency-smoke.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-create-order.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-conservation.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-invariants-suite.ts --network arbitrumSepolia
+```
+
+#### B) 可写验收（谨慎，建议先在 Sepolia）
+
+**Arbitrum 主网（高风险，先小流量）**
+
+```bash
+READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/preconfig-strict-smoke-local.ts --network arbitrum
+READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/viewcache-smoke-local.ts --network arbitrum
+READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/reward-smoke-local.ts --network arbitrum
+READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/ai-credits-exchange-idempotency-smoke.ts --network arbitrum
+```
+
+**Arbitrum Sepolia（推荐先跑）**
+
+```bash
+READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/preconfig-strict-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/viewcache-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/reward-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/ai-credits-exchange-idempotency-smoke.ts --network arbitrumSepolia
+```
+
+> 可写验收前请确认：  
+> - 执行账户具备对应角色（否则会 `MissingRole()`）  
+> - 账户 gas 余额充足  
+> - 你接受脚本会改变链上状态（特别是 cache / reward 相关写入）
 
 ## 冒烟运行器 “方案 A/B/C/D” （推荐） — `test:smoke:prodlike:localhost`
 
@@ -26,10 +118,85 @@ pnpm -s exec ts-node --project ./tsconfig.scripts.json scripts/tests/view-matrix
 ### Runner 开关（env）
 - `RUN_VIEW_SMOKE=1`：新增 view + Scheme U 冒烟（`SystemRiskView` 路由、`HealthView` 公开读、`RiskView/BatchView` Scheme U gate）
 - `RUN_VIEWCACHE_SMOKE=1`：新增 ViewCache 冒烟（写权限 gate、TTL 过期、DataPushed payload 可解码）
+- `RUN_REWARD_SMOKE=1`：新增 Reward 冒烟（Earn 闸门 + GFM penalty + RewardView DataPushed + EasyToken 相关状态变更 + Easy 消耗可观测性）
 - `RUN_CACHE_REFRESH=1`：A-class cache refresh 入口检查
 - `RUN_SSOT_VERIFY=1`：SSOT wiring 检查
 - `RUN_FUNDS=1`：funds-flow invariants suite
 - `RUN_ATTACK=1`：attack suite
+
+## 如何运行 Smoke（localhost：推荐一键）
+
+> 推荐优先用 “ephemeral fresh node” 方式跑（最稳定、最接近 CI，一次命令自动起节点并执行 smoke）。
+
+### 方式 0：快速 Smoke（最轻量，默认跳过 funds/attack）
+
+适合本地快速判断“主要链路是否正常”，默认只跑 cache/SSOT/view/viewcache/reward 等关键读写校验：
+
+```bash
+pnpm -s run test:smoke:quick:localhost
+```
+
+常用开关（与 prodlike runner 一致）：
+
+```bash
+RUN_REWARD_SMOKE=0 pnpm -s run test:smoke:quick:localhost
+RUN_VIEWCACHE_SMOKE=0 pnpm -s run test:smoke:quick:localhost
+```
+
+### 方式 1（最推荐）：一键 fresh（自动起临时节点 + deploy/grant/preconfig）
+
+```bash
+pnpm -s run test:smoke:prodlike:localhost:autonode
+```
+
+- **默认行为**（见 runner 输出）：`MODE=fresh RUN_DEPLOY=1 RUN_GRANT=1 RUN_PRECONFIG=1`，并执行 cache/SSOT/view/viewcache/reward/funds/attack 等步骤。
+- **只想快速验证 Reward**，可跳过 funds/attack（更快）：
+
+```bash
+RUN_FUNDS=0 RUN_ATTACK=0 pnpm -s run test:smoke:prodlike:localhost:autonode
+```
+
+### 方式 2：手动起 localhost 节点（适合反复调试）
+
+终端 A（起节点）：
+
+```bash
+pnpm -s run node
+```
+
+终端 B（跑 smoke；fresh 模式会要求“真 fresh node”）：
+
+```bash
+MODE=fresh RUN_DEPLOY=1 RUN_GRANT=1 RUN_PRECONFIG=1 pnpm -s run test:smoke:prodlike:localhost
+```
+
+如果你是在 dirty state 上跑（更贴近 testnet/mainnet），用：
+
+```bash
+MODE=dirty RUN_DEPLOY=0 RUN_GRANT=0 RUN_PRECONFIG=0 pnpm -s run test:smoke:prodlike:localhost
+```
+
+## 常见失败与排查（高频）
+
+- **报 `function selector was not recognized`**
+  - **含义**：ABI/部署不匹配（代理指向旧实现或未重新部署）。
+  - **处理**：`pnpm -s hardhat clean && pnpm -s compile` 后重新 `deploy:localhost`，或直接用 `test:smoke:prodlike:localhost:autonode`。
+
+- **`MissingRole()`**
+  - **含义**：角色未授予（常见于手动跑、或 `RUN_GRANT/RUN_PRECONFIG` 关掉了）。
+  - **处理**：用 fresh 一键跑；或至少 `RUN_GRANT=1 RUN_PRECONFIG=1`。
+
+- **`ModuleNotRegistered(REWARD_EARN_CONFIG)` / `getModuleOrRevert` 报错**
+  - **含义**：Registry 漏绑模块（常见是 EarnConfig/RewardView/LoanFlowView 等）。
+  - **处理**：重新 deploy 并确认绑定阶段成功；优先用 autonode runner。
+
+### Reward smoke（本次回归总结）
+- **关键前置**：Reward 的可写参数（level multiplier / dynamic params）会通过 `RewardConfig -> Registry[REWARD_EARN_CONFIG] -> EarnConfig` 写入。
+  - 若本地链报 `ModuleNotRegistered(REWARD_EARN_CONFIG)`：说明 Registry 漏绑 `REWARD_EARN_CONFIG -> EarnConfig`，需要先修复部署/绑定流程再跑 smoke。
+- **常见失败点 1（MODE=fresh）**：`MODE=fresh` 必须在“真 fresh node”上跑，否则 runner 会拒绝执行。
+  - 推荐：重启 hardhat node，或使用 `test:smoke:prodlike:localhost:autonode`。
+- **常见失败点 2（penalty 抵扣导致余额不足）**：当存在 `pendingPenalty` 时，后续奖励会先抵扣欠分再入账，因此“mint 1 point”不一定让钱包余额立刻达到 1 point。
+  - 结论：脚本应按“余额达到阈值”为准（必要时多轮补分），而不是假设一次 mint 足够。
 
 ### 方案 A（dirty + 不自动准备；跑 attack 套件做安全/误配扫描）
 
@@ -241,7 +408,7 @@ pnpm -s exec hardhat run "scripts/tests/viewcache-smoke-local.ts" --network loca
   - ops read `getLoanOrder(orderId)`（需要 `VIEW_USER_DATA`）与 borrower 视图一致
   - `getDebt(user, asset)` 在借出后等于 principal，完全还款后归零
   - `getFailedFeeAmount/getNftRetryCount`（需要 `VIEW_SYSTEM_DATA`）可调用
-  - **LEV-02 相关方可读**：`canAccessLoanOrder(orderId, borrower) === true`；`getUserLoanCount(borrower) >= 1` 在 match 后断言
+  - **LEV-02 相关方可读**：`canAccessLoanOrder(orderId, borrower) === true`；`LoanNFTView.getUserLoanCount(borrower) >= 1` 在 match 后断言
   - **还款后一致性**：repay 后再次用 ops 调 `getLoanOrder(orderId)`，断言 `repaidAmount` 与 borrower 视角一致
 - `VaultCore.repay` → 全额还款后 debt 清零；并 best-effort 检查是否自动释放抵押
 

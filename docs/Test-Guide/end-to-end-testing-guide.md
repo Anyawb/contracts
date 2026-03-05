@@ -42,8 +42,9 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       // 1. 用户存款
       await vaultCore.deposit(asset, depositAmount);
       
-      // 2. 用户借款
-      await vaultCore.borrow(asset, borrowAmount);
+      // 2. 用户借款（SSOT：撮合/订单化路径）
+      // ⚠️ 当前架构已移除 `VaultCore.borrow(asset, amount)`；
+      // 借款必须由撮合/keeper 走 `VaultBusinessLogic.finalizeMatch(...)` 创建 orderId（SSOT）。
       
       // 3. 用户还款
       await vaultCore.repay(orderId, asset, repayAmount);
@@ -79,7 +80,8 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
       await mockPriceOracle.setShouldFail(true);
       
       // 业务操作应该继续，使用降级策略
-      await vaultCore.borrow(asset, amount);
+      // 借款同样走撮合/订单化路径（VaultBusinessLogic.finalizeMatch / SettlementMatchLib），
+      // 并在内部触发账本写入与优雅降级逻辑（不再直接调用 VaultCore.borrow）。
       
       // 验证使用了降级价格
       const priceResult = await priceOracle.getPriceWithFallback(asset);
@@ -91,7 +93,7 @@ describe('End-to-End – 用户路径 / 批量 / 风险 / 降级 / Gas', functio
     it('应该正确监控用户健康因子', async function () {
       // 设置用户抵押和债务
       await vaultCore.deposit(asset, collateralAmount);
-      await vaultCore.borrow(asset, borrowAmount);
+      // borrow: 通过撮合/订单化路径创建债务（见上）
       
       // 查询健康因子
       const [healthFactor, isValid] = await healthView.getUserHealthFactorWithMeta(user);

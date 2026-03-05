@@ -34,7 +34,7 @@ interface IGuaranteeFundManager {
      * @dev Distributes the entire locked guarantee balance into:
      *      - refundToBorrower (to user)
      *      - penaltyToLender (to lender)
-     *      - platformFee (to platform)
+     *      - platformFee (routed via FeeRouter)
      *
      * Reverts if:
      * - sum(refundToBorrower, penaltyToLender, platformFee) does not match the user's locked guarantee balance
@@ -42,7 +42,6 @@ interface IGuaranteeFundManager {
      * @param user Borrower address.
      * @param asset ERC20 guarantee asset address.
      * @param lender Lender address that receives penaltyToLender.
-     * @param platform Platform fee receiver address.
      * @param refundToBorrower Amount refunded to borrower.
      * @param penaltyToLender Amount paid to lender as penalty.
      * @param platformFee Amount paid to platform as fee.
@@ -51,7 +50,6 @@ interface IGuaranteeFundManager {
         address user,
         address asset,
         address lender,
-        address platform,
         uint256 refundToBorrower,
         uint256 penaltyToLender,
         uint256 platformFee

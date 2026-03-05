@@ -10,6 +10,10 @@ import fs from 'fs';
 import path from 'path';
 import { deployRegistryStack } from './modules/registry';
 import { initStableDeploymentOutput } from './utils/stable-output';
+import {
+  ensureRewardConfigEmergencyGranted,
+  ensureRewardConfigEmergencyRevoked,
+} from './utils/reward-config-emergency';
 
 // Must run BEFORE requiring Hardhat to prevent redraw-style output from polluting logs.
 initStableDeploymentOutput();
@@ -119,6 +123,24 @@ async function deployProxy(name: string, args: unknown[] = [], opts: Record<stri
   return addr;
 }
 
+async function ensureAcmRole(
+  acm: any,
+  roleUpperSnake: string,
+  grantee: string | undefined,
+  label: string
+): Promise<void> {
+  if (!grantee || grantee === ethers.ZeroAddress) return;
+  const role = ethers.keccak256(ethers.toUtf8Bytes(roleUpperSnake));
+  try {
+    const already = await acm.hasRole(role, grantee);
+    if (already) return;
+    await (await acm.grantRole(role, grantee)).wait();
+    logActionTo(`🔑 Granted ${roleUpperSnake} to ${label}`, grantee);
+  } catch (e) {
+    console.log(`⚠️ Grant ${roleUpperSnake} to ${label} skipped/failed:`, e);
+  }
+}
+
 async function ensureFeeRouterSupportedToken(feeRouterAddr: string, token: string, label: string) {
   if (!feeRouterAddr || feeRouterAddr === ethers.ZeroAddress) return;
   if (!token || token === ethers.ZeroAddress) return;
@@ -148,14 +170,19 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     CoinGeckoPriceUpdater: 'COINGECKO_PRICE_UPDATER',
     FeeRouter: 'FEE_ROUTER',
     FeeRouterView: 'FEE_ROUTER_VIEW',
-    RewardPoints: 'REWARD_POINTS',
+    CrossChainGovernance: 'CROSS_CHAIN_GOVERNANCE',
+    GovernanceGate: 'GOVERNANCE_GATE',
+    FeatureRegistry: 'FEATURE_REGISTRY',
+    GovernanceGuardian: 'GOVERNANCE_GUARDIAN',
+    AICreditsVault: 'AI_CREDITS_VAULT',
     RewardManagerCore: 'REWARD_MANAGER_CORE',
-    RewardCore: 'REWARD_CORE',
     RewardManager: 'REWARD_MANAGER',
+    EarnConfig: 'REWARD_EARN_CONFIG',
     CollateralManager: 'COLLATERAL_MANAGER',
     // core/LendingEngine is the order engine (createLoanOrder/repay order) => KEY_ORDER_ENGINE
     LendingEngine: 'ORDER_ENGINE',
     LendingEngineView: 'LENDING_ENGINE_VIEW',
+    LoanNFTView: 'LOAN_NFT_VIEW',
     VaultBusinessLogic: 'VAULT_BUSINESS_LOGIC',
     VaultCore: 'VAULT_CORE',
     // VaultLendingEngine implements ILendingEngineBasic (VaultCore.borrow/repay) => KEY_LE
@@ -167,6 +194,9 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     StatisticsView: 'VAULT_STATISTICS',
     // Strict B+ (snapshot + single-entry orchestrator)
     StatisticsPushManager: 'STATISTICS_PUSH_MANAGER',
+    // Protocol flow cache (USD-8 SSOT, strict B+)
+    LoanFlowView: 'LOAN_FLOW_VIEW',
+    LoanFlowPushManager: 'LOAN_FLOW_PUSH_MANAGER',
     PositionView: 'POSITION_VIEW',
     PreviewView: 'PREVIEW_VIEW',
     DashboardView: 'DASHBOARD_VIEW',
@@ -180,7 +210,12 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     EventHistoryManager: 'EVENT_HISTORY_MANAGER',
     RewardView: 'REWARD_VIEW',
     RewardConfig: 'REWARD_CONFIG',
-    RewardConsumption: 'REWARD_CONSUMPTION',
+    EasyToken: 'EASY_TOKEN',
+    EasyEmissionConfig: 'EASY_EMISSION_CONFIG',
+    EasyEmissionController: 'EASY_EMISSION_CONTROLLER',
+    EasyConsumption: 'EASY_CONSUMPTION',
+    EasyRecycleDistributor: 'EASY_RECYCLE_DISTRIBUTOR',
+    EasyStaking: 'EASY_STAKING',
     ValuationOracleView: 'VALUATION_ORACLE_VIEW',
     LiquidatorView: 'LIQUIDATION_VIEW',
     LiquidationConfigModule: 'LIQUIDATION_CONFIG_MANAGER',
@@ -194,6 +229,9 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     LiquidationRiskManager: 'LIQUIDATION_RISK_MANAGER',
     // Monitor modules
     DegradationCore: 'DEGRADATION_CORE',
+    // IMPORTANT (Write-path SSOT):
+    // Core/Storage treat `Registry[DEGRADATION_MONITOR]` as the single-entry write coordinator.
+    // Phase B MUST bind this key; otherwise DegradationMonitor won't be recognized and writes may be role-blocked.
     DegradationMonitor: 'DEGRADATION_MONITOR',
     DegradationStorage: 'DEGRADATION_STORAGE',
     ModuleHealthView: 'MODULE_HEALTH_VIEW',
@@ -226,12 +264,15 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     'CollateralManager',
     'LendingEngine',
     'LendingEngineView',
+    'LoanNFTView',
     'VaultBusinessLogic',
     'VaultCore',
     'HealthView',
     'SystemView',
     'StatisticsView',
     'StatisticsPushManager',
+    'LoanFlowView',
+    'LoanFlowPushManager',
     'PositionView',
     'PreviewView',
     'DashboardView',
@@ -243,13 +284,22 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     'SystemRiskView',
     'ViewCache',
     'EventHistoryManager',
-    'RewardPoints',
+    'CrossChainGovernance',
+    'GovernanceGate',
+    'FeatureRegistry',
+    'GovernanceGuardian',
+    'AICreditsVault',
     'RewardManagerCore',
-    'RewardCore',
     'RewardManager',
+    'EarnConfig',
     'RewardView',
     'RewardConfig',
-    'RewardConsumption',
+    'EasyToken',
+    'EasyEmissionConfig',
+    'EasyEmissionController',
+    'EasyConsumption',
+    'EasyRecycleDistributor',
+    'EasyStaking',
     'ValuationOracleView',
     'LiquidatorView',
     'LiquidationConfigModule',
@@ -424,6 +474,7 @@ async function main() {
     // 1) 部署 Registry（Scheme A：单一入口，Registry 本身提供 setModule）
     // 建议最小延迟 1 小时（本地可设为 ~60 blocks 方便调试）
     const MIN_DELAY_BLOCKS = 60; // blocks (local dev)
+    const MAX_DELAY_BLOCKS = 302_400; // explicit blocks cap (Strategy A)
 
     await deployRegistryStack({
       ethers,
@@ -432,6 +483,7 @@ async function main() {
       deployProxy,
       config: {
         minDelayBlocks: MIN_DELAY_BLOCKS,
+        maxDelayBlocks: MAX_DELAY_BLOCKS,
         initialOwner: deployer.address,
         upgradeAdmin: deployer.address,
         emergencyAdmin: deployer.address,
@@ -493,6 +545,8 @@ async function main() {
       'ACTION_ADMIN',
       // 本地可配置参数（用于 setTestingMode / StatisticsView.pushUserStatsUpdate 等）
       'SET_PARAMETER',
+      // Easy ops: API call consumption
+      'CONSUME_EASY',
       // 运维/重试入口（Strict B+）
       'ACTION_VIEW_PUSH',
       // 读权限（全量覆盖）
@@ -547,8 +601,11 @@ async function main() {
   }
 
   if (!deployed.FeeRouter) {
-    // platformBps / ecoBps 示例：9 (=0.09%), 1 (=0.01%)
-    deployed.FeeRouter = await deployProxy('src/Vault/FeeRouter.sol:FeeRouter', [deployed.Registry, deployer.address, deployer.address, 9, 1]);
+    // platformBps / ecoBps：30 (=0.30%), 0 (=0.00%)
+    deployed.FeeRouter = await deployProxy(
+      'src/Vault/FeeRouter.sol:FeeRouter',
+      [deployed.Registry, deployer.address, deployer.address, 30, 0]
+    );
     save(deployed);
   }
 
@@ -795,6 +852,7 @@ async function main() {
       const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
       const VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM_DATA'));
       const VIEW_PRICE_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_PRICE_DATA'));
+      const VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
       const already = await acm.hasRole(VIEW_SYSTEM_DATA, deployed.StatisticsPushManager);
       if (!already) {
         await (await acm.grantRole(VIEW_SYSTEM_DATA, deployed.StatisticsPushManager)).wait();
@@ -810,9 +868,43 @@ async function main() {
       } else {
         console.log('✅ StatisticsPushManager has VIEW_PRICE_DATA (verified)');
       }
+
+      const alreadyRisk = await acm.hasRole(VIEW_RISK_DATA, deployed.StatisticsPushManager);
+      if (!alreadyRisk) {
+        await (await acm.grantRole(VIEW_RISK_DATA, deployed.StatisticsPushManager)).wait();
+        console.log('🔑 Granted VIEW_RISK_DATA to StatisticsPushManager');
+      } else {
+        console.log('✅ StatisticsPushManager has VIEW_RISK_DATA (verified)');
+      }
     }
   } catch (e) {
     console.log('⚠️ Grant roles to StatisticsPushManager skipped/failed:', e);
+  }
+
+  // Strict B+ protocol flow cache: LoanFlowView + LoanFlowPushManager (USD-8 SSOT)
+  // - LendingEngine best-effort notifies LoanFlowPushManager on borrow/repay.
+  // - RewardManagerCore best-effort reads LoanFlowView for user level auto-upgrades.
+  if (!deployed.LoanFlowView) {
+    try {
+      deployed.LoanFlowView = await deployProxy(
+        'src/Vault/view/modules/LoanFlowView.sol:LoanFlowView',
+        [deployed.Registry]
+      );
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ LoanFlowView deployment failed:', error);
+    }
+  }
+  if (!deployed.LoanFlowPushManager) {
+    try {
+      deployed.LoanFlowPushManager = await deployProxy(
+        'src/Vault/modules/LoanFlowPushManager.sol:LoanFlowPushManager',
+        [deployed.Registry]
+      );
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ LoanFlowPushManager deployment failed:', error);
+    }
   }
   if (!deployed.PositionView) {
     try {
@@ -842,6 +934,9 @@ async function main() {
   }
   if (!deployed.LendingEngineView) {
     try { deployed.LendingEngineView = await deployProxy('LendingEngineView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ LendingEngineView deployment failed:', error); }
+  }
+  if (!deployed.LoanNFTView) {
+    try { deployed.LoanNFTView = await deployProxy('LoanNFTView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ LoanNFTView deployment failed:', error); }
   }
   if (!deployed.FeeRouterView) {
     try { deployed.FeeRouterView = await deployProxy('FeeRouterView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ FeeRouterView deployment failed:', error); }
@@ -914,7 +1009,20 @@ async function main() {
   // 第二步：部署依赖其他监控模块的 DegradationMonitor
   if (!deployed.DegradationMonitor && deployed.DegradationCore && deployed.DegradationStorage && deployed.ModuleHealthView) {
     try {
-      deployed.DegradationMonitor = await deployProxy('src/monitor/DegradationMonitor.sol:DegradationMonitor', [deployed.Registry, deployer.address, deployed.DegradationCore, deployed.DegradationStorage, deployed.ModuleHealthView, ethers.ZeroAddress, deployer.address]);
+      const upgradeWindowBlocks = Number(process.env.DEGRADATION_UPGRADE_WINDOW_BLOCKS || '1800') || 1800;
+      deployed.DegradationMonitor = await deployProxy(
+        'src/monitor/DegradationMonitor.sol:DegradationMonitor',
+        [
+          deployed.Registry,
+          deployer.address,
+          deployed.DegradationCore,
+          deployed.DegradationStorage,
+          deployed.ModuleHealthView,
+          ethers.ZeroAddress, // analytics module removed; keep unset (best-effort)
+          deployer.address, // placeholder admin module addr (interface is empty; backward-compat)
+          upgradeWindowBlocks,
+        ]
+      );
       save(deployed);
       // NOTE: deployProxy already printed the deployed address; keep this log semantically distinct.
       console.log('✅ DegradationMonitor ready');
@@ -1056,42 +1164,20 @@ async function main() {
   }
 
   // ====== 奖励系统（完整）======
-  if (!deployed.RewardPoints) {
+  // ====== Governance voting token (SSOT) ======
+  // SSOT target-state: governance votes token is stEASY (Registry[KEY_EASY_STAKING]).
+
+  // ====== AI Credits Vault（链上 credits SSOT）======
+  if (!deployed.AICreditsVault) {
     try {
-      deployed.RewardPoints = await deployProxy(
-        'src/Token/RewardPoints.sol:RewardPoints',
-        [deployer.address],
-        {}
-      );
+      deployed.AICreditsVault = await deployProxy('src/core/AICreditsVault.sol:AICreditsVault', [deployed.Registry]);
       save(deployed);
-    } catch (error) { console.log('⚠️ RewardPoints deployment failed:', error); }
-  }
-  // 确认 RewardPoints 地址有效（本地链重启后旧地址可能无代码），无代码则自动重部署
-  try {
-    if (deployed.RewardPoints) {
-      const rpCode = await ethers.provider.getCode(deployed.RewardPoints);
-      if (!rpCode || rpCode === '0x') {
-        console.log('⚠️ Detected empty code at RewardPoints address, re-deploying RewardPoints...');
-        deployed.RewardPoints = await deployProxy(
-          'src/Token/RewardPoints.sol:RewardPoints',
-          [deployer.address],
-          {}
-        );
-        save(deployed);
-        console.log('✅ RewardPoints re-deployed @', deployed.RewardPoints);
-      }
+    } catch (error) {
+      console.log('⚠️ AICreditsVault deployment failed:', error);
     }
-  } catch (err) {
-    console.log('⚠️ RewardPoints code check failed:', err);
   }
   if (!deployed.RewardManagerCore) {
-    try { deployed.RewardManagerCore = await deployProxy('RewardManagerCore', [deployed.Registry, ethers.parseUnits('10', 18), ethers.parseUnits('1', 18), ethers.parseUnits('500', 18), ethers.parseUnits('100', 18)]); save(deployed); } catch (error) { console.log('⚠️ RewardManagerCore deployment failed:', error); }
-  }
-  if (!deployed.RewardCore) {
-    try { deployed.RewardCore = await deployProxy('RewardCore', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RewardCore deployment failed:', error); }
-  }
-  if (!deployed.RewardConsumption) {
-    try { deployed.RewardConsumption = await deployProxy('RewardConsumption', [deployed.RewardCore || ethers.ZeroAddress, deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RewardConsumption deployment failed:', error); }
+    try { deployed.RewardManagerCore = await deployProxy('RewardManagerCore', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RewardManagerCore deployment failed:', error); }
   }
   if (!deployed.RewardManager) {
     try { deployed.RewardManager = await deployProxy('RewardManager', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RewardManager deployment failed:', error); }
@@ -1099,60 +1185,156 @@ async function main() {
   if (!deployed.RewardConfig) {
     try { deployed.RewardConfig = await deployProxy('RewardConfig', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RewardConfig deployment failed:', error); }
   }
+  if (!deployed.EarnConfig) {
+    try { deployed.EarnConfig = await deployProxy('EarnConfig', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ EarnConfig deployment failed:', error); }
+  }
   if (!deployed.RewardView) {
     try { deployed.RewardView = await deployProxy('RewardView', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ RewardView deployment failed:', error); }
   }
 
-  // MINTER_ROLE 授权（RewardPoints -> RMCore/RewardCore）
+  // ====== Easy tokenomics (EasyToken + emission/consumption + staking) ======
+  const easyTeamRecipient = process.env.EASY_TEAM_RECIPIENT || deployer.address;
+  const easyEcoRecipient = process.env.EASY_ECO_RECIPIENT || deployer.address;
+
+  if (!deployed.EasyToken) {
+    try { deployed.EasyToken = await deployProxy('src/Token/EasyToken.sol:EasyToken', [deployer.address]); save(deployed); } catch (error) { console.log('⚠️ EasyToken deployment failed:', error); }
+  }
+  if (!deployed.EasyEmissionConfig) {
+    try { deployed.EasyEmissionConfig = await deployProxy('EasyEmissionConfig', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ EasyEmissionConfig deployment failed:', error); }
+  }
+  if (!deployed.EasyEmissionController) {
+    try { deployed.EasyEmissionController = await deployProxy('EasyEmissionController', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ EasyEmissionController deployment failed:', error); }
+  }
+  if (!deployed.EasyConsumption) {
+    try { deployed.EasyConsumption = await deployProxy('EasyConsumption', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ EasyConsumption deployment failed:', error); }
+  }
+  if (!deployed.EasyRecycleDistributor) {
+    try {
+      deployed.EasyRecycleDistributor = await deployProxy(
+        'EasyRecycleDistributor',
+        [deployed.Registry, easyTeamRecipient, easyEcoRecipient]
+      );
+      save(deployed);
+    } catch (error) { console.log('⚠️ EasyRecycleDistributor deployment failed:', error); }
+  }
+  if (!deployed.EasyStaking) {
+    try { deployed.EasyStaking = await deployProxy('src/Governance/EasyStaking.sol:EasyStaking', [deployed.Registry]); save(deployed); } catch (error) { console.log('⚠️ EasyStaking deployment failed:', error); }
+  }
+
+  // EasyToken roles (SSOT):
+  // - MINTER_ROLE: issuance (sole minter = EasyEmissionController)
+  // - BURNER_ROLE: burn paths (penalty/ledger + recycle burn)
   try {
-    if (deployed.RewardPoints) {
-      const code = await ethers.provider.getCode(deployed.RewardPoints);
-      if (!code || code === '0x') {
-        console.log('⚠️ RewardPoints has no code at', deployed.RewardPoints, '- skip MINTER_ROLE grant');
-      } else {
-        const rp = await ethers.getContractAt('src/Token/RewardPoints.sol:RewardPoints', deployed.RewardPoints);
-        
-        // 检查合约是否已初始化
-        try {
-          const name = await rp.name();
-          console.log('✅ RewardPoints is initialized, name:', name);
-        } catch (initError) {
-          console.log('⚠️ RewardPoints not initialized, attempting to initialize...');
-          try {
-            await (await rp.initialize(deployer.address)).wait();
-            console.log('✅ RewardPoints initialized with deployer as admin');
-          } catch (initErr) {
-            console.log('⚠️ RewardPoints initialization failed:', initErr);
-          }
+    if (deployed.EasyToken) {
+      const easyToken = await ethers.getContractAt('src/Token/EasyToken.sol:EasyToken', deployed.EasyToken);
+      const MINTER_ROLE = await easyToken.MINTER_ROLE();
+      const BURNER_ROLE = await easyToken.BURNER_ROLE();
+
+      if (deployed.EasyEmissionController) {
+        const hasController = await easyToken.hasRole(MINTER_ROLE, deployed.EasyEmissionController);
+        if (!hasController) {
+          await (await easyToken.setSoleMinter(deployed.EasyEmissionController)).wait();
+          console.log('✅ EasyToken sole minter set to EasyEmissionController');
         }
-        
-        // 使用合约的MINTER_ROLE常量，而不是手动计算
-        try {
-          const MINTER_ROLE = await rp.MINTER_ROLE();
-          console.log('✅ Got MINTER_ROLE from contract:', MINTER_ROLE);
-          
-          if (deployed.RewardManagerCore) {
-            try { 
-              await (await rp.grantRole(MINTER_ROLE, deployed.RewardManagerCore)).wait(); 
-              console.log('✅ Granted MINTER_ROLE to RewardManagerCore');
-            } catch (error) { 
-              console.log('⚠️ RewardManagerCore MINTER_ROLE grant failed:', error); 
-            }
-          }
-          console.log('🔐 RewardPoints MINTER_ROLE granted');
-        } catch (roleError) {
-          console.log('⚠️ Failed to get MINTER_ROLE from contract, using fallback:', roleError);
-          // 回退方案：使用手动计算的哈希
-          const MINTER_ROLE = ethers.keccak256(ethers.toUtf8Bytes('MINTER_ROLE'));
-          if (deployed.RewardManagerCore) {
-            try { await (await rp.grantRole(MINTER_ROLE, deployed.RewardManagerCore)).wait(); } catch (error) { console.log('⚠️ RewardManagerCore MINTER_ROLE grant failed (fallback):', error); }
-          }
+      }
+
+      if (deployed.EasyRecycleDistributor) {
+        const hasBurner = await easyToken.hasRole(BURNER_ROLE, deployed.EasyRecycleDistributor);
+        if (!hasBurner) {
+          await (await easyToken.grantRole(BURNER_ROLE, deployed.EasyRecycleDistributor)).wait();
+          console.log('✅ EasyToken BURNER_ROLE granted to EasyRecycleDistributor');
         }
+      }
+
+      if (deployed.RewardManagerCore) {
+        const hasRmcore = await easyToken.hasRole(BURNER_ROLE, deployed.RewardManagerCore);
+        if (!hasRmcore) {
+          await (await easyToken.grantRole(BURNER_ROLE, deployed.RewardManagerCore)).wait();
+          console.log('✅ EasyToken BURNER_ROLE granted to RewardManagerCore');
+        }
+      }
+
+      // Localhost hardening: deployer should not retain burn powers by default.
+      const deployerHasBurner = await easyToken.hasRole(BURNER_ROLE, deployer.address);
+      if (deployerHasBurner) {
+        await (await easyToken.revokeRole(BURNER_ROLE, deployer.address)).wait();
+        console.log('🔐 Revoked EasyToken BURNER_ROLE from deployer (localhost hardening)');
       }
     }
   } catch (error) {
-    console.log('⚠️ RewardPoints MINTER_ROLE setup failed:', error);
+    console.log('⚠️ EasyToken role setup failed:', error);
   }
+
+  // ====== FeatureRegistry (SSOT: on-chain feature semantics) ======
+  if (!deployed.FeatureRegistry) {
+    try {
+      deployed.FeatureRegistry = await deployProxy('src/Reward/FeatureRegistry.sol:FeatureRegistry', [deployed.Registry]);
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ FeatureRegistry deployment failed:', error);
+    }
+  }
+
+  // ====== GovernanceGate (SSOT: propose/vote eligibility) ======
+  if (!deployed.GovernanceGate) {
+    try {
+      deployed.GovernanceGate = await deployProxy('src/Governance/GovernanceGate.sol:GovernanceGate', [deployed.Registry]);
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ GovernanceGate deployment failed:', error);
+    }
+  }
+
+  // ====== CrossChainGovernance (gate + veto) ======
+  if (!deployed.CrossChainGovernance) {
+    try {
+      deployed.CrossChainGovernance = await deployProxy(
+        'src/Governance/CrossChainGovernance.sol:CrossChainGovernance',
+        [deployer.address, deployed.Registry]
+      );
+      save(deployed);
+    } catch (error) {
+      console.log('⚠️ CrossChainGovernance deployment failed:', error);
+    }
+  }
+
+  // ====== Governance guardian (foundation veto SSOT) ======
+  // Stored as Registry module-address entry under KEY_GOVERNANCE_GUARDIAN.
+  if (!deployed.GovernanceGuardian) {
+    deployed.GovernanceGuardian = process.env.GOVERNANCE_GUARDIAN || deployer.address;
+    save(deployed);
+  }
+
+  // Reward governance roles (write-path SSOT):
+  // - RewardConfig governance entrypoints are role-gated via AccessControlManager.
+  try {
+    if (deployed.AccessControlManager) {
+      const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+      await ensureAcmRole(acm, 'SET_PARAMETER', deployed.RewardConfig, 'RewardConfig');
+
+      // Break-glass (revocable): mimic non-localhost hardening on localhost by default.
+      // - DO NOT auto-grant to deployer.
+      // - If needed for a one-off local run, explicitly set `REWARD_CONFIG_EMERGENCY_GRANTEE`
+      //   to a separate EOA/timelock/multisig address.
+      const emergencyGrantee = process.env.REWARD_CONFIG_EMERGENCY_GRANTEE;
+      if (emergencyGrantee && emergencyGrantee !== ethers.ZeroAddress) {
+        await ensureRewardConfigEmergencyGranted(acm, emergencyGrantee, (m) => logActionTo(m, emergencyGrantee));
+      }
+
+      // Localhost default hardening: always ensure deployer break-glass is revoked.
+      await ensureRewardConfigEmergencyRevoked(
+        acm,
+        deployer.address,
+        (m) => logActionTo(m, deployer.address)
+      );
+    }
+  } catch (e) {
+    console.log('⚠️ Reward governance role grants skipped/failed:', e);
+  }
+
+  // NOTE: CrossChainGovernance.setRegistry() moved to Phase B+ (after phaseBBindRegistry)
+  // because setRegistry() internally syncs governance token cache from Registry[KEY_EASY_STAKING].
+  // That key is only bound in Phase B, so calling it here can revert with ModuleNotRegistered.
 
   // 2.99) 部署 LiquidationManager（方案A：直达账本 + View 单点推送）
   // NOTE: 该模块将作为 Registry.KEY_LIQUIDATION_MANAGER 的唯一清算入口；
@@ -1227,6 +1409,14 @@ async function main() {
         await (await acm.grantRole(ACTION_LIQUIDATE, deployed.LiquidationManager)).wait();
         console.log('🔑 Granted ACTION_LIQUIDATE to LiquidationManager');
       }
+
+      // LiquidationManager routes liquidation platform fees via FeeRouter.distributePrepaid.
+      const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes('DEPOSIT'));
+      const hasDeposit = await acm.hasRole(ACTION_DEPOSIT, deployed.LiquidationManager);
+      if (!hasDeposit) {
+        await (await acm.grantRole(ACTION_DEPOSIT, deployed.LiquidationManager)).wait();
+        console.log('🔑 Granted ACTION_DEPOSIT to LiquidationManager');
+      }
     }
   } catch (e) {
     console.log('⚠️ Grant ACTION_LIQUIDATE to LiquidationManager skipped/failed:', e);
@@ -1270,6 +1460,21 @@ async function main() {
     console.log('⚠️ Grant ACTION_REPAY/VIEW_SYSTEM_DATA to SettlementManager skipped/failed:', e);
   }
 
+  // 2.99.1.2.1) 授权 GuaranteeFundManager 分发平台罚金（FeeRouter.distributePrepaid -> ACTION_DEPOSIT）
+  try {
+    if (deployed.AccessControlManager && deployed.GuaranteeFundManager) {
+      const acm = await ethers.getContractAt('AccessControlManager', deployed.AccessControlManager);
+      const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes('DEPOSIT'));
+      const already = await acm.hasRole(ACTION_DEPOSIT, deployed.GuaranteeFundManager);
+      if (!already) {
+        await (await acm.grantRole(ACTION_DEPOSIT, deployed.GuaranteeFundManager)).wait();
+        console.log('🔑 Granted ACTION_DEPOSIT to GuaranteeFundManager');
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Grant ACTION_DEPOSIT to GuaranteeFundManager skipped/failed:', e);
+  }
+
     // 2.99.1.3) 强制本地环境：全额还款必须自动释放抵押
     try {
       if (deployed.SettlementManager) {
@@ -1292,6 +1497,23 @@ async function main() {
   //       Phase B is the canonical single pass that binds all deployed modules into Registry (SSOT).
   const registry = await ethers.getContractAt('Registry', deployed.Registry);
   await phaseBBindRegistry(registry, deployed);
+
+  // ===================== Phase B+: Post-binding wiring =====================
+  // Wire Registry SSOT into CrossChainGovernance (enables gate + guardian + token cache sync).
+  // MUST run AFTER Phase B so the governance SSOT keys (e.g., KEY_EASY_STAKING) are already bound; otherwise
+  // setRegistry() → _syncGovernanceTokenFromRegistry() → getModuleOrRevert() reverts.
+  try {
+    if (deployed.CrossChainGovernance) {
+      const gov = await ethers.getContractAt(
+        'src/Governance/CrossChainGovernance.sol:CrossChainGovernance',
+        deployed.CrossChainGovernance
+      );
+      await (await gov.setRegistry(deployed.Registry)).wait();
+      console.log('✅ CrossChainGovernance registry wired (gate+guardian enabled)');
+    }
+  } catch (e) {
+    console.log('⚠️ CrossChainGovernance.setRegistry skipped/failed:', e);
+  }
 
   // ===================== Phase C: Validate & Outputs =====================
   await phaseCValidateAndWriteOutputs(registry, deployed);

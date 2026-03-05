@@ -184,8 +184,9 @@ const vaultCore = await ethers.getContractAt("VaultCore", vaultCoreAddress);
 // 存款（需要白名单权限，由业务逻辑层检查）
 await vaultCore.deposit(assetAddress, amount);
 
-// 借款（需要白名单权限，由业务逻辑层检查）
-await vaultCore.borrow(assetAddress, amount);
+// 借款（SSOT：撮合/订单化路径）
+// ⚠️ 当前架构已移除 `VaultCore.borrow(asset, amount)`；借款必须由撮合/keeper 走
+// `VaultBusinessLogic.finalizeMatch(...)`，并在内部完成白名单校验/资金拨付/订单创建（orderId SSOT）。
 
 // 还款（需要白名单权限，由业务逻辑层检查）
 await vaultCore.repay(orderId, assetAddress, amount);

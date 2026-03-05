@@ -17,11 +17,91 @@
 - **`E2E_STRICT_VIEWS`**（默认开启）
   - `E2E_STRICT_VIEWS=0`：关闭严格校验（回退为 best-effort，允许打印 ⚠️ 继续跑）
   - 其它值/不设置：开启严格校验
+- **`E2E_STRICT_DATAPUSH`**（默认关闭）
+  - `E2E_STRICT_DATAPUSH=1`：DataPush 关键事件缺失即失败（仅对带 key-event 检查的脚本生效）
 - **`E2E_ALLOW_DIRTY_STATE=1`**（仅在需要时使用）
   - 允许在“非干净状态”（已有历史仓位/债务）下跑严格 E2E（更贴近 testnet/mainnet）
 - **`E2E_VIEW_STRICT=1`**
   - 仅用于 **ViewScan**（启动阶段扫描所有 View 模块）强制失败策略；
   - 说明：部分脚本会把 ViewScan.strict 直接绑定到 `E2E_STRICT_VIEWS`（因此 `E2E_VIEW_STRICT` 只对未显式传 strict 的脚本生效）。
+
+## 📊 Artifacts 量化（最新 batch 对比）
+
+> 目的：把 batch E2E 产生的 artifacts 变成“可回归的量化仪表盘”，用于快速回答：
+> - 这次跑的是不是同一条链（RPC/chainId/block）？
+> - orders/orderIds 是否连贯（是否有跳号/缺失/重复）？
+> - View push（DataPushed）大致发生了哪些类型、数量是否异常？
+
+### 量化脚本
+
+- 脚本：scripts/e2e/quantify-latest-batch-artifacts.ts
+- 输入：自动读取 scripts/e2e/artifacts/ 下最新的：
+  - batch-10-users.*.json
+  - batch-advanced-10-users.*.json
+- 输出：scripts/e2e/doc/E2E-Quantification-Latest.md（覆盖更新）
+
+### 如何运行
+
+1) 先跑两个 batch（产出 artifacts）
+
+`LOCALHOST_RPC_URL` 必须与 deploy / E2E 指向同一条 localhost 链。
+
+```bash
+LOCALHOST_RPC_URL=http://127.0.0.1:18545 pnpm -s exec hardhat e2e:batch-10-users --network localhost
+LOCALHOST_RPC_URL=http://127.0.0.1:18545 pnpm -s exec hardhat e2e:batch-advanced --network localhost
+```
+
+2) 再跑量化（不需要 RPC；只读 artifacts 文件）
+
+```bash
+pnpm -s exec ts-node --project ./tsconfig.scripts.json scripts/e2e/quantify-latest-batch-artifacts.ts
+```
+
+### 如何解读（重点字段）
+
+- **rpcUrl / chainId / block**
+  - 两套 artifacts 若不是同一条链，后续所有对比都不可信（典型症状：地址存在但 getCode=0x）。
+- **orders / orderIds / missingOrderIds**
+  - `missingOrderIds` 非空通常表示：某些场景分支被跳过、创建失败但流程继续、或 ID 分配并非严格递增。
+  - advanced artifacts 若包含 `orders[]`，报告会额外列出按 orderId 排序的订单列表，便于快速定位“跳号点”。
+- **DataPushed breakdown**
+  - 报告同时输出 top5 与 all typeHash（按次数降序）。
+  - 注意：这是“事件可观测性统计”，并不能在无“期望清单”的情况下严格证明“全部推送完毕”；它更适合用来发现 **回归/异常漂移**（例如某些 typeHash 突然消失或暴涨）。
+- **typeHash diff（advanced vs basic）**
+  - 显示 advanced 相对 basic 的新增/缺失 typeHash（逐行列出）。
+  - 这不等价于“推送不完整”，因为两套 batch 覆盖的业务路径不同；但它是定位“为什么前端某类数据没更新”的第一入口。
+
+## 🧭 全量 E2E 同一 RPC + 详细报告（推荐）
+
+> 目标：所有 E2E 脚本 **统一走同一条 RPC**，并生成“可用于排查问题”的详细汇总报告（不做两份 batch 对比）。
+
+### 1) 一键运行全部 E2E（同一 RPC）
+
+```bash
+LOCALHOST_RPC_URL=http://127.0.0.1:18545 pnpm -s exec ts-node --project ./tsconfig.scripts.json scripts/e2e/tools/run-all-e2e.ts --network localhost
+```
+
+如需 DataPush 关键事件缺失即失败：
+
+```bash
+E2E_STRICT_DATAPUSH=1 LOCALHOST_RPC_URL=http://127.0.0.1:18545 pnpm -s exec ts-node --project ./tsconfig.scripts.json scripts/e2e/tools/run-all-e2e.ts --network localhost
+```
+
+- 日志目录：`scripts/e2e/logs/e2e-run-<timestamp>/`
+- 清单文件：`scripts/e2e/logs/e2e-run-<timestamp>/manifest.json`
+- 默认不中断（收集所有脚本结果）。如需失败即停：追加 `--fail-fast`
+
+### 2) 生成“详细情况”汇总报告（不对比）
+
+```bash
+pnpm -s exec ts-node --project ./tsconfig.scripts.json scripts/e2e/tools/quantify-latest-e2e-details.ts
+```
+
+- 输出：`scripts/e2e/doc/E2E-Details-Latest.md`
+- 报告聚合：
+  - 最新一次 run 的脚本状态与日志路径（若存在 manifest）
+  - 每个 artifacts 前缀的最新 JSON 元数据（chainId/rpc/block/orders/checkpoints/dataPushed 等）
+  - 便于定位“某个测试是否产出可追踪证据”以及“具体输出路径”
 
 ## ✅ View 相关 E2E 验收要求（MUST）
 
@@ -115,8 +195,8 @@
 - 验证 View 层缓存是否正确更新
 - 验证多个 View 模块的数据一致性
 - **Reward 严格断言（新增）**：
-  - 通过 `RewardPoints.balanceOf` 与 `RewardView.getUserRewardSummary.totalEarned` 做 **delta 断言**（不依赖“链是否干净”）
-  - 当脚本使用的借款本金 < `MIN_ELIGIBLE_PRINCIPAL(1000e6)` 时，要求 **delta 必须为 0**，且 repay tx 中 **不得出现** `RewardView.DataPushed`
+  - 通过 `EasyToken.balanceOf` 与 `RewardView.getUserEasyEarnedWithMeta` 做 **delta/单调断言**（不依赖“链是否干净”）
+  - 当脚本使用的借款本金 < `MIN_ELIGIBLE_PRINCIPAL(1000e6)` 时，要求 **delta 必须为 0**，且 repay tx 中 **不得出现** `DataPushed(DATA_TYPE_EASY_MINTED, ...)`
 - **Artifacts 输出（新增）**：
   - 运行结束会写入 `scripts/e2e/artifacts/full-with-views.<blockNumber>.json`
   - 包含模块地址快照、`RewardView.getVersionInfo()`、以及 RewardView `DataPushed` 按 `dataTypeHash` 的计数统计
@@ -125,9 +205,9 @@
 **Reward 隐私 + Read-Gate 专项验收**
 - 覆盖场景：
   - **隐私读取**：RewardView 的用户数据仅允许 **本人** 或 **运营团队（VIEW_USER_DATA）** 读取
-  - **协议内读取**：`RewardView.getUserLevelForBorrowCheck` 仅允许 `KEY_LE` 调用（用于 LendingEngine 链上校验）
+  - **协议内读取**：`RewardView.getUserLevelForBorrowCheck` 仅允许 `ORDER_ENGINE` 调用（用于链上 borrow 门槛校验）
   - **Read-Gate**：`RewardManagerCore.get*` 查询接口禁止 EOA 直连（必须通过 RewardView）
-  - **积分语义**：按期还款 +1；提前还款 +0；逾期还款扣 5%（默认 `latePenaltyBps=500`）
+  - **Easy 语义**：按期还款发放；提前还款不发放；逾期还款触发惩罚（默认 `latePenaltyBps=500`）
 
 ### 4.2 `e2e-localhost-systemview-routing.ts` ⭐
 **SystemView 路由/发现性 + “不依赖 revert 文本”专项验收**
@@ -214,7 +294,7 @@
     - user 私域：需 `VIEW_USER_DATA`（非本人需 admin）
     - liquidation 读接口：需 `VIEW_LIQUIDATION_DATA`
   - **新鲜度字段（placeholder 一致性）**：
-    - 对返回的 `lastLiquidationTime/daysSinceLastLiquidation` 做基本一致性断言（0 → 0）
+    - 对返回的 `lastLiquidationBlock/blocksSinceLastLiquidation` 做基本一致性断言（0 → 0）
 
 ### 4.11 `e2e-localhost-batch-aggregators-acceptance.ts` ⭐
 **BatchView / CacheOptimizedView / DashboardView（ARCH 4.11）专项验收：只聚合不写入 + batch 限制统一 + 权限不绕过**
@@ -264,12 +344,20 @@
 ### 4.16 `e2e-localhost-rewardview-acceptance.ts` ⭐
 **RewardView（ARCH 4.14）专项验收：写入口白名单 + DataPushed + 用户私域读权限（Scheme U）+ B 类缓存有效性**
 - 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.14）：
-  - **写入口白名单**：非 writer（既不是 `RewardManagerCore` 也不是 `RewardConsumption`）调用任意 `push*` 必须 revert
-  - **DataPush 可观测性**：每个 `pushRewardEarned/pushPointsBurned/pushPenaltyLedger/pushUserLevel/pushUserPrivilege/pushSystemStats` 成功必须出现 `DataPushed`，且 `dataTypeHash` 来自集中常量口径
+  - **写入口白名单**：非 writer 调用任意 `push*` 必须 revert
+  - **DataPush 可观测性**：关键写入（含 `pushEasyMinted/pushEasySpent/pushEasyRecycledSplit` 以及 reward/penalty/system 侧的 `push*`）成功必须出现 `DataPushed`，且 `dataTypeHash` 来自集中常量口径（`DataPushTypes`）
   - **用户私域读权限（Scheme U）**：非本人读取 Reward 私域数据必须 `MissingRole()`；本人/ops/admin 可读
-  - **B 类缓存有效性**：`getUserRewardSummary` 返回值必须包含 `isValid/blockNumber`；blockNumber 单调推进；过期后 `isValid=false`
+  - **B 类缓存有效性**：`getUserEasyEarnedWithMeta` 返回值必须包含 `isValid/blockNumber`；blockNumber 单调推进；过期后 `isValid=false`
 
-### 4.17 `e2e-localhost-statisticsview-acceptance.ts` ⭐
+### 4.17 `e2e-localhost-rewardmanager-governance.ts` ⭐
+**RewardManager 治理/权限路径验收（入口收紧 + GFM 惩罚 SSOT）**
+- 覆盖场景：
+  - **入口收紧**：非 `ORDER_ENGINE` 调用 `onLoanEvent` 必须 `MissingRole()`
+  - **惩罚入口**：非 `GUARANTEE_FUND` 调用 `applyPenalty` 必须 `MissingRole()`
+  - **审计事件**：`applyPenalty` 成功后必须出现 `PenaltyApplied` 与 `ActionExecuted`
+  - **欠分账本**：`applyPenalty`（积分不足）应增加 `RewardView.pendingPenalty`
+
+### 4.18 `e2e-localhost-statisticsview-acceptance.ts` ⭐
 **StatisticsView（ARCH 4.4）专项验收：系统聚合只读 + push 后单调推进 + 并发/幂等（nextVersion/requestId/seq）**
 - 覆盖场景（对应 `ARCH-VIEW-ALIGNMENT-WORKGUIDE.md` 4.4）：
   - **系统聚合只读**：`getGlobalStatistics/getGlobalStatisticsWithMeta` 返回 `totalUsers/activeUsers/totalCollateral/totalDebt/lastUpdateBlock` + `(isValid,blockNumber)`
@@ -289,9 +377,10 @@
 - ViewScan（新增）：启动阶段从 Registry 扫描全部 View 模块并调用 `getVersionInfo()` + 少量只读 sanity-call。
   - 默认 best-effort（只打印告警不失败）
   - 可选严格模式：`E2E_VIEW_STRICT=1`（任何 View 扫描失败将直接终止脚本）
-- Reward（新增）：按 `Architecture-Guide.md` 的唯一路径（LE 落账后触发）对 **积分/RewardView** 做最小端到端断言：
-  - 输出 **人类可读积分**（`RewardPoints.decimals()`）与 raw 值
-  - 断言 repay 后 `RewardPoints.balanceOf` 与 `RewardView.getUserRewardSummary.totalEarned` 的 **delta == 1.0**
+- Reward（新增）：按 `Architecture-Guide.md` 的唯一路径（LE 落账后触发）对 **EasyToken/RewardView** 做最小端到端断言：
+  - 输出 **人类可读 Easy**（`EasyToken.decimals()`）与 raw 值
+  - eligible repay：应可观测 `DataPushed(DATA_TYPE_EASY_MINTED, ...)`，且 `EasyToken.balanceOf` 增加（并确保 `RewardView.getUserEasyEarnedWithMeta` 单调不减）
+  - ineligible repay：不应出现 `DataPushed(DATA_TYPE_EASY_MINTED, ...)`，且 `EasyToken.balanceOf` 不应增加
 - Read-gate（补强）：EOA 直连 `RewardManagerCore.get*` 必须按 selector 失败（不得绕过 RewardView）
 - Artifacts（新增）：运行结束写入 `scripts/e2e/artifacts/batch-10-users.<blockNumber>.json`，包含模块快照、`RewardView.getVersionInfo()`、以及 `DataPushed` 按 `dataTypeHash` 的计数统计
 - “样本 borrower”可配置：
@@ -343,6 +432,13 @@
   - **逾期还款**：`evm_increaseTime` 快进到超过到期日后再 repay
   - **多 lender 拆单**：将 500 拆成两笔 250/250（两笔订单），分别由不同 lender 出借（更贴近真实“拆单”）
   - **EarlyRepaymentGuarantee（保证金：lock → early settle）**：覆盖 `EarlyRepaymentGuaranteeManager` + `GuaranteeFundManager` 的联动路径（锁定 → 提前结算分配）
+  - **边界/负例补强**（新增）：
+    - 资产白名单移除后 `reserveForLending` 必须 revert
+    - `PreviewView` LTV 边界（just-above-max）只做预览校验，不依赖 revert
+    - `SystemView` 路由一致性（Registry ↔ route* 对齐）
+  - **风险更新自然触发**（新增）：
+    - 通过真实借贷/还款/清算路径触发 `HealthView.pushRiskStatus`（LendingEngineCore 内部）
+    - 严格模式下要求 `HealthView` cache 已更新（`isValid=true` 且 `blockNumber>0`）
 - 每一步都断言（strict 模式下为硬失败）：
   - `PositionView.getUserPosition` == `UserView.getUserPosition` == `CollateralManager/VaultLendingEngine`（账本）
   - `RiskView.getUserRiskAssessment` 可正常调用（不对语义做强约束）
@@ -352,10 +448,10 @@
   - 默认：随 strict 策略（本脚本中 strict 默认开启）
   - 关闭 strict：`E2E_STRICT_VIEWS=0`
 - Reward（升级为严格一致性）：
-  - 通过 `RewardPoints.decimals()` 输出 **人类可读积分**与 raw 值
-  - 通过 `RewardPoints.balanceOf` 与 `RewardView.getUserRewardSummary.totalEarned` 做 **delta 断言**：
-    - 若本金 \(\ge 1000e6\)（eligible），按期全额还款应满足 **delta == 1 point**
-    - 若本金 \(< 1000e6\)（ineligible），必须满足 **delta == 0**
+  - 通过 `EasyToken.decimals()` 输出 **人类可读 Easy** 与 raw 值
+  - 通过 `EasyToken.balanceOf` 与 `RewardView.getUserEasyEarnedWithMeta` 做 **delta/单调断言**：
+    - 若本金 \(\ge 1000e6\)（eligible），按期全额还款应可观测 `DataPushed(DATA_TYPE_EASY_MINTED, ...)`，且 Easy 余额增加
+    - 若本金 \(< 1000e6\)（ineligible），不应出现 `DataPushed(DATA_TYPE_EASY_MINTED, ...)`，且 Easy 余额不应增加
   - Read-gate（补强）：EOA 直连 `RewardManagerCore.get*` 必须按 selector 失败（不得绕过 RewardView）
 - **Artifacts 输出（新增）**：
   - 运行结束会写入 `scripts/e2e/artifacts/batch-advanced-10-users.<blockNumber>.json`
@@ -364,13 +460,43 @@
   - **env**：`E2E_SAMPLE_BORROWER_INDEX=0..4`（默认 0）
   - **task/argv**：`npx hardhat e2e:batch-advanced --sample-borrower-index 0..4`（task 定义在 `scripts/tasks/e2e-batch-advanced.ts`，并已在 `hardhat.config.ts` 引入）
 
-## 运行方式
+## 网络兼容性（任何链）
+
+> 目标：同一套 E2E 文档能在 **本地链 / devnet / testnet / fork** 上复用。
+> 关键点：不同脚本对“链能力”的依赖不同。
+
+### 链能力要求（按强度排序）
+
+1) **只读能力（任何链）**
+- 只依赖 `eth_call`、事件查询、只读 View 接口
+- 适合：多数 *acceptance* / *routing* / *view* 验收脚本
+
+2) **可写能力（devnet/testnet）**
+- 需要真实交易 + 角色授予 + 可用资金（faucet 或 mint）
+- 适合：基础业务流、撮合流程、Reward/Stats 等落账
+
+3) **可控时间/快照能力（本地链/可控 devnet）**
+- 需要 `evm_snapshot` / `evm_revert` / `hardhat_mine` / `evm_increaseTime`
+- 适合：逾期/TTL/缓存失效/性能矩阵等需要“时间跳转”的脚本
+
+### 运行前检查（任何链通用）
+
+- **Registry 完整性**：目标链必须已部署并注册所有模块（`Registry.getModuleOrRevert` 不应抛 `ModuleNotRegistered`）
+- **权限**：运行账号必须具备 View/Stats 所需的只读角色（`runViewPreflight` 会检查）
+- **资产/价格**：目标链上的结算资产必须可用（已入白名单且价格可读）
+
+> 如果你希望“哪条链都能跑”，建议先跑只读/acceptance 脚本；
+> 需要写入或时间跳转的脚本，要求链本身支持对应能力。
+
+## 运行方式（通用）
+
+> 适用于任何已在 `hardhat.config.ts` 配置过的网络。
 
 ### 快速命令参考（针对批量测试）
 
 #### 完整流程（3 个终端窗口）
 
-**终端 1：启动本地 Hardhat 节点**
+**终端 1：启动本地 Hardhat 节点（仅 localhost）**
 ```bash
 pnpm -s run node
 ```
@@ -379,14 +505,15 @@ pnpm -s run node
 hardhat node --hostname 127.0.0.1 --port 8545
 ```
 
-**终端 2：部署合约到本地节点**
+**终端 2：部署合约（根据网络选择）**
 ```bash
 pnpm -s run deploy:localhost
 ```
 或者使用完整命令：
 ```bash
-hardhat run scripts/deploy/deploylocal.ts --network localhost
+pnpm -s hardhat run scripts/deploy/deploylocal.ts --network localhost
 ```
+> 非 localhost 网络请使用对应的部署脚本/流程（确保 Registry 模块已完整注册）。
 
 **终端 3：运行 E2E 测试**
 
@@ -397,29 +524,62 @@ hardhat run scripts/deploy/deploylocal.ts --network localhost
 
 运行 `e2e-localhost-batch-10-users.ts`：
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network <network>
 ```
 
 运行 `e2e-localhost-batch-advanced-10-users.ts`：
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network <network>
 ```
+
+> 说明：两份 batch 脚本默认会在末尾串行执行 Reward 专项脚本（RewardView acceptance / privacy+read-gate / edgecases / break-glass）。  
+> 如需加速排障可跳过：`E2E_SKIP_REWARD_SUITES=1 npx hardhat run ...`
+
+运行 `e2e-localhost-degradationmonitor-trends-acceptance.ts`（验证 DegradationMonitor 趋势在 analytics 未配置时不再返回全 0）：
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-degradationmonitor-trends-acceptance.ts --network <network>
+```
+
+运行 `e2e-localhost-rewardconfig-breakglass.ts`（验证 RewardConfig “break-glass” 紧急写入权限：有权限可直连写入，撤销后必须 revert，但常规写入路径仍可用，最后恢复权限）：
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-rewardconfig-breakglass.ts --network <network>
+```
+
+运行 `scripts/tests/funds-flow-invariants-suite.ts`（资金链 invariants suite，新增 RewardConfig break-glass 强约束预检查；并修复 guarantee “隐性耦合”导致的非 guarantee 场景失败）：
+
+- **默认推荐（不跑 guarantee-extension）**：基线禁用 guarantee，避免 `finalizeMatch` 额外要求 borrower 对 `GuaranteeFundManager` 的 allowance
+
+```bash
+RUN_GUARANTEE_EXTENSION=0 npx hardhat run scripts/tests/funds-flow-invariants-suite.ts --network <network>
+```
+
+- **需要跑 guarantee-extension 时**：显式开启，按 suite 自己的 guarantee 流程单独启用/验证
+
+```bash
+RUN_GUARANTEE_EXTENSION=1 npx hardhat run scripts/tests/funds-flow-invariants-suite.ts --network <network>
+```
+
+> 说明：
+> - suite 内部会用 `evm_snapshot/evm_revert` 包裹用例，避免污染链状态。
+> - `break-glass` 预检查对齐 `e2e-localhost-rewardconfig-breakglass.ts` 的强约束：撤销 `ACTION_REWARD_CONFIG_EMERGENCY` 后 **direct call** 必须 revert，但通过 `RewardConfig.setServiceCooldown(FeatureUnlock, ...)` 的 SSOT 路径仍必须成功并真实修改 `FeatureUnlockConfig.getCooldown()`。
 
 ### 前置条件
 
-1. **启动本地 Hardhat 节点**：
+1. **启动本地 Hardhat 节点（仅 localhost）**：
 ```bash
 pnpm -s run node
 ```
 或者使用完整命令：
 ```bash
 hardhat node --hostname 127.0.0.1 --port 8545
+LOCALHOST_RPC_URL=http://127.0.0.1:18545 pnpm -s run deploy:localhost
 ```
 
-2. **部署合约到本地节点**（在另一个终端）：
+2. **部署合约**（在另一个终端，按网络选择）：
 ```bash
 pnpm -s run deploy:localhost
 ```
+> 如果使用非默认端口（如 `:18545`），请在部署/对齐/测试时统一设置 `LOCALHOST_RPC_URL`。
 或者使用完整命令：
 ```bash
 hardhat run scripts/deploy/deploylocal.ts --network localhost
@@ -427,78 +587,125 @@ hardhat run scripts/deploy/deploylocal.ts --network localhost
 
 ### 运行测试脚本
 
-3. **Registry 对齐预处理（推荐）**：运行全量 E2E 前先对齐 Registry 与本地配置。
+3. **Registry 对齐预处理（推荐）**：运行全量 E2E 前先对齐 Registry 与配置。
 ```bash
-npx hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network localhost
+npx hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network <network>
 ```
 
 4. **Registry 对齐验收（必须）**：全量 E2E 结束后输出对齐表并确认 `mismatches=0`。
 ```bash
-npx hardhat run scripts/e2e/utils/registry-alignment-report.ts --network localhost
+npx hardhat run scripts/e2e/utils/registry-alignment-report.ts --network <network>
 ```
 
 #### 全量 E2E 一键命令（推荐）
 ```bash
-npx hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network localhost && for f in scripts/e2e/*.ts; do echo "\n=== Running $f ==="; npx hardhat run "$f" --network localhost || exit $?; done && npx hardhat run scripts/e2e/utils/registry-alignment-report.ts --network localhost
+npx hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network <network> && for f in scripts/e2e/*.ts; do echo "\n=== Running $f ==="; npx hardhat run "$f" --network <network> || exit $?; done && npx hardhat run scripts/e2e/utils/registry-alignment-report.ts --network <network>
 ```
 或使用 `pnpm exec` 版本：
 ```bash
-pnpm -s exec hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network localhost && for f in scripts/e2e/*.ts; do echo "\n=== Running $f ==="; pnpm -s exec hardhat run "$f" --network localhost || exit $?; done && pnpm -s exec hardhat run scripts/e2e/utils/registry-alignment-report.ts --network localhost
+pnpm -s exec hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network <network> && for f in scripts/e2e/*.ts; do echo "\n=== Running $f ==="; pnpm -s exec hardhat run "$f" --network <network> || exit $?; done && pnpm -s exec hardhat run scripts/e2e/utils/registry-alignment-report.ts --network <network>
 ```
+
+### CI 运行建议（基于 Hardhat 本地链）
+> 目标：CI 依托 **Hardhat 本地链** 跑 smoke/E2E，保持“可重复、可定位、可审计”。
+
+**推荐顺序**：
+1. 启动本地 Hardhat 节点  
+2. 部署 `deploylocal.ts`  
+3. Registry 对齐（rebind）  
+4. 运行 E2E 脚本（可全量或选定子集）  
+5. 输出 Registry 对齐报告  
+
+**示例（bash）**：
+```bash
+# 1) 启动 node（后台）
+pnpm -s run node > /tmp/hardhat-node.log 2>&1 &
+
+# 2) 部署
+pnpm -s exec hardhat run scripts/deploy/deploylocal.ts --network localhost
+
+# 3) Registry 对齐
+pnpm -s exec hardhat run scripts/e2e/utils/registry-rebind-from-config.ts --network localhost
+
+# 4) 运行 E2E（全量）
+for f in scripts/e2e/*.ts; do
+  echo "\n=== Running $f ==="
+  pnpm -s exec hardhat run "$f" --network localhost || exit $?
+done
+
+# 5) 对齐报告
+pnpm -s exec hardhat run scripts/e2e/utils/registry-alignment-report.ts --network localhost
+```
+
+**更贴近 CI 的 smoke runner（推荐）**：
+- 入口：`pnpm -s run test:smoke:prodlike:localhost`
+- 自动起临时节点（CI 友好）：`pnpm -s run test:smoke:prodlike:localhost:autonode`
+- 方案 A/B/C/D 与开关请见：`scripts/tests/README.md`
+
+**常用环境变量**：
+- `E2E_STRICT_VIEWS=0`：关闭严格 View 校验（仅临时排障）
+- `E2E_ALLOW_DIRTY_STATE=1`：允许非干净链状态（更贴近 testnet/mainnet）
+
+> 提示：CI 中建议保留 `hardhat-node` 日志（如上例写入 `/tmp/hardhat-node.log`），便于定位 ABI/部署不匹配或权限缺失问题。
 
 #### 基础业务流测试
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-run.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-run.ts --network <network>
 ```
 
 #### 订单引擎流程测试
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-orderflow.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-orderflow.ts --network <network>
 ```
 
 #### 撮合流程测试
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-matchflow.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-matchflow.ts --network <network>
 ```
 
 #### 完整测试（推荐）⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-full-with-views.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-full-with-views.ts --network <network>
 ```
 
 #### Reward 隐私 + Read-Gate 专项验收 ⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-reward-privacy.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-reward-privacy.ts --network <network>
 ```
 
 #### SystemView 路由/发现性专项验收 ⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-systemview-routing.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-systemview-routing.ts --network <network>
 ```
 
 #### PositionView（ARCH 4.2）专项验收 ⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-positionview-acceptance.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-positionview-acceptance.ts --network <network>
 ```
 
 #### HealthView（ARCH 4.3）专项验收 ⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-healthview-acceptance.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-healthview-acceptance.ts --network <network>
 ```
 
 #### RewardView（ARCH 4.14）专项验收 ⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-rewardview-acceptance.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-rewardview-acceptance.ts --network <network>
+```
+
+#### RewardManager 治理/权限专项验收 ⭐
+```bash
+npx hardhat run scripts/e2e/e2e-localhost-rewardmanager-governance.ts --network <network>
 ```
 
 #### StatisticsView（ARCH 4.4）专项验收 ⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-statisticsview-acceptance.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-statisticsview-acceptance.ts --network <network>
 ```
 
 #### Reward Edge Cases（多订单/partial repay/提前-按期-逾期/penaltyLedger）⭐
 ```bash
-npx hardhat e2e:reward-edgecases --network localhost
+npx hardhat e2e:reward-edgecases --network <network>
 ```
 - 脚本：`scripts/e2e/e2e-localhost-reward-edgecases.ts`
 - 覆盖场景：
@@ -508,47 +715,53 @@ npx hardhat e2e:reward-edgecases --network localhost
   - **penaltyLedger 更新**：验证逾期还款后 penaltyDebt 的正确记录与查询
   - **DataPushed 可观测性**：验证所有 Reward 相关 push 操作都触发对应的 `DataPushed` 事件
 
+**本次回归总结（常见失败点与修复）**
+- **Read-gate（selector 校验）**：在部分 provider/实现路径下，未授权 EOA 读取 `RewardManagerCore` 可能出现 **revert 但无 revert data**（`data=0x`），导致“按 selector 精确断言”误判失败。
+  - 修复策略：read-gate 检查允许 `no-data revert` 作为“已被 gate 拦截”的通过条件（仅限该检查）。
+- **场景隔离（全局参数污染）**：`Earn formula (3b)` 会修改全局奖励参数（level multiplier / dynamic params），若后续场景依赖固定基数（如 late penalty 5% of 1 point），需要在场景开始前把参数归一化回确定值。
+  - 修复策略：在 late penalty 场景前显式设置 `setLevelMultiplier(1,1x)`、`setDynamicRewardParams(off)`、`setPenaltyBps(0,500)`。
+
 #### 10 用户批量撮合借贷（推荐用于压测/一致性验收）
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network <network>
 ```
 
 ##### 可配置：选择一个 “样本 borrower” 打印 PositionView.version（Phase3 可观测性）
 - **env 方式（兼容旧用法）**：
 
 ```bash
-E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network localhost
+E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-10-users.ts --network <network>
 ```
 
 - **argv/task 方式（推荐）**：
 
 ```bash
-pnpm -s exec hardhat e2e:batch-10-users --network localhost --sample-borrower-index 2
+pnpm -s exec hardhat e2e:batch-10-users --network <network> --sample-borrower-index 2
 ```
 
 #### 安全攻击场景测试套件 ⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-attack-suite.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-attack-suite.ts --network <network>
 ```
 
 #### FeeRouter 业务逻辑 E2E 测试
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-feerouter.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-feerouter.ts --network <network>
 ```
 
 #### E2E 场景矩阵（ARCH 5.1.3）⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-scenario-matrix.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-scenario-matrix.ts --network <network>
 ```
 
 #### 基础 E2E 流程测试（简化版）
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost.ts --network <network>
 ```
 
 #### 高级批量测试（部分还款/逾期/拆单 + 每步 View 断言）⭐
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network <network>
 ```
 
 ##### Strict 模式相关（本脚本默认开启）
@@ -556,26 +769,26 @@ npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network l
 - **默认（推荐）**：严格校验（任何 View/Stats 与账本不一致会直接失败）
 
 ```bash
-npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network <network>
 ```
 
 - **关闭 strict（仅用于临时排障）**：
 
 ```bash
-E2E_STRICT_VIEWS=0 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+E2E_STRICT_VIEWS=0 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network <network>
 ```
 
 - **允许 dirty state（更贴近 testnet/mainnet）**：
 
 ```bash
-E2E_ALLOW_DIRTY_STATE=1 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+E2E_ALLOW_DIRTY_STATE=1 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network <network>
 ```
 
 ##### 可配置：选择一个 “样本 borrower” 打印 PositionView.version / getPositionVersion（Phase3 可观测性）
 - **env 方式（仍然支持）**：
 
 ```bash
-E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network localhost
+E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-advanced-10-users.ts --network <network>
 ```
 
 - **argv/task 方式（推荐）**：
@@ -583,7 +796,7 @@ E2E_SAMPLE_BORROWER_INDEX=2 npx hardhat run scripts/e2e/e2e-localhost-batch-adva
   - 已在 `hardhat.config.ts` 引入（只要用 hardhat 运行即可生效）
 
 ```bash
-pnpm -s exec hardhat e2e:batch-advanced --network localhost --sample-borrower-index 2
+pnpm -s exec hardhat e2e:batch-advanced --network <network> --sample-borrower-index 2
 ```
 
 ## 输出说明
@@ -615,7 +828,7 @@ pnpm -s exec hardhat e2e:batch-advanced --network localhost --sample-borrower-in
   RiskView: healthFactor=10000, riskLevel=N/A
   StatisticsView: totalUsers=0, totalCollateral=0.0, totalDebt=0.0
   DashboardView: totalCollateral=1000.0, totalDebt=0.0, healthFactor=0
-  RewardView: totalEarned=0, level=0, totalLoans=0
+  RewardView: easyEarned=0, level=0
 
 ...
 ```
@@ -673,6 +886,32 @@ pnpm -s exec hardhat e2e:batch-advanced --network localhost --sample-borrower-in
 - 检查 EIP-712 签名是否正确
 - 检查资金是否已正确保留
 - 检查意向是否过期或已匹配
+
+### 问题：`ModuleNotRegistered(...)`
+- 目标链的 Registry 缺少关键模块（部署脚本过旧或网络未升级）
+- 解决方式：
+  - 本地链：重新部署最新 `deploylocal.ts`
+  - 远程链：确认该链已升级并完成 Registry 模块注册（仅 rebind 无法补齐缺失模块）
+
+### 问题：`function selector was not recognized`（常见于 View 预检）
+- 通常是 **链不一致** 或 **模块地址错误**（SystemView route 指向了非目标合约）
+- 解决方式：
+  - 确认部署、rebind、E2E 全部使用同一条 RPC（例如都设置 `LOCALHOST_RPC_URL=http://127.0.0.1:18545`）
+  - 本地链建议重新 `deploy:localhost` 后再跑 E2E
+
+## 本次跑通经验（可复用）
+
+1) **RPC 一致性是第一优先级**
+- 如果 `deploy` 在 `:8545`，而 `E2E` 在 `:18545`，会出现 `ModuleNotRegistered` 或 View ABI 不匹配。
+- 做法：部署、rebind、E2E 三者都显式设置 `LOCALHOST_RPC_URL`。
+
+2) **`ModuleNotRegistered(0x3e93...)` 对应 `LOAN_NFT_VIEW`**
+- 这是 `keccak256("LOAN_NFT_VIEW")`。
+- 解决方案：确保该模块已部署并注册到 Registry；必要时先 `deploy:localhost`。
+
+3) **Registry rebind 需要同一 RPC**
+- `registry-rebind-from-config.ts` 读取的是 `frontend-config/contracts-localhost.ts`，但 RPC 由 `LOCALHOST_RPC_URL` 决定。
+- 如果 rebind 运行在另一条链，`updated=0` 并不代表当前链已对齐。
 
 ## 扩展建议
 

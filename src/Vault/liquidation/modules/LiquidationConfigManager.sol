@@ -11,7 +11,7 @@ import {ModuleCache} from "../libraries/ModuleCache.sol";
 import {LiquidationTypes} from "../types/LiquidationTypes.sol";
 import {ActionKeys} from "../../../constants/ActionKeys.sol";
 import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
-import {ArrayLengthMismatch, EmptyArray, ZeroAddress} from "../../../errors/StandardErrors.sol";
+import {ArrayLengthMismatch, EmptyArray, NotAContract, ZeroAddress} from "../../../errors/StandardErrors.sol";
 import {ICacheRefreshable} from "../../../interfaces/ICacheRefreshable.sol";
 import {ILiquidationConfigManager} from "../../../interfaces/ILiquidationConfigManager.sol";
 import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
@@ -53,7 +53,6 @@ abstract contract LiquidationConfigManager is
     
     /// @notice Maximum cache validity period for module addresses (in blocks).
     /// @dev Time-Dependency-Refactor SSOT: cache aging is block-based (block.number).
-    ///      Baseline assumes ~12s per block, so 1 day ≈ 7200 blocks.
     uint256 public constant CACHE_MAX_AGE = 7200;
 
     /* ============ Storage ============ */
@@ -186,6 +185,7 @@ abstract contract LiquidationConfigManager is
         onlyInitializing
     {
         if (initialRegistryAddr == address(0) || initialAccessControl == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();

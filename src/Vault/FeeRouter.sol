@@ -117,6 +117,13 @@ contract FeeRouter is
      */
     error FeeRouter__InvalidBatchSize();
 
+    /**
+     * @notice FeeRouter balance is insufficient for prepaid distribution.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     */
+    error FeeRouter__InsufficientBalance(uint256 balance, uint256 required);
+
     /*━━━━━━━━━━━━━━━ Best-effort View Push Observability ━━━━━━━━━━━━━━━*/
     /// @notice Emitted when a best-effort FeeRouterView push fails (must not revert main flow).
     /// @param kind Push kind identifier.
@@ -280,10 +287,10 @@ contract FeeRouter is
 
         // Unified data push (batch distribution summary).
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_FEE_DISTRIBUTED,
-            abi.encode(token, totalAmount, length, msg.sender, ts)
+            abi.encode(token, totalAmount, length, msg.sender, blockNumber)
         );
     }
 
@@ -315,6 +322,38 @@ contract FeeRouter is
         if (_dynamicFees[token][feeType] == 0) revert FeeRouter__InvalidFeeType();
         
         _distributeDynamic(token, amount, feeType);
+        _updateStats(1, amount);
+        _emitActionExecuted(ActionKeys.ACTION_DEPOSIT);
+    }
+
+    /**
+     * @notice Distribute a prepaid fee amount already held by FeeRouter.
+     * @dev Reverts if:
+     *      - amount == 0 (AmountIsZero)
+     *      - token is not supported (FeeRouter__TokenNotSupported)
+     *      - system is paused (Pausable)
+     *      - registry is invalid (FeeRouter__ZeroAddress)
+     *      - caller lacks ACTION_DEPOSIT role (ACM)
+     *      - FeeRouter balance is insufficient (FeeRouter__InsufficientBalance)
+     *
+     * Security:
+     * - Role-gated via ACM.requireRole(ACTION_DEPOSIT).
+     *
+     * @param token ERC20 token address (must be supported).
+     * @param amount Prepaid fee amount already transferred to FeeRouter.
+     * @param feeType Fee type identifier.
+     * @param payer Payer address used for fee statistics attribution.
+     */
+    function distributePrepaid(address token, uint256 amount, bytes32 feeType, address payer)
+        external
+        override
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_DEPOSIT)
+    {
+        if (amount == 0) revert AmountIsZero();
+        if (!_isSupportedToken[token]) revert FeeRouter__TokenNotSupported();
+
+        _distributePrepaid(token, amount, feeType, payer);
         _updateStats(1, amount);
         _emitActionExecuted(ActionKeys.ACTION_DEPOSIT);
     }
@@ -498,10 +537,10 @@ contract FeeRouter is
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_CONFIG_UPDATED,
-            abi.encode(platformBps, ecosystemBps, msg.sender, ts)
+            abi.encode(platformBps, ecosystemBps, msg.sender, blockNumber)
         );
     }
 
@@ -541,10 +580,10 @@ contract FeeRouter is
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_TREASURY_UPDATED,
-            abi.encode(oldPlatformTreasury, platformTreasury, oldEcosystemVault, ecosystemVault, msg.sender, ts)
+            abi.encode(oldPlatformTreasury, platformTreasury, oldEcosystemVault, ecosystemVault, msg.sender, blockNumber)
         );
     }
 
@@ -583,10 +622,10 @@ contract FeeRouter is
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_DYNAMIC_FEE_UPDATED,
-            abi.encode(token, feeType, oldFee, feeBps, msg.sender, ts)
+            abi.encode(token, feeType, oldFee, feeBps, msg.sender, blockNumber)
         );
     }
 
@@ -616,10 +655,10 @@ contract FeeRouter is
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_TOKEN_SUPPORTED,
-            abi.encode(token, true, msg.sender, ts)
+            abi.encode(token, true, msg.sender, blockNumber)
         );
     }
 
@@ -655,10 +694,10 @@ contract FeeRouter is
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_TOKEN_SUPPORTED,
-            abi.encode(token, false, msg.sender, ts)
+            abi.encode(token, false, msg.sender, blockNumber)
         );
     }
 
@@ -684,10 +723,10 @@ contract FeeRouter is
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_CACHE_CLEARED,
-            abi.encode(token, feeType, msg.sender, ts)
+            abi.encode(token, feeType, msg.sender, blockNumber)
         );
     }
 
@@ -706,8 +745,8 @@ contract FeeRouter is
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(true, msg.sender, ts));
+        uint256 blockNumber = block.number;
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(true, msg.sender, blockNumber));
     }
 
     /**
@@ -725,8 +764,8 @@ contract FeeRouter is
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(false, msg.sender, ts));
+        uint256 blockNumber = block.number;
+        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(false, msg.sender, blockNumber));
     }
     
     /**
@@ -747,6 +786,7 @@ contract FeeRouter is
         onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
     {
         if (newRegistryAddr == address(0)) revert FeeRouter__ZeroAddress();
+        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
         
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
@@ -756,18 +796,18 @@ contract FeeRouter is
         
         // Emit module address update event.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         emit SystemEvents.ModuleAddressUpdated(
             ModuleKeys.getModuleKeyString(ModuleKeys.KEY_FR),
             oldRegistry,
             newRegistryAddr,
-            ts
+            blockNumber
         );
 
         // Unified data push.
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_REGISTRY_UPDATED,
-            abi.encode(oldRegistry, newRegistryAddr, msg.sender, ts)
+            abi.encode(oldRegistry, newRegistryAddr, msg.sender, blockNumber)
         );
 
         // Sync new view (best-effort) to avoid stale view state.
@@ -783,12 +823,12 @@ contract FeeRouter is
      */
     function _emitActionExecuted(bytes32 actionKey) internal {
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         emit SystemEvents.ActionExecuted(
             actionKey,
             ActionKeys.getActionKeyString(actionKey),
             msg.sender,
-            ts
+            blockNumber
         );
     }
     
@@ -870,6 +910,28 @@ contract FeeRouter is
     }
 
     /**
+     * @notice Internal prepaid fee distribution using platform/ecosystem split ratio.
+     * @param token ERC20 token address.
+     * @param amount Prepaid fee amount (token decimals).
+     * @param feeType Fee type identifier.
+     * @param payer Payer address for stats attribution.
+     */
+    function _distributePrepaid(address token, uint256 amount, bytes32 feeType, address payer) internal whenNotPaused {
+        uint256 platformBps = _platformFeeBps;
+        uint256 ecoBps = _ecosystemFeeBps;
+        (uint256 platformAmt, uint256 ecoAmt) = _calculateRevenueSplit(amount, platformBps, ecoBps);
+        _executePrepaidDistribution(
+            token,
+            platformAmt,
+            ecoAmt,
+            feeType,
+            amount,
+            payer,
+            platformBps + ecoBps
+        );
+    }
+
+    /**
      * @notice Compute distribution amounts (platform, ecosystem, remaining).
      * @param amount Total amount (token decimals).
      * @param platformBps Platform fee rate in bps.
@@ -886,6 +948,26 @@ contract FeeRouter is
         platformAmt = VaultMath.calculateFee(amount, platformBps);
         ecoAmt = VaultMath.calculateFee(amount, ecoBps);
         remaining = amount - platformAmt - ecoAmt;
+    }
+
+    /**
+     * @notice Compute revenue split (platform/ecosystem) with full allocation (no remainder).
+     * @param amount Total prepaid fee amount (token decimals).
+     * @param platformBps Platform split weight (bps).
+     * @param ecoBps Ecosystem split weight (bps).
+     * @return platformAmt Platform share.
+     * @return ecoAmt Ecosystem share.
+     */
+    function _calculateRevenueSplit(uint256 amount, uint256 platformBps, uint256 ecoBps)
+        internal
+        pure
+        returns (uint256 platformAmt, uint256 ecoAmt)
+    {
+        uint256 totalBps = platformBps + ecoBps;
+        if (totalBps == 0) revert FeeRouter__InvalidConfig();
+        uint256 platformWeightBps = (platformBps * 10_000) / totalBps;
+        platformAmt = VaultMath.calculateFee(amount, platformWeightBps);
+        ecoAmt = amount - platformAmt;
     }
 
     /**
@@ -1029,6 +1111,52 @@ contract FeeRouter is
     }
 
     /**
+     * @notice Execute prepaid fee distribution (uses FeeRouter balance, no refund).
+     * @param token ERC20 token address.
+     * @param platformAmt Platform amount.
+     * @param ecoAmt Ecosystem amount.
+     * @param feeType Fee type identifier.
+     * @param totalAmount Total prepaid amount (for stats).
+     * @param payer Payer address for fee stats attribution.
+     * @param appliedFeeBps Applied fee bps (used for stats metadata).
+     */
+    function _executePrepaidDistribution(
+        address token,
+        uint256 platformAmt,
+        uint256 ecoAmt,
+        bytes32 feeType,
+        uint256 totalAmount,
+        address payer,
+        uint256 appliedFeeBps
+    ) internal {
+        if (totalAmount > 0) {
+            uint256 bal = IERC20(token).balanceOf(address(this));
+            if (bal < totalAmount) revert FeeRouter__InsufficientBalance(bal, totalAmount);
+        }
+
+        if (platformAmt > 0) {
+            IERC20(token).safeTransfer(_platformTreasury, platformAmt);
+        }
+        if (ecoAmt > 0) {
+            IERC20(token).safeTransfer(_ecosystemVault, ecoAmt);
+        }
+
+        _feeStatistics[token][feeType] += totalAmount;
+        _feeCache[token][feeType] += totalAmount;
+        _pushFeeRouterViewAfterDistribution(payer, token, feeType, totalAmount, appliedFeeBps);
+
+        emit FeeDistributed(token, platformAmt, ecoAmt);
+        emit FeeStatisticsUpdated(token, feeType, _feeStatistics[token][feeType]);
+        // Unified data push.
+        // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
+        uint256 blockNumber = block.number;
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_FEE_DISTRIBUTED,
+            abi.encode(token, platformAmt, ecoAmt, uint256(0), feeType, totalAmount, msg.sender, blockNumber)
+        );
+    }
+
+    /**
      * @notice Execute fee distribution (pull funds, pay recipients, refund remainder) and update stats/cache.
      * @param token ERC20 token address.
      * @param platformAmt Platform amount.
@@ -1073,10 +1201,10 @@ contract FeeRouter is
         emit FeeStatisticsUpdated(token, feeType, _feeStatistics[token][feeType]);
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_DISTRIBUTED,
-            abi.encode(token, platformAmt, ecoAmt, remaining, feeType, totalAmount, msg.sender, ts)
+            abi.encode(token, platformAmt, ecoAmt, remaining, feeType, totalAmount, msg.sender, blockNumber)
         );
     }
 

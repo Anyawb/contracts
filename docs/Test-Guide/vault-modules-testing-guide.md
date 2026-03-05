@@ -4,6 +4,9 @@
 
 本文档提供了 RWA 借贷平台 Vault 模块测试的完整指南。Vault 模块包括抵押管理、业务逻辑、保证金管理等核心业务模块，本文档基于 `test/Vault/modules/` 文件夹中的实际测试文件，详细说明了如何运行、理解和扩展 Vault 模块相关的测试。
 
+> 术语与 SSOT（与 Reward 文档一致）：
+> - **奖励通证（reward token）地址 SSOT**：`Registry[KEY_EASY_TOKEN]`（EasyToken）。
+
 ## 📁 测试文件结构
 
 Vault 模块的测试文件包括：
@@ -66,7 +69,7 @@ describe('VaultBusinessLogic – 业务逻辑测试', function () {
     await vaultBusinessLogic.borrow(asset, amount);
     
     // 2. 验证奖励触发（由 LendingEngine 触发）
-    const rewardBalance = await rewardPoints.balanceOf(user);
+    const rewardBalance = await easyToken.balanceOf(user);
     expect(rewardBalance).to.be.gt(0);
   });
 });

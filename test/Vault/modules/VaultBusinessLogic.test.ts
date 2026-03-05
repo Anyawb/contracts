@@ -406,11 +406,9 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
 
   describe('借款（borrow）', function () {
     it('VaultBusinessLogic – borrow: 已按架构收敛（Strict SSOT），应直接拒绝', async function () {
-      const amount = ethers.parseUnits('5', 18);
-      await expect(vaultBusinessLogic.borrow(userAddress, TEST_ASSET, amount)).to.be.revertedWithCustomError(
-        vaultBusinessLogic,
-        'VaultBusinessLogic__UseVaultCoreEntry'
-      );
+      // Strict SSOT: VaultBusinessLogic 不再暴露 borrow 写入口（避免写路径分叉）。
+      // 因此应当在 ABI 层面直接不存在该函数（JS/TS 侧表现为 undefined）。
+      expect((vaultBusinessLogic as any).borrow).to.equal(undefined);
     });
   });
 

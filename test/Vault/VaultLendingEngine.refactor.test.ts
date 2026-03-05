@@ -92,11 +92,12 @@ describe('VaultLendingEngine – refactor regression', function () {
     // Configure oracle price
     // Using 1e8 (100000000) to match DEFAULT_MAX_REASONABLE_PRICE = 1e12
     // Price should be <= 1e12 to pass validation in GracefulDegradation
-    const nowTs = Math.floor(Date.now() / 1000);
+    // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
+    const nowBlock = await ethers.provider.getBlockNumber();
     const priceValue = ethers.parseUnits('1', 8); // 1e8, which is < 1e12
-    await priceOracle.connect(vaultCore).setPrice(await settlementToken.getAddress(), priceValue, nowTs, 8);
+    await priceOracle.connect(vaultCore).setPrice(await settlementToken.getAddress(), priceValue, nowBlock, 8);
     const debtAsset = ethers.Wallet.createRandom().address;
-    await priceOracle.connect(vaultCore).setPrice(debtAsset, priceValue, nowTs, 8);
+    await priceOracle.connect(vaultCore).setPrice(debtAsset, priceValue, nowBlock, 8);
 
     // Deploy LendingEngine
     const LendingEngine = await ethers.getContractFactory('VaultLendingEngine');
@@ -630,8 +631,8 @@ describe('VaultLendingEngine – refactor regression', function () {
       const { vaultCoreModule, vaultCore, user, lending, debtAsset, priceOracle } = await loadFixture(deployFixture);
       const debtAsset2 = ethers.Wallet.createRandom().address;
 
-      const nowTs = Math.floor(Date.now() / 1000);
-      await priceOracle.connect(vaultCore).setPrice(debtAsset2, ethers.parseEther('1'), nowTs, 18);
+      const nowBlock = await ethers.provider.getBlockNumber();
+      await priceOracle.connect(vaultCore).setPrice(debtAsset2, ethers.parseEther('1'), nowBlock, 18);
 
       await vaultCoreModule.borrow(user.address, debtAsset, 30, 0, 0);
       await vaultCoreModule.borrow(user.address, debtAsset2, 20, 0, 0);

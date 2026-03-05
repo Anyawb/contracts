@@ -56,9 +56,10 @@ describe('LiquidatorView', function () {
     await collateralMgr.depositCollateral(viewer.address, asset, 2_000);
 
     // Configure oracle for 1:1 valuation (price=1, decimals=8)
-    const nowTs = Math.floor(Date.now() / 1000);
+    // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
+    const nowBlock = await ethers.provider.getBlockNumber();
     await priceOracle.connect(admin).configureAsset(asset, 'test', 8, 3600);
-    await priceOracle.connect(admin).setPrice(asset, ethers.parseUnits('1', 8), nowTs, 8);
+    await priceOracle.connect(admin).setPrice(asset, ethers.parseUnits('1', 8), nowBlock, 8);
 
     const LiquidatorViewFactory = await ethers.getContractFactory('LiquidatorView');
     const view = await upgrades.deployProxy(LiquidatorViewFactory, [await registry.getAddress(), ethers.ZeroAddress], {
@@ -117,7 +118,7 @@ describe('LiquidatorView', function () {
       expect(res.liquidator).to.equal(admin.address);
       expect(res.totalProfit).to.equal(0n);
       expect(res.totalLiquidations).to.equal(0n);
-      expect(res.lastLiquidationTime).to.equal(0n);
+      expect(res.lastLiquidationBlock).to.equal(0n);
     });
 
     it('returns global liquidation view', async function () {
@@ -162,7 +163,7 @@ describe('LiquidatorView', function () {
       const [stats] = await view.connect(admin).getUserLiquidationStats(admin.address);
       expect(stats.totalLiquidations).to.equal(0n);
       expect(stats.totalSeizedValue).to.equal(0n);
-      expect(stats.lastLiquidationTime).to.equal(0n);
+      expect(stats.lastLiquidationBlock).to.equal(0n);
     });
 
     it('allows self-read of user liquidation stats without VIEW_USER_DATA role (Scheme U self-read)', async function () {
@@ -376,20 +377,20 @@ describe('LiquidatorView', function () {
       expect(res.averageProfitPerLiquidation).to.equal(0n);
     });
 
-    it('calculates days since last liquidation correctly', async function () {
+    it('calculates blocks since last liquidation correctly', async function () {
       const { view, viewer, profitStats, admin } = await deployFixture();
-      // Time-Dependency-Refactor: treat lastLiquidationTime as blockNumber time-axis marker (legacy name).
+      // Time-Dependency-Refactor: treat lastLiquidationBlock as blockNumber time-axis marker.
       // Use any non-zero value; view returns placeholders so this mainly asserts non-revert.
       const oneDayAgo = 1;
       await profitStats.setProfitStats(admin.address, 1_000, 1, oneDayAgo);
       const res = await view.connect(viewer).getLiquidatorProfitView(admin.address);
-      expect(res.daysSinceLastLiquidation).to.be.gte(0n);
+      expect(res.blocksSinceLastLiquidation).to.be.gte(0n);
     });
 
     it('handles zero last liquidation time', async function () {
       const { view, viewer, admin } = await deployFixture();
       const res = await view.connect(viewer).getLiquidatorProfitView(admin.address);
-      expect(res.daysSinceLastLiquidation).to.equal(0n);
+      expect(res.blocksSinceLastLiquidation).to.equal(0n);
     });
 
     it('calculates global average profit per liquidation correctly', async function () {
@@ -463,11 +464,11 @@ describe('LiquidatorView', function () {
       const { view, viewer, priceOracle, admin } = await deployFixture();
       const asset1 = ethers.Wallet.createRandom().address;
       const asset2 = ethers.Wallet.createRandom().address;
-      const nowTs = Math.floor(Date.now() / 1000);
+      const nowBlock = await ethers.provider.getBlockNumber();
       await priceOracle.connect(admin).configureAsset(asset1, 'a1', 8, 3600);
-      await priceOracle.connect(admin).setPrice(asset1, ethers.parseUnits('1', 8), nowTs, 8);
+      await priceOracle.connect(admin).setPrice(asset1, ethers.parseUnits('1', 8), nowBlock, 8);
       await priceOracle.connect(admin).configureAsset(asset2, 'a2', 8, 3600);
-      await priceOracle.connect(admin).setPrice(asset2, ethers.parseUnits('1', 8), nowTs, 8);
+      await priceOracle.connect(admin).setPrice(asset2, ethers.parseUnits('1', 8), nowBlock, 8);
       const values = await view.connect(viewer).batchCalculateCollateralValues([asset1, asset2], [1_000n, 2_000n]);
       expect(values[0]).to.equal(1_000n);
       expect(values[1]).to.equal(2_000n);
@@ -533,7 +534,7 @@ describe('LiquidatorView', function () {
       // Scheme A: user liquidation stats are aggregated off-chain; on-chain returns placeholders.
       expect(stats.totalLiquidations).to.equal(0n);
       expect(stats.totalSeizedValue).to.equal(0n);
-      expect(stats.lastLiquidationTime).to.equal(0n);
+      expect(stats.lastLiquidationBlock).to.equal(0n);
     });
 
     it('returns zero stats when record manager module is not registered', async function () {
@@ -768,9 +769,9 @@ describe('LiquidatorView', function () {
     it('handles batch collateral values with zero addresses', async function () {
       const { view, viewer, asset, priceOracle, admin } = await deployFixture();
       // ensure oracle has price for the asset used
-      const nowTs = Math.floor(Date.now() / 1000);
+      const nowBlock = await ethers.provider.getBlockNumber();
       await priceOracle.connect(admin).configureAsset(asset, 'asset', 8, 3600);
-      await priceOracle.connect(admin).setPrice(asset, ethers.parseUnits('1', 8), nowTs, 8);
+      await priceOracle.connect(admin).setPrice(asset, ethers.parseUnits('1', 8), nowBlock, 8);
       const values = await view.connect(viewer).batchCalculateCollateralValues(
         [asset, ethers.ZeroAddress, asset],
         [1_000n, 2_000n, 3_000n],

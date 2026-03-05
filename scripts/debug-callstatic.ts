@@ -1,5 +1,5 @@
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../frontend-config/contracts-localhost.ts";
 
 async function main() {
   const [, borrower] = await ethers.getSigners();

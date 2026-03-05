@@ -48,7 +48,6 @@ contracts/
 │   ├── Usage-Guide/      # 使用指南
 │   └── Test-Guide/       # 测试指南
 ├── deployments/           # 部署地址和配置
-├── configs/               # 配置文件
 └── hardhat.config.ts      # Hardhat 配置
 ```
 

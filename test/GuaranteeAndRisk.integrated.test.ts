@@ -25,6 +25,7 @@ import type {
   MockLendingEngineBasic,
   EarlyRepaymentGuaranteeManager,
   GuaranteeFundManager,
+  FeeRouter,
   RiskView
 } from '../../types';
 
@@ -34,6 +35,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
   const ONE_ETH = ethers.parseUnits('1', 18);
   const TEST_AMOUNT = ethers.parseUnits('1000', 18);
   const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER'));
+  const KEY_FR = ethers.keccak256(ethers.toUtf8Bytes('FEE_ROUTER'));
 
   // 动态地址
   let TEST_ASSET: string;
@@ -47,6 +49,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
   let lendingEngine: MockLendingEngineBasic;
   let guaranteeFund: GuaranteeFundManager;
   let earlyRepayGM: EarlyRepaymentGuaranteeManager;
+  let feeRouter: FeeRouter;
   let riskView: RiskView;
   let healthViewLite: any;
 
@@ -55,6 +58,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
   let user: any;
   let lender: any;
   let platform: any;
+  let ecoVault: any;
 
   async function deployProxyContract(contractName: string, initData: string = '0x') {
     const ImplF = await ethers.getContractFactory(contractName);
@@ -68,7 +72,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
   }
 
   async function deployFixture() {
-    [owner, user, lender, platform] = await ethers.getSigners();
+    [owner, user, lender, platform, ecoVault] = await ethers.getSigners();
     TEST_ASSET = (await ethers.getSigners())[9].address; // 随机地址占位
 
     // 1. 基础模块
@@ -106,6 +110,10 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     guaranteeFund = gfmProxy as unknown as GuaranteeFundManager;
     await guaranteeFund.initialize(vaultCore.target, registry.target, await owner.getAddress());
 
+    const { instance: feeRouterProxy } = await deployProxyContract('FeeRouter');
+    feeRouter = feeRouterProxy as unknown as FeeRouter;
+    await feeRouter.initialize(registry.target, await platform.getAddress(), await ecoVault.getAddress(), 1, 0);
+
     const { instance: ergmProxy } = await deployProxyContract('EarlyRepaymentGuaranteeManager');
     earlyRepayGM = ergmProxy as unknown as EarlyRepaymentGuaranteeManager;
     await earlyRepayGM.initialize(registry.target, await platform.getAddress(), 100); // 1%
@@ -119,6 +127,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     const KEY_HEALTH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW'));
     await registry.setModule(KEY_VAULT_CORE, vaultCore.target);
     await registry.setModule(KEY_GUARANTEE_FUND, guaranteeFund.target);
+    await registry.setModule(KEY_FR, feeRouter.target);
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')), acm.target);
 
     // RiskView 依赖 HealthView 的缓存（getUserHealthFactor(uint256,bool)）
@@ -149,10 +158,12 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
 
     // 5. 权限（ActionKeys 常量字符串）
     const SET_PARAMETER_ROLE = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
+    const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes('DEPOSIT'));
     const UPGRADE_MODULE_ROLE = ethers.keccak256(ethers.toUtf8Bytes('UPGRADE_MODULE'));
     const VIEW_RISK_DATA_ROLE = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
     const VIEW_USER_DATA_ROLE = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
-    await acm.grantRole(SET_PARAMETER_ROLE, await owner.getAddress());
+      await acm.grantRole(SET_PARAMETER_ROLE, await owner.getAddress());
+    await acm.grantRole(ACTION_DEPOSIT, guaranteeFund.target);
     await acm.grantRole(UPGRADE_MODULE_ROLE, await owner.getAddress());
     // RiskView read APIs are Scheme U: VIEW_USER_DATA or ACTION_ADMIN
     await acm.grantRole(VIEW_USER_DATA_ROLE, await owner.getAddress());
@@ -160,6 +171,8 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     // 6. 资金准备：MockERC20 构造已向部署者铸造初始供应，这里从 owner 转给 user
     await erc20.transfer(await user.getAddress(), TEST_AMOUNT * 10n);
     await erc20.connect(user).approve(guaranteeFund.target, TEST_AMOUNT * 10n);
+
+    await feeRouter.connect(owner).addSupportedToken(erc20.target);
 
     return { owner, user, lender, platform };
   }
@@ -416,7 +429,6 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
         await user.getAddress(),
         erc20.target,
         await lender.getAddress(),
-        await platform.getAddress(),
         refundToBorrower,
         penaltyToLender,
         platformFee
@@ -434,7 +446,6 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
           await user.getAddress(),
           erc20.target,
           await lender.getAddress(),
-          await platform.getAddress(),
           ONE_ETH,
           ONE_ETH,
           ONE_ETH
@@ -448,7 +459,6 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
           ZERO_ADDRESS,
           erc20.target,
           await lender.getAddress(),
-          await platform.getAddress(),
           ONE_ETH,
           ONE_ETH,
           TEST_AMOUNT - ONE_ETH * 2n

@@ -40,7 +40,7 @@ interface CacheEvents {
      * @param seq Monotonic sequence number (0 if unused)
      * @param nextVersion Expected next version (0 if auto-increment mode)
      */
-    event CacheUpdateFailedV2(
+    event CacheUpdateFailedWithContext(
         address indexed user,
         address indexed asset,
         bytes32 indexed requestId,

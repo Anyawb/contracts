@@ -16,7 +16,7 @@ library DataPushTypes {
     bytes32 public constant DATA_TYPE_REGISTRY_UPDATED         = keccak256("REGISTRY_UPDATED");
     bytes32 public constant DATA_TYPE_MODULE_HEALTH            = keccak256("MODULE_HEALTH");
     /// @dev Component/service health alert with human-readable details (string).
-    ///      payload = abi.encode(address component, string name, bool ok, string details, uint256 ts)
+    ///      payload = abi.encode(address component, string name, bool ok, string details, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_COMPONENT_HEALTH         = keccak256("COMPONENT_HEALTH");
     /// @dev User-scoped degradation event (frontends can filter by user).
     bytes32 public constant DATA_TYPE_USER_DEGRADATION         = keccak256("USER_DEGRADATION");
@@ -43,6 +43,9 @@ library DataPushTypes {
     /*━━━━━━━━━━━━━━━ LENDING / LOANNFT ━━━━━━━━━━━━━━━*/
     bytes32 public constant DATA_TYPE_LOAN_CREATED             = keccak256("LOAN_CREATED");
     bytes32 public constant DATA_TYPE_LOAN_REPAID              = keccak256("LOAN_REPAID");
+    /// @notice Loan flow statistics update (borrow/repay volume counters).
+    /// @dev payload = abi.encode(address user, uint256 borrowDeltaUsd8, uint256 repayDeltaUsd8, uint64 nextVersion, bytes32 requestId, uint64 seq, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_LOAN_FLOW_UPDATED        = keccak256("LOAN_FLOW_UPDATED");
 
     bytes32 public constant DATA_TYPE_LOAN_NFT_MINTED           = keccak256("LOAN_NFT_MINTED");
     bytes32 public constant DATA_TYPE_LOAN_NFT_LOCKED           = keccak256("LOAN_NFT_LOCKED");
@@ -60,20 +63,20 @@ library DataPushTypes {
 
     /*━━━━━━━━━━━━━━━ LENDER RESERVE FLOW ━━━━━━━━━━━━━━━*/
     /// @dev payload = abi.encode(bytes32 lendIntentHash, address lenderSigner, address asset,
-    ///      uint256 amount, uint256 ts)
+    ///      uint256 amount, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_RESERVE_FOR_LENDING      = keccak256("RESERVE_FOR_LENDING");
     /// @dev payload = abi.encode(bytes32 lendIntentHash, address lenderSigner, address asset,
-    ///      uint256 amount, uint256 ts)
+    ///      uint256 amount, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_CANCEL_RESERVE           = keccak256("CANCEL_RESERVE");
     /// @dev payload = abi.encode(bytes32 lendIntentHash, address lenderSigner, address asset,
-    ///      uint256 amount, uint256 ts)
+    ///      uint256 amount, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_RESERVE_CONSUMED         = keccak256("RESERVE_CONSUMED");
 
     /*━━━━━━━━━━━━━━━ SETTLEMENTMANAGER (REPAY / SETTLE) ━━━━━━━━━━━━━━━*/
     /// @dev payload = abi.encode(address user, address debtAsset, uint256 repayAmount, uint256 orderId,
-    ///      bool releasedAllCollateral, uint256 ts)
+    ///      bool releasedAllCollateral, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_REPAY_AND_SETTLE         = keccak256("REPAY_AND_SETTLE");
-    /// @dev payload = abi.encode(address user, address collateralAsset, uint256 collateralAmount, uint256 ts)
+    /// @dev payload = abi.encode(address user, address collateralAsset, uint256 collateralAmount, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_COLLATERAL_RELEASED      = keccak256("COLLATERAL_RELEASED");
 
     /*━━━━━━━━━━━━━━━ GUARANTEEFUNDMANAGER ━━━━━━━━━━━━━━━*/
@@ -88,17 +91,17 @@ library DataPushTypes {
     bytes32 public constant DATA_TYPE_PERMISSION_LEVEL_UPDATE  = keccak256("PERMISSION_LEVEL_UPDATE");
 
     /*━━━━━━━━━━━━━━━ ASSETWHITELIST ━━━━━━━━━━━━━━━*/
-    /// @dev payload = abi.encode(address asset, address actor, uint256 ts)
+    /// @dev payload = abi.encode(address asset, address actor, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_ASSET_WHITELIST_ADDED        = keccak256("ASSET_WHITELIST_ADDED");
-    /// @dev payload = abi.encode(address asset, address actor, uint256 ts)
+    /// @dev payload = abi.encode(address asset, address actor, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_ASSET_WHITELIST_REMOVED      = keccak256("ASSET_WHITELIST_REMOVED");
-    /// @dev payload = abi.encode(address[] assets, address actor, uint256 addedCount, uint256 totalCount, uint256 ts)
+    /// @dev payload = abi.encode(address[] assets, address actor, uint256 addedCount, uint256 totalCount, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_ASSET_WHITELIST_BATCH_ADDED  = keccak256("ASSET_WHITELIST_BATCH_ADDED");
-    /// @dev payload = abi.encode(address[] assets, address actor, uint256 removedCount, uint256 totalCount, uint256 ts)
+    /// @dev payload = abi.encode(address[] assets, address actor, uint256 removedCount, uint256 totalCount, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_ASSET_WHITELIST_BATCH_REMOVED = keccak256("ASSET_WHITELIST_BATCH_REMOVED");
-    /// @dev payload = abi.encode(address asset, address actor, uint256 ts)
+    /// @dev payload = abi.encode(address asset, address actor, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_ASSET_WHITELIST_INFO_UPDATED = keccak256("ASSET_WHITELIST_INFO_UPDATED");
-    /// @dev payload = abi.encode(address oldRegistry, address newRegistry, address actor, uint256 ts)
+    /// @dev payload = abi.encode(address oldRegistry, address newRegistry, address actor, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_ASSET_WHITELIST_REGISTRY_UPDATED =
         keccak256("ASSET_WHITELIST_REGISTRY_UPDATED");
 
@@ -133,12 +136,44 @@ library DataPushTypes {
     bytes32 public constant DATA_TYPE_REWARD_LEVEL_UPDATED     = keccak256("REWARD_LEVEL_UPDATED");
     bytes32 public constant DATA_TYPE_REWARD_PRIVILEGE_UPDATED = keccak256("REWARD_PRIVILEGE_UPDATED");
     bytes32 public constant DATA_TYPE_REWARD_STATS_UPDATED     = keccak256("REWARD_STATS_UPDATED");
-    /// @notice Penalty ledger update (user pending debt points).
-    /// @dev payload = abi.encode(address user, uint256 pendingDebt, uint256 ts)
+    /// @notice Penalty ledger update (user pending Easy debt).
+    /// @dev payload = abi.encode(address user, uint256 pendingDebt, uint256 blockNumber)
     bytes32 public constant DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED = keccak256("REWARD_PENALTY_LEDGER_UPDATED");
-    /// @notice Reward consumption record update.
-    /// @dev payload = abi.encode(address user, uint8 serviceType, uint8 serviceLevel, uint256 points, uint256 expirationTime, uint256 ts)
-    bytes32 public constant DATA_TYPE_REWARD_CONSUMPTION_RECORDED = keccak256("REWARD_CONSUMPTION_RECORDED");
+
+    /// @notice Easy minted (borrower/lender) update.
+    /// @dev payload = abi.encode(address borrower, address lender, uint256 totalMinted, uint256 borrowerShare,
+    ///      uint256 lenderShare, uint256 orderId, uint256 amountUsd8, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_EASY_MINTED = keccak256("EASY_MINTED");
+
+    /// @notice Easy spent (per-call) update.
+    /// @dev payload = abi.encode(address user, uint8 spendType, uint256 amount, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_EASY_SPENT = keccak256("EASY_SPENT");
+
+    /// @notice Easy recycled split (burn/team/eco).
+    /// @dev payload = abi.encode(address payer, uint256 amount, uint256 burnAmount, uint256 teamAmount,
+    ///      uint256 ecoAmount, uint8 spendType, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_EASY_RECYCLED_SPLIT = keccak256("EASY_RECYCLED_SPLIT");
+
+    /// @notice Easy staked update.
+    /// @dev payload = abi.encode(address user, uint256 amount, uint256 newStaked, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_EASY_STAKED = keccak256("EASY_STAKED");
+
+    /// @notice Easy unstaked update.
+    /// @dev payload = abi.encode(address user, uint256 amount, uint256 newStaked, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_EASY_UNSTAKED = keccak256("EASY_UNSTAKED");
+
+    /// @notice Easy emission params updated.
+    /// @dev payload = abi.encode(uint256 thresholdUsd8, uint256 mintPer1000Usd, uint256 kNum, uint256 kDen, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_EASY_EMISSION_PARAMS_UPDATED = keccak256("EASY_EMISSION_PARAMS_UPDATED");
+
+    /// @notice Earn-side dynamic reward parameters updated (governance observability).
+    /// @dev payload = abi.encode(uint256 thresholdEasy, uint256 multiplierBps, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_REWARD_DYNAMIC_REWARD_PARAMS_UPDATED =
+        keccak256("REWARD_DYNAMIC_REWARD_PARAMS_UPDATED");
+
+    /// @notice Earn-side level multiplier updated (governance observability).
+    /// @dev payload = abi.encode(uint8 level, uint256 multiplierBps, uint256 blockNumber)
+    bytes32 public constant DATA_TYPE_REWARD_LEVEL_MULTIPLIER_UPDATED = keccak256("REWARD_LEVEL_MULTIPLIER_UPDATED");
 }
 
 

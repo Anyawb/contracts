@@ -4,6 +4,9 @@
 
 本文档提供了 RWA 借贷平台 LendingEngine 借贷引擎测试的完整指南。LendingEngine 是平台的核心业务模块，负责借贷账本管理、债务计算和奖励触发，本文档基于 `test/LendingEngine.test.ts` 及相关测试文件，详细说明了如何运行、理解和扩展 LendingEngine 相关的测试。
 
+> 术语与 SSOT（与 Reward 文档一致）：
+> - **奖励通证（reward token）地址 SSOT**：`Registry[KEY_EASY_TOKEN]`（EasyToken）。
+
 ## 📁 测试文件位置
 
 ```
@@ -147,7 +150,7 @@ describe('集成测试', function () {
     await lendingEngine.connect(vaultCore).borrow(user, asset, amount, duration, hfHigh);
     
     // 验证奖励触发
-    const rewardBalance = await rewardPoints.balanceOf(user);
+    const rewardBalance = await easyToken.balanceOf(user);
     expect(rewardBalance).to.be.gt(0);
   });
 

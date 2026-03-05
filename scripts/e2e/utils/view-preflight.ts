@@ -5,7 +5,9 @@
  * 可选为链上“写 View 缓存”的模块（VaultLendingEngine、VaultRouter 等）授予 ACTION_VIEW_PUSH 与 VIEW_RISK_DATA，
  * 校验 SystemView 各 route* 与 Registry 一致、routePrice 主/备与价格回源一致，并打印各 View 的 VersionInfo。
  */
-import { ethers } from "hardhat";
+import hardhat from "hardhat";
+
+const { ethers } = hardhat;
 
 /** 将字符串转为 Registry 使用的 keccak256 模块 key */
 function key(s: string) {
@@ -121,6 +123,11 @@ export async function runViewPreflight(params: {
       if (addr && addr !== ethers.ZeroAddress) pushers.push(addr);
     }
 
+    const isRoleAlreadyGranted = (err: any) => {
+      const msg = String(err?.message ?? err ?? "");
+      return msg.includes("RoleAlreadyGranted") || msg.includes("AccessControlManager__RoleAlreadyGranted");
+    };
+
     for (const pusher of pushers) {
       const ok = (await acm.hasRole(ROLE_VIEW_PUSH, pusher)) as boolean;
       if (!ok) {
@@ -129,9 +136,13 @@ export async function runViewPreflight(params: {
           await (await acm.connect(adminSigner).grantRole(ROLE_VIEW_PUSH, pusher)).wait();
           if (print) console.log(`  [preflight] granted ACTION_VIEW_PUSH to ${pusher}`);
         } catch (e: any) {
+          if (isRoleAlreadyGranted(e)) {
+            if (print) console.log(`  [preflight] ACTION_VIEW_PUSH already granted to ${pusher}`);
+          } else {
           throw new Error(
             `preflight: missing ACTION_VIEW_PUSH for ${pusher} and failed to grantRole (are you ACM owner?): ${e?.message ?? String(e)}`
           );
+          }
         }
       }
 
@@ -146,9 +157,13 @@ export async function runViewPreflight(params: {
             await (await acm.connect(adminSigner).grantRole(ROLE_VIEW_RISK_DATA, pusher)).wait();
             if (print) console.log(`  [preflight] granted VIEW_RISK_DATA to ${pusher}`);
           } catch (e: any) {
+            if (isRoleAlreadyGranted(e)) {
+              if (print) console.log(`  [preflight] VIEW_RISK_DATA already granted to ${pusher}`);
+            } else {
             throw new Error(
               `preflight: missing VIEW_RISK_DATA for ${pusher} and failed to grantRole (are you ACM owner?): ${e?.message ?? String(e)}`
             );
+            }
           }
         }
       }

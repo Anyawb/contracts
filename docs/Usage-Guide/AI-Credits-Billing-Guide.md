@@ -11,7 +11,7 @@
 ## 0) 术语与 SSOT
 
 - **Credit**：一次 AI 调用的计费单位。本文约定 **1 Credit = 1 次调用**。
-- **Points**：项目积分代币 `RewardPoints`（ERC20, 18 decimals）。
+- **EasyToken（积分币/奖励通证）**：`Registry[KEY_EASY_TOKEN]` 指向的 `EasyToken`（18 decimals）。
 - **SSOT（Source of Truth）**：
   - **链上 SSOT（余额凭证）**：`AICreditsVault.creditsBalance(tenantId, user)`（链上余额，B）
   - **链下 SSOT（实时可用/用量）**：后端 `usage_ledger`（用于高频扣次、并发、失败退款、幂等）
@@ -64,7 +64,7 @@
 
 ### 2.3 核心接口（建议）
 
-> 以下是接口“形态规范”（不是你仓库现有合约）。你可以新建合约实现它，并通过 Registry 注册地址供前端解析。
+> ✅ 本仓库已实现：`src/core/AICreditsVault.sol:AICreditsVault`，并通过 `ModuleKeys.KEY_AI_CREDITS_VAULT`（`keccak256("AI_CREDITS_VAULT")`）注册到 `Registry` 供前端解析。
 
 ```solidity
 interface IAICreditsVault {
@@ -89,6 +89,8 @@ interface IAICreditsVault {
   ) external;
 }
 ```
+
+> 注意：当前不提供“EasyToken（奖励通证）→ AI Credits”的链上兑换入口。
 
 ### 2.4 定价（你当前设定）
 
@@ -317,14 +319,16 @@ interface IAICreditsVault {
 
 ## 9) 与现有 Reward 系统的关系（重要）
 
-你仓库现有 `RewardPoints`：
-- 只有 `MINTER_ROLE` 可以 `mintPoints/burnPoints`（见 `src/Token/RewardPoints.sol`）
-- 因此不适合让普通用户“直接 burn 自己的 points”来按次扣费（用户无法调用 `burnPoints`）
+目标态：奖励通证为 `Registry[KEY_EASY_TOKEN]`（EasyToken），并采用 **MINTER/BURNER 分离**：
+- `MINTER_ROLE`：发行（`mint`），建议仅 `EasyEmissionController`（可 `setSoleMinter` 硬收口）
+- `BURNER_ROLE`：扣罚/消费/回收（`burn`），由协议内模块持有（如 `RewardManagerCore/EasyRecycleDistributor`）
+
+因此不适合让普通用户“直接 burn 自己的 points/Easy”来按次扣费（用户通常不具备 `BURNER_ROLE`）。
 
 结论：
-- **AI 次数包售卖（USDC/USDT）不应依赖用户自行 burn RewardPoints**
+- **AI 次数包售卖（USDC/USDT）不应依赖用户自行 burn 奖励通证（Easy）**
 - 应用新的 `AICreditsVault` 作为“次数包 SSOT（B）”，并通过事件/余额实现审计
-- `RewardView` / `RewardConsumption` 仍可继续用于你已有的“服务购买/等级/借贷奖励”体系，两者互不冲突
+- `RewardView` 可继续作为 Reward 侧只读聚合入口（借贷奖励/惩罚等），与 AI Credits 的链上购买与链下扣次体系解耦
 
 ---
 

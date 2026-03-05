@@ -1,16 +1,24 @@
 import hre from "hardhat";
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../frontend-config/contracts-localhost.ts";
 
 async function main() {
   const [deployer, borrower] = await ethers.getSigners();
 
-  const vc = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
-  const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
-  const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
-  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
-  const vr = (await ethers.getContractAt("VaultRouter", CONTRACT_ADDRESSES.VaultRouter)) as any;
+  const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
+  const acmAddrFromRegistry = (await registry.getModuleOrRevert(ethers.keccak256(ethers.toUtf8Bytes("ACCESS_CONTROL_MANAGER")))) as string;
+  const assetWhitelistAddrFromRegistry = (await registry.getModuleOrRevert(ethers.keccak256(ethers.toUtf8Bytes("ASSET_WHITELIST")))) as string;
+  const priceOracleAddrFromRegistry = (await registry.getModuleOrRevert(ethers.keccak256(ethers.toUtf8Bytes("PRICE_ORACLE")))) as string;
+  const settlementTokenAddrFromRegistry = (await registry.getModuleOrRevert(ethers.keccak256(ethers.toUtf8Bytes("SETTLEMENT_TOKEN")))) as string;
+  const vaultCoreFromRegistryAddr = (await registry.getModuleOrRevert(ethers.keccak256(ethers.toUtf8Bytes("VAULT_CORE")))) as string;
+
+  const vc = (await ethers.getContractAt("VaultCore", vaultCoreFromRegistryAddr)) as any;
+  const usdc = (await ethers.getContractAt("MockERC20", settlementTokenAddrFromRegistry)) as any;
+  const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
+  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
+  const vaultRouterAddr = (await vc.viewContractAddrVar()) as string;
+  const vr = (await ethers.getContractAt("VaultRouter", vaultRouterAddr)) as any;
 
   const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT"));
   const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes("SET_PARAMETER"));
@@ -19,22 +27,22 @@ async function main() {
     if (!(await acm.hasRole(role, who))) await acm.grantRole(role, who);
   };
 
-  await ensureRole(ACTION_DEPOSIT, CONTRACT_ADDRESSES.VaultCore);
-  await ensureRole(ACTION_DEPOSIT, CONTRACT_ADDRESSES.VaultRouter);
+  await ensureRole(ACTION_DEPOSIT, vaultCoreFromRegistryAddr);
+  await ensureRole(ACTION_DEPOSIT, vaultRouterAddr);
 
-  if (!(await aw.isAssetAllowed(usdc.target))) {
-    await aw.connect(deployer).addAllowedAsset(usdc.target);
+  if (!(await aw.isAssetAllowed(settlementTokenAddrFromRegistry))) {
+    await aw.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
   }
   {
-    const cfg = await po.getAssetConfig(usdc.target);
+    const cfg = await po.getAssetConfig(settlementTokenAddrFromRegistry);
     if (!cfg.isActive) {
       const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
-      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
+      await po.connect(deployer).configureAsset(settlementTokenAddrFromRegistry, "usd-coin", usdcDecimals, 3600);
     }
   }
   const blockNumber = await ethers.provider.getBlockNumber();
   // SSOT: price is USD-8 ($1.00 = 100000000)
-  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), blockNumber);
+  await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), blockNumber);
 
   // Optional (legacy): enable router testing mode if supported by deployed VaultRouter.
   await ensureRole(ACTION_SET_PARAMETER, deployer.address);
@@ -46,14 +54,14 @@ async function main() {
   }
 
   await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("10000", 6));
-  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, ethers.MaxUint256);
+  await usdc.connect(borrower).approve(vaultCoreFromRegistryAddr, ethers.MaxUint256);
 
   const amount = ethers.parseUnits("1000", 6);
-  const txReq = await vc.connect(borrower).deposit.populateTransaction(usdc.target, amount);
+  const txReq = await vc.connect(borrower).deposit.populateTransaction(settlementTokenAddrFromRegistry, amount);
 
   const call = {
     from: borrower.address,
-    to: CONTRACT_ADDRESSES.VaultCore,
+    to: vaultCoreFromRegistryAddr,
     data: txReq.data,
     gas: "0x7a1200", // 8_000_000
     value: "0x0",

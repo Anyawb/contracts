@@ -165,7 +165,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       .to.emit(pv, "CacheUpdateFailed")
       .withArgs(user.address, asset, await pv.getAddress(), 1n, 1n, anyValue);
     await expect(tx)
-      .to.emit(pv, "CacheUpdateFailedV2")
+      .to.emit(pv, "CacheUpdateFailedWithContext")
       .withArgs(user.address, asset, anyValue, await pv.getAddress(), 1n, 1n, anyValue, anyValue, anyValue);
   });
 
@@ -177,7 +177,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       .to.emit(pv, "CacheUpdateFailed")
       .withArgs(user.address, asset, await pv.getAddress(), 1n, 1n, anyValue);
     await expect(tx)
-      .to.emit(pv, "CacheUpdateFailedV2")
+      .to.emit(pv, "CacheUpdateFailedWithContext")
       .withArgs(user.address, asset, anyValue, await pv.getAddress(), 1n, 1n, anyValue, anyValue, anyValue);
     // 恢复账本读取，避免 read path 的账本回退读取直接透传 revert
     await lending.setMockSuccess(true);
@@ -198,7 +198,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     ).to.emit(pv, "CacheUpdateFailed");
     await expect(
       (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 5n)
-    ).to.emit(pv, "CacheUpdateFailedV2");
+    ).to.emit(pv, "CacheUpdateFailedWithContext");
     await lending.setMockSuccess(true);
 
     // 手动重试应刷新缓存
@@ -209,7 +209,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     expect(d).to.equal(5n);
   });
 
-  it("retryUserPositionUpdate 账本读取再次失败时应 best-effort emit CacheUpdateFailedV2 并返回（不 revert）", async function () {
+  it("retryUserPositionUpdate 账本读取再次失败时应 best-effort emit CacheUpdateFailedWithContext 并返回（不 revert）", async function () {
     const { pv, admin, user, asset, registry, collateral, lending } = await loadFixture(deployFixture);
 
     // Prepare some ledger values (not strictly needed for the failure case).
@@ -224,13 +224,15 @@ describe("PositionView - 缓存有效性与回退", function () {
 
     const txFail = await pv.connect(admin).retryUserPositionUpdate(user.address, asset);
     await expect(txFail)
-      .to.emit(pv, "CacheUpdateFailedV2")
+      .to.emit(pv, "CacheUpdateFailedWithContext")
       .withArgs(user.address, asset, anyValue, await pv.getAddress(), 0n, 0n, anyValue, 0, 0);
 
     // Restore CM and self-heal.
     await registry.setModule(KEY_CM, await collateral.getAddress());
     const txOk = await pv.connect(admin).retryUserPositionUpdate(user.address, asset);
-    await expect(txOk).to.emit(pv, "UserPositionCachedV2").withArgs(user.address, asset, 10n, 5n, anyValue, anyValue);
+    await expect(txOk)
+      .to.emit(pv, "UserPositionCachedWithVersion")
+      .withArgs(user.address, asset, 10n, 5n, anyValue, anyValue);
   });
 
   it("零地址输入被拒绝", async function () {
@@ -785,14 +787,14 @@ describe("PositionView - 缓存有效性与回退", function () {
   });
 
   // ============ 事件验证测试 ============
-  it("推送时发出 UserPositionCachedV2 事件", async function () {
+  it("推送时发出 UserPositionCachedWithVersion 事件", async function () {
     const { pv, user, asset, collateral, lending } = await loadFixture(deployFixture);
     await collateral.depositCollateral(user.address, asset, 123n);
     await lending.setUserDebt(user.address, asset, 45n);
     await expect(
       (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 123n, 45n)
     )
-      .to.emit(pv, "UserPositionCachedV2")
+      .to.emit(pv, "UserPositionCachedWithVersion")
       .withArgs(user.address, asset, 123n, 45n, 1n, anyValue);
   });
 
@@ -804,7 +806,7 @@ describe("PositionView - 缓存有效性与回退", function () {
 
     const tx = await pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user.address, asset, 5, 1);
     await expect(tx)
-      .to.emit(pv, "UserPositionCachedV2")
+      .to.emit(pv, "UserPositionCachedWithVersion")
       .withArgs(user.address, asset, 15n, 2n, 2n, anyValue);
   });
 
@@ -1326,13 +1328,13 @@ describe("PositionView - 缓存有效性与回退", function () {
     )
       .to.emit(pv, "UserPositionCached")
       .withArgs(user.address, asset, 10n, 1n, anyValue)
-      .and.to.emit(pv, "UserPositionCachedV2")
+      .and.to.emit(pv, "UserPositionCachedWithVersion")
       .withArgs(user.address, asset, 10n, 1n, 1n, anyValue);
 
     await expect(
       pv["pushUserPositionUpdateDelta(address,address,int256,int256)"](user.address, asset, 5, 2)
     )
-      .to.emit(pv, "UserPositionCachedV2")
+      .to.emit(pv, "UserPositionCachedWithVersion")
       .withArgs(user.address, asset, 15n, 3n, 2n, anyValue);
 
     const [c, d] = await pv.getUserPositionWithMeta(user.address, asset);

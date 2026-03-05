@@ -13,13 +13,27 @@
  */
 
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
 import { expect } from "chai";
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const BPS_DENOM = 10000n;
+const FEE_TYPE_EARLY_REPAYMENT_PLATFORM = ethers.keccak256(
+  ethers.toUtf8Bytes("EARLY_REPAYMENT_PLATFORM_FEE")
+);
+const FEE_TYPE_LIQUIDATION_PLATFORM = ethers.keccak256(
+  ethers.toUtf8Bytes("LIQUIDATION_PLATFORM_SHARE")
+);
 function calcFee(amount: bigint, bps: bigint): bigint {
   return (amount * bps) / BPS_DENOM;
+}
+function calcPrepaidSplit(amount: bigint, platformBps: bigint, ecoBps: bigint) {
+  const total = platformBps + ecoBps;
+  if (total === 0n) throw new Error("Invalid fee config: total bps = 0");
+  const platformShareBps = (platformBps * BPS_DENOM) / total;
+  const platformAmt = calcFee(amount, platformShareBps);
+  const ecoAmt = amount - platformAmt;
+  return { platformAmt, ecoAmt };
 }
 
 async function main() {
@@ -166,6 +180,34 @@ async function main() {
     console.log(`     Ecosystem: ${ethers.formatUnits(parsed?.args[2], 6)} USDC`);
   }
 
+  // ====== 2b. 预存分发（FeeRouter.distributePrepaid） ======
+  console.log("\n=== 2b. Prepaid Fee Distribution Test ===");
+  const prepaidAmount = ethers.parseUnits("500", 6);
+  await usdc.connect(alice).transfer(await feeRouter.getAddress(), prepaidAmount);
+
+  const treasuryPrepaidBefore = await usdc.balanceOf(platformTreasury);
+  const ecoVaultPrepaidBefore = await usdc.balanceOf(ecosystemVault);
+
+  await feeRouter
+    .connect(alice)
+    .distributePrepaid(await usdc.getAddress(), prepaidAmount, FEE_TYPE_EARLY_REPAYMENT_PLATFORM, alice.address);
+  console.log("  ✅ Prepaid distribution completed");
+
+  const treasuryPrepaidAfter = await usdc.balanceOf(platformTreasury);
+  const ecoVaultPrepaidAfter = await usdc.balanceOf(ecosystemVault);
+  const prepaidExpected = calcPrepaidSplit(prepaidAmount, BigInt(platformFeeBps), BigInt(ecosystemFeeBps));
+
+  const prepaidTreasuryDelta = treasuryPrepaidAfter - treasuryPrepaidBefore;
+  const prepaidEcoDelta = ecoVaultPrepaidAfter - ecoVaultPrepaidBefore;
+
+  if (platformTreasury.toLowerCase() === ecosystemVault.toLowerCase()) {
+    expect(prepaidTreasuryDelta).to.equal(prepaidAmount);
+    expect(prepaidEcoDelta).to.equal(prepaidTreasuryDelta);
+  } else {
+    expect(prepaidTreasuryDelta).to.equal(prepaidExpected.platformAmt);
+    expect(prepaidEcoDelta).to.equal(prepaidExpected.ecoAmt);
+  }
+
   // ====== 3. 动态费率测试 ======
   console.log("\n=== 3. Dynamic Fee Test ===");
   const feeType = ethers.keccak256(ethers.toUtf8Bytes("CUSTOM_FEE"));
@@ -213,7 +255,7 @@ async function main() {
   const feeTypes = [
     ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT")),
     ethers.keccak256(ethers.toUtf8Bytes("BORROW")),
-    ethers.keccak256(ethers.toUtf8Bytes("LIQUIDATE"))
+    FEE_TYPE_LIQUIDATION_PLATFORM,
   ];
 
   const totalBatchAmount = amounts.reduce((sum, amount) => sum + amount, 0n);
@@ -286,34 +328,38 @@ async function main() {
 
   // ====== 7. 费率配置更新测试 ======
   console.log("\n=== 7. Fee Config Update Test ===");
-  const newPlatformBps = 10; // 0.1%
-  const newEcoBps = 2; // 0.02%
+  const targetPlatformBps = 30n; // 0.30%
+  const targetEcoBps = 0n; // 0.00%
 
-  console.log(`  Updating fee config: platform=${newPlatformBps} bps, eco=${newEcoBps} bps`);
-  const updateConfigTx = await feeRouter.connect(deployer).setFeeConfig(newPlatformBps, newEcoBps);
-  const updateConfigReceipt = await updateConfigTx.wait();
-  console.log(`  ✅ Fee config updated`);
+  if (platformFeeBps !== targetPlatformBps || ecosystemFeeBps !== targetEcoBps) {
+    console.log(`  Updating fee config: platform=${targetPlatformBps} bps, eco=${targetEcoBps} bps`);
+    const updateConfigTx = await feeRouter.connect(deployer).setFeeConfig(targetPlatformBps, targetEcoBps);
+    const updateConfigReceipt = await updateConfigTx.wait();
+    console.log("  ✅ Fee config updated");
 
-  // 验证更新
-  const updatedPlatformFeeBps = await feeRouter.getPlatformFeeBps();
-  const updatedEcoFeeBps = await feeRouter.getEcosystemFeeBps();
-  console.log(`  Updated Platform Fee: ${updatedPlatformFeeBps} bps`);
-  console.log(`  Updated Ecosystem Fee: ${updatedEcoFeeBps} bps`);
+    // 验证更新
+    const updatedPlatformFeeBps = await feeRouter.getPlatformFeeBps();
+    const updatedEcoFeeBps = await feeRouter.getEcosystemFeeBps();
+    console.log(`  Updated Platform Fee: ${updatedPlatformFeeBps} bps`);
+    console.log(`  Updated Ecosystem Fee: ${updatedEcoFeeBps} bps`);
 
-  // 验证事件
-  const feeConfigUpdatedEvent = updateConfigReceipt?.logs.find((log: any) => {
-    try {
-      const parsed = feeRouter.interface.parseLog(log);
-      return parsed?.name === "FeeConfigUpdated";
-    } catch {
-      return false;
+    // 验证事件
+    const feeConfigUpdatedEvent = updateConfigReceipt?.logs.find((log: any) => {
+      try {
+        const parsed = feeRouter.interface.parseLog(log);
+        return parsed?.name === "FeeConfigUpdated";
+      } catch {
+        return false;
+      }
+    });
+    if (feeConfigUpdatedEvent) {
+      const parsed = feeRouter.interface.parseLog(feeConfigUpdatedEvent);
+      console.log("  ✅ FeeConfigUpdated event emitted");
+      console.log(`     Platform Bps: ${parsed?.args[0]}`);
+      console.log(`     Eco Bps: ${parsed?.args[1]}`);
     }
-  });
-  if (feeConfigUpdatedEvent) {
-    const parsed = feeRouter.interface.parseLog(feeConfigUpdatedEvent);
-    console.log(`  ✅ FeeConfigUpdated event emitted`);
-    console.log(`     Platform Bps: ${parsed?.args[0]}`);
-    console.log(`     Eco Bps: ${parsed?.args[1]}`);
+  } else {
+    console.log("  ✅ Fee config already matches target (30/0 bps)");
   }
 
   // ====== 8. 暂停/恢复测试 ======

@@ -1,5 +1,5 @@
 import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../../frontend-config/contracts-localhost";
+import { CONTRACT_ADDRESSES } from "../../../frontend-config/contracts-localhost.ts";
 
 type ModuleKeyMap = Record<string, string>;
 
@@ -14,13 +14,13 @@ const NAME_TO_KEY: ModuleKeyMap = {
   CoinGeckoPriceUpdater: "COINGECKO_PRICE_UPDATER",
   FeeRouter: "FEE_ROUTER",
   FeeRouterView: "FEE_ROUTER_VIEW",
-  RewardPoints: "REWARD_POINTS",
+  EasyToken: "EASY_TOKEN",
   RewardManagerCore: "REWARD_MANAGER_CORE",
-  RewardCore: "REWARD_CORE",
   RewardManager: "REWARD_MANAGER",
   CollateralManager: "COLLATERAL_MANAGER",
   LendingEngine: "ORDER_ENGINE",
   LendingEngineView: "LENDING_ENGINE_VIEW",
+  LoanNFTView: "LOAN_NFT_VIEW",
   VaultBusinessLogic: "VAULT_BUSINESS_LOGIC",
   VaultCore: "VAULT_CORE",
   VaultLendingEngine: "LENDING_ENGINE",
@@ -42,7 +42,6 @@ const NAME_TO_KEY: ModuleKeyMap = {
   EventHistoryManager: "EVENT_HISTORY_MANAGER",
   RewardView: "REWARD_VIEW",
   RewardConfig: "REWARD_CONFIG",
-  RewardConsumption: "REWARD_CONSUMPTION",
   ValuationOracleView: "VALUATION_ORACLE_VIEW",
   LiquidatorView: "LIQUIDATION_VIEW",
   LiquidationConfigModule: "LIQUIDATION_CONFIG_MANAGER",
@@ -86,6 +85,7 @@ const MODULE_ORDER = [
   "CollateralManager",
   "LendingEngine",
   "LendingEngineView",
+  "LoanNFTView",
   "VaultBusinessLogic",
   "VaultCore",
   "HealthView",
@@ -103,13 +103,11 @@ const MODULE_ORDER = [
   "SystemRiskView",
   "ViewCache",
   "EventHistoryManager",
-  "RewardPoints",
+  "EasyToken",
   "RewardManagerCore",
-  "RewardCore",
   "RewardManager",
   "RewardView",
   "RewardConfig",
-  "RewardConsumption",
   "ValuationOracleView",
   "LiquidatorView",
   "LiquidationConfigModule",

@@ -45,7 +45,8 @@ const usdcAddress = "0x...";
 const amount = ethers.parseUnits("1000", 6); // 1000 USDC
 
 const erc20 = await ethers.getContractAt("IERC20", usdcAddress);
-await erc20.approve(VAULT_CORE_ADDRESS, amount);
+// ⚠️ 抵押存入的真实 pull spender 是 CollateralManager（托管者），不是 VaultCore
+await erc20.approve(COLLATERAL_MANAGER_ADDRESS, amount);
 
 // 2. 存入抵押物
 await vaultCore.deposit(usdcAddress, amount);
@@ -55,10 +56,14 @@ console.log("✅ 抵押物存入成功");
 #### 3. 借款
 
 ```typescript
-// 借款（需要足够的抵押物）
-const borrowAmount = ethers.parseUnits("500", 6); // 借 500 USDC
-await vaultCore.borrow(usdcAddress, borrowAmount);
-console.log("✅ 借款成功");
+// 借款（SSOT：撮合/订单化路径，不存在 VaultCore.borrow）
+//
+// 借款必须由撮合/keeper 走：
+//   VaultBusinessLogic.finalizeMatch(...) -> SettlementMatchLib.finalizeAtomicFull(...)
+// 并在内部通过 VaultCore.borrowFor(...) 写账本、通过 ORDER_ENGINE.createLoanOrder(...) 创建 orderId（SSOT）。
+//
+// 前端/SDK 通常只负责意向签名与发起撮合请求；成功后拿到 orderId，用于后续还款：
+//   await vaultCore.repay(orderId, usdcAddress, repayAmount)
 ```
 
 #### 4. 查询状态
@@ -259,16 +264,22 @@ async function borrowAsset(asset: string, amount: bigint) {
         throw new Error(`借款金额超过可借额度: ${maxBorrowable}`);
     }
     
-    // 3. 执行借款
-    const tx = await vaultCore.borrow(asset, amount);
-    const receipt = await tx.wait();
+    // 3. 执行借款（SSOT：撮合/订单化路径）
+    // ⚠️ 当前架构已移除 `VaultCore.borrow(asset, amount)`：
+    // - 资金拨付/费用路由/订单创建（orderId SSOT）必须由撮合路径完成
+    // - 债务账本写入通过 `VaultCore.borrowFor(...)` 仅允许模块调用
+    //
+    // 因此这里应该调用你们的撮合服务/keeper：
+    //   - 生成并签名 borrowIntent / lendIntent（EIP-712）
+    //   - keeper 调用 `VaultBusinessLogic.finalizeMatch(...)`
+    // 成功后返回 `orderId`（用于 repay/settle）。
+    throw new Error("Borrow must be orchestrated via VaultBusinessLogic.finalizeMatch (SSOT); VaultCore.borrow is removed.");
     
     // 4. 检查健康因子（借款后）
     const [healthFactorAfter, isValidAfter] = await userView.getUserHealthFactor(userAddress);
     console.log(`借款后健康因子: ${healthFactorAfter.toString()}`);
     
-    console.log(`✅ 借款成功: ${ethers.formatUnits(amount, decimals)}`);
-    return receipt;
+    // unreachable (placeholder)
 }
 ```
 
@@ -1005,11 +1016,11 @@ export function useVaultOperations() {
                 throw new Error("健康因子不足，无法借款");
             }
             
-            // 借款
-            const tx = await vaultCore.borrow(asset, amount);
-            await tx.wait();
-            
-            return { success: true };
+            // 借款（SSOT：撮合/订单化路径）
+            // ⚠️ 当前架构已移除 `VaultCore.borrow(asset, amount)`；请调用撮合服务/keeper，
+            // 由其执行 `VaultBusinessLogic.finalizeMatch(...)` 并返回 orderId。
+            asset; amount; // placeholder
+            throw new Error("Borrow must be orchestrated via matchflow (VaultBusinessLogic.finalizeMatch).");
         } catch (err: any) {
             setError(err.message);
             return { success: false, error: err.message };
@@ -1257,9 +1268,9 @@ console.log(`当前健康因子: ${healthFactor}`);
 const additionalCollateral = ethers.parseUnits("1000", 6);
 await vaultCore.deposit(assetAddress, additionalCollateral);
 
-// 3. 或减少借款金额
-const reducedAmount = ethers.parseUnits("400", 6); // 减少借款金额
-await vaultCore.borrow(assetAddress, reducedAmount);
+// 3. 或减少借款金额：重新发起撮合/订单化借款请求（matchflow），由 keeper 执行 finalizeMatch
+// const reducedAmount = ethers.parseUnits("400", 6);
+// await matchService.requestBorrow({ asset: assetAddress, amount: reducedAmount, ... });
 ```
 
 #### Q3: 提取失败 - "InsufficientCollateral"

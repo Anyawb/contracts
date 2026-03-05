@@ -83,7 +83,7 @@ interface IAccessControlManager {
 | ActionKey | 说明 | 使用场景 |
 |-----------|------|---------|
 | `ACTION_DEPOSIT` | 存入抵押物 | VaultCore.deposit() |
-| `ACTION_BORROW` | 借款 | VaultCore.borrow() |
+| `ACTION_BORROW` | 借款/订单铸造 | ORDER_ENGINE.createLoanOrder() / LoanNFT mint（撮合落地路径） |
 | `ACTION_REPAY` | 还款 | VaultCore.repay() |
 | `ACTION_WITHDRAW` | 提取抵押物 | VaultCore.withdraw() |
 | `ACTION_ORDER_CREATE` | 创建订单 | LendingEngine.createLoanOrder() |
@@ -96,7 +96,7 @@ interface IAccessControlManager {
 | ActionKey | 说明 |
 |-----------|------|
 | `ACTION_BATCH_DEPOSIT` | 批量存入 |
-| `ACTION_BATCH_BORROW` | 批量借款 |
+| `ACTION_BATCH_BORROW` | 批量借款（撮合/订单化编排） |
 | `ACTION_BATCH_REPAY` | 批量还款 |
 | `ACTION_BATCH_WITHDRAW` | 批量提取 |
 
@@ -105,8 +105,7 @@ interface IAccessControlManager {
 | ActionKey | 说明 |
 |-----------|------|
 | `ACTION_CLAIM_REWARD` | 领取奖励 |
-| `ACTION_CONSUME_POINTS` | 消费积分 |
-| `ACTION_UPGRADE_SERVICE` | 升级服务 |
+| `ACTION_CONSUME_EASY` | 消费 Easy |
 
 ### 系统管理动作
 
@@ -304,11 +303,22 @@ await acm.grantRole(ActionKeys.ACTION_UNPAUSE_SYSTEM, governanceAddress);
 const priceUpdaterAddress = deployed.CoinGeckoPriceUpdater;
 await acm.grantRole(ActionKeys.ACTION_UPDATE_PRICE, priceUpdaterAddress);
 
-// 4. 为 Reward 模块授予积分铸造权限
-const rewardManagerAddress = deployed.RewardManagerCore;
-const rewardPointsAddress = deployed.RewardPoints;
-const MINTER_ROLE = await rewardPoints.MINTER_ROLE();
-await rewardPoints.grantRole(MINTER_ROLE, rewardManagerAddress);
+// 4. 配置奖励通证（EasyToken；SSOT = Registry[KEY_EASY_TOKEN]）
+// - 发行（mint）：只授予 EasyEmissionController（推荐 setSoleMinter 硬收口）
+// - 销毁（burn，用于扣罚/消费/回收）：授予 RewardManagerCore 与 EasyRecycleDistributor
+const easyTokenAddress = deployed.EasyToken;
+const easyEmissionControllerAddress = deployed.EasyEmissionController;
+const rewardManagerCoreAddress = deployed.RewardManagerCore;
+const easyRecycleDistributorAddress = deployed.EasyRecycleDistributor;
+
+const easyToken = await ethers.getContractAt("EasyToken", easyTokenAddress);
+
+const MINTER_ROLE = await easyToken.MINTER_ROLE();
+const BURNER_ROLE = await easyToken.BURNER_ROLE();
+
+await easyToken.setSoleMinter(easyEmissionControllerAddress);
+await easyToken.grantRole(BURNER_ROLE, rewardManagerCoreAddress);
+await easyToken.grantRole(BURNER_ROLE, easyRecycleDistributorAddress);
 
 // 5. 为部署者授予白名单管理权限（用于初始资产配置）
 await acm.grantRole(ActionKeys.ACTION_ADD_WHITELIST, deployerAddress);
@@ -324,12 +334,13 @@ await acm.grantRole(ActionKeys.ACTION_ADD_WHITELIST, deployerAddress);
 
 ### 场景 1：用户操作（无需权限）
 
-用户的基础操作（存款、借款、还款、提取）通常不需要特殊权限，由 VaultCore 直接处理：
+用户的基础操作（存款、还款、提取）通常不需要特殊权限，由 VaultCore 直接处理。  
+⚠️ 借款不再提供 direct user `VaultCore.borrow(...)`，必须由撮合/keeper 走 `VaultBusinessLogic.finalizeMatch(...)` 创建 orderId（SSOT）。
 
 ```solidity
 // 用户直接调用，无需权限验证
 vaultCore.deposit(assetAddress, amount);
-vaultCore.borrow(assetAddress, amount);
+// borrow: 通过撮合/订单化路径（VaultBusinessLogic.finalizeMatch），成功后返回 orderId
 ```
 
 ### 场景 2：管理员配置参数

@@ -8,7 +8,7 @@
 
 import { expect } from 'chai';
 import { ethers, upgrades } from 'hardhat';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 import { ModuleKeys } from '../frontend-config/moduleKeys';
 
@@ -80,9 +80,10 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
     await acm.grantRole(ACTION_VIEW_RISK_DATA, admin.address);
 
     // Configure oracle supported assets + price
-    const nowTs = await time.latest();
+    // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
+    const nowBlock = await ethers.provider.getBlockNumber();
     await oracle.configureAsset(await asset.getAddress(), 'tst', 8, 3600);
-    await oracle.setPrice(await asset.getAddress(), ethers.parseUnits('1', 8), nowTs, 8);
+    await oracle.setPrice(await asset.getAddress(), ethers.parseUnits('1', 8), nowBlock, 8);
 
     // Fund user + approve CM
     const depositAmount = ethers.parseUnits('1000', 18);

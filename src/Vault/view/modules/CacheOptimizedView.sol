@@ -89,7 +89,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /// @notice Per-asset user position entry with PositionView cache metadata (best-effort).
-    /// @dev `positionIsValid/positionTimestamp/positionVersion` are sourced from PositionView meta APIs when available;
+    /// @dev `positionIsValid/positionUpdateBlock/positionVersion` are sourced from PositionView meta APIs when available;
     ///      missing fields may return default values (e.g. blockNumber==0) when older APIs are used.
     struct UserPositionItemMeta {
         address user;
@@ -98,7 +98,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         address asset;
         uint256 collateral;
         uint256 debt;
-        uint256 positionTimestamp;
+        uint256 positionUpdateBlock;
     }
 
     struct UserSummary {
@@ -299,7 +299,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
                 collateral: collateral,
                 debt: debt,
                 positionIsValid: posValid,
-                positionTimestamp: posTs,
+                positionUpdateBlock: posTs,
                 positionVersion: posVer
             });
         }
@@ -319,7 +319,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Scheme U batch read policy (no self-bypass; requires VIEW_USER_DATA or ADMIN).
      * - Best-effort metadata: uses `staticcall` to probe multiple PositionView APIs. API mismatch/reverts are swallowed
      *   (ok==false) and metadata fields may fall back to default values.
-     * - Callers SHOULD treat `positionTimestamp == 0` as "unknown/unavailable" and handle accordingly.
+     * - Callers SHOULD treat `positionUpdateBlock == 0` as "unknown/unavailable" and handle accordingly.
      *
      * @param users The users to query. Must match `assets.length`.
      * @param assets The assets to query. Must match `users.length`.
@@ -348,7 +348,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
                 collateral: collateral,
                 debt: debt,
                 positionIsValid: posValid,
-                positionTimestamp: posTs,
+                positionUpdateBlock: posTs,
                 positionVersion: posVer
             });
         }
@@ -371,9 +371,9 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\).
      * @return summary Aggregated totals plus health factor and cache-valid flag.
      * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
-     * @return positionTimestamps Per-asset update blockNumbers (best-effort; 0 may mean unknown).
+     * @return positionUpdateBlocks Per-asset update blockNumbers (best-effort; 0 may mean unknown).
      * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
-     * @return healthTimestamp HealthView blockNumber (or per HealthView semantics).
+     * @return healthUpdateBlock HealthView blockNumber (or per HealthView semantics).
      */
     function getUserSummary(address user, address[] calldata trackedAssets)
         external
@@ -383,9 +383,9 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             UserSummary memory summary,
             bool[] memory positionValidFlags,
-            uint256[] memory positionTimestamps,
+            uint256[] memory positionUpdateBlocks,
             uint64[] memory positionVersions,
-            uint256 healthTimestamp
+            uint256 healthUpdateBlock
         )
     {
         return _getUserSummaryWithMeta(user, trackedAssets);
@@ -404,15 +404,15 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
      * - Best-effort metadata: per-asset metadata is retrieved via `staticcall` probes into PositionView. Missing fields
-     *   may return default values; callers SHOULD treat `positionTimestamps[i] == 0` as "unknown/unavailable".
+     *   may return default values; callers SHOULD treat `positionUpdateBlocks[i] == 0` as "unknown/unavailable".
      *
      * @param user The user to summarize.
      * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\). May be zero.
      * @return summary Aggregated totals plus health factor and cache-valid flag.
      * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
-     * @return positionTimestamps Per-asset update blockNumbers (best-effort; 0 may mean unknown).
+     * @return positionUpdateBlocks Per-asset update blockNumbers (best-effort; 0 may mean unknown).
      * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
-     * @return healthTimestamp HealthView blockNumber (or per HealthView semantics).
+     * @return healthUpdateBlock HealthView blockNumber (or per HealthView semantics).
      */
     function getUserSummaryWithMeta(address user, address[] calldata trackedAssets)
         external
@@ -422,9 +422,9 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             UserSummary memory summary,
             bool[] memory positionValidFlags,
-            uint256[] memory positionTimestamps,
+            uint256[] memory positionUpdateBlocks,
             uint64[] memory positionVersions,
-            uint256 healthTimestamp
+            uint256 healthUpdateBlock
         )
     {
         return _getUserSummaryWithMeta(user, trackedAssets);
@@ -436,19 +436,19 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (
             UserSummary memory summary,
             bool[] memory positionValidFlags,
-            uint256[] memory positionTimestamps,
+            uint256[] memory positionUpdateBlocks,
             uint64[] memory positionVersions,
-            uint256 healthTimestamp
+            uint256 healthUpdateBlock
         )
     {
         uint256 len = trackedAssets.length;
         if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
 
-        (summary.healthFactor, summary.cacheValid, healthTimestamp) = _readHealthFactorWithMeta(user);
+        (summary.healthFactor, summary.cacheValid, healthUpdateBlock) = _readHealthFactorWithMeta(user);
 
         address pvAddr = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         positionValidFlags = new bool[](len);
-        positionTimestamps = new uint256[](len);
+        positionUpdateBlocks = new uint256[](len);
         positionVersions = new uint64[](len);
 
         uint256 totalCollateral;
@@ -459,7 +459,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
             totalCollateral += collateral;
             totalDebt += debt;
             positionValidFlags[i] = posValid;
-            positionTimestamps[i] = posTs;
+            positionUpdateBlocks[i] = posTs;
             positionVersions[i] = posVer;
         }
         summary.totalCollateral = totalCollateral;

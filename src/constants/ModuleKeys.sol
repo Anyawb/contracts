@@ -27,6 +27,7 @@ library ModuleKeys {
     /// @param key The unknown module key (`bytes32`)
     error ModuleKeys__UnknownModuleKey(bytes32 key);
 
+
     // ============ Core Modules ============
     /// @notice CollateralManager module key.
     /// @dev Used by Registry to store the CollateralManager contract address.
@@ -65,6 +66,18 @@ library ModuleKeys {
     ///      reading SSOT snapshots, and pushing snapshots into StatisticsView.
     /// @dev Hash: keccak256("STATISTICS_PUSH_MANAGER")
     bytes32 internal constant KEY_STATS_PUSH_MANAGER = keccak256("STATISTICS_PUSH_MANAGER");
+
+    /// @notice Loan flow view module key (protocol loan flow metrics, USD-8 SSOT).
+    /// @dev Used by Registry to store the LoanFlowView contract address.
+    /// @dev Hash: keccak256("LOAN_FLOW_VIEW")
+    bytes32 internal constant KEY_LOAN_FLOW_VIEW = keccak256("LOAN_FLOW_VIEW");
+
+    /// @notice Loan flow push orchestrator module key (strict B+).
+    /// @dev Used by Registry to store the LoanFlowPushManager contract address.
+    ///      This module is the single on-chain entrypoint responsible for generating `requestId/seq/nextVersion`,
+    ///      computing USD-8 value from the price-oracle SSOT, and pushing deltas into LoanFlowView.
+    /// @dev Hash: keccak256("LOAN_FLOW_PUSH_MANAGER")
+    bytes32 internal constant KEY_LOAN_FLOW_PUSH_MANAGER = keccak256("LOAN_FLOW_PUSH_MANAGER");
     
     /// @notice Degradation core monitoring module identifier
     /// @dev Hash: keccak256("DEGRADATION_CORE")
@@ -119,11 +132,6 @@ library ModuleKeys {
     /// @dev Hash: keccak256("REWARD_MANAGER")
     bytes32 internal constant KEY_RM = keccak256("REWARD_MANAGER");
     
-    /// @notice Reward core module key.
-    /// @dev Used by Registry to store the RewardCore contract address.
-    /// @dev Hash: keccak256("REWARD_CORE")
-    bytes32 internal constant KEY_REWARD_CORE = keccak256("REWARD_CORE");
-    
     /// @notice Reward manager core module key.
     /// @dev Used by Registry to store the RewardManagerCore contract address.
     /// @dev Hash: keccak256("REWARD_MANAGER_CORE")
@@ -133,11 +141,31 @@ library ModuleKeys {
     /// @dev Used by Registry to store the RewardConfig contract address.
     /// @dev Hash: keccak256("REWARD_CONFIG")
     bytes32 internal constant KEY_REWARD_CONFIG = keccak256("REWARD_CONFIG");
-    
-    /// @notice Reward consumption module key.
-    /// @dev Used by Registry to store the RewardConsumption contract address.
-    /// @dev Hash: keccak256("REWARD_CONSUMPTION")
-    bytes32 internal constant KEY_REWARD_CONSUMPTION = keccak256("REWARD_CONSUMPTION");
+
+    /// @notice Reward earn-configuration submodule key.
+    /// @dev Used by Registry to store the EarnConfig contract address.
+    /// @dev Hash: keccak256("REWARD_EARN_CONFIG")
+    bytes32 internal constant KEY_REWARD_EARN_CONFIG = keccak256("REWARD_EARN_CONFIG");
+
+    /// @notice Easy emission config module key.
+    /// @dev Used by Registry to store the EasyEmissionConfig contract address.
+    /// @dev Hash: keccak256("EASY_EMISSION_CONFIG")
+    bytes32 internal constant KEY_EASY_EMISSION_CONFIG = keccak256("EASY_EMISSION_CONFIG");
+
+    /// @notice Easy emission controller module key.
+    /// @dev Used by Registry to store the EasyEmissionController contract address.
+    /// @dev Hash: keccak256("EASY_EMISSION_CONTROLLER")
+    bytes32 internal constant KEY_EASY_EMISSION_CONTROLLER = keccak256("EASY_EMISSION_CONTROLLER");
+
+    /// @notice Easy consumption module key.
+    /// @dev Used by Registry to store the EasyConsumption contract address.
+    /// @dev Hash: keccak256("EASY_CONSUMPTION")
+    bytes32 internal constant KEY_EASY_CONSUMPTION = keccak256("EASY_CONSUMPTION");
+
+    /// @notice Easy recycle distributor module key.
+    /// @dev Used by Registry to store the EasyRecycleDistributor contract address.
+    /// @dev Hash: keccak256("EASY_RECYCLE_DISTRIBUTOR")
+    bytes32 internal constant KEY_EASY_RECYCLE_DISTRIBUTOR = keccak256("EASY_RECYCLE_DISTRIBUTOR");
     
     /// @notice Deprecated: valuation oracle adapter module key.
     /// @dev Replaced by KEY_PRICE_ORACLE; preserved for backward compatibility only. New code must not use it.
@@ -254,6 +282,26 @@ library ModuleKeys {
     /// @dev Hash: keccak256("GOVERNANCE_ROLE")
     bytes32 internal constant KEY_GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
 
+    /// @notice Governance escrow module key (DEPRECATED in SSOT "one-token-two-uses" mode).
+    /// @dev Kept for backward compatibility. SSOT target-state uses EasyToken directly as IVotes token.
+    /// @dev Hash: keccak256("GOVERNANCE_ESCROW")
+    bytes32 internal constant KEY_GOVERNANCE_ESCROW = keccak256("GOVERNANCE_ESCROW");
+
+    /// @notice Governance gate (SSOT) module key.
+    /// @dev Used by Registry to store the GovernanceGate contract address.
+    /// @dev Hash: keccak256("GOVERNANCE_GATE")
+    bytes32 internal constant KEY_GOVERNANCE_GATE = keccak256("GOVERNANCE_GATE");
+
+    /// @notice Feature registry (SSOT) module key.
+    /// @dev Used by Registry to store the FeatureRegistry contract address.
+    /// @dev Hash: keccak256("FEATURE_REGISTRY")
+    bytes32 internal constant KEY_FEATURE_REGISTRY = keccak256("FEATURE_REGISTRY");
+
+    /// @notice Governance guardian (foundation veto) address key.
+    /// @dev Stored as a module-address entry in Registry for SSOT + migration.
+    /// @dev Hash: keccak256("GOVERNANCE_GUARDIAN")
+    bytes32 internal constant KEY_GOVERNANCE_GUARDIAN = keccak256("GOVERNANCE_GUARDIAN");
+
     // ============ Registry ============
     /// @notice Registry module key.
     /// @dev Used by Registry to store the Registry contract address.
@@ -266,10 +314,20 @@ library ModuleKeys {
     /// @dev Hash: keccak256("LOAN_NFT")
     bytes32 internal constant KEY_LOAN_NFT = keccak256("LOAN_NFT");
     
-    /// @notice Reward points module key.
-    /// @dev Used by Registry to store the RewardPoints contract address.
-    /// @dev Hash: keccak256("REWARD_POINTS")
-    bytes32 internal constant KEY_REWARD_POINTS = keccak256("REWARD_POINTS");
+    /// @notice Easy token module key.
+    /// @dev Used by Registry to store the EasyToken contract address.
+    /// @dev Hash: keccak256("EASY_TOKEN")
+    bytes32 internal constant KEY_EASY_TOKEN = keccak256("EASY_TOKEN");
+
+    /// @notice Easy staking module key.
+    /// @dev Used by Registry to store the EasyStaking contract address.
+    /// @dev Hash: keccak256("EASY_STAKING")
+    bytes32 internal constant KEY_EASY_STAKING = keccak256("EASY_STAKING");
+
+    /// @notice AI credits vault module key.
+    /// @dev Used by Registry to store the AICreditsVault contract address.
+    /// @dev Hash: keccak256("AI_CREDITS_VAULT")
+    bytes32 internal constant KEY_AI_CREDITS_VAULT = keccak256("AI_CREDITS_VAULT");
     
     /// @notice RWA token module key.
     /// @dev Used by Registry to store the RWAToken contract address.
@@ -394,32 +452,6 @@ library ModuleKeys {
     /// @dev Hash: keccak256("EVENT_HISTORY_MANAGER")
     bytes32 internal constant KEY_EVENT_HISTORY_MANAGER = keccak256("EVENT_HISTORY_MANAGER");
 
-    // ============ Reward Configuration Submodules ============
-    /// @notice Advanced analytics configuration module key.
-    /// @dev Used by Registry to store the AdvancedAnalyticsConfig contract address.
-    /// @dev Hash: keccak256("ADVANCED_ANALYTICS_CONFIG")
-    bytes32 internal constant KEY_ADVANCED_ANALYTICS_CONFIG = keccak256("ADVANCED_ANALYTICS_CONFIG");
-    
-    /// @notice Priority service configuration module key.
-    /// @dev Used by Registry to store the PriorityServiceConfig contract address.
-    /// @dev Hash: keccak256("PRIORITY_SERVICE_CONFIG")
-    bytes32 internal constant KEY_PRIORITY_SERVICE_CONFIG = keccak256("PRIORITY_SERVICE_CONFIG");
-    
-    /// @notice Feature unlock configuration module key.
-    /// @dev Used by Registry to store the FeatureUnlockConfig contract address.
-    /// @dev Hash: keccak256("FEATURE_UNLOCK_CONFIG")
-    bytes32 internal constant KEY_FEATURE_UNLOCK_CONFIG = keccak256("FEATURE_UNLOCK_CONFIG");
-    
-    /// @notice Governance access configuration module key.
-    /// @dev Used by Registry to store the GovernanceAccessConfig contract address.
-    /// @dev Hash: keccak256("GOVERNANCE_ACCESS_CONFIG")
-    bytes32 internal constant KEY_GOVERNANCE_ACCESS_CONFIG = keccak256("GOVERNANCE_ACCESS_CONFIG");
-    
-    /// @notice Testnet features configuration module key.
-    /// @dev Used by Registry to store the TestnetFeaturesConfig contract address.
-    /// @dev Hash: keccak256("TESTNET_FEATURES_CONFIG")
-    bytes32 internal constant KEY_TESTNET_FEATURES_CONFIG = keccak256("TESTNET_FEATURES_CONFIG");
-
     // ============ Versioned Keys ============
     /// @notice Reward manager V1 module key (example).
     /// @dev Used by Registry to store the RewardManager V1 contract address.
@@ -440,119 +472,133 @@ library ModuleKeys {
      */
     function getAllKeys() internal pure returns (bytes32[] memory) {
         // NOTE: Keep this list dense (no holes) and in sync with getAllKeyStrings().
-        bytes32[] memory keys = new bytes32[](73);
+        bytes32[] memory keys = new bytes32[](80);
+        uint256 i = 0;
 
         // ===== Core Modules =====
-        keys[0] = KEY_CM;
-        keys[1] = KEY_LE;
-        keys[2] = KEY_HF_CALC;
-        keys[3] = KEY_STATS;
-        keys[4] = KEY_VAULT_CONFIG;
-        keys[5] = KEY_VAULT_CORE;
-        // Core (added): Order engine
-        keys[6] = KEY_ORDER_ENGINE;
+        keys[i++] = KEY_CM;
+        keys[i++] = KEY_LE;
+        keys[i++] = KEY_HF_CALC;
+        keys[i++] = KEY_STATS;
+        keys[i++] = KEY_VAULT_CONFIG;
+        keys[i++] = KEY_VAULT_CORE;
+        keys[i++] = KEY_ORDER_ENGINE;
 
         // ===== Supporting Modules =====
-        keys[7]  = KEY_FR;
-        keys[8]  = KEY_RM;
-        keys[9]  = KEY_REWARD_CORE;
-        keys[10] = KEY_REWARD_MANAGER_CORE;
-        keys[11] = KEY_REWARD_CONFIG;
-        keys[12] = KEY_REWARD_CONSUMPTION;
+        keys[i++] = KEY_FR;
+        keys[i++] = KEY_RM;
+        keys[i++] = KEY_REWARD_MANAGER_CORE;
+        keys[i++] = KEY_REWARD_CONFIG;
+        keys[i++] = KEY_REWARD_EARN_CONFIG;
         // Canonical price view facade.
-        keys[13] = KEY_VALUATION_ORACLE_VIEW;
-        keys[14] = KEY_GUARANTEE_FUND;
-        keys[15] = KEY_KEEPER_REGISTRY;
-        keys[16] = KEY_WHITELIST_REGISTRY;
+        keys[i++] = KEY_VALUATION_ORACLE_VIEW;
+        keys[i++] = KEY_GUARANTEE_FUND;
+        keys[i++] = KEY_KEEPER_REGISTRY;
+        keys[i++] = KEY_WHITELIST_REGISTRY;
 
         // ===== Access Control Modules =====
-        keys[17] = KEY_ACCESS_CONTROL;
-        keys[18] = KEY_ACCESS_CONTROLLER;
-        keys[19] = KEY_ASSET_WHITELIST;
-        keys[20] = KEY_AUTHORITY_WHITELIST;
+        keys[i++] = KEY_ACCESS_CONTROL;
+        keys[i++] = KEY_ACCESS_CONTROLLER;
+        keys[i++] = KEY_ASSET_WHITELIST;
+        keys[i++] = KEY_AUTHORITY_WHITELIST;
 
         // ===== Registry System Modules =====
-        keys[21] = KEY_DYNAMIC_MODULE_REGISTRY;
+        keys[i++] = KEY_DYNAMIC_MODULE_REGISTRY;
 
         // ===== Governance Modules =====
-        keys[22] = KEY_CROSS_CHAIN_GOV;
-        keys[23] = KEY_GOVERNANCE_ROLE;
+        keys[i++] = KEY_CROSS_CHAIN_GOV;
+        keys[i++] = KEY_GOVERNANCE_ROLE;
 
         // ===== Registry =====
-        keys[24] = KEY_REGISTRY;
+        keys[i++] = KEY_REGISTRY;
 
         // ===== NFT / Token =====
-        keys[25] = KEY_LOAN_NFT;
-        keys[26] = KEY_REWARD_POINTS;
-        keys[27] = KEY_RWA_TOKEN;
+        keys[i++] = KEY_LOAN_NFT;
+        keys[i++] = KEY_EASY_TOKEN;
+        keys[i++] = KEY_RWA_TOKEN;
 
         // ===== Utilities =====
-        keys[28] = KEY_TOKEN_UTILS;
-        keys[29] = KEY_REVERT_DECODER;
-        keys[30] = KEY_VAULT_UTILS;
+        keys[i++] = KEY_TOKEN_UTILS;
+        keys[i++] = KEY_REVERT_DECODER;
+        keys[i++] = KEY_VAULT_UTILS;
 
         // ===== Oracles =====
-        keys[31] = KEY_PRICE_ORACLE;
-        keys[32] = KEY_COINGECKO_UPDATER;
-        keys[33] = KEY_COINGECKO_PRICE_UPDATER_VIEW;
-        keys[34] = KEY_SETTLEMENT_TOKEN;
+        keys[i++] = KEY_PRICE_ORACLE;
+        keys[i++] = KEY_COINGECKO_UPDATER;
+        keys[i++] = KEY_COINGECKO_PRICE_UPDATER_VIEW;
+        keys[i++] = KEY_SETTLEMENT_TOKEN;
 
         // ===== Strategies =====
-        keys[35] = KEY_RWA_STRATEGY;
+        keys[i++] = KEY_RWA_STRATEGY;
 
         // ===== Business Logic =====
-        keys[36] = KEY_VAULT_BUSINESS_LOGIC;
+        keys[i++] = KEY_VAULT_BUSINESS_LOGIC;
 
         // ===== Views =====
-        keys[37] = KEY_HEALTH_VIEW;
-        keys[38] = KEY_RISK_VIEW;
-        keys[39] = KEY_SYSTEM_VIEW;
-        keys[40] = KEY_USER_VIEW;
-        keys[41] = KEY_VIEW_CACHE;
-        keys[42] = KEY_EVENT_HISTORY_MANAGER;
-        keys[43] = KEY_POSITION_VIEW;
-        keys[44] = KEY_DASHBOARD_VIEW;
-        keys[45] = KEY_PREVIEW_VIEW;
-        keys[46] = KEY_LIQUIDATION_VIEW;
-        keys[47] = KEY_REWARD_VIEW;
+        keys[i++] = KEY_HEALTH_VIEW;
+        keys[i++] = KEY_RISK_VIEW;
+        keys[i++] = KEY_SYSTEM_VIEW;
+        keys[i++] = KEY_USER_VIEW;
+        keys[i++] = KEY_VIEW_CACHE;
+        keys[i++] = KEY_EVENT_HISTORY_MANAGER;
+        keys[i++] = KEY_POSITION_VIEW;
+        keys[i++] = KEY_DASHBOARD_VIEW;
+        keys[i++] = KEY_PREVIEW_VIEW;
+        keys[i++] = KEY_LIQUIDATION_VIEW;
+        keys[i++] = KEY_REWARD_VIEW;
 
         // ===== Liquidation =====
-        keys[48] = KEY_LIQUIDATION_MANAGER;
-        keys[49] = KEY_LIQUIDATION_RISK_MANAGER;
-        keys[50] = KEY_LIQUIDATION_ORCHESTRATOR;
-        keys[51] = KEY_LIQUIDATION_CALCULATOR;
-        keys[52] = KEY_LIQUIDATION_CONFIG_MANAGER;
-
-        // ===== Reward Configuration Submodules =====
-        keys[53] = KEY_ADVANCED_ANALYTICS_CONFIG;
-        keys[54] = KEY_PRIORITY_SERVICE_CONFIG;
-        keys[55] = KEY_FEATURE_UNLOCK_CONFIG;
-        keys[56] = KEY_GOVERNANCE_ACCESS_CONFIG;
-        keys[57] = KEY_TESTNET_FEATURES_CONFIG;
+        keys[i++] = KEY_LIQUIDATION_MANAGER;
+        keys[i++] = KEY_LIQUIDATION_RISK_MANAGER;
+        keys[i++] = KEY_LIQUIDATION_ORCHESTRATOR;
+        keys[i++] = KEY_LIQUIDATION_CALCULATOR;
+        keys[i++] = KEY_LIQUIDATION_CONFIG_MANAGER;
 
         // ===== Versioned Keys =====
-        keys[58] = KEY_REWARD_MANAGER_V1;
-        keys[59] = KEY_DEGRADATION_MANAGER;
+        keys[i++] = KEY_REWARD_MANAGER_V1;
+        keys[i++] = KEY_DEGRADATION_MANAGER;
 
         // ===== Additional Modules =====
-        keys[60] = KEY_VAULT_LENDING_ENGINE;
-        keys[61] = KEY_DEGRADATION_STORAGE;
-        keys[62] = KEY_MODULE_HEALTH_VIEW;
-        keys[63] = KEY_BATCH_VIEW;
-        keys[64] = KEY_EARLY_REPAYMENT_GUARANTEE;
-        keys[65] = KEY_REGISTRY_VIEW;
-        keys[66] = KEY_SYSTEM_HEALTH_VIEW;
-        keys[67] = KEY_LIQUIDATION_PAYOUT_MANAGER;
+        keys[i++] = KEY_VAULT_LENDING_ENGINE;
+        keys[i++] = KEY_DEGRADATION_STORAGE;
+        keys[i++] = KEY_MODULE_HEALTH_VIEW;
+        keys[i++] = KEY_BATCH_VIEW;
+        keys[i++] = KEY_EARLY_REPAYMENT_GUARANTEE;
+        keys[i++] = KEY_REGISTRY_VIEW;
+        keys[i++] = KEY_SYSTEM_HEALTH_VIEW;
+        keys[i++] = KEY_LIQUIDATION_PAYOUT_MANAGER;
         // SettlementManager (unified settlement / liquidation write entry)
-        keys[68] = KEY_SETTLEMENT_MANAGER;
+        keys[i++] = KEY_SETTLEMENT_MANAGER;
         // LenderPoolVault (on-chain liquidity pool)
-        keys[69] = KEY_LENDER_POOL_VAULT;
+        keys[i++] = KEY_LENDER_POOL_VAULT;
         // CacheMaintenanceManager (governance ops: batch refresh module caches)
-        keys[70] = KEY_CACHE_MAINTENANCE_MANAGER;
+        keys[i++] = KEY_CACHE_MAINTENANCE_MANAGER;
         // SystemRiskView (system-only risk reads)
-        keys[71] = KEY_SYSTEM_RISK_VIEW;
+        keys[i++] = KEY_SYSTEM_RISK_VIEW;
         // Statistics push orchestrator (strict B+)
-        keys[72] = KEY_STATS_PUSH_MANAGER;
+        keys[i++] = KEY_STATS_PUSH_MANAGER;
+        // Loan flow view (protocol flow stats, USD-8)
+        keys[i++] = KEY_LOAN_FLOW_VIEW;
+        // Loan flow push orchestrator (strict B+)
+        keys[i++] = KEY_LOAN_FLOW_PUSH_MANAGER;
+        // AI credits vault (on-chain credits SSOT)
+        keys[i++] = KEY_AI_CREDITS_VAULT;
+        // Governance escrow (deprecated in SSOT one-token mode)
+        keys[i++] = KEY_GOVERNANCE_ESCROW;
+        // Governance gate (SSOT)
+        keys[i++] = KEY_GOVERNANCE_GATE;
+        // Feature registry (SSOT)
+        keys[i++] = KEY_FEATURE_REGISTRY;
+        // Governance guardian (foundation veto)
+        keys[i++] = KEY_GOVERNANCE_GUARDIAN;
+
+        // ===== Easy Token / Emission =====
+        keys[i++] = KEY_EASY_TOKEN;
+        keys[i++] = KEY_EASY_EMISSION_CONFIG;
+        keys[i++] = KEY_EASY_EMISSION_CONTROLLER;
+        keys[i++] = KEY_EASY_CONSUMPTION;
+        keys[i++] = KEY_EASY_RECYCLE_DISTRIBUTOR;
+        keys[i++] = KEY_EASY_STAKING;
 
         return keys;
     }
@@ -569,112 +615,120 @@ library ModuleKeys {
      */
     function getAllKeyStrings() internal pure returns (string[] memory) {
         // NOTE: Keep this list dense (no holes) and in sync with getAllKeys().
-        string[] memory names = new string[](73);
+        string[] memory names = new string[](80);
+        uint256 i = 0;
 
         // ===== Core Modules =====
-        names[0] = "KEY_CM";
-        names[1] = "KEY_LE";
-        names[2] = "KEY_HF_CALC";
-        names[3] = "KEY_STATS";
-        names[4] = "KEY_VAULT_CONFIG";
-        names[5] = "KEY_VAULT_CORE";
-        names[6] = "KEY_ORDER_ENGINE";
+        names[i++] = "KEY_CM";
+        names[i++] = "KEY_LE";
+        names[i++] = "KEY_HF_CALC";
+        names[i++] = "KEY_STATS";
+        names[i++] = "KEY_VAULT_CONFIG";
+        names[i++] = "KEY_VAULT_CORE";
+        names[i++] = "KEY_ORDER_ENGINE";
 
         // ===== Supporting Modules =====
-        names[7]  = "KEY_FR";
-        names[8]  = "KEY_RM";
-        names[9]  = "KEY_REWARD_CORE";
-        names[10] = "KEY_REWARD_MANAGER_CORE";
-        names[11] = "KEY_REWARD_CONFIG";
-        names[12] = "KEY_REWARD_CONSUMPTION";
-        names[13] = "KEY_VALUATION_ORACLE_VIEW";
-        names[14] = "KEY_GUARANTEE_FUND";
-        names[15] = "KEY_KEEPER_REGISTRY";
-        names[16] = "KEY_WHITELIST_REGISTRY";
+        names[i++] = "KEY_FR";
+        names[i++] = "KEY_RM";
+        names[i++] = "KEY_REWARD_MANAGER_CORE";
+        names[i++] = "KEY_REWARD_CONFIG";
+        names[i++] = "KEY_REWARD_EARN_CONFIG";
+        names[i++] = "KEY_VALUATION_ORACLE_VIEW";
+        names[i++] = "KEY_GUARANTEE_FUND";
+        names[i++] = "KEY_KEEPER_REGISTRY";
+        names[i++] = "KEY_WHITELIST_REGISTRY";
 
         // ===== Access Control Modules =====
-        names[17] = "KEY_ACCESS_CONTROL";
-        names[18] = "KEY_ACCESS_CONTROLLER";
-        names[19] = "KEY_ASSET_WHITELIST";
-        names[20] = "KEY_AUTHORITY_WHITELIST";
+        names[i++] = "KEY_ACCESS_CONTROL";
+        names[i++] = "KEY_ACCESS_CONTROLLER";
+        names[i++] = "KEY_ASSET_WHITELIST";
+        names[i++] = "KEY_AUTHORITY_WHITELIST";
 
         // ===== Registry System Modules =====
-        names[21] = "KEY_DYNAMIC_MODULE_REGISTRY";
+        names[i++] = "KEY_DYNAMIC_MODULE_REGISTRY";
 
         // ===== Governance Modules =====
-        names[22] = "KEY_CROSS_CHAIN_GOV";
-        names[23] = "KEY_GOVERNANCE_ROLE";
+        names[i++] = "KEY_CROSS_CHAIN_GOV";
+        names[i++] = "KEY_GOVERNANCE_ROLE";
 
         // ===== Registry =====
-        names[24] = "KEY_REGISTRY";
+        names[i++] = "KEY_REGISTRY";
 
         // ===== NFT / Token =====
-        names[25] = "KEY_LOAN_NFT";
-        names[26] = "KEY_REWARD_POINTS";
-        names[27] = "KEY_RWA_TOKEN";
+        names[i++] = "KEY_LOAN_NFT";
+        names[i++] = "KEY_EASY_TOKEN";
+        names[i++] = "KEY_RWA_TOKEN";
 
         // ===== Utilities =====
-        names[28] = "KEY_TOKEN_UTILS";
-        names[29] = "KEY_REVERT_DECODER";
-        names[30] = "KEY_VAULT_UTILS";
+        names[i++] = "KEY_TOKEN_UTILS";
+        names[i++] = "KEY_REVERT_DECODER";
+        names[i++] = "KEY_VAULT_UTILS";
 
         // ===== Oracles =====
-        names[31] = "KEY_PRICE_ORACLE";
-        names[32] = "KEY_COINGECKO_UPDATER";
-        names[33] = "KEY_COINGECKO_PRICE_UPDATER_VIEW";
-        names[34] = "KEY_SETTLEMENT_TOKEN";
+        names[i++] = "KEY_PRICE_ORACLE";
+        names[i++] = "KEY_COINGECKO_UPDATER";
+        names[i++] = "KEY_COINGECKO_PRICE_UPDATER_VIEW";
+        names[i++] = "KEY_SETTLEMENT_TOKEN";
 
         // ===== Strategies =====
-        names[35] = "KEY_RWA_STRATEGY";
+        names[i++] = "KEY_RWA_STRATEGY";
 
         // ===== Business Logic =====
-        names[36] = "KEY_VAULT_BUSINESS_LOGIC";
+        names[i++] = "KEY_VAULT_BUSINESS_LOGIC";
 
         // ===== Views =====
-        names[37] = "KEY_HEALTH_VIEW";
-        names[38] = "KEY_RISK_VIEW";
-        names[39] = "KEY_SYSTEM_VIEW";
-        names[40] = "KEY_USER_VIEW";
-        names[41] = "KEY_VIEW_CACHE";
-        names[42] = "KEY_EVENT_HISTORY_MANAGER";
-        names[43] = "KEY_POSITION_VIEW";
-        names[44] = "KEY_DASHBOARD_VIEW";
-        names[45] = "KEY_PREVIEW_VIEW";
-        names[46] = "KEY_LIQUIDATION_VIEW";
-        names[47] = "KEY_REWARD_VIEW";
+        names[i++] = "KEY_HEALTH_VIEW";
+        names[i++] = "KEY_RISK_VIEW";
+        names[i++] = "KEY_SYSTEM_VIEW";
+        names[i++] = "KEY_USER_VIEW";
+        names[i++] = "KEY_VIEW_CACHE";
+        names[i++] = "KEY_EVENT_HISTORY_MANAGER";
+        names[i++] = "KEY_POSITION_VIEW";
+        names[i++] = "KEY_DASHBOARD_VIEW";
+        names[i++] = "KEY_PREVIEW_VIEW";
+        names[i++] = "KEY_LIQUIDATION_VIEW";
+        names[i++] = "KEY_REWARD_VIEW";
 
         // ===== Liquidation =====
-        names[48] = "KEY_LIQUIDATION_MANAGER";
-        names[49] = "KEY_LIQUIDATION_RISK_MANAGER";
-        names[50] = "KEY_LIQUIDATION_ORCHESTRATOR";
-        names[51] = "KEY_LIQUIDATION_CALCULATOR";
-        names[52] = "KEY_LIQUIDATION_CONFIG_MANAGER";
-
-        // ===== Reward Configuration Submodules =====
-        names[53] = "KEY_ADVANCED_ANALYTICS_CONFIG";
-        names[54] = "KEY_PRIORITY_SERVICE_CONFIG";
-        names[55] = "KEY_FEATURE_UNLOCK_CONFIG";
-        names[56] = "KEY_GOVERNANCE_ACCESS_CONFIG";
-        names[57] = "KEY_TESTNET_FEATURES_CONFIG";
+        names[i++] = "KEY_LIQUIDATION_MANAGER";
+        names[i++] = "KEY_LIQUIDATION_RISK_MANAGER";
+        names[i++] = "KEY_LIQUIDATION_ORCHESTRATOR";
+        names[i++] = "KEY_LIQUIDATION_CALCULATOR";
+        names[i++] = "KEY_LIQUIDATION_CONFIG_MANAGER";
 
         // ===== Versioned Keys =====
-        names[58] = "KEY_REWARD_MANAGER_V1";
-        names[59] = "KEY_DEGRADATION_MANAGER";
+        names[i++] = "KEY_REWARD_MANAGER_V1";
+        names[i++] = "KEY_DEGRADATION_MANAGER";
 
         // ===== Additional Modules =====
-        names[60] = "KEY_VAULT_LENDING_ENGINE";
-        names[61] = "KEY_DEGRADATION_STORAGE";
-        names[62] = "KEY_MODULE_HEALTH_VIEW";
-        names[63] = "KEY_BATCH_VIEW";
-        names[64] = "KEY_EARLY_REPAYMENT_GUARANTEE";
-        names[65] = "KEY_REGISTRY_VIEW";
-        names[66] = "KEY_SYSTEM_HEALTH_VIEW";
-        names[67] = "KEY_LIQUIDATION_PAYOUT_MANAGER";
-        names[68] = "KEY_SETTLEMENT_MANAGER";
-        names[69] = "KEY_LENDER_POOL_VAULT";
-        names[70] = "KEY_CACHE_MAINTENANCE_MANAGER";
-        names[71] = "KEY_SYSTEM_RISK_VIEW";
-        names[72] = "KEY_STATS_PUSH_MANAGER";
+        names[i++] = "KEY_VAULT_LENDING_ENGINE";
+        names[i++] = "KEY_DEGRADATION_STORAGE";
+        names[i++] = "KEY_MODULE_HEALTH_VIEW";
+        names[i++] = "KEY_BATCH_VIEW";
+        names[i++] = "KEY_EARLY_REPAYMENT_GUARANTEE";
+        names[i++] = "KEY_REGISTRY_VIEW";
+        names[i++] = "KEY_SYSTEM_HEALTH_VIEW";
+        names[i++] = "KEY_LIQUIDATION_PAYOUT_MANAGER";
+        names[i++] = "KEY_SETTLEMENT_MANAGER";
+        names[i++] = "KEY_LENDER_POOL_VAULT";
+        names[i++] = "KEY_CACHE_MAINTENANCE_MANAGER";
+        names[i++] = "KEY_SYSTEM_RISK_VIEW";
+        names[i++] = "KEY_STATS_PUSH_MANAGER";
+        names[i++] = "KEY_LOAN_FLOW_VIEW";
+        names[i++] = "KEY_LOAN_FLOW_PUSH_MANAGER";
+        names[i++] = "KEY_AI_CREDITS_VAULT";
+        names[i++] = "KEY_GOVERNANCE_ESCROW";
+        names[i++] = "KEY_GOVERNANCE_GATE";
+        names[i++] = "KEY_FEATURE_REGISTRY";
+        names[i++] = "KEY_GOVERNANCE_GUARDIAN";
+
+        // ===== Easy Token / Emission =====
+        names[i++] = "KEY_EASY_TOKEN";
+        names[i++] = "KEY_EASY_EMISSION_CONFIG";
+        names[i++] = "KEY_EASY_EMISSION_CONTROLLER";
+        names[i++] = "KEY_EASY_CONSUMPTION";
+        names[i++] = "KEY_EASY_RECYCLE_DISTRIBUTOR";
+        names[i++] = "KEY_EASY_STAKING";
 
         return names;
     }
@@ -733,10 +787,14 @@ library ModuleKeys {
         if (key == KEY_VAULT_CORE) return "vaultCore";
         if (key == KEY_FR) return "feeRouter";
         if (key == KEY_RM) return "rewardManager";
-        if (key == KEY_REWARD_CORE) return "rewardCore";
         if (key == KEY_REWARD_MANAGER_CORE) return "rewardManagerCore";
         if (key == KEY_REWARD_CONFIG) return "rewardConfig";
-        if (key == KEY_REWARD_CONSUMPTION) return "rewardConsumption";
+        if (key == KEY_REWARD_EARN_CONFIG) return "rewardEarnConfig";
+        if (key == KEY_EASY_EMISSION_CONFIG) return "easyEmissionConfig";
+        if (key == KEY_EASY_EMISSION_CONTROLLER) return "easyEmissionController";
+        if (key == KEY_EASY_CONSUMPTION) return "easyConsumption";
+        if (key == KEY_EASY_RECYCLE_DISTRIBUTOR) return "easyRecycleDistributor";
+        if (key == KEY_EASY_STAKING) return "easyStaking";
         // DEPRECATED: use "priceOracle" in new code.
         if (key == KEY_VALUATION_ORACLE) return "valuationOracle";
         if (key == KEY_VALUATION_ORACLE_VIEW) return "valuationOracleView";
@@ -750,9 +808,14 @@ library ModuleKeys {
         if (key == KEY_DYNAMIC_MODULE_REGISTRY) return "dynamicModuleRegistry";
         if (key == KEY_CROSS_CHAIN_GOV) return "crossChainGovernance";
         if (key == KEY_GOVERNANCE_ROLE) return "governanceRole";
+        if (key == KEY_GOVERNANCE_ESCROW) return "governanceEscrow";
+        if (key == KEY_GOVERNANCE_GATE) return "governanceGate";
+        if (key == KEY_FEATURE_REGISTRY) return "featureRegistry";
+        if (key == KEY_GOVERNANCE_GUARDIAN) return "governanceGuardian";
         if (key == KEY_REGISTRY) return "registry";
         if (key == KEY_LOAN_NFT) return "loanNFT";
-        if (key == KEY_REWARD_POINTS) return "rewardPoints";
+        if (key == KEY_EASY_TOKEN) return "easyToken";
+        if (key == KEY_AI_CREDITS_VAULT) return "aiCreditsVault";
         if (key == KEY_RWA_TOKEN) return "rwaToken";
         if (key == KEY_TOKEN_UTILS) return "tokenUtils";
         if (key == KEY_REVERT_DECODER) return "revertDecoder";
@@ -776,11 +839,6 @@ library ModuleKeys {
         if (key == KEY_MODULE_HEALTH_VIEW) return "moduleHealthView";
         if (key == KEY_BATCH_VIEW) return "batchView";
         if (key == KEY_EARLY_REPAYMENT_GUARANTEE) return "earlyRepaymentGuaranteeManager";
-        if (key == KEY_ADVANCED_ANALYTICS_CONFIG) return "advancedAnalyticsConfig";
-        if (key == KEY_PRIORITY_SERVICE_CONFIG) return "priorityServiceConfig";
-        if (key == KEY_FEATURE_UNLOCK_CONFIG) return "featureUnlockConfig";
-        if (key == KEY_GOVERNANCE_ACCESS_CONFIG) return "governanceAccessConfig";
-        if (key == KEY_TESTNET_FEATURES_CONFIG) return "testnetFeaturesConfig";
         if (key == KEY_REWARD_MANAGER_V1) return "rewardManagerV1";
         if (key == KEY_DEGRADATION_MANAGER) return "degradationManager";
         if (key == KEY_POSITION_VIEW) return "positionView";
@@ -790,6 +848,8 @@ library ModuleKeys {
         if (key == KEY_SYSTEM_RISK_VIEW) return "systemRiskView";
         if (key == KEY_CACHE_MAINTENANCE_MANAGER) return "cacheMaintenanceManager";
         if (key == KEY_STATS_PUSH_MANAGER) return "statisticsPushManager";
+        if (key == KEY_LOAN_FLOW_VIEW) return "loanFlowView";
+        if (key == KEY_LOAN_FLOW_PUSH_MANAGER) return "loanFlowPushManager";
         return "";
     }
     
@@ -817,10 +877,14 @@ library ModuleKeys {
         if (key == KEY_VAULT_CORE) return "KEY_VAULT_CORE";
         if (key == KEY_FR) return "KEY_FR";
         if (key == KEY_RM) return "KEY_RM";
-        if (key == KEY_REWARD_CORE) return "KEY_REWARD_CORE";
         if (key == KEY_REWARD_MANAGER_CORE) return "KEY_REWARD_MANAGER_CORE";
         if (key == KEY_REWARD_CONFIG) return "KEY_REWARD_CONFIG";
-        if (key == KEY_REWARD_CONSUMPTION) return "KEY_REWARD_CONSUMPTION";
+        if (key == KEY_REWARD_EARN_CONFIG) return "KEY_REWARD_EARN_CONFIG";
+        if (key == KEY_EASY_EMISSION_CONFIG) return "KEY_EASY_EMISSION_CONFIG";
+        if (key == KEY_EASY_EMISSION_CONTROLLER) return "KEY_EASY_EMISSION_CONTROLLER";
+        if (key == KEY_EASY_CONSUMPTION) return "KEY_EASY_CONSUMPTION";
+        if (key == KEY_EASY_RECYCLE_DISTRIBUTOR) return "KEY_EASY_RECYCLE_DISTRIBUTOR";
+        if (key == KEY_EASY_STAKING) return "KEY_EASY_STAKING";
         // DEPRECATED: preserved for backward compatibility only.
         if (key == KEY_VALUATION_ORACLE) return "KEY_VALUATION_ORACLE";
         if (key == KEY_VALUATION_ORACLE_VIEW) return "KEY_VALUATION_ORACLE_VIEW";
@@ -834,9 +898,14 @@ library ModuleKeys {
         if (key == KEY_DYNAMIC_MODULE_REGISTRY) return "KEY_DYNAMIC_MODULE_REGISTRY";
         if (key == KEY_CROSS_CHAIN_GOV) return "KEY_CROSS_CHAIN_GOV";
         if (key == KEY_GOVERNANCE_ROLE) return "KEY_GOVERNANCE_ROLE";
+        if (key == KEY_GOVERNANCE_ESCROW) return "KEY_GOVERNANCE_ESCROW";
+        if (key == KEY_GOVERNANCE_GATE) return "KEY_GOVERNANCE_GATE";
+        if (key == KEY_FEATURE_REGISTRY) return "KEY_FEATURE_REGISTRY";
+        if (key == KEY_GOVERNANCE_GUARDIAN) return "KEY_GOVERNANCE_GUARDIAN";
         if (key == KEY_REGISTRY) return "KEY_REGISTRY";
         if (key == KEY_LOAN_NFT) return "KEY_LOAN_NFT";
-        if (key == KEY_REWARD_POINTS) return "KEY_REWARD_POINTS";
+        if (key == KEY_EASY_TOKEN) return "KEY_EASY_TOKEN";
+        if (key == KEY_AI_CREDITS_VAULT) return "KEY_AI_CREDITS_VAULT";
         if (key == KEY_RWA_TOKEN) return "KEY_RWA_TOKEN";
         if (key == KEY_TOKEN_UTILS) return "KEY_TOKEN_UTILS";
         if (key == KEY_REVERT_DECODER) return "KEY_REVERT_DECODER";
@@ -854,11 +923,6 @@ library ModuleKeys {
         if (key == KEY_LIQUIDATION_ORCHESTRATOR) return "KEY_LIQUIDATION_ORCHESTRATOR";
         if (key == KEY_LIQUIDATION_CALCULATOR) return "KEY_LIQUIDATION_CALCULATOR";
         if (key == KEY_LIQUIDATION_CONFIG_MANAGER) return "KEY_LIQUIDATION_CONFIG_MANAGER";
-        if (key == KEY_ADVANCED_ANALYTICS_CONFIG) return "KEY_ADVANCED_ANALYTICS_CONFIG";
-        if (key == KEY_PRIORITY_SERVICE_CONFIG) return "KEY_PRIORITY_SERVICE_CONFIG";
-        if (key == KEY_FEATURE_UNLOCK_CONFIG) return "KEY_FEATURE_UNLOCK_CONFIG";
-        if (key == KEY_GOVERNANCE_ACCESS_CONFIG) return "KEY_GOVERNANCE_ACCESS_CONFIG";
-        if (key == KEY_TESTNET_FEATURES_CONFIG) return "KEY_TESTNET_FEATURES_CONFIG";
         if (key == KEY_REWARD_MANAGER_V1) return "KEY_REWARD_MANAGER_V1";
         if (key == KEY_DEGRADATION_MANAGER) return "KEY_DEGRADATION_MANAGER";
         if (key == KEY_POSITION_VIEW) return "KEY_POSITION_VIEW";
@@ -874,6 +938,8 @@ library ModuleKeys {
         if (key == KEY_CACHE_MAINTENANCE_MANAGER) return "KEY_CACHE_MAINTENANCE_MANAGER";
         if (key == KEY_SYSTEM_RISK_VIEW) return "KEY_SYSTEM_RISK_VIEW";
         if (key == KEY_STATS_PUSH_MANAGER) return "KEY_STATS_PUSH_MANAGER";
+        if (key == KEY_LOAN_FLOW_VIEW) return "KEY_LOAN_FLOW_VIEW";
+        if (key == KEY_LOAN_FLOW_PUSH_MANAGER) return "KEY_LOAN_FLOW_PUSH_MANAGER";
         
         revert ModuleKeys__UnknownModuleKey(key);
     }
@@ -903,10 +969,14 @@ library ModuleKeys {
         if (nameHash == keccak256(abi.encodePacked("vaultCore"))) return KEY_VAULT_CORE;
         if (nameHash == keccak256(abi.encodePacked("feeRouter"))) return KEY_FR;
         if (nameHash == keccak256(abi.encodePacked("rewardManager"))) return KEY_RM;
-        if (nameHash == keccak256(abi.encodePacked("rewardCore"))) return KEY_REWARD_CORE;
         if (nameHash == keccak256(abi.encodePacked("rewardManagerCore"))) return KEY_REWARD_MANAGER_CORE;
         if (nameHash == keccak256(abi.encodePacked("rewardConfig"))) return KEY_REWARD_CONFIG;
-        if (nameHash == keccak256(abi.encodePacked("rewardConsumption"))) return KEY_REWARD_CONSUMPTION;
+        if (nameHash == keccak256(abi.encodePacked("rewardEarnConfig"))) return KEY_REWARD_EARN_CONFIG;
+        if (nameHash == keccak256(abi.encodePacked("easyEmissionConfig"))) return KEY_EASY_EMISSION_CONFIG;
+        if (nameHash == keccak256(abi.encodePacked("easyEmissionController"))) return KEY_EASY_EMISSION_CONTROLLER;
+        if (nameHash == keccak256(abi.encodePacked("easyConsumption"))) return KEY_EASY_CONSUMPTION;
+        if (nameHash == keccak256(abi.encodePacked("easyRecycleDistributor"))) return KEY_EASY_RECYCLE_DISTRIBUTOR;
+        if (nameHash == keccak256(abi.encodePacked("easyStaking"))) return KEY_EASY_STAKING;
         if (nameHash == keccak256(abi.encodePacked("valuationOracle"))) return KEY_VALUATION_ORACLE; // DEPRECATED
         if (nameHash == keccak256(abi.encodePacked("valuationOracleView"))) return KEY_VALUATION_ORACLE_VIEW;
         if (nameHash == keccak256(abi.encodePacked("guaranteeFundManager"))) return KEY_GUARANTEE_FUND;
@@ -919,9 +989,14 @@ library ModuleKeys {
         if (nameHash == keccak256(abi.encodePacked("dynamicModuleRegistry"))) return KEY_DYNAMIC_MODULE_REGISTRY;
         if (nameHash == keccak256(abi.encodePacked("crossChainGovernance"))) return KEY_CROSS_CHAIN_GOV;
         if (nameHash == keccak256(abi.encodePacked("governanceRole"))) return KEY_GOVERNANCE_ROLE;
+        if (nameHash == keccak256(abi.encodePacked("governanceEscrow"))) return KEY_GOVERNANCE_ESCROW;
+        if (nameHash == keccak256(abi.encodePacked("governanceGate"))) return KEY_GOVERNANCE_GATE;
+        if (nameHash == keccak256(abi.encodePacked("featureRegistry"))) return KEY_FEATURE_REGISTRY;
+        if (nameHash == keccak256(abi.encodePacked("governanceGuardian"))) return KEY_GOVERNANCE_GUARDIAN;
         if (nameHash == keccak256(abi.encodePacked("registry"))) return KEY_REGISTRY;
         if (nameHash == keccak256(abi.encodePacked("loanNFT"))) return KEY_LOAN_NFT;
-        if (nameHash == keccak256(abi.encodePacked("rewardPoints"))) return KEY_REWARD_POINTS;
+        if (nameHash == keccak256(abi.encodePacked("easyToken"))) return KEY_EASY_TOKEN;
+        if (nameHash == keccak256(abi.encodePacked("aiCreditsVault"))) return KEY_AI_CREDITS_VAULT;
         if (nameHash == keccak256(abi.encodePacked("rwaToken"))) return KEY_RWA_TOKEN;
         if (nameHash == keccak256(abi.encodePacked("tokenUtils"))) return KEY_TOKEN_UTILS;
         if (nameHash == keccak256(abi.encodePacked("revertDecoder"))) return KEY_REVERT_DECODER;
@@ -941,11 +1016,6 @@ library ModuleKeys {
         if (nameHash == keccak256(abi.encodePacked("liquidationOrchestrator"))) return KEY_LIQUIDATION_ORCHESTRATOR;
         if (nameHash == keccak256(abi.encodePacked("liquidationCalculator"))) return KEY_LIQUIDATION_CALCULATOR;
         if (nameHash == keccak256(abi.encodePacked("liquidationConfigManager"))) return KEY_LIQUIDATION_CONFIG_MANAGER;
-        if (nameHash == keccak256(abi.encodePacked("advancedAnalyticsConfig"))) return KEY_ADVANCED_ANALYTICS_CONFIG;
-        if (nameHash == keccak256(abi.encodePacked("priorityServiceConfig"))) return KEY_PRIORITY_SERVICE_CONFIG;
-        if (nameHash == keccak256(abi.encodePacked("featureUnlockConfig"))) return KEY_FEATURE_UNLOCK_CONFIG;
-        if (nameHash == keccak256(abi.encodePacked("governanceAccessConfig"))) return KEY_GOVERNANCE_ACCESS_CONFIG;
-        if (nameHash == keccak256(abi.encodePacked("testnetFeaturesConfig"))) return KEY_TESTNET_FEATURES_CONFIG;
         if (nameHash == keccak256(abi.encodePacked("rewardManagerV1"))) return KEY_REWARD_MANAGER_V1;
         if (nameHash == keccak256(abi.encodePacked("degradationManager"))) return KEY_DEGRADATION_MANAGER;
         if (nameHash == keccak256(abi.encodePacked("positionView"))) return KEY_POSITION_VIEW;
@@ -965,6 +1035,8 @@ library ModuleKeys {
         }
         if (nameHash == keccak256(abi.encodePacked("cacheMaintenanceManager"))) return KEY_CACHE_MAINTENANCE_MANAGER;
         if (nameHash == keccak256(abi.encodePacked("statisticsPushManager"))) return KEY_STATS_PUSH_MANAGER;
+        if (nameHash == keccak256(abi.encodePacked("loanFlowView"))) return KEY_LOAN_FLOW_VIEW;
+        if (nameHash == keccak256(abi.encodePacked("loanFlowPushManager"))) return KEY_LOAN_FLOW_PUSH_MANAGER;
         
         return bytes32(0);
     }

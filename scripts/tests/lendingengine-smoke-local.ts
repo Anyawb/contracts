@@ -1,6 +1,6 @@
 import { ethers, network } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
 import { getErc20, key } from "./_fundsFlowUtils";
+import { loadAddressMap, resolveAddress } from "./_addressResolver";
 
 const ONE_DAY = 24n * 60n * 60n;
 const ONE_HOUR_BLOCKS = 1_800n;
@@ -66,15 +66,16 @@ async function pickCleanSigner(opts: {
 }
 
 async function main() {
-  if (network.name !== "localhost") {
-    throw new Error(`This script must run with --network localhost (got ${network.name})`);
-  }
+  const supportsHardhat = network.name === "localhost" || network.name === "hardhat";
+  const readOnly = envBool("READ_ONLY", network.name !== "localhost");
+  const enableWrite = envBool("ENABLE_WRITE", !readOnly);
 
   // This smoke step runs in a shared localhost chain (smoke runner executes multiple scripts sequentially).
   // To avoid cross-test coupling (e.g. leaving ERC20 allowances that break later "expected revert" checks),
   // we snapshot+revert by default. Set KEEP_STATE=1 to keep state (not recommended in the runner).
   const KEEP_STATE = envBool("KEEP_STATE", false);
-  const snap = (await ethers.provider.send("evm_snapshot", [])) as string;
+  const USE_SNAPSHOT = envBool("USE_SNAPSHOT", supportsHardhat && enableWrite && !KEEP_STATE);
+  const snap = USE_SNAPSHOT ? ((await ethers.provider.send("evm_snapshot", [])) as string) : "";
   try {
   const STRICT = envBool("STRICT", true);
   const allowDirty = envBool("E2E_ALLOW_DIRTY_STATE", false);
@@ -83,8 +84,11 @@ async function main() {
   const signers = await ethers.getSigners();
   const deployer = signers[0];
 
+  const addressMap = loadAddressMap(network.name);
+  const registryAddr = resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
+
   // ---- SSOT bootstrap: Registry drift safe ----
-  const registryBootstrap = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
+  const registryBootstrap = (await ethers.getContractAt("Registry", registryAddr)) as any;
   const settlementManagerBootstrapAddr = (await registryBootstrap.getModuleOrRevert(
     key("SETTLEMENT_MANAGER")
   )) as string;
@@ -122,19 +126,20 @@ async function main() {
   );
 
   // VaultLendingEngine interface (minimal; aligns with other smoke scripts).
+  const vLeAddr = (await registry.getModuleOrRevert(key("LENDING_ENGINE"))) as string;
   const vLe = await ethers.getContractAt(
     [
       "function getUserTotalDebtValue(address user) view returns (uint256)",
       "function getDebt(address user, address asset) view returns (uint256)",
       "function getUserDebtAssets(address user) view returns (address[])",
     ],
-    CONTRACT_ADDRESSES.VaultLendingEngine
+    vLeAddr
   );
 
   const lendingEngineView = (await ethers.getContractAt("LendingEngineView", lendingEngineViewAddr)) as any;
 
   // Token selection: prefer FeeRouter supported token[0], fallback to MockUSDC.
-  let assetAddr: string = CONTRACT_ADDRESSES.MockUSDC;
+  let assetAddr: string = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
   try {
     const toks = (await feeRouter.getSupportedTokens()) as string[];
     if (toks?.length) assetAddr = toks[0];
@@ -159,9 +164,39 @@ async function main() {
     return true;
   }
 
-  console.log("=== LendingEngine Smoke (localhost) ===");
-  console.log(`Config: STRICT=${STRICT} E2E_ALLOW_DIRTY_STATE=${allowDirty} NO_AUTO_GRANT=${noAutoGrant}`);
+  console.log(`=== LendingEngine Smoke (${network.name}) ===`);
+  console.log(
+    `Config: READ_ONLY=${readOnly} ENABLE_WRITE=${enableWrite} STRICT=${STRICT} E2E_ALLOW_DIRTY_STATE=${allowDirty} NO_AUTO_GRANT=${noAutoGrant}`
+  );
+  console.log(`Registry(SSOT): ${registryAddrSSOT}`);
   console.log(`Token: ${String(symbol)} @ ${assetAddr} (decimals=${dec})`);
+
+  if (readOnly || !enableWrite) {
+    // Arbitrum-mode: read-path only (no state mutations).
+    // Minimal invariants: Registry bindings exist and core reads work.
+    const mustNonZero = (label: string, addr: string) => {
+      if (!addr || addr === ethers.ZeroAddress) throw new Error(`[FAIL] missing module: ${label}`);
+      console.log(`  ✅ module ${label}=${addr}`);
+    };
+    mustNonZero("VAULT_CORE", vaultCoreAddr);
+    mustNonZero("VAULT_BUSINESS_LOGIC", vblAddr);
+    mustNonZero("COLLATERAL_MANAGER", cmAddr);
+    mustNonZero("ORDER_ENGINE", orderEngineAddr);
+    mustNonZero("LENDING_ENGINE (KEY_LE)", vLeAddr);
+    mustNonZero("LENDING_ENGINE_VIEW", lendingEngineViewAddr);
+    mustNonZero("PRICE_ORACLE", poAddr);
+    mustNonZero("FEE_ROUTER", feeRouterAddr);
+
+    try {
+      await po.getPrice(assetAddr);
+      console.log("  ✅ PriceOracle.getPrice(asset) ok");
+    } catch (e: any) {
+      console.log(`  ⚠️  PriceOracle.getPrice(asset) failed (best-effort): ${fmtErr(e)}`);
+    }
+
+    console.log("\n✅ lendingengine-smoke (read-only) PASSED\n");
+    return;
+  }
 
   // ---- minimal preconditions (best-effort, but strict by default) ----
   const canAddWhitelist = await ensureRole(key("ADD_WHITELIST"), deployer.address, "ADD_WHITELIST(deployer)");
@@ -394,16 +429,25 @@ async function main() {
     console.log(`  ⚠️  [BestEffort] LEView diagnostics failed: ${fmtErr(e)}`);
   }
 
-  // LEV-02–style: borrower is related party → canAccessLoanOrder true; getUserLoanCount >= 1.
+  // LEV-02–style: borrower is related party → canAccessLoanOrder true; LoanNFTView.getUserLoanCount >= 1.
   const [canAccess] = (await lendingEngineView
     .connect(borrower)
     .canAccessLoanOrder(orderId, borrower.address)) as [boolean, boolean, bigint];
   if (!canAccess) throw new Error("LEView: canAccessLoanOrder(orderId, borrower) must be true");
-  const [userLoanCount] = (await lendingEngineView
+
+  const loanNftViewAddr = (await registry.getModuleOrRevert(key("LOAN_NFT_VIEW"))) as string;
+  const loanNftView = (await ethers.getContractAt("LoanNFTView", loanNftViewAddr)) as any;
+  const [userLoanCount] = (await loanNftView
     .connect(deployer)
     .getUserLoanCount(borrower.address)) as [bigint, boolean, bigint];
-  if (userLoanCount < 1n) throw new Error(`LEView: getUserLoanCount(borrower) must be >= 1 after match (got ${userLoanCount})`);
-  console.log(`  ✅ LEView canAccessLoanOrder(borrower)=true getUserLoanCount(borrower)=${userLoanCount.toString()}`);
+  if (userLoanCount < 1n) {
+    throw new Error(
+      `LoanNFTView: getUserLoanCount(borrower) must be >= 1 after match (got ${userLoanCount})`,
+    );
+  }
+  console.log(
+    `  ✅ LEView canAccessLoanOrder(borrower)=true LoanNFTView.getUserLoanCount(borrower)=${userLoanCount.toString()}`,
+  );
 
   // ---- Step 5: repay full (principal + interest) ----
   const termSec = BigInt(termDays) * ONE_DAY;
@@ -436,9 +480,13 @@ async function main() {
 
   console.log("\n✅ LendingEngine smoke PASSED");
   } finally {
-    if (!KEEP_STATE) {
-      await ethers.provider.send("evm_revert", [snap]);
-    } else {
+    if (USE_SNAPSHOT && !KEEP_STATE) {
+      try {
+        await ethers.provider.send("evm_revert", [snap]);
+      } catch {
+        // ignore on live networks
+      }
+    } else if (KEEP_STATE && USE_SNAPSHOT) {
       console.log("  ⚠️  KEEP_STATE=1: leaving localhost chain state modified by lendingengine-smoke-local.ts");
     }
   }

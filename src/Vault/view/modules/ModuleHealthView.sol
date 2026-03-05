@@ -328,7 +328,7 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
 
     function apiVersion() public pure override returns (uint256) {
-        // v2: add canonical meta-read (blockNumber/isValid) and align to single DataPush emitter:
+        // API change: add canonical meta-read (blockNumber/isValid) and align to single DataPush emitter:
         // HealthView.pushModuleHealth emits DataPushed(DATA_TYPE_MODULE_HEALTH); ModuleHealthView MUST NOT emit it.
         return 2;
     }

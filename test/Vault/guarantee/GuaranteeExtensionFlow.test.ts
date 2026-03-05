@@ -8,6 +8,36 @@ function calcExpectedInterest(principal: bigint, annualRateBps: bigint, termDays
   return (principal * annualRateBps * termDays) / (365n * 10_000n);
 }
 
+function calcExpectedEarlyRepaymentSplit(
+  record: { promisedInterest: bigint; startTime: bigint; maturityTime: bigint; earlyRepayPenaltyDays: bigint },
+  platformFeeRateBps: bigint,
+  currentBlock: bigint
+): { actualInterestPaid: bigint; penaltyToLender: bigint; refundToBorrower: bigint; platformFee: bigint } {
+  // Mirror EarlyRepaymentGuaranteeManager._calculateEarlyRepaymentResult (SSOT: blocks).
+  const startBlock = record.startTime;
+  const maturityBlock = record.maturityTime;
+  let totalBlocks = maturityBlock > startBlock ? (maturityBlock - startBlock) : 0n;
+  if (totalBlocks === 0n) totalBlocks = 1n;
+
+  let elapsedBlocks = currentBlock - startBlock;
+  if (elapsedBlocks > totalBlocks) elapsedBlocks = totalBlocks;
+
+  const promised = record.promisedInterest;
+  const actualInterestPaid = (promised * elapsedBlocks) / totalBlocks;
+
+  const penaltyBlocks = record.earlyRepayPenaltyDays; // legacy field name; semantics are penaltyBlocks
+  let penaltyInterest = (promised * penaltyBlocks) / totalBlocks;
+
+  const remainingGuarantee = promised - actualInterestPaid;
+  if (penaltyInterest > remainingGuarantee) penaltyInterest = remainingGuarantee;
+
+  const platformFee = (penaltyInterest * platformFeeRateBps) / 10_000n;
+  const penaltyToLender = actualInterestPaid + penaltyInterest - platformFee;
+  const refundToBorrower = promised - actualInterestPaid - penaltyInterest;
+
+  return { actualInterestPaid, penaltyToLender, refundToBorrower, platformFee };
+}
+
 async function deployUUPSProxy(implName: string, initData: string) {
   const ImplFactory = await ethers.getContractFactory(implName);
   const impl = await ImplFactory.deploy();
@@ -89,6 +119,17 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
       ])
     );
 
+    const feeRouter = await deployUUPSProxy(
+      'FeeRouter',
+      (await ethers.getContractFactory('FeeRouter')).interface.encodeFunctionData('initialize', [
+        registry.target,
+        owner.address,
+        owner.address,
+        300,
+        0,
+      ])
+    );
+
     const ergm = await deployUUPSProxy(
       'EarlyRepaymentGuaranteeManager',
       (await ethers.getContractFactory('EarlyRepaymentGuaranteeManager')).interface.encodeFunctionData('initialize', [
@@ -121,6 +162,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
       KEY_LIQUIDATION_RISK_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_RISK_MANAGER')),
       KEY_POSITION_VIEW: ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW')),
       KEY_LIQUIDATION_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_MANAGER')),
+      KEY_FR: ethers.keccak256(ethers.toUtf8Bytes('FEE_ROUTER')),
     } as const;
 
     await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, acm.target);
@@ -136,15 +178,19 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, risk.target);
     await registry.setModule(ModuleKeys.KEY_POSITION_VIEW, pvVal.target);
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, liquidationManager.target);
+    await registry.setModule(ModuleKeys.KEY_FR, feeRouter.target);
 
     // Roles
     const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
     const ACTION_ORDER_CREATE = ethers.keccak256(ethers.toUtf8Bytes('ORDER_CREATE'));
     const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
+    const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes('DEPOSIT'));
 
     await acm.grantRole(ACTION_SET_PARAMETER, owner.address);
     await acm.grantRole(ACTION_ORDER_CREATE, vbl.target);
     await acm.grantRole(ACTION_LIQUIDATE, keeper.address);
+    await acm.grantRole(ACTION_DEPOSIT, gfm.target);
+    await feeRouter.connect(owner).addSupportedToken(token.target);
 
     // Enable guarantee for this asset
     await ergm.connect(owner).setGuaranteeEnabled(token.target, true);
@@ -166,6 +212,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
       settlementManager,
       orderEngine,
       gfm,
+      feeRouter,
       ergm,
       vbl,
     };
@@ -204,7 +251,10 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     const guaranteeId = await ergm.getUserGuaranteeId(borrower.address, token.target);
     expect(guaranteeId).to.not.equal(0n);
 
-    const preview = await ergm.previewEarlyRepayment(guaranteeId, principal);
+    // NOTE: preview is block-sensitive (computed at `block.number`), while `repay` executes in a later block.
+    // We compute the expected split using the settle block number to avoid flaky 1-block drift.
+    const recordBefore = await ergm.getGuaranteeRecord(guaranteeId);
+    const feeRate = await ergm.platformFeeRate();
 
     // Ensure borrower can repay full principal even after paying guarantee
     await token.transfer(borrower.address, expectedInterest);
@@ -216,7 +266,10 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     const gfmBalBefore = await token.balanceOf(gfm.target);
     expect(gfmBalBefore).to.equal(expectedInterest);
 
-    await vaultCore.connect(borrower).repay(orderId, token.target, principal);
+    const tx = await vaultCore.connect(borrower).repay(orderId, token.target, principal);
+    const receipt = await tx.wait();
+    const settleBlock = BigInt(receipt!.blockNumber);
+    const expected = calcExpectedEarlyRepaymentSplit(recordBefore, feeRate, settleBlock);
 
     // custody cleared
     expect(await gfm.getLockedGuarantee(borrower.address, token.target)).to.equal(0n);
@@ -228,9 +281,9 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     const poolBalAfter = await token.balanceOf(lenderPoolVault.target);
     const ownerBalAfter = await token.balanceOf(owner.address);
 
-    expect(ownerBalAfter - ownerBalBefore).to.equal(preview.platformFee);
-    expect(poolBalAfter - poolBalBefore).to.equal(preview.penaltyToLender);
-    expect(userBalAfter).to.equal(userBalBefore - principal + preview.refundToBorrower);
+    expect(ownerBalAfter - ownerBalBefore).to.equal(expected.platformFee);
+    expect(poolBalAfter - poolBalBefore).to.equal(expected.penaltyToLender);
+    expect(userBalAfter).to.equal(userBalBefore - principal + expected.refundToBorrower);
   });
 
   it('settleOrLiquidate -> processes default guarantee forfeiture and clears custody', async function () {

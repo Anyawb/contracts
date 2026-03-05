@@ -7,7 +7,9 @@ pragma solidity ^0.8.20;
  * @dev Architecture SSOT:
  * - User write entrypoints live in VaultCore.
  * - deposit/withdraw route through VaultRouter -> CollateralManager.
- * - borrow writes the debt ledger via LendingEngine (onlyVaultCore enforced downstream).
+ * - Borrow disbursement + orderId creation is orchestrated via SSOT match/settlement paths
+ *   (e.g., VaultBusinessLogic.finalizeMatch(...) -> VaultCore.borrowFor(...) -> ORDER_ENGINE.createLoanOrder(...)).
+ *   Therefore there is intentionally no direct user-facing borrow entrypoint in VaultCore.
  * - repay MUST go through SettlementManager.repayAndSettle(orderId,...) (SSOT for repay/settle).
  *
  * Security:
@@ -34,23 +36,6 @@ interface IVaultCore {
      * @param amount Collateral amount (token decimals)
      */
     function deposit(address asset, uint256 amount) external;
-
-    /**
-     * @notice Borrow (authority path) via the LendingEngine module.
-     * @dev Reverts if:
-     *      - asset == address(0)
-     *      - amount == 0
-     *      - Registry module resolution fails (e.g., LendingEngine missing)
-     *      - LendingEngine reverts (e.g., onlyVaultCore / risk checks / limits)
-     *
-     * Security:
-     * - User entrypoint.
-     * - Non-reentrant in implementation.
-     *
-     * @param asset Debt asset address
-     * @param amount Borrow amount (token decimals)
-     */
-    function borrow(address asset, uint256 amount) external;
 
     /**
      * @notice Repay and settle (SSOT via SettlementManager).
@@ -105,26 +90,6 @@ interface IVaultCore {
      * @param amounts Collateral amounts (token decimals)
      */
     function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external;
-
-    /**
-     * @notice Batch borrow.
-     * @dev Reverts if:
-     *      - assets.length != amounts.length
-     *      - assets.length == 0
-     *      - assets.length exceeds the implementation batch cap
-     *      - any asset == address(0)
-     *      - any amount == 0
-     *      - Registry module resolution fails (e.g., LendingEngine missing)
-     *      - LendingEngine reverts for any item
-     *
-     * Security:
-     * - User entrypoint.
-     * - Non-reentrant in implementation.
-     *
-     * @param assets Debt asset addresses
-     * @param amounts Borrow amounts (token decimals)
-     */
-    function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external;
 
     /**
      * @notice Batch repay and settle.

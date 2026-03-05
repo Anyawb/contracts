@@ -46,7 +46,7 @@ flowchart TD
 
 出借人优先于借款人
 
-若同为借款人或出借人，按区块时间戳排序
+若同为借款人或出借人，按 **(blockNumber, logIndex)**（或显式 `seq`）排序（推荐；避免 timestamp 语义混淆）
 
 💰 撮合与上链落地逻辑（统一编排：SettlementMatchLib.finalizeAtomicFull）
 撮合成功后（VBL 仅做签名/保留校验），`SettlementMatchLib.finalizeAtomicFull` 执行以下步骤：
@@ -129,7 +129,7 @@ flowchart TD
 
 5. **奖励触发**：
    - 检查是否按期且足额还款：
-     - 按期窗口：到期日 ±24小时（ON_TIME_WINDOW = 24 hours）
+     - 按期窗口（时间口径 SSOT=blocks）：到期块高度 ±`ON_TIME_WINDOW_BLOCKS`（基线：7200 blocks \(\approx\) 24h，仅用于理解/展示；链上判定以 blocks 为准）
      - 足额：`repaidAmount >= totalDue`
    - 调用 `RewardManager.onLoanEvent(borrower, repayAmount, 0, isOnTimeAndFullyRepaid)` 触发积分奖励
    - 借方和贷方根据履约情况获得积分

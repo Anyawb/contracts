@@ -629,7 +629,10 @@ async function getPriceData(asset: string) {
         const priceData = await priceOracle.getPriceData(asset);
         return {
             price: priceData.price.toString(),
-            blockNumber: priceData.timestamp.toString(),
+            // NOTE (Time-Dependency-Refactor):
+            // - `PriceData.blockNumber` is an informational source marker for the quote (not freshness SSOT).
+            // - Freshness SSOT is `getPriceUpdateBlock(asset)` (block.number axis).
+            blockNumber: priceData.blockNumber.toString(),
             assetDecimals: priceData.assetDecimals.toString(),
             isValid: priceData.isValid,
             // price 是 USD-8（$1.00 = 100000000）
@@ -1441,7 +1444,7 @@ if (!hasConfigPermission) {
 **排查步骤**：
 1. 检查权限
 2. 检查价格格式（必须是8位精度）
-3. 检查时间戳（不能是未来时间）
+3. 检查 `blockNumber`（不能是未来块高；并建议保持单调不回退）
 4. 检查资产是否已配置
 
 **解决方案**：

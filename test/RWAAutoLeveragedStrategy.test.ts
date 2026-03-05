@@ -244,7 +244,7 @@ describe('RWAAutoLeveragedStrategy', function () {
           200n, // minLeverage
           150n  // maxLeverage
         )
-      ).to.be.revertedWith('Invalid leverage range');
+      ).to.be.revertedWithCustomError(strategyFactory, 'Strategy__InvalidLeverageRange');
     });
   });
 
@@ -385,7 +385,7 @@ describe('RWAAutoLeveragedStrategy', function () {
           insufficientCollateral,
           LEVERAGE_RATIO
         )
-      ).to.be.revertedWithCustomError(strategyContract, 'AmountIsZero');
+      ).to.be.revertedWithCustomError(strategyContract, 'Strategy__CollateralTooSmall');
     });
   });
 

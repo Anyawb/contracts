@@ -94,6 +94,16 @@ describe('Funds Flow Architecture (SSOT)', function () {
     const LEF = await ethers.getContractFactory('MockLendingEngineBasic');
     const le = await LEF.deploy();
 
+    const TokenF = await ethers.getContractFactory('MockERC20');
+    const collateralToken = await TokenF.deploy('Collateral', 'COL', 18, ethers.parseUnits('1000000', 18));
+
+    const FeeRouterF = await ethers.getContractFactory('FeeRouter');
+    const feeRouter = await upgrades.deployProxy(
+      FeeRouterF,
+      [registry.target, owner.address, owner.address, 300, 0],
+      { kind: 'uups', initializer: 'initialize' }
+    );
+
     const PayoutF = await ethers.getContractFactory('LiquidationPayoutManager');
     const payout = await upgrades.deployProxy(
       PayoutF,
@@ -118,18 +128,23 @@ describe('Funds Flow Architecture (SSOT)', function () {
     await registry.setModule(ModuleKeys.KEY_LE, le.target);
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_PAYOUT_MANAGER, payout.target);
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, liquidation.target);
+    await registry.setModule(ModuleKeys.KEY_FR, feeRouter.target);
 
     await acm.grantRole(ActionKeys.ACTION_LIQUIDATE, liquidator.address);
+    await acm.grantRole(ActionKeys.ACTION_DEPOSIT, liquidation.target);
+    await acm.grantRole(ActionKeys.ACTION_SET_PARAMETER, owner.address);
+    await feeRouter.connect(owner).addSupportedToken(collateralToken.target);
 
-    return { user, liquidator, cm, le, payout, liquidation };
+    return { user, liquidator, cm, le, payout, liquidation, collateralToken };
   }
 
   it('Liquidation Flow: LiquidationManager writes CM/LE and emits payout', async function () {
-    const { user, liquidator, cm, le, payout, liquidation } = await loadFixture(deployLiquidationFlowFixture);
-    const collateralAsset = ethers.Wallet.createRandom().address;
+    const { user, liquidator, cm, le, payout, liquidation, collateralToken } = await loadFixture(deployLiquidationFlowFixture);
+    const collateralAsset = collateralToken.target;
     const debtAsset = ethers.Wallet.createRandom().address;
 
     await cm.setUserCollateral(user.address, collateralAsset, 1000);
+    await collateralToken.mint(cm.target, 1000);
     await le.setUserDebt(user.address, debtAsset, 500);
 
     const collateralAmount = 400;

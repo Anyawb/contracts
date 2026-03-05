@@ -474,13 +474,13 @@ describe('StatisticsView – 全面测试', function () {
 
       const [reward] = await stats.getRewardStatsWithMeta();
       expect(reward.rewardRate).to.equal(0n);
-      expect(reward.totalRewardPoints).to.equal(0n);
+      expect(reward.totalEasyTokenSupply).to.equal(0n);
     });
 
     it('rewardRate 语义已移除，应固定为 0', async function () {
       const { stats, registry } = await loadFixture(deployFixture);
 
-      // 即使注册了 RewardManager，rewardRate 也应为 0（只读查询迁移至 RewardView/RewardPoints）
+      // 即使注册了 RewardManager，rewardRate 也应为 0（只读查询迁移至 RewardView/EasyToken）
       const RmF = await ethers.getContractFactory('MockRewardManager');
       const rm = await RmF.deploy();
       await registry.setModule(KEY_RM, await rm.getAddress());
@@ -495,7 +495,7 @@ describe('StatisticsView – 全面测试', function () {
       // 如果模块不存在，getModule 返回 address(0)，会直接返回零值
       const [reward] = await stats.getRewardStatsWithMeta();
       expect(reward.rewardRate).to.equal(0n);
-      expect(reward.totalRewardPoints).to.equal(0n);
+      expect(reward.totalEasyTokenSupply).to.equal(0n);
     });
   });
 

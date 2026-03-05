@@ -63,7 +63,7 @@ describe("StatisticsPushManager (strict B+) – USD-8 snapshot pipeline", functi
     return { admin, outsider, registry, acm, stats, pushMgr, pv, le };
   }
 
-  it("emits CacheUpdateFailedV2 (best-effort) when a dependency is missing", async function () {
+  it("emits CacheUpdateFailedWithContext (best-effort) when a dependency is missing", async function () {
     const { admin, registry, stats, pushMgr } = await loadFixture(deployFixture);
 
     const user = ethers.Wallet.createRandom().address;
@@ -73,7 +73,7 @@ describe("StatisticsPushManager (strict B+) – USD-8 snapshot pipeline", functi
 
     const tx = await pushMgr.connect(admin).retryUserStats(user);
     await expect(tx)
-      .to.emit(pushMgr, "CacheUpdateFailedV2")
+      .to.emit(pushMgr, "CacheUpdateFailedWithContext")
       .withArgs(user, ethers.ZeroAddress, anyValue, await stats.getAddress(), 0n, 0n, anyValue, anyValue, 0);
   });
 

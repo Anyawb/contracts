@@ -8,7 +8,7 @@ contract MockLiquidationProfitStatsManager {
     struct ProfitStats {
         uint256 totalProfit;
         uint256 totalLiquidations;
-        uint256 lastLiquidationTime;
+        uint256 lastLiquidationBlock;
     }
 
     mapping(address => ProfitStats) private _profitStats;
@@ -17,17 +17,17 @@ contract MockLiquidationProfitStatsManager {
     /// @param liquidator Liquidator address
     /// @param totalProfit Total profit earned
     /// @param totalLiquidations Total number of liquidations
-    /// @param lastLiquidationTime Timestamp of last liquidation
+    /// @param lastLiquidationBlock Last liquidation blockNumber (block.number axis; legacy mock)
     function setProfitStats(
         address liquidator,
         uint256 totalProfit,
         uint256 totalLiquidations,
-        uint256 lastLiquidationTime
+        uint256 lastLiquidationBlock
     ) external {
         _profitStats[liquidator] = ProfitStats({
             totalProfit: totalProfit,
             totalLiquidations: totalLiquidations,
-            lastLiquidationTime: lastLiquidationTime
+            lastLiquidationBlock: lastLiquidationBlock
         });
     }
 
@@ -35,17 +35,17 @@ contract MockLiquidationProfitStatsManager {
     /// @param liquidator Liquidator address
     /// @return totalProfit Total profit earned
     /// @return totalLiquidations Total number of liquidations
-    /// @return lastLiquidationTime Timestamp of last liquidation
+    /// @return lastLiquidationBlock Last liquidation blockNumber
     function getProfitStats(address liquidator)
         external
         view
         returns (
             uint256 totalProfit,
             uint256 totalLiquidations,
-            uint256 lastLiquidationTime
+            uint256 lastLiquidationBlock
         )
     {
         ProfitStats memory stats = _profitStats[liquidator];
-        return (stats.totalProfit, stats.totalLiquidations, stats.lastLiquidationTime);
+        return (stats.totalProfit, stats.totalLiquidations, stats.lastLiquidationBlock);
     }
 }

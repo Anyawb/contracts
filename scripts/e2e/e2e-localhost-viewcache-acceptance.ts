@@ -64,8 +64,8 @@
  */
 
 import { ethers, network } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
-import { runViewPreflight } from "./utils/view-preflight";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { runViewPreflight } from "./utils/view-preflight.ts";
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -219,6 +219,14 @@ async function main() {
     const assetB = ethers.Wallet.createRandom().address;
 
     // --- VC-01: 读返回 staleness（未写入时 updateBlock=0、isValid=false）---
+    // Ensure a clean baseline: clear cache for assetA/assetB (tests can run on a dirty localhost chain).
+    const ROLE_ADMIN = key("ACTION_ADMIN");
+    if (!(await acm.hasRole(ROLE_ADMIN, deployer.address))) {
+      await acm.connect(deployer).grantRole(ROLE_ADMIN, deployer.address);
+    }
+    await vc.connect(deployer).clearSystemCache(assetA);
+    await vc.connect(deployer).clearSystemCache(assetB);
+
     const [s0, v0] = (await mustSucceed("ViewCache.getSystemStatus(assetA)", async () => vc.getSystemStatus(assetA))) as [
       { updateBlock: bigint },
       boolean,
@@ -230,7 +238,6 @@ async function main() {
     // --- VC-02: 写入口权限（无权限 MissingRole；非法 asset revert）---
     // ViewCache uses ActionKeys.ACTION_VIEW_SYSTEM_DATA == keccak256("VIEW_SYSTEM_DATA")
     const ROLE_VIEW_SYSTEM_DATA = key("VIEW_SYSTEM_DATA");
-    const ROLE_ADMIN = key("ACTION_ADMIN");
 
     // Ensure deployer can write (either VIEW_SYSTEM_DATA or ADMIN).
     if (!(await acm.hasRole(ROLE_VIEW_SYSTEM_DATA, deployer.address)) && !(await acm.hasRole(ROLE_ADMIN, deployer.address))) {

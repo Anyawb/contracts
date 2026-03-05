@@ -11,6 +11,7 @@ import { IOrderEngine } from "../interfaces/IOrderEngine.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
 import { IFeeRouter } from "../interfaces/IFeeRouter.sol";
 import { ILenderPoolVault } from "../interfaces/ILenderPoolVault.sol";
+import { TermBlocksLib } from "./TermBlocksLib.sol";
 
 /**
  * @dev Minimal VaultCore interface for typed calls.
@@ -44,14 +45,9 @@ library SettlementMatchLib {
     error SettlementMatchLib__CollateralTopUpNotSupported();
 
     /*━━━━━━━━━━━━━━━ TIME AXIS (SSOT: blocks) ━━━━━━━━━━━━━━━*/
-    /// @dev Baseline blocks-per-day used across this repo (assumes ~12s/block).
-    ///      Frontend/keeper should do ETA mapping offchain.
-    uint256 private constant BLOCKS_PER_DAY = 7200;
-
-    /// @dev Convert a term in days to blocks (SSOT: block-based term).
-    function _termDaysToBlocks(uint16 termDays) private pure returns (uint256) {
-        return uint256(termDays) * BLOCKS_PER_DAY;
-    }
+    /// @dev NOTE (Time-Dependency-Refactor):
+    /// - We avoid any onchain "days->blocks" arithmetic.
+    /// - `termDays` is a legacy bucket identifier; mapping to blocks is explicit via {TermBlocksLib}.
 
     /*━━━━━━━━━━━━━━━ INTERNAL HELPERS ━━━━━━━━━━━━━━━*/
     function _requireRole(address registry, bytes32 actionKey, address user) private view {
@@ -141,7 +137,7 @@ library SettlementMatchLib {
             principal: amount,
             rate: rateBps,
             // SSOT (time refactor): term is measured in blocks, not seconds.
-            term: _termDaysToBlocks(termDays),
+            term: TermBlocksLib.termDaysToBlocks(termDays),
             borrower: borrower,
             lender: lender,
             asset: borrowAsset,
@@ -220,7 +216,7 @@ library SettlementMatchLib {
             principal: amount,
             rate: rateBps,
             // SSOT (time refactor): term is measured in blocks, not seconds.
-            term: _termDaysToBlocks(termDays),
+            term: TermBlocksLib.termDaysToBlocks(termDays),
             borrower: borrower,
             lender: lender,
             asset: borrowAsset,

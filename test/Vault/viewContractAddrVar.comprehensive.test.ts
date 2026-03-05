@@ -85,11 +85,12 @@ describe('viewContractAddrVar - 全面功能测试', function () {
     const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as MockERC20;
 
     // Configure price oracle
-    const nowTs = Math.floor(Date.now() / 1000);
+    // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
+    const nowBlock = await ethers.provider.getBlockNumber();
     const priceValue = ethers.parseUnits('1', 8);
     const testAsset = ethers.Wallet.createRandom().address;
-    await priceOracle.connect(admin).setPrice(testAsset, priceValue, nowTs, 8);
-    await priceOracle.connect(admin).setPrice(await settlementToken.getAddress(), priceValue, nowTs, 8);
+    await priceOracle.connect(admin).setPrice(testAsset, priceValue, nowBlock, 8);
+    await priceOracle.connect(admin).setPrice(await settlementToken.getAddress(), priceValue, nowBlock, 8);
 
     // Deploy VaultCore（UUPS：必须通过 Proxy 初始化；实现合约 constructor 已禁用 initialize）
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
@@ -355,10 +356,10 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       const asset2 = ethers.Wallet.createRandom().address;
       
       // 为两个资产设置价格
-      const nowTs = Math.floor(Date.now() / 1000);
+      const nowBlock = await ethers.provider.getBlockNumber();
       const priceValue = ethers.parseUnits('1', 8);
-      await priceOracle.connect(admin).setPrice(asset1, priceValue, nowTs, 8);
-      await priceOracle.connect(admin).setPrice(asset2, priceValue, nowTs, 8);
+      await priceOracle.connect(admin).setPrice(asset1, priceValue, nowBlock, 8);
+      await priceOracle.connect(admin).setPrice(asset2, priceValue, nowBlock, 8);
       
       // 存入两个资产的抵押物
       await collateralManager.depositCollateral(user.address, asset1, 100);

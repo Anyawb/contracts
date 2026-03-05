@@ -318,7 +318,7 @@ mapping(address => mapping(address => uint256)) private _userCollateral;
 
 // 升级后如果需要添加新字段
 mapping(address => mapping(address => uint256)) private _userCollateral;
-mapping(address => mapping(address => uint256)) private _userCollateralV2; // 新字段
+mapping(address => mapping(address => uint256)) private _userCollateralNew; // 新字段
 ```
 
 #### 影响
@@ -339,8 +339,8 @@ mapping(address => mapping(address => uint256)) private _userCollateralV2; // �
      - `apiVersion`：对外 API 语义版本（函数/事件语义变化时递增）
      - `schemaVersion`：缓存/输出结构版本（字段/编码/解释变化时递增）
      - 存储变量仍必须遵循 **append-only**（仅追加到 `__gap` 之前并缩减 `__gap`），避免破坏布局
-   - **A：关键模块显式 V2/V3（外部依赖强时）**：
-     - 例如保留旧事件/旧入口，并新增 `*V2` 事件携带新字段（如 `blockNumber/version`），实现平滑迁移
+  - **A：关键模块显式语义化 companion（外部依赖强时）**：
+     - 例如保留旧事件/旧入口，并新增 `*AtBlock/*WithVersion/*WithBlockMeta` 事件或接口携带新字段（如 `updateBlock/version/ageBlocks`），实现平滑迁移
      - 对写入型缓存接口，结合 `nextVersion/requestId/seq` 做并发与幂等控制，避免乱序/重复覆盖
 
 ### 7. VaultLendingEngine 规模过大 ⚠️ **高风险** ✅ 已验证
@@ -707,7 +707,7 @@ modifier onlyBusinessContract() {
 
 #### 问题描述（历史问题，已修复）
 根据架构文档，`VaultCore` 应统一调用 `LendingEngine` 进行账本写入。但历史代码路径存在问题：
-1. `VaultCore.borrow` 调用 `VaultRouter.processUserOperation`。
+1. `VaultCore.borrow`（旧版用户入口）调用 `VaultRouter.processUserOperation`。
 2. `VaultRouter.processUserOperation` 调用 `_distributeToModule`。
 3. `VaultRouter._distributeToModule` 针对 `ACTION_BORROW` **未执行任何操作**（空代码块）。
 4. `VaultLendingEngine.borrow` 具有 `onlyVaultCore` 修饰符，要求 `msg.sender` 必须为 `VaultCore`。
@@ -715,28 +715,32 @@ modifier onlyBusinessContract() {
 **历史结果**：标准借贷流程无法执行。`VaultCore` 委托给 `VaultRouter`，但 `VaultRouter` 不作为，且即使 `VaultRouter` 尝试调用 `LendingEngine`，也会因权限校验失败（`msg.sender` 为 `VaultRouter` 而非 `VaultCore`）而 revert。
 
 #### 当前状态（已实施解决方案）
-- ✅ **采用方案 A**：`VaultCore` 直接调用 `LendingEngine`（`ILendingEngineBasic.borrow/repay`），不再经过 `VaultRouter` 进行账本写入操作。
-- ✅ **实现细节**：
-  - `VaultCore.borrow()`（第84-88行）：直接从 Registry 解析 `KEY_LE`，调用 `ILendingEngineBasic.borrow(msg.sender, asset, amount, 0, 0)`
-  - `VaultCore.repay()`（第94-98行）：直接从 Registry 解析 `KEY_LE`，调用 `ILendingEngineBasic.repay(msg.sender, asset, amount)`
-  - `VaultRouter._distributeToModule()`：对 `ACTION_BORROW` 和 `ACTION_REPAY` 保持空代码块，仅更新本地缓存（`_updateLocalState`），符合"写入不经 View"原则
-  - `LendingEngine` 通过 `onlyVaultCore` 修饰符确保仅 `KEY_VAULT_CORE` 可调用账本写入函数
-- ✅ **符合架构原则**：遵循 Architecture-Guide.md 中"写入不经 View"的核心原则，账本写入统一由 VaultCore 执行，View 层仅负责缓存更新和事件发出。
+- ✅ **SSOT 收敛（当前实现）**：
+  - **Borrow（放款 + 订单创建）**：不再提供 direct user `VaultCore.borrow(...)`（该入口已移除，避免绕开 orderId/费用/Reward 编排）
+    - 权威路径：`VaultBusinessLogic.finalizeMatch(...) -> SettlementMatchLib.finalizeAtomicFull(...)`
+    - 账本写入入口：内部通过 `VaultCore.borrowFor(borrower, asset, amount, termDays)` 触达 `KEY_LE`
+    - 订单创建：内部通过 `ORDER_ENGINE(LendingEngine).createLoanOrder(...)` 创建 `orderId`（SSOT）
+  - **Repay/Settle（唯一入口）**：`VaultCore.repay(orderId, asset, amount)` → `SettlementManager.repayAndSettle(...)`
+  - **VaultRouter**：仅处理 deposit/withdraw 的路由与 View push 转发；不承接借还账本写入（符合“写入不经 View”）
+  - **LendingEngine/VaultLendingEngine（KEY_LE）**：通过 `onlyVaultCore` 确保账本写入口收敛
+- ✅ **符合架构原则**：写入账本不经 View；orderId 与资金拨付路径以 Funds-Flow SSOT 为准。
 - ✅ **View 推送失败处理**：遵循 Architecture-Guide.md 的"最佳努力"模式（第41-46行），使用 try/catch 处理 View 推送失败，失败时发出 `CacheUpdateFailed` 事件，主流程不回滚，保障账本写入的可用性。
 
 #### 数据流路径
 ```
-用户调用 VaultCore.borrow/repay
+撮合/keeper 调用 VaultBusinessLogic.finalizeMatch(...)
   ↓
-VaultCore 直接从 Registry 解析 KEY_LE
+SettlementMatchLib.finalizeAtomicFull（出金/费用/订单落地）
   ↓
-直接调用 ILendingEngineBasic.borrow/repay（账本写入）
+VaultCore.borrowFor（账本写入入口）→ KEY_LE
   ↓
-LendingEngine 内部：
-  1. 更新账本（recordBorrow/recordRepay）
-  2. 推送 View 缓存（_pushUserPositionToView，最佳努力模式）
-  3. 推送健康状态（_pushHealthStatus）
-  4. 触发奖励（_notifyRewardManager）
+ORDER_ENGINE.createLoanOrder（orderId SSOT）→ Reward/NFT/DataPush（按模块 SSOT）
+
+用户调用 VaultCore.repay(orderId, ...)
+  ↓
+SettlementManager.repayAndSettle（repay/settle SSOT）
+  ↓
+ORDER_ENGINE.repay + CollateralManager.withdrawCollateralTo（必要时释放抵押）
 ```
 
 #### 测试文件：
@@ -762,14 +766,14 @@ LendingEngine 内部：
 目标：保证 Reward 仅通过 **唯一路径**触发与结算，避免“绕过入口/未落账先发/权限绕过”。
 
 - **入口收敛（强约束）**
-  - 允许的唯一路径：`LendingEngine` → `RewardManager.onLoanEvent(uint256)` → `RewardManagerCore.onLoanEvent(uint256)`
-  - `RewardManagerCore.onLoanEvent` / `onBatchLoanEvents` 必须拒绝任何非 `RewardManager` 的直接调用：
+  - 允许的唯一路径：`LendingEngine (OrderEngine)` → `RewardManager.onLoanEventByOrder(...)` → `RewardManagerCore.onLoanEventByOrder(...)`（legacy `onLoanEvent(...)` 仅兼容回退）
+  - `RewardManagerCore.onLoanEvent` / `onLoanEventByOrder` 必须拒绝任何非 `RewardManager` 的直接调用：
     - revert：`RewardManagerCore__UseRewardManagerEntry`
     - event：`DeprecatedDirectEntryAttempt(caller,blockNumber)`（供链下审计）
 - **代码级检查（grep/CI 可执行）**
   - 全仓库不应出现除 `src/Reward/RewardManager.sol` 之外的：
-    - `RewardManagerCore(...).onLoanEvent(` / `RewardManagerCore(...).onBatchLoanEvents(`
-  - 业务链路（LE）仅调用 `IRewardManager.onLoanEvent(...)`（最佳努力 try/catch 允许失败不回滚）
+    - `RewardManagerCore(...).onLoanEvent(`（legacy） / `RewardManagerCore(...).onLoanEventByOrder(`（按订单入口）
+  - 业务链路（LE）优先调用 `IRewardManagerByOrder.onLoanEventByOrder(...)`，并在不支持时回退到 `IRewardManager.onLoanEvent(...)`（最佳努力 try/catch 允许失败不回滚）
 - **测试/脚本覆盖（至少其一满足）**
   - 单元/集成测试：断言“直接调用 RMCore 会 revert（UseRewardManagerEntry）”，且标准入口可正常触发积分发放/扣罚。
   - E2E：通过 `RewardView` 验证积分数据（earned/burned/penaltyLedger 等）随 borrow/repay 的落账路径发生变化。
@@ -1020,7 +1024,7 @@ function viewContractAddrVar() external view returns (address) {
 | 12 | **完善存储迁移文档** ✅ | 提供具体实现指南和模板 | 文档维护 |
 | 13 | **并发更新处理** ✅ | 使用增量更新或统一入口 | 核心开发 |
 | 14 | **存储成本优化** | 选择性缓存，定期清理 | 核心开发 |
-| 15 | **升级兼容性** ✅ | `__gap` + `apiVersion/schemaVersion/getVersionInfo`（关键模块可用 V2 事件/旧入口兼容） | 核心开发 |
+| 15 | **升级兼容性** ✅ | `__gap` + `apiVersion/schemaVersion/getVersionInfo`（关键模块可用语义化 companion 事件/旧入口兼容） | 核心开发 |
 | 16 | **验证 Reward 模块入口** ✅ | 确保无遗留直接调用 | QA 团队 |
 | 17 | **健康推送静默失败优化** | 增加 HealthPushFailed 事件 | 核心开发 |
 
@@ -1114,9 +1118,9 @@ function viewContractAddrVar() external view returns (address) {
 
 | 日期 | 版本 | 更新内容 |
 |------|------|----------|
-| 2025-12-15 | v2.2 | **二次验证**：通过代码级分析确认P0问题存在，新增问题19（viewContractAddrVar缺失），共发现3个P0级问题 |
-| 2025-12-15 | v2.1 | **紧急审计**：发现借贷流程断裂和奖励缺失等P0级阻断性缺陷，更新优先级 |
-| 2025-12-15 | v2.0 | 基于最新架构分析报告全面更新，新增10个问题点 |
+| 2025-12-15 | 2.2 | **二次验证**：通过代码级分析确认P0问题存在，新增问题19（viewContractAddrVar缺失），共发现3个P0级问题 |
+| 2025-12-15 | 2.1 | **紧急审计**：发现借贷流程断裂和奖励缺失等P0级阻断性缺陷，更新优先级 |
+| 2025-12-15 | 2.0 | 基于最新架构分析报告全面更新，新增10个问题点 |
 | - | v1.0 | 初始版本 |
 
 ---

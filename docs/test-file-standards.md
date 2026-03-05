@@ -82,8 +82,9 @@ expect(result.lastUpdateTime).to.be.gt(0);
 // ✅ 正确 - 使用 BigInt 比较
 expect(result.lastUpdateTime).to.be.gt(BigInt(0));
 
-// ✅ 正确 - 使用时间戳比较
-expect(result.lastUpdateTime).to.be.gt(Math.floor(Date.now() / 1000));
+// ✅ 正确 - 使用区块号（block number）比较（推荐：Time-Dependency-Refactor SSOT）
+const currentBlock = await ethers.provider.getBlockNumber();
+expect(result.lastUpdateTime).to.be.lte(currentBlock);
 ```
 
 ### 3. 模块导入问题
@@ -487,9 +488,10 @@ expect(result).to.equal(BigInt(100));        // 期望 bigint
 expect(result).to.equal(ethers.parseUnits('1000', 18)); // 期望 bigint
 expect(result).to.equal('0x123...');         // 期望 string (地址)
 
-// ✅ 时间戳比较
+// ✅ 区块号比较（推荐）
 expect(result.lastUpdateTime).to.be.gt(0);   // 期望 number
-expect(result.lastUpdateTime).to.be.gt(Math.floor(Date.now() / 1000)); // 期望 number
+const currentBlock = await ethers.provider.getBlockNumber();
+expect(result.lastUpdateTime).to.be.lte(currentBlock); // 期望 number
 
 // ❌ 避免类型不匹配
 expect(result).to.equal(100);                // 可能类型不匹配
@@ -1269,8 +1271,9 @@ expect(result.lastUpdateTime).to.be.gt(BigInt(0));
 // ✅ 正确 - 使用数字类型
 expect(result.lastUpdateTime).to.be.gt(0);
 
-// ✅ 正确 - 使用时间戳
-expect(result.lastUpdateTime).to.be.gt(Math.floor(Date.now() / 1000));
+// ✅ 正确 - 使用区块号（block number）
+const currentBlock = await ethers.provider.getBlockNumber();
+expect(result.lastUpdateTime).to.be.lte(currentBlock);
 ```
 
 ### 问题9: "Module can only be default-imported using the 'esModuleInterop' flag"
@@ -1961,7 +1964,7 @@ beforeEach(async function () {
 2. **测试框架语法** - 使用 Hardhat + Chai 的正确语法，避免 Chai-as-promised 冲突
 3. **Mock 合约选择** - 使用具体合约而不是抽象合约
 4. **BigInt 使用** - 使用 BigInt() 构造函数确保兼容性
-5. **类型安全** - 确保数值类型匹配，特别是时间戳比较
+5. **类型安全** - 确保数值类型匹配，特别是区块号/更新时间字段的比较
 6. **错误处理** - 正确区分自定义错误和字符串错误
 7. **权限管理** - 正确使用 grantRole/revokeRole
 8. **代币管理** - 确保合约和用户都有足够的代币余额

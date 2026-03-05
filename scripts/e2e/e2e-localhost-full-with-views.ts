@@ -1,8 +1,8 @@
 import { ethers, network } from "hardhat";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
-import { runViewPreflight } from "./utils/view-preflight";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { runViewPreflight } from "./utils/view-preflight.ts";
 
 const BLOCKS_PER_DAY = 7_200n;
 const ONE_HOUR_BLOCKS = 1_800n;
@@ -96,26 +96,41 @@ async function main() {
 
   // ============ Setup Contracts ============
   const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
-  const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
-  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
-  const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter)) as any;
+  const acmAddrFromRegistry = (await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"))) as string;
+  const assetWhitelistAddrFromRegistry = (await registry.getModuleOrRevert(key("ASSET_WHITELIST"))) as string;
+  const priceOracleAddrFromRegistry = (await registry.getModuleOrRevert(key("PRICE_ORACLE"))) as string;
+  const feeRouterAddrFromRegistry = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
+  const settlementManagerAddrFromRegistry = (await registry.getModuleOrRevert(key("SETTLEMENT_MANAGER"))) as string;
+  const settlementTokenAddrFromRegistry = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
+  const vaultCoreFromRegistryAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
+  const vblAddrFromRegistry = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
+  const cmAddrFromRegistry = (await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"))) as string;
+  const gfmAddrFromRegistry = (await registry.getModule(key("GUARANTEE_FUND_MANAGER"))) as string;
+
+  const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
+  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
+  const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddrFromRegistry)) as any;
   const settlementManager = (await ethers.getContractAt(
     "src/Vault/liquidation/modules/SettlementManager.sol:SettlementManager",
-    CONTRACT_ADDRESSES.SettlementManager
+    settlementManagerAddrFromRegistry
   )) as any;
-  const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
-  const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
-  const vbl = (await ethers.getContractAt("VaultBusinessLogic", CONTRACT_ADDRESSES.VaultBusinessLogic)) as any;
-  const cm = (await ethers.getContractAt("CollateralManager", CONTRACT_ADDRESSES.CollateralManager)) as any;
-  const vle = (await ethers.getContractAt("src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine", CONTRACT_ADDRESSES.VaultLendingEngine)) as any;
+  const usdc = (await ethers.getContractAt("MockERC20", settlementTokenAddrFromRegistry)) as any;
+  const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreFromRegistryAddr)) as any;
+  const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddrFromRegistry)) as any;
+  const vaultLendingEngineAddrFromRegistry = (await registry.getModuleOrRevert(key("LENDING_ENGINE"))) as string;
+  const cm = (await ethers.getContractAt("CollateralManager", cmAddrFromRegistry)) as any;
+  const vle = (await ethers.getContractAt(
+    "src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine",
+    vaultLendingEngineAddrFromRegistry
+  )) as any;
 
   // MUST: Preflight for route↔registry + version info + required roles
   await runViewPreflight({
     registryAddr: CONTRACT_ADDRESSES.Registry,
-    acmAddr: CONTRACT_ADDRESSES.AccessControlManager,
+    acmAddr: acmAddrFromRegistry,
     adminSigner: deployer,
-    assetForPriceCheck: CONTRACT_ADDRESSES.MockUSDC,
+    assetForPriceCheck: settlementTokenAddrFromRegistry,
   });
 
   // Pick "clean" borrower/lender to make re-runs on dirty node stable.
@@ -124,7 +139,7 @@ async function main() {
   let borrower = signers[1];
   let lender = signers[2];
   try {
-    const assetAddr = usdc.target as string;
+    const assetAddr = settlementTokenAddrFromRegistry;
     const ergmAddr =
       ((await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE_MANAGER"))) as string) ||
       ((await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE"))) as string);
@@ -174,10 +189,10 @@ async function main() {
   const loanNftAddr = await registry.getModuleOrRevert(key("LOAN_NFT"));
   const loanNft = (await ethers.getContractAt("LoanNFT", loanNftAddr)) as any;
 
-  const rewardPointsAddr = await registry.getModuleOrRevert(key("REWARD_POINTS"));
-  const rewardPoints = (await ethers.getContractAt("src/Token/RewardPoints.sol:RewardPoints", rewardPointsAddr)) as any;
-  const rewardDecimals = (await rewardPoints.decimals()) as number;
-  const fmtPoints = (x: bigint) => ethers.formatUnits(x, rewardDecimals);
+  const easyTokenAddr = await registry.getModuleOrRevert(key("EASY_TOKEN"));
+  const easyToken = (await ethers.getContractAt("src/Token/EasyToken.sol:EasyToken", easyTokenAddr)) as any;
+  const easyDecimals = (await easyToken.decimals()) as number;
+  const fmtEasy = (x: bigint) => ethers.formatUnits(x, easyDecimals);
 
   console.log("📋 View Modules:");
   console.log("  PositionView:", positionViewAddr);
@@ -187,7 +202,7 @@ async function main() {
   console.log("  DashboardView:", dashboardViewAddr);
   console.log("  RiskView:", riskViewAddr);
   console.log("  UserView:", userViewAddr);
-  console.log("  RewardPoints:", rewardPointsAddr);
+  console.log("  EasyToken:", easyTokenAddr);
   console.log("");
 
   // ============ Setup Roles ============
@@ -210,32 +225,32 @@ async function main() {
   await ensureRole(ACTION_ADD_WHITELIST, deployer.address);
   await ensureRole(ACTION_UPDATE_PRICE, deployer.address);
   await ensureRole(ACTION_SET_PARAMETER, deployer.address);
-  await ensureRole(ACTION_ORDER_CREATE, CONTRACT_ADDRESSES.VaultBusinessLogic);
-  await ensureRole(ACTION_DEPOSIT, CONTRACT_ADDRESSES.VaultBusinessLogic);
+  await ensureRole(ACTION_ORDER_CREATE, vblAddrFromRegistry);
+  await ensureRole(ACTION_DEPOSIT, vblAddrFromRegistry);
   await ensureRole(ACTION_BORROW, orderEngineAddr);
   await ensureRole(ACTION_REPAY, borrower.address);
   // SSOT repay path: VaultCore.repay -> SettlementManager.repayAndSettle -> ORDER_ENGINE.repay.
   // ORDER_ENGINE.repay is role-gated by ACTION_REPAY, so SettlementManager must have this role.
-  await ensureRole(ACTION_REPAY, CONTRACT_ADDRESSES.SettlementManager);
+  await ensureRole(ACTION_REPAY, settlementManagerAddrFromRegistry);
   console.log("");
 
   // ============ Setup Asset & Price ============
   console.log("💰 Setting up asset whitelist and price...");
-  if (!(await aw.isAssetAllowed(usdc.target))) {
-    await aw.connect(deployer).addAllowedAsset(usdc.target);
+  if (!(await aw.isAssetAllowed(settlementTokenAddrFromRegistry))) {
+    await aw.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
   }
   {
-    const cfg = await po.getAssetConfig(usdc.target);
+    const cfg = await po.getAssetConfig(settlementTokenAddrFromRegistry);
     if (!cfg.isActive) {
       const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
-      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
+      await po.connect(deployer).configureAsset(settlementTokenAddrFromRegistry, "usd-coin", usdcDecimals, 3600);
     }
   }
   const blockNumber = await ethers.provider.getBlockNumber();
-  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 6), blockNumber);
+  await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 6), blockNumber);
 
-  if (!(await feeRouter.isTokenSupported(usdc.target))) {
-    await feeRouter.connect(deployer).addSupportedToken(usdc.target);
+  if (!(await feeRouter.isTokenSupported(settlementTokenAddrFromRegistry))) {
+    await feeRouter.connect(deployer).addSupportedToken(settlementTokenAddrFromRegistry);
   }
   console.log("");
 
@@ -327,13 +342,11 @@ async function main() {
         level,
         privilegesPacked,
         lastActivity,
-        totalLoans,
-        totalVolume,
         blockNumber,
         isValid,
       ] = await rewardView.getUserRewardSummaryWithMeta(user);
       console.log(
-        `  RewardView: totalEarned=${totalEarned.toString()}, level=${level}, totalLoans=${totalLoans.toString()}, block=${blockNumber.toString()}, isValid=${isValid}`
+        `  RewardView: totalEarned=${totalEarned.toString()}, level=${level}, block=${blockNumber.toString()}, isValid=${isValid}`
       );
     } catch (e: any) {
       console.log(`  RewardView: ${e.message || "query failed"}`);
@@ -345,13 +358,13 @@ async function main() {
   const collateralAmt = ethers.parseUnits("1000", 6);
   // IMPORTANT (authority path): CollateralManager pulls tokens from user via transferFrom.
   // Therefore user must approve CollateralManager (not VaultCore).
-  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.CollateralManager, collateralAmt);
-  await vaultCore.connect(borrower).deposit(usdc.target, collateralAmt);
+  await usdc.connect(borrower).approve(cmAddrFromRegistry, collateralAmt);
+  await vaultCore.connect(borrower).deposit(settlementTokenAddrFromRegistry, collateralAmt);
   
-  const colAfterDeposit = await cm.getCollateral(borrower.address, usdc.target);
+  const colAfterDeposit = await cm.getCollateral(borrower.address, settlementTokenAddrFromRegistry);
   console.log("✅ Deposit completed. Collateral:", ethers.formatUnits(colAfterDeposit, 6));
   
-  await verifyViews("After Deposit", borrower.address, usdc.target);
+  await verifyViews("After Deposit", borrower.address, settlementTokenAddrFromRegistry);
 
   // NOTE (SSOT): orderId is the primary key for repay/settle.
   // A plain VaultCore.borrow(...) does not necessarily create an ORDER_ENGINE orderId,
@@ -366,9 +379,9 @@ async function main() {
 
   const borrowIntent = {
     borrower: borrower.address,
-    collateralAsset: usdc.target,
+    collateralAsset: settlementTokenAddrFromRegistry,
     collateralAmount: collateralAmt,
-    borrowAsset: usdc.target,
+    borrowAsset: settlementTokenAddrFromRegistry,
     amount: borrowAmt2,
     termDays,
     rateBps,
@@ -378,7 +391,7 @@ async function main() {
 
   const lendIntent = {
     lenderSigner: lender.address,
-    asset: usdc.target,
+    asset: settlementTokenAddrFromRegistry,
     amount: borrowAmt2,
     minTermDays: 1,
     maxTermDays: 30,
@@ -388,9 +401,9 @@ async function main() {
   };
 
   // Lender reserves funds
-  await usdc.connect(lender).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, borrowAmt2);
+  await usdc.connect(lender).approve(vblAddrFromRegistry, borrowAmt2);
   const lendHash = buildLendIntentHash(lendIntent);
-  await vbl.connect(lender).reserveForLending(lender.address, usdc.target, borrowAmt2, lendHash);
+  await vbl.connect(lender).reserveForLending(lender.address, settlementTokenAddrFromRegistry, borrowAmt2, lendHash);
   console.log("✅ Lender reserved funds.");
 
   // Sign EIP-712 intents
@@ -398,7 +411,7 @@ async function main() {
     name: "RwaLending",
     version: "1",
     chainId: Number((await ethers.provider.getNetwork()).chainId),
-    verifyingContract: CONTRACT_ADDRESSES.VaultBusinessLogic,
+    verifyingContract: vblAddrFromRegistry,
   } as const;
 
   const typesBorrow = {
@@ -436,7 +449,9 @@ async function main() {
   // Finalize match
   // NOTE: matchflow may lock EarlyRepaymentGuarantee via GuaranteeFundManager, which pulls settlementToken via transferFrom.
   // Ensure borrower has sufficient allowance to avoid ERC20InsufficientAllowance during finalizeMatch.
-  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.GuaranteeFundManager, ethers.MaxUint256);
+  if (gfmAddrFromRegistry && gfmAddrFromRegistry !== ethers.ZeroAddress) {
+    await usdc.connect(borrower).approve(gfmAddrFromRegistry, ethers.MaxUint256);
+  }
   const tx = await vbl.connect(deployer).finalizeMatch(
     borrowIntent,
     [lendIntent],
@@ -464,7 +479,7 @@ async function main() {
   const newTokenId = borrowerTokensAfter.find((t) => !borrowerTokensBefore.includes(t));
   console.log("✅ LoanNFT minted. tokenId:", newTokenId?.toString());
 
-  await verifyViews("After Match", borrower.address, usdc.target);
+  await verifyViews("After Match", borrower.address, settlementTokenAddrFromRegistry);
 
   // ============ Step 3: Repay Match Loan (via SettlementManager SSOT) ============
   console.log("\n=== Step 3: Borrower Repays Match Loan ===");
@@ -477,12 +492,12 @@ async function main() {
   const termBlocks = BigInt(termDays) * BLOCKS_PER_DAY;
   const totalDue = calcTotalDue(borrowAmt2, rateBps, termBlocks);
   // Reward baseline: this script uses borrowAmt2=500 USDC (<1000e6), so rewards MUST NOT change.
-  const rewardBalBefore = (await rewardPoints.balanceOf(borrower.address)) as bigint;
+  const rewardBalBefore = (await easyToken.balanceOf(borrower.address)) as bigint;
   const rewardSummaryBefore = await rewardView.getUserRewardSummaryWithMeta(borrower.address);
   const earnedBefore = rewardSummaryBefore[0] as bigint;
   // 统一入口：走 VaultCore.repay → SettlementManager
-  await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, totalDue);
-  const repayTx = await vaultCore.connect(borrower).repay(orderId, usdc.target, totalDue);
+  await usdc.connect(borrower).approve(vaultCoreFromRegistryAddr, totalDue);
+  const repayTx = await vaultCore.connect(borrower).repay(orderId, settlementTokenAddrFromRegistry, totalDue);
   const repayRcpt = await repayTx.wait();
   const rewardPushes = parseRewardDataPushed(repayRcpt, String(rewardViewAddr));
   for (const p of rewardPushes) bump(p.typeHash);
@@ -493,20 +508,20 @@ async function main() {
     console.log("✅ LoanNFT status after repay:", meta.status.toString());
   }
 
-  await verifyViews("After Match Repay", borrower.address, usdc.target);
+  await verifyViews("After Match Repay", borrower.address, settlementTokenAddrFromRegistry);
 
   // Reward strict check: delta must be zero (ineligible principal)
-  const rewardBalAfter = (await rewardPoints.balanceOf(borrower.address)) as bigint;
+  const rewardBalAfter = (await easyToken.balanceOf(borrower.address)) as bigint;
   const rewardSummaryAfter = await rewardView.getUserRewardSummaryWithMeta(borrower.address);
   const earnedAfter = rewardSummaryAfter[0] as bigint;
   const balDelta = rewardBalAfter - rewardBalBefore;
   const earnedDelta = earnedAfter - earnedBefore;
   console.log(
-    `  [Reward] repay delta (ineligible): balDelta=${fmtPoints(balDelta)} earnedDelta=${fmtPoints(earnedDelta)} dataPushed=${rewardPushes.length}`
+    `  [Reward] repay delta (ineligible): balDelta=${fmtEasy(balDelta)} earnedDelta=${fmtEasy(earnedDelta)} dataPushed=${rewardPushes.length}`
   );
   if (balDelta !== 0n || earnedDelta !== 0n) {
     throw new Error(
-      `[Reward] expected no points change for ineligible principal (<1000e6): balDelta=${balDelta.toString()} earnedDelta=${earnedDelta.toString()}`
+      `[Reward] expected no Easy change for ineligible principal (<1000e6): balDelta=${balDelta.toString()} earnedDelta=${earnedDelta.toString()}`
     );
   }
   if (rewardPushes.length !== 0) {
@@ -515,8 +530,8 @@ async function main() {
 
   // ============ Final Summary ============
   console.log("\n=== Final Summary ===");
-  const finalCol = await cm.getCollateral(borrower.address, usdc.target);
-  const finalDebt = await vle.getDebt(borrower.address, usdc.target);
+  const finalCol = await cm.getCollateral(borrower.address, settlementTokenAddrFromRegistry);
+  const finalDebt = await vle.getDebt(borrower.address, settlementTokenAddrFromRegistry);
   console.log("📊 Ledger Values (Source of Truth):");
   console.log("  Collateral:", ethers.formatUnits(finalCol, 6));
   console.log("  Debt:", ethers.formatUnits(finalDebt, 6));
@@ -550,27 +565,31 @@ async function main() {
 
   // Artifacts: module snapshot + RewardView version + reward dp counts
   const rvVer = (await rewardView.getVersionInfo()) as [bigint, bigint, string];
+  const rpcUrl = process.env.LOCALHOST_RPC_URL || "";
   const artifactBlock = await ethers.provider.getBlockNumber();
   const artifactPath = artifacts.writeJson(`full-with-views.${artifactBlock}.json`, {
     name: "e2e-localhost-full-with-views (Reward-aligned)",
     generatedAt: new Date().toISOString(),
     chainId: (await ethers.provider.getNetwork()).chainId.toString(),
+    rpcUrl,
+    blockNumber: artifactBlock,
     modules: {
       Registry: CONTRACT_ADDRESSES.Registry,
-      AccessControlManager: CONTRACT_ADDRESSES.AccessControlManager,
+      AccessControlManager: acmAddrFromRegistry,
       RewardView: String(rewardViewAddr),
-      RewardPoints: String(rewardPointsAddr),
+      EasyToken: String(easyTokenAddr),
       OrderEngine: String(orderEngineAddr),
     },
     versionInfo: {
       RewardView: { apiVersion: rvVer[0].toString(), schemaVersion: rvVer[1].toString(), implementation: rvVer[2] },
     },
     counters: {
+      dataPushedByTypeHash: dataPushedCounts,
       rewardDataPushedByTypeHash: dataPushedCounts,
     },
     rewardCheck: {
       principalRaw: borrowAmt2.toString(),
-      pointsBalanceDeltaRaw: balDelta.toString(),
+      easyBalanceDeltaRaw: balDelta.toString(),
       totalEarnedDeltaRaw: earnedDelta.toString(),
     },
   });

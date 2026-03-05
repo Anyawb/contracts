@@ -1,5 +1,5 @@
-import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { ethers, network } from "hardhat";
+import { envBool, loadAddressMap, resolveAddress } from "./_addressResolver";
 import {
   assertConservation,
   discoverTrackedAddresses,
@@ -17,7 +17,8 @@ import {
 
 const ONE_DAY = 24n * 60n * 60n;
 const ONE_HOUR_BLOCKS = 1_800n;
-const BLOCKS_PER_DAY = 43_200n;
+// Keep consistent with TermBlocksLib bucket mapping (5d=36000 => 7200 blocks/day baseline).
+const BLOCKS_PER_DAY = 7_200n;
 let cachedNonStableCollateral: string | null = null;
 
 async function latestBlockNumber(): Promise<bigint> {
@@ -28,7 +29,10 @@ async function mineToBlock(targetBlock: bigint) {
   const current = await latestBlockNumber();
   if (targetBlock <= current) return;
   const delta = targetBlock - current;
-  await ethers.provider.send("hardhat_mine", ["0x" + delta.toString(16)]);
+  // Only available on local hardhat RPC.
+  if (network.name === "localhost" || network.name === "hardhat") {
+    await ethers.provider.send("hardhat_mine", ["0x" + delta.toString(16)]);
+  }
 }
 
 function key(s: string) {
@@ -259,14 +263,21 @@ async function createOrder(opts: {
   if (keeper.address.toLowerCase() === borrower.address.toLowerCase()) {
     throw new Error("[Config] keeper must differ from borrower for liquidation tests.");
   }
-  const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
-  const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
-  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
+  const addressMap = loadAddressMap(network.name);
+  const registryAddr = resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
+  const registry = (await ethers.getContractAt("Registry", registryAddr)) as any;
+  const acmAddrFromRegistry = (await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"))) as string;
+  const assetWhitelistAddrFromRegistry = (await registry.getModuleOrRevert(key("ASSET_WHITELIST"))) as string;
+  const priceOracleAddrFromRegistry = (await registry.getModuleOrRevert(key("PRICE_ORACLE"))) as string;
+  const settlementTokenAddrFromRegistry = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
+
+  const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
+  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
   // IMPORTANT: use the FeeRouter resolved from Registry (SSOT). finalizeMatch -> SettlementMatchLib resolves FeeRouter via Registry.
   const feeRouterAddr = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddr)) as any;
-  const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
+  const usdc = (await ethers.getContractAt("MockERC20", settlementTokenAddrFromRegistry)) as any;
 
   const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
   const vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
@@ -300,20 +311,20 @@ async function createOrder(opts: {
   await ensureRole(ACTION_DEPOSIT, vblAddr);
   await ensureRole(ACTION_BORROW, orderEngineAddr);
 
-  if (!(await aw.isAssetAllowed(usdc.target))) {
-    await aw.connect(deployer).addAllowedAsset(usdc.target);
+  if (!(await aw.isAssetAllowed(settlementTokenAddrFromRegistry))) {
+    await aw.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
   }
   {
-    const cfg = await po.getAssetConfig(usdc.target);
+    const cfg = await po.getAssetConfig(settlementTokenAddrFromRegistry);
     if (!cfg.isActive) {
       const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
-      await po.connect(deployer).configureAsset(usdc.target, "usd-coin", usdcDecimals, 3600);
+      await po.connect(deployer).configureAsset(settlementTokenAddrFromRegistry, "usd-coin", usdcDecimals, 3600);
     }
   }
   const now = await latestBlockNumber();
-  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now);
-  if (!(await feeRouter.isTokenSupported(usdc.target))) {
-    await feeRouter.connect(deployer).addSupportedToken(usdc.target);
+  await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), now);
+  if (!(await feeRouter.isTokenSupported(settlementTokenAddrFromRegistry))) {
+    await feeRouter.connect(deployer).addSupportedToken(settlementTokenAddrFromRegistry);
   }
 
   // Fund test signers (moves funds from deployer -> users; does not change totalSupply).
@@ -325,7 +336,7 @@ async function createOrder(opts: {
   const useNonStableCollateral = process.env.USE_NONSTABLE_COLLATERAL === "1";
   const collateralPriceMode = (process.env.COLLATERAL_PRICE_MODE ?? "fresh").toLowerCase(); // fresh|stale|unreasonable|bad_decimals
 
-  let collateralAssetAddr = usdc.target as string;
+  let collateralAssetAddr = settlementTokenAddrFromRegistry;
   let collateralAmt = ethers.parseUnits("1000", 6);
   if (useNonStableCollateral) {
     collateralAssetAddr = await getOrDeployNonStableCollateral(deployer);
@@ -358,7 +369,7 @@ async function createOrder(opts: {
     await vaultCore.connect(borrower).deposit(collateralAssetAddr, collateralAmt);
   } else {
     await usdc.connect(borrower).approve(collateralManagerAddr, collateralAmt);
-    await vaultCore.connect(borrower).deposit(usdc.target, collateralAmt);
+    await vaultCore.connect(borrower).deposit(settlementTokenAddrFromRegistry, collateralAmt);
   }
 
   const borrowAmt = ethers.parseUnits("500", 6);
@@ -370,7 +381,7 @@ async function createOrder(opts: {
     borrower: borrower.address,
     collateralAsset: collateralAssetAddr,
     collateralAmount: collateralAmt,
-    borrowAsset: usdc.target,
+    borrowAsset: settlementTokenAddrFromRegistry,
     amount: borrowAmt,
     termDays,
     rateBps,
@@ -380,7 +391,7 @@ async function createOrder(opts: {
 
   const lendIntent = {
     lenderSigner: lender.address,
-    asset: usdc.target,
+    asset: settlementTokenAddrFromRegistry,
     amount: borrowAmt,
     minTermDays: 1,
     maxTermDays: 30,
@@ -413,7 +424,7 @@ async function createOrder(opts: {
       ]
     )
   );
-  await vbl.connect(lender).reserveForLending(lender.address, usdc.target, borrowAmt, lendHash);
+  await vbl.connect(lender).reserveForLending(lender.address, settlementTokenAddrFromRegistry, borrowAmt, lendHash);
 
   // Typed-data signatures for finalizeMatch.
   const domain = {
@@ -458,7 +469,7 @@ async function createOrder(opts: {
   if (ergmAddr && ergmAddr !== ethers.ZeroAddress && gfmAddr && gfmAddr !== ethers.ZeroAddress) {
     try {
       const ergm = await ethers.getContractAt(["function isGuaranteeEnabled(address) view returns (bool)"], ergmAddr);
-      const enabled = (await ergm.isGuaranteeEnabled(usdc.target)) as boolean;
+      const enabled = (await ergm.isGuaranteeEnabled(settlementTokenAddrFromRegistry)) as boolean;
       if (enabled) {
         const termSec = BigInt(termDays) * ONE_DAY;
         const promisedInterest = calcInterest(borrowAmt, rateBps, termSec);
@@ -486,7 +497,7 @@ async function createOrder(opts: {
   const ecoBefore = (await usdc.balanceOf(ecosystemVault)) as bigint;
   const [opsBefore, statsBefore] = (await Promise.all([
     feeRouter.getOperationStats().catch(() => [0n, 0n] as const),
-    feeRouter.getFeeStatistics(usdc.target, feeTypeNormal).catch(() => 0n),
+    feeRouter.getFeeStatistics(settlementTokenAddrFromRegistry, feeTypeNormal).catch(() => 0n),
   ])) as [[bigint, bigint], bigint];
 
   const borrowerTokensBefore = await loanNft.getUserTokens(borrower.address);
@@ -502,7 +513,7 @@ async function createOrder(opts: {
     const expectedEco = calcFeeBps(borrowAmt, ecoFeeBps);
     const [opsAfter, statsAfter] = (await Promise.all([
       feeRouter.getOperationStats().catch(() => [0n, 0n] as const),
-      feeRouter.getFeeStatistics(usdc.target, feeTypeNormal).catch(() => 0n),
+      feeRouter.getFeeStatistics(settlementTokenAddrFromRegistry, feeTypeNormal).catch(() => 0n),
     ])) as [[bigint, bigint], bigint];
 
     console.log(
@@ -523,7 +534,7 @@ async function createOrder(opts: {
           const token = String(parsed.args.token).toLowerCase();
           const pAmt = parsed.args.platformAmount as bigint;
           const eAmt = parsed.args.ecoAmount as bigint;
-          if (token === usdc.target.toLowerCase()) {
+          if (token === settlementTokenAddrFromRegistry.toLowerCase()) {
             if (pAmt !== expectedPlatform || eAmt !== expectedEco) {
               throw new Error(
                 `[FeeDistribution] FeeDistributed mismatch: token=${token} ` +
@@ -606,7 +617,7 @@ async function createOrder(opts: {
     const ord = await orderEngine.getLoanOrderForView(orderId);
     await mineToBlock(BigInt(ord.maturity) + ONE_HOUR_BLOCKS);
     const nowAfter = await latestBlockNumber();
-    await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), nowAfter);
+    await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), nowAfter);
     if (useNonStableCollateral) {
       // Best-effort: refresh collateral price in fresh/unreasonable/bad_decimals modes (stale mode intentionally stays stale)
       if (collateralPriceMode === "fresh") {
@@ -633,9 +644,17 @@ async function runOracleEdgeChecks() {
   const signers = await ethers.getSigners();
   const deployer = signers[0];
 
-  const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+  const addressMap2 = loadAddressMap(network.name);
+  const registryAddr2 = resolveAddress({ name: "Registry", map: addressMap2, envVar: "REGISTRY_ADDRESS" });
+  const registry = (await ethers.getContractAt("Registry", registryAddr2)) as any;
+  const acmAddrFromRegistry = (await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"))) as string;
+  const priceOracleAddrFromRegistry = (await registry.getModuleOrRevert(key("PRICE_ORACLE"))) as string;
+  const assetWhitelistAddrFromRegistry = (await registry.getModuleOrRevert(key("ASSET_WHITELIST"))) as string;
+  const settlementTokenAddrFromRegistry = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
+
+  const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
+  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
+  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
 
   const ACTION_ADD_WHITELIST = key("ADD_WHITELIST");
   const ACTION_UPDATE_PRICE = key("UPDATE_PRICE");
@@ -656,7 +675,7 @@ async function runOracleEdgeChecks() {
   const gd = await gdFactory.deploy();
   await gd.waitForDeployment();
 
-  const settlementToken = CONTRACT_ADDRESSES.MockUSDC;
+  const settlementToken = settlementTokenAddrFromRegistry;
   const cfg = await gd.createDefaultConfig(settlementToken);
   const amount = ethers.parseUnits("10", 18);
   const now = await latestBlockNumber();
@@ -706,12 +725,31 @@ async function runOracleEdgeChecks() {
 }
 
 async function main() {
+  const readOnly = envBool("READ_ONLY", network.name !== "localhost");
+  const enableWrite = envBool("ENABLE_WRITE", !readOnly);
+
+  if (readOnly || !enableWrite) {
+    const addressMap = loadAddressMap(network.name);
+    const registryAddr = resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
+    const registry = (await ethers.getContractAt("Registry", registryAddr)) as any;
+    const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
+    const settlementMgrAddr = (await registry.getModuleOrRevert(key("SETTLEMENT_MANAGER"))) as string;
+    console.log(`=== funds-flow-smoke-conservation (read-only) network=${network.name} ===`);
+    console.log(`  Registry=${registryAddr}`);
+    console.log(`  VAULT_CORE=${vaultCoreAddr}`);
+    console.log(`  SETTLEMENT_MANAGER=${settlementMgrAddr}`);
+    console.log("  ℹ️  [skip] conservation invariants require local writeable chain + time-advance.");
+    console.log("\n✅ funds-flow-smoke-conservation (read-only) PASSED\n");
+    return;
+  }
   const signers = await ethers.getSigners();
   const deployer = signers[0];
   const keeper = signers[1];
   const signerByAddr = new Map<string, any>(signers.map((s) => [s.address.toLowerCase(), s]));
 
-  const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
+  const addressMap3 = loadAddressMap(network.name);
+  const registryAddr3 = resolveAddress({ name: "Registry", map: addressMap3, envVar: "REGISTRY_ADDRESS" });
+  const registry = (await ethers.getContractAt("Registry", registryAddr3)) as any;
 
   const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
   const settlementManagerAddr = (await registry.getModuleOrRevert(key("SETTLEMENT_MANAGER"))) as string;
@@ -742,7 +780,7 @@ async function main() {
   // does not revert due to the user having *other* active debt.
   const vle = await ethers.getContractAt(
     ["function getUserTotalDebtValue(address user) view returns (uint256)"],
-    CONTRACT_ADDRESSES.VaultLendingEngine
+    (await registry.getModuleOrRevert(key("LENDING_ENGINE"))) as string
   );
   const cm = await ethers.getContractAt(
     ["function getUserCollateralAssets(address user) view returns (address[])"],
@@ -849,10 +887,10 @@ async function main() {
     console.log(`Lender(order.lender): ${ord.lender}`);
     console.log("");
     const tokenUniverseBaseNow = await getTokenUniverse({
-      assetWhitelistAddr: CONTRACT_ADDRESSES.AssetWhitelist,
-      priceOracleAddr: CONTRACT_ADDRESSES.PriceOracle,
+      assetWhitelistAddr: assetWhitelistAddrFromRegistry,
+      priceOracleAddr: priceOracleAddrFromRegistry,
       feeRouterAddr,
-      extra: [CONTRACT_ADDRESSES.MockUSDC],
+      extra: [settlementTokenAddrFromRegistry],
     });
     console.log(
       `TokenUniverseNow(${tokenUniverseBaseNow.length}): ${tokenUniverseBaseNow.map(shortAddr).join(", ") || "<empty>"}`
@@ -862,7 +900,7 @@ async function main() {
 
     // Production-like mode: require keeper has ACTION_LIQUIDATE (no auto-grant inside smoke).
     {
-      const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
+      const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
       const ACTION_LIQUIDATE = key("LIQUIDATE");
       const has = await acm.hasRole(ACTION_LIQUIDATE, keeper.address);
       if (!has) {
@@ -942,10 +980,10 @@ async function main() {
     }
 
     const tokenUniverseBaseNow = await getTokenUniverse({
-      assetWhitelistAddr: CONTRACT_ADDRESSES.AssetWhitelist,
-      priceOracleAddr: CONTRACT_ADDRESSES.PriceOracle,
+      assetWhitelistAddr: assetWhitelistAddrFromRegistry,
+      priceOracleAddr: priceOracleAddrFromRegistry,
       feeRouterAddr,
-      extra: [CONTRACT_ADDRESSES.MockUSDC],
+      extra: [settlementTokenAddrFromRegistry],
     });
     console.log(
       `TokenUniverseNow(${tokenUniverseBaseNow.length}): ${tokenUniverseBaseNow.map(shortAddr).join(", ") || "<empty>"}`

@@ -5,7 +5,9 @@
  * 可选做轻量健全性调用（如 HealthView.getUserHealthFactorWithMeta、ViewCache.getSystemStatus）。
  * 供 e2e（如 attack-suite 收尾的 ViewScan）复用；strict 模式下任一失败即抛错。
  */
-import { ethers } from "hardhat";
+import hardhat from "hardhat";
+
+const { ethers } = hardhat;
 
 /** View 合约 getVersionInfo() 返回结构 */
 type VersionInfo = {

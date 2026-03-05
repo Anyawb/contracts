@@ -44,7 +44,7 @@
   - `IVaultRouter`/`VaultCore` 已补齐携带 `nextVersion` 的推送重载（含 delta 版），保留旧版兼容；`VaultRouter` 直呼 `PositionView.pushUserPositionUpdate{Delta}` 并保留事件 `UserPositionPushed/UserPositionDeltaPushed` 供链下幂等（已完成）。
   - `VaultRouter` 已引入 `KEY_POSITION_VIEW` 解析并在写路径中使用 `_getCachedPositionView()`（已完成）。
   - `CollateralManager`/`LendingEngine`/`Liquidation` 在推送前调用 `PositionView.getPositionVersion(user, asset)`，生成 `nextVersion = version + 1` 透传；读取失败则传 `nextVersion=0` 降级为合约自增模式（已完成）。
-  - `PositionView` 已支持 delta 写入，带版本自增/指定版本，落后版本拒绝（`StaleVersion`），防下溢（`InvalidDelta`），事件新增 `UserPositionCachedV2`（含 version）（已完成）。
+  - `PositionView` 已支持 delta 写入，带版本自增/指定版本，落后版本拒绝（`StaleVersion`），防下溢（`InvalidDelta`），事件新增 `UserPositionCachedWithVersion`（含 version）（已完成）。
   - 统计视图写路径已同步引入严格 `nextVersion` 校验（`StatisticsView`）（已完成）。
   - `CacheOptimizedView` 当前为读路径，不存在写入入口：该条目移除/合并到“已完成清单”（无额外工作项）。
 - **批量聚合写入（移除：可选优化，暂不纳入本轮）**

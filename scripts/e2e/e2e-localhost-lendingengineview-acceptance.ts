@@ -1,6 +1,6 @@
 import { ethers, network } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
-import { runViewPreflight } from "./utils/view-preflight";
+import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { runViewPreflight } from "./utils/view-preflight.ts";
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -129,10 +129,13 @@ async function main() {
 
     const viewAddr = (await registry.getModuleOrRevert(key("LENDING_ENGINE_VIEW"))) as string;
     const view = (await ethers.getContractAt("LendingEngineView", viewAddr)) as any;
+    const loanNftViewAddr = (await registry.getModuleOrRevert(key("LOAN_NFT_VIEW"))) as string;
+    const loanNftView = (await ethers.getContractAt("LoanNFTView", loanNftViewAddr)) as any;
     const orderEngineAddr = (await registry.getModuleOrRevert(key("ORDER_ENGINE"))) as string;
     const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr)) as any;
 
     console.log("  LendingEngineView:", viewAddr);
+    console.log("  LoanNFTView:", loanNftViewAddr);
     console.log("  ORDER_ENGINE:", orderEngineAddr);
 
     assertNoPushEntryPoints(view, "LendingEngineView");
@@ -224,7 +227,7 @@ async function main() {
 
     await mustRevertWithSelector(
       "Outsider cannot read borrower loan count",
-      async () => view.connect(outsider).getUserLoanCount(borrowerAddr),
+      async () => loanNftView.connect(outsider).getUserLoanCount(borrowerAddr),
       missingRoleSel
     );
 

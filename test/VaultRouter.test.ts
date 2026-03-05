@@ -173,7 +173,7 @@ describe('VaultRouter – strict (slim) behavior', function () {
       await expect(vaultCoreModule.pushUserPositionUpdate(user.address, testAsset, 100, 50, requestId, seq, 0))
         .to.emit(vaultRouter, 'UserPositionPushed')
         .withArgs(user.address, testAsset, 100, 50, anyValue, requestId, seq)
-        .and.to.emit(positionView, 'UserPositionCachedV2');
+        .and.to.emit(positionView, 'UserPositionCachedWithVersion');
     });
   });
 

@@ -75,8 +75,8 @@
 
 ### 缓存推送失败与手动重试（新增要求 & 已实施）
 - 推送失败不做链上自动重试，避免 gas 暴涨/重复失败；采用“事件告警 + 链下人工重放”。
-- 在推送 try/catch 中发事件 `CacheUpdateFailed(...)` 或 **`CacheUpdateFailedV2(...)`**；当 view 地址解析为零也要触发，payload 建议携带期望写入的数值。
-- **`CacheUpdateFailedV2`** 必须覆盖 `requestId/seq/nextVersion` 上下文，便于链下重放与并发诊断；`CacheUpdateFailed` 可保留作兼容。
+- 在推送 try/catch 中发事件 `CacheUpdateFailed(...)` 或 **`CacheUpdateFailedWithContext(...)`**；当 view 地址解析为零也要触发，payload 建议携带期望写入的数值。
+- **`CacheUpdateFailedWithContext`** 必须覆盖 `requestId/seq/nextVersion` 上下文，便于链下重放与并发诊断；`CacheUpdateFailed` 可保留作兼容。
 - 健康推送失败补充事件：`HealthPushFailed(address user, address healthView, uint256 totalCollateral, uint256 totalDebt, bytes reason)`（最佳努力不回滚，用于链下重试/告警）。
 - 链下监听事件写入重试队列（含 tx hash、block time、payload）；人工核查原因后重放：先重新读取最新账本，数据一致或可接受才推送，可设置最小间隔/去重，同一 (user, asset, view) 避免并发轰击。
 - 链下重试同一 (user, asset, view) 连续多次失败时，将该条目标记为“死亡信箱”并告警，链上不再尝试；重试成功后清理队列/提示。
@@ -110,6 +110,7 @@
 - **UserView.sol**：用户维度只读聚合与便捷查询（与 Position/Health/Reward 等模块协作）
 - **HealthView.sol**：健康因子/风险状态缓存与批量读取（写路径由风控/账本模块推送）
 - **StatisticsView.sol**：系统级统计聚合缓存（活跃用户/全局抵押债务/保证金聚合/降级统计等）
+- **LoanFlowView.sol**：协议层 loan-flow 统计缓存（per-user/global 的 borrow+repay volume/count；**Value Unit SSOT=USD-8**；写入由 `LoanFlowPushManager` best-effort 推送）
 - **ViewCache.sol**：系统级快照缓存（按资产聚合的系统状态，支持批量读取）
 - **AccessControlView.sol**：权限只读查询（权限缓存、权限级别等）
 - **BatchView.sol**：批量查询聚合（价格/健康/模块健康等批量接口）
@@ -200,14 +201,24 @@ contract VaultCore is Initializable, UUPSUpgradeable {
         IVaultRouter(_viewContractAddr).processUserOperation(msg.sender, ActionKeys.ACTION_DEPOSIT, asset, amount, block.number);
     }
     
-    /// @notice 借款操作 - 传送数据至View层
-    /// @param asset 资产地址
+    /// @notice 借款（资金拨付/订单创建）的主路径不在 VaultCore 内完成（SSOT）
+    /// @dev 资金链 SSOT（详见 docs/Usage-Guide/Funds-Flow-Architecture-Guide.md）：
+    ///      - 撮合放款：VaultBusinessLogic.finalizeMatch(...) 负责资金拨付/费用路由；
+    ///      - 债务账本写入：通过 VaultCore.borrowFor(...) 统一入口触达 VaultLendingEngine(KEY_LE)；
+    ///      - 订单创建与 orderId SSOT：由 OrderEngine(KEY_ORDER_ENGINE, core/LendingEngine) 创建订单并在落账成功后回调 RewardManager（Reward SSOT）。
+    ///      因此：不要把 KEY_LE 当作“对外推荐直连写入口”，否则会绕开 orderId/Reward 等后置编排。
+    ///
+    /// @notice 借款账本写入（仅业务模块调用，撮合落地 SSOT）
+    /// @param borrower 借款人
+    /// @param asset 债务资产
     /// @param amount 借款金额
-    /// @dev 极简实现：直接调用借贷引擎进行账本写入，遵循单一入口
-    function borrow(address asset, uint256 amount) external {
+    /// @param termDays 借款期限（天）
+    /// @dev 极简实现：VaultCore 仅作为“统一账本写入口”，不承担资金拨付/订单创建/奖励触发编排。
+    function borrowFor(address borrower, address asset, uint256 amount, uint16 termDays) external onlyBusinessModule {
+        require(borrower != address(0), "Borrower must be set");
         require(amount > 0, "Amount must be positive");
         address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
+        ILendingEngineBasic(lendingEngine).borrow(borrower, asset, amount, 0, termDays);
     }
     
     /// @notice 还款操作 - 统一结算入口（结算/清算二合一）
@@ -302,8 +313,10 @@ contract VaultRouter is ReentrancyGuard, Pausable {
     // ============ 模块地址缓存（仅用于路由）========== ✅ 已实现
     address private _cachedCMAddr;
     address private _cachedLEAddr;
-    uint256 private _lastCacheUpdate;
-    uint256 private constant CACHE_EXPIRY_TIME = 1 hours;
+    /// @dev 时间口径 SSOT：缓存新鲜度/过期一律用 block 口径（避免 seconds 口径造成歧义）
+    uint256 private _lastCacheUpdateBlock;
+    /// @dev 约等于 1 小时（仅用于理解/展示）；链上门槛语义以 blocks 为准
+    uint256 private constant CACHE_EXPIRY_BLOCKS = 1_800;
     
     // ============ 用户操作路由 ============ ✅ 已实现
     function processUserOperation(
@@ -372,7 +385,7 @@ contract VaultRouter is ReentrancyGuard, Pausable {
 - [x] 用户操作路由（deposit/withdraw 路由到 CollateralManager）
 - [x] 数据推送接口（接收业务模块推送，发出事件）
 - [x] 事件驱动架构（发出标准化事件，支持数据库收集）
-- [x] 模块地址缓存（仅用于路由，1小时有效期）
+- [x] 模块地址缓存（仅用于路由，block 口径 TTL：`CACHE_EXPIRY_BLOCKS`，约等于 1 小时仅用于理解/展示）
 - [x] 权限控制（onlyVaultCore、onlyBusinessModule）
 - [x] 安全保护（ReentrancyGuard、Pausable）
 - [x] 向后兼容查询（getUserCollateral，直接查询账本）
@@ -605,6 +618,24 @@ contract LendingEngine {
 - 降级策略
   - 失败/过期/精度异常/价格不合理/稳定币脱锚时，返回 `PriceResult{ usedFallback=true, reason=..., value=... }`；上层（LE）可据此发事件或写系统统计（`DegradationCore` 提供系统级统计/事件）。
 
+#### 2.1) 降级监控模块（DegradationMonitor/Core/Storage）写路径 SSOT（推荐）
+
+> 目标：把“降级事件记录”的写路径收敛为单入口（协调器），避免脚本/模块绕过导致口径漂移或权限误配。
+
+- **写入口（协调器，SSOT）**：`DegradationMonitor`
+  - 对外写接口：`recordDegradationEvent(...)`（admin）与 `recordDegradationEventFromPriceOracle(...)`（仅 `Registry[KEY_PRICE_ORACLE]`）
+  - 职责：协调写入 Core（聚合统计）与 Storage（ring-buffer 历史），并提供只读聚合查询。
+
+- **子模块写入权限（强约束，推荐默认）**
+  - `DegradationCore.adminRecordDegradation(...)` 与 `DegradationStorage.addEventToCircularBuffer(...)` 允许：
+    - **`msg.sender == Registry[KEY_DEGRADATION_MONITOR]`**（单入口协调器）
+    - 或 caller 具备 `ActionKeys.ACTION_ADMIN`（保留 legacy/运维直写能力）
+  - 说明：这允许 `DegradationMonitor` 作为写入协调器**开箱即用**，而无需给 Monitor 合约授予 `ACTION_ADMIN`（避免过权）。
+
+- **只读聚合**
+  - `getSystemDegradationTrends()`：analytics 未配置时（本仓库默认），采用 **方案 A（read-time）** 从 `DegradationStorage` ring-buffer 计算 `recentEvents/mostFrequentModule`，并优先从 `DegradationCore` 读取 `totalEvents/averageFallbackValue`（生命周期口径）。
+  - `recentEvents` 的窗口以 blocks 表示：默认 `ViewConstants.CACHE_DURATION_BLOCKS`（链无关；不要用 seconds）。
+
 ### 3) 端到端数据流（简述）
 - 用户操作 → `VaultCore` → 业务编排 `VaultBusinessLogic`（转入/转出、抵押/保证金、奖励/撮合） → **统一结算/清算入口 `SettlementManager`**（还款/提前还款/到期处置/被动清算） → （内部）`LendingEngine` 更新债务账本 + `CollateralManager` 执行抵押释放/划转 → 写入成功后推送 `VaultRouter.pushUserPositionUpdate`（抵押来自 CM，债务来自 LE）与 `HealthView.pushRiskStatus` → 前端/机器人 0 gas 查询 View 层缓存。
 
@@ -657,11 +688,16 @@ contract LendingEngine {
 
 ### 业务流程（用户 → 账本 → 视图）
 ```
-用户操作 → VaultCoreRefactored → VaultBusinessLogic（资金/抵押/保证金/奖励）
-         → VaultCoreRefactored 统一调用 LendingEngine（borrow/repay）写账本
-         → LendingEngine 推送 VaultRouter.pushUserPositionUpdate（仓位缓存）
-         → LendingEngine 计算并推送 HealthView.pushRiskStatus（健康缓存）
-         → 前端/机器人从 View 层免费查询
+用户操作（deposit/withdraw/repay）→ VaultCore（权威入口）
+  - deposit/withdraw：VaultCore → VaultRouter.processUserOperation → CollateralManager（抵押托管/账本）
+  - repay：VaultCore → SettlementManager.repayAndSettle(orderId, ...)（结算/清算 SSOT）
+
+撮合放款（borrow，SSOT）→ VaultBusinessLogic.finalizeMatch(...)
+  → SettlementMatchLib.finalizeAtomicFull（出金/费用）→ VaultCore.borrowFor(...)（账本写入入口）
+  → VaultLendingEngine(KEY_LE) 写债务账本 + ORDER_ENGINE.createLoanOrder(...)（orderId SSOT；并 best-effort 通知 `LoanFlowPushManager` 更新 `LoanFlowView`）
+
+账本写入后（best-effort）→ VaultCore.push* → VaultRouter.push* → View 模块缓存
+前端/机器人从 View 层免费查询
 ```
 
 ### 职责边界
@@ -669,7 +705,8 @@ contract LendingEngine {
   - 代币转入/转出；抵押与保证金联动；唯一奖励触发；批量编排
   - 写入口必须收敛到“统一结算/清算入口”（见下节 `SettlementManager`），避免 repay/liquidate/settle 分叉
 - **VaultCoreRefactored**：
-  - 作为用户入口的转调者：借款可直达 `LendingEngine.borrow`；还款/结算必须统一进入 `SettlementManager`（见下节）
+  - 作为用户入口的权威收敛点：对外仅暴露 deposit/withdraw/repay（repay/settle SSOT 为 `SettlementManager`）
+  - 借款不提供 direct user entry；借款账本写入只允许通过 `borrowFor(...)` 由撮合/结算编排路径触达（见上文与资金链 SSOT）
   - 不做代币二次转账（避免与业务层重复）
 - **SettlementManager（新增，唯一写入口）**：
   - **唯一权威写入口（SSOT）**：统一承接 **按时还款结算 / 提前还款结算 / 到期未还处置 / 抵押价值过低触发的被动清算**
@@ -705,7 +742,7 @@ contract LendingEngine {
     - 验签：`borrower` 与每个 `lendIntent.lenderSigner`（EOA 或 ERC-1271）；
     - 消耗 reserve：按 `lendIntentHash` consume，对应 lenderSigner 必须匹配（防篡改/防重放）；
     - 放款：通过 `SettlementMatchLib.finalizeAtomicFull` 从 `LenderPoolVault.transferOut` 出金；
-    - 手续费：通过 `FeeRouter.distributeNormal` 统一路由；
+    - 手续费：通过 `FeeRouter.distributeNormal` 统一路由；清算/保证金等预存费用使用 `FeeRouter.distributePrepaid` 分发；
     - 订单：调用 `ORDER_ENGINE(LendingEngine).createLoanOrder` 创建 `orderId` 并铸造 `LoanNFT`；
     - **关键口径**：订单的 `LoanOrder.lender` 必须为 `LenderPoolVault` 地址（资金池），而非 `lenderSigner`。
   - 权限/配置要点（测试与部署必须满足）：
@@ -851,11 +888,11 @@ contract LendingEngine {
 - 清算执行流程：`SettlementManager` 进入清算分支 → 调用 `LiquidationManager`（执行器）→
   直达账本执行：扣押/划转抵押（`CM.withdrawCollateralTo`）与减少债务（`LE.forceReduceDebt`）→
   使用 `LiquidationPayoutManager`（SSOT）读取 recipients/rates 并计算 shares →
-  由执行器将抵押按份额路由到平台/准备金/出借人补偿接收者/清算人。
+  由执行器将抵押按份额路由到平台/准备金/出借人补偿接收者/清算人，其中平台份额先进入 `FeeRouter` 再分发。
 - 残值/份额计算：在当前实现中以“被扣押的抵押数量（collateralAmount）”作为分配基数，
   份额计算由 `LiquidationPayoutManager.calculateShares` 提供，整数除不尽的余数归清算人。
 - 分配执行：由清算执行器（`LiquidationManager`，或未来可由 `SettlementManager` 直达账本）调用
-  `CollateralManager.withdrawCollateralTo` 完成实际转账；`LiquidationPayoutManager` 作为配置/计算模块不直接转账。
+  `CollateralManager.withdrawCollateralTo` 完成实际转账；平台份额的接收者为 `FeeRouter`（再由 `FeeRouter.distributePrepaid` 分发）。
 
 ### 部署与配置
 - **环境变量**（三网脚本均可用）：
@@ -923,7 +960,6 @@ jobs:
 - 阶段二（后续）：统一地址解析到 `KEY_VAULT_CORE -> viewContractAddrVar()`，逐步去除对 `KEY_STATS` 的依赖；清理 `VaultStatistics.sol` 与 `IVaultStatistics.sol` 遗留。
 
 ---
-
 ## 🔧 双架构命名规范要求
 
 ### **必须遵循的命名规范（SmartContractStandard.md第127行）**
@@ -957,7 +993,7 @@ error MissingRole();
 
 ## 📝 NatSpec 注释规范（必须）
 参考文件：/Volumes/AI-hosts/contracts/docs/Usage-Guide/Audit-Grade-NatSpec-Guide.md
-```
+---
 
 ## Unified DataPush Interface
 
@@ -994,7 +1030,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
     - `getVersionInfo() -> (apiVersion, schemaVersion, implementation)`
     - `apiVersion` 表达对外 API 语义版本；`schemaVersion` 表达缓存/输出结构版本（字段/编码/解释变化时递增）
     - `implementation` 用于链下定位当前实现地址（代理场景下可直接识别实现）
-    - **关键模块可采用 A 策略**：保留旧事件/旧入口并新增 `*V2/*V3` 事件或接口以平滑迁移（例如 `PositionView` 的 `UserPositionCachedV2`）
+    - **关键模块可采用 A 策略**：保留旧事件/旧入口并新增语义化的 companion 事件或接口以平滑迁移（例如 `PositionView` 的 `UserPositionCachedWithVersion` / `*AtBlock` / `*WithBlockMeta`）
   - **统一 DataPush**：所有 `push*` 写路径必须调用 `DataPushLibrary._emitData(...)`；`dataTypeHash` 使用 **集中常量**（`DataPushTypes` / `keccak256("UPPER_SNAKE_CASE")`），避免散落重复定义。
   - **批量限制**：所有批量查询/批量推送统一使用 `ViewConstants.MAX_BATCH_SIZE` 并在入口校验长度，避免 RPC/执行失败。
   - **错误风格**：优先使用自定义 error（例如 `ContractName__Xxx`）或 `StandardErrors`，避免字符串 `require/revert`（更省 gas、链下更易解码）。
@@ -1023,74 +1059,128 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
   - [`docs/Usage-Guide/User-Dimensional-View-Read-Policy-Guide.md`](Usage-Guide/User-Dimensional-View-Read-Policy-Guide.md)
 
 ## Reward 模块架构与路径
+### 📚 术语（Reward）
+
+> 术语补充（避免误解）：本文涉及“积分/points”时，资产语义统一理解为**奖励通证 / reward token = Easy（`EasyToken`）**（SSOT = `Registry[KEY_EASY_TOKEN]`）。
 
 ### 目标
 - 严格以“落账后触发”为准：仅当账本在 `LendingEngine` 成功更新后，才触发积分计算/发放。
 - 只读与写入分层：`RewardManager/RewardManagerCore` 负责计算、发放与扣减；`RewardView` 负责只读缓存与统一 DataPush。
+- 口径隔离：**Reward 口径（reward-qualified）** 与 **协议口径（protocol loan flow）** 必须分离；协议层的 borrow+repay volume/count（USD-8）应读取 `LoanFlowView`（SSOT），`RewardView` 不承载协议借贷统计字段。
+- 统一功能库：Reward 模块的模块访问/权限校验/RewardView best-effort 推送统一由 `RewardModuleBase` 提供，避免业务合约重复实现。
+
+### 方案 B（推荐默认）：`KEY_ORDER_ENGINE` + 按订单入口优先（运行稳定性闸门）
+
+> 本节用于将 Reward 的“入口、顺序与文档口径”锁死为可回归验证的约束，避免出现“奖励与账本分叉 / 入口误配 / 双 SSOT 漂移”。
+
+#### 运行稳定性闸门（必须全部满足）
+1. **闸门 1：严格保证“先落账，再触发 Reward”**
+   - `OrderEngine` 只能在 ledger（`LendingEngine` / debt ledger）成功更新之后调用 `RewardManager`。
+   - 失败语义必须明确：要么整笔回滚；要么把 `RewardView.push*` 视为 best-effort（允许 push 失败不阻塞主流程），但禁止出现“Reward 核心写成功而 ledger 写失败”的分叉。
+2. **闸门 2：Reward 写入口只允许 `KEY_ORDER_ENGINE`（单入口收敛）**
+   - `RewardManager.onLoanEvent*` 写入口 caller gate 只认 `Registry[KEY_ORDER_ENGINE]`，明确拒绝其它模块（包括 `KEY_LE`）直连。
+3. **闸门 3：文档 SSOT 必须收敛到一致**
+   - 本章（架构 SSOT）必须与合约实现/部署脚本一致：`KEY_ORDER_ENGINE` 为唯一写入口；按订单入口为推荐主路径；legacy 仅兼容。
+4. **闸门 4：用测试把入口与顺序锁死**
+   - 非 `KEY_ORDER_ENGINE` 调用写入口必 revert；并覆盖“落账失败时不应产生 Reward 侧状态变化”。
 
 ### 职责分工（建议统一口径）
-- **RewardManager（Earn gateway）**：借贷触发的奖励写入口门面 + 参数治理入口（仅 `KEY_LE` 可调用写入口；治理权限走 ACM）。
+- **RewardManager（Earn gateway）**：借贷触发的奖励写入口门面 + 参数治理入口（**仅 `KEY_ORDER_ENGINE` 可调用写入口**；治理权限走 ACM）。
 - **RewardManagerCore（Earn core）**：发放与惩罚核心（锁定/释放/欠分账本/等级统计；向 `RewardView` 推送）。
-- **RewardConsumption（Spend gateway）**：用户消费对外入口（对外入口 + 批量入口；转发到 `RewardCore`；在 `RewardView.onlyWriter` 白名单内，负责消费侧推送）。
-- **RewardCore（Spend core）**：消费核心（服务购买/升级、消费记录、特权状态；业务逻辑核心，不推荐作为对外统一入口）。
 - **RewardView**：统一只读 + 统一 DataPush（链下订阅与前端查询入口；writer 白名单严格限制）。
+- **EasyEmissionController（Easy 发行）**：按订单完成后发放 Easy（borrower/lender 50/50），并推送 `RewardView`。
+- **EasyEmissionConfig（Easy 参数）**：Easy 发行参数 SSOT（阈值/系数），参数更新会推送 `RewardView`。
+- **EasyConsumption（Easy 消耗）**：EasiM/Strategy API 按次消耗入口（每次 1 Easy），并推送 `RewardView`。
+- **EasyRecycleDistributor（Easy 回收/分配）**：Easy 消耗后的 75/15/10 分配（burn/team/eco）+ 推送 `RewardView`。
+- **EasyStaking（治理质押）**：质押 Easy 获得投票权（1:1），并推送 `RewardView`。
 
 ### 唯一路径（强约束）
 1. 业务编排：`VaultBusinessLogic` 完成业务流程（不触发奖励）。
-2. 账本落账：`LendingEngine` 在 borrow/repay 成功后触发：
-   - `IRewardManager.onLoanEvent(address user, uint256 amount, uint256 duration, bool flag)`
-   - **现行语义**：`flag` 在 `LendingEngine` 内部计算为 `isOnTimeAndFullyRepaid`（按期且足额还清）。历史上该参数名为 `hfHighEnough`，请以当前调用方语义为准。
-3. 积分计算/发放：`RewardManager` → `RewardManagerCore`：
-   - **当前链上基线**：borrow（`duration>0`）锁定 1 积分；repay（`duration=0 && flag=true`）释放锁定积分并铸币；否则走提前/逾期扣罚（不足则记入 `penaltyLedger`）。
-   - **可配置/可演进部分**：`RewardManagerCore.calculateExamplePoints(...)` 保留公式/参数（等级倍数、动态奖励、bonusBps 等）用于模拟与后续升级，但当前 `onLoanEvent` 主路径采用固定 1 积分的锁定-释放模型。
-   - 先用积分抵扣欠分账本 `penaltyLedger`（若存在），剩余部分通过 `RewardPoints.mintPoints` 发放。
-4. 只读与 DataPush：由 `RewardView` 内部统一 `DataPushLibrary._emitData(...)`：
+2. 账本落账：`OrderEngine` 完成 borrow/repay 并驱动 ledger（`LendingEngine`）成功更新。
+3. Reward 触发（方案 B，推荐默认）：由 `OrderEngine`（Registry `KEY_ORDER_ENGINE`）在“落账成功之后”回调 `RewardManager`：
+   - **推荐主路径（按订单维度）**：`IRewardManagerByOrder.onLoanEventByOrder(user, orderId, amount, maturity, outcome)`
+     - **时间口径 SSOT**：`maturity` 语义为 `maturityBlock`（到期区块高度，legacy 参数名保留）。
+     - outcome: 0=Borrow,1=RepayOnTimeFull,2=RepayEarlyFull,3=RepayLateFull
+   - **Easy 发行（按订单 + lender）**：`onLoanEventByOrderWithLender(borrower, lender, asset, orderId, amount, maturity, outcome)`
+     - 当 `outcome` 为任意“结清足额”（`RepayOnTimeFull/RepayEarlyFull/RepayLateFull`）且满足白皮书门槛/口径时触发 Easy 发行。
+     - `RewardManager` 同步触发 `RewardManagerCore`（积分）与 `EasyEmissionController`（Easy 发行）。
+   - **兼容路径（legacy）**：`IRewardManager.onLoanEvent(user, amount, duration, flag)`
+     - `flag` 语义以调用方为准：`isOnTimeAndFullyRepaid`（按期且足额还清）。历史上该参数名为 `hfHighEnough`，请勿按旧名误解。
+4. 锁定/扣罚/欠分账本：`RewardManager` → `RewardManagerCore`：
+  - **RMCore 职责**：borrow 锁定、repay 释放与抵扣欠分账本 `penaltyLedger`、逾期扣罚（不足则记入 `penaltyLedger`），并向 `RewardView` 推送可观测数据。
+  - **重要变化（SSOT）**：RMCore **不再铸币**；Easy 的发行统一由 `EasyEmissionController` 按白皮书公式负责（避免双发币）。
+5. 只读与 DataPush：由 `RewardView` 内部统一 `DataPushLibrary._emitData(...)`：
    - **发放（Earn）侧**：`RewardManagerCore` 调用 `RewardView.push*`（writer 白名单）
-   - **消费（Spend）侧**：`RewardConsumption` 调用 `RewardView.push*`（writer 白名单）
-   - 说明：历史表述曾写为“`RewardManagerCore/RewardCore` 成功后调用 `RewardView.push*`”；现已按 `RewardView.onlyWriter` 白名单修正为：**消费侧由 `RewardConsumption` 推送**，避免读者误解。
-  - `REWARD_EARNED` / `REWARD_BURNED` / `REWARD_LEVEL_UPDATED` / `REWARD_PRIVILEGE_UPDATED` / `REWARD_STATS_UPDATED` / `REWARD_PENALTY_LEDGER_UPDATED`。
+  - **消费（Spend）侧**：`EasyConsumption` / `EasyRecycleDistributor` 调用 `RewardView.push*`（writer 白名单）
+  - **Easy 侧**：`EasyEmissionController` / `EasyEmissionConfig` / `EasyConsumption` / `EasyRecycleDistributor` / `EasyStaking` 调用 `RewardView.push*`（writer 白名单）
+  - `REWARD_EARNED` / `REWARD_BURNED` / `REWARD_LEVEL_UPDATED` / `REWARD_PRIVILEGE_UPDATED` / `REWARD_CONSUMPTION_RECORDED` / `REWARD_STATS_UPDATED` / `REWARD_PENALTY_LEDGER_UPDATED`。
+  - `EASY_MINTED` / `EASY_SPENT` / `EASY_RECYCLED_SPLIT` / `EASY_STAKED` / `EASY_UNSTAKED` / `EASY_EMISSION_PARAMS_UPDATED`。
 
 ### 权限与边界
 - `RewardManager.onLoanEvent(address,int256,int256)`：**已移除**（统一入口，避免语义不确定）。
-- `RewardManager.onLoanEvent(address,uint256,uint256,bool)`：仅允许 `KEY_LE` 调用（标准入口）。
-- `RewardView` 写入白名单：仅 `RewardManagerCore` 与 `RewardConsumption`。查询对外 0 gas。
-- `RewardPoints` 的 mint/burn 仅授予 `RewardManagerCore`，外部消费通过 `RewardCore/RewardConsumption` 路径进行。
+- `RewardManager.onLoanEvent(address,uint256,uint256,bool)`：仅允许 `KEY_ORDER_ENGINE` 调用（兼容入口）。
+- `RewardManager.onLoanEventByOrder(user, orderId, amount, maturity, outcome)`：仅允许 `KEY_ORDER_ENGINE` 调用（推荐入口）。
+- `RewardView` 写入白名单：`RewardManagerCore`、`EasyEmissionController`、`EasyEmissionConfig`、`EasyConsumption`、`EasyRecycleDistributor`、`EasyStaking`。
+- 奖励通证地址 SSOT：`Registry[KEY_EASY_TOKEN]`（EasyToken）。
+- `EasyToken` 权限：
+  - `MINTER_ROLE`：仅 `EasyEmissionController`
+  - `BURNER_ROLE`：`RewardManagerCore`（扣罚/账本扣减）与 `EasyRecycleDistributor`（消费回收 burn）
+
+### 借款期限门槛校验（BorrowCheck）读路径（强约束）
+
+> 背景：`OrderEngine` 在创建长周期订单（如 90/180/360 天）时需要读取用户等级做门槛校验。该读取属于**协议内强制校验**，不是面向前端/链下的通用查询入口。
+
+- **接口**：`RewardView.getUserLevelForBorrowCheck(user)`
+- **caller gate（必须对齐真实调用方，避免线上 revert）**：
+  - **必须允许**：`Registry[KEY_ORDER_ENGINE]`（OrderEngine，推荐默认）
+  - **禁止**：任意其它 caller（必须 `revert MissingRole()`）
+- **文档与测试要求**：
+  - NatSpec 必须明确上述 caller gate（禁止只写 “KEY_LE only” 造成口径漂移）。
+  - 测试必须锁死：`KEY_ORDER_ENGINE` 允许、其它地址拒绝。
 
 ### 按期窗口（实现口径）
-- “按期且足额还清”的权威判断发生在 `LendingEngine`，当前固定 `ON_TIME_WINDOW = 24 hours`。
-- `RewardManager.setOnTimeWindow(...)` 当前用于惩罚路径中“提前/逾期”的窗口判定，并不改变 `LendingEngine` 的按期判断。
+- **时间口径（强约束）**：所有“窗口/门槛/到期”判断一律使用 **block 口径**（见本文“时间依赖改造原则”），不得使用秒级时间或“秒差比较”。
+- “按期且足额还清”的权威判断发生在 `LendingEngine (OrderEngine)`，当前固定为 `ON_TIME_WINDOW_BLOCKS`（实现基线：`7200` blocks）。
+  - 解释：在约 \(12s/block\) 的基线下，`7200` blocks \(\approx\) 24h；**该“24h”仅用于理解/展示，不作为链上门槛语义**。
+- `RewardManager.setOnTimeWindow(...)` 当前用于 Reward 侧（`RewardManagerCore`）惩罚路径中“提前/逾期”的窗口判定，其单位也必须为 **blocks**，并不改变 `LendingEngine` 的按期判断。
 
 ### 模块键（ModuleKeys）
 - `KEY_RM`：RewardManager
 - `KEY_REWARD_MANAGER_CORE`：RewardManagerCore
-- `KEY_REWARD_CONSUMPTION`：RewardConsumption
 - `KEY_REWARD_VIEW`：RewardView（新增，只读视图 + 统一 DataPush）
+- `KEY_EASY_TOKEN`：EasyToken
+- `KEY_EASY_EMISSION_CONFIG`：EasyEmissionConfig
+- `KEY_EASY_EMISSION_CONTROLLER`：EasyEmissionController
+- `KEY_EASY_CONSUMPTION`：EasyConsumption
+- `KEY_EASY_RECYCLE_DISTRIBUTOR`：EasyRecycleDistributor
+- `KEY_EASY_STAKING`：EasyStaking（治理投票权 token）
 
 ### 前端/链下对接
-- 订阅 `DataPushed` 事件，过滤上述 `DATA_TYPE_REWARD_*`（含 `REWARD_PENALTY_LEDGER_UPDATED`）。
+- 订阅 `DataPushed` 事件，过滤 `DATA_TYPE_REWARD_*` + `DATA_TYPE_EASY_*`（含 `REWARD_PENALTY_LEDGER_UPDATED`）。
 - 说明：`penaltyLedger`（欠分账本）更新使用独立 `REWARD_PENALTY_LEDGER_UPDATED`，避免与 `REWARD_STATS_UPDATED`（系统统计）复用导致 payload 冲突。
 - 仅访问 `RewardView` 只读接口：
   - `getUserRewardSummary(user)`
-  - `getUserRecentActivities(user, fromTs, toTs, limit)`（分页/窗口）
+  - `getUserRecentActivitiesWithMeta(user, fromBlock, toBlock, limit)`（分页/窗口，block 口径）
   - `getSystemRewardStats()`
   - `getTopEarners()`
+  - `getEasyEmissionParamsWithMeta()` / `getEasySpentWithMeta(user)` / `getEasyStakedWithMeta(user)`（Easy 观测）
   - **禁止/不要**在前端/链下直接调用 `RewardManagerCore` 的 `getUserLevel/getRewardParameters/getUserCache/...` 等查询接口：这些接口仅为协议内硬约束（例如 `LendingEngine` 的长周期期限门槛）与 `RewardView` 透传保留，视为 **DEPRECATED for external consumers**。
 
 ### 重要差异
 - 不再从 `VaultBusinessLogic` 触发奖励；批量库（`VaultBusinessLogicLibrary`）完全移除奖励相关逻辑。
-- 所有奖励以 `LendingEngine` 落账后的唯一入口触发，保证状态一致性。
+- 所有奖励以 `OrderEngine` 在 **ledger 落账成功后** 的唯一入口触发（`KEY_ORDER_ENGINE`），保证状态一致性。
 
 ### 入口收紧（强制规范，必须遵守）
-- 唯一路径：`LendingEngine` 成功落账后调用 `RewardManager.onLoanEvent(address,uint256,uint256,bool)`，再由 RM 调用 `RewardManagerCore`。
-- **V2 按订单路径**：若上游已对接订单级回调，可调用 `RewardManager.onLoanEventV2(user, orderId, amount, maturity, outcome)`（outcome: 0=Borrow,1=RepayOnTimeFull,2=RepayEarlyFull,3=RepayLateFull），RM 再转发至 `RewardManagerCore.onLoanEventV2` 实现“多订单独立锁定/结算”。
-- 本金门槛：`RewardManagerCore` 已在 `onLoanEvent / onLoanEventV2` 强制 `amount < 1000 USDC` 不计分/不锁定；如需调整，请同步修改合约与测试并更新说明。
-- `RewardManagerCore.onLoanEvent` 与 `onBatchLoanEvents` 不再接受外部直接调用：
+- **推荐唯一路径（按订单维度）**：`OrderEngine` 在成功落账后调用 `RewardManager.onLoanEventByOrder(user, orderId, amount, maturity, outcome)`，再由 RM 调用 `RewardManagerCore.onLoanEventByOrder` 实现“多订单独立锁定/结算”。
+- **兼容路径（V1）**：仅用于历史兼容/过渡：`OrderEngine` 调用 `RewardManager.onLoanEvent(address,uint256,uint256,bool)`，再由 RM 调用 `RewardManagerCore`。
+- 本金门槛：`RewardManagerCore` 已在 `onLoanEvent / onLoanEventByOrder` 强制 `amount < 1000 USDC` 不计分/不锁定；如需调整，请同步修改合约与测试并更新说明。
+- `RewardManagerCore.onLoanEvent` 与 `onLoanEventByOrder` 不再接受外部直接调用：
   - 调用白名单仅限 `RewardManager`；否则将触发自定义错误 `RewardManagerCore__UseRewardManagerEntry`；
   - 同时发出 `DeprecatedDirectEntryAttempt(caller,blockNumber)` 事件用于链下审计迁移；
   - 旧入口 `RewardManager.onLoanEvent(address,int256,int256)`：**已移除**，全局入口统一为 `RewardManager.onLoanEvent(address,uint256,uint256,bool)`。
 
 ### 迁移说明（对脚本/测试的影响）
-- 任何直接调用 `RewardManagerCore.onLoanEvent` 的脚本或测试都会失败。请统一改为：`LendingEngine → RewardManager → RewardManagerCore` 路径。
+- 任何直接调用 `RewardManagerCore.onLoanEvent` 的脚本或测试都会失败。请统一改为：`OrderEngine → RewardManager → RewardManagerCore` 路径（推荐走按订单入口：`onLoanEventByOrder`；legacy 仅兼容/过渡）。
 - 测试改动：新增断言“直接调用 RMCore 将 revert（`RewardManagerCore__UseRewardManagerEntry`）”。
 - 前端/服务端仅订阅 `DataPushed` 事件，过滤 `DATA_TYPE_REWARD_*`，不再依赖旧的链下解析路径。
 
@@ -1241,7 +1331,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
  ### 模块映射建议
  - **库式统一存储（共享状态）**：Registry 家族（上文列举）。
  - **本地存储 + UUPS（独立状态）**：
-   - View 层：`VaultRouter`、`PositionView`、`UserView`、`HealthView`、`StatisticsView`、`ViewCache`、`AccessControlView`、`BatchView`、`RegistryView`、`SystemView`、`CacheOptimizedView`、`RewardView`、`LiquidatorView`，以及可选的 `DashboardView`、`PreviewView`、`RiskView`、`ValuationOracleView`、`FeeRouterView`、`LendingEngineView`、`ModuleHealthView`、`EventHistoryManager`、`LiquidationRiskView` 等。
+  - View 层：`VaultRouter`、`PositionView`、`UserView`、`HealthView`、`StatisticsView`、`LoanFlowView`、`ViewCache`、`AccessControlView`、`BatchView`、`RegistryView`、`SystemView`、`CacheOptimizedView`、`RewardView`、`LiquidatorView`，以及可选的 `DashboardView`、`PreviewView`、`RiskView`、`ValuationOracleView`、`FeeRouterView`、`LendingEngineView`、`ModuleHealthView`、`EventHistoryManager`、`LiquidationRiskView` 等。
    - 业务层：`CollateralManager`、`LendingEngine`、`FeeRouter`、`PriceOracle`、清算各模块等。
    - 动态键：`RegistryDynamicModuleKey`（其状态与 Registry 家族解耦，独立升级）。
  

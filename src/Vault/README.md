@@ -9,35 +9,18 @@ Vault模块是RWA借贷平台的核心组件，负责管理抵押物、借贷、
 ### 1. VaultCore.sol - 核心业务逻辑
 **文件路径**: `contracts/Vault/VaultCore.sol`
 
-**主要功能**: 处理用户的主要操作（存款、借款、还款、提取）
+**主要功能**: 处理用户的主要操作（存款、还款/结算、提取；借款由撮合/订单化 SSOT 路径编排）
 
 **暴露接口**:
 ```solidity
 // 基础操作
 function deposit(address asset, uint256 amount) external
 function withdraw(address asset, uint256 amount) external
-function borrow(address asset, uint256 amount) external
-function repay(address asset, uint256 amount) external
-
-// 复合操作
-function depositAndBorrow(
-    address collateralAsset,
-    uint256 collateralAmount,
-    address borrowAsset,
-    uint256 borrowAmount
-) external
-
-function repayAndWithdraw(
-    address repayAsset,
-    uint256 repayAmount,
-    address withdrawAsset,
-    uint256 withdrawAmount
-) external
+function repay(uint256 orderId, address asset, uint256 amount) external
 
 // 批量操作
 function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external
-function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external
-function batchRepay(address[] calldata assets, uint256[] calldata amounts) external
+function batchRepay(uint256[] calldata orderIds, address[] calldata assets, uint256[] calldata amounts) external
 function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external
 ```
 
@@ -200,17 +183,10 @@ const [healthFactor, isValid] = await vaultView.getUserHealthFactorWithMeta(user
 
 #### 借款操作
 ```javascript
-// 1. 检查健康因子
-const [healthFactor, isValid] = await vaultView.getUserHealthFactorWithMeta(userAddress);
-
-// 2. 检查合约流动性
-const contractBalance = await tokenContract.balanceOf(vaultCoreAddress);
-
-// 3. 执行借款
-await vaultCore.borrow(assetAddress, amount);
-
-// 4. 查询借款后的状态
-const userDebt = await vaultView.getUserDebt(userAddress, assetAddress);
+// ⚠️ 当前架构已移除 `VaultCore.borrow(asset, amount)`。
+// 借款必须通过撮合/订单化 SSOT 路径完成（并返回 orderId）：
+//   VaultBusinessLogic.finalizeMatch(...) -> SettlementMatchLib.finalizeAtomicFull(...)
+// 账本写入通过 VaultCore.borrowFor(...)（仅模块调用），订单创建通过 ORDER_ENGINE.createLoanOrder(...)（orderId SSOT）。
 ```
 
 #### 还款操作

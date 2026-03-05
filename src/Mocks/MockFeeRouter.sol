@@ -35,6 +35,7 @@ contract MockFeeRouter is IFeeRouter {
 
     function distributeNormal(address, uint256) external pure { _noop(); }
     function distributeDynamic(address, uint256, bytes32) external pure { _noop(); }
+    function distributePrepaid(address, uint256, bytes32, address) external pure { _noop(); }
     function batchDistribute(address, uint256[] calldata, bytes32[] calldata) external pure { _noop(); }
 
     // ===== Admin writes (no-op in mock) =====

@@ -18,6 +18,8 @@ import { IAccessControlManager } from "../../interfaces/IAccessControlManager.so
 import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
 import { DataPushTypes } from "../../constants/DataPushTypes.sol";
 import { IGuaranteeFundManager } from "../../interfaces/IGuaranteeFundManager.sol";
+import { IFeeRouter } from "../../interfaces/IFeeRouter.sol";
+import { FeeTypes } from "../../constants/FeeTypes.sol";
 
 interface IStatisticsPushManagerMinimal {
     function notifyGuarantee(address user, address asset) external;
@@ -196,7 +198,7 @@ contract GuaranteeFundManager is
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         
         // Keep strict non-zero guards for backward-compatible deploy & test flows.
         if (initialVaultCoreAddr == address(0)) revert ZeroAddress();
@@ -213,7 +215,7 @@ contract GuaranteeFundManager is
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
             msg.sender,
-            ts
+            blockNumber
         );
     }
 
@@ -387,7 +389,7 @@ contract GuaranteeFundManager is
         nonReentrant
     {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
@@ -401,12 +403,12 @@ contract GuaranteeFundManager is
         _totalGuaranteesByAsset[asset] += amount;
         _trackAssetIfNeeded(user, asset, newBal);
         
-        emit GuaranteeLocked(user, asset, amount, ts);
+        emit GuaranteeLocked(user, asset, amount, blockNumber);
 
         // DataPush + View 缓存（best-effort）
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_GUARANTEE_LOCKED,
-            abi.encode(user, asset, amount, ts)
+            abi.encode(user, asset, amount, blockNumber)
         );
         _tryNotifyGuaranteeStatsPushManager(user, asset);
     }
@@ -440,7 +442,7 @@ contract GuaranteeFundManager is
         nonReentrant
     {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
@@ -459,12 +461,12 @@ contract GuaranteeFundManager is
             // Transfer to user (refund).
             IERC20(asset).safeTransfer(user, amount);
             
-            emit GuaranteeReleased(user, asset, amount, ts);
+            emit GuaranteeReleased(user, asset, amount, blockNumber);
 
             // DataPush + View 缓存（best-effort）
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_RELEASED,
-                abi.encode(user, asset, amount, ts)
+                abi.encode(user, asset, amount, blockNumber)
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
@@ -499,7 +501,7 @@ contract GuaranteeFundManager is
         nonReentrant
     {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (feeReceiver == address(0)) revert ZeroAddress();
@@ -513,12 +515,12 @@ contract GuaranteeFundManager is
             // Transfer to fee receiver (forfeit).
             IERC20(asset).safeTransfer(feeReceiver, currentGuarantee);
             
-            emit GuaranteeForfeited(user, asset, currentGuarantee, feeReceiver, ts);
+            emit GuaranteeForfeited(user, asset, currentGuarantee, feeReceiver, blockNumber);
 
             // DataPush + View 缓存（best-effort）
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
-                abi.encode(user, asset, currentGuarantee, feeReceiver, ts)
+                abi.encode(user, asset, currentGuarantee, feeReceiver, blockNumber)
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
@@ -544,22 +546,20 @@ contract GuaranteeFundManager is
      * @param user Borrower address.
      * @param asset ERC20 guarantee asset address.
      * @param lender Lender address receiving `penaltyToLender`.
-     * @param platform Platform fee receiver address receiving `platformFee`.
      * @param refundToBorrower Amount refunded to borrower (token decimals).
      * @param penaltyToLender Amount paid to lender as penalty (token decimals).
-     * @param platformFee Amount paid to platform as fee (token decimals).
+    * @param platformFee Amount routed as platform fee (token decimals).
      */
     function settleEarlyRepayment(
         address user,
         address asset,
         address lender,
-        address platform,
         uint256 refundToBorrower,
         uint256 penaltyToLender,
         uint256 platformFee
     ) external override onlyVaultCoreOrEarlyRepaymentGuaranteeManager onlyValidRegistry nonReentrant {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         uint256 total = _userGuarantees[user][asset];
@@ -574,10 +574,10 @@ contract GuaranteeFundManager is
 
         if (refundToBorrower > 0) {
             IERC20(asset).safeTransfer(user, refundToBorrower);
-            emit GuaranteeReleased(user, asset, refundToBorrower, ts);
+            emit GuaranteeReleased(user, asset, refundToBorrower, blockNumber);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_RELEASED,
-                abi.encode(user, asset, refundToBorrower, ts)
+                abi.encode(user, asset, refundToBorrower, blockNumber)
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
@@ -585,21 +585,27 @@ contract GuaranteeFundManager is
         if (penaltyToLender > 0) {
             if (lender == address(0)) revert ZeroAddress();
             IERC20(asset).safeTransfer(lender, penaltyToLender);
-            emit GuaranteeForfeited(user, asset, penaltyToLender, lender, ts);
+            emit GuaranteeForfeited(user, asset, penaltyToLender, lender, blockNumber);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
-                abi.encode(user, asset, penaltyToLender, lender, ts)
+                abi.encode(user, asset, penaltyToLender, lender, blockNumber)
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
 
         if (platformFee > 0) {
-            if (platform == address(0)) revert ZeroAddress();
-            IERC20(asset).safeTransfer(platform, platformFee);
-            emit GuaranteeForfeited(user, asset, platformFee, platform, ts);
+            address feeRouter = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
+            IERC20(asset).safeTransfer(feeRouter, platformFee);
+            IFeeRouter(feeRouter).distributePrepaid(
+                asset,
+                platformFee,
+                FeeTypes.FEE_TYPE_EARLY_REPAYMENT_PLATFORM,
+                user
+            );
+            emit GuaranteeForfeited(user, asset, platformFee, feeRouter, blockNumber);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
-                abi.encode(user, asset, platformFee, platform, ts)
+                abi.encode(user, asset, platformFee, feeRouter, blockNumber)
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
@@ -633,7 +639,7 @@ contract GuaranteeFundManager is
         uint256 amount
     ) external override onlyVaultCoreOrEarlyRepaymentGuaranteeManager onlyValidRegistry nonReentrant {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (receiver == address(0)) revert ZeroAddress();
@@ -647,10 +653,10 @@ contract GuaranteeFundManager is
         _trackAssetIfNeeded(user, asset, newBal);
 
         IERC20(asset).safeTransfer(receiver, amount);
-        emit GuaranteeForfeited(user, asset, amount, receiver, ts);
+        emit GuaranteeForfeited(user, asset, amount, receiver, blockNumber);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
-            abi.encode(user, asset, amount, receiver, ts)
+            abi.encode(user, asset, amount, receiver, blockNumber)
         );
         _tryNotifyGuaranteeStatsPushManager(user, asset);
     }
@@ -686,7 +692,7 @@ contract GuaranteeFundManager is
         uint256[] calldata amounts
     ) external override onlyVaultCore onlyValidRegistry nonReentrant {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         uint256 len = receivers.length;
@@ -713,10 +719,10 @@ contract GuaranteeFundManager is
             if (amt == 0) continue;
             if (recv == address(0)) revert ZeroAddress();
             IERC20(asset).safeTransfer(recv, amt);
-            emit GuaranteeForfeited(user, asset, amt, recv, ts);
+            emit GuaranteeForfeited(user, asset, amt, recv, blockNumber);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
-                abi.encode(user, asset, amt, recv, ts)
+                abi.encode(user, asset, amt, recv, blockNumber)
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
@@ -752,7 +758,7 @@ contract GuaranteeFundManager is
         uint256[] calldata amounts
     ) external override onlyVaultCoreOrBusinessLogic onlyValidRegistry nonReentrant {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         uint256 length = assets.length;
         if (length != amounts.length) revert GuaranteeFundManager__LengthMismatch();
@@ -774,12 +780,12 @@ contract GuaranteeFundManager is
             _totalGuaranteesByAsset[asset] += amount;
             _trackAssetIfNeeded(user, asset, newBal);
             
-            emit GuaranteeLocked(user, asset, amount, ts);
+            emit GuaranteeLocked(user, asset, amount, blockNumber);
 
             // DataPush + StatisticsView cache update (per-item, best-effort).
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_LOCKED,
-                abi.encode(user, asset, amount, ts)
+                abi.encode(user, asset, amount, blockNumber)
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
@@ -787,7 +793,7 @@ contract GuaranteeFundManager is
         // DataPush (batch summary).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_GUARANTEE_LOCKED,
-            abi.encode(user, length, ts)
+            abi.encode(user, length, blockNumber)
         );
     }
 
@@ -821,7 +827,7 @@ contract GuaranteeFundManager is
         uint256[] calldata amounts
     ) external override onlyVaultCore onlyValidRegistry nonReentrant {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         uint256 length = assets.length;
         if (length != amounts.length) revert GuaranteeFundManager__LengthMismatch();
@@ -849,12 +855,12 @@ contract GuaranteeFundManager is
                 // Transfer to user (refund).
                 IERC20(asset).safeTransfer(user, amount);
                 
-                emit GuaranteeReleased(user, asset, amount, ts);
+                emit GuaranteeReleased(user, asset, amount, blockNumber);
 
                 // DataPush + View 缓存（逐条）
                 DataPushLibrary._emitData(
                     DataPushTypes.DATA_TYPE_GUARANTEE_RELEASED,
-                    abi.encode(user, asset, amount, ts)
+                    abi.encode(user, asset, amount, blockNumber)
                 );
                 _tryNotifyGuaranteeStatsPushManager(user, asset);
             }
@@ -863,7 +869,7 @@ contract GuaranteeFundManager is
         // DataPush (batch summary).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_GUARANTEE_RELEASED,
-            abi.encode(user, length, ts)
+            abi.encode(user, length, blockNumber)
         );
     }
 
@@ -882,7 +888,7 @@ contract GuaranteeFundManager is
      */
     function _authorizeUpgrade(address newImplementation) internal override {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         
@@ -893,7 +899,7 @@ contract GuaranteeFundManager is
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
-            ts
+            blockNumber
         );
 
     }

@@ -117,31 +117,6 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the number of loan orders for a given user, with metadata.
-     * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyAuthorizedUser)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @param user Target user address
-     * @return count Number of orders for the user
-     * @return isValid Whether the read succeeded
-     * @return blockNumber Read block number (block.number)
-     */
-    function getUserLoanCount(address user)
-        external
-        view
-        onlyValidRegistry
-        onlyAuthorizedUser(user)
-        returns (uint256 count, bool isValid, uint256 blockNumber)
-    {
-        count = _engine().getUserLoanCountForView(user);
-        return (count, true, _now());
-    }
-
-    /**
      * @notice Get the accumulated failed fee amount for an order (ops diagnostics).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)

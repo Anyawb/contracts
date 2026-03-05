@@ -70,8 +70,12 @@ src/
 ├─ Reward/                      # 奖励系统
 │  ├─ RewardManager.sol         # 奖励管理器
 │  ├─ RewardManagerCore.sol    # 奖励管理核心
-│  ├─ RewardCore.sol            # 奖励核心
-│  └─ RewardConsumption.sol    # 奖励消费
+│  ├─ RewardView.sol            # 只读聚合 + 统一 DataPush
+│  ├─ EasyConsumption.sol       # Easy 按次消耗（每次 1 Easy）
+│  ├─ EasyRecycleDistributor.sol # Easy 回收/分配
+│  ├─ EasyEmissionConfig.sol    # Easy 发行参数
+│  ├─ EasyEmissionController.sol # Easy 发行控制器
+│  └─ EasyStaking.sol           # Easy 质押（治理投票权）
 ├─ Governance/                  # 治理模块
 │  └─ CrossChainGovernance.sol  # 跨链治理
 ├─ libraries/                   # 共享库
@@ -128,7 +132,7 @@ src/
 - **常量命名**：`KEY_XXX` / `ACTION_XXX`，类型为 `bytes32 constant`。
 - **字符串映射**：所有 key 均支持 lowerCamelCase 字符串与 bytes32 常量的双向映射。
 - **错误处理**：未知字符串严格 revert，防止隐性错误。
-- **版本化扩展**：预留 `KEY_XXX_V2` 等常量，便于平滑升级。
+- **扩展与兼容**：预留语义化的新 key（例如 `KEY_XXX_NEXT` / `KEY_XXX_UPGRADED`），便于平滑升级。
 
 #### 3.2.2 典型用法
 ```solidity

@@ -1,9 +1,10 @@
-import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost";
+import { ethers, network } from "hardhat";
+import { envBool, loadAddressMap, resolveAddress } from "./_addressResolver";
 
 const ONE_DAY = 24n * 60n * 60n;
 const ONE_HOUR_BLOCKS = 1_800n;
-const BLOCKS_PER_DAY = 43_200n;
+// Keep consistent with TermBlocksLib bucket mapping (5d=36000 => 7200 blocks/day baseline).
+const BLOCKS_PER_DAY = 7_200n;
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -42,23 +43,54 @@ async function mineToBlock(targetBlock: bigint) {
   const current = await latestBlockNumber();
   if (targetBlock <= current) return;
   const delta = targetBlock - current;
-  await ethers.provider.send("hardhat_mine", [ethers.toBeHex(delta)]);
+  if (network.name === "localhost" || network.name === "hardhat") {
+    await ethers.provider.send("hardhat_mine", [ethers.toBeHex(delta)]);
+  }
 }
 
 async function main() {
+  const readOnly = envBool("READ_ONLY", network.name !== "localhost");
+  const enableWrite = envBool("ENABLE_WRITE", !readOnly);
+
+  if (readOnly || !enableWrite) {
+    const addressMap = loadAddressMap(network.name);
+    const registryAddr = resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
+    const registry = (await ethers.getContractAt("Registry", registryAddr)) as any;
+    const vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
+    const orderEngineAddr = (await registry.getModuleOrRevert(key("ORDER_ENGINE"))) as string;
+    console.log(`=== funds-flow-smoke-create-order (read-only) network=${network.name} ===`);
+    console.log(`  Registry=${registryAddr}`);
+    console.log(`  VAULT_BUSINESS_LOGIC=${vblAddr}`);
+    console.log(`  ORDER_ENGINE=${orderEngineAddr}`);
+    console.log("  ℹ️  [skip] write-heavy order creation flow (set ENABLE_WRITE=1 on localhost if needed)");
+    console.log("\n✅ funds-flow-smoke-create-order (read-only) PASSED\n");
+    return;
+  }
+
   const [deployer, keeper, borrower, lender] = await ethers.getSigners();
   if (keeper.address.toLowerCase() === borrower.address.toLowerCase()) {
     throw new Error("[Config] keeper must differ from borrower for liquidation tests.");
   }
 
-  const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
-  const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
-  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
-  const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter)) as any;
-  const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
-  const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
-  const vbl = (await ethers.getContractAt("VaultBusinessLogic", CONTRACT_ADDRESSES.VaultBusinessLogic)) as any;
+  const addressMap = loadAddressMap(network.name);
+  const registryAddr = resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
+  const registry = (await ethers.getContractAt("Registry", registryAddr)) as any;
+
+  const acmAddr = (await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"))) as string;
+  const awAddr = (await registry.getModuleOrRevert(key("ASSET_WHITELIST"))) as string;
+  const poAddr = (await registry.getModuleOrRevert(key("PRICE_ORACLE"))) as string;
+  const feeRouterAddr = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
+  const usdcAddr = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
+  const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
+  const vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
+
+  const acm = (await ethers.getContractAt("AccessControlManager", acmAddr)) as any;
+  const aw = (await ethers.getContractAt("AssetWhitelist", awAddr)) as any;
+  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", poAddr)) as any;
+  const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddr)) as any;
+  const usdc = (await ethers.getContractAt("MockERC20", usdcAddr)) as any;
+  const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreAddr)) as any;
+  const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddr)) as any;
 
   const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
   const collateralManagerAddr = await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"));
@@ -99,8 +131,8 @@ async function main() {
   await requireRole(ACTION_SET_PARAMETER, deployer.address, "deployer ACTION_SET_PARAMETER");
 
   // Module roles required for finalizeMatch -> order creation -> LoanNFT mint path.
-  await requireRole(ACTION_ORDER_CREATE, CONTRACT_ADDRESSES.VaultBusinessLogic, "VaultBusinessLogic ACTION_ORDER_CREATE");
-  await requireRole(ACTION_DEPOSIT, CONTRACT_ADDRESSES.VaultBusinessLogic, "VaultBusinessLogic ACTION_DEPOSIT");
+  await requireRole(ACTION_ORDER_CREATE, vblAddr, "VaultBusinessLogic ACTION_ORDER_CREATE");
+  await requireRole(ACTION_DEPOSIT, vblAddr, "VaultBusinessLogic ACTION_DEPOSIT");
   await requireRole(ACTION_BORROW, orderEngineAddr, "OrderEngine ACTION_BORROW (LoanNFT minter)");
 
   // ============ Production-like preflight checks (no auto-config) ============
@@ -179,7 +211,7 @@ async function main() {
     salt: ethers.keccak256(ethers.toUtf8Bytes("smoke-lend-salt-1")),
   };
 
-  await usdc.connect(lender).approve(CONTRACT_ADDRESSES.VaultBusinessLogic, borrowAmt);
+  await usdc.connect(lender).approve(vblAddr, borrowAmt);
   const lendHash = buildLendIntentHash(lendIntent);
   await vbl.connect(lender).reserveForLending(lender.address, usdc.target, borrowAmt, lendHash);
 
@@ -187,7 +219,7 @@ async function main() {
     name: "RwaLending",
     version: "1",
     chainId: Number((await ethers.provider.getNetwork()).chainId),
-    verifyingContract: CONTRACT_ADDRESSES.VaultBusinessLogic,
+    verifyingContract: vblAddr,
   } as const;
 
   const typesBorrow = {

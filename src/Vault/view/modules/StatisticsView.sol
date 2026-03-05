@@ -69,7 +69,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 lastUpdateBlock;
     }
 
-    struct RewardStats { uint256 rewardRate; uint256 totalRewardPoints; }
+    struct RewardStats { uint256 rewardRate; uint256 totalEasyTokenSupply; }
 
     /// @notice Cached graceful degradation stats payload.
     struct GracefulDegradationStats {
@@ -957,7 +957,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Snapshot semantics:
      * - `userBalance` and `totalByAsset` are treated as authoritative SSOT-derived snapshots.
-     * - This keeps `CacheUpdateFailedV2` payload stable and replayable.
+     * - This keeps `CacheUpdateFailedWithContext` payload stable and replayable.
      *
      * @param user User address.
      * @param asset Guarantee asset address.
@@ -1153,13 +1153,13 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Read-only.
-     * - Best-effort external dependency:
-     *   - If RewardPoints is missing in Registry or the call reverts, `r.totalRewardPoints` is returned as 0.
+    * - Best-effort external dependency:
+    *   - If EasyToken is missing in Registry or the call reverts, `r.totalEasyTokenSupply` is returned as 0.
      *   - Callers MUST treat this output as informational (not a ledger SSOT).
      *
-     * @return r Reward stats where:
-     *         - r.rewardRate is deprecated and always 0
-     *         - r.totalRewardPoints is RewardPoints.totalSupply() (0 if module missing / call fails)
+    * @return r Reward stats where:
+    *         - r.rewardRate is deprecated and always 0
+    *         - r.totalEasyTokenSupply is EasyToken.totalSupply() (0 if module missing / call fails)
      * @return isValid Whether the global snapshot blockNumber is within `ViewConstants.CACHE_DURATION`
      * @return blockNumber Cache blockNumber (block.number)
      */
@@ -1171,13 +1171,13 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         // rewardRate is deprecated; keep as 0.
         r.rewardRate = 0;
-        // Best-effort: RewardPoints.totalSupply(); module may be unset or revert.
-        address rp = _getModule(ModuleKeys.KEY_REWARD_POINTS);
-        if (rp != address(0)) {
-            try IRewardPointsSupply(rp).totalSupply() returns (uint256 s) {
-                r.totalRewardPoints = s;
+        // Best-effort: EasyToken.totalSupply(); module may be unset or revert.
+        address easyTokenAddr = _getModule(ModuleKeys.KEY_EASY_TOKEN);
+        if (easyTokenAddr != address(0)) {
+            try IEasyTokenSupply(easyTokenAddr).totalSupply() returns (uint256 s) {
+                r.totalEasyTokenSupply = s;
             } catch {
-                r.totalRewardPoints = 0;
+                r.totalEasyTokenSupply = 0;
             }
         }
         blockNumber = _globalSnapshot.blockNumber;
@@ -1389,7 +1389,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 } 
 
-/// @dev Minimal read-only interface for RewardPoints (avoid importing the full implementation).
-interface IRewardPointsSupply {
+/// @dev Minimal read-only interface for EasyToken (avoid importing the full implementation).
+interface IEasyTokenSupply {
     function totalSupply() external view returns (uint256);
 }

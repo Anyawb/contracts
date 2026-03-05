@@ -233,7 +233,7 @@ describe("PreviewView", function () {
       expect(borrowRes.newHF).to.equal((130n * 10_000n) / 30n);
       expect(borrowRes.newLTV).to.equal((30n * 10_000n) / 130n);
       expect(borrowRes.positionIsValid).to.equal(true);
-      expect(borrowRes.positionTimestamp).to.be.gt(0n);
+      expect(borrowRes.positionUpdateBlock).to.be.gt(0n);
       expect(borrowRes.positionVersion).to.be.gt(0n);
 
       const repayRes = await preview.connect(user).previewRepay(user.address, asset, 5n);
@@ -242,7 +242,7 @@ describe("PreviewView", function () {
       expect(repayRes.newHF).to.equal((100n * 10_000n) / 15n);
       expect(repayRes.newLTV).to.equal((15n * 10_000n) / 100n);
       expect(repayRes.positionIsValid).to.equal(true);
-      expect(repayRes.positionTimestamp).to.be.gt(0n);
+      expect(repayRes.positionUpdateBlock).to.be.gt(0n);
       expect(repayRes.positionVersion).to.be.gt(0n);
     });
 
@@ -829,11 +829,11 @@ describe("PreviewView", function () {
   describe("UUPS 升级测试", function () {
     it("非管理员不能升级", async function () {
       const { user, preview } = await loadFixture(deployFixture);
-      const PreviewV2 = await ethers.getContractFactory("PreviewView");
-      const previewV2 = await PreviewV2.deploy();
+      const PreviewNewImpl = await ethers.getContractFactory("PreviewView");
+      const previewNewImpl = await PreviewNewImpl.deploy();
       
       await expect(
-        preview.connect(user).upgradeToAndCall(await previewV2.getAddress(), "0x")
+        preview.connect(user).upgradeToAndCall(await previewNewImpl.getAddress(), "0x")
       ).to.be.reverted;
     });
 

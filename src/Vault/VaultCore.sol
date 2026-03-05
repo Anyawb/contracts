@@ -19,7 +19,9 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /// @title VaultCore
 /// @notice Single user entry (dual-architecture): routes writes to ledger modules.
 /// @notice Exposes the View address resolver.
-/// @dev Architecture-Guide: deposit/withdraw -> CollateralManager; borrow -> LendingEngine.
+/// @dev Architecture-Guide: deposit/withdraw -> CollateralManager.
+/// @dev Architecture-Guide: borrow is NOT a direct user entry; it is orchestrated through SSOT match/settlement paths
+///      and reaches the debt ledger via `borrowFor(...)` (module-only).
 /// @dev Architecture-Guide: repay -> SettlementManager (SSOT).
 /// @dev UUPS + ReentrancyGuard baseline: constructor disables initializers; keep __gap.
 /// @dev User-facing write entrypoints are nonReentrant.
@@ -207,13 +209,13 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
         // NOTE (Time-Dependency-Refactor): we do not use block-based time in seconds in this repo.
         // The router interface parameter is a legacy *observability* field.
         // We pass `block.number` as a monotonic chain freshness signal.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         IVaultRouter(_viewContractAddr).processUserOperation(
             msg.sender,
             ActionKeys.ACTION_DEPOSIT,
             asset,
             amount,
-            ts
+            blockNumber
         );
     }
 
@@ -237,35 +239,14 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
 
         // NOTE (Time-Dependency-Refactor): legacy param is used as observability only.
         // Pass block.number (updateBlock) for a monotonic chain time axis.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         IVaultRouter(_viewContractAddr).processUserOperation(
             msg.sender,
             ActionKeys.ACTION_WITHDRAW,
             asset,
             amount,
-            ts
+            blockNumber
         );
-    }
-
-    /**
-     * @notice Borrow via LendingEngine (single authority entry).
-     * @dev Reverts if:
-     *      - asset is zero
-     *      - amount is zero
-     *
-     * Security:
-     * - Non-reentrant
-     * - LendingEngine enforces onlyVaultCore and downstream permissions
-     *
-     * @param asset Debt asset address (non-zero)
-     * @param amount Borrow amount (token decimals)
-     */
-    function borrow(address asset, uint256 amount) external nonReentrant onlyValidRegistry {
-        if (asset == address(0)) revert ZeroAddress();
-        if (amount == 0) revert AmountIsZero();
-
-        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
     }
 
     /**
@@ -364,7 +345,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
 
         // NOTE (Time-Dependency-Refactor): legacy param is used as observability only.
         // Pass block.number (updateBlock) for a monotonic chain time axis.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i];
             uint256 amount = amounts[i];
@@ -375,38 +356,8 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
                 ActionKeys.ACTION_DEPOSIT,
                 asset,
                 amount,
-                ts
+                blockNumber
             );
-        }
-    }
-
-    /**
-     * @notice Batch borrow via LendingEngine.
-     * @dev Reverts if:
-     *      - assets.length != amounts.length
-     *      - assets is empty
-     *      - assets.length > _MAX_BATCH_SIZE
-     *      - any asset is zero
-     *      - any amount is zero
-     *
-     * Security:
-     * - Non-reentrant
-     *
-     * @param assets Debt asset addresses
-     * @param amounts Borrow amounts (token decimals)
-     */
-    function batchBorrow(address[] calldata assets, uint256[] calldata amounts) external nonReentrant onlyValidRegistry {
-        if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
-        if (assets.length == 0) revert EmptyArray();
-        if (assets.length > _MAX_BATCH_SIZE) revert VaultCore__BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
-
-        address lendingEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LE);
-        for (uint256 i = 0; i < assets.length; ++i) {
-            address asset = assets[i];
-            uint256 amount = amounts[i];
-            if (asset == address(0)) revert ZeroAddress();
-            if (amount == 0) revert AmountIsZero();
-            ILendingEngineBasic(lendingEngine).borrow(msg.sender, asset, amount, 0, 0);
         }
     }
 
@@ -471,7 +422,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
 
         // NOTE (Time-Dependency-Refactor): legacy param is used as observability only.
         // Pass block.number (updateBlock) for a monotonic chain time axis.
-        uint256 ts = block.number;
+        uint256 blockNumber = block.number;
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i];
             uint256 amount = amounts[i];
@@ -482,7 +433,7 @@ contract VaultCore is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable
                 ActionKeys.ACTION_WITHDRAW,
                 asset,
                 amount,
-                ts
+                blockNumber
             );
         }
     }

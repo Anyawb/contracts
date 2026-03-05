@@ -44,7 +44,6 @@ describe('LendingEngineView', function () {
       maturity: 2000n,
       repaidAmount: 100n,
     });
-    await engine.setUserLoanCount(borrower.address, 2);
     await engine.setFailedFeeAmount(1, 77);
     await engine.setNftRetryCount(1, 3);
     await engine.setMatchEngine(admin.address, true);
@@ -116,20 +115,6 @@ describe('LendingEngineView', function () {
   });
 
   describe('LEV-04 user-scoped reads (self vs ops/admin)', function () {
-    it('allows self read; denies unauthorized; allows ops (VIEW_USER_DATA)', async function () {
-      const { view, borrower, outsider, ops } = await deployFixture();
-      const [borrowerCount] = await view.connect(borrower).getUserLoanCount(borrower.address);
-      expect(borrowerCount).to.equal(2n);
-
-      await expect(view.connect(outsider).getUserLoanCount(borrower.address)).to.be.revertedWithCustomError(
-        view,
-        'MissingRole',
-      );
-
-      const [opsCount] = await view.connect(ops).getUserLoanCount(borrower.address);
-      expect(opsCount).to.equal(2n);
-    });
-
     it('applies the same gate to canAccessLoanOrder(orderId,user)', async function () {
       const { view, borrower, outsider, ops } = await deployFixture();
       const [borrowerAccess] = await view.connect(borrower).canAccessLoanOrder(1, borrower.address);
@@ -239,7 +224,6 @@ describe('LendingEngineView', function () {
       await impl.waitForDeployment();
 
       await expect(impl.getLoanOrder(1)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
-      await expect(impl.getUserLoanCount(ethers.ZeroAddress)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
       await expect(impl.getFailedFeeAmount(1)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
       await expect(impl.getNftRetryCount(1)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
       await expect(impl.isMatchEngine(ethers.ZeroAddress)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
@@ -334,12 +318,6 @@ describe('LendingEngineView', function () {
       expect(asOps.borrower).to.equal(ethers.ZeroAddress);
       expect(asOps.lender).to.equal(ethers.ZeroAddress);
       expect(asAdmin.principal).to.equal(0n);
-    });
-
-    it('self can read own count even when not seeded (returns 0)', async function () {
-      const { view, lender } = await deployFixture();
-      const [lenderCount] = await view.connect(lender).getUserLoanCount(lender.address);
-      expect(lenderCount).to.equal(0n);
     });
 
     it('ops-only diagnostics return false/0 defaults without reverting', async function () {
@@ -461,17 +439,9 @@ describe('LendingEngineView', function () {
       // Registry lookup revert (MockRegistry string). This captures the "Registry must register ACCESS_CONTROL" invariant.
       await expect(view.connect(borrower).getLoanOrder(1)).to.be.revertedWith('MockRegistry: module not found');
 
-      // Self-scoped reads that do not touch role checks should still work (Scheme U self-bypass).
-      await engine.setUserLoanCount(borrower.address, 7);
-      const [borrowerCount] = await view.connect(borrower).getUserLoanCount(borrower.address);
-      expect(borrowerCount).to.equal(7n);
+      // canAccessLoanOrder also performs role lookup (Scheme U for non-self reads) and will revert with missing ACCESS_CONTROL.
       const [borrowerAccess] = await view.connect(borrower).canAccessLoanOrder(1, borrower.address);
       expect(borrowerAccess).to.equal(true);
-
-      // Non-self reads attempt role lookup and will revert due to missing ACCESS_CONTROL module.
-      await expect(view.connect(outsider).getUserLoanCount(borrower.address)).to.be.revertedWith(
-        'MockRegistry: module not found',
-      );
 
       // Ops-only endpoints also require role lookup and will revert due to missing ACCESS_CONTROL module.
       await expect(view.connect(ops).getFailedFeeAmount(1)).to.be.revertedWith('MockRegistry: module not found');
@@ -536,14 +506,6 @@ describe('LendingEngineView', function () {
   });
 
   describe('permission matrix completeness (fine-grained)', function () {
-    it('getUserLoanCount: VIEW_USER_DATA and ADMIN are equivalent for non-self reads', async function () {
-      const { view, borrower, ops, admin } = await deployFixture();
-      const [opsCount] = await view.connect(ops).getUserLoanCount(borrower.address);
-      const [adminCount] = await view.connect(admin).getUserLoanCount(borrower.address);
-      expect(opsCount).to.equal(2n);
-      expect(adminCount).to.equal(2n);
-    });
-
     it('ops diagnostics: VIEW_SYSTEM_DATA and ADMIN are equivalent; VIEW_SYSTEM_DATA alone does not grant getLoanOrder', async function () {
       const { view, acm, outsider, borrower } = await deployFixture();
 
@@ -567,8 +529,6 @@ describe('LendingEngineView', function () {
       const failingCalls: Array<Promise<unknown>> = [
         // order privacy: outsider cannot read parties' order
         view.connect(outsider).getLoanOrder(1),
-        // user-scoped reads: outsider cannot read others
-        view.connect(outsider).getUserLoanCount(borrower.address),
         view.connect(outsider).canAccessLoanOrder(1, borrower.address),
         // ops-only diagnostics: outsider cannot access
         view.connect(outsider).getFailedFeeAmount(1),

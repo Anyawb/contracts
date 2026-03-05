@@ -198,7 +198,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset ERC-20 asset address
      * @param amount Amount in token base units (ERC-20 decimals)
      * @return valueUsd8 USD-8 value
-     * @return priceTimestamp Oracle update block (block.number)
+     * @return priceUpdateBlock Oracle update block (block.number)
      * @return isValid Whether the oracle call succeeded
      */
     function getAssetValueUsd8(address asset, uint256 amount)
@@ -206,7 +206,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyPriceViewer
-        returns (uint256 valueUsd8, uint256 priceTimestamp, bool isValid)
+        returns (uint256 valueUsd8, uint256 priceUpdateBlock, bool isValid)
     {
         if (asset == address(0) || amount == 0) return (0, 0, true);
         address priceOracle = _priceOracle();

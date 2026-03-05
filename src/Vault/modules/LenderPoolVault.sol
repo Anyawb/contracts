@@ -76,6 +76,7 @@ contract LenderPoolVault is
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         __Pausable_init();

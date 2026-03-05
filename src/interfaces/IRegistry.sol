@@ -83,9 +83,9 @@ interface IRegistry {
      * Security:
      * - Read-only.
      *
-     * @return minDelaySeconds Delay window (blocks; block.number time axis).
+     * @return minDelayBlocks Delay window (blocks; block.number time axis).
      */
-    function minDelay() external view returns (uint256 minDelaySeconds);
+    function minDelay() external view returns (uint256 minDelayBlocks);
     
     /**
      * @notice Returns the maximum allowed delay window.
@@ -95,9 +95,9 @@ interface IRegistry {
      * Security:
      * - Read-only (pure in the implementation).
      *
-     * @return maxDelaySeconds Maximum delay window (blocks; block.number time axis).
+     * @return maxDelayBlocks Maximum delay window (blocks; block.number time axis).
      */
-    function MAX_DELAY() external view returns (uint256 maxDelaySeconds);
+    function MAX_DELAY() external view returns (uint256 maxDelayBlocks);
 
     /**
      * @notice Returns the governance admin address (owner).

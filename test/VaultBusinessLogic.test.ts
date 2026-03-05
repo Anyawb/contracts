@@ -332,13 +332,14 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     await mockERC20_3.connect(user2).approve(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
 
     // 设置价格预言机
-    const currentTimestamp = Math.floor(Date.now() / 1000);
+    // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
+    const currentBlock = await ethers.provider.getBlockNumber();
     const decimals = 8;
     
-    await mockPriceOracle.setPrice(TEST_ASSET, ethers.parseUnits('100', 8), currentTimestamp, decimals);
-    await mockPriceOracle.setPrice(TEST_ASSET2, ethers.parseUnits('200', 8), currentTimestamp, decimals);
-    await mockPriceOracle.setPrice(TEST_ASSET3, ethers.parseUnits('300', 8), currentTimestamp, decimals);
-    await mockPriceOracle.setPrice(SETTLEMENT_TOKEN, ethers.parseUnits('1', 8), currentTimestamp, decimals);
+    await mockPriceOracle.setPrice(TEST_ASSET, ethers.parseUnits('100', 8), currentBlock, decimals);
+    await mockPriceOracle.setPrice(TEST_ASSET2, ethers.parseUnits('200', 8), currentBlock, decimals);
+    await mockPriceOracle.setPrice(TEST_ASSET3, ethers.parseUnits('300', 8), currentBlock, decimals);
+    await mockPriceOracle.setPrice(SETTLEMENT_TOKEN, ethers.parseUnits('1', 8), currentBlock, decimals);
 
     // 设置资产白名单
     await mockAssetWhitelist.setAssetAllowed(TEST_ASSET, true);

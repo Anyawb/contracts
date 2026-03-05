@@ -26,6 +26,7 @@ import type { RegistryStorageMigratorVersionBump } from '../types/src/Mocks/Regi
 describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', function () {
   // 常量
   const TEST_MIN_DELAY = 3600; // 1h
+  const TEST_MAX_DELAY = 302400; // 7d cap (blocks)
 
   // 账户
   let owner: SignerWithAddress;
@@ -57,6 +58,7 @@ describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', f
     const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
     const initData = registryImpl.interface.encodeFunctionData('initialize', [
       TEST_MIN_DELAY,
+      TEST_MAX_DELAY,
       upgradeAdmin.address,
       emergencyAdmin.address,
       owner.address,

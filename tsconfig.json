@@ -54,7 +54,6 @@
     "contracts/test/RegistryDynamicModuleKey.test.ts", 
     "contracts/test/RegistrySignatureManager.test.ts", 
     "contracts/test/RegistryUpgradeManager.test.ts", 
-    "contracts/test/RWAAutoLeveragedStrategy.test.ts", 
     "contracts/test/SimpleMockDemo.test.ts", 
     "contracts/test/StatisticsResolution.frontend.test.ts", 
     "contracts/test/StatisticsView.active-users.test.ts", 

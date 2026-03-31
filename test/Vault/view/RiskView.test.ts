@@ -107,11 +107,6 @@ describe("RiskView", function () {
     expect(hf).to.equal(15000);
   });
 
-  it("registryAddr returns current registry", async function () {
-    const { rv, registry } = await loadFixture(deployFixture);
-    expect(await rv.registryAddr()).to.equal(await registry.getAddress());
-  });
-
   it("upgrade authorization requires admin role", async function () {
     const { rv, other } = await loadFixture(deployFixture);
     await expect(

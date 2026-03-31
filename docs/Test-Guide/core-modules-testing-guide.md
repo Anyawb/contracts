@@ -10,7 +10,7 @@ Core 模块的测试文件位于 `test/core/` 目录下：
 
 ```
 test/core/
-├── CoinGeckoPriceUpdater.test.ts           # CoinGecko 价格更新器测试
+├── PriceUpdater.test.ts                    # 价格更新器测试
 ├── FeeRouter.test.ts                       # 费用路由测试
 ├── LoanNFT.test.ts                         # 借贷 NFT 测试
 └── PriceOracle.new.test.ts                 # 价格预言机测试（新版本）
@@ -62,19 +62,19 @@ npx hardhat test test/core/PriceOracle.new.test.ts
 npx hardhat test test/PriceOracle.graceful-degradation.test.ts
 ```
 
-### 2. CoinGecko 价格更新器测试
+### 2. PriceUpdater 测试
 
-**文件**: `CoinGeckoPriceUpdater.test.ts`
+**文件**: `PriceUpdater.test.ts`
 
 **测试目标**:
-- CoinGecko API 集成
+- 统一价格更新器行为
 - 价格更新机制
 - 错误处理和重试
 - 批量价格更新
 
 **运行命令**:
 ```bash
-npx hardhat test test/core/CoinGeckoPriceUpdater.test.ts
+npx hardhat test test/core/PriceUpdater.test.ts
 ```
 
 ### 3. 费用路由测试
@@ -202,7 +202,7 @@ REPORT_GAS=true npx hardhat test test/core/
 |---------|---------|--------|
 | **价格预言机** | `PriceOracle.new.test.ts` | ✅ 完整 |
 | **优雅降级** | `PriceOracle.graceful-degradation.test.ts` | ✅ 完整 |
-| **价格更新器** | `CoinGeckoPriceUpdater.test.ts` | ✅ 完整 |
+| **价格更新器** | `PriceUpdater.test.ts` | ✅ 完整 |
 | **费用路由** | `FeeRouter.test.ts` | ✅ 完整 |
 | **借贷 NFT** | `LoanNFT.test.ts` | ✅ 完整 |
 
@@ -380,7 +380,7 @@ npx hardhat test --verbose test/core/
 | `PriceOracle.new.test.ts` | ~5-7s | 15+ |
 | `FeeRouter.test.ts` | ~4-6s | 12+ |
 | `LoanNFT.test.ts` | ~3-5s | 10+ |
-| `CoinGeckoPriceUpdater.test.ts` | ~6-8s | 8+ |
+| `PriceUpdater.test.ts` | ~6-8s | 8+ |
 
 ### 优化建议
 

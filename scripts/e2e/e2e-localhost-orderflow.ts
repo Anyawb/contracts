@@ -27,7 +27,8 @@ async function main() {
   const cmAddrFromRegistry = (await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"))) as string;
 
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", assetWhitelistAddrFromRegistry)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", assetWhitelistAddrFromRegistry)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", settlementTokenAddrFromRegistry)) as any;
   const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreFromRegistryAddr)) as any;
@@ -79,8 +80,8 @@ async function main() {
   await ensureRole(ACTION_REPAY, settlementManagerAddr);
 
   // Whitelist + price
-  if (!(await aw.isAssetAllowed(settlementTokenAddrFromRegistry))) {
-    await aw.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
+  if (!(await awRead.isAssetAllowed(settlementTokenAddrFromRegistry))) {
+    await awAdmin.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
   }
   {
     const cfg = await po.getAssetConfig(settlementTokenAddrFromRegistry);

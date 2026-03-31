@@ -10,7 +10,7 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
+import { IPriceOracleRead } from "../../../interfaces/IPriceOracleRead.sol";
 import { GracefulDegradation } from "../../../libraries/GracefulDegradation.sol";
 import { SystemEvents } from "../../SystemEvents.sol";
 import { BatchTooLarge, EmptyArray, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
@@ -19,15 +19,15 @@ import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
  * @title ValuationOracleView
- * @notice Exposes read-only price-oracle queries for the Vault system.
+ * @notice Exposes price-oracle queries for the Vault system.
  * @dev Reverts if:
  *      - registry address is zero (see {ZeroAddress})
  *      - registry address is not a contract (see {NotAContract})
  *      - caller lacks required read permissions (role-gated via {ViewAccessLib})
  *
  * Security:
- * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
- * - Upgrade authorization is role-gated (ACTION_UPGRADE_MODULE)
+ * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+ * - Upgrade authorization is role-gated (ACTION_UPGRADE_MODULE).
  */
 contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
@@ -106,25 +106,11 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (never; returns stored address even if unset)
      *
      * Security:
-     * - Read-only
+     * - View-only.
      *
-     * @return Registry contract address
+     * @return registryAddr_ Registry contract address.
      */
-    function registryAddrVar() external view returns (address) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Returns the Registry address (legacy getter name).
-     * @dev Reverts if:
-     *      - (never; returns stored address even if unset)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return Registry contract address
-     */
-    function registryAddr() external view returns (address) {
+    function registryAddrVar() external view returns (address registryAddr_) {
         return _registryAddr;
     }
 
@@ -137,20 +123,20 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
-     * - Best-effort oracle call: returns (0,0) if the oracle call fails
+    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+    * - Best-effort oracle call: returns `(0, 0, false)` if the oracle call fails.
      *
-     * @param asset Asset address
-     * @return price Asset price (SSOT: USD-8, i.e. $1.00 = 100000000)
-     * @return blockNumber Oracle update block (block.number)
-     * @return isValid Whether the oracle call succeeded
+    * @param asset Asset address.
+    * @return price Asset price in USD-8.
+    * @return blockNumber Oracle update block number.
+    * @return isValid True if the oracle call succeeded.
      */
     function getAssetPrice(
         address asset
     ) external view onlyValidRegistry onlyPriceViewer returns (uint256 price, uint256 blockNumber, bool isValid) {
         address priceOracle = _priceOracle();
 
-        try IPriceOracle(priceOracle).getPrice(asset) returns (
+        try IPriceOracleRead(priceOracle).getPrice(asset) returns (
             uint256 p,
             uint256 oracleBlockNumber,
             uint256 /* assetDecimals */
@@ -166,10 +152,10 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev This is the canonical "ERC-20 aware" read: `assetDecimals` is required to convert
      *      `amount(token base units)` into `valueUSD8`.
      *
-     * @return price Asset price (USD-8)
-     * @return blockNumber Oracle update block (block.number)
-     * @return assetDecimals ERC-20 token decimals (SSOT: same semantics as IPriceOracle.getPrice's third return value)
-     * @return isValid Whether the oracle call succeeded
+    * @return price Asset price in USD-8.
+    * @return blockNumber Oracle update block number.
+    * @return assetDecimals ERC-20 token decimals returned by the oracle.
+    * @return isValid True if the oracle call succeeded.
      */
     function getAssetPriceWithDecimals(address asset)
         external
@@ -179,7 +165,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (uint256 price, uint256 blockNumber, uint256 assetDecimals, bool isValid)
     {
         address priceOracle = _priceOracle();
-        try IPriceOracle(priceOracle).getPrice(asset) returns (uint256 p, uint256 oracleBlockNumber, uint256 dAsset) {
+        try IPriceOracleRead(priceOracle).getPrice(asset) returns (uint256 p, uint256 oracleBlockNumber, uint256 dAsset) {
             return (p, oracleBlockNumber, dAsset, true);
         } catch {
             return (0, 0, 0, false);
@@ -195,11 +181,11 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - assetDecimals is ERC-20 decimals
      * - valueUSD8 = amount(token base units) * price(USD-8) / 10**assetDecimals
      *
-     * @param asset ERC-20 asset address
-     * @param amount Amount in token base units (ERC-20 decimals)
-     * @return valueUsd8 USD-8 value
-     * @return priceUpdateBlock Oracle update block (block.number)
-     * @return isValid Whether the oracle call succeeded
+    * @param asset ERC-20 asset address.
+    * @param amount Amount in token base units.
+    * @return valueUsd8 Converted value in USD-8.
+    * @return priceUpdateBlock Oracle update block number.
+    * @return isValid True if the oracle call succeeded.
      */
     function getAssetValueUsd8(address asset, uint256 amount)
         external
@@ -210,7 +196,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         if (asset == address(0) || amount == 0) return (0, 0, true);
         address priceOracle = _priceOracle();
-        try IPriceOracle(priceOracle).getPrice(asset) returns (uint256 p, uint256 blockNumber, uint256 dAsset) {
+        try IPriceOracleRead(priceOracle).getPrice(asset) returns (uint256 p, uint256 blockNumber, uint256 dAsset) {
             if (p == 0) return (0, blockNumber, true);
             if (dAsset > 77) return (0, blockNumber, false);
             uint256 scale = 10 ** dAsset;
@@ -231,13 +217,13 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
-     * - Best-effort oracle call: returns zero-filled arrays if the oracle call fails
+    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+    * - Best-effort oracle call: returns zero-filled arrays if the oracle call fails.
      *
-     * @param assets Asset addresses
-     * @return prices Asset prices (oracle-defined precision)
-     * @return blockNumbers Oracle update blocks (block.number)
-     * @return validFlags Per-asset validity flags (best-effort)
+    * @param assets Asset addresses.
+    * @return prices Asset prices in oracle-defined precision.
+    * @return blockNumbers Oracle update block numbers.
+    * @return validFlags Per-asset validity flags.
      */
     function getAssetPrices(
         address[] calldata assets
@@ -257,7 +243,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         validFlags = new bool[](length);
 
         address priceOracle = _priceOracle();
-        try IPriceOracle(priceOracle).getPrices(assets) returns (
+        try IPriceOracleRead(priceOracle).getPrices(assets) returns (
             uint256[] memory p,
             uint256[] memory blockNumber,
             uint256[] memory
@@ -291,12 +277,12 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
-     * - Best-effort oracle call: returns false if the oracle call fails
+    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+    * - Best-effort oracle call: returns false if the oracle call fails.
      *
-     * @param asset Asset address
-     * @return isValid True if oracle reports the price is valid
-     * @return blockNumber Oracle update block (block.number; best-effort)
+    * @param asset Asset address.
+    * @return isValid True if the oracle reports the price is valid.
+    * @return blockNumber Oracle update block number.
      */
     function isPriceValid(address asset)
         external
@@ -307,7 +293,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         address priceOracle = _priceOracle();
 
-        try IPriceOracle(priceOracle).isPriceValid(asset) returns (bool ok) {
+        try IPriceOracleRead(priceOracle).isPriceValid(asset) returns (bool ok) {
             (, uint256 oracleBlockNumber) = _readAssetPrice(priceOracle, asset);
             return (ok, oracleBlockNumber);
         } catch {
@@ -323,13 +309,13 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
-     * - Best-effort oracle call: returns (false, "oracle call failed") if the oracle call fails
+    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+    * - Best-effort oracle call: returns `(false, "oracle call failed", 0)` if the oracle call fails.
      *
-     * @param asset Asset address
-     * @return isHealthy True if the oracle reports healthy status for the asset
-     * @return details Human-readable diagnostic details
-     * @return blockNumber Read blockNumber (block.number; best-effort)
+    * @param asset Asset address.
+    * @return isHealthy True if the oracle reports healthy status for the asset.
+    * @return details Human-readable diagnostic details.
+    * @return blockNumber Read block number.
      */
     function checkPriceOracleHealth(
         address asset
@@ -346,7 +332,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         // Best-effort: if the oracle can expose asset config, use it to provide stable, user-friendly reasons.
         // This avoids leaking low-level revert payloads into UI-facing outputs.
-        try IPriceOracle(priceOracle).getAssetConfig(asset) returns (IPriceOracle.AssetConfig memory cfg) {
+        try IPriceOracleRead(priceOracle).getAssetConfig(asset) returns (IPriceOracleRead.AssetConfig memory cfg) {
             if (!cfg.isActive) return (false, "Asset not supported", _now());
         } catch {
             return (false, "oracle call failed", 0);
@@ -370,13 +356,13 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-     * - Role-gated reads (ACTION_VIEW_PRICE_DATA)
-     * - Best-effort oracle call: per-asset fallback to (false, "oracle call failed")
+    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+    * - Best-effort oracle call: each asset falls back to `(false, "oracle call failed", 0)` on failure.
      *
-     * @param assets Asset addresses
-     * @return healthStatuses Per-asset health status
-     * @return details Per-asset diagnostic details
-     * @return blockNumbers Per-asset read blockNumbers (block.number; best-effort)
+    * @param assets Asset addresses.
+    * @return healthStatuses Per-asset health statuses.
+    * @return details Per-asset diagnostic details.
+    * @return blockNumbers Per-asset read block numbers.
      */
     function batchCheckPriceOracleHealth(
         address[] calldata assets
@@ -407,7 +393,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
             }
 
             // Stable, user-friendly reasons if the oracle exposes asset config.
-            try IPriceOracle(priceOracle).getAssetConfig(asset) returns (IPriceOracle.AssetConfig memory cfg) {
+            try IPriceOracleRead(priceOracle).getAssetConfig(asset) returns (IPriceOracleRead.AssetConfig memory cfg) {
                 if (!cfg.isActive) {
                     healthStatuses[i] = false;
                     details[i] = "Asset not supported";
@@ -462,7 +448,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     function _readAssetPrice(address oracle, address asset) internal view returns (uint256 price, uint256 blockNumber) {
-        try IPriceOracle(oracle).getPrice(asset) returns (
+        try IPriceOracleRead(oracle).getPrice(asset) returns (
             uint256 p,
             uint256 oracleBlockNumber,
             uint256 /* assetDecimals */
@@ -475,17 +461,17 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Admin ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Returns the Registry address (admin-gated).
+    * @notice Return the Registry address through the admin-gated accessor.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
      *      - caller lacks ACTION_ADMIN role (via {ViewAccessLib})
      *
      * Security:
-     * - Role-gated (ACTION_ADMIN)
+     * - Role-gated (ACTION_ADMIN).
      *
-     * @return Registry contract address
+     * @return registryAddr_ Registry contract address.
      */
-    function getRegistry() external view onlyValidRegistry returns (address) {
+    function getRegistry() external view onlyValidRegistry returns (address registryAddr_) {
         if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
             revert MissingRole();
         }
@@ -501,9 +487,9 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - newRegistryAddr is not a contract (see {NotAContract})
      *
      * Security:
-     * - Role-gated (ACTION_ADMIN)
+    * - Role-gated (ACTION_ADMIN).
      *
-     * @param newRegistryAddr New Registry contract address
+    * @param newRegistryAddr New Registry contract address.
      */
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
@@ -525,46 +511,44 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Returns the API version of this module.
-     * @dev Reverts if:
-     *      - (never)
+     * @notice Return the API semantic version of this module.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Pure function
+     * - Pure function.
      *
-     * @return API version
+     * @return version API semantic version.
      */
-    function apiVersion() public pure override returns (uint256) {
+    function apiVersion() public pure override returns (uint256 version) {
         return 1;
     }
 
     /**
-     * @notice Returns the schema version of this module's outputs.
-     * @dev Reverts if:
-     *      - (never)
+     * @notice Return the schema version of this module's outputs.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Pure function
+     * - Pure function.
      *
-     * @return Schema version
+     * @return version Schema version.
      */
-    function schemaVersion() public pure override returns (uint256) {
+    function schemaVersion() public pure override returns (uint256 version) {
         return 1;
     }
 
     /**
-     * @notice Returns whether a user has permission to upgrade this module, with metadata.
+    * @notice Return whether a user can upgrade this module, with metadata.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
      *      - Registry does not have KEY_ACCESS_CONTROL configured (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-     * - Read-only; consults the Registry ACM (ACTION_UPGRADE_MODULE)
+    * - View-only; consults the Registry ACM for ACTION_UPGRADE_MODULE.
      *
-     * @param user User address to check
-     * @return hasPermission True if user has ACTION_UPGRADE_MODULE role
-     * @return isValid Whether the read succeeded
-     * @return blockNumber Read blockNumber (block.number)
+    * @param user User address to check.
+    * @return hasPermission True if `user` has ACTION_UPGRADE_MODULE.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function hasUpgradePermission(address user)
         external

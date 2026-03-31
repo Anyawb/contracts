@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Registry } from "../registry/Registry.sol";
-import { EventLibrary } from "./EventLibrary.sol";
-import { ZeroAddress } from "../errors/StandardErrors.sol";
+import {Registry} from "../registry/Registry.sol";
+import {EventLibrary} from "./EventLibrary.sol";
+import {ZeroAddress} from "../errors/StandardErrors.sol";
 
 /// @title ModuleAccessLibrary
 /// @notice Shared library for Registry module resolution with audit events.
 /// @dev Provides common module access helpers and emits unified access/failure events.
 /// @custom:security-contact security@example.com
 library ModuleAccessLibrary {
-
     /// @dev Reverts when a resolved module address is zero.
     error ModuleAccessLibrary__InvalidModuleAddress(string moduleName);
 
@@ -34,9 +33,11 @@ library ModuleAccessLibrary {
         address caller
     ) internal returns (address) {
         if (registryAddr == address(0)) revert ZeroAddress();
-        
-        address moduleAddress = Registry(registryAddr).getModuleOrRevert(moduleKey);
-        
+
+        address moduleAddress = Registry(registryAddr).getModuleOrRevert(
+            moduleKey
+        );
+
         // Emit module access event for auditability.
         emit EventLibrary.ModuleAccessed(
             moduleKey,
@@ -46,7 +47,7 @@ library ModuleAccessLibrary {
             EventLibrary.OPERATION_QUERY,
             ""
         );
-        
+
         return moduleAddress;
     }
 
@@ -71,8 +72,10 @@ library ModuleAccessLibrary {
         address caller
     ) internal returns (address) {
         if (registryAddr == address(0)) return address(0);
-        
-        try Registry(registryAddr).getModuleOrRevert(moduleKey) returns (address moduleAddress) {
+
+        try Registry(registryAddr).getModuleOrRevert(moduleKey) returns (
+            address moduleAddress
+        ) {
             // Emit module access event for auditability.
             emit EventLibrary.ModuleAccessed(
                 moduleKey,
@@ -82,7 +85,7 @@ library ModuleAccessLibrary {
                 EventLibrary.OPERATION_QUERY,
                 ""
             );
-            
+
             return moduleAddress;
         } catch {
             // Emit failure event for monitoring and retry pipelines.
@@ -92,7 +95,7 @@ library ModuleAccessLibrary {
                 true,
                 block.number
             );
-            
+
             return address(0);
         }
     }
@@ -108,7 +111,10 @@ library ModuleAccessLibrary {
      * @param moduleAddr Module address to validate.
      * @param moduleName Human-readable module name for error context.
      */
-    function validateModuleAddress(address moduleAddr, string memory moduleName) internal pure {
+    function validateModuleAddress(
+        address moduleAddr,
+        string memory moduleName
+    ) internal pure {
         if (moduleAddr == address(0)) {
             revert ModuleAccessLibrary__InvalidModuleAddress(moduleName);
         }

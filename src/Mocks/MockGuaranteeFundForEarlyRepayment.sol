@@ -42,4 +42,14 @@ contract MockGuaranteeFundForEarlyRepayment {
         emit ForfeitPartial(borrower, asset, receiver, amount);
         return true;
     }
+
+    function forfeitPartialWithRewardPenalty(
+        address borrower,
+        address asset,
+        address receiver,
+        uint256 amount
+    ) external returns (bool) {
+        emit ForfeitPartial(borrower, asset, receiver, amount);
+        return true;
+    }
 }

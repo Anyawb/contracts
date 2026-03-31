@@ -355,13 +355,12 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
 
     /**
      * @notice Check whether a module is registered in Registry.
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * @param moduleKey Module key
-     * @return True if registered
+     * @return isRegistered True if the module is registered.
      */
-    function _isModuleRegistered(bytes32 moduleKey) internal view returns (bool) {
+    function _isModuleRegistered(bytes32 moduleKey) internal view returns (bool isRegistered) {
         return Registry(_registryAddr).isModuleRegistered(moduleKey);
     }
 
@@ -373,7 +372,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @param liquidator Liquidator address
      * @return profitView Profit/statistics view (placeholder values)
@@ -394,7 +393,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @param liquidator Liquidator address
      * @return profitView Profit/statistics view (placeholder values)
@@ -418,7 +417,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @return globalView Global liquidation view (placeholder values)
      */
@@ -438,7 +437,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @return globalView Global liquidation view (placeholder values)
      * @return blockNumber Last update block number (0 for off-chain aggregation placeholder)
@@ -463,7 +462,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @param liquidators Array of liquidator addresses
      * @return views Array of views (placeholder values)
@@ -494,7 +493,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @param liquidators Array of liquidator addresses
      * @return views Array of views (placeholder values)
@@ -520,7 +519,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @param limit Max number of entries to return
      * @return liquidators Liquidator address list (currently empty placeholder)
@@ -550,7 +549,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorLeaderboardWithMeta(uint256 limit)
         external
@@ -575,7 +574,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @param liquidator Liquidator address
      * @param asset Asset address
@@ -599,7 +598,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorTempDebtWithMeta(address liquidator, address asset)
         external
@@ -618,7 +617,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      *
      * @return profitRate Profit rate (bps; placeholder)
      */
@@ -639,7 +638,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorProfitRateWithMeta()
         external
@@ -660,7 +659,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorActivityStats(
         address liquidator,
@@ -685,7 +684,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorActivityStatsWithMeta(
         address liquidator,
@@ -711,7 +710,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorEfficiencyRanking(uint256 limit) public view onlyValidRegistry onlySystemViewer returns (
         address[] memory liquidators,
@@ -737,7 +736,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorEfficiencyRankingWithMeta(uint256 limit)
         external
@@ -762,7 +761,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_RISK_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorRiskAnalysis(address /* liquidator */)
         public
@@ -783,7 +782,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_RISK_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidatorRiskAnalysisWithMeta(address liquidator)
         external
@@ -804,7 +803,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-     * - View only
+    * - View-only.
      */
     function getLiquidationMarketOverview() public view onlyValidRegistry onlySystemViewer returns (
         uint256 totalLiquidations,
@@ -1044,7 +1043,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
 
     
 
-    /*━━━━━━━━━━━━━━━ COLLATERAL (READ-ONLY, PLACEHOLDER) ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ COLLATERAL (VIEW-ONLY, PLACEHOLDER) ━━━━━━━━━━━━━━━*/
     /**
      * @notice Get seizable collateral amount with staleness metadata (best-effort; delegates to CollateralManager).
      * @dev Reverts if:
@@ -1318,30 +1317,15 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /*━━━━━━━━━━━━━━━ REGISTRY ADMIN (DEPRECATED) ━━━━━━━━━━━━━━━*/
     
     /**
-     * @notice Get Registry address.
-     * @dev Reverts if:
-     *      - (never; may return address(0) if not initialized)
+    * @notice Return the Registry address.
+    * @dev Reverts if: (never). May return address(0) if not initialized.
      *
      * Security:
-     * - View only
+    * - View-only.
      *
-     * @return registry Registry address
+    * @return registry Registry address.
      */
     function getRegistry() external view returns (address registry) {
-        return _registryAddr;
-    }
-    
-    /**
-     * @notice Legacy getter for Registry address (compatibility).
-     * @dev Reverts if:
-     *      - (never; may return address(0) if not initialized)
-     *
-     * Security:
-     * - View only
-     *
-     * @return registry Registry address
-     */
-    function registryAddr() external view returns (address registry) {
         return _registryAddr;
     }
     

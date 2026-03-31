@@ -90,11 +90,6 @@ describe('CacheOptimizedView (read-only facade)', function () {
   }
 
   describe('initialization', function () {
-    it('stores registry address', async function () {
-      const { cacheOptimizedView, registry } = await loadFixture(deployFixture);
-      expect(await cacheOptimizedView.registryAddr()).to.equal(await registry.getAddress());
-    });
-
     it('reverts on zero address init', async function () {
       const CacheOptimizedViewFactory = await ethers.getContractFactory('CacheOptimizedView');
       await expect(
@@ -478,11 +473,9 @@ describe('CacheOptimizedView (read-only facade)', function () {
 
   describe('UUPS upgradeability', function () {
     it('allows admin to upgrade', async function () {
-      const { cacheOptimizedView, admin, registry } = await loadFixture(deployFixture);
+      const { cacheOptimizedView } = await loadFixture(deployFixture);
       const CacheOptimizedViewFactory = await ethers.getContractFactory('CacheOptimizedView');
       await upgrades.upgradeProxy(await cacheOptimizedView.getAddress(), CacheOptimizedViewFactory);
-      // 验证状态保持
-      expect(await cacheOptimizedView.registryAddr()).to.equal(await registry.getAddress());
     });
 
     it('rejects upgrade from non-admin', async function () {
@@ -494,13 +487,11 @@ describe('CacheOptimizedView (read-only facade)', function () {
     });
 
     it('rejects upgrade to zero address', async function () {
-      const { cacheOptimizedView, admin } = await loadFixture(deployFixture);
+      const { cacheOptimizedView } = await loadFixture(deployFixture);
       // 零地址检查在 _authorizeUpgrade 中实现
       // 通过代码审查确认: if (newImplementation == address(0)) revert ZeroAddress();
       const CacheOptimizedViewFactory = await ethers.getContractFactory('CacheOptimizedView');
       await upgrades.upgradeProxy(await cacheOptimizedView.getAddress(), CacheOptimizedViewFactory);
-      // 验证升级后功能正常
-      expect(await cacheOptimizedView.registryAddr()).to.not.equal(ethers.ZeroAddress);
     });
   });
 

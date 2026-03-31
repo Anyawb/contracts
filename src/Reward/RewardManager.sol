@@ -1,28 +1,58 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { RewardManagerCore } from "./RewardManagerCore.sol";
-import { IRewardManager, IRewardManagerByOrder } from "../interfaces/IRewardManager.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { Registry } from "../registry/Registry.sol";
-import { RewardModuleBase } from "./internal/RewardModuleBase.sol";
+import {RewardManagerCore} from "./RewardManagerCore.sol";
+import {IRewardManagerByOrder} from "../interfaces/IRewardManager.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {SystemEvents} from "../Vault/SystemEvents.sol";
+import {Registry} from "../registry/Registry.sol";
+import {RewardModuleBase} from "./internal/RewardModuleBase.sol";
 import {
     ZeroAddress,
     NotAContract,
     MissingRole
 } from "../errors/StandardErrors.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
-/// @dev RewardManagerCore 的“按订单维度”最小接口（用于让 IDE/静态分析器稳定识别入口）
+/// @dev Minimal order-scoped RewardManagerCore adapter kept local for stable IDE and static-analysis resolution.
 interface IRewardManagerCoreByOrder {
-    function onLoanEventByOrder(address user, uint256 orderId, uint256 amount, uint256 maturity, uint8 outcome) external;
+    function onLoanEventByOrder(
+        address user,
+        uint256 orderId,
+        uint256 amount,
+        uint256 maturity,
+        uint8 outcome
+    ) external;
 }
 
+/// @title IRewardManagerCoreLiquidationPenalty
+/// @notice Minimal liquidation-penalty interface exposed by RewardManagerCore.
+/// @dev Used by {RewardManager} to quote and apply liquidation penalties
+///      without importing the full RewardManagerCore surface.
+interface IRewardManagerCoreLiquidationPenalty {
+    /// @notice Quotes the current liquidation penalty for a user.
+    function quoteLiquidationPenalty(
+        address user
+    ) external view returns (uint256 easyAmount);
+
+    /// @notice Applies liquidation penalty based on the user's current locked Easy state.
+    function applyLiquidationPenaltyByCurrentLock(
+        address user,
+        address executor
+    ) external returns (uint256 easyAmount);
+
+    /// @notice Updates the liquidation penalty rate in RewardManagerCore.
+    function setLiquidationPenaltyBps(uint256 liquidationBps) external;
+}
+
+/// @title IEasyEmissionControllerByOrder
+/// @notice Minimal order-scoped emission interface for EasyEmissionController.
+/// @dev Used by {RewardManager} to trigger post-repayment Easy minting without importing the full implementation.
 interface IEasyEmissionControllerByOrder {
+    /// @notice Processes an order-level loan event with borrower, lender, and asset context.
     function onLoanEventByOrderWithLender(
         address borrower,
         address lender,
@@ -34,80 +64,112 @@ interface IEasyEmissionControllerByOrder {
     ) external;
 }
 
+/// @title IRewardConfigEarnGovernance
+/// @notice Minimal earn-governance write interface exposed by RewardConfig.
+/// @dev Used by {RewardManager} to route earn-side governance writes into RewardConfig.
 interface IRewardConfigEarnGovernance {
-    function setDynamicRewardParams(uint256 thresholdEasy, uint256 multiplierBps) external;
+    /// @notice Updates dynamic reward parameters in RewardConfig/EarnConfig.
+    function setDynamicRewardParams(
+        uint256 thresholdEasy,
+        uint256 multiplierBps
+    ) external;
+
+    /// @notice Updates one level multiplier in RewardConfig/EarnConfig.
     function setLevelMultiplier(uint8 level, uint256 multiplierBps) external;
 }
 
-/// @title RewardManager - 积分管理统一入口
-/// @notice 奖励系统的**写入口与治理入口**（只读查询统一走 RewardView）
-/// @dev 遵循 docs/SmartContractStandard.md 注释规范
-/// @dev 使用 ActionKeys 进行标准化动作标识
-/// @dev 使用 ModuleKeys 进行模块地址管理
-/// @dev 使用 SystemEvents 进行标准化事件记录
-/// @dev 使用 StandardErrors 进行统一错误处理
-/// @dev 通过 Registry 进行模块地址获取
-contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, RewardModuleBase, IRewardManager {
-    // ========== Custom Errors (gas efficient) ==========
-    /// @notice 参数非法：等级不在 1-5
+/// @title RewardManager
+/// @notice Unified write and governance entry point for the Reward subsystem.
+/// @dev Read-only integrations MUST use RewardView.
+///      This module only orchestrates Reward writes, governance, and gateway checks.
+contract RewardManager is
+    Initializable,
+    UUPSUpgradeable,
+    ReentrancyGuardUpgradeable,
+    RewardModuleBase
+{
+    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
+
+    /// @dev Reverts when a requested level is outside the supported 1..5 range. Used by {updateUserLevel}.
     error RewardManager__InvalidLevel(uint8 level);
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /// @notice Registry 合约地址（私有存储；不对外提供只读 getter，避免入口分裂）
+    /// @notice Registry contract address kept private to avoid read-path
+    ///      fragmentation.
     address private _registryAddr;
 
-    /// @notice 惩罚执行事件（用于审计与监控：明确 executor + user + easyAmount）
-    event PenaltyApplied(address indexed executor, address indexed user, uint256 easyAmount, uint256 blockNumber);
+    /// @notice Emitted when a penalty is applied through this gateway.
+    /// @dev executor is the actual liquidation executor propagated into Reward accounting and monitoring.
+    event PenaltyApplied(
+        address indexed executor,
+        address indexed user,
+        uint256 easyAmount,
+        uint256 blockNumber
+    );
 
-    /// @notice 初始化合约
-    /// @param initialRegistryAddr Registry 合约地址
+    /**
+     * @notice Initializes the module.
+     * @dev Reverts if:
+     *      - initialRegistryAddr is zero (see {ZeroAddress})
+     *      - initialRegistryAddr is not a contract (see {NotAContract})
+     *
+     * Security:
+     * - One-time initializer.
+     * - Registry address becomes the SSOT for Reward module and ACL resolution.
+     *
+     * @param initialRegistryAddr Registry contract address.
+     */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
-        
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
+
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         _registryAddr = initialRegistryAddr;
     }
 
-    // ========== 内部模块获取 ==========
+    /*━━━━━━━━━━━━━━━ Internal Module Resolution ━━━━━━━━━━━━━━━*/
 
-    /// @dev 获取核心业务合约
+    /// @dev Returns the RewardManagerCore implementation resolved from Registry.
     function _getRewardManagerCore() internal view returns (RewardManagerCore) {
-        return RewardManagerCore(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_MANAGER_CORE));
+        return
+            RewardManagerCore(
+                Registry(_registryAddr).getModuleOrRevert(
+                    ModuleKeys.KEY_REWARD_MANAGER_CORE
+                )
+            );
     }
 
-    // ========== RewardModuleBase ==========
+    /*━━━━━━━━━━━━━━━ RewardModuleBase ━━━━━━━━━━━━━━━*/
 
     function _getRegistryAddr() internal view override returns (address) {
         return _registryAddr;
     }
 
-    // ========== 公共接口 ==========
+    /*━━━━━━━━━━━━━━━ Loan And Penalty Entries ━━━━━━━━━━━━━━━*/
 
-    /// @notice ORDER_ENGINE(core/LendingEngine) 在 borrow 或 repay 后调用此函数
-    /// @param user 用户地址
-    /// @param amount 金额（以最小单位；USDT/USDC 按 6 位，ETH 按 18 位）
-    /// @param duration 借款时长（区块数）：borrow 推荐传订单 term（用于锁定/计算奖励）；若上游无法提供期限可传 0（表示未知/不计分/不锁定）；repay 固定传 0
-    /// @param hfHighEnough 历史遗留命名；当前语义为 `isOnTimeAndFullyRepaid`（按期且足额还清，由 LendingEngine 计算并传入；主要在 repay 场景有意义）。
-    ///        注意：**不要**将其按旧名误解为“健康因子足够（HealthFactor）”。
-    function onLoanEvent(address user, uint256 amount, uint256 duration, bool hfHighEnough)
-        external
-        onlyValidRegistry
-        nonReentrant
-    {
-        // 按 Architecture-Guide：Reward 的唯一路径为 ORDER_ENGINE 落账后触发
-        address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
-        if (msg.sender != orderEngine) revert MissingRole();
-        
-        _getRewardManagerCore().onLoanEvent(user, amount, duration, hfHighEnough);
-    }
-
-    /// @notice ORDER_ENGINE(core/LendingEngine) 在 borrow/repay(足额) 后调用此函数（按订单维度：锁定/释放/扣罚）
-    /// @dev 与 IRewardManagerByOrder 保持一致；旧版 LendingEngine 可继续调用 legacy 的 onLoanEvent
+    /**
+     * @notice Forwards one order-level loan event into RewardManagerCore.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - Registry missing KEY_ORDER_ENGINE or KEY_REWARD_MANAGER_CORE
+     *      - caller is not Registry[KEY_ORDER_ENGINE] (see {MissingRole})
+     *      - downstream {IRewardManagerCoreByOrder.onLoanEventByOrder} reverts
+     *
+     * Security:
+     * - Non-reentrant order-engine gateway.
+     * - This is the canonical entry for order-based lock, unlock, and penalty accounting.
+     *
+     * @param user Borrower account.
+     * @param orderId Order identifier.
+     * @param amount Principal amount in the loan asset base units.
+    * @param maturity Order maturity block (`maturityBlock`, block-based SSOT) forwarded to RewardManagerCore.
+     * @param outcome Loan outcome enum defined by {IRewardManagerByOrder}.
+     */
     function onLoanEventByOrder(
         address user,
         uint256 orderId,
@@ -115,16 +177,42 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         uint256 maturity,
         IRewardManagerByOrder.LoanEventOutcome outcome
     ) external onlyValidRegistry nonReentrant {
-        address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+        address orderEngine = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ORDER_ENGINE
+        );
         if (msg.sender != orderEngine) revert MissingRole();
 
-        IRewardManagerCoreByOrder(address(_getRewardManagerCore())).onLoanEventByOrder(
-            user, orderId, amount, maturity, uint8(outcome)
-        );
+        IRewardManagerCoreByOrder(address(_getRewardManagerCore()))
+            .onLoanEventByOrder(
+                user,
+                orderId,
+                amount,
+                maturity,
+                uint8(outcome)
+            );
     }
 
-    /// @notice ORDER_ENGINE 在 borrow/repay(足额) 后调用（按订单维度，含 lender/asset）
-    /// @dev 该入口会同步触发 RMCore（积分锁定/释放）与 EasyEmissionController（Easy 发行）
+    /**
+     * @notice Processes one order-level loan event and, when available, triggers Easy emission.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - Registry missing KEY_ORDER_ENGINE or KEY_REWARD_MANAGER_CORE
+     *      - caller is not Registry[KEY_ORDER_ENGINE] (see {MissingRole})
+     *      - downstream RewardManagerCore call reverts
+     *      - downstream EasyEmissionController call reverts when the module is present and contract-backed
+     *
+     * Security:
+     * - Non-reentrant order-engine gateway.
+     * - EasyEmissionController is optional; missing or non-contract addresses are ignored deliberately.
+     *
+     * @param borrower Borrower account.
+     * @param lender Lender account.
+     * @param asset Borrowed asset used for Easy emission valuation.
+     * @param orderId Order identifier.
+     * @param amount Principal amount in the loan asset base units.
+    * @param maturity Order maturity block (`maturityBlock`, block-based SSOT) forwarded downstream.
+     * @param outcome Loan outcome enum defined by {IRewardManagerByOrder}.
+     */
     function onLoanEventByOrderWithLender(
         address borrower,
         address lender,
@@ -134,41 +222,89 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         uint256 maturity,
         IRewardManagerByOrder.LoanEventOutcome outcome
     ) external onlyValidRegistry nonReentrant {
-        address orderEngine = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+        address orderEngine = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ORDER_ENGINE
+        );
         if (msg.sender != orderEngine) revert MissingRole();
 
-        IRewardManagerCoreByOrder(address(_getRewardManagerCore())).onLoanEventByOrder(
-            borrower, orderId, amount, maturity, uint8(outcome)
-        );
-
-        address controller = Registry(_registryAddr).getModule(ModuleKeys.KEY_EASY_EMISSION_CONTROLLER);
-        if (controller != address(0) && controller.code.length != 0) {
-            IEasyEmissionControllerByOrder(controller).onLoanEventByOrderWithLender(
+        IRewardManagerCoreByOrder(address(_getRewardManagerCore()))
+            .onLoanEventByOrder(
                 borrower,
-                lender,
-                asset,
                 orderId,
                 amount,
                 maturity,
                 uint8(outcome)
             );
+
+        address controller = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_EASY_EMISSION_CONTROLLER
+        );
+        if (controller != address(0) && controller.code.length != 0) {
+            IEasyEmissionControllerByOrder(controller)
+                .onLoanEventByOrderWithLender(
+                    borrower,
+                    lender,
+                    asset,
+                    orderId,
+                    amount,
+                    maturity,
+                    uint8(outcome)
+                );
         }
     }
 
-    /// @notice 惩罚用户 EasyToken（清算模块调用）
-    /// @param user 用户地址
-    /// @param easyAmount 扣除 Easy 数量（reward units, 18 decimals）
-    function applyPenalty(address user, uint256 easyAmount) external onlyValidRegistry {
-        // 通过 Registry 获取清算相关模块地址进行权限验证
-        address guaranteeFundManager = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_GUARANTEE_FUND);
-        if (msg.sender != guaranteeFundManager) revert MissingRole();
-        
-        // 调用核心合约的惩罚功能
-        _getRewardManagerCore().deductEasy(user, easyAmount);
-        
-        emit PenaltyApplied(msg.sender, user, easyAmount, block.number);
+    /**
+     * @notice Quotes the current liquidation penalty for a user.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - Registry missing KEY_REWARD_MANAGER_CORE
+     *      - downstream {IRewardManagerCoreLiquidationPenalty.quoteLiquidationPenalty} reverts
+     *
+     * Security:
+     * - View-only gateway into RewardManagerCore.
+     *
+     * @param user Account to quote.
+     * @return easyAmount Quoted Easy penalty amount, in 18 decimals.
+     */
+    function quoteLiquidationPenalty(
+        address user
+    ) external view onlyValidRegistry returns (uint256 easyAmount) {
+        return
+            IRewardManagerCoreLiquidationPenalty(
+                address(_getRewardManagerCore())
+            ).quoteLiquidationPenalty(user);
+    }
 
-        // 使用标准化事件记录惩罚（executor 必须为真实执行者：清算模块）
+    /**
+     * @notice Applies the liquidation penalty derived from the user's current locked Easy balance.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - Registry missing KEY_GUARANTEE_FUND or KEY_REWARD_MANAGER_CORE
+     *      - caller is not Registry[KEY_GUARANTEE_FUND] (see {MissingRole})
+     *      - downstream {IRewardManagerCoreLiquidationPenalty.applyLiquidationPenaltyByCurrentLock} reverts
+     *
+     * Security:
+     * - Non-reentrant liquidation gateway restricted to GuaranteeFund.
+     * - Penalty measurement stays in the Reward domain and is based on current aggregated lockedEasy.
+     *
+     * @param user Penalized account.
+     * @return easyAmount Actual Easy penalty applied, in 18 decimals.
+     */
+    function applyLiquidationPenalty(
+        address user
+    ) external onlyValidRegistry nonReentrant returns (uint256 easyAmount) {
+        address guaranteeFundManager = Registry(_registryAddr)
+            .getModuleOrRevert(ModuleKeys.KEY_GUARANTEE_FUND);
+        if (msg.sender != guaranteeFundManager) revert MissingRole();
+
+        easyAmount = IRewardManagerCoreLiquidationPenalty(
+            address(_getRewardManagerCore())
+        ).applyLiquidationPenaltyByCurrentLock(user, msg.sender);
+
+        if (easyAmount > 0) {
+            emit PenaltyApplied(msg.sender, user, easyAmount, block.number);
+        }
+
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_LIQUIDATE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE),
@@ -177,59 +313,149 @@ contract RewardManager is Initializable, UUPSUpgradeable, ReentrancyGuardUpgrade
         );
     }
 
-    // ========== 管理接口 ==========
+    /*━━━━━━━━━━━━━━━ Governance Writes ━━━━━━━━━━━━━━━*/
 
-    /// @notice Update earn-side dynamic reward parameters (governance).
-    /// @dev SSOT: RewardConfig -> EarnConfig. Observability cache is pushed best-effort via RewardManagerCore -> RewardView.
-    function setDynamicRewardParams(uint256 thresholdEasy, uint256 multiplierBps) external onlyValidRegistry {
+    /**
+     * @notice Updates earn-side dynamic reward parameters.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - caller lacks ACTION_SET_PARAMETER
+     *      - Registry missing KEY_REWARD_CONFIG or KEY_REWARD_MANAGER_CORE
+     *      - downstream RewardConfig or RewardManagerCore call reverts
+     *
+     * Security:
+     * - Governance-only write.
+     * - RewardView observability push is best-effort once RewardManagerCore receives the updated values.
+     *
+     * @param thresholdEasy Easy threshold for enabling the dynamic reward boost.
+     * @param multiplierBps Dynamic multiplier in BPS.
+     */
+    function setDynamicRewardParams(
+        uint256 thresholdEasy,
+        uint256 multiplierBps
+    ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        address rewardConfig = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONFIG);
-        IRewardConfigEarnGovernance(rewardConfig).setDynamicRewardParams(thresholdEasy, multiplierBps);
-        _getRewardManagerCore().pushDynamicRewardParamsToView(thresholdEasy, multiplierBps);
+        address rewardConfig = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_REWARD_CONFIG
+        );
+        IRewardConfigEarnGovernance(rewardConfig).setDynamicRewardParams(
+            thresholdEasy,
+            multiplierBps
+        );
+        _getRewardManagerCore().pushDynamicRewardParamsToView(
+            thresholdEasy,
+            multiplierBps
+        );
     }
 
-    /// @notice Update earn-side level multiplier (BPS, 10000=1x).
-    /// @dev SSOT: RewardConfig -> EarnConfig. Observability cache is pushed best-effort via RewardManagerCore -> RewardView.
-    function setLevelMultiplier(uint8 level, uint256 multiplierBps) external onlyValidRegistry {
+    /**
+     * @notice Updates one earn-side level multiplier.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - caller lacks ACTION_SET_PARAMETER
+     *      - Registry missing KEY_REWARD_CONFIG or KEY_REWARD_MANAGER_CORE
+     *      - downstream RewardConfig or RewardManagerCore call reverts
+     *
+     * Security:
+     * - Governance-only write.
+     * - RewardView observability push is best-effort once RewardManagerCore receives the updated values.
+     *
+     * @param level User level whose multiplier is updated.
+     * @param multiplierBps Multiplier in BPS, where 10000 = 1x.
+     */
+    function setLevelMultiplier(
+        uint8 level,
+        uint256 multiplierBps
+    ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        address rewardConfig = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONFIG);
-        IRewardConfigEarnGovernance(rewardConfig).setLevelMultiplier(level, multiplierBps);
+        address rewardConfig = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_REWARD_CONFIG
+        );
+        IRewardConfigEarnGovernance(rewardConfig).setLevelMultiplier(
+            level,
+            multiplierBps
+        );
         _getRewardManagerCore().pushLevelMultiplierToView(level, multiplierBps);
     }
 
-    /// @notice 更新用户等级
-    /// @param user 用户地址
-    /// @param newLevel 新等级 (1-5)
-    function updateUserLevel(address user, uint8 newLevel) external onlyValidRegistry {
+    /**
+     * @notice Updates a user's Reward level.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - caller lacks ACTION_SET_PARAMETER
+     *      - newLevel is outside 1..5 (see {RewardManager__InvalidLevel})
+     *      - Registry missing KEY_REWARD_MANAGER_CORE
+     *      - downstream {RewardManagerCore.updateUserLevel} reverts
+     *
+     * Security:
+     * - Governance-only write.
+     *
+     * @param user Account whose level is updated.
+     * @param newLevel New level in the inclusive range 1..5.
+     */
+    function updateUserLevel(
+        address user,
+        uint8 newLevel
+    ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        if (newLevel == 0 || newLevel > 5) revert RewardManager__InvalidLevel(newLevel);
-        
-        // 调用核心合约更新用户等级
+        if (newLevel == 0 || newLevel > 5)
+            revert RewardManager__InvalidLevel(newLevel);
+
+        // Delegate the level write to RewardManagerCore, which owns the level ledger.
         _getRewardManagerCore().updateUserLevel(user, newLevel);
     }
 
-    /// @notice 设置按期窗口（区块数）
-    function setOnTimeWindow(uint256 newWindow) external onlyValidRegistry {
+    /**
+     * @notice Updates the late-repayment penalty rate.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - caller lacks ACTION_SET_PARAMETER
+     *      - Registry missing KEY_REWARD_MANAGER_CORE
+     *      - downstream {RewardManagerCore.setLatePenaltyBps} reverts
+     *
+     * Security:
+     * - Governance-only write.
+     *
+     * @param lateBps Late repayment penalty in BPS.
+     */
+    function setLatePenaltyBps(
+        uint256 lateBps
+    ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        _getRewardManagerCore().setOnTimeWindow(newWindow);
+        _getRewardManagerCore().setLatePenaltyBps(lateBps);
     }
 
-    /// @notice 设置提前/逾期扣罚（BPS）
-    function setPenaltyBps(uint256 earlyBps, uint256 lateBps) external onlyValidRegistry {
+    /**
+     * @notice Updates the liquidation penalty rate.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - caller lacks ACTION_SET_PARAMETER
+     *      - Registry missing KEY_REWARD_MANAGER_CORE
+     *      - downstream {IRewardManagerCoreLiquidationPenalty.setLiquidationPenaltyBps} reverts
+     *
+     * Security:
+     * - Governance-only write.
+     *
+     * @param liquidationBps Liquidation penalty in BPS.
+     */
+    function setLiquidationPenaltyBps(
+        uint256 liquidationBps
+    ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        _getRewardManagerCore().setPenaltyBps(earlyBps, lateBps);
+        IRewardManagerCoreLiquidationPenalty(address(_getRewardManagerCore()))
+            .setLiquidationPenaltyBps(liquidationBps);
     }
 
-    // ========== 查询接口（与架构一致：仅保留入口职责；只读查询迁移至 RewardView） ==========
+    /*━━━━━━━━━━━━━━━ UUPS ━━━━━━━━━━━━━━━*/
 
-    /// @notice 升级授权函数
-    /// @dev 通过 ACM(ActionKeys.ACTION_UPGRADE_MODULE) 校验升级权限
-    /// @dev 若后续接入 Timelock/Multisig，应在 ACM 层或此处增加“仅 Timelock/Multisig 执行”的约束
-    function _authorizeUpgrade(address newImplementation) internal view override {
+    /// @dev Reverts if caller lacks ACTION_UPGRADE_MODULE or newImplementation is zero (see {ZeroAddress}).
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
     }
 
-    // ============ UUPS storage gap ============
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     uint256[50] private __gap;
-} 
+}

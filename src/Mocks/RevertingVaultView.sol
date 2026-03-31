@@ -37,7 +37,7 @@ contract RevertingVaultRouter is IVaultRouter {
         uint64,
         uint64
     ) external pure override {
-        revert("revert-pushUserPositionUpdateDelta");
+        revert("revert-pushUPUDelta");
     }
 
     function pushAssetStatsUpdate(

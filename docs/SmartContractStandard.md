@@ -19,119 +19,159 @@
 
 ```
 src/
-├─ constants/                   # 常量库（ModuleKeys / ActionKeys）
-│  ├─ ModuleKeys.sol           # 模块 KEY_ 常量及映射函数
-│  ├─ ActionKeys.sol           # 动作 ACTION_ 常量及映射函数
-│  ├─ DataPushLibrary.sol      # 统一数据推送库
-│  └─ DataPushTypes.sol        # 数据推送类型定义
-├─ Vault/                      # 核心业务 Vault 合约聚合层
-│  ├─ VaultCore.sol            # 极简入口合约（双架构设计）
-│  ├─ VaultRouter.sol          # 路由协调器（deposit/withdraw 路由 + push 到 View）
-│  ├─ VaultStorage.sol         # 存储合约（Registry系统集成）
-│  ├─ VaultMath.sol            # 统一数学计算库
-│  ├─ SystemEvents.sol         # 全局标准事件（跨模块共享事件 SSOT，原 VaultTypes.sol）
-│  ├─ VaultAdmin.sol           # 管理功能合约
-│  ├─ modules/                 # 具体业务子模块
-│  │  ├─ CollateralManager.sol        # 抵押资产管理
-│  │  ├─ VaultLendingEngine.sol      # Vault借贷引擎
-│  │  ├─ VaultBusinessLogic.sol      # 业务逻辑模块
-│  │  ├─ EarlyRepaymentGuaranteeManager.sol  # 提前还款保证金管理
-│  │  └─ GuaranteeFundManager.sol   # 保证金基金管理
-│  ├─ view/                    # View层模块
-│  │  └─ modules/              # View层子模块
-│  │     ├─ UserView.sol              # 用户视图
-│  │     ├─ HealthView.sol            # 健康因子视图
-│  │     ├─ StatisticsView.sol        # 统计视图
-│  │     ├─ RewardView.sol            # 奖励视图
-│  │     ├─ LiquidatorView.sol        # 清算视图
-│  │     └─ ...                       # 其他视图模块
-│  └─ liquidation/             # 清算模块
-│     ├─ modules/              # 清算子模块
-│     │  ├─ LiquidationManager.sol    # 清算管理器
-│     │  ├─ LiquidationRiskManager.sol # 清算风险管理器
-│     │  ├─ LiquidationRewardManager.sol # 清算奖励管理器
-│     │  └─ ...                       # 其他清算模块
-│     └─ libraries/            # 清算库
+├─ constants/                    # 全局常量与 DataPush 类型
+│  ├─ ModuleKeys.sol            # 模块 KEY_ 常量及映射函数
+│  ├─ ActionKeys.sol            # 动作 ACTION_ 常量及映射函数
+│  ├─ DataPushTypes.sol         # DataPush 类型定义
+│  └─ FeeTypes.sol              # 费用类型常量
+├─ Vault/                       # Vault 聚合层与核心读写门面
+│  ├─ VaultCore.sol             # 极简用户入口与业务模块写入口
+│  ├─ VaultRouter.sol           # 路由协调器 + DataPush 转发层
+│  ├─ VaultAdmin.sol            # Vault 管理面
+│  ├─ VaultMath.sol             # 统一数学计算库
+│  ├─ SystemEvents.sol          # 全局标准事件 SSOT
+│  ├─ CacheEvents.sol           # 缓存相关标准事件
+│  ├─ modules/                  # Vault 业务写模块
+│  │  ├─ CollateralManager.sol  # 抵押账本与资产操作
+│  │  ├─ VaultLendingEngine.sol # Vault 债务账本引擎
+│  │  ├─ VaultBusinessLogic.sol # 跨模块编排入口
+│  │  ├─ LoanFlowPushManager.sol # LoanFlow 统计推送管理
+│  │  ├─ StatisticsPushManager.sol # Statistics 推送管理
+│  │  ├─ EarlyRepaymentGuaranteeManager.sol # 提前还款保证金管理
+│  │  └─ GuaranteeFundManager.sol # 保证金基金管理
+│  ├─ view/
+│  │  └─ modules/               # View 层查询/缓存模块
+│  │     ├─ PositionView.sol    # 用户仓位查询与缓存
+│  │     ├─ UserView.sol        # 用户维度只读聚合
+│  │     ├─ HealthView.sol      # 健康因子与风险状态视图
+│  │     ├─ StatisticsView.sol  # 系统级统计聚合
+│  │     ├─ LoanFlowView.sol    # 协议 loan-flow 统计视图
+│  │     ├─ ViewCache.sol       # 系统级快照缓存
+│  │     ├─ AccessControlView.sol # 权限只读查询
+│  │     ├─ BatchView.sol       # 批量查询聚合
+│  │     ├─ RegistryView.sol    # Registry 枚举/反查视图
+│  │     ├─ SystemView.sol      # 系统统一入口/元信息路由
+│  │     ├─ RewardView.sol      # 奖励只读聚合 + 统一 DataPush
+│  │     ├─ LiquidatorView.sol  # 清算数据权威只读入口
+│  │     ├─ SystemRiskView.sol  # system-scoped 风险参数视图
+│  │     ├─ LiquidationRiskView.sol # 清算风险只读视图
+│  │     ├─ ValuationOracleView.sol # 价格/预言机只读门面
+│  │     ├─ FeeRouterView.sol   # 费用镜像只读视图
+│  │     └─ ...                 # 其他可选 View 模块
+│  └─ liquidation/
+│     ├─ modules/               # 清算/结算写模块
+│     │  ├─ SettlementManager.sol # 统一 repay/settle/liquidate 写入口
+│     │  ├─ LiquidationManager.sol # 清算执行编排入口
+│     │  ├─ LiquidationRiskManager.sol # 风险聚合与评估
+│     │  ├─ LiquidationConfigManager.sol # 清算参数治理模块
+│     │  ├─ LiquidationPayoutManager.sol # 清算收益分配模块
+│     │  └─ LiquidationCalculator.sol # 清算计算模块
+│     └─ libraries/             # 清算共享库
 ├─ registry/                    # Registry 模块注册中心
 │  ├─ Registry.sol              # 主注册表入口
-│  ├─ RegistryCore.sol          # 核心业务逻辑
-│  ├─ RegistryUpgradeManager.sol # 升级管理器
-│  ├─ RegistryAdmin.sol         # 治理管理员
+│  ├─ RegistryStorageLibrary.sol # Registry 存储逻辑库
+│  ├─ RegistryQueryLibrary.sol  # Registry 查询逻辑库
+│  ├─ RegistryEventsLibrary.sol # Registry 事件逻辑库
+│  ├─ RegistryCompatQueryLibrary.sol # 兼容查询逻辑库
+│  ├─ CacheMaintenanceManager.sol # A 类缓存刷新入口
 │  └─ RegistryDynamicModuleKey.sol # 动态模块键注册表
-├─ core/                        # 核心业务合约
+├─ core/                        # 核心业务与权威写路径模块
 │  ├─ LendingEngine.sol         # 订单引擎（core/LendingEngine）
-│  ├─ PriceOracle.sol           # 价格预言机
-│  ├─ FeeRouter.sol             # 手续费路由
-│  ├─ LoanNFT.sol               # 贷款NFT
-│  └─ CoinGeckoPriceUpdater.sol # CoinGecko价格更新器
-├─ access/                      # 访问控制模块
+│  ├─ PriceOracle.sol           # 协议内部价格源
+│  ├─ LoanNFT.sol               # 贷款凭证 NFT
+│  ├─ PriceUpdater.sol          # 价格更新器
+│  └─ AICreditsVault.sol        # AI Credits Vault
+├─ access/                      # 访问控制与白名单模块
 │  ├─ AccessControlManager.sol  # 访问控制管理器
-│  └─ AssetWhitelist.sol       # 资产白名单
-├─ Reward/                      # 奖励系统
-│  ├─ RewardManager.sol         # 奖励管理器
-│  ├─ RewardManagerCore.sol    # 奖励管理核心
-│  ├─ RewardView.sol            # 只读聚合 + 统一 DataPush
-│  ├─ EasyConsumption.sol       # Easy 按次消耗（每次 1 Easy）
+│  ├─ AssetWhitelist.sol        # 资产白名单
+│  └─ WhitelistRegistry.sol     # 白名单集中注册表
+├─ Reward/                      # 奖励写路径模块
+│  ├─ RewardManager.sol         # 奖励编排入口
+│  ├─ RewardManagerCore.sol     # Earn 侧核心
+│  ├─ RewardAccrualManager.sol  # Penalty SSOT
+│  ├─ EasyConsumption.sol       # Easy 按次消耗
 │  ├─ EasyRecycleDistributor.sol # Easy 回收/分配
 │  ├─ EasyEmissionConfig.sol    # Easy 发行参数
-│  ├─ EasyEmissionController.sol # Easy 发行控制器
-│  └─ EasyStaking.sol           # Easy 质押（治理投票权）
-├─ Governance/                  # 治理模块
-│  └─ CrossChainGovernance.sol  # 跨链治理
+│  └─ EasyEmissionController.sol # Easy 发行控制器
+├─ Governance/                  # 治理与投票模块
+│  ├─ CrossChainGovernance.sol  # 跨链治理
+│  ├─ GovernanceGate.sol        # 治理门控
+│  └─ EasyStaking.sol           # Easy 质押治理票权
+├─ Token/                       # 协议 Token 合约
+│  ├─ EasyToken.sol             # EASY 通证
+│  └─ RWAToken.sol              # RWA 通证
 ├─ libraries/                   # 共享库
-│  ├─ SettlementMatchLib.sol   # 撮合结算库
-│  ├─ GracefulDegradation.sol  # 优雅降级库
-│  └─ ...                       # 其他库
+│  ├─ AccessControlLibrary.sol  # 写路径权限校验 + 审计
+│  ├─ ViewAccessLib.sol         # 只读权限判断
+│  ├─ ModuleAccessLibrary.sol   # Registry 模块解析与访问审计
+│  ├─ DataPushLibrary.sol       # 统一 DataPush 发射边界
+│  ├─ GracefulDegradation.sol   # 预言机/估值降级库
+│  ├─ HealthFactorLib.sol       # 健康因子计算库
+│  ├─ ProxyIntrospectionLib.sol # 代理实现地址自省
+│  └─ ...                       # 其他共享库
 ├─ interfaces/                  # 接口定义
-│  ├─ IRegistry.sol             # Registry接口
-│  ├─ IVaultCore.sol            # VaultCore接口
-│  ├─ IVaultRouter.sol            # VaultRouter接口
+│  ├─ IRegistry.sol             # Registry 接口
+│  ├─ IVaultCore.sol            # VaultCore 接口
+│  ├─ IVaultRouter.sol          # VaultRouter 接口
+│  ├─ IPositionView.sol         # PositionView 接口
+│  ├─ IPriceOracleRead.sol      # 价格源只读接口
 │  └─ ...                       # 其他接口
 ├─ Mocks/                       # 单元 / 集成测试用 Mock 合约
 │  ├─ MockCollateralManager.sol # 模拟抵押管理
 │  ├─ MockLendingEngine.sol     # 模拟借贷引擎
 │  └─ MockAccessControlManager.sol # 可配置角色的 Mock
-└─ errors/                      # 标准错误定义
-   └─ StandardErrors.sol        # 统一错误定义
+├─ errors/                      # 标准错误定义
+│  └─ StandardErrors.sol        # 统一错误定义
+├─ AuthorityWhitelist.sol       # Authority 主体白名单
+├─ blocks-only/                 # blocks-only 产品线模块
+├─ monitor/                     # 降级/健康监控模块
+└─ utils/                       # 通用工具库
 ```
 
 #### 3.1.1 模块功能说明
+
+> 注意（资金链 SSOT）：本节只描述“模块职责边界与依赖关系”，不复述链上资金链路、托管者、资产去向或跨模块调用顺序；相关内容统一以 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 为准。
 
 | 模块 | 主要职责 | 关键交互 |
 |------|----------|----------|
 | **VaultCore** | 1. 极简入口合约，处理用户操作（deposit/withdraw/borrow/repay）<br/>2. 传送数据至 View 层<br/>3. 支持 Registry 升级能力 | • VaultRouter<br/>• Registry |
 | **VaultRouter** | 1. 路由协调器：用户操作路由（deposit/withdraw 到 CollateralManager）<br/>2. 数据推送接口：接收业务模块推送，发出事件（轻量实现，不维护缓存）<br/>3. 事件驱动：统一事件发出，支持数据库收集<br/>⚠️ **架构演进（2025-08）**：查询功能已迁移到独立 View 模块（PositionView、UserView 等），VaultRouter 仅负责路由和数据推送 | • VaultCore<br/>• CollateralManager<br/>• Registry |
-| **VaultStorage** | 1. 纯Registry系统存储合约<br/>2. 提供统一的模块管理和状态存储<br/>3. 集成ACM进行权限控制 | • Registry<br/>• AccessControlManager |
-| **VaultRouter** | 1. 路由合约，权限校验与模块分发<br/>2. 提供原子性操作保护<br/>3. 集成优雅降级机制 | • Registry<br/>• AccessControlManager<br/>• CollateralManager<br/>• VaultLendingEngine |
-| **CollateralManager** | 1. 用户存 / 取抵押品<br/>2. 调用 PriceOracle 获取实时价格<br/>3. 计算并上报手续费至 FeeRouter<br/>4. 数据推送到 View 层缓存 | • PriceOracle<br/>• FeeRouter<br/>• VaultRouter<br/>• Registry |
+| **CollateralManager** | 1. 抵押相关账本写入与资产操作（deposit/withdraw 等）<br/>2. 安全 ERC20 交互（SafeERC20）<br/>3. 写入口收口与权限边界以实现与 Funds-Flow SSOT 为准 | • VaultRouter<br/>• Registry |
 | **VaultLendingEngine** | 1. Vault借贷引擎，管理借贷记录和债务计算<br/>2. 账本变更后推送 VaultRouter<br/>3. 计算并推送健康因子到 HealthView | • VaultRouter<br/>• HealthView<br/>• Registry |
-| **VaultBusinessLogic** | 1. 业务逻辑模块：代币转入/转出、抵押与保证金联动<br/>2. 唯一奖励触发<br/>3. 批量编排 | • CollateralManager<br/>• VaultLendingEngine<br/>• RewardManager<br/>• Registry |
-| **LendingEngine** (core/) | 1. 订单引擎：记录并管理贷款订单全生命周期<br/>2. 调用 LoanNFT 铸造/更新贷款凭证<br/>3. 处理还款并计算利息<br/>4. 向 FeeRouter 上报并分配还款手续费 | • LoanNFT<br/>• FeeRouter<br/>• RewardManager<br/>• Registry |
+| **VaultBusinessLogic** | 1. 撮合/批量编排与跨模块协调入口（不在本节复述资金链）<br/>2. 奖励触发编排（以实现为准） | • CollateralManager<br/>• VaultLendingEngine<br/>• RewardManager<br/>• Registry |
+| **LendingEngine** (core/) | 1. 订单引擎：记录并管理贷款订单全生命周期<br/>2. 贷款凭证（LoanNFT）铸造/更新<br/>3. 还款/计息等订单语义处理（资金链与费用口径以 Funds-Flow SSOT 为准） | • LoanNFT<br/>• FeeRouter<br/>• RewardManager<br/>• Registry |
+| **SettlementManager** | 1. repay / settle / liquidate 的统一写入口<br/>2. 统一承接 legacy / 通用订单的结算编排<br/>3. 清算分支内部协调 LiquidationManager 或直达账本 | • LendingEngine<br/>• LiquidationManager<br/>• Registry |
 | **LiquidationManager** | 1. 清算编排入口<br/>2. 协调清算流程<br/>3. 触发清算事件 | • CollateralManager<br/>• VaultLendingEngine<br/>• LiquidationRiskManager<br/>• Registry |
-| **LiquidationRiskManager** | 1. 健康因子与风控聚合<br/>2. 清算风险评估<br/>3. 提供只读查询接口 | • HealthView<br/>• Registry |
-| **RewardManager** | 1. 依据借贷行为发放平台积分<br/>2. 积分可接入 DAO 治理、费用折扣、空投等<br/>3. 提供可升级的奖励规则接口 | • LendingEngine<br/>• RewardView<br/>• Registry |
+| **LiquidationRiskManager** | 1. 用户/仓位维度的清算风险只读聚合与评估<br/>2. 可复用的风险计算编排入口<br/>3. 不承载治理写入、system-scoped 阈值配置或迁移脚本语义 | • HealthView<br/>• Registry |
+| **RewardManager** | 1. 依据借贷行为触发奖励通证 Easy（EasyToken-only）发放/锁定/释放逻辑<br/>2. 奖励通证可接入治理、费用折扣、空投等（以 Easy 为唯一口径）<br/>3. 提供可升级的奖励规则接口 | • LendingEngine<br/>• RewardView<br/>• Registry |
+| **RewardAccrualManager** | 1. Penalty ledger 的 SSOT<br/>2. 优先 burn Easy，不足则累积 penalty ledger<br/>3. 向 RewardView 推送扣罚状态变更 | • RewardManager<br/>• RewardView<br/>• Registry |
 | **ModuleKeys** | 提供全局 `bytes32` 模块常量，避免硬编码，支持字符串映射 | • Registry<br/>• 所有模块 |
 | **ActionKeys** | 提供全局 `bytes32` 动作常量，用于权限分发和事件追踪 | • AccessControlManager<br/>• 所有模块 |
 | **Registry** | 1. `key => address` 模块地址映射<br/>2. 延时升级三步：`schedule / cancel / execute`<br/>3. 仅 Owner / UpgradeAdmin 可操作 | • 所有模块<br/>• Governance |
 | **AccessControlManager** | 1. 集中角色管理 (`requireRole / hasRole`)<br/>2. 支持角色动态增删、事件通知 | • 全链路调用者（所有模块） |
-| **PriceOracle** | 1. 价格预言机：提供资产价格信息<br/>2. 支持多源价格聚合<br/>3. 价格更新与查询 | • CollateralManager<br/>• VaultLendingEngine<br/>• Registry |
-| **FeeRouter** | 1. 统一手续费分账<br/>2. 支持平台/生态分账比例配置<br/>3. 费用分发与统计 | • LendingEngine<br/>• CollateralManager<br/>• Registry |
+| **AssetWhitelist** | 1. 治理控制的资产准入白名单 SSOT<br/>2. 写路径通过 Registry + ACM 做权限校验<br/>3. 读路径优先依赖 `IAssetWhitelistRead` | • VaultRouter<br/>• Registry<br/>• AccessControlManager |
+| **AuthorityWhitelist** | 1. Authority 主体白名单管理<br/>2. 仅维护 authority-name 成员资格<br/>3. 不充当通用地址注册表 | • Registry<br/>• AccessControlManager |
+| **PriceOracle** | 1. 协议内部价格源/聚合写路径与权威报价提供者<br/>2. 多源价格聚合与标准化输出<br/>3. 对外只读门面与批量观测能力应收敛到 `ValuationOracleView` | • CollateralManager<br/>• VaultLendingEngine<br/>• Registry |
+| **FeeRouter** | 1. 统一手续费分账与落账写路径<br/>2. 支持平台/生态分账比例配置<br/>3. 读查询、报表与低成本镜像能力应收敛到独立 View/只读接口 | • LendingEngine<br/>• CollateralManager<br/>• Registry |
 | **EarlyRepaymentGuaranteeManager** | 1. 提前还款保证金管理<br/>2. 锁定、释放、没收保证金<br/>3. 提前还款结算 | • GuaranteeFundManager<br/>• Registry |
 | **GuaranteeFundManager** | 1. 保证金基金管理<br/>2. 锁定、释放、没收保证金<br/>3. 保证金统计 | • EarlyRepaymentGuaranteeManager<br/>• Registry |
+| **PositionView** | 1. 用户仓位查询 + 缓存<br/>2. 支持版本化与幂等推送<br/>3. 为前端与链下机器人提供权威仓位读取 | • VaultRouter<br/>• VaultLendingEngine |
 | **StatisticsView** | 1. 统计视图：活跃用户、全局抵押/债务、保证金聚合<br/>2. 业务入口统一推送<br/>3. 只读查询接口（0 gas） | • VaultRouter<br/>• 业务模块 |
 | **HealthView** | 1. 健康因子视图：缓存健康因子和风险状态<br/>2. 数据推送接口<br/>3. 只读查询接口（0 gas） | • VaultLendingEngine<br/>• LiquidationRiskManager |
+| **RewardView** | 1. 奖励只读聚合与统一 DataPush 入口<br/>2. 作为链下订阅与前端查询门面<br/>3. 写入方由 writer 白名单严格限制 | • RewardManagerCore<br/>• RewardAccrualManager<br/>• Registry |
+| **SystemView / RegistryView / SystemRiskView** | 1. 提供系统入口、Registry 发现与 system-scoped risk 参数查询<br/>2. 避免把用户维度与系统维度查询混在同一接口族中<br/>3. 为前端和运维脚本提供稳定只读门面 | • Registry<br/>• View 层模块 |
 
-### 3.2. 模块与动作常量库（ModuleKeys / ActionKeys）
+### 3.2. 模块与动作常量规范（ModuleKeys / ActionKeys）
 
 为实现高可维护性、可扩展性和类型安全，平台将所有全局常量分为两大类：
 
-- **ModuleKeys**：所有模块唯一标识（如 `KEY_VAULT_CORE`、`KEY_ACCESS_CONTROL_MANAGER`），用于动态注册、查找、权限校验等。
+- **ModuleKeys**：所有模块唯一标识（如 `KEY_VAULT_CORE`、`KEY_ACCESS_CONTROL`），用于动态注册、查找、权限校验等。
 - **ActionKeys**：所有系统动作唯一标识（如 `ACTION_CLAIM_REWARD`、`ACTION_UPDATE_PRICE`），用于权限分发、事件追踪等。
 
 #### 3.2.1 设计原则
 - **常量命名**：`KEY_XXX` / `ACTION_XXX`，类型为 `bytes32 constant`。
-- **字符串映射**：所有 key 均支持 lowerCamelCase 字符串与 bytes32 常量的双向映射。
-- **错误处理**：未知字符串严格 revert，防止隐性错误。
+- **字符串映射**：`ModuleKeys` 提供 legacy `lowerCamelCase <-> bytes32` 的兼容映射；`ActionKeys` 当前仅提供 `bytes32 -> legacy lowerCamelCase audit string` 的兼容映射。
+- **错误处理**：兼容映射函数对未知输入采用“空字符串 / `bytes32(0)`”返回语义；严格校验应结合 `isValidActionKey(...)`、`getModuleKeyConstantString(...)` 或显式非零检查完成。
 - **扩展与兼容**：预留语义化的新 key（例如 `KEY_XXX_NEXT` / `KEY_XXX_UPGRADED`），便于平滑升级。
 
 #### 3.2.2 典型用法
@@ -165,10 +205,19 @@ registry.executeModuleUpgrade(ModuleKeys.KEY_CM);
 #### 3.2.3 映射函数
 - `getModuleKeyFromString(string memory name) returns (bytes32)`
 - `getModuleKeyString(bytes32 key) returns (string memory)`
-- `getActionKeyFromString(string memory name) returns (bytes32)`
+- `getModuleKeyConstantString(bytes32 key) returns (string memory)`
 - `getActionKeyString(bytes32 key) returns (string memory)`
+- `isValidActionKey(bytes32 key) returns (bool)`
 
-所有映射函数遇到未知字符串/常量时，均会 revert，保证类型安全。
+当前代码语义如下：
+
+- `getModuleKeyFromString(...)`：未知名称返回 `bytes32(0)`
+- `getModuleKeyString(...)`：未知 key 返回空字符串
+- `getModuleKeyConstantString(...)`：未知 key 会 revert
+- `getActionKeyString(...)`：未知 key 返回空字符串
+- `isValidActionKey(...)`：未知 key 返回 `false`
+
+因此，新代码应优先直接使用常量；只有在兼容旧脚本、旧配置或审计输出时才使用这些字符串映射 helper。
 
 #### 3.2.4 测试要求
 - 覆盖所有 key 的正向/逆向映射
@@ -179,25 +228,25 @@ registry.executeModuleUpgrade(ModuleKeys.KEY_CM);
 #### 3.2.5 历史兼容说明
 > **注意**：`Constants.sol` 已废弃，所有新开发必须使用 `ModuleKeys.sol` 和 `ActionKeys.sol`。
 
-### 3.3. 命名约定与规范
+### 3.3. Solidity 命名规范
 
 #### 3.3.1. 基础命名规则
 
 | 类型 | 命名规范 | 示例 | 说明 |
 |------|----------|------|------|
-| **合约名** | PascalCase | `VaultManager.sol` | 类名风格 |
-| **接口名** | I + PascalCase | `IVaultManager.sol` | 接口标识 |
-| **函数名** | camelCase | `registerVault` | 动词开头 |
-| **事件名** | PascalCase，过去时态 | `VaultCreated` | 描述已发生动作 |
+| **合约名** | PascalCase | `VaultCore.sol` | 类名风格 |
+| **接口名** | I + PascalCase | `IVaultCore.sol` | 接口标识 |
+| **函数名** | camelCase | `borrowFor` | 动词开头 |
+| **事件名** | PascalCase，过去时态 | `VaultRouterInitialized` | 描述已发生动作 |
 | **枚举名** | PascalCase | `VaultStatus` | 类型名风格 |
-| **错误类型** | PascalCase with `__` 前缀 | `VaultManager__NotOwner` | 合约名__错误描述 |
+| **错误类型** | PascalCase with `__` 前缀 | `VaultCore__UnauthorizedModule` | 合约名__错误描述 |
 | **常量** | 全大写 + `_` | `TIMELOCK_DELAY` | 编译时常量 |
 | **模块常量** | KEY_ + 全大写 | `KEY_VAULT_CORE` | 模块标识常量 |
 | **动作常量** | ACTION_ + 全大写 | `ACTION_CLAIM_REWARD` | 动作标识常量 |
-| **私有状态变量** | `_` + camelCase | `_owner`, `_vaultRegistry` | 私有属性标识 |
-| **公共状态变量** | camelCase + `Var` | `totalLiquidityVar`, `pausedVar` | 避免与getter冲突 |
-| **不可变变量** | camelCase + `Addr` | `rwaTokenAddr`, `vaultManagerAddr` | 地址类型变量 |
-| **函数参数** | camelCase，语义化 | `initialOwner`, `targetVault` | 描述参数用途 |
+| **私有状态变量** | `_` + camelCase | `_registryAddr`, `_viewContractAddr` | 私有属性标识 |
+| **显式 getter** | camelCase + `Var` / `AddrVar` | `registryAddrVar`, `viewContractAddrVar` | 暴露原始存储值或地址依赖 |
+| **地址类型变量** | camelCase + `Addr` | `registryAddr`, `viewContractAddr` | 地址语义变量名 |
+| **函数参数** | camelCase，语义化 | `initialRegistryAddr`, `targetUser` | 描述参数用途 |
 | **函数内部变量** | camelCase | `newRate`, `totalAmount` | 局部变量 |
 | **Struct字段** | camelCase | `vault`, `isActive`, `createdAt` | 与变量命名一致 |
 
@@ -205,17 +254,18 @@ registry.executeModuleUpgrade(ModuleKeys.KEY_CM);
 
 1. **Getter函数与状态变量**
    ```solidity
-   // ✅ 推荐 - 状态变量添加后缀
-   address public immutable vaultManagerAddr;
-   function vaultManager() external view returns (address) {
-       return vaultManagerAddr;
+  // ✅ 推荐 - 私有存储 + 显式 getter，和当前仓库风格一致
+  address private _registryAddr;
+  function registryAddrVar() external view returns (address) {
+     return _registryAddr;
    }
    ```
 
 2. **地址类型变量**
    ```solidity
    // ✅ 推荐 - 地址类型添加Addr后缀
-   address public immutable rwaTokenAddr;
+  address registryAddr;
+  address viewContractAddr;
    address private _ownerAddr;
    ```
 
@@ -223,18 +273,18 @@ registry.executeModuleUpgrade(ModuleKeys.KEY_CM);
    ```solidity
    // 构造函数参数 - 使用 initial 前缀
    constructor(
-       address initialRwaToken,
-       address initialVaultManager
+       address initialRegistryAddr,
+       address initialViewContractAddr
    )
 
    // 初始化函数参数 - 使用 initial 前缀
    function initialize(
-       address initialRwaToken,
-       address initialVaultManager
+       address initialRegistryAddr,
+       address initialViewContractAddr
    )
 
    // setter函数参数 - 使用 new 前缀
-   function setVaultManager(address newVaultManager)
+     function setFeeRouterView(address newFeeRouterView)
 
    // 业务函数参数 - 使用描述性前缀
    function deposit(uint256 depositAmount)
@@ -245,25 +295,25 @@ registry.executeModuleUpgrade(ModuleKeys.KEY_CM);
 4. **接口实现参数命名**
    ```solidity
    // 接口定义
-   interface IVault {
-       function initialize(address rwaToken, address vaultManager) external;
+     interface IVaultCore {
+       function initialize(address registryAddr, address viewContractAddr) external;
    }
 
    // ✅ 推荐 - 实现时使用明确的前缀
-   contract Vault is IVault {
+     contract VaultCore is IVaultCore {
        function initialize(
-           address initialRwaToken,
-           address initialVaultManager
+         address initialRegistryAddr,
+         address initialViewContractAddr
        ) external override {
            // 实现逻辑
        }
    }
 
    // ❌ 避免 - 与状态变量同名
-   contract Vault is IVault {
+     contract VaultCore is IVaultCore {
        function initialize(
-           address rwaToken,  // 与状态变量冲突
-           address vaultManager  // 与状态变量冲突
+         address registryAddr,  // 与 _registryAddr 语义冲突
+         address viewContractAddr  // 与 _viewContractAddr 语义冲突
        ) external override {
            // 实现逻辑
        }
@@ -277,8 +327,8 @@ registry.executeModuleUpgrade(ModuleKeys.KEY_CM);
 | 层级 | 命名规范 | 示例 | 说明 |
 |------|----------|------|------|
 | 私有状态变量 | `_` + camelCase | `_owner`, `_vaultRegistry` | 私有属性标识 |
-| 公共状态变量 | camelCase | `totalLiquidity`, `paused` | 公共属性 |
-| 不可变变量 | camelCase | `rwaToken`, `vaultManager` | 构造函数设置 |
+| 显式 getter 函数 | camelCase + `Var` / `AddrVar` | `registryAddrVar`, `feeRouterViewAddrVar` | 返回原始存储值 |
+| 地址类型局部/参数 | camelCase + `Addr` | `registryAddr`, `viewContractAddr` | 地址语义更明确 |
 | 常量 | 全大写 + `_` | `TIMELOCK_DELAY` | 编译时常量 |
 | 函数参数 | camelCase，语义化 | `newOwner`, `newVault` | 避免与状态变量同名 |
 | 函数内部变量 | camelCase | `newRate`, `totalAmount` | 局部变量 |
@@ -300,31 +350,31 @@ function setOwner(address newOwner) public {
     _owner = newOwner; // 无遮蔽
 }
 
-// ❌ 不推荐 - 参数与状态变量同名
-IERC20 public immutable rwaToken;
-function initialize(address rwaToken) external { ... }
+// ❌ 不推荐 - 参数与状态变量语义重名
+address private _registryAddr;
+function initialize(address registryAddr) external { ... }
 
 // ✅ 推荐 - 语义化参数名
-IERC20 public immutable rwaToken;
-function initialize(address newRwaToken) external { ... }
+address private _registryAddr;
+function initialize(address initialRegistryAddr) external { ... }
 ```
 
 #### 3.3.4. 状态变量命名详细规则
 
 ```solidity
 // 私有状态变量 - 使用 _ 前缀
-address private _owner;
-mapping(address => bool) private _registrars;
-uint256 private _totalVaults;
+address private _registryAddr;
+address private _viewContractAddr;
+address private _assetWhitelistAddr;
 
-// 公共状态变量 - 不加前缀，但避免与函数参数重复
-address public vaultManager;
-uint256 public totalLiquidity;
-bool public paused;
+// 显式 getter - 使用 Var / AddrVar 后缀暴露底层存储值
+function registryAddrVar() external view returns (address) { ... }
+function viewContractAddrVar() external view returns (address) { ... }
+function feeRouterViewAddrVar() external view returns (address) { ... }
 
-// 不可变变量 - 不加前缀
-address public immutable whitelistRegistry;
-IERC20 public immutable rwaToken;
+// 地址类型的局部变量 / 参数 - 使用 Addr 后缀
+address registryAddr;
+address feeRouterViewAddr;
 
 // 常量 - 全大写
 uint256 public constant TIMELOCK_DELAY = 2 days;
@@ -335,21 +385,21 @@ uint256 public constant COLLATERAL_FACTOR = 70;
 
 ```solidity
 // ✅ 推荐 - 语义化参数名
-function registerVault(address newVault, address newToken) external { ... }
+function setFeeRouterView(address newFeeRouterView) external { ... }
 function setOwner(address newOwner) external { ... }
 function updateCollateralFactor(uint256 newFactor) external { ... }
 
 // ❌ 避免 - 与状态变量同名
 function setOwner(address owner) external { ... } // 与 _owner 冲突
-function setVault(address vault) external { ... } // 与 _vault 冲突
+function setRegistry(address registryAddr) external { ... } // 与 _registryAddr 语义冲突
 
 // ✅ 推荐 - 接口实现时保持一致性
-interface IVault {
-    function initialize(address rwaToken, address vaultManager) external;
+interface IVaultCore {
+  function initialize(address registryAddr, address viewContractAddr) external;
 }
 
 contract VaultCore is IVaultCore {
-    // 参数名与接口保持一致
+  // 参数名可比接口更具体，但应保持语义一致
     function initialize(address initialRegistryAddr, address initialViewContractAddr) external override {
         // 实现逻辑
     }
@@ -417,6 +467,44 @@ contract VaultBusinessLogic is IVaultBusinessLogicErrors, IVaultBusinessLogicEve
 - 符合 Solidity 最佳实践
 - 便于代码审计和问题排查
 
+#### 3.3.7. 接口与库的命名收敛规则
+
+本节用于把 [Architecture-Guide.md](Architecture-Guide.md) 中已经形成的职责边界，固化为强制命名规范，避免接口族与共享库继续膨胀。
+
+1. **接口必须与职责边界一一对应**
+- 名称带有 `Manager`、`Router`、`Oracle`、`Registry` 的接口，不得同时混合以下多类职责：只读查询、纯计算工具、治理/配置写入、迁移/运维脚本语义。
+- 当一个接口同时覆盖 user-scoped 查询与 system-scoped 参数时，必须拆分；system-scoped 风险阈值、全局参数等只读能力应优先归入专属 View 或系统配置接口。
+- `ILiquidationRiskManager` 这类接口只能表达“风险聚合/评估”本身；治理更新、阈值配置、迁移说明不得继续堆入同一接口族。
+- `IFeeRouter` 这类写路径模块接口应聚焦“落账/分账/配置写入”；统计查询、镜像读取、前端报表应下沉到 `IFeeRouterView` 或等价只读接口。
+
+2. **View / Minimal / Basic / Adapter / 动作裁剪接口后缀必须语义唯一**
+- `View`：对外只读门面或查询聚合层。不得承载账本写入、副作用事件审计或治理更新语义。
+- `Minimal`：为单一依赖方或极小依赖面裁剪出的最小必要接口。只允许保留当前调用方真正使用的方法，禁止把“以后可能会用”的函数提前塞入。
+- `Basic`：仅用于表达稳定、可复用的基础能力子集，且该子集面向多个实现或多个调用方都成立；不得把 `Basic` 当作“比主接口少一点”的模糊占位名。若只是为单点依赖裁剪，请改用 `Minimal` 或动作裁剪接口。
+- `Adapter`：仅用于“外部源/异构协议 -> 本协议标准语义”的适配边界。凡命名为 `Adapter`，必须明确其上游来源或适配目标，不能与协议内权威接口、View 门面混名。
+- 动作裁剪接口：当依赖方只需要单个或少量写动作时，应优先定义类似 `IVaultCoreBorrowFor` 这种按动作命名的窄接口，而不是依赖整个大接口。
+
+3. **Oracle 接口族必须显式区分“权威源”“适配层”“只读门面”**
+- `IPriceOracleRead` / `IPriceOracleAdmin` 分别用于协议内部权威报价源的读边界与治理/写入边界；`IPriceOracle` 仅作为兼容聚合口保留。
+- `IPriceOracleAdapterRead` / `IPriceOracleAdapterAdmin` 分别用于外部数据源适配器的读边界与配置边界；`IPriceOracleAdapter` 仅作为兼容聚合口保留。
+- `ValuationOracleView` 或同类 `*OracleView` 命名保留给只读查询门面；批量价格、观测性、健康检查展示等能力应优先在这一层暴露。
+- RWA 专用权威源若继续保留旧聚合名 `IRWAPriceOracle`，必须同时提供更明确的 `IRWAAssetPriceRead` / `IRWAAssetPriceAdmin` 分层，并优先让调用方依赖后者。
+
+4. **Whitelist 接口族必须统一按“主体白名单 / 集中注册表”分层命名**
+- 面向具体主体的白名单能力，统一使用 `I<Subject>WhitelistRead` / `I<Subject>WhitelistAdmin`，兼容聚合口可保留 `I<Subject>Whitelist`。
+- 承担集中注册、枚举、统一维护语义的地址白名单模块，统一使用 `I<Subject>WhitelistRegistry` 或 `IWhitelistRegistry`；若仅暴露读取能力，优先补出 `IWhitelistRegistryRead` 之类的明确读边界。
+- 同一职责域内禁止用 `Registry` 命名承载单点 subject whitelist 判断，也禁止让 `Whitelist` 同时表示“主体白名单”和“集中注册表”。
+
+5. **共享库命名必须暴露其副作用边界**
+- 名称叫 `Library`、`Lib`、`Helper` 的共享库，若内部包含事件发射、权限审计、Registry 解析、模块访问日志等副作用，必须在 NatSpec 与标准文档里明确写出，不能把它描述成“纯辅助函数库”。
+- `AccessControlLibrary` 的标准职责是“非 view 写路径权限校验 + 审计事件”；`ModuleAccessLibrary` 的标准职责是“Registry 模块解析 + 访问审计”。后续新增同类库时，命名与文档必须同样显式暴露副作用。
+- `DataPushLibrary` 是统一 DataPush 发射边界，不是通用事件总线、缓存协调器或任意业务兜底容器；若未来出现超出 DataPush 发射的职责，应拆分为新库或新模块。
+
+6. **GracefulDegradation 必须保持受限边界，禁止继续膨胀**
+- `GracefulDegradation` 的职责限定为估值/预言机场景下的健康检查、只读降级与受控 fallback。
+- 不得把通用缓存刷新框架、写路径补偿、业务编排、迁移兼容开关等继续堆入该库。
+- 若未来新增降级逻辑已经超出“估值与 oracle 健康”边界，必须先拆出独立库/模块，再决定命名，禁止在现有 `GracefulDegradation` 中持续累加。
+
 ### 3.4. 自动检测工具配置
 
 #### 3.4.1. Solhint 配置
@@ -446,12 +534,12 @@ npm install -g solhint
 
 **检查代码：**
 ```bash
-solhint contracts/**/*.sol
+solhint src/**/*.sol
 ```
 
 **输出示例：**
 ```
-contracts/VaultManager.sol
+src/Vault/VaultCore.sol
   58:21  error  "owner" is shadowing the state variable  no-shadowed-variables
   125:15  warning  Function state mutability can be restricted to pure  func-visibility
 ```
@@ -465,7 +553,7 @@ pip3 install slither-analyzer
 
 **检查代码：**
 ```bash
-slither contracts/ --exclude naming-convention
+slither src/ --exclude naming-convention
 ```
 
 #### 3.4.3. CI/CD 集成
@@ -602,7 +690,10 @@ pragma solidity ^0.8.20;
 11. Private Functions (私有函数)
 
 ### 4.3. NatSpec 注释
-所有 `public` 和 `external` 函数、以及所有合约都必须包含完整的 NatSpec 注释。
+所有 `public` 和 `external` 函数、所有 `event`、所有 `error`、以及对安全边界有影响的 `internal` 逻辑都必须包含完整的审计级 NatSpec 注释。
+
+双架构 / View / 升级 / 权限相关 NatSpec 的权威口径以 [Architecture-Guide.md](Architecture-Guide.md) 与 [Usage-Guide/Audit-Grade-NatSpec-Guide.md](Usage-Guide/Audit-Grade-NatSpec-Guide.md) 为准；若与本文件其他示例冲突，以架构指南为准。
+
 ```solidity
 /// @title VaultCore（双架构设计）
 /// @author Your Name
@@ -622,7 +713,11 @@ function deposit(address asset, uint256 amount) external {
 }
 ```
 
-- 使用 `/// @notice` 和 `/// @dev` 写清楚函数说明；
+- NatSpec 必须优先使用英文输出，并采用统一结构：`@notice` → `@dev Reverts if:` → 空行 → `Security:` → `@param/@return`；
+- `Reverts if` 必须覆盖权限、参数校验、状态机条件、模块缺失、以及会向上传递的外部调用回滚；
+- `Security` 必须写清 caller gate、信任假设、best-effort / try-catch 降级语义、以及升级或唯一入口边界；
+- `view` 接口若返回 `0` / 空值代表失败或未知，必须明确写出该语义，避免集成方误判；
+- 合约内主要分区分隔符统一使用 `/*━━━━━━━━━━━━━━━ <Section> ━━━━━━━━━━━━━━━*/`，禁止使用 `// ============ ... ============` 与 `/* ============ ... ============ */` 风格；
 - 写好单元测试；
 - 使用 `slither` 或 `hardhat analyze` 工具检查安全性；
 - 确保符合 Solidity 0.8.x 最佳实践（如 Custom Error、immutable、unchecked 块等）
@@ -683,43 +778,46 @@ contract MyContract is ReentrancyGuard {
     ```
 
 ### 5.3. 访问控制
-系统使用统一的 `AccessControlManager` (ACM) 进行权限管理，通过 `Registry` 系统获取 ACM 地址。
+系统使用统一的权限控制体系，并通过 `Registry` 解析依赖模块地址。双架构下的权限选择必须与 [Architecture-Guide.md](Architecture-Guide.md) 保持一致。
 
--   **权限系统**: 使用 `ActionKeys` 定义所有系统动作，通过 `AccessControlManager` 进行权限验证
+-   **权限系统**: 使用 `ActionKeys` 定义所有系统动作；权限判断入口必须与函数语义匹配
 -   **权限级别**: 使用 `PermissionLevel` 枚举（NONE, VIEWER, OPERATOR, ADMIN, SUPER_ADMIN）
--   **权限验证**: 使用 `requireRole()` 函数进行权限验证，未授权则 revert
+-   **只读 View 接口**: 必须优先使用 `ViewAccessLib`，保持 `view` 语义、0 gas 查询与无审计事件副作用
+-   **写入/可变更接口**: 必须使用 `AccessControlLibrary` 或等效的架构级写路径权限校验，并保留审计事件能力
+-   **模块解析**: 必须通过 `Registry.getModuleOrRevert(ModuleKeys.KEY_*)` 获取依赖模块地址，禁止硬编码
+-   **权限验证**: 未授权必须明确 revert；NatSpec 中必须写清具体 `ActionKeys` 与校验入口
 -   **时间锁 (Timelock)**: **强烈建议**为所有关键的管理功能（如升级合约、修改关键参数）通过 Registry 的延时升级机制添加时间锁，为社区提供反应时间
 
 **典型用法：**
 ```solidity
-import { IRegistry } from "../interfaces/IRegistry.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
+import { ViewAccessLib } from "../libraries/ViewAccessLib.sol";
+import { AccessControlLibrary } from "../libraries/AccessControlLibrary.sol";
 
 contract MyContract {
     address private _registryAddr;
-    
-    function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acmAddr).requireRole(actionKey, user);
+
+  function getUserData(address user) external view returns (uint256) {
+    ViewAccessLib.requireRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender);
+    return _loadUserData(user);
     }
-    
-    modifier onlyRole(bytes32 actionKey) {
-        _requireRole(actionKey, msg.sender);
-        _;
-    }
-    
-    function criticalAction() external onlyRole(ActionKeys.ACTION_DEPOSIT) {
-        // ...
+
+  function criticalAction() external {
+    AccessControlLibrary.requireRole(_registryAddr, ActionKeys.ACTION_DEPOSIT, msg.sender);
+    _executeCriticalAction();
     }
 }
 ```
 
 ### 5.4. Pausable 紧急暂停
-所有核心合约都应继承 `Pausable`，为应对紧急情况提供 "暂停开关"。
+紧急暂停不是“一刀切”要求。是否引入 `Pausable` / `PausableUpgradeable`，必须遵循双架构职责边界，避免与统一入口或路由层的暂停语义冲突。
 
-**对于可升级合约**，使用 `PausableUpgradeable`：
+-   **统一原则**: 若系统已经在架构层定义了暂停 SSOT（例如统一路由或治理入口），模块合约不得再无差别复制独立暂停开关；
+-   **适用场景**: 仅在合约自身确实承担独立可暂停的关键状态写入路径，且不会与上层暂停机制重复或冲突时，才引入 `Pausable`；
+-   **权限要求**: 暂停/恢复权限必须通过架构规定的治理或权限控制路径执行，并在 NatSpec 中写清 caller gate；
+-   **文档要求**: 若某合约明确“不实现全局暂停”，必须在合约 NatSpec `Security` 中注明暂停 SSOT 所在模块。
+
+**当合约确实需要独立暂停能力时，可升级合约使用 `PausableUpgradeable`：**
 ```solidity
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { IRegistry } from "../interfaces/IRegistry.sol";
@@ -753,7 +851,7 @@ contract MyContract is Initializable, PausableUpgradeable {
 }
 ```
 
-**对于普通合约**，使用 `Pausable`：
+**对于普通合约**，在同样满足上述条件时再使用 `Pausable`：
 ```solidity
 import "@openzeppelin/contracts/security/Pausable.sol";
 
@@ -952,13 +1050,14 @@ const ONE_USD = ethers.parseUnits("1", 6);
 
 ### 8.1.5. ActionKeys/ModuleKeys 大小写敏感性与一致性要求
 
-- **所有 ActionKeys/ModuleKeys 的字符串输入必须为小写**，如 'deposit'，'borrow'，'repay' 等。
-- 合约实现严格区分大小写，只有小写字符串会被接受并映射为有效的 bytes32 key。
-- 任何非小写（如 'Deposit'、'DEPOSIT'）都会被拒绝，并抛出明确的错误（revert reason: 'Unknown action name'）。
+- **ModuleKeys 的 legacy 字符串输入必须使用 lowerCamelCase**，如 `vaultCore`、`accessControlManager`、`rewardManager`。
+- **ActionKeys 当前没有 `string -> bytes32` 的通用链上映射入口**；链上与脚本侧应优先直接使用 `ACTION_*` 常量，`getActionKeyString(...)` 仅用于 `bytes32 -> legacy lowerCamelCase audit string`。
+- 合约实现严格区分大小写；对 `ModuleKeys.getModuleKeyFromString(...)` 而言，错误大小写或未知名称不会被映射为有效 key，而是返回 `bytes32(0)`，调用方必须自行做非零校验。
 - 测试用例已覆盖所有常见场景，包括：
-  - 小写字符串能正常通过，返回有效 key。
-  - 大写/混合大小写字符串会被拒绝，且 revert 消息与断言完全一致。
-- **最佳实践**：团队开发、脚本、前端等所有调用方，务必统一使用小写字符串，避免因大小写导致的权限或事件追踪异常。
+-  - `ModuleKeys` 的 lowerCamelCase 字符串能正常映射到有效 key。
+-  - 错误大小写或未知名称不会产生有效 key，且必须由调用方显式判空/判零。
+-  - `ActionKeys.getActionKeyString(...)` 仅输出 legacy lowerCamelCase audit string。
+- **最佳实践**：团队开发、脚本、前端等所有调用方，优先直接使用 `KEY_*` / `ACTION_*` 常量；只有在兼容旧配置、旧脚本或审计输出时才使用 legacy 字符串。
 - 相关测试文件：`test/constants/ActionKeys.test.ts`、`test/constants/ModuleKeys.test.ts`、`test/constants/ConstantsIntegration.test.ts` 均已实现严格验证。
 
 #### 问题总结与解决方案汇总
@@ -1174,12 +1273,12 @@ private priceOracle: any;
 
 // ✅ 正确做法 - 使用生成的合约类型
 import type { 
-  CoinGeckoPriceUpdater,
+  PriceUpdater,
   PriceOracle
 } from '../types';
 
 class CoinGeckoKeeper {
-  private priceUpdater!: CoinGeckoPriceUpdater;
+  private priceUpdater!: PriceUpdater;
   private priceOracle!: PriceOracle;
 }
 ```
@@ -1209,7 +1308,7 @@ private async listenToEvents(receipt: ContractTransactionReceipt) {
 this.priceUpdater = PriceUpdater.attach(priceUpdaterAddress);
 
 // ✅ 正确做法 - 使用类型断言
-this.priceUpdater = PriceUpdater.attach(priceUpdaterAddress) as CoinGeckoPriceUpdater;
+this.priceUpdater = PriceUpdater.attach(priceUpdaterAddress) as PriceUpdater;
 this.priceOracle = PriceOracle.attach(priceOracleAddress) as PriceOracle;
 ```
 

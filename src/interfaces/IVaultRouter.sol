@@ -12,7 +12,7 @@ pragma solidity ^0.8.20;
  *      - All read-only queries live in dedicated View modules (PositionView/UserView/SystemView/...).
  */
 interface IVaultRouter {
-    /* ============ Core Routing ============ */
+    /*━━━━━━━━━━━━━━━ Core Routing ━━━━━━━━━━━━━━━*/
     /**
      * @notice Route a user deposit/withdraw operation from VaultCore to the ledger module.
      * @dev Reverts if:
@@ -40,7 +40,7 @@ interface IVaultRouter {
         uint256 blockNumber
     ) external;
 
-    /* ============ Push forwarding (VaultCore -> View modules) ============ */
+    /*━━━━━━━━━━━━━━━ Push Forwarding (VaultCore To View Modules) ━━━━━━━━━━━━━━━*/
     /**
      * @notice Forward a full (absolute) user position update to PositionView.
      * @dev Reverts if:
@@ -122,5 +122,3 @@ interface IVaultRouter {
         uint64 seq
     ) external;
 }
-
-

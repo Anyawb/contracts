@@ -1,13 +1,41 @@
 #!/usr/bin/env ts-node
 
-import hardhat from 'hardhat';
 import logger from '../utils/logger';
 
-const { ethers } = hardhat;
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+if (!process.env.HARDHAT_NETWORK && process.env.LOCALHOST_RPC_URL) {
+  process.env.HARDHAT_NETWORK = 'localhost';
+}
+
+const BASELINE_ROLES = [
+  ['ACTION_ADMIN', 'ACTION_ADMIN'],
+  ['ACTION_SET_PARAMETER', 'SET_PARAMETER'],
+  ['ACTION_UPGRADE_MODULE', 'UPGRADE_MODULE'],
+  ['ACTION_PAUSE_SYSTEM', 'PAUSE_SYSTEM'],
+  ['ACTION_UNPAUSE_SYSTEM', 'UNPAUSE_SYSTEM'],
+];
+
+const OBSERVER_ROLES = [
+  ['ACTION_VIEW_SYSTEM_DATA', 'VIEW_SYSTEM_DATA'],
+  ['ACTION_VIEW_USER_DATA', 'VIEW_USER_DATA'],
+  ['ACTION_VIEW_PRICE_DATA', 'VIEW_PRICE_DATA'],
+  ['ACTION_VIEW_RISK_DATA', 'VIEW_RISK_DATA'],
+  ['ACTION_VIEW_LIQUIDATION_DATA', 'VIEW_LIQUIDATION_DATA'],
+  ['ACTION_VIEW_PUSH', 'ACTION_VIEW_PUSH'],
+];
+
+function roleHash(
+  ethersLike: { keccak256: (data: Uint8Array | string) => string; toUtf8Bytes: (text: string) => Uint8Array },
+  roleName: string,
+): string {
+  return ethersLike.keccak256(ethersLike.toUtf8Bytes(roleName));
+}
 
 async function checkRoles(): Promise<void> {
   logger.info('开始检查角色分配...');
+
+  const hardhatModule = await import('hardhat');
+  const hardhat = hardhatModule.default ?? hardhatModule;
+  const { ethers } = hardhat;
 
   const accessControlAddress = process.env.ACCESS_CONTROL_MANAGER_ADDRESS;
   if (!accessControlAddress) {
@@ -20,64 +48,33 @@ async function checkRoles(): Promise<void> {
     const accessControl = await ethers.getContractAt('AccessControlManager', accessControlAddress);
     logger.info(`连接到 AccessControlManager: ${accessControlAddress}`);
 
-    const roles: Record<string, string> = {
-      DEFAULT_ADMIN_ROLE: ethers.ZeroHash,
-    };
+    const targetCaller = process.env.GOVERNANCE_CALLER || (await ethers.getSigners())[0].address;
+    logger.info(`检查目标账户: ${targetCaller}`);
 
-    try {
-      const accessControlAny = accessControl as unknown as {
-        GOVERNANCE_ROLE?: () => Promise<string>;
-        OPERATOR_ROLE?: () => Promise<string>;
-        KEEPER_ROLE?: () => Promise<string>;
-        getRoleMemberCount: (role: string) => Promise<bigint>;
-        getRoleMember: (role: string, index: number) => Promise<string>;
-      };
-      const governanceRole = await accessControlAny.GOVERNANCE_ROLE?.();
-      const operatorRole = await accessControlAny.OPERATOR_ROLE?.();
-      const keeperRole = await accessControlAny.KEEPER_ROLE?.();
-      if (governanceRole) roles['GOVERNANCE_ROLE'] = governanceRole;
-      if (operatorRole) roles['OPERATOR_ROLE'] = operatorRole;
-      if (keeperRole) roles['KEEPER_ROLE'] = keeperRole;
-    } catch (error) {
-      logger.warning('无法获取某些角色常量，将仅检查默认管理员角色');
-    }
+    let hasFailure = false;
 
-    const [deployer] = await ethers.getSigners();
-    void deployer;
-
-    for (const [roleName, roleHash] of Object.entries(roles)) {
-      if (!roleHash) continue;
-      logger.info(`检查 ${roleName} (${roleHash})...`);
-      try {
-        const accessControlAny = accessControl as unknown as {
-          getRoleMemberCount: (role: string) => Promise<bigint>;
-          getRoleMember: (role: string, index: number) => Promise<string>;
-        };
-        const memberCount = await accessControlAny.getRoleMemberCount(roleHash);
-        logger.info(`${roleName} 有 ${memberCount} 个成员`);
-        for (let i = 0; i < memberCount; i++) {
-          const member = await accessControlAny.getRoleMember(roleHash, i);
-          logger.info(`- 成员 ${i + 1}: ${member}`);
-          if (member === ZERO_ADDRESS) {
-            logger.warning(`${roleName} 分配给了零地址`);
-          }
-        }
-      } catch (error) {
-        logger.error(`检查 ${roleName} 时出错: ${error instanceof Error ? error.message : String(error)}`);
+    for (const [label, roleName] of BASELINE_ROLES) {
+      const hash = roleHash(ethers, roleName);
+      const hasRole = await accessControl.hasRole(hash, targetCaller);
+      logger.info(`${label} (${hash}) = ${hasRole}`);
+      if (!hasRole) {
+        hasFailure = true;
+        logger.error(`${targetCaller} 缺少基线管理角色 ${label}`);
       }
     }
 
-    try {
-      const accessControlAny = accessControl as unknown as { getRoleMemberCount: (role: string) => Promise<bigint> };
-      const adminCount = await accessControlAny.getRoleMemberCount(roles.DEFAULT_ADMIN_ROLE);
-      if (adminCount === 0n) {
-        logger.error('DEFAULT_ADMIN_ROLE 没有成员，这可能导致无法管理角色');
-        process.exitCode = 1;
-      } else {
-        logger.success(`DEFAULT_ADMIN_ROLE 有 ${adminCount} 个成员`);
-      }
-    } catch (error) {
-      logger.error(`检查角色成员数量时出错: ${error instanceof Error ? error.message : String(error)}`);
+    for (const [label, roleName] of OBSERVER_ROLES) {
+      const hash = roleHash(ethers, roleName);
+      const hasRole = await accessControl.hasRole(hash, targetCaller);
+      logger.info(`${label} (${hash}) = ${hasRole}`);
+    }
+
+    const inferredPermission = await accessControl.getUserPermission(targetCaller);
+    logger.info(`getUserPermission(${targetCaller}) = ${inferredPermission}`);
+
+    if (hasFailure) {
+      process.exitCode = 1;
+      return;
     }
 
     logger.success('角色检查完成');

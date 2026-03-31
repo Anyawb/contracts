@@ -13,21 +13,25 @@ pragma solidity ^0.8.20;
  *   to support the "unified event library" rule in Architecture-Guide.md.
  */
 interface IRegistryDynamicModuleKey {
-    // ============ Module key registration ============
+    /*━━━━━━━━━━━━━━━ Module Key Registration ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Register a new dynamic module key.
      * @param name Human-readable module key name (implementation-defined normalization rules).
      * @return moduleKey Derived module key (bytes32).
      */
-    function registerModuleKey(string calldata name) external returns (bytes32 moduleKey);
+    function registerModuleKey(
+        string calldata name
+    ) external returns (bytes32 moduleKey);
 
     /**
      * @notice Register multiple dynamic module keys in a single transaction.
      * @param names Human-readable module key names.
      * @return moduleKeys Derived module keys (same length as `names`).
      */
-    function batchRegisterModuleKeys(string[] calldata names) external returns (bytes32[] memory moduleKeys);
+    function batchRegisterModuleKeys(
+        string[] calldata names
+    ) external returns (bytes32[] memory moduleKeys);
 
     /**
      * @notice Unregister a dynamic module key.
@@ -35,7 +39,7 @@ interface IRegistryDynamicModuleKey {
      */
     function unregisterModuleKey(bytes32 moduleKey) external;
 
-    // ============ Core dynamic module key functions ============
+    /*━━━━━━━━━━━━━━━ Core Dynamic Module Key Functions ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Returns true if `moduleKey` is a registered dynamic module key.
@@ -54,61 +58,74 @@ interface IRegistryDynamicModuleKey {
      * @param name Human-readable module key name.
      * @return moduleKey Derived module key (bytes32).
      */
-    function getModuleKeyByName(string calldata name) external view returns (bytes32 moduleKey);
+    function getModuleKeyByName(
+        string calldata name
+    ) external view returns (bytes32 moduleKey);
 
     /**
      * @notice Resolve a human-readable name for a module key.
      * @param moduleKey Module key.
      * @return name Normalized name.
      */
-    function getModuleKeyName(bytes32 moduleKey) external view returns (string memory name);
+    function getModuleKeyName(
+        bytes32 moduleKey
+    ) external view returns (string memory name);
 
-    // ============ Dynamic module key management ============
+    /*━━━━━━━━━━━━━━━ Dynamic Module Key Management ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Get all registered dynamic module keys.
      * @return keys Dynamic module keys array.
      */
-    function getDynamicModuleKeys() external view returns (bytes32[] memory keys);
-    
+    function getDynamicModuleKeys()
+        external
+        view
+        returns (bytes32[] memory keys);
+
     /**
      * @notice Get total number of registered dynamic module keys.
      */
     function getDynamicKeyCount() external view returns (uint256);
-    
+
     /**
      * @notice Get the stored (normalized) name for a dynamic module key.
      * @param moduleKey Module key.
      * @return name Name string.
      */
-    function getDynamicModuleKeyName(bytes32 moduleKey) external view returns (string memory name);
-    
+    function getDynamicModuleKeyName(
+        bytes32 moduleKey
+    ) external view returns (string memory name);
+
     /**
      * @notice Resolve a module key from a normalized name hash.
      * @param nameHash keccak256 hash of the normalized name.
      * @return moduleKey Module key.
      */
-    function getNameHashToModuleKey(bytes32 nameHash) external view returns (bytes32 moduleKey);
-    
+    function getNameHashToModuleKey(
+        bytes32 nameHash
+    ) external view returns (bytes32 moduleKey);
+
     /**
      * @notice Get the dynamic module key at a given index.
      * @param index 0-based index.
      * @return moduleKey Module key at index.
      */
-    function getDynamicModuleKeyByIndex(uint256 index) external view returns (bytes32 moduleKey);
+    function getDynamicModuleKeyByIndex(
+        uint256 index
+    ) external view returns (bytes32 moduleKey);
 
-    // ============ Admin functions ============
+    /*━━━━━━━━━━━━━━━ Admin Functions ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Get the current registration admin address.
      */
     function getRegistrationAdmin() external view returns (address);
-    
+
     /**
      * @notice Get the current system admin address.
      */
     function getSystemAdmin() external view returns (address);
-    
+
     /**
      * @notice Set the registration admin address.
      * @param newRegistrationAdmin New registration admin.
@@ -130,4 +147,4 @@ interface IRegistryDynamicModuleKey {
      * @notice Unpause the module (admin-only in the implementation).
      */
     function unpause() external;
-} 
+}

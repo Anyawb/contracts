@@ -23,7 +23,7 @@ library RegistryQuery {
      * - Read-only
      *
      * @param key Module key (bytes32).
-     * @return Module address (zero if unset).
+     * @return moduleAddr Module address, or address(0) if unset.
      */
     function getModule(bytes32 key) internal view returns (address) {
         return RegistryStorage.layout().modules[key];
@@ -38,7 +38,7 @@ library RegistryQuery {
      * - Read-only
      *
      * @param key Module key (bytes32).
-     * @return Module address.
+     * @return moduleAddr Registered module address.
      */
     function getModuleOrRevert(bytes32 key) internal view returns (address) {
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
@@ -56,10 +56,9 @@ library RegistryQuery {
      * - Read-only
      *
      * @param key Module key (bytes32).
-     * @return True if module address is non-zero.
+     * @return isRegistered True if the module address is non-zero.
      */
     function isModuleRegistered(bytes32 key) internal view returns (bool) {
         return RegistryStorage.layout().modules[key] != address(0);
     }
 }
-

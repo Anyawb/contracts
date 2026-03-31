@@ -1,12 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IPriceOracle
-/// @notice Price oracle interface for querying and updating per-asset prices.
-/// @dev NOTE: This interface uses block-number based staleness to avoid relying on time-in-seconds for validity.
-interface IPriceOracle {
+import {IPriceOracleRead} from "./IPriceOracleRead.sol";
+import {IPriceOracleAdmin} from "./IPriceOracleAdmin.sol";
+
+/**
+ * @title IPriceOracle
+ * @notice Legacy umbrella interface for querying and administering per-asset prices.
+ * @dev Reverts if:
+ *      - see inherited {IPriceOracleRead} and {IPriceOracleAdmin} semantics
+ *
+ * Security:
+ * - Compatibility-oriented aggregation layer retained for callers that still depend on a combined oracle surface.
+ * - New integrations should prefer the narrow read/admin split so authorization boundaries remain explicit.
+ * - Freshness semantics are block-based rather than timestamp-based.
+ */
+interface IPriceOracle is IPriceOracleRead, IPriceOracleAdmin {
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
-    
+
     /// @dev Reverts when attempting to add an already-supported asset (reserved for future use).
     error PriceOracle__AssetAlreadySupported();
     /// @dev Reverts when an asset is not supported/active.
@@ -24,40 +35,27 @@ interface IPriceOracle {
     /// @dev Reverts when configured token decimals are invalid for safe scaling.
     error PriceOracle__InvalidAssetDecimals(uint256 decimals);
 
-    /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
-
-    /// @notice Price data structure.
-    struct PriceData {
-        /// @notice Price in USD-8 (e.g., $1.00 = 100000000).
-        uint256 price;
-        /// @notice Informational block number associated with the quoted price (not used for staleness).
-        uint256 blockNumber;
-        /// @notice Token decimals used for valuation scaling (NOT price precision).
-        uint256 assetDecimals;
-        /// @notice Whether the stored price is initialized/valid.
-        bool isValid;
-    }
-
-    /// @notice Asset configuration structure.
-    struct AssetConfig {
-        /// @notice CoinGecko id used by offchain updaters (may be empty).
-        string coingeckoId;
-        /// @notice Token decimals used for valuation scaling (NOT price precision).
-        uint256 assetDecimals;
-        /// @notice Whether the asset is active.
-        bool isActive;
-        /// @notice Maximum allowed staleness in blocks (based on `block.number`).
-        uint256 maxPriceAgeBlocks;
-    }
-
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
-    
-    /// @notice Emitted when a price is updated.
-    /// @dev Emitted by PriceOracle; `blockNumber` is an informational source marker.
-    event PriceUpdated(address indexed asset, uint256 price, uint256 blockNumber);
-    
-    /// @notice Emitted when an asset config is updated.
-    event AssetConfigUpdated(address indexed asset, string coingeckoId, bool isActive);
+
+    /**
+     * @notice Emitted when a price is updated.
+     * @dev Event only. Emitted by PriceOracle; `blockNumber` is an informational source marker.
+     */
+    event PriceUpdated(
+        address indexed asset,
+        uint256 price,
+        uint256 blockNumber
+    );
+
+    /**
+     * @notice Emitted when an asset config is updated.
+     * @dev Event only.
+     */
+    event AssetConfigUpdated(
+        address indexed asset,
+        string sourceId,
+        bool isActive
+    );
 
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
 
@@ -78,7 +76,13 @@ interface IPriceOracle {
      * @return blockNumber Informational block number associated with the quoted price.
      * @return assetDecimals Token decimals used for valuation scaling (NOT price precision).
      */
-    function getPrice(address asset) external view returns (uint256 price, uint256 blockNumber, uint256 assetDecimals);
+    function getPrice(
+        address asset
+    )
+        external
+        view
+        override
+        returns (uint256 price, uint256 blockNumber, uint256 assetDecimals);
 
     /**
      * @notice Returns the raw stored {PriceData} for `asset` (does not enforce staleness).
@@ -93,7 +97,9 @@ interface IPriceOracle {
      * @param asset Asset address.
      * @return priceData Stored price data.
      */
-    function getPriceData(address asset) external view returns (PriceData memory priceData);
+    function getPriceData(
+        address asset
+    ) external view override returns (PriceData memory priceData);
 
     /**
      * @notice Returns the block number when the latest stored price for `asset` was updated.
@@ -109,7 +115,9 @@ interface IPriceOracle {
      * @param asset Asset address.
      * @return updateBlock Block number at which the latest price was stored.
      */
-    function getPriceUpdateBlock(address asset) external view returns (uint256 updateBlock);
+    function getPriceUpdateBlock(
+        address asset
+    ) external view override returns (uint256 updateBlock);
 
     /**
      * @notice Batch-returns update blocks aligned to `assets`.
@@ -124,7 +132,9 @@ interface IPriceOracle {
      * @param assets Asset address list.
      * @return updateBlocks Update block numbers aligned to `assets`.
      */
-    function getPriceUpdateBlocks(address[] calldata assets) external view returns (uint256[] memory updateBlocks);
+    function getPriceUpdateBlocks(
+        address[] calldata assets
+    ) external view override returns (uint256[] memory updateBlocks);
 
     /**
      * @notice Batch-returns latest stored prices if all assets are active and not stale (by block number).
@@ -142,11 +152,17 @@ interface IPriceOracle {
      * @return blockNumbers Informational block numbers.
      * @return assetDecimalsArray Token decimals used for valuation scaling.
      */
-    function getPrices(address[] calldata assets) external view returns (
-        uint256[] memory prices,
-        uint256[] memory blockNumbers,
-        uint256[] memory assetDecimalsArray
-    );
+    function getPrices(
+        address[] calldata assets
+    )
+        external
+        view
+        override
+        returns (
+            uint256[] memory prices,
+            uint256[] memory blockNumbers,
+            uint256[] memory assetDecimalsArray
+        );
 
     /**
      * @notice Returns whether the stored price is currently usable (by block-number staleness rules).
@@ -159,10 +175,12 @@ interface IPriceOracle {
      * @param asset Asset address.
      * @return isValid True if active, initialized, and not stale.
      */
-    function isPriceValid(address asset) external view returns (bool isValid);
+    function isPriceValid(
+        address asset
+    ) external view override returns (bool isValid);
 
     /**
-     * @notice Returns the configured CoinGecko id for `asset`.
+    * @notice Returns the configured offchain source identifier for `asset`.
      * @dev Reverts if:
      *      - asset is zero (ZeroAddress)
      *      - asset is not active (PriceOracle__AssetNotSupported)
@@ -170,9 +188,11 @@ interface IPriceOracle {
      * Security:
      * - View-only
      * @param asset Asset address.
-     * @return coingeckoId CoinGecko id.
+     * @return sourceId Offchain source identifier.
      */
-    function getAssetCoingeckoId(address asset) external view returns (string memory coingeckoId);
+    function getAssetSourceId(
+        address asset
+    ) external view override returns (string memory sourceId);
 
     /**
      * @notice Returns the asset configuration for `asset`.
@@ -184,7 +204,9 @@ interface IPriceOracle {
      * @param asset Asset address.
      * @return config Asset config.
      */
-    function getAssetConfig(address asset) external view returns (AssetConfig memory config);
+    function getAssetConfig(
+        address asset
+    ) external view override returns (AssetConfig memory config);
 
     /**
      * @notice Returns the list of supported assets.
@@ -195,7 +217,11 @@ interface IPriceOracle {
      * - View-only
      * @return assets Supported assets list.
      */
-    function getSupportedAssets() external view returns (address[] memory assets);
+    function getSupportedAssets()
+        external
+        view
+        override
+        returns (address[] memory assets);
 
     /**
      * @notice Returns the number of supported assets.
@@ -206,7 +232,7 @@ interface IPriceOracle {
      * - View-only
      * @return count Asset count.
      */
-    function getAssetCount() external view returns (uint256 count);
+    function getAssetCount() external view override returns (uint256 count);
 
     /*━━━━━━━━━━━━━━━ ADMIN FUNCTIONS ━━━━━━━━━━━━━━━*/
 
@@ -219,7 +245,8 @@ interface IPriceOracle {
      *      - asset is not active (PriceOracle__AssetNotSupported)
      *      - price is zero (PriceOracle__InvalidPrice)
      *      - blockNumber is invalid (PriceOracle__InvalidBlockNumber)
-     *      - asset decimals are missing/invalid (PriceOracle__AssetDecimalsNotConfigured / PriceOracle__InvalidAssetDecimals)
+     *      - asset decimals are missing/invalid
+     *        (PriceOracle__AssetDecimalsNotConfigured / PriceOracle__InvalidAssetDecimals)
      *
      * Security:
      * - Role-gated (ACTION_UPDATE_PRICE)
@@ -227,7 +254,11 @@ interface IPriceOracle {
      * @param price Price in USD-8.
      * @param blockNumber Informational block number associated with the quoted price.
      */
-    function updatePrice(address asset, uint256 price, uint256 blockNumber) external;
+    function updatePrice(
+        address asset,
+        uint256 price,
+        uint256 blockNumber
+    ) external override;
 
     /**
      * @notice Batch-updates stored prices (role-gated in implementations).
@@ -239,7 +270,8 @@ interface IPriceOracle {
      *      - any asset is not active (PriceOracle__AssetNotSupported)
      *      - any price is zero (PriceOracle__InvalidPrice)
      *      - any blockNumber is invalid (PriceOracle__InvalidBlockNumber)
-     *      - any asset decimals are missing/invalid (PriceOracle__AssetDecimalsNotConfigured / PriceOracle__InvalidAssetDecimals)
+     *      - any asset decimals are missing/invalid
+     *        (PriceOracle__AssetDecimalsNotConfigured / PriceOracle__InvalidAssetDecimals)
      *
      * Security:
      * - Role-gated (ACTION_UPDATE_PRICE)
@@ -251,7 +283,7 @@ interface IPriceOracle {
         address[] calldata assets,
         uint256[] calldata prices,
         uint256[] calldata blockNumbers
-    ) external;
+    ) external override;
 
     /**
      * @notice Configures an asset for this oracle (governance-only in implementations).
@@ -259,21 +291,22 @@ interface IPriceOracle {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract)
      *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
      *      - asset is zero (ZeroAddress)
-     *      - asset decimals are missing or invalid (PriceOracle__AssetDecimalsNotConfigured / PriceOracle__InvalidAssetDecimals)
+     *      - asset decimals are missing or invalid
+     *        (PriceOracle__AssetDecimalsNotConfigured / PriceOracle__InvalidAssetDecimals)
      *
      * Security:
      * - Role-gated (ACTION_SET_PARAMETER)
      * @param asset Asset address.
-     * @param coingeckoId CoinGecko id.
+     * @param sourceId Offchain source identifier.
      * @param assetDecimals Token decimals used for valuation scaling.
      * @param maxPriceAgeBlocks Max allowed staleness in blocks.
      */
     function configureAsset(
         address asset,
-        string calldata coingeckoId,
+        string calldata sourceId,
         uint256 assetDecimals,
         uint256 maxPriceAgeBlocks
-    ) external;
+    ) external override;
 
     /**
      * @notice Activate or deactivate an asset (governance-only in implementations).
@@ -288,5 +321,5 @@ interface IPriceOracle {
      * @param asset Asset address.
      * @param isActive True to activate, false to deactivate.
      */
-    function setAssetActive(address asset, bool isActive) external;
-} 
+    function setAssetActive(address asset, bool isActive) external override;
+}

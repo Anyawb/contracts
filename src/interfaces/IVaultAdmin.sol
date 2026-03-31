@@ -9,7 +9,7 @@ pragma solidity ^0.8.20;
  * - Most parameters should be managed by their dedicated SSOT modules (e.g., config managers).
  */
 interface IVaultAdmin {
-    /* ============ Governance Functions ============ */
+    /*━━━━━━━━━━━━━━━ Governance Functions ━━━━━━━━━━━━━━━*/
     /**
      * @notice Set the minimum health factor (bps).
      * @dev Reverts if:
@@ -23,4 +23,4 @@ interface IVaultAdmin {
      * @param hf New minimum health factor in basis points (bps, 10000 = 100%)
      */
     function setMinHealthFactor(uint256 hf) external;
-} 
+}

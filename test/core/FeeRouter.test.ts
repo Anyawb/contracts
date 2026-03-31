@@ -24,6 +24,10 @@ import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers'
 // 常量定义
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
+function calcExpectedFee(amount: bigint): bigint {
+  return amount * 10n / 10000n;
+}
+
 describe('FeeRouter – 费率管理测试', function () {
   async function deployFixture() {
     // 部署测试环境
@@ -309,14 +313,16 @@ describe('FeeRouter – 费率管理测试', function () {
       
       // 分发费用
       await feeRouter.connect(alice).distributeNormal(tokenAddress, amount);
+
+      const expectedFee = calcExpectedFee(amount);
       
       // 验证费用统计
       const feeStatistics = await feeRouter.getFeeStatistics(tokenAddress, feeType);
-      expect(feeStatistics).to.equal(amount);
+      expect(feeStatistics).to.equal(expectedFee);
       
       // 验证费用缓存
       const feeCache = await feeRouter.getFeeCache(tokenAddress, feeType);
-      expect(feeCache).to.equal(amount);
+      expect(feeCache).to.equal(expectedFee);
     });
   });
 
@@ -551,11 +557,14 @@ describe('FeeRouter – 费率管理测试', function () {
       
       // 第一次分发
       await feeRouter.connect(alice).distributeNormal(tokenAddress, amount1);
+
+      const fee1 = calcExpectedFee(amount1);
+      const fee2 = calcExpectedFee(amount2);
       
       let totalDistributions = await feeRouter.getTotalDistributions();
       let totalAmount = await feeRouter.getTotalAmountDistributed();
       expect(totalDistributions).to.equal(1);
-      expect(totalAmount).to.equal(amount1);
+      expect(totalAmount).to.equal(fee1);
       
       // 第二次分发
       await feeRouter.connect(alice).distributeNormal(tokenAddress, amount2);
@@ -563,7 +572,7 @@ describe('FeeRouter – 费率管理测试', function () {
       totalDistributions = await feeRouter.getTotalDistributions();
       totalAmount = await feeRouter.getTotalAmountDistributed();
       expect(totalDistributions).to.equal(2);
-      expect(totalAmount).to.equal(amount1 + amount2);
+      expect(totalAmount).to.equal(fee1 + fee2);
     });
 
     it('getOperationStats 应返回正确的统计信息', async function () {
@@ -574,10 +583,12 @@ describe('FeeRouter – 费率管理测试', function () {
       
       await mockToken.connect(alice).approve(await feeRouter.getAddress(), amount);
       await feeRouter.connect(alice).distributeNormal(tokenAddress, amount);
+
+      const expectedFee = calcExpectedFee(amount);
       
       const [distributions, totalAmount] = await feeRouter.getOperationStats();
       expect(distributions).to.equal(1);
-      expect(totalAmount).to.equal(amount);
+      expect(totalAmount).to.equal(expectedFee);
     });
 
     it('批量分发应正确更新统计信息', async function () {
@@ -599,11 +610,13 @@ describe('FeeRouter – 费率管理测试', function () {
       await mockToken.connect(alice).approve(await feeRouter.getAddress(), totalAmount);
       
       await feeRouter.connect(alice).batchDistribute(tokenAddress, amounts, feeTypes);
+
+      const expectedTotalFee = amounts.reduce((sum, amount) => sum + calcExpectedFee(amount), 0n);
       
       const totalDistributions = await feeRouter.getTotalDistributions();
       const totalAmountDistributed = await feeRouter.getTotalAmountDistributed();
       expect(totalDistributions).to.equal(amounts.length);
-      expect(totalAmountDistributed).to.equal(totalAmount);
+      expect(totalAmountDistributed).to.equal(expectedTotalFee);
     });
   });
 
@@ -661,10 +674,12 @@ describe('FeeRouter – 费率管理测试', function () {
       
       await mockToken.connect(alice).approve(await feeRouter.getAddress(), amount);
       await feeRouter.connect(alice).distributeNormal(tokenAddress, amount);
+
+      const expectedFee = calcExpectedFee(amount);
       
       // 验证缓存存在
       let feeCache = await feeRouter.getFeeCache(tokenAddress, feeType);
-      expect(feeCache).to.equal(amount);
+      expect(feeCache).to.equal(expectedFee);
       
       // 清理缓存
       await feeRouter.connect(governance).clearFeeCache(tokenAddress, feeType);
@@ -675,7 +690,7 @@ describe('FeeRouter – 费率管理测试', function () {
       
       // 验证统计信息未受影响
       const feeStatistics = await feeRouter.getFeeStatistics(tokenAddress, feeType);
-      expect(feeStatistics).to.equal(amount);
+      expect(feeStatistics).to.equal(expectedFee);
     });
 
     it('清理不存在的缓存应成功', async function () {
@@ -844,8 +859,8 @@ describe('FeeRouter – 费率管理测试', function () {
       const stats1 = await feeRouter.getFeeStatistics(await mockToken.getAddress(), feeType);
       const stats2 = await feeRouter.getFeeStatistics(await token2.getAddress(), feeType);
       
-      expect(stats1).to.equal(amount1);
-      expect(stats2).to.equal(amount2);
+      expect(stats1).to.equal(calcExpectedFee(amount1));
+      expect(stats2).to.equal(calcExpectedFee(amount2));
     });
   });
 
@@ -986,8 +1001,18 @@ describe('FeeRouter – 费率管理测试', function () {
       // 在新 Registry 中注册 ACM
       const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
       await newRegistry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
-      
-      await feeRouter.connect(governance).updateRegistry(await newRegistry.getAddress());
+
+      const oldRegistry = await feeRouter.getRegistry();
+      const tx = await feeRouter.connect(governance).updateRegistry(await newRegistry.getAddress());
+      await expect(tx)
+        .to.emit(feeRouter, 'RegistryUpdated')
+        .withArgs(oldRegistry, await newRegistry.getAddress());
+
+      const receipt = await tx.wait();
+      const moduleAddressUpdatedTopic = ethers.id('ModuleAddressUpdated(string,address,address,uint256)');
+      const hasModuleAddressUpdated =
+        receipt?.logs.some((log: { topics: readonly string[] }) => log.topics[0] === moduleAddressUpdatedTopic) ?? false;
+      expect(hasModuleAddressUpdated).to.equal(false);
       
       const registryAddr = await feeRouter.getRegistry();
       expect(registryAddr).to.equal(await newRegistry.getAddress());
@@ -1026,9 +1051,10 @@ describe('FeeRouter – 费率管理测试', function () {
       // 验证统计信息累积
       const feeStatistics = await feeRouter.getFeeStatistics(tokenAddress, feeType);
       const feeCache = await feeRouter.getFeeCache(tokenAddress, feeType);
+      const expectedTotalFee = amounts.reduce((sum, amount) => sum + calcExpectedFee(amount), 0n);
       
-      expect(feeStatistics).to.equal(totalAmount);
-      expect(feeCache).to.equal(totalAmount);
+      expect(feeStatistics).to.equal(expectedTotalFee);
+      expect(feeCache).to.equal(expectedTotalFee);
     });
 
     it('不同费用类型的统计应独立', async function () {
@@ -1053,8 +1079,8 @@ describe('FeeRouter – 费率管理测试', function () {
       const depositStats = await feeRouter.getFeeStatistics(tokenAddress, depositType);
       const borrowStats = await feeRouter.getFeeStatistics(tokenAddress, borrowType);
       
-      expect(depositStats).to.equal(depositAmount);
-      expect(borrowStats).to.equal(borrowAmount);
+      expect(depositStats).to.equal(calcExpectedFee(depositAmount));
+      expect(borrowStats).to.equal(calcExpectedFee(borrowAmount));
     });
   });
 }); 

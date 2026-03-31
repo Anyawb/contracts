@@ -67,9 +67,9 @@ describe('StatisticsView – 全面测试', function () {
     });
 
     it('应拒绝重复初始化', async function () {
-      const { stats } = await loadFixture(deployFixture);
+      const { stats, registry } = await loadFixture(deployFixture);
       await expect(
-        stats.initialize(await stats.registryAddr())
+        stats.initialize(await registry.getAddress())
       ).to.be.revertedWithCustomError(stats, 'InvalidInitialization');
     });
   });
@@ -642,14 +642,6 @@ describe('StatisticsView – 全面测试', function () {
       
       // 验证 updateGuaranteeStats 存在且可调用
       expect(stats.updateGuaranteeStats).to.not.be.undefined;
-    });
-  });
-
-  describe('Registry 地址查询', function () {
-    it('应正确返回 Registry 地址', async function () {
-      const { stats, registry } = await loadFixture(deployFixture);
-
-      expect(await stats.registryAddr()).to.equal(await registry.getAddress());
     });
   });
 

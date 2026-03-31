@@ -4,7 +4,7 @@
 
 本指南以 `docs/Architecture-Guide.md` 为准，面向“当前清算域实现”的回归测试与排障：
 
-- **唯一对外写入口（SSOT）**：`SettlementManager`
+- **对外写入口（按产品线区分）**：legacy / 通用订单是 `SettlementManager`；blocks-only 订单是 `BlocksOnlyCoordinator`
 - **清算执行器**：`LiquidationManager`（直达账本写入 + best-effort 单点推送）
 - **DataPush 单点**：`LiquidatorView`（`KEY_LIQUIDATION_VIEW`）
 - **风控只读**：`LiquidationRiskManager`（健康因子 bps + 风险分数 0-100）

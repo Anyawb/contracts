@@ -2,7 +2,11 @@
 
 ## 🎯 概述
 
-保证金系统是 RWA 借贷平台的核心风险控制机制，在借款时自动预收利息作为"保证金"，确保在正常还款时返还，在提前还款时按规则分配，在清算时没收。系统采用模块化设计，职责清晰，支持完整的状态追踪与事件记录。
+保证金系统是平台风险控制机制的一部分，提供保证金相关的记账、结算与可观测性能力。
+
+> 约束：本文件不复述借贷资金链、资产去向、内部调用串联或 step-by-step 业务流程。
+>
+> 资金链与资金语义唯一权威：`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`。
 
 ## 📁 核心合约
 
@@ -10,14 +14,14 @@
 
 **位置**: `src/Vault/modules/GuaranteeFundManager.sol`
 
-**功能**: 资金托管和分发模块，负责保证金的实际资金管理
+**功能**: 保证金相关写入口与账本维护模块（资金语义与资产去向以 Funds-Flow SSOT 为准）
 
 **核心功能**:
-- ✅ `lockGuarantee()` - 锁定用户保证金（从用户转入托管池）
-- ✅ `releaseGuarantee()` - 释放用户保证金（返还给用户）
-- ✅ `forfeitGuarantee()` - 没收用户保证金（转给费用接收者）
-- ✅ `settleEarlyRepayment()` - 提前还款三方结算（一次性完成返还/罚金/平台费三路分发）
-- ✅ `forfeitPartial()` - 部分没收保证金
+- ✅ `lockGuarantee()` - 锁定保证金记录/状态（资金语义见 Funds-Flow SSOT）
+- ✅ `releaseGuarantee()` - 释放保证金（资金语义见 Funds-Flow SSOT）
+- ✅ `forfeitGuarantee()` - 没收保证金（资金语义见 Funds-Flow SSOT）
+- ✅ `settleEarlyRepayment()` - 提前还款相关保证金结算（资金语义见 Funds-Flow SSOT）
+- ✅ `forfeitPartial()` - 部分没收保证金（资金语义见 Funds-Flow SSOT）
 
 **查询功能**:
 - ✅ `getLockedGuarantee()` - 获取用户锁定保证金金额
@@ -33,12 +37,12 @@
 
 **位置**: `src/Vault/modules/EarlyRepaymentGuaranteeManager.sol`
 
-**功能**: 提前还款保证金记录和规则计算模块
+**功能**: 提前还款保证金记录与规则计算模块（不作为资金链 SSOT）
 
 **核心功能**:
 - ✅ `lockGuaranteeRecord()` - 记录保证金信息（borrower/lender/asset/principal/promisedInterest/termDays）
-- ✅ `settleEarlyRepayment()` - 计算提前还款结果并关闭记录，调用 GFM 进行真实转账
-- ✅ `processDefault()` - 处理违约，调用 GFM.forfeitPartial 完成真实转账
+- ✅ `settleEarlyRepayment()` - 计算提前还款结果并关闭记录（资金执行语义见 Funds-Flow SSOT）
+- ✅ `processDefault()` - 处理违约（资金执行语义见 Funds-Flow SSOT）
 
 **数据结构**:
 ```solidity
@@ -54,8 +58,8 @@ struct GuaranteeRecord {
 }
 
 struct EarlyRepaymentResult {
-    uint256 penaltyToLender;              // 给贷款方的罚金
-    uint256 refundToBorrower;            // 返还给借款方的金额
+    uint256 penaltyToLender;              // 结果组件：penalty
+    uint256 refundToBorrower;            // 结果组件：refund
     uint256 platformFee;                  // 平台手续费
     uint256 actualInterestPaid;          // 实际支付的利息
 }
@@ -72,22 +76,22 @@ struct EarlyRepaymentResult {
 **功能**: 业务编排模块，协调保证金锁定和释放
 
 **核心功能**:
-- ✅ `borrowWithRate()` - 低 gas 借款（通过 `SettlementMatchLib.finalizeAtomic` 执行）
-- ✅ `repay()` - 还款操作
-- ✅ `repayWithStop()` - 显式关单还款，触发早偿结算
+- ✅ 撮合/保证金相关的编排入口（不在本文件复述资金链与内部调用串联）
 
 **实现说明**:
-- `borrowWithRate()` 现在通过 `SettlementMatchLib.finalizeAtomic()` 执行原子化操作
-- 保证金锁定由 `SettlementMatchLib` 统一协调，调用 `EarlyRepaymentGuaranteeManager.lockGuaranteeRecord()` 和 `GuaranteeFundManager.lockGuarantee()`
+本文件不再维护借款/还款/撮合落地的资金链与内部调用顺序，避免与 SSOT 口径漂移。
+
+- 资金链唯一权威：`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`
+- 保证金扩展流（实现级 SSOT）：同上 Funds-Flow 文档对应章节
 
 ### 4. SettlementMatchLib.sol
 
 **位置**: `src/libraries/SettlementMatchLib.sol`
 
-**功能**: 资金拨付与账本/订单落地的一体化原子流程库
+**功能**: 撮合原子落地相关库（资金链细节与资产去向以 Funds-Flow SSOT 为准）
 
 **核心功能**:
-- ✅ `finalizeAtomic()` - 原子完成：抵押（可选）→ 放款拨付 → 债务记账 → 订单落地 → 保证金锁定
+- ✅ 撮合原子落地相关逻辑（细节与资金去向以 Funds-Flow SSOT 为准）
 
 ## 📊 事件系统
 
@@ -173,68 +177,7 @@ error BorrowerCannotBeLender();
 
 ## 🔄 业务流程
 
-### 借款流程（原子化操作）
-
-```
-1. 用户发起借款请求（通过 VaultBusinessLogic.borrowWithRate）
-   │
-   ├─> SettlementMatchLib.finalizeAtomic()
-   │   │
-   │   ├─> 2. 可选：补充抵押（CollateralManager.depositCollateral）
-   │   │
-   │   ├─> 3. 资金拨付：从业务层合约余额划转给借款人
-   │   │
-   │   ├─> 4. 债务记账：通过 VaultCore.borrowFor 写入账本
-   │   │
-   │   ├─> 5. 订单落地：LoanNFT + Reward + DataPush（由 LendingEngine 完成）
-   │   │
-   │   └─> 6. 保证金锁定：
-   │       ├─> EarlyRepaymentGuaranteeManager.lockGuaranteeRecord()（记录）
-   │       └─> GuaranteeFundManager.lockGuarantee()（真实转账）
-   │
-   └─> 7. 触发事件和数据推送
-```
-
-### 还款流程
-
-```
-1. 用户发起还款请求（通过 VaultBusinessLogic.repay 或 repayWithStop）
-   │
-   ├─> 2. 转移代币到合约
-   │
-   ├─> 3. 债务记账：通过 VaultCore.repay 更新账本
-   │
-   └─> 4. 若 stop=true 或债务=0，触发早偿结算：
-       │
-       └─> EarlyRepaymentGuaranteeManager.settleEarlyRepayment()
-           │
-           ├─> 计算提前还款结果（罚金/返还/平台费）
-           │
-           ├─> 关闭保证金记录
-           │
-           └─> 调用 GuaranteeFundManager.settleEarlyRepayment()
-               │
-               └─> 一次性三路分发：
-                   ├─> 返还给借款方
-                   ├─> 罚金给贷款方
-                   └─> 平台手续费给平台
-```
-
-### 清算流程
-
-```
-1. 系统检测到清算条件
-   │
-   ├─> 2. 执行清算操作（通过 LiquidationManager）
-   │
-   └─> 3. 处理违约：
-       │
-       └─> EarlyRepaymentGuaranteeManager.processDefault()
-           │
-           └─> 调用 GuaranteeFundManager.forfeitPartial()
-               │
-               └─> 没收保证金给费用接收者
-```
+本模块涉及的资金语义（锁定/释放/没收/提前还款结算/违约处置的资产去向与费用口径）不在本文件维护，避免与实现漂移；请以 Funds-Flow SSOT 为准。
 
 ## 🔧 技术特性
 
@@ -250,7 +193,7 @@ error BorrowerCannotBeLender();
 
 - ✅ **职责分离**: 
   - `EarlyRepaymentGuaranteeManager` - 记录和计算
-  - `GuaranteeFundManager` - 资金托管和分发
+    - `GuaranteeFundManager` - 写入口执行与状态维护
   - `VaultBusinessLogic` - 业务编排
   - `SettlementMatchLib` - 原子化操作
 - ✅ **接口驱动**: 通过接口进行模块间调用
@@ -299,7 +242,7 @@ function calculateHealthFactorExcludingGuarantee(
 ### 测试场景
 
 - ✅ 保证金锁定和释放
-- ✅ 提前还款结算（三方分发）
+- ✅ 提前还款结算
 - ✅ 清算时保证金没收
 - ✅ 重复操作防护
 - ✅ 事件触发验证
@@ -329,13 +272,13 @@ await earlyRepaymentGuaranteeManager.initialize(
     vaultCoreAddress,           // VaultCore 合约地址
     registryAddress,            // Registry 合约地址
     platformFeeReceiverAddress, // 平台费用接收者地址
-    platformFeeRate            // 平台手续费率（基点，默认100 = 1%）
+    platformFeeRate            // 保证金结算的“平台分成费率”（bps，默认 100 = 1%），注意：不是借/还款手续费
 );
 ```
 
 ### 配置参数
 
-- **平台手续费率**: 默认 100 bps (1%)，可通过治理调整
+- **保证金结算平台分成费率**: 默认 100 bps (1%)，可通过治理调整（与协议借/还款手续费口径无关）
 - **提前还款罚金天数**: 默认 2 天
 - **最大借款期限**: 10 年（365 * 10 天）
 - **最大利息比例**: 利息不超过本金的 2 倍
@@ -430,32 +373,7 @@ function processDefault(
 
 ## 📝 使用示例
 
-### 1. 锁定保证金
-
-```typescript
-import { IGuaranteeFundManager } from '../types/contracts';
-
-const guaranteeFundManager = await ethers.getContractAt(
-    'IGuaranteeFundManager',
-    guaranteeFundManagerAddress
-);
-
-// 通过 VaultCore 调用（需要权限）
-await vaultCore.borrowWithRate(
-    userAddress,
-    lenderAddress,
-    assetAddress,
-    amount,
-    annualRateBps,
-    termDays
-);
-
-// 系统会自动：
-// 1. EarlyRepaymentGuaranteeManager.lockGuaranteeRecord() - 记录
-// 2. GuaranteeFundManager.lockGuarantee() - 锁定资金
-```
-
-### 2. 查询保证金
+### 查询保证金（只读）
 
 ```typescript
 // 查询用户锁定保证金
@@ -478,19 +396,7 @@ const totalGuarantee = await guaranteeFundManager.getTotalGuaranteeByAsset(
 
 ### 3. 提前还款结算
 
-```typescript
-// 通过 VaultBusinessLogic 还款并触发结算
-await vaultBusinessLogic.repayWithStop(
-    userAddress,
-    assetAddress,
-    repayAmount,
-    true  // stop=true 触发早偿结算
-);
-
-// 系统会自动：
-// 1. EarlyRepaymentGuaranteeManager.settleEarlyRepayment() - 计算并关闭记录
-// 2. GuaranteeFundManager.settleEarlyRepayment() - 三路分发
-```
+提前还款相关的资金语义与结算去向请以 Funds-Flow SSOT 为准；本文件不复述触发链路与内部编排。
 
 ### 4. 计算排除保证金的健康因子
 
@@ -528,8 +434,8 @@ const [healthFactor] = await riskView.calculateHealthFactorExcludingGuarantee(
 
 保证金系统已成功实现所有核心功能，包括：
 
-1. **完整的业务流程**: 借款锁定 → 还款释放/提前还款结算 → 清算没收
-2. **职责清晰的模块设计**: 记录管理、资金托管、业务编排分离
+1. **模块边界清晰**: 记录与计算、写入口执行、只读查询分离
+2. **职责清晰的模块设计**: 记录管理、写入口执行、业务编排分离
 3. **安全的状态管理**: 防止重复操作和无效状态
 4. **详细的事件记录**: 完整的操作追踪和审计
 5. **灵活的配置管理**: 支持动态参数调整
@@ -537,7 +443,7 @@ const [healthFactor] = await riskView.calculateHealthFactorExcludingGuarantee(
 7. **View 层集成**: 提供查询和统计功能
 8. **健康因子支持**: 排除保证金的健康因子计算
 
-该系统为 RWA 借贷平台提供了强大的风险控制机制，有效保护了平台、出借人和借款人的利益。
+该系统为 RWA 借贷平台提供风险控制能力；资金链与资产去向口径以 Funds-Flow SSOT 为唯一权威。
 
 ---
 

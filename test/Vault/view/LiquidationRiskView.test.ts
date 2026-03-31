@@ -48,7 +48,7 @@ describe("LiquidationRiskView (HealthView-aligned)", function () {
 
   it("stores registry and exposes getters", async function () {
     const { view, registry } = await deployFixture();
-    expect(await view.registryAddr()).to.equal(await registry.getAddress());
+    expect(await view.getRegistry()).to.equal(await registry.getAddress());
     expect(await view.getRegistry()).to.equal(await registry.getAddress());
   });
 

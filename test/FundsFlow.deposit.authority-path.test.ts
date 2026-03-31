@@ -25,6 +25,7 @@ describe("Funds-Flow – Deposit authority path", function () {
   const KEY_POSITION_VIEW = ethers.id("POSITION_VIEW");
 
   const DATA_TYPE_DEPOSIT_PROCESSED = ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT_PROCESSED"));
+  const DATA_TYPE_WITHDRAW_PROCESSED = ethers.keccak256(ethers.toUtf8Bytes("WITHDRAW_PROCESSED"));
   const ACTION_DEPOSIT = ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT"));
 
   async function deployFixture() {
@@ -142,6 +143,35 @@ describe("Funds-Flow – Deposit authority path", function () {
     expect(ledger).to.equal(amount);
   });
 
+  it("routes VaultCore.withdraw -> VaultRouter -> CollateralManager, updates ledger, emits events", async function () {
+    const { user, collateralToken, vaultCore, collateralManager } = await loadFixture(deployFixture);
+
+    const asset = await collateralToken.getAddress();
+    const depositAmount = ethers.parseUnits("200", 18);
+    const withdrawAmount = ethers.parseUnits("80", 18);
+
+    await (await collateralToken.connect(user).approve(await collateralManager.getAddress(), depositAmount)).wait();
+    await (await vaultCore.connect(user).deposit(asset, depositAmount)).wait();
+
+    const userBalBefore = await collateralToken.balanceOf(user.address);
+    const cmBalBefore = await collateralToken.balanceOf(await collateralManager.getAddress());
+
+    const tx = await vaultCore.connect(user).withdraw(asset, withdrawAmount);
+
+    await expect(tx)
+      .to.emit(collateralManager, "WithdrawProcessed")
+      .withArgs(user.address, asset, withdrawAmount, anyValue);
+
+    await expect(tx).to.emit(collateralManager, "DataPushed").withArgs(DATA_TYPE_WITHDRAW_PROCESSED, anyValue);
+
+    const userBalAfter = await collateralToken.balanceOf(user.address);
+    const cmBalAfter = await collateralToken.balanceOf(await collateralManager.getAddress());
+
+    expect(userBalAfter).to.equal(userBalBefore + withdrawAmount);
+    expect(cmBalAfter).to.equal(cmBalBefore - withdrawAmount);
+    expect(await collateralManager.getCollateral(user.address, asset)).to.equal(depositAmount - withdrawAmount);
+  });
+
   it("rejects user calling VaultRouter.processUserOperation directly (onlyVaultCore)", async function () {
     const { user, collateralToken, vaultRouter } = await loadFixture(deployFixture);
     const asset = await collateralToken.getAddress();
@@ -158,6 +188,15 @@ describe("Funds-Flow – Deposit authority path", function () {
     const amount = 1n;
 
     await expect(collateralManager.connect(user).depositCollateral(user.address, asset, amount))
+      .to.be.revertedWithCustomError(collateralManager, "CollateralManager__UnauthorizedAccess");
+  });
+
+  it("rejects user calling CollateralManager.withdrawCollateral directly (onlyVaultRouterOrCore)", async function () {
+    const { user, collateralToken, collateralManager } = await loadFixture(deployFixture);
+    const asset = await collateralToken.getAddress();
+    const amount = 1n;
+
+    await expect(collateralManager.connect(user).withdrawCollateral(user.address, asset, amount))
       .to.be.revertedWithCustomError(collateralManager, "CollateralManager__UnauthorizedAccess");
   });
 

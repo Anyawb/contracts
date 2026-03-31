@@ -13,6 +13,13 @@
 > **核心目标**：在 2.5–3 周内完成修正并部署，**统一幂等 Key 规范**，修复账本隔离漏洞，
 > 新增链上事件索引（Ponder）和 Stripe 计费，杜绝"多服务幂等口径分叉"问题。
 
+> **blocks-only keeper/撮合速查**：若当前工作重点是 blocks-only 对接，请先看 [Blocks-Only-Frontend-Matching-Checklist.md](Blocks-Only-Frontend-Matching-Checklist.md)，其中把前端、撮合服务与 keeper 的当前责任边界压缩成了一页式清单。
+
+> **本次变更说明（2026-03-23）**：
+> 1. 统一价格发布路径继续维持为 `PriceUpdater.updateAssetPrice`，且该命名已经脱离 CoinGecko 专属语义。
+> 2. 前后端共享的 module key 口径需要跟随当前仓库主名：`KEY_PRICE_UPDATER` / `KEY_PRICE_UPDATER_VIEW`；若底层仍看到 `COINGECKO_PRICE_UPDATER`，那是 Registry 历史字符串兼容，不应再作为业务命名向上扩散。
+> 3. 外围部署/联调环境变量主名已收敛为 `*_SOURCE_ID`，后端若消费前端或运维脚本注入的 source 标识，应优先读取新变量名，仅将 `*_COINGECKO_ID` 视为兼容输入。
+
 ---
 
 ## 目录
@@ -40,14 +47,14 @@
 
 ### 1.1 已确认的幂等性分叉问题
 
-| 子系统 | 幂等 Key 格式 | 存储层 | 问题 |
-|--------|-------------|--------|------|
-| `api-server` LedgerService | `entryId`（自由格式，如 `reward:consume:{userId}:{requestId}`） | PostgreSQL `ledger_entries.entry_id` UNIQUE | Key 构造规则分散在各 usecase 中，无统一 registry |
-| `api-server` IdempotencyKeyRegistry | `requestId`（仅格式校验，Phase 2 未实现） | **无持久化**（仅 log） | 只做了 `requestId.length <= 128` 校验，Redis/DB 检查标注 TODO |
-| `api-server` RewardLedger | `(userId, requestId)` 隐式去重（INSERT ON CONFLICT） | PostgreSQL `reward_ledger` | 依赖 DB 约束捕获 `23505`，但没有显式幂等 key 字段 |
-| `ai-services` UsageLedger | `(tenant_id, request_id, category)` | PostgreSQL `usage_idempotency` 表 | 独立表，与 api-server 的 `ledger_entries.entry_id` 完全脱节 |
-| `ai-services` IdempotencyService | `idemp:agg:{symbol}:{ts}:{sourceModel}:{signalType}` | Redis（TTL 7d） | 仅用于信号去重，与账本无关 |
-| `ai-services` EmbeddingQueue | `idemp:embed:q:{idempotencyKey}` | Redis NX | 仅用于队列去重 |
+| 子系统                              | 幂等 Key 格式                                                   | 存储层                                      | 问题                                                          |
+| ----------------------------------- | --------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------- |
+| `api-server` LedgerService          | `entryId`（自由格式，如 `reward:consume:{userId}:{requestId}`） | PostgreSQL `ledger_entries.entry_id` UNIQUE | Key 构造规则分散在各 usecase 中，无统一 registry              |
+| `api-server` IdempotencyKeyRegistry | `requestId`（仅格式校验，Phase 2 未实现）                       | **无持久化**（仅 log）                      | 只做了 `requestId.length <= 128` 校验，Redis/DB 检查标注 TODO |
+| `api-server` RewardLedger           | `(userId, requestId)` 隐式去重（INSERT ON CONFLICT）            | PostgreSQL `reward_ledger`                  | 依赖 DB 约束捕获 `23505`，但没有显式幂等 key 字段             |
+| `ai-services` UsageLedger           | `(tenant_id, request_id, category)`                             | PostgreSQL `usage_idempotency` 表           | 独立表，与 api-server 的 `ledger_entries.entry_id` 完全脱节   |
+| `ai-services` IdempotencyService    | `idemp:agg:{symbol}:{ts}:{sourceModel}:{signalType}`            | Redis（TTL 7d）                             | 仅用于信号去重，与账本无关                                    |
+| `ai-services` EmbeddingQueue        | `idemp:embed:q:{idempotencyKey}`                                | Redis NX                                    | 仅用于队列去重                                                |
 
 **核心问题**：五种不同的幂等机制、三种不同的存储层、零统一规范。当 `ai-services` 通过 `aiGrantClient` 调用 `api-server` 的 `/api/rewards/ai/grant` 时：
 
@@ -65,13 +72,13 @@ ai-services 生成 requestId (格式 A)
 
 ### 1.2 多租户与账本的隔离漏洞
 
-| 表 | 是否有 `tenant_id` | 风险 |
-|----|-------------------|------|
-| `accounts` | **无** | 跨租户共享同一账户空间，`user:123` 在租户 A 和 B 指向同一行 |
-| `ledger_entries` | **无** | 复式分录没有租户维度，跨租户对账不可行 |
-| `reward_ledger` | 有 | 但与 `accounts` 脱节，对账时需手动关联 |
-| `platform_ledger` | 有 | 平台账户 `platform_pool` 是全局的，多租户共享 |
-| `ai_usage_detail` | 有 | 但 `requestId` 格式与 `api-server` 不统一 |
+| 表                | 是否有 `tenant_id` | 风险                                                        |
+| ----------------- | ------------------ | ----------------------------------------------------------- |
+| `accounts`        | **无**             | 跨租户共享同一账户空间，`user:123` 在租户 A 和 B 指向同一行 |
+| `ledger_entries`  | **无**             | 复式分录没有租户维度，跨租户对账不可行                      |
+| `reward_ledger`   | 有                 | 但与 `accounts` 脱节，对账时需手动关联                      |
+| `platform_ledger` | 有                 | 平台账户 `platform_pool` 是全局的，多租户共享               |
+| `ai_usage_detail` | 有                 | 但 `requestId` 格式与 `api-server` 不统一                   |
 
 **核心问题**：`accounts` 表的主键是 `(account_id, currency)`，缺少 `tenant_id` 维度。多租户环境下 `user:123` 的“奖励通证余额”（目标态对应 Registry[KEY_EASY_TOKEN] 指向的奖励通证，即 EasyToken）会在所有租户间共享——这是数据隔离的致命漏洞。
 
@@ -106,13 +113,13 @@ IdempotencyKey = {domain}:{entity}:{scope}:{nonce}
 
 **示例**：
 
-| 业务场景 | 幂等 Key | 说明 |
-|---------|---------|------|
-| 用户消费积分 | `reward:u123:consume:req-abc123` | 用户 123 的消费请求 |
-| AI 用量记录 | `usage:t-default:u123:llm:req-abc123` | 租户 default、用户 123 的 LLM 用量 |
-| 链上事件索引 | `chain:arb42161:tx-0xabc:log-5` | Arbitrum 链上交易 0xabc 的第 5 条日志 |
-| 计费对账 | `billing:t-default:2026-02:stmt-001` | 租户 default 2026 年 2 月账单 |
-| 链上积分兑换 | `chain:arb42161:exchange:tx-0xdef:u123` | 用户 123 的链上兑换交易 |
+| 业务场景     | 幂等 Key                                | 说明                                  |
+| ------------ | --------------------------------------- | ------------------------------------- |
+| 用户消费积分 | `reward:u123:consume:req-abc123`        | 用户 123 的消费请求                   |
+| AI 用量记录  | `usage:t-default:u123:llm:req-abc123`   | 租户 default、用户 123 的 LLM 用量    |
+| 链上事件索引 | `chain:arb42161:tx-0xabc:log-5`         | Arbitrum 链上交易 0xabc 的第 5 条日志 |
+| 计费对账     | `billing:t-default:2026-02:stmt-001`    | 租户 default 2026 年 2 月账单         |
+| 链上积分兑换 | `chain:arb42161:exchange:tx-0xdef:u123` | 用户 123 的链上兑换交易               |
 
 ### 2.2 幂等 Key 注册表（统一实现）
 
@@ -122,9 +129,9 @@ IdempotencyKey = {domain}:{entity}:{scope}:{nonce}
 
 /**
  * 统一幂等 Key 生成器（SSOT）
- * 
+ *
  * 所有服务/模块必须通过本类生成幂等 Key，禁止自行拼接字符串。
- * 
+ *
  * 设计原则：
  * 1. Key 格式在编译期确定（TypeScript 类型约束）
  * 2. 验证在构造期完成（fail fast）
@@ -132,8 +139,15 @@ IdempotencyKey = {domain}:{entity}:{scope}:{nonce}
  */
 
 const KEY_PATTERN = /^[A-Za-z0-9:_\-.]{1,128}$/;
-const DOMAINS = ['ledger', 'reward', 'usage', 'ai', 'billing', 'chain'] as const;
-type Domain = typeof DOMAINS[number];
+const DOMAINS = [
+  "ledger",
+  "reward",
+  "usage",
+  "ai",
+  "billing",
+  "chain",
+] as const;
+type Domain = (typeof DOMAINS)[number];
 
 export class IdempotencyKey {
   readonly value: string;
@@ -144,16 +158,18 @@ export class IdempotencyKey {
 
   /** 从结构化参数构建 Key（推荐） */
   static build(domain: Domain, ...parts: string[]): IdempotencyKey {
-    const raw = [domain, ...parts].join(':');
+    const raw = [domain, ...parts].join(":");
     return IdempotencyKey.parse(raw);
   }
 
   /** 从字符串解析 Key（用于反序列化/跨服务接收） */
   static parse(raw: string): IdempotencyKey {
     if (!raw || !KEY_PATTERN.test(raw)) {
-      throw new IdempotencyKeyError(`Invalid idempotency key: ${raw?.slice(0, 20)}`);
+      throw new IdempotencyKeyError(
+        `Invalid idempotency key: ${raw?.slice(0, 20)}`,
+      );
     }
-    const domain = raw.split(':')[0];
+    const domain = raw.split(":")[0];
     if (!DOMAINS.includes(domain as Domain)) {
       throw new IdempotencyKeyError(`Unknown domain: ${domain}`);
     }
@@ -162,7 +178,7 @@ export class IdempotencyKey {
 
   /** 提取 domain 部分 */
   get domain(): Domain {
-    return this.value.split(':')[0] as Domain;
+    return this.value.split(":")[0] as Domain;
   }
 
   toString(): string {
@@ -178,7 +194,7 @@ export class IdempotencyKey {
 export class IdempotencyKeyError extends Error {
   constructor(msg: string) {
     super(msg);
-    this.name = 'IdempotencyKeyError';
+    this.name = "IdempotencyKeyError";
   }
 }
 
@@ -187,31 +203,51 @@ export class IdempotencyKeyError extends Error {
 export const IdempotencyKeys = {
   /** 积分消费 */
   rewardConsume: (userId: string | number, requestId: string) =>
-    IdempotencyKey.build('reward', `u${userId}`, 'consume', requestId),
+    IdempotencyKey.build("reward", `u${userId}`, "consume", requestId),
 
   /** 积分发放 */
   rewardGrant: (userId: string | number, requestId: string) =>
-    IdempotencyKey.build('reward', `u${userId}`, 'grant', requestId),
+    IdempotencyKey.build("reward", `u${userId}`, "grant", requestId),
 
   /** AI 用量记录 */
-  aiUsage: (tenantId: string, userId: string | number, category: string, requestId: string) =>
-    IdempotencyKey.build('usage', `t-${tenantId}`, `u${userId}`, category, requestId),
+  aiUsage: (
+    tenantId: string,
+    userId: string | number,
+    category: string,
+    requestId: string,
+  ) =>
+    IdempotencyKey.build(
+      "usage",
+      `t-${tenantId}`,
+      `u${userId}`,
+      category,
+      requestId,
+    ),
 
   /** 链上事件索引 */
   chainEvent: (chainId: number, txHash: string, logIndex: number) =>
-    IdempotencyKey.build('chain', `c${chainId}`, txHash, `log-${logIndex}`),
+    IdempotencyKey.build("chain", `c${chainId}`, txHash, `log-${logIndex}`),
 
   /** 链上积分兑换 */
   chainExchange: (chainId: number, txHash: string, userId: string | number) =>
-    IdempotencyKey.build('chain', `c${chainId}`, 'exchange', txHash, `u${userId}`),
+    IdempotencyKey.build(
+      "chain",
+      `c${chainId}`,
+      "exchange",
+      txHash,
+      `u${userId}`,
+    ),
 
   /** 复式记账分录 */
-  ledgerEntry: (debitAccount: string, creditAccount: string, requestId: string) =>
-    IdempotencyKey.build('ledger', debitAccount, creditAccount, requestId),
+  ledgerEntry: (
+    debitAccount: string,
+    creditAccount: string,
+    requestId: string,
+  ) => IdempotencyKey.build("ledger", debitAccount, creditAccount, requestId),
 
   /** 计费账单 */
   billingStatement: (tenantId: string, period: string, statementId: string) =>
-    IdempotencyKey.build('billing', `t-${tenantId}`, period, statementId),
+    IdempotencyKey.build("billing", `t-${tenantId}`, period, statementId),
 } as const;
 ```
 
@@ -231,13 +267,13 @@ Level 3: DB UNIQUE CONSTRAINT（最后防线，捕获并发写入）
 export class IdempotencyGuard {
   constructor(
     private redis: RedisClient,
-    private config: { ttlSeconds: number; prefix: string }
+    private config: { ttlSeconds: number; prefix: string },
   ) {}
 
   /**
    * 三级幂等检查
-   * 
-   * @returns 
+   *
+   * @returns
    *   - { status: 'new' }         → 首次请求，继续处理
    *   - { status: 'duplicate' }   → 重复请求，返回缓存结果
    *   - { status: 'processing' }  → 正在处理中，等待或拒绝
@@ -246,7 +282,7 @@ export class IdempotencyGuard {
     const redisKey = `${this.config.prefix}:${key.value}`;
 
     // Level 1: Redis NX（原子性设置，防止并发进入）
-    const acquired = await this.redis.set(redisKey, 'processing', {
+    const acquired = await this.redis.set(redisKey, "processing", {
       NX: true,
       EX: this.config.ttlSeconds,
     });
@@ -254,19 +290,19 @@ export class IdempotencyGuard {
     if (!acquired) {
       // Key 已存在，检查状态
       const status = await this.redis.get(redisKey);
-      if (status === 'completed') {
-        return { status: 'duplicate' };
+      if (status === "completed") {
+        return { status: "duplicate" };
       }
-      return { status: 'processing' };
+      return { status: "processing" };
     }
 
-    return { status: 'new', release: () => this.complete(key) };
+    return { status: "new", release: () => this.complete(key) };
   }
 
   /** 标记为已完成（成功路径） */
   async complete(key: IdempotencyKey): Promise<void> {
     const redisKey = `${this.config.prefix}:${key.value}`;
-    await this.redis.set(redisKey, 'completed', { EX: this.config.ttlSeconds });
+    await this.redis.set(redisKey, "completed", { EX: this.config.ttlSeconds });
   }
 
   /** 标记为失败（释放锁，允许重试） */
@@ -277,9 +313,9 @@ export class IdempotencyGuard {
 }
 
 type IdempotencyCheckResult =
-  | { status: 'new'; release: () => Promise<void> }
-  | { status: 'duplicate' }
-  | { status: 'processing' };
+  | { status: "new"; release: () => Promise<void> }
+  | { status: "duplicate" }
+  | { status: "processing" };
 ```
 
 ### 2.4 跨服务幂等 Key 透传规范（强制）
@@ -315,13 +351,13 @@ ai-services 生成: IdempotencyKeys.aiUsage('default', '123', 'llm', 'req-abc')
 
 **选择**：Shared Database, Schema-Per-Tenant（Row Level Security）
 
-| 层级 | 隔离方式 | 实现 |
-|------|---------|------|
-| HTTP 层 | `X-Tenant-ID` Header + JWT claim | 中间件注入 |
-| 应用层 | AsyncLocalStorage 上下文 | 全链路透传 |
-| 数据库层 | PostgreSQL RLS | `SET app.tenant_id` |
-| 缓存层 | Redis key 前缀 | `{tenantId}:key` |
-| 链上层 | 租户→钱包映射表 | `tenant_wallets` |
+| 层级     | 隔离方式                         | 实现                |
+| -------- | -------------------------------- | ------------------- |
+| HTTP 层  | `X-Tenant-ID` Header + JWT claim | 中间件注入          |
+| 应用层   | AsyncLocalStorage 上下文         | 全链路透传          |
+| 数据库层 | PostgreSQL RLS                   | `SET app.tenant_id` |
+| 缓存层   | Redis key 前缀                   | `{tenantId}:key`    |
+| 链上层   | 租户→钱包映射表                  | `tenant_wallets`    |
 
 ### 3.2 核心数据模型（修正先行系统的隔离漏洞）
 
@@ -436,7 +472,7 @@ CREATE TABLE usage_detail_2026_02 PARTITION OF usage_detail
 ```
 用户账户:    user:{userId}
 平台收入:    platform:income
-平台支出:    platform:expense  
+平台支出:    platform:expense
 FX 资金池:   fx_pool:{currency_pair}
 AI Credits:  ai_credits:{userId}
 保证金池:    guarantee_pool
@@ -453,7 +489,7 @@ AI Credits:  ai_credits:{userId}
 > **重要架构变更**：链上 Reward 系统现已完备（详见 `docs/Usage-Guide/Reward-Best-Practices-Guide.md`），
 > 包含完整的 Earn/Spend/View 三层架构、per-order 幂等、penalty ledger（负余额追踪）、
 > 以及通过 `RewardView.DataPushed` 的统一事件流。
-> 
+>
 > 链下账本的角色因此发生根本性转变：**从"唯一 SSOT"变为"链上 SSOT 的镜像 + 高频 AI 计费层"**。
 
 ### 4.0 SSOT 分层架构（链上 vs 链下权威边界，强制）
@@ -472,7 +508,7 @@ AI Credits:  ai_credits:{userId}
 │  │  RewardManagerCore（Earn 核心账本）                                │  │
 │  │    → _lockedPoints[user]: 已锁定（虚拟，未铸币）                   │  │
 │  │    → _lockedPointsByOrderId[orderId]: per-order 锁定（幂等 SSOT）│  │
-│  │    → _penaltyLedger[user]: 负余额/欠分账本（SSOT）                │  │
+│  │    → RewardAccrualManager._penaltyLedger[user]: 负余额/欠分账本（SSOT） │  │
 │  │    → _userLevels[user]: 用户等级 1-5（SSOT）                      │  │
 │  │                                                                   │  │
 │  │  EasyConsumption + EasyRecycleDistributor（按次消费）              │  │
@@ -510,17 +546,17 @@ AI Credits:  ai_credits:{userId}
 
 **关键规则（强制）**：
 
-| 数据类型 | SSOT | 链下角色 | 对账方向 |
-|---------|------|---------|---------|
-| 奖励通证余额 | `IERC20(Registry[KEY_EASY_TOKEN]).balanceOf(user)` | 镜像（Ponder 索引奖励通证 `Transfer` 的 mint/burn） | 链下 → 链上 |
-| 锁定点数 | `RewardManagerCore._lockedPoints[user]` | 镜像（`DataPushed: REWARD_EARNED`） | 链下 → 链上 |
-| 负余额/欠分 | `RewardManagerCore._penaltyLedger[user]` | 镜像（`DataPushed: REWARD_PENALTY_LEDGER_UPDATED`） | 链下 → 链上 |
-| 用户等级 | `RewardManagerCore._userLevels[user]` | 镜像（`DataPushed: REWARD_LEVEL_UPDATED`） | 链下 → 链上 |
-| Easy 消费观测 | `RewardView.DataPushed(EASY_SPENT / EASY_RECYCLED_SPLIT)` | 镜像（用于分析/对账辅助；最终以 ERC20 balance 为准） | 链下 → 链上 |
-| AI Credits 审计余额 | `AICreditsVault.creditsBalance(tenantId, user)` | 镜像 + 高频扣次层 | 链下 → 链上 |
-| AI 用量明细 | 链下 `ai_requests` 表 | **链下原生** | 链上← 批量结算 |
-| 抵押/手续费 | `CollateralManager / FeeRouter` | 镜像（Ponder 索引） | 链下 → 链上 |
-| Stripe 计费 | 链下 `billing_subscriptions` | **链下原生** | 无链上对应 |
+| 数据类型            | SSOT                                                      | 链下角色                                             | 对账方向       |
+| ------------------- | --------------------------------------------------------- | ---------------------------------------------------- | -------------- |
+| 奖励通证余额        | `IERC20(Registry[KEY_EASY_TOKEN]).balanceOf(user)`        | 镜像（Ponder 索引奖励通证 `Transfer` 的 mint/burn）  | 链下 → 链上    |
+| 锁定点数            | `RewardView.getUserEarnStateWithMeta(user).lockedEasy`    | 镜像（`DataPushed: REWARD_EARN_STATE_UPDATED`）      | 链下 → 链上    |
+| 负余额/欠分         | `RewardAccrualManager._penaltyLedger[user]`               | 镜像（`DataPushed: REWARD_PENALTY_LEDGER_UPDATED`）  | 链下 → 链上    |
+| 用户等级            | `RewardManagerCore._userLevels[user]`                     | 镜像（`DataPushed: REWARD_LEVEL_UPDATED`）           | 链下 → 链上    |
+| Easy 消费观测       | `RewardView.DataPushed(EASY_SPENT / EASY_RECYCLED_SPLIT)` | 镜像（用于分析/对账辅助；最终以 ERC20 balance 为准） | 链下 → 链上    |
+| AI Credits 审计余额 | `AICreditsVault.creditsBalance(tenantId, user)`           | 镜像 + 高频扣次层                                    | 链下 → 链上    |
+| AI 用量明细         | 链下 `ai_requests` 表                                     | **链下原生**                                         | 链上← 批量结算 |
+| 抵押/手续费         | `CollateralManager / FeeRouter`                           | 镜像（Ponder 索引）                                  | 链下 → 链上    |
+| Stripe 计费         | 链下 `billing_subscriptions`                              | **链下原生**                                         | 无链上对应     |
 
 ### 4.1 链上 Reward 会计模型（按 `Reward-Best-Practices-Guide.md` 对齐）
 
@@ -543,7 +579,7 @@ Borrow（outcome = 0，锁定，不铸币）:
         )
 
 RepayOnTimeFull（outcome = 1，释放 + 铸币）:
-  链上：释放 _lockedPoints → 扣除 _penaltyLedger 欠分 → 由 EasyEmissionController 发放奖励通证（对 EasyToken mint）
+  链上：释放 _lockedPoints → 由 RewardAccrualManager 先抵扣欠分 → EasyEmissionController 铸币（对 EasyToken mint）
         DataPushed(EASY_MINTED, ...)
   链下：INSERT ledger_entries (
           idempotency_key = 'chain:c{chainId}:tx-{hash}:log-{idx}',
@@ -562,11 +598,11 @@ RepayOnTimeFull（outcome = 1，释放 + 铸币）:
 
 RepayEarlyFull（outcome = 2，不发放、不处罚）:
   链上：释放 _lockedPoints，无铸币/销毁
-  链下：UPDATE ledger_entries SET status='cancelled' 
+  链下：UPDATE ledger_entries SET status='cancelled'
         WHERE idempotency_key = 原 borrow 的 lock 分录 key
 
 RepayLateFull（outcome = 3，处罚）:
-  链上：释放 _lockedPoints → 计算罚分 → try burn → 失败则记入 _penaltyLedger
+  链上：释放 _lockedPoints → 计算罚分 → RewardAccrualManager 尝试 burn → 失败则记入 penaltyLedger
         RewardView.DataPushed(REWARD_BURNED 或 REWARD_PENALTY_LEDGER_UPDATED)
   链下：INSERT ledger_entries (
           debit_account = 'user:{userId}',           -- 用户被罚
@@ -595,15 +631,16 @@ EasiM / Strategy API 按次消费（每次 1 Easy）:
 
 #### 4.1.3 链上幂等机制（已内建，链下不需要重新实现）
 
-| 链上操作 | 幂等机制 | 链下对应 |
-|---------|---------|---------|
-| `onLoanEventByOrder(orderId)` | `_lockedPointsByOrderId[orderId] != 0 → return` | Ponder 索引天然幂等（同一 event 只处理一次） |
-| `buyCredits(clientOrderId)` | `_usedClientOrderId[tenantId][user][clientOrderId]` | 同上 |
-| `settleBatch(settlementBatchId)` | `_appliedSettlementBatch[settlementBatchId]` | 链下以 `settlement_batch_id` 做幂等 |
+| 链上操作                         | 幂等机制                                            | 链下对应                                     |
+| -------------------------------- | --------------------------------------------------- | -------------------------------------------- |
+| `onLoanEventByOrder(orderId)`    | `_lockedPointsByOrderId[orderId] != 0 → return`     | Ponder 索引天然幂等（同一 event 只处理一次） |
+| `buyCredits(clientOrderId)`      | `_usedClientOrderId[tenantId][user][clientOrderId]` | 同上                                         |
+| `settleBatch(settlementBatchId)` | `_appliedSettlementBatch[settlementBatchId]`        | 链下以 `settlement_batch_id` 做幂等          |
 
 ### 4.2 链下复式记账流程（镜像 + 高频计费）
 
 > **定位**：链下复式记账有两个职责：
+>
 > 1. **镜像链上事件**为链下分录（通过 Ponder 索引 `DataPushed` 事件）
 > 2. **处理链下原生计费**（AI 高频扣次、Stripe 订阅）
 
@@ -613,9 +650,10 @@ EasiM / Strategy API 按次消费（每次 1 Easy）:
 Ponder 索引服务（自动，无需手动触发）:
   RewardView.DataPushed(dataTypeHash, payload)
     │
-    ├── REWARD_EARNED → INSERT ledger_entries (platform:reward_pool → user)
+    ├── EASY_MINTED → INSERT ledger_entries (platform:reward_pool → user)
     ├── REWARD_BURNED → INSERT ledger_entries (user → platform:burn_pool)
     ├── REWARD_PENALTY_LEDGER_UPDATED → UPDATE penalty_mirror_table
+    ├── REWARD_EARN_STATE_UPDATED → UPDATE user_reward_cache.locked_easy / counters
     ├── REWARD_LEVEL_UPDATED → UPDATE user_level_cache
     ├── REWARD_PRIVILEGE_UPDATED → UPDATE user_privilege_cache
     ├── REWARD_DYNAMIC_REWARD_PARAMS_UPDATED → UPDATE config_cache
@@ -689,24 +727,59 @@ Ponder 天然保证：同一 (block, txIndex, logIndex) 只处理一次
 
 ### 4.3 完整链上/链下事件映射表
 
-> 链下系统**必须**订阅 `RewardView.DataPushed(bytes32 indexed dataTypeHash, bytes payload)` 作为唯一事件源（SSOT）。
-> **禁止**直接订阅 `RewardEvents.sol` 中的 legacy 事件（仅 debug 用途）。
+> 链下系统**应优先**订阅 `RewardView.DataPushed(bytes32 indexed dataTypeHash, bytes payload)` 作为镜像更新主事件流。
+> 它不是主账本 SSOT；主账本真相仍以 RewardManagerCore / RewardAccrualManager / EasyToken 等链上状态为准。
+> 若 `RewardViewPushFailed` 出现，链下必须走补偿、重试与读模型修复，而不是把镜像延迟误判为真实状态延迟。
+> **禁止**直接依赖 `RewardEvents.sol` 中的 legacy 事件作为生产镜像来源（仅 debug 用途）。
 
-| dataTypeHash | 链上触发模块 | payload schema | 链下处理 | 链下幂等 Key |
-|---|---|---|---|---|
-| `REWARD_EARNED` | `RewardManagerCore` (on-time repay mint) | `(address user, uint256 amount, string reason, uint256 blockNumber)` | INSERT `ledger_entries`（platform:reward_pool → user） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_BURNED` | `RewardManagerCore` (penalty burn) | `(address user, uint256 amount, string reason, uint256 blockNumber)` | INSERT `ledger_entries`（user → platform:burn_pool） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `EASY_SPENT` | `RewardView` (from EasyConsumption) | `(address user, uint8 spendType, uint256 amount, uint256 blockNumber)` | INSERT `ledger_entries`（user → platform:recycle_pool） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `EASY_RECYCLED_SPLIT` | `RewardView` (from EasyRecycleDistributor) | `(address payer, uint256 amount, uint256 burnAmount, uint256 teamAmount, uint256 ecoAmount, uint8 spendType, uint256 blockNumber)` | INSERT `ledger_entries`（recycle_pool → burn/team/eco） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_LEVEL_UPDATED` | `RewardManagerCore` | `(address user, uint8 level, uint256 blockNumber)` | UPDATE `user_reward_cache.level` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_PENALTY_LEDGER_UPDATED` | `RewardManagerCore` | `(address user, uint256 pendingDebt, uint256 blockNumber)` | UPDATE `user_reward_cache.penalty_debt` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_STATS_UPDATED` | `RewardView` (aggregation) | `(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 blockNumber)` | UPDATE `system_stats_cache` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_DYNAMIC_REWARD_PARAMS_UPDATED` | `RewardManagerCore` | `(uint256 threshold, uint256 multiplierBps, uint256 blockNumber)` | UPDATE `config_cache.dynamic_params` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_LEVEL_MULTIPLIER_UPDATED` | `RewardManagerCore` | `(uint8 level, uint256 multiplierBps, uint256 blockNumber)` | UPDATE `config_cache.level_multipliers` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `CreditsPurchased`（AICreditsVault 原生事件） | `AICreditsVault` | `(tenantId, buyer, payToken, payAmount, credits, clientOrderId, blockNumber)` | UPDATE `credit_balances` + INSERT `credit_purchases` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `CreditsSettled`（AICreditsVault 原生事件） | `AICreditsVault` | `(tenantId, settlementBatchId, userCount, totalCredits, merkleRoot, blockNumber)` | UPDATE `credit_settlement_batches` status | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `DEPOSIT_PROCESSED` | `CollateralManager` (via VaultRouter DataPushed) | `(address user, address asset, uint256 amount, uint256 blockNumber)` | INSERT `ledger_entries`（user → collateral_pool） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `FeeDistributed` | `FeeRouter` | `(address token, uint256 amount, ...)` | INSERT `ledger_entries`（多腿分账） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| dataTypeHash                                  | 链上触发模块                                                     | payload schema                                                                                                                                                  | 链下处理                                                          | 链下幂等 Key                           |
+| --------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------- |
+| `EASY_MINTED`                                 | `RewardView` (from EasyEmissionController)                       | `(address borrower, address lender, uint256 totalMinted, uint256 borrowerShare, uint256 lenderShare, uint256 orderId, uint256 amountUsd8, uint256 blockNumber)` | INSERT `ledger_entries`（platform:reward_pool → borrower/lender） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_BURNED`                               | `RewardView`（上游来源通常为 RewardAccrualManager penalty burn） | `(address user, uint256 amount, string reason, uint256 blockNumber)`                                                                                            | INSERT `ledger_entries`（user → platform:burn_pool）              | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `EASY_SPENT`                                  | `RewardView` (from EasyConsumption)                              | `(address user, uint8 spendType, uint256 amount, uint256 blockNumber)`                                                                                          | INSERT `ledger_entries`（user → platform:recycle_pool）           | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `EASY_RECYCLED_SPLIT`                         | `RewardView` (from EasyRecycleDistributor)                       | `(address payer, uint256 amount, uint256 burnAmount, uint256 teamAmount, uint256 ecoAmount, uint8 spendType, uint256 blockNumber)`                              | INSERT `ledger_entries`（recycle_pool → burn/team/eco）           | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_LEVEL_UPDATED`                        | `RewardView`（上游来源通常为 RewardManagerCore）                 | `(address user, uint8 level, uint256 blockNumber)`                                                                                                              | UPDATE `user_reward_cache.level`                                  | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_EARN_STATE_UPDATED`                   | `RewardView`                                                     | `(address user, uint256 lockedEasy, uint256 eligibleLoanCount, uint256 onTimeRepayCount, uint256 blockNumber)`                                                  | UPDATE `user_reward_cache.locked_easy / earn_counters`            | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_PENALTY_LEDGER_UPDATED`               | `RewardView`（上游来源通常为 RewardAccrualManager）              | `(address user, uint256 pendingDebt, uint256 blockNumber)`                                                                                                      | UPDATE `user_reward_cache.penalty_debt`                           | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_STATS_UPDATED`                        | `RewardView` (aggregation)                                       | `(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 blockNumber)`                                                                                      | UPDATE `system_stats_cache`                                       | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_DYNAMIC_REWARD_PARAMS_UPDATED`        | `RewardView`（上游来源由 writer push）                           | `(uint256 threshold, uint256 multiplierBps, uint256 blockNumber)`                                                                                               | UPDATE `config_cache.dynamic_params`                              | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_LEVEL_MULTIPLIER_UPDATED`             | `RewardView`（上游来源由 writer push）                           | `(uint8 level, uint256 multiplierBps, uint256 blockNumber)`                                                                                                     | UPDATE `config_cache.level_multipliers`                           | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `CreditsPurchased`（AICreditsVault 原生事件） | `AICreditsVault`                                                 | `(tenantId, buyer, payToken, payAmount, credits, clientOrderId, blockNumber)`                                                                                   | UPDATE `credit_balances` + INSERT `credit_purchases`              | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+
+#### 4.3.1 Reward 镜像延迟与真实状态边界（强制）
+
+对 Reward 域，团队必须区分两件事：
+
+1. 真实状态是否已在链上主账本生效。
+2. RewardView / DataPushed 这一层镜像是否已经同步到最新地址或最新读模型。
+
+强制规则：
+
+- `EasyToken.balanceOf(user)`、`RewardManagerCore` 锁定账本、`RewardAccrualManager._penaltyLedger[user]` 才是 Reward 域真实状态。
+- `RewardView.DataPushed` 是首选镜像流，不是主账本 SSOT。
+- 若 RewardView push 因模块不可用、writer 权限问题、或链上模块地址缓存尚未 rollover 而失败，主流程仍然可能已经成功，这不构成账本错误。
+- 用户需要“即时知道结果”时，后端应直接读取链上真实状态或已确认事件，而不是等待镜像自然收敛。
+- 当镜像晚于主账本时，后端必须负责：
+  - 监听 `RewardViewPushFailed`
+  - 触发链下重试 / repair job
+  - 修复 `user_reward_cache`、报表和聚合读模型
+  - 对外明确标注“镜像修复中”，不得把它描述成“链上结果未生效”
+
+可操作口径：
+
+- 链上：保持 best-effort，不因为 RewardView 异常回滚 repay / liquidation / guarantee / penalty 主链路。
+- 链下：把 `RewardViewPushFailed` 视为可恢复观测缺口，而不是资金账本差错。
+- 前端/客服：若用户追问“是否成功”，应优先展示链上主账本结论；镜像视图晚到属于观测延迟，不属于业务失败。
+  | `CreditsSettled`（AICreditsVault 原生事件） | `AICreditsVault` | `(tenantId, settlementBatchId, userCount, totalCredits, merkleRoot, blockNumber)` | UPDATE `credit_settlement_batches` status | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+  | `DEPOSIT_PROCESSED` | `CollateralManager` (via VaultRouter DataPushed) | `(address user, address asset, uint256 amount, uint256 blockNumber)` | INSERT `ledger_entries`（user → collateral_pool） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+  | `FeeDistributed` | `FeeRouter` | `(address token, uint256 amount, ...)` | INSERT `ledger_entries`（多腿分账） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+
+**Reason 口径（链下分类）**：
+
+- `REWARD_BURNED.reason = "LiquidationPenaltyByGFM"`：清算惩罚（由 GFM 触发）
+- `REWARD_BURNED.reason = "LateRepayPenalty"`：逾期足额还款惩罚
+- 欠分抵扣不会产生 `REWARD_BURNED`，仅通过 `REWARD_PENALTY_LEDGER_UPDATED` 反映账本变化；
+  业务侧可按入账场景区分为 `PenaltyOffsetOnUnlock` 或 `PenaltyOffsetOnReward`。
 
 ### 4.4 链下数据库表结构扩展（镜像 + AI 计费，对齐 AI-Credits-Billing-Guide）
 
@@ -780,7 +853,7 @@ CREATE TABLE user_reward_cache (
   user_address    TEXT NOT NULL,
   rlp_balance     NUMERIC(38,18) NOT NULL DEFAULT 0,   -- 镜像奖励通证余额（SSOT=Registry[KEY_EASY_TOKEN]；字段名 rlp_balance 为历史命名）
   locked_points   NUMERIC(38,18) NOT NULL DEFAULT 0,   -- 镜像 _lockedPoints
-  penalty_debt    NUMERIC(38,18) NOT NULL DEFAULT 0,   -- 镜像 _penaltyLedger
+  penalty_debt    NUMERIC(38,18) NOT NULL DEFAULT 0,   -- 镜像 RewardAccrualManager._penaltyLedger
   user_level      SMALLINT NOT NULL DEFAULT 1,          -- 镜像 _userLevels
   privileges      TEXT,                                 -- 镜像 packed privileges
   last_sync_block BIGINT NOT NULL DEFAULT 0,
@@ -800,16 +873,16 @@ CREATE POLICY tenant_isolation_ai_requests ON ai_requests
 
 ### 4.5 链上/链下职责边界总结（速查表）
 
-| 功能 | 链上负责 | 链下负责 | 禁止 |
-|------|---------|---------|------|
-| **奖励通证铸造/销毁（EasyToken）** | RewardManagerCore → Reward Token（Registry[KEY_EASY_TOKEN]） | 镜像为 ledger_entries | 链下不得直接修改奖励通证余额 |
-| **积分锁定/释放** | RewardManagerCore per-order | 镜像 REWARD_EARNED/BURNED | 链下不得维护独立锁定状态 |
-| **负余额/欠分** | RewardManagerCore._penaltyLedger | 镜像 PENALTY_LEDGER_UPDATED | 链下不得维护独立 penalty 账本 |
-| **按次消费（Easy）** | EasyConsumption + EasyRecycleDistributor | 镜像 EASY_SPENT/EASY_RECYCLED_SPLIT | 链下不得维护独立消费记录 |
-| **AI Credits 购买** | AICreditsVault.buyCredits | 索引 CreditsPurchased → credit_purchases | — |
-| **AI 高频扣次** | **不在链上** | ai_requests + credit_balances | 禁止每次 AI 调用上链 burn 奖励通证（目标态 EasyToken；legacy: RLP） |
-| **AI 批量结算** | AICreditsVault.settleBatch | 生成 batch → 提交链上 | — |
-| **对账** | 链上为准 | 链下 → 链上对齐 | 链下余额不得高于链上余额 |
+| 功能                               | 链上负责                                                     | 链下负责                                       | 禁止                                                                |
+| ---------------------------------- | ------------------------------------------------------------ | ---------------------------------------------- | ------------------------------------------------------------------- |
+| **奖励通证铸造/销毁（EasyToken）** | RewardManagerCore → Reward Token（Registry[KEY_EASY_TOKEN]） | 镜像为 ledger_entries                          | 链下不得直接修改奖励通证余额                                        |
+| **积分锁定/释放**                  | RewardView earnState / RewardAccrualManager                  | 镜像 REWARD_EARN_STATE_UPDATED / REWARD_BURNED | 链下不得维护独立锁定状态                                            |
+| **负余额/欠分**                    | RewardAccrualManager.\_penaltyLedger                         | 镜像 PENALTY_LEDGER_UPDATED                    | 链下不得维护独立 penalty 账本                                       |
+| **按次消费（Easy）**               | EasyConsumption + EasyRecycleDistributor                     | 镜像 EASY_SPENT/EASY_RECYCLED_SPLIT            | 链下不得维护独立消费记录                                            |
+| **AI Credits 购买**                | AICreditsVault.buyCredits                                    | 索引 CreditsPurchased → credit_purchases       | —                                                                   |
+| **AI 高频扣次**                    | **不在链上**                                                 | ai_requests + credit_balances                  | 禁止每次 AI 调用上链 burn 奖励通证（目标态 EasyToken；legacy: RLP） |
+| **AI 批量结算**                    | AICreditsVault.settleBatch                                   | 生成 batch → 提交链上                          | —                                                                   |
+| **对账**                           | 链上为准                                                     | 链下 → 链上对齐                                | 链下余额不得高于链上余额                                            |
 
 ---
 
@@ -911,17 +984,17 @@ easifi-monorepo-wt/
 
 ### 5.2 技术选型
 
-| 层级 | 选型 | 理由 |
-|------|------|------|
-| **SaaS 应用层** | **现有 `api-server`（Express + Prisma）** | 已有完整的路由/中间件/账本，修正即可上线 |
-| **AI 服务层** | **现有 `ai-services`** | 67 个服务文件、RAG/Embedding/向量搜索、Worker 全部保留 |
-| **统一幂等层** | **新增 `packages/shared`** | api-server 和 ai-services 共同引用，消除幂等分叉 |
-| **链上索引** | **新增 Ponder** | TypeScript；EVM 原生；比 The Graph 快 10x |
-| **数据库** | PostgreSQL 16 | RLS；分区表；JSONB；现有系统已用 |
-| **缓存** | Redis 7 | 幂等锁；余额缓存；限流；现有系统已用 |
-| **ORM** | Prisma | 类型安全；迁移管理；现有系统已用 |
-| **计费** | **新增 Stripe 集成** | 订阅/Webhook/发票；在 api-server 中新增路由 |
-| **区块链交互** | ethers.js v6 | 与 contracts/ 共享 TypeChain/ABI |
+| 层级            | 选型                                      | 理由                                                   |
+| --------------- | ----------------------------------------- | ------------------------------------------------------ |
+| **SaaS 应用层** | **现有 `api-server`（Express + Prisma）** | 已有完整的路由/中间件/账本，修正即可上线               |
+| **AI 服务层**   | **现有 `ai-services`**                    | 67 个服务文件、RAG/Embedding/向量搜索、Worker 全部保留 |
+| **统一幂等层**  | **新增 `packages/shared`**                | api-server 和 ai-services 共同引用，消除幂等分叉       |
+| **链上索引**    | **新增 Ponder**                           | TypeScript；EVM 原生；比 The Graph 快 10x              |
+| **数据库**      | PostgreSQL 16                             | RLS；分区表；JSONB；现有系统已用                       |
+| **缓存**        | Redis 7                                   | 幂等锁；余额缓存；限流；现有系统已用                   |
+| **ORM**         | Prisma                                    | 类型安全；迁移管理；现有系统已用                       |
+| **计费**        | **新增 Stripe 集成**                      | 订阅/Webhook/发票；在 api-server 中新增路由            |
+| **区块链交互**  | ethers.js v6                              | 与 contracts/ 共享 TypeChain/ABI                       |
 
 ---
 
@@ -929,52 +1002,53 @@ easifi-monorepo-wt/
 
 ### 6.1 为什么不推倒重来？
 
-| 维度 | 推倒重来（新项目） | 原地修正（本方案） |
-|------|------------------|------------------|
-| **已有代码复用率** | 0%（全部重写） | ~80%（只改幂等 + 账本隔离） |
-| **预计工期** | 5–6 周 | **2.5–3 周** |
-| **风险** | 高（新架构未经验证） | 低（核心业务逻辑已验证） |
-| **AI 服务** | 需整体迁移（67 个文件） | **零迁移**（原地可用） |
-| **账本引擎** | 需重写（~1,454 行） | **仅修正 2 个点**（tenant_id + 幂等 Key） |
-| **中间件/鉴权** | 需重写 | **直接复用** |
+| 维度               | 推倒重来（新项目）      | 原地修正（本方案）                        |
+| ------------------ | ----------------------- | ----------------------------------------- |
+| **已有代码复用率** | 0%（全部重写）          | ~80%（只改幂等 + 账本隔离）               |
+| **预计工期**       | 5–6 周                  | **2.5–3 周**                              |
+| **风险**           | 高（新架构未经验证）    | 低（核心业务逻辑已验证）                  |
+| **AI 服务**        | 需整体迁移（67 个文件） | **零迁移**（原地可用）                    |
+| **账本引擎**       | 需重写（~1,454 行）     | **仅修正 2 个点**（tenant_id + 幂等 Key） |
+| **中间件/鉴权**    | 需重写                  | **直接复用**                              |
 
 ### 6.2 现有系统已具备的能力（无需重写）
 
-| 能力 | 现有位置 | 状态 |
-|------|---------|------|
-| 复式记账引擎 | `api-server/src/services/ledger/LedgerService.ts` | ✅ 核心逻辑完整，修正 tenant_id 即可 |
-| 多租户 RLS 中间件 | `api-server/src/middleware/tenantDbSession.ts` | ✅ 可直接复用 |
-| 租户隔离中间件 | `api-server/src/middleware/tenantIsolation.ts` | ✅ 可直接复用 |
-| 租户配额管控 | `api-server/src/middleware/tenantQuota.ts` | ✅ 可直接复用 |
-| JWT 鉴权 | `api-server/src/middleware/` | ✅ 可直接复用 |
-| Easy 消费（含平台镜像） | `api-server/src/usecases/reward/ConsumeEasyWithPlatformMirror.ts` | ⚠️ 需修正幂等 Key |
-| 计费账单 | `api-server/src/services/billing/billingStatementService.ts` | ⚠️ 需从统一 usage_detail 聚合 |
-| RAG/Embedding/向量搜索 | `ai-services/src/services/` (67 个文件) | ✅ 可直接复用 |
-| AI 用量记录 | `ai-services/src/services/quota/usageLedger.ts` | ⚠️ 需替换幂等表 |
-| 向量配额限流 | `ai-services/src/services/quota/vectorQuotaGuard.ts` | ✅ Redis key 加租户前缀即可 |
-| 后台 Worker（Redis Stream） | `ai-services/src/workers/` | ✅ 可直接复用 |
-| 数据采集器 | `ai-services/src/collectors/` | ✅ 可直接复用 |
-| 成本预测 | `ai-services/src/services/forecasting/costForecastService.ts` | ✅ 可直接复用 |
+| 能力                        | 现有位置                                                          | 状态                                 |
+| --------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
+| 复式记账引擎                | `api-server/src/services/ledger/LedgerService.ts`                 | ✅ 核心逻辑完整，修正 tenant_id 即可 |
+| 多租户 RLS 中间件           | `api-server/src/middleware/tenantDbSession.ts`                    | ✅ 可直接复用                        |
+| 租户隔离中间件              | `api-server/src/middleware/tenantIsolation.ts`                    | ✅ 可直接复用                        |
+| 租户配额管控                | `api-server/src/middleware/tenantQuota.ts`                        | ✅ 可直接复用                        |
+| JWT 鉴权                    | `api-server/src/middleware/`                                      | ✅ 可直接复用                        |
+| Easy 消费（含平台镜像）     | `api-server/src/usecases/reward/ConsumeEasyWithPlatformMirror.ts` | ⚠️ 需修正幂等 Key                    |
+| 计费账单                    | `api-server/src/services/billing/billingStatementService.ts`      | ⚠️ 需从统一 usage_detail 聚合        |
+| RAG/Embedding/向量搜索      | `ai-services/src/services/` (67 个文件)                           | ✅ 可直接复用                        |
+| AI 用量记录                 | `ai-services/src/services/quota/usageLedger.ts`                   | ⚠️ 需替换幂等表                      |
+| 向量配额限流                | `ai-services/src/services/quota/vectorQuotaGuard.ts`              | ✅ Redis key 加租户前缀即可          |
+| 后台 Worker（Redis Stream） | `ai-services/src/workers/`                                        | ✅ 可直接复用                        |
+| 数据采集器                  | `ai-services/src/collectors/`                                     | ✅ 可直接复用                        |
+| 成本预测                    | `ai-services/src/services/forecasting/costForecastService.ts`     | ✅ 可直接复用                        |
 
 ### 6.3 需要新增的组件
 
-| 组件 | 用途 | 实现方式 |
-|------|------|---------|
-| **`packages/shared`** | 统一幂等 Key + Guard | 新建 npm workspace 包，api-server 和 ai-services 共同引用 |
-| **Ponder 索引服务** | 链上 EVM 事件索引 | `npm create ponder@latest ponder-indexer`；TypeScript；支持 Arbitrum |
-| **Stripe 路由** | 订阅计费 + Webhook | 在 api-server 中新增 `src/routes/stripe.ts` |
-| **Admin Dashboard** | 租户/用量/链上数据管理 | 后期可用 React Admin 或轻量 UI，初期用 API + 脚本 |
+| 组件                  | 用途                   | 实现方式                                                             |
+| --------------------- | ---------------------- | -------------------------------------------------------------------- |
+| **`packages/shared`** | 统一幂等 Key + Guard   | 新建 npm workspace 包，api-server 和 ai-services 共同引用            |
+| **Ponder 索引服务**   | 链上 EVM 事件索引      | `npm create ponder@latest ponder-indexer`；TypeScript；支持 Arbitrum |
+| **Stripe 路由**       | 订阅计费 + Webhook     | 在 api-server 中新增 `src/routes/stripe.ts`                          |
+| **Admin Dashboard**   | 租户/用量/链上数据管理 | 后期可用 React Admin 或轻量 UI，初期用 API + 脚本                    |
 
 ### 6.4 Ponder（链上索引层，新增）
 
-| 属性 | 值 |
-|------|---|
-| 仓库 | https://github.com/ponder-sh/ponder |
-| Stars | ~1,000+ |
-| 语言 | TypeScript |
-| 许可 | MIT |
+| 属性  | 值                                  |
+| ----- | ----------------------------------- |
+| 仓库  | https://github.com/ponder-sh/ponder |
+| Stars | ~1,000+                             |
+| 语言  | TypeScript                          |
+| 许可  | MIT                                 |
 
 **核心能力**：
+
 - 原生 EVM 事件索引（支持 Arbitrum）
 - 比 The Graph 快 10x（冷启动 37s）
 - 端到端类型安全（与 TypeChain 一致）
@@ -982,17 +1056,18 @@ easifi-monorepo-wt/
 - 自托管（Docker/ECS/EKS）
 
 **与 contracts/ 的对接**：
+
 - 直接复用 TypeChain ABI（零转换成本）
 - 配置 `DataPushed` 事件索引即可消费所有业务数据
 - 支持多合约、多网络配置
 
 ### 6.5 BoxyHQ SaaS Starter Kit（后期企业 SSO，备选）
 
-| 属性 | 值 |
-|------|---|
-| 仓库 | https://github.com/boxyhq/saas-starter-kit |
-| Stars | 4,700 |
-| 能力 | SAML SSO / SCIM / 企业身份管理 |
+| 属性  | 值                                         |
+| ----- | ------------------------------------------ |
+| 仓库  | https://github.com/boxyhq/saas-starter-kit |
+| Stars | 4,700                                      |
+| 能力  | SAML SSO / SCIM / 企业身份管理             |
 
 **定位**：Phase 3/4 按需引入，不影响初期上线。
 
@@ -1005,19 +1080,20 @@ easifi-monorepo-wt/
 
 ### Phase 1: 统一幂等层 + 账本隔离修正（Day 1–5）
 
-| 日 | 任务 | 涉及文件/操作 | 产出 |
-|----|------|--------------|------|
-| D1 | **创建 `packages/shared` 共享包** | 新建 `packages/shared/package.json`、`tsconfig.json`；写入 `src/idempotency/IdempotencyKey.ts` + `IdempotencyGuard.ts`（本文第 2 节代码）；在根 `package.json` 添加 workspace 配置 | `IdempotencyKey` + `IdempotencyGuard` 模块可用 |
-| D2 | **修正 `accounts` 表加 `tenant_id`** | `api-server/prisma/schema.prisma`：修改 `Account` model 主键为 `(tenant_id, account_id, currency)`；新建 migration：`npx prisma migrate dev --name add_tenant_id_to_accounts` | Prisma migration 可执行 |
-| D2 | **修正 `ledger_entries` 表加 `tenant_id` + 统一幂等 Key** | `api-server/prisma/schema.prisma`：修改 `LedgerEntry` model 添加 `tenant_id` + `idempotency_key` 字段，UNIQUE 改为 `(tenant_id, idempotency_key)` | 账本隔离修正完成 |
-| D3 | **新建 `idempotency_registry` 表 + `tenants` 表** | `api-server/prisma/schema.prisma`：新增 `Tenant` 和 `IdempotencyRegistry` model（本文第 3.2 节 Schema） | 统一幂等注册表可用 |
-| D3 | **新建 RLS 策略** | 手写 SQL migration（Prisma raw SQL）：对 `accounts`、`ledger_entries` 启用 RLS，策略 `USING (tenant_id = current_setting('app.tenant_id', true))` | RLS 隔离生效 |
-| D4 | **重写 `api-server/src/lib/idempotency.ts`** | 废弃旧的 `IdempotencyKeyRegistry`（仅格式校验），替换为 `import { IdempotencyGuard, IdempotencyKeys } from '@shared/idempotency'` + 三级防御实现 | 幂等检查从 Day 1 生效 |
-| D4 | **修正 `LedgerService.ts`** | `api-server/src/services/ledger/LedgerService.ts`：① `postDoubleEntryWithClient` 参数加 `tenantId`；② `entry_id` 替换为 `idempotency_key`（来自 `IdempotencyKey.value`）；③ 事务开头加 `SET app.tenant_id` | 复式记账租户隔离生效 |
-| D5 | **修正 `ConsumeEasyWithPlatformMirror.ts`** | `api-server/src/usecases/reward/`：① `entryId` 替换为 `IdempotencyKeys.rewardConsume(userId, requestId).value`；② 去掉 `catch 23505` 逻辑，改为事务前 `IdempotencyGuard.check()` | Easy 消费幂等修正完成 |
-| D5 | **单测覆盖** | 新增/修改 `api-server/tests/idempotency.test.ts`、`api-server/tests/ledger-tenant.test.ts` | 所有修正项测试通过 |
+| 日  | 任务                                                      | 涉及文件/操作                                                                                                                                                                                              | 产出                                           |
+| --- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| D1  | **创建 `packages/shared` 共享包**                         | 新建 `packages/shared/package.json`、`tsconfig.json`；写入 `src/idempotency/IdempotencyKey.ts` + `IdempotencyGuard.ts`（本文第 2 节代码）；在根 `package.json` 添加 workspace 配置                         | `IdempotencyKey` + `IdempotencyGuard` 模块可用 |
+| D2  | **修正 `accounts` 表加 `tenant_id`**                      | `api-server/prisma/schema.prisma`：修改 `Account` model 主键为 `(tenant_id, account_id, currency)`；新建 migration：`npx prisma migrate dev --name add_tenant_id_to_accounts`                              | Prisma migration 可执行                        |
+| D2  | **修正 `ledger_entries` 表加 `tenant_id` + 统一幂等 Key** | `api-server/prisma/schema.prisma`：修改 `LedgerEntry` model 添加 `tenant_id` + `idempotency_key` 字段，UNIQUE 改为 `(tenant_id, idempotency_key)`                                                          | 账本隔离修正完成                               |
+| D3  | **新建 `idempotency_registry` 表 + `tenants` 表**         | `api-server/prisma/schema.prisma`：新增 `Tenant` 和 `IdempotencyRegistry` model（本文第 3.2 节 Schema）                                                                                                    | 统一幂等注册表可用                             |
+| D3  | **新建 RLS 策略**                                         | 手写 SQL migration（Prisma raw SQL）：对 `accounts`、`ledger_entries` 启用 RLS，策略 `USING (tenant_id = current_setting('app.tenant_id', true))`                                                          | RLS 隔离生效                                   |
+| D4  | **重写 `api-server/src/lib/idempotency.ts`**              | 废弃旧的 `IdempotencyKeyRegistry`（仅格式校验），替换为 `import { IdempotencyGuard, IdempotencyKeys } from '@shared/idempotency'` + 三级防御实现                                                           | 幂等检查从 Day 1 生效                          |
+| D4  | **修正 `LedgerService.ts`**                               | `api-server/src/services/ledger/LedgerService.ts`：① `postDoubleEntryWithClient` 参数加 `tenantId`；② `entry_id` 替换为 `idempotency_key`（来自 `IdempotencyKey.value`）；③ 事务开头加 `SET app.tenant_id` | 复式记账租户隔离生效                           |
+| D5  | **修正 `ConsumeEasyWithPlatformMirror.ts`**               | `api-server/src/usecases/reward/`：① `entryId` 替换为 `IdempotencyKeys.rewardConsume(userId, requestId).value`；② 去掉 `catch 23505` 逻辑，改为事务前 `IdempotencyGuard.check()`                           | Easy 消费幂等修正完成                          |
+| D5  | **单测覆盖**                                              | 新增/修改 `api-server/tests/idempotency.test.ts`、`api-server/tests/ledger-tenant.test.ts`                                                                                                                 | 所有修正项测试通过                             |
 
 **验收标准**：
+
 - [ ] `IdempotencyKey.build()` 编译期类型校验通过
 - [ ] 同一 `idempotency_key` 的两次 POST 请求，第二次返回 `{ isIdempotentHit: true }`
 - [ ] 不同 tenant 的 `user:123` 指向不同的 `accounts` 行
@@ -1026,19 +1102,20 @@ easifi-monorepo-wt/
 
 ### Phase 2: ai-services 幂等统一 + Ponder 链上索引 + Stripe（Day 6–12）
 
-| 日 | 任务 | 涉及文件/操作 | 产出 |
-|----|------|--------------|------|
-| D6 | **修正 `aiGrantClient.ts` 跨服务调用** | `ai-services/src/services/rewards/aiGrantClient.ts`：① 引入 `@shared/idempotency`；② HTTP POST Header 加 `X-Idempotency-Key: IdempotencyKeys.aiUsage(tenantId, userId, category, requestId).value`；③ 去掉自行构造 requestId 的逻辑 | 跨服务幂等 Key 透传 |
-| D6 | **修正 `usageLedger.ts` 幂等机制** | `ai-services/src/services/quota/usageLedger.ts`：① 用 `IdempotencyKeys.aiUsage(...)` 替换旧的 `(tenant_id, request_id, category)` 组合键；② 用 `idempotency_registry` 表替代 `usage_idempotency` 表 | ai-services 幂等统一 |
-| D7 | **修正 `idempotencyService.ts`** | `ai-services/src/services/idempotencyService.ts`：① Redis key 格式改为统一 `IdempotencyKey.value`；② 保留 TTL 机制但与 DB 层对齐 | 信号去重也统一 |
-| D7 | **api-server 接收端适配** | `api-server/src/routes/rewards.ts`（或对应 controller）：① 从 `X-Idempotency-Key` Header 读取 key；② 直接用于 `LedgerService.postDoubleEntry()` 的 `idempotencyKey` 参数 | api-server 侧接收统一 |
-| D8 | **初始化 Ponder 索引服务** | 在 monorepo 根目录：`npm create ponder@latest ponder-indexer`；配置 `ponder.config.ts`（本文第 8.1 节）；连接 Arbitrum RPC | Ponder 冷启动成功 |
-| D9 | **实现 `DataPushed` 事件索引** | `ponder-indexer/src/index.ts`：实现 DEPOSIT_PROCESSED、REWARD_EARNED 等事件的索引函数（本文第 8.2 节） | PostgreSQL 可查询链上事件 |
-| D10 | **新增 Stripe 路由** | `api-server/src/routes/stripe.ts`（新增）：① Stripe 产品/价格配置；② Webhook 处理（`subscription.created/updated/deleted`）；③ 幂等处理（Stripe event ID 作为 `IdempotencyKeys.billingStatement(...)` 的 nonce） | 订阅计费可用 |
-| D11 | **AI Credits 余额同步** | `api-server/src/services/` 新增 `chainSync.ts`：链上 `AICreditsVault.creditsBalance()` → Redis `credits_balance:{tenantId}:{userId}`；定时同步（cron job） | 按次扣费可用 |
-| D12 | **集成测试** | 新增/修改 e2e 测试：链上事件 → Ponder 索引 → 账本记录 → 对账验证；跨服务幂等 Key 端到端 | E2E 测试通过 |
+| 日  | 任务                                   | 涉及文件/操作                                                                                                                                                                                                                       | 产出                      |
+| --- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| D6  | **修正 `aiGrantClient.ts` 跨服务调用** | `ai-services/src/services/rewards/aiGrantClient.ts`：① 引入 `@shared/idempotency`；② HTTP POST Header 加 `X-Idempotency-Key: IdempotencyKeys.aiUsage(tenantId, userId, category, requestId).value`；③ 去掉自行构造 requestId 的逻辑 | 跨服务幂等 Key 透传       |
+| D6  | **修正 `usageLedger.ts` 幂等机制**     | `ai-services/src/services/quota/usageLedger.ts`：① 用 `IdempotencyKeys.aiUsage(...)` 替换旧的 `(tenant_id, request_id, category)` 组合键；② 用 `idempotency_registry` 表替代 `usage_idempotency` 表                                 | ai-services 幂等统一      |
+| D7  | **修正 `idempotencyService.ts`**       | `ai-services/src/services/idempotencyService.ts`：① Redis key 格式改为统一 `IdempotencyKey.value`；② 保留 TTL 机制但与 DB 层对齐                                                                                                    | 信号去重也统一            |
+| D7  | **api-server 接收端适配**              | `api-server/src/routes/rewards.ts`（或对应 controller）：① 从 `X-Idempotency-Key` Header 读取 key；② 直接用于 `LedgerService.postDoubleEntry()` 的 `idempotencyKey` 参数                                                            | api-server 侧接收统一     |
+| D8  | **初始化 Ponder 索引服务**             | 在 monorepo 根目录：`npm create ponder@latest ponder-indexer`；配置 `ponder.config.ts`（本文第 8.1 节）；连接 Arbitrum RPC                                                                                                          | Ponder 冷启动成功         |
+| D9  | **实现 `DataPushed` 事件索引**         | `ponder-indexer/src/index.ts`：实现 DEPOSIT_PROCESSED、EASY_MINTED、REWARD_PENALTY_LEDGER_UPDATED 等事件的索引函数（本文第 8.2 节）                                                                                                 | PostgreSQL 可查询链上事件 |
+| D10 | **新增 Stripe 路由**                   | `api-server/src/routes/stripe.ts`（新增）：① Stripe 产品/价格配置；② Webhook 处理（`subscription.created/updated/deleted`）；③ 幂等处理（Stripe event ID 作为 `IdempotencyKeys.billingStatement(...)` 的 nonce）                    | 订阅计费可用              |
+| D11 | **AI Credits 余额同步**                | `api-server/src/services/` 新增 `chainSync.ts`：链上 `AICreditsVault.creditsBalance()` → Redis `credits_balance:{tenantId}:{userId}`；定时同步（cron job）                                                                          | 按次扣费可用              |
+| D12 | **集成测试**                           | 新增/修改 e2e 测试：链上事件 → Ponder 索引 → 账本记录 → 对账验证；跨服务幂等 Key 端到端                                                                                                                                             | E2E 测试通过              |
 
 **验收标准**：
+
 - [ ] `ai-services` 到 `api-server` 的 grant 请求使用统一 `X-Idempotency-Key` Header
 - [ ] 同一 AI 请求重试不产生重复扣费（端到端验证）
 - [ ] `usage_idempotency` 表不再有新写入（已切换到 `idempotency_registry`）
@@ -1048,16 +1125,17 @@ easifi-monorepo-wt/
 
 ### Phase 3: AWS 部署 + 生产加固（Day 13–21）
 
-| 日 | 任务 | 涉及文件/操作 | 产出 |
-|----|------|--------------|------|
-| D13-14 | **Docker 化所有服务** | 新建/更新各服务 `Dockerfile`：`api-server/Dockerfile`、`ai-services/Dockerfile`、`ponder-indexer/Dockerfile`；新建 `infrastructure/docker-compose.yml`（dev 环境）+ `docker-compose.production.yml` | `docker-compose up` 一键启动 |
-| D15-16 | **AWS 基础设施** | 新建 `infrastructure/terraform/`：ECS Fargate（api-server × 2 + ai-services × 1 + Ponder × 1）、RDS PostgreSQL、ElastiCache Redis、ALB、安全组 | Terraform apply 可执行 |
-| D17-18 | **CI/CD Pipeline** | `.github/workflows/deploy.yml`：test → build → push ECR → ECS rolling deploy（本文第 11.1 节） | Push to main 自动部署 |
-| D19 | **监控 + 告警** | CloudWatch Metrics + Dashboard；幂等命中率、账本延迟、索引器落后、对账差异等告警规则（本文第 11.2 节） | Dashboard 可观测 |
-| D20 | **安全加固** | WAF 配置；Secrets Manager 管理 DB/Redis/Stripe/RPC 密钥；VPC 内网通信；安全组最小权限 | 安全审计通过 |
-| D21 | **对账脚本 + 灰度发布 + 回退预案** | 新增 `scripts/recon/` 对账脚本（本文第 12 节）；ECS 蓝绿部署配置；数据库 migration 回退方案 | 生产就绪 |
+| 日     | 任务                               | 涉及文件/操作                                                                                                                                                                                       | 产出                         |
+| ------ | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| D13-14 | **Docker 化所有服务**              | 新建/更新各服务 `Dockerfile`：`api-server/Dockerfile`、`ai-services/Dockerfile`、`ponder-indexer/Dockerfile`；新建 `infrastructure/docker-compose.yml`（dev 环境）+ `docker-compose.production.yml` | `docker-compose up` 一键启动 |
+| D15-16 | **AWS 基础设施**                   | 新建 `infrastructure/terraform/`：ECS Fargate（api-server × 2 + ai-services × 1 + Ponder × 1）、RDS PostgreSQL、ElastiCache Redis、ALB、安全组                                                      | Terraform apply 可执行       |
+| D17-18 | **CI/CD Pipeline**                 | `.github/workflows/deploy.yml`：test → build → push ECR → ECS rolling deploy（本文第 11.1 节）                                                                                                      | Push to main 自动部署        |
+| D19    | **监控 + 告警**                    | CloudWatch Metrics + Dashboard；幂等命中率、账本延迟、索引器落后、对账差异等告警规则（本文第 11.2 节）                                                                                              | Dashboard 可观测             |
+| D20    | **安全加固**                       | WAF 配置；Secrets Manager 管理 DB/Redis/Stripe/RPC 密钥；VPC 内网通信；安全组最小权限                                                                                                               | 安全审计通过                 |
+| D21    | **对账脚本 + 灰度发布 + 回退预案** | 新增 `scripts/recon/` 对账脚本（本文第 12 节）；ECS 蓝绿部署配置；数据库 migration 回退方案                                                                                                         | 生产就绪                     |
 
 **验收标准**：
+
 - [ ] 2 个 ECS Task 同时处理请求，幂等无冲突
 - [ ] RDS 故障转移后服务自动恢复
 - [ ] 链上/链下对账差异 < 0.01%
@@ -1066,32 +1144,66 @@ easifi-monorepo-wt/
 
 ### 工期对比
 
-| 方案 | 总工期 | 原因 |
-|------|--------|------|
-| ~~推倒重来（Open SaaS）~~ | ~~4–5 周~~ | ~~需重新搭建全部业务逻辑~~ |
-| **原地修正（本方案）** | **2.5–3 周** | 只修幂等 + 隔离 + 新增 Ponder/Stripe |
+| 方案                      | 总工期       | 原因                                 |
+| ------------------------- | ------------ | ------------------------------------ |
+| ~~推倒重来（Open SaaS）~~ | ~~4–5 周~~   | ~~需重新搭建全部业务逻辑~~           |
+| **原地修正（本方案）**    | **2.5–3 周** | 只修幂等 + 隔离 + 新增 Ponder/Stripe |
 
 ---
 
 ## 8. 区块链集成层
+
+### 8.0.A 已反查 `lending-backend` / `lending-frontend` 后的接口漂移结论
+
+本节补充“按当前代码仓实际命中”的改造结论，便于后端和联调同学快速判断优先级。
+
+#### 后端 `lending-backend/src` 反查结果
+
+- **未发现**旧 RewardView 读接口调用：在 `lending-backend/src` 下没有搜索到 `getUserConsumptionsWithMeta`、`getUserLastConsumptionWithMeta`、`getUserPrivilegePackedWithMeta` 等已删除接口的实际调用。
+- **发现 1 处旧 Registry key 包装**：`src/services/frontend-migrated/config/moduleKeys.ts` 仍导出 `KEY_REWARD_CONSUMPTION = moduleKey('REWARD_CONSUMPTION')`。
+
+这说明后端当前的主要风险不在 RewardView ABI，而在“与前端共享/迁移层仍保留旧 key 名称”，会导致：
+
+- SSR 或后端代理读链时解析到错误模块 key
+- 与当前合约生成文件 `frontend-config/moduleKeys.ts` 的常量口径不一致
+- 前后端联调时，一个走 `EASY_CONSUMPTION`，一个还走 `REWARD_CONSUMPTION`
+
+#### 后端必须执行的改造项
+
+| 优先级 | 文件                                                                  | 当前问题                                                          | 必须改成什么                                                                                                                   |
+| ------ | --------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **P0** | `lending-backend/src/services/frontend-migrated/config/moduleKeys.ts` | 仍声明 `KEY_REWARD_CONSUMPTION = moduleKey('REWARD_CONSUMPTION')` | 改为 `KEY_EASY_CONSUMPTION = moduleKey('EASY_CONSUMPTION')`；若存在兼容期，旧名称只能保留为 deprecated alias，不得作为默认导出 |
+| **P1** | 后端所有引用该模块 key 的调用点                                       | 未来若继续 import 旧常量，会造成 Registry 解析不一致              | 统一替换为 `KEY_EASY_CONSUMPTION`，并与前端共享同一份 module key SSOT                                                          |
+
+#### 联调结论
+
+- **前端是真正存在旧接口调用的一侧**：旧 RewardView ABI、旧字段映射、旧消费模块 key 都在前端实码中命中。
+- **后端当前更像“配置漂移”而不是“接口漂移”**：没有发现旧 RewardView 读方法的直接调用，但保留旧 key 依然会在代理读链、SSR 或共享 SDK 场景里埋雷。
+- **联调优先级**：先让前端完成 RewardView ABI 迁移，再让后端统一 `EASY_CONSUMPTION` key，最后再做端到端回归。
+
+补充：与价格模块相关的联调现在也应统一使用 `KEY_PRICE_UPDATER` 作为代码层主名；若共享 SDK 仍暴露 `COINGECKO_PRICE_UPDATER` 字样，应一并列入兼容层清理清单。
 
 ### 8.0 当前落地情况（基于 `lending-backend` / `lending-frontend`）
 
 本节的“目标态”描述了 **链下索引 + 数据库 + 分页 API**（浏览器能力）的理想形态。
 在你们当前的实现中（本机目录：`/Volumes/AI-hosts/EasiFi-workspace/lending-backend`、`/Volumes/AI-hosts/EasiFi-workspace/lending-frontend`），已经能看到以下**最小闭环能力**：
 
-1) **数据库 + 读模型表**（Prisma）：
+1. **数据库 + 读模型表**（Prisma）：
+
 - 后端已包含 `PortfolioPosition/PortfolioAsset/PortfolioSummary` 等读模型，用于承载“用户维度的仓位快照与历史”。
 
-2) **分页/查询 API**（Explorer-like 的必要条件之一）：
+2. **分页/查询 API**（Explorer-like 的必要条件之一）：
+
 - 后端已提供 `GET /api/portfolio/history?user&limit&offset` 等分页接口（DB 查询）。
 - 前端已在 `src/lib/portfolio/fetchers.ts` 使用上述接口（positions/history/refresh），说明“DB + 分页 API”的通路已打通。
 
-3) **链上 → 链下同步的可运行形态（cron/worker 雏形）**：
+3. **链上 → 链下同步的可运行形态（cron/worker 雏形）**：
+
 - 后端已存在链上同步服务（如 `src/services/chainSync.ts`），可用 ethers provider 读取链上数据并写入 Redis/DB。
 - 这证明：你们已经具备在后端进程中接入 RPC、做限流、做周期性同步的基础设施。
 
-4) **失败可观测 + 手动/异步重试入口**（与本仓库的 B 类 View cache 失败事件闭环一致）：
+4. **失败可观测 + 手动/异步重试入口**（与本仓库的 B 类 View cache 失败事件闭环一致）：
+
 - 后端已存在 `cache-retry` 相关路由（如 `POST /api/cache-retry/request`、`GET /api/cache-retry/status`），用于把“需要重试的链上视图/缓存更新”入队。
 
 > 结论：当前实现已经具备“**浏览器能力的底座**”（DB + API + 分页 + 基础链上读取/同步 + 重试入口）。
@@ -1101,6 +1213,18 @@ easifi-monorepo-wt/
 
 - **强一致、用户自查（钱包直连）**：仍建议优先走链上 View（带 `isValid/blockNumber/version`），例如 Position/Health、LoanNFTView 枚举 + `getLoanOrder(orderId)`。
 - **历史/搜索/跨用户聚合**：必须走后端读模型 API（分页），避免前端 RPC 扫链与速率限制。
+
+### 8.0.1.2 清算前必做（后端 keeper 侧）
+
+> 口径：链上不会自动刷新价格，清算前必须由后端完成新鲜度校验与刷新。
+
+- **价格新鲜度校验**：对订单涉及的 collateral/debt 资产读取 `PriceOracle.getPriceUpdateBlock` 或 `getAssetConfig`。
+- **强制刷新**：若 `block.number - updateBlock > maxPriceAgeBlocks`，先调用价格更新器刷新价格；失败则跳过该订单并告警。
+- **口径建议（团队需确认语义取舍）**：清算/风险关键路径遇到 stale/invalid price 时，长期更可控的策略是“显式 revert + 可识别错误”，而不是静默 0 化；否则 keeper 的“漏刷/断更”更容易被误判为“用户无抵押/无风险”。
+- **权限检查**：keeper EOA 具备 `ACTION_LIQUIDATE`；`SettlementManager/LiquidationManager` 具备 `ACTION_LIQUIDATE` + `VIEW_*`；`LiquidationManager` 具备 `ACTION_DEPOSIT`。
+- **失败预警**：对 `PriceOracle__StalePrice`、`SettlementManager__NotLiquidatable`、`MissingRole`、`CacheUpdateFailed` 建立告警与重试队列（含 orderId/asset/blockNumber）。
+
+> 可执行回归参考：见 [scripts/e2e/e2e-fork-arbitrum-stale-price-keeper.ts](scripts/e2e/e2e-fork-arbitrum-stale-price-keeper.ts)（基于 `maxPriceAgeBlocks` 的相对 staleness + keeper 刷新）。
 
 ### 8.0.1.1 View 系统“浏览器直读”时，后端需要补齐什么？（以 `LoanNFTView.sol` 为例）
 
@@ -1119,9 +1243,9 @@ easifi-monorepo-wt/
 
 若你们希望把“读链上 View”也纳入后端日志、统一速率限制或 SSR，需要注意两件事：
 
-1) **`eth_call` 的 `from` 可被伪造**：节点允许任意设置 `from`，它不是签名，不等于“用户已授权”。
+1. **`eth_call` 的 `from` 可被伪造**：节点允许任意设置 `from`，它不是签名，不等于“用户已授权”。
    - 这意味着：后端如果提供 `/api/view/*?user=0xVictim` 这类接口，而不做强鉴权，攻击者可以把 `from=user` 伪造为 Victim，从而绕过 Scheme U 的“self-read”门槛。
-2) 因此后端代理用户私域数据时必须二选一（推荐第 1 个）：
+2. 因此后端代理用户私域数据时必须二选一（推荐第 1 个）：
    - **方案 1（推荐）**：只对“已认证为该地址的用户”开放代理读取（例如 SIWE / 钱包签名登录后绑定 session），并强制 `req.userAddress === query.user`。
    - **方案 2（更保守）**：后端不代理任何 Scheme U 用户私域 View，只代理 system-level View（后端 own signer 持有 `VIEW_SYSTEM_DATA/VIEW_PRICE_DATA/...`）。用户私域仍走前端直连。
 
@@ -1153,12 +1277,24 @@ async function getUserLoansViaViewGateway(params: {
     throw new Error("INVALID_LIMIT");
   }
 
-  const loanNftView = new ethers.Contract(params.loanNftViewAddr, LOAN_NFT_VIEW_ABI, params.provider);
+  const loanNftView = new ethers.Contract(
+    params.loanNftViewAddr,
+    LOAN_NFT_VIEW_ABI,
+    params.provider,
+  );
 
-  // 关键：eth_call 使用 from=user（这不是签名，所以必须配合上面的鉴权）
-  return loanNftView.getUserLoansPaginated(params.user, params.offset, params.limit, { from: params.user });
+  // 关键：Scheme U 仍由链上按 msg.sender / from 判定；
+  // 若服务端是代用户发起 eth_call，则必须显式携带 from=user，且前面已完成应用层鉴权。
+  return loanNftView.getUserLoansPaginated(
+    params.user,
+    params.offset,
+    params.limit,
+    { from: params.user },
+  );
 }
 ```
+
+补充：`LoanNFTView.getUserLoansPaginated(...)` 只返回 `(tokenId, orderId, status)` 的分页枚举；订单详情必须再通过 `LendingEngineView.getLoanOrder(orderId)` 取回。当前 `LendingEngineView` 允许 borrower、lender、当前 LoanNFT 持有人，或具备 `VIEW_USER_DATA` / admin 的调用者读取订单详情。
 
 #### D) 什么时候必须走后端读模型（Explorer API），不要试图用 View 解决？
 
@@ -1183,12 +1319,14 @@ async function getUserLoansViaViewGateway(params: {
 
 **在 lending-backend 内部常驻两类任务**，并与现有路由体系/幂等体系完全一致：
 
-1) **Indexer（事件索引）**：负责历史与时间线（浏览器能力）
+1. **Indexer（事件索引）**：负责历史与时间线（浏览器能力）
+
 - 输入：链上日志（`DataPushed`、`LoanNFT Transfer`、关键业务事件）
 - 输出：`chain_events` + 派生读模型（如 `loan_orders`）
 - 幂等：`(chainId, txHash, logIndex)` 唯一；冲突即幂等命中
 
-2) **Snapshotter（View 快照）**：负责当前态与 meta
+2. **Snapshotter（View 快照）**：负责当前态与 meta
+
 - 输入：链上 View 合约（Position/Health/LoanNFT/Reward/Fee/Stats/...）
 - 输出：`view_snapshots`（最新快照）+ 现有 `portfolio_*` 读模型
 - 触发：定时 + 事件驱动（DataPushed 触发局部刷新）
@@ -1202,6 +1340,7 @@ async function getUserLoansViaViewGateway(params: {
 #### 8.0.3.2 存储结构（与现有 DB 风格一致）
 
 **A. 事件事实表（历史/审计）**
+
 - `chain_events`：已在 §8.3.1 设计（`chainId/txHash/logIndex` 幂等）
 
 **B. View 最新快照表（当前态）**
@@ -1225,12 +1364,14 @@ view_snapshots
 **C. 业务读模型表（前端高频用）**
 
 保留现有 `portfolio_*` 表作为“高频读模型”，并增加：
+
 - `loan_orders`（已在 §8.3.1 设计，来自 LoanNFT/LoanOrder 组合）
 - 需要时再补 `reward_user_summary` / `fee_user_summary`（从 `view_snapshots` 聚合）
 
 #### 8.0.3.3 路由与鉴权（遵循现有 /api 体系）
 
 **现有路由保持不变**（前端已依赖）：
+
 - `/api/portfolio/*`、`/api/rewards/*`、`/api/ai-credits/balance`、`/api/cache-retry/*`
 
 **新增路由（Explorer 能力，必须实现）**：
@@ -1246,6 +1387,7 @@ src/routes/explorer/loan-orders.ts
 - `GET /api/explorer/chain-events?user=0x..&eventName=...&limit=100&cursor=...`
 
 **鉴权规则**：
+
 - 用户私域：沿用 `requireAuth`，强制 `req.user.addr === query.user`（防止 “from 伪造”）
 - 管理/运维：沿用 admin/service 角色或 `x-service-token`
 
@@ -1254,7 +1396,7 @@ src/routes/explorer/loan-orders.ts
 - **事件幂等**：`chain_events` 唯一键 `(chainId, txHash, logIndex)`
 - **请求幂等**：沿用 `src/lib/idempotency.ts` + `@easifi/shared`；写入类 API 支持 `X-Idempotency-Key`
 - **reorg**：`chain_events.status` 标记 `PENDING/CONFIRMED/REORGED`，保留 `blockHash`，`finalityDepth` 由配置决定
-> 现状补充：`X-Idempotency-Key` 已在 `/api/rewards/ai-usage/report` 生效，其它写入路由需按同口径接入。
+  > 现状补充：`X-Idempotency-Key` 已在 `/api/rewards/ai-usage/report` 生效，其它写入路由需按同口径接入。
 
 #### 8.0.3.5 与前端调用的最终形态
 
@@ -1267,6 +1409,7 @@ src/routes/explorer/loan-orders.ts
 > 重要：本文档上游历史沿用了 `easifi-monorepo-wt/ponder-indexer` 的“目标态命名”。
 > 但你们当前实际后端仓库是 `lending-backend`（本机路径：`/Volumes/AI-hosts/EasiFi-workspace/lending-backend`），且默认启动入口为 `pnpm dev → src/index.ts → src/server.ts`。
 > 本节将给出与 **当前后端目录结构/启动方式完全对齐** 的可执行落地步骤：
+>
 > - 先用 **后端内嵌 indexer worker**（最快落地、可直接复用 Prisma/Express）
 > - 再可选升级为 **独立 ponder-indexer 进程**（目标态，解耦写库/读库）
 
@@ -1288,6 +1431,7 @@ docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | sed -n '1,10p'
 ### 8.1.2 本地可执行：后端启动命令（与真实入口对齐）
 
 后端真实启动脚本来自 `lending-backend/package.json`：
+
 - 开发：`pnpm dev`（nodemon + ts-node，入口 `src/index.ts`）
 - 生产：`pnpm build && pnpm start`（入口 `dist/index.js`）
 
@@ -1390,12 +1534,12 @@ ponder.on("VaultRouter:DataPushed", async ({ event, context }) => {
   const decoder = new AbiCoder();
 
   const DEPOSIT = keccak256(toUtf8Bytes("DEPOSIT_PROCESSED"));
-  const REWARD_EARNED = keccak256(toUtf8Bytes("REWARD_EARNED"));
+  const EASY_MINTED = keccak256(toUtf8Bytes("EASY_MINTED"));
 
   if (dataTypeHash === DEPOSIT) {
     const [user, asset, amount, blockNumber] = decoder.decode(
       ["address", "address", "uint256", "uint256"],
-      payload
+      payload,
     );
     await context.db.ChainEvent.create({
       id: idemKey.value,
@@ -1413,10 +1557,28 @@ ponder.on("VaultRouter:DataPushed", async ({ event, context }) => {
     });
   }
 
-  if (dataTypeHash === REWARD_EARNED) {
-    const [user, amount, reason, ts] = decoder.decode(
-      ["address", "uint256", "string", "uint256"],
-      payload
+  if (dataTypeHash === EASY_MINTED) {
+    const [
+      borrower,
+      lender,
+      totalMinted,
+      borrowerShare,
+      lenderShare,
+      orderId,
+      amountUsd8,
+      blockNumber,
+    ] = decoder.decode(
+      [
+        "address",
+        "address",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+      ],
+      payload,
     );
     await context.db.ChainEvent.create({
       id: idemKey.value,
@@ -1424,11 +1586,15 @@ ponder.on("VaultRouter:DataPushed", async ({ event, context }) => {
         chainId,
         txHash,
         logIndex,
-        eventType: "REWARD_EARNED",
-        user: user.toLowerCase(),
-        amount: amount.toString(),
-        reason,
-        blockNumber: Number(event.block.number),
+        eventType: "EASY_MINTED",
+        borrower: borrower.toLowerCase(),
+        lender: lender.toLowerCase(),
+        totalMinted: totalMinted.toString(),
+        borrowerShare: borrowerShare.toString(),
+        lenderShare: lenderShare.toString(),
+        orderId: orderId.toString(),
+        amountUsd8: amountUsd8.toString(),
+        blockNumber: Number(blockNumber),
         indexedAt: new Date(),
       },
     });
@@ -1557,6 +1723,7 @@ pnpm -s indexer:run -- --chainId 421614 --fromBlock 0 --toBlock latest
 ```
 
 > 注意：即便你们未来升级为独立 Ponder 进程，上述目录结构与表设计仍然有用：
+>
 > - `ChainEvent` 作为“原始事实表”（审计/对账/重放）
 > - `LoanOrderReadModel` 作为“前端友好表”（分页/筛选）
 
@@ -1565,12 +1732,14 @@ pnpm -s indexer:run -- --chainId 421614 --fromBlock 0 --toBlock latest
 当前后端所有路由都挂在 `/api`（见 `src/server.ts`），分为“已落地”与“需新增”两组：
 
 **已落地：Portfolio（开关：`ENABLE_PORTFOLIO_ROUTES=true`）**
+
 - `GET /api/portfolio/positions?user=0x..`
 - `GET /api/portfolio/summary?user=0x..`
 - `GET /api/portfolio/history?user=0x..&limit=50&offset=0`（offset 分页，limit 默认 ≤ 100）
 - `POST /api/portfolio/positions/refresh`
 
 **已落地：Rewards（开关：`FEATURE_REWARD_ROUTES` / `ENABLE_REWARD_ROUTES`）**
+
 - `POST /api/rewards/ai-usage`（用户查询，JWT）
 - `POST /api/rewards/ai-usage/report`（内部上报）
   - 读取 `X-Idempotency-Key`（可选），当前实际幂等依赖 `requestId` + `(tenant_id, request_id)` 唯一索引
@@ -1578,16 +1747,20 @@ pnpm -s indexer:run -- --chainId 421614 --fromBlock 0 --toBlock latest
 - `POST /api/rewards/balance`、`POST /api/rewards/ledger`
 
 **已落地：AI Credits**
+
 - `GET /api/ai-credits/balance?tenantId=&user=0x..`（JWT 可选，支持 query user）
 
 **已落地：Cache Retry**
+
 - `POST /api/cache-retry/request`、`POST /api/cache/retry`、`GET /api/cache-retry/status?user=0x..&asset=0x..`
 
 **已落地：Contracts 配置（JWT）**
+
 - `GET /api/contracts/config`
 - `GET /api/contracts/:contractName/abi`
 
 **需新增：Explorer（链上历史/时间线）**
+
 - `GET /api/explorer/loan-orders?user=0x..&role=borrower|lender|owner&limit=50&cursor=...`
 - `GET /api/explorer/loan-orders/:orderId`
 - `GET /api/explorer/loan-orders/:orderId/events?limit=100&cursor=...`
@@ -1607,17 +1780,17 @@ pnpm -s indexer:run -- --chainId 421614 --fromBlock 0 --toBlock latest
 
 > `ai-services` 的核心能力（RAG/Embedding/向量搜索/Worker）全部保留，只修改幂等和跨服务通信相关的文件。
 
-| 模块 | 文件路径 | 改动方式 |
-|------|---------|---------|
-| QA Service | `ai-services/src/services/qaService.ts` | **不改**（零修改） |
-| Embedding Service | `ai-services/src/services/embeddingService.ts` | **不改**（零修改） |
-| Vector Query | `ai-services/src/services/vectorQueryService.ts` | **不改**（零修改） |
-| Usage Ledger | `ai-services/src/services/quota/usageLedger.ts` | **修改**：`import { IdempotencyKeys } from '@shared/idempotency'`；`usage_idempotency` 表查询替换为 `idempotency_registry` |
-| Quota Guard | `ai-services/src/services/quota/vectorQuotaGuard.ts` | **微调**：Redis key 加 `{tenantId}:` 前缀（约 3 行改动） |
-| AI Grant Client | `ai-services/src/services/rewards/aiGrantClient.ts` | **修改**：HTTP Header 加 `X-Idempotency-Key`；去掉自行构造 requestId 逻辑 |
-| Idempotency Service | `ai-services/src/services/idempotencyService.ts` | **修改**：Redis key 格式改为 `IdempotencyKey.value` |
-| Workers | `ai-services/src/workers/*` | **不改**（零修改） |
-| Collectors | `ai-services/src/collectors/*` | **不改**（零修改） |
+| 模块                | 文件路径                                             | 改动方式                                                                                                                   |
+| ------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| QA Service          | `ai-services/src/services/qaService.ts`              | **不改**（零修改）                                                                                                         |
+| Embedding Service   | `ai-services/src/services/embeddingService.ts`       | **不改**（零修改）                                                                                                         |
+| Vector Query        | `ai-services/src/services/vectorQueryService.ts`     | **不改**（零修改）                                                                                                         |
+| Usage Ledger        | `ai-services/src/services/quota/usageLedger.ts`      | **修改**：`import { IdempotencyKeys } from '@shared/idempotency'`；`usage_idempotency` 表查询替换为 `idempotency_registry` |
+| Quota Guard         | `ai-services/src/services/quota/vectorQuotaGuard.ts` | **微调**：Redis key 加 `{tenantId}:` 前缀（约 3 行改动）                                                                   |
+| AI Grant Client     | `ai-services/src/services/rewards/aiGrantClient.ts`  | **修改**：HTTP Header 加 `X-Idempotency-Key`；去掉自行构造 requestId 逻辑                                                  |
+| Idempotency Service | `ai-services/src/services/idempotencyService.ts`     | **修改**：Redis key 格式改为 `IdempotencyKey.value`                                                                        |
+| Workers             | `ai-services/src/workers/*`                          | **不改**（零修改）                                                                                                         |
+| Collectors          | `ai-services/src/collectors/*`                       | **不改**（零修改）                                                                                                         |
 
 ### 9.2 统一 AI 请求计费流程（修正后）
 
@@ -1650,7 +1823,7 @@ pnpm -s indexer:run -- --chainId 421614 --fromBlock 0 --toBlock latest
 # easifi-monorepo-wt/infrastructure/docker-compose.production.yml
 
 services:
-  api-server:                          # 现有 api-server（修正后）
+  api-server: # 现有 api-server（修正后）
     image: ${ECR_REPO}/api-server:latest
     build:
       context: ../api-server
@@ -1663,7 +1836,7 @@ services:
     ports:
       - "3000:3000"
 
-  ponder-indexer:                      # 新增：链上事件索引
+  ponder-indexer: # 新增：链上事件索引
     image: ${ECR_REPO}/ponder-indexer:latest
     build:
       context: ../ponder-indexer
@@ -1673,7 +1846,7 @@ services:
       - DATABASE_URL=postgresql://...
       - ARBITRUM_RPC_URL=${ARBITRUM_RPC_URL}
 
-  ai-services:                         # 现有 ai-services（修正后）
+  ai-services: # 现有 ai-services（修正后）
     image: ${ECR_REPO}/ai-services:latest
     build:
       context: ../ai-services
@@ -1688,17 +1861,17 @@ services:
 
 ### 10.2 AWS 资源清单
 
-| 服务 | 规格 | 月费（估算） |
-|------|------|------------|
-| ECS Fargate（api-server × 2） | 0.5 vCPU, 1GB | ~$30 |
-| ECS Fargate（ponder-indexer × 1） | 0.25 vCPU, 512MB | ~$10 |
-| ECS Fargate（ai-services × 1） | 0.5 vCPU, 1GB | ~$15 |
-| RDS PostgreSQL | db.t4g.micro | ~$15 |
-| ElastiCache Redis | cache.t4g.micro | ~$13 |
-| ALB | 标准 | ~$20 |
-| CloudWatch | 基础 | ~$5 |
-| S3（备份/日志） | 标准 | ~$2 |
-| **总计** | | **~$110/月** |
+| 服务                              | 规格             | 月费（估算） |
+| --------------------------------- | ---------------- | ------------ |
+| ECS Fargate（api-server × 2）     | 0.5 vCPU, 1GB    | ~$30         |
+| ECS Fargate（ponder-indexer × 1） | 0.25 vCPU, 512MB | ~$10         |
+| ECS Fargate（ai-services × 1）    | 0.5 vCPU, 1GB    | ~$15         |
+| RDS PostgreSQL                    | db.t4g.micro     | ~$15         |
+| ElastiCache Redis                 | cache.t4g.micro  | ~$13         |
+| ALB                               | 标准             | ~$20         |
+| CloudWatch                        | 基础             | ~$5          |
+| S3（备份/日志）                   | 标准             | ~$2          |
+| **总计**                          |                  | **~$110/月** |
 
 ---
 
@@ -1727,11 +1900,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with: { node-version: "20" }
       - run: npm ci
-      - run: npm run test:idempotency   # 幂等层单测（必须通过）
-      - run: npm run test:ledger         # 账本单测
-      - run: npm run test:integration    # 集成测试
+      - run: npm run test:idempotency # 幂等层单测（必须通过）
+      - run: npm run test:ledger # 账本单测
+      - run: npm run test:integration # 集成测试
 
   deploy:
     needs: test
@@ -1746,14 +1919,14 @@ jobs:
 
 ### 11.2 必须监控的指标
 
-| 指标 | 告警阈值 | 说明 |
-|------|---------|------|
-| `idempotency_hits_total` | 无（信息类） | 幂等命中率，过高可能有重试风暴 |
-| `idempotency_conflicts_total` | > 10/min | payload 不匹配的冲突，说明 Key 生成有 bug |
-| `ledger_entry_latency_p99` | > 200ms | 账本写入延迟 |
-| `chain_indexer_lag_blocks` | > 100 blocks | Ponder 索引落后 |
-| `recon_diff_absolute` | > 0.01 | 链上/链下对账差异 |
-| `credits_balance_negative` | > 0 | 余额透支，说明扣费与同步有竞态 |
+| 指标                          | 告警阈值     | 说明                                      |
+| ----------------------------- | ------------ | ----------------------------------------- |
+| `idempotency_hits_total`      | 无（信息类） | 幂等命中率，过高可能有重试风暴            |
+| `idempotency_conflicts_total` | > 10/min     | payload 不匹配的冲突，说明 Key 生成有 bug |
+| `ledger_entry_latency_p99`    | > 200ms      | 账本写入延迟                              |
+| `chain_indexer_lag_blocks`    | > 100 blocks | Ponder 索引落后                           |
+| `recon_diff_absolute`         | > 0.01       | 链上/链下对账差异                         |
+| `credits_balance_negative`    | > 0          | 余额透支，说明扣费与同步有竞态            |
 
 ---
 
@@ -1767,18 +1940,19 @@ jobs:
 维度 1: 奖励通证余额对账（每小时；legacy 字段名 rlp_balance）
   ∀ (tenant, user):
      user_reward_cache.rlp_balance == IERC20(Registry[KEY_EASY_TOKEN]).balanceOf(user)
-  
+
   偏差处理：以链上为准，重新同步链下缓存
   触发方式：Ponder 索引奖励通证 `Transfer` 的 mint/burn 事件
 
 维度 2: Reward 账本对账（每 6 小时）
   ∀ (tenant, user):
     user_reward_cache.locked_points == RewardManagerCore._lockedPoints[user]（通过 RewardView 读取）
-    user_reward_cache.penalty_debt == RewardManagerCore._penaltyLedger[user]（通过 RewardView 读取）
+    user_reward_cache.penalty_debt == RewardAccrualManager._penaltyLedger[user]（通过 RewardView 读取）
     user_reward_cache.user_level == RewardManagerCore._userLevels[user]（通过 RewardView 读取）
-  
+
   偏差处理：以链上 RewardView 为准，重新同步
   补偿机制：若链下遗漏 DataPushed 事件，检查 RewardViewPushFailed 事件并重试
+  即时查询规则：若用户需要即时状态，优先回源 Reward 主账本，不等待镜像修复完成
 
 维度 3: AI Credits 对账（每小时，关键）
   ∀ (tenant, user):
@@ -1794,13 +1968,13 @@ jobs:
 
 维度 4: 复式平衡校验（每日）
   ∀ tenant: SUM(所有链下 ledger_entries 借方) == SUM(所有链下 ledger_entries 贷方)
-  ∀ (tenant, account, currency): 
+  ∀ (tenant, account, currency):
     accounts.balance == initial_balance + SUM(credits) - SUM(debits)
 
 维度 5: 链上事件完整性校验（每日）
   链上: COUNT(DataPushed events WHERE dataTypeHash IN REWARD_*) for block range
   链下: COUNT(ledger_entries WHERE source='chain_event') for same block range
-  
+
   偏差处理：若链下 < 链上，说明有遗漏事件 → 触发 Ponder re-index
   补充检查：RewardViewPushFailed 事件数量 → 若 > 0，触发链下重试逻辑
 ```
@@ -1816,7 +1990,7 @@ jobs:
 结算后验证:
   1. 链上 CreditsSettled 事件确认（tx receipt）
   2. 链下更新 credit_settlement_batches status = 'CONFIRMED'
-  3. 验证: AICreditsVault.creditsBalance(tenantId, user) 
+  3. 验证: AICreditsVault.creditsBalance(tenantId, user)
            == 结算前余额 - creditsUsed[user]
   4. 若验证失败 → 告警 + 暂停后续结算
 
@@ -1868,18 +2042,18 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 
 ### 13.1 关键风险
 
-| 风险 | 概率 | 影响 | 缓解措施 |
-|------|------|------|---------|
-| Ponder 索引服务宕机 | 中 | 链上事件镜像延迟，链下 ledger_entries 滞后 | 自动重启 + 告警；冷启动快（37s）；链上 SSOT 不受影响 |
-| RPC 节点不可用 | 低-中 | 链上查询/对账失败 | 配置多个 RPC 端点（Alchemy + Infura）；链下 AI 扣次不受影响 |
-| RewardView push 失败 | 中 | 链下遗漏 DataPushed 事件 | 监控 `RewardViewPushFailed` 事件 → 链下重试；链上 SSOT 不受影响 |
-| 链下/链上 AI Credits 不一致 | 低-中 | 用户可能透支或无法使用 | 每小时对账（维度 3）；差异超 5% 暂停扣次 |
-| settleBatch Reorg | 低 | 链上结算回滚，链下状态不一致 | 监控 block confirmations ≥ 20；Reorg 检测 → 重新结算 |
-| PostgreSQL 故障 | 低 | AI 扣次不可用（链上功能不受影响） | RDS Multi-AZ + 自动故障转移 |
-| Redis 故障 | 低 | 幂等 Level 1 失效；AI Credits 实时余额不可用 | ElastiCache 副本；Level 2/3 仍然工作；fallback 到 DB 直查 |
-| Stripe Webhook 丢失 | 低 | 订阅状态不一致 | Stripe 自动重试 + 定期轮询同步 |
-| 链上 MINTER_ROLE 泄露 | 极低 | 奖励通证（目标态 EasyToken）被非授权铸造 | MINTER_ROLE 单持有人（EasyEmissionController）；setSoleMinter 硬收口；burn 由独立 BURNER_ROLE 承担 |
-| 幂等 Key 冲突（hash 碰撞） | 极低 | 请求被错误拒绝 | 128 字符 key + payload hash 双重校验 |
+| 风险                        | 概率  | 影响                                         | 缓解措施                                                                                                 |
+| --------------------------- | ----- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Ponder 索引服务宕机         | 中    | 链上事件镜像延迟，链下 ledger_entries 滞后   | 自动重启 + 告警；冷启动快（37s）；链上 SSOT 不受影响                                                     |
+| RPC 节点不可用              | 低-中 | 链上查询/对账失败                            | 配置多个 RPC 端点（Alchemy + Infura）；链下 AI 扣次不受影响                                              |
+| RewardView push 失败        | 中    | 链下遗漏 DataPushed 事件、读模型延迟         | 监控 `RewardViewPushFailed` 事件 → 链下重试/读模型修复；用户即时查询时回源链上主账本；链上 SSOT 不受影响 |
+| 链下/链上 AI Credits 不一致 | 低-中 | 用户可能透支或无法使用                       | 每小时对账（维度 3）；差异超 5% 暂停扣次                                                                 |
+| settleBatch Reorg           | 低    | 链上结算回滚，链下状态不一致                 | 监控 block confirmations ≥ 20；Reorg 检测 → 重新结算                                                     |
+| PostgreSQL 故障             | 低    | AI 扣次不可用（链上功能不受影响）            | RDS Multi-AZ + 自动故障转移                                                                              |
+| Redis 故障                  | 低    | 幂等 Level 1 失效；AI Credits 实时余额不可用 | ElastiCache 副本；Level 2/3 仍然工作；fallback 到 DB 直查                                                |
+| Stripe Webhook 丢失         | 低    | 订阅状态不一致                               | Stripe 自动重试 + 定期轮询同步                                                                           |
+| 链上 MINTER_ROLE 泄露       | 极低  | 奖励通证（目标态 EasyToken）被非授权铸造     | MINTER_ROLE 单持有人（EasyEmissionController）；setSoleMinter 硬收口；burn 由独立 BURNER_ROLE 承担       |
+| 幂等 Key 冲突（hash 碰撞）  | 极低  | 请求被错误拒绝                               | 128 字符 key + payload hash 双重校验                                                                     |
 
 ### 13.2 回退策略
 
@@ -1937,12 +2111,12 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 
 ### 14.2 后端各阶段的前端依赖分析
 
-| 后端阶段 | 前端需要等待？ | 原因 |
-|---------|-------------|------|
-| Phase 1: 幂等层 + RLS | **否** | 前端此阶段只做链上交互（View 迁移），不调用后端 API |
-| Phase 2: ai-services + Ponder | **少量** | AI Credits 余额查询 API 需要 Day 11 就绪 |
-| Phase 2: Stripe 路由 | **否** | 前端先用 Mock，Stripe 路由在 Day 12 前就绪即可 |
-| Phase 3: 部署 + 联调 | **是** | E2E 联调需要后端全部就绪 |
+| 后端阶段                      | 前端需要等待？ | 原因                                                |
+| ----------------------------- | -------------- | --------------------------------------------------- |
+| Phase 1: 幂等层 + RLS         | **否**         | 前端此阶段只做链上交互（View 迁移），不调用后端 API |
+| Phase 2: ai-services + Ponder | **少量**       | AI Credits 余额查询 API 需要 Day 11 就绪            |
+| Phase 2: Stripe 路由          | **否**         | 前端先用 Mock，Stripe 路由在 Day 12 前就绪即可      |
+| Phase 3: 部署 + 联调          | **是**         | E2E 联调需要后端全部就绪                            |
 
 ### 14.3 后端需要在关键节点提供的交付物
 
@@ -2000,25 +2174,95 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 
 ### 14.4 协同检查点
 
-| 时间 | 检查点 | 后端动作 | 前端动作 |
-|------|--------|---------|---------|
-| **Day 1** | 项目启动 | 开始 packages/shared + 幂等层修正 | 拿到最新 ABI，开始 View 层迁移 |
-| **Day 5** | Phase 1 验收 | 幂等层 + 账本隔离通过单元测试 | P0 完成，localhost 链上读路径跑通 |
-| **Day 8** | API 契约交付 | 提供 API 接口文档/OpenAPI spec | 拿到接口文档，用 Mock 先行开发 |
-| **Day 12** | Phase 2 验收 | ai-services + Ponder + Stripe 就绪 | P1/P2 完成，开始联调 |
-| **Day 15** | E2E 联调 | 配合联调，修复对接问题 | 前端 → 后端 → 链上全链路 |
-| **Day 18** | 全部验收 | 全部功能完成 | 所有修改完成 |
-| **Day 21** | 灰度发布 | AWS 部署，灰度发布，监控 | 配合灰度验证 |
+| 时间       | 检查点       | 后端动作                           | 前端动作                          |
+| ---------- | ------------ | ---------------------------------- | --------------------------------- |
+| **Day 1**  | 项目启动     | 开始 packages/shared + 幂等层修正  | 拿到最新 ABI，开始 View 层迁移    |
+| **Day 5**  | Phase 1 验收 | 幂等层 + 账本隔离通过单元测试      | P0 完成，localhost 链上读路径跑通 |
+| **Day 8**  | API 契约交付 | 提供 API 接口文档/OpenAPI spec     | 拿到接口文档，用 Mock 先行开发    |
+| **Day 12** | Phase 2 验收 | ai-services + Ponder + Stripe 就绪 | P1/P2 完成，开始联调              |
+| **Day 15** | E2E 联调     | 配合联调，修复对接问题             | 前端 → 后端 → 链上全链路          |
+| **Day 18** | 全部验收     | 全部功能完成                       | 所有修改完成                      |
+| **Day 21** | 灰度发布     | AWS 部署，灰度发布，监控           | 配合灰度验证                      |
 
 ### 14.5 风险控制：并行实施的潜在风险
 
-| 风险 | 概率 | 影响 | 应对 |
-|------|------|------|------|
-| Day 8 接口契约延迟 | 中 | 前端 P3 开发延迟 | 前端持续使用 Mock + 链上直接调用 |
-| 幂等 Key 格式前后端不一致 | 低 | 请求被拒绝 | Day 1 统一确认 `IdempotencyKey` 格式；共用 `packages/shared` |
-| Ponder 索引延迟 | 中 | 链下数据滞后，AI Credits 余额不同步 | 前端降级到链上直接读 `AICreditsVault.creditsBalance()` |
-| Stripe Webhook 集成问题 | 低 | 订阅状态不更新 | 前端轮询 `GET /api/stripe/subscriptions` 兜底 |
-| E2E 联调发现大量 Bug | 高 | 延误发布 | 预留 Day 15-18 四天联调；关键路径优先修 |
+| 风险                      | 概率 | 影响                                | 应对                                                         |
+| ------------------------- | ---- | ----------------------------------- | ------------------------------------------------------------ |
+| Day 8 接口契约延迟        | 中   | 前端 P3 开发延迟                    | 前端持续使用 Mock + 链上直接调用                             |
+| 幂等 Key 格式前后端不一致 | 低   | 请求被拒绝                          | Day 1 统一确认 `IdempotencyKey` 格式；共用 `packages/shared` |
+| Ponder 索引延迟           | 中   | 链下数据滞后，AI Credits 余额不同步 | 前端降级到链上直接读 `AICreditsVault.creditsBalance()`       |
+| Stripe Webhook 集成问题   | 低   | 订阅状态不更新                      | 前端轮询 `GET /api/stripe/subscriptions` 兜底                |
+| E2E 联调发现大量 Bug      | 高   | 延误发布                            | 预留 Day 15-18 四天联调；关键路径优先修                      |
+
+### 14.5.1 后端监控开发任务清单（按 Monitoring-Observability 指南拆分）
+
+> 任务来源：`docs/Usage-Guide/Monitoring-Observability-Implementation-Guide.md` 第 4.7 节 + Step 1-5。
+> 目标：把“后端服务状态、作业状态、链上交易提交状态、依赖健康、对账差异”全部落成可采集指标与可执行告警。
+
+#### P0：监控基础设施与统一埋点（先做，没这层后面都不稳定）
+
+- [ ] 在 API 网关/服务入口统一生成或透传 `traceId`、`requestId`、`X-Idempotency-Key`、`X-Tenant-ID`
+- [ ] 所有后端结构化日志统一补齐字段：`traceId/requestId/idempotencyKey/tenant/chainId/user/txHash/job/queue`
+- [ ] 后端统一暴露 `/metrics`，并确认 Prometheus scrape labels 至少包含 `service/component/environment/chain_id/tenant`
+- [ ] 为核心依赖增加健康探针：`rpc`、`db`、`redis`、`indexer`、`ai_provider`
+- [ ] 把健康探针结果映射到 `dependency_health{dependency}` 指标，并补充最近成功时间或错误原因日志
+
+**交付物**
+
+- [ ] API 服务 `/metrics` 可抓取
+- [ ] 核心日志样例通过 review，字段齐全且可串 trace
+- [ ] Prometheus 已接入 scrape job
+
+#### P0：API / Worker / 幂等 / 队列指标
+
+- [ ] 为所有核心 API 暴露 `api_requests_total{route,method,status_class,tenant}`
+- [ ] 为所有核心 API 暴露 `api_latency_ms_bucket{route,method,status_class}`
+- [ ] 为所有 cron / worker / job 暴露 `job_runs_total{job,outcome}` 与 `job_duration_ms_bucket{job}`
+- [ ] 为队列或异步任务暴露 `job_backlog{job}`、`job_oldest_age_seconds{job}`
+- [ ] 为幂等层暴露 `idempotency_hits_total{route}` 与 `idempotency_conflicts_total{route}`
+- [ ] 为消息队列或重试队列暴露 `queue_messages_ready{queue}` 与 `queue_dead_letter_total{queue}`
+
+**验收标准**
+
+- [ ] 能在 Dashboard 上看到 API 5xx、慢接口、积压 job、死信队列、幂等冲突趋势
+- [ ] 任一 job 失败后 5 分钟内可以通过指标和日志定位到具体 job 名称与失败原因
+
+#### P0：链上交易提交链路监控
+
+- [ ] 对所有后端发起的链上交易统一埋点：`submitted`、`mined`、`confirmed`、`reverted`、`dropped/replaced`
+- [ ] 暴露 `tx_submit_total{entrypoint,outcome}`
+- [ ] 暴露 `tx_confirmation_latency_seconds_bucket{entrypoint}`
+- [ ] 暴露 `tx_pending_total{entrypoint}`
+- [ ] 对 keeper / retry-push / force-sync / 结算 / 清算入口补充 txHash 级日志与失败原因分类
+
+**验收标准**
+
+- [ ] 任意一笔后端提交的链上交易都能从日志定位到 `txHash`
+- [ ] 能区分“广播成功但未确认”和“链上 revert”两类故障
+
+#### P1：监控作业与对账闭环
+
+- [ ] 为 `force-sync`、`retry-push`、`reconciliation`、`chainSync` 等作业建立独立 job 指标
+- [ ] 对 Reward / AI Credits / 账本差异暴露 `recon_diff_absolute` 与 `reconciliation_issues_total{issue}`
+- [ ] 对 `RewardViewPushFailed`、`CacheUpdateFailed` 等失败事件建立链下计数与重试结果指标
+- [ ] 为链上/链下差异修复动作建立可观测结果：成功、失败、跳过、重试次数
+
+**验收标准**
+
+- [ ] 能回答“当前有没有差异”“差异来自哪类数据”“修复作业是否在收敛”
+- [ ] 同一类差异可以追踪到最近一次自动修复结果
+
+#### P1：告警规则与运行手册
+
+- [ ] 接入 `BackendApi5xxHigh`、`WorkerBacklogGrowing`、`TxSubmitRevertStorm`、`TxConfirmationStuck`、`IdempotencyStorm`、`DependencyHealthDown`
+- [ ] 为每条告警补 runbook：现象、排查命令、兜底动作、升级条件
+- [ ] Dashboard 至少交付 3 张：API & Jobs、Tx Submitter、Reconciliation
+- [ ] 告警通知接入 Slack/飞书/邮件其一，保证值班可接收
+
+**最终完成定义**
+
+- [ ] 后端任一 P0 问题都能通过“告警 → 指标 → 日志 → txHash/job”完成定位
+- [ ] 新增 cron、worker、链上提交入口时，有对应监控模板可直接复用
 
 ### 14.6 Git 分支策略（前后端并行）
 
@@ -2087,30 +2331,31 @@ Phase 3 (Day 13-18/21):
 
 > 以下是需要改动的所有文件，按优先级排列。**未列出的文件 = 零修改，保持原样。**
 
-| 优先级 | 文件路径 | 改动类型 | 改动内容 |
-|--------|---------|---------|---------|
-| **P0** | `api-server/src/lib/idempotency.ts` | **重写** | 废弃 `IdempotencyKeyRegistry`，替换为 `import { IdempotencyGuard } from '@shared/idempotency'` + 三级防御 |
-| **P0** | `api-server/src/services/ledger/LedgerService.ts` | **修正** | ① 参数加 `tenantId`；② `entry_id` → `idempotency_key`；③ 事务内 `SET app.tenant_id` |
-| **P0** | `api-server/src/usecases/reward/ConsumeEasyWithPlatformMirror.ts` | **修正** | ① `entryId` → `IdempotencyKeys.rewardConsume(userId, requestId).value`；② 去掉 `catch 23505` |
-| **P0** | `api-server/prisma/schema.prisma` | **修正** | `Account`: PK → `(tenant_id, account_id, currency)`；`LedgerEntry`: 加 `tenant_id` + `idempotency_key`，UNIQUE → `(tenant_id, idempotency_key)` |
-| **P0** | `api-server/prisma/migrations/` | **新增** | `add_tenant_id_to_accounts`、`add_idempotency_registry`、`enable_rls` |
-| **P1** | `ai-services/src/services/rewards/aiGrantClient.ts` | **修正** | Header 加 `X-Idempotency-Key`；去掉自行构造 requestId |
-| **P1** | `ai-services/src/services/quota/usageLedger.ts` | **修正** | 幂等 key → `IdempotencyKeys.aiUsage(...)`；表 → `idempotency_registry` |
-| **P1** | `ai-services/src/services/idempotencyService.ts` | **修正** | Redis key 格式 → `IdempotencyKey.value` |
-| **P2** | `ai-services/src/services/quota/vectorQuotaGuard.ts` | **微调** | Redis key 加 `{tenantId}:` 前缀（~3 行） |
-| **P2** | `api-server/src/services/billing/billingStatementService.ts` | **修正** | 从统一 `usage_detail` 聚合（替代分散查询） |
-| **P2** | `api-server/src/routes/stripe.ts` | **新增** | Stripe Webhook 处理路由 |
-| **P3** | `api-server/src/services/pricing/pricingEngine.ts` | **不改** | 原样保留 |
-| **新增** | `packages/shared/src/idempotency/IdempotencyKey.ts` | **新建** | 统一幂等 Key 生成器（本文第 2.2 节） |
-| **新增** | `packages/shared/src/idempotency/IdempotencyGuard.ts` | **新建** | 三级防御检查（本文第 2.3 节） |
-| **新增** | `ponder-indexer/` | **新建** | 链上事件索引服务（本文第 8 节） |
-| **新增** | `infrastructure/` | **新建** | Docker/Terraform 部署配置 |
+| 优先级   | 文件路径                                                          | 改动类型 | 改动内容                                                                                                                                        |
+| -------- | ----------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| **P0**   | `api-server/src/lib/idempotency.ts`                               | **重写** | 废弃 `IdempotencyKeyRegistry`，替换为 `import { IdempotencyGuard } from '@shared/idempotency'` + 三级防御                                       |
+| **P0**   | `api-server/src/services/ledger/LedgerService.ts`                 | **修正** | ① 参数加 `tenantId`；② `entry_id` → `idempotency_key`；③ 事务内 `SET app.tenant_id`                                                             |
+| **P0**   | `api-server/src/usecases/reward/ConsumeEasyWithPlatformMirror.ts` | **修正** | ① `entryId` → `IdempotencyKeys.rewardConsume(userId, requestId).value`；② 去掉 `catch 23505`                                                    |
+| **P0**   | `api-server/prisma/schema.prisma`                                 | **修正** | `Account`: PK → `(tenant_id, account_id, currency)`；`LedgerEntry`: 加 `tenant_id` + `idempotency_key`，UNIQUE → `(tenant_id, idempotency_key)` |
+| **P0**   | `api-server/prisma/migrations/`                                   | **新增** | `add_tenant_id_to_accounts`、`add_idempotency_registry`、`enable_rls`                                                                           |
+| **P1**   | `ai-services/src/services/rewards/aiGrantClient.ts`               | **修正** | Header 加 `X-Idempotency-Key`；去掉自行构造 requestId                                                                                           |
+| **P1**   | `ai-services/src/services/quota/usageLedger.ts`                   | **修正** | 幂等 key → `IdempotencyKeys.aiUsage(...)`；表 → `idempotency_registry`                                                                          |
+| **P1**   | `ai-services/src/services/idempotencyService.ts`                  | **修正** | Redis key 格式 → `IdempotencyKey.value`                                                                                                         |
+| **P2**   | `ai-services/src/services/quota/vectorQuotaGuard.ts`              | **微调** | Redis key 加 `{tenantId}:` 前缀（~3 行）                                                                                                        |
+| **P2**   | `api-server/src/services/billing/billingStatementService.ts`      | **修正** | 从统一 `usage_detail` 聚合（替代分散查询）                                                                                                      |
+| **P2**   | `api-server/src/routes/stripe.ts`                                 | **新增** | Stripe Webhook 处理路由                                                                                                                         |
+| **P3**   | `api-server/src/services/pricing/pricingEngine.ts`                | **不改** | 原样保留                                                                                                                                        |
+| **新增** | `packages/shared/src/idempotency/IdempotencyKey.ts`               | **新建** | 统一幂等 Key 生成器（本文第 2.2 节）                                                                                                            |
+| **新增** | `packages/shared/src/idempotency/IdempotencyGuard.ts`             | **新建** | 三级防御检查（本文第 2.3 节）                                                                                                                   |
+| **新增** | `ponder-indexer/`                                                 | **新建** | 链上事件索引服务（本文第 8 节）                                                                                                                 |
+| **新增** | `infrastructure/`                                                 | **新建** | Docker/Terraform 部署配置                                                                                                                       |
 
 ## 附录 B: 零修改模块清单（直接保留，不动一行）
 
 > 以下模块在本次修正中**完全不需要改动**，确认它们的稳定性。
 
 **ai-services（零修改）：**
+
 - `ai-services/src/services/embeddingService.ts` — 文本向量化
 - `ai-services/src/services/vectorQueryService.ts` — 向量检索
 - `ai-services/src/services/qaService.ts` / `enhancedQAService.ts` — RAG 问答
@@ -2123,6 +2368,7 @@ Phase 3 (Day 13-18/21):
 - `ai-services/src/processors/*` — 数据处理器
 
 **api-server（零修改）：**
+
 - `api-server/src/middleware/tenantDbSession.ts` — RLS 中间件（已正确）
 - `api-server/src/middleware/tenantIsolation.ts` — 租户隔离中间件
 - `api-server/src/middleware/tenantQuota.ts` — 租户配额中间件
@@ -2231,6 +2477,9 @@ main                          # 生产分支（不直接修改）
 - [ ] 后端读模型：历史/搜索 API 走 DB，具备 cursor 分页与必要索引（不扫 RPC）
 - [ ] 幂等与重试：链上事件写库按 `(chainId, txHash, logIndex)` 幂等；失败可观测并可重放
 - [ ] 权限与多租户：Scheme U/系统权限边界清晰；后端 API 做租户隔离与鉴权（不能靠 `eth_call from` 冒充）
+- [ ] 清算执行链路：legacy / 通用订单由 keeper 调用 `SettlementManager.settleOrLiquidate`，blocks-only 订单由 keeper 调用 `BlocksOnlyCoordinator.settleOrLiquidateBlocks`；两者都不应把 `LiquidationManager.liquidate` 作为常态入口
+- [ ] 价格刷新硬步骤：清算前检查 `updateBlock/maxPriceAgeBlocks`，过期则先调用价格更新器；失败则跳过并告警
+- [ ] 失败预警：对 `PriceOracle__StalePrice`、`MissingRole`、`SettlementManager__NotLiquidatable`、`CacheUpdateFailed` 建立告警与重试队列
 
 ## 上线前统一 Checklist（DB/Redis/Feature Flag/Routes/Pagination/Idempotency/Reorg）
 
@@ -2241,6 +2490,103 @@ main                          # 生产分支（不直接修改）
 - [ ] 分页边界：`limit` 默认/上限固定；`cursor/offset` 越界返回空列表而非 500；排序稳定（按 `(blockNumber, logIndex)`）
 - [ ] 幂等键约定：跨服务透传 `X-Idempotency-Key`；链上事件幂等键格式固定为 `chain:c{chainId}:{txHash}:log-{logIndex}`
 - [ ] 重组窗口约定：明确 `finalityDepth`（如 64 blocks）与状态（`PENDING/CONFIRMED/REORGED`）；窗口内数据可回滚重算
+- [ ] 清算告警通路：失败原因、订单号、资产与区块高度可追踪；支持手动重试与自动退避
+
+## RWA 价格采集与发布补充方案
+
+本节用于把链上合约实施计划与 RWA live/mock 测试系统对齐。
+
+### 1. 后端新增的最小作业集
+
+建议在现有后端或独立 worker 中新增四个 job：
+
+1. rwa-price-collector
+2. fx-normalizer
+3. oracle-publisher
+4. live-preflight-checker
+
+### 2. 作业职责
+
+#### 2.1 rwa-price-collector
+
+职责：
+
+1. 从 Google Finance 或其许可镜像抓取原始行情
+2. 记录 ticker、rawPrice、rawCurrency、collectedAt
+3. 把结果写入 rwa_price_snapshots
+
+#### 2.2 fx-normalizer
+
+职责：
+
+1. 读取 HKDUSD、SGDUSD 等 FX 数据
+2. 把非 USD 稳定币和非 USD 计价 RWA 统一换算到 USD-8
+3. 输出 normalizedPriceUsd8
+
+#### 2.3 oracle-publisher
+
+职责：
+
+1. 读取最新 normalizedPriceUsd8
+2. 生成统一幂等键
+3. 正常路径统一调用 PriceUpdater.updateAssetPrice 写链
+4. 监听 PriceUpdated 事件回写发布结果
+
+补充约束：
+
+1. `PriceOracle.updatePrice` 仅保留 break-glass / admin / emergency 用途
+2. publisher 的成功标准不只是交易成功，还包括链上 `PriceUpdated` 事件与链下作业状态一致
+3. publish status 必须可被前端、preflight、缓存层读取
+
+建议幂等键：
+
+1. 发布任务：price:rwa:{oracleAssetKey}:{collectedAt}
+2. 事件落库：chain:c{chainId}:{txHash}:log-{logIndex}
+
+#### 2.4 live-preflight-checker
+
+职责：
+
+1. 检查资产是否已配置到 whitelist / feeRouter / priceOracle
+2. 检查价格是否过期
+3. 检查最近一次 publish 是否成功
+4. 检查当前 Registry / SettlementToken / asset pack 是否一致
+
+### 3. live mock 与 testnet-launch 的模式切换
+
+后端至少要识别两种模式：
+
+1. live-mock
+2. launch-required-price
+
+推荐策略：
+
+1. live-mock 允许 bootstrap seeder 或 env 手工补价
+2. launch-required-price 禁止 defaultPriceUsd8 自动补价
+3. launch-required-price 下若价格缺失，preflight 必须 hard fail
+
+### 3.1 统一消费规则
+
+所有消费方统一遵循：
+
+1. 前端读取链上最终价 + 链下 publish status
+2. preflight 读取链上最终价 + 链下 publish status
+3. 缓存与读模型以 `PriceUpdated` 为链上事实，以 publish job 为链下事实
+4. 不允许某一侧单独依赖 raw source 或 defaultPriceUsd8 直接做业务判断
+
+### 4. 建议新增的数据表
+
+1. rwa_asset_catalog
+2. rwa_price_snapshots
+3. oracle_publish_jobs
+
+最小字段可参考 [RWA-Price-System-Guide.md](RWA-Price-System-Guide.md)。
+
+### 5. 与现有链下索引契约的关系
+
+1. PriceUpdated / PriceUpdateFailed 事件属于链上事实，必须进入统一索引
+2. dashboard / explorer / preflight API 优先读链下 read model，再对关键链路做链上回读抽样
+3. 若 publish 成功但索引未跟上，应标记为 lagging，而不是误判为 missing price
 
 ---
 
@@ -2248,6 +2594,7 @@ main                          # 生产分支（不直接修改）
 > 随着实施进展，请及时更新各阶段验收状态和架构决策变更。
 >
 > **版本历史**：
+>
 > - v3.1（2026-02-11）：新增第 14 节"前后端并行实施计划"——与前端 Frontend-Modification-Guide 第 17 节对齐
 > - v3.0（2026-02-11）：第 4 节重写——基于链上完善的 Reward 系统建立 SSOT 分层架构（链上 SSOT + 链下镜像）；
 >   新增链上会计模型（Earn/Spend/AI Credits 对照 `Reward-Best-Practices-Guide.md`）；
@@ -2256,6 +2603,7 @@ main                          # 生产分支（不直接修改）
 > - v1.0（2026-02-11）：初版，基于 Open SaaS 新建方案（已废弃）
 >
 > 关联文档：
+>
 > - `docs/Architecture-Guide.md`（链上架构 SSOT）
 > - `docs/FRONTEND_CONTRACTS_INTEGRATION.md`（前端集成 SSOT）
 > - `docs/Usage-Guide/Reward-Best-Practices-Guide.md`（Reward 最优实践 SSOT）

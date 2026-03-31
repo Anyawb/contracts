@@ -22,7 +22,7 @@ import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 
-/*━━━━━━━━━━━━━━━ Selector SSOT (B方案) ━━━━━━━━━━━━━━━*/
+/*━━━━━━━━━━━━━━━ Selector SSOT ━━━━━━━━━━━━━━━*/
 // Selectors are derived from the canonical module contracts in this repository (SSOT),
 // rather than duplicating minimal interfaces in this file.
 import {PositionView} from "./PositionView.sol";
@@ -37,8 +37,8 @@ import {PreviewView} from "./PreviewView.sol";
  *      - registry address is not set or invalid (see `onlyValidRegistry`)
  *
  * Security:
- * - Read-only facade: uses `staticcall` for downstream module calls
- * - UUPS upgrade is role-gated (MissingRole on failure)
+ * - View-only facade: uses `staticcall` for downstream module calls.
+ * - UUPS upgrades are role-gated (MissingRole on failure).
  *
  * @custom:security-contact security@example.com
  */
@@ -51,7 +51,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - Registry returns `address(0)` for `moduleKey`
      *
      * Security:
-     * - Prevents ambiguous reads when a dependency is not configured
+    * - Prevents ambiguous reads when a dependency is not configured.
      *
      * @param moduleKey Registry module key that is required
      */
@@ -63,7 +63,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - downstream `staticcall` fails (some functions are best-effort and may return zeros instead)
      *
      * Security:
-     * - Read-only: this is emitted via revert, no state changes occur here
+    * - View-only failure path: this reverts without performing state changes.
      *
      * @param moduleKey Registry module key that was called
      * @param selector Function selector attempted on the downstream contract
@@ -171,9 +171,9 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - `initialRegistryAddr` is not a contract (`NotAContract`)
      *
      * Security:
-     * - Initializer can only be called once (UUPS/Initializable)
+    * - Initializer: callable once.
      *
-     * @param initialRegistryAddr Registry contract address
+    * @param initialRegistryAddr Registry contract address.
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -204,7 +204,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - never reverts (best-effort; returns `address(0)` on failure)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param key Module key in the Registry
      * @return module Module address, or `address(0)` if missing/unavailable
@@ -224,7 +224,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - never reverts (best-effort)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @return HealthView module address, or `address(0)` if missing
      */
@@ -238,7 +238,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - never reverts (best-effort)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @return PositionView module address, or `address(0)` if missing
      */
@@ -252,7 +252,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - never reverts (best-effort)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @return StatisticsView module address, or `address(0)` if missing
      */
@@ -266,7 +266,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - never reverts (best-effort)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @return Settlement token address, or `address(0)` if missing
      */
@@ -353,7 +353,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @param asset Asset address
@@ -379,7 +379,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @param asset Asset address
@@ -405,7 +405,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address
      * @param asset Asset address
@@ -431,7 +431,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall` to `token.balanceOf(user)`)
+    * - View-only (`staticcall` to `token.balanceOf(user)`).
      *
      * @param user User address
      * @param token ERC20 token address
@@ -461,7 +461,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - always reverts (kept only for source compatibility)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address (unused)
      * @return balance Unused; this function always reverts
@@ -482,7 +482,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - `balanceOf(address)` staticcall fails (`UserView__ExternalCallFailed`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @return balance Settlement token balance (token decimals depend on the settlement token)
@@ -514,7 +514,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - downstream call fails (`UserView__ExternalCallFailed`) via `getUserTotalsWithMeta`
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address
      * @return totalValue Total collateral value (denomination depends on system settlement unit)
@@ -542,7 +542,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - downstream call fails (`UserView__ExternalCallFailed`) via `getUserTotalsWithMeta`
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address
      * @return totalValue Total debt value (denomination depends on system settlement unit)
@@ -596,7 +596,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - downstream call fails (`UserView__ExternalCallFailed`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @return totalCollateral Total collateral (settlement-denominated)
@@ -629,7 +629,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address
      * @param asset Asset address
@@ -654,7 +654,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address
      * @param asset Asset address
@@ -681,7 +681,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @return hf Health factor (bps, 1e4 = 100%)
@@ -704,7 +704,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @return hf Health factor (bps, 1e4 = 100%)
@@ -727,7 +727,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address
      * @return hf Health factor (bps, 1e4 = 100%)
@@ -750,7 +750,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address
      * @param asset Asset address
@@ -795,7 +795,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user User address
      * @param asset Asset address
@@ -842,7 +842,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @param asset Asset address
@@ -898,7 +898,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @param asset Asset address
@@ -931,7 +931,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @param asset Asset address
@@ -964,7 +964,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set or invalid (`ZeroAddress` / `NotAContract`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param user User address
      * @param asset Asset address
@@ -1001,7 +1001,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`BatchTooLarge`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param users User addresses
      * @param assets Asset addresses (must match `users` length)
@@ -1040,7 +1040,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`BatchTooLarge`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param users User addresses
      * @return healthFactors Health factors (bps)
@@ -1071,7 +1071,7 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - `users.length > ViewConstants.MAX_BATCH_SIZE` (`BatchTooLarge`)
      *
      * Security:
-     * - Read-only (`staticcall`)
+    * - View-only (`staticcall`).
      *
      * @param users User addresses
      * @return healthFactors Health factors (bps)
@@ -1118,9 +1118,9 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - `newImplementation` is not a contract (`NotAContract`)
      *
      * Security:
-     * - Role-gated upgrade authorization
+    * - Role-gated upgrade authorization.
      *
-     * @param newImplementation New implementation address
+    * @param newImplementation New implementation address.
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
@@ -1133,60 +1133,43 @@ contract UserView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Compatibility getters ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Read the Registry address (backward compatibility).
-     * @dev Reverts if:
-     *      - never reverts
+     * @notice Return the Registry address for backward compatibility.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - View-only.
      *
-     * @return Registry address
+     * @return registryAddr_ Registry contract address.
      */
-    function getRegistry() external view returns (address) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Legacy auto-getter compatible name for Registry address.
-     * @dev Reverts if:
-     *      - never reverts
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return Registry address
-     */
-    function registryAddr() external view returns (address) {
+    function getRegistry() external view returns (address registryAddr_) {
         return _registryAddr;
     }
 
     /*━━━━━━━━━━━━━━━ Versioning ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice API version for offchain integrations.
-     * @dev Reverts if:
-     *      - never reverts
+     * @notice Return the API semantic version for off-chain integrations.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - Pure function.
      *
-     * @return API version
+     * @return version API semantic version.
      */
-    function apiVersion() public pure override returns (uint256) {
+    function apiVersion() public pure override returns (uint256 version) {
         return 1;
     }
 
     /**
-     * @notice Schema version for returned payloads.
-     * @dev Reverts if:
-     *      - never reverts
+     * @notice Return the schema version for returned payloads.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - Pure function.
      *
-     * @return Schema version
+     * @return version Schema version.
      */
-    function schemaVersion() public pure override returns (uint256) {
+    function schemaVersion() public pure override returns (uint256 version) {
         return 1;
     }
 

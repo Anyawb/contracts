@@ -48,7 +48,7 @@ contract MockPositionViewRoleGated {
     function _write(address user, address asset, uint256 c, uint256 d, uint64 nextVersion) internal {
         uint64 current = version[user][asset];
         uint64 newVersion = nextVersion == 0 ? current + 1 : nextVersion;
-        require(newVersion > current, "MockPositionViewRoleGated: stale version");
+        require(newVersion > current, "MPVRG: stale ver");
         collateral[user][asset] = c;
         debt[user][asset] = d;
         version[user][asset] = newVersion;

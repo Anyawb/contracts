@@ -3,6 +3,20 @@ pragma solidity ^0.8.20;
 
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
 
+interface ICollateralManagerBatchMock {
+    function batchDepositCollateral(
+        address user,
+        address[] calldata assets,
+        uint256[] calldata amounts
+    ) external;
+
+    function batchWithdrawCollateral(
+        address user,
+        address[] calldata assets,
+        uint256[] calldata amounts
+    ) external;
+}
+
 /// @title MaliciousCollateralManager
 /// @notice Simplified attacker contract used in security tests to attempt reentrancy
 /// @dev This contract does not implement the collateral manager interface itself. Instead,
@@ -25,12 +39,12 @@ contract MaliciousCollateralManager {
 
     /// @notice Attempts to trigger a reentrant `depositCollateral`.
     function attackDeposit(address user, address asset, uint256 amount) external {
-        _attempt(abi.encodeWithSignature("depositCollateral(address,address,uint256)", user, asset, amount));
+        _attempt(abi.encodeCall(ICollateralManager.depositCollateral, (user, asset, amount)));
     }
 
     /// @notice Attempts to trigger a reentrant `withdrawCollateral`.
     function attackWithdraw(address user, address asset, uint256 amount) external {
-        _attempt(abi.encodeWithSignature("withdrawCollateral(address,address,uint256)", user, asset, amount));
+        _attempt(abi.encodeCall(ICollateralManager.withdrawCollateral, (user, asset, amount)));
     }
 
     /// @notice Attempts to trigger a reentrant `batchDepositCollateral`.
@@ -39,7 +53,7 @@ contract MaliciousCollateralManager {
         address[] calldata assets,
         uint256[] calldata amounts
     ) external {
-        _attempt(abi.encodeWithSignature("batchDepositCollateral(address,address[],uint256[])", user, assets, amounts));
+        _attempt(abi.encodeCall(ICollateralManagerBatchMock.batchDepositCollateral, (user, assets, amounts)));
     }
 
     /// @notice Attempts to trigger a reentrant `batchWithdrawCollateral`.
@@ -48,7 +62,7 @@ contract MaliciousCollateralManager {
         address[] calldata assets,
         uint256[] calldata amounts
     ) external {
-        _attempt(abi.encodeWithSignature("batchWithdrawCollateral(address,address[],uint256[])", user, assets, amounts));
+        _attempt(abi.encodeCall(ICollateralManagerBatchMock.batchWithdrawCollateral, (user, assets, amounts)));
     }
 
     function _attempt(bytes memory payload) private {

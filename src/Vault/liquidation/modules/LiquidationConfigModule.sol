@@ -30,21 +30,19 @@ contract LiquidationConfigModule is LiquidationConfigManager {
         _initializeLiquidationConfigManager(initialRegistryAddr, initialAccessControl);
     }
 
-    /// @notice Unauthorized caller for proxied updates
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when a proxied config update is called by an address other than the Registry-registered LiquidationRiskManager. Used by RiskManager compatibility paths.
     error LiquidationConfigModule__UnauthorizedCaller();
 
-    /// @notice Invalid liquidation threshold
+    /// @dev Reverts when a liquidation threshold value fails LiquidationTypes validation. Used by {updateLiquidationThresholdFromRiskManager}.
     error LiquidationConfigModule__InvalidLiquidationThreshold();
 
-    /// @notice Invalid maximum LTV
+    /// @dev Reverts when a maximum LTV value fails LiquidationTypes validation. Used by {updateMaxLtvBpsFromRiskManager}.
     error LiquidationConfigModule__InvalidMaxLtvBps();
 
-    /**
-     * @notice Liquidation threshold updated.
-     * @param oldThreshold Old liquidation threshold (bps=1e4)
-     * @param newThreshold New liquidation threshold (bps=1e4)
-     * @param blockNumber Legacy field name: update block number (block.number)
-     */
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when the liquidation threshold is updated.
+    /// @dev Emitted by the RiskManager compatibility path after proxied caller checks and threshold validation succeed.
     event LiquidationThresholdUpdated(uint256 oldThreshold, uint256 newThreshold, uint256 blockNumber);
 
     /**

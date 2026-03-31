@@ -1,5 +1,6 @@
 import { expect } from 'chai';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 import hardhat from 'hardhat';
 const { ethers } = hardhat;
 
@@ -55,6 +56,17 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     );
     await rewardManagerCoreProxy.waitForDeployment();
     const rewardManagerCore: any = RewardManagerCore.attach(await rewardManagerCoreProxy.getAddress());
+
+    // RewardAccrualManager proxy (penalty ledger SSOT).
+    const RewardAccrualManager = await ethers.getContractFactory('RewardAccrualManager');
+    const rewardAccrualManagerImpl: any = await RewardAccrualManager.deploy();
+    await rewardAccrualManagerImpl.waitForDeployment();
+    const rewardAccrualManagerProxy = await proxyFactory.deploy(
+      await rewardAccrualManagerImpl.getAddress(),
+      (rewardAccrualManagerImpl.interface as any).encodeFunctionData('initialize', [registry.target]),
+    );
+    await rewardAccrualManagerProxy.waitForDeployment();
+    const rewardAccrualManager: any = RewardAccrualManager.attach(await rewardAccrualManagerProxy.getAddress());
 
     // RewardManager proxy.
     const RewardManager = await ethers.getContractFactory('RewardManager');
@@ -121,6 +133,10 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     );
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('REWARD_CONFIG')), await rewardConfig.getAddress());
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('REWARD_EARN_CONFIG')), await earnConfig.getAddress());
+    await registry.setModule(
+      ethers.keccak256(ethers.toUtf8Bytes('REWARD_ACCRUAL_MANAGER')),
+      await rewardAccrualManager.getAddress(),
+    );
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('EASY_TOKEN')), easyToken.target);
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER')), governance.address);
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('REWARD_VIEW')), await rewardView.getAddress());
@@ -146,20 +162,11 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     await ensureRole(ROLE_ACTION_ADMIN, governance.address);
     await ensureRole(ROLE_CLAIM_REWARD, orderEngine.address);
 
-    // Penalty burns are executed by RewardManagerCore via EasyToken.burn, so it must hold BURNER_ROLE.
-    await easyToken.connect(governance).grantRole(await easyToken.BURNER_ROLE(), await rewardManagerCore.getAddress());
+    // Penalty SSOT moved to RewardAccrualManager: it attempts EasyToken.burn first, then falls back to penalty ledger.
+    await easyToken.connect(governance).grantRole(await easyToken.BURNER_ROLE(), await rewardAccrualManager.getAddress());
 
-    return { easyToken, rewardManagerCore, rewardManager, rewardView, rewardConfig, earnConfig };
+    return { easyToken, rewardManagerCore, rewardAccrualManager, rewardManager, rewardView, rewardConfig, earnConfig };
   }
-
-  it('RewardManager write entry only allows OrderEngine', async function () {
-    const { rewardManager } = await loadFixture(fixture);
-
-    await expect(rewardManager.connect(alice).onLoanEvent(alice.address, 1n, 1n, true)).to.be.revertedWithCustomError(
-      rewardManager,
-      'MissingRole',
-    );
-  });
 
   it('RewardManager write entry only allows OrderEngine (order-based)', async function () {
     const { rewardManager } = await loadFixture(fixture);
@@ -170,22 +177,13 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     ).to.be.revertedWithCustomError(rewardManager, 'MissingRole');
   });
 
-  it('RewardManagerCore rejects direct earn entry (deprecated attempt is auditable)', async function () {
-    const { rewardManagerCore } = await loadFixture(fixture);
-
-    await expect(rewardManagerCore.connect(alice).onLoanEvent(alice.address, 1n, 1n, true)).to.emit(
-      rewardManagerCore,
-      'DeprecatedDirectEntryAttempt',
-    );
-  });
-
-  it('RewardManagerCore rejects direct earn entry (order-based; deprecated attempt is auditable)', async function () {
+  it('RewardManagerCore rejects direct earn entry (order-based)', async function () {
     const { rewardManagerCore } = await loadFixture(fixture);
     const maturity = await maturityBlockAfterDays(30n);
 
     await expect(
       callBySignature(rewardManagerCore.connect(alice), SIG_ON_LOAN_EVENT_BY_ORDER)(alice.address, 1, 1_000e6, maturity, 0),
-    ).to.emit(rewardManagerCore, 'DeprecatedDirectEntryAttempt');
+    ).to.be.revertedWithCustomError(rewardManagerCore, 'RewardManagerCore__UseRewardManagerEntry');
   });
 
   it('Order-based: borrow locks, on-time repay releases and records earned (1e18 baseline)', async function () {
@@ -206,8 +204,16 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     ).to.not.be.reverted;
     expect(await easyToken.balanceOf(alice.address)).to.equal(0n);
 
+    const [lockedAfterBorrow, eligibleAfterBorrow, onTimeAfterBorrow] = await rewardView
+      .connect(alice)
+      .getUserEarnStateWithMeta(alice.address);
+    expect(lockedAfterBorrow).to.equal(ethers.parseUnits('1', 18));
+    expect(eligibleAfterBorrow).to.equal(1n);
+    expect(onTimeAfterBorrow).to.equal(0n);
+
     // Repay on-time full (outcome=1): token minting is handled elsewhere (EasyEmissionController).
-    // RewardManagerCore does not push `totalEarned` here; we only assert no penalty side effects.
+    // RewardManagerCore does not update the EasyToken lifetime mint read model directly on this path.
+    // We only assert that repay does not introduce penalty side effects on this path.
     await expect(
       callBySignature(rewardManager.connect(orderEngine), SIG_ON_LOAN_EVENT_BY_ORDER)(
         alice.address,
@@ -220,10 +226,16 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     expect(await easyToken.balanceOf(alice.address)).to.equal(0n);
 
     // RewardView is the read SSOT: should not show penalty/burn for on-time full repay.
-    const [earned, burned, pendingPenalty] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
-    expect(earned).to.equal(0n);
+    const [burned, pendingPenalty] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
     expect(burned).to.equal(0n);
     expect(pendingPenalty).to.equal(0n);
+
+    const [lockedAfterRepay, eligibleAfterRepay, onTimeAfterRepay] = await rewardView
+      .connect(alice)
+      .getUserEarnStateWithMeta(alice.address);
+    expect(lockedAfterRepay).to.equal(0n);
+    expect(eligibleAfterRepay).to.equal(1n);
+    expect(onTimeAfterRepay).to.equal(1n);
   });
 
   it('Locked points formula: level multiplier + dynamic reward are reflected in late penalty base', async function () {
@@ -236,7 +248,7 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     await rewardManager.connect(governance).updateUserLevel(alice.address, 3);
     await rewardManager.connect(governance).setLevelMultiplier(3, 20_000); // 2x
     await rewardManager.connect(governance).setDynamicRewardParams(ethers.parseUnits('1', 18), 2_000); // +20%
-    await rewardManager.connect(governance).setPenaltyBps(0n, 500n); // latePenaltyBps = 5%
+    await rewardManager.connect(governance).setLatePenaltyBps(500n); // latePenaltyBps = 5%
 
     // Borrow locks: 1e18 * 2x => 2e18; then +20% => 2.4e18
     await callBySignature(rewardManager.connect(orderEngine), SIG_ON_LOAN_EVENT_BY_ORDER)(
@@ -254,7 +266,7 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
       maturity,
       3,
     );
-    const [, , pendingPenalty0] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
+    const [, pendingPenalty0] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
     expect(pendingPenalty0).to.equal(ethers.parseUnits('0.12', 18)); // 2.4e18 * 5%
 
     // Disable dynamic reward: next order penalty base becomes 2e18 (2x only).
@@ -273,7 +285,7 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
       maturity,
       3,
     );
-    const [, , pendingPenalty1] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
+    const [, pendingPenalty1] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
     expect(pendingPenalty1).to.equal(ethers.parseUnits('0.22', 18)); // 0.12 + (2.0e18 * 5% = 0.10)
   });
 
@@ -301,7 +313,7 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
       3,
     );
 
-    const [, , pendingPenalty] = await rewardView.connect(bob).getUserRewardSummaryWithMeta(bob.address);
+    const [, pendingPenalty] = await rewardView.connect(bob).getUserRewardSummaryWithMeta(bob.address);
     expect(pendingPenalty).to.be.greaterThan(0n);
   });
 
@@ -315,7 +327,7 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     await rewardManager.connect(governance).updateUserLevel(bob.address, 3);
     await rewardManager.connect(governance).setLevelMultiplier(3, 20_000); // 2x
     await rewardManager.connect(governance).setDynamicRewardParams(0n, 0n); // keep clean
-    await rewardManager.connect(governance).setPenaltyBps(0n, 500n); // latePenaltyBps = 5%
+    await rewardManager.connect(governance).setLatePenaltyBps(500n); // latePenaltyBps = 5%
 
     // Borrow locks 2e18.
     await callBySignature(rewardManager.connect(orderEngine), SIG_ON_LOAN_EVENT_BY_ORDER)(
@@ -335,23 +347,48 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
       3,
     );
 
-    const [, , pendingPenalty] = await rewardView.connect(bob).getUserRewardSummaryWithMeta(bob.address);
+    const [, pendingPenalty] = await rewardView.connect(bob).getUserRewardSummaryWithMeta(bob.address);
     expect(pendingPenalty).to.equal(ethers.parseUnits('0.1', 18));
   });
 
-  it('Governance can set onTimeWindowBlocks + penalty bps via RewardManager', async function () {
+  it('Governance can set late penalty bps via RewardManager', async function () {
     const { rewardManager } = await loadFixture(fixture);
 
-    // Strict: block-based values, not seconds.
-    await expect(rewardManager.connect(governance).setOnTimeWindow(7_200)).to.not.be.reverted;
-    await expect(rewardManager.connect(governance).setPenaltyBps(0, 500)).to.not.be.reverted;
+    await expect(rewardManager.connect(governance).setLatePenaltyBps(500)).to.not.be.reverted;
+  });
+
+  it('GuaranteeFund-triggered liquidation penalty uses lockedEasy as the reward-unit base', async function () {
+    const { rewardManager, rewardView } = await loadFixture(fixture);
+
+    const principal = 1_000e6;
+    const maturity = await maturityBlockAfterDays(30n);
+
+    await rewardManager.connect(governance).setLiquidationPenaltyBps(500n);
+
+    await callBySignature(rewardManager.connect(orderEngine), SIG_ON_LOAN_EVENT_BY_ORDER)(
+      alice.address,
+      77,
+      principal,
+      maturity,
+      0,
+    );
+
+    const quotedPenalty = await rewardManager.quoteLiquidationPenalty(alice.address);
+    expect(quotedPenalty).to.equal(ethers.parseUnits('0.05', 18));
+
+    await expect(rewardManager.connect(governance).applyLiquidationPenalty(alice.address))
+      .to.emit(rewardManager, 'PenaltyApplied')
+      .withArgs(governance.address, alice.address, quotedPenalty, anyValue);
+
+    const [, pendingPenalty] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
+    expect(pendingPenalty).to.equal(quotedPenalty);
   });
 
   it('Governance can update user level (mirrored into RewardView)', async function () {
     const { rewardManager, rewardView } = await loadFixture(fixture);
 
     await rewardManager.connect(governance).updateUserLevel(alice.address, 3);
-    const [, , , level] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
+    const [, , level] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
     expect(level).to.equal(3);
 
     await expect(rewardManager.connect(governance).updateUserLevel(alice.address, 0)).to.be.revertedWithCustomError(

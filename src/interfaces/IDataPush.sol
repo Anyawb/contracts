@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IDataPush
-/// @notice Unified, gas-efficient data push interface for off-chain monitoring.
-/// @dev Any module that needs to stream structured data to off-chain services SHOULD
-///      emit the `DataPushed` event instead of bespoke events.  
-///      `dataTypeHash` MUST be the keccak256 hash of a short, UPPER_SNAKE_CASE identifier
-///      (e.g. "USER_HEALTH", "GLOBAL_STATS").  The `payload` **SHOULD** be ABI-encoded
-///      as a struct defined in its respective module contract to keep context.
+/**
+ * @title IDataPush
+ * @notice Unified, gas-efficient data push interface for off-chain monitoring.
+ * @dev Reverts if:
+ *      - implementations reject malformed payloads, unsupported data types, or unauthorized push callers
+ *
+ * Security:
+ * - Any module that needs to stream structured data to off-chain services SHOULD emit the `DataPushed` event instead
+ *   of bespoke events.
+ * - `dataTypeHash` MUST be the keccak256 hash of a short, UPPER_SNAKE_CASE identifier (e.g. "USER_HEALTH",
+ *   "GLOBAL_STATS").
+ * - `payload` SHOULD be ABI-encoded as a struct defined in its respective module contract to preserve schema context.
+ */
 interface IDataPush {
     /**
      * @notice Unified data bus event for off-chain consumers.
@@ -26,7 +32,9 @@ interface IDataPush {
     /**
      * @notice Push structured data to off-chain listeners.
      * @dev Reverts if:
-     *      - implementation-defined
+     *      - the implementation rejects `dataTypeHash` as unsupported
+     *      - the implementation rejects `payload` as malformed for the selected schema
+     *      - the caller is not authorized to publish through the implementation
      *
      * Security:
      * - Most modules in this repo emit `DataPushed` directly (typically via DataPushLibrary) and do not

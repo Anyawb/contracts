@@ -34,10 +34,9 @@ describe('EventHistoryManager', function () {
       expect(await eventHistory.getRegistry()).to.equal(await registry.getAddress());
     });
 
-    it('registryAddr() returns same address as getRegistry()', async function () {
+      it('getRegistry() returns configured registry', async function () {
       const { eventHistory, registry } = await loadFixture(deployFixture);
-      expect(await eventHistory.registryAddr()).to.equal(await registry.getAddress());
-      expect(await eventHistory.registryAddr()).to.equal(await eventHistory.getRegistry());
+        expect(await eventHistory.getRegistry()).to.equal(await registry.getAddress());
     });
 
     it('rejects zero address registry', async function () {
@@ -372,12 +371,10 @@ describe('EventHistoryManager', function () {
   });
 
   describe('兼容性', function () {
-    it('registryAddr() and getRegistry() return same value', async function () {
+    it('getRegistry() returns configured registry', async function () {
       const { eventHistory, registry } = await loadFixture(deployFixture);
-      const addr1 = await eventHistory.registryAddr();
-      const addr2 = await eventHistory.getRegistry();
-      expect(addr1).to.equal(addr2);
-      expect(addr1).to.equal(await registry.getAddress());
+      const addr = await eventHistory.getRegistry();
+      expect(addr).to.equal(await registry.getAddress());
     });
   });
 });

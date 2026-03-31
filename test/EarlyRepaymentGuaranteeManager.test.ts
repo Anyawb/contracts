@@ -128,7 +128,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
   describe('Initialization', function () {
     it('stores initializer parameters', async function () {
       const { ergm, vaultCore, platformFeeReceiver } = await loadFixture(deploySystemFixture);
-      expect(await ergm.vaultCore()).to.equal(vaultCore.address);
+      expect(await ergm.vaultCoreAddrVar()).to.equal(vaultCore.address);
       expect(await ergm.platformFeeReceiver()).to.equal(platformFeeReceiver.address);
       expect(await ergm.platformFeeRate()).to.equal(PLATFORM_FEE_RATE);
     });

@@ -1,13 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { AmountIsZero, Overpay, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { SystemEvents } from "../../SystemEvents.sol";
-import { LendingEngineStorage } from "./LendingEngineStorage.sol";
-import { LendingEngineValuation } from "./LendingEngineValuation.sol";
+import {
+    AmountIsZero,
+    Overpay,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {SystemEvents} from "../../SystemEvents.sol";
+import {LendingEngineStorage} from "./LendingEngineStorage.sol";
+import {LendingEngineValuation} from "./LendingEngineValuation.sol";
 
-/// @notice Debt accounting helpers for VaultLendingEngine.
+/**
+ * @title LendingEngineAccounting
+ * @notice Provides debt-accounting helpers for VaultLendingEngine.
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
+ * - This library mutates debt-ledger state and updates cached valuation through LendingEngineValuation.
+ * - Higher layers remain responsible for best-effort view and health pushes.
+ */
 library LendingEngineAccounting {
     using LendingEngineStorage for LendingEngineStorage.Layout;
 
@@ -16,10 +29,15 @@ library LendingEngineAccounting {
     /// @param asset Debt asset address.
     /// @param amount Debt delta amount in `asset` token base units (token decimals).
     /// @param isBorrow True for borrow (increase debt), false for repay / debt reduction.
-    event DebtRecorded(address indexed user, address indexed asset, uint256 amount, bool isBorrow);
+    event DebtRecorded(
+        address indexed user,
+        address indexed asset,
+        uint256 amount,
+        bool isBorrow
+    );
 
     /**
-     * @notice Record a borrow: increase debt balances and update cached valuation (ledger-side helper).
+     * @notice Records a borrow by increasing debt balances and updating cached valuation.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)
@@ -27,15 +45,20 @@ library LendingEngineAccounting {
      *      - valuation delta underflows system total (LendingEngineValuation__TotalDebtValueUnderflow) (propagated)
      *
      * Security:
-     * - Ledger-first: state writes occur before any best-effort cache/view pushes (handled in higher layers).
-     * - Emits standardized action events for observability.
+     * - State writes occur before any best-effort cache or view pushes handled in higher layers.
+     * - Emits standardized action events for off-chain monitoring.
      *
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      * @param asset Debt asset address.
      * @param amount Borrow amount in `asset` token base units (token decimals).
      */
-    function recordBorrow(LendingEngineStorage.Layout storage s, address user, address asset, uint256 amount) internal {
+    function recordBorrow(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset,
+        uint256 amount
+    ) internal {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
         if (user == address(0)) revert ZeroAddress();
@@ -60,7 +83,7 @@ library LendingEngineAccounting {
     }
 
     /**
-     * @notice Record a repay: decrease debt balances and update cached valuation (ledger-side helper).
+     * @notice Records a repayment by decreasing debt balances and updating cached valuation.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)
@@ -69,15 +92,20 @@ library LendingEngineAccounting {
      *      - valuation delta underflows system total (LendingEngineValuation__TotalDebtValueUnderflow) (propagated)
      *
      * Security:
-     * - Ledger-first: state writes occur before any best-effort cache/view pushes (handled in higher layers).
-     * - Emits standardized action events for observability.
+     * - State writes occur before any best-effort cache or view pushes handled in higher layers.
+     * - Emits standardized action events for off-chain monitoring.
      *
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      * @param asset Debt asset address.
      * @param amount Repay amount in `asset` token base units (token decimals).
      */
-    function recordRepay(LendingEngineStorage.Layout storage s, address user, address asset, uint256 amount) internal {
+    function recordRepay(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset,
+        uint256 amount
+    ) internal {
         if (amount == 0) revert AmountIsZero();
         if (asset == address(0)) revert ZeroAddress();
         if (user == address(0)) revert ZeroAddress();
@@ -104,7 +132,7 @@ library LendingEngineAccounting {
     }
 
     /**
-     * @notice Record a forced debt reduction (liquidation path) and update cached valuation.
+     * @notice Records a forced debt reduction for liquidation and updates cached valuation.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)
@@ -112,19 +140,21 @@ library LendingEngineAccounting {
      *      - valuation delta underflows system total (LendingEngineValuation__TotalDebtValueUnderflow) (propagated)
      *
      * Security:
-     * - Amount is clamped to current debt (never underflows the user's asset debt).
-     * - Emits standardized action events for observability.
+     * - Amount is clamped to current debt so the user's asset debt cannot underflow.
+     * - Emits standardized action events for off-chain monitoring.
      *
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      * @param asset Debt asset address.
      * @param amount Requested reduction amount in `asset` token base units (token decimals).
-     * @return reducedAmount Actual reduced amount in `asset` token base units (token decimals).
+     * @return reducedAmount Actual reduced amount in asset token base units.
      */
-    function recordForceReduceDebt(LendingEngineStorage.Layout storage s, address user, address asset, uint256 amount)
-        internal
-        returns (uint256 reducedAmount)
-    {
+    function recordForceReduceDebt(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset,
+        uint256 amount
+    ) internal returns (uint256 reducedAmount) {
         if (asset == address(0)) revert ZeroAddress();
         if (user == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
@@ -153,13 +183,21 @@ library LendingEngineAccounting {
     }
 
     /**
-     * @notice Add an asset to a user's debt asset list (if not already present).
-     * @dev Uses a 1-based index mapping (`index+1`) so 0 can represent "not present".
+     * @notice Adds an asset to a user's debt-asset list if it is not already present.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Uses a 1-based index mapping so 0 can represent not present.
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      * @param asset Debt asset address.
      */
-    function _addUserDebtAsset(LendingEngineStorage.Layout storage s, address user, address asset) internal {
+    function _addUserDebtAsset(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset
+    ) internal {
         uint256 index = s._userDebtAssetIndex[user][asset];
         if (index == 0) {
             s._userDebtAssets[user].push(asset);
@@ -169,13 +207,21 @@ library LendingEngineAccounting {
     }
 
     /**
-     * @notice Remove an asset from a user's debt asset list (if present).
-     * @dev Removal is done via swap-and-pop and updates the 1-based index mapping.
+     * @notice Removes an asset from a user's debt-asset list if it is present.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Uses swap-and-pop and updates the 1-based index mapping.
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      * @param asset Debt asset address.
      */
-    function _removeUserDebtAsset(LendingEngineStorage.Layout storage s, address user, address asset) internal {
+    function _removeUserDebtAsset(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset
+    ) internal {
         uint256 index = s._userDebtAssetIndex[user][asset];
         if (index > 0) {
             uint256 lastIndex = s._userDebtAssets[user].length - 1;
@@ -190,4 +236,3 @@ library LendingEngineAccounting {
         }
     }
 }
-

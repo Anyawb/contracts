@@ -300,15 +300,15 @@ await acm.grantRole(ActionKeys.ACTION_PAUSE_SYSTEM, governanceAddress);
 await acm.grantRole(ActionKeys.ACTION_UNPAUSE_SYSTEM, governanceAddress);
 
 // 3. 为价格更新器授予更新价格权限
-const priceUpdaterAddress = deployed.CoinGeckoPriceUpdater;
+const priceUpdaterAddress = deployed.PriceUpdater;
 await acm.grantRole(ActionKeys.ACTION_UPDATE_PRICE, priceUpdaterAddress);
 
 // 4. 配置奖励通证（EasyToken；SSOT = Registry[KEY_EASY_TOKEN]）
 // - 发行（mint）：只授予 EasyEmissionController（推荐 setSoleMinter 硬收口）
-// - 销毁（burn，用于扣罚/消费/回收）：授予 RewardManagerCore 与 EasyRecycleDistributor
+// - 销毁（burn，用于扣罚/消费/回收）：授予 RewardAccrualManager 与 EasyRecycleDistributor
 const easyTokenAddress = deployed.EasyToken;
 const easyEmissionControllerAddress = deployed.EasyEmissionController;
-const rewardManagerCoreAddress = deployed.RewardManagerCore;
+const rewardAccrualManagerAddress = deployed.RewardAccrualManager;
 const easyRecycleDistributorAddress = deployed.EasyRecycleDistributor;
 
 const easyToken = await ethers.getContractAt("EasyToken", easyTokenAddress);
@@ -317,7 +317,7 @@ const MINTER_ROLE = await easyToken.MINTER_ROLE();
 const BURNER_ROLE = await easyToken.BURNER_ROLE();
 
 await easyToken.setSoleMinter(easyEmissionControllerAddress);
-await easyToken.grantRole(BURNER_ROLE, rewardManagerCoreAddress);
+await easyToken.grantRole(BURNER_ROLE, rewardAccrualManagerAddress);
 await easyToken.grantRole(BURNER_ROLE, easyRecycleDistributorAddress);
 
 // 5. 为部署者授予白名单管理权限（用于初始资产配置）
@@ -350,7 +350,7 @@ vaultCore.deposit(assetAddress, amount);
 contract PriceOracle {
     function configureAsset(
         address asset,
-        string memory coingeckoId,
+        string memory sourceId,
         uint8 decimals,
         uint256 maxPriceAge
     ) external {
@@ -363,8 +363,8 @@ contract PriceOracle {
 ### 场景 3：价格更新（自动化）
 
 ```solidity
-// CoinGeckoPriceUpdater 需要 ACTION_UPDATE_PRICE 权限
-contract CoinGeckoPriceUpdater {
+// PriceUpdater 需要 ACTION_UPDATE_PRICE 权限
+contract PriceUpdater {
     function updatePrices(address[] calldata assets) external {
         _requireRole(ActionKeys.ACTION_UPDATE_PRICE, msg.sender);
         // 更新价格

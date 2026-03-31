@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { HealthFactorLib } from "../../../libraries/HealthFactorLib.sol";
-import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
-import { IPositionView } from "../../../interfaces/IPositionView.sol";
-import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
-import { IVaultCoreDataPush } from "../../../interfaces/IVaultCoreDataPush.sol";
-import { IVaultCoreMinimal } from "../../../interfaces/IVaultCoreMinimal.sol";
-import { Registry } from "../../../registry/Registry.sol";
-import { CacheEvents } from "../../CacheEvents.sol";
-import { HealthEvents } from "../../HealthEvents.sol";
-import { LendingEngineStorage } from "./LendingEngineStorage.sol";
-import { LendingEngineAccounting } from "./LendingEngineAccounting.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
+import {HealthFactorLib} from "../../../libraries/HealthFactorLib.sol";
+import {ILiquidationRiskRead} from "../../../interfaces/ILiquidationRiskRead.sol";
+import {IPositionView} from "../../../interfaces/IPositionView.sol";
+import {IPositionViewValuation} from "../../../interfaces/IPositionViewValuation.sol";
+import {IVaultCoreDataPush} from "../../../interfaces/IVaultCoreDataPush.sol";
+import {IVaultCoreMinimal} from "../../../interfaces/IVaultCoreMinimal.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {CacheEvents} from "../../CacheEvents.sol";
+import {HealthEvents} from "../../HealthEvents.sol";
+import {LendingEngineStorage} from "./LendingEngineStorage.sol";
+import {LendingEngineAccounting} from "./LendingEngineAccounting.sol";
 
 /// @notice Minimal interface for HealthView
 interface IHealthViewMinimal {
@@ -27,10 +27,20 @@ interface IHealthViewMinimal {
     ) external;
 }
 
-/// @notice Core orchestration helpers for VaultLendingEngine
+/**
+ * @title LendingEngineCore
+ * @notice Provides core debt-orchestration helpers for VaultLendingEngine.
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
+ * - This library coordinates ledger writes with best-effort view and health pushes.
+ * - Module resolution and role checks remain centralized in Registry and AccessControlManager.
+ * - Best-effort push paths must not block ledger writes.
+ */
 library LendingEngineCore {
-    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-    /// @notice Amount cannot be represented as int256.
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when a uint256 amount cannot be represented as int256. Used by debt-delta push helpers.
     error LendingEngineCore__AmountOverflowInt256();
 
     using LendingEngineStorage for LendingEngineStorage.Layout;
@@ -42,20 +52,20 @@ library LendingEngineCore {
     // `HealthEvents.HealthPushFailed(...)` below. Libraries cannot inherit interfaces.
 
     /**
-     * @notice Borrow orchestration: record debt, then best-effort push View/Health updates.
+     * @notice Records a borrow and then triggers best-effort view and health updates.
      * @dev Reverts if:
      *      - underlying accounting reverts (e.g., AmountIsZero / ZeroAddress) (propagated)
      *      - amount cannot be represented as int256 (LendingEngineCore__AmountOverflowInt256)
      *
      * Security:
-     * - Ledger SSOT: debt is recorded first; cache pushes are best-effort and must not block the ledger.
-     * - Reward is NOT triggered here. Reward SSOT is ORDER_ENGINE (core/LendingEngine) callbacks after settlement.
+     * - Debt is recorded first; follow-up push paths are best-effort and must not block the ledger.
+     * - Reward callbacks are not triggered here; reward handling remains in the order-engine flow.
      *
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      * @param asset Debt asset address.
      * @param amount Borrow amount (token decimals).
-     * @param termDays Loan term in days (used by higher-level flows; 0 = unknown / do-not-score).
+     * @param termDays Loan term in days, used by higher-level flows; 0 means unknown or do-not-score.
      */
     function borrow(
         LendingEngineStorage.Layout storage s,
@@ -76,21 +86,26 @@ library LendingEngineCore {
     }
 
     /**
-     * @notice Repay orchestration: record repayment, then best-effort push View/Health updates.
+     * @notice Records a repayment and then triggers best-effort view and health updates.
      * @dev Reverts if:
      *      - underlying accounting reverts (e.g., Overpay / AmountIsZero / ZeroAddress) (propagated)
      *      - amount cannot be represented as int256 (LendingEngineCore__AmountOverflowInt256)
      *
      * Security:
-     * - Ledger SSOT: repayment is recorded first; cache pushes are best-effort and must not block the ledger.
-     * - Reward is NOT triggered here. Reward SSOT is ORDER_ENGINE (core/LendingEngine) callbacks after settlement.
+     * - Repayment is recorded first; follow-up push paths are best-effort and must not block the ledger.
+     * - Reward callbacks are not triggered here; reward handling remains in the order-engine flow.
      *
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      * @param asset Debt asset address.
      * @param amount Repay amount (token decimals).
      */
-    function repay(LendingEngineStorage.Layout storage s, address user, address asset, uint256 amount) internal {
+    function repay(
+        LendingEngineStorage.Layout storage s,
+        address user,
+        address asset,
+        uint256 amount
+    ) internal {
         s.recordRepay(user, asset, amount);
         // Push debt delta (repay reduces principal debt).
         _pushDebtDeltaToView(s, user, asset, -_toInt(amount));
@@ -98,14 +113,14 @@ library LendingEngineCore {
     }
 
     /**
-     * @notice Liquidation orchestration: record forced debt reduction, then best-effort push View/Health updates.
+     * @notice Records a forced debt reduction and then triggers best-effort view and health updates.
      * @dev Reverts if:
      *      - caller lacks ACTION_LIQUIDATE (via ACM.requireRole) (propagated)
      *      - underlying accounting reverts (e.g., AmountIsZero / ZeroAddress) (propagated)
      *      - amount cannot be represented as int256 (LendingEngineCore__AmountOverflowInt256)
      *
      * Security:
-     * - Role-gated by ACTION_LIQUIDATE (ledger write path).
+     * - Role-gated by ACTION_LIQUIDATE.
      * - Cache pushes are best-effort and must not block the ledger.
      *
      * @param s LendingEngine storage layout.
@@ -126,47 +141,50 @@ library LendingEngineCore {
     }
 
     /**
-     * @notice Resolve a module address via Registry (strict).
+     * @notice Resolves a module address via Registry using the strict path.
      * @dev Reverts if:
      *      - Registry.getModuleOrRevert(moduleKey) reverts (propagated)
      *
      * Security:
-     * - SSOT: module address resolution MUST come from Registry.
-     * - Use this strict variant for ledger-critical dependencies (authorization, invariants).
+     * - Module address resolution must come from Registry.
+     * - This strict variant is intended for ledger-critical dependencies such as authorization and invariants.
      *
      * @param s LendingEngine storage layout.
      * @param moduleKey Registry module key.
-     * @return Module address.
+     * @return moduleAddr Module address resolved from Registry.
      */
     function _getModuleAddress(
         LendingEngineStorage.Layout storage s,
         bytes32 moduleKey
-    ) internal view returns (address) {
+    ) internal view returns (address moduleAddr) {
         return Registry(s._registryAddr).getModuleOrRevert(moduleKey);
     }
 
     /**
-     * @notice Resolve a module address via Registry (best-effort; returns 0 on failure).
+     * @notice Resolves a module address via Registry using a best-effort path.
      * @dev Reverts if:
-     *      - (none) - this function must not revert (best-effort)
+     *      - (none)
      *
      * Security:
-     * - Best-effort: used ONLY for View/Cache/observability push paths.
-     * - Must not block the ledger on misconfiguration.
+     * - Intended only for view, cache, and off-chain push paths.
+     * - Misconfiguration must not block the ledger.
      *
      * @param s LendingEngine storage layout.
      * @param moduleKey Registry module key.
-     * @return Module address, or address(0) if missing/unavailable.
+     * @return moduleAddr Module address, or address(0) if the module is missing or unavailable.
      */
     function _getModuleAddressOrZero(
         LendingEngineStorage.Layout storage s,
         bytes32 moduleKey
-    ) internal view returns (address) {
+    ) internal view returns (address moduleAddr) {
         // If Registry is not configured or not a contract, return 0.
-        if (s._registryAddr == address(0) || s._registryAddr.code.length == 0) return address(0);
+        if (s._registryAddr == address(0) || s._registryAddr.code.length == 0)
+            return address(0);
         // Architecture-Guide: runtime SSOT uses `Registry.getModuleOrRevert`.
         // For push paths we must be best-effort: swallow reverts and return 0.
-        try Registry(s._registryAddr).getModuleOrRevert(moduleKey) returns (address addr) {
+        try Registry(s._registryAddr).getModuleOrRevert(moduleKey) returns (
+            address addr
+        ) {
             return addr;
         } catch {
             return address(0);
@@ -174,38 +192,56 @@ library LendingEngineCore {
     }
 
     /**
-     * @notice Require an ACM role via Registry -> AccessControlManager (strict).
+     * @notice Requires an ACM role through Registry and AccessControlManager.
      * @dev Reverts if:
      *      - KEY_ACCESS_CONTROL is not registered (propagated)
      *      - ACM.requireRole(actionKey, user) reverts (propagated)
      *
      * Security:
-     * - Authorization SSOT is AccessControlManager (ACM).
+     * - Authorization remains centralized in AccessControlManager.
      *
      * @param s LendingEngine storage layout.
      * @param actionKey Action key (bytes32, see ActionKeys).
      * @param user Address to check.
      */
-    function _requireRole(LendingEngineStorage.Layout storage s, bytes32 actionKey, address user) internal view {
+    function _requireRole(
+        LendingEngineStorage.Layout storage s,
+        bytes32 actionKey,
+        address user
+    ) internal view {
         address acmAddr = _getModuleAddress(s, ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
- 
-
-    /// @notice Push debt delta to View (via VaultCore -> VaultRouter -> PositionView).
-    /// @dev This keeps both PositionView and StatisticsView consistent in a delta-based (multi-asset) manner,
-    ///      and does NOT depend on PositionView cache freshness (CACHE_DURATION).
+    /**
+     * @notice Pushes a debt delta to the view layer through VaultCore.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Best-effort push helper; failures emit CacheUpdateFailed and must not block the ledger.
+     * - Uses delta-based updates so PositionView cache freshness does not gate debt propagation.
+     *
+     * @param s LendingEngine storage layout.
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @param debtDelta Signed debt delta in token base units.
+     */
     function _pushDebtDeltaToView(
         LendingEngineStorage.Layout storage s,
         address user,
         address asset,
         int256 debtDelta
     ) internal {
-        address vaultCore = _getModuleAddressOrZero(s, ModuleKeys.KEY_VAULT_CORE);
+        address vaultCore = _getModuleAddressOrZero(
+            s,
+            ModuleKeys.KEY_VAULT_CORE
+        );
         address viewAddr = address(0);
         if (vaultCore != address(0) && vaultCore.code.length != 0) {
-            try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address v) {
+            try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (
+                address v
+            ) {
                 viewAddr = v;
             } catch {
                 // Best-effort: ignore view address resolution failure.
@@ -226,15 +262,17 @@ library LendingEngineCore {
         }
 
         uint64 nextVersion = _getNextVersion(s, user, asset);
-        try IVaultCoreDataPush(vaultCore).pushUserPositionUpdateDelta(
-            user,
-            asset,
-            int256(0),
-            debtDelta,
-            bytes32(0),
-            0,
-            nextVersion
-        ) {
+        try
+            IVaultCoreDataPush(vaultCore).pushUserPositionUpdateDelta(
+                user,
+                asset,
+                int256(0),
+                debtDelta,
+                bytes32(0),
+                0,
+                nextVersion
+            )
+        {
             // Best-effort: ignore push success value.
             user; // silence empty block
         } catch (bytes memory reason) {
@@ -250,15 +288,34 @@ library LendingEngineCore {
         }
     }
 
+    /**
+     * @notice Returns the next PositionView version for a user-asset pair.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Best-effort helper for view pushes; returns 0 if PositionView is unavailable.
+     *
+     * @param s LendingEngine storage layout.
+     * @param user Borrower address.
+     * @param asset Debt asset address.
+     * @return nextVersion Next version to use for the push, or 0 if it cannot be determined.
+     */
     function _getNextVersion(
         LendingEngineStorage.Layout storage s,
         address user,
         address asset
-    ) internal view returns (uint64) {
+    ) internal view returns (uint64 nextVersion) {
         // View push path: best-effort; do not revert if PositionView is missing.
-        address positionView = _getModuleAddressOrZero(s, ModuleKeys.KEY_POSITION_VIEW);
-        if (positionView == address(0) || positionView.code.length == 0) return 0;
-        try IPositionView(positionView).getPositionVersion(user, asset) returns (uint64 version) {
+        address positionView = _getModuleAddressOrZero(
+            s,
+            ModuleKeys.KEY_POSITION_VIEW
+        );
+        if (positionView == address(0) || positionView.code.length == 0)
+            return 0;
+        try
+            IPositionView(positionView).getPositionVersion(user, asset)
+        returns (uint64 version) {
             unchecked {
                 return version + 1;
             }
@@ -267,26 +324,44 @@ library LendingEngineCore {
         }
     }
 
-    function _toInt(uint256 value) internal pure returns (int256) {
-        if (value > uint256(type(int256).max)) revert LendingEngineCore__AmountOverflowInt256();
+    /**
+     * @notice Converts a uint256 value to int256.
+     * @dev Reverts if:
+     *      - value > type(int256).max (LendingEngineCore__AmountOverflowInt256)
+     *
+     * Security:
+     * - Pure bounds check only.
+     *
+     * @param value Unsigned value to convert.
+     * @return signedValue Signed representation of value.
+     */
+    function _toInt(uint256 value) internal pure returns (int256 signedValue) {
+        if (value > uint256(type(int256).max))
+            revert LendingEngineCore__AmountOverflowInt256();
         return int256(value);
     }
 
     /**
-     * @notice Aggregate collateral/debt and best-effort push health status to HealthView.
+     * @notice Aggregates collateral and debt values and pushes best-effort health status to HealthView.
      * @dev Reverts if:
-     *      - (none) - this function must not revert (best-effort)
+     *      - (none)
      *
      * Security:
-     * - Best-effort push: failures emit `CacheUpdateFailed` and `HealthPushFailed` and DO NOT revert.
+     * - Best-effort push: failures emit CacheUpdateFailed and HealthPushFailed and do not revert.
      * - Reads collateral from PositionView valuation and risk thresholds from LiquidationRiskManager.
      *
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      */
-    function _pushHealthStatus(LendingEngineStorage.Layout storage s, address user) internal {
+    function _pushHealthStatus(
+        LendingEngineStorage.Layout storage s,
+        address user
+    ) internal {
         // Health push is a View/Cache path: best-effort, never block the ledger.
-        address lrm = _getModuleAddressOrZero(s, ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
+        address lrm = _getModuleAddressOrZero(
+            s,
+            ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER
+        );
         address hv = _getModuleAddressOrZero(s, ModuleKeys.KEY_HEALTH_VIEW);
         address pv = _getModuleAddressOrZero(s, ModuleKeys.KEY_POSITION_VIEW);
 
@@ -301,17 +376,45 @@ library LendingEngineCore {
             hv.code.length == 0 ||
             lrm.code.length == 0
         ) {
-            emit CacheEvents.CacheUpdateFailed(user, address(0), hv, 0, totalDebt, bytes("health push deps missing"));
-            emit HealthEvents.HealthPushFailed(user, hv, 0, totalDebt, bytes("health push deps missing"));
+            emit CacheEvents.CacheUpdateFailed(
+                user,
+                address(0),
+                hv,
+                0,
+                totalDebt,
+                bytes("health push deps missing")
+            );
+            emit HealthEvents.HealthPushFailed(
+                user,
+                hv,
+                0,
+                totalDebt,
+                bytes("health push deps missing")
+            );
             return;
         }
 
         uint256 totalCollateral = 0;
-        try IPositionViewValuation(pv).getUserTotalCollateralValue(user) returns (uint256 v) {
+        try
+            IPositionViewValuation(pv).getUserTotalCollateralValue(user)
+        returns (uint256 v) {
             totalCollateral = v;
         } catch (bytes memory reason) {
-            emit CacheEvents.CacheUpdateFailed(user, address(0), hv, totalCollateral, totalDebt, reason);
-            emit HealthEvents.HealthPushFailed(user, hv, totalCollateral, totalDebt, reason);
+            emit CacheEvents.CacheUpdateFailed(
+                user,
+                address(0),
+                hv,
+                totalCollateral,
+                totalDebt,
+                reason
+            );
+            emit HealthEvents.HealthPushFailed(
+                user,
+                hv,
+                totalCollateral,
+                totalDebt,
+                reason
+            );
             return;
         }
 
@@ -335,16 +438,36 @@ library LendingEngineCore {
         }
 
         uint256 minHFBps;
-        try ILiquidationRiskManager(lrm).getMinHealthFactor() returns (uint256 v) {
+        try ILiquidationRiskRead(lrm).getMinHealthFactor() returns (uint256 v) {
             minHFBps = v;
         } catch (bytes memory reason) {
-            emit CacheEvents.CacheUpdateFailed(user, address(0), hv, totalCollateral, totalDebt, reason);
-            emit HealthEvents.HealthPushFailed(user, hv, totalCollateral, totalDebt, reason);
+            emit CacheEvents.CacheUpdateFailed(
+                user,
+                address(0),
+                hv,
+                totalCollateral,
+                totalDebt,
+                reason
+            );
+            emit HealthEvents.HealthPushFailed(
+                user,
+                hv,
+                totalCollateral,
+                totalDebt,
+                reason
+            );
             return;
         }
 
-        bool under = HealthFactorLib.isUnderCollateralized(totalCollateral, totalDebt, minHFBps);
-        uint256 hfBps = HealthFactorLib.calcHealthFactor(totalCollateral, totalDebt);
+        bool under = HealthFactorLib.isUnderCollateralized(
+            totalCollateral,
+            totalDebt,
+            minHFBps
+        );
+        uint256 hfBps = HealthFactorLib.calcHealthFactor(
+            totalCollateral,
+            totalDebt
+        );
 
         if (totalDebt > 0 && hfBps > type(uint256).max / 2) {
             emit CacheEvents.CacheUpdateFailed(
@@ -369,12 +492,32 @@ library LendingEngineCore {
         // NOTE (Time-Dependency-Refactor): `blockNumber` is the field name in the HealthView push API.
         // Semantics in this repo: treat it as a time-axis marker (blockNumber), NOT unix time.
         uint256 blockNumber = block.number;
-        try IHealthViewMinimal(hv).pushRiskStatus(user, hfBps, minHFBps, under, blockNumber) {
+        try
+            IHealthViewMinimal(hv).pushRiskStatus(
+                user,
+                hfBps,
+                minHFBps,
+                under,
+                blockNumber
+            )
+        {
             user; // silence empty block
         } catch (bytes memory reason) {
-            emit CacheEvents.CacheUpdateFailed(user, address(0), hv, totalCollateral, totalDebt, reason);
-            emit HealthEvents.HealthPushFailed(user, hv, totalCollateral, totalDebt, reason);
+            emit CacheEvents.CacheUpdateFailed(
+                user,
+                address(0),
+                hv,
+                totalCollateral,
+                totalDebt,
+                reason
+            );
+            emit HealthEvents.HealthPushFailed(
+                user,
+                hv,
+                totalCollateral,
+                totalDebt,
+                reason
+            );
         }
     }
 }
-

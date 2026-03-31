@@ -61,7 +61,7 @@ async function getVersionInfo(view: any): Promise<VersionInfo> {
  * strict 可由 opts.strict 或环境变量 E2E_VIEW_STRICT 控制。
  */
 export async function scanViewModules(registryAddr: string, opts?: ViewScanOptions) {
-  const strict = opts?.strict ?? envBool("E2E_VIEW_STRICT", false);
+  const strict = opts?.strict ?? envBool("E2E_VIEW_STRICT", envBool("E2E_STRICT_VIEWS", true));
   const registry = await ethers.getContractAt("Registry", registryAddr);
 
   console.log("=== ViewScan (Registry-driven) ===");
@@ -100,8 +100,9 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
     { key: "BATCH_VIEW", name: "BatchView", expectedApi: 1n, expectedSchema: 1n },
     { key: "LIQUIDATION_VIEW", name: "LiquidatorView", expectedApi: 1n, expectedSchema: 1n },
     { key: "LIQUIDATION_RISK_VIEW", name: "LiquidationRiskView", expectedApi: 1n, expectedSchema: 1n },
-    // RewardView bumped apiVersion to 2 after introducing a dedicated penalty-ledger DataPush type
-    { key: "REWARD_VIEW", name: "RewardView", expectedApi: 2n, expectedSchema: 1n },
+    // RewardView bumped to api=3/schema=2 after removing legacy totalEarned from the public summary ABI
+    // and splitting earn-side state into a dedicated getter.
+    { key: "REWARD_VIEW", name: "RewardView", expectedApi: 3n, expectedSchema: 2n },
   ];
 
   // 第一步：从 Registry 解析所有模块地址（解析失败在 strict 下会抛错）

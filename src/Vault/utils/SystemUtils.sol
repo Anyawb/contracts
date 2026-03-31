@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ArrayLengthMismatch } from "../../errors/StandardErrors.sol";
+import {ArrayLengthMismatch} from "../../errors/StandardErrors.sol";
 
 /**
  * @title SystemUtils
  * @notice Stateless system-level helpers for scores, rates, and cache timing.
- * @dev Security:
- * - Library functions are pure/view only; no external calls.
- * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
+ * @dev Reverts if:
+ *      - array lengths differ in weighted-average paths (ArrayLengthMismatch)
+ *      - arithmetic overflows or underflows in unchecked-free math paths (Solidity ^0.8.x)
  *
- * @custom:security-contact security@example.com
+ * Security:
+ * - Library functions are pure/view only; no external calls.
+ * - Solidity ^0.8.x overflow/underflow checks apply automatically.
  */
 library SystemUtils {
     uint256 internal constant _BPS_DENOMINATOR = 10_000;
@@ -35,15 +37,15 @@ library SystemUtils {
         uint256 criticalUsers,
         uint256 averageHealthFactorBps
     ) internal pure returns (uint256 healthScore) {
-        if (totalUsers == 0) return 100; // No users => treat as healthy.
-        
-        // 基础分数：基于平均健康因子
+        if (totalUsers == 0) return 100;
+
+        // Base score derived from the average health factor.
         uint256 baseScore = _calculateBaseHealthScore(averageHealthFactorBps);
-        
-        // 风险用户比例扣分
+
+        // Penalty derived from the warning and critical user ratios.
         uint256 riskPenalty = _calculateRiskPenalty(totalUsers, warningUsers, criticalUsers);
-        
-        // 计算最终分数
+
+        // Clamp the final score at zero.
         if (baseScore > riskPenalty) {
             healthScore = baseScore - riskPenalty;
         } else {
@@ -54,7 +56,7 @@ library SystemUtils {
     /**
      * @notice Compute a base score from average health factor.
      * @dev Reverts if:
-     *      - none
+    *      - (none)
      *
      * Security:
      * - Pure mapping only.
@@ -90,8 +92,8 @@ library SystemUtils {
         uint256 warningUsers,
         uint256 criticalUsers
     ) internal pure returns (uint256 riskPenalty) {
-        uint256 warningPenalty = (warningUsers * 5) / totalUsers; // Warning users: -5 each (ratio-based)
-        uint256 criticalPenalty = (criticalUsers * 15) / totalUsers; // Critical users: -15 each (ratio-based)
+        uint256 warningPenalty = (warningUsers * 5) / totalUsers;
+        uint256 criticalPenalty = (criticalUsers * 15) / totalUsers;
         
         return warningPenalty + criticalPenalty;
     }
@@ -128,7 +130,7 @@ library SystemUtils {
      */
     function calculateGrowthRate(uint256 current, uint256 previous) internal pure returns (uint256 growthRateBps) {
         if (previous == 0) return 0;
-        if (current < previous) return 0; // Negative growth => 0 (clamped)
+        if (current < previous) return 0;
         
         return ((current - previous) * _BPS_DENOMINATOR) / previous;
     }
@@ -194,7 +196,7 @@ library SystemUtils {
      *      - cacheBlock > block.number would underflow (Solidity ^0.8.x)
      *
      * Security:
-     * - Reads block number; do not use for critical security decisions.
+    * - Reads block number and is suitable only for freshness heuristics.
      *
      * @param cacheBlock Cache update block (block.number).
      * @param maxAgeBlocks Maximum allowed age (blocks).
@@ -211,7 +213,7 @@ library SystemUtils {
      *      - cacheBlock > block.number would underflow (Solidity ^0.8.x)
      *
      * Security:
-     * - Reads block number; do not use for critical security decisions.
+    * - Reads block number and is suitable only for freshness heuristics.
      *
      * @param cacheBlock Cache update block (block.number).
      * @param maxAgeBlocks Maximum allowed age (blocks).

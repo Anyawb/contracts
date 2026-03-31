@@ -96,6 +96,7 @@ function countOrderIds(orderIds: any): number {
   let total = 0;
   for (const v of Object.values(orderIds)) {
     if (Array.isArray(v)) total += v.length;
+    else if (typeof v === "string" || typeof v === "number") total += 1;
   }
   return total;
 }
@@ -109,19 +110,24 @@ function summarizeArtifact(prefix: string, data: any) {
   const orders = Array.isArray(data.orders) ? data.orders.length : 0;
   const orderIds = countOrderIds(data.orderIds);
   const checkpoints = safeCount(data.checkpoints);
-  const modules = safeCount(data.modules);
-  const dataPushTypes = safeCount(data?.counters?.dataPushedByTypeHash);
+  const modules = Math.max(safeCount(data.modules), safeCount(data.deployment));
+  const dataPushTypes = Math.max(
+    safeCount(data?.counters?.dataPushedByTypeHash),
+    safeCount(data?.dataPushCounts),
+  );
   const expectedReverts = safeCount(data?.counters?.expectedReverts);
+  const blockNumber = data.blockNumber ?? data.block ?? "";
+  const rpcUrl = data.rpcUrl ?? data.rpc ?? "";
 
   return {
     prefix,
     name: data.name ?? "",
     generatedAt: data.generatedAt ?? "",
     chainId: data.chainId ?? "",
-    rpcUrl: data.rpcUrl ?? "",
-    blockNumber: data.blockNumber ?? "",
+    rpcUrl,
+    blockNumber,
     strictViews: data.strictViews ?? "",
-    orders,
+    orders: orders || orderIds,
     orderIds,
     checkpoints,
     modules,

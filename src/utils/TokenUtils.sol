@@ -1,44 +1,60 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-import { ZeroAddress } from "../errors/StandardErrors.sol";
-import { RWAAssetNotAllowed } from "../errors/StandardErrors.sol";
+import {ZeroAddress} from "../errors/StandardErrors.sol";
+import {RWAAssetNotAllowed} from "../errors/StandardErrors.sol";
 
-import { IRWAPriceOracle } from "../interfaces/IRWAPriceOracle.sol";
-import { IRWATokenRegistry } from "../interfaces/IRWATokenRegistry.sol";
-import { TokenUtilsInternal } from "./TokenUtilsInternal.sol";
+import {IRWAAssetPriceRead} from "../interfaces/IRWAAssetPriceRead.sol";
+import {IRWATokenRegistry} from "../interfaces/IRWATokenRegistry.sol";
+import {TokenUtilsInternal} from "./TokenUtilsInternal.sol";
 
-/* =====================================================
- *              External Facade Contract (Ownable)
- * ===================================================*/
 /**
  * @title TokenUtils
  * @notice Convenience facade for token utility operations (delegate-less reuse).
- * @dev Security:
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
  * - This contract performs external token and oracle/registry calls.
  * - Owner may update dependency addresses; callers should treat these as trusted configuration.
  */
 contract TokenUtils is Ownable {
-    // External dependencies
+    /*━━━━━━━━━━━━━━━ State Variables ━━━━━━━━━━━━━━━*/
     address private _priceOracleAddr;
     address private _tokenRegistryAddr;
 
-    /// @notice Emitted when the price oracle address is updated.
-    /// @param newOracleAddr New oracle address.
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when the price oracle address changes.
+    /// @dev Emitted by {setPriceOracle} after the trusted oracle dependency is updated.
     event PriceOracleUpdated(address indexed newOracleAddr);
 
-    /// @notice Emitted when the token registry address is updated.
-    /// @param newRegistryAddr New registry address.
+    /// @notice Emitted when the token registry address changes.
+    /// @dev Emitted by {setTokenRegistry} after the trusted token-registry dependency is updated.
     event TokenRegistryUpdated(address indexed newRegistryAddr);
 
-    constructor(address _priceOracle, address _tokenRegistry) Ownable(msg.sender) {
+    /**
+     * @notice Constructs the TokenUtils facade with trusted dependency addresses.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Stores externally provided dependency addresses as trusted configuration.
+     * - Ownership is assigned to msg.sender.
+     *
+     * @param _priceOracle Initial price oracle address.
+     * @param _tokenRegistry Initial token registry address.
+     */
+    constructor(
+        address _priceOracle,
+        address _tokenRegistry
+    ) Ownable(msg.sender) {
         _priceOracleAddr = _priceOracle;
         _tokenRegistryAddr = _tokenRegistry;
     }
 
-    /* ============ Admin ============ */
+    /*━━━━━━━━━━━━━━━ Admin Views And Setters ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Get the configured price oracle address.
@@ -48,7 +64,7 @@ contract TokenUtils is Ownable {
      * Security:
      * - View-only.
      *
-     * @return Price oracle address.
+     * @return priceOracleAddr Configured price oracle address.
      */
     function priceOracleAddrVar() external view returns (address) {
         return _priceOracleAddr;
@@ -62,7 +78,7 @@ contract TokenUtils is Ownable {
      * Security:
      * - View-only.
      *
-     * @return Price oracle address.
+     * @return priceOracleAddr Configured price oracle address.
      */
     function priceOracle() external view returns (address) {
         return _priceOracleAddr;
@@ -76,7 +92,7 @@ contract TokenUtils is Ownable {
      * Security:
      * - View-only.
      *
-     * @return Token registry address.
+     * @return tokenRegistryAddr Configured token registry address.
      */
     function tokenRegistryAddrVar() external view returns (address) {
         return _tokenRegistryAddr;
@@ -90,7 +106,7 @@ contract TokenUtils is Ownable {
      * Security:
      * - View-only.
      *
-     * @return Token registry address.
+     * @return tokenRegistryAddr Configured token registry address.
      */
     function tokenRegistry() external view returns (address) {
         return _tokenRegistryAddr;
@@ -128,7 +144,7 @@ contract TokenUtils is Ownable {
         emit TokenRegistryUpdated(newRegistryAddr);
     }
 
-    /* ============ External Callables ============ */
+    /*━━━━━━━━━━━━━━━ External Callables ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Pull tokens (ERC20/ERC721/ERC1155) into this contract.
@@ -136,7 +152,7 @@ contract TokenUtils is Ownable {
      *      - TokenUtilsInternal._pullTokenUniversal reverts
      *
      * Security:
-     * - External token calls.
+     * - Performs external token calls.
      *
      * @param token Token contract address.
      * @param from Sender address.
@@ -158,19 +174,20 @@ contract TokenUtils is Ownable {
      *      - TokenUtilsInternal._getBalanceDelta reverts
      *
      * Security:
-     * - View-only external call to token.
+     * - Performs a view-only external call to the token contract.
      *
      * @param token ERC20 token address.
      * @param account Account address.
      * @param beforeBalance Balance snapshot before (token decimals).
-     * @return delta afterBalance - beforeBalance.
+     * @return delta Observed balance increase relative to beforeBalance.
      */
     function getBalanceDelta(
         address token,
         address account,
         uint256 beforeBalance
     ) external view returns (uint256) {
-        return TokenUtilsInternal._getBalanceDelta(token, account, beforeBalance);
+        return
+            TokenUtilsInternal._getBalanceDelta(token, account, beforeBalance);
     }
 
     /**
@@ -180,15 +197,17 @@ contract TokenUtils is Ownable {
      *      - oracle call reverts (propagates)
      *
      * Security:
-     * - View-only external call to oracle.
+     * - Performs a view-only external call to the configured oracle.
      *
      * @param token Token address.
-     * @return price Price value as returned by oracle.
-     * @return decimals Price decimals as returned by oracle.
+     * @return price Price value returned by the oracle.
+     * @return decimals Decimal precision returned by the oracle.
      */
-    function getPriceUSD(address token) external view returns (uint256 price, uint8 decimals) {
+    function getPriceUSD(
+        address token
+    ) external view returns (uint256 price, uint8 decimals) {
         if (_priceOracleAddr == address(0)) revert ZeroAddress();
-        return IRWAPriceOracle(_priceOracleAddr).getPriceUSD(token);
+        return IRWAAssetPriceRead(_priceOracleAddr).getPriceUSD(token);
     }
 
     /**
@@ -198,7 +217,7 @@ contract TokenUtils is Ownable {
      *      - token is not allowed (RWAAssetNotAllowed)
      *
      * Security:
-     * - View-only external call to registry.
+     * - Performs a view-only external call to the configured token registry.
      *
      * @param token Token address to validate.
      */
@@ -207,4 +226,4 @@ contract TokenUtils is Ownable {
         bool allowed = IRWATokenRegistry(_tokenRegistryAddr).isAllowed(token);
         if (!allowed) revert RWAAssetNotAllowed(token);
     }
-} 
+}

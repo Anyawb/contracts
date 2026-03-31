@@ -108,6 +108,20 @@ function mkArtifactsWriter() {
   };
 }
 
+const DATA_PUSH_IFACE = new ethers.Interface(["event DataPushed(bytes32 indexed dataTypeHash, bytes payload)"]);
+const DATA_PUSH_TOPIC0 = ethers.id("DataPushed(bytes32,bytes)").toLowerCase();
+
+function extractDataPushTypes(receipt: any, emitter: string): string[] {
+  return (receipt?.logs ?? [])
+    .filter((log: any) => {
+      if ((log?.topics?.[0] || "").toLowerCase() !== DATA_PUSH_TOPIC0) return false;
+      return String(log.address ?? "").toLowerCase() === emitter.toLowerCase();
+    })
+    .map((log: any) => DATA_PUSH_IFACE.parseLog(log))
+    .filter((parsed: any) => parsed)
+    .map((parsed: any) => String(parsed.args.dataTypeHash).toLowerCase());
+}
+
 async function pickCleanUser(signers: any[], easyToken: any) {
   for (const s of signers) {
     const bal = (await easyToken.balanceOf(s.address)) as bigint;
@@ -163,16 +177,16 @@ export async function runRewardManagerGovernance() {
     const missingRoleSel = errorSelector("MissingRole()");
 
     await mustRevertWithSelector(
-      "onLoanEvent from non-ORDER_ENGINE must revert",
+      "onLoanEventByOrder from non-ORDER_ENGINE must revert",
       async () =>
-        rm.connect(outsider).onLoanEvent(user.address, ethers.parseUnits("1000", 6), 30 * 24 * 3600, true),
+        rm.connect(outsider).onLoanEventByOrder(user.address, 1n, ethers.parseUnits("1000", 6), 123n, 0),
       missingRoleSel,
       { allowNoData: true }
     );
 
     await mustRevertWithSelector(
-      "applyPenalty from non-GUARANTEE_FUND must revert",
-      async () => rm.connect(outsider).applyPenalty(user.address, 1n),
+      "applyLiquidationPenalty from non-GUARANTEE_FUND must revert",
+      async () => rm.connect(outsider).applyLiquidationPenalty(user.address),
       missingRoleSel,
       { allowNoData: true }
     );
@@ -181,17 +195,33 @@ export async function runRewardManagerGovernance() {
     await network.provider.send("hardhat_setBalance", [gfmAddr, "0x56BC75E2D63100000"]); // 100 ETH
     const gfmSigner = await ethers.getSigner(gfmAddr);
 
+    const orderEngineAddr = (await registry.getModuleOrRevert(key("ORDER_ENGINE"))) as string;
+    await network.provider.send("hardhat_impersonateAccount", [orderEngineAddr]);
+    await network.provider.send("hardhat_setBalance", [orderEngineAddr, "0x56BC75E2D63100000"]); // 100 ETH
+    const orderEngineSigner = await ethers.getSigner(orderEngineAddr);
+
     const signers = await ethers.getSigners();
     const target = await pickCleanUser(signers, easyToken);
-    const before = await rv.connect(target).getUserRewardSummaryWithMeta(target.address);
-    const penaltyBefore = before[2] as bigint;
-    const points = 10n ** BigInt(await easyToken.decimals());
+    const orderId = BigInt(Date.now());
+    const maturity = BigInt((await ethers.provider.getBlockNumber()) + 7_200);
+    await waitTx(
+      Promise.resolve(
+        rm.connect(orderEngineSigner).onLoanEventByOrder(target.address, orderId, ethers.parseUnits("1000", 6), maturity, 0)
+      ),
+      "lock order for liquidation penalty"
+    );
 
-    const tx = await rm.connect(gfmSigner).applyPenalty(target.address, points);
-    const receipt = await waitTx(Promise.resolve(tx), "applyPenalty");
+    const before = await rv.connect(target).getUserRewardSummaryWithMeta(target.address);
+    const penaltyBefore = before[1] as bigint;
+    const easyAmount = (await rm.quoteLiquidationPenalty(target.address)) as bigint;
+    assertOk(easyAmount > 0n, "quoted liquidation penalty must be > 0");
+
+    const tx = await rm.connect(gfmSigner).applyLiquidationPenalty(target.address);
+    const receipt = await waitTx(Promise.resolve(tx), "applyLiquidationPenalty");
+    const rewardPushTypes = extractDataPushTypes(receipt, rvAddr);
 
     const paIface = new ethers.Interface([
-      "event PenaltyApplied(address indexed executor,address indexed user,uint256 points,uint256 blockNumber)",
+      "event PenaltyApplied(address indexed executor,address indexed user,uint256 easyAmount,uint256 blockNumber)",
     ]);
     const actionIface = new ethers.Interface([
       "event ActionExecuted(bytes32 indexed actionKey,string actionName,address indexed executor,uint256 blockNumber)",
@@ -209,8 +239,8 @@ export async function runRewardManagerGovernance() {
     assertOk(!!actionLog, "ActionExecuted event not found");
 
     const after = await rv.connect(target).getUserRewardSummaryWithMeta(target.address);
-    const penaltyAfter = after[2] as bigint;
-    assertOk(penaltyAfter === penaltyBefore + points, "penalty ledger did not increase as expected");
+    const penaltyAfter = after[1] as bigint;
+    assertOk(penaltyAfter === penaltyBefore + easyAmount, "penalty ledger did not increase as expected");
 
     const artifactPath = artifacts.writeJson(`rewardmanager-governance.${Date.now()}.json`, {
       name: "RewardManager governance (localhost)",
@@ -222,6 +252,15 @@ export async function runRewardManagerGovernance() {
         RewardView: rvAddr,
         EasyToken: easyTokenAddr,
         GuaranteeFundManager: gfmAddr,
+      },
+      counters: {
+        dataPushedByTypeHash: Object.fromEntries(rewardPushTypes.map((hash) => [hash, rewardPushTypes.filter((v) => v === hash).length])),
+      },
+      penaltyFlow: {
+        target: target.address,
+        penaltyBefore: penaltyBefore.toString(),
+        penaltyAfter: penaltyAfter.toString(),
+        rewardPushTypes,
       },
     });
     console.log("  📦 artifacts:", artifactPath);

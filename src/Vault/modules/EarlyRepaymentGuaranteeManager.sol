@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import { 
-    AmountIsZero, 
+import {
+    AmountIsZero,
     NotAContract,
-    ZeroAddress, 
+    ZeroAddress,
     ExternalModuleRevertedRaw,
     GuaranteeNotActive,
     InvalidGuaranteeId,
@@ -24,39 +24,30 @@ import {
     EarlyRepaymentGuaranteeManager__RateTooHigh,
     EarlyRepaymentGuaranteeManager__RateUnchanged
 } from "../../errors/StandardErrors.sol";
-import { ActionKeys } from "../../constants/ActionKeys.sol";
-import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { SystemEvents } from "../SystemEvents.sol";
-import { Registry } from "../../registry/Registry.sol";
-import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
-import { IGuaranteeFundManager } from "../../interfaces/IGuaranteeFundManager.sol";
-import { IEarlyRepaymentGuaranteeManager } from "../../interfaces/IEarlyRepaymentGuaranteeManager.sol";
+import {ActionKeys} from "../../constants/ActionKeys.sol";
+import {ModuleKeys} from "../../constants/ModuleKeys.sol";
+import {SystemEvents} from "../SystemEvents.sol";
+import {Registry} from "../../registry/Registry.sol";
+import {IAccessControlManager} from "../../interfaces/IAccessControlManager.sol";
+import {IGuaranteeFundManager} from "../../interfaces/IGuaranteeFundManager.sol";
+import {IEarlyRepaymentGuaranteeManager} from "../../interfaces/IEarlyRepaymentGuaranteeManager.sol";
 
 /**
  * @title EarlyRepaymentGuaranteeManager
- * @notice Manage early-repayment guarantee records and orchestrate settlement outcomes.
- * @dev SSOT / boundary:
- *      - This module is the SSOT for guarantee *records* (principal, promisedInterest, term, status),
- *        but it is NOT the custody/transfer authority for funds.
- *      - The SSOT for guarantee *fund custody and transfers* is `GuaranteeFundManager` (KEY_GUARANTEE_FUND).
- *      - Business write entrypoints are restricted to `VaultCore` (onlyVaultCore).
- *      - Governance/ops entrypoints are restricted by ACM ActionKeys (onlyRole).
- *      - Module address resolution SSOT is always `Registry.getModuleOrRevert(...)`; this module must not be used
- *        as an address-resolution facade.
- *
- * Reverts if:
- * - (see each external/public function; view getters are non-reverting unless explicitly documented)
+ * @notice Manages early-repayment guarantee records and orchestrates settlement outcomes.
+ * @dev Reverts if:
+ *      - see individual functions
  *
  * Security:
- * - UUPSUpgradeable: upgrades are role-gated in `_authorizeUpgrade`
- * - ReentrancyGuard: state-changing external entrypoints are nonReentrant
- * - Access control: governance writes are gated via ACM.requireRole(ActionKeys.*)
- *
- * @custom:security-contact security@example.com
+ * - This module is the SSOT for guarantee records but not for guarantee-fund custody.
+ * - GuaranteeFundManager remains the SSOT for guarantee-fund custody and transfers.
+ * - Business write entrypoints are restricted to VaultCore, while governance paths are gated through ACM roles.
+ * - Module address resolution remains centralized in Registry and must not be proxied through this module.
+ * - State-changing external entrypoints are non-reentrant and upgrades are role-gated.
  */
-contract EarlyRepaymentGuaranteeManager is 
-    Initializable, 
-    UUPSUpgradeable, 
+contract EarlyRepaymentGuaranteeManager is
+    Initializable,
+    UUPSUpgradeable,
     ReentrancyGuardUpgradeable,
     IEarlyRepaymentGuaranteeManager
 {
@@ -72,25 +63,26 @@ contract EarlyRepaymentGuaranteeManager is
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
     /// @notice guaranteeId => GuaranteeRecord
-    mapping(uint256 => IEarlyRepaymentGuaranteeManager.GuaranteeRecord) private _guaranteeRecords;
-    
+    mapping(uint256 => IEarlyRepaymentGuaranteeManager.GuaranteeRecord)
+        private _guaranteeRecords;
+
     /// @notice borrower => asset => guaranteeId
     mapping(address => mapping(address => uint256)) private _userGuaranteeIds;
-    
+
     /// @notice Monotonically increasing guarantee id counter.
     uint256 private _guaranteeIdCounter;
-    
+
     /// @notice Registry address for module resolution and access control.
     address private _registryAddr;
-    
+
     /// @notice Platform fee receiver address.
     address private _platformFeeReceiverAddr;
-    
+
     /// @notice Default early repayment penalty days.
     /// @dev Legacy name kept in {IEarlyRepaymentGuaranteeManager.GuaranteeRecord.earlyRepayPenaltyDays};
     ///      semantics in this repo are **penaltyBlocks** (block.number axis), not days.
     uint256 internal constant _DEFAULT_EARLY_REPAY_PENALTY_BLOCKS = 14_400;
-    
+
     /// @notice Platform fee rate (bps).
     uint256 private _platformFeeRate;
 
@@ -102,18 +94,24 @@ contract EarlyRepaymentGuaranteeManager is
     /// 0 = inherit default, 1 = enabled, 2 = disabled
     mapping(address => uint8) private _guaranteeAssetMode;
 
-    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-    /// @notice Called by an account other than the current SettlementManager resolved via Registry (SSOT).
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when a caller is not the current SettlementManager resolved via Registry.
+    ///      Used by settlement-only entrypoints.
     error EarlyRepaymentGuaranteeManager__OnlySettlementManager();
-    /// @notice Called by an account other than VaultCore or VaultBusinessLogic resolved via Registry (SSOT).
+    /// @dev Reverts when a caller is not VaultCore or VaultBusinessLogic resolved via Registry.
+    ///      Used by borrow-time orchestration paths.
     error EarlyRepaymentGuaranteeManager__OnlyAuthorizedOrchestrator();
-    /// @notice Guarantee feature is disabled for the given asset.
+    /// @dev Reverts when the guarantee feature is disabled for the specified asset.
+    ///      Used by feature-gated guarantee paths.
     error EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
     /// @dev Map a legacy `termDays` bucket to explicit blocks, and normalize reverts to {InvalidGuaranteeTerm}.
-    function _mapTermDaysToBlocks(uint256 termDays) internal pure returns (uint256) {
-        if (termDays == 0 || termDays > type(uint16).max) revert InvalidGuaranteeTerm();
+    function _mapTermDaysToBlocks(
+        uint256 termDays
+    ) internal pure returns (uint256) {
+        if (termDays == 0 || termDays > type(uint16).max)
+            revert InvalidGuaranteeTerm();
         uint16 td = uint16(termDays);
         // Inline mapping to keep error surface stable (revert InvalidGuaranteeTerm, not TermBlocksLib's error).
         if (td == 5) return 36_000;
@@ -131,7 +129,8 @@ contract EarlyRepaymentGuaranteeManager is
 
     /**
      * @notice Constructs the implementation contract and disables initializers.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Prevents the implementation contract from being initialized directly.
@@ -192,9 +191,10 @@ contract EarlyRepaymentGuaranteeManager is
      * @param oldRegistry Previous Registry address.
      * @param newRegistry New Registry address.
      */
-    event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
-
-
+    event RegistryUpdated(
+        address indexed oldRegistry,
+        address indexed newRegistry
+    );
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
 
@@ -202,23 +202,31 @@ contract EarlyRepaymentGuaranteeManager is
     modifier onlyVaultCore() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         // Backward compat: do not depend on Registry having KEY_VAULT_CORE configured for custom error matching.
-        address vaultCoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE);
-        if (msg.sender != vaultCoreAddr) revert EarlyRepaymentGuaranteeManager__OnlyVaultCore();
+        address vaultCoreAddr = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_VAULT_CORE
+        );
+        if (msg.sender != vaultCoreAddr)
+            revert EarlyRepaymentGuaranteeManager__OnlyVaultCore();
         _;
     }
 
     /// @notice Restricts calls to VaultCore or VaultBusinessLogic (borrow-time orchestration).
     modifier onlyVaultCoreOrBusinessLogic() {
         if (_registryAddr == address(0)) revert ZeroAddress();
-        address vaultCoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE);
+        address vaultCoreAddr = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_VAULT_CORE
+        );
         if (msg.sender == vaultCoreAddr) {
             _;
             return;
         }
-        address vbl = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
+        address vbl = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_VAULT_BUSINESS_LOGIC
+        );
         // Backward compat: keep the legacy "OnlyVaultCore" custom error for non-authorized callers
         // (tests and off-chain tooling depend on this selector).
-        if (msg.sender != vbl) revert EarlyRepaymentGuaranteeManager__OnlyVaultCore();
+        if (msg.sender != vbl)
+            revert EarlyRepaymentGuaranteeManager__OnlyVaultCore();
         _;
     }
 
@@ -226,13 +234,18 @@ contract EarlyRepaymentGuaranteeManager is
     modifier onlySettlementManager() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         // Backward compat: allow VaultCore to call settlement functions directly in legacy tests.
-        address vaultCoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE);
+        address vaultCoreAddr = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_VAULT_CORE
+        );
         if (vaultCoreAddr != address(0) && msg.sender == vaultCoreAddr) {
             _;
             return;
         }
-        address sm = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
-        if (msg.sender != sm) revert EarlyRepaymentGuaranteeManager__OnlySettlementManager();
+        address sm = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_SETTLEMENT_MANAGER
+        );
+        if (msg.sender != sm)
+            revert EarlyRepaymentGuaranteeManager__OnlySettlementManager();
         _;
     }
 
@@ -273,15 +286,15 @@ contract EarlyRepaymentGuaranteeManager is
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         uint256 blockNumber = block.number;
-        
+
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
         if (initialPlatformFeeReceiverAddr == address(0)) revert ZeroAddress();
-        
+
         _registryAddr = initialRegistryAddr;
         _platformFeeReceiverAddr = initialPlatformFeeReceiverAddr;
         _platformFeeRate = initialPlatformFeeRate;
         _guaranteeDefaultEnabled = true;
-        
+
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
@@ -292,47 +305,21 @@ contract EarlyRepaymentGuaranteeManager is
     }
 
     /**
-     * @notice Get current VaultCore address (legacy getter kept for tests/backward-compat).
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - View-only
-     *
-     * @return vaultCoreAddr VaultCore address.
-     */
-    function vaultCore() external view returns (address vaultCoreAddr) {
-        if (_registryAddr == address(0)) revert ZeroAddress();
-        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-    }
-
-    /**
-     * @notice Get current Registry address (legacy getter kept for tests/backward-compat).
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - View-only
-     *
-     * @return registryAddr Registry address.
-     */
-    function registry() external view returns (address registryAddr) {
-        return _registryAddr;
-    }
-
-    /**
      * @notice Get current VaultCore address.
      * @dev Reverts if:
      *      - (none)
      *
      * Security:
-     * - View-only
+     * - View-only.
      *
-     * @return vaultCoreAddr VaultCore address.
+     * @return vaultCoreAddr Current VaultCore address resolved from Registry.
      */
     function vaultCoreAddrVar() external view returns (address vaultCoreAddr) {
         if (_registryAddr == address(0)) revert ZeroAddress();
-        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
+        return
+            Registry(_registryAddr).getModuleOrRevert(
+                ModuleKeys.KEY_VAULT_CORE
+            );
     }
 
     /**
@@ -341,7 +328,7 @@ contract EarlyRepaymentGuaranteeManager is
      *      - (none)
      *
      * Security:
-     * - View-only
+     * - View-only.
      *
      * @return registryAddr Registry address.
      */
@@ -355,11 +342,15 @@ contract EarlyRepaymentGuaranteeManager is
      *      - (none)
      *
      * Security:
-     * - View-only
+     * - View-only.
      *
-     * @return receiverAddr Platform fee receiver address.
+     * @return receiverAddr Current platform fee receiver address.
      */
-    function platformFeeReceiver() external view returns (address receiverAddr) {
+    function platformFeeReceiver()
+        external
+        view
+        returns (address receiverAddr)
+    {
         return _platformFeeReceiverAddr;
     }
 
@@ -369,9 +360,9 @@ contract EarlyRepaymentGuaranteeManager is
      *      - (none)
      *
      * Security:
-     * - View-only
+     * - View-only.
      *
-     * @return rateBps Platform fee rate (bps, 10_000 = 100%).
+     * @return rateBps Current platform fee rate in bps.
      */
     function platformFeeRate() external view returns (uint256 rateBps) {
         return _platformFeeRate;
@@ -379,10 +370,16 @@ contract EarlyRepaymentGuaranteeManager is
 
     /**
      * @notice Whether early-repayment guarantee is enabled for the given asset.
-     * @dev Reverts if: (none)
-     * Security: view-only
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     * - Uses the asset override if configured; otherwise falls back to the module default.
      */
-    function isGuaranteeEnabled(address asset) external view override returns (bool enabled) {
+    function isGuaranteeEnabled(
+        address asset
+    ) external view override returns (bool enabled) {
         uint8 mode = _guaranteeAssetMode[asset];
         if (mode == 1) return true;
         if (mode == 2) return false;
@@ -404,25 +401,35 @@ contract EarlyRepaymentGuaranteeManager is
      * @param user Caller address to validate.
      */
     function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
     /**
-     * @notice Best-effort role check helper.
+     * @notice Check whether a user currently holds an ACM role through a best-effort path.
      * @dev Reverts if:
-     *      - (none) - returns false on external call failure
+     *      - (none)
      *
      * Security:
-     * - Best-effort: does not block execution if ACM is unavailable/misconfigured
+     * - View-only best-effort helper.
+     * - Returns false if ACM is unavailable or misconfigured.
      *
      * @param actionKey Action key (bytes32, see ActionKeys).
      * @param user Address to check.
-     * @return True if user has role, otherwise false.
+     * @return hasRole True if the user currently has the requested role.
      */
-    function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        try IAccessControlManager(acmAddr).hasRole(actionKey, user) returns (bool hasRole) {
+    function _hasRole(
+        bytes32 actionKey,
+        address user
+    ) internal view returns (bool) {
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
+        try IAccessControlManager(acmAddr).hasRole(actionKey, user) returns (
+            bool hasRole
+        ) {
             return hasRole;
         } catch {
             return false;
@@ -449,7 +456,7 @@ contract EarlyRepaymentGuaranteeManager is
      *      - (none)
      *
      * Security:
-     * - View-only
+     * - View-only.
      *
      * @return registryAddr Registry address.
      */
@@ -464,15 +471,16 @@ contract EarlyRepaymentGuaranteeManager is
      *      - (none)
      *
      * Security:
-     * - View-only
-     *
-     * Note:
-     * - If guaranteeId was never created, returns a zero-initialized struct.
+     * - View-only.
      *
      * @param guaranteeId Guarantee id.
-     * @return record Guarantee record struct.
+     * - Returns a zero-initialized struct if guaranteeId was never created.
+     *
+     * @return record Guarantee record snapshot.
      */
-    function getGuaranteeRecord(uint256 guaranteeId)
+    function getGuaranteeRecord(
+        uint256 guaranteeId
+    )
         external
         view
         override
@@ -487,18 +495,16 @@ contract EarlyRepaymentGuaranteeManager is
      *      - (none)
      *
      * Security:
-     * - View-only
+     * - View-only.
      *
      * @param user Borrower address.
      * @param asset Guarantee asset address.
-     * @return guaranteeId Guarantee id (0 if none is set).
+     * @return guaranteeId Active or last guarantee id for the user and asset, or 0 if none exists.
      */
-    function getUserGuaranteeId(address user, address asset)
-        external
-        view
-        override
-        returns (uint256 guaranteeId)
-    {
+    function getUserGuaranteeId(
+        address user,
+        address asset
+    ) external view override returns (uint256 guaranteeId) {
         return _userGuaranteeIds[user][asset];
     }
 
@@ -508,17 +514,21 @@ contract EarlyRepaymentGuaranteeManager is
      *      - (none)
      *
      * Security:
-     * - View-only
+     * - View-only.
      *
      * @param user Borrower address.
      * @param asset Guarantee asset address.
-     * @return isActive True if an active guarantee exists, otherwise false.
+     * @return isActive True if an active guarantee currently exists for the user and asset.
      */
-    function hasActiveGuarantee(address user, address asset) external view override returns (bool isActive) {
+    function hasActiveGuarantee(
+        address user,
+        address asset
+    ) external view override returns (bool isActive) {
         uint256 guaranteeId = _userGuaranteeIds[user][asset];
         if (guaranteeId == 0) return false;
-        
-        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[guaranteeId];
+
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord
+            storage record = _guaranteeRecords[guaranteeId];
         return record.isActive;
     }
 
@@ -528,21 +538,27 @@ contract EarlyRepaymentGuaranteeManager is
      *      - guarantee is not active (GuaranteeNotActive)
      *
      * Security:
-     * - View-only
+     * - View-only.
      *
      * @param guaranteeId Guarantee id.
      * @param actualRepayAmount Actual repay amount (reserved for future rules).
-     * @return result Previewed settlement amounts.
+     * @return result Previewed early-repayment settlement amounts.
      */
     function previewEarlyRepayment(
         uint256 guaranteeId,
         uint256 actualRepayAmount
     ) external view override returns (EarlyRepaymentResult memory result) {
-        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[guaranteeId];
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord
+            storage record = _guaranteeRecords[guaranteeId];
         if (!record.isActive) revert GuaranteeNotActive();
         uint256 blockNumber = block.number;
 
-        return _calculateEarlyRepaymentResult(record, actualRepayAmount, blockNumber);
+        return
+            _calculateEarlyRepaymentResult(
+                record,
+                actualRepayAmount,
+                blockNumber
+            );
     }
 
     /*━━━━━━━━━━━━━━━ Core functions ━━━━━━━━━━━━━━━*/
@@ -567,7 +583,7 @@ contract EarlyRepaymentGuaranteeManager is
      * @param principal Borrow principal amount.
      * @param promisedInterest Promised interest amount to be locked as guarantee.
      * @param termDays Loan term (days).
-     * @return guaranteeId New guarantee id.
+     * @return guaranteeId Newly allocated guarantee id.
      */
     function lockGuaranteeRecord(
         address borrower,
@@ -576,7 +592,14 @@ contract EarlyRepaymentGuaranteeManager is
         uint256 principal,
         uint256 promisedInterest,
         uint256 termDays
-    ) external override onlyVaultCoreOrBusinessLogic onlyValidRegistry nonReentrant returns (uint256 guaranteeId) {
+    )
+        external
+        override
+        onlyVaultCoreOrBusinessLogic
+        onlyValidRegistry
+        nonReentrant
+        returns (uint256 guaranteeId)
+    {
         uint256 blockNumber = block.number;
         // Basic parameter validation.
         if (borrower == address(0)) revert ZeroAddress();
@@ -585,14 +608,15 @@ contract EarlyRepaymentGuaranteeManager is
         if (principal == 0) revert AmountIsZero();
         if (promisedInterest == 0) revert AmountIsZero();
         if (termDays == 0) revert AmountIsZero();
-        if (!_isEnabled(asset)) revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
-        
+        if (!_isEnabled(asset))
+            revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
+
         // Business rule validation.
         if (borrower == lender) revert BorrowerCannotBeLender();
         // NOTE: termDays is a legacy term bucket identifier; only supported buckets are allowed.
         uint256 termBlocks = _mapTermDaysToBlocks(termDays);
         if (promisedInterest > principal * 2) revert GuaranteeInterestTooHigh(); // capped at 2x principal
-        
+
         // Ensure there is no active guarantee for (borrower, asset).
         if (_userGuaranteeIds[borrower][asset] != 0) {
             uint256 existingId = _userGuaranteeIds[borrower][asset];
@@ -600,16 +624,18 @@ contract EarlyRepaymentGuaranteeManager is
                 revert GuaranteeAlreadyProcessed();
             }
         }
-        
+
         // Guard against id counter overflow.
-        if (_guaranteeIdCounter == type(uint256).max) revert GuaranteeIdOverflow();
-        
+        if (_guaranteeIdCounter == type(uint256).max)
+            revert GuaranteeIdOverflow();
+
         // Generate a new guarantee id.
         uint256 newGuaranteeId = ++_guaranteeIdCounter;
         guaranteeId = newGuaranteeId;
-        
+
         // Create the guarantee record (semantic layer; no funds transfer).
-        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[newGuaranteeId];
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord
+            storage record = _guaranteeRecords[newGuaranteeId];
         record.principal = principal;
         record.promisedInterest = promisedInterest;
         // NOTE (Time-Dependency-Refactor):
@@ -621,10 +647,10 @@ contract EarlyRepaymentGuaranteeManager is
         record.isActive = true;
         record.lender = lender;
         record.asset = asset;
-        
+
         // Update user -> asset -> guaranteeId mapping.
         _userGuaranteeIds[borrower][asset] = newGuaranteeId;
-        
+
         emit GuaranteeLocked(
             newGuaranteeId,
             borrower,
@@ -637,11 +663,13 @@ contract EarlyRepaymentGuaranteeManager is
             record.earlyRepayPenaltyDays,
             blockNumber
         );
-        
+
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE),
+            ActionKeys.getActionKeyString(
+                ActionKeys.ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE
+            ),
             msg.sender,
             blockNumber
         );
@@ -665,50 +693,68 @@ contract EarlyRepaymentGuaranteeManager is
      * @param borrower Borrower address.
      * @param asset Guarantee asset address.
      * @param actualRepayAmount Actual repay amount (reserved for future rules).
-     * @return result Computed settlement amounts.
+     * @return result Computed early-repayment settlement amounts.
      */
     function settleEarlyRepayment(
         address borrower,
         address asset,
         uint256 actualRepayAmount
-    ) external override onlySettlementManager onlyValidRegistry nonReentrant returns (EarlyRepaymentResult memory result) {
+    )
+        external
+        override
+        onlySettlementManager
+        onlyValidRegistry
+        nonReentrant
+        returns (EarlyRepaymentResult memory result)
+    {
         uint256 blockNumber = block.number;
         if (borrower == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (actualRepayAmount == 0) revert AmountIsZero();
-        if (!_isEnabled(asset)) revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
-        
+        if (!_isEnabled(asset))
+            revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
+
         uint256 currentGuaranteeId = _userGuaranteeIds[borrower][asset];
         if (currentGuaranteeId == 0) revert GuaranteeRecordNotFound();
-        
-        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[currentGuaranteeId];
+
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord
+            storage record = _guaranteeRecords[currentGuaranteeId];
         if (!record.isActive) revert GuaranteeNotActive();
-        
+
         // Compute early repayment settlement amounts.
-        result = _calculateEarlyRepaymentResult(record, actualRepayAmount, blockNumber);
-        
+        result = _calculateEarlyRepaymentResult(
+            record,
+            actualRepayAmount,
+            blockNumber
+        );
+
         // CEI: update state first (Effects).
         record.isActive = false;
         delete _userGuaranteeIds[borrower][asset];
-        
+
         // Transfers are executed by GuaranteeFundManager: one-call 3-way distribution.
-        address gfm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_GUARANTEE_FUND);
+        address gfm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_GUARANTEE_FUND
+        );
         // Call GFM to perform custodial settlement (typed interface + unified revert wrapping).
         bool gfmCallOk;
-        try IGuaranteeFundManager(gfm).settleEarlyRepayment(
-            borrower,
-            asset,
-            record.lender,
-            result.refundToBorrower,
-            result.penaltyToLender,
-            result.platformFee
-        ) {
+        try
+            IGuaranteeFundManager(gfm).settleEarlyRepayment(
+                borrower,
+                asset,
+                record.lender,
+                result.refundToBorrower,
+                result.penaltyToLender,
+                result.platformFee
+            )
+        {
             gfmCallOk = true;
         } catch (bytes memory reason) {
             revert ExternalModuleRevertedRaw("GuaranteeFundManager", reason);
         }
-        if (!gfmCallOk) revert ExternalModuleRevertedRaw("GuaranteeFundManager", bytes(""));
-        
+        if (!gfmCallOk)
+            revert ExternalModuleRevertedRaw("GuaranteeFundManager", bytes(""));
+
         emit EarlyRepaymentProcessed(
             currentGuaranteeId,
             borrower,
@@ -720,11 +766,13 @@ contract EarlyRepaymentGuaranteeManager is
             result.actualInterestPaid,
             blockNumber
         );
-        
+
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE),
+            ActionKeys.getActionKeyString(
+                ActionKeys.ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE
+            ),
             msg.sender,
             blockNumber
         );
@@ -746,45 +794,59 @@ contract EarlyRepaymentGuaranteeManager is
      *
      * @param borrower Borrower address.
      * @param asset Guarantee asset address.
-     * @return forfeitedAmount Amount forfeited.
+     * @return forfeitedAmount Full guarantee amount forfeited to the lender.
      */
     function processDefault(
         address borrower,
         address asset
-    ) external override onlySettlementManager onlyValidRegistry nonReentrant returns (uint256 forfeitedAmount) {
+    )
+        external
+        override
+        onlySettlementManager
+        onlyValidRegistry
+        nonReentrant
+        returns (uint256 forfeitedAmount)
+    {
         uint256 blockNumber = block.number;
         if (borrower == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
-        if (!_isEnabled(asset)) revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
-        
+        if (!_isEnabled(asset))
+            revert EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
+
         uint256 currentGuaranteeId = _userGuaranteeIds[borrower][asset];
         if (currentGuaranteeId == 0) revert GuaranteeRecordNotFound();
-        
-        IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record = _guaranteeRecords[currentGuaranteeId];
+
+        IEarlyRepaymentGuaranteeManager.GuaranteeRecord
+            storage record = _guaranteeRecords[currentGuaranteeId];
         if (!record.isActive) revert GuaranteeNotActive();
-        
+
         // Forfeit full guarantee (current policy).
         forfeitedAmount = record.promisedInterest;
-        
+
         // CEI: update state before external transfer.
         record.isActive = false;
         delete _userGuaranteeIds[borrower][asset];
-        
+
         // Transfers are executed by GuaranteeFundManager.
-        address gfm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_GUARANTEE_FUND);
+        address gfm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_GUARANTEE_FUND
+        );
         bool gfmCallOk;
-        try IGuaranteeFundManager(gfm).forfeitPartial(
-            borrower,
-            asset,
-            record.lender,
-            forfeitedAmount
-        ) {
+        try
+            IGuaranteeFundManager(gfm).forfeitPartialWithRewardPenalty(
+                borrower,
+                asset,
+                record.lender,
+                forfeitedAmount
+            )
+        {
             gfmCallOk = true;
         } catch (bytes memory reason) {
             revert ExternalModuleRevertedRaw("GuaranteeFundManager", reason);
         }
-        if (!gfmCallOk) revert ExternalModuleRevertedRaw("GuaranteeFundManager", bytes(""));
-        
+        if (!gfmCallOk)
+            revert ExternalModuleRevertedRaw("GuaranteeFundManager", bytes(""));
+
         emit GuaranteeForfeited(
             currentGuaranteeId,
             borrower,
@@ -793,11 +855,13 @@ contract EarlyRepaymentGuaranteeManager is
             forfeitedAmount,
             blockNumber
         );
-        
+
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_LIQUIDATE_GUARANTEE,
-            ActionKeys.getActionKeyString(ActionKeys.ACTION_LIQUIDATE_GUARANTEE),
+            ActionKeys.getActionKeyString(
+                ActionKeys.ACTION_LIQUIDATE_GUARANTEE
+            ),
             msg.sender,
             blockNumber
         );
@@ -817,18 +881,20 @@ contract EarlyRepaymentGuaranteeManager is
      *
      * @param newReceiverAddr New receiver address.
      */
-    function setPlatformFeeReceiver(address newReceiverAddr)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function setPlatformFeeReceiver(
+        address newReceiverAddr
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         uint256 blockNumber = block.number;
         _validateModuleAddress(newReceiverAddr);
         address oldReceiver = _platformFeeReceiverAddr;
         _platformFeeReceiverAddr = newReceiverAddr;
-        
-        emit PlatformFeeReceiverUpdated(oldReceiver, newReceiverAddr, blockNumber);
-        
+
+        emit PlatformFeeReceiverUpdated(
+            oldReceiver,
+            newReceiverAddr,
+            blockNumber
+        );
+
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -851,15 +917,19 @@ contract EarlyRepaymentGuaranteeManager is
      *
      * @param newRate New platform fee rate (bps).
      */
-    function setPlatformFeeRate(uint256 newRate) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function setPlatformFeeRate(
+        uint256 newRate
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         uint256 blockNumber = block.number;
-        if (newRate > 1000) revert EarlyRepaymentGuaranteeManager__RateTooHigh();
-        if (newRate == _platformFeeRate) revert EarlyRepaymentGuaranteeManager__RateUnchanged();
+        if (newRate > 1000)
+            revert EarlyRepaymentGuaranteeManager__RateTooHigh();
+        if (newRate == _platformFeeRate)
+            revert EarlyRepaymentGuaranteeManager__RateUnchanged();
         uint256 oldRate = _platformFeeRate;
         _platformFeeRate = newRate;
-        
+
         emit PlatformFeeRateUpdated(oldRate, newRate, blockNumber);
-        
+
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -881,11 +951,10 @@ contract EarlyRepaymentGuaranteeManager is
      * @param asset Guarantee asset address.
      * @param enabled True to enable, false to disable.
      */
-    function setGuaranteeEnabled(address asset, bool enabled)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function setGuaranteeEnabled(
+        address asset,
+        bool enabled
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (asset == address(0)) revert ZeroAddress();
         _guaranteeAssetMode[asset] = enabled ? 1 : 2;
     }
@@ -924,19 +993,18 @@ contract EarlyRepaymentGuaranteeManager is
      *
      * @param newRegistryAddr New Registry address.
      */
-    function setRegistry(address newRegistryAddr)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
-    {
+    function setRegistry(
+        address newRegistryAddr
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
         uint256 blockNumber = block.number;
         _validateModuleAddress(newRegistryAddr);
-        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
+        if (newRegistryAddr.code.length == 0)
+            revert NotAContract(newRegistryAddr);
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
-        
+
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
-        
+
         // Emit standardized action event for observability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
@@ -954,11 +1022,11 @@ contract EarlyRepaymentGuaranteeManager is
      *      - currentBlock < record.startTime (InvalidGuaranteeId)
      *
      * Security:
-     * - View-only internal helper (does not mutate state)
+     * - View-only internal helper.
      *
      * @param record Guarantee record reference.
      * @param currentTimestamp Legacy param name: current block number used for the settlement calculation.
-     * @return result Computed settlement amounts.
+     * @return result Computed early-repayment settlement amounts.
      */
     function _calculateEarlyRepaymentResult(
         IEarlyRepaymentGuaranteeManager.GuaranteeRecord storage record,
@@ -973,22 +1041,33 @@ contract EarlyRepaymentGuaranteeManager is
         // - Avoid blocks<->days conversions; compute pro-rata directly in blocks.
         uint256 startBlock = record.startTime;
         uint256 maturityBlock = record.maturityTime;
-        uint256 totalBlocks = maturityBlock > startBlock ? (maturityBlock - startBlock) : 0;
+        uint256 totalBlocks = maturityBlock > startBlock
+            ? (maturityBlock - startBlock)
+            : 0;
         if (totalBlocks == 0) totalBlocks = 1; // prevent div-by-zero on malformed/legacy records
 
         uint256 elapsedBlocks = currentTimestamp - startBlock;
         if (elapsedBlocks > totalBlocks) elapsedBlocks = totalBlocks; // clamp to maturity
 
         // promisedInterest * elapsedBlocks / totalBlocks
-        result.actualInterestPaid = Math.mulDiv(record.promisedInterest, elapsedBlocks, totalBlocks);
+        result.actualInterestPaid = Math.mulDiv(
+            record.promisedInterest,
+            elapsedBlocks,
+            totalBlocks
+        );
 
         // Compute penalty (extra N blocks interest), capped by the remaining guarantee.
         // Legacy field name: `earlyRepayPenaltyDays` but semantics are penaltyBlocks.
         uint256 penaltyBlocks = record.earlyRepayPenaltyDays;
-        uint256 penaltyInterest = Math.mulDiv(record.promisedInterest, penaltyBlocks, totalBlocks);
-        
+        uint256 penaltyInterest = Math.mulDiv(
+            record.promisedInterest,
+            penaltyBlocks,
+            totalBlocks
+        );
+
         // Ensure penalty does not exceed remaining guarantee.
-        uint256 remainingGuarantee = record.promisedInterest - result.actualInterestPaid;
+        uint256 remainingGuarantee = record.promisedInterest -
+            result.actualInterestPaid;
         if (penaltyInterest > remainingGuarantee) {
             penaltyInterest = remainingGuarantee;
         }
@@ -1002,9 +1081,15 @@ contract EarlyRepaymentGuaranteeManager is
         //
         // We treat `penaltyToLender` as the net amount paid to lender from the guarantee pool:
         // earnedInterest (actualInterestPaid) + penaltyInterest - platformFee.
-        result.penaltyToLender = result.actualInterestPaid + penaltyInterest - platformFee;
-        result.refundToBorrower = record.promisedInterest - result.actualInterestPaid - penaltyInterest;
-        
+        result.penaltyToLender =
+            result.actualInterestPaid +
+            penaltyInterest -
+            platformFee;
+        result.refundToBorrower =
+            record.promisedInterest -
+            result.actualInterestPaid -
+            penaltyInterest;
+
         return result;
     }
 
@@ -1027,20 +1112,21 @@ contract EarlyRepaymentGuaranteeManager is
         uint256 blockNumber = block.number;
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        
+
         // Validate target implementation.
-        if (newImplementation.code.length == 0) revert EarlyRepaymentGuaranteeManager__InvalidImplementation();
-        
+        if (newImplementation.code.length == 0)
+            revert EarlyRepaymentGuaranteeManager__InvalidImplementation();
+
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
             blockNumber
         );
-        
+
         // Additional validations can be added here (e.g., interface checks, storage layout compatibility).
     }
 
     /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
     uint256[50] private __gap;
-} 
+}

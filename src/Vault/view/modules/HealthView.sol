@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { DegradationMonitor as GracefulDegradationMonitor } from "../../../monitor/DegradationMonitor.sol";
-import { DegradationCore as GracefulDegradationCore } from "../../../monitor/DegradationCore.sol";
-import { DegradationStorage as GracefulDegradationStorage } from "../../../monitor/DegradationStorage.sol";
-import { ModuleHealthView } from "./ModuleHealthView.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {DataPushLibrary} from "../../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../../constants/DataPushTypes.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {DegradationMonitor as GracefulDegradationMonitor} from "../../../monitor/DegradationMonitor.sol";
+import {DegradationCore as GracefulDegradationCore} from "../../../monitor/DegradationCore.sol";
+import {DegradationStorage as GracefulDegradationStorage} from "../../../monitor/DegradationStorage.sol";
+import {ModuleHealthView} from "./ModuleHealthView.sol";
 import {
     ArrayLengthMismatch,
     BatchTooLarge,
@@ -23,10 +23,17 @@ import {
     NotAContract,
     ZeroAddress
 } from "../../../errors/StandardErrors.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
 
+/// @title ISystemRiskViewLite
+/// @notice Minimal read interface for system risk thresholds.
+/// @dev Used by {HealthView} to read the system minimum health factor without importing the full risk module.
 interface ISystemRiskViewLite {
-    function getMinHealthFactor() external view returns (uint256 minHealthFactor);
+    /// @notice Returns the minimum health factor configured for the system.
+    function getMinHealthFactor()
+        external
+        view
+        returns (uint256 minHealthFactor);
 }
 
 /**
@@ -43,7 +50,8 @@ interface ISystemRiskViewLite {
  *
  * Security:
  * - Cache writes are restricted via ACTION_VIEW_PUSH and/or system-status/admin roles.
- * - User health-factor reads follow Scheme U (self read allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN).
+ * - User health-factor reads follow Scheme U
+ *   (self read allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN).
  * - Batch user reads (users[]) are treated as enumeration capabilities: no self-bypass; requires
  *   ACTION_VIEW_USER_DATA or ACTION_ADMIN.
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
@@ -57,7 +65,11 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param healthFactor Cached health factor (bps)
      * @param blockNumber Cache update blockNumber (block.number)
      */
-    event HealthFactorCached(address indexed user, uint256 healthFactor, uint256 blockNumber);
+    event HealthFactorCached(
+        address indexed user,
+        uint256 healthFactor,
+        uint256 blockNumber
+    );
 
     /**
      * @notice Emitted when a module health status is cached for off-chain indexing.
@@ -90,10 +102,10 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Module health cache ━━━━━━━━━━━━━━━*/
     // NOTE: Storage layout must remain stable across upgrades; do not reorder fields for packing.
     struct ModuleHealth {
-        bool    isHealthy;
+        bool isHealthy;
         bytes32 detailsHash;
-        uint32  lastCheckTime;
-        uint32  consecutiveFailures;
+        uint32 lastCheckTime;
+        uint32 consecutiveFailures;
     }
 
     mapping(address => ModuleHealth) private _moduleHealth;
@@ -108,7 +120,13 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     modifier onlyViewPusher() {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_PUSH, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_PUSH,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         _;
@@ -133,8 +151,8 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U: self read allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN.
     modifier onlyAuthorizedFor(address user) {
         if (msg.sender != user) {
-            bool ok =
-                _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) || _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
+            bool ok = _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) ||
+                _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
             if (!ok) revert MissingRole();
         }
         _;
@@ -142,8 +160,8 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @dev Scheme U batch: no self-bypass; requires ACTION_VIEW_USER_DATA or ACTION_ADMIN.
     modifier onlyOpsOrAdmin() {
-        bool ok =
-            _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) || _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        bool ok = _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) ||
+            _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
         if (!ok) revert MissingRole();
         _;
     }
@@ -168,7 +186,8 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -187,12 +206,18 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param user Target user address
      * @param healthFactor Health factor (bps)
      */
-    function pushHealthFactor(address user, uint256 healthFactor) external onlyValidRegistry onlyViewPusher {
+    function pushHealthFactor(
+        address user,
+        uint256 healthFactor
+    ) external onlyValidRegistry onlyViewPusher {
         _healthFactorCache[user] = healthFactor;
         _cacheUpdateBlocks[user] = block.number;
         emit HealthFactorCached(user, healthFactor, block.number);
         // Push to generic data stream
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_HEALTH_FACTOR, abi.encode(user, healthFactor));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_HEALTH_FACTOR,
+            abi.encode(user, healthFactor)
+        );
     }
 
     /**
@@ -219,11 +244,23 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 blockNumber
     ) external onlyValidRegistry onlyViewPusher {
         _healthFactorCache[user] = healthFactorBps;
-        _cacheUpdateBlocks[user] = blockNumber == 0 ? block.number : blockNumber;
-        emit HealthFactorCached(user, healthFactorBps, _cacheUpdateBlocks[user]);
+        _cacheUpdateBlocks[user] = blockNumber == 0
+            ? block.number
+            : blockNumber;
+        emit HealthFactorCached(
+            user,
+            healthFactorBps,
+            _cacheUpdateBlocks[user]
+        );
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_RISK_STATUS,
-            abi.encode(user, healthFactorBps, minHFBps, undercollateralized, _cacheUpdateBlocks[user])
+            abi.encode(
+                user,
+                healthFactorBps,
+                minHFBps,
+                undercollateralized,
+                _cacheUpdateBlocks[user]
+            )
         );
     }
 
@@ -267,16 +304,28 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
             revert ArrayLengthMismatch(users.length, underFlags.length);
         }
         uint256 len = users.length;
-        uint256 resolvedBlockNumber = blockNumber == 0 ? block.number : blockNumber;
+        uint256 resolvedBlockNumber = blockNumber == 0
+            ? block.number
+            : blockNumber;
         for (uint256 i; i < len; ++i) {
             address u = users[i];
             _healthFactorCache[u] = healthFactorsBps[i];
             _cacheUpdateBlocks[u] = resolvedBlockNumber;
-            emit HealthFactorCached(u, healthFactorsBps[i], resolvedBlockNumber);
+            emit HealthFactorCached(
+                u,
+                healthFactorsBps[i],
+                resolvedBlockNumber
+            );
         }
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_RISK_STATUS_BATCH,
-            abi.encode(users, healthFactorsBps, minHFsBps, underFlags, resolvedBlockNumber)
+            abi.encode(
+                users,
+                healthFactorsBps,
+                minHFsBps,
+                underFlags,
+                resolvedBlockNumber
+            )
         );
     }
 
@@ -309,11 +358,23 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 blockNumber = block.number;
         mh.lastCheckTime = uint32(blockNumber);
 
-        emit ModuleHealthCached(module, isHealthy, detailsHash, consecutiveFailures, blockNumber);
+        emit ModuleHealthCached(
+            module,
+            isHealthy,
+            detailsHash,
+            consecutiveFailures,
+            blockNumber
+        );
         // Push to generic data stream
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_MODULE_HEALTH,
-            abi.encode(module, isHealthy, detailsHash, consecutiveFailures, blockNumber)
+            abi.encode(
+                module,
+                isHealthy,
+                detailsHash,
+                consecutiveFailures,
+                blockNumber
+            )
         );
     }
 
@@ -322,17 +383,23 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - View-only.
      *
-     * @param module Target module address
-     * @return moduleHealth_ Cached module health data
-     * @return isValid Whether the cache update block is within `ViewConstants.CACHE_DURATION_BLOCKS`
-     * @return blockNumber Cache update blockNumber (block.number)
+     * @param module Target module address.
+     * @return moduleHealth_ Cached module health data.
+     * @return isValid True if the cache update block is within the configured TTL.
+     * @return blockNumber Cache update block number.
      */
-    function getModuleHealthWithMeta(address module)
+    function getModuleHealthWithMeta(
+        address module
+    )
         external
         view
-        returns (ModuleHealth memory moduleHealth_, bool isValid, uint256 blockNumber)
+        returns (
+            ModuleHealth memory moduleHealth_,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         moduleHealth_ = _moduleHealth[module];
         blockNumber = uint256(moduleHealth_.lastCheckTime);
@@ -350,12 +417,14 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U user-dimensional read (self allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN)
      *
-     * @param user Target user address
-     * @return healthFactor Cached health factor (bps)
-     * @return isValid Whether the cached value is valid (within CACHE_DURATION_BLOCKS)
-     * @return blockNumber Cache update blockNumber (block.number)
+     * @param user Target user address.
+     * @return healthFactor Cached health factor in bps.
+     * @return isValid True if the cached value is within the configured TTL.
+     * @return blockNumber Cache update block number.
      */
-    function getUserHealthFactorWithMeta(address user)
+    function getUserHealthFactorWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -380,17 +449,23 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U batch user-dimensional read: enumeration capability (no self-bypass; ops/admin only)
      *
-     * @param users Target user addresses
-     * @return factors Cached health factors (bps)
-     * @return validFlags Cache validity flags
-     * @return blockNumbers Cache update blockNumbers (block.number)
+     * @param users Target user addresses.
+     * @return factors Cached health factors in bps.
+     * @return validFlags Cache-validity flags for each user.
+     * @return blockNumbers Cache update block numbers for each user.
      */
-    function batchGetHealthFactorsWithMeta(address[] calldata users)
+    function batchGetHealthFactorsWithMeta(
+        address[] calldata users
+    )
         external
         view
         onlyValidRegistry
         onlyOpsOrAdmin
-        returns (uint256[] memory factors, bool[] memory validFlags, uint256[] memory blockNumbers)
+        returns (
+            uint256[] memory factors,
+            bool[] memory validFlags,
+            uint256[] memory blockNumbers
+        )
     {
         // NOTE: Do NOT call `this.batchGetHealthFactorsWithMeta(users)` here (unnecessary external call).
         if (users.length == 0) revert EmptyArray();
@@ -398,9 +473,9 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
             revert BatchTooLarge(users.length, ViewConstants.MAX_BATCH_SIZE);
         }
         uint256 len = users.length;
-        factors     = new uint256[](len);
-        validFlags  = new bool[](len);
-        blockNumbers  = new uint256[](len);
+        factors = new uint256[](len);
+        validFlags = new bool[](len);
+        blockNumbers = new uint256[](len);
         for (uint256 i; i < len; ++i) {
             uint256 blockNumber = _cacheUpdateBlocks[users[i]];
             factors[i] = _healthFactorCache[users[i]];
@@ -410,22 +485,26 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Check whether a user is liquidatable based on cached health factor (best-effort).
+     * @notice Check whether a user is liquidatable based on the cached health factor through a best-effort path.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not the target user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via Scheme U)
      *      - SystemRiskView returns `minHealthFactor == 0` (HealthView__InvalidMinHealthFactor)
      *
      * Security:
-     * - Scheme U user-dimensional read (self allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN)
-     * - Conservative: returns `(false, false, blockNumber)` if cache is invalid or system risk parameters cannot be read.
+     * - Scheme U user-dimensional read
+     *   (self allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN)
+     * - Conservative: returns `(false, false, blockNumber)` if cache is
+     *   invalid or system risk parameters cannot be read.
      *
-     * @param user Target user address
+     * @param user Target user address.
      * @return isLiquidatable True if cached health factor is valid and below the SSOT min health factor.
      * @return isValid Whether this best-effort determination is valid (cache valid AND min health factor resolved).
-     * @return blockNumber Cache update blockNumber (block.number)
+     * @return blockNumber Cache update block number.
      */
-    function isUserLiquidatableWithMeta(address user)
+    function isUserLiquidatableWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -438,7 +517,9 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         // SSOT threshold: resolve SystemRiskView (system-scoped) and read min health factor.
         // If the SystemRiskView is not configured or the call fails, return "unknown/invalid" conservatively.
-        address srv = Registry(_registryAddr).getModule(ModuleKeys.KEY_SYSTEM_RISK_VIEW);
+        address srv = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_SYSTEM_RISK_VIEW
+        );
         if (srv == address(0)) return (false, false, blockNumber);
 
         uint256 minHf;
@@ -455,10 +536,14 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
     function _isValid(uint256 updateBlock) internal view returns (bool) {
         if (updateBlock == 0 || updateBlock > block.number) return false;
-        return block.number - updateBlock <= ViewConstants.CACHE_DURATION_BLOCKS;
+        return
+            block.number - updateBlock <= ViewConstants.CACHE_DURATION_BLOCKS;
     }
 
-    function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
+    function _hasRole(
+        bytes32 actionKey,
+        address user
+    ) internal view returns (bool) {
         return ViewAccessLib.hasRole(_registryAddr, actionKey, user);
     }
 
@@ -478,12 +563,21 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /**
@@ -492,23 +586,9 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (none)
      *
      * Security:
-     * - Read-only
+     * - View-only.
      *
-     * @return registryAddr_ Registry contract address
-     */
-    function registryAddr() external view returns (address registryAddr_) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Get Registry contract address (legacy getter for backward compatibility).
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddr_ Registry contract address
+     * @return registryAddr_ Registry contract address.
      */
     function getRegistry() external view returns (address registryAddr_) {
         return _registryAddr;
@@ -525,7 +605,7 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Role-gated via ACTION_VIEW_SYSTEM_STATUS or ACTION_ADMIN
      *
-     * @return stats System degradation statistics (zeroed if monitor is not configured)
+     * @return stats System degradation statistics, or a zeroed struct if the monitor is not configured.
      */
     function getGracefulDegradationStats()
         external
@@ -534,17 +614,20 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlySystemHealthViewer
         returns (GracefulDegradationCore.DegradationStats memory stats)
     {
-        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        address mon = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_DEGRADATION_MONITOR
+        );
         if (mon == address(0)) {
-            return GracefulDegradationCore.DegradationStats({
-                totalDegradations: 0,
-                lastDegradationBlock: 0,
-                lastDegradedModule: address(0),
-                lastDegradationReasonHash: bytes32(0),
-                fallbackValueUsed: 0,
-                totalFallbackValue: 0,
-                averageFallbackValue: 0
-            });
+            return
+                GracefulDegradationCore.DegradationStats({
+                    totalDegradations: 0,
+                    lastDegradationBlock: 0,
+                    lastDegradedModule: address(0),
+                    lastDegradationReasonHash: bytes32(0),
+                    fallbackValueUsed: 0,
+                    totalFallbackValue: 0,
+                    averageFallbackValue: 0
+                });
         }
         return GracefulDegradationMonitor(mon).getGracefulDegradationStats();
     }
@@ -559,26 +642,31 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Role-gated via ACTION_VIEW_SYSTEM_STATUS or ACTION_ADMIN
      *
      * @param module Target module address
-     * @return healthStatus Module health status (defaults if monitor is not configured)
+     * @return healthStatus Module health status, or a defaulted struct if the monitor is not configured.
      */
-    function getModuleHealthStatus(address module)
+    function getModuleHealthStatus(
+        address module
+    )
         external
         view
         onlyValidRegistry
         onlySystemHealthViewer
         returns (ModuleHealthView.ModuleHealthStatus memory healthStatus)
     {
-        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        address mon = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_DEGRADATION_MONITOR
+        );
         if (mon == address(0)) {
-            return ModuleHealthView.ModuleHealthStatus({
-                module: module,
-                isHealthy: false,
-                detailsHash: bytes32(0),
-                lastCheckTime: 0,
-                consecutiveFailures: 0,
-                totalChecks: 0,
-                successRate: 0
-            });
+            return
+                ModuleHealthView.ModuleHealthStatus({
+                    module: module,
+                    isHealthy: false,
+                    detailsHash: bytes32(0),
+                    lastCheckTime: 0,
+                    consecutiveFailures: 0,
+                    totalChecks: 0,
+                    successRate: 0
+                });
         }
         return GracefulDegradationMonitor(mon).getModuleHealthStatus(module);
     }
@@ -592,21 +680,26 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Role-gated via ACTION_VIEW_SYSTEM_STATUS or ACTION_ADMIN
      *
-     * @param limit Maximum number of events to return
-     * @return history Degradation events (empty if monitor is not configured)
+     * @param limit Maximum number of events to return.
+     * @return history Degradation events, or an empty array if the monitor is not configured.
      */
-    function getSystemDegradationHistory(uint256 limit)
+    function getSystemDegradationHistory(
+        uint256 limit
+    )
         external
         view
         onlyValidRegistry
         onlySystemHealthViewer
         returns (GracefulDegradationStorage.DegradationEvent[] memory history)
     {
-        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        address mon = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_DEGRADATION_MONITOR
+        );
         if (mon == address(0)) {
             return new GracefulDegradationStorage.DegradationEvent[](0);
         }
-        return GracefulDegradationMonitor(mon).getSystemDegradationHistory(limit);
+        return
+            GracefulDegradationMonitor(mon).getSystemDegradationHistory(limit);
     }
 
     /**
@@ -618,18 +711,22 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Role-gated via ACTION_VIEW_SYSTEM_STATUS or ACTION_ADMIN
      *
-     * @param module Target module address
-     * @return isHealthy Whether the module is healthy
-     * @return details Human-readable status string (intended for off-chain tools; not for on-chain branching)
+     * @param module Target module address.
+     * @return isHealthy True if the module is currently healthy.
+     * @return details Human-readable status string intended for off-chain tools.
      */
-    function checkModuleHealth(address module)
+    function checkModuleHealth(
+        address module
+    )
         external
         view
         onlyValidRegistry
         onlySystemHealthViewer
         returns (bool isHealthy, string memory details)
     {
-        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        address mon = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_DEGRADATION_MONITOR
+        );
         if (mon == address(0)) {
             return (false, "No health monitor available");
         }
@@ -645,10 +742,10 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Role-gated via ACTION_VIEW_SYSTEM_STATUS or ACTION_ADMIN
      *
-     * @return totalEvents Total recorded events
-     * @return recentEvents Recent event count
-     * @return mostFrequentModule Most frequently degraded module
-     * @return averageFallbackValue Average fallback value used
+     * @return totalEvents Total recorded degradation events.
+     * @return recentEvents Recent degradation-event count.
+     * @return mostFrequentModule Module most frequently seen in degradation events.
+     * @return averageFallbackValue Average fallback value recorded by the monitor.
      */
     function getSystemDegradationTrends()
         external
@@ -656,12 +753,15 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyValidRegistry
         onlySystemHealthViewer
         returns (
-        uint256 totalEvents,
-        uint256 recentEvents,
-        address mostFrequentModule,
-        uint256 averageFallbackValue
-    ) {
-        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+            uint256 totalEvents,
+            uint256 recentEvents,
+            address mostFrequentModule,
+            uint256 averageFallbackValue
+        )
+    {
+        address mon = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_DEGRADATION_MONITOR
+        );
         if (mon == address(0)) {
             return (0, 0, address(0), 0);
         }
@@ -676,9 +776,9 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (none)
      *
      * Security:
-     * - Read-only
+     * - Pure function.
      *
-     * @return apiVersion_ API semantic version
+     * @return apiVersion_ API semantic version.
      */
     function apiVersion() public pure override returns (uint256 apiVersion_) {
         return 1;
@@ -690,11 +790,16 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (none)
      *
      * Security:
-     * - Read-only
+     * - Pure function.
      *
-     * @return schemaVersion_ Schema version
+     * @return schemaVersion_ Schema version.
      */
-    function schemaVersion() public pure override returns (uint256 schemaVersion_) {
+    function schemaVersion()
+        public
+        pure
+        override
+        returns (uint256 schemaVersion_)
+    {
         return 1;
     }
 
@@ -702,4 +807,4 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @notice Storage gap for future upgrades.
     uint256[50] private __gap;
-} 
+}

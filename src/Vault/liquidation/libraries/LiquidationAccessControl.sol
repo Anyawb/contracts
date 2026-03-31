@@ -4,53 +4,36 @@ pragma solidity ^0.8.20;
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
 
 /**
- * @title LiquidationAccessControl - Liquidation Access Control Library
- * @notice Implements library-based access control, saving approximately 70% gas compared to interface approach
- * @dev Provides access control helpers for the liquidation module.
+ * @title LiquidationAccessControl
+ * @notice Provides internal role-management helpers for liquidation modules.
+ * @dev Reverts if:
+ *      - see individual functions
  *
  * Security:
  * - This library does not enforce caller permissions by itself; callers MUST gate role-management writes.
- * - Uses `msg.sender` as the actor when emitting events from internal calls.
- * @custom:security-contact security@example.com
+ * - Uses msg.sender as the actor when emitting events from internal calls.
  */
 library LiquidationAccessControl {
-    /**
-     * @notice Thrown when an account does not have the required role.
-     */
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when an account does not hold the required role. Used by {requireRole}.
     error LiquidationAccessControl__InsufficientPermission();
-    /**
-     * @notice Thrown when a provided account address is the zero address.
-     */
+    /// @dev Reverts when an account argument is address(0). Used by role-grant and role-revoke paths.
     error LiquidationAccessControl__InvalidAccountAddress();
-    /**
-     * @notice Thrown when attempting to grant a role that is already granted.
-     */
+    /// @dev Reverts when attempting to grant a role that is already present. Used by {grantRole}.
     error LiquidationAccessControl__RoleAlreadyGranted();
-    /**
-     * @notice Thrown when attempting to revoke/renounce a role that is not granted.
-     */
+    /// @dev Reverts when attempting to revoke or renounce a role that is not present. Used by {revokeRole} and {renounceRole}.
     error LiquidationAccessControl__RoleNotGranted();
-    /**
-     * @notice Thrown when an operation is not authorized for the caller.
-     */
+    /// @dev Reverts when an operation is not authorized for the caller. Used by {renounceRole}.
     error LiquidationAccessControl__UnauthorizedOperation();
-    /**
-     * @notice Thrown when a role member index is out of bounds.
-     */
+    /// @dev Reverts when a role-member lookup cannot resolve the requested index or member. Used by member enumeration helpers.
     error LiquidationAccessControl__MemberNotFound();
-    /**
-     * @notice Thrown when two input arrays must have equal length but do not.
-     */
+    /// @dev Reverts when paired input arrays have different lengths. Used by batch role-management helpers.
     error LiquidationAccessControl__ArrayLengthMismatch();
-    /**
-     * @notice Thrown when an owner address is the zero address during initialization.
-     */
+    /// @dev Reverts when an owner address is address(0) during initialization. Used by {initialize}.
     error LiquidationAccessControl__InvalidOwnerAddress();
-    /**
-     * @notice Thrown when a keeper address is the zero address during initialization or update.
-     */
+    /// @dev Reverts when a keeper address is address(0) during initialization or update. Used by keeper-management paths.
     error LiquidationAccessControl__InvalidKeeperAddress();
-    /* ============ Storage Structure ============ */
+    /*━━━━━━━━━━━━━━━ Storage Structure ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Access control storage structure
@@ -82,45 +65,33 @@ library LiquidationAccessControl {
         bool emergencyPaused;
     }
 
-    /* ============ Events ============ */
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     
-    /**
-     * @notice Emitted when a role is granted to an account.
-     * @param roleKey Role identifier (bytes32)
-     * @param targetAccount Account address that received the role
-     * @param senderAddr Address that granted the role
-     */
+    /// @notice Emitted when a role is granted to an account.
+    /// @dev Emitted by {grantRole} and internal grant flows after storage is updated.
     event RoleGranted(
         bytes32 indexed roleKey, 
         address indexed targetAccount,
         address indexed senderAddr
     );
     
-    /**
-     * @notice Emitted when a role is revoked from an account.
-     * @param roleKey Role identifier (bytes32)
-     * @param targetAccount Account address that lost the role
-     * @param senderAddr Address that revoked the role
-     */
+    /// @notice Emitted when a role is revoked from an account.
+    /// @dev Emitted by {revokeRole} and {renounceRole} after storage is updated.
     event RoleRevoked(
         bytes32 indexed roleKey, 
         address indexed targetAccount,
         address indexed senderAddr
     );
     
-    /**
-     * @notice Emitted when the admin role for a role is changed.
-     * @param roleKey Role identifier (bytes32)
-     * @param previousAdminRole Previous admin role identifier (bytes32)
-     * @param newAdminRole New admin role identifier (bytes32)
-     */
+    /// @notice Emitted when the admin role for a role changes.
+    /// @dev Emitted by role-hierarchy management flows after the admin mapping is updated.
     event RoleAdminChanged(
         bytes32 indexed roleKey,
         bytes32 indexed previousAdminRole,
         bytes32 indexed newAdminRole
     );
 
-    /* ============ Core Permission Functions ============ */
+    /*━━━━━━━━━━━━━━━ Core Permission Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Check if an account has a specific role.
@@ -164,7 +135,7 @@ library LiquidationAccessControl {
         if (!self.roles[roleKey][targetAccount]) revert LiquidationAccessControl__InsufficientPermission();
     }
 
-    /* ============ Role Management Functions ============ */
+    /*━━━━━━━━━━━━━━━ Role Management Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Grant a role to an account.
@@ -247,7 +218,7 @@ library LiquidationAccessControl {
         emit RoleRevoked(roleKey, targetAccount, msg.sender);
     }
 
-    /* ============ Role Hierarchy Functions ============ */
+    /*━━━━━━━━━━━━━━━ Role Hierarchy Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Get the admin role for a specific role.
@@ -292,7 +263,7 @@ library LiquidationAccessControl {
         emit RoleAdminChanged(roleKey, previousAdminRole, newAdminRole);
     }
 
-    /* ============ Role Information Functions ============ */
+    /*━━━━━━━━━━━━━━━ Role Information Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Check if a role key is valid.
@@ -353,7 +324,7 @@ library LiquidationAccessControl {
         return members[memberIndex];
     }
 
-    /* ============ Batch Query Functions ============ */
+    /*━━━━━━━━━━━━━━━ Batch Query Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Batch check if multiple accounts have their corresponding roles.
@@ -441,7 +412,7 @@ library LiquidationAccessControl {
         return admins;
     }
 
-    /* ============ Initialization Functions ============ */
+    /*━━━━━━━━━━━━━━━ Initialization Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Initialize access control with owner and keeper addresses.
@@ -481,7 +452,7 @@ library LiquidationAccessControl {
         grantRole(self, ActionKeys.ACTION_UPGRADE_MODULE, initialOwner);
     }
 
-    /* ============ Utility Functions ============ */
+    /*━━━━━━━━━━━━━━━ Utility Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Check if an account is the owner.
@@ -585,7 +556,7 @@ library LiquidationAccessControl {
         }
     }
 
-    /* ============ Internal Helper Functions ============ */
+    /*━━━━━━━━━━━━━━━ Internal Helper Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Internal implementation of granting a role to an account.

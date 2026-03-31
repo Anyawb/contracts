@@ -136,26 +136,13 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the Registry contract address (legacy getter).
-     * @dev This function is kept for backward compatibility; prefer `getRegistry()`.
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddrVar Registry contract address
-     */
-    function registryAddr() external view returns (address registryAddrVar) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Get the Registry contract address.
+    * @notice Return the Registry contract address.
      * @dev Prefer this function over the legacy `registryAddr()` getter.
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return registryAddrVar Registry contract address
+    * @return registryAddrVar Registry contract address.
      */
     function getRegistry() external view returns (address registryAddrVar) {
         return _registryAddr;

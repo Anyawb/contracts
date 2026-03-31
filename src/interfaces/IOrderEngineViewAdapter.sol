@@ -1,11 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IOrderEngine } from "./IOrderEngine.sol";
+import {IOrderEngine} from "./IOrderEngine.sol";
 
-/// @title IOrderEngineViewAdapter (view-only adapter surface)
-/// @notice Read-only adapter functions used by view-layer modules (e.g., LendingEngineView) and SettlementManager.
-/// @dev These are intentionally separated from IOrderEngine to avoid mixing "write SSOT" with view helpers.
+/**
+ * @title IOrderEngineViewAdapter
+ * @notice Read-only adapter surface used by view-layer modules and settlement helpers.
+ * @dev Reverts if:
+ *      - the implementation enforces read access control and the caller lacks permission
+ *      - the requested order or account cannot be queried under implementation rules
+ *
+ * Security:
+ * - View-only dependency that intentionally separates read helpers from the write-oriented {IOrderEngine} SSOT.
+ * - Downstream consumers must not infer write privileges from the availability of this adapter.
+ */
 interface IOrderEngineViewAdapter {
     /**
      * @notice View-only read of a loan order (ORDER_ENGINE internal view adapter).
@@ -18,7 +26,9 @@ interface IOrderEngineViewAdapter {
      * @param orderId Loan order id.
      * @return order Loan order snapshot (see IOrderEngine.LoanOrder).
      */
-    function getLoanOrderForView(uint256 orderId) external view returns (IOrderEngine.LoanOrder memory order);
+    function getLoanOrderForView(
+        uint256 orderId
+    ) external view returns (IOrderEngine.LoanOrder memory order);
 
     /**
      * @notice View-only read of a user's loan count (borrower perspective).
@@ -31,7 +41,9 @@ interface IOrderEngineViewAdapter {
      * @param user Borrower address.
      * @return count Number of loans for the borrower.
      */
-    function getUserLoanCountForView(address user) external view returns (uint256 count);
+    function getUserLoanCountForView(
+        address user
+    ) external view returns (uint256 count);
 
     /**
      * @notice View-only read of accumulated failed fee amount for an order (ops/monitoring).
@@ -44,7 +56,9 @@ interface IOrderEngineViewAdapter {
      * @param orderId Loan order id.
      * @return feeAmount Failed fee amount (token decimals of order.asset).
      */
-    function getFailedFeeAmountForView(uint256 orderId) external view returns (uint256 feeAmount);
+    function getFailedFeeAmountForView(
+        uint256 orderId
+    ) external view returns (uint256 feeAmount);
 
     /**
      * @notice View-only read of NFT retry count for an order (ops/monitoring).
@@ -57,7 +71,9 @@ interface IOrderEngineViewAdapter {
      * @param orderId Loan order id.
      * @return retryCount Number of NFT mint retry attempts.
      */
-    function getNftRetryCountForView(uint256 orderId) external view returns (uint256 retryCount);
+    function getNftRetryCountForView(
+        uint256 orderId
+    ) external view returns (uint256 retryCount);
 
     /**
      * @notice View-only access check for a loan order.
@@ -71,7 +87,10 @@ interface IOrderEngineViewAdapter {
      * @param user Address to check.
      * @return hasAccess True if user can access the order, otherwise false.
      */
-    function canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess);
+    function canAccessLoanOrderForView(
+        uint256 orderId,
+        address user
+    ) external view returns (bool hasAccess);
 
     /**
      * @notice View-only check whether an account is considered a match engine (keeper/orchestrator capability).
@@ -84,7 +103,9 @@ interface IOrderEngineViewAdapter {
      * @param account Address to check.
      * @return isMatch True if account is a match engine, otherwise false.
      */
-    function isMatchEngineForView(address account) external view returns (bool isMatch);
+    function isMatchEngineForView(
+        address account
+    ) external view returns (bool isMatch);
 
     /**
      * @notice View-only getter for the Registry address stored in ORDER_ENGINE.
@@ -97,4 +118,3 @@ interface IOrderEngineViewAdapter {
      */
     function getRegistryForView() external view returns (address registry);
 }
-

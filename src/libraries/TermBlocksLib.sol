@@ -24,4 +24,3 @@ library TermBlocksLib {
         revert TermBlocksLib__UnsupportedTermDays(termDays);
     }
 }
-

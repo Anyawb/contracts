@@ -20,12 +20,13 @@ import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 import { IFeeRouterView } from "../../../interfaces/IFeeRouterView.sol";
+import { IVaultCoreMinimal } from "../../../interfaces/IVaultCoreMinimal.sol";
 
 // Constants migrated to DataPushTypes.
 
 /**
  * @title FeeRouterView
- * @notice FeeRouter read-only mirror (view/cache): best-effort, low-gas reads backed by FeeRouter pushes.
+ * @notice FeeRouter view mirror (view/cache): best-effort, low-gas reads backed by FeeRouter pushes.
  * @dev Reverts if:
  *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
  *      - caller lacks required read permissions for the requested scope (see access-control modifiers)
@@ -33,7 +34,7 @@ import { IFeeRouterView } from "../../../interfaces/IFeeRouterView.sol";
  *
  * Security:
  * - Role-gated reads via {ViewAccessLib} and {ActionKeys}
- * - Writer-gated pushes: only the FeeRouter module resolved via the Registry (KEY_FR)
+ * - Writer-gated pushes: only the FeeRouter module or the canonical view gateway resolved via VaultCore.viewContractAddrVar()
  */
 contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRouterView {
     
@@ -167,7 +168,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
     
-    /// @notice Thrown when a push entrypoint is called by a non-FeeRouter address.
+    /// @notice Thrown when a push entrypoint is called by neither FeeRouter nor the canonical view gateway.
     error FeeRouterView__OnlyFeeRouter();
     // Batch errors use StandardErrors for cross-module consistency.
 
@@ -197,12 +198,14 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     }
     
     /**
-     * @notice Restrict caller to FeeRouter (Registry.KEY_FR).
+     * @notice Restrict caller to FeeRouter (Registry.KEY_FR) or the canonical view gateway.
      * @dev Reverts if:
-     *      - caller is not FeeRouter (FeeRouterView__OnlyFeeRouter)
+     *      - caller is neither FeeRouter nor the view gateway (FeeRouterView__OnlyFeeRouter)
      */
     modifier onlyFeeRouter() {
-        if (msg.sender != _getFeeRouter()) revert FeeRouterView__OnlyFeeRouter();
+        address feeRouter = _getFeeRouter();
+        address viewGateway = _getViewGateway();
+        if (msg.sender != feeRouter && msg.sender != viewGateway) revert FeeRouterView__OnlyFeeRouter();
         _;
     }
     
@@ -287,6 +290,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         _userStats[user].transactionCount += 1;
         _userStats[user].lastActivityBlock = block.number;
         _userCacheUpdateBlocks[user] = block.number;
+        _lastSyncBlock = block.number;
         
         emit UserDataPushed(user, "FeeUpdate", block.number);
         DataPushLibrary._emitData(
@@ -400,8 +404,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     
     /**
      * @notice Check whether this view cache appears stale based on the last sync blockNumber.
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * Security:
      * - Block-based heuristic using block.number (Time-Dependency-Refactor).
@@ -549,8 +552,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
 
     /**
      * @notice Check whether a token is supported, with cache metadata (public view).
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * @param token ERC20 token address
      * @return supported True if token is currently marked as supported in the cached config.
@@ -569,8 +571,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
 
     /**
      * @notice Get supported token list, with cache metadata (public view).
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * @return tokens List of supported ERC20 token addresses (cached)
      * @return blockNumber Cache blockNumber (blocks)
@@ -870,8 +871,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     
     /**
      * @notice Compute a derived discount level for a user (placeholder).
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * Security:
      * - View-only; uses cached aggregates as input.
@@ -894,8 +894,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     
     /**
      * @notice Get configured Registry address.
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * @return registry Registry address (module resolver)
      */
@@ -914,27 +913,6 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
         return _getFeeRouter();
     }
 
-    /**
-     * @notice Legacy getter for registry address (backwards compatibility).
-     * @dev Reverts if:
-     *      - none
-     *
-     * @return registry Registry address
-     */
-    /**
-     * @notice Returns the Registry address (legacy getter name).
-     * @dev Reverts if:
-     *      - (never; may return address(0) if not initialized)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registry Registry address
-     */
-    function registryAddr() external view returns (address registry) {
-        return _registryAddr;
-    }
-
     /*━━━━━━━━━━━━━━━ CONTRACT UPGRADE ━━━━━━━━━━━━━━━*/
     
     /**
@@ -947,7 +925,7 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
      * Security:
      * - Role-gated via ACTION_ADMIN.
      *
-     * @param newImplementation New implementation address
+    * @param newImplementation New implementation address.
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
@@ -959,6 +937,19 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
 
     function _getFeeRouter() internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
+    }
+
+    function _getViewGateway() internal view returns (address viewGateway) {
+        try Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE) returns (address vaultCore) {
+            if (vaultCore == address(0) || vaultCore.code.length == 0) return address(0);
+            try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address gateway) {
+                viewGateway = gateway;
+            } catch {
+                viewGateway = address(0);
+            }
+        } catch {
+            viewGateway = address(0);
+        }
     }
 
     function _isUserCacheValid(uint256 blockNumber) internal view returns (bool) {
@@ -974,24 +965,28 @@ contract FeeRouterView is Initializable, UUPSUpgradeable, ViewVersioned, IFeeRou
     }
 
     /**
-     * @notice API version of this view module.
-     * @dev Reverts if:
-     *      - none
+     * @notice Return the API semantic version of this view module.
+     * @dev Reverts if: (never)
      *
-     * @return version Semantic API version (uint256)
+     * Security:
+     * - Pure function.
+     *
+     * @return version Semantic API version.
      */
-    function apiVersion() public pure override returns (uint256) {
+    function apiVersion() public pure override returns (uint256 version) {
         return 1;
     }
 
     /**
-     * @notice Schema version of this view module.
-     * @dev Reverts if:
-     *      - none
+     * @notice Return the schema version of this view module.
+     * @dev Reverts if: (never)
      *
-     * @return version Schema version (uint256)
+     * Security:
+     * - Pure function.
+     *
+     * @return version Schema version.
      */
-    function schemaVersion() public pure override returns (uint256) {
+    function schemaVersion() public pure override returns (uint256 version) {
         return 1;
     }
 

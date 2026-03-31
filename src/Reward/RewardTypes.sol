@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title RewardTypes - Reward 子系统共享数据类型
-/// @notice 定义 Reward 子系统的枚举和结构体
-/// @dev 遵循 docs/SmartContractStandard.md 注释规范
-/// @dev Types-only：用于被 Reward 子系统合约继承/引用，不应单独部署
-/// @dev 重要：`ServiceLevel` 的枚举顺序是对外 ABI 的一部分（前端/脚本依赖），禁止调整/插入/重排
+/**
+ * @title RewardTypes
+ * @notice Shared enums and structs for the Reward subsystem.
+ * @dev Types-only abstract contract.
+ *      It is intended to be inherited or referenced by Reward modules and MUST NOT be deployed standalone.
+ *      The {ServiceLevel} enum order is part of the external ABI surface.
+ *      Scripts and frontends rely on it, so it MUST NOT be reordered or extended in place.
+ */
 abstract contract RewardTypes {
-    /// @notice 服务等级枚举
+    /*━━━━━━━━━━━━━━━ ENUMS ━━━━━━━━━━━━━━━*/
+
+    /// @notice Service levels used by Reward-gated features and governance thresholds.
+    /// @dev Enum ordinals are ABI-significant: Basic=0, Standard=1, Premium=2, VIP=3.
     enum ServiceLevel {
-        Basic,      // 基础
-        Standard,   // 标准
-        Premium,    // 高级
-        VIP         // VIP
+        Basic,
+        Standard,
+        Premium,
+        VIP
     }
-} 
+}

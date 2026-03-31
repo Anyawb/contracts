@@ -60,7 +60,8 @@ library SettlementReserveLib {
         uint256 amount,
         bytes32 intentHash
     ) internal {
-        if (lender == address(0) || asset == address(0)) revert SettlementReserveLib__ZeroAddress();
+        if (lender == address(0) || asset == address(0))
+            revert SettlementReserveLib__ZeroAddress();
         if (amount == 0) revert SettlementReserveLib__InvalidAmount();
         LendReserve storage slot = reserves[intentHash];
         if (slot.active) revert SettlementReserveLib__AlreadyReserved();
@@ -123,7 +124,8 @@ library SettlementReserveLib {
     ) internal returns (address lender, address asset, uint256 amount) {
         LendReserve storage slot = reserves[intentHash];
         if (!slot.active) revert SettlementReserveLib__NotActive();
-        if (expectedLender != address(0) && slot.lender != expectedLender) revert SettlementReserveLib__NotOwner();
+        if (expectedLender != address(0) && slot.lender != expectedLender)
+            revert SettlementReserveLib__NotOwner();
         lender = slot.lender;
         asset = slot.asset;
         amount = slot.amount;
@@ -155,11 +157,15 @@ library SettlementReserveLib {
         bytes32 intentHash,
         address expectedLender,
         uint256 maxAmount
-    ) internal returns (address lender, address asset, uint256 used, uint256 remaining) {
+    )
+        internal
+        returns (address lender, address asset, uint256 used, uint256 remaining)
+    {
         if (maxAmount == 0) revert SettlementReserveLib__InvalidAmount();
         LendReserve storage slot = reserves[intentHash];
         if (!slot.active) revert SettlementReserveLib__NotActive();
-        if (expectedLender != address(0) && slot.lender != expectedLender) revert SettlementReserveLib__NotOwner();
+        if (expectedLender != address(0) && slot.lender != expectedLender)
+            revert SettlementReserveLib__NotOwner();
         lender = slot.lender;
         asset = slot.asset;
         if (slot.amount <= maxAmount) {
@@ -173,5 +179,3 @@ library SettlementReserveLib {
         }
     }
 }
-
-

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
 import {
     ArrayLengthMismatch,
     BatchTooLarge,
@@ -15,30 +15,53 @@ import {
     NotAContract,
     ZeroAddress
 } from "../../../errors/StandardErrors.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
 
-/*━━━━━━━━━━━━━━━ Selector SSOT (B方案) ━━━━━━━━━━━━━━━*/
+/*━━━━━━━━━━━━━━━ Selector SSOT ━━━━━━━━━━━━━━━*/
 // Selectors are derived from the canonical module contracts in this repository (SSOT),
 // rather than hardcoding hex values or duplicating minimal interfaces in this file.
-import { HealthView } from "./HealthView.sol";
-import { PositionView } from "./PositionView.sol";
+import {HealthView} from "./HealthView.sol";
+import {PositionView} from "./PositionView.sol";
 
+/// @title IHealthViewLite
+/// @notice Minimal read interface for HealthView.
+/// @dev Used by {CacheOptimizedView} to aggregate health data without importing the full HealthView implementation.
 interface IHealthViewLite {
-    function getUserHealthFactorWithMeta(address user)
+    /// @notice Returns one user's health factor together with validity metadata.
+    function getUserHealthFactorWithMeta(
+        address user
+    )
         external
         view
         returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
 }
 
+/// @title IPositionViewLite
+/// @notice Minimal read interface for PositionView.
+/// @dev Used by {CacheOptimizedView} to aggregate position data without importing the full PositionView implementation.
 interface IPositionViewLite {
-    function getUserPositionWithMeta(address user, address asset)
+    /// @notice Returns one user's position snapshot for one asset.
+    function getUserPositionWithMeta(
+        address user,
+        address asset
+    )
         external
         view
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version);
+        returns (
+            uint256 collateral,
+            uint256 debt,
+            bool isValid,
+            uint256 blockNumber,
+            uint64 version
+        );
 }
 
+/// @title IStatisticsViewLite
+/// @notice Minimal read interface for StatisticsView.
+/// @dev Used by {CacheOptimizedView} to aggregate global statistics without
+///      importing the full StatisticsView implementation.
 interface IStatisticsViewLite {
     struct GlobalStatistics {
         uint256 totalUsers;
@@ -48,6 +71,7 @@ interface IStatisticsViewLite {
         uint256 lastUpdateBlock;
     }
 
+    /// @notice Returns the global statistics snapshot together with validity metadata.
     function getGlobalStatisticsWithMeta()
         external
         view
@@ -55,13 +79,13 @@ interface IStatisticsViewLite {
 }
 
 /// @title CacheOptimizedView
-/// @notice Read-only facade that forwards queries to View modules and returns frontend-friendly aggregates.
+/// @notice View facade that forwards queries to view modules and returns frontend-friendly aggregates.
 /// @dev This module is upgradeable (UUPS) and stores only the Registry address. It does not persist business state;
 ///      all values are sourced from modules resolved via {Registry.getModuleOrRevert}
 ///      (e.g. PositionView/HealthView/StatisticsView).
 ///
 ///      IMPORTANT (Architecture-Guide / Workguide alignment):
-///      - Some downstream modules (notably `HealthView`) may be **public read-only** by default to support
+///      - Some downstream modules (notably `HealthView`) may be **public view-only** by default to support
 ///        permissionless `eth_call` for frontends/keepers.
 ///      - This facade is a **user-dimensional view** and therefore enforces **Scheme U** on all `user/users[]`
 ///        reads (self-read allowed; non-self requires `ACTION_VIEW_USER_DATA` or `ACTION_ADMIN`; batch has
@@ -73,8 +97,10 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     /// @dev Function selectors for downstream `staticcall` payload encoding (derived from SSOT module contracts).
-    bytes4 private constant _SEL_GET_USER_POSITION_WITH_META = PositionView.getUserPositionWithMeta.selector;
-    bytes4 private constant _SEL_GET_USER_HEALTH_FACTOR_WITH_META = HealthView.getUserHealthFactorWithMeta.selector;
+    bytes4 private constant _SEL_GET_USER_POSITION_WITH_META =
+        PositionView.getUserPositionWithMeta.selector;
+    bytes4 private constant _SEL_GET_USER_HEALTH_FACTOR_WITH_META =
+        HealthView.getUserHealthFactorWithMeta.selector;
 
     address private _registryAddr;
 
@@ -88,8 +114,10 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 debt;
     }
 
-    /// @notice Per-asset user position entry with PositionView cache metadata (best-effort).
-    /// @dev `positionIsValid/positionUpdateBlock/positionVersion` are sourced from PositionView meta APIs when available;
+    /// @notice Per-asset user position entry with PositionView cache metadata
+    ///         (best-effort).
+    /// @dev `positionIsValid/positionUpdateBlock/positionVersion` are sourced
+    ///      from PositionView meta APIs when available;
     ///      missing fields may return default values (e.g. blockNumber==0) when older APIs are used.
     struct UserPositionItemMeta {
         address user;
@@ -125,9 +153,16 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyUserDim(address user) {
         if (msg.sender != user) {
-            bool ok =
-                ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                    || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+            bool ok = ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) ||
+                ViewAccessLib.hasRole(
+                    _registryAddr,
+                    ActionKeys.ACTION_ADMIN,
+                    msg.sender
+                );
             if (!ok) revert MissingRole();
         }
         _;
@@ -135,9 +170,16 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @dev Scheme U batch: no self-bypass for `users[]` enumeration; requires VIEW_USER_DATA or ADMIN.
     modifier onlyUserDimBatch() {
-        bool ok =
-            ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        bool ok = ViewAccessLib.hasRole(
+            _registryAddr,
+            ActionKeys.ACTION_VIEW_USER_DATA,
+            msg.sender
+        ) ||
+            ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            );
         if (!ok) revert MissingRole();
         _;
     }
@@ -161,55 +203,44 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
-    }
-
-    /**
-     * @notice Returns the Registry address used for module resolution.
-     * @dev Reverts if: none.
-     *
-     * Security:
-     * - Read-only.
-     *
-     * @return registry The Registry contract address.
-     */
-    function registryAddr() external view returns (address) {
-        return _registryAddr;
     }
 
     /*━━━━━━━━━━━━━━━ User queries ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Returns a user's health factor as reported by HealthView, plus cache validity and blockNumber.
+     * @notice Return a user's health factor as reported by HealthView, plus cache validity and block metadata.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
      *      - caller is not authorized to read `user` (Scheme U; see {onlyUserDim})
      *      - Registry missing `ModuleKeys.KEY_HEALTH_VIEW` (reverts in {Registry.getModuleOrRevert})
      *      - HealthView call reverts (propagated)
      *
-     * Notes:
-     * - Even if `HealthView` is configured as public read-only, this facade enforces Scheme U because it is a
-     *   user-dimensional view module.
-     *
      * Security:
      * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
-     * - Read-only; performs an external view call into HealthView.
+     * - View-only facade.
+     * - Even if `HealthView` is configured as public view-only, this facade still enforces Scheme U because it is a
+     *   user-dimensional view module.
      *
      * @param user The account to query.
      * @return healthFactor The health factor value (unit/precision defined by HealthView).
      * @return cacheValid True if HealthView indicates the value is valid (e.g. not stale/invalid).
      * @return blockNumber HealthView cache update blockNumber (block.number).
      */
-    function getUserHealthFactor(address user)
+    function getUserHealthFactor(
+        address user
+    )
         external
         view
         onlyValidRegistry
         onlyUserDim(user)
         returns (uint256 healthFactor, bool cacheValid, uint256 blockNumber)
     {
-        (healthFactor, cacheValid, blockNumber) = _healthView().getUserHealthFactorWithMeta(user);
+        (healthFactor, cacheValid, blockNumber) = _healthView()
+            .getUserHealthFactorWithMeta(user);
     }
 
     /**
@@ -222,26 +253,28 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - Registry missing `ModuleKeys.KEY_HEALTH_VIEW` (reverts in {Registry.getModuleOrRevert})
      *      - HealthView call reverts (propagated)
      *
-     * Notes:
-     * - Batch reads are considered enumeration; this facade does not allow self-bypass for `users[]`.
-     * - If an integration requires permissionless reads, call `HealthView.batchGetHealthFactorsWithMeta` (or
-     *   equivalent canonical HealthView batch API) directly.
-     *
      * Security:
      * - Scheme U batch read policy (no self-bypass; requires VIEW_USER_DATA or ADMIN).
-     * - Read-only; performs per-user external view calls into HealthView.
+     * - View-only facade.
+     * - Batch reads are considered enumeration, so this facade does not allow self-bypass for `users[]`.
      *
      * @param users The accounts to query. Length must be \(1..MAX_BATCH_SIZE\).
      * @return factors Health factors for each user, in the same order as `users`.
      * @return validFlags Cache-validity flags for each user, in the same order as `users`.
-     * @return blockNumbers Cache update blockNumbers for each user, in the same order as `users`.
+     * @return blockNumbers Cache update block numbers for each user, in the same order as `users`.
      */
-    function batchGetUserHealthFactors(address[] calldata users)
+    function batchGetUserHealthFactors(
+        address[] calldata users
+    )
         external
         view
         onlyValidRegistry
         onlyUserDimBatch
-        returns (uint256[] memory factors, bool[] memory validFlags, uint256[] memory blockNumbers)
+        returns (
+            uint256[] memory factors,
+            bool[] memory validFlags,
+            uint256[] memory blockNumbers
+        )
     {
         uint256 len = users.length;
         _validateBatchLength(len);
@@ -251,7 +284,8 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         validFlags = new bool[](len);
         blockNumbers = new uint256[](len);
         for (uint256 i; i < len; ++i) {
-            (uint256 hf, bool ok, uint256 blockNumber) = hv.getUserHealthFactorWithMeta(users[i]);
+            (uint256 hf, bool ok, uint256 blockNumber) = hv
+                .getUserHealthFactorWithMeta(users[i]);
             factors[i] = hf;
             validFlags[i] = ok;
             blockNumbers[i] = blockNumber;
@@ -276,7 +310,10 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param assets The assets to query. Must match `users.length`.
      * @return positions Position entries (with metadata) in the same order as the input pairs.
      */
-    function batchGetUserPositions(address[] calldata users, address[] calldata assets)
+    function batchGetUserPositions(
+        address[] calldata users,
+        address[] calldata assets
+    )
         external
         view
         onlyValidRegistry
@@ -285,14 +322,20 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
-        if (len != assets.length) revert ArrayLengthMismatch(len, assets.length);
+        if (len != assets.length)
+            revert ArrayLengthMismatch(len, assets.length);
         _validateBatchLength(len);
 
         address pvAddr = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         positions = new UserPositionItemMeta[](len);
         for (uint256 i; i < len; ++i) {
-            (uint256 collateral, uint256 debt, bool posValid, uint256 posTs, uint64 posVer) =
-                _readUserPositionWithMeta(pvAddr, users[i], assets[i]);
+            (
+                uint256 collateral,
+                uint256 debt,
+                bool posValid,
+                uint256 posTs,
+                uint64 posVer
+            ) = _readUserPositionWithMeta(pvAddr, users[i], assets[i]);
             positions[i] = UserPositionItemMeta({
                 user: users[i],
                 asset: assets[i],
@@ -325,7 +368,10 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param assets The assets to query. Must match `users.length`.
      * @return positions Position entries (with metadata) in the same order as the input pairs.
      */
-    function batchGetUserPositionsWithMeta(address[] calldata users, address[] calldata assets)
+    function batchGetUserPositionsWithMeta(
+        address[] calldata users,
+        address[] calldata assets
+    )
         external
         view
         onlyValidRegistry
@@ -334,14 +380,20 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
-        if (len != assets.length) revert ArrayLengthMismatch(len, assets.length);
+        if (len != assets.length)
+            revert ArrayLengthMismatch(len, assets.length);
         _validateBatchLength(len);
 
         address pvAddr = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         positions = new UserPositionItemMeta[](len);
         for (uint256 i; i < len; ++i) {
-            (uint256 collateral, uint256 debt, bool posValid, uint256 posTs, uint64 posVer) =
-                _readUserPositionWithMeta(pvAddr, users[i], assets[i]);
+            (
+                uint256 collateral,
+                uint256 debt,
+                bool posValid,
+                uint256 posTs,
+                uint64 posVer
+            ) = _readUserPositionWithMeta(pvAddr, users[i], assets[i]);
             positions[i] = UserPositionItemMeta({
                 user: users[i],
                 asset: assets[i],
@@ -365,17 +417,20 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
-     * - Read-only; performs external view calls into HealthView and PositionView.
+     * - View-only; performs external view calls into HealthView and PositionView.
      *
      * @param user The user to summarize.
      * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\).
      * @return summary Aggregated totals plus health factor and cache-valid flag.
      * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
-     * @return positionUpdateBlocks Per-asset update blockNumbers (best-effort; 0 may mean unknown).
+     * @return positionUpdateBlocks Per-asset update block numbers (best-effort; 0 may mean unknown).
      * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
-     * @return healthUpdateBlock HealthView blockNumber (or per HealthView semantics).
+     * @return healthUpdateBlock HealthView update block number.
      */
-    function getUserSummary(address user, address[] calldata trackedAssets)
+    function getUserSummary(
+        address user,
+        address[] calldata trackedAssets
+    )
         external
         view
         onlyValidRegistry
@@ -410,11 +465,14 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param trackedAssets The assets to aggregate. Length must be \(\le MAX_BATCH_SIZE\). May be zero.
      * @return summary Aggregated totals plus health factor and cache-valid flag.
      * @return positionValidFlags Per-asset validity flags as reported by PositionView (best-effort).
-     * @return positionUpdateBlocks Per-asset update blockNumbers (best-effort; 0 may mean unknown).
+     * @return positionUpdateBlocks Per-asset update block numbers (best-effort; 0 may mean unknown).
      * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
-     * @return healthUpdateBlock HealthView blockNumber (or per HealthView semantics).
+     * @return healthUpdateBlock HealthView update block number.
      */
-    function getUserSummaryWithMeta(address user, address[] calldata trackedAssets)
+    function getUserSummaryWithMeta(
+        address user,
+        address[] calldata trackedAssets
+    )
         external
         view
         onlyValidRegistry
@@ -430,7 +488,10 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         return _getUserSummaryWithMeta(user, trackedAssets);
     }
 
-    function _getUserSummaryWithMeta(address user, address[] calldata trackedAssets)
+    function _getUserSummaryWithMeta(
+        address user,
+        address[] calldata trackedAssets
+    )
         internal
         view
         returns (
@@ -444,7 +505,11 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 len = trackedAssets.length;
         if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
 
-        (summary.healthFactor, summary.cacheValid, healthUpdateBlock) = _readHealthFactorWithMeta(user);
+        (
+            summary.healthFactor,
+            summary.cacheValid,
+            healthUpdateBlock
+        ) = _readHealthFactorWithMeta(user);
 
         address pvAddr = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         positionValidFlags = new bool[](len);
@@ -454,8 +519,13 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 totalCollateral;
         uint256 totalDebt;
         for (uint256 i; i < len; ++i) {
-            (uint256 collateral, uint256 debt, bool posValid, uint256 posTs, uint64 posVer) =
-                _readUserPositionWithMeta(pvAddr, user, trackedAssets[i]);
+            (
+                uint256 collateral,
+                uint256 debt,
+                bool posValid,
+                uint256 posTs,
+                uint64 posVer
+            ) = _readUserPositionWithMeta(pvAddr, user, trackedAssets[i]);
             totalCollateral += collateral;
             totalDebt += debt;
             positionValidFlags[i] = posValid;
@@ -478,7 +548,8 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Role-gated via AccessControlManager.
-     * - Read-only; performs an external view call into StatisticsView.
+     * - View-only facade.
+     * - Performs an external view call into StatisticsView.
      *
      * @return stats System-wide statistics snapshot.
      */
@@ -489,7 +560,8 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (SystemStats memory stats)
     {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
-        (IStatisticsViewLite.GlobalStatistics memory g, , ) = _statisticsView().getGlobalStatisticsWithMeta();
+        (IStatisticsViewLite.GlobalStatistics memory g, , ) = _statisticsView()
+            .getGlobalStatisticsWithMeta();
         stats = SystemStats({
             totalUsers: g.totalUsers,
             activeUsers: g.activeUsers,
@@ -518,7 +590,8 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     function _requireRole(bytes32 actionKey, address user) internal view {
-        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, user)) revert MissingRole();
+        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, user))
+            revert MissingRole();
     }
 
     function _validateBatchLength(uint256 len) internal pure {
@@ -539,29 +612,50 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation The new implementation contract address.
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-        if (newImplementation == address(0)) revert CacheOptimizedView__ZeroImplementation();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation == address(0))
+            revert CacheOptimizedView__ZeroImplementation();
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Meta passthrough helpers ━━━━━━━━━━━━━━━*/
 
-    function _readUserPositionWithMeta(address pvAddr, address user, address asset)
+    function _readUserPositionWithMeta(
+        address pvAddr,
+        address user,
+        address asset
+    )
         internal
         view
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
+        returns (
+            uint256 collateral,
+            uint256 debt,
+            bool isValid,
+            uint256 blockNumber,
+            uint64 version
+        )
     {
         if (pvAddr == address(0)) return (0, 0, false, 0, 0);
 
-        (bool ok, bytes memory data) =
-            pvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_USER_POSITION_WITH_META, user, asset));
+        (bool ok, bytes memory data) = pvAddr.staticcall(
+            abi.encodeWithSelector(
+                _SEL_GET_USER_POSITION_WITH_META,
+                user,
+                asset
+            )
+        );
         if (ok && data.length >= 160) {
             return abi.decode(data, (uint256, uint256, bool, uint256, uint64));
         }
     }
 
-    function _readHealthFactorWithMeta(address user)
+    function _readHealthFactorWithMeta(
+        address user
+    )
         internal
         view
         returns (uint256 healthFactor, bool isValid, uint256 blockNumber)
@@ -569,8 +663,9 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         address hvAddr = _getModule(ModuleKeys.KEY_HEALTH_VIEW);
         if (hvAddr == address(0)) return (0, false, 0);
 
-        (bool ok, bytes memory data) =
-            hvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR_WITH_META, user));
+        (bool ok, bytes memory data) = hvAddr.staticcall(
+            abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR_WITH_META, user)
+        );
         if (ok && data.length >= 96) {
             return abi.decode(data, (uint256, bool, uint256));
         }
@@ -579,26 +674,28 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Versioning ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Returns the API version exposed by this module.
-     * @dev Reverts if: none.
+     * @notice Return the API version exposed by this module.
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Pure function; does not read state.
      *
-     * @return version The API version.
+     * @return version API version.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
     /**
-     * @notice Returns the schema version used by this module's return types.
-     * @dev Reverts if: none.
+     * @notice Return the schema version used by this module's return types.
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Pure function; does not read state.
      *
-     * @return version The schema version.
+     * @return version Schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 2;

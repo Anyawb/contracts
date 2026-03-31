@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import { Registry } from "../registry/Registry.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
+import { ILendingEngineDebtWrite } from "../interfaces/ILendingEngineDebtWrite.sol";
 import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
 
@@ -33,7 +33,7 @@ contract SettlementBorrowCoreMock {
         // termDays 在当前实现中未使用，仅为兼容签名
         termDays;
         address le = Registry(registry).getModuleOrRevert(ModuleKeys.KEY_LE);
-        ILendingEngineBasic(le).borrow(borrower, asset, amount, 0, 0);
+        ILendingEngineDebtWrite(le).borrow(borrower, asset, amount, 0, 0);
     }
 
     /// @notice 存入抵押物，转发至 VaultRouter 标准入口
@@ -64,7 +64,7 @@ contract SettlementBorrowCoreMock {
     function borrow(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
         address le = Registry(registry).getModuleOrRevert(ModuleKeys.KEY_LE);
-        ILendingEngineBasic(le).borrow(msg.sender, asset, amount, 0, 0);
+        ILendingEngineDebtWrite(le).borrow(msg.sender, asset, amount, 0, 0);
     }
 
     /// @notice 还款（透传到 LendingEngine；兼容 VaultCore.repay(orderId, asset, amount) 新签名）
@@ -72,7 +72,7 @@ contract SettlementBorrowCoreMock {
         orderId; // mock: orderId is not used in this simplified forwarder
         require(amount > 0, "Amount must be positive");
         address le = Registry(registry).getModuleOrRevert(ModuleKeys.KEY_LE);
-        ILendingEngineBasic(le).repay(msg.sender, asset, amount);
+        ILendingEngineDebtWrite(le).repay(msg.sender, asset, amount);
     }
 
     /// @notice 业务模块推送用户头寸更新（简化版）

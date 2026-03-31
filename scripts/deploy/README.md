@@ -62,13 +62,47 @@ npx hardhat run scripts/deploy/deploylocal.ts --network localhost
 
 **环境变量要求**：
 ```bash
-PRIVATE_KEY=your_private_key          # 必需
-ARBISCAN_API_KEY=your_api_key        # 可选（用于验证）
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc  # 必需，推荐显式设置
+PRIVATE_KEY=your_private_key                                    # 必需
+ARBISCAN_API_KEY=your_api_key                                   # 可选（用于验证）
 ```
 
 **运行方式**：
 ```bash
-npx hardhat run scripts/deploy/deploy-arbitrum-sepolia.ts --network arbitrum-sepolia
+pnpm -s exec hardhat run scripts/deploy/deploy-arbitrum-sepolia.ts --network arbitrumSepolia
+```
+
+**推荐执行顺序**：
+1. 准备一个专用的 Arbitrum Sepolia deployer，不要混用 localhost 或 fork 账户。
+2. 为该地址充值足够测试 ETH，建议至少保留 `0.02 ETH`，脚本最低会检查 `0.01 ETH`。
+3. 显式设置 `ARBITRUM_SEPOLIA_RPC_URL`，避免依赖本地 shell 的历史残留变量。
+4. 首次建立真链基线时，必须直接运行部署，不要使用 `--skip-deploy`。
+5. 部署成功后立刻执行 live-safe smoke，确认本轮产物可作为后续复跑基线。
+
+**首次真链部署命令**：
+```bash
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+PRIVATE_KEY=your_private_key \
+pnpm -s exec hardhat run scripts/deploy/deploy-arbitrum-sepolia.ts --network arbitrumSepolia
+```
+
+**推荐的部署后验收命令**：
+```bash
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+PRIVATE_KEY=your_private_key \
+pnpm -s run e2e:pre-release:arbitrum-sepolia-live
+```
+
+**何时允许使用 `--skip-deploy`**：
+- 仅当 `scripts/deployments/arbitrum-sepolia.json` 是刚刚通过 live 验收生成的最新产物。
+- 仅当该产物中的 `Registry` 在 Arbitrum Sepolia 上 `getCode != 0x`。
+- 仅当你只是想复跑 invariant 和 live-safe smoke，而不是重新建立部署基线。
+
+**复跑 live gate（跳过重新部署）**：
+```bash
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+PRIVATE_KEY=your_private_key \
+pnpm -s exec ts-node --project ./tsconfig.scripts.json scripts/e2e/tools/run-pre-release.ts --arbitrum-sepolia-live --skip-deploy
 ```
 
 ---
@@ -121,8 +155,13 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 
 ### 阶段 3: 预言机系统
 9. **PriceOracle** - 价格预言机
-10. **CoinGeckoPriceUpdater** - CoinGecko 价格更新器
+10. **PriceUpdater** - 统一价格更新器
 11. 配置资产（从配置文件读取）
+
+补充说明（2026-03-23）：
+- deploy 脚本和文档主名已统一为 PriceUpdater / PRICE_UPDATER
+- 为保持链上 Registry hash 稳定，部署脚本实际写入的 raw key 仍是 COINGECKO_PRICE_UPDATER
+- 因此部署日志会优先显示 PRICE_UPDATER，必要时附带 compat raw: COINGECKO_PRICE_UPDATER
 
 ### 阶段 4: 费用路由
 12. **FeeRouter** - 费用路由
@@ -167,13 +206,19 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 44. **EasyToken** - 奖励通证（唯一通证）
 45. **RewardManagerCore** - 奖励管理核心
 46. **RewardManager** - 奖励管理器
-47. **RewardConfig** - 奖励配置
-48. **EarnConfig** - Earn 参数配置
-49. **RewardView** - 奖励视图
+47. **RewardAccrualManager** - 惩罚账本与扣减 SSOT
+48. **RewardConfig** - 奖励参数配置
+49. **EarnConfig** - Earn 参数配置（Registry key: `REWARD_EARN_CONFIG`）
+50. **EasyEmissionConfig** - Easy 发放参数配置
+51. **EasyEmissionController** - Easy 唯一 mint 路径
+52. **EasyConsumption** - Easy 消费入口
+53. **EasyRecycleDistributor** - Easy 回收/75-15-10 分配与补结算路径
+54. **FeatureRegistry** - Reward 功能语义注册表
+55. **RewardView** - Reward 统一读模型 / DataPush 镜像面
 
 ### 阶段 9: 其他模块
-50. **LoanNFT** - 贷款 NFT
-51. **MockUSDC** - Mock USDC（仅本地网络）
+56. **LoanNFT** - 贷款 NFT
+57. **MockUSDC** - Mock USDC（仅本地网络）
 
 ### 阶段 10: 模块注册
 - 将所有已部署的模块注册到 Registry
@@ -182,7 +227,10 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 
 ### 阶段 11: 权限配置
 - 为部署者授予必要的权限
-- 配置 EasyToken 的 MINTER_ROLE
+- 配置 EasyToken 的唯一 mint / burn 角色
+- 确保 `EasyEmissionController` 为 sole minter
+- 确保仅 `RewardAccrualManager` 与 `EasyRecycleDistributor` 持有 `BURNER_ROLE`
+- 撤销 `RewardManagerCore` 的历史 `BURNER_ROLE`
 - 配置预言机系统权限
 
 ### 阶段 12: 前端配置生成
@@ -215,7 +263,7 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
   "assets": [
     {
       "address": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-      "coingeckoId": "usd-coin",
+      "sourceId": "usd-coin",
       "decimals": 6,
       "maxPriceAge": 3600,
       "active": true
@@ -232,7 +280,7 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
   "assets": [
     {
       "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-      "coingeckoId": "usd-coin",
+      "sourceId": "usd-coin",
       "decimals": 6,
       "maxPriceAge": 3600,
       "active": true
@@ -251,25 +299,35 @@ npx hardhat run scripts/deploy/deploy-arbitrum.ts --network arbitrum
 
 ```bash
 # 必需
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc
 PRIVATE_KEY=your_private_key_here
 
 # 可选（用于合约验证）
 ARBISCAN_API_KEY=your_arbiscan_api_key
 
+# 兼容旧变量名，仅在未设置 ARBITRUM_SEPOLIA_RPC_URL 时作为回退
+ARBITRUM_SEPOLIA_URL=
+
 # 本地网络可选
 LOCAL_ADMIN_ADDRESS=your_local_admin_address
 ```
 
+补充说明：
+
+- 当前 Hardhat 配置优先读取 `ARBITRUM_SEPOLIA_RPC_URL`，其次才回退到 `ARBITRUM_SEPOLIA_URL`。
+- `PRIVATE_KEY` 必须是去掉 `0x` 前缀后的十六进制私钥，且对应地址需要有足够的 Arbitrum Sepolia 测试 ETH。
+- `ARBISCAN_API_KEY` 不是部署必需项，但如果后续要执行 `hardhat verify`，建议一开始就配置好。
+
 ### 2. 安装依赖
 
 ```bash
-npm install
+pnpm install
 ```
 
 ### 3. 编译合约
 
 ```bash
-npm run compile
+pnpm -s run compile
 ```
 
 ### 4. 配置 Hardhat 网络
@@ -281,18 +339,86 @@ networks: {
   localhost: {
     url: "http://127.0.0.1:8545"
   },
-  "arbitrum-sepolia": {
-    url: "https://sepolia-rollup.arbitrum.io/rpc",
+  arbitrumSepolia: {
+    url: process.env.ARBITRUM_SEPOLIA_RPC_URL || process.env.ARBITRUM_SEPOLIA_URL || "",
     chainId: 421614,
-    accounts: [process.env.PRIVATE_KEY]
+    accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
   },
   arbitrum: {
-    url: "https://arb1.arbitrum.io/rpc",
+    url: process.env.ARBITRUM_RPC_URL || process.env.ARBITRUM_URL || "",
     chainId: 42161,
-    accounts: [process.env.PRIVATE_KEY]
+    accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
   }
 }
 ```
+
+注意：Hardhat 网络名是 `arbitrumSepolia`，不是 `arbitrum-sepolia`。命令行里写错网络名会直接导致部署命令失败。
+
+---
+
+## 🧪 Arbitrum Sepolia 部署执行入口
+
+标准化部署 Runbook 已迁移到 [docs/Usage-Guide/runbook/README.md](../../docs/Usage-Guide/runbook/README.md)。
+
+这里不再维护第二套真链部署 / live 验收步骤。统一入口如下：
+
+- live deploy 基线：看 runbook 第 5.4 节
+- live skip-deploy 复跑：看 runbook 第 5.5 节
+- 发布前最终判定：看 runbook 第 6 节
+
+本 README 继续保留脚本说明、部署架构、配置要求和单项命令索引。
+
+### 常用单项命令
+
+```bash
+# 仅部署
+pnpm -s exec hardhat run scripts/deploy/deploy-arbitrum-sepolia.ts --network arbitrumSepolia
+
+# 部署后先跑 Reward 绑定/角色检查
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+LOCALHOST_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+pnpm -s run checks:reward-monitor:registry-bindings
+
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+LOCALHOST_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+pnpm -s run checks:reward-monitor:role-bindings
+
+# 单跑 reward live-safe smoke
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/reward-smoke-local.ts --network arbitrumSepolia
+
+# 单跑 funds-flow live-safe smoke
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-create-order.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-conservation.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-smoke-local.ts --network arbitrumSepolia
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/funds-flow-invariants-suite.ts --network arbitrumSepolia
+```
+
+Reward 子系统当前建议的最小放行集：
+
+```bash
+pnpm -s run compile
+pnpm exec hardhat test test/Reward/EasyEconomics.integration.test.ts
+
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+LOCALHOST_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+pnpm -s run checks:reward-monitor:config-events
+
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+LOCALHOST_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+pnpm -s run checks:reward-monitor:breakglass
+
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+LOCALHOST_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+pnpm -s run checks:reward-monitor:registry-bindings
+
+ARBITRUM_SEPOLIA_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+LOCALHOST_RPC_URL=https://sepolia-rollup.arbitrum.io/rpc \
+pnpm -s run checks:reward-monitor:role-bindings
+
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/reward-smoke-local.ts --network arbitrumSepolia
+```
+
+说明：`RewardManagerCore` 不再允许直接作为 Easy burn 路径；部署标准以 `EasyEmissionController` 唯一 mint、`RewardAccrualManager + EasyRecycleDistributor` 唯一 burn 为准。
 
 ---
 
@@ -310,12 +436,9 @@ npx hardhat run scripts/deploy/deploylocal.ts --network localhost
 
 ### 测试网部署
 
-```bash
-# 1. 确保环境变量已配置
-# 2. 确保账户有足够的测试 ETH
-# 3. 运行部署脚本
-npx hardhat run scripts/deploy/deploy-arbitrum-sepolia.ts --network arbitrum-sepolia
-```
+测试网部署与 live-safe 验收的标准步骤已经迁移到 [docs/Usage-Guide/runbook/README.md](../../docs/Usage-Guide/runbook/README.md)。
+
+这里不再重复维护首轮 deploy、skip-deploy 复跑和验收顺序。
 
 ### 主网部署
 
@@ -382,7 +505,7 @@ cat frontend-config/contracts-localhost.ts
 
 ```bash
 # 验证单个合约（需要 API Key）
-npx hardhat verify --network arbitrum-sepolia <CONTRACT_ADDRESS> <CONSTRUCTOR_ARGS>
+npx hardhat verify --network arbitrumSepolia <CONTRACT_ADDRESS> <CONSTRUCTOR_ARGS>
 ```
 
 ### 测试部署
@@ -409,6 +532,8 @@ npm test
 - 部署前会自动检查网络连接和余额
 - 会自动备份钱包资产信息
 - 需要配置资产文件（`assets.arbitrum-sepolia.json`）
+- 首次建立真链基线时不要使用 `--skip-deploy`
+- 只有 live gate 验收通过的 `scripts/deployments/arbitrum-sepolia.json` 才能作为后续复跑基线
 
 ### 主网
 

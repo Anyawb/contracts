@@ -1,24 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ERC721Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
-import { ERC721EnumerableUpgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721EnumerableUpgradeable.sol";
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import { Strings } from "@openzeppelin/contracts/utils/Strings.sol";
-import { Base64 } from "@openzeppelin/contracts/utils/Base64.sol";
+import {ERC721Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
+// solhint-disable-next-line max-line-length
+import {ERC721EnumerableUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721EnumerableUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
 
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { ILoanNFT } from "../interfaces/ILoanNFT.sol";
-import { IRegistry } from "../interfaces/IRegistry.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
-import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../constants/DataPushTypes.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {SystemEvents} from "../Vault/SystemEvents.sol";
+import {ILoanNFT} from "../interfaces/ILoanNFT.sol";
+import {IRegistry} from "../interfaces/IRegistry.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {NotAContract, ZeroAddress} from "../errors/StandardErrors.sol";
+import {DataPushLibrary} from "../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../constants/DataPushTypes.sol";
 
 /**
  * @title LoanNFT
@@ -42,7 +43,6 @@ contract LoanNFT is
     UUPSUpgradeable,
     ILoanNFT
 {
-    
     /*━━━━━━━━━━━━━━━ ROLES ━━━━━━━━━━━━━━━*/
 
     /**
@@ -50,12 +50,13 @@ contract LoanNFT is
      * @dev Maps to `ActionKeys.ACTION_BORROW`.
      */
     bytes32 public constant MINTER_ROLE_VAR = ActionKeys.ACTION_BORROW;
-    
+
     /**
      * @notice Action key used to gate governance/admin operations.
      * @dev Maps to `ActionKeys.ACTION_SET_PARAMETER`.
      */
-    bytes32 public constant GOVERNANCE_ROLE_VAR = ActionKeys.ACTION_SET_PARAMETER;
+    bytes32 public constant GOVERNANCE_ROLE_VAR =
+        ActionKeys.ACTION_SET_PARAMETER;
 
     /*━━━━━━━━━━━━━━━ STATE ━━━━━━━━━━━━━━━*/
 
@@ -74,13 +75,13 @@ contract LoanNFT is
      * @notice Loan metadata by token id.
      */
     mapping(uint256 tokenId => LoanMetadata) private _loanMetadata;
-    
+
     /**
      * @notice SBT lock flag by token id.
      * @dev When true, transfers between non-zero addresses are blocked (mint/burn are allowed).
      */
     mapping(uint256 tokenId => bool) private _soulBound;
-    
+
     /**
      * @notice One-time mint guard by loan id.
      */
@@ -91,14 +92,13 @@ contract LoanNFT is
      */
     string private _baseTokenURI;
 
-
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Legacy / internal error for non-minter callers (not used by current role-gated flow).
      */
     error LoanNFT__NotMinter();
-    
+
     /**
      * @notice Invalid loan/order input.
      */
@@ -108,11 +108,11 @@ contract LoanNFT is
      * @notice Invalid upgrade implementation (no code at target).
      */
     error LoanNFT__InvalidImplementation();
-    
+
     // Data push type constants live in `DataPushTypes`.
 
     /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Ensures the Registry address is configured.
      * @dev Reverts with `ZeroAddress()` if `_registryAddr` is zero.
@@ -145,7 +145,8 @@ contract LoanNFT is
         address initialRegistryAddr
     ) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
 
         __ERC721_init(name_, symbol_);
         __ERC721Enumerable_init();
@@ -155,7 +156,7 @@ contract LoanNFT is
 
         _registryAddr = initialRegistryAddr;
         _baseTokenURI = baseTokenURI_;
-        
+
         // Log initialization action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -189,7 +190,7 @@ contract LoanNFT is
     function pause() external onlyValidRegistry {
         _requireRole(GOVERNANCE_ROLE_VAR, msg.sender);
         _pause();
-        
+
         // Log pause action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_PAUSE_SYSTEM,
@@ -201,10 +202,7 @@ contract LoanNFT is
         // Unified data push (architecture requirement).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_NFT_PAUSED,
-            abi.encode(
-                msg.sender,
-                block.number
-            )
+            abi.encode(msg.sender, block.number)
         );
     }
 
@@ -220,7 +218,7 @@ contract LoanNFT is
     function unpause() external onlyValidRegistry {
         _requireRole(GOVERNANCE_ROLE_VAR, msg.sender);
         _unpause();
-        
+
         // Log unpause action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UNPAUSE_SYSTEM,
@@ -232,13 +230,10 @@ contract LoanNFT is
         // Unified data push (architecture requirement).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_NFT_UNPAUSED,
-            abi.encode(
-                msg.sender,
-                block.number
-            )
+            abi.encode(msg.sender, block.number)
         );
     }
-    
+
     /**
      * @notice Update the Registry address.
      * @dev Reverts if:
@@ -281,23 +276,40 @@ contract LoanNFT is
     function mintLoanCertificate(
         address to,
         LoanMetadata calldata data
-    ) external override whenNotPaused onlyValidRegistry nonReentrant returns (uint256 tokenId) {
+    )
+        external
+        override
+        whenNotPaused
+        onlyValidRegistry
+        nonReentrant
+        returns (uint256 tokenId)
+    {
         _requireRole(MINTER_ROLE_VAR, msg.sender);
         if (to == address(0)) revert ZeroAddress();
-        if (_loanMinted[data.loanId]) revert LoanNFT__LoanAlreadyMinted(data.loanId);
+        if (_loanMinted[data.loanId])
+            revert LoanNFT__LoanAlreadyMinted(data.loanId);
         if (data.principal == 0) revert LoanNFT__InvalidOrder();
 
         _loanMinted[data.loanId] = true;
         tokenId = _nextTokenId;
-        unchecked { _nextTokenId = tokenId + 1; }
+        unchecked {
+            _nextTokenId = tokenId + 1;
+        }
 
         LoanMetadata memory metadata = data;
         metadata.status = LoanStatus.Active;
         _loanMetadata[tokenId] = metadata;
         _safeMint(to, tokenId);
 
-        emit LoanCertificateMinted(to, tokenId, data.loanId, data.principal, data.rate, data.term);
-        
+        emit LoanCertificateMinted(
+            to,
+            tokenId,
+            data.loanId,
+            data.principal,
+            data.rate,
+            data.term
+        );
+
         // Log mint action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_BORROW,
@@ -339,7 +351,7 @@ contract LoanNFT is
         if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         _soulBound[tokenId] = true;
         emit TokenLocked(tokenId);
-        
+
         // Log parameter update action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -351,11 +363,7 @@ contract LoanNFT is
         // Unified data push (architecture requirement).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_NFT_LOCKED,
-            abi.encode(
-                tokenId,
-                msg.sender,
-                block.number
-            )
+            abi.encode(tokenId, msg.sender, block.number)
         );
     }
 
@@ -377,7 +385,7 @@ contract LoanNFT is
         if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         _burn(tokenId);
         emit TokenBurned(tokenId);
-        
+
         // Log burn action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -389,11 +397,7 @@ contract LoanNFT is
         // Unified data push (architecture requirement).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_NFT_BURNED,
-            abi.encode(
-                tokenId,
-                msg.sender,
-                block.number
-            )
+            abi.encode(tokenId, msg.sender, block.number)
         );
     }
 
@@ -411,12 +415,15 @@ contract LoanNFT is
      * @param newStatus New loan status
      * @inheritdoc ILoanNFT
      */
-    function updateLoanStatus(uint256 tokenId, LoanStatus newStatus) external override onlyValidRegistry {
+    function updateLoanStatus(
+        uint256 tokenId,
+        LoanStatus newStatus
+    ) external override onlyValidRegistry {
         _requireRole(MINTER_ROLE_VAR, msg.sender);
         if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         _loanMetadata[tokenId].status = newStatus;
         emit LoanStatusUpdated(tokenId, newStatus);
-        
+
         // Log status update action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -428,12 +435,7 @@ contract LoanNFT is
         // Unified data push (architecture requirement).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_NFT_STATUS_UPDATED,
-            abi.encode(
-                tokenId,
-                newStatus,
-                msg.sender,
-                block.number
-            )
+            abi.encode(tokenId, newStatus, msg.sender, block.number)
         );
     }
 
@@ -450,7 +452,9 @@ contract LoanNFT is
      * @param tokenId Token id
      * @return Metadata URI in `data:application/json;base64,...` form
      */
-    function tokenURI(uint256 tokenId) public view override returns (string memory) {
+    function tokenURI(
+        uint256 tokenId
+    ) public view override returns (string memory) {
         if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         LoanMetadata memory metadata = _loanMetadata[tokenId];
 
@@ -458,39 +462,24 @@ contract LoanNFT is
         string memory json = Base64.encode(
             bytes(
                 string(
+                    // solhint-disable quotes
                     abi.encodePacked(
-                        "{\"name\":\"Loan #",
+                        '{"name":"Loan #',
                         Strings.toString(tokenId),
-                        "\",\"description\":\"",
-                        "Loan Certificate NFT",
-                        "\",\"attributes\":[",
-                        "{\"trait_type\":\"",
-                        "LoanId",
-                        "\",\"value\":\"",
+                        '","description":"Loan Certificate NFT",',
+                        '"attributes":[{"trait_type":"LoanId","value":"',
                         Strings.toString(metadata.loanId),
-                        "\"},",
-                        "{\"trait_type\":\"",
-                        "Principal",
-                        "\",\"value\":\"",
+                        '"},{"trait_type":"Principal","value":"',
                         Strings.toString(metadata.principal),
-                        "\"},",
-                        "{\"trait_type\":\"",
-                        "Rate (bps)",
-                        "\",\"value\":\"",
+                        '"},{"trait_type":"Rate (bps)","value":"',
                         Strings.toString(metadata.rate),
-                        "\"},",
-                        "{\"trait_type\":\"",
-                        "Term",
-                        "\",\"value\":\"",
+                        '"},{"trait_type":"Term","value":"',
                         Strings.toString(metadata.term),
-                        "\"},",
-                        "{\"trait_type\":\"",
-                        "Status",
-                        "\",\"value\":\"",
+                        '"},{"trait_type":"Status","value":"',
                         _statusToString(metadata.status),
-                        "\"}",
-                        "]}"
+                        '"}]}'
                     )
+                    // solhint-enable quotes
                 )
             )
         );
@@ -509,7 +498,9 @@ contract LoanNFT is
      * @return Loan metadata snapshot
      * @inheritdoc ILoanNFT
      */
-    function getLoanMetadata(uint256 tokenId) external view override returns (LoanMetadata memory) {
+    function getLoanMetadata(
+        uint256 tokenId
+    ) external view override returns (LoanMetadata memory) {
         if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
         return _loanMetadata[tokenId];
     }
@@ -526,16 +517,20 @@ contract LoanNFT is
      * @return Array of token ids owned by `user`
      * @inheritdoc ILoanNFT
      */
-    function getUserTokens(address user) external view override returns (uint256[] memory) {
+    function getUserTokens(
+        address user
+    ) external view override returns (uint256[] memory) {
         uint256 balance = balanceOf(user);
         uint256[] memory tokens = new uint256[](balance);
         for (uint256 i; i < balance; ) {
             tokens[i] = tokenOfOwnerByIndex(user, i);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         return tokens;
     }
-    
+
     /**
      * @notice Get the current Registry address.
      * @return Registry address
@@ -556,7 +551,9 @@ contract LoanNFT is
      * @param user Address being checked
      */
     function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         if (acmAddr == address(0)) revert ZeroAddress();
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
@@ -573,7 +570,11 @@ contract LoanNFT is
         address to,
         uint256 tokenId,
         address auth
-    ) internal override(ERC721Upgradeable, ERC721EnumerableUpgradeable) returns (address) {
+    )
+        internal
+        override(ERC721Upgradeable, ERC721EnumerableUpgradeable)
+        returns (address)
+    {
         // mint: from == 0; burn: to == 0; only block user-to-user transfers.
         address from = _ownerOf(tokenId);
         if (from != address(0) && to != address(0) && _soulBound[tokenId]) {
@@ -605,8 +606,9 @@ contract LoanNFT is
      */
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(GOVERNANCE_ROLE_VAR, msg.sender);
-        if (newImplementation.code.length == 0) revert LoanNFT__InvalidImplementation();
-        
+        if (newImplementation.code.length == 0)
+            revert LoanNFT__InvalidImplementation();
+
         // Log upgrade action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
@@ -621,7 +623,9 @@ contract LoanNFT is
      * @param st Loan status
      * @return Status string
      */
-    function _statusToString(LoanStatus st) private pure returns (string memory) {
+    function _statusToString(
+        LoanStatus st
+    ) private pure returns (string memory) {
         if (st == LoanStatus.Active) return "Active";
         if (st == LoanStatus.Repaid) return "Repaid";
         if (st == LoanStatus.Liquidated) return "Liquidated";
@@ -633,7 +637,9 @@ contract LoanNFT is
      * @param interfaceId Interface id
      * @return True if supported
      */
-    function supportsInterface(bytes4 interfaceId)
+    function supportsInterface(
+        bytes4 interfaceId
+    )
         public
         view
         override(ERC721Upgradeable, ERC721EnumerableUpgradeable)
@@ -651,11 +657,12 @@ contract LoanNFT is
      */
     function _setRegistry(address newRegistryAddr) internal {
         if (newRegistryAddr == address(0)) revert ZeroAddress();
-        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
-        
+        if (newRegistryAddr.code.length == 0)
+            revert NotAContract(newRegistryAddr);
+
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
-        
+
         // Log parameter update action.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -667,12 +674,7 @@ contract LoanNFT is
         // Unified data push (architecture requirement).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_NFT_REGISTRY_UPDATED,
-            abi.encode(
-                oldRegistry,
-                newRegistryAddr,
-                msg.sender,
-                block.number
-            )
+            abi.encode(oldRegistry, newRegistryAddr, msg.sender, block.number)
         );
     }
 

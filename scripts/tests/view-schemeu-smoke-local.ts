@@ -1,5 +1,6 @@
 import { ethers, network } from "hardhat";
 import { envBool, loadAddressMap, resolveAddress } from "./_addressResolver";
+import { runWithNetworkRetry } from "./live-test/_networkRetry";
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -194,7 +195,4 @@ async function main() {
   console.log("\n✅ View/SchemeU smoke PASSED");
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exitCode = 1;
-});
+void runWithNetworkRetry("view-schemeu-smoke-local", main);

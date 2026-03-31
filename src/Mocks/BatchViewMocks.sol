@@ -7,7 +7,7 @@ contract BatchMockHealthView {
     struct ModuleHealth {
         bool    isHealthy;
         bytes32 detailsHash;
-        uint32  lastCheckBlock;
+        uint32  lastCheckTime;
         uint32  consecutiveFailures;
     }
 
@@ -24,13 +24,13 @@ contract BatchMockHealthView {
         address module,
         bool isHealthy,
         bytes32 detailsHash,
-        uint32 lastCheckBlock,
+        uint32 lastCheckTime,
         uint32 consecutiveFailures
     ) external {
         _moduleHealth[module] = ModuleHealth({
             isHealthy: isHealthy,
             detailsHash: detailsHash,
-            lastCheckBlock: lastCheckBlock,
+            lastCheckTime: lastCheckTime,
             consecutiveFailures: consecutiveFailures
         });
     }
@@ -41,7 +41,7 @@ contract BatchMockHealthView {
 
     function getModuleHealthWithMeta(address module) external view returns (ModuleHealth memory, bool, uint256) {
         ModuleHealth memory mh = _moduleHealth[module];
-        return (mh, true, uint256(mh.lastCheckBlock));
+        return (mh, true, uint256(mh.lastCheckTime));
     }
 }
 

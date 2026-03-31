@@ -4,6 +4,10 @@ pragma solidity ^0.8.20;
 import { IRegistryStorageMigrator } from "../interfaces/IRegistryStorageMigrator.sol";
 import { RegistryStorage } from "../registry/RegistryStorageLibrary.sol";
 
+interface IRegistryMigrateStorageCaller {
+    function migrateStorage(uint256 fromVersion, uint256 toVersion, address migrator) external;
+}
+
 /// @notice Stateless migrator for testing Registry.migrateStorage via delegatecall (fixed STORAGE_SLOT).
 /// @dev Uses only RegistryStorage layout; no contract storage is touched (immutable is code-only).
 contract RegistryStorageMigratorMock is IRegistryStorageMigrator {
@@ -93,7 +97,9 @@ contract RegistryStorageMigratorReentrant is IRegistryStorageMigrator {
     }
     function migrate(uint256 fromVersion, uint256 toVersion) external override {
         // Attempt reentrancy; should fail due to onlyOwner/version checks
-        (bool ok, ) = registry.call(abi.encodeWithSignature("migrateStorage(uint256,uint256,address)", fromVersion, toVersion, address(this)));
+        (bool ok, ) = registry.call(
+            abi.encodeCall(IRegistryMigrateStorageCaller.migrateStorage, (fromVersion, toVersion, address(this)))
+        );
         ok; // silence warning
     }
 }

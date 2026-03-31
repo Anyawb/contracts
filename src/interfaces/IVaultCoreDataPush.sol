@@ -4,7 +4,16 @@ pragma solidity ^0.8.20;
 /**
  * @title IVaultCoreDataPush
  * @notice Data-push surface on VaultCore used by business/ledger modules to forward cache updates to the View layer.
- * @dev Strong-constraint split:
+ * @dev Reverts if:
+ *      - the VaultCore implementation rejects the caller under its business-module authorization rules
+ *      - the VaultCore implementation is misconfigured for downstream view routing
+ *
+ * Security:
+ * - Push operations are expected to be best-effort from the caller's perspective only if the implementation says so.
+ * - Callers should treat this interface as a privileged bridge into view or cache propagation logic.
+ *
+ * Architecture:
+ * - Strong-constraint split:
  *      - User entry ABI stays in IVaultCore.
  *      - View address resolver stays in IVaultCoreMinimal.
  *      - push* lives here to avoid "minimal" interface drift and to make module dependencies explicit.
@@ -89,4 +98,3 @@ interface IVaultCoreDataPush {
         uint64 seq
     ) external;
 }
-

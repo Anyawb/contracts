@@ -69,7 +69,8 @@ async function main() {
   } = CONTRACT_ADDRESSES;
 
   const acm = (await ethers.getContractAt("AccessControlManager", ACM)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", AW)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", AW)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", AW)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", PO)) as any;
   const vr = (await ethers.getContractAt("VaultRouter", VR)) as any;
   const vc = (await ethers.getContractAt("VaultCore", VC)) as any;
@@ -108,9 +109,9 @@ async function main() {
   await ensureRole(ACTION_BORROW, LE); // OrderEngine mints/updates LoanNFT
 
   // Allow asset + price
-  if (!(await aw.isAssetAllowed(usdc.target))) {
+  if (!(await awRead.isAssetAllowed(usdc.target))) {
     await ensureRole(ACTION_ADD_WHITELIST, deployer.address);
-    await aw.connect(deployer).addAllowedAsset(usdc.target);
+    await awAdmin.connect(deployer).addAllowedAsset(usdc.target);
   }
   {
     const cfg = await po.getAssetConfig(usdc.target);

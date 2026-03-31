@@ -5,12 +5,14 @@ import { MathConstants } from "../../../constants/MathConstants.sol";
 import { VaultMath } from "../../VaultMath.sol";
 
 /**
- * @title Liquidation Risk Library
- * @author RWA Lending Platform
- * @notice Provides pure calculation functions for liquidation risk assessment (health factor and risk score).
- * @dev Security:
- * - Pure library: no storage reads/writes, no external calls.
- * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
+ * @title LiquidationRiskLib
+ * @notice Provides pure liquidation risk calculations for health factor and risk score.
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
+ * - Pure library: no storage reads, writes, or external calls.
+ * - Solidity ^0.8.x overflow and underflow checks apply.
  */
 library LiquidationRiskLib {
     /**

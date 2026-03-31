@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
-import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { Registry } from "../../../registry/Registry.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import {ICollateralManager} from "../../../interfaces/ICollateralManager.sol";
+import {ILendingEngineDebtRead} from "../../../interfaces/ILendingEngineDebtRead.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {DataPushLibrary} from "../../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../../constants/DataPushTypes.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
 import {
     ArrayLengthMismatch,
     BatchTooLarge,
@@ -21,12 +21,17 @@ import {
     NotAContract,
     ZeroAddress
 } from "../../../errors/StandardErrors.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
-import { IPriceOracle } from "../../../interfaces/IPriceOracle.sol";
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
-import { CacheEvents } from "../../CacheEvents.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
+import {IPriceOracleRead} from "../../../interfaces/IPriceOracleRead.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {CacheEvents} from "../../CacheEvents.sol";
 
+/// @title IVaultCoreViewAddr
+/// @notice Minimal read interface for the active view-contract address.
+/// @dev Used by {PositionView} to resolve the canonical view address from
+///      VaultCore without importing the full implementation.
 interface IVaultCoreViewAddr {
+    /// @notice Returns the currently configured view contract address.
     function viewContractAddrVar() external view returns (address);
 }
 
@@ -45,14 +50,20 @@ interface IVaultCoreViewAddr {
  *
  * Security:
  * - Cache writes are restricted to configured business modules + ACTION_VIEW_PUSH role checks.
- * - User-dimensional reads follow Scheme U (self read allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN).
+ * - User-dimensional reads follow Scheme U
+ *   (self read allowed; non-self requires ACTION_VIEW_USER_DATA or ACTION_ADMIN).
  * - Batch user reads (users[]) are treated as enumeration capabilities: no self-bypass; requires
  *   ACTION_VIEW_USER_DATA or ACTION_ADMIN.
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  *
  * @custom:security-contact security@example.com
  */
-contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEvents {
+contract PositionView is
+    Initializable,
+    UUPSUpgradeable,
+    ViewVersioned,
+    CacheEvents
+{
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
 
     /**
@@ -109,7 +120,12 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @param requestId Idempotency key (bytes32)
      * @param seq Monotonic sequence number (if provided)
      */
-    event IdempotentRequestIgnored(address indexed user, address indexed asset, bytes32 indexed requestId, uint64 seq);
+    event IdempotentRequestIgnored(
+        address indexed user,
+        address indexed asset,
+        bytes32 indexed requestId,
+        uint64 seq
+    );
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
@@ -123,7 +139,10 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     error PositionView__LedgerMismatch();
 
     /// @notice Incoming version is stale or violates monotonic ordering.
-    error PositionView__StaleVersion(uint64 currentVersion, uint64 incomingVersion);
+    error PositionView__StaleVersion(
+        uint64 currentVersion,
+        uint64 incomingVersion
+    );
 
     /// @notice Delta update would underflow (negative resulting collateral/debt).
     error PositionView__InvalidDelta();
@@ -146,20 +165,22 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     // user => asset => collateral|debt
     mapping(address => mapping(address => uint256)) private _collateralCache;
     mapping(address => mapping(address => uint256)) private _debtCache;
-    mapping(address => uint256)                         private _cacheBlocks;
+    mapping(address => uint256) private _cacheBlocks;
     // user => asset => version (单调递增)
-    mapping(address => mapping(address => uint64))      private _positionVersion;
+    mapping(address => mapping(address => uint64)) private _positionVersion;
     // user => asset => last updated blockNumber
-    mapping(address => mapping(address => uint256))     private _positionUpdatedAt;
+    mapping(address => mapping(address => uint256)) private _positionUpdatedAt;
     // user-level manual invalidation barrier (clearing cache should invalidate all (user,asset) cached entries)
-    mapping(address => uint256)                         private _userInvalidatedAt;
+    mapping(address => uint256) private _userInvalidatedAt;
     // user => asset => last applied seq (optional monotonic ordering aid)
-    mapping(address => mapping(address => uint64))      private _positionSeq;
+    mapping(address => mapping(address => uint64)) private _positionSeq;
     // user => asset => last applied requestId (O(1) idempotency, version-bound)
-    mapping(address => mapping(address => bytes32))     private _lastAppliedRequestId;
+    mapping(address => mapping(address => bytes32))
+        private _lastAppliedRequestId;
 
     // constants via ViewConstants
-    uint256 private constant _CACHE_DURATION_BLOCKS = ViewConstants.CACHE_DURATION_BLOCKS;
+    uint256 private constant _CACHE_DURATION_BLOCKS =
+        ViewConstants.CACHE_DURATION_BLOCKS;
     uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
@@ -172,8 +193,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyAuthorizedFor(address user) {
         if (msg.sender != user) {
-            bool ok =
-                _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) || _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
+            bool ok = _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) ||
+                _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
             if (!ok) revert MissingRole();
         }
         _;
@@ -181,9 +202,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
     /// @dev Scheme U batch: no self-bypass; requires VIEW_USER_DATA or ADMIN.
     modifier onlyOpsOrAdmin() {
-        bool ok =
-            _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                || _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
+        bool ok = _hasRole(ActionKeys.ACTION_VIEW_USER_DATA, msg.sender) ||
+            _hasRole(ActionKeys.ACTION_ADMIN, msg.sender);
         if (!ok) revert MissingRole();
         _;
     }
@@ -193,20 +213,26 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     ///      Access policy: ACTION_VIEW_RISK_DATA with ACTION_ADMIN bypass.
     modifier onlyValuationViewerOrAdmin() {
         if (
-            !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
-                && !_hasRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender)
+            !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender) &&
+            !_hasRole(ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender)
         ) revert MissingRole();
         _;
     }
 
     modifier onlyBusinessContract() {
-        (address cm, address le, address vaultCore, address vbl, address vaultRouter) = _resolveBusinessModules();
+        (
+            address cm,
+            address le,
+            address vaultCore,
+            address vbl,
+            address vaultRouter
+        ) = _resolveBusinessModules();
         if (
-            msg.sender != cm
-            && msg.sender != le
-            && msg.sender != vaultCore
-            && msg.sender != vbl
-            && msg.sender != vaultRouter
+            msg.sender != cm &&
+            msg.sender != le &&
+            msg.sender != vaultCore &&
+            msg.sender != vbl &&
+            msg.sender != vaultRouter
         ) {
             revert PositionView__Unauthorized();
         }
@@ -214,23 +240,30 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     }
 
     function _requireRole(bytes32 actionKey, address user) internal view {
-        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, user)) revert MissingRole();
+        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, user))
+            revert MissingRole();
     }
 
-    function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
+    function _hasRole(
+        bytes32 actionKey,
+        address user
+    ) internal view returns (bool) {
         return ViewAccessLib.hasRole(_registryAddr, actionKey, user);
     }
 
     /*━━━━━━━━━━━━━━━ Access helpers ━━━━━━━━━━━━━━━*/
     modifier onlyUserOrStrictAdmin(address user) {
-        if (msg.sender != user && !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)) {
+        if (
+            msg.sender != user && !_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
+        ) {
             revert PositionView__OnlyUserOrAdmin();
         }
         _;
     }
 
     modifier onlyAdmin() {
-        if (!_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)) revert PositionView__OnlyAdmin();
+        if (!_hasRole(ActionKeys.ACTION_ADMIN, msg.sender))
+            revert PositionView__OnlyAdmin();
         _;
     }
 
@@ -253,7 +286,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -283,7 +317,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint256 collateral,
         uint256 debt
     ) external onlyValidRegistry onlyBusinessContract {
-        _pushUserPositionUpdate(user, asset, collateral, debt, bytes32(0), 0, 0);
+        _pushUserPositionUpdate(
+            user,
+            asset,
+            collateral,
+            debt,
+            bytes32(0),
+            0,
+            0
+        );
     }
 
     /**
@@ -311,7 +353,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         bytes32 requestId,
         uint64 seq
     ) external onlyValidRegistry onlyBusinessContract {
-        _pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, 0);
+        _pushUserPositionUpdate(
+            user,
+            asset,
+            collateral,
+            debt,
+            requestId,
+            seq,
+            0
+        );
     }
 
     /**
@@ -336,7 +386,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint256 debt,
         uint64 nextVersion
     ) external onlyValidRegistry onlyBusinessContract {
-        _pushUserPositionUpdate(user, asset, collateral, debt, bytes32(0), 0, nextVersion);
+        _pushUserPositionUpdate(
+            user,
+            asset,
+            collateral,
+            debt,
+            bytes32(0),
+            0,
+            nextVersion
+        );
     }
 
     /**
@@ -366,7 +424,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint64 seq,
         uint64 nextVersion
     ) external onlyValidRegistry onlyBusinessContract {
-        _pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, nextVersion);
+        _pushUserPositionUpdate(
+            user,
+            asset,
+            collateral,
+            debt,
+            requestId,
+            seq,
+            nextVersion
+        );
     }
 
     /**
@@ -393,7 +459,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         int256 collateralDelta,
         int256 debtDelta
     ) external onlyValidRegistry onlyBusinessContract {
-        _pushUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, bytes32(0), 0, 0);
+        _pushUserPositionUpdateDelta(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            bytes32(0),
+            0,
+            0
+        );
     }
 
     /**
@@ -421,7 +495,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         bytes32 requestId,
         uint64 seq
     ) external onlyValidRegistry onlyBusinessContract {
-        _pushUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, requestId, seq, 0);
+        _pushUserPositionUpdateDelta(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            requestId,
+            seq,
+            0
+        );
     }
 
     /**
@@ -446,7 +528,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         int256 debtDelta,
         uint64 nextVersion
     ) external onlyValidRegistry onlyBusinessContract {
-        _pushUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, bytes32(0), 0, nextVersion);
+        _pushUserPositionUpdateDelta(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            bytes32(0),
+            0,
+            nextVersion
+        );
     }
 
     /**
@@ -476,7 +566,15 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint64 seq,
         uint64 nextVersion
     ) external onlyValidRegistry onlyBusinessContract {
-        _pushUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, requestId, seq, nextVersion);
+        _pushUserPositionUpdateDelta(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            requestId,
+            seq,
+            nextVersion
+        );
     }
 
     function _pushUserPositionUpdate(
@@ -489,14 +587,18 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint64 nextVersion
     ) internal {
         _requireRole(ActionKeys.ACTION_VIEW_PUSH, msg.sender);
-        if (user == address(0) || asset == address(0)) revert PositionView__InvalidInput();
+        if (user == address(0) || asset == address(0))
+            revert PositionView__InvalidInput();
 
         // O(1) idempotency (version-bound):
         // If a tx is replayed after success, currentVersion == applied nextVersion.
         // If requestId matches the last applied requestId, ignore as idempotent replay.
         if (requestId != bytes32(0) && nextVersion != 0) {
             uint64 currentVersion = _positionVersion[user][asset];
-            if (nextVersion == currentVersion && requestId == _lastAppliedRequestId[user][asset]) {
+            if (
+                nextVersion == currentVersion &&
+                requestId == _lastAppliedRequestId[user][asset]
+            ) {
                 emit IdempotentRequestIgnored(user, asset, requestId, seq);
                 return;
             }
@@ -505,12 +607,13 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         // Optional strict ordering guard (monotonic seq). Skipped for idempotent replays above.
         if (seq != 0) {
             uint64 currentSeq = _positionSeq[user][asset];
-            if (seq <= currentSeq) revert PositionView__OutOfOrderSeq(currentSeq, seq);
+            if (seq <= currentSeq)
+                revert PositionView__OutOfOrderSeq(currentSeq, seq);
         }
 
         uint64 newVersion = _computeVersionOrRevert(user, asset, nextVersion);
 
-        (bool ok, uint256 ledgerCollateral, uint256 ledgerDebt) = _fetchLatestPositionGuarded(
+        (bool ok, , ) = _fetchLatestPositionGuarded(
             user,
             asset,
             collateral,
@@ -519,28 +622,37 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
             seq,
             nextVersion
         );
-        if (!ok) {
-            // Ledger read failed: CacheUpdateFailed was emitted; skip cache write.
-            return;
-        }
-        if (ledgerCollateral != collateral || ledgerDebt != debt) {
-            revert PositionView__LedgerMismatch();
-        }
+        if (!ok) return;
 
         // Persist ordering/idempotency markers only after we are sure we will write cache successfully.
         if (seq != 0) _positionSeq[user][asset] = seq;
-        if (requestId != bytes32(0)) _lastAppliedRequestId[user][asset] = requestId;
+        if (requestId != bytes32(0))
+            _lastAppliedRequestId[user][asset] = requestId;
 
         _collateralCache[user][asset] = collateral;
-        _debtCache[user][asset]       = debt;
-        _cacheBlocks[user]        = block.number;
+        _debtCache[user][asset] = debt;
+        _cacheBlocks[user] = block.number;
         _positionUpdatedAt[user][asset] = block.number;
         _positionVersion[user][asset] = newVersion;
 
         uint256 updateBlock = block.number;
         emit UserPositionCached(user, asset, collateral, debt, updateBlock);
-        emit UserPositionCachedWithVersion(user, asset, collateral, debt, newVersion, updateBlock);
-        emit UserPositionCachedV3(user, asset, collateral, debt, newVersion, updateBlock);
+        emit UserPositionCachedWithVersion(
+            user,
+            asset,
+            collateral,
+            debt,
+            newVersion,
+            updateBlock
+        );
+        emit UserPositionCachedV3(
+            user,
+            asset,
+            collateral,
+            debt,
+            newVersion,
+            updateBlock
+        );
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
             abi.encode(user, asset, collateral, debt)
@@ -557,12 +669,16 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint64 nextVersion
     ) internal {
         _requireRole(ActionKeys.ACTION_VIEW_PUSH, msg.sender);
-        if (user == address(0) || asset == address(0)) revert PositionView__InvalidInput();
+        if (user == address(0) || asset == address(0))
+            revert PositionView__InvalidInput();
 
         // O(1) idempotency (version-bound) — see _pushUserPositionUpdate.
         if (requestId != bytes32(0) && nextVersion != 0) {
             uint64 currentVersion = _positionVersion[user][asset];
-            if (nextVersion == currentVersion && requestId == _lastAppliedRequestId[user][asset]) {
+            if (
+                nextVersion == currentVersion &&
+                requestId == _lastAppliedRequestId[user][asset]
+            ) {
                 emit IdempotentRequestIgnored(user, asset, requestId, seq);
                 return;
             }
@@ -570,28 +686,58 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         if (seq != 0) {
             uint64 currentSeq = _positionSeq[user][asset];
-            if (seq <= currentSeq) revert PositionView__OutOfOrderSeq(currentSeq, seq);
+            if (seq <= currentSeq)
+                revert PositionView__OutOfOrderSeq(currentSeq, seq);
         }
 
         // Compute delta based on valid cache; if invalid, fall back to ledger.
-        (uint256 baseCollateral, uint256 baseDebt, bool isValid) = _getCachedOrLatestPositionWithValidity(user, asset);
+        (
+            uint256 baseCollateral,
+            uint256 baseDebt,
+            bool isValid
+        ) = _getCachedOrLatestPositionWithValidity(user, asset);
 
         // Critical safety: when cache is invalid, base values may come from the *post-update* ledger.
         // Adding delta on top would double-count. In this case, degrade to a full ledger sync.
         if (!isValid) {
-            uint64 newVersionSync = _computeVersionOrRevert(user, asset, nextVersion);
+            uint64 newVersionSync = _computeVersionOrRevert(
+                user,
+                asset,
+                nextVersion
+            );
             if (seq != 0) _positionSeq[user][asset] = seq;
-            if (requestId != bytes32(0)) _lastAppliedRequestId[user][asset] = requestId;
+            if (requestId != bytes32(0))
+                _lastAppliedRequestId[user][asset] = requestId;
             _collateralCache[user][asset] = baseCollateral;
-            _debtCache[user][asset]       = baseDebt;
-            _cacheBlocks[user]        = block.number;
+            _debtCache[user][asset] = baseDebt;
+            _cacheBlocks[user] = block.number;
             _positionUpdatedAt[user][asset] = block.number;
             _positionVersion[user][asset] = newVersionSync;
 
             uint256 updateBlockSync = block.number;
-            emit UserPositionCached(user, asset, baseCollateral, baseDebt, updateBlockSync);
-            emit UserPositionCachedWithVersion(user, asset, baseCollateral, baseDebt, newVersionSync, updateBlockSync);
-            emit UserPositionCachedV3(user, asset, baseCollateral, baseDebt, newVersionSync, updateBlockSync);
+            emit UserPositionCached(
+                user,
+                asset,
+                baseCollateral,
+                baseDebt,
+                updateBlockSync
+            );
+            emit UserPositionCachedWithVersion(
+                user,
+                asset,
+                baseCollateral,
+                baseDebt,
+                newVersionSync,
+                updateBlockSync
+            );
+            emit UserPositionCachedV3(
+                user,
+                asset,
+                baseCollateral,
+                baseDebt,
+                newVersionSync,
+                updateBlockSync
+            );
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
                 abi.encode(user, asset, baseCollateral, baseDebt)
@@ -601,7 +747,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
 
         int256 newCollateralSigned = int256(baseCollateral) + collateralDelta;
         int256 newDebtSigned = int256(baseDebt) + debtDelta;
-        if (newCollateralSigned < 0 || newDebtSigned < 0) revert PositionView__InvalidDelta();
+        if (newCollateralSigned < 0 || newDebtSigned < 0)
+            revert PositionView__InvalidDelta();
 
         uint256 newCollateral = uint256(newCollateralSigned);
         uint256 newDebt = uint256(newDebtSigned);
@@ -609,18 +756,39 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         uint64 newVersion = _computeVersionOrRevert(user, asset, nextVersion);
 
         if (seq != 0) _positionSeq[user][asset] = seq;
-        if (requestId != bytes32(0)) _lastAppliedRequestId[user][asset] = requestId;
+        if (requestId != bytes32(0))
+            _lastAppliedRequestId[user][asset] = requestId;
 
         _collateralCache[user][asset] = newCollateral;
-        _debtCache[user][asset]       = newDebt;
-        _cacheBlocks[user]        = block.number;
+        _debtCache[user][asset] = newDebt;
+        _cacheBlocks[user] = block.number;
         _positionUpdatedAt[user][asset] = block.number;
         _positionVersion[user][asset] = newVersion;
 
         uint256 updateBlockDelta = block.number;
-        emit UserPositionCached(user, asset, newCollateral, newDebt, updateBlockDelta);
-        emit UserPositionCachedWithVersion(user, asset, newCollateral, newDebt, newVersion, updateBlockDelta);
-        emit UserPositionCachedV3(user, asset, newCollateral, newDebt, newVersion, updateBlockDelta);
+        emit UserPositionCached(
+            user,
+            asset,
+            newCollateral,
+            newDebt,
+            updateBlockDelta
+        );
+        emit UserPositionCachedWithVersion(
+            user,
+            asset,
+            newCollateral,
+            newDebt,
+            newVersion,
+            updateBlockDelta
+        );
+        emit UserPositionCachedV3(
+            user,
+            asset,
+            newCollateral,
+            newDebt,
+            newVersion,
+            updateBlockDelta
+        );
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
             abi.encode(user, asset, newCollateral, newDebt)
@@ -640,35 +808,52 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @param user Target user address
      * @param asset Asset address
      */
-    function retryUserPositionUpdate(address user, address asset) external onlyAdmin {
-        if (user == address(0) || asset == address(0)) revert PositionView__InvalidInput();
-
-        (bool ok, uint256 collateral, uint256 debt) = _fetchLatestPositionGuarded(
-            user,
-            asset,
-            0,
-            0,
-            bytes32(0),
-            0,
-            0
-        );
-        if (!ok) {
-            // CacheUpdateFailed was emitted in _fetchLatestPositionGuarded.
-            return;
-        }
+    function retryUserPositionUpdate(
+        address user,
+        address asset
+    ) external onlyAdmin {
+        if (user == address(0) || asset == address(0))
+            revert PositionView__InvalidInput();
 
         uint64 newVersion = _computeVersionOrRevert(user, asset, 0);
-
+        (
+            bool ok,
+            uint256 collateral,
+            uint256 debt
+        ) = _fetchLatestPositionGuarded(
+                user,
+                asset,
+                _collateralCache[user][asset],
+                _debtCache[user][asset],
+                bytes32(0),
+                0,
+                newVersion
+            );
+        if (!ok) return;
         _collateralCache[user][asset] = collateral;
-        _debtCache[user][asset]       = debt;
-        _cacheBlocks[user]        = block.number;
+        _debtCache[user][asset] = debt;
+        _cacheBlocks[user] = block.number;
         _positionUpdatedAt[user][asset] = block.number;
         _positionVersion[user][asset] = newVersion;
 
         uint256 updateBlock = block.number;
         emit UserPositionCached(user, asset, collateral, debt, updateBlock);
-        emit UserPositionCachedWithVersion(user, asset, collateral, debt, newVersion, updateBlock);
-        emit UserPositionCachedV3(user, asset, collateral, debt, newVersion, updateBlock);
+        emit UserPositionCachedWithVersion(
+            user,
+            asset,
+            collateral,
+            debt,
+            newVersion,
+            updateBlock
+        );
+        emit UserPositionCachedV3(
+            user,
+            asset,
+            collateral,
+            debt,
+            newVersion,
+            updateBlock
+        );
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_POSITION_UPDATE,
             abi.encode(user, asset, collateral, debt)
@@ -693,14 +878,26 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @return blockNumber Legacy field: last cache write marker for (user, asset) (treated as blockNumber)
      * @return version Position version for (user, asset) (0 if never written)
      */
-    function getUserPositionWithMeta(address user, address asset)
+    function getUserPositionWithMeta(
+        address user,
+        address asset
+    )
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
+        returns (
+            uint256 collateral,
+            uint256 debt,
+            bool isValid,
+            uint256 blockNumber,
+            uint64 version
+        )
     {
-        (collateral, debt, isValid) = _getCachedOrLatestPositionWithValidity(user, asset);
+        (collateral, debt, isValid) = _getCachedOrLatestPositionWithValidity(
+            user,
+            asset
+        );
         blockNumber = _positionUpdatedAt[user][asset];
         version = _positionVersion[user][asset];
     }
@@ -716,14 +913,27 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @return ageBlocks Number of blocks since update (0 if never written)
      * @return version Position version for (user, asset)
      */
-    function getUserPositionWithBlockMeta(address user, address asset)
+    function getUserPositionWithBlockMeta(
+        address user,
+        address asset
+    )
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 updateBlock, uint256 ageBlocks, uint64 version)
+        returns (
+            uint256 collateral,
+            uint256 debt,
+            bool isValid,
+            uint256 updateBlock,
+            uint256 ageBlocks,
+            uint64 version
+        )
     {
-        (collateral, debt, isValid) = _getCachedOrLatestPositionWithValidity(user, asset);
+        (collateral, debt, isValid) = _getCachedOrLatestPositionWithValidity(
+            user,
+            asset
+        );
         updateBlock = _positionUpdatedAt[user][asset];
         version = _positionVersion[user][asset];
         if (updateBlock == 0 || updateBlock > block.number) {
@@ -753,7 +963,10 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @return blockNumbers Legacy field: cache markers (treated as blockNumber)
      * @return versions Position versions
      */
-    function batchGetUserPositionsWithMeta(address[] calldata users, address[] calldata assets)
+    function batchGetUserPositionsWithMeta(
+        address[] calldata users,
+        address[] calldata assets
+    )
         external
         view
         onlyValidRegistry
@@ -768,21 +981,23 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     {
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
-        if (len != assets.length) revert ArrayLengthMismatch(len, assets.length);
+        if (len != assets.length)
+            revert ArrayLengthMismatch(len, assets.length);
         if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
 
         collaterals = new uint256[](len);
-        debts       = new uint256[](len);
-        validFlags  = new bool[](len);
-        blockNumbers  = new uint256[](len);
-        versions    = new uint64[](len);
+        debts = new uint256[](len);
+        validFlags = new bool[](len);
+        blockNumbers = new uint256[](len);
+        versions = new uint64[](len);
         for (uint256 i; i < len; ++i) {
-            (collaterals[i], debts[i], validFlags[i]) = _getCachedOrLatestPositionWithValidity(
-                users[i],
-                assets[i]
-            );
+            (
+                collaterals[i],
+                debts[i],
+                validFlags[i]
+            ) = _getCachedOrLatestPositionWithValidity(users[i], assets[i]);
             blockNumbers[i] = _positionUpdatedAt[users[i]][assets[i]];
-            versions[i]   = _positionVersion[users[i]][assets[i]];
+            versions[i] = _positionVersion[users[i]][assets[i]];
         }
     }
 
@@ -790,7 +1005,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @notice Get user's total collateral value (USD-8 value).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin (MissingRole via onlyValuationViewerOrAdmin)
+     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin
+     *        (MissingRole via onlyValuationViewerOrAdmin)
      *
      * Security:
      * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
@@ -799,7 +1015,9 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @param user Target user address
      * @return totalValue Total collateral value (USD-8 value)
      */
-    function getUserTotalCollateralValue(address user)
+    function getUserTotalCollateralValue(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -807,31 +1025,40 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         returns (uint256 totalValue)
     {
         if (user == address(0)) revert ZeroAddress();
-        (address cm,, address oracle) = _resolveCollateralAndOracle();
+        (address cm, , address oracle) = _resolveCollateralAndOracle();
 
         address[] memory assets;
-        try ICollateralManager(cm).getUserCollateralAssets(user) returns (address[] memory a) {
+        try ICollateralManager(cm).getUserCollateralAssets(user) returns (
+            address[] memory a
+        ) {
             assets = a;
         } catch {
             // best-effort fallback
             return 0;
         }
 
-        if (assets.length > _MAX_BATCH_SIZE) revert BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
+        if (assets.length > _MAX_BATCH_SIZE)
+            revert BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
 
         for (uint256 i; i < assets.length; ++i) {
             address asset = assets[i];
             if (asset == address(0)) continue;
 
             uint256 amount;
-            try ICollateralManager(cm).getCollateral(user, asset) returns (uint256 a) {
+            try ICollateralManager(cm).getCollateral(user, asset) returns (
+                uint256 a
+            ) {
                 amount = a;
             } catch {
                 continue;
             }
             if (amount == 0) continue;
 
-            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*blockNumber*/, uint256 decimals) {
+            try IPriceOracleRead(oracle).getPrice(asset) returns (
+                uint256 price,
+                uint256 /*blockNumber*/,
+                uint256 decimals
+            ) {
                 if (price == 0) continue;
                 // 10**decimals must not overflow uint256
                 if (decimals > 77) continue;
@@ -849,7 +1076,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @notice Get system total collateral value (USD-8 value).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin (MissingRole via onlyValuationViewerOrAdmin)
+     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin
+     *        (MissingRole via onlyValuationViewerOrAdmin)
      *
      * Security:
      * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
@@ -857,32 +1085,47 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      *
      * @return totalValue Total collateral value (USD-8 value)
      */
-    function getTotalCollateralValue() external view onlyValidRegistry onlyValuationViewerOrAdmin returns (uint256 totalValue) {
-        (address cm,, address oracle) = _resolveCollateralAndOracle();
+    function getTotalCollateralValue()
+        external
+        view
+        onlyValidRegistry
+        onlyValuationViewerOrAdmin
+        returns (uint256 totalValue)
+    {
+        (address cm, , address oracle) = _resolveCollateralAndOracle();
 
         address[] memory assets;
-        try IPriceOracle(oracle).getSupportedAssets() returns (address[] memory a) {
+        try IPriceOracleRead(oracle).getSupportedAssets() returns (
+            address[] memory a
+        ) {
             assets = a;
         } catch {
             // best-effort fallback
             return 0;
         }
 
-        if (assets.length > _MAX_BATCH_SIZE) revert BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
+        if (assets.length > _MAX_BATCH_SIZE)
+            revert BatchTooLarge(assets.length, _MAX_BATCH_SIZE);
 
         for (uint256 i; i < assets.length; ++i) {
             address asset = assets[i];
             if (asset == address(0)) continue;
 
             uint256 totalAmount;
-            try ICollateralManager(cm).getTotalCollateralByAsset(asset) returns (uint256 a) {
+            try
+                ICollateralManager(cm).getTotalCollateralByAsset(asset)
+            returns (uint256 a) {
                 totalAmount = a;
             } catch {
                 continue;
             }
             if (totalAmount == 0) continue;
 
-            try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*blockNumber*/, uint256 decimals) {
+            try IPriceOracleRead(oracle).getPrice(asset) returns (
+                uint256 price,
+                uint256 /*blockNumber*/,
+                uint256 decimals
+            ) {
                 if (price == 0) continue;
                 if (decimals > 77) continue;
                 uint256 scale = 10 ** decimals;
@@ -898,7 +1141,8 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @notice Get value of an asset amount (USD-8 value).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin (MissingRole via onlyValuationViewerOrAdmin)
+     *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin
+     *        (MissingRole via onlyValuationViewerOrAdmin)
      *
      * Security:
      * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
@@ -908,7 +1152,10 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @param amount Asset amount (asset decimals)
      * @return value Value in USD-8
      */
-    function getAssetValue(address asset, uint256 amount)
+    function getAssetValue(
+        address asset,
+        uint256 amount
+    )
         external
         view
         onlyValidRegistry
@@ -918,7 +1165,11 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         if (asset == address(0) || amount == 0) return 0;
         (, , address oracle) = _resolveCollateralAndOracle();
 
-        try IPriceOracle(oracle).getPrice(asset) returns (uint256 price, uint256 /*blockNumber*/, uint256 decimals) {
+        try IPriceOracleRead(oracle).getPrice(asset) returns (
+            uint256 price,
+            uint256 /*blockNumber*/,
+            uint256 decimals
+        ) {
             if (price == 0) return 0;
             if (decimals > 77) return 0;
             uint256 scale = 10 ** decimals;
@@ -936,24 +1187,30 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - View-only.
      *
-     * @param user Target user address
-     * @return isValid Whether the user-level cache marker is valid
-     * @return cacheBlock User-level cache marker block (block.number)
+     * @param user Target user address.
+     * @return isValid True if the user-level cache marker is valid.
+     * @return cacheBlock User-level cache marker block number.
      */
-    function getUserCacheStatusWithMeta(address user) external view returns (bool isValid, uint256 cacheBlock) {
+    function getUserCacheStatusWithMeta(
+        address user
+    ) external view returns (bool isValid, uint256 cacheBlock) {
         cacheBlock = _cacheBlocks[user];
         if (cacheBlock == 0) return (false, 0);
         if (cacheBlock <= _userInvalidatedAt[user]) return (false, cacheBlock);
-        isValid = block.number >= cacheBlock && (block.number - cacheBlock <= _CACHE_DURATION_BLOCKS);
+        isValid =
+            block.number >= cacheBlock &&
+            (block.number - cacheBlock <= _CACHE_DURATION_BLOCKS);
     }
 
     /**
      * @notice Return user-level cache marker with explicit block-based metadata (recommended).
      * @dev Reverts if: (never)
      */
-    function getUserCacheStatusWithBlockMeta(address user)
+    function getUserCacheStatusWithBlockMeta(
+        address user
+    )
         external
         view
         returns (bool isValid, uint256 updateBlock, uint256 ageBlocks)
@@ -988,39 +1245,46 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     }
 
     /**
-     * @notice Get the current position version for (user, asset).
-     * @dev Reverts if:
-     *      - (none)
+     * @notice Return the current position version for a user and asset.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - View-only.
      *
-     * @param user Target user address
-     * @param asset Asset address
-     * @return version Position version (0 if never written)
+     * @param user Target user address.
+     * @param asset Asset address.
+     * @return version Position version, or 0 if never written.
      */
-    function getPositionVersion(address user, address asset) external view returns (uint64 version) {
+    function getPositionVersion(
+        address user,
+        address asset
+    ) external view returns (uint64 version) {
         return _positionVersion[user][asset];
     }
 
     /**
-     * @notice Get the last cache write marker for (user, asset).
-     * @dev Reverts if:
-     *      - (none)
+     * @notice Return the last cache-write marker for a user and asset.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - View-only.
      *
-     * @param user Target user address
-     * @param asset Asset address
-     * @return blockNumber Legacy field: last update marker (treated as blockNumber; 0 if never written)
+     * @param user Target user address.
+     * @param asset Asset address.
+     * @return blockNumber Legacy update marker, treated as a block number.
      */
-    function getPositionUpdatedAt(address user, address asset) external view returns (uint256 blockNumber) {
+    function getPositionUpdatedAt(
+        address user,
+        address asset
+    ) external view returns (uint256 blockNumber) {
         return _positionUpdatedAt[user][asset];
     }
 
     /*━━━━━━━━━━━━━━━ Internal ━━━━━━━━━━━━━━━*/
-    function _isValidPosition(address user, address asset) internal view returns (bool) {
+    function _isValidPosition(
+        address user,
+        address asset
+    ) internal view returns (bool) {
         uint256 updateBlock = _positionUpdatedAt[user][asset];
         if (updateBlock == 0) return false;
         // if user cleared cache after this position was written, treat as invalid
@@ -1029,21 +1293,22 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         return block.number - updateBlock <= _CACHE_DURATION_BLOCKS;
     }
 
-    function _getCachedOrLatestPosition(address user, address asset)
-        internal
-        view
-        returns (uint256 collateral, uint256 debt)
-    {
-        (collateral, debt, ) = _getCachedOrLatestPositionWithValidity(user, asset);
+    function _getCachedOrLatestPosition(
+        address user,
+        address asset
+    ) internal view returns (uint256 collateral, uint256 debt) {
+        (collateral, debt, ) = _getCachedOrLatestPositionWithValidity(
+            user,
+            asset
+        );
     }
 
-    function _getCachedOrLatestPositionWithValidity(address user, address asset)
-        internal
-        view
-        returns (uint256 collateral, uint256 debt, bool isValid)
-    {
+    function _getCachedOrLatestPositionWithValidity(
+        address user,
+        address asset
+    ) internal view returns (uint256 collateral, uint256 debt, bool isValid) {
         collateral = _collateralCache[user][asset];
-        debt       = _debtCache[user][asset];
+        debt = _debtCache[user][asset];
         // MUST (ARCH): validity is per (user, asset), not user-global.
         isValid = _isValidPosition(user, asset);
         if (!isValid) {
@@ -1053,14 +1318,13 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         return (collateral, debt, true);
     }
 
-    function _fetchLatestPosition(address user, address asset)
-        internal
-        view
-        returns (uint256 collateral, uint256 debt)
-    {
+    function _fetchLatestPosition(
+        address user,
+        address asset
+    ) internal view returns (uint256 collateral, uint256 debt) {
         (address cm, address le) = _resolveLedgerModules();
         collateral = ICollateralManager(cm).getCollateral(user, asset);
-        debt       = ILendingEngineBasic(le).getDebt(user, asset);
+        debt = ILendingEngineDebtRead(le).getDebt(user, asset);
     }
 
     function _fetchLatestPositionGuarded(
@@ -1074,11 +1338,22 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     ) internal returns (bool ok, uint256 collateral, uint256 debt) {
         (address cm, address le) = _resolveLedgerModules();
 
-        try ICollateralManager(cm).getCollateral(user, asset) returns (uint256 ledgerCollateral) {
-            try ILendingEngineBasic(le).getDebt(user, asset) returns (uint256 ledgerDebt) {
+        try ICollateralManager(cm).getCollateral(user, asset) returns (
+            uint256 ledgerCollateral
+        ) {
+            try ILendingEngineDebtRead(le).getDebt(user, asset) returns (
+                uint256 ledgerDebt
+            ) {
                 return (true, ledgerCollateral, ledgerDebt);
             } catch (bytes memory reason) {
-                emit CacheUpdateFailed(user, asset, address(this), expectedCollateral, expectedDebt, reason);
+                emit CacheUpdateFailed(
+                    user,
+                    asset,
+                    address(this),
+                    expectedCollateral,
+                    expectedDebt,
+                    reason
+                );
                 emit CacheUpdateFailedWithContext(
                     user,
                     asset,
@@ -1093,7 +1368,14 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
                 return (false, 0, 0);
             }
         } catch (bytes memory reason) {
-            emit CacheUpdateFailed(user, asset, address(this), expectedCollateral, expectedDebt, reason);
+            emit CacheUpdateFailed(
+                user,
+                asset,
+                address(this),
+                expectedCollateral,
+                expectedDebt,
+                reason
+            );
             emit CacheUpdateFailedWithContext(
                 user,
                 asset,
@@ -1125,16 +1407,30 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
-        if (newImplementation == address(0)) revert PositionView__ZeroImplementation();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation == address(0))
+            revert PositionView__ZeroImplementation();
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Module resolution ━━━━━━━━━━━━━━━*/
-    function _resolveLedgerModules() internal view returns (address cm, address le) {
+    function _resolveLedgerModules()
+        internal
+        view
+        returns (address cm, address le)
+    {
         Registry registry = Registry(_registryAddr);
         cm = registry.getModuleOrRevert(ModuleKeys.KEY_CM);
         le = registry.getModuleOrRevert(ModuleKeys.KEY_LE);
@@ -1143,22 +1439,35 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     function _resolveBusinessModules()
         internal
         view
-        returns (address cm, address le, address vaultCore, address vbl, address vaultRouter)
+        returns (
+            address cm,
+            address le,
+            address vaultCore,
+            address vbl,
+            address vaultRouter
+        )
     {
         Registry registry = Registry(_registryAddr);
-        cm        = registry.getModuleOrRevert(ModuleKeys.KEY_CM);
-        le        = registry.getModuleOrRevert(ModuleKeys.KEY_LE);
+        cm = registry.getModuleOrRevert(ModuleKeys.KEY_CM);
+        le = registry.getModuleOrRevert(ModuleKeys.KEY_LE);
         vaultCore = registry.getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        vbl       = registry.getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
+        vbl = registry.getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
         // Architecture-Guide: resolve VaultRouter via VaultCore.viewContractAddrVar() to avoid multi-source keys.
         vaultRouter = IVaultCoreViewAddr(vaultCore).viewContractAddrVar();
     }
 
     function _getPriceOracleAddr() internal view returns (address) {
-        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
+        return
+            Registry(_registryAddr).getModuleOrRevert(
+                ModuleKeys.KEY_PRICE_ORACLE
+            );
     }
 
-    function _resolveCollateralAndOracle() internal view returns (address cm, address le, address oracle) {
+    function _resolveCollateralAndOracle()
+        internal
+        view
+        returns (address cm, address le, address oracle)
+    {
         Registry registry = Registry(_registryAddr);
         cm = registry.getModuleOrRevert(ModuleKeys.KEY_CM);
         le = registry.getModuleOrRevert(ModuleKeys.KEY_LE);
@@ -1179,38 +1488,25 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
         // Strict optimistic concurrency:
         // - nextVersion==0: legacy auto-increment mode
         // - nextVersion!=0: must match current+1 (CAS-style next version)
-        if (nextVersion != 0 && newVersion != current + 1) revert PositionView__StaleVersion(current, newVersion);
-        if (nextVersion == 0 && newVersion <= current) revert PositionView__StaleVersion(current, newVersion);
+        if (nextVersion != 0 && newVersion != current + 1)
+            revert PositionView__StaleVersion(current, newVersion);
+        if (nextVersion == 0 && newVersion <= current)
+            revert PositionView__StaleVersion(current, newVersion);
     }
 
     // NOTE: requestId idempotency is intentionally version-bound and O(1):
     // we only keep the last applied requestId per (user, asset).
 
     /**
-     * @notice Get Registry contract address (legacy getter for backward compatibility).
-     * @dev Reverts if:
-     *      - (none)
+     * @notice Return the Registry contract address using the legacy getter name.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - View-only.
      *
-     * @return registryAddr_ Registry contract address
+     * @return registryAddr_ Registry contract address.
      */
     function getRegistry() external view returns (address registryAddr_) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Get Registry contract address (legacy getter for backward compatibility).
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddr_ Registry contract address
-     */
-    function registryAddr() external view returns (address registryAddr_) {
         return _registryAddr;
     }
 
@@ -1222,30 +1518,33 @@ contract PositionView is Initializable, UUPSUpgradeable, ViewVersioned, CacheEve
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the API semantic version for this module.
-     * @dev Reverts if:
-     *      - (none)
+     * @notice Return the API semantic version for this module.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - Pure function.
      *
-     * @return apiVersion_ API semantic version
+     * @return apiVersion_ API semantic version.
      */
     function apiVersion() public pure override returns (uint256 apiVersion_) {
         return 1;
     }
 
     /**
-     * @notice Get the output/schema version for this module.
-     * @dev Reverts if:
-     *      - (none)
+     * @notice Return the output/schema version for this module.
+     * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+     * - Pure function.
      *
-     * @return schemaVersion_ Schema version
+     * @return schemaVersion_ Schema version.
      */
-    function schemaVersion() public pure override returns (uint256 schemaVersion_) {
+    function schemaVersion()
+        public
+        pure
+        override
+        returns (uint256 schemaVersion_)
+    {
         // Schema includes versioned cache metadata: emits UserPositionCachedWithVersion (adds `version`) and maintains
         // idempotency/version metadata for off-chain consumers.
         return 2;

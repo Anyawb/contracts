@@ -14,23 +14,6 @@ pragma solidity ^0.8.20;
 interface IPositionView {
     /*━━━━━━━━━━━━━━━ Write Functions ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Push a full (absolute) user position update (legacy overload).
-     * @dev Reverts if:
-     *      - Registry reference is invalid (implementation-defined)
-     *      - caller is not an authorized writer (e.g., ACTION_VIEW_PUSH via ViewAccessLib)
-     *      - inputs are invalid per implementation rules
-     *
-     * Security:
-     * - Writer-gated (e.g., onlyBusinessContract + ACTION_VIEW_PUSH)
-     *
-     * @param user User address.
-     * @param asset Asset address.
-     * @param collateral Collateral amount (token decimals).
-     * @param debt Debt amount (token decimals).
-     */
-    function pushUserPositionUpdate(address user, address asset, uint256 collateral, uint256 debt) external;
-
-    /**
      * @notice Push a full (absolute) user position update with idempotency context.
      * @dev Reverts if:
      *      - Registry reference is invalid (implementation-defined)
@@ -106,28 +89,6 @@ interface IPositionView {
         bytes32 requestId,
         uint64 seq,
         uint64 nextVersion
-    ) external;
-
-    /**
-     * @notice Push a delta user position update (legacy overload).
-     * @dev Reverts if:
-     *      - Registry reference is invalid (implementation-defined)
-     *      - caller is not an authorized writer (e.g., ACTION_VIEW_PUSH via ViewAccessLib)
-     *      - applying delta would violate bounds/underflow rules (implementation-defined)
-     *
-     * Security:
-     * - Writer-gated (e.g., onlyBusinessContract + ACTION_VIEW_PUSH)
-     *
-     * @param user User address.
-     * @param asset Asset address.
-     * @param collateralDelta Collateral delta (token decimals; signed).
-     * @param debtDelta Debt delta (token decimals; signed).
-     */
-    function pushUserPositionUpdateDelta(
-        address user,
-        address asset,
-        int256 collateralDelta,
-        int256 debtDelta
     ) external;
 
     /**
@@ -222,7 +183,10 @@ interface IPositionView {
      * @param asset Asset address.
      * @return version Current version (0 means never written).
      */
-    function getPositionVersion(address user, address asset) external view returns (uint64);
+    function getPositionVersion(
+        address user,
+        address asset
+    ) external view returns (uint64);
 
     /**
      * @notice Get a user position with cache validity, blockNumber, and version.
@@ -241,10 +205,19 @@ interface IPositionView {
      * @return blockNumber Last cache update block number (block-based time axis).
      * @return version Position version (0 if never written).
      */
-    function getUserPositionWithMeta(address user, address asset)
+    function getUserPositionWithMeta(
+        address user,
+        address asset
+    )
         external
         view
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version);
+        returns (
+            uint256 collateral,
+            uint256 debt,
+            bool isValid,
+            uint256 blockNumber,
+            uint64 version
+        );
 
     /**
      * @notice Batch query user positions with cache metadata.
@@ -265,7 +238,10 @@ interface IPositionView {
      * @return blockNumbers Cache update block numbers.
      * @return versions Position versions.
      */
-    function batchGetUserPositionsWithMeta(address[] calldata users, address[] calldata assets)
+    function batchGetUserPositionsWithMeta(
+        address[] calldata users,
+        address[] calldata assets
+    )
         external
         view
         returns (
@@ -276,7 +252,3 @@ interface IPositionView {
             uint64[] memory versions
         );
 }
-
-
-
-

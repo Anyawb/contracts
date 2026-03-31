@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 // Project-wide custom errors collected here for consistency and easier decoding.
 
-// ============ 基础错误 ============
+/*━━━━━━━━━━━━━━━ Basic Errors ━━━━━━━━━━━━━━━*/
 error AmountIsZero();
 error AmountMismatch();
 error InsufficientBalance();
@@ -29,11 +29,15 @@ error InvalidStatsData();
 /// @dev Standardized across view/aggregator modules: `BatchTooLarge(actual, max)`.
 error BatchTooLarge(uint256 length, uint256 max);
 
-// ============ Registry 模块精确错误 ============
+/*━━━━━━━━━━━━━━━ Registry Errors ━━━━━━━━━━━━━━━*/
 error MismatchedArrayLengths(uint256 keysLength, uint256 addressesLength);
 error ModuleAlreadyRegistered(bytes32 key);
 error ModuleNotRegistered(bytes32 key);
-error ModuleUpgradeNotReady(bytes32 key, uint256 executeAfter, uint256 currentTime);
+error ModuleUpgradeNotReady(
+    bytes32 key,
+    uint256 executeAfter,
+    uint256 currentTime
+);
 error ModuleUpgradeNotFound(bytes32 key);
 error ModuleUpgradeAlreadyExists(bytes32 key);
 error ModuleUpgradeDuplicate(bytes32 key, address oldAddr, address newAddr);
@@ -48,22 +52,26 @@ error NotPendingAdmin(address caller, address pendingAdmin);
 error InvalidUpgradeAdmin(address upgradeAdmin);
 error InvalidEmergencyAdmin(address emergencyAdmin);
 
-// ============ 签名相关错误 ============
+/*━━━━━━━━━━━━━━━ Signature Errors ━━━━━━━━━━━━━━━*/
 error SignatureExpired(uint256 deadline, uint256 currentTime);
 error InvalidSigner(address signer);
-error InvalidNonce(address signer, uint256 expectedNonce, uint256 providedNonce);
+error InvalidNonce(
+    address signer,
+    uint256 expectedNonce,
+    uint256 providedNonce
+);
 error InvalidSignature(address recoveredSigner, address expectedSigner);
 error SignatureZeroAddress();
 
-// ============ 合约验证错误 ============
+/*━━━━━━━━━━━━━━━ Contract Validation Errors ━━━━━━━━━━━━━━━*/
 error NotAContract(address addr);
 
-// ============ 索引和数组相关错误 ============
+/*━━━━━━━━━━━━━━━ Index And Array Errors ━━━━━━━━━━━━━━━*/
 error IndexOutOfBounds(uint256 index, uint256 length);
 error EmptyArray();
 error ArrayLengthMismatch(uint256 length1, uint256 length2);
 
-// ============ 存储和初始化相关错误 ============
+/*━━━━━━━━━━━━━━━ Storage And Initialization Errors ━━━━━━━━━━━━━━━*/
 error AlreadyInitialized();
 error NotInitialized();
 error StorageVersionMismatch(uint256 expected, uint256 actual);
@@ -71,52 +79,55 @@ error InvalidStorageVersion(uint256 version);
 error MinDelayTooLarge(uint256 delay, uint256 maxDelay);
 error MinDelayOverflow(uint256 delay);
 
-// ============ 模块相关错误 ============
+/*━━━━━━━━━━━━━━━ Module Errors ━━━━━━━━━━━━━━━*/
 error ModuleCapExceeded(uint256 count, uint256 maxCount);
 
-// ============ 权限相关错误 ============
+/*━━━━━━━━━━━━━━━ Permission Errors ━━━━━━━━━━━━━━━*/
 error NotGovernance();
 error NotKeeper();
 error NotWhitelisted();
 error AssetNotAllowed();
 
-// ============ 模块特定错误 ============
-// PriceOracle 相关
+/*━━━━━━━━━━━━━━━ PriceOracle Errors ━━━━━━━━━━━━━━━*/
 error PriceOracle__AssetAlreadySupported();
 error PriceOracle__AssetNotSupported();
 error PriceOracle__StalePrice();
 error PriceOracle__InvalidPrice();
 error PriceOracle__Unauthorized();
 
-// FeeRouter 相关
+/*━━━━━━━━━━━━━━━ FeeRouter Errors ━━━━━━━━━━━━━━━*/
 error FeeRouter__ZeroAddress();
 error FeeRouter__InvalidFeeRate();
 error FeeRouter__InvalidRecipient();
 
-// LendingEngine 相关
+/*━━━━━━━━━━━━━━━ LendingEngine Errors ━━━━━━━━━━━━━━━*/
 error LendingEngine__ZeroAddress();
 error LendingEngine__InvalidLoan();
 error LendingEngine__InsufficientLiquidity();
 
-// Registry 相关
+/*━━━━━━━━━━━━━━━ Registry Module Errors ━━━━━━━━━━━━━━━*/
 error Registry__ZeroAddress();
 error Registry__ModuleNotFound();
 error Registry__ModuleAlreadyExists();
 
-// Reward 相关
+/*━━━━━━━━━━━━━━━ Reward Errors ━━━━━━━━━━━━━━━*/
 error RewardManager__ZeroAddress();
 error RewardManager__MissingMinterRole();
 error RewardManagerCore__ZeroAddress();
 
-// AccessControl 相关
+/*━━━━━━━━━━━━━━━ Access Control Errors ━━━━━━━━━━━━━━━*/
 error AccessControlManager__ZeroAddress();
 error AccessControlManager__MissingRole(bytes32 role, address account);
-error AccessControlManager__MissingEitherRole(bytes32 role1, bytes32 role2, address account);
+error AccessControlManager__MissingEitherRole(
+    bytes32 role1,
+    bytes32 role2,
+    address account
+);
 
-// 新增：RWA 借出资产未被授权
+/// @dev Reverts when an RWA lending asset is not authorized by policy.
 error RWAAssetNotAllowed(address token);
 
-// ============ 保证金相关错误 ============
+/*━━━━━━━━━━━━━━━ Guarantee Errors ━━━━━━━━━━━━━━━*/
 error GuaranteeNotPaid();
 error GuaranteeAlreadyReleased();
 error InvalidGuaranteeAmount();
@@ -130,11 +141,11 @@ error InvalidGuaranteeTerm();
 error GuaranteeInterestTooHigh();
 error BorrowerCannotBeLender();
 
-// ============ EarlyRepaymentGuaranteeManager 专用错误 ============
+/*━━━━━━━━━━━━━━━ Early Repayment Guarantee Errors ━━━━━━━━━━━━━━━*/
 error EarlyRepaymentGuaranteeManager__OnlyVaultCore();
 error EarlyRepaymentGuaranteeManager__InvalidImplementation();
 error EarlyRepaymentGuaranteeManager__RateTooHigh();
 error EarlyRepaymentGuaranteeManager__RateUnchanged();
 
-/// @dev 统一外部模块 revert 捕获后抛出的错误，`module` 为易读字符串标识模块名，`data` 为底层 revert data。
-error ExternalModuleRevertedRaw(string module, bytes data); 
+/// @dev Re-throws a caught external module revert with a readable module label and raw revert data payload.
+error ExternalModuleRevertedRaw(string module, bytes data);

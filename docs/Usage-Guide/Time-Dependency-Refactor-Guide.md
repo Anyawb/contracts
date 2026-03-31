@@ -203,11 +203,11 @@
 ### `src/libraries/GracefulDegradation.sol`
 
 - 移除所有基于 `block.number` 以外时间轴的过期判断
-- 使用预言机边界（`IPriceOracle.getPrice`）作为过期门槛
+- 使用预言机读边界（`IPriceOracleRead.getPrice`）作为过期门槛
 - 缓存改为存储 `updateBlock`（而不是 blockNumber）
 - 缓存过期判断改为：
   - `block.number - updateBlock > maxAgeBlocks`
-- best-effort 读取 `updateBlock`（`IPriceOracle.getPriceUpdateBlock(asset)`）：
+- best-effort 读取 `updateBlock`（`IPriceOracleRead.getPriceUpdateBlock(asset)`）：
   - 失败返回 `0`，视为 unknown
 
 ---
@@ -238,13 +238,13 @@
   - `cacheBlockNumber`, `cacheBlockNumbers`
   - `_lastSyncBlockNumber`, `lastSyncBlockNumber`
   - `startBlockNumber`
-  - `PriceOracle__InvalidBlockNumber`, `CoinGeckoPriceUpdater__InvalidBlockNumber`
+  - `PriceOracle__InvalidBlockNumber`, `PriceUpdater__InvalidBlockNumber`
 - **测试/脚本里的“时间推进/取链上时间”（本仓库命中项）**
   - 时间推进：`evm_increaseTime`（通常配合 `evm_mine`）
   - OZ helpers：`time.increase` / `time.increaseTo`
 - 读区块号：`getBlock(...).number` / `latestBlock.number`
 - **补充：本仓库实际出现的“窗口/到期语义命名”（用于排查非 `blockNumber` 字段的时间门槛）**
-  - `expireAt`, `maturity`, `_lockedMaturity`, `_lockedMaturityByOrderId`
+  - `expireAt`, `maturity`, `_lockedMaturityByOrderId`
   - `_cooldown`, `_initializeCooldown`, `setCooldown`, `getCooldown`
   - `cacheExpiryTime`, `_CACHE_EXPIRY_TIME`
 
@@ -253,7 +253,7 @@
 以下为本次全仓扫描 `timestamp` 的**完整文件列表**（相对仓库根目录）。统一以任务清单形式标记：
 
 - [x] `docs/Usage-Guide/PriceOracle-Guide.md`
-- [x] `src/core/CoinGeckoPriceUpdater.sol`
+- [x] `src/core/PriceUpdater.sol`
 - [x] `src/Vault/view/modules/AccessControlView.sol`
 - [x] `src/Vault/liquidation/modules/SettlementManager.sol`
 - [x] `src/Vault/liquidation/modules/LiquidationRiskManager.sol`
@@ -275,7 +275,7 @@
 - [x] `src/Vault/view/modules/PreviewView.sol`
 - [x] `src/Vault/view/modules/CacheOptimizedView.sol`
 - [x] `src/Vault/SystemEvents.sol`
-- [x] `src/interfaces/IResidualAllocation.sol`
+- [x] `src/interfaces/IResidualAllocation.sol`（已在后续架构清理中移除）
 - [x] `src/interfaces/IEarlyRepaymentGuaranteeManager.sol`
 - [x] `src/interfaces/IPriceOracleAdapter.sol`
 - [x] `src/Vault/view/modules/HealthView.sol`
@@ -356,7 +356,7 @@
 - [x] `scripts/e2e/e2e-localhost-batch-aggregators-acceptance.ts`
 - [x] `scripts/e2e/e2e-localhost-statisticsview-acceptance.ts`
 - [x] `test/core/PriceOracle.new.test.ts`
-- [x] `test/core/CoinGeckoPriceUpdater.test.ts`
+- [x] `test/core/PriceUpdater.test.ts`
 - [x] `test/Vault/view/HealthView.test.ts`
 - [x] `src/Mocks/RegistryStorageLibraryHarness.sol`
 - [x] `scripts/e2e/e2e-localhost-scenario-matrix.ts`
@@ -485,8 +485,8 @@ src/Vault/VaultRouter.sol: 247
 意向单过期（intent expire）
 src/libraries/SettlementIntentLib.sol: 215
 预言机/价格更新新鲜度与更新间隔（oracle freshness / update interval）
-CoinGecko 更新器（interval / lastUpdateTime）
-src/core/CoinGeckoPriceUpdater.sol: 237, 271, 281, 293, 333, 375, 412, 450, 473, 481, 504, 512, 541, 545, 578, 607, 661, 725, 736, 743, 768, 776, 780, 803, 862, 871, 914, 921, 925, 930, 961, 969, 973, 1027
+PriceUpdater（interval / lastUpdateTime）
+src/core/PriceUpdater.sol: 237, 271, 281, 293, 333, 375, 412, 450, 473, 481, 504, 512, 541, 545, 578, 607, 661, 725, 736, 743, 768, 776, 780, 803, 862, 871, 914, 921, 925, 930, 961, 969, 973, 1027
 PriceOracle（blockNumber / stale 判定相关）
 src/core/PriceOracle.sol: 142, 433, 466, 497, 549, 612, 717
 RWA 价格预言机 mock
@@ -538,7 +538,7 @@ src/Vault/VaultAdmin.sol: 116
   - 这是链无关的 Strategy A（不要用 seconds/minutes/days）。
 | **贷款到期 / 还款窗口 / 提前-按时判定**（`maturity` / `ON_TIME_WINDOW`） | **A**（秒→块）+（可选）**D**（单调性） | **谨慎允许**：若 ABI 历史字段名叫 `blockNumber/maturity` | 把 `maturity` 改为 `maturityBlock`；窗口改为 `windowBlocks`；任何 “+window < maturity” 全部以块计算；如外部仍传入 blockNumber，仅做**单调不回退**约束（D），不得与 `block.number` 比较。 |
 | **意向单过期**（`expireAt`） | **A**（秒→块）或 **D**（单调性/序列号） | **不建议保留**（门槛语义） | 把 `expireAt`（blockNumber）迁移为 `expireBlock`；或改为 seq/nonce + 链下调度（D + offchain）。 |
-| **预言机/价格新鲜度与更新间隔**（`PriceOracle` / `CoinGeckoPriceUpdater`） | **B**（边界强制过期）+ **A**（updateBlock/ageBlocks）+（可选）**D**（单调 blockNumber） | **允许**：仅作为“数据源观测字段” | SSOT 放在 `IPriceOracle.getPrice`（B）；链上缓存写入存 `lastUpdateBlock`（A）；如仍保留 `PriceData.blockNumber`/`updatePrice(..., blockNumber)`，只能做单调性约束（D），不得秒差门槛。 |
+| **预言机/价格新鲜度与更新间隔**（`PriceOracle` / `PriceUpdater`） | **B**（边界强制过期）+ **A**（updateBlock/ageBlocks）+（可选）**D**（单调 blockNumber） | **允许**：仅作为“数据源观测字段” | SSOT 放在 `IPriceOracleRead.getPrice`（B）；链上缓存写入存 `lastUpdateBlock`（A）；如仍保留 `PriceData.blockNumber`/`updatePrice(..., blockNumber)`，只能做单调性约束（D），不得秒差门槛。 |
 | **Reward / 冷却期 / feature unlock / service config**（`cooldown` 等） | **A**（秒→块）或 **C**（epoch） | **允许**：用于 UI/审计展示 | 若本质是“窗口/周期”，优先 epoch（C）；否则用 `cooldownBlocks`/`unlockBlock`（A）；避免在核心资金路径用 blockNumber。 |
 
 ---
@@ -553,12 +553,14 @@ src/Vault/VaultAdmin.sol: 116
   - 参见：`src/core/LendingEngine.sol` 对 `LoanOrder.maturity` 的注释，以及 `SettlementManager` 的 `ord.maturity is a maturityBlock` 注释。
   - 注意：如发现接口注释仍写“秒时间戳”（例如 `src/interfaces/IRewardManager.sol` 的 `@param maturity` 描述），应视为 **legacy 文档错误**，需要同步修正以避免外部集成误用。
 - **按期窗口（ON_TIME_WINDOW）**：
-  - 链上 SSOT 应为 `ON_TIME_WINDOW_BLOCKS`（或同语义变量，例如 `_onTimeWindowBlocks`），其值**必须以“显式 blocks”形式进入链上**（初始化/治理配置）。
+  - 链上 SSOT 应为 `_ON_TIME_WINDOW_BLOCKS`（或同语义常量），其值**必须以“显式 blocks”形式进入链上**（初始化/治理配置）。
   - 文档里允许给“理解/展示用”的近似说明（例如“在某条链上 24h \(\approx\) N blocks（仅用于理解/展示）”），但**不得**把该近似写成合约内的默认常量或 `24 hours / 2 seconds` 这类换算表达式。
 - **termDays 的处理（策略 A，对齐全仓口径）**：
   - **链上不做 `days → blocks` 换算**（禁止 `termDays * BLOCKS_PER_DAY`、禁止 `X days / Y seconds`）。
   - 若 UX 需要 `termDays` 输入：链下（前端/keeper/部署脚本）将其映射为 `termBlocks`（或 `termId`），并把 **`termBlocks` 作为唯一门槛语义参数** 传入合约。
   - 链上如需白名单：配置合约存储“允许的 `termBlocks` 集合/范围”，业务合约仅做 membership/range 校验；不要在业务合约里引入任何“每块多少秒/每天多少块”的假设。
+  - **新增产品约束**：对于 blocks-only 产品（例如 `termBlocks = 1`），必须把它视为独立产品线，而不是把 `termDays = 1` 解释为“1 block 产品”。所有签名、校验、清算、Reward 逻辑都应直接消费显式 `termBlocks`。
+  - **边界一致性**：若 legacy day-bucket 产品仍保留 `maturityBlock = openBlock + termBlocks + 1` 的确认偏移，该偏移只属于 day-bucket 兼容语义；blocks-only 产品应保持 `maturityBlock = openBlock + termBlocks`，避免“1 block 产品”被无意放大成 2 blocks 成熟。
 
 ---
 
@@ -653,9 +655,9 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 - **verifyingContract**（EIP-712 域分离）必须使用**撮合入口合约**（例如 `VaultBusinessLogic`）的地址，而不是 library 地址。
 - `expireAt` 字段名保留是为了签名兼容，但语义必须当作 **expireBlock**。
 
-### 3) termBlocks 撮合入口与资金链路（从 termDays → termBlocks）
+### 3) termBlocks 撮合入口与 Funds-Flow SSOT 对齐（termDays → termBlocks）
 
-迁移目标是把 matchflow 的 SSOT 从：
+迁移目标是把 matchflow 的期限语义从：
 
 - legacy：`finalizeMatch(BorrowIntent{termDays}, LendIntent{min/maxTermDays})`  
 
@@ -663,10 +665,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 
 - termBlocks 方案：撮合入口使用包含 `termBlocks` 的 intent 结构（`BorrowIntentBlocks/LendIntentBlocks`），并以 block 口径完成期限与到期语义传递。
 
-并且在原子 finalize 过程中（以 blocks 为时间轴 SSOT）：
-
-- 订单创建/记账使用 `termBlocks`
-- 借款账本写入使用接收 `termBlocks` 的入口（例如 `borrowForWithTermBlocks(..., termBlocks)`；legacy `borrowFor(..., termDays)` 仅用于兼容）
+具体“撮合放款资金链/内部调用串联/资金去向”不在本文复述；统一以 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 的 **Match → Borrow Disbursement** 章节为准。
 
 ### 4) termBlocks Guarantee（提前还款保证金）锁定：termBlocks 贯穿 maturity
 
@@ -722,7 +721,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 
 > 说明：这里的 checkbox 与下方“分组表格”的 `状态` 一致；`[x]` 表示已满足“链上门槛不依赖非 `block.number` 时间轴”的合约层标准。
 
-##### 1) 抵押物资金链（Collateral Flow）
+##### 1) Funds-Flow §1（抵押相关模块；只引用不复述）
 
 - [x] ✅ DONE `src/Vault/VaultCore.sol`
   - 为什么在这里改：这是用户入口与对外事件/参数的**口径源头**；先把对外 `blockNumber` 语义收敛为“观测字段”，并优先并行输出 `blockNumber/updateBlock`，下游才好统一跟随。
@@ -735,14 +734,14 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 - [x] ✅ DONE `src/Vault/view/modules/PositionView.sol`
   - 为什么在这里改：PositionView 依赖 `ViewCache` 的有效性口径，且仓位 SSOT 在账本模块；放在最后改可直接复用 blocks TTL，并把输出 meta 与上游 `blockNumber/updateBlock` 对齐。
 
-##### 2) 出借资金资金链（Reserve Flow）
+##### 2) Funds-Flow §2（出借资金/流动性相关模块；只引用不复述）
 
 - [x] ✅ DONE `src/libraries/SettlementIntentLib.sol`
   - 为什么在这里改：intent 的过期/有效性是**门槛语义的底层校验点**；先把 `expireAt/expiry` 统一迁移为 `expireBlock/...Blocks`，上层业务只做复用不再自行“秒差比较”。
 - [x] ✅ DONE `src/Vault/modules/VaultBusinessLogic.sol`
   - 为什么在这里改：业务层通常负责 reserve/cancel/finalize 的 gate；在 lib 口径定型后再改这里，可一次性把所有 deadline/expiry 语义切到 blocks（并避免重复实现校验）。
 
-##### 3) 撮合放款资金链（Finalize Match / Borrow Disbursement）
+##### 3) Funds-Flow §3（撮合放款相关模块；只引用不复述）
 
 - [x] ✅ DONE `src/core/LendingEngine.sol`
   - 为什么在这里改：已完成（此处作为执行顺序占位），maturity/window 属于资金门槛 SSOT；后续模块一律消费其 `...Block(s)` 口径。
@@ -751,7 +750,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 - [x] ✅ DONE `src/Vault/modules/VaultBusinessLogic.sol`（含 finalize/match 路径）
   - 为什么在这里改：与 Reserve Flow 同文件；本次已把 `finalizeMatch` 的 intent expiry 门槛统一为 blocks（复用 `SettlementIntentLib`），并修复撮合落单时 term 的秒/块混用（`SettlementMatchLib` 统一为 blocks）。
 
-##### 4) 还款/结算资金链（Repay → Settle）
+##### 4) Funds-Flow §4（还款/结算相关模块；只引用不复述）
 
 - [x] ✅ DONE `src/Vault/liquidation/modules/SettlementManager.sol`
   - 为什么在这里改：已完成（此处作为执行顺序占位），其编排依赖 maturity/window 门槛；必须与 `LendingEngine` 的 block 口径一致。
@@ -764,14 +763,14 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 - [x] ✅ DONE `src/Vault/modules/VaultLendingEngine.sol`
   - 为什么在这里改：外层模块多为组合/对外入口；放在 core/accounting 之后改能直接对齐内部 blocks 口径，减少接口反复调整。
 
-##### 5) 提前还款保证金（Extension Flow）
+##### 5) Funds-Flow §5（提前还款保证金扩展流相关模块；只引用不复述）
 
 - [x] ✅ DONE `src/Vault/modules/GuaranteeFundManager.sol`
   - 为什么在这里改：资金池/结算口径是更底层的门槛/支撑；先统一窗口与事件时间轴为 blocks，上层保证金流程才能稳定复用。
 - [x] ✅ DONE `src/Vault/modules/EarlyRepaymentGuaranteeManager.sol`
   - 为什么在这里改：该流程往往依赖资金池与窗口判定；在 FundManager 完成 block-based 后改这里更线性、改动面更可控。
 
-##### 6) 违约清算（Default → Liquidation）
+##### 6) Funds-Flow §6（违约清算相关模块；只引用不复述）
 
 - [x] ✅ DONE `src/Vault/liquidation/libraries/ModuleCache.sol`
   - 为什么在这里改：清算域依赖缓存（模块地址/依赖解析）属于最硬门槛；先把 TTL/aging 改成 blocks，避免上层风控/执行各自实现一套。
@@ -788,7 +787,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 - [x] ✅ DONE `src/Vault/view/modules/LiquidatorView.sol`
   - 为什么在这里改：View 侧仅观测/缓存时间轴，必须跟随清算域上游事件/推送口径（优先输出 `blockNumber/updateBlock`）。
 
-##### 7) 费用与分账（Fee Flow）
+##### 7) Funds-Flow §7（费用与分账相关模块；只引用不复述）
 
 - [x] ✅ DONE `src/Vault/FeeRouter.sol`
   - 为什么在这里改：费用分发/结算属于 SSOT（可能存在周期/同步门槛）；先定 epoch 或 syncBlocks 口径，下游 View 只做镜像与 meta 输出。
@@ -801,7 +800,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
   - 为什么在这里改：通用 TTL/时间差工具是全局“依赖收敛点”；先补齐 blocks 版本（并逐步淘汰 ts 版本），其他模块改造才能复用而不是复制。
 - [x] `src/core/PriceOracle.sol`
   - 为什么在这里改：已完成（此处作为执行顺序占位），预言机新鲜度门槛应集中在 SSOT（`getPrice`）并以 blocks 表达。
-- [x] `src/core/CoinGeckoPriceUpdater.sol`
+- [x] `src/core/PriceUpdater.sol`
   - 为什么在这里改：已完成（此处作为执行顺序占位），updater 的 interval/lastUpdate 口径与 oracle freshness 保持一致（blocks）。
 - [x] ✅ DONE `src/registry/Registry.sol`
   - 为什么在这里改：治理 timelock/升级窗口是门槛语义，且被其他系统模块引用；先切到 `executeAfterBlock/...Blocks` 可避免全局混用秒。
@@ -852,9 +851,9 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 - [x] ✅ DONE `src/Mocks/MockGracefulDegradationMonitor.sol`
   - 为什么在这里改：同上，mock 应复刻 Degradation 体系的 block-based 判定口径，确保测试覆盖真实门槛。
 
-#### Step 2C（按执行顺序 1～7 分组的合约层状态表）
+#### Step 2C（按 Funds-Flow SSOT §1～§7 分组的合约层状态表；只引用不复述）
 
-##### 1) 抵押物资金链（Collateral Flow）
+##### 1) Funds-Flow §1（抵押相关模块；只引用不复述）
 
 | 状态 | 文件 | 语义 | 门槛/观测 | 模式 | SSOT（权威判定位置） | 新增/替换字段名（建议） |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -864,22 +863,22 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 | [ ] TODO | `src/Vault/view/modules/PositionView.sol` | 仓位快照缓存 TTL/isValid | **观测**（仓位 SSOT 在账本） | **A** | `CollateralManager` + `LendingEngine`（账本 SSOT） | `positionTimestamp -> positionUpdateBlock`；`CACHE_DURATION -> ...BLOCKS` |
 | [ ] TODO | `src/Vault/view/modules/ViewCache.sol` | system-level 快照 TTL/isValid | **观测** | **A** | `ViewCache`（只读缓存） | `_systemCacheTimestamp -> _systemCacheUpdateBlock` |
 
-##### 2) 出借资金资金链（Reserve Flow）
+##### 2) Funds-Flow §2（出借资金/流动性相关模块；只引用不复述）
 
 | 状态 | 文件 | 语义 | 门槛/观测 | 模式 | SSOT（权威判定位置） | 新增/替换字段名（建议） |
 | --- | --- | --- | --- | --- | --- | --- |
 | [ ] TODO | `src/Vault/modules/VaultBusinessLogic.sol` | reserve/cancel/finalize 的时间语义（expiry/deadline 等） | **门槛** | **A/D** | `VaultBusinessLogic` + libs（意向/撮合 SSOT） | `expireAt -> expireBlock`（或 seq）；移除秒差门槛 |
 | [ ] TODO | `src/libraries/SettlementIntentLib.sol` | intent 过期（expireAt） | **门槛** | **A**（或 D） | `SettlementIntentLib`（校验） | `expireAt -> expireBlock`（推荐） |
 
-##### 3) 撮合放款资金链（Finalize Match / Borrow Disbursement）
+##### 3) Funds-Flow §3（撮合放款相关模块；只引用不复述）
 
 | 状态 | 文件 | 语义 | 门槛/观测 | 模式 | SSOT（权威判定位置） | 新增/替换字段名（建议） |
 | --- | --- | --- | --- | --- | --- | --- |
-| [x] ✅ DONE | `src/core/LendingEngine.sol` | maturity / 按时窗口 / 提前-逾期判定 | **门槛** | **A**（+可选 D） | `LendingEngine`（判定 SSOT） | `maturity -> maturityBlock`；`ON_TIME_WINDOW -> ON_TIME_WINDOW_BLOCKS`；（注：注释仍提及非 `block.number` 时间轴，建议后续清理） |
+| [x] ✅ DONE | `src/core/LendingEngine.sol` | maturity / 按时窗口 / 提前-逾期判定 | **门槛** | **A**（+可选 D） | `LendingEngine`（判定 SSOT） | `maturity -> maturityBlock`；`ON_TIME_WINDOW -> _ON_TIME_WINDOW_BLOCKS`；（注：注释仍提及非 `block.number` 时间轴，建议后续清理） |
 | [x] ✅ DONE | `src/core/LoanNFT.sol` | 生命周期时间字段（到期/元数据） | **谨慎**：若参与 gate=门槛；否则=观测 | **A**（+可选 D） | gate 以 `LendingEngine/SettlementManager` 为准 | `maturity -> maturityBlock`；观测字段可保留 `blockNumber` 但必须并行输出 `blockNumber` |
 | [ ] TODO | `src/Vault/modules/VaultBusinessLogic.sol` | finalize/match 分支的 deadline/expiry 语义 | **门槛** | **A/D** | `VaultBusinessLogic` + libs（撮合 SSOT） | `deadline -> deadlineBlock`；必要时用 nonce/seq（D） |
 
-##### 4) 还款/结算资金链（Repay → Settle）
+##### 4) Funds-Flow §4（还款/结算相关模块；只引用不复述）
 
 | 状态 | 文件 | 语义 | 门槛/观测 | 模式 | SSOT（权威判定位置） | 新增/替换字段名（建议） |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -888,14 +887,14 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 | [ ] TODO | `src/Vault/modules/lendingEngine/LendingEngineCore.sol` | LE 核心逻辑窗口/到期判定辅助 | **门槛/支撑** | **A** | `LendingEngine` | `...Block` |
 | [ ] TODO | `src/Vault/modules/lendingEngine/LendingEngineAccounting.sol` | 会计路径里若有窗口/限频 | **门槛/支撑** | **A** | `VaultLendingEngine` | `...Blocks` |
 
-##### 5) 提前还款保证金（Extension Flow）
+##### 5) Funds-Flow §5（提前还款保证金扩展流相关模块；只引用不复述）
 
 | 状态 | 文件 | 语义 | 门槛/观测 | 模式 | SSOT（权威判定位置） | 新增/替换字段名（建议） |
 | --- | --- | --- | --- | --- | --- | --- |
 | [ ] TODO | `src/Vault/modules/EarlyRepaymentGuaranteeManager.sol` | guarantee window/cooldown/到期语义（若存在） | **门槛** | **A/C** | `EarlyRepaymentGuaranteeManager` | `...Seconds -> ...Blocks`（或 epoch） |
 | [ ] TODO | `src/Vault/modules/GuaranteeFundManager.sol` | guarantee settlement/窗口/事件时间轴 | **门槛/观测** | **A/C** | `GuaranteeFundManager` | 事件/门槛统一 block-based；避免保留非 `block.number` 时间轴 |
 
-##### 6) 违约清算（Default → Liquidation）
+##### 6) Funds-Flow §6（违约清算相关模块；只引用不复述）
 
 | 状态 | 文件 | 语义 | 门槛/观测 | 模式 | SSOT（权威判定位置） | 新增/替换字段名（建议） |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -907,7 +906,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 | [ ] TODO | `src/Vault/liquidation/modules/LiquidationConfigModule.sol` | 清算配置模块窗口/生效时点 | **门槛** | **A**（或 C） | `LiquidationConfigManager` | `...Block` / `...Blocks` |
 | [ ] TODO | `src/Vault/view/modules/LiquidatorView.sol` | 清算事件/榜单“观测时间轴”与缓存 | **观测**（写入不经 View） | **A** | `SettlementManager`/`LiquidationManager`（写）→ `LiquidatorView.push*`（单点推送） | 事件 `ts -> blockNumber`（或保留 `blockNumber` 但标注观测并并行输出 `blockNumber`） |
 
-##### 7) 费用与分账（Fee Flow）
+##### 7) Funds-Flow §7（费用与分账相关模块；只引用不复述）
 
 | 状态 | 文件 | 语义 | 门槛/观测 | 模式 | SSOT（权威判定位置） | 新增/替换字段名（建议） |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -924,8 +923,8 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 | [ ] TODO | `src/monitor/DegradationMonitor.sol` | 降级/升级窗口 | **门槛**（影响估值/降级策略） | **A**（或 C） | `DegradationMonitor`/`DegradationCore` | `upgradeEnabledUntil -> upgradeEnabledUntilBlock` |
 | [ ] TODO | `src/monitor/DegradationCore.sol` | 降级统计/事件/可能的窗口判定 | **门槛/支撑** | **A** | `DegradationCore`（系统统计 SSOT） | `...Timestamp -> ...UpdateBlock` |
 | [ ] TODO | `src/monitor/DegradationStorage.sol` | 降级相关持久化字段（含窗口） | **门槛/支撑** | **A** | `DegradationMonitor/Core` | 存储字段统一 `...Block` |
-| [x] ✅ DONE | `src/core/PriceOracle.sol` | price freshness/stale 判定 | **门槛** | **B + A**（+可选 D） | `IPriceOracle.getPrice`（B） | `PriceData.blockNumber -> PriceData.updateBlock`；`maxPriceAgeSeconds -> maxPriceAgeBlocks`；可保留 `blockNumber` 仅观测 |
-| [x] ✅ DONE | `src/core/CoinGeckoPriceUpdater.sol` | updater interval/lastUpdate | **门槛/支撑**（影响数据更新节奏） | **A**（+可选 D） | `PriceOracle`/updater | `lastUpdateTime -> lastUpdateBlock`；`minUpdateIntervalSeconds -> ...Blocks` |
+| [x] ✅ DONE | `src/core/PriceOracle.sol` | price freshness/stale 判定 | **门槛** | **B + A**（+可选 D） | `IPriceOracleRead.getPrice`（B） | `PriceData.blockNumber -> PriceData.updateBlock`；`maxPriceAgeSeconds -> maxPriceAgeBlocks`；可保留 `blockNumber` 仅观测 |
+| [x] ✅ DONE | `src/core/PriceUpdater.sol` | updater interval/lastUpdate | **门槛/支撑**（影响数据更新节奏） | **A**（+可选 D） | `PriceOracle`/updater | `lastUpdateTime -> lastUpdateBlock`；`minUpdateIntervalSeconds -> ...Blocks` |
 | [ ] TODO | `src/Vault/view/modules/AccessControlView.sol` | View 权限快照 TTL（isValid） | **观测**（不得 gate） | **A** | `AccessControlView.get*WithMeta` / `isValid` | `_cacheTimestamps[user] -> _cacheUpdateBlocks[user]`；`CACHE_DURATION -> CACHE_DURATION_BLOCKS` |
 | [ ] TODO | `src/Vault/view/modules/EventHistoryManager.sol` | 事件/推送的“观测时间轴” | **观测** | **A** | Event/DataPush 订阅侧（链下） | 事件中的 `ts` 优先改为 `blockNumber`（或 `updateBlock`） |
 | [ ] TODO | `src/Vault/view/modules/HealthView.sol` | 风险状态快照 TTL/有效性 | **观测**（结果可被 UI/keeper 用，但 gate 不得依赖 TTL） | **A** | 风控/账本层计算（如 `LendingEngine` / `LiquidationRiskManager`） | `healthTimestamp -> healthUpdateBlock`；`CACHE_DURATION -> ...BLOCKS` |
@@ -935,9 +934,9 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 | [ ] TODO | `src/Vault/view/modules/RiskView.sol` | 风险派生只读（基于 Health/Position） | **观测** | **A** | `HealthView`/`PositionView`（读） | 若需要 meta：`updateBlock` 输出 |
 | [ ] TODO | `src/Vault/view/modules/StatisticsView.sol` | 系统统计快照 TTL/isValid | **观测** | **A**（或 C：按 epoch 统计） | `StatisticsView`（聚合 SSOT） | `_systemCacheTimestamp -> _systemCacheUpdateBlock`；`CACHE_DURATION -> ...BLOCKS` |
 | [ ] TODO | `src/Vault/view/modules/UserView.sol` | 用户维度聚合缓存 TTL | **观测** | **A** | `UserView`（只读聚合） | `cacheTimestamp -> cacheUpdateBlock` |
-| [ ] TODO | `src/Vault/view/modules/ValuationOracleView.sol` | 价格只读门面/缓存 meta | **观测**（门槛 SSOT 在 oracle） | **B + A** | `IPriceOracle.getPrice`（B） | `lastUpdateBlock`/`ageBlocks` 输出 |
+| [ ] TODO | `src/Vault/view/modules/ValuationOracleView.sol` | 价格只读门面/缓存 meta | **观测**（门槛 SSOT 在 oracle） | **B + A** | `IPriceOracleRead.getPrice`（B） | `lastUpdateBlock`/`ageBlocks` 输出 |
 | [ ] TODO | `src/Reward/configs/EarnConfig.sol` | earn 配置窗口（如解锁/冷却等按实现） | **门槛**（但非资金安全关键；仍需一致口径） | **A**（或 C） | EarnConfig | `...At -> ...Block`；`...Seconds -> ...Blocks`；周期类用 `epoch` |
-| [ ] TODO | `src/Reward/*`（RewardConfig/RewardManager/RewardManagerCore/Easy* 等） | 奖励冷却/窗口/锁定期 | **门槛**（奖励域） | **A**（或 C） | `RewardManagerCore.onLoanEvent*`（SSOT） | `cooldown -> cooldownBlocks`；周期类 `epoch`；仅观测字段可并行输出 `blockNumber` |
+| [ ] TODO | `src/Reward/*`（RewardConfig/RewardManager/RewardManagerCore/Easy* 等） | 奖励冷却/窗口/锁定期 | **门槛**（奖励域） | **A**（或 C） | `RewardManagerCore.onLoanEventByOrder*`（SSOT） | `cooldown -> cooldownBlocks`；周期类 `epoch`；仅观测字段可并行输出 `blockNumber` |
 | [ ] TODO | `src/Token/EasyToken.sol` | 策略/奖励通证时间相关 | **支撑/门槛（取决于是否用于 gate）** | **A** | Reward SSOT（奖励通证 SSOT = `Registry[KEY_EASY_TOKEN]`） | `...Block(s)` |
 | [ ] TODO | `src/strategies/RWAAutoLeveragedStrategy.sol` | 策略时间窗口/冷却（若有） | **门槛**（策略域） | **A** | 策略合约 | `...Blocks` |
 | [ ] TODO | `src/access/AssetWhitelist.sol` | allowlist 生效窗口 | **门槛** | **A** | `AssetWhitelist` gate | `enabledAfter -> enabledAfterBlock`；`disabledAfter -> disabledAfterBlock` |
@@ -953,9 +952,9 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 | 缓存 TTL / View 快照有效性 / 同步间隔 | 各 View `get*WithMeta` 的 `isValid`（仅观测） | `cacheBlockNumber -> cacheUpdateBlock`；`CACHE_DURATION -> CACHE_DURATION_BLOCKS`；`SYNC_INTERVAL -> SYNC_INTERVAL_BLOCKS` | `...WithMeta` 返回并行输出 `updateBlock`（或 `blockNumber`） | 旧字段名仍叫 `blockNumber` 的：保留但标注“观测字段”，不得用于 gate；推荐并行新增 `updateBlock` |
 | 清算域模块地址/依赖缓存 TTL | `LiquidationRiskManager` / `ModuleCache`（门槛） | `lastUpdateBlockNumber -> lastUpdateBlock`；`CACHE_MAX_AGE -> ...BLOCKS` | 清算风险查询接口 meta 返回 `lastUpdateBlock/ageBlocks` | **不建议保留 blockNumber**（清算域最硬）；若必须兼容，仅做观测字段并并行 block |
 | Timelock / 治理延迟 / 升级窗口 | `Registry` / 治理合约 gate（门槛） | `executeAfterBlockNumber -> executeAfterBlock`；`minDelaySeconds -> minDelayBlocks`；`enabledUntilBlockNumber -> enabledUntilBlock` | 对外 getter 增加 `getExecuteAfterBlock(...)` | 若历史事件里有 `blockNumber`：允许保留为观测，并并行输出 `executeAfterBlock`；链上 gate 一律用 block |
-| 贷款到期 / 还款窗口 / 提前-按时判定 | `LendingEngine`（判定 SSOT）+ `SettlementManager`（编排 SSOT） | `maturity -> maturityBlock`；`ON_TIME_WINDOW -> ON_TIME_WINDOW_BLOCKS`；相关窗口 `...Seconds -> ...Blocks` | 任何对外暴露 maturity 的接口：并行输出 `maturityBlock`（必要时保留旧 `maturity/blockNumber` 字段为观测） | 如果外部仍传入 blockNumber：只允许 **D 单调不回退**约束；不得与 `block.number` 比较 |
+| 贷款到期 / 还款窗口 / 提前-按时判定 | `LendingEngine`（判定 SSOT）+ `SettlementManager`（编排 SSOT） | `maturity -> maturityBlock`；`ON_TIME_WINDOW -> _ON_TIME_WINDOW_BLOCKS`；相关窗口 `...Seconds -> ...Blocks` | 任何对外暴露 maturity 的接口：并行输出 `maturityBlock`（必要时保留旧 `maturity/blockNumber` 字段为观测） | 如果外部仍传入 blockNumber：只允许 **D 单调不回退**约束；不得与 `block.number` 比较 |
 | 意向单过期 | `SettlementIntentLib`（门槛） | `expireAt -> expireBlock` | 校验函数改为 `require(block.number <= expireBlock)` | 不建议保留 blockNumber 语义；如兼容旧 ABI，保留字段名但语义改为“观测/链下调度提示”，并新增 `expireBlock` |
-| 预言机/价格新鲜度与更新间隔 | `IPriceOracle.getPrice`（B：集中裁决） | `PriceData.blockNumber -> PriceData.updateBlock`；`maxPriceAgeSeconds -> maxPriceAgeBlocks`；`lastUpdateBlock` | `getPrice` 返回 `updateBlock`（或 `ageBlocks`）作为明确新鲜度信号 | 若必须保留 `blockNumber`：仅观测字段；若 `updatePrice(..., blockNumber)` 存在：只做 **D 单调性**检查 |
+| 预言机/价格新鲜度与更新间隔 | `IPriceOracleRead.getPrice`（B：集中裁决） | `PriceData.blockNumber -> PriceData.updateBlock`；`maxPriceAgeSeconds -> maxPriceAgeBlocks`；`lastUpdateBlock` | `getPrice` 返回 `updateBlock`（或 `ageBlocks`）作为明确新鲜度信号 | 若必须保留 `blockNumber`：仅观测字段；若 `updatePrice(..., blockNumber)` 存在：只做 **D 单调性**检查 |
 | Reward / cooldown / feature unlock / service config | `RewardManagerCore` + 各 config 合约（门槛） | `cooldownSeconds -> cooldownBlocks`；`unlockAt -> unlockBlock`；周期类用 `epoch` | 对外展示接口可返回 `unlockBlock` + 链下 ETA | 允许保留 `blockNumber` 仅观测，用于 UI/审计，但不得影响资金路径 |
 | 白名单/权限窗口 | `AssetWhitelist`/`AuthorityWhitelist` gate（门槛） | `enabledAfter -> enabledAfterBlock`；`validUntil -> validUntilBlock` | 校验逻辑改为 block-based；对外 getter 输出 block 字段 | 不建议保留 blockNumber 门槛；如历史事件有 blockNumber，仅观测并并行 block |
 | 费用/路由相关（同步/观测） | `FeeRouter`（分发/统计 SSOT） | 周期：`epoch`；间隔：`syncBlocks` | 事件/只读 view 输出 `epoch` 或 `lastSyncBlock` | blockNumber 若存在，仅观测；周期统计优先 epoch，避免秒差 |
@@ -994,16 +993,16 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
 
 ## 执行顺序（按 `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md` 的章节顺序逐段改造）
 
-> 目的：把“时间依赖改造”按资金链 SSOT 的真实路径拆解，避免遗漏关键入口或出现多口径并存。
+> 目的：把“时间依赖改造”按 Funds-Flow SSOT 的章节拆解，避免遗漏关键入口或出现多口径并存。
 >
 > 做法：每一段都遵循同一套规则——**链上门槛只用 block**、**接口/事件里若有 blockNumber 字段一律视为观测字段**、**前端用 ETA 映射**。
 
 ### 0) 先做全局盘点（对应 Funds-Flow：SSOT 原则与估值口径）
 
 - 搜索并清单化（必须落到 PR checklist）：`block.number` / `blockNumber` 算术 / `deadline/expiry/cooldown/maturity/maxAge`
-- 对每个命中点标注其所在资金链段落（见下方 1～9），防止“改一半”。
+- 对每个命中点标注其所在 Funds-Flow SSOT 章节段落（见下方分段），防止“改一半”。
 
-### 1) 抵押物资金链（Collateral Flow）
+### 1) Funds-Flow §1（抵押相关模块；只引用不复述）
 
 - 目标：deposit/withdraw 的任何 guard 不依赖非 `block.number` 时间轴；若存在观测字段，统一按 block 语义处理或明确为观测字段。
 - 主要文件（Funds-Flow 已列出落点）：
@@ -1013,7 +1012,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
   - 相关 View/事件推送：`src/Vault/view/modules/PositionView.sol`、`src/Vault/view/modules/CacheOptimizedView.sol`、`src/Vault/view/modules/ViewCache.sol`（以 Funds-Flow §1.3 为准）
   - DataPush/类型常量（若事件 payload 含 ts 字段需统一口径）：`src/libraries/DataPushLibrary.sol`、`src/constants/DataPushTypes.sol`
 
-### 2) 出借资金资金链（Reserve Flow）
+### 2) Funds-Flow §2（出借资金/流动性相关模块；只引用不复述）
 
 - 目标：reserve/cancel 的“有效性窗口/去重/过期”统一改为 blocks 或单调序列（不要秒差门槛）。
 - 主要文件：
@@ -1022,7 +1021,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
   - `src/libraries/SettlementIntentLib.sol`
   - `src/Vault/modules/LenderPoolVault.sol`
 
-### 3) 撮合放款资金链（Finalize Match / Borrow Disbursement）
+### 3) Funds-Flow §3（撮合放款相关模块；只引用不复述）
 
 - 目标：撮合意向的“deadline/validUntil/expiry”统一为 `deadlineBlock`（或 round/seq），链下以 ETA 展示与调度。
 - 主要文件：
@@ -1031,7 +1030,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
   - `src/core/LendingEngine.sol`（order 创建/状态机里如存在时间门槛，必须按 block 改造）
   - `src/core/LoanNFT.sol`（若 NFT 状态/奖励 outcome 依赖时间窗口，必须按 block 改造）
 
-### 4) 还款/结算资金链（Repay → Settle）
+### 4) Funds-Flow §4（还款/结算相关模块；只引用不复述）
 
 - 目标：“按时/提前/逾期”的判定语义统一迁移为 block-based（例如 `maturityBlock ± windowBlocks`），并确保 `SettlementManager` / `ORDER_ENGINE` 不出现秒差门槛。
 - 主要文件：
@@ -1039,14 +1038,14 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
   - `src/Vault/liquidation/modules/SettlementManager.sol`（SSOT）
   - `src/core/LendingEngine.sol`（订单语义判定 SSOT）
 
-### 5) 提前还款保证金（Extension Flow）
+### 5) Funds-Flow §5（提前还款保证金扩展流相关模块；只引用不复述）
 
 - 目标：保证金 record 中涉及 maturity/penaltyDays/窗口的部分改为 blocks/epoch（避免墙钟时间分支）。
 - 主要文件：
   - `src/Vault/modules/GuaranteeFundManager.sol`
   - `src/Vault/modules/EarlyRepaymentGuaranteeManager.sol`
 
-### 6) 违约清算（Default → Liquidation）
+### 6) Funds-Flow §6（违约清算相关模块；只引用不复述）
 
 - 目标：可清算判定窗口、清算触发条件全部改为 block-based；清算域不允许出现非 `block.number` 时间轴的门槛判断。
 - 主要文件：
@@ -1056,7 +1055,7 @@ termBlocks intent 的 struct 与 type string 已在 `src/libraries/SettlementInt
   - `src/Vault/liquidation/modules/LiquidationPayoutManager.sol`（若 payout/epoch 逻辑存在窗口，必须按 block 改造）
   - `src/Vault/view/modules/LiquidatorView.sol`（清算观测/推送字段的“时间轴”口径统一为 block）
 
-### 7) 费用与分账（Fee Flow）
+### 7) Funds-Flow §7（费用与分账相关模块；只引用不复述）
 
 - 目标：FeeRouter 的分发与统计不依赖非 `block.number` 时间轴做门槛；若需要“周期统计”，优先用 epoch/round/seq。
 - 主要文件：

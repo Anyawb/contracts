@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import { ILiquidationRiskRead } from "./ILiquidationRiskRead.sol";
+
 /**
  * @title ILiquidationRiskManager
  * @notice Interface for liquidation risk assessment and threshold governance.
  * @dev Implemented by LiquidationRiskManager; this interface is the SSOT for read-only risk checks and
  *      governance updates to liquidation thresholds/min health factor/max LTV.
  */
-interface ILiquidationRiskManager {
+interface ILiquidationRiskManager is ILiquidationRiskRead {
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     /**
      * @notice Emitted when liquidation threshold is updated.
@@ -37,7 +39,9 @@ interface ILiquidationRiskManager {
      * @param user User address.
      * @return liquidatable True if liquidatable, otherwise false.
      */
-    function isLiquidatable(address user) external view returns (bool liquidatable);
+    function isLiquidatable(
+        address user
+    ) external view returns (bool liquidatable);
 
     /**
      * @notice Check if a position is liquidatable using provided collateral/debt values.
@@ -73,7 +77,9 @@ interface ILiquidationRiskManager {
      * @param user User address.
      * @return riskScore Risk score in [0,100] (0 = lowest risk, 100 = highest).
      */
-    function getLiquidationRiskScore(address user) external view returns (uint256 riskScore);
+    function getLiquidationRiskScore(
+        address user
+    ) external view returns (uint256 riskScore);
 
     /**
      * @notice Calculate liquidation risk score for given collateral/debt values.
@@ -109,13 +115,18 @@ interface ILiquidationRiskManager {
      * @return riskLevel Risk level (0-4).
      * @return safetyMargin Safety margin in bps.
      */
-    function getUserRiskAssessment(address user) external view returns (
-        bool liquidatable,
-        uint256 riskScore,
-        uint256 healthFactor,
-        uint256 riskLevel,
-        uint256 safetyMargin
-    );
+    function getUserRiskAssessment(
+        address user
+    )
+        external
+        view
+        returns (
+            bool liquidatable,
+            uint256 riskScore,
+            uint256 healthFactor,
+            uint256 riskLevel,
+            uint256 safetyMargin
+        );
 
     /*━━━━━━━━━━━━━━━ Threshold Management Functions ━━━━━━━━━━━━━━━*/
     /**
@@ -129,7 +140,10 @@ interface ILiquidationRiskManager {
      *
      * @return threshold Liquidation threshold (bps, 10_000 = 100%).
      */
-    function getLiquidationThreshold() external view returns (uint256 threshold);
+    function getLiquidationThreshold()
+        external
+        view
+        returns (uint256 threshold);
 
     /**
      * @notice Update liquidation threshold.
@@ -158,7 +172,10 @@ interface ILiquidationRiskManager {
      *
      * @return minHealthFactor Minimum health factor (bps, 10_000 = 100%).
      */
-    function getMinHealthFactor() external view returns (uint256 minHealthFactor);
+    function getMinHealthFactor()
+        external
+        view
+        returns (uint256 minHealthFactor);
 
     /**
      * @notice Update minimum health factor.
@@ -240,4 +257,4 @@ interface ILiquidationRiskManager {
     ) external view returns (uint256[] memory riskScores);
 
     /*━━━━━━━━━━━━━━━ Preview Functions moved to View contract ━━━━━━━━━━━━━━━*/
-} 
+}

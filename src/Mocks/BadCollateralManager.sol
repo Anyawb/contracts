@@ -19,16 +19,6 @@ contract BadCollateralManager is ICollateralManager {
         user; asset; amount; receiver; // silence unused parameters
     }
 
-    function seizeCollateralForLiquidation(
-        address targetUser,
-        address collateralAsset,
-        uint256 collateralAmount,
-        address liquidator
-    ) external pure {
-        targetUser; collateralAsset; collateralAmount; liquidator; // silence unused parameters
-        revert("Mock fail");
-    }
-
     function forceWithdrawCollateral(address user, address asset, uint256 amount, address to) external pure {
         user; asset; amount; to; // silence unused parameters
     }

@@ -43,13 +43,12 @@ describe('FeeRouterView', function () {
   describe('initialization', function () {
     it('stores registry address', async function () {
       const { feeRouterView, registry } = await loadFixture(deployFixture);
-      expect(await feeRouterView.registryAddr()).to.equal(await registry.getAddress());
+      expect(await feeRouterView.getRegistry()).to.equal(await registry.getAddress());
     });
 
-    it('getRegistry() returns same value as registryAddr()', async function () {
+    it('getRegistry() returns configured registry', async function () {
       const { feeRouterView, registry } = await loadFixture(deployFixture);
       expect(await feeRouterView.getRegistry()).to.equal(await registry.getAddress());
-      expect(await feeRouterView.getRegistry()).to.equal(await feeRouterView.registryAddr());
     });
 
     it('reverts on zero address init', async function () {
@@ -118,6 +117,32 @@ describe('FeeRouterView', function () {
 
       const [stats] = await feeRouterView.connect(user).getUserStatsWithMeta(user.address);
       expect(stats.transactionCount).to.equal(1n); // Transaction count still increments
+    });
+
+    it('pushUserFeeUpdate refreshes sync status after the cache becomes stale', async function () {
+      const { feeRouterView, feeRouter, user } = await loadFixture(deployFixture);
+      const feeType = ethers.keccak256(ethers.toUtf8Bytes('STALE_SYNC_REFRESH'));
+
+      const [, initialSyncBlock, initialNeedsSync] = await feeRouterView.getSyncStatus();
+      expect(initialNeedsSync).to.equal(false);
+
+      await mineBlocks(151);
+      const [isValidStale, staleSyncBlock, needsSyncStale] = await feeRouterView.getSyncStatus();
+      expect(isValidStale).to.equal(false);
+      expect(needsSyncStale).to.equal(true);
+      expect(staleSyncBlock).to.equal(initialSyncBlock);
+
+      const receipt = await (await feeRouterView.connect(feeRouter).pushUserFeeUpdate(user.address, feeType, 123n, 456n)).wait();
+
+      const [isValidFresh, refreshedSyncBlock, needsSyncFresh] = await feeRouterView.getSyncStatus();
+      expect(isValidFresh).to.equal(true);
+      expect(needsSyncFresh).to.equal(false);
+      expect(refreshedSyncBlock).to.equal(BigInt(receipt!.blockNumber!));
+      expect(refreshedSyncBlock).to.be.greaterThan(initialSyncBlock);
+
+      const [stats] = await feeRouterView.connect(user).getUserStatsWithMeta(user.address);
+      expect(stats.totalFeePaid).to.equal(123n);
+      expect(stats.transactionCount).to.equal(1n);
     });
 
     it('handles very large fee amounts', async function () {
@@ -775,7 +800,7 @@ describe('FeeRouterView', function () {
       const FeeRouterViewFactory = await ethers.getContractFactory('FeeRouterView');
       await upgrades.upgradeProxy(await feeRouterView.getAddress(), FeeRouterViewFactory);
       // Verify state is preserved
-      expect(await feeRouterView.registryAddr()).to.equal(await registry.getAddress());
+      expect(await feeRouterView.getRegistry()).to.equal(await registry.getAddress());
     });
 
     it('rejects upgrade from non-admin', async function () {
@@ -794,7 +819,7 @@ describe('FeeRouterView', function () {
       // the upgrade mechanism works correctly through the upgrade process
       await upgrades.upgradeProxy(await feeRouterView.getAddress(), FeeRouterViewFactory);
       // Verify state is preserved
-      expect(await feeRouterView.registryAddr()).to.equal(await registry.getAddress());
+      expect(await feeRouterView.getRegistry()).to.equal(await registry.getAddress());
     });
   });
 

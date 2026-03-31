@@ -1,7 +1,10 @@
 #!/usr/bin/env ts-node
 
-import hardhat from 'hardhat';
-const { ethers } = hardhat as unknown as { ethers: typeof import('ethers'); } as any;
+import { ethers } from 'ethers';
+
+if (!process.env.HARDHAT_NETWORK && process.env.LOCALHOST_RPC_URL) {
+	process.env.HARDHAT_NETWORK = 'localhost';
+}
 
 // Helper: compute keccak256 of uppercase identifiers used in ModuleKeys/ActionKeys
 function k256(text: string): string {
@@ -24,6 +27,10 @@ async function safeGetModule(registry: any, key: string, label: string): Promise
 }
 
 async function main(): Promise<void> {
+	const hardhatModule = await import('hardhat');
+	const hardhat = (hardhatModule as any).default ?? hardhatModule;
+	const { ethers } = hardhat as unknown as { ethers: typeof import('ethers'); } as any;
+
 	const envRegistry = process.env.REGISTRY_ADDRESS as string | undefined;
 	const vaultAdminAddress = process.env.VAULT_ADMIN_ADDRESS as string | undefined;
 	let governanceAddress = process.env.GOVERNANCE_CALLER as string;
@@ -58,13 +65,25 @@ async function main(): Promise<void> {
 	const lrmAddr = await safeGetModule(registry, KEY_LRM, 'KEY_LIQUIDATION_RISK_MANAGER');
 
 	if (acmAddr === ethers.ZeroAddress) {
-		console.log('Result: ACM not registered. Cannot check role.');
+		console.error('Result: ACM not registered. Cannot check role.');
+		process.exitCode = 1;
+		return;
+	}
+
+	if (lrmAddr === ethers.ZeroAddress) {
+		console.error('Result: LiquidationRiskManager not registered.');
+		process.exitCode = 1;
 		return;
 	}
 
 	const acm = await (hardhat as any).ethers.getContractAt('IAccessControlManager', acmAddr);
 	const hasRole: boolean = await acm.hasRole(ACTION_SET_PARAMETER, governanceAddress);
 	console.log(`[ACM] caller(${governanceAddress}) has ACTION_SET_PARAMETER =`, hasRole);
+	if (!hasRole) {
+		console.error('Result: governance caller lacks ACTION_SET_PARAMETER.');
+		process.exitCode = 1;
+		return;
+	}
 	console.log('✅ Script finished.');
 }
 

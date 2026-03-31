@@ -3,6 +3,7 @@
 ## 🔗 References（口径来源与关联文档）
 
 - **Architecture**: [`docs/Architecture-Guide.md`](../../Architecture-Guide.md)
+- **资金链 SSOT（托管者/资产去向/内部调用串联）**: [`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`](../Funds-Flow-Architecture-Guide.md)
 - **Terminology**: [`docs/Architecture-Liquidation-DirectLedger-Terminology.md`](../../Architecture-Liquidation-DirectLedger-Terminology.md)
 - **Related**
   - 完整清算逻辑（端到端口径）：[`liquidation-complete-logic.md`](./liquidation-complete-logic.md)
@@ -10,45 +11,25 @@
 
 ## 📋 概述
 
-本文档对齐当前代码与 `docs/Architecture-Guide.md`：
+本文档对齐当前代码与 `docs/Architecture-Guide.md`，但**不复述资金链/托管者/资产去向/内部调用顺序**。
 
-- **统一结算/清算写入口（SSOT）**：`SettlementManager` 为唯一对外写入口，统一承接按时还款/提前还款/到期未还/价值过低触发的被动清算；在进入清算分支时，写入直达 `CollateralManager`（扣押抵押）与 `VaultLendingEngine`（减少债务），不经 View 转发写入。
-- **事件/DataPush 单点**：账本写入成功后，统一由 `LiquidatorView.pushLiquidationUpdate/Batch` 触发（best-effort，不回滚账本写入）。
-- **风控只读聚合**：`HealthView` / `LiquidationRiskManager` 提供健康因子与风险聚合；只读查询统一走 View/风险模块，不在写入口做“只读门面”。
-- **预言机与优雅降级**：仅在 `VaultLendingEngine` 的估值路径中访问预言机并执行降级逻辑。
-
-## 🏗️ 系统架构（对齐当前实现）
-
-```
-处置系统（统一入口 + 清算分支直达账本 + 单点推送）
-├── Registry
-│   ├── KEY_SETTLEMENT_MANAGER → SettlementManager（唯一对外写入口：结算/清算）
-│   ├── KEY_LIQUIDATION_MANAGER → LiquidationManager（清算执行器：仅供 SettlementManager 内部调用）
-│   ├── KEY_CM → CollateralManager（扣押抵押：withdrawCollateralTo）
-│   ├── KEY_LE → VaultLendingEngine（减债：forceReduceDebt）
-│   ├── KEY_LIQUIDATION_VIEW → LiquidatorView（只读 + DataPush 单点）
-│   ├── KEY_HEALTH_VIEW → HealthView（风险缓存/推送）
-│   └── KEY_LIQUIDATION_RISK_MANAGER → LiquidationRiskManager（风险聚合只读/缓存）
-└── 写路径
-    └── SettlementManager → (清算分支：CM.withdrawCollateralTo, LE.forceReduceDebt) → LiquidatorView.push*
-```
+- **按产品线区分写入口**：legacy / 通用订单的结算与处置收敛到 `SettlementManager`；blocks-only 订单的到期收尾收敛到 `BlocksOnlyCoordinator`。
+- **事件/DataPush 单点**：写入成功后由 `LiquidatorView.push*` 进行 best-effort 推送（不应放大为资金层不可用）。
+- **风控只读聚合**：`HealthView` / `LiquidationRiskManager` 只读聚合与缓存；写入口不承担只读门面。
+- **预言机与优雅降级**：预言机访问与降级逻辑收敛在 `VaultLendingEngine` 的估值路径。
 
 ## ✅ 职责边界（当前实现）
 
-- **编排层（SettlementManager）**：唯一对外写入口；内部根据状态机选择“结算（还款/提前还款）”或“清算（被动清算）”分支。
-- **清算执行器（LiquidationManager）**：仅供 SettlementManager 在清算分支内部调用；不作为对外唯一入口使用。
-- **账本层（CollateralManager / VaultLendingEngine）**：执行状态变更并在内部校验权限（例如 `ACTION_LIQUIDATE`）；LE 负责估值与降级。
+- **编排层（SettlementManager）**：legacy / 通用订单的对外写入口；内部根据状态机选择“结算（还款/提前还款）”或“清算（被动清算）”分支。
+- **BlocksOnlyCoordinator**：blocks-only 产品线的对外写入口；内部根据 debt 与 maturity 状态选择“settle”或“liquidate”分支。
+- **清算执行器（LiquidationManager）**：供上游产品线入口在清算分支内部调用；不作为对外默认入口使用。
+- **账本层（CollateralManager / VaultLendingEngine）**：执行状态变更并在内部校验权限；LE 负责估值与降级。
 - **视图层（LiquidatorView / HealthView / LiquidationRiskManager）**：只读、缓存、推送；不代写账本、不放行写权限。
 
-## 🔁 清算写路径（与当前实现一致）
+## 🧭 入口收敛与验收点
 
-1) Keeper/机器人通过只读模块确认“需要进入清算分支”（到期未还或风险可清算）。  
-2) 调用 `SettlementManager.settleOrLiquidate(orderId)`（**默认/推荐入口（SSOT）**：内部判定并进入清算分支，且基于 `orderId` 自动计算清算参数）。  
-3) 清算分支直达账本（由 SettlementManager 内部直接调用，或经 LiquidationManager 执行器转调）：
-   - `KEY_CM → withdrawCollateralTo(targetUser, collateralAsset, collateralAmount, liquidatorOrReceiver)`
-   - `KEY_LE → forceReduceDebt(targetUser, debtAsset, debtAmount)`
-4) 成功后 best-effort：`LiquidatorView.pushLiquidationUpdate/Batch` 单点推送。  
-5) 账本变更后，`VaultLendingEngine` 会推送 `VaultRouter`/`HealthView` 更新缓存（与架构指南保持一致）。  
+- keeper/机器人应只依赖“所属产品线的唯一对外写入口”触发处置；避免同一产品线出现多入口而导致权限/参数/对账口径分叉。
+- 任何涉及“谁持币/钱怎么走/先后顺序”的描述，一律引用 Funds-Flow SSOT。
 
 ## ⚙️ 参数与配置说明（当前实现口径）
 
@@ -57,7 +38,7 @@
 
 ## 🧩 执行器入口（兼容/测试/应急）
 
-- `LiquidationManager.liquidate/batchLiquidate(...)` 保留为 **显式参数执行器入口**（role-gated），用于测试/应急/手工处置；**不应**作为 keeper 常态主入口（避免参数计算/权限/资金去向口径分叉）。
+- `LiquidationManager.liquidate/batchLiquidate(...)` 保留为 **显式参数执行器入口**（role-gated），用于测试/应急/手工处置；**不应**作为 keeper 常态主入口（避免参数计算/权限/资金链口径分叉）。
 
 ## 🧭 迁移提示（避免旧路径回流）
 

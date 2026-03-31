@@ -73,10 +73,6 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       expect(await valuationOracleView.registryAddrVar()).to.equal(await registry.getAddress());
     });
 
-    it('registryAddr() 和 registryAddrVar() 应返回相同值', async function () {
-      expect(await valuationOracleView.registryAddr()).to.equal(await valuationOracleView.registryAddrVar());
-      expect(await valuationOracleView.registryAddr()).to.equal(await registry.getAddress());
-    });
   });
 
   describe('访问控制', function () {

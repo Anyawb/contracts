@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "evm-deployment-manifest",
+  "status": "workspace-snapshot",
+  "environment": "arbitrum-sepolia",
+  "network": {
+    "name": "arbitrum-sepolia",
+    "chainId": 421614,
+    "rpcUrl": "https://sepolia-rollup.arbitrum.io/rpc",
+    "explorerUrl": "https://sepolia.arbiscan.io"
+  },
+  "release": {
+    "version": "workspace-snapshot-2026-03-25",
+    "generatedAt": "2026-03-25T00:00:00Z",
+    "commitHash": "a51626ecd4cbdefd2fd38e50647ebed2577ad3ff"
+  },
+  "authority": {
+    "addressesFile": "scripts/deployments/arbitrum-sepolia.json",
+    "frontendConfigFile": "frontend-config/contracts-arbitrum-sepolia.ts",
+    "eventsDoc": "docs/events.md",
+    "errorsDoc": "docs/errors.md"
+  },
+  "anchors": {
+    "Registry": "0xD42676Ef80391ab90ef8d8c85cd2F966c16d09D2",
+    "VaultCore": "0xcB7952E94BbbB88e96936fA0Ff1Ed46C1bE02843",
+    "SettlementManager": "0x32fa1570FCD2da84f6b56976600d6360DCb2Bc2d",
+    "PositionView": "0x4BB60108A66Dad339Eb6B355e0D621B7b5Fc1558",
+    "RewardView": "0xeCA904982fC5EAf99cDEfF3A35A9b02fe28574ab"
+  },
+  "validation": {
+    "frontendConfigAligned": false,
+    "notes": [
+      "Current repo authority source is scripts/deployments/arbitrum-sepolia.json.",
+      "frontend-config/contracts-arbitrum-sepolia.ts is currently not aligned with scripts/deployments/arbitrum-sepolia.json.",
+      "Before formal release, the frontend config, backend config, and indexer config must be regenerated from the same deployment output."
+    ]
+  }
+}

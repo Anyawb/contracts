@@ -85,7 +85,7 @@ async function main() {
   const vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
 
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddr)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", awAddr)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", awAddr)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", poAddr)) as any;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddr)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", usdcAddr)) as any;
@@ -137,7 +137,7 @@ async function main() {
 
   // ============ Production-like preflight checks (no auto-config) ============
   // 1) AssetWhitelist must allow the debt/collateral token used by the flow.
-  if (!(await aw.isAssetAllowed(usdc.target))) {
+  if (!(await awRead.isAssetAllowed(usdc.target))) {
     throw new Error(
       `[Config] AssetWhitelist is missing token ${usdc.target}. ` +
         `Pre-config required: call AssetWhitelist.addAllowedAsset(${usdc.target}) via governance.`

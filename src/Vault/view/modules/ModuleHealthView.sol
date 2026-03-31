@@ -21,9 +21,9 @@ import { ViewConstants } from "../ViewConstants.sol";
  *      - module is zero address for push flow (ZeroAddress)
  *
  * Security:
- * - Role-gated: only system health viewers can run checks and read cached results
- * - UUPS upgradeability is role-gated (ACTION_ADMIN)
- * - Health checks are intentionally lightweight (code-size based) to keep gas low
+    * - Role-gated: only system health viewers can run checks and read cached results.
+    * - UUPS upgradeability is role-gated via ACTION_ADMIN.
+    * - Health checks are intentionally lightweight and code-size based to keep gas bounded.
  */
 contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
@@ -60,6 +60,17 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 consecutiveFailures;
         uint256 totalChecks;
         uint256 successRate; // percentage (0–100)
+    }
+
+    /**
+     * @notice Lightweight module health tuple kept ABI-compatible with BatchView.
+     * @dev Mirrors the smaller struct expected by BatchView's internal interface.
+     */
+    struct ModuleHealth {
+        bool isHealthy;
+        bytes32 detailsHash;
+        uint32 lastCheckTime;
+        uint32 consecutiveFailures;
     }
 
     /// @notice Latest cached health status: module => status.
@@ -133,8 +144,8 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Role-gated (system health viewer)
      * - Pushes module health into HealthView (which emits unified DataPushed)
      *
-     * @param module Module address to check
-     * @return isHealthy Whether the module is considered healthy (non-zero code size)
+    * @param module Module address to check.
+    * @return isHealthy True if the module is considered healthy.
      */
     function checkAndPushModuleHealth(address module)
         external
@@ -195,12 +206,12 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks required role (MissingRole via onlySystemHealthViewer)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param module Module address to query
-     * @return healthStatus Cached status struct (legacy-compatible)
-     * @return blockNumber Last cache write blockNumber (block.number)
-     * @return isValid Whether the cache is valid under TTL (ViewConstants.CACHE_DURATION_BLOCKS)
+    * @param module Module address to query.
+    * @return healthStatus Cached status struct.
+    * @return blockNumber Last cache-write block number.
+    * @return isValid True if the cache is valid under the configured TTL.
      */
     function getModuleHealthStatus(address module)
         external
@@ -221,12 +232,12 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks required role (MissingRole via onlySystemHealthViewer)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param module Module address to query
-     * @return healthStatus Cached status struct (legacy-compatible)
-     * @return blockNumber Last cache write blockNumber (block.number)
-     * @return isValid Whether the cache is valid under TTL (ViewConstants.CACHE_DURATION_BLOCKS)
+    * @param module Module address to query.
+    * @return healthStatus Cached status struct.
+    * @return blockNumber Last cache-write block number.
+    * @return isValid True if the cache is valid under the configured TTL.
      */
     function getModuleHealthStatusWithMeta(address module)
         external
@@ -241,18 +252,46 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
+     * @notice Compatibility getter for BatchView-style module health aggregation.
+     * @dev Returns the compact health struct together with validity metadata in
+     *      the order expected by BatchView's IHealthViewBatch interface.
+     *
+     * @param module Module address to query.
+     * @return moduleHealth Compact cached status struct.
+     * @return isValid True if the cache is valid under the configured TTL.
+     * @return blockNumber Last cache-write block number.
+     */
+    function getModuleHealthWithMeta(address module)
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (ModuleHealth memory moduleHealth, bool isValid, uint256 blockNumber)
+    {
+        ModuleHealthStatus storage s = _moduleHealth[module];
+        moduleHealth = ModuleHealth({
+            isHealthy: s.isHealthy,
+            detailsHash: s.detailsHash,
+            lastCheckTime: uint32(s.lastCheckTime),
+            consecutiveFailures: uint32(s.consecutiveFailures)
+        });
+        blockNumber = s.lastCheckTime;
+        isValid = _isCacheValid(blockNumber);
+    }
+
+    /**
      * @notice Run a lightweight health check without mutating state (legacy-compatible).
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks required role (MissingRole via onlySystemHealthViewer)
      *
      * Security:
-     * - Read-only
-     * - Does not push results to HealthView
+    * - View-only.
+    * - Does not push results to HealthView.
      *
-     * @param module Module address to check
-     * @return isHealthy Whether the module is considered healthy (non-zero code size)
-     * @return details Human-readable detail string (legacy output)
+    * @param module Module address to check.
+    * @return isHealthy True if the module is considered healthy.
+    * @return details Human-readable detail string.
      */
     function checkModuleHealth(address module)
         external
@@ -278,28 +317,15 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the Registry contract address.
+    * @notice Return the Registry address used by this module.
      * @dev This getter may return address(0) if the contract is not initialized.
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return registryAddrVar Registry contract address
+    * @return registryAddrVar Registry contract address.
      */
     function getRegistry() external view returns (address registryAddrVar) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Get the Registry contract address (legacy getter).
-     * @dev This function is kept for backward compatibility; prefer `getRegistry()`.
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddrVar Registry contract address
-     */
-    function registryAddr() external view returns (address registryAddrVar) {
         return _registryAddr;
     }
 
@@ -354,12 +380,12 @@ interface IHealthViewPush {
      *      - HealthView rejects the call (module-specific)
      *
      * Security:
-     * - Called by ModuleHealthView after role-gated checks
+    * - Called by ModuleHealthView after role-gated checks.
      *
-     * @param module Module address
-     * @param ok Whether the module is healthy
-     * @param detailsHash Detail hash describing the status
-     * @param failures Consecutive failure count (implementation-defined)
+    * @param module Module address.
+    * @param ok True if the module is healthy.
+    * @param detailsHash Detail hash describing the status.
+    * @param failures Consecutive failure count.
      */
     function pushModuleHealth(address module, bool ok, bytes32 detailsHash, uint32 failures) external;
 }

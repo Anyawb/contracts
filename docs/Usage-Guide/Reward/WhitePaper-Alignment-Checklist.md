@@ -32,6 +32,7 @@
 - [ ] 发放入口由订单落账后触发（`RewardManager.onLoanEventByOrderWithLender(...)`）。
 - [ ] 发放由 `EasyEmissionController`（如启用）执行 mint 与分配（borrower/lender）。
 - [ ] 任何发放失败都不应破坏核心借贷落账流程（Reward 侧 best-effort 推送可观测性）。
+- [ ] 非 `RewardManager` 直接调用 `RewardManagerCore` 写入口必须显式 revert，不允许 no-op 假成功。
 
 ### 2.3 发行数量公式（红利期 / 通缩期）
 
@@ -47,6 +48,7 @@
 
 - [ ] 收入必须进入 `EasyRecycleDistributor` 并即时结算。
 - [ ] 比例为：75% burn，15% team，10% ecosystem（remainder 吸收舍入误差）。
+- [ ] 若 recycle 合约误收到直转 Easy，必须能通过 `settleOutstandingEasyBalance()` 按同一 75/15/10 恢复结算。
 
 ### 2.6 治理（质押与投票权）
 
@@ -61,6 +63,9 @@
 - [ ] `pnpm -s run checks:reward-monitor:config-events` 通过
 - [ ] `pnpm -s run checks:reward-monitor:breakglass` 通过
 - [ ] `pnpm -s run checks:reward-monitor:registry-bindings` 通过
+- [ ] `pnpm -s run checks:reward-monitor:role-bindings` 通过
+- [ ] `pnpm exec hardhat test test/Reward/EasyEconomics.integration.test.ts` 通过（覆盖 spend 主路径与 recycle 恢复路径）
 - [ ] `RewardView` 为唯一对外只读入口；写模块不暴露面向外部的查询 API。
 - [ ] Spend 主路径只能是 `EasyConsumption` → `EasyRecycleDistributor`；不得旁路成“直接 burn”。
+- [ ] `RewardManagerCore` 不持有遗留 `BURNER_ROLE`；Penalty burn SSOT 必须为 `RewardAccrualManager`。
 

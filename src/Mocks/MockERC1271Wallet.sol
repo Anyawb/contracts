@@ -48,7 +48,7 @@ contract MockERC1271Wallet is IERC1271, IERC721Receiver {
 
     receive() external payable {}
 
-    function isValidSignature(bytes32 hash, bytes memory /*signature*/ ) external view override returns (bytes4) {
+    function isValidSignature(bytes32 hash, bytes calldata /*signature*/ ) external view override returns (bytes4) {
         if (mode == Mode.Revert) revert("MockERC1271Wallet: reverted");
         if (mode == Mode.AlwaysInvalid) return bytes4(0xffffffff);
         if (mode == Mode.ValidOnlyForDigest) return hash == allowedDigest ? MAGICVALUE : bytes4(0xffffffff);

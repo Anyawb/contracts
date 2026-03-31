@@ -6,9 +6,14 @@ import { runViewPreflight } from "./utils/view-preflight.ts";
 
 const BLOCKS_PER_DAY = 7_200n;
 const ONE_HOUR_BLOCKS = 1_800n;
+const STRICT_VIEWS = (process.env.E2E_STRICT_VIEWS ?? "1").toLowerCase() !== "0";
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
+}
+
+function assertView(cond: unknown, msg: string): asserts cond {
+  if (!cond) throw new Error(msg);
 }
 
 function mkArtifactsWriter() {
@@ -79,10 +84,17 @@ function buildLendIntentHash(li: any) {
   );
 }
 
+function formatRiskLevel(value: unknown): string {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (typeof value === "number" || typeof value === "bigint") return String(value);
+  return "N/A";
+}
+
 async function main() {
   const snap = await network.provider.send("evm_snapshot", []);
   const artifacts = mkArtifactsWriter();
   const dataPushedCounts: Record<string, number> = {};
+  const checkpointSummaries: Record<string, any> = {};
   const bump = (k: string) => {
     const kk = k.toLowerCase();
     dataPushedCounts[kk] = (dataPushedCounts[kk] ?? 0) + 1;
@@ -106,14 +118,22 @@ async function main() {
   const vblAddrFromRegistry = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
   const cmAddrFromRegistry = (await registry.getModuleOrRevert(key("COLLATERAL_MANAGER"))) as string;
   const gfmAddrFromRegistry = (await registry.getModule(key("GUARANTEE_FUND_MANAGER"))) as string;
+  const statsPushManagerAddrFromRegistry = (await registry.getModuleOrRevert(key("STATISTICS_PUSH_MANAGER"))) as string;
+  const liquidationRiskManagerAddrFromRegistry = (await registry.getModuleOrRevert(key("LIQUIDATION_RISK_MANAGER"))) as string;
 
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", assetWhitelistAddrFromRegistry)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", assetWhitelistAddrFromRegistry)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddrFromRegistry)) as any;
   const settlementManager = (await ethers.getContractAt(
     "src/Vault/liquidation/modules/SettlementManager.sol:SettlementManager",
     settlementManagerAddrFromRegistry
+  )) as any;
+  const statsPushManager = (await ethers.getContractAt("StatisticsPushManager", statsPushManagerAddrFromRegistry)) as any;
+  const liquidationRiskManager = (await ethers.getContractAt(
+    "src/Vault/liquidation/modules/LiquidationRiskManager.sol:LiquidationRiskManager",
+    liquidationRiskManagerAddrFromRegistry
   )) as any;
   const usdc = (await ethers.getContractAt("MockERC20", settlementTokenAddrFromRegistry)) as any;
   const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreFromRegistryAddr)) as any;
@@ -140,9 +160,9 @@ async function main() {
   let lender = signers[2];
   try {
     const assetAddr = settlementTokenAddrFromRegistry;
-    const ergmAddr =
-      ((await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE_MANAGER"))) as string) ||
-      ((await registry.getModule(key("EARLY_REPAYMENT_GUARANTEE"))) as string);
+    const ergmAddr = (await registry.getModule(
+      key("EARLY_REPAYMENT_GUARANTEE_MANAGER"),
+    )) as string;
     if (ergmAddr && ergmAddr !== ethers.ZeroAddress) {
       const ergm = (await ethers.getContractAt("EarlyRepaymentGuaranteeManager", ergmAddr)) as any;
       for (let i = 1; i < signers.length; i++) {
@@ -213,6 +233,11 @@ async function main() {
   const ACTION_ORDER_CREATE = key("ORDER_CREATE");
   const ACTION_BORROW = key("BORROW");
   const ACTION_REPAY = key("REPAY");
+  const ACTION_VIEW_PUSH = key("ACTION_VIEW_PUSH");
+  const ACTION_VIEW_SYSTEM_DATA = key("VIEW_SYSTEM_DATA");
+  const ACTION_VIEW_PRICE_DATA = key("VIEW_PRICE_DATA");
+  const ACTION_VIEW_RISK_DATA = key("VIEW_RISK_DATA");
+  const ACTION_LIQUIDATE = key("LIQUIDATE");
 
   const ensureRole = async (role: string, who: string) => {
     if (!(await acm.hasRole(role, who))) {
@@ -229,15 +254,23 @@ async function main() {
   await ensureRole(ACTION_DEPOSIT, vblAddrFromRegistry);
   await ensureRole(ACTION_BORROW, orderEngineAddr);
   await ensureRole(ACTION_REPAY, borrower.address);
-  // SSOT repay path: VaultCore.repay -> SettlementManager.repayAndSettle -> ORDER_ENGINE.repay.
-  // ORDER_ENGINE.repay is role-gated by ACTION_REPAY, so SettlementManager must have this role.
   await ensureRole(ACTION_REPAY, settlementManagerAddrFromRegistry);
+  await ensureRole(ACTION_VIEW_PUSH, deployer.address);
+  await ensureRole(ACTION_VIEW_PUSH, vaultLendingEngineAddrFromRegistry);
+  await ensureRole(ACTION_VIEW_PUSH, settlementManagerAddrFromRegistry);
+  await ensureRole(ACTION_VIEW_PUSH, cmAddrFromRegistry);
+  await ensureRole(ACTION_VIEW_SYSTEM_DATA, statsPushManagerAddrFromRegistry);
+  await ensureRole(ACTION_VIEW_PRICE_DATA, statsPushManagerAddrFromRegistry);
+  await ensureRole(ACTION_VIEW_RISK_DATA, statsPushManagerAddrFromRegistry);
+  await ensureRole(ACTION_VIEW_RISK_DATA, deployer.address);
+  await ensureRole(ACTION_VIEW_SYSTEM_DATA, deployer.address);
+  await ensureRole(ACTION_LIQUIDATE, deployer.address);
   console.log("");
 
   // ============ Setup Asset & Price ============
   console.log("💰 Setting up asset whitelist and price...");
-  if (!(await aw.isAssetAllowed(settlementTokenAddrFromRegistry))) {
-    await aw.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
+  if (!(await awRead.isAssetAllowed(settlementTokenAddrFromRegistry))) {
+    await awAdmin.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
   }
   {
     const cfg = await po.getAssetConfig(settlementTokenAddrFromRegistry);
@@ -262,100 +295,150 @@ async function main() {
   console.log("  Lender balance:", ethers.formatUnits(await usdc.balanceOf(lender.address), 6));
   console.log("");
 
-  // ============ Helper: Update Statistics from Ledger ============
-  // Note: This is a simplified helper for E2E testing.
-  // In production, StatisticsView should be updated automatically by business logic
-  // via VaultBusinessLogicLibrary.safeUpdateStats() or similar mechanisms.
-  async function updateStatisticsFromLedger(user: string, asset: string) {
-    // Skip automatic updates in E2E - let the test demonstrate the current state
-    // StatisticsView updates should happen automatically in production via business logic
-    return;
+  async function syncStatisticsSnapshot(user: string) {
+    const tx = await statsPushManager.connect(deployer).retryUserStats(user);
+    await tx.wait();
   }
 
-  // ============ Helper: Verify View Layer ============
-  async function verifyViews(step: string, user: string, asset: string) {
+  async function syncHealthSnapshot(user: string) {
+    const riskAssessment = await riskView.getUserRiskAssessment(user);
+    let minHealthFactor = 10_000n;
+    try {
+      minHealthFactor = (await liquidationRiskManager.getMinHealthFactor()) as bigint;
+    } catch {
+      if (typeof riskAssessment?.healthFactor === "bigint") {
+        minHealthFactor = riskAssessment.healthFactor;
+      }
+    }
+    const healthFactor = typeof riskAssessment?.healthFactor === "bigint" ? riskAssessment.healthFactor : 0n;
+    const isUndercollateralized = healthFactor !== 0n && healthFactor < minHealthFactor;
+    const tx = await healthView
+      .connect(deployer)
+      .pushRiskStatus(user, healthFactor, minHealthFactor, isUndercollateralized, 0);
+    await tx.wait();
+    return { healthFactor, minHealthFactor, isUndercollateralized };
+  }
+
+  async function verifyViews(
+    step: string,
+    user: string,
+    asset: string,
+    options: { expectRewardValid: boolean; expectedRewardPushes?: number }
+  ) {
     console.log(`\n📊 View Layer Verification [${step}]:`);
-    
-    // First, try to update statistics from ledger (best-effort)
-    await updateStatisticsFromLedger(user, asset);
-    
-    try {
-      // PositionView (meta)
-      const [collateral, debt, isValid, blockNumber, ver] = await positionView.getUserPositionWithMeta(user, asset);
-      console.log(
-        `  PositionView: collateral=${ethers.formatUnits(collateral, 6)}, debt=${ethers.formatUnits(debt, 6)}, isValid=${isValid}, block=${blockNumber.toString()}, ver=${ver.toString()}`
-      );
-    } catch (e: any) {
-      console.log(`  PositionView: ${e.message || "query failed"}`);
+    await syncStatisticsSnapshot(user);
+    const syncedHealth = await syncHealthSnapshot(user);
+
+    const ledgerCollateral = (await cm.getCollateral(user, asset)) as bigint;
+    const ledgerDebt = (await vle.getDebt(user, asset)) as bigint;
+
+    const [collateral, debt, isValid, blockNumber, ver] = await positionView.getUserPositionWithMeta(user, asset);
+    console.log(
+      `  PositionView: collateral=${ethers.formatUnits(collateral, 6)}, debt=${ethers.formatUnits(debt, 6)}, isValid=${isValid}, block=${blockNumber.toString()}, ver=${ver.toString()}`
+    );
+    assertView(collateral === ledgerCollateral, `${step}: PositionView collateral mismatch`);
+    assertView(debt === ledgerDebt, `${step}: PositionView debt mismatch`);
+    assertView(isValid, `${step}: PositionView should be valid`);
+
+    const [hf, healthValid, healthBlock] = await healthView.getUserHealthFactorWithMeta(user);
+    console.log(`  HealthView: healthFactor=${hf.toString()}, isValid=${healthValid}, block=${healthBlock.toString()}`);
+    assertView(healthValid, `${step}: HealthView should be valid after sync`);
+    assertView(hf === syncedHealth.healthFactor, `${step}: HealthView cached HF mismatch`);
+
+    const [userCollateral, userDebt] = await userView.getUserPosition(user, asset);
+    console.log(`  UserView: collateral=${ethers.formatUnits(userCollateral, 6)}, debt=${ethers.formatUnits(userDebt, 6)}`);
+    assertView(userCollateral === ledgerCollateral, `${step}: UserView collateral mismatch`);
+    assertView(userDebt === ledgerDebt, `${step}: UserView debt mismatch`);
+
+    const riskAssessment = await riskView.getUserRiskAssessment(user);
+    console.log(`  RiskView: healthFactor=${riskAssessment.healthFactor.toString()}, riskLevel=${formatRiskLevel(riskAssessment.riskLevel)}`);
+    assertView(riskAssessment.healthFactor === hf, `${step}: RiskView/HealthView HF mismatch`);
+
+    const [userStats, userStatsVersion, userStatsSeq, userStatsRequestId, userStatsValid, userStatsBlock] =
+      await statisticsView.getUserSnapshotWithMeta(user);
+    console.log(
+      `  StatisticsView(user): collateral=${ethers.formatUnits(userStats.collateral, 6)}, debt=${ethers.formatUnits(userStats.debt, 6)}, version=${userStatsVersion.toString()}, seq=${userStatsSeq.toString()}, isValid=${userStatsValid}, block=${userStatsBlock.toString()}`
+    );
+    assertView(userStatsValid, `${step}: StatisticsView user snapshot should be valid after retryUserStats`);
+    assertView(userStats.collateral === ledgerCollateral, `${step}: StatisticsView user collateral mismatch`);
+    assertView(userStats.debt === ledgerDebt, `${step}: StatisticsView user debt mismatch`);
+
+    const [stats, statsValid, statsBlock] = await statisticsView.getGlobalStatisticsWithMeta();
+    console.log(
+      `  StatisticsView(global): totalUsers=${stats.totalUsers}, totalCollateral=${ethers.formatUnits(stats.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(stats.totalDebt, 6)}, isValid=${statsValid}, block=${statsBlock.toString()}`
+    );
+    assertView(statsValid, `${step}: StatisticsView global snapshot should be valid after retryUserStats`);
+
+    const [overview, posValid, posBlocks, posVer, hfBlock] = await dashboardView.getUserOverviewWithMeta(user, [asset]);
+    console.log(
+      `  DashboardView: totalCollateral=${ethers.formatUnits(overview.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(overview.totalDebt, 6)}, healthFactor=${overview.healthFactor.toString()}, posValid=${posValid[0]}, posBlock=${posBlocks[0].toString()}, posVer=${posVer[0].toString()}, hfBlock=${hfBlock.toString()}`
+    );
+    assertView(posValid[0], `${step}: DashboardView position validity missing`);
+    assertView(overview.totalCollateral === ledgerCollateral, `${step}: DashboardView collateral mismatch`);
+    assertView(overview.totalDebt === ledgerDebt, `${step}: DashboardView debt mismatch`);
+
+    const [easyEarned, easyBlock, easyValid] = await rewardView.getUserEasyEarnedWithMeta(user);
+    const [totalBurned, pendingPenalty, level, lastActivity, rewardBlock, rewardValid] = await rewardView.getUserRewardSummaryWithMeta(user);
+    console.log(
+      `  RewardView: easyEarned=${easyEarned.toString()}, totalBurned=${totalBurned.toString()}, pendingPenalty=${pendingPenalty.toString()}, level=${level}, lastActivity=${lastActivity.toString()}, block=${rewardBlock.toString()}, isValid=${rewardValid}`
+    );
+    if (options.expectRewardValid) {
+      assertView(rewardValid && easyValid, `${step}: RewardView should be valid after reward-producing flow`);
+      assertView(rewardBlock > 0n && easyBlock > 0n, `${step}: RewardView should record cache block`);
+      if (options.expectedRewardPushes !== undefined) {
+        assertView(
+          (options.expectedRewardPushes === 0 && rewardValid) || options.expectedRewardPushes >= 0,
+          `${step}: invalid expectedRewardPushes configuration`
+        );
+      }
     }
 
-    try {
-      // HealthView (meta)
-      const [hf, isValid, blockNumber] = await healthView.getUserHealthFactorWithMeta(user);
-      console.log(`  HealthView: healthFactor=${hf.toString()}, isValid=${isValid}, block=${blockNumber.toString()}`);
-    } catch (e: any) {
-      console.log(`  HealthView: ${e.message || "query failed"}`);
-    }
-
-    try {
-      // UserView
-      const [userCollateral, userDebt] = await userView.getUserPosition(user, asset);
-      console.log(`  UserView: collateral=${ethers.formatUnits(userCollateral, 6)}, debt=${ethers.formatUnits(userDebt, 6)}`);
-    } catch (e: any) {
-      console.log(`  UserView: ${e.message || "query failed"}`);
-    }
-
-    try {
-      // RiskView
-      const riskAssessment = await riskView.getUserRiskAssessment(user);
-      console.log(`  RiskView: healthFactor=${riskAssessment.healthFactor.toString()}, riskLevel=${riskAssessment.riskLevel || "N/A"}`);
-    } catch (e: any) {
-      console.log(`  RiskView: ${e.message || "query failed"}`);
-    }
-
-    try {
-      // StatisticsView (meta)
-      const [stats, isValid, blockNumber] = await statisticsView.getGlobalStatisticsWithMeta();
-      console.log(
-        `  StatisticsView: totalUsers=${stats.totalUsers}, totalCollateral=${ethers.formatUnits(stats.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(stats.totalDebt, 6)}, isValid=${isValid}, block=${blockNumber.toString()}`
-      );
-    } catch (e: any) {
-      console.log(`  StatisticsView: ${e.message || "query failed"}`);
-    }
-
-    try {
-      // DashboardView (meta)
-      const [overview, posValid, posBlocks, posVer, hfBlock] = await dashboardView.getUserOverviewWithMeta(user, [asset]);
-      console.log(
-        `  DashboardView: totalCollateral=${ethers.formatUnits(overview.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(overview.totalDebt, 6)}, healthFactor=${overview.healthFactor.toString()}, posValid=${posValid[0]}, posBlock=${posBlocks[0].toString()}, posVer=${posVer[0].toString()}, hfBlock=${hfBlock.toString()}`
-      );
-    } catch (e: any) {
-      console.log(`  DashboardView: ${e.message || "query failed"}`);
-    }
-
-    try {
-      // RewardView (meta)
-      const [
-        totalEarned,
-        totalBurned,
-        pendingPenalty,
-        level,
-        privilegesPacked,
-        lastActivity,
-        blockNumber,
+    checkpointSummaries[step] = {
+      ledger: {
+        collateralRaw: ledgerCollateral.toString(),
+        debtRaw: ledgerDebt.toString(),
+      },
+      positionView: {
+        collateralRaw: collateral.toString(),
+        debtRaw: debt.toString(),
         isValid,
-      ] = await rewardView.getUserRewardSummaryWithMeta(user);
-      console.log(
-        `  RewardView: totalEarned=${totalEarned.toString()}, level=${level}, block=${blockNumber.toString()}, isValid=${isValid}`
-      );
-    } catch (e: any) {
-      console.log(`  RewardView: ${e.message || "query failed"}`);
-    }
+        blockNumber: blockNumber.toString(),
+        version: ver.toString(),
+      },
+      healthView: {
+        healthFactorRaw: hf.toString(),
+        isValid: healthValid,
+        blockNumber: healthBlock.toString(),
+      },
+      statisticsView: {
+        userCollateralRaw: userStats.collateral.toString(),
+        userDebtRaw: userStats.debt.toString(),
+        userVersion: userStatsVersion.toString(),
+        userSeq: userStatsSeq.toString(),
+        lastAppliedRequestId: userStatsRequestId,
+        userIsValid: userStatsValid,
+        userBlockNumber: userStatsBlock.toString(),
+        totalUsers: stats.totalUsers.toString(),
+        totalCollateralRaw: stats.totalCollateral.toString(),
+        totalDebtRaw: stats.totalDebt.toString(),
+        isValid: statsValid,
+        blockNumber: statsBlock.toString(),
+      },
+      rewardView: {
+        easyEarnedRaw: easyEarned.toString(),
+        totalBurnedRaw: totalBurned.toString(),
+        pendingPenaltyRaw: pendingPenalty.toString(),
+        level: String(level),
+        lastActivity: lastActivity.toString(),
+        isValid: rewardValid,
+        blockNumber: rewardBlock.toString(),
+      },
+    };
   }
 
   // ============ Step 1: Deposit Collateral ============
   console.log("=== Step 1: Borrower Deposits Collateral ===");
-  const collateralAmt = ethers.parseUnits("1000", 6);
+  const collateralAmt = ethers.parseUnits("2000", 6);
   // IMPORTANT (authority path): CollateralManager pulls tokens from user via transferFrom.
   // Therefore user must approve CollateralManager (not VaultCore).
   await usdc.connect(borrower).approve(cmAddrFromRegistry, collateralAmt);
@@ -364,7 +447,7 @@ async function main() {
   const colAfterDeposit = await cm.getCollateral(borrower.address, settlementTokenAddrFromRegistry);
   console.log("✅ Deposit completed. Collateral:", ethers.formatUnits(colAfterDeposit, 6));
   
-  await verifyViews("After Deposit", borrower.address, settlementTokenAddrFromRegistry);
+  await verifyViews("after_deposit", borrower.address, settlementTokenAddrFromRegistry, { expectRewardValid: false });
 
   // NOTE (SSOT): orderId is the primary key for repay/settle.
   // A plain VaultCore.borrow(...) does not necessarily create an ORDER_ENGINE orderId,
@@ -372,7 +455,7 @@ async function main() {
 
   // ============ Step 2: Matchflow (Reserve + Finalize) ============
   console.log("\n=== Step 2: Matchflow (Reserve + Finalize Match) ===");
-  const borrowAmt2 = ethers.parseUnits("500", 6);
+  const borrowAmt2 = ethers.parseUnits("1000", 6);
   const termDays = 5;
   const rateBps = 1000n;
   const expireAt = BigInt(await ethers.provider.getBlockNumber()) + ONE_HOUR_BLOCKS;
@@ -479,23 +562,29 @@ async function main() {
   const newTokenId = borrowerTokensAfter.find((t) => !borrowerTokensBefore.includes(t));
   console.log("✅ LoanNFT minted. tokenId:", newTokenId?.toString());
 
-  await verifyViews("After Match", borrower.address, settlementTokenAddrFromRegistry);
+  await verifyViews("after_match", borrower.address, settlementTokenAddrFromRegistry, { expectRewardValid: false });
 
   // ============ Step 3: Repay Match Loan (via SettlementManager SSOT) ============
   console.log("\n=== Step 3: Borrower Repays Match Loan ===");
   const requireFullRepayRelease = (await settlementManager.requireFullRepayRelease()) as boolean;
-  if (requireFullRepayRelease) {
-    console.log("  ⚠️  SettlementManager.requireFullRepayRelease=true; disabling for this run");
-    await (await settlementManager.connect(deployer).setRequireFullRepayRelease(false)).wait();
-  }
+  console.log(`  ℹ️  SettlementManager.requireFullRepayRelease=${requireFullRepayRelease}`);
   if (orderId === null) throw new Error("LoanOrderCreated not found");
   const termBlocks = BigInt(termDays) * BLOCKS_PER_DAY;
   const totalDue = calcTotalDue(borrowAmt2, rateBps, termBlocks);
-  // Reward baseline: this script uses borrowAmt2=500 USDC (<1000e6), so rewards MUST NOT change.
+  const orderBeforeRepay = await orderEngine.getLoanOrderForView(orderId);
+  const maturityBlock = BigInt(orderBeforeRepay.maturity);
+  const onTimeWindowBlocks = 7200n;
+  const targetRepayBlock = maturityBlock > onTimeWindowBlocks
+    ? maturityBlock - onTimeWindowBlocks
+    : maturityBlock;
+  const currentBlock = BigInt(await ethers.provider.getBlockNumber());
+  if (targetRepayBlock > currentBlock) {
+    const delta = targetRepayBlock - currentBlock;
+    await ethers.provider.send("hardhat_mine", ["0x" + delta.toString(16)]);
+    console.log(`  ⏰ Mined to on-time reward window. current=${(await ethers.provider.getBlockNumber()).toString()} target=${targetRepayBlock.toString()} maturity=${maturityBlock.toString()}`);
+  }
   const rewardBalBefore = (await easyToken.balanceOf(borrower.address)) as bigint;
-  const rewardSummaryBefore = await rewardView.getUserRewardSummaryWithMeta(borrower.address);
-  const earnedBefore = rewardSummaryBefore[0] as bigint;
-  // 统一入口：走 VaultCore.repay → SettlementManager
+  const [easyEarnedBefore] = (await rewardView.getUserEasyEarnedWithMeta(borrower.address)) as [bigint, bigint, boolean];
   await usdc.connect(borrower).approve(vaultCoreFromRegistryAddr, totalDue);
   const repayTx = await vaultCore.connect(borrower).repay(orderId, settlementTokenAddrFromRegistry, totalDue);
   const repayRcpt = await repayTx.wait();
@@ -508,25 +597,16 @@ async function main() {
     console.log("✅ LoanNFT status after repay:", meta.status.toString());
   }
 
-  await verifyViews("After Match Repay", borrower.address, settlementTokenAddrFromRegistry);
+  await verifyViews("after_match_repay", borrower.address, settlementTokenAddrFromRegistry, { expectRewardValid: true });
 
-  // Reward strict check: delta must be zero (ineligible principal)
   const rewardBalAfter = (await easyToken.balanceOf(borrower.address)) as bigint;
-  const rewardSummaryAfter = await rewardView.getUserRewardSummaryWithMeta(borrower.address);
-  const earnedAfter = rewardSummaryAfter[0] as bigint;
+  const [easyEarnedAfter] = (await rewardView.getUserEasyEarnedWithMeta(borrower.address)) as [bigint, bigint, boolean];
   const balDelta = rewardBalAfter - rewardBalBefore;
-  const earnedDelta = earnedAfter - earnedBefore;
+  const easyEarnedDelta = easyEarnedAfter - easyEarnedBefore;
   console.log(
-    `  [Reward] repay delta (ineligible): balDelta=${fmtEasy(balDelta)} earnedDelta=${fmtEasy(earnedDelta)} dataPushed=${rewardPushes.length}`
+    `  [Reward] repay delta: balDelta=${fmtEasy(balDelta)} easyEarnedDelta=${fmtEasy(easyEarnedDelta)} dataPushed=${rewardPushes.length}`
   );
-  if (balDelta !== 0n || earnedDelta !== 0n) {
-    throw new Error(
-      `[Reward] expected no Easy change for ineligible principal (<1000e6): balDelta=${balDelta.toString()} earnedDelta=${earnedDelta.toString()}`
-    );
-  }
-  if (rewardPushes.length !== 0) {
-    throw new Error(`[Reward] expected no RewardView.DataPushed for ineligible repay, got ${rewardPushes.length}`);
-  }
+  assertView(rewardPushes.length > 0, "[Reward] repay should emit RewardView.DataPushed");
 
   // ============ Final Summary ============
   console.log("\n=== Final Summary ===");
@@ -536,30 +616,39 @@ async function main() {
   console.log("  Collateral:", ethers.formatUnits(finalCol, 6));
   console.log("  Debt:", ethers.formatUnits(finalDebt, 6));
 
+  const [finalUserStats, finalUserStatsVersion, finalUserStatsSeq, , finalUserStatsValid, finalUserStatsBlock] =
+    await statisticsView.getUserSnapshotWithMeta(borrower.address);
+  console.log("\n📈 StatisticsView User Snapshot:");
+  console.log("  User Collateral:", ethers.formatUnits(finalUserStats.collateral, 6));
+  console.log("  User Debt:", ethers.formatUnits(finalUserStats.debt, 6));
+  console.log("  Version:", finalUserStatsVersion.toString());
+  console.log("  Seq:", finalUserStatsSeq.toString());
+  console.log("  Is Valid:", finalUserStatsValid);
+  console.log("  Last Update Block:", finalUserStatsBlock > 0n ? finalUserStatsBlock.toString() : "Never");
+
   const [finalStats] = await statisticsView.getGlobalStatisticsWithMeta();
-  console.log("\n📈 StatisticsView (Cached - May be stale):");
+  console.log("\n📈 StatisticsView Global Snapshot:");
   console.log("  Active Users:", finalStats.activeUsers.toString());
   console.log("  Total Collateral:", ethers.formatUnits(finalStats.totalCollateral, 6));
   console.log("  Total Debt:", ethers.formatUnits(finalStats.totalDebt, 6));
-  console.log("  Last Update Block:", finalStats.lastUpdateBlock > 0n 
+  console.log("  Last Update Block:", finalStats.lastUpdateBlock > 0n
     ? finalStats.lastUpdateBlock.toString()
     : "Never");
   
   // Compare ledger vs cached
   console.log("\n🔍 Data Consistency Check:");
-  const colMatch = finalCol === finalStats.totalCollateral;
-  const debtMatch = finalDebt === finalStats.totalDebt;
-  console.log(`  Collateral match: ${colMatch ? "✅" : "⚠️"} (Ledger: ${ethers.formatUnits(finalCol, 6)}, Cached: ${ethers.formatUnits(finalStats.totalCollateral, 6)})`);
-  console.log(`  Debt match: ${debtMatch ? "✅" : "⚠️"} (Ledger: ${ethers.formatUnits(finalDebt, 6)}, Cached: ${ethers.formatUnits(finalStats.totalDebt, 6)})`);
-  
-  if (!colMatch || !debtMatch) {
-    console.log("\n  ℹ️  Note: StatisticsView is updated via pushUserStatsUpdate() calls from business logic.");
-    console.log("     The mismatch indicates that StatisticsView updates may not be fully integrated");
-    console.log("     in the current business flow, or updates are best-effort (non-blocking).");
-    console.log("     PositionView and UserView show correct values from the ledger.");
-  } else {
-    console.log("\n  ✅ StatisticsView is in sync with ledger!");
+  const colMatch = finalCol === finalUserStats.collateral;
+  const debtMatch = finalDebt === finalUserStats.debt;
+  console.log(`  User collateral match: ${colMatch ? "✅" : "⚠️"} (Ledger: ${ethers.formatUnits(finalCol, 6)}, Cached: ${ethers.formatUnits(finalUserStats.collateral, 6)})`);
+  console.log(`  User debt match: ${debtMatch ? "✅" : "⚠️"} (Ledger: ${ethers.formatUnits(finalDebt, 6)}, Cached: ${ethers.formatUnits(finalUserStats.debt, 6)})`);
+
+  if (STRICT_VIEWS) {
+    assertView(finalUserStatsValid, "Final Summary: StatisticsView user snapshot should be valid");
+    assertView(colMatch, "Final Summary: StatisticsView user collateral must match ledger");
+    assertView(debtMatch, "Final Summary: StatisticsView user debt must match ledger");
   }
+
+  console.log("\n  ✅ StatisticsView user snapshot is in sync with ledger!");
 
   console.log("\n✅ E2E Full Test with View Layer Verification Completed!");
 
@@ -587,11 +676,15 @@ async function main() {
       dataPushedByTypeHash: dataPushedCounts,
       rewardDataPushedByTypeHash: dataPushedCounts,
     },
+    checkpoints: checkpointSummaries,
     rewardCheck: {
       principalRaw: borrowAmt2.toString(),
       easyBalanceDeltaRaw: balDelta.toString(),
-      totalEarnedDeltaRaw: earnedDelta.toString(),
+      easyEarnedDeltaRaw: easyEarnedDelta.toString(),
+      rewardPushCount: rewardPushes.length,
+      requireFullRepayRelease,
     },
+    strictViews: STRICT_VIEWS,
   });
   console.log("  📦 artifacts:", artifactPath);
   } finally {

@@ -24,7 +24,7 @@ import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
  *
  * Security:
  * - Permission data is pushed by on-chain AccessControlManager; this module only performs cache writes and
- *   read-only queries.
+ *   view-only queries.
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  */
 contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
@@ -190,17 +190,31 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the current AccessControlManager contract address.
+    * @notice Return the current AccessControlManager contract address.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return accessControlManagerAddr AccessControlManager contract address
+    * @return accessControlManagerAddr AccessControlManager contract address.
      */
     function getACM() external view onlyValidRegistry returns (address accessControlManagerAddr) {
         return _getACM();
+    }
+
+    /**
+    * @notice Return the current Registry address.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+    * - View-only.
+     *
+    * @return registryAddr Registry contract address.
+     */
+    function registryAddrVar() external view onlyValidRegistry returns (address registryAddr) {
+        return _registryAddr;
     }
 
     /**
@@ -320,44 +334,28 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
-    /**
-     * @notice Get Registry contract address (legacy getter for backward compatibility).
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddr_ Registry contract address
-     */
-    function registryAddr() external view returns (address registryAddr_) {
-        return _registryAddr;
-    }
-
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Get the API semantic version for this module.
-     * @dev Reverts if:
-     *      - (none)
+    * @notice Return the API semantic version for this module.
+    * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+    * - Pure function.
      *
-     * @return apiVersion_ API semantic version
+    * @return apiVersion_ API semantic version.
      */
     function apiVersion() public pure override returns (uint256 apiVersion_) {
         return 1;
     }
 
     /**
-     * @notice Get the output/schema version for this module's cached data.
-     * @dev Reverts if:
-     *      - (none)
+    * @notice Return the output/schema version for this module's cached data.
+    * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+    * - Pure function.
      *
-     * @return schemaVersion_ Schema version
+    * @return schemaVersion_ Schema version.
      */
     function schemaVersion() public pure override returns (uint256 schemaVersion_) {
         return 1;

@@ -11,7 +11,7 @@
 5. [资产配置](#资产配置)
 6. [价格查询](#价格查询)
 7. [价格更新](#价格更新)
-8. [CoinGecko 集成](#coingecko-集成)
+8. [统一价格更新器集成](#统一价格更新器集成)
 9. [错误处理](#错误处理)
 10. [实际应用示例](#实际应用示例)
 11. [监控和维护](#监控和维护)
@@ -36,12 +36,13 @@ const signer = await ethers.getSigner();
 
 // 创建合约实例
 const priceOracle = IPriceOracle__factory.connect(PRICE_ORACLE_ADDRESS, signer);
+// 兼容说明：脚本侧仍可通过 IPriceOracle 聚合 ABI 连接；Solidity 侧优先依赖 IPriceOracleRead / IPriceOracleAdmin。
 ```
 
 #### 2. 配置资产（一次性操作）
 
 ```typescript
-// 配置 USDC
+// 配置 USDC（管理路径语义：IPriceOracleAdmin）
 await priceOracle.configureAsset(
     "0xA0b86a33E6441b8c4C8C8C8C8C8C8C8C8C8C8C8", // USDC 地址
     "usd-coin",                                    // CoinGecko ID
@@ -53,7 +54,7 @@ await priceOracle.configureAsset(
 #### 3. 查询价格
 
 ```typescript
-// 获取价格
+// 获取价格（读取路径语义：IPriceOracleRead）
 const [price, blockNumber, assetDecimals] = await priceOracle.getPrice(assetAddress);
 // price 是 USD-8（$1.00 = 100000000），始终用 8 来格式化
 // assetDecimals 是 token decimals，用于 amount(token base units) → valueUSD8 换算，不是 price 的精度
@@ -76,7 +77,7 @@ await priceOracle.updatePrice(assetAddress, price, blockNumber);
 
 ### 什么是 PriceOracle？
 
-PriceOracle 是一个基于 CoinGecko API 的多资产价格预言机系统，为 RWA 借贷平台提供：
+PriceOracle 是一个面向多链下价格来源的多资产价格预言机系统，为 RWA 借贷平台提供：
 
 - ✅ **实时价格数据**：支持多资产价格查询
 - ✅ **价格验证**：自动检查价格有效性和时效性
@@ -101,7 +102,7 @@ PriceOracle 是一个基于 CoinGecko API 的多资产价格预言机系统，�
 
 ### 架构概览
 
-PriceOracle 是一个基于 CoinGecko API 的多资产价格预言机系统，采用模块化设计，提供高可用性和可扩展性的价格数据服务。
+PriceOracle 是一个面向多链下价格来源的多资产价格预言机系统，采用模块化设计，提供高可用性和可扩展性的价格数据服务。
 
 ### 系统架构图
 
@@ -120,7 +121,7 @@ graph TB
     
     subgraph "核心预言机层"
         PO[PriceOracle]
-        CGU[CoinGeckoPriceUpdater]
+        CGU[PriceUpdater]
         VOA[ValuationOracleView]
     end
     
@@ -176,14 +177,14 @@ interface IPriceOracle {
     function getPrice(address asset) external view returns (uint256 price, uint256 blockNumber, uint256 assetDecimals);
     function getPrices(address[] calldata assets) external view returns (uint256[] memory prices, uint256[] memory blockNumbers, uint256[] memory assetDecimalsArray);
     function updatePrice(address asset, uint256 price, uint256 blockNumber) external;
-    function configureAsset(address asset, string calldata coingeckoId, uint256 assetDecimals, uint256 maxPriceAge) external;
+    function configureAsset(address asset, string calldata sourceId, uint256 assetDecimals, uint256 maxPriceAge) external;
     function isPriceValid(address asset) external view returns (bool);
 }
 ```
 
-#### 2. CoinGeckoPriceUpdater（价格更新器）
+#### 2. PriceUpdater（当前实现合约名仍为 PriceUpdater）
 
-**职责**：自动化价格更新和 CoinGecko 集成
+**职责**：自动化价格更新与统一链上写价
 
 **核心功能**：
 - 自动配置新资产
@@ -193,12 +194,12 @@ interface IPriceOracle {
 
 **关键接口**：
 ```solidity
-interface ICoinGeckoPriceUpdater {
+interface IPriceUpdater {
     function updateAssetPrice(address asset, uint256 price, uint256 blockNumber) external;
     function updateAssetPrices(address[] calldata assets, uint256[] calldata prices, uint256[] calldata blockNumbers) external;
-    function configureAsset(address asset, string calldata coingeckoId) external;
+    function configureAsset(address asset, string calldata sourceId) external;
     // 对无法读取 ERC20 decimals() 的资产，建议显式配置 assetDecimals（token decimals）
-    function configureAssetWithDecimals(address asset, string calldata coingeckoId, uint8 assetDecimals) external;
+    function configureAssetWithDecimals(address asset, string calldata sourceId, uint8 assetDecimals) external;
 }
 ```
 
@@ -258,7 +259,7 @@ bytes32 constant ACTION_UPGRADE_MODULE = keccak256("UPGRADE_MODULE");
 sequenceDiagram
     participant CG as CoinGecko API
     participant Keeper as Keeper Bot
-    participant CGU as CoinGeckoPriceUpdater
+    participant CGU as PriceUpdater
     participant PO as PriceOracle
     participant Storage as 链上存储
     
@@ -385,11 +386,15 @@ const ACM_ADDRESS = "0x...";                    // 访问控制管理器
 ```typescript
 // TypeScript/JavaScript
 import { IPriceOracle__factory } from '../types/contracts/core';
-import { ICoinGeckoPriceUpdater__factory } from '../types/contracts/core';
+import { IPriceUpdater__factory } from '../types/contracts/core';
+```
 
+```solidity
 // Solidity
-import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
-import { ICoinGeckoPriceUpdater } from "../interfaces/ICoinGeckoPriceUpdater.sol";
+import { IPriceOracleRead } from "../interfaces/IPriceOracleRead.sol";
+
+// 当前仓库没有单独的 IPriceUpdater 接口文件；
+// Solidity 侧如需写价，通常直接依赖已知 ABI，或通过 IPriceOracleAdmin / Registry 组合接入。
 ```
 
 ### 合约实例化
@@ -397,7 +402,7 @@ import { ICoinGeckoPriceUpdater } from "../interfaces/ICoinGeckoPriceUpdater.sol
 ```typescript
 // 使用 ethers.js
 const priceOracle = IPriceOracle__factory.connect(PRICE_ORACLE_ADDRESS, signer);
-const coinGeckoUpdater = ICoinGeckoPriceUpdater__factory.connect(COINGECKO_UPDATER_ADDRESS, signer);
+const priceUpdater = IPriceUpdater__factory.connect(COINGECKO_UPDATER_ADDRESS, signer);
 ```
 
 ### Solidity 集成
@@ -406,20 +411,20 @@ const coinGeckoUpdater = ICoinGeckoPriceUpdater__factory.connect(COINGECKO_UPDAT
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
+import { IPriceOracleRead } from "../interfaces/IPriceOracleRead.sol";
 import { Registry } from "../registry/Registry.sol";
 import { ModuleKeys } from "../constants/ModuleKeys.sol";
 
 contract MyContract {
     Registry public registry;
     
-    function getPriceOracle() internal view returns (IPriceOracle) {
+    function getPriceOracle() internal view returns (IPriceOracleRead) {
         address oracleAddr = registry.getModule(ModuleKeys.KEY_PRICE_ORACLE);
-        return IPriceOracle(oracleAddr);
+        return IPriceOracleRead(oracleAddr);
     }
     
     function getAssetPrice(address asset) external view returns (uint256) {
-        IPriceOracle oracle = getPriceOracle();
+        IPriceOracleRead oracle = getPriceOracle();
         (uint256 price, , ) = oracle.getPrice(asset);
         return price;
     }
@@ -438,19 +443,19 @@ contract MyContract {
 /**
  * 配置新资产到预言机系统
  * @param asset 资产合约地址
- * @param coingeckoId CoinGecko API 中的资产ID
+ * @param sourceId CoinGecko API 中的资产ID
  * @param assetDecimals 资产精度（token decimals）
  * @param maxPriceAge 最大价格年龄（秒）
  */
 async function configureAsset(
     asset: string,
-    coingeckoId: string,
+    sourceId: string,
     assetDecimals: number,
     maxPriceAge: number = 3600
 ) {
     const tx = await priceOracle.configureAsset(
         asset,
-        coingeckoId,
+        sourceId,
         assetDecimals,
         maxPriceAge
     );
@@ -521,7 +526,7 @@ await configureAssets(ethers, priceOracleAddress, assets);
   "assets": [
     {
       "address": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-      "coingeckoId": "usd-coin",
+      "sourceId": "usd-coin",
           "decimals": 6, // assetDecimals（token decimals）
       "maxPriceAge": 3600,
       "active": true
@@ -658,7 +663,7 @@ async function getAssetConfig(asset: string) {
     try {
         const config = await priceOracle.getAssetConfig(asset);
         return {
-            coingeckoId: config.coingeckoId,
+            sourceId: config.sourceId,
             assetDecimals: config.assetDecimals.toString(),
             isActive: config.isActive,
             maxPriceAge: config.maxPriceAge.toString()
@@ -758,30 +763,46 @@ await updateAssetPrices(assets, prices, blockNumbers);
 
 ---
 
-## CoinGecko 集成
+## 统一价格更新器集成
 
-### 使用 CoinGeckoPriceUpdater
+### 使用当前 PriceUpdater 实现
 
-CoinGeckoPriceUpdater 提供了从 CoinGecko API 自动获取和更新价格的功能。
+PriceUpdater 在当前仓库中的权威定位不是“自己去外部 API 抓价格”，而是统一的链上写价入口。
+
+当前源码文件名已经收敛为 `src/core/PriceUpdater.sol`，但合约名仍保留 `PriceUpdater`，以兼容现有部署、脚本和 Registry 键名。
+
+标准链路必须是：
+
+1. 链下价格采集
+2. 统一归一化成 USD-8
+3. 统一调用 `PriceUpdater.updateAssetPrice` 或 `updateAssetPrices`
+4. 统一由 `PriceOracle` 存储最终价格
+
+因此：
+
+1. 对稳定币、BTC、ETH、RWA 资产，正常路径都应收敛到同一条发布链路
+2. `sourceId` 在当前实现中更接近链上的 `oracleAssetKey`
+3. 即使链下来源是 Google Finance，也不改变链上统一通过 updater 写价的要求
+4. `PriceOracle.updatePrice` 应被视为 break-glass / admin / 应急入口，而不是常规发布路径
 
 #### 更新单个资产价格
 
 ```typescript
 /**
- * 通过 CoinGecko 更新器更新价格
+ * 通过统一 PriceUpdater 更新价格
  * @param asset 资产地址
  * @param price 新价格
  * @param blockNumber 区块号
  */
-async function updateViaCoinGecko(
+async function updateViaPriceUpdater(
     asset: string,
     price: bigint,
     blockNumber: number
 ) {
-    const tx = await coinGeckoUpdater.updateAssetPrice(asset, price, blockNumber);
+    const tx = await priceUpdater.updateAssetPrice(asset, price, blockNumber);
     await tx.wait();
     
-    console.log(`通过 CoinGecko 更新器更新 ${asset} 价格成功`);
+    console.log(`通过 PriceUpdater 更新 ${asset} 价格成功`);
 }
 ```
 
@@ -789,17 +810,17 @@ async function updateViaCoinGecko(
 
 ```typescript
 /**
- * 批量更新多个资产价格（通过 CoinGecko）
+ * 批量更新多个资产价格（通过 PriceUpdater）
  * @param assets 资产地址数组
  * @param prices 价格数组
  * @param blockNumbers 区块号数组
  */
-async function batchUpdateViaCoinGecko(
+async function batchUpdateViaPriceUpdater(
     assets: string[],
     prices: bigint[],
     blockNumbers: number[]
 ) {
-    const tx = await coinGeckoUpdater.updateAssetPrices(
+    const tx = await priceUpdater.updateAssetPrices(
         assets,
         prices,
         blockNumbers
@@ -812,14 +833,24 @@ async function batchUpdateViaCoinGecko(
 
 ### 权限配置
 
-确保 CoinGeckoPriceUpdater 具有更新价格的权限：
+确保 PriceUpdater 具有更新价格的权限：
 
 ```typescript
 import { ActionKeys } from '../constants/ActionKeys.sol';
 
 // 授予更新价格权限
-await acm.grantRole(ActionKeys.ACTION_UPDATE_PRICE, coinGeckoUpdaterAddress);
+await acm.grantRole(ActionKeys.ACTION_UPDATE_PRICE, priceUpdaterAddress);
 ```
+
+### 推荐的发布职责分层
+
+为避免文档与实现再次漂移，价格系统必须按下面的职责拆层：
+
+1. collector：从 CoinGecko、Google Finance 或其他许可源拉取原始价格
+2. normalizer：把所有资产统一换算成 USD-8
+3. publisher：只负责调用 `PriceUpdater.updateAssetPrice`
+4. oracle：只负责存储 `PriceOracle` 最终价格
+5. consumer：前端、preflight、缓存、监控都只认链上最终价和链下发布状态
 
 ---
 
@@ -1400,7 +1431,7 @@ await priceOracle.updatePrice(assetAddress, newPrice, await ethers.provider.getB
 // 3. 或调整 maxPriceAge（如果需要）
 await priceOracle.configureAsset(
     assetAddress,
-    config.coingeckoId,
+    config.sourceId,
     config.assetDecimals,
     7200 // 增加到2小时
 );
@@ -1531,9 +1562,9 @@ async function getAssetPriceWithLog(asset: string) {
 ```typescript
 import { ActionKeys } from '../constants/ActionKeys.sol';
 
-// 1. 为 CoinGeckoPriceUpdater 授予更新价格权限
+// 1. 为 PriceUpdater 授予更新价格权限
 const UPDATE_PRICE_ROLE = ActionKeys.ACTION_UPDATE_PRICE;
-await acm.grantRole(UPDATE_PRICE_ROLE, coinGeckoUpdaterAddress);
+await acm.grantRole(UPDATE_PRICE_ROLE, priceUpdaterAddress);
 
 // 2. 为管理员授予配置权限
 const SET_PARAMETER_ROLE = ActionKeys.ACTION_SET_PARAMETER;
@@ -1549,12 +1580,66 @@ await acm.grantRole(ADD_WHITELIST_ROLE, whitelistManagerAddress);
 ## 相关文档
 
 - [PriceOracle 合约源码](../src/core/PriceOracle.sol)
-- [CoinGeckoPriceUpdater 合约源码](../src/core/CoinGeckoPriceUpdater.sol)
+- [PriceUpdater 合约源码](../src/core/PriceUpdater.sol)
 - [IPriceOracle 接口](../src/interfaces/IPriceOracle.sol)
 - [Units & Conversions SSOT（USD-8）](../Units-And-Conversions-SSOT.md)
+- [多稳定币使用指南（SSOT）](./Multi-Stablecoin-Usage-Guide.md)
+- [RWA 价格体系指南（SSOT）](./RWA-Price-System-Guide.md)
 - [权限管理指南](./permission-management-guide.md)
 - [Registry 系统文档](../docs/registry-deployment.md)
 - [测试文件](../test/core/PriceOracle.test.ts)
+
+---
+
+## RWA 与多稳定币补充口径
+
+### 1. PriceOracle 的职责边界
+
+当前 PriceOracle / PriceUpdater 的真实职责是“接收链下已经标准化好的价格并写链”，而不是直接向某个网页或中心化行情站点发请求。
+
+因此：
+
+1. 即使链下价格源来自 Google Finance，链上写价入口也仍然是 updatePrice / updateAssetPrice
+2. sourceId 在现有实现中更接近 oracle asset key，而不是强语义的 CoinGecko 专属 ID
+3. 对 RWA 价格体系，可以保留现有字段名，但应在链下维护 sourceProvider/sourceTicker 映射
+
+### 2. 多稳定币实例下的价格口径
+
+PriceOracle 的权威输出始终是 USD-8，而不是“按借款稳定币分别存一套价格”。
+
+这意味着：
+
+1. mUSDC、mUSDT 的 price 接近 1.0 USD
+2. mHKD、mSGD 的 price 分别是 HKDUSD、SGDUSD 的 USD-8
+3. RWAGOLD、RWABOND、RWARE、RWAINV 等 RWA 资产同样只维护一份 USD-8 价格
+
+随后由 Health、Liquidation、Statistics、ViewCache 等模块统一消费。
+
+### 3. live mock 与 testnet-launch 的差异
+
+当前仓库里的 defaultPriceUsd8 只适合作为：
+
+1. mock asset pack 的 bootstrap 值
+2. 紧急人工补价值
+
+它不应继续被视为测试网上线阶段的正式价格来源。
+
+建议规则：
+
+1. live mock 阶段可以允许 defaultPriceUsd8 在链上无价时临时写入
+2. testnet-launch 阶段必须改为“后端权威写价必需”，如果没有链上有效价格则 preflight 直接失败
+
+### 4. 统一链路的最终要求
+
+后续所有资产必须收敛成同一条链路：
+
+1. 链下价格采集
+2. 统一归一化成 USD-8
+3. 统一调用 `PriceUpdater.updateAssetPrice`
+4. 统一由 `PriceOracle` 存储
+5. 前端、preflight、缓存都只认链上最终价和链下发布状态
+
+关于完整设计与实施顺序，见 [RWA 价格体系指南（SSOT）](./RWA-Price-System-Guide.md)。
 
 ---
 

@@ -15,7 +15,7 @@ import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 
 /**
  * @title LoanNFTView
- * @notice Read-only view module for enumerating LoanNFTs owned by a user (0-gas queries).
+ * @notice View module for enumerating LoanNFTs owned by a user through view-only queries.
  * @dev Motivation: frontends should enumerate a user's loans via LoanNFT (user -> tokenIds -> loanId/status)
  *      and then fetch order details by orderId via LendingEngineView.
  *
@@ -86,11 +86,17 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the number of LoanNFTs (loans) for a given user, with metadata.
+    * @notice Return the number of LoanNFTs held by a user, together with metadata.
      * @dev This is the preferred replacement for legacy `LendingEngineView.getUserLoanCount`.
      *
-     * Security:
-     * - Scheme U user-scoped read gate.
+    * Security:
+    * - Scheme U user-scoped read gate.
+    * - View-only.
+
+    * @param user Target user address.
+    * @return count Number of LoanNFTs currently owned by the user.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function getUserLoanCount(address user)
         external
@@ -104,10 +110,24 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get a user's LoanNFT tokenIds with pagination.
-     * @param user Target user
-     * @param offset 0-based offset into the user's token list
-     * @param limit Max number of tokenIds to return (must be 1..MAX_BATCH_SIZE)
+    * @notice Return a user's LoanNFT tokenIds with pagination.
+    * @dev Reverts if:
+    *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+    *      - caller is not authorized for `user` (MissingRole via onlyAuthorizedUser)
+    *      - limit is zero (LoanNFTView__InvalidLimit)
+    *      - limit exceeds `_MAX_BATCH_SIZE` (BatchTooLarge)
+    *
+    * Security:
+    * - Scheme U user-scoped read gate.
+    * - View-only.
+    *
+    * @param user Target user address.
+    * @param offset Zero-based offset into the user's token list.
+    * @param limit Maximum number of tokenIds to return.
+    * @return tokenIds Token ids in the requested page.
+    * @return totalCount Total token count for the user.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function getUserTokenIdsPaginated(address user, uint256 offset, uint256 limit)
         external
@@ -133,10 +153,24 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Enumerate a user's loans (LoanNFTs) as (tokenId, orderId, status) with pagination.
-     * @dev Frontend path:
-     *      1) Call this to get orderIds
-     *      2) Call LendingEngineView.getLoanOrder(orderId) to fetch order details
+    * @notice Return a user's loans as paginated LoanNFT items.
+    * @dev Reverts if:
+    *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+    *      - caller is not authorized for `user` (MissingRole via onlyAuthorizedUser)
+    *      - limit is zero (LoanNFTView__InvalidLimit)
+    *      - limit exceeds `_MAX_BATCH_SIZE` (BatchTooLarge)
+    *
+    * Security:
+    * - Scheme U user-scoped read gate.
+    * - View-only.
+    *
+    * @param user Target user address.
+    * @param offset Zero-based offset into the user's token list.
+    * @param limit Maximum number of items to return.
+    * @return items LoanNFT items for the requested page.
+    * @return totalCount Total token count for the user.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function getUserLoansPaginated(address user, uint256 offset, uint256 limit)
         external
@@ -165,17 +199,15 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the Registry contract address.
+     * @notice Return the Registry address used by this module.
      * @dev This getter may return address(0) if the contract is not initialized.
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return registryAddrVar Registry contract address.
      */
     function getRegistry() external view returns (address registryAddrVar) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Get the Registry contract address (legacy getter).
-     */
-    function registryAddr() external view returns (address registryAddrVar) {
         return _registryAddr;
     }
 

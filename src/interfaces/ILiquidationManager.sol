@@ -12,6 +12,8 @@ pragma solidity ^0.8.20;
  * - Liquidation must write directly to ledger SSOT modules (CollateralManager + KEY_LE)
  *   and MUST NOT rely on View writes.
  * - View push is best-effort; failures must not revert ledger writes.
+ * - Current blocks-only maturity enforcement reaches this interface through {BlocksOnlyCoordinator} after upstream
+ *   role checks and collateral/debt selection logic have already been resolved.
  */
 interface ILiquidationManager {
     /**
@@ -27,6 +29,8 @@ interface ILiquidationManager {
      * Security:
      * - Direct ledger writes: CollateralManager.withdrawCollateralTo + KEY_LE.forceReduceDebt
      * - Best-effort View push (LiquidatorView.pushLiquidationUpdate); must not revert ledger writes
+     * - Callers in the current blocks-only path should only invoke this after the dedicated coordinator has decided
+     *   that collateral release is not available and liquidation is required.
      *
      * @param targetUser Liquidated user address
      * @param collateralAsset Seized collateral asset address
@@ -52,6 +56,8 @@ interface ILiquidationManager {
      *
      * Security:
      * - Preserves `liquidator == keeper msg.sender` semantics when SettlementManager routes the liquidation
+     * - Primarily preserves legacy SettlementManager attribution; current blocks-only maturity enforcement does not
+     *   rely on SettlementManager as its orchestration entrypoint.
      *
      * @param liquidator Original keeper address to attribute payouts and events to
      * @param targetUser Liquidated user address
@@ -80,6 +86,8 @@ interface ILiquidationManager {
      *
      * Security:
      * - Direct ledger writes per item; View push is best-effort and must not revert ledger writes
+     * - Batch callers must ensure each item has already passed upstream product-specific authorization and eligibility
+     *   checks before invoking liquidation fan-out.
      */
     function batchLiquidate(
         address[] calldata targetUsers,
@@ -89,4 +97,4 @@ interface ILiquidationManager {
         uint256[] calldata debtAmounts,
         uint256[] calldata bonuses
     ) external;
-} 
+}

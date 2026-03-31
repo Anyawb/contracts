@@ -12,7 +12,7 @@ import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
  * @title SystemView
- * @notice Unified read-only facade for registry discovery and cross-module view routing.
+ * @notice Unified view facade for registry discovery and cross-module view routing.
  * @dev Reverts if:
  *      - registry is zero / not a contract (ZeroAddress / NotAContract)
  *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via ViewAccessLib / ACM)
@@ -21,7 +21,7 @@ import { ViewVersioned } from "../ViewVersioned.sol";
  *      - UUPS upgrade is unauthorized (MissingRole via ACM)
  *
  * Security:
- * - Read-only facade: does not write business state and does not emit DataPush events.
+ * - View-only facade: does not write business state and does not emit DataPush events.
  * - Access control is enforced via ACTION_VIEW_SYSTEM_DATA for discovery endpoints.
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  */
@@ -51,7 +51,7 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if: (never)
      *
      * Security:
-     * - SystemView is a read-only routing facade and MUST NOT store any business caches.
+        * - SystemView is a view-only routing facade and MUST NOT store any business caches.
      */
     address private _registryAddr;
 
@@ -84,9 +84,9 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - initialRegistryAddr is not a contract (NotAContract)
      *
      * Security:
-     * - initializer (UUPS)
+    * - Initializer: callable once.
      *
-     * @param initialRegistryAddr Registry contract address
+    * @param initialRegistryAddr Registry contract address.
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -98,84 +98,53 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Basic metadata ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the Registry contract address (legacy getter).
-     * @dev Reverts if:
-     *      - (none)
+    * @notice Return the Registry contract address using the preferred frontend-facing name.
+    * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return registryAddr_ Registry contract address
-     */
-    function registry() external view returns (address registryAddr_) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Get the Registry contract address (legacy getter).
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddr_ Registry contract address
-     */
-    function registryAddr() external view returns (address registryAddr_) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Get the Registry contract address (preferred naming for frontend integration).
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddr_ Registry contract address
+    * @return registryAddr_ Registry contract address.
      */
     function registryAddrVar() external view returns (address registryAddr_) {
         return _registryAddr;
     }
 
     /**
-     * @notice Get the AccessControlManager contract address resolved from Registry.
+    * @notice Return the AccessControlManager contract address resolved from Registry.
      * @dev Reverts if:
      *      - Registry has no module for KEY_ACCESS_CONTROL (via Registry.getModuleOrRevert)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return accessControlManagerAddr AccessControlManager module address
+    * @return accessControlManagerAddr AccessControlManager module address.
      */
     function acm() external view returns (address accessControlManagerAddr) {
         return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
     }
 
     /**
-     * @notice Get the ViewCache module address resolved from Registry.
-     * @dev Reverts if:
-     *      - (none) (returns address(0) if not configured)
+    * @notice Return the ViewCache module address resolved from Registry.
+    * @dev Reverts if: (never). Returns address(0) if not configured.
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return viewCacheAddr ViewCache module address (or address(0) if not configured)
+    * @return viewCacheAddr ViewCache module address, or address(0) if not configured.
      */
     function viewCache() external view returns (address viewCacheAddr) {
         return Registry(_registryAddr).getModule(ModuleKeys.KEY_VIEW_CACHE);
     }
 
     /**
-     * @notice Get the ViewCache module address resolved from Registry (preferred naming for frontend integration).
-     * @dev Reverts if:
-     *      - (none) (returns address(0) if not configured)
+    * @notice Return the ViewCache module address using the preferred frontend-facing name.
+    * @dev Reverts if: (never). Returns address(0) if not configured.
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return viewCacheAddr ViewCache module address (or address(0) if not configured)
+    * @return viewCacheAddr ViewCache module address, or address(0) if not configured.
      */
     function viewCacheAddrVar() external view returns (address viewCacheAddr) {
         return Registry(_registryAddr).getModule(ModuleKeys.KEY_VIEW_CACHE);
@@ -189,10 +158,10 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - module is not configured (via Registry.getModuleOrRevert)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
      * @param key Module key (bytes32)
-     * @return moduleAddr Module address (non-zero)
+    * @return moduleAddr Module address resolved from Registry.
      */
     function getModule(bytes32 key) external view onlyValidRegistry onlyViewRole returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(key);
@@ -205,10 +174,10 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
      * @param key Module key (bytes32)
-     * @return moduleAddr Module address (or address(0) if not configured)
+    * @return moduleAddr Module address, or address(0) if not configured.
      */
     function getModuleOptional(bytes32 key) external view onlyValidRegistry onlyViewRole returns (address) {
         return Registry(_registryAddr).getModule(key);
@@ -223,11 +192,11 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      *        (SystemView__UnknownModuleName)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
      * @param name Module name (string); first resolved via ModuleKeys.getModuleKeyFromString(name),
      *             then falls back to Registry.getModule(keccak256(bytes(name))).
-     * @return moduleAddr Module address (non-zero)
+    * @return moduleAddr Module address resolved from the canonical or legacy name path.
      */
     function getNamedModule(string calldata name) external view onlyValidRegistry onlyViewRole returns (address) {
         // Prefer the canonical mapping (ModuleKeys legacy string compatibility).
@@ -249,11 +218,11 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
      * @param name Module name (string); first resolved via ModuleKeys.getModuleKeyFromString(name),
      *             then falls back to Registry.getModule(keccak256(bytes(name))).
-     * @return moduleAddr Module address (or address(0) if not configured)
+    * @return moduleAddr Module address, or address(0) if not configured.
      */
     function getNamedModuleOptional(string calldata name)
         external
@@ -272,15 +241,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Routing / discovery ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the canonical price view route (primary + fallback).
+    * @notice Return the canonical price-view route, including primary and fallback modules.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeHint_ Price route hint (primary: ValuationOracleView, fallback: PRICE_ORACLE)
+    * @return routeHint_ Price-route hint with primary and fallback module addresses.
      */
     function routePrice() external view onlyValidRegistry onlyViewRole returns (RouteHint memory routeHint_) {
         routeHint_.primaryRoute = RouteInfo({
@@ -294,15 +263,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the StatisticsView route.
+    * @notice Return the StatisticsView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for StatisticsView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for StatisticsView.
      */
     function routeStatistics() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -312,15 +281,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the RewardView route.
+    * @notice Return the RewardView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for RewardView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for RewardView.
      */
     function routeReward() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -330,15 +299,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the LiquidatorView route.
+    * @notice Return the LiquidatorView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for LiquidatorView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for LiquidatorView.
      */
     function routeLiquidation() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -348,15 +317,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the RiskView route.
+    * @notice Return the RiskView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for RiskView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for RiskView.
      */
     function routeRisk() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -366,15 +335,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the SystemRiskView route.
+    * @notice Return the SystemRiskView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for SystemRiskView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for SystemRiskView.
      */
     function routeSystemRisk() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -384,15 +353,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the UserView route.
+    * @notice Return the UserView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for UserView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for UserView.
      */
     function routeUser() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -402,15 +371,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the PositionView route.
+    * @notice Return the PositionView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for PositionView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for PositionView.
      */
     function routePosition() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -420,15 +389,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the BatchView route.
+    * @notice Return the BatchView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for BatchView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for BatchView.
      */
     function routeBatch() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -438,15 +407,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the DashboardView route.
+    * @notice Return the DashboardView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for DashboardView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for DashboardView.
      */
     function routeDashboard() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -456,15 +425,15 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the PreviewView route.
+    * @notice Return the PreviewView route.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA permission (via onlyViewRole)
      *
      * Security:
-     * - Role-gated via ACTION_VIEW_SYSTEM_DATA
+    * - Role-gated via ACTION_VIEW_SYSTEM_DATA.
      *
-     * @return routeInfo_ Route info for PreviewView (may return address(0) if not configured)
+    * @return routeInfo_ Route info for PreviewView.
      */
     function routePreview() external view onlyValidRegistry onlyViewRole returns (RouteInfo memory routeInfo_) {
         routeInfo_ = RouteInfo({
@@ -484,10 +453,10 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - newImplementation is not a contract (NotAContract)
      *
      * Security:
-     * - onlyValidRegistry modifier
-     * - ACTION_ADMIN role-gated via ACM
+    * - onlyValidRegistry modifier.
+    * - ACTION_ADMIN role-gated via ACM.
      *
-     * @param newImplementation New implementation contract address
+    * @param newImplementation New implementation contract address.
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
@@ -500,28 +469,26 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the API semantic version for this module.
-     * @dev Reverts if:
-     *      - (none)
+    * @notice Return the API semantic version for this module.
+    * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+    * - Pure function.
      *
-     * @return apiVersion_ API semantic version
+    * @return apiVersion_ API semantic version.
      */
     function apiVersion() public pure override returns (uint256 apiVersion_) {
         return 1;
     }
 
     /**
-     * @notice Get the output/schema version for this module.
-     * @dev Reverts if:
-     *      - (none)
+    * @notice Return the output/schema version for this module.
+    * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+    * - Pure function.
      *
-     * @return schemaVersion_ Schema version
+    * @return schemaVersion_ Schema version.
      */
     function schemaVersion() public pure override returns (uint256 schemaVersion_) {
         return 1;

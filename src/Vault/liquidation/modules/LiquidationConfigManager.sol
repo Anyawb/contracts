@@ -18,27 +18,17 @@ import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.s
 import {Registry} from "../../../registry/Registry.sol";
 import {RegistryEvents} from "../../../registry/RegistryEventsLibrary.sol";
 
-/// @title LiquidationConfigManager
-/// @notice Base class for liquidation configuration management.
-/// @dev Provides module address caching, Registry integration, access control, and emergency pause.
-/// @dev Module positioning: abstract base class for other liquidation modules to inherit.
-/// @dev Design principles:
-///     - Module address caching: caches commonly used module addresses through ModuleCache
-///       to reduce Registry query overhead
-///     - Unified access control: uses LiquidationAccessControl library, unified permission verification through ACM
-///     - Registry integration: all module addresses are resolved through Registry (no hardcoding)
-///     - Emergency pause mechanism: emergency pause/resume functionality for governance/operations
-///     - UUPS upgrade support: supports secure contract upgrades; upgrade permissions are controlled
-///       through ACTION_UPGRADE_MODULE
-/// @dev Integration with liquidation flow:
-///     - Subclasses inherit module caching, access control, and other common capabilities
-///     - Module addresses are uniformly resolved through Registry to ensure address consistency
-///     - Permission verification is unified through ACM to avoid scattered permission logic
-/// @dev Naming conventions (following Architecture-Guide.md §852-879):
-///     - Private state variables: _ + camelCase (e.g., _registryAddr, _baseStorage, _moduleCache)
-///     - Public variables: camelCase + Var (e.g., registryAddrVar)
-///     - Constants: UPPER_SNAKE_CASE (e.g., CACHE_MAX_AGE)
-///     - Event names: PascalCase, past tense (e.g., SystemPaused, SystemUnpaused)
+/**
+ * @title LiquidationConfigManager
+ * @notice Provides shared liquidation configuration, module cache, and governance helpers.
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
+ * - Abstract base contract for liquidation modules.
+ * - Resolves dependencies through Registry and gates privileged writes through AccessControlManager.
+ * - Supports pause controls and UUPS upgrades with governance-enforced permissions.
+ */
 abstract contract LiquidationConfigManager is 
     Initializable,
     UUPSUpgradeable,
@@ -49,13 +39,13 @@ abstract contract LiquidationConfigManager is
 {
     using LiquidationAccessControl for LiquidationAccessControl.Storage;
 
-    /* ============ Constants ============ */
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     
     /// @notice Maximum cache validity period for module addresses (in blocks).
     /// @dev Time-Dependency-Refactor SSOT: cache aging is block-based (block.number).
     uint256 public constant CACHE_MAX_AGE = 7200;
 
-    /* ============ Storage ============ */
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     
     /// @notice Registry address (internal storage, following naming conventions)
     /// @dev Used for module address resolution and access control, exposed publicly through registryAddrVar()
@@ -96,60 +86,39 @@ abstract contract LiquidationConfigManager is
         return _registryAddr;
     }
 
-    /* ============ Errors ============ */
-    /// @notice Invalid minimum health factor (must be >= liquidationThresholdVar and non-zero)
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when a minimum health factor is zero or lower than the liquidation threshold mirror. Used by min-health-factor governance paths.
     error LiquidationConfigManager__InvalidMinHealthFactor();
 
-    /// @notice Invalid maximum LTV (must be non-zero and <= 10_000 bps).
+    /// @dev Reverts when a maximum LTV value is zero or above 10_000 bps. Used by max-LTV governance paths.
     error LiquidationConfigManager__InvalidMaxLtvBps();
 
-    /// @notice Unauthorized caller for cache refresh (CacheMaintenanceManager-only).
+    /// @dev Reverts when a cache refresh is called by an address other than the configured CacheMaintenanceManager. Used by {refreshModuleCache}.
     error LiquidationConfigManager__UnauthorizedAccess();
 
-    /* ============ Events ============ */
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     
-    /**
-     * @notice System paused event
-     * @param pauser Address that executed the pause
-     * @param blockNumber Pause block number (block.number)
-     * @dev Follows event naming convention: PascalCase, past tense
-     * @dev Emitted when the system is emergency paused, for off-chain monitoring and auditing
-     */
+    /// @notice Emitted when the system is paused.
+    /// @dev Emitted by pause flows after the pause state is enabled and recorded for off-chain monitoring.
     event SystemPaused(address indexed pauser, uint256 blockNumber);
 
-    /**
-     * @notice System unpaused event
-     * @param unpauser Address that executed the unpause
-     * @param blockNumber Unpause block number (block.number)
-     * @dev Follows event naming convention: PascalCase, past tense
-     * @dev Emitted when the system resumes from paused state, for off-chain monitoring and auditing
-     */
+    /// @notice Emitted when the system is unpaused.
+    /// @dev Emitted by unpause flows after the pause state is cleared.
     event SystemUnpaused(address indexed unpauser, uint256 blockNumber);
 
-    /**
-     * @notice Minimum health factor updated event
-     * @param oldMinHealthFactor Old minimum health factor (bps=1e4)
-     * @param newMinHealthFactor New minimum health factor (bps=1e4)
-     * @param blockNumber Update block number (block.number)
-     */
+    /// @notice Emitted when the minimum health factor is updated.
+    /// @dev Emitted by governance-controlled min-health-factor update paths after validation succeeds.
     event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 blockNumber);
 
-    /**
-     * @notice Maximum LTV updated event.
-     * @param oldMaxLtvBps Old maximum LTV (bps=1e4)
-     * @param newMaxLtvBps New maximum LTV (bps=1e4)
-     * @param blockNumber Update block number (block.number)
-     */
+    /// @notice Emitted when the maximum LTV is updated.
+    /// @dev Emitted by governance-controlled max-LTV update paths after validation succeeds.
     event MaxLtvBpsUpdated(uint256 oldMaxLtvBps, uint256 newMaxLtvBps, uint256 blockNumber);
 
-    /**
-     * @notice Emitted when module cache is refreshed via maintenance manager.
-     * @param caller Caller that performed refresh (should be CacheMaintenanceManager)
-     * @param blockNumber Refresh block number (block.number)
-     */
+    /// @notice Emitted when the module cache is refreshed.
+    /// @dev Emitted by maintenance-manager refresh flows after the cache refresh completes.
     event ModuleCacheRefreshed(address indexed caller, uint256 blockNumber);
 
-    /* ============ Constructor ============ */
+    /*━━━━━━━━━━━━━━━ Constructor ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Constructor (disables initialization)
@@ -160,7 +129,7 @@ abstract contract LiquidationConfigManager is
         _disableInitializers();
     }
 
-    /* ============ Initializer ============ */
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Initialize the liquidation configuration manager
@@ -213,7 +182,7 @@ abstract contract LiquidationConfigManager is
         _refreshModuleCacheBestEffort();
     }
 
-    // ============ Modifiers ============
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Access control modifier
@@ -233,7 +202,7 @@ abstract contract LiquidationConfigManager is
     }
 
 
-    // ============ Registry Module Getter Functions ============
+    /*━━━━━━━━━━━━━━━ Registry Module Getter Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Get module address from Registry (internal function)
@@ -255,7 +224,7 @@ abstract contract LiquidationConfigManager is
         return Registry(_registryAddr).isModuleRegistered(moduleKey);
     }
 
-    /* ============ Module Management Functions ============ */
+    /*━━━━━━━━━━━━━━━ Module Management Functions ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Get module address (from cache).
@@ -346,7 +315,7 @@ abstract contract LiquidationConfigManager is
         ModuleCache.remove(_moduleCache, key, msg.sender);
     }
 
-    /* ============ Liquidation Parameter Governance ============ */
+    /*━━━━━━━━━━━━━━━ Liquidation Parameter Governance ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Update liquidation bonus rate.
@@ -450,7 +419,7 @@ abstract contract LiquidationConfigManager is
         emit MaxLtvBpsUpdated(old, newMaxLtvBps, block.number);
     }
 
-    /* ============ Query Functions ============ */
+    /*━━━━━━━━━━━━━━━ Query Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Get cached orchestrator address
@@ -500,7 +469,7 @@ abstract contract LiquidationConfigManager is
         );
     }
 
-    /* ============ Emergency Functions ============ */
+    /*━━━━━━━━━━━━━━━ Emergency Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Emergency pause the liquidation system
@@ -538,7 +507,7 @@ abstract contract LiquidationConfigManager is
         return super.paused();
     }
 
-    /* ============ Utility Functions ============ */
+    /*━━━━━━━━━━━━━━━ Utility Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Get access control interface address
@@ -565,7 +534,7 @@ abstract contract LiquidationConfigManager is
         return _registryAddr;
     }
 
-    /* ============ UUPS Upgradeable ============ */
+    /*━━━━━━━━━━━━━━━ UUPS Upgradeable ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice UUPS upgrade authorization function
@@ -589,7 +558,7 @@ abstract contract LiquidationConfigManager is
         if (newImplementation == address(0)) revert ZeroAddress();
     }
 
-    /* ============ Internal: Cache Refresh & Best-effort Resolution ============ */
+    /*━━━━━━━━━━━━━━━ Internal Cache Refresh And Best-Effort Resolution ━━━━━━━━━━━━━━━*/
 
     /// @dev Best-effort: refresh commonly-used module cache entries from Registry.
     function _refreshModuleCacheBestEffort() internal {
@@ -627,6 +596,6 @@ abstract contract LiquidationConfigManager is
         return fromReg != address(0) ? fromReg : moduleAddr;
     }
 
-    // ============ Storage Gap ============
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     uint256[49] private __gap;
 } 

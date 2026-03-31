@@ -103,6 +103,7 @@ async function main() {
   const awAddr = (await registry.getModuleOrRevert(key("ASSET_WHITELIST"))) as string;
   const poAddr = (await registry.getModuleOrRevert(key("PRICE_ORACLE"))) as string;
   const feeRouterAddr = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
+  const valuationOracleViewAddr = (await registry.getModule(key("VALUATION_ORACLE_VIEW"))) as string;
 
   const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
   const vblAddr = (await registry.getModuleOrRevert(key("VAULT_BUSINESS_LOGIC"))) as string;
@@ -112,9 +113,17 @@ async function main() {
   const lendingEngineViewAddr = (await registry.getModuleOrRevert(key("LENDING_ENGINE_VIEW"))) as string;
 
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddr)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", awAddr)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", awAddr)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", awAddr)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", poAddr)) as any;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddr)) as any;
+  const valuationOracleView =
+    valuationOracleViewAddr && valuationOracleViewAddr !== ethers.ZeroAddress
+      ? ((await ethers.getContractAt(
+          ["function getAssetPrice(address asset) view returns (uint256,uint256,bool)"],
+          valuationOracleViewAddr
+        )) as any)
+      : null;
   const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreAddr)) as any;
   const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddr)) as any;
   const gfmAddr = (await registry.getModuleOrRevert(key("GUARANTEE_FUND_MANAGER"))) as string;
@@ -138,13 +147,15 @@ async function main() {
 
   const lendingEngineView = (await ethers.getContractAt("LendingEngineView", lendingEngineViewAddr)) as any;
 
-  // Token selection: prefer FeeRouter supported token[0], fallback to MockUSDC.
+  // Token selection: prefer the Registry settlement token and only fallback if it is missing.
   let assetAddr: string = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
-  try {
-    const toks = (await feeRouter.getSupportedTokens()) as string[];
-    if (toks?.length) assetAddr = toks[0];
-  } catch {
-    // ignore
+  if (!assetAddr || assetAddr === ethers.ZeroAddress) {
+    try {
+      const toks = (await feeRouter.getSupportedTokens()) as string[];
+      if (toks?.length) assetAddr = toks[0];
+    } catch {
+      // ignore
+    }
   }
   const erc20 = (await getErc20(assetAddr)) as any;
   const [symbol, decimals] = await Promise.all([
@@ -191,7 +202,23 @@ async function main() {
       await po.getPrice(assetAddr);
       console.log("  ✅ PriceOracle.getPrice(asset) ok");
     } catch (e: any) {
-      console.log(`  ⚠️  PriceOracle.getPrice(asset) failed (best-effort): ${fmtErr(e)}`);
+      let valuationReadable = false;
+      if (valuationOracleView) {
+        try {
+          const [price, blockNumber, valid] = (await valuationOracleView.getAssetPrice(assetAddr)) as [bigint, bigint, boolean];
+          valuationReadable = valid || (price > 0n && blockNumber > 0n);
+          if (valuationReadable) {
+            console.log(
+              `  ℹ️  PriceOracle.getPrice(asset) unavailable, but ValuationOracleView is readable: price=${price.toString()} block=${blockNumber.toString()} valid=${valid}`
+            );
+          }
+        } catch {
+          // ignore and keep the original best-effort warning below
+        }
+      }
+      if (!valuationReadable) {
+        console.log(`  ℹ️  PriceOracle.getPrice(asset) unavailable in read-only best-effort check: ${fmtErr(e)}`);
+      }
     }
 
     console.log("\n✅ lendingengine-smoke (read-only) PASSED\n");
@@ -210,9 +237,9 @@ async function main() {
   await ensureRole(key("VIEW_USER_DATA"), deployer.address, "VIEW_USER_DATA(deployer)");
   await ensureRole(key("VIEW_SYSTEM_DATA"), deployer.address, "VIEW_SYSTEM_DATA(deployer)");
 
-  if (!(await aw.isAssetAllowed(assetAddr))) {
+  if (!(await awRead.isAssetAllowed(assetAddr))) {
     if (!canAddWhitelist) throw new Error("AssetWhitelist: token not allowed and cannot ADD_WHITELIST");
-    await (await aw.connect(deployer).addAllowedAsset(assetAddr)).wait();
+    await (await awAdmin.connect(deployer).addAllowedAsset(assetAddr)).wait();
   }
   if (!(await feeRouter.isTokenSupported(assetAddr))) {
     if (!canSetParam) throw new Error("FeeRouter: token not supported and cannot SET_PARAMETER");

@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "network": "arbitrum-sepolia",
+  "chainId": 421614,
+  "generatedAt": "2026-03-20T05:15:37.428Z",
+  "sourcePack": "deployments/mock-assets.arbitrum-sepolia.json",
+  "targetPriceUnit": "USD-8",
+  "defaultWriteTarget": "PriceUpdater.updateAssetPrice",
+  "rwaAssetCatalog": [
+    {
+      "assetId": "rwa-gold",
+      "symbol": "RWAGOLD",
+      "address": "0x0A31eFa4dA816F3cDb94F263c18d85fe23aD93A0",
+      "updaterAssetId": "mock-rwa-gold",
+      "publishMode": "backend-required",
+      "source": {
+        "provider": "google-finance",
+        "ticker": "GLD:NYSEARCA",
+        "pricingCurrency": "USD",
+        "quoteToUsdPair": "USD/USD"
+      },
+      "bootstrapPriceUsd8": "2000",
+      "updateCadence": "15m",
+      "staleAfterSeconds": 3600
+    },
+    {
+      "assetId": "rwa-bond",
+      "symbol": "RWABOND",
+      "address": "0x77092F361228ad290fccB695eE10642Fe4A97F65",
+      "updaterAssetId": "mock-rwa-bond",
+      "publishMode": "backend-required",
+      "source": {
+        "provider": "google-finance",
+        "ticker": "IEF:NASDAQ",
+        "pricingCurrency": "USD",
+        "quoteToUsdPair": "USD/USD"
+      },
+      "bootstrapPriceUsd8": "100",
+      "updateCadence": "30m",
+      "staleAfterSeconds": 7200
+    },
+    {
+      "assetId": "rwa-real-estate",
+      "symbol": "RWARE",
+      "address": "0x1d3e5eB3F8838ee05d80B6F952FBeF370A309E14",
+      "updaterAssetId": "mock-rwa-real-estate",
+      "publishMode": "backend-required",
+      "source": {
+        "provider": "google-finance",
+        "ticker": "VNQ:NYSEARCA",
+        "pricingCurrency": "USD",
+        "quoteToUsdPair": "USD/USD"
+      },
+      "bootstrapPriceUsd8": "500",
+      "updateCadence": "1h",
+      "staleAfterSeconds": 14400
+    },
+    {
+      "assetId": "rwa-invoice",
+      "symbol": "RWAINV",
+      "address": "0xcbef1eFbcD89DbB100e6f5930f1b90bB4483C6E6",
+      "updaterAssetId": "mock-rwa-invoice",
+      "publishMode": "backend-required",
+      "source": {
+        "provider": "google-finance",
+        "ticker": "MINT:NYSEARCA",
+        "pricingCurrency": "USD",
+        "quoteToUsdPair": "USD/USD"
+      },
+      "bootstrapPriceUsd8": "50",
+      "updateCadence": "1h",
+      "staleAfterSeconds": 14400
+    }
+  ],
+  "oraclePublishJobs": [
+    {
+      "jobId": "publish-rwagold",
+      "assetId": "rwa-gold",
+      "symbol": "RWAGOLD",
+      "address": "0x0A31eFa4dA816F3cDb94F263c18d85fe23aD93A0",
+      "updaterAssetId": "mock-rwa-gold",
+      "publishMode": "backend-required",
+      "writeTarget": "PriceUpdater.updateAssetPrice",
+      "enabled": true,
+      "bootstrapPriceUsd8": "2000",
+      "targetPriceUnit": "USD-8",
+      "source": {
+        "provider": "google-finance",
+        "ticker": "GLD:NYSEARCA",
+        "pricingCurrency": "USD",
+        "quoteToUsdPair": "USD/USD"
+      },
+      "updateCadence": "15m",
+      "staleAfterSeconds": 3600
+    },
+    {
+      "jobId": "publish-rwabond",
+      "assetId": "rwa-bond",
+      "symbol": "RWABOND",
+      "address": "0x77092F361228ad290fccB695eE10642Fe4A97F65",
+      "updaterAssetId": "mock-rwa-bond",
+      "publishMode": "backend-required",
+      "writeTarget": "PriceUpdater.updateAssetPrice",
+      "enabled": true,
+      "bootstrapPriceUsd8": "100",
+      "targetPriceUnit": "USD-8",
+      "source": {
+        "provider": "google-finance",
+        "ticker": "IEF:NASDAQ",
+        "pricingCurrency": "USD",
+        "quoteToUsdPair": "USD/USD"
+      },
+      "updateCadence": "30m",
+      "staleAfterSeconds": 7200
+    },
+    {
+      "jobId": "publish-rware",
+      "assetId": "rwa-real-estate",
+      "symbol": "RWARE",
+      "address": "0x1d3e5eB3F8838ee05d80B6F952FBeF370A309E14",
+      "updaterAssetId": "mock-rwa-real-estate",
+      "publishMode": "backend-required",
+      "writeTarget": "PriceUpdater.updateAssetPrice",
+      "enabled": true,
+      "bootstrapPriceUsd8": "500",
+      "targetPriceUnit": "USD-8",
+      "source": {
+        "provider": "google-finance",
+        "ticker": "VNQ:NYSEARCA",
+        "pricingCurrency": "USD",
+        "quoteToUsdPair": "USD/USD"
+      },
+      "updateCadence": "1h",
+      "staleAfterSeconds": 14400
+    },
+    {
+      "jobId": "publish-rwainv",
+      "assetId": "rwa-invoice",
+      "symbol": "RWAINV",
+      "address": "0xcbef1eFbcD89DbB100e6f5930f1b90bB4483C6E6",
+      "updaterAssetId": "mock-rwa-invoice",
+      "publishMode": "backend-required",
+      "writeTarget": "PriceUpdater.updateAssetPrice",
+      "enabled": true,
+      "bootstrapPriceUsd8": "50",
+      "targetPriceUnit": "USD-8",
+      "source": {
+        "provider": "google-finance",
+        "ticker": "MINT:NYSEARCA",
+        "pricingCurrency": "USD",
+        "quoteToUsdPair": "USD/USD"
+      },
+      "updateCadence": "1h",
+      "staleAfterSeconds": 14400
+    }
+  ]
+}

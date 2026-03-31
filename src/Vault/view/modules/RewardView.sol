@@ -38,14 +38,22 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     address private _registryAddr;
 
     struct UserSummary {
-        uint256 totalEarned;
+        // Reserved legacy storage slot. Canonical lifetime mint accounting is `_easyEarned`.
+        uint256 deprecatedTotalEarnedSlot;
         uint256 totalBurned;
         uint256 pendingPenalty;
         uint8 level;
         uint256 lastActivity;
     }
 
+    struct EarnState {
+        uint256 lockedEasy;
+        uint256 eligibleLoanCount;
+        uint256 onTimeRepayCount;
+    }
+
     mapping(address => UserSummary) private _userSummary;
+    mapping(address => EarnState) private _userEarnState;
     mapping(address => uint256) private _userCacheBlocks;
 
     /// @notice Easy token earned totals (borrower + lender mint shares).
@@ -86,11 +94,11 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     uint256 private constant _MAX_ACTIVITY_SCAN = 500;
     uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION_BLOCKS;
 
-    /*━━━━━━━━━━━━━━━ Top earners cache (fixed length) ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Top Easy earners cache (fixed length) ━━━━━━━━━━━━━━━*/
 
     uint256 private constant _TOP_N = 10;
     address[_TOP_N] private _topEarners;
-    uint256[_TOP_N] private _topEarnedAmounts;
+    uint256[_TOP_N] private _topEasyEarnedAmounts;
     mapping(address => bool) private _isActiveUser;
 
     struct SystemStats {
@@ -102,7 +110,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     SystemStats private _systemStats;
     uint256 private _systemCacheUpdateBlock;
 
-    /*━━━━━━━━━━━━━━━ Earn-config cache (RewardView-only; governance observability) ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Earn-config cache (RewardView-only; governance monitoring) ━━━━━━━━━━━━━━━*/
 
     uint256 private _dynamicRewardThresholdEasy;
     uint256 private _dynamicRewardMultiplierBps;
@@ -124,6 +132,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         address rmc = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
         address ec = _getModule(ModuleKeys.KEY_EASY_EMISSION_CONTROLLER);
+        address ram = _getModule(ModuleKeys.KEY_REWARD_ACCRUAL_MANAGER);
         address es = _getModule(ModuleKeys.KEY_EASY_STAKING);
         address econf = _getModule(ModuleKeys.KEY_EASY_EMISSION_CONFIG);
         address econ = _getModule(ModuleKeys.KEY_EASY_CONSUMPTION);
@@ -132,6 +141,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (
             msg.sender != rmc
                 && msg.sender != ec
+                && msg.sender != ram
                 && msg.sender != es
                 && msg.sender != econf
                 && msg.sender != econ
@@ -224,60 +234,33 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Push APIs (writers only) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Push a "reward earned" update for a user and emit a unified DataPush event.
+     * @notice Push an "Easy burned" update for a user and emit a unified DataPush event.
      * @dev Reverts if:
-     *      - registry is zero / not a contract (ZeroAddress / NotAContract)
-        *      - a required writer module is missing in Registry (ZeroAddress via onlyWriter)
      *      - caller is not an authorized writer module (RewardView__UnauthorizedWriter)
      *
      * Security:
         * - onlyWriter (authorized writer modules via Registry)
-     * - Emits DataPushed(DATA_TYPE_REWARD_EARNED, abi.encode(user, amount, reason, blockNumber))
+     * - Emits DataPushed(DATA_TYPE_REWARD_BURNED, abi.encode(user, easyAmount, reason, blockNumber))
      *
      * @param user User address
-    * @param amount Earned Easy amount (reward units, system-defined)
+    * @param easyAmount Burned Easy amount (reward units, system-defined)
      * @param reason Short reason string (off-chain display only)
      * @param blockNumber Business blockNumber (block number; writer-defined)
      */
-    function pushRewardEarned(address user, uint256 amount, string calldata reason, uint256 blockNumber)
+    function pushEasyBurned(address user, uint256 easyAmount, string calldata reason, uint256 blockNumber)
         external
         onlyWriter
     {
         UserSummary storage s = _userSummary[user];
-        s.totalEarned += amount;
+        s.totalBurned += easyAmount;
         if (blockNumber > s.lastActivity) s.lastActivity = blockNumber;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
-        _activities[user].push(Activity({ kind: 1, amount: amount, blockNumber: blockNumber }));
-        _updateTopEarners(user, s.totalEarned);
+        _activities[user].push(Activity({ kind: 2, amount: easyAmount, blockNumber: blockNumber }));
         _touchUserCache(user);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_EARNED, abi.encode(user, amount, reason, blockNumber));
-    }
-
-    /**
-     * @notice Push an "Easy burned" update for a user and emit a unified DataPush event.
-     * @dev Reverts if:
-     *      - see {pushRewardEarned} (onlyWriter)
-     *
-     * Security:
-        * - onlyWriter (authorized writer modules via Registry)
-     * - Emits DataPushed(DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, blockNumber))
-     *
-     * @param user User address
-    * @param amount Burned Easy amount (reward units, system-defined)
-     * @param reason Short reason string (off-chain display only)
-     * @param blockNumber Business blockNumber (block number; writer-defined)
-     */
-    function pushEasyBurned(address user, uint256 amount, string calldata reason, uint256 blockNumber)
-        external
-        onlyWriter
-    {
-        UserSummary storage s = _userSummary[user];
-        s.totalBurned += amount;
-        if (blockNumber > s.lastActivity) s.lastActivity = blockNumber;
-        if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
-        _activities[user].push(Activity({ kind: 2, amount: amount, blockNumber: blockNumber }));
-        _touchUserCache(user);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, blockNumber));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_BURNED,
+            abi.encode(user, easyAmount, reason, blockNumber)
+        );
     }
 
     /**
@@ -308,6 +291,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         if (borrower != address(0) && borrowerShare > 0) {
             _easyEarned[borrower] += borrowerShare;
+            _updateTopEasyEarners(borrower, _easyEarned[borrower]);
             if (blockNumber > _userSummary[borrower].lastActivity) _userSummary[borrower].lastActivity = blockNumber;
             if (!_isActiveUser[borrower]) { _isActiveUser[borrower] = true; _systemStats.activeUsers++; }
             _touchUserCache(borrower);
@@ -315,6 +299,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         if (lender != address(0) && lenderShare > 0) {
             _easyEarned[lender] += lenderShare;
+            _updateTopEasyEarners(lender, _easyEarned[lender]);
             if (blockNumber > _userSummary[lender].lastActivity) _userSummary[lender].lastActivity = blockNumber;
             if (!_isActiveUser[lender]) { _isActiveUser[lender] = true; _systemStats.activeUsers++; }
             _touchUserCache(lender);
@@ -330,7 +315,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Push an Easy staked update (from EasyStaking).
      * @dev Writer: EasyStaking
      */
-    function pushEasyStaked(address user, uint256 amount, uint256 newStaked, uint256 blockNumber) external onlyWriter {
+    function pushEasyStaked(address user, uint256 easyAmount, uint256 newStaked, uint256 blockNumber) external onlyWriter {
         address es = _getModule(ModuleKeys.KEY_EASY_STAKING);
         if (msg.sender != es) revert RewardView__UnauthorizedWriter();
 
@@ -341,7 +326,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_EASY_STAKED,
-            abi.encode(user, amount, newStaked, blockNumber)
+            abi.encode(user, easyAmount, newStaked, blockNumber)
         );
     }
 
@@ -349,7 +334,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Push an Easy unstaked update (from EasyStaking).
      * @dev Writer: EasyStaking
      */
-    function pushEasyUnstaked(address user, uint256 amount, uint256 newStaked, uint256 blockNumber) external onlyWriter {
+    function pushEasyUnstaked(address user, uint256 easyAmount, uint256 newStaked, uint256 blockNumber) external onlyWriter {
         address es = _getModule(ModuleKeys.KEY_EASY_STAKING);
         if (msg.sender != es) revert RewardView__UnauthorizedWriter();
 
@@ -360,7 +345,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_EASY_UNSTAKED,
-            abi.encode(user, amount, newStaked, blockNumber)
+            abi.encode(user, easyAmount, newStaked, blockNumber)
         );
     }
 
@@ -394,13 +379,13 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @notice Push an Easy spent update (from EasyConsumption).
      * @dev Writer: EasyConsumption
      */
-    function pushEasySpent(address user, uint8 spendType, uint256 amount, uint256 blockNumber) external onlyWriter {
+    function pushEasySpent(address user, uint8 spendType, uint256 easySpent, uint256 blockNumber) external onlyWriter {
         address econ = _getModule(ModuleKeys.KEY_EASY_CONSUMPTION);
         if (msg.sender != econ) revert RewardView__UnauthorizedWriter();
-        if (user == address(0) || amount == 0) return;
+        if (user == address(0) || easySpent == 0) return;
 
-        _easySpent[user] += amount;
-        _easyTotalSpent += amount;
+        _easySpent[user] += easySpent;
+        _easyTotalSpent += easySpent;
         _easySpendCacheBlock = block.number;
 
         if (blockNumber > _userSummary[user].lastActivity) _userSummary[user].lastActivity = blockNumber;
@@ -409,7 +394,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_EASY_SPENT,
-            abi.encode(user, spendType, amount, blockNumber)
+            abi.encode(user, spendType, easySpent, blockNumber)
         );
     }
 
@@ -419,26 +404,34 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function pushEasyRecycledSplit(
         address payer,
-        uint256 amount,
-        uint256 burnAmount,
-        uint256 teamAmount,
-        uint256 ecoAmount,
+        uint256 easyAmount,
+        uint256 easyBurned,
+        uint256 teamEasyAmount,
+        uint256 ecoEasyAmount,
         uint8 spendType,
         uint256 blockNumber
     ) external onlyWriter {
         address erd = _getModule(ModuleKeys.KEY_EASY_RECYCLE_DISTRIBUTOR);
         if (msg.sender != erd) revert RewardView__UnauthorizedWriter();
-        if (amount == 0) return;
+        if (easyAmount == 0) return;
 
-        _easyTotalRecycled += amount;
-        _easyTotalBurned += burnAmount;
-        _easyTotalTeam += teamAmount;
-        _easyTotalEco += ecoAmount;
+        _easyTotalRecycled += easyAmount;
+        _easyTotalBurned += easyBurned;
+        _easyTotalTeam += teamEasyAmount;
+        _easyTotalEco += ecoEasyAmount;
         _easySpendCacheBlock = block.number;
 
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_EASY_RECYCLED_SPLIT,
-            abi.encode(payer, amount, burnAmount, teamAmount, ecoAmount, spendType, blockNumber)
+            abi.encode(
+                payer,
+                easyAmount,
+                easyBurned,
+                teamEasyAmount,
+                ecoEasyAmount,
+                spendType,
+                blockNumber
+            )
         );
     }
 
@@ -453,11 +446,11 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Should not be used on normal paths (manual recovery only)
      *
      * @param user User address
-    * @param amount Burned Easy amount
+    * @param easyAmount Burned Easy amount
      * @param reason Short reason string
      * @param blockNumber Business blockNumber (block number; admin-defined)
      */
-    function retryPushEasyBurned(address user, uint256 amount, string calldata reason, uint256 blockNumber)
+    function retryPushEasyBurned(address user, uint256 easyAmount, string calldata reason, uint256 blockNumber)
         external
         onlyValidRegistry
     {
@@ -465,18 +458,55 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
             revert MissingRole();
         }
         UserSummary storage s = _userSummary[user];
-        s.totalBurned += amount;
+        s.totalBurned += easyAmount;
         if (blockNumber > s.lastActivity) s.lastActivity = blockNumber;
         if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
-        _activities[user].push(Activity({ kind: 2, amount: amount, blockNumber: blockNumber }));
+        _activities[user].push(Activity({ kind: 2, amount: easyAmount, blockNumber: blockNumber }));
         _touchUserCache(user);
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_REWARD_BURNED, abi.encode(user, amount, reason, blockNumber));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_BURNED,
+            abi.encode(user, easyAmount, reason, blockNumber)
+        );
+    }
+
+    /**
+     * @notice Admin retry helper: replay a penalty-ledger push (manual recovery / backend compensation).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     * - Idempotent-by-state: this helper overwrites the mirrored pending debt instead of incrementing it.
+     *
+     * @param user User address
+     * @param pendingDebt Pending Easy debt
+     * @param blockNumber Business blockNumber (block number; admin-defined)
+     */
+    function retryPushPenaltyLedger(address user, uint256 pendingDebt, uint256 blockNumber)
+        external
+        onlyValidRegistry
+    {
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
+
+        UserSummary storage s = _userSummary[user];
+        s.pendingPenalty = pendingDebt;
+        if (blockNumber > s.lastActivity) s.lastActivity = blockNumber;
+        if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
+        _activities[user].push(Activity({ kind: 3, amount: pendingDebt, blockNumber: blockNumber }));
+        _touchUserCache(user);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED,
+            abi.encode(user, pendingDebt, blockNumber)
+        );
     }
 
     /**
         * @notice Push a penalty ledger (pending Easy debt) update for a user.
      * @dev Reverts if:
-     *      - see {pushRewardEarned} (onlyWriter)
+        *      - caller is not an authorized writer module (RewardView__UnauthorizedWriter)
      *
      * Security:
         * - onlyWriter (authorized writer modules via Registry)
@@ -503,7 +533,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /**
      * @notice Push a user level update and emit a unified DataPush event.
      * @dev Reverts if:
-     *      - see {pushRewardEarned} (onlyWriter)
+    *      - caller is not an authorized writer module (RewardView__UnauthorizedWriter)
      *
      * Security:
         * - onlyWriter (authorized writer modules via Registry)
@@ -521,7 +551,36 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Push earn-side dynamic reward parameters (governance observability) and emit DataPushed.
+     * @notice Push the latest earn-state snapshot for a user.
+     * @dev Writer: RewardManagerCore
+     */
+    function pushEarnState(
+        address user,
+        uint256 lockedEasy,
+        uint256 eligibleLoanCount,
+        uint256 onTimeRepayCount,
+        uint256 blockNumber
+    ) external onlyWriter {
+        address rmc = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
+        if (msg.sender != rmc) revert RewardView__UnauthorizedWriter();
+
+        _userEarnState[user] = EarnState({
+            lockedEasy: lockedEasy,
+            eligibleLoanCount: eligibleLoanCount,
+            onTimeRepayCount: onTimeRepayCount
+        });
+        if (blockNumber > _userSummary[user].lastActivity) _userSummary[user].lastActivity = blockNumber;
+        if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
+        _touchUserCache(user);
+
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_EARN_STATE_UPDATED,
+            abi.encode(user, lockedEasy, eligibleLoanCount, onTimeRepayCount, blockNumber)
+        );
+    }
+
+    /**
+    * @notice Push earn-side dynamic reward parameters for governance monitoring and emit DataPushed.
         * @dev Writer: authorized writer modules via {onlyWriter}.
      *
      * @param thresholdEasy Threshold in reward units (writer-defined; example-only until integrated)
@@ -539,7 +598,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Push earn-side level multiplier (governance observability) and emit DataPushed.
+    * @notice Push earn-side level multiplier for governance monitoring and emit DataPushed.
         * @dev Writer: authorized writer modules via {onlyWriter}.
      *
      * @param level Level (1-5)
@@ -558,7 +617,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /**
      * @notice Push system-level reward stats and emit a unified DataPush event.
      * @dev Reverts if:
-     *      - see {pushRewardEarned} (onlyWriter)
+    *      - caller is not an authorized writer module (RewardView__UnauthorizedWriter)
      *
      * Security:
         * - onlyWriter (authorized writer modules via Registry)
@@ -609,28 +668,26 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get a user's reward summary plus local cache metadata (blockNumber + TTL validity).
+        * @notice Return a user's reward summary together with local cache metadata.
      * @dev Reverts if:
      *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param user Target user address
-    * @return totalEarned Total earned Easy
-    * @return totalBurned Total burned Easy
-     * @return pendingPenalty Pending penalty debt
-     * @return level User level
-     * @return lastActivity Last activity blockNumber (block number; writer-defined)
-     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
-     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+    * @param user Target user address.
+    * @return totalBurned Total burned Easy.
+    * @return pendingPenalty Pending penalty debt.
+    * @return level User level.
+    * @return lastActivity Last activity block number recorded by the writer.
+    * @return blockNumber RewardView local cache last-write block number.
+    * @return isValid True if the local cache is within the configured TTL.
      */
     function getUserRewardSummaryWithMeta(address user)
         external
         view
         onlyAuthorizedFor(user)
         returns (
-            uint256 totalEarned,
             uint256 totalBurned,
             uint256 pendingPenalty,
             uint8 level,
@@ -642,26 +699,18 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         UserSummary storage s = _userSummary[user];
         blockNumber = _userCacheBlocks[user];
         isValid = _isUserCacheValid(blockNumber);
-        return (
-            s.totalEarned,
-            s.totalBurned,
-            s.pendingPenalty,
-            s.level,
-            s.lastActivity,
-            blockNumber,
-            isValid
-        );
+        return (s.totalBurned, s.pendingPenalty, s.level, s.lastActivity, blockNumber, isValid);
     }
 
     /**
-     * @notice Get a user's Easy earned total plus local cache metadata.
+        * @notice Return a user's Easy earned total together with local cache metadata.
      * @dev Reverts if:
      *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole)
      *
-     * @param user Target user address
-     * @return easyEarned Total Easy minted to user (RewardView-local)
-     * @return blockNumber RewardView local cache last-write blockNumber
-     * @return isValid Whether the local cache is within TTL
+    * @param user Target user address.
+    * @return easyEarned Total Easy minted to the user in RewardView-local accounting.
+    * @return blockNumber RewardView local cache last-write block number.
+    * @return isValid True if the local cache is within the configured TTL.
      */
     function getUserEasyEarnedWithMeta(address user)
         external
@@ -670,6 +719,30 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (uint256 easyEarned, uint256 blockNumber, bool isValid)
     {
         easyEarned = _easyEarned[user];
+        blockNumber = _userCacheBlocks[user];
+        isValid = _isUserCacheValid(blockNumber);
+    }
+
+    /**
+     * @notice Return a user's earn-side state snapshot with cache metadata.
+     * @dev Includes lock/release accounting state mirrored from RewardManagerCore.
+     */
+    function getUserEarnStateWithMeta(address user)
+        external
+        view
+        onlyAuthorizedFor(user)
+        returns (
+            uint256 lockedEasy,
+            uint256 eligibleLoanCount,
+            uint256 onTimeRepayCount,
+            uint256 blockNumber,
+            bool isValid
+        )
+    {
+        EarnState storage s = _userEarnState[user];
+        lockedEasy = s.lockedEasy;
+        eligibleLoanCount = s.eligibleLoanCount;
+        onTimeRepayCount = s.onTimeRepayCount;
         blockNumber = _userCacheBlocks[user];
         isValid = _isUserCacheValid(blockNumber);
     }
@@ -756,19 +829,19 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get system-level reward stats from RewardView local cache, with cache metadata.
+        * @notice Return system-level reward stats from RewardView local cache, with metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return totalBatchOps Total batch operations count (writer-defined)
-     * @return totalCachedRewards Total cache-hit count (writer-defined)
-     * @return activeUsers Active user count (RewardView-local)
-     * @return blockNumber RewardView system cache blockNumber (block.number)
-     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+    * @return totalBatchOps Total batch-operation count.
+    * @return totalCachedRewards Total cache-hit count.
+    * @return activeUsers Active user count tracked by RewardView.
+    * @return blockNumber RewardView system-cache block number.
+    * @return isValid True if the local cache is within the configured TTL.
      */
     function getSystemRewardStatsWithMeta()
         external
@@ -791,22 +864,24 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the current Registry address used by this module.
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the current Registry address used by this module.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - View-only.
      *
-     * @return registryAddr Registry contract address
+        * @return registryAddr Registry contract address.
      */
     function getRegistry() external view returns (address) {
         return _registryAddr;
     }
 
     /**
-     * @notice Get cached dynamic reward parameters with TTL metadata.
-     * @dev Security: read-only, public (non-user-scoped).
+        * @notice Return cached dynamic reward parameters with TTL metadata.
+        * @dev Reverts if: (never)
+        *
+        * Security:
+        * - View-only public read.
      */
     function getDynamicRewardParamsWithMeta()
         external
@@ -821,8 +896,11 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get cached level multiplier (BPS) for a level with TTL metadata.
-     * @dev Security: read-only, public (non-user-scoped).
+        * @notice Return the cached level multiplier for a level, with TTL metadata.
+        * @dev Reverts if: (never)
+        *
+        * Security:
+        * - View-only public read.
      */
     function getLevelMultiplierWithMeta(uint8 level)
         external
@@ -838,20 +916,20 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Extended read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get a user's recent reward activities from local cache, with cache metadata.
+        * @notice Return a user's recent reward activities from local cache, with metadata.
      * @dev Reverts if:
      *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param user Target user address
-     * @param fromBlock Inclusive start blockNumber filter (block-based). 0 means no lower bound.
-     * @param toBlock Inclusive end blockNumber filter (block-based). 0 means no upper bound.
-     * @param limit Maximum number of entries to return (0 returns empty)
+    * @param user Target user address.
+    * @param fromBlock Inclusive start block-number filter. Zero means no lower bound.
+    * @param toBlock Inclusive end block-number filter. Zero means no upper bound.
+    * @param limit Maximum number of entries to return. Zero returns an empty array.
      * @return out Activity array (most recent first). Scan is capped by _MAX_ACTIVITY_SCAN.
-     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
-     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+    * @return blockNumber RewardView local cache last-write block number.
+    * @return isValid True if the local cache is within the configured TTL.
      */
     function getUserRecentActivitiesWithMeta(address user, uint256 fromBlock, uint256 toBlock, uint256 limit)
         external
@@ -890,18 +968,18 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the Top-N earners from RewardView local cache, with cache metadata.
+        * @notice Return the Top-N Easy earners from RewardView local cache, with metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return addrs Top-N user addresses (fixed length)
-     * @return amounts Top-N earned totals (fixed length)
-     * @return blockNumber RewardView system cache blockNumber (block.number)
-     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+    * @return addrs Top-N user addresses.
+    * @return amounts Top-N Easy earned totals aligned to `addrs`.
+    * @return blockNumber RewardView system-cache block number.
+    * @return isValid True if the local cache is within the configured TTL.
      */
     function getTopEarnersWithMeta()
         external
@@ -916,7 +994,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         amounts = new uint256[](n);
         for (uint256 i = 0; i < n; i++) {
             addrs[i] = _topEarners[i];
-            amounts[i] = _topEarnedAmounts[i];
+            amounts[i] = _topEasyEarnedAmounts[i];
         }
         blockNumber = _systemCacheUpdateBlock;
         isValid = _isUserCacheValid(blockNumber);
@@ -946,19 +1024,19 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     
     /*━━━━━━━━━━━━━━━ Additional read APIs (View SSOT) ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Get a user's EasyToken balance with RewardView cache metadata.
+        * @notice Return a user's EasyToken balance together with RewardView cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
-     * - Read-only
-    * - Best-effort: returns 0 if EasyToken module is missing.
+    * - View-only.
+    * - Best-effort: returns 0 if the EasyToken module is missing.
      *
-     * @param user Target user address
-    * @return balance EasyToken balance (token units)
-     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
-     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+    * @param user Target user address.
+    * @return balance EasyToken balance in token units.
+    * @return blockNumber RewardView local cache last-write block number.
+    * @return isValid True if the local cache is within the configured TTL.
      */
     function getUserBalance(address user)
         external
@@ -978,19 +1056,19 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get a user's EasyToken balance, with RewardView cache metadata.
+        * @notice Return a user's EasyToken balance, with RewardView cache metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not the user and lacks ACTION_VIEW_USER_DATA or ACTION_ADMIN (MissingRole via onlyAuthorizedFor)
      *
      * Security:
-     * - Read-only
-    * - Best-effort: returns 0 if EasyToken module is missing.
+    * - View-only.
+    * - Best-effort: returns 0 if the EasyToken module is missing.
      *
-     * @param user Target user address
-    * @return balance EasyToken balance (token units)
-     * @return blockNumber RewardView local cache last-write blockNumber (block.number)
-     * @return isValid Whether the local cache is within TTL (ViewConstants.CACHE_DURATION)
+    * @param user Target user address.
+    * @return balance EasyToken balance in token units.
+    * @return blockNumber RewardView local cache last-write block number.
+    * @return isValid True if the local cache is within the configured TTL.
      */
     function getUserBalanceWithMeta(address user)
         external
@@ -1011,7 +1089,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
-    function _updateTopEarners(address user, uint256 totalEarned) internal {
+    function _updateTopEasyEarners(address user, uint256 easyEarned) internal {
         // If already in the list, update and potentially bubble up (simple insertion-sort approach).
         uint256 pos = _TOP_N;
         for (uint256 i = 0; i < _TOP_N; i++) {
@@ -1022,18 +1100,18 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
         if (pos == _TOP_N) {
             // Not in list: insert only if better than the current tail.
-            if (totalEarned <= _topEarnedAmounts[_TOP_N - 1]) return;
+            if (easyEarned <= _topEasyEarnedAmounts[_TOP_N - 1]) return;
             pos = _TOP_N - 1;
             _topEarners[pos] = user;
-            _topEarnedAmounts[pos] = totalEarned;
+            _topEasyEarnedAmounts[pos] = easyEarned;
         } else {
-            _topEarnedAmounts[pos] = totalEarned;
+            _topEasyEarnedAmounts[pos] = easyEarned;
         }
         // Bubble up to keep descending order.
-        while (pos > 0 && _topEarnedAmounts[pos] > _topEarnedAmounts[pos - 1]) {
+        while (pos > 0 && _topEasyEarnedAmounts[pos] > _topEasyEarnedAmounts[pos - 1]) {
             (_topEarners[pos], _topEarners[pos - 1]) = (_topEarners[pos - 1], _topEarners[pos]);
-            (_topEarnedAmounts[pos], _topEarnedAmounts[pos - 1]) =
-                (_topEarnedAmounts[pos - 1], _topEarnedAmounts[pos]);
+            (_topEasyEarnedAmounts[pos], _topEasyEarnedAmounts[pos - 1]) =
+                (_topEasyEarnedAmounts[pos - 1], _topEasyEarnedAmounts[pos]);
             pos--;
         }
     }
@@ -1072,9 +1150,9 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - newImplementation is not a contract (NotAContract)
      *
      * Security:
-     * - Role-gated: ACTION_ADMIN
+    * - Role-gated: ACTION_ADMIN.
      *
-     * @param newImplementation New implementation address
+    * @param newImplementation New implementation address.
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
@@ -1087,32 +1165,30 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the API version for this module.
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the API semantic version for this module.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - Pure function.
      *
-     * @return version API semantic version
+        * @return version API semantic version.
      */
     function apiVersion() public pure override returns (uint256) {
-        // API change: split penalty-ledger DataPush type from REWARD_STATS_UPDATED into REWARD_PENALTY_LEDGER_UPDATED.
-        return 2;
+        // API change: remove legacy totalEarned from the public summary ABI.
+        return 3;
     }
 
     /**
-     * @notice Get the schema version for this module's outputs.
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the schema version for this module's outputs.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - Pure function.
      *
-     * @return version Schema version
+        * @return version Schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
-        return 1;
+        return 2;
     }
 
     /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/

@@ -80,6 +80,7 @@ interface ILoanNFT {
      * @param tokenId Token id
      */
     event TokenLocked(uint256 indexed tokenId);
+
     /**
      * @notice Emitted when a token is burned.
      * @dev Security:
@@ -101,23 +102,18 @@ interface ILoanNFT {
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
 
-    /**
-     * @notice Caller is not authorized to perform the action.
-     */
+    /// @dev Reverts when the caller is not authorized to perform the action.
     error LoanNFT__NotAuthorized();
-    /**
-     * @notice Token is locked as SBT and cannot be transferred between users.
-     * @param tokenId Token id
-     */
+
+    /// @dev Reverts when a token locked as SBT is transferred between users.
+    /// @param tokenId Token id.
     error LoanNFT__SoulBound(uint256 tokenId);
-    /**
-     * @notice Token id does not exist.
-     */
+
+    /// @dev Reverts when the referenced token id does not exist.
     error LoanNFT__InvalidTokenId();
-    /**
-     * @notice Loan/order id was already minted.
-     * @param loanId Loan/order id
-     */
+
+    /// @dev Reverts when the loan or order id was already minted.
+    /// @param loanId Loan or order id.
     error LoanNFT__LoanAlreadyMinted(uint256 loanId);
 
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
@@ -136,7 +132,10 @@ interface ILoanNFT {
      * @param data Loan metadata snapshot (see struct-level units)
      * @return tokenId Newly minted token id
      */
-    function mintLoanCertificate(address to, LoanMetadata calldata data) external returns (uint256 tokenId);
+    function mintLoanCertificate(
+        address to,
+        LoanMetadata calldata data
+    ) external returns (uint256 tokenId);
 
     /**
      * @notice Permanently lock a token as SBT (non-transferable between users).
@@ -184,7 +183,9 @@ interface ILoanNFT {
      * @param user Owner address
      * @return tokenIds Array of token ids owned by `user`
      */
-    function getUserTokens(address user) external view returns (uint256[] memory tokenIds);
+    function getUserTokens(
+        address user
+    ) external view returns (uint256[] memory tokenIds);
 
     /**
      * @notice Get loan metadata for a token id.
@@ -197,7 +198,9 @@ interface ILoanNFT {
      * @param tokenId Token id
      * @return metadata Loan metadata snapshot
      */
-    function getLoanMetadata(uint256 tokenId) external view returns (LoanMetadata memory metadata);
+    function getLoanMetadata(
+        uint256 tokenId
+    ) external view returns (LoanMetadata memory metadata);
 
     /*━━━━━━━━━━━━━━━ RESERVED FOR FUTURE UPGRADE ━━━━━━━━━━━━━━━*/
     // /**
@@ -210,4 +213,4 @@ interface ILoanNFT {
     //  * - Role-gated in implementation
     //  */
     // function batchMintLoanCertificate(address[] calldata to, LoanMetadata[] calldata data) external;
-} 
+}

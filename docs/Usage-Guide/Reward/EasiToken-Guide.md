@@ -2,7 +2,7 @@
 
 > 适用范围：本仓库 Reward 子系统（Earn/Spend/View + EasyEmission/EasyConsumption/EasyRecycle + EasyStaking/CrossChainGovernance）。
 >
-> 目标态口径：**平台唯一通证 = Easy（`EasyToken`）**，不引入第二套“积分币”。
+> 目标态口径：**平台唯一通证 = Easy（`EasyToken`）**，不引入第二套奖励资产。
 >
 > 相关架构 SSOT：`docs/Architecture-Guide.md`（Reward 章节、View 权限方案、block 口径）。
 
@@ -11,7 +11,7 @@
 ## 0) 一句话结论（先读这个）
 
 - **Easy（`EasyToken`）是唯一通证（18 decimals）**：用于借贷激励（Earn）、生态支付（Spend）、治理（Stake→Vote）。
-- **借贷挖矿发币按白皮书公式执行**：借贷“完成/结清”触发铸币，扣除 0.06% 手续费后计算，奖励 **借贷双方 50/50**。
+- **借贷挖矿发币按白皮书公式执行**：借贷“完成/结清”触发铸币，基于**净借款额**（扣除借款侧 0.3% = 30 bps 手续费）计算，奖励 **借贷双方 50/50**。
 - **EasiM/API 外调按次支付 1 Easy**：支付进入回收模块，按 75/15/10 自动销毁与分配。
 - **治理投票权 SSOT = stEASY（`EasyStaking` 产生的 `ERC20Votes`）**：`CrossChainGovernance` 读取 `getPastVotes`；用户 stake 时自动 self-delegate。
 
@@ -73,7 +73,7 @@ Reward 的写入口 SSOT：
 ### 2.3 发币规则（白皮书 SSOT）
 
 - **发币触发**：每笔借贷完成（结清）自动铸币发行，平分给借贷双方
-- **手续费口径**：平台扣除 0.06% 手续费后，以净借贷额度计算 mint
+- **手续费口径**：平台总费率为 **0.6%**（借款侧 0.3% + 还款侧 0.3%）；mint 口径以“净借款额”（借款侧扣费后）计算
 - **最低额度**：单笔借贷额最低 1000U
 - **两阶段公式**：
   - 红利期：累计借贷总额 < 1 亿 U：每 1000U → 10 Easy（双方各 5）
@@ -94,9 +94,9 @@ Reward 的写入口 SSOT：
 - **EasiM 调用**：每次支付 1 Easy
 - **策略 API 外调**：每次支付 1 Easy
 - 链上入口（SSOT）：`src/Reward/EasyConsumption.sol`
-- 资金流：用户 `transferFrom` 1 Easy → 回收模块 `EasyRecycleDistributor` → 自动执行 75/15/10
+- 分配比例：75/15/10（销毁/团队/生态）。
 
-可观测性 SSOT：消费/回收相关的链下订阅一律使用 `RewardView.DataPushed(DATA_TYPE_REWARD_*)`。
+可观测性 SSOT：消费/回收相关的链下订阅一律使用 `RewardView.DataPushed(...)`；当前主类型是 `DATA_TYPE_EASY_SPENT` 与 `DATA_TYPE_EASY_RECYCLED_SPLIT`，不要只过滤 `DATA_TYPE_REWARD_*`。
 
 ### 3.2 Easy 与 AI Credits 的关系
 
@@ -131,7 +131,7 @@ Reward 的写入口 SSOT：
 ### 5.1 Reward 侧只读与订阅
 
 - 只读入口：统一走 `RewardView`
-- 订阅入口：统一订阅 `RewardView.DataPushed(dataTypeHash, payload)`，过滤 `DATA_TYPE_REWARD_*`
+- 订阅入口：统一订阅 `RewardView.DataPushed(dataTypeHash, payload)`，同时覆盖 `DATA_TYPE_REWARD_*` 与 `DATA_TYPE_EASY_*`
 
 > 参考：`docs/Usage-Guide/Reward/Reward-Best-Practices-Guide.md`
 
@@ -150,9 +150,17 @@ Reward 的写入口 SSOT：
 - **Registry 是模块地址 SSOT**：Reward/GovernanceGate/FeatureRegistry/Token 等模块地址必须通过 Registry 绑定与解析，避免 stale 指针
 - **EasyToken 权限 SSOT（非 localhost）**：
   - `MINTER_ROLE` 仅授予 `EasyEmissionController`（发行）
-  - `BURNER_ROLE` 授予 `RewardManagerCore`（扣罚/账本扣减）与 `EasyRecycleDistributor`（消费回收 burn）
+  - `BURNER_ROLE` 仅授予 `RewardAccrualManager`（扣罚 burn 优先、否则记账）与 `EasyRecycleDistributor`（消费回收 burn）
+  - `RewardManagerCore` 不应持有遗留 `BURNER_ROLE`；部署脚本应在发现时主动撤销
 - **时间口径统一 blocks**：到期、窗口、治理快照等一律按 blocks；前端用平均出块时间做 ETA 展示
 - **多租户边界**：Easy 不隔离 tenant；如产品需要隔离，必须在 credits/链下归因层实现
+
+### 6.1 异常余额恢复（EasyRecycleDistributor）
+
+- 正常情况下，Easy spend 只能通过 `EasyConsumption` 进入 `EasyRecycleDistributor.handleEasyIncome(...)`。
+- 若发生异常直转，`EasyRecycleDistributor.settleOutstandingEasyBalance()` 是唯一恢复口。
+- 恢复口不会改变分账规则，仍严格执行 75/15/10（burn/team/eco）。
+- 上线前应至少验证一次该恢复路径，避免异常余额永久滞留在 recycle 合约。
 
 ---
 

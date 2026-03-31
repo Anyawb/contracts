@@ -62,7 +62,7 @@ scripts/utils/
 import { loadAssetsConfig } from './utils/configure-assets';
 
 const assets = loadAssetsConfig('arbitrum-sepolia', 421614);
-// 返回: [{ address: '0x...', coingeckoId: 'usd-coin', decimals: 6, ... }]
+// 返回: [{ address: '0x...', sourceId: 'usd-coin', decimals: 6, ... }]
 ```
 
 #### `configureAssets(ethers: any, priceOracleAddress: string, assets: AssetConfigItem[]): Promise<void>`
@@ -86,7 +86,7 @@ await configureAssets(ethers, priceOracleAddress, assets);
 ```typescript
 interface AssetConfigItem {
   address: string;        // 代币合约地址
-  coingeckoId: string;    // CoinGecko 资产 ID
+  sourceId: string;    // 链下 source 资产 ID
   decimals: number;        // 小数位数
   maxPriceAge: number;    // 最大价格年龄（秒）
   active?: boolean;       // 是否激活
@@ -262,7 +262,7 @@ interface DeploymentInfo {
 - `KEY_VALUATION_ORACLE`, `KEY_GUARANTEE_FUND`
 - `KEY_ACCESS_CONTROL`, `KEY_ASSET_WHITELIST`, `KEY_AUTHORITY_WHITELIST`
 - `KEY_REGISTRY`, `KEY_LOAN_NFT`, `KEY_EASY_TOKEN`
-- `KEY_PRICE_ORACLE`, `KEY_COINGECKO_UPDATER`
+- `KEY_PRICE_ORACLE`, `KEY_PRICE_UPDATER`
 - `KEY_VAULT_BUSINESS_LOGIC`
 - `KEY_ADVANCED_ANALYTICS_CONFIG`, `KEY_PRIORITY_SERVICE_CONFIG`
 - `KEY_FEATURE_UNLOCK_CONFIG`, `KEY_GOVERNANCE_ACCESS_CONFIG`

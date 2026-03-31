@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { MathConstants } from "../constants/MathConstants.sol";
+import {MathConstants} from "../constants/MathConstants.sol";
 
 /// @title HealthFactorLib
 /// @notice Pure library for health factor calculations and threshold checks.
@@ -29,8 +29,10 @@ library HealthFactorLib {
     ) internal pure returns (bool undercollateralized) {
         if (totalDebt == 0) return false;
         unchecked {
-            // collateral * 1e4 < debt * minHF 视为不健康
-            return totalCollateral * MathConstants.BPS < totalDebt * minHealthFactor;
+            // collateral * 1e4 < debt * minHF is considered unhealthy
+            return
+                totalCollateral * MathConstants.BPS <
+                totalDebt * minHealthFactor;
         }
     }
 
@@ -47,7 +49,10 @@ library HealthFactorLib {
      * @param totalDebt Total debt value (value units defined by caller; consistent with totalCollateral).
      * @return healthFactorBps Health factor in bps (1e4 = 100%).
      */
-    function calcHealthFactor(uint256 totalCollateral, uint256 totalDebt) internal pure returns (uint256) {
+    function calcHealthFactor(
+        uint256 totalCollateral,
+        uint256 totalDebt
+    ) internal pure returns (uint256) {
         if (totalDebt == 0) return type(uint256).max;
         return (totalCollateral * MathConstants.BPS) / totalDebt;
     }
@@ -65,7 +70,10 @@ library HealthFactorLib {
      * @param collateral Total collateral value (value units defined by caller; consistent with debt).
      * @return ltvBps LTV in bps (1e4 = 100%).
      */
-    function calcLtv(uint256 debt, uint256 collateral) internal pure returns (uint256) {
+    function calcLtv(
+        uint256 debt,
+        uint256 collateral
+    ) internal pure returns (uint256) {
         if (collateral == 0) return 0;
         return (debt * MathConstants.BPS) / collateral;
     }
@@ -83,9 +91,13 @@ library HealthFactorLib {
      * @param guaranteeAmount Guarantee amount/value to exclude.
      * @return effective Effective collateral after exclusion.
      */
-    function effectiveCollateral(uint256 totalCollateral, uint256 guaranteeAmount) internal pure returns (uint256) {
-        return totalCollateral > guaranteeAmount ? totalCollateral - guaranteeAmount : 0;
+    function effectiveCollateral(
+        uint256 totalCollateral,
+        uint256 guaranteeAmount
+    ) internal pure returns (uint256) {
+        return
+            totalCollateral > guaranteeAmount
+                ? totalCollateral - guaranteeAmount
+                : 0;
     }
 }
-
-

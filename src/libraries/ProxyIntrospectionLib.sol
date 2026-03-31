@@ -25,6 +25,7 @@ library ProxyIntrospectionLib {
      */
     function getImplementation() internal view returns (address impl) {
         bytes32 slot = _IMPLEMENTATION_SLOT;
+        // solhint-disable-next-line no-inline-assembly
         assembly ("memory-safe") {
             impl := sload(slot)
         }
@@ -45,5 +46,3 @@ library ProxyIntrospectionLib {
         if (impl == address(0)) impl = address(this);
     }
 }
-
-

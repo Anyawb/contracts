@@ -99,7 +99,7 @@ async function main() {
   assertOk(!(await acm.hasRole(ACTION_VIEW_SYSTEM_DATA, unauthorized.address)), "unexpected VIEW_SYSTEM_DATA for unauthorized");
 
   // ====== Basic metadata: MUST be consumable for next-hop ======
-  assertOk((await systemView.registryAddr()) === CONTRACT_ADDRESSES.Registry, "SystemView.registryAddr mismatch");
+  assertOk((await systemView.registryAddrVar()) === CONTRACT_ADDRESSES.Registry, "SystemView.registryAddrVar mismatch");
 
   const [apiV, schemaV, impl] = (await systemView.getVersionInfo()) as [bigint, bigint, string];
   console.log(`  VersionInfo: api=${apiV} schema=${schemaV} impl=${impl}`);

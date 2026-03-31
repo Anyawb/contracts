@@ -18,14 +18,15 @@ import { ViewVersioned } from "../ViewVersioned.sol";
 /**
  * @title StatisticsView
  * @notice Aggregated (cached) system-level statistics and lightweight push-based cache updates.
- * @dev Security:
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
  * - UUPS upgradeable contract; upgrades are admin-gated via Registry.
  * - All write paths are role-gated via Registry (admin or system-data pushers).
- *
- * Notes:
- * - Health factor and LTV are expressed in basis points (bps) where 10_000 = 100%.
- * - Collateral/debt values MUST share the same unit (domain "value" unit).
- * - Guarantee amounts are tracked in raw token units (token decimals).
+ * - Health factor and LTV are expressed in basis points where 10_000 = 100%.
+ * - Collateral and debt values must share the same value-denominated unit.
+ * - Guarantee amounts are tracked in raw token base units.
  */
 contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
@@ -162,8 +163,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - Pure function.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
@@ -174,8 +175,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - Pure function.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;
@@ -257,12 +258,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
-     * @return g Cached global statistics (see `GlobalStatistics`).
-     * @return isValid Whether the cache blockNumber is within `ViewConstants.CACHE_DURATION`.
-     * @return blockNumber Cache blockNumber (block.number).
+    * @return g Cached global statistics snapshot.
+    * @return isValid True if the cache block number is within the configured TTL.
+    * @return blockNumber Cache block number.
      */
     function getGlobalStatisticsWithMeta()
         external
@@ -284,12 +285,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
-     * @return s Cached global snapshot.
-     * @return isValid Whether the cache blockNumber is within `ViewConstants.CACHE_DURATION`.
-     * @return blockNumber Cache blockNumber (block.number).
+    * @return s Cached global snapshot.
+    * @return isValid True if the cache block number is within the configured TTL.
+    * @return blockNumber Cache block number.
      */
     function getGlobalSnapshotWithMeta()
         external
@@ -306,12 +307,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
-     * @return activeUsers Cached active user count.
-     * @return isValid Whether the cache blockNumber is within `ViewConstants.CACHE_DURATION`.
-     * @return blockNumber Cache blockNumber (block.number).
+    * @return activeUsers Cached active user count.
+    * @return isValid True if the cache block number is within the configured TTL.
+    * @return blockNumber Cache block number.
      */
     function getActiveUsersWithMeta()
         external
@@ -330,18 +331,18 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      * - User-dimensional read follows Scheme U: self-read allowed; non-self requires `ACTION_VIEW_USER_DATA` or
      *   `ACTION_ADMIN`.
      *
      * @param user User address.
-     * @return s Cached snapshot.
+    * @return s Cached user snapshot.
      * @return version Current optimistic concurrency version.
      * @return seq Current monotonic sequence (0 if never provided).
      * @return lastAppliedRequestId Last applied idempotency key (bytes32(0) if none).
-     * @return isValid Whether the snapshot blockNumber is within `ViewConstants.CACHE_DURATION`.
-     * @return blockNumber Snapshot blockNumber (block.number).
+    * @return isValid True if the snapshot block number is within the configured TTL.
+    * @return blockNumber Snapshot block number.
      */
     function getUserSnapshotWithMeta(address user)
         external
@@ -371,11 +372,11 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
      * @param user User address.
-     * @return Current version (monotonic).
+    * @return version Current monotonic version.
      */
     function getUserStatsVersion(address user)
         external
@@ -393,16 +394,13 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is neither Registry `KEY_STATS_PUSH_MANAGER` nor has `ACTION_ADMIN` (MissingRole)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only pusher helper.
      * - This is intended for on-chain modules that perform best-effort pushes and need to compute
      *   `nextVersion = currentVersion + 1` before calling the strict {pushUserStatsUpdate(..., requestId, seq, nextVersion)}.
      *
-     * Note:
-     * - This intentionally does NOT use Scheme U; it is a pusher-oriented helper and is role-gated.
-     *
      * @param user User address.
-     * @return Current version (monotonic).
+    * @return version Current monotonic version.
      */
     function getUserStatsVersionForPusher(address user) external view onlyValidRegistry returns (uint64) {
         // Single-entry orchestrator helper: only stats pusher or admin may read.
@@ -416,12 +414,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is neither Registry `KEY_STATS_PUSH_MANAGER` nor has `ACTION_ADMIN` (MissingRole)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only pusher helper.
      *
      * @param user User address.
      * @param asset Guarantee asset address.
-     * @return Current version (monotonic).
+    * @return version Current monotonic version.
      */
     function getGuaranteeVersionForPusher(address user, address asset) external view onlyValidRegistry returns (uint64) {
         // Single-entry orchestrator helper: only stats pusher or admin may read.
@@ -435,11 +433,11 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
      * @param user User address.
-     * @return Current sequence.
+    * @return seq Current monotonic sequence.
      */
     function getUserStatsSeq(address user) external view onlyValidRegistry onlyUserOrViewer(user) returns (uint64) {
         return _userStatsSeq[user];
@@ -451,11 +449,11 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
      * @param user User address.
-     * @return requestId Last applied idempotency key.
+    * @return requestId Last applied idempotency key.
      */
     function getUserStatsLastAppliedRequestId(address user)
         external
@@ -482,8 +480,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Role-gated: `ACTION_VIEW_SYSTEM_STATUS` or `ACTION_ADMIN`.
-     * - Emits {DegradationStatsCached} and `DataPushed(DATA_TYPE_DEGRADATION_STATS_UPDATE, payload)` for off-chain
-     *   observability.
+    * - Emits {DegradationStatsCached} and `DataPushed(DATA_TYPE_DEGRADATION_STATS_UPDATE, payload)` for off-chain
+    *   monitoring.
      *
      * @param s Degradation stats payload to cache.
      */
@@ -516,12 +514,16 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
-     * @return Last cached degradation stats.
+     * @return stats Last cached degradation stats payload.
      */
-    function getDegradationStats() external view returns (GracefulDegradationStats memory) {
+    function getDegradationStats()
+        external
+        view
+        returns (GracefulDegradationStats memory stats)
+    {
         return _degradationStats;
     }
 
@@ -892,7 +894,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Writer-gated: Registry `KEY_STATS_PUSH_MANAGER` or `ACTION_ADMIN`.
-     * - Emits `DataPushed(DATA_TYPE_GUARANTEE_STATS_UPDATE, payload)` for off-chain observability.
+    * - Emits `DataPushed(DATA_TYPE_GUARANTEE_STATS_UPDATE, payload)` for off-chain monitoring.
      *
      * @param user User address.
      * @param asset ERC20 guarantee asset address.
@@ -1076,7 +1078,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Writer-gated: Registry `KEY_STATS_PUSH_MANAGER` or `ACTION_ADMIN`.
-     * - Emits `DataPushed(DATA_TYPE_STATS_SNAPSHOT_RECORDED, payload)` for off-chain observability.
+    * - Emits `DataPushed(DATA_TYPE_STATS_SNAPSHOT_RECORDED, payload)` for off-chain monitoring.
      *
      * @param user User address.
      */
@@ -1088,7 +1090,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         _globalSnapshot.blockNumber = blockNumber;
         _lastGlobalUpdate = blockNumber;
 
-        // Emit DataPushed for observability (Architecture-Guide/Workguide acceptance).
+        // Emit DataPushed for off-chain monitoring and replay diagnostics.
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_STATS_SNAPSHOT_RECORDED,
             abi.encode(user, blockNumber, _userStatsVersion[user], _userStatsSeq[user])
@@ -1102,14 +1104,14 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
      * @param user User address.
      * @param asset ERC20 guarantee asset address.
-     * @return amount Current cached locked amount (token decimals).
-     * @return isValid Whether the cache blockNumber is within `ViewConstants.CACHE_DURATION`.
-     * @return blockNumber Cache blockNumber (block.number).
+    * @return amount Current cached locked amount in token base units.
+    * @return isValid True if the cache block number is within the configured TTL.
+    * @return blockNumber Cache block number.
      */
     function getUserGuaranteeBalanceWithMeta(address user, address asset)
         external
@@ -1128,13 +1130,13 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
      * @param asset ERC20 guarantee asset address.
-     * @return amount Current cached total locked amount (token decimals).
-     * @return isValid Whether the cache blockNumber is within `ViewConstants.CACHE_DURATION`.
-     * @return blockNumber Cache blockNumber (block.number).
+    * @return amount Current cached total locked amount in token base units.
+    * @return isValid True if the cache block number is within the configured TTL.
+    * @return blockNumber Cache block number.
      */
     function getTotalGuaranteeByAssetWithMeta(address asset)
         external
@@ -1147,21 +1149,19 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Return reward-related statistics with cache metadata (best-effort).
+    * @notice Return reward-related statistics with cache metadata through a best-effort path.
      * @dev Reverts if:
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *
-     * Security:
-     * - Read-only.
-    * - Best-effort external dependency:
-    *   - If EasyToken is missing in Registry or the call reverts, `r.totalEasyTokenSupply` is returned as 0.
+    * Security:
+    * - View-only.
+    * - Best-effort external dependency: if EasyToken is missing in Registry or the call reverts,
+    *   `r.totalEasyTokenSupply` is returned as 0.
      *   - Callers MUST treat this output as informational (not a ledger SSOT).
      *
-    * @return r Reward stats where:
-    *         - r.rewardRate is deprecated and always 0
-    *         - r.totalEasyTokenSupply is EasyToken.totalSupply() (0 if module missing / call fails)
-     * @return isValid Whether the global snapshot blockNumber is within `ViewConstants.CACHE_DURATION`
-     * @return blockNumber Cache blockNumber (block.number)
+    * @return r Reward stats where `rewardRate` is always 0 and `totalEasyTokenSupply` is best-effort.
+    * @return isValid True if the global snapshot block number is within the configured TTL.
+    * @return blockNumber Cache block number.
      */
     function getRewardStatsWithMeta()
         external
@@ -1189,12 +1189,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
-     * @return totalUsers Total seen user count (monotonic).
-     * @return isValid Whether the global snapshot blockNumber is within `ViewConstants.CACHE_DURATION`.
-     * @return blockNumber Global snapshot blockNumber (block.number).
+    * @return totalUsers Total seen user count.
+    * @return isValid True if the global snapshot block number is within the configured TTL.
+    * @return blockNumber Global snapshot block number.
      */
     function getTotalUsersWithMeta() external view returns (uint256 totalUsers, bool isValid, uint256 blockNumber) {
         totalUsers = _totalUsers;
@@ -1203,15 +1203,15 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Return the last global cache update blockNumber with cache metadata.
+    * @notice Return the last global cache update block number with cache metadata.
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
-     * @return blockNumber Last global update blockNumber (block.number).
-     * @return isValid Whether `blockNumber` is within `ViewConstants.CACHE_DURATION`.
+    * @return blockNumber Last global update block number.
+    * @return isValid True if `blockNumber` is within the configured TTL.
      */
     function getLastGlobalUpdateWithMeta() external view returns (uint256 blockNumber, bool isValid) {
         blockNumber = _lastGlobalUpdate;
@@ -1219,17 +1219,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Return the cached last activity blockNumber for a user with cache metadata.
+    * @notice Return the cached last-activity block number for a user with cache metadata.
      * @dev Reverts if:
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
      * @param user User address.
-     * @return blockNumber Last activity blockNumber (block.number).
-     * @return isValid Whether `blockNumber` is within `ViewConstants.CACHE_DURATION`.
+    * @return blockNumber Last activity block number.
+    * @return isValid True if `blockNumber` is within the configured TTL.
      */
     function getUserLastActiveTimeWithMeta(address user)
         external
@@ -1243,15 +1243,15 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Return the last guarantee cache update blockNumber with cache metadata.
+    * @notice Return the last guarantee-cache update block number with cache metadata.
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
-     * @return blockNumber Last guarantee update blockNumber (block.number).
-     * @return isValid Whether `blockNumber` is within `ViewConstants.CACHE_DURATION`.
+    * @return blockNumber Last guarantee update block number.
+    * @return isValid True if `blockNumber` is within the configured TTL.
      */
     function getLastGuaranteeUpdateWithMeta() external view returns (uint256 blockNumber, bool isValid) {
         blockNumber = _lastGuaranteeUpdate;
@@ -1259,16 +1259,16 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Return the last guarantee cache update blockNumber for an asset with metadata.
+    * @notice Return the last guarantee-cache update block number for an asset with metadata.
      * @dev Reverts if:
      *      - (none)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
      * @param asset ERC20 guarantee asset address.
-     * @return blockNumber Last update blockNumber for `asset` (block.number).
-     * @return isValid Whether `blockNumber` is within `ViewConstants.CACHE_DURATION`.
+    * @return blockNumber Last update block number for the asset.
+    * @return isValid True if `blockNumber` is within the configured TTL.
      */
     function getGuaranteeLastUpdateByAssetWithMeta(address asset)
         external
@@ -1280,27 +1280,13 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Return the configured Registry address for this view module.
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Read-only.
-     *
-     * @return Registry address.
-     */
-    function registryAddr() external view returns (address) {
-        return _registryAddr;
-    }
-
-    /**
      * @notice Return whether the user is currently considered active (position > 0) with metadata.
      * @dev Reverts if:
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-     * Security:
-     * - Read-only.
+    * Security:
+    * - View-only.
      *
      * @param user User address.
      * @return isActive True if cached collateral > 0 or cached debt > 0.
@@ -1389,7 +1375,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 } 
 
-/// @dev Minimal read-only interface for EasyToken (avoid importing the full implementation).
+/// @dev Minimal view-only interface for EasyToken (avoid importing the full implementation).
 interface IEasyTokenSupply {
     function totalSupply() external view returns (uint256);
 }

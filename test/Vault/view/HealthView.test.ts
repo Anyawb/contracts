@@ -57,7 +57,7 @@ describe('HealthView', function () {
     it('stores registry address', async function () {
       const { healthView, registry } = await loadFixture(deployFixture);
       expect(await healthView.getRegistry()).to.equal(await registry.getAddress());
-      expect(await healthView.registryAddr()).to.equal(await registry.getAddress());
+      expect(await healthView.getRegistry()).to.equal(await registry.getAddress());
     });
 
     it('reverts on zero address init', async function () {
@@ -966,7 +966,7 @@ describe('HealthView', function () {
     it('handles registry address getter methods', async function () {
       const { healthView, registry } = await loadFixture(deployFixture);
       const registryAddr1 = await healthView.getRegistry();
-      const registryAddr2 = await healthView.registryAddr();
+      const registryAddr2 = await healthView.getRegistry();
       expect(registryAddr1).to.equal(await registry.getAddress());
       expect(registryAddr2).to.equal(await registry.getAddress());
       expect(registryAddr1).to.equal(registryAddr2);

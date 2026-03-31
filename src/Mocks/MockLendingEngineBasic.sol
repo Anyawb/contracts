@@ -11,6 +11,8 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     mapping(address => uint256) private _totalByAsset;
     mapping(address => uint256) private _userTotalValue;
     uint256 private _totalValue;
+    mapping(address => address[]) private _userDebtAssets;
+    mapping(address => mapping(address => uint256)) private _userDebtAssetIndexPlusOne;
     
     // 测试控制标志
     bool public mockSuccess = true;
@@ -29,6 +31,9 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         if (!mockSuccess) revert("MockLendingEngine: borrow failed");
         // 注意：collateralAdded和termDays参数在此Mock实现中未使用，但保留以符合接口规范
         collateralAdded; termDays;
+        if (_userDebt[user][asset] == 0) {
+            _addDebtAsset(user, asset);
+        }
         _userDebt[user][asset] += amount;
         _totalByAsset[asset] += amount;
         _userTotalValue[user] += amount;
@@ -44,6 +49,9 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         if (!mockSuccess) revert("MockLendingEngine: repay failed");
         require(_userDebt[user][asset] >= amount, "Insufficient debt");
         _userDebt[user][asset] -= amount;
+        if (_userDebt[user][asset] == 0) {
+            _removeDebtAsset(user, asset);
+        }
         _totalByAsset[asset] = _totalByAsset[asset] >= amount ? _totalByAsset[asset] - amount : 0;
         _userTotalValue[user] = _userTotalValue[user] > amount ? _userTotalValue[user] - amount : 0;
         _totalValue = _totalValue > amount ? _totalValue - amount : 0;
@@ -59,6 +67,9 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         // For liquidation, insufficient debt should revert (matches typical engine behavior and helps test atomicity)
         require(currentDebt >= amount, "Insufficient debt");
         _userDebt[user][asset] = currentDebt - amount;
+        if (_userDebt[user][asset] == 0) {
+            _removeDebtAsset(user, asset);
+        }
         _totalByAsset[asset] -= amount;
         _userTotalValue[user] = _userTotalValue[user] > amount ? _userTotalValue[user] - amount : 0;
         _totalValue = _totalValue > amount ? _totalValue - amount : 0;
@@ -70,7 +81,7 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     /// @param asset 资产地址
     /// @return 债务数量
     function getDebt(address user, address asset) external view override returns (uint256) {
-        if (!mockSuccess) revert("MockLendingEngine: getDebt failed");
+        if (!mockSuccess) revert("MLE: get debt fail");
         return _userDebt[user][asset];
     }
     
@@ -102,11 +113,9 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     /// @notice 获取用户债务资产列表
     /// @param user 用户地址
     /// @return 资产地址数组
-    function getUserDebtAssets(address user) external pure override returns (address[] memory) {
-        // 简化实现，返回空数组
-        // 注意：user参数在此Mock实现中未使用，但保留以符合接口规范
-        user;
-        return new address[](0);
+    function getUserDebtAssets(address user) external view override returns (address[] memory) {
+        address[] memory assets = _userDebtAssets[user];
+        return assets;
     }
     
     /// @notice 计算预期利息
@@ -161,6 +170,11 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         // Keep derived totals consistent with _userDebt, since production paths
         // rely on getUserTotalDebtValue() for collateral release decisions.
         uint256 prev = _userDebt[user][asset];
+        if (prev == 0 && amount > 0) {
+            _addDebtAsset(user, asset);
+        } else if (prev > 0 && amount == 0) {
+            _removeDebtAsset(user, asset);
+        }
         _userDebt[user][asset] = amount;
 
         if (amount >= prev) {
@@ -173,6 +187,17 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
             _totalByAsset[asset] = _totalByAsset[asset] >= delta ? _totalByAsset[asset] - delta : 0;
             _userTotalValue[user] = _userTotalValue[user] >= delta ? _userTotalValue[user] - delta : 0;
             _totalValue = _totalValue >= delta ? _totalValue - delta : 0;
+        }
+    }
+
+    /// @notice 设置用户总债务价值缓存（用于测试估值缓存陈旧场景）
+    function setUserTotalDebtValue(address user, uint256 amount) external {
+        uint256 prev = _userTotalValue[user];
+        _userTotalValue[user] = amount;
+        if (amount >= prev) {
+            _totalValue += (amount - prev);
+        } else {
+            _totalValue -= (prev - amount);
         }
     }
 
@@ -217,5 +242,29 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     /// @param success 是否成功
     function setMockSuccess(bool success) external {
         mockSuccess = success;
+    }
+
+    function _addDebtAsset(address user, address asset) internal {
+        if (_userDebtAssetIndexPlusOne[user][asset] != 0) {
+            return;
+        }
+        _userDebtAssets[user].push(asset);
+        _userDebtAssetIndexPlusOne[user][asset] = _userDebtAssets[user].length;
+    }
+
+    function _removeDebtAsset(address user, address asset) internal {
+        uint256 indexPlusOne = _userDebtAssetIndexPlusOne[user][asset];
+        if (indexPlusOne == 0) {
+            return;
+        }
+        uint256 index = indexPlusOne - 1;
+        uint256 lastIndex = _userDebtAssets[user].length - 1;
+        if (index != lastIndex) {
+            address lastAsset = _userDebtAssets[user][lastIndex];
+            _userDebtAssets[user][index] = lastAsset;
+            _userDebtAssetIndexPlusOne[user][lastAsset] = index + 1;
+        }
+        _userDebtAssets[user].pop();
+        delete _userDebtAssetIndexPlusOne[user][asset];
     }
 }

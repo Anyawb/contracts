@@ -7,7 +7,11 @@ import { DivisionByZero } from "../errors/StandardErrors.sol";
 /**
  * @title VaultMath
  * @notice Stateless math helpers for the Vault domain (basis points = 1e4).
- * @dev Security:
+ * @dev Reverts if:
+ *      - arithmetic overflows or underflows in pure math operations (Solidity ^0.8.x)
+ *      - division inputs violate explicit guards such as {DivisionByZero}
+ *
+ * Security:
  * - Pure library: no storage reads/writes, no external calls.
  * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
  */
@@ -22,7 +26,7 @@ library VaultMath {
      *
      * @param value Base value (same unit as the return value).
      * @param bps Basis points where 10_000 = 100% (0 is allowed).
-     * @return result Floor(value * bps / 10_000).
+    * @return result Floor(value * bps / 10_000).
      */
     function percentageMul(uint256 value, uint256 bps)
         internal
@@ -64,7 +68,7 @@ library VaultMath {
      *
      * @param collateral Total collateral value (any unit; must match debt unit).
      * @param debt Total debt value (same unit as collateral).
-     * @return healthFactorBps Basis points where 10_000 = 100%; returns max uint if debt == 0.
+    * @return healthFactorBps Basis points where 10_000 = 100%; returns max uint256 if debt == 0.
      */
     function calculateHealthFactor(uint256 collateral, uint256 debt)
         internal

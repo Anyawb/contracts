@@ -5,6 +5,7 @@ import { ethers, upgrades } from 'hardhat';
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const KEY_HEALTH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW'));
+const KEY_MODULE_HEALTH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('MODULE_HEALTH_VIEW'));
 const KEY_RISK_VIEW = ethers.keccak256(ethers.toUtf8Bytes('RISK_VIEW'));
 const KEY_PRICE_ORACLE = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
 const KEY_DEGRADATION_MONITOR = ethers.keccak256(ethers.toUtf8Bytes('DEGRADATION_MONITOR'));
@@ -29,6 +30,7 @@ describe('BatchView', function () {
     const degradationMonitor = await (await ethers.getContractFactory('BatchMockDegradationMonitor')).deploy();
 
     await registry.setModule(KEY_HEALTH_VIEW, await healthView.getAddress());
+  await registry.setModule(KEY_MODULE_HEALTH_VIEW, await healthView.getAddress());
     await registry.setModule(KEY_RISK_VIEW, await riskView.getAddress());
     await registry.setModule(KEY_PRICE_ORACLE, await priceOracle.getAddress());
     await registry.setModule(KEY_DEGRADATION_MONITOR, await degradationMonitor.getAddress());
@@ -118,14 +120,12 @@ describe('BatchView', function () {
   describe('initialization', function () {
     it('stores registry address', async function () {
       const { batchView, registry } = await loadFixture(deployFixture);
-      expect(await batchView.registryAddr()).to.equal(await registry.getAddress());
+      expect(await batchView.registryAddrVar()).to.equal(await registry.getAddress());
     });
 
-    it('registryAddr() and registryAddrVar() return same value', async function () {
+    it('registryAddrVar() returns configured registry', async function () {
       const { batchView, registry } = await loadFixture(deployFixture);
-      expect(await batchView.registryAddr()).to.equal(await registry.getAddress());
       expect(await batchView.registryAddrVar()).to.equal(await registry.getAddress());
-      expect(await batchView.registryAddr()).to.equal(await batchView.registryAddrVar());
     });
 
     it('reverts on zero address', async function () {
@@ -565,7 +565,7 @@ describe('BatchView', function () {
       const BatchViewFactory = await ethers.getContractFactory('BatchView');
       await upgrades.upgradeProxy(await batchView.getAddress(), BatchViewFactory);
       // 验证状态保持
-      expect(await batchView.registryAddr()).to.equal(await registry.getAddress());
+      expect(await batchView.registryAddrVar()).to.equal(await registry.getAddress());
     });
 
     it('rejects upgrade from non-admin', async function () {
@@ -583,7 +583,7 @@ describe('BatchView', function () {
       const BatchViewFactory = await ethers.getContractFactory('BatchView');
       await upgrades.upgradeProxy(await batchView.getAddress(), BatchViewFactory);
       // 验证升级后功能正常
-      expect(await batchView.registryAddr()).to.not.equal(ethers.ZeroAddress);
+      expect(await batchView.registryAddrVar()).to.not.equal(ethers.ZeroAddress);
     });
   });
 

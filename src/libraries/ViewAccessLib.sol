@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Registry } from "../registry/Registry.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
+import {Registry} from "../registry/Registry.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
 
 /// @title ViewAccessLib
 /// @notice Shared access-control helpers for view-layer modules.
@@ -23,8 +23,14 @@ library ViewAccessLib {
      * @param actionKey Action key (see ActionKeys).
      * @param user Address to check.
      */
-    function requireRole(address registryAddr, bytes32 actionKey, address user) internal view {
-        address acmAddr = Registry(registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+    function requireRole(
+        address registryAddr,
+        bytes32 actionKey,
+        address user
+    ) internal view {
+        address acmAddr = Registry(registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
@@ -42,10 +48,14 @@ library ViewAccessLib {
      * @param user Address to check.
      * @return True if user has role, otherwise false.
      */
-    function hasRole(address registryAddr, bytes32 actionKey, address user) internal view returns (bool) {
-        address acmAddr = Registry(registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+    function hasRole(
+        address registryAddr,
+        bytes32 actionKey,
+        address user
+    ) internal view returns (bool) {
+        address acmAddr = Registry(registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         return IAccessControlManager(acmAddr).hasRole(actionKey, user);
     }
 }
-
-

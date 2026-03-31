@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { EventLibrary } from "./EventLibrary.sol";
-import { ModuleAccessLibrary } from "./ModuleAccessLibrary.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { MissingRole } from "../errors/StandardErrors.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {EventLibrary} from "./EventLibrary.sol";
+import {ModuleAccessLibrary} from "./ModuleAccessLibrary.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {MissingRole} from "../errors/StandardErrors.sol";
 
-/// @title AccessControlLibrary
-/// @notice Shared access-control helpers with standardized events.
-/// @dev Provides common permission checks and emits audit-friendly events.
-/// @custom:security-contact security@example.com
+/**
+ * @title AccessControlLibrary
+ * @notice Shared access-control helpers with standardized events.
+ * @dev Provides common permission checks and emits audit-friendly events.
+ */
 library AccessControlLibrary {
-    
     /**
      * @notice Require a role via Registry-resolved AccessControlManager.
      * @dev Reverts if:
@@ -35,21 +35,40 @@ library AccessControlLibrary {
         address user,
         address caller
     ) internal {
-        address acmAddr = ModuleAccessLibrary.getModule(registryAddr, ModuleKeys.KEY_ACCESS_CONTROL, caller);
-        
+        address acmAddr = ModuleAccessLibrary.getModule(
+            registryAddr,
+            ModuleKeys.KEY_ACCESS_CONTROL,
+            caller
+        );
+
         if (acmAddr == address(0)) {
-            emit EventLibrary.PermissionVerified(user, actionKey, false, block.number);
+            emit EventLibrary.PermissionVerified(
+                user,
+                actionKey,
+                false,
+                block.number
+            );
             revert MissingRole();
         }
-        
+
         try IAccessControlManager(acmAddr).requireRole(actionKey, user) {
-            emit EventLibrary.PermissionVerified(user, actionKey, true, block.number);
+            emit EventLibrary.PermissionVerified(
+                user,
+                actionKey,
+                true,
+                block.number
+            );
         } catch {
-            emit EventLibrary.PermissionVerified(user, actionKey, false, block.number);
+            emit EventLibrary.PermissionVerified(
+                user,
+                actionKey,
+                false,
+                block.number
+            );
             revert MissingRole();
         }
     }
-    
+
     /**
      * @notice Check whether a user has a role.
      * @dev Reverts if:
@@ -70,22 +89,43 @@ library AccessControlLibrary {
         address user,
         address caller
     ) internal returns (bool) {
-        address acmAddr = ModuleAccessLibrary.safeGetModule(registryAddr, ModuleKeys.KEY_ACCESS_CONTROL, caller);
-        
+        address acmAddr = ModuleAccessLibrary.safeGetModule(
+            registryAddr,
+            ModuleKeys.KEY_ACCESS_CONTROL,
+            caller
+        );
+
         if (acmAddr == address(0)) {
-            emit EventLibrary.PermissionVerified(user, actionKey, false, block.number);
+            emit EventLibrary.PermissionVerified(
+                user,
+                actionKey,
+                false,
+                block.number
+            );
             return false;
         }
-        
-        try IAccessControlManager(acmAddr).hasRole(actionKey, user) returns (bool hasPermission) {
-            emit EventLibrary.PermissionVerified(user, actionKey, hasPermission, block.number);
+
+        try IAccessControlManager(acmAddr).hasRole(actionKey, user) returns (
+            bool hasPermission
+        ) {
+            emit EventLibrary.PermissionVerified(
+                user,
+                actionKey,
+                hasPermission,
+                block.number
+            );
             return hasPermission;
         } catch {
-            emit EventLibrary.PermissionVerified(user, actionKey, false, block.number);
+            emit EventLibrary.PermissionVerified(
+                user,
+                actionKey,
+                false,
+                block.number
+            );
             return false;
         }
     }
-    
+
     /**
      * @notice Require access to user-scoped data.
      * @dev Reverts if:
@@ -105,10 +145,15 @@ library AccessControlLibrary {
     ) internal {
         // Users can access their own data; otherwise requires VIEW_USER_DATA.
         if (user != address(0) && caller != user) {
-            requireRole(registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, caller, caller);
+            requireRole(
+                registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                caller,
+                caller
+            );
         }
     }
-    
+
     /**
      * @notice Require access to system-scoped data.
      * @dev Reverts if:
@@ -124,6 +169,11 @@ library AccessControlLibrary {
         address registryAddr,
         address caller
     ) internal {
-        requireRole(registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, caller, caller);
+        requireRole(
+            registryAddr,
+            ActionKeys.ACTION_VIEW_SYSTEM_DATA,
+            caller,
+            caller
+        );
     }
 }

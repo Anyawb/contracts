@@ -4,6 +4,7 @@ import { FunctionFragment } from 'ethers';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const KEY_ORDER_ENGINE = ethers.keccak256(ethers.toUtf8Bytes('ORDER_ENGINE'));
+const KEY_LOAN_NFT = ethers.keccak256(ethers.toUtf8Bytes('LOAN_NFT'));
 
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
@@ -16,10 +17,12 @@ describe('LendingEngineView', function () {
     const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
     const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
     const engine = await (await ethers.getContractFactory('MockLendingEngineViewAdapter')).deploy();
+    const loanNft = await (await ethers.getContractFactory('MockLoanNFTEnumerable')).deploy();
 
     await engine.setRegistry(await registry.getAddress());
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(KEY_ORDER_ENGINE, await engine.getAddress());
+    await registry.setModule(KEY_LOAN_NFT, await loanNft.getAddress());
 
     // grant admin for upgrades + privileged reads
     await acm.grantRole(ACTION_ADMIN, admin.address);
@@ -48,7 +51,7 @@ describe('LendingEngineView', function () {
     await engine.setNftRetryCount(1, 3);
     await engine.setMatchEngine(admin.address, true);
 
-    return { view, registry, acm, admin, borrower, lender, outsider, ops, engine };
+    return { view, registry, acm, admin, borrower, lender, outsider, ops, engine, loanNft };
   }
 
   describe('LEV-01 responsibility boundary (read-only, no push*)', function () {
@@ -111,6 +114,19 @@ describe('LendingEngineView', function () {
         view,
         'MissingRole',
       );
+    });
+
+    it('allows current LoanNFT owner to read getLoanOrder(orderId)', async function () {
+      const { view, outsider, loanNft, borrower, lender } = await deployFixture();
+
+      await loanNft.seedToken(outsider.address, 77, 1, 0);
+
+      const orderAsOwner = await view.connect(outsider).getLoanOrder(1);
+      expect(orderAsOwner.borrower).to.equal(borrower.address);
+      expect(orderAsOwner.lender).to.equal(lender.address);
+
+      const [hasAccess] = await view.connect(outsider).canAccessLoanOrder(1, outsider.address);
+      expect(hasAccess).to.equal(true);
     });
   });
 
@@ -186,7 +202,7 @@ describe('LendingEngineView', function () {
   describe('initialization (basic sanity)', function () {
     it('stores registry and exposes getters', async function () {
       const { view, registry } = await deployFixture();
-      expect(await view.registryAddr()).to.equal(await registry.getAddress());
+      expect(await view.getRegistry()).to.equal(await registry.getAddress());
       expect(await view.getRegistry()).to.equal(await registry.getAddress());
     });
 

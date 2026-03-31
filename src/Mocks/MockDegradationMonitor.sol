@@ -9,7 +9,7 @@ contract MockDegradationMonitor {
     
     /// @notice 记录来自PriceOracle的降级事件
     function recordDegradationEventFromPriceOracle(
-        string memory reason,
+        string calldata reason,
         uint256 fallbackValue,
         bool usedFallback
     ) external {
@@ -19,7 +19,7 @@ contract MockDegradationMonitor {
     /// @notice 记录降级事件（管理员接口）
     function recordDegradationEvent(
         address,
-        string memory reason,
+        string calldata reason,
         uint256 fallbackValue,
         bool usedFallback
     ) external {

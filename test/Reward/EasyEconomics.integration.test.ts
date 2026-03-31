@@ -123,16 +123,16 @@ describe("Easy economics milestones (A-D)", function () {
     await priceOracle.setPrice(asset, 10n ** 8n, 1n, 6n); // $1, assetDecimals=6
     await loanFlowView.setGlobalLoanFlow(0n, 0n, 0n, 0n, true, 1n);
 
-    // NOTE: mint is based on net amount after 0.06% fee, and net must be >= 1000U.
-    // Use 1001 USDC so net amount is still >= 1000U.
-    const amountBaseUnits = 1_001n * 10n ** 6n; // 1001 USDC
+    // NOTE: mint is based on net amount after borrow-side fee (0.3% = 30 bps), and net must be >= 1000U.
+    // Use 1004 USDC so net amount is still >= 1000U.
+    const amountBaseUnits = 1_004n * 10n ** 6n; // 1004 USDC
     await controller
       .connect(admin)
       .onLoanEventByOrderWithLender(borrower.address, lender.address, asset, 1n, amountBaseUnits, 0n, 1);
 
     const [, mintPer1000Usd] = await easyEmissionConfig.getEmissionParams();
     const amountUsd8Gross = (amountBaseUnits * 10n ** 8n) / 10n ** 6n; // $1, assetDecimals=6
-    const amountUsd8Net = (amountUsd8Gross * (10_000n - 6n)) / 10_000n;
+    const amountUsd8Net = (amountUsd8Gross * (10_000n - 30n)) / 10_000n;
     const totalMinted = (amountUsd8Net * mintPer1000Usd) / (1_000n * 10n ** 8n);
     const borrowerShare = totalMinted / 2n;
     const lenderShare = totalMinted - borrowerShare;
@@ -172,14 +172,14 @@ describe("Easy economics milestones (A-D)", function () {
     await easyToken.connect(admin).mint(admin.address, 100n * 10n ** 18n);
     await easyToken.connect(admin).setSoleMinter(await controller.getAddress());
 
-    const amountBaseUnits = 1_001n * 10n ** 6n;
+    const amountBaseUnits = 1_004n * 10n ** 6n;
     await controller
       .connect(admin)
       .onLoanEventByOrderWithLender(borrower.address, lender.address, asset, 9n, amountBaseUnits, 0n, 1);
 
     const retainedEasy = 100n;
     const amountUsd8Gross = (amountBaseUnits * 10n ** 8n) / 10n ** 6n;
-    const amountUsd8Net = (amountUsd8Gross * (10_000n - 6n)) / 10_000n;
+    const amountUsd8Net = (amountUsd8Gross * (10_000n - 30n)) / 10_000n;
     const base = (amountUsd8Net * 10n ** 10n) / 100n; // amountUsd8 * 1e18 / 1e8 / 100
     const expectedTotal = (base * kDen) / (kDen + kNum * retainedEasy);
 
@@ -257,6 +257,27 @@ describe("Easy economics milestones (A-D)", function () {
 
     await acm.grantRole(ACTION_CONSUME_EASY, caller.address);
     await easyConsumption.connect(caller).consumeStrategyApiCall(user.address);
+  });
+
+  it("Milestone C: stranded Easy held by recycle contract can be settled via canonical split", async function () {
+    const { admin, user, team, eco, easyToken, easyRecycle } = await loadFixture(deployConsumptionFixture);
+
+    const strandedAmount = 2n * 10n ** 18n;
+    const supplyBefore = await easyToken.totalSupply();
+    const teamBefore = await easyToken.balanceOf(team.address);
+    const ecoBefore = await easyToken.balanceOf(eco.address);
+
+    await easyToken.connect(admin).mint(user.address, strandedAmount);
+    await easyToken.connect(user).transfer(await easyRecycle.getAddress(), strandedAmount);
+
+    await expect(easyRecycle.connect(user).settleOutstandingEasyBalance())
+      .to.emit(easyToken, "EasyBurned")
+      .withArgs(await easyRecycle.getAddress(), (strandedAmount * 75n) / 100n);
+
+    expect(await easyToken.balanceOf(await easyRecycle.getAddress())).to.equal(0n);
+    expect(await easyToken.balanceOf(team.address)).to.equal(teamBefore + (strandedAmount * 15n) / 100n);
+    expect(await easyToken.balanceOf(eco.address)).to.equal(ecoBefore + (strandedAmount * 10n) / 100n);
+    expect(await easyToken.totalSupply()).to.equal(supplyBefore + strandedAmount - (strandedAmount * 75n) / 100n);
   });
 
   async function deployStakingFixture() {

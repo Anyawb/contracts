@@ -19,7 +19,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
     /// @param asset 资产地址
     /// @param amount 保证金金额
     function lockGuarantee(address user, address asset, uint256 amount) external override {
-        if (!mockSuccess) revert("MockGuaranteeFundManager: lock failed");
+        if (!mockSuccess) revert("MGFM: lock fail");
         _userGuarantees[user][asset] += amount;
         _totalByAsset[asset] += amount;
         emit GuaranteeLocked(user, asset, amount, block.number);
@@ -30,7 +30,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
     /// @param asset 资产地址
     /// @param amount 释放金额
     function releaseGuarantee(address user, address asset, uint256 amount) external override {
-        if (!mockSuccess) revert("MockGuaranteeFundManager: release failed");
+        if (!mockSuccess) revert("MGFM: release fail");
         require(_userGuarantees[user][asset] >= amount, "Insufficient guarantee");
         _userGuarantees[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
@@ -59,7 +59,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         uint256 penaltyToLender,
         uint256 platformFee
     ) external override {
-        if (!mockSuccess) revert("MockGuaranteeFundManager: settleEarlyRepayment failed");
+        if (!mockSuccess) revert("MGFM: settle early fail");
         uint256 total = _userGuarantees[user][asset];
         uint256 sum = refundToBorrower + penaltyToLender + platformFee;
         require(sum == total, "Sum mismatch");
@@ -74,7 +74,20 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
 
     /// @notice Partial forfeiture (mock).
     function forfeitPartial(address user, address asset, address receiver, uint256 amount) external override {
-        if (!mockSuccess) revert("MockGuaranteeFundManager: forfeitPartial failed");
+        if (!mockSuccess) revert("MGFM: forfeit part fail");
+        require(_userGuarantees[user][asset] >= amount, "Insufficient guarantee");
+        _userGuarantees[user][asset] -= amount;
+        _totalByAsset[asset] -= amount;
+        emit GuaranteeForfeited(user, asset, amount, receiver, block.number);
+    }
+
+    function forfeitPartialWithRewardPenalty(
+        address user,
+        address asset,
+        address receiver,
+        uint256 amount
+    ) external override {
+        if (!mockSuccess) revert("MGFM: forfeit reward fail");
         require(_userGuarantees[user][asset] >= amount, "Insufficient guarantee");
         _userGuarantees[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
@@ -88,7 +101,7 @@ contract MockGuaranteeFundManager is IGuaranteeFundManager, LoanEvents {
         address[] calldata receivers,
         uint256[] calldata amounts
     ) external override {
-        if (!mockSuccess) revert("MockGuaranteeFundManager: settleDefault failed");
+        if (!mockSuccess) revert("MGFM: settle default fail");
         require(receivers.length == amounts.length, "Array length mismatch");
         uint256 total = _userGuarantees[user][asset];
         uint256 sum;

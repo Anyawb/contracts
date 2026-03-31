@@ -5,9 +5,9 @@ contract MockPositionViewBatch {
     struct Position {
         uint256 collateral;
         uint256 debt;
-        bool isValid;
         uint256 updateBlock;
         uint64 version;
+        bool isValid;
     }
 
     mapping(address => mapping(address => Position)) private _positions;
@@ -35,9 +35,9 @@ contract MockPositionViewBatch {
         _positions[user][asset] = Position({
             collateral: collateral,
             debt: debt,
-            isValid: isValid,
             updateBlock: updateBlock,
-            version: version
+            version: version,
+            isValid: isValid
         });
     }
 
@@ -72,7 +72,7 @@ contract MockPositionViewBatch {
             uint64[] memory versions
         )
     {
-        require(users.length == assets.length, "MockPositionViewBatch: length mismatch");
+        require(users.length == assets.length, "MPVB: len mismatch");
         uint256 len = users.length;
         collaterals = new uint256[](len);
         debts = new uint256[](len);
@@ -139,33 +139,33 @@ contract MockPreviewView {
         uint256 hf;
         uint256 ltv;
         uint256 maxBorrowable;
-        bool positionIsValid;
         uint256 positionBlockNumber;
         uint64 positionVersion;
+        bool positionIsValid;
     }
 
     struct DepositResult {
         uint256 hf;
-        bool ok;
-        bool positionIsValid;
         uint256 positionBlockNumber;
         uint64 positionVersion;
+        bool ok;
+        bool positionIsValid;
     }
 
     struct RepayResult {
         uint256 hf;
         uint256 ltv;
-        bool positionIsValid;
         uint256 positionBlockNumber;
         uint64 positionVersion;
+        bool positionIsValid;
     }
 
     struct WithdrawResult {
         uint256 hf;
-        bool ok;
-        bool positionIsValid;
         uint256 positionBlockNumber;
         uint64 positionVersion;
+        bool ok;
+        bool positionIsValid;
     }
 
     mapping(bytes32 => BorrowResult) public borrowResult;
@@ -184,19 +184,19 @@ contract MockPreviewView {
             hf: hf,
             ltv: ltv,
             maxBorrowable: maxBorrowable,
-            positionIsValid: true,
             positionBlockNumber: block.number,
-            positionVersion: 1
+            positionVersion: 1,
+            positionIsValid: true
         });
     }
 
     function setPreviewDeposit(address user, address asset, uint256 hf, bool ok) external {
         depositResult[_key(user, asset)] = DepositResult({
             hf: hf,
-            ok: ok,
-            positionIsValid: true,
             positionBlockNumber: block.number,
-            positionVersion: 1
+            positionVersion: 1,
+            ok: ok,
+            positionIsValid: true
         });
     }
 
@@ -204,19 +204,19 @@ contract MockPreviewView {
         repayResult[_key(user, asset)] = RepayResult({
             hf: hf,
             ltv: ltv,
-            positionIsValid: true,
             positionBlockNumber: block.number,
-            positionVersion: 1
+            positionVersion: 1,
+            positionIsValid: true
         });
     }
 
     function setPreviewWithdraw(address user, address asset, uint256 hf, bool ok) external {
         withdrawResult[_key(user, asset)] = WithdrawResult({
             hf: hf,
-            ok: ok,
-            positionIsValid: true,
             positionBlockNumber: block.number,
-            positionVersion: 1
+            positionVersion: 1,
+            ok: ok,
+            positionIsValid: true
         });
     }
 

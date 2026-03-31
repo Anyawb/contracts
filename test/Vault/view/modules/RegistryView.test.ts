@@ -85,7 +85,7 @@ describe("RegistryView", function () {
 
     it("sets registry address", async function () {
       const { registry, rv } = await loadFixture(deployFixture);
-      expect(await rv.registryAddr()).to.equal(await registry.getAddress());
+      expect(await rv.registryAddrVar()).to.equal(await registry.getAddress());
       expect(await rv.getRegistry()).to.equal(await registry.getAddress());
     });
   });
@@ -114,7 +114,7 @@ describe("RegistryView", function () {
       await expect(impl.getAllModuleKeys()).to.be.revertedWithCustomError(impl, "ZeroAddress");
       await expect(impl.checkModulesExist([KEY_ACM])).to.be.revertedWithCustomError(impl, "ZeroAddress");
       // Legacy getters should not revert.
-      expect(await impl.registryAddr()).to.equal(ethers.ZeroAddress);
+      expect(await impl.registryAddrVar()).to.equal(ethers.ZeroAddress);
       expect(await impl.registryAddrVar()).to.equal(ethers.ZeroAddress);
     });
   });
@@ -473,7 +473,7 @@ describe("RegistryView", function () {
       const { admin, registry, rv, minDelay } = await loadFixture(deployRealRegistryFixture);
       
       // 验证 RegistryView 可以访问真实 Registry
-      expect(await rv.registryAddr()).to.equal(await registry.getAddress());
+      expect(await rv.registryAddrVar()).to.equal(await registry.getAddress());
       
       // 验证可以获取真实 Registry 的 minDelay
       const actualMinDelay = await rv.minDelay();

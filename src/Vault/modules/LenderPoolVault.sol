@@ -1,32 +1,36 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import { Registry } from "../../registry/Registry.sol";
-import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
-import { ILenderPoolVault } from "../../interfaces/ILenderPoolVault.sol";
-import { NotAContract, ZeroAddress, AmountIsZero } from "../../errors/StandardErrors.sol";
+import {Registry} from "../../registry/Registry.sol";
+import {ModuleKeys} from "../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../constants/ActionKeys.sol";
+import {IAccessControlManager} from "../../interfaces/IAccessControlManager.sol";
+import {ILenderPoolVault} from "../../interfaces/ILenderPoolVault.sol";
+import {
+    NotAContract,
+    ZeroAddress,
+    AmountIsZero
+} from "../../errors/StandardErrors.sol";
 
 /**
  * @title LenderPoolVault
- * @notice Custody vault for pooled lender liquidity used for match settlement.
- * @dev This module implements a minimal "custody + restricted transferOut" pattern:
- *      - deposit: anyone can deposit funds into the pool (transferFrom -> this contract)
- *      - transferOut: only the Registry-configured VaultBusinessLogic can transfer funds out (for settlement)
+ * @notice Custodies pooled lender liquidity used for settlement matching.
+ * @dev Reverts if:
+ *      - see individual functions
  *
- * Note:
- * - In the order engine, the `lender` field is expected to be this pool address under the pool-based architecture.
- *
- * @custom:security-contact security@example.com
+ * Security:
+ * - Implements a minimal custody plus restricted transferOut pattern.
+ * - Anyone may deposit funds into the pool.
+ * - Only the Registry-configured VaultBusinessLogic or BlocksOnlyCoordinator may transfer funds out for settlement.
+ * - In the order engine, the lender field is expected to equal this pool address under the pool-based architecture.
  */
 contract LenderPoolVault is
     Initializable,
@@ -41,14 +45,24 @@ contract LenderPoolVault is
     /// @dev Stored privately; exposed via explicit getter `registryAddrVar()` (no public state variable).
     address private _registryAddr;
 
-    /// @notice Get Registry address.
-    function registryAddrVar() external view returns (address) {
+    /**
+     * @notice Return the Registry address reference used by this module.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return registryAddr Registry address.
+     */
+    function registryAddrVar() external view returns (address registryAddr) {
         return _registryAddr;
     }
 
-    /// @notice Thrown when a caller is not the Registry-configured VaultBusinessLogic module.
-    error LenderPoolVault__OnlyVaultBusinessLogic();
-    /// @notice Thrown when an upgrade target is not a deployed contract.
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when a caller is not an authorized settlement orchestrator module. Used by {transferOut}.
+    error LenderPoolVault__OnlyAuthorizedSettlementModule();
+    /// @dev Reverts when a UUPS upgrade target has no deployed code. Used by {_authorizeUpgrade}.
     error LenderPoolVault__InvalidImplementation();
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
@@ -76,7 +90,8 @@ contract LenderPoolVault is
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -124,53 +139,120 @@ contract LenderPoolVault is
      * @param asset ERC20 asset address.
      * @param amount Amount to deposit (token native decimals).
      */
-    function deposit(address asset, uint256 amount) external override whenNotPaused nonReentrant {
+    function deposit(
+        address asset,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
         IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
     }
 
     /**
-     * @notice Transfer assets out of the pool vault (restricted to VaultBusinessLogic for settlement).
+     * @notice Transfers assets out of the pool vault for settlement orchestration.
      * @dev Reverts if:
      *      - asset == address(0) or to == address(0) (ZeroAddress)
      *      - amount == 0 (AmountIsZero)
-     *      - caller is not VaultBusinessLogic resolved from Registry (LenderPoolVault__OnlyVaultBusinessLogic)
+     *      - caller is not VaultBusinessLogic or BlocksOnlyCoordinator resolved from Registry
+     *        (LenderPoolVault__OnlyAuthorizedSettlementModule)
      *      - ERC20 transfer fails
      *
      * Security:
      * - nonReentrant
      * - whenNotPaused
-     * - Caller-gated to VaultBusinessLogic (SSOT settlement orchestrator)
+     * - Caller-gated to VaultBusinessLogic or BlocksOnlyCoordinator as the Registry-bound settlement orchestrators.
+     * - BlocksOnlyCoordinator access exists specifically for the blocks-only product's principal disbursement and
+     *   repayment or maturity flows.
      *
      * @param asset ERC20 asset address.
      * @param to Recipient address.
      * @param amount Amount to transfer (token native decimals).
      */
-    function transferOut(address asset, address to, uint256 amount) external override onlyValidRegistry whenNotPaused nonReentrant {
+    function transferOut(
+        address asset,
+        address to,
+        uint256 amount
+    ) external override onlyValidRegistry whenNotPaused nonReentrant {
         if (asset == address(0) || to == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
-        _requireVaultBusinessLogic(msg.sender);
+        _requireSettlementOrchestrator(msg.sender);
         IERC20(asset).safeTransfer(to, amount);
     }
 
-    function _requireVaultBusinessLogic(address caller) internal view onlyValidRegistry {
-        address vbl = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
-        if (caller != vbl) revert LenderPoolVault__OnlyVaultBusinessLogic();
+    /**
+     * @notice Requires `caller` to be a Registry-authorized settlement orchestrator.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - caller is not KEY_VAULT_BUSINESS_LOGIC nor KEY_BLOCKS_ONLY_COORDINATOR
+     *        (LenderPoolVault__OnlyAuthorizedSettlementModule)
+     *
+     * Security:
+     * - View-only authorization helper.
+     * - Keeps pool outflow authority anchored to Registry so blocks-only settlement cannot bypass module governance.
+     *
+     * @param caller Caller address to validate.
+     */
+    function _requireSettlementOrchestrator(
+        address caller
+    ) internal view onlyValidRegistry {
+        address vbl = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_VAULT_BUSINESS_LOGIC
+        );
+        address blocksOnlyCoordinator = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_BLOCKS_ONLY_COORDINATOR
+        );
+        if (caller != vbl && caller != blocksOnlyCoordinator) {
+            revert LenderPoolVault__OnlyAuthorizedSettlementModule();
+        }
     }
 
-    function _requireRole(bytes32 role, address caller) internal view onlyValidRegistry {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+    /**
+     * @notice Require an AccessControlManager role.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - KEY_ACCESS_CONTROL is not registered (propagated)
+     *      - caller lacks the requested role (propagated)
+     *
+     * Security:
+     * - View-only authorization helper.
+     *
+     * @param role Action key / role hash to require.
+     * @param caller Caller address to validate.
+     */
+    function _requireRole(
+        bytes32 role,
+        address caller
+    ) internal view onlyValidRegistry {
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(role, caller);
     }
 
-    function _authorizeUpgrade(address newImplementation) internal view override {
+    /**
+     * @notice Authorize a UUPS upgrade.
+     * @dev Reverts if:
+     *      - newImplementation == address(0) (ZeroAddress)
+     *      - newImplementation has no deployed code (LenderPoolVault__InvalidImplementation)
+     *      - caller lacks ACTION_UPGRADE_MODULE (propagated)
+     *
+     * Security:
+     * - Role-gated via AccessControlManager.
+     * - Validates that the target implementation is a deployed contract.
+     *
+     * @param newImplementation Proposed implementation address.
+     */
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override {
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert LenderPoolVault__InvalidImplementation();
+        if (newImplementation.code.length == 0)
+            revert LenderPoolVault__InvalidImplementation();
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
     }
 
-    /* ============ Storage Gap ============ */
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     uint256[50] private __gap;
 }
-

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import { MessageHashUtils } from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 
 /**
  * @title SettlementIntentLib
@@ -30,10 +30,13 @@ library SettlementIntentLib {
         bytes32 salt;
     }
 
-    // NOTE (Time-Dependency-Refactor / blocks-term intent):
-    // - `termDays` is legacy and is treated as a bucket id in the legacy intent.
-    // - This intent uses `termBlocks` as the SSOT duration input (block.number axis), provided fully off-chain.
-    // - Field order is EIP-712 canonical and MUST match the type string in `hashBorrowIntentBlocks`.
+    /**
+     * @notice Borrower-side blocks-only intent payload with explicit `termBlocks` duration.
+     * @dev Field order is EIP-712 canonical and MUST match the type string in {hashBorrowIntentBlocks}.
+     *      `termDays` is a legacy-only concept and is intentionally absent from this struct.
+     *      `expireAt` is retained for signing compatibility, but its semantic meaning is `expireBlock` on the
+     *      `block.number` axis rather than a unix timestamp.
+     */
     struct BorrowIntentBlocks {
         address borrower;
         address collateralAsset;
@@ -65,9 +68,13 @@ library SettlementIntentLib {
         bytes32 salt;
     }
 
-    // NOTE (Time-Dependency-Refactor / blocks-term intent):
-    // - Uses explicit blocks-based bounds, and avoids any on-chain "days <-> blocks" conversion.
-    // - Field order is EIP-712 canonical and MUST match the type string in `hashLendIntentBlocks`.
+    /**
+     * @notice Lender-side blocks-only intent payload with explicit block-based term bounds.
+     * @dev Field order is EIP-712 canonical and MUST match the type string in {hashLendIntentBlocks}.
+     *      This struct avoids any on-chain `days <-> blocks` conversion and lets off-chain matching reason directly
+     *      about `minTermBlocks` and `maxTermBlocks`.
+     *      `expireAt` is retained for signing compatibility, but its semantic meaning is `expireBlock`.
+     */
     struct LendIntentBlocks {
         address lenderSigner;
         address asset;
@@ -100,47 +107,71 @@ library SettlementIntentLib {
      * @param bi Borrow intent payload.
      * @return structHash EIP-712 struct hash for BorrowIntent.
      */
-    function hashBorrowIntent(BorrowIntent memory bi) internal pure returns (bytes32) {
-        return keccak256(abi.encode(
+    function hashBorrowIntent(
+        BorrowIntent memory bi
+    ) internal pure returns (bytes32) {
+        return
             keccak256(
-                "BorrowIntent(address borrower,address collateralAsset,uint256 collateralAmount,address borrowAsset,"
-                "uint256 amount,uint16 termDays,uint256 rateBps,uint256 expireAt,bytes32 salt)"
-            ),
-            bi.borrower,
-            bi.collateralAsset,
-            bi.collateralAmount,
-            bi.borrowAsset,
-            bi.amount,
-            bi.termDays,
-            bi.rateBps,
-            bi.expireAt,
-            bi.salt
-        ));
+                abi.encode(
+                    keccak256(
+                        abi.encodePacked(
+                            "BorrowIntent(address borrower,address collateralAsset,",
+                            "uint256 collateralAmount,address borrowAsset,",
+                            "uint256 amount,uint16 termDays,uint256 rateBps,",
+                            "uint256 expireAt,bytes32 salt)"
+                        )
+                    ),
+                    bi.borrower,
+                    bi.collateralAsset,
+                    bi.collateralAmount,
+                    bi.borrowAsset,
+                    bi.amount,
+                    bi.termDays,
+                    bi.rateBps,
+                    bi.expireAt,
+                    bi.salt
+                )
+            );
     }
 
     /**
      * @notice Compute the EIP-712 struct hash for a BorrowIntentBlocks (termBlocks SSOT).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure hashing helper for the blocks-only borrow intent surface.
+     * - Callers must ensure the off-chain type string and field order remain exactly aligned with this function before
+     *   accepting signatures as valid blocks-only authorizations.
      *
      * @param bi Borrow intent (blocks-term) payload.
      * @return structHash EIP-712 struct hash for BorrowIntentBlocks.
      */
-    function hashBorrowIntentBlocks(BorrowIntentBlocks memory bi) internal pure returns (bytes32) {
-        return keccak256(abi.encode(
+    function hashBorrowIntentBlocks(
+        BorrowIntentBlocks memory bi
+    ) internal pure returns (bytes32) {
+        return
             keccak256(
-                "BorrowIntentBlocks(address borrower,address collateralAsset,uint256 collateralAmount,address borrowAsset,"
-                "uint256 amount,uint256 termBlocks,uint256 rateBps,uint256 expireAt,bytes32 salt)"
-            ),
-            bi.borrower,
-            bi.collateralAsset,
-            bi.collateralAmount,
-            bi.borrowAsset,
-            bi.amount,
-            bi.termBlocks,
-            bi.rateBps,
-            bi.expireAt,
-            bi.salt
-        ));
+                abi.encode(
+                    keccak256(
+                        abi.encodePacked(
+                            "BorrowIntentBlocks(address borrower,address collateralAsset,",
+                            "uint256 collateralAmount,address borrowAsset,",
+                            "uint256 amount,uint256 termBlocks,uint256 rateBps,",
+                            "uint256 expireAt,bytes32 salt)"
+                        )
+                    ),
+                    bi.borrower,
+                    bi.collateralAsset,
+                    bi.collateralAmount,
+                    bi.borrowAsset,
+                    bi.amount,
+                    bi.termBlocks,
+                    bi.rateBps,
+                    bi.expireAt,
+                    bi.salt
+                )
+            );
     }
 
     /**
@@ -154,45 +185,61 @@ library SettlementIntentLib {
      * @param li Lend intent payload.
      * @return structHash EIP-712 struct hash for LendIntent.
      */
-    function hashLendIntent(LendIntent memory li) internal pure returns (bytes32) {
-        return keccak256(abi.encode(
+    function hashLendIntent(
+        LendIntent memory li
+    ) internal pure returns (bytes32) {
+        return
             keccak256(
-                "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,"
-                "uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
-            ),
-            li.lenderSigner,
-            li.asset,
-            li.amount,
-            li.minTermDays,
-            li.maxTermDays,
-            li.minRateBps,
-            li.expireAt,
-            li.salt
-        ));
+                abi.encode(
+                    keccak256(
+                        "LendIntent(address lenderSigner,address asset,uint256 amount,uint16 minTermDays,"
+                        "uint16 maxTermDays,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                    ),
+                    li.lenderSigner,
+                    li.asset,
+                    li.amount,
+                    li.minTermDays,
+                    li.maxTermDays,
+                    li.minRateBps,
+                    li.expireAt,
+                    li.salt
+                )
+            );
     }
 
     /**
      * @notice Compute the EIP-712 struct hash for a LendIntentBlocks (termBlocks bounds).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure hashing helper for the blocks-only lend intent surface.
+     * - Callers must keep off-chain typed-data generation exactly aligned with this field order and type string to
+     *   avoid accepting signatures over mismatched duration semantics.
      *
      * @param li Lend intent (blocks-term) payload.
      * @return structHash EIP-712 struct hash for LendIntentBlocks.
      */
-    function hashLendIntentBlocks(LendIntentBlocks memory li) internal pure returns (bytes32) {
-        return keccak256(abi.encode(
+    function hashLendIntentBlocks(
+        LendIntentBlocks memory li
+    ) internal pure returns (bytes32) {
+        return
             keccak256(
-                "LendIntentBlocks(address lenderSigner,address asset,uint256 amount,uint256 minTermBlocks,"
-                "uint256 maxTermBlocks,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
-            ),
-            li.lenderSigner,
-            li.asset,
-            li.amount,
-            li.minTermBlocks,
-            li.maxTermBlocks,
-            li.minRateBps,
-            li.expireAt,
-            li.salt
-        ));
+                abi.encode(
+                    keccak256(
+                        "LendIntentBlocks(address lenderSigner,address asset,uint256 amount,uint256 minTermBlocks,"
+                        "uint256 maxTermBlocks,uint256 minRateBps,uint256 expireAt,bytes32 salt)"
+                    ),
+                    li.lenderSigner,
+                    li.asset,
+                    li.amount,
+                    li.minTermBlocks,
+                    li.maxTermBlocks,
+                    li.minRateBps,
+                    li.expireAt,
+                    li.salt
+                )
+            );
     }
 
     /**
@@ -215,15 +262,18 @@ library SettlementIntentLib {
         uint256 chainId,
         address verifyingContract
     ) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes(name)),
-                keccak256(bytes(version)),
-                chainId,
-                verifyingContract
-            )
-        );
+        return
+            keccak256(
+                abi.encode(
+                    keccak256(
+                        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                    ),
+                    keccak256(bytes(name)),
+                    keccak256(bytes(version)),
+                    chainId,
+                    verifyingContract
+                )
+            );
     }
 
     /**
@@ -238,7 +288,10 @@ library SettlementIntentLib {
      * @param structHash EIP-712 struct hash (e.g., from hashBorrowIntent/hashLendIntent).
      * @return digest EIP-712 typed data digest.
      */
-    function toTypedDataHash(bytes32 domainSeparator, bytes32 structHash) internal pure returns (bytes32) {
+    function toTypedDataHash(
+        bytes32 domainSeparator,
+        bytes32 structHash
+    ) internal pure returns (bytes32) {
         return MessageHashUtils.toTypedDataHash(domainSeparator, structHash);
     }
 
@@ -262,7 +315,9 @@ library SettlementIntentLib {
     ) internal view returns (bool) {
         if (signer == address(0)) return false;
         if (_isContract(signer)) {
-            return IERC1271(signer).isValidSignature(digest, signature) == 0x1626ba7e;
+            return
+                IERC1271(signer).isValidSignature(digest, signature) ==
+                0x1626ba7e;
         }
         return ECDSA.recover(digest, signature) == signer;
     }
@@ -278,7 +333,9 @@ library SettlementIntentLib {
      * @param account Address to check.
      * @return isContract_ True if `account` has code.
      */
-    function _isContract(address account) private view returns (bool isContract_) {
+    function _isContract(
+        address account
+    ) private view returns (bool isContract_) {
         return account.code.length > 0;
     }
 
@@ -300,7 +357,8 @@ library SettlementIntentLib {
         bytes32 intentHash,
         uint256 expireAt
     ) internal view {
-        if (block.number > expireAt) revert SettlementIntentLib__IntentExpired();
+        if (block.number > expireAt)
+            revert SettlementIntentLib__IntentExpired();
         if (matched[intentHash]) revert SettlementIntentLib__AlreadyMatched();
     }
 
@@ -322,5 +380,3 @@ library SettlementIntentLib {
         matched[intentHash] = true;
     }
 }
-
-

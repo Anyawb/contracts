@@ -21,8 +21,6 @@ import { BatchTooLarge, EmptyArray, NotAContract, ZeroAddress } from "../../../e
  * Security:
  * - UUPS upgradeable contract; upgrades are admin-gated via Registry roles.
  * - Write APIs are role-gated via Registry.
- *
- * Notes:
  * - User-scoped caches live in `UserView`; this module only caches system-level snapshots.
  * - `SystemStatusCache.utilizationRate` is expressed in WAD (1e18).
  */
@@ -111,22 +109,13 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     /**
      * @notice Return the configured Registry address (preferred naming).
      * @dev Reverts if: (never)
-     * Security: (read-only)
      *
-     * @return Registry address.
+     * Security:
+     * - View-only.
+     *
+     * @return registryAddr_ Registry contract address.
      */
     function registryAddrVar() external view returns (address) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Return the configured Registry address (legacy alias).
-     * @dev Reverts if: (never)
-     * Security: (read-only)
-     *
-     * @return Registry address.
-     */
-    function registryAddr() external view returns (address) {
         return _registryAddr;
     }
 
@@ -213,7 +202,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only.
+        * - View-only.
      *
      * @param asset Asset address.
      * @return status Cached snapshot struct.
@@ -260,7 +249,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - assets.length > ViewConstants.MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
-     * - Read-only.
+        * - View-only.
      *
      * @param assets Asset address list.
      * @return statuses Cached snapshot structs (1:1 with `assets`).
@@ -321,7 +310,9 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     /**
      * @notice Return the external API semantic version for this view module.
      * @dev Reverts if: (never)
-     * Security: (read-only)
+     *
+     * Security:
+     * - Pure function.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
@@ -330,7 +321,9 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     /**
      * @notice Return the schema version for cached outputs and DataPushed payloads.
      * @dev Reverts if: (never)
-     * Security: (read-only)
+     *
+     * Security:
+     * - Pure function.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;

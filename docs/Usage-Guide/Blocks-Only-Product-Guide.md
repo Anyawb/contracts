@@ -1,0 +1,375 @@
+# Blocks-Only 产品独立指南
+
+> 本指南为 EasiFi 借贷协议 blocks-only 产品专属文档，面向开发、集成、风控、产品、前端、撮合、清算等全链路角色。本文同时区分当前仓库已落地能力与后续目标设计，避免把“待实施方案”误读成“已上线事实”。
+
+## 集成者速读
+
+- 如果你是外部前端、撮合服务、清算服务或数据消费方，当前最重要的事实只有四条：`termBlocks` 是唯一 blocks-only 期限字段；当前只支持 `termBlocks = 1`；当前资产准入以链上全局 `AssetWhitelist` 为准；当前 maturity 后的结算/清算触发仍要求 `ACTION_LIQUIDATE` 权限。
+- 如果你只关心“现在能依赖什么”，优先阅读第 1 节、第 4.1 节、第 4.4 节、第 4.5 节和第 6 节；这些段落描述的是当前仓库已经存在或已经定稿、可直接作为集成边界的内容。
+- 如果你看到“目标接口”“建议命名”“未来拆分”“阶段 2”这类字样，应理解为后续演进方向，而不是当前 ABI、当前权限模型或当前链上注册事实。
+- 如果链下目录、旧文档或历史理解与链上实现冲突，以当前仓库中的 `BlocksOnlyCoordinator`、`BlocksOnlyView`、`VaultCore.borrowForBlocks(...)` / `repayForBlocks(...)`、`AssetWhitelist` 和本文第 4 节为准。
+
+---
+
+## 1. 文档定位与当前状态
+
+- **产品定位**：blocks-only 产品是以区块数作为唯一借贷周期单位的独立产品线，首个目标形态为 `termBlocks = 1` 的即时产品。
+- **与 legacy day-bucket 的关系**：它不是对 `5/10/15/30/60/90/180/360` 天 bucket 的别名，也不是把 `termDays = 1` 解释成 1 block；它必须是一条独立产品线。
+- **当前仓库状态**：截至当前代码状态，blocks-only 已落地独立链上产品入口与最小生命周期：`finalizeMatchBlocks`、`borrowForBlocks`、`repayForBlocks`、`repayBlocks`、`settleOrLiquidateBlocks`、独立订单记录、独立 `BlocksOnlyView` 查询面、独立 `DATA_TYPE_BLOCKS_ONLY_*` DataPush，以及 Registry 绑定所需的 `KEY_BLOCKS_ONLY_COORDINATOR / KEY_BLOCKS_ONLY_VIEW`；更大范围的前端目录、更多 term 配置、独立产品注册模块仍属于后续扩展。
+- **文档约束**：本文只把仓库中已验证存在的实现写成“现状”，把尚未落地的能力写成“目标接口/建议命名/后续实施要求”。
+
+### 1.1 如何阅读本文
+
+- 面向当前集成：优先把“当前仓库已落地能力”“已定稿的实施决策”“白名单定稿口径”“前端、撮合与链下服务要求”视为当前对外边界。
+- 面向未来设计：把“架构原则”“推荐依赖图”“迁移与实施建议”视为演进路线，用于避免新实现继续把 blocks-only 语义塞回 legacy day-bucket 主路径。
+- 面向外部系统：除非本文明确写成“已落地能力”或“已定稿”，否则不要把文中命名、目录、模块拆分建议直接当作可调用接口。
+
+---
+
+## 2. 产品定义与核心语义
+
+- **Blocks-Only 产品**：以 `termBlocks` 作为唯一期限输入的借贷产品。
+- **maturityBlock**：blocks-only 产品下的成熟区块应为 `openBlock + termBlocks`。
+- **首个产品选项**：当前实现固定只允许 `termBlocks = 1`，即“借贷形成后的下一个区块即成熟”。
+- **确认偏移边界**：legacy day-bucket 若保留 `+1 confirmation offset`，该偏移仅属于 day-bucket 兼容语义；blocks-only 不得复用该偏移，否则“1 block 产品”会被放大为实际 2 blocks 才成熟。
+- **典型场景**：RWA 自动化撮合、AMM/RFQ、极短周期策略、链上流动性管理、自动化清算联动等。
+
+---
+
+## 3. SSOT 统一口径
+
+### 3.1 必须统一的定义
+
+- **唯一期限参数**：链上与签名层的权威期限字段必须是 `termBlocks`，不是 `termDays`。
+- **termDays 的角色**：`termDays` 仅可保留为 legacy bucket 输入或旧 ABI 兼容字段，不能被解释为 blocks-only 产品语义。
+- **expireAt 语义**：在 intent 相关结构中，`expireAt` 的真实语义是 `expireBlock`，不是 unix timestamp。
+- **清算边界**：当 `block.number >= maturityBlock` 时，blocks-only 订单即可进入既有结算/清算/Reward outcome 判定轴。
+
+### 3.2 当前仓库已验证的 SSOT 落点
+
+- `SettlementIntentLib` 已提供 `BorrowIntentBlocks`、`LendIntentBlocks` 以及对应的 EIP-712 哈希函数，说明签名层已接受显式 `termBlocks` 语义。
+- `TermBlocksLib` 当前只提供 legacy `termDays -> termBlocks` 显式映射，用于 day-bucket 基线口径，不等同于 blocks-only 独立白名单。
+- `LendingEngine` 当前采用 block-based duration whitelist，但白名单仍对应 legacy bucket 映射后的 blocks 值，并非独立的 blocks-only 产品清单。
+- `BlocksOnlyCoordinator` 当前把产品规则直接收口为实现约束：`termBlocks == 1`、`rateBps == 0`、`lender == LenderPoolVault`、借款资产必须通过全局 `AssetWhitelist`。
+- `BlocksOnlyView` 当前通过 `ACTION_VIEW_USER_DATA`、`ACTION_VIEW_SYSTEM_DATA` 与 `ACTION_ADMIN` 做 permissioned 查询，不是完全公开的订单视图。
+
+### 3.3 SSOT 参考文档
+
+- 时间依赖改造总原则：见 [Time-Dependency-Refactor-Guide.md](Time-Dependency-Refactor-Guide.md)
+- 前端签名与快照消费：见 [Frontend-Modification-Guide.md](Frontend-Modification-Guide.md)
+- 前端与合约连接说明：见 [../FRONTEND_CONTRACTS_INTEGRATION.md](../FRONTEND_CONTRACTS_INTEGRATION.md)
+- 资金链路：见 [Funds-Flow-Architecture-Guide.md](Funds-Flow-Architecture-Guide.md)
+- 奖励与等级约束：见 [Reward/Reward-System-Usage-Guide.md](Reward/Reward-System-Usage-Guide.md)
+
+---
+
+## 4. 当前实现与待实施边界
+
+### 4.0 当前对外可依赖的最小事实
+
+- 当前链上 blocks-only 写路径已经存在，最小闭环由 `VaultBusinessLogic.finalizeMatchBlocks(...)`、`BlocksOnlyCoordinator.finalizeMatchBlocks(...)`、`VaultCore.borrowForBlocks(...)`、`VaultCore.repayForBlocks(...)`、`BlocksOnlyCoordinator.repayBlocks(...)` 与 `settleOrLiquidateBlocks(...)` 组成。
+- 当前链上 blocks-only 只读路径已经存在，`BlocksOnlyView` 可返回订单静态字段与运行时字段，如 `remainingDebt`、`isMatured`、`isClosed`、`canSettleOrLiquidate`。
+- 当前 blocks-only 产品规则不是“可配置矩阵”，而是实现内硬约束：`termBlocks == 1`、`rateBps == 0`、`lender == LenderPoolVault`。
+- 当前资产准入不是独立 blocks-only 注册模块，而是先复用全局 `AssetWhitelist`。
+- 当前 maturity 后并不是任何账户都能直接触发收尾；`settleOrLiquidateBlocks(...)` 仍受 `ACTION_LIQUIDATE` 权限约束。
+
+### 4.1 当前仓库已落地能力
+
+- **blocks-term intent 结构已存在**：`SettlementIntentLib` 中已定义 `BorrowIntentBlocks` / `LendIntentBlocks` 及其 EIP-712 哈希逻辑。
+- **block-based maturity 语义已确立**：`LendingEngine`、`EarlyRepaymentGuaranteeManager` 等核心模块已将 maturity 语义统一到 block 轴。
+- **legacy bucket 的显式映射已存在**：`TermBlocksLib.termDaysToBlocks` 提供 `5/10/15/30/60/90/180/360` 到 blocks 的显式映射。
+- **前端文档已为 blocks-only 预留目录口径**：前端文档已要求通过 `blocksOnlyProducts` 目录消费 blocks-only 产品，而不是自行推导。
+
+### 4.2 当前仓库尚未落地的内容
+
+- **独立链上产品入口已落地最小闭环，但还未扩到完整产品矩阵**：当前已存在 `BlocksOnlyCoordinator.finalizeMatchBlocks(...)`、`repayBlocks(...)`、`settleOrLiquidateBlocks(...)` 与 `VaultCore.borrowForBlocks(...) / repayForBlocks(...)`；但还没有更通用的多 term blocks-only 产品注册、目录治理与只读聚合层。
+- **独立 blocks-only 白名单尚未落地**：当前代码中没有名为 `ALLOWED_BLOCKS_ONLY_TERMS` 的链上实现常量或只读接口。
+- **保证金直收 termBlocks 入口尚未落地**：`EarlyRepaymentGuaranteeManager` 当前仍以 legacy `termDays` 为入参，再映射到 `termBlocks`。
+- **撮合主路径已新增 blocks-only 专用入口，但 legacy helper 仍保留**：`VaultBusinessLogic.finalizeMatchBlocks(...)` 已经接到 `BlocksOnlyCoordinator`；`SettlementMatchLib` 仍保留极薄转发 helper，以兼容现有 module 边界。
+- **专属事件与 DataPush 已落地最小集**：当前已实现 `BlocksOnlyMatchFinalized`、`BlocksOnlyRepaymentRecorded`、`BlocksOnlyOrderSettled`、`BlocksOnlyOrderLiquidated` 以及对应的 `DATA_TYPE_BLOCKS_ONLY_*`；更完整的快照聚合层仍未单独建设。
+- **专属读接口已落地最小集**：当前已实现 `BlocksOnlyView`，支持单订单、borrower 分页和 system 分页查询，并返回运行时字段 `remainingDebt / isMatured / isClosed / canSettleOrLiquidate`。
+
+### 4.3 文档表达规则
+
+- 本文后续凡写“目标接口”“建议命名”“建议事件”，均表示**建议设计**，不是当前仓库已存在 ABI。
+- 集成方若按现有代码开发，应以现有 `SettlementIntentLib`、`TermBlocksLib`、`LendingEngine`、`EarlyRepaymentGuaranteeManager` 的实际实现为准。
+
+### 4.3A 对外集成判断表
+
+- 想判断某资产当前能否进入 blocks-only：先看链上 `AssetWhitelist`，再看链下产品目录是否已接入该资产；两者缺一不可。
+- 想判断某订单当前是否可展示为“待结算/待清算”：优先读 `BlocksOnlyView` 运行时字段，不要自行用本地缓存重算 maturity 与 debt。
+- 想判断 maturity 后是否可以由任意 keeper 直接触发：不能这样假设；当前仍取决于调用方是否具备 `ACTION_LIQUIDATE`。
+- 想新增更多 `termBlocks` 产品：不能只改前端目录或链下撮合；当前还必须先改链上 Coordinator 的硬编码约束与治理配置来源。
+- 想把全局 `AssetWhitelist` 中的资产默认视为“已上线 blocks-only 产品”：不能这样假设；进入全局白名单只是必要条件，不是产品已上线的充分条件。
+
+### 4.3B 当前实现下，外部集成方不应自行假设的内容
+
+- 不要假设当前存在独立 blocks-only 产品注册合约、独立 blocks-only 白名单合约或完整产品矩阵查询合约。
+- 不要假设当前 blocks-only 会自动复用 legacy `SettlementManager`、legacy Reward 回调、`EarlyRepaymentGuaranteeManager` 或 day-bucket order creation。
+- 不要假设当前 `termBlocks` 已经开放任意正整数；当前实现只接受 `1`。
+- 不要假设 `rateBps` 可以像 legacy 借贷那样按期限自由配置；当前实现固定要求 `0`。
+- 不要假设 `BlocksOnlyView` 是完全公开的；当前查询仍受权限控制。
+
+### 4.4 已定稿的实施决策（2026-03-15）
+
+以下规则已定案，后续代码实施必须直接按本节执行，不再按 legacy day-bucket 语义做兼容推导：
+
+- **独立写入口是强约束**：blocks-only 必须新增独立入口，至少包括 `finalizeMatchBlocks`、`borrowForBlocks` 及独立产品创建路径；不得复用 day-bucket 的公开产品入口。
+- **产品目标是即时交易，不是计息借贷**：首发 `termBlocks = 1` 产品本质上按“1 block 确认后立即成交/交换”建模，不引入 day-bucket 的利息语义。
+- **blocks-only 首版不计息**：对 `termBlocks = 1` 产品，利息口径固定为 `0`，不再使用 `termDays / 365`，也不使用 `termBlocks / YEAR_BLOCKS` 的借贷计息模型。
+- **Reward 系统完全独立**：blocks-only 不沿用 legacy 的 `_ON_TIME_WINDOW_BLOCKS`、early/on-time/late 分类或对应 Reward outcome 规则；若未来需要 Reward，应单独定义 blocks-only Reward 子系统。
+- **提前还款保证金不适用**：blocks-only 首版不接入 `EarlyRepaymentGuaranteeManager` / `GuaranteeFundManager`，也不生成任何提前还款保证金记录。
+- **清算边界极简化**：当订单获得 `1 block` 确认并达到 blocks-only maturity 后，即可立即进入清算/交割分支；不引入额外 grace window，也不复用 day-bucket 的确认偏移。
+- **适用场景是 RWA 与稳定币即时交换**：首版产品面向 RWA 与 USDT/USDC 等稳定币的快速撮合成交，语义上更接近 block-confirmed atomic trade，而非传统借贷周期产品。
+- **阶段 1 先采用全局资产白名单**：在社区与产品体系尚未成熟前，blocks-only 首版先复用全局 `AssetWhitelist` 作为 RWA 资产准入门槛；每新增一种可交易 RWA 资产，先加入全局资产白名单，再允许进入 blocks-only 产品流程。
+- **当前链上权威来源是 `AssetWhitelist`**：第一阶段链下 `blocksOnlyProducts` 快照只能展示已进入全局 `AssetWhitelist` 的资产；若链下目录与链上白名单冲突，以链上 `AssetWhitelist` 为准。
+- **当前结算/清算权限不是公开权限**：`settleOrLiquidateBlocks(...)` 当前要求调用方持有 `ACTION_LIQUIDATE`，而不是任何人都可在 maturity 后直接触发。
+- **阶段 2 再拆独立产品注册合约**：当社区成熟、开放上架需求增强后，再把 blocks-only 的“资产准入”和“产品目录/交易模板”从全局 `AssetWhitelist` 中拆分为独立产品注册模块。
+- **仅更新资产白名单仍不足以完整上线产品**：在第一阶段，新增 RWA 资产进入 `AssetWhitelist` 只是准入前提；前端展示、撮合配置、事件/DataPush、只读查询仍需同步接入该资产，才能真正可交易。
+
+### 4.5 白名单定稿口径（必须按本节理解）
+
+为避免后续实现时把“独立产品体系”和“独立白名单模块”混为一谈，白名单口径在此单独定稿：
+
+- **Blocks-Only 是独立产品体系**：它在产品编码、签名结构、撮合路径、写入口、清算语义、Reward 规则、监控口径上都必须作为独立体系处理。
+- **独立体系不等于首版必须独立白名单合约**：第一阶段可以复用全局 `AssetWhitelist` 作为链上资产准入门槛，这不改变 blocks-only 作为独立产品体系的事实。
+- **阶段 1 的链上资产准入 SSOT 只有一个**：即全局 `AssetWhitelist`。任何 blocks-only 资产，只要链上未进入 `AssetWhitelist`，都不得进入 blocks-only 主路径。
+- **阶段 1 的真实上线条件是“双条件”**：
+  1.  资产已进入全局 `AssetWhitelist`；
+  2.  该资产已被接入 blocks-only 的链下产品目录、前端展示、撮合配置、监控与只读消费链路。
+- **因此，进入 `AssetWhitelist` 是必要条件，但不是充分条件**：资产只进了全局白名单，并不自动意味着该资产已经成为“可交易的 blocks-only 产品”。
+- **前端展示必须做交集判断**：阶段 1 下，前端展示的 `blocksOnlyProducts` 必须与链上 `AssetWhitelist` 同时成立；链下目录允许、链上白名单不允许时，以链上拒绝为准。
+- **撮合与链上执行也必须以链上白名单为准**：即使链下撮合服务已经发布某个 blocks-only 产品，只要链上 `AssetWhitelist` 不允许对应资产，最终执行仍必须失败，而不能放行。
+- **阶段 2 才考虑拆独立产品注册模块**：未来若把 blocks-only 的产品目录、模板、参数和准入彻底抽成独立注册模块，那是“独立体系的进一步工程化落地”，不是“今天才能算独立体系”的前置条件。
+
+一句话总结本节：**Blocks-Only 是独立产品体系；但在首版资产准入上，先复用全局 `AssetWhitelist`，而不是现在就强行要求独立 whitelist 合约。**
+
+---
+
+## 5. 当前合约实现要点
+
+### 5.1 LendingEngine
+
+- 当前 `LendingEngine` 已使用 blocks 作为账本期限与 maturity 语义。
+- 当前允许的 duration whitelist 仍对应 legacy day-bucket 映射结果：`36000 / 72000 / 108000 / 216000 / 432000 / 648000 / 1296000 / 2592000`。
+- 这说明协议已经具备 block-based 账本基础，但尚未把 blocks-only 独立产品白名单单独抽离。
+- 当前 blocks-only debt write 并不要求 `LendingEngine` 直接接受 `termBlocks = 1` 作为独立 whitelist 项；实际路径是 `VaultCore.borrowForBlocks(...) / repayForBlocks(...)` 作为独立 debt-ledger bridge，内部写入仍复用现有 debt mutation。
+
+### 5.2 SettlementIntentLib
+
+- `BorrowIntentBlocks` 使用显式 `termBlocks`。
+- `LendIntentBlocks` 使用显式 `minTermBlocks / maxTermBlocks`。
+- 当前 blocks-only 最可信的“已实现能力”在于签名结构已经为独立产品线铺好路径。
+
+### 5.3 SettlementMatchLib
+
+- 当前撮合主路径仍会把 legacy `termDays` 显式映射到 `termBlocks`。
+- blocks-only 已经新增直接消费 `termBlocks` 的 `finalizeMatchBlocks(...) -> BlocksOnlyCoordinator` 路径，不再依赖 day-bucket 入口；`SettlementMatchLib` 只保留极薄桥接 helper。
+
+### 5.4 EarlyRepaymentGuaranteeManager
+
+- 当前保证金锁定入口仍接收 `termDays`，内部再映射为 `termBlocks`。
+- 但当前 blocks-only 主路径不会调用 `EarlyRepaymentGuaranteeManager`；该模块仅保留为 legacy / 非 blocks-only 路径的实现背景。
+
+### 5.5 TermBlocksLib
+
+- 当前职责是维护 legacy bucket 的显式 blocks 映射，避免链上做 seconds/days 运算。
+- 它不是 blocks-only 产品白名单模块，也不应被误写成 `isBlocksOnlyTermWhitelisted` 之类当前并不存在的接口。
+
+---
+
+## 6. 前端、撮合与链下服务要求
+
+### 6.1 前端要求
+
+- blocks-only 产品必须作为独立产品线展示，不能混入 day-bucket 下拉框并复用 `termDays` 概念。
+- 签名时必须写入显式 `termBlocks`，尤其是 `1 block` 产品必须签入 `termBlocks = 1`。
+- 期限目录应来自链下快照源，不允许前端自行用“天数乘平均出块时间”推导产品期限。
+- 前端应同时展示确定值 `blocksLeft` 与估计值 ETA，并明确 ETA 只是估计。
+- 前端读取单订单、borrower 分页与系统分页时，应优先消费 `BlocksOnlyView` 返回的运行时字段，而不是自行拼接 debt 或 maturity 状态。
+
+### 6.2 撮合服务要求
+
+- 撮合服务必须支持 `BorrowIntentBlocks / LendIntentBlocks` 的签名、验签与复现。
+- blocks-only 的 borrow/lend 意向单应使用显式 `termBlocks` 范围匹配，不能回退到 `minTermDays / maxTermDays` 语义。
+- 若采用链下快照发布期限目录，borrower 与 lender 必须使用同一份快照版本，否则会产生无法撮合的签名不一致。
+
+### 6.3 快照与配置服务要求
+
+- 推荐由链下服务统一发布 `TermBlocks` 快照。
+- 快照中可并行包含 `termBuckets` 与 `blocksOnlyProducts`，前者服务 legacy，后者服务 blocks-only。
+- `blocksOnlyProducts` 应至少包含 `productCode`、`label`、`termBlocks`、结算模式等字段。
+
+### 6.4 参考文档
+
+- 前端签名与快照消费：见 [Frontend-Modification-Guide.md](Frontend-Modification-Guide.md)
+- 前端与合约连接：见 [../FRONTEND_CONTRACTS_INTEGRATION.md](../FRONTEND_CONTRACTS_INTEGRATION.md)
+
+---
+
+## 7. 奖励、清算与风控边界
+
+- **清算边界**：blocks-only 产品达到 `maturityBlock` 后即可进入结算/清算判定，不应叠加 day-bucket 的确认偏移。
+- **清算权限边界**：当前代码要求持有 `ACTION_LIQUIDATE` 的调用方才能触发 `settleOrLiquidateBlocks(...)`，因此 maturity 只是可判定条件，不等于任何账户都可直接结算。
+- **奖励边界**：blocks-only 产品是独立产品线，Reward 规则应直接消费显式 `termBlocks`，不能把 legacy 的 days bucket 逻辑生搬硬套。
+- **等级约束**：若未来 blocks-only 产品引入奖励门槛、等级门槛或更细粒度风控，应单独定义，不应默认继承 day-bucket 长周期规则。
+- **极短周期风险**：`1 block` 产品天然暴露更强的链上拥堵、MEV、预言机延迟、撮合与清算竞争、价格跳变风险。
+- **白名单约束**：只允许治理明确批准的 blocks-only 周期，尤其是首发建议从 `termBlocks = 1` 这种严格白名单选项开始。
+
+参考：
+
+- [Reward/Reward-System-Usage-Guide.md](Reward/Reward-System-Usage-Guide.md)
+- [Funds-Flow-Architecture-Guide.md](Funds-Flow-Architecture-Guide.md)
+- [Time-Dependency-Refactor-Guide.md](Time-Dependency-Refactor-Guide.md)
+
+---
+
+## 8. 独立体系设计原则与集成建议
+
+blocks-only 产品若作为未来 AMM / RFQ / RWA 自动化交易基础，应与现有 day-bucket / legacy 流程保持结构性解耦。
+
+### 8.1 架构原则
+
+- **完全独立**：产品标识、目录、快照、撮合路由、风控、奖励、清算策略应独立管理；这里的“独立”首先指产品体系独立，不要求首版必须同步拥有独立白名单合约。
+- **接口集成**：外部模块应通过标准接口、事件、快照或服务契约与 blocks-only 集成，而不是依赖内部实现细节。
+- **依赖反转**：blocks-only 方案不应要求 legacy 模块感知其内部状态；理想形态是由 blocks-only 向外暴露稳定接口。
+- **可扩展**：接口与目录命名要为未来 `termBlocks = N`、AMM、RWA 自动化策略预留空间。
+
+### 8.2 当前可执行的集成建议
+
+- 在链下先把产品目录、签名结构、撮合约束与快照接口独立出来。
+- 在链上真正新增产品入口前，不要对外宣称存在独立 `BlocksOnly*` 合约或已上线 ABI。
+- 文档、前端、撮合、清算、奖励的产品编码应统一，例如使用稳定的 `productCode` 区分 legacy 与 blocks-only。
+
+### 8.3 已定稿命名与模块边界（后续代码必须按本节实现）
+
+从本节开始，以下命名不再是“建议”，而是本仓库后续 blocks-only 实施的正式口径：
+
+- **独立协调合约名称**：`BlocksOnlyCoordinator`。
+- **独立模块 Registry Key**：`KEY_BLOCKS_ONLY_COORDINATOR`。
+- **目录口径**：独立实现放在 `src/blocks-only/` 或等价独立目录中，不继续堆进 `VaultCore` / `VaultBusinessLogic` / `SettlementMatchLib` 内部。
+- **最小写接口名称**：`IBlocksOnlyCoordinator`。
+- **VaultCore 对外新增入口**：`borrowForBlocks(address borrower, address asset, uint256 amount, uint256 termBlocks)`。
+- **VaultBusinessLogic 对外新增入口**：`finalizeMatchBlocks(BorrowIntentBlocks borrowIntent, LendIntentBlocks[] lendIntents, bytes sigBorrower, bytes[] sigLenders)`。
+- **协调合约核心写入口**：`finalizeMatchBlocks(...)`，由 `VaultBusinessLogic` 转发调用，不再由 `SettlementMatchLib` 直接承担 blocks-only 主路径编排。
+- **SettlementMatchLib 的口径**：继续服务 legacy day-bucket 原子撮合；blocks-only 不再把主编排逻辑继续塞进该 library。
+- **错误命名**：统一使用 `BlocksOnlyCoordinator__*` 前缀。
+- **事件命名**：统一使用 `BlocksOnly*` 前缀，至少保留 `BlocksOnlyMatchFinalized` 作为第一版链上主事件。
+
+### 8.4 三个桥接点的固定职责
+
+本项目已明确要求 blocks-only 为独立产品系统，因此三处 legacy 模块只允许承担“桥接/转发”职责：
+
+- **VaultCore**：只保留 debt-ledger 写入口桥接，即新增 `borrowForBlocks(...)`，内部把显式 `termBlocks` 转发给独立协调模块或专用 debt 写路径；不得在 `VaultCore` 内部复制 blocks-only 撮合、事件、Reward、Guarantee 逻辑。
+- **VaultBusinessLogic**：只保留 borrower/lender intent 校验、reserve 消耗与最终转发职责，即新增 `finalizeMatchBlocks(...)` 并把执行收口到 `BlocksOnlyCoordinator`；不得再把 blocks-only 原子结算主流程直接实现在本合约里。
+- **SettlementMatchLib**：保留 legacy `termDays -> termBlocks` 原子借贷撮合实现；如果需要兼容过渡，只允许提供极薄的 helper，不再作为 blocks-only 主流程承载层。
+
+一句话理解：**legacy 三件套只负责 bridge；blocks-only 真正的产品编排必须落在 `BlocksOnlyCoordinator`。**
+
+### 8.5 Blocks-Only Coordinator 的固定职责范围
+
+`BlocksOnlyCoordinator` 第一版必须至少承担以下职责：
+
+- 校验 blocks-only 资产准入：阶段 1 仍以全局 `AssetWhitelist` 为链上 SSOT。
+- 校验 `termBlocks`：当前实现直接硬编码只放行 `termBlocks = 1`，尚未抽象成独立链上白名单容器。
+- 校验 `rateBps`：当前实现固定只放行 `rateBps = 0`。
+- 校验资金来源：当前实现要求 `lender` 必须等于 Registry 中的 `LenderPoolVault`。
+- 从 `LenderPoolVault` 出金并向 borrower 放款。
+- 调用独立 debt 写入口完成 `borrowForBlocks(...)` 账本写入。
+- 创建 blocks-only 订单记录或等价链上订单结果。
+- 明确隔离 legacy Reward：不得触发 legacy `Borrow` / `RepayOnTime` / `RepayLate` 等 Reward 语义。
+- 明确隔离 early repayment guarantee：不得调用 `EarlyRepaymentGuaranteeManager` / `GuaranteeFundManager`。
+- 发出 blocks-only 专属事件，供 DataPush / 前端 / 监控消费。
+- 暴露独立读取面：当前已通过 `BlocksOnlyView` 暴露 permissioned 订单与运行时查询。
+
+### 8.6 与现有 ORDER_ENGINE / LendingEngine 的固定边界
+
+实现前必须统一以下边界，否则 `termBlocks = 1` 无法真实上线：
+
+- **不能直接复用当前 legacy `createLoanOrder` 语义而不做隔离**：当前 `LendingEngine.createLoanOrder(...)` 只允许 legacy duration whitelist，`term = 1` 会被 `InvalidTerm` 拒绝。
+- **不能让 blocks-only 订单默认触发 legacy Reward borrow 回调**：当前 `LendingEngine.createLoanOrder(...)` 会在创建后尝试触发 `RewardManager.onLoanEventByOrder*`，这与 blocks-only 首版“Reward 完全独立”的定稿冲突。
+- **因此 Blocks-Only 必须拥有独立订单创建路径**：可以是独立订单合约、独立 coordinator 内部订单记录、或未来独立 order engine，但第一版不得伪装成 legacy order creation 的一个 term 特例。
+- **VaultCore 的 debt 写入与订单创建要解耦**：blocks-only 可以复用 debt ledger，但不能被 legacy order creation 规则反向绑死。
+
+### 8.7 第一版推荐依赖图
+
+为便于后续拆分，第一版按以下依赖方向实施：
+
+1. `VaultBusinessLogic.finalizeMatchBlocks(...)`
+2. 校验签名、校验 reserve、汇总金额后调用 `Registry[KEY_BLOCKS_ONLY_COORDINATOR]`
+3. `BlocksOnlyCoordinator.finalizeMatchBlocks(...)`
+4. 协调合约完成资产白名单校验、termBlocks 校验、资金划拨、债务写入、blocks-only 订单记录、事件发出
+5. `VaultCore.borrowForBlocks(...)` 仅作为 debt-ledger bridge 被协调合约调用
+
+该依赖图的关键点是：**blocks-only 自己控制产品语义，legacy 模块只暴露必要桥接面，不再反向主导产品规则。**
+
+---
+
+## 9. 迁移与实施建议
+
+### 9.1 实施顺序建议
+
+1. 先统一链下 SSOT：期限快照、产品目录、签名结构、撮合匹配语义。
+2. 再新增链上入口：显式 `termBlocks` 写入路径、独立白名单、独立事件。
+3. 最后接清算、Reward、前端展示与监控面，完成端到端闭环。
+
+### 9.2 最小验收清单
+
+- 链上关键路径不再依赖 `termDays = 1` 这种错误表达来模拟 1 block 产品。
+- blocks-only 路径的 maturity 统一为 `openBlock + termBlocks`。
+- 签名、撮合、放款、保证金、清算、Reward 均直接消费显式 `termBlocks`。
+- 前端、撮合、清算、风控使用同一份产品目录或快照版本。
+- 文档、事件、监控、API 中不再把“目标接口”误写成“现有事实”。
+
+### 9.3 与 legacy 的兼容性结论
+
+- blocks-only 产品应与现有 day-bucket 产品并存，但必须明确分流。
+- 它不应破坏现有 legacy 订单、奖励、清算逻辑。
+- 只有在前后端、撮合、风控、清算、Reward 全链路都支持后，blocks-only 才能算完整上线。
+
+---
+
+## 10. FAQ
+
+**Q: blocks-only 产品和 day-bucket 产品能否混用？**
+
+A: 不能混用语义。两者可以并存，但 blocks-only 必须作为独立产品线处理，不能把 `termDays` bucket 当作其内部实现。
+
+**Q: Blocks-Only 到底是不是单独体系？**
+
+A: 是。当前已经定稿的口径是：blocks-only 在产品语义、签名、撮合、写入口、清算、Reward、前端目录和监控上都按独立体系处理。需要特别区分的是，**独立体系不等于首版就必须独立 whitelist 合约**；首版资产准入先复用全局 `AssetWhitelist`，但产品体系本身仍然是独立的。
+
+**Q: 1 block 产品的 maturityBlock 应如何计算？**
+
+A: 应为 `openBlock + 1`，不再叠加 legacy day-bucket 的 `+1 confirmation offset`。
+
+**Q: 当前仓库是否已经存在 blocks-only 独立合约入口？**
+
+A: 有。当前仓库已经存在 `BlocksOnlyCoordinator`，并通过 `VaultBusinessLogic.finalizeMatchBlocks(...)`、`VaultCore.borrowForBlocks(...) / repayForBlocks(...)` 以及 `repayBlocks(...)`、`settleOrLiquidateBlocks(...)` 形成最小独立闭环。
+
+**Q: 当前仓库是否已经存在 blocks-only 专属白名单常量或只读接口？**
+
+A: 没有。当前仅存在 legacy day-bucket 到 blocks 的显式映射，以及 `LendingEngine` 内部的 block-based whitelist。
+
+**Q: blocks-only 产品的奖励、清算与前端集成规则去哪里看？**
+
+A: 分别参考 [Reward/Reward-System-Usage-Guide.md](Reward/Reward-System-Usage-Guide.md)、[Funds-Flow-Architecture-Guide.md](Funds-Flow-Architecture-Guide.md)、[Frontend-Modification-Guide.md](Frontend-Modification-Guide.md) 和 [Time-Dependency-Refactor-Guide.md](Time-Dependency-Refactor-Guide.md)。
+
+**Q: 如何扩展更多 blocks-only 周期？**
+
+A: 应通过治理明确增加新的 blocks-only 白名单与产品目录，并同步更新前端、撮合、清算、Reward 和监控。就当前实现而言，还需要先把 Coordinator 中硬编码的 `termBlocks == 1` / `rateBps == 0` 约束抽象成可治理配置，不能只在 UI 或链下侧单独放开。
+
+---
+
+## 11. 相关文档索引
+
+- [Time-Dependency-Refactor-Guide.md](Time-Dependency-Refactor-Guide.md)
+- [Frontend-Modification-Guide.md](Frontend-Modification-Guide.md)
+- [Funds-Flow-Architecture-Guide.md](Funds-Flow-Architecture-Guide.md)
+- [Reward/Reward-System-Usage-Guide.md](Reward/Reward-System-Usage-Guide.md)
+- [../FRONTEND_CONTRACTS_INTEGRATION.md](../FRONTEND_CONTRACTS_INTEGRATION.md)
+- [../Architecture-Guide.md](../Architecture-Guide.md)
+
+---
+
+> 本指南是 blocks-only 产品的 SSOT 汇总文档，但“现状”与“目标设计”必须严格区分。若与代码实现冲突，以当前仓库代码和本文第 4 节的状态说明为准；若推进新开发，以本文的 SSOT 语义与相关引用文档为准。

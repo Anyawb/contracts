@@ -12,6 +12,11 @@ set -euo pipefail
 # - REGISTRY_ADDRESS            : Registry address for the target network
 # - VAULT_ROUTER_ADDRESS        : VaultRouter address (required by cache-refresh)
 #
+# Runtime behavior:
+# - Baseline smoke paths are executed in read-only mode by the script itself.
+# - Most baseline calls set READ_ONLY=1 and ENABLE_WRITE=0 internally.
+# - Only RUN_CACHE_REFRESH=1 enables the explicit write-path cache refresh check.
+#
 # Script toggles:
 # - CI_NETWORK                  : "arbitrum" | "arbitrumSepolia" (overrides branch inference)
 # - RUN_CACHE_REFRESH           : "1" to run cache-refresh (write path)
@@ -72,12 +77,18 @@ echo "  network=$NETWORK"
 echo "  run_cache_refresh=${RUN_CACHE_REFRESH:-0}"
 echo ""
 
-# Read-path (recommended baseline)
+# Read-path (recommended baseline; forced read-only here)
 READ_ONLY=1 pnpm -s exec hardhat run "scripts/tests/verify-config-ssot-local.ts" --network "$NETWORK"
 GRANT_ROLE=${GRANT_ROLE:-0} REQUIRE_AUTHZ=${REQUIRE_AUTHZ:-1} pnpm -s exec hardhat run "scripts/tests/view-schemeu-smoke-local.ts" --network "$NETWORK"
 READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run "scripts/tests/viewcache-smoke-local.ts" --network "$NETWORK"
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run "scripts/tests/lendingengine-smoke-local.ts" --network "$NETWORK"
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run "scripts/tests/reward-smoke-local.ts" --network "$NETWORK"
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-create-order.ts" --network "$NETWORK"
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-conservation.ts" --network "$NETWORK"
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-local.ts" --network "$NETWORK"
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --network "$NETWORK"
 
-# Write-path (requires maintainer/admin rights)
+# Write-path (requires maintainer/admin rights; disabled unless explicitly enabled)
 if [[ "${RUN_CACHE_REFRESH:-0}" == "1" ]]; then
   ENABLE_WRITE=1 pnpm -s exec hardhat run "scripts/tests/cache-refresh-local.ts" --network "$NETWORK"
 else

@@ -20,7 +20,7 @@ pragma solidity ^0.8.20;
  * - Prefer module-level events and `DataPushed` for off-chain consumption.
  */
 interface IVaultCore {
-    /* ============ Core Business Functions ============ */
+    /*━━━━━━━━━━━━━━━ Core Business Functions ━━━━━━━━━━━━━━━*/
     /**
      * @notice Deposit collateral (authority path).
      * @dev Reverts if:
@@ -89,7 +89,10 @@ interface IVaultCore {
      * @param assets Collateral asset addresses
      * @param amounts Collateral amounts (token decimals)
      */
-    function batchDeposit(address[] calldata assets, uint256[] calldata amounts) external;
+    function batchDeposit(
+        address[] calldata assets,
+        uint256[] calldata amounts
+    ) external;
 
     /**
      * @notice Batch repay and settle.
@@ -112,7 +115,11 @@ interface IVaultCore {
      * @param assets Debt asset addresses
      * @param amounts Repay amounts (token decimals)
      */
-    function batchRepay(uint256[] calldata orderIds, address[] calldata assets, uint256[] calldata amounts) external;
+    function batchRepay(
+        uint256[] calldata orderIds,
+        address[] calldata assets,
+        uint256[] calldata amounts
+    ) external;
 
     /**
      * @notice Batch withdraw collateral.
@@ -131,7 +138,10 @@ interface IVaultCore {
      * @param assets Collateral asset addresses
      * @param amounts Withdraw amounts (token decimals)
      */
-    function batchWithdraw(address[] calldata assets, uint256[] calldata amounts) external;
+    function batchWithdraw(
+        address[] calldata assets,
+        uint256[] calldata amounts
+    ) external;
 
     /**
      * @notice Borrow on behalf of a borrower (orchestrated module path).
@@ -150,5 +160,10 @@ interface IVaultCore {
      * @param amount Borrow amount (token decimals)
      * @param termDays Loan term (days)
      */
-    function borrowFor(address borrower, address asset, uint256 amount, uint16 termDays) external;
-} 
+    function borrowFor(
+        address borrower,
+        address asset,
+        uint256 amount,
+        uint16 termDays
+    ) external;
+}

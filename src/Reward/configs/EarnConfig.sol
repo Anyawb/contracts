@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IRegistry } from "../../interfaces/IRegistry.sol";
-import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../constants/ActionKeys.sol";
-import { RewardModuleBase } from "../internal/RewardModuleBase.sol";
-import { SystemEvents } from "../../Vault/SystemEvents.sol";
-import { NotAContract, ZeroAddress, InvalidCaller } from "../../errors/StandardErrors.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {IRegistry} from "../../interfaces/IRegistry.sol";
+import {ModuleKeys} from "../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../constants/ActionKeys.sol";
+import {RewardModuleBase} from "../internal/RewardModuleBase.sol";
+import {SystemEvents} from "../../Vault/SystemEvents.sol";
+import {
+    NotAContract,
+    ZeroAddress,
+    InvalidCaller
+} from "../../errors/StandardErrors.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /*━━━━━━━━━━━━━━━ EarnConfig ━━━━━━━━━━━━━━━*/
 
@@ -34,11 +38,19 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
 
     /// @notice Emitted when dynamic reward params are updated.
     /// @dev Emitted by setDynamicRewardParams. thresholdEasy/multiplierBps may be 0 when disabling.
-    event DynamicRewardParamsUpdated(uint256 thresholdEasy, uint256 multiplierBps, uint256 blockNumber);
+    event DynamicRewardParamsUpdated(
+        uint256 thresholdEasy,
+        uint256 multiplierBps,
+        uint256 blockNumber
+    );
 
     /// @notice Emitted when a level multiplier is updated.
     /// @dev Emitted by setLevelMultiplier. level is indexed for filtering.
-    event LevelMultiplierUpdated(uint8 indexed level, uint256 multiplierBps, uint256 blockNumber);
+    event LevelMultiplierUpdated(
+        uint8 indexed level,
+        uint256 multiplierBps,
+        uint256 blockNumber
+    );
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -58,7 +70,8 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
 
@@ -85,8 +98,12 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
     /// @dev Strong constraint for EarnConfig writes (SSOT):
     ///      Default: only Registry[KEY_REWARD_CONFIG] may call.
     ///      Break-glass: allow callers with ACTION_REWARD_CONFIG_EMERGENCY (revocable).
-    function _requireEarnConfigWriter(address caller) internal view onlyValidRegistry {
-        address rewardConfigAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_REWARD_CONFIG);
+    function _requireEarnConfigWriter(
+        address caller
+    ) internal view onlyValidRegistry {
+        address rewardConfigAddr = IRegistry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_REWARD_CONFIG
+        );
         if (caller == rewardConfigAddr) return;
         _requireRole(ActionKeys.ACTION_REWARD_CONFIG_EMERGENCY, caller);
     }
@@ -99,7 +116,7 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
      *      - Registry is zero or not a contract (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - Registry missing KEY_REWARD_CONFIG or KEY_ACCESS_CONTROL (reverts in getModuleOrRevert)
      *      - Caller is not RewardConfig and lacks ACTION_REWARD_CONFIG_EMERGENCY (ACM MissingRole)
-    *      - multiplierBps != 0 and thresholdEasy == 0 (see {InvalidCaller})
+     *      - multiplierBps != 0 and thresholdEasy == 0 (see {InvalidCaller})
      *      - multiplierBps > 100_000 (see {InvalidCaller})
      *
      * Security:
@@ -109,7 +126,10 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
      * @param thresholdEasy EasyToken threshold for dynamic reward. Ignored when multiplierBps = 0.
      * @param multiplierBps Multiplier in BPS (10000 = 1x). Max 100000. 0 disables.
      */
-    function setDynamicRewardParams(uint256 thresholdEasy, uint256 multiplierBps) external onlyValidRegistry {
+    function setDynamicRewardParams(
+        uint256 thresholdEasy,
+        uint256 multiplierBps
+    ) external onlyValidRegistry {
         _requireEarnConfigWriter(msg.sender);
 
         // Allow disabling via multiplierBps=0 (threshold ignored).
@@ -127,7 +147,11 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
         _dynamicThresholdEasy = thresholdEasy;
         _dynamicMultiplierBps = multiplierBps;
         _dynamicConfigUpdateBlock = block.number;
-        emit DynamicRewardParamsUpdated(thresholdEasy, multiplierBps, block.number);
+        emit DynamicRewardParamsUpdated(
+            thresholdEasy,
+            multiplierBps,
+            block.number
+        );
     }
 
     /**
@@ -145,10 +169,14 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
      * @param level User level (1..5).
      * @param multiplierBps Multiplier in BPS (10000 = 1x). Range: (0, 100000].
      */
-    function setLevelMultiplier(uint8 level, uint256 multiplierBps) external onlyValidRegistry {
+    function setLevelMultiplier(
+        uint8 level,
+        uint256 multiplierBps
+    ) external onlyValidRegistry {
         _requireEarnConfigWriter(msg.sender);
         if (level < 1 || level > 5) revert InvalidCaller();
-        if (multiplierBps == 0 || multiplierBps > 100_000) revert InvalidCaller();
+        if (multiplierBps == 0 || multiplierBps > 100_000)
+            revert InvalidCaller();
         _levelMultiplierBps[level] = multiplierBps;
         _levelConfigUpdateBlock = block.number;
         emit LevelMultiplierUpdated(level, multiplierBps, block.number);
@@ -173,9 +201,17 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
         external
         view
         onlyValidRegistry
-        returns (uint256 thresholdEasy, uint256 multiplierBps, uint256 updateBlock)
+        returns (
+            uint256 thresholdEasy,
+            uint256 multiplierBps,
+            uint256 updateBlock
+        )
     {
-        return (_dynamicThresholdEasy, _dynamicMultiplierBps, _dynamicConfigUpdateBlock);
+        return (
+            _dynamicThresholdEasy,
+            _dynamicMultiplierBps,
+            _dynamicConfigUpdateBlock
+        );
     }
 
     /**
@@ -190,7 +226,9 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
      * @param level User level (1..5).
      * @return multiplierBps Multiplier in BPS (10000 = 1x).
      */
-    function getLevelMultiplierBps(uint8 level) external view onlyValidRegistry returns (uint256 multiplierBps) {
+    function getLevelMultiplierBps(
+        uint8 level
+    ) external view onlyValidRegistry returns (uint256 multiplierBps) {
         if (level < 1 || level > 5) revert InvalidCaller();
         return _levelMultiplierBps[level];
     }
@@ -206,7 +244,12 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
      *
      * @return Block number of last setLevelMultiplier call.
      */
-    function getLevelConfigUpdateBlock() external view onlyValidRegistry returns (uint256) {
+    function getLevelConfigUpdateBlock()
+        external
+        view
+        onlyValidRegistry
+        returns (uint256)
+    {
         return _levelConfigUpdateBlock;
     }
 
@@ -219,7 +262,9 @@ contract EarnConfig is Initializable, UUPSUpgradeable, RewardModuleBase {
     /*━━━━━━━━━━━━━━━ UUPS ━━━━━━━━━━━━━*/
 
     /// @dev Reverts if: caller lacks ACTION_UPGRADE_MODULE; newImplementation is zero (see {ZeroAddress}).
-    function _authorizeUpgrade(address newImplementation) internal view override {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
     }

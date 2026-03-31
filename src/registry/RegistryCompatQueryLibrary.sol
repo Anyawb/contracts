@@ -11,9 +11,9 @@ import {RegistryStorage} from "./RegistryStorageLibrary.sol";
  *      - (see individual functions)
  *
  * Security:
- * - Read-only (view) helpers operating on RegistryStorage
- * - Enumeration is O(N) over ModuleKeys.getAllKeys(); not intended as a long-term stable production API
- * - Prefer dedicated view modules for heavy enumeration/pagination if needed
+ * - Read-only helpers operating on RegistryStorage.
+ * - Enumeration is O(N) over ModuleKeys.getAllKeys() and is not intended as a high-throughput production API.
+ * - Prefer dedicated view modules for heavy enumeration or pagination workloads.
  */
 library RegistryCompatQuery {
     /**
@@ -25,9 +25,13 @@ library RegistryCompatQuery {
      * - Read-only
      * - O(N) over ModuleKeys.getAllKeys()
      *
-     * @return keys Registered module keys (filtered from ModuleKeys.getAllKeys()).
+     * @return keys Registered module keys filtered from ModuleKeys.getAllKeys().
      */
-    function getAllRegisteredModuleKeys() internal view returns (bytes32[] memory) {
+    function getAllRegisteredModuleKeys()
+        internal
+        view
+        returns (bytes32[] memory)
+    {
         bytes32[] memory allKeys = ModuleKeys.getAllKeys();
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         uint256 count = 0;
@@ -61,14 +65,13 @@ library RegistryCompatQuery {
      *
      * @param offset 0-based offset into the registered module keys list.
      * @param limit Maximum number of keys to return.
-     * @return keys Page of registered module keys.
+     * @return keys Paginated slice of registered module keys.
      * @return totalCount Total number of registered module keys.
      */
-    function getRegisteredModuleKeysPaginated(uint256 offset, uint256 limit)
-        internal
-        view
-        returns (bytes32[] memory keys, uint256 totalCount)
-    {
+    function getRegisteredModuleKeysPaginated(
+        uint256 offset,
+        uint256 limit
+    ) internal view returns (bytes32[] memory keys, uint256 totalCount) {
         bytes32[] memory all = getAllRegisteredModuleKeys();
         totalCount = all.length;
         if (offset >= totalCount) {
@@ -87,4 +90,3 @@ library RegistryCompatQuery {
         return (keys, totalCount);
     }
 }
-

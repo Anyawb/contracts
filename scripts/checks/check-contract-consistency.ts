@@ -176,7 +176,7 @@ async function checkModuleDependencies(contracts: ContractInfo[], report: Consis
   // NOTE(Architecture-Guide): HealthFactorCalculator / ValuationOracleAdapter are deprecated in this repo.
   // Keep the list aligned with the current module set.
   const businessModules = ['CollateralManager', 'LendingEngine', 'VaultLendingEngine', 'HealthView', 'StatisticsView'];
-  const infrastructureModules = ['AssetWhitelist', 'FeeRouter', 'RewardManager', 'PriceOracle', 'CoinGeckoPriceUpdater', 'ValuationOracleView'];
+  const infrastructureModules = ['AssetWhitelist', 'FeeRouter', 'RewardManager', 'PriceOracle', 'PriceUpdater', 'ValuationOracleView'];
   
   // 检查核心模块依赖
   for (const module of coreModules) {

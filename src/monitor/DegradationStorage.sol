@@ -222,20 +222,6 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
             .requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
     }
 
-    /**
-     * @notice Compatibility getter for Registry address.
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - View-only
-     *
-     * @return registry Registry address.
-     */
-    function registryAddr() external view returns(address registry){ 
-        return _registryAddr; 
-    }
-
     /*━━━━━━━━━━━━━━━ Ring-Buffer Logic ━━━━━━━━━━━━━━━*/
     /**
      * @notice Add an event to the circular buffer.
@@ -358,7 +344,7 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param details Human-readable details.
      * @param module Module address.
      */
-    function registerHealthDetailsIfNew(bytes32 detailsHash,string memory details,address module) external onlyValidRegistry onlyAdmin {
+    function registerHealthDetailsIfNew(bytes32 detailsHash,string calldata details,address module) external onlyValidRegistry onlyAdmin {
         if(bytes(_detailsHashToText[detailsHash]).length==0){
             _detailsHashToText[detailsHash]=details;
             emit HealthDetailsRegistered(detailsHash,details,module,block.number);

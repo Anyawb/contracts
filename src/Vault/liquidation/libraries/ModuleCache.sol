@@ -2,72 +2,50 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title Module Cache Library
- * @author RWA Lending Platform
- * @notice Provides efficient module address cache management with expiration checking, batch operations,
- *         enumerability, and version control.
- * @dev Security:
- * - Library contains internal/view helpers; callers must gate privileged writes at the module level.
- * - Time-Dependency-Refactor SSOT: cache freshness is block-based (block.number), NOT time-in-seconds.
+ * @title ModuleCache
+ * @notice Provides internal module-address cache management for liquidation modules.
+ * @dev Reverts if:
+ *      - see individual functions
  *
- * Architecture alignment:
- * - Centralizes module address resolution for liquidation modules.
- * - Supports time-rollback tolerance (optional) and expiration checks to prevent stale cache usage.
+ * Security:
+ * - Library contains internal and view helpers; callers must gate privileged writes at the module level.
+ * - Cache freshness is block-based (block.number), not time-in-seconds.
+ * - Centralizes module address resolution and supports optional rollback tolerance plus expiration checks.
  */
 library ModuleCache {
-    /* ============ Custom Errors ============ */
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
 
-    /// @notice Already initialized error - Triggered when module cache is already initialized
+    /// @dev Reverts when module cache initialization is attempted more than once. Used by {initialize}.
     error ModuleCache__AlreadyInitialized();
     
-    /// @notice Module not found error - Triggered when requested module doesn't exist
-    /// @param moduleKey Module key (bytes32)
+    /// @dev Reverts when a requested module key is not present in the cache. Used by cache lookup helpers.
     error ModuleCache__ModuleNotFound(bytes32 moduleKey);
     
-    /// @notice Invalid module address error - Triggered when module address is zero
-    /// @param moduleKey Module key (bytes32)
-    /// @param moduleAddr Invalid address (address(0))
+    /// @dev Reverts when a module address is invalid for caching, including address(0). Used by {set} and batch setters.
     error ModuleCache__InvalidModuleAddress(bytes32 moduleKey, address moduleAddr);
     
-    /// @notice Invalid module key error - Triggered when module key is zero
-    /// @param moduleKey Module key (bytes32(0))
+    /// @dev Reverts when a module key is bytes32(0) or otherwise invalid for cache operations. Used by cache mutation and lookup helpers.
     error ModuleCache__InvalidModuleKey(bytes32 moduleKey);
     
-    /// @notice Cache expired error - Triggered when cache exceeds maximum validity period
-    /// @param moduleKey Module key (bytes32)
-    /// @param cacheAge Cache age (blocks since cache update block)
-    /// @param maxAge Maximum validity period (blocks)
+    /// @dev Reverts when a cached module entry exceeds the allowed block-based age. Used by expiration-aware getters.
     error ModuleCache__CacheExpired(bytes32 moduleKey, uint256 cacheAge, uint256 maxAge);
     
-    /// @notice Duplicate set error - Triggered when trying to set same address
-    /// @param moduleKey Module key (bytes32)
-    /// @param existingAddr Existing address
-    /// @param newAddr New address (same as existingAddr)
+    /// @dev Reverts when a cache set attempts to store the same module address again. Used by {set}.
     error ModuleCache__DuplicateModuleAddress(bytes32 moduleKey, address existingAddr, address newAddr);
     
-    /// @notice Array length mismatch error - Triggered when batch operation array lengths don't match
-    /// @param keysLength Keys array length
-    /// @param addressesLength Addresses array length
+    /// @dev Reverts when paired batch arrays have different lengths. Used by batch cache operations.
     error ModuleCache__ArrayLengthMismatch(uint256 keysLength, uint256 addressesLength);
     
-    /// @notice Unauthorized operation error - Triggered when caller is not authorized
-    /// @param operation Operation type (string)
-    /// @param caller Caller address
+    /// @dev Reverts when a cache operation is attempted by an unauthorized caller. Used by access-controlled cache mutation helpers.
     error ModuleCache__UnauthorizedOperation(string operation, address caller);
     
-    /// @notice Time rollback error - Triggered when time rollback is detected and not allowed
-    /// @param currentTime Current block number
-    /// @param cachedTime Cached update block number
+    /// @dev Reverts when block-number rollback is detected and rollback tolerance is disabled. Used by cache age validation helpers.
     error ModuleCache__TimeRollbackDetected(uint256 currentTime, uint256 cachedTime);
 
-    /* ============ Events ============ */
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     
-    /// @notice Module cached event - Triggered when module is cached
-    /// @param moduleKey Module key (bytes32)
-    /// @param moduleAddr Module address
-    /// @param version Version number (uint256, increments on each update)
-    /// @param cacheBlock Cache update block number (block.number)
-    /// @param callerAddr Caller address
+    /// @notice Emitted when a module address is cached.
+    /// @dev Emitted by cache set flows after the module address, version, and cache block are updated.
     event ModuleCached(
         bytes32 indexed moduleKey, 
         address indexed moduleAddr, 
@@ -76,11 +54,8 @@ library ModuleCache {
         address indexed callerAddr
     );
     
-    /// @notice Module removed event - Triggered when module is removed from cache
-    /// @param moduleKey Module key (bytes32)
-    /// @param moduleAddr Module address
-    /// @param version Version number (uint256, last version before removal)
-    /// @param callerAddr Caller address
+    /// @notice Emitted when a cached module is removed.
+    /// @dev Emitted by cache removal flows after the module entry is cleared from storage.
     event ModuleRemoved(
         bytes32 indexed moduleKey, 
         address indexed moduleAddr, 
@@ -88,12 +63,8 @@ library ModuleCache {
         address indexed callerAddr
     );
     
-    /// @notice Batch modules cached event - Triggered when multiple modules are cached simultaneously
-    /// @param moduleKeys Array of module keys (bytes32[])
-    /// @param moduleAddresses Array of module addresses
-    /// @param version Version number (uint256, increments on each update)
-    /// @param callerAddr Caller address
-    /// @param successCount Success count (number of modules successfully cached)
+    /// @notice Emitted when multiple module addresses are cached in one operation.
+    /// @dev Emitted by batch cache set flows with aligned key and address arrays plus the resulting version.
     event BatchModulesCached(
         bytes32[] moduleKeys, 
         address[] moduleAddresses, 
@@ -102,16 +73,12 @@ library ModuleCache {
         uint256 successCount
     );
     
-    /// @notice Cache cleared event - Triggered when cache is cleared
-    /// @param clearedCount Cleared count (number of modules cleared)
-    /// @param caller Caller address
+    /// @notice Emitted when cached module entries are cleared.
+    /// @dev Emitted by cache clear flows with the number of removed entries and the caller.
     event CacheCleared(uint256 clearedCount, address indexed caller);
     
-    /// @notice Duplicate operation attempted event - Triggered when attempting duplicate operation
-    /// @param moduleKey Module key (bytes32)
-    /// @param existingAddr Existing address
-    /// @param attemptedAddr Attempted address (same as existingAddr)
-    /// @param callerAddr Caller address
+    /// @notice Emitted when a duplicate cache-set operation is attempted.
+    /// @dev Emitted before reverting duplicate cache writes so off-chain systems can monitor redundant attempts.
     event DuplicateOperationAttempted(
         bytes32 indexed moduleKey,
         address indexed existingAddr,
@@ -119,7 +86,7 @@ library ModuleCache {
         address callerAddr
     );
 
-    /* ============ Structs ============ */
+    /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Module cache storage structure - Stores module addresses, blocks, versions and key collection.
@@ -138,7 +105,7 @@ library ModuleCache {
         bool initialized;                                 // Whether initialized
     }
 
-    /* ============ Constants ============ */
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     
     /// @dev Default batch clear size
     uint256 private constant DEFAULT_BATCH_SIZE = 50;
@@ -146,7 +113,7 @@ library ModuleCache {
     /// @dev Maximum batch operation size
     uint256 private constant MAX_BATCH_SIZE = 100;
 
-    /* ============ Core Functions ============ */
+    /*━━━━━━━━━━━━━━━ Core Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Initialize module cache with initial configuration.
@@ -442,7 +409,7 @@ library ModuleCache {
         emit ModuleRemoved(moduleKey, moduleAddr, version, callerAddr);
     }
 
-    /* ============ Batch Operations ============ */
+    /*━━━━━━━━━━━━━━━ Batch Operations ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Batch set module cache - Cache multiple module addresses at once (full transaction consistency).
@@ -545,7 +512,7 @@ library ModuleCache {
         }
     }
 
-    /* ============ Utility Functions ============ */
+    /*━━━━━━━━━━━━━━━ Utility Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Check if module exists in cache.
@@ -649,7 +616,7 @@ library ModuleCache {
         return elapsed >= maxAge ? 0 : maxAge - elapsed;
     }
 
-    /* ============ Enumerable Functions ============ */
+    /*━━━━━━━━━━━━━━━ Enumerable Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Get all module keys - Return all cached module keys.
@@ -698,7 +665,7 @@ library ModuleCache {
         return self.keyIndexes[moduleKey];
     }
 
-    /* ============ Version Control Functions ============ */
+    /*━━━━━━━━━━━━━━━ Version Control Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Get module version - Get version number of specified module.
@@ -732,7 +699,7 @@ library ModuleCache {
         return self.globalVersion;
     }
 
-    /* ============ Configuration Functions ============ */
+    /*━━━━━━━━━━━━━━━ Configuration Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Set time rollback tolerance - Set whether to allow time rollback.
@@ -880,7 +847,7 @@ library ModuleCache {
         return self.moduleKeys.length;
     }
 
-    /* ============ Internal Helper Functions ============ */
+    /*━━━━━━━━━━━━━━━ Internal Helper Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Access control check - Check if caller has permission to perform operation.

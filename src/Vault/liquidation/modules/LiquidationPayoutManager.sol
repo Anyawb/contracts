@@ -13,27 +13,17 @@ import { Registry } from "../../../registry/Registry.sol";
 import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
 import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 
-/// @title LiquidationPayoutManager
-/// @notice Liquidation residual value distribution management module:
-/// stores distribution ratios and recipient addresses, provides share calculation.
-/// @dev Follows architecture guide (Architecture-Guide.md §732-771):
-/// serves as the single source of truth for liquidation residual value distribution configuration.
-/// @dev Module positioning: Registry.KEY_LIQUIDATION_PAYOUT_MANAGER points to this contract.
-/// @dev Design principles:
-///     - Residual value distribution SSOT: stores governance-controlled recipients and BPS configuration.
-///     - Execution coordination: LiquidationManager/SettlementManager execute ledger transfers
-///       (e.g., CollateralManager.withdrawCollateralTo) based on calculateShares results.
-///     - Governability: recipients and rates are adjustable via ACTION_SET_PARAMETER.
-///     - Integer distribution: remainder (rounding dust) goes to liquidator.
-/// @dev Integration with liquidation flow:
-///     - LiquidationManager/SettlementManager call calculateShares to get shares,
-///       then execute CollateralManager.withdrawCollateralTo accordingly.
-///     - After distribution completes, LiquidationManager triggers DataPush via LiquidatorView.
-/// @dev Naming conventions (following Architecture-Guide.md §852-879):
-///     - Private state variables: _ + camelCase (e.g., _registryAddr, _recipients, _rates)
-///     - Public variables: camelCase + Var (e.g., registryAddrVar)
-///     - Event names: PascalCase, past tense (e.g., PayoutConfigUpdated)
-///     - Error names: PascalCase with __ prefix (e.g., LiquidationPayoutManager__InvalidRates)
+/**
+ * @title LiquidationPayoutManager
+ * @notice Stores liquidation residual-value recipients and distribution rates.
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
+ * - Single source of truth for governance-controlled residual-value distribution.
+ * - Execution remains in LiquidationManager and SettlementManager; this module only stores config and computes shares.
+ * - Integer rounding remainder is assigned to the liquidator.
+ */
 contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidationPayoutManager {
     using LiquidationAccessControl for LiquidationAccessControl.Storage;
 
@@ -57,26 +47,19 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
     /// @dev Contains distribution ratios for four roles: platform, risk reserve, lender compensation, liquidator
     PayoutRates private _rates;
 
-    /**
-     * @notice Payout configuration updated event
-     * @param recipients Updated recipient address configuration
-     * @param rates Updated distribution ratio configuration
-     * @dev Follows event naming convention: PascalCase, past tense
-     */
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when payout recipients or rates are updated.
+    /// @dev Emitted by governance-controlled config update flows after validation succeeds.
     event PayoutConfigUpdated(PayoutRecipients recipients, PayoutRates rates);
 
-    /// @notice Invalid distribution ratios error
-    /// @dev Triggered when distribution ratio sum does not equal 10_000 basis points
-    /// @dev Follows error naming convention: PascalCase with __ prefix
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when payout rates do not sum to 10_000 basis points. Used by config update helpers.
     error LiquidationPayoutManager__InvalidRates();
 
-    /// @notice AccessControlManager address mismatch error
-    /// @dev Triggered when initializer-provided ACM address does not match Registry.KEY_ACCESS_CONTROL.
+    /// @dev Reverts when the initializer-provided AccessControlManager does not match Registry.KEY_ACCESS_CONTROL. Used by {initialize}.
     error LiquidationPayoutManager__AccessControlMismatch(address expectedAcm, address providedAcm);
 
-    /**
-     * @notice Invalid upgrade implementation (no code at target).
-     */
+    /// @dev Reverts when a UUPS upgrade target has no deployed code. Used by {_authorizeUpgrade}.
     error LiquidationPayoutManager__InvalidImplementation();
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
@@ -166,10 +149,7 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
 
     /**
      * @notice Calculate distribution shares (integer distribution, remainder all goes to liquidator)
-     * @dev Notes:
-     *      - liquidatorBps is validated as part of the 10_000-bps sum, but liquidatorShare is computed as
-     *        `collateralAmount - (platformShare + reserveShare + lenderShare)` so any rounding remainder
-     *        is deterministically assigned to the liquidator (matches Architecture-Guide).
+    * - liquidatorShare is computed as collateralAmount minus the first three shares, so any rounding remainder is deterministically assigned to the liquidator.
      * @param collateralAmount Amount of seized collateral
      * @return platformShare Platform share (collateral amount × platformBps / 10_000)
      * @return reserveShare Risk reserve share (collateral amount × reserveBps / 10_000)
@@ -294,7 +274,7 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
         if (newImplementation.code.length == 0) revert LiquidationPayoutManager__InvalidImplementation();
     }
 
-    /* ============ Storage Gap ============ */
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     uint256[50] private __gap;
 
     /**

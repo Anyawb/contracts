@@ -3,7 +3,8 @@
  * generateModuleKeys.ts
  *
  * 从 Solidity 源码 ModuleKeys.sol 中解析所有 `bytes32 internal constant KEY_XXX = keccak256("YYY")`，
- * 自动生成 frontend-config/moduleKeys.ts。
+ * 自动生成 frontend-config/moduleKeys.ts 兼容产物。
+ * 当前正式生成链见 docs/Contract-Artifact-Generation-Guide.md。
  *
  * 用法:
  *   npx ts-node frontend-config/scripts/generateModuleKeys.ts

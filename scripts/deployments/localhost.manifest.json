@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "evm-deployment-manifest",
+  "status": "workspace-snapshot",
+  "environment": "localhost",
+  "network": {
+    "name": "localhost",
+    "chainId": 1337,
+    "rpcUrl": "http://127.0.0.1:18545"
+  },
+  "release": {
+    "version": "workspace-snapshot-2026-03-25",
+    "generatedAt": "2026-03-25T00:00:00Z",
+    "commitHash": "a51626ecd4cbdefd2fd38e50647ebed2577ad3ff"
+  },
+  "authority": {
+    "addressesFile": "scripts/deployments/localhost.json",
+    "frontendConfigFile": "frontend-config/contracts-localhost.ts",
+    "eventsDoc": "docs/events.md",
+    "errorsDoc": "docs/errors.md"
+  },
+  "anchors": {
+    "Registry": "0x93186504d1D8f321753d9FB3795aD3c264CF91B2",
+    "VaultCore": "0x29C5eAfE3Ed1F169b3CD594CE0506A3c0FFBfb85",
+    "SettlementManager": "0xaa38b98b510781C6c726317FEb12610BEe90aE20",
+    "PositionView": "0xf1b0d662277400bAcb18243Aef312FE1F1790024",
+    "RewardView": "0x658DC7259527383eCA195EA2D64F96eA0A13107A"
+  },
+  "validation": {
+    "frontendConfigAligned": true,
+    "notes": [
+      "Current repo authority source is scripts/deployments/localhost.json.",
+      "frontend-config/contracts-localhost.ts matches the current localhost deployment snapshot.",
+      "This manifest is a transition artifact for stable consumption and has not yet been wired into deploy scripts."
+    ]
+  }
+}

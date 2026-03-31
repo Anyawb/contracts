@@ -2,68 +2,62 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title Liquidation Validation Library
- * @author RWA Lending Platform
- * @notice Provides common validation functions and error definitions, integrates all repeated validation logic from
- *         liquidation modules.
- * @dev Security:
- * - Pure library: no storage reads/writes, no external calls.
- * - Validation helpers are intended to be used at module entry points to ensure consistent revert reasons.
- * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
+ * @title LiquidationValidationLibrary
+ * @notice Provides shared validation helpers and canonical liquidation revert reasons.
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
+ * - Pure library: no storage reads, writes, or external calls.
+ * - Validation helpers are intended to be used at module entry points to keep revert behavior consistent.
+ * - Solidity ^0.8.x overflow and underflow checks apply.
  */
 library LiquidationValidationLibrary {
-    /* ============ Custom Errors ============ */
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
     
-    /// @notice Zero address error - Triggered when address is zero
+    /// @dev Reverts when an address argument is address(0). Used by address-validation helpers.
     error ZeroAddress();
     
-    /// @notice Zero amount error - Triggered when amount is zero
+    /// @dev Reverts when an amount argument is zero. Used by amount-validation helpers.
     error ZeroAmount();
     
-    /// @notice Invalid range error - Triggered when value is out of valid range
+    /// @dev Reverts when a value falls outside the allowed inclusive range. Used by range-validation helpers.
     error InvalidRange();
     
-    /// @notice Invalid module key error - Triggered when module key is empty
-    /// @param moduleKey Module key identifier
+    /// @dev Reverts when a module key is bytes32(0) or otherwise invalid for validation paths. Used by module-key validators.
     error InvalidModuleKey(bytes32 moduleKey);
     
-    /// @notice Array length mismatch error - Triggered when array lengths don't match
-    /// @param expectedLengthValue Expected array length
-    /// @param actualLengthValue Actual array length
+    /// @dev Reverts when paired arrays have different lengths. Used by array-validation helpers.
     error ArrayLengthMismatch(uint256 expectedLengthValue, uint256 actualLengthValue);
     
-    /// @notice Invalid batch size error - Triggered when batch size exceeds limit
-    /// @param batchSizeValue Actual batch size
-    /// @param maxSizeValue Maximum allowed batch size
+    /// @dev Reverts when a batch size exceeds the configured maximum. Used by batch-size validators.
     error InvalidBatchSize(uint256 batchSizeValue, uint256 maxSizeValue);
     
-    /// @notice Invalid parameter error - Triggered when parameter is invalid
-    /// @param parameterName Parameter name identifier
-    /// @param parameterValue Invalid parameter value
+    /// @dev Reverts when a named parameter violates its allowed bound. Used by parameter-validation helpers.
     error InvalidParameter(string parameterName, uint256 parameterValue);
     
-    /// @notice Price cannot be zero error - Triggered when price is zero
+    /// @dev Reverts when a required price value is zero. Used by price-validation helpers.
     error PriceCannotBeZero();
     
-    /// @notice Record not found error - Triggered when record doesn't exist
+    /// @dev Reverts when a required record does not exist. Used by record-validation helpers.
     error RecordNotFound();
     
-    /// @notice Record already exists error - Triggered when record already exists
+    /// @dev Reverts when creating a record that already exists. Used by record-validation helpers.
     error RecordAlreadyExists();
     
-    /// @notice Stats not found error - Triggered when stats don't exist
+    /// @dev Reverts when required statistics data is missing. Used by stats-validation helpers.
     error StatsNotFound();
     
-    /// @notice Insufficient guarantee error - Triggered when guarantee is insufficient
+    /// @dev Reverts when guarantee amount is insufficient for the requested operation. Used by sufficiency validators.
     error InsufficientGuarantee();
     
-    /// @notice Insufficient debt error - Triggered when debt is insufficient
+    /// @dev Reverts when debt amount is insufficient for the requested operation. Used by sufficiency validators.
     error InsufficientDebt();
     
-    /// @notice Insufficient collateral error - Triggered when collateral is insufficient
+    /// @dev Reverts when collateral amount is insufficient for the requested operation. Used by sufficiency validators.
     error InsufficientCollateral();
 
-    /* ============ Address Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Address Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate address is not zero.
@@ -96,7 +90,7 @@ library LiquidationValidationLibrary {
     /**
      * @notice Check if address is zero.
      * @dev Reverts if:
-     *      - None (pure function, returns boolean)
+    *      - (none)
      *
      * Security:
      * - Pure function (no state access or external calls)
@@ -108,7 +102,7 @@ library LiquidationValidationLibrary {
         return targetAddr == address(0);
     }
 
-    /* ============ Amount Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Amount Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate amount is not zero.
@@ -141,7 +135,7 @@ library LiquidationValidationLibrary {
     /**
      * @notice Check if amount is zero.
      * @dev Reverts if:
-     *      - None (pure function, returns boolean)
+    *      - (none)
      *
      * Security:
      * - Pure function (no state access or external calls)
@@ -153,7 +147,7 @@ library LiquidationValidationLibrary {
         return amountValue == 0;
     }
 
-    /* ============ Range Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Range Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate value is within specified range [minValueInput, maxValueInput].
@@ -214,7 +208,7 @@ library LiquidationValidationLibrary {
         if (parameterValue > maxValueInput) revert InvalidParameter(parameterNameString, parameterValue);
     }
 
-    /* ============ Array Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Array Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate two address arrays have matching lengths.
@@ -334,7 +328,7 @@ library LiquidationValidationLibrary {
         }
     }
 
-    /* ============ Module Key Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Module Key Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate module key is not empty.
@@ -350,7 +344,7 @@ library LiquidationValidationLibrary {
         if (moduleKeyInput == bytes32(0)) revert InvalidModuleKey(moduleKeyInput);
     }
 
-    /* ============ Batch Size Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Batch Size Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate batch size is within valid range (0 < batchSizeValue <= maxSizeValue).
@@ -384,7 +378,7 @@ library LiquidationValidationLibrary {
         if (batchSizeValue == 0) revert InvalidBatchSize(batchSizeValue, 0);
     }
 
-    /* ============ Price Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Price Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate price is not zero.
@@ -400,7 +394,7 @@ library LiquidationValidationLibrary {
         if (priceValue == 0) revert PriceCannotBeZero();
     }
 
-    /* ============ Record Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Record Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate record exists.
@@ -430,7 +424,7 @@ library LiquidationValidationLibrary {
         if (existsFlag) revert RecordAlreadyExists();
     }
 
-    /* ============ Stats Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Stats Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate stats exist.
@@ -446,7 +440,7 @@ library LiquidationValidationLibrary {
         if (!existsFlag) revert StatsNotFound();
     }
 
-    /* ============ Sufficiency Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Sufficiency Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate available guarantee amount is sufficient for required amount.
@@ -493,7 +487,7 @@ library LiquidationValidationLibrary {
         if (availableAmount < requiredAmount) revert InsufficientCollateral();
     }
 
-    /* ============ Composite Validation Functions ============ */
+    /*━━━━━━━━━━━━━━━ Composite Validation Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Validate all liquidation parameters (user, asset, amount, liquidator).

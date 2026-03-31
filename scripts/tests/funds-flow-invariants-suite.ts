@@ -196,7 +196,8 @@ async function main() {
   const feeRouterAddr = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
 
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddr)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", awAddr)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", awAddr)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", awAddr)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", poAddr)) as any;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddr)) as any;
   const settlementTokenAddr = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
@@ -348,6 +349,16 @@ async function main() {
     }
     return total;
   };
+  const reusableSignerPool = signers.slice(2);
+  let reuseCursor = 0;
+  const nextReusableSigner = () => {
+    if (reusableSignerPool.length === 0) {
+      throw new Error("No reusable signer available.");
+    }
+    const signer = reusableSignerPool[reuseCursor % reusableSignerPool.length];
+    reuseCursor += 1;
+    return signer;
+  };
   const pickCleanSigner = async () => {
     for (let i = 2; i < signers.length; i++) {
       const s = signers[i];
@@ -359,6 +370,9 @@ async function main() {
       }
     }
     if (!allowDirtyState) {
+      if (allowSignerReuse) {
+        return nextReusableSigner();
+      }
       throw new Error("No clean signer found. Restart localhost node for a clean state, or set E2E_ALLOW_DIRTY_STATE=1.");
     }
     // fallback: any unused signer
@@ -368,6 +382,9 @@ async function main() {
       if (exclude.has(k)) continue;
       exclude.add(k);
       return s;
+    }
+    if (allowSignerReuse) {
+      return nextReusableSigner();
     }
     throw new Error("No unused signer available.");
   };
@@ -413,8 +430,8 @@ async function main() {
 
   const pickLender = async () => {
     if (allowSignerReuse) {
-      // Reuse the first non-deployer/keeper signer to avoid exhaustion in long loops.
-      return signers[2];
+      // Reuse a rotating non-deployer/keeper signer to avoid exhaustion in long loops.
+      return nextReusableSigner();
     }
     for (let i = 2; i < signers.length; i++) {
       const s = signers[i];
@@ -435,12 +452,12 @@ async function main() {
   const canBorrow = await ensureRole(key("BORROW"), orderEngineAddr, "BORROW");
 
   // AssetWhitelist: must already be configured, or we need ADD_WHITELIST.
-  if (!(await aw.isAssetAllowed(usdc.target))) {
+  if (!(await awRead.isAssetAllowed(usdc.target))) {
     if (!canAddWhitelist) {
       console.log(`  ⏭️  [SKIP] USDC is not whitelisted and caller cannot ADD_WHITELIST. Skipping suite.`);
       return;
     }
-    await (await aw.connect(deployer).addAllowedAsset(usdc.target)).wait();
+    await (await awAdmin.connect(deployer).addAllowedAsset(usdc.target)).wait();
   }
 
   // PriceOracle: must have active config + fresh price, or we need UPDATE_PRICE (and possibly configure via SET_PARAMETER-like authority).
@@ -722,7 +739,7 @@ async function main() {
 
     // Best-effort: ensure token is supported/whitelisted and has a price configured.
     try {
-      if (!(await aw.isAssetAllowed(assetAddr))) await (await aw.connect(deployer).addAllowedAsset(assetAddr)).wait();
+      if (!(await awRead.isAssetAllowed(assetAddr))) await (await awAdmin.connect(deployer).addAllowedAsset(assetAddr)).wait();
     } catch {}
     try {
       const cfg = await po.getAssetConfig(assetAddr);

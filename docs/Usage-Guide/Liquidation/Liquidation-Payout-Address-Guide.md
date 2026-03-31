@@ -1,59 +1,31 @@
-# 清算残值分配收款地址指南
+# 清算残值分配配置（收款地址/参数：运维与部署用）
 
-> ⚠️ 本文为“专题指南”。关于整改的权威口径（统一写入口、模块边界、迁移步骤等）请以总纲为准：[`SettlementManager-Refactor-Plan.md`](./SettlementManager-Refactor-Plan.md)
+> ⚠️ 约束：本文件只说明“部署/运维侧如何配置收款地址与参数”，不定义任何资金链、托管者、资产去向、分配含义或内部调用顺序。相关语义统一以资金链 SSOT 为准：[`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`](../Funds-Flow-Architecture-Guide.md)（Default → Liquidation 章节）。
 
-本指南说明在 RWA 借贷平台中，清算残值分配的收款地址如何配置，覆盖平台费、风险准备金以及出借人补偿三类地址，并给出推荐方案和部署要点。
+> 按产品线区分入口与模块边界的整改总纲仍以：[`SettlementManager-Refactor-Plan.md`](./SettlementManager-Refactor-Plan.md) 为准。
 
-## 业务背景
-- A = 出借人；B = 抵押人（提供 RWA 抵押）。  
-- 到期未还或触发清算：抵押物/残值分配给出借人等角色。  
-- 提前还款：抵押物返还给抵押人，可能包含罚金与积分；与本指南关注的残值分配分开处理。
+## 1) 适用范围
 
-## 分配角色与默认比例
-- 平台（platform）：默认 3% 用于运营/手续费。  
-- 准备金（reserve）：默认 2% 用于风险准备金/保险金。  
-- 出借人补偿（lender compensation）：默认 17%，应支付给当前实际出借人 A。  
-- 清算人（liquidator）：默认 78%，并接收整数除不尽的余数。
-- 比例总和需为 10,000 bps，可在部署后由有 `ACTION_SET_PARAMETER` 权限的角色调整。
+- 适用于配置 `LiquidationPayoutManager`（Registry: `KEY_LIQUIDATION_PAYOUT_MANAGER`）的 recipients/rates 等参数。
+- 该模块的“钱从哪来、转给谁、何时触发、如何对账”的口径不在此文维护，避免与 Funds-Flow SSOT 漂移。
 
-## 地址配置选项
-### 方案 A（推荐，资金池作为出借人补偿接收者）
-- 平台/准备金：使用固定**合约金库地址**（推荐）或多签地址（备选），主网/测试网分别配置。  
-- 出借人补偿：建议配置为 `LenderPoolVault`（线上流动性资金池，SSOT），由资金池在协议内部再进行份额/记账归属（或作为后续扩展的路由入口）。  
-- 含义：`LiquidationPayoutManager` 存储固定接收者（平台/准备金/出借人补偿接收者），清算执行器按该配置直接路由残值。
+## 2) 环境变量（部署脚本读取）
 
-### 方案 B（保持现有接口，出借人前置路由）
-- 平台/准备金：同上，固定合约金库或多签。  
-- 出借人补偿：部署时设置为“转发/结算路由”合约地址；该路由在收到补偿后再把款项转给实际出借人 A。  
-- 适用：希望最小化合约接口改动，但仍要避免把补偿打到固定地址。
+部署脚本可读取以下 env（不同网络脚本通用；命名以实际脚本实现为准）：
 
-### 方案 C（仅用于本地/快速演示）
-- 平台/准备金/出借人补偿都用部署者地址占位，便于本地或测试链快速跑通；上线前必须替换为实际地址或路由。
+- `PAYOUT_PLATFORM_ADDR`：平台侧收款地址（建议为合约金库地址）
+- `PAYOUT_RESERVE_ADDR`：准备金侧收款地址（建议为合约金库地址，可选）
+- `PAYOUT_LENDER_ADDR`：出借人侧收款地址（可为路由合约或其它受控地址；语义以 Funds-Flow SSOT 为准）
 
-## 环境变量与部署脚本
-- 支持的 env 变量（三网脚本均可用）：  
-  - `PAYOUT_PLATFORM_ADDR`：平台收款地址（建议为合约金库地址；也可用多签）。  
-  - `PAYOUT_RESERVE_ADDR`：准备金收款地址（建议为合约金库地址；也可用多签）。  
-  - `PAYOUT_LENDER_ADDR`：出借人补偿地址。  
-- 默认比例（可被修改）：`300/200/1700/7800`（平台/准备金/出借人/清算人）。
-- 若未提供 env，脚本会回退为 deployer 地址（仅适合本地/演示）。
+> 注意：若未提供 env，脚本可能回退为 deployer 地址；该回退仅适用于本地/演示环境，不应作为上链长期配置。
 
-## 推荐落地步骤（主网/测试网）
-1) 确定方案：  
-   - 业务优先：用方案 A；若暂不改合约接口，则采用方案 B 并准备一个路由合约地址。  
-2) 准备地址：  
-   - `PAYOUT_PLATFORM_ADDR`、`PAYOUT_RESERVE_ADDR`：合约金库地址（推荐）或多签/安全托管地址。  
-   - `PAYOUT_LENDER_ADDR`：方案 A 可留空（由代码查询/传入）；方案 B 填路由合约地址。  
-3) 配置 env 并部署：  
-   - `deploylocal.ts` / `deploy-arbitrum.ts` / `deploy-arbitrum-sepolia.ts` 会读取上述 env，部署 `LiquidationPayoutManager` 并在 Registry 注册 `KEY_LIQUIDATION_PAYOUT_MANAGER`；清算/结算统一入口由 `KEY_SETTLEMENT_MANAGER → SettlementManager` 承接。  
-4) 权限与调整：  
-   - 需要更新比例或收款人时，由 `ACTION_SET_PARAMETER` 角色调用 `updateRates` / `updateRecipients`。  
+## 3) 推荐落地步骤（主网/测试网）
 
-## 与架构指南的契合
-- 残值分配走独立的 `LiquidationPayoutManager`，符合“清算逻辑内聚、配置可治理”的要求。  
-- 收款地址与比例可治理、可升级，通过 Registry 解析模块地址，前端读取自动生成的 `frontend-config/contracts-*.ts`。  
-- 分配事件已通过 `LiquidatorView` 以 DataPush 形式上链，便于前端/离线服务消费。  
+1) 准备地址：按 Funds-Flow SSOT 与治理要求确定各收款地址（建议为合约金库/受控合约）。
+2) 配置 env 并部署：使用 `deploylocal.ts` / `deploy-arbitrum.ts` / `deploy-arbitrum-sepolia.ts`（或对应网络脚本）部署并在 Registry 注册 `KEY_LIQUIDATION_PAYOUT_MANAGER`。
+3) 权限与调整：后续如需更新收款地址或参数，必须由具备 `ACTION_SET_PARAMETER`（或等效治理权限）的角色调用模块的配置入口（例如 `updateRecipients` / `updateRates`）。
 
-## 需要你确认的事项
-- 主网/测试网的实际平台与准备金地址（是否多签）。  
-- 出借人补偿采用方案 A（动态地址）还是方案 B（路由合约），以便最终定稿部署脚本和合约接口。
+## 4) 与前端/链下的对齐
+
+- 前端/链下索引若需要读取 recipients/rates，建议通过 Registry 解析模块地址后读取，避免硬编码。
+- “如何解读这些 recipients/rates”不在本文维护，统一以 Funds-Flow SSOT 为准。

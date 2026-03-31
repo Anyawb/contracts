@@ -19,7 +19,7 @@
 
 用于修改：
 - Earn 侧参数（`setDynamicRewardParams`、`setLevelMultiplier`）
-- RewardManagerCore 内部治理参数（例如 `setOnTimeWindow`、`setPenaltyBps`、`updateUserLevel`）
+- RewardManagerCore 内部治理参数（例如 `setLatePenaltyBps`、`updateUserLevel`）
 - FeatureRegistry 特性开关与最小等级
 - GovernanceGate 门控参数
 
@@ -72,7 +72,7 @@
 
 - `src/Reward/RewardManager.sol`
   - `setDynamicRewardParams(...)` / `setLevelMultiplier(...)`：转发到 `RewardConfig` 后写入 `EarnConfig`
-  - `setOnTimeWindow(...)` / `setPenaltyBps(...)` / `updateUserLevel(...)`：直接写入 `RewardManagerCore`
+  - `setLatePenaltyBps(...)` / `updateUserLevel(...)`：直接写入 `RewardManagerCore`
 
 - `src/Reward/RewardConfig.sol`
   - `setDynamicRewardParams(...)` / `setLevelMultiplier(...)` -> `EarnConfig`
@@ -120,20 +120,22 @@
 
 ## 7. 自动化检查脚本（防 PR 回归）
 
-为防止后续 PR 引入“旁路写入口/路径漂移”，建议将以下命令作为 Reward 相关改动的必跑项：
+为防止后续 PR 引入“旁路写入口/路径漂移/角色回退”，建议将以下命令作为 Reward 相关改动的必跑项：
 
 ```bash
 pnpm -s run compile
 pnpm -s run checks:reward-monitor:config-events
 pnpm -s run checks:reward-monitor:breakglass
 pnpm -s run checks:reward-monitor:registry-bindings
+pnpm -s run checks:reward-monitor:role-bindings
+pnpm exec hardhat test test/Reward/EasyEconomics.integration.test.ts
 ```
 
 ---
 
-## 8. EasyToken-only 口径全量清理方案（执行记录）
+## 8. EasyToken-only 口径全量清理方案（当前要求）
 
-目标：清除 Reward 相关“points/积分”残留（对外 surface + 注释 + 测试/文档），确保 EasyToken-only 口径一致。
+目标：保持 Reward 域对外说明与实现都只使用 Easy 语义，不再把历史 points 迁移信息当成运行口径。
 
 ### 8.1 清理范围
 
@@ -141,20 +143,17 @@ pnpm -s run checks:reward-monitor:registry-bindings
 - Reward 域注释与内部命名：统一为 Easy/EasyToken 语义
 - Smoke / E2E / docs：对外描述统一为 Easy
 
-### 8.2 实施项（已执行）
+### 8.2 当前基线要求
 
 - **ActionKeys**
   - 移除 `ACTION_CONSUME_POINTS` 与 `consumePoints` 映射，固定数组移位
   - 更新 ActionKeys 数量常量
 - **Reward 域注释与命名**
-  - RewardCore 动态奖励注释改为 Easy
-  - RewardModuleBase push 注释改为 Easy
-  - EarnConfig 内部字段改为 `_dynamicThresholdEasy`
-  - RewardView summary 注释改为 Easy
+  - Reward/Earn/Spend/Recycle 文档与对外注释只保留 Easy 语义
+  - RewardView 统一承接 Earn 状态、消费状态、回收状态的对外可观测口径
 - **Smoke / Docs 口径**
-  - Reward smoke 注释与变量改为 Easy
-  - 权限指南奖励动作改为 `ACTION_CONSUME_EASY`
-  - SaaS 后端实施文档：ConsumePoints → ConsumeEasy
+  - 权限指南奖励动作固定为 `ACTION_CONSUME_EASY`
+  - 部署/放行文档必须包含 role-bindings 与 recycle 恢复结算检查
 
 ### 8.3 触达文件清单
 
@@ -169,7 +168,7 @@ pnpm -s run checks:reward-monitor:registry-bindings
 
 ### 8.4 验证建议（手动/CI）
 
-- 搜索 `points`：仅保留 bps/price/checkpoints 等非业务语义
-- Reward smoke：通过 `reward-smoke-local`（Easy 发行/扣费/回收/罚分路径）
-- 权限表：确认 `ACTION_CONSUME_EASY` 为唯一消费动作 key
+- 搜索 Reward 相关文档与接口：不应再把 `points/积分` 当成当前业务资产口径
+- Reward 检查组合：通过 config-events、breakglass、registry-bindings、role-bindings
+- Reward 集成测试：覆盖 Easy 发行、消费、回收与 recycle 异常余额恢复路径
 

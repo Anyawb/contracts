@@ -23,6 +23,7 @@ const KEYS: ReadonlyArray<string> = [
   'VAULT_CORE',
   'VAULT_VIEW',
   'REWARD_VIEW',
+  'ORDER_ENGINE',
   'LENDING_ENGINE',
 ];
 

@@ -262,7 +262,7 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyUserOrViewer)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user Target user address
      * @return borrowVolumeUsd8 Total borrow volume (USD-8)
@@ -311,7 +311,7 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @return totalBorrowVolumeUsd8 Total borrow volume (USD-8)
      * @return totalRepayVolumeUsd8 Total repay volume (USD-8)
@@ -349,7 +349,7 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller is not `Registry[KEY_REWARD_MANAGER_CORE]` and lacks ACTION_ADMIN (MissingRole)
      *
      * Security:
-     * - Read-only (module-gated)
+    * - View-only, module-gated.
      *
      * Units (SSOT):
      * - USD-8 (e.g. $1.00 = 100000000)
@@ -381,7 +381,7 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller is not `Registry[KEY_LOAN_FLOW_PUSH_MANAGER]` and lacks ACTION_ADMIN (MissingRole)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param user Target user address
      * @return version Current version (monotonic)
@@ -398,11 +398,10 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /**
      * @notice Return the current Registry address.
-     * @dev Reverts if:
-     *      - (never)
+    * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @return registryAddr Registry contract address
      */

@@ -33,7 +33,6 @@ describe('StatisticsView (VaultStatistics 替代)', function () {
   describe('初始化', function () {
     it('应正确初始化（proxy）', async function () {
       const { stats, registry } = await deployFixture();
-      expect(await stats.registryAddr()).to.equal(await registry.getAddress());
       const [global] = await stats.getGlobalStatisticsWithMeta();
       expect(global.totalCollateral).to.equal(0n);
     });

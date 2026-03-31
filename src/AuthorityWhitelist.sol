@@ -12,43 +12,81 @@ import { SystemEvents } from "./Vault/SystemEvents.sol";
 import { NotAContract, ZeroAddress } from "./errors/StandardErrors.sol";
 import { Registry } from "./registry/Registry.sol";
 
-// ======== Custom Errors ========
-error AuthorityWhitelist__AuthorityNotExisted(); // E001
-error AuthorityWhitelist__AlreadyExists(); // E002
+/*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
-/// @title AuthorityWhitelist
-/// @notice 管理权威认证机构白名单，供 Vault 等模块验证
-/// @dev 使用ACM进行权限控制，确保系统安全性
-/// @dev 支持Registry升级事件监听，实现模块化架构
-/// @custom:security-contact security@example.com
+/// @dev Reverts when attempting to remove an authority that is not currently whitelisted.
+error AuthorityWhitelist__AuthorityNotExisted();
+
+/// @dev Reverts when attempting to add an authority that is already whitelisted.
+error AuthorityWhitelist__AlreadyExists();
+
+/**
+ * @title AuthorityWhitelist
+ * @notice Authority-subject whitelist for managing approved authority names.
+ * @dev Reverts if:
+ *      - Registry is unset or invalid when a Registry-dependent path is invoked (ZeroAddress / NotAContract)
+ *      - caller lacks the required governance role for whitelist administration or upgrades (via ACM)
+ *      - duplicate add or missing remove operations are attempted (AuthorityWhitelist__AlreadyExists / AuthorityWhitelist__AuthorityNotExisted)
+ *
+ * Security:
+ * - UUPS upgradeable contract with governance-gated administration through ACM ActionKeys.
+ * - Stores only authority-name membership and does not act as a generic address registry.
+ * - Read-side integrations should prefer the dedicated whitelist read interfaces.
+ *
+ * @custom:security-contact security@example.com
+ */
 contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhitelist {
-    // 使用 bytes32 存储字符串哈希，节省 gas 且避免动态 key 复杂性
+    /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
+
+    /// @dev Authority-name membership keyed by `keccak256(bytes(name))`.
     mapping(bytes32 => bool) private _whitelist;
 
-    /// @notice Registry合约地址
+    /// @notice Registry contract address used for ACM resolution and governance controls.
     address private _registryAddr;
 
-    /* ============ Modifiers ============ */
-    /// @notice 验证Registry地址有效性
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+
+    /// @notice Ensure the Registry address is configured and points to a contract.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
 
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+
+    /// @notice Emitted when an authority name is added to the whitelist.
+    /// @dev Event only.
     event AuthorityAdded(string name, address indexed operator);
+
+    /// @notice Emitted when an authority name is removed from the whitelist.
+    /// @dev Event only.
     event AuthorityRemoved(string name, address indexed operator);
 
-    /// @dev 禁用实现合约的初始化器
+    /// @notice Emitted when the whitelist updates the Registry dependency it uses.
+    /// @dev Event only.
+    event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    /* ============ Initializer ============ */
-    /// @notice 初始化权威认证机构白名单合约
-    /// @param initialRegistryAddr Registry合约地址
-    /// @dev 使用 StandardErrors 进行错误处理
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
+
+    /**
+     * @notice Initialize the authority whitelist with the authoritative Registry address.
+     * @dev Reverts if:
+     *      - initialRegistryAddr == address(0) (ZeroAddress)
+     *      - initialRegistryAddr is not a contract (NotAContract)
+     *      - initializer is invoked more than once
+     *
+     * Security:
+     * - Initializer: callable once.
+     * - Seeds a small default authority set for bootstrap compatibility.
+     *
+     * @param initialRegistryAddr Registry contract address.
+     */
     function initialize(address initialRegistryAddr) external initializer {
         __UUPSUpgradeable_init();
         
@@ -57,13 +95,13 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         
         _registryAddr = initialRegistryAddr;
         
-        // 预置常用机构
+        // Seed common authority names for bootstrap compatibility.
         _add("Moody's");
         _add("Standard Chartered");
         _add("S&P Global");
         _add("Fitch Ratings");
         
-        // 记录初始化动作
+        // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
@@ -72,15 +110,26 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         );
     }
 
-    /* ============ External Admin ============ */
+    /*━━━━━━━━━━━━━━━ External Admin ━━━━━━━━━━━━━━━*/
 
-    /// @notice 向白名单新增认证机构
-    /// @param name 机构名称（区分大小写）
+    /**
+     * @notice Add an authority name to the whitelist.
+     * @dev Reverts if:
+     *      - Registry is unset or invalid (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADD_WHITELIST (via ACM)
+     *      - `name` is already whitelisted (AuthorityWhitelist__AlreadyExists)
+     *
+     * Security:
+     * - Role-gated via ACTION_ADD_WHITELIST.
+     * - Emits both a domain event and a standardized ActionExecuted event.
+     *
+     * @param name Authority name. Matching is case-sensitive.
+     */
     function addAuthority(string calldata name) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
         _add(name);
         
-        // 记录标准化动作事件
+        // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_ADD_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_ADD_WHITELIST),
@@ -89,8 +138,19 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         );
     }
 
-    /// @notice 从白名单移除认证机构
-    /// @param name 机构名称（区分大小写）
+    /**
+     * @notice Remove an authority name from the whitelist.
+     * @dev Reverts if:
+     *      - Registry is unset or invalid (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_REMOVE_WHITELIST (via ACM)
+     *      - `name` is not currently whitelisted (AuthorityWhitelist__AuthorityNotExisted)
+     *
+     * Security:
+     * - Role-gated via ACTION_REMOVE_WHITELIST.
+     * - Emits both a domain event and a standardized ActionExecuted event.
+     *
+     * @param name Authority name. Matching is case-sensitive.
+     */
     function removeAuthority(string calldata name) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_REMOVE_WHITELIST, msg.sender);
         bytes32 key = keccak256(bytes(name));
@@ -98,7 +158,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         _whitelist[key] = false;
         emit AuthorityRemoved(name, msg.sender);
         
-        // 记录标准化动作事件
+        // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_REMOVE_WHITELIST,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_REMOVE_WHITELIST),
@@ -107,25 +167,54 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         );
     }
 
-    /* ============ View ============ */
+    /*━━━━━━━━━━━━━━━ View ━━━━━━━━━━━━━━━*/
 
-    /// @notice 查询某机构是否在白名单内
-    /// @param name 机构名称
-    /// @return existed 是否存在
+    /**
+     * @notice Check whether an authority name is whitelisted.
+     * @dev Reverts if:
+     *      - Registry is unset or invalid (ZeroAddress / NotAContract via onlyValidRegistry)
+     *
+     * Security:
+     * - View-only read.
+     *
+     * @param name Authority name. Matching is case-sensitive.
+     * @return existed True if `name` is currently whitelisted.
+     */
     function check(string calldata name) external view override onlyValidRegistry returns (bool) {
         return _whitelist[keccak256(bytes(name))];
     }
 
-    /// @notice 获取Registry地址（仅管理员）
-    /// @return Registry合约地址
+    /**
+     * @notice Return the Registry address through the admin-gated accessor.
+     * @dev Reverts if:
+     *      - Registry is unset or invalid (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (via ACM)
+     *
+     * Security:
+     * - View-only read.
+     * - Role-gated via ACTION_ADMIN.
+     *
+     * @return registryAddr_ Registry contract address.
+     */
     function getRegistry() external view onlyValidRegistry returns (address) {
         _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
         return _registryAddr;
     }
 
-    /// @notice 更新Registry地址
-    /// @param newRegistryAddr 新的Registry地址
-    /// @dev Registry地址不能为零地址
+    /**
+     * @notice Update the Registry address used by this whitelist.
+     * @dev Reverts if:
+     *      - Registry is unset or invalid (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_SET_PARAMETER (via ACM)
+     *      - newRegistryAddr == address(0) (ZeroAddress)
+     *      - newRegistryAddr is not a contract (NotAContract)
+     *
+     * Security:
+     * - Role-gated via ACTION_SET_PARAMETER.
+    * - Emits standardized governance and registry-update events.
+     *
+     * @param newRegistryAddr New Registry contract address.
+     */
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
@@ -134,7 +223,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
         
-        // 记录标准化动作事件
+        // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
@@ -142,25 +231,27 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
             block.number
         );
         
-        // 发出模块地址更新事件
-        emit SystemEvents.ModuleAddressUpdated(
-            ModuleKeys.getModuleKeyString(ModuleKeys.KEY_REGISTRY),
-            oldRegistry,
-            newRegistryAddr,
-            block.number
-        );
+        emit RegistryUpdated(oldRegistry, newRegistryAddr);
     }
 
-    /* ============ Internal Functions ============ */
+    /*━━━━━━━━━━━━━━━ Internal Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 内部权限验证函数
-    /// @param actionKey 动作标识符
-    /// @param user 用户地址
+    /**
+     * @notice Resolve ACM from Registry and require that `user` has `actionKey`.
+     * @dev Reverts if Registry or ACM resolution fails, or if the role check fails.
+     * @param actionKey Action key.
+     * @param user User address to check.
+     */
     function _requireRole(bytes32 actionKey, address user) internal view {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
+    /**
+     * @notice Add an authority name to storage without external permission checks.
+     * @dev Reverts if `name` is already whitelisted.
+     * @param name Authority name. Matching is case-sensitive.
+     */
     function _add(string memory name) internal {
         bytes32 key = keccak256(bytes(name));
         if (_whitelist[key]) revert AuthorityWhitelist__AlreadyExists();
@@ -168,16 +259,25 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         emit AuthorityAdded(name, msg.sender);
     }
 
-    /* ============ Upgrade Functions ============ */
+    /*━━━━━━━━━━━━━━━ Upgrade Functions ━━━━━━━━━━━━━━━*/
     
-    /// @notice 升级授权函数
-    /// @dev onlyRole modifier 已经足够验证权限
-    /// @dev 如需接入 Timelock/Multisig 治理，应在此处增加相应的权限检查逻辑
+    /**
+     * @notice Authorize a UUPS upgrade.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_UPGRADE_MODULE (via ACM)
+     *      - newImplementation == address(0) (ZeroAddress)
+     *
+     * Security:
+     * - Role-gated via ACTION_UPGRADE_MODULE.
+     * - Emits a standardized governance action event.
+     *
+     * @param newImplementation New implementation address.
+     */
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
         
-        // 记录升级动作
+        // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
@@ -186,8 +286,8 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         );
     }
 
-    /* ============ Storage Gap ============ */
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     
-    /// @dev 为可升级合约预留存储空间
+    /// @dev Storage gap reserved for upgrade safety.
     uint256[50] private __gap;
 } 

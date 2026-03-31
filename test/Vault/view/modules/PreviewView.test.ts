@@ -1185,12 +1185,6 @@ describe("PreviewView", function () {
   });
 
   describe("初始化与状态验证", function () {
-    it("初始化后 registryAddr 正确设置", async function () {
-      const { registry, preview } = await loadFixture(deployFixture);
-      const registryAddr = await preview.registryAddr();
-      expect(registryAddr).to.equal(await registry.getAddress());
-    });
-
     it("重复初始化应该失败", async function () {
       const { registry, preview } = await loadFixture(deployFixture);
       await expect(

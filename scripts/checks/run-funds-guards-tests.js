@@ -48,7 +48,7 @@ const baseTests = [
   "test/Vault/modules/VaultBusinessLogic.test.ts",
 
   // P0/P2 adjacent (oracle updater frequently coupled with view/oracle wiring)
-  "test/core/CoinGeckoPriceUpdater.test.ts",
+  "test/core/PriceUpdater.test.ts",
 ];
 
 const viewTests = [

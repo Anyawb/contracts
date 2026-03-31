@@ -34,7 +34,8 @@ async function main() {
   const tokenAddr = (await registry.getModuleOrRevert(ethers.keccak256(ethers.toUtf8Bytes("SETTLEMENT_TOKEN")))) as string;
 
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddr)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", awAddr)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", awAddr)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", awAddr)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", poAddr)) as any;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddr)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", tokenAddr)) as any;
@@ -44,7 +45,7 @@ async function main() {
   console.log("  deployer:", deployer.address);
   console.log("  MockUSDC:", usdc.target);
   console.log("  AccessControlManager:", await acm.getAddress());
-  console.log("  AssetWhitelist:", await aw.getAddress());
+  console.log("  AssetWhitelist:", awAddr);
   console.log("  PriceOracle:", await po.getAddress());
   console.log("  FeeRouter:", await feeRouter.getAddress());
 
@@ -86,9 +87,9 @@ async function main() {
   }
 
   // 1) AssetWhitelist
-  const allowed = await aw.isAssetAllowed(usdc.target);
+  const allowed = await awRead.isAssetAllowed(usdc.target);
   if (!allowed && enableWrite) {
-    const tx = await aw.connect(deployer).addAllowedAsset(usdc.target);
+    const tx = await awAdmin.connect(deployer).addAllowedAsset(usdc.target);
     await tx.wait();
     console.log("  ✅ AssetWhitelist allowed MockUSDC");
   } else if (!allowed) {

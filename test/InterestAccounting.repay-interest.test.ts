@@ -18,7 +18,7 @@ describe('Interest Accounting – full repay posts interest', function () {
   const ACTION_BORROW = ethers.keccak256(ethers.toUtf8Bytes('BORROW')); // LoanNFT minter role
 
   const YEAR = 365n * 24n * 60n * 60n;
-  const REPAY_FEE_BPS = 6n; // src/core/LendingEngine.sol constant
+  const REPAY_FEE_BPS = 30n; // src/core/LendingEngine.sol constant (repay-side fee: 0.3%)
 
   function calcInterest(principal: bigint, rateBps: bigint, termSec: bigint): bigint {
     return (principal * rateBps * termSec) / (YEAR * 10000n);

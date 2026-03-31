@@ -1,157 +1,240 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
+import {IRWAAssetPriceRead} from "./IRWAAssetPriceRead.sol";
+import {IRWAAssetPriceAdmin} from "./IRWAAssetPriceAdmin.sol";
 
-/// @title IRWAPriceOracle
-/// @notice 提供 RWA 资产的美元价格查询接口
-/// @dev 与 ActionKeys 和 ModuleKeys 集成，提供标准化的模块管理
-/// @dev 与 SystemEvents 集成，提供标准化的事件记录
-/// @dev 使用 StandardErrors 进行统一的错误处理
-/// @custom:security-contact security@example.com
-interface IRWAPriceOracle {
+/**
+ * @title IRWAPriceOracle
+ * @notice Legacy umbrella interface for RWA-scoped authoritative price sources.
+ * @dev Reverts if:
+ *      - see inherited {IRWAAssetPriceRead} and {IRWAAssetPriceAdmin} semantics
+ *
+ * Security:
+ * - Compatibility-oriented aggregation layer retained for callers that still depend on a combined RWA price surface.
+ * - Prefer {IRWAAssetPriceRead} for read consumers and {IRWAAssetPriceAdmin} for governance or updater callers.
+ */
+interface IRWAPriceOracle is IRWAAssetPriceRead, IRWAAssetPriceAdmin {
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
 
-    /// @notice 价格更新事件
-    /// @param token    资产地址
-    /// @param price    最新价格（USD 定价）
-    /// @param blockNumber 更新区块号（blockNumber）
-    event PriceUpdated(address indexed token, uint256 price, uint256 blockNumber);
+    /**
+     * @notice Emitted when an RWA asset price is updated.
+     * @dev Event only.
+     * @param token Asset address.
+     * @param price Latest USD price.
+     * @param blockNumber Update block number.
+     */
+    event PriceUpdated(
+        address indexed token,
+        uint256 price,
+        uint256 blockNumber
+    );
 
-    /// @notice RWA 资产配置更新事件
-    /// @param token 资产地址
-    /// @param isActive 是否激活
-    /// @param maxPriceAge 最大价格年龄
-    event RWAAssetConfigUpdated(address indexed token, bool isActive, uint256 maxPriceAge);
+    /**
+     * @notice Emitted when RWA asset configuration is updated.
+     * @dev Event only.
+     * @param token Asset address.
+     * @param isActive Whether the asset is active.
+     * @param maxPriceAge Maximum allowed price age.
+     */
+    event RWAAssetConfigUpdated(
+        address indexed token,
+        bool isActive,
+        uint256 maxPriceAge
+    );
 
-    /// @notice RWA 预言机参数更新事件
-    /// @param paramName 参数名称
-    /// @param oldValue 旧值
-    /// @param newValue 新值
-    event RWAParameterUpdated(string indexed paramName, uint256 oldValue, uint256 newValue);
+    /**
+     * @notice Emitted when an oracle parameter is updated.
+     * @dev Event only.
+     * @param paramName Parameter name.
+     * @param oldValue Previous value.
+     * @param newValue New value.
+     */
+    event RWAParameterUpdated(
+        string indexed paramName,
+        uint256 oldValue,
+        uint256 newValue
+    );
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
 
-    /// @notice 零地址参数
+    /// @dev Reverts when a required address parameter is zero.
     error RWAPriceOracle__ZeroAddress();
 
-    /// @notice 资产不支持
+    /// @dev Reverts when the requested RWA asset is not supported.
     error RWAPriceOracle__AssetNotSupported();
 
-    /// @notice 价格无效
+    /// @dev Reverts when the supplied or stored price is invalid.
     error RWAPriceOracle__InvalidPrice();
 
-    /// @notice 价格过期
+    /// @dev Reverts when the stored price is stale under the implementation's freshness rules.
     error RWAPriceOracle__StalePrice();
 
-    /// @notice 未授权操作
+    /// @dev Reverts when the caller is not authorized to perform the operation.
     error RWAPriceOracle__Unauthorized();
-
-    /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
-
-    /// @notice RWA 价格数据结构
-    struct RWAPriceData {
-        uint256 price;        // 价格（USD 定价，8位小数）
-        uint256 blockNumber;    // 价格更新区块号（blockNumber）
-        uint8 decimals;       // 价格精度
-        bool isValid;         // 价格是否有效
-        string assetType;     // 资产类型（如：real-estate, commodities, etc.）
-    }
-
-    /// @notice RWA 资产配置结构
-    struct RWAAssetConfig {
-        string assetType;     // 资产类型
-        uint8 decimals;       // 资产精度
-        bool isActive;        // 资产是否激活
-        uint256 maxPriceAge;  // 最大价格年龄（秒）
-        string description;   // 资产描述
-    }
 
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 获取指定 RWA 资产的美元价格
-     * @param token 目标资产地址
-     * @return price   当前价格（定价单位为 USD，decimals 精度）
-     * @return decimals 价格精度
+     * @notice Returns the USD price for `token`.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceRead.getPriceUSD}
+     *
+     * Security:
+     * - Read-only compatibility alias for the narrow RWA price read surface.
+     *
+     * @param token Target asset address.
+     * @return price Current USD price.
+     * @return decimals Price decimals.
      */
-    function getPriceUSD(address token) external view returns (uint256 price, uint8 decimals);
+    function getPriceUSD(
+        address token
+    ) external view override returns (uint256 price, uint8 decimals);
 
     /**
-     * @notice 获取指定 RWA 资产的完整价格数据
-     * @param token 目标资产地址
-     * @return priceData 价格数据结构
+     * @notice Returns the full price data struct for `token`.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceRead.getPriceData}
+     *
+     * Security:
+     * - Read-only compatibility alias for the narrow RWA price read surface.
+     *
+     * @param token Target asset address.
+     * @return priceData Price data struct.
      */
-    function getPriceData(address token) external view returns (RWAPriceData memory priceData);
+    function getPriceData(
+        address token
+    ) external view override returns (RWAPriceData memory priceData);
 
     /**
-     * @notice 批量获取多个 RWA 资产的价格
-     * @param tokens 资产地址数组
-     * @return prices 价格数组
-     * @return decimalsArray 精度数组
+     * @notice Batch-returns USD prices for multiple RWA assets.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceRead.getPricesUSD}
+     *
+     * Security:
+     * - Read-only compatibility alias for the narrow RWA price read surface.
+     *
+     * @param tokens Asset addresses.
+     * @return prices Prices aligned with `tokens`.
+     * @return decimalsArray Decimals aligned with `tokens`.
      */
-    function getPricesUSD(address[] calldata tokens) external view returns (
-        uint256[] memory prices,
-        uint8[] memory decimalsArray
-    );
+    function getPricesUSD(
+        address[] calldata tokens
+    )
+        external
+        view
+        override
+        returns (uint256[] memory prices, uint8[] memory decimalsArray);
 
     /**
-     * @notice 检查 RWA 资产价格是否有效
-     * @param token 资产地址
-     * @return isValid 价格是否有效
+     * @notice Returns whether the stored price for `token` is valid.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceRead.isPriceValid}
+     *
+     * Security:
+     * - Read-only compatibility alias for the narrow RWA price read surface.
+     *
+     * @param token Asset address.
+     * @return isValid Whether the price is valid.
      */
-    function isPriceValid(address token) external view returns (bool isValid);
+    function isPriceValid(
+        address token
+    ) external view override returns (bool isValid);
 
     /**
-     * @notice 获取 RWA 资产配置信息
-     * @param token 资产地址
-     * @return config 资产配置结构
+     * @notice Returns the configuration for `token`.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceRead.getAssetConfig}
+     *
+     * Security:
+     * - Read-only compatibility alias for the narrow RWA price read surface.
+     *
+     * @param token Asset address.
+     * @return config Asset configuration struct.
      */
-    function getAssetConfig(address token) external view returns (RWAAssetConfig memory config);
+    function getAssetConfig(
+        address token
+    ) external view override returns (RWAAssetConfig memory config);
 
     /**
-     * @notice 获取支持的 RWA 资产列表
-     * @return tokens 支持的资产地址数组
+     * @notice Returns the list of supported RWA assets.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceRead.getSupportedAssets}
+     *
+     * Security:
+     * - Read-only compatibility alias for the narrow RWA price read surface.
+     *
+     * @return tokens Supported asset addresses.
      */
-    function getSupportedAssets() external view returns (address[] memory tokens);
+    function getSupportedAssets()
+        external
+        view
+        override
+        returns (address[] memory tokens);
 
     /**
-     * @notice 获取 RWA 资产数量
-     * @return count 支持的资产数量
+     * @notice Returns the number of supported RWA assets.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceRead.getAssetCount}
+     *
+     * Security:
+     * - Read-only compatibility alias for the narrow RWA price read surface.
+     *
+     * @return count Supported asset count.
      */
-    function getAssetCount() external view returns (uint256 count);
+    function getAssetCount() external view override returns (uint256 count);
 
-    /*━━━━━━━━━━━━━━━ ADMIN FUNCTIONS ━━━━━━━━━━━━━━━*/
+    /*━━━━━━━━━━━━━━━ Admin Functions ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice 更新 RWA 资产价格（仅授权地址可调用）
-     * @param token 资产地址
-     * @param price 价格（USD 定价，8位小数）
-     * @param blockNumber 价格区块号（blockNumber）
+     * @notice Updates the price of `token`.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceAdmin.updatePrice}
+     *
+     * Security:
+     * - Governance compatibility alias for the narrow RWA price admin surface.
+     *
+     * @param token Asset address.
+     * @param price USD price, typically with 8 decimals.
+     * @param blockNumber Price block number.
      */
-    function updatePrice(address token, uint256 price, uint256 blockNumber) external;
+    function updatePrice(
+        address token,
+        uint256 price,
+        uint256 blockNumber
+    ) external override;
 
     /**
-     * @notice 批量更新 RWA 资产价格（仅授权地址可调用）
-     * @param tokens 资产地址数组
-     * @param prices 价格数组
-     * @param blockNumbers 区块号数组（blockNumber）
+     * @notice Batch-updates prices for multiple RWA assets.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceAdmin.updatePrices}
+     *
+     * Security:
+     * - Governance compatibility alias for the narrow RWA price admin surface.
+     *
+     * @param tokens Asset addresses.
+     * @param prices Price values aligned with `tokens`.
+     * @param blockNumbers Price block numbers aligned with `tokens`.
      */
     function updatePrices(
         address[] calldata tokens,
         uint256[] calldata prices,
         uint256[] calldata blockNumbers
-    ) external;
+    ) external override;
 
     /**
-     * @notice 配置 RWA 资产（仅治理可调用）
-     * @param token 资产地址
-     * @param assetType 资产类型
-     * @param decimals 资产精度
-     * @param maxPriceAge 最大价格年龄（秒）
-     * @param description 资产描述
+     * @notice Configures a supported RWA asset.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceAdmin.configureAsset}
+     *
+     * Security:
+     * - Governance compatibility alias for the narrow RWA price admin surface.
+     *
+     * @param token Asset address.
+     * @param assetType Asset type.
+     * @param decimals Asset decimals.
+     * @param maxPriceAge Maximum allowed price age.
+     * @param description Asset description.
      */
     function configureAsset(
         address token,
@@ -159,19 +242,34 @@ interface IRWAPriceOracle {
         uint8 decimals,
         uint256 maxPriceAge,
         string calldata description
-    ) external;
+    ) external override;
 
     /**
-     * @notice 激活/停用 RWA 资产（仅治理可调用）
-     * @param token 资产地址
-     * @param isActive 是否激活
+     * @notice Activates or deactivates a configured RWA asset.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceAdmin.setAssetActive}
+     *
+     * Security:
+     * - Governance compatibility alias for the narrow RWA price admin surface.
+     *
+     * @param token Asset address.
+     * @param isActive Whether the asset should be active.
      */
-    function setAssetActive(address token, bool isActive) external;
+    function setAssetActive(address token, bool isActive) external override;
 
     /**
-     * @notice 更新 RWA 预言机参数（仅治理可调用）
-     * @param paramName 参数名称
-     * @param newValue 新值
+     * @notice Updates an oracle parameter.
+     * @dev Reverts if:
+     *      - see {IRWAAssetPriceAdmin.updateParameter}
+     *
+     * Security:
+     * - Governance compatibility alias for the narrow RWA price admin surface.
+     *
+     * @param paramName Parameter name.
+     * @param newValue New value.
      */
-    function updateParameter(string calldata paramName, uint256 newValue) external;
-} 
+    function updateParameter(
+        string calldata paramName,
+        uint256 newValue
+    ) external override;
+}

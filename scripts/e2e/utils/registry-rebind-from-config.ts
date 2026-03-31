@@ -3,15 +3,16 @@ import { CONTRACT_ADDRESSES } from "../../../frontend-config/contracts-localhost
 
 type ModuleKeyMap = Record<string, string>;
 
+const PRICE_UPDATER_REGISTRY_RAW_KEY = "COINGECKO_PRICE_UPDATER";
+
 const NAME_TO_KEY: ModuleKeyMap = {
-  RegistryHelper: "REGISTRY_HELPER",
   RegistryDynamicModuleKey: "DYNAMIC_MODULE_REGISTRY",
   AccessControlManager: "ACCESS_CONTROL_MANAGER",
   CacheMaintenanceManager: "CACHE_MAINTENANCE_MANAGER",
   AssetWhitelist: "ASSET_WHITELIST",
   AuthorityWhitelist: "AUTHORITY_WHITELIST",
   PriceOracle: "PRICE_ORACLE",
-  CoinGeckoPriceUpdater: "COINGECKO_PRICE_UPDATER",
+  PriceUpdater: PRICE_UPDATER_REGISTRY_RAW_KEY,
   FeeRouter: "FEE_ROUTER",
   FeeRouterView: "FEE_ROUTER_VIEW",
   EasyToken: "EASY_TOKEN",
@@ -67,7 +68,7 @@ const MODULE_ORDER = [
   "AssetWhitelist",
   "AuthorityWhitelist",
   "PriceOracle",
-  "CoinGeckoPriceUpdater",
+  "PriceUpdater",
   "VaultLendingEngine",
   "EarlyRepaymentGuaranteeManager",
   "DegradationCore",

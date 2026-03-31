@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { IRegistry } from "../interfaces/IRegistry.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { NotAContract, ZeroAddress, AmountMismatch } from "../errors/StandardErrors.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IPriceOracle} from "../interfaces/IPriceOracle.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {IRegistry} from "../interfaces/IRegistry.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {SystemEvents} from "../Vault/SystemEvents.sol";
+import {
+    NotAContract,
+    ZeroAddress,
+    AmountMismatch
+} from "../errors/StandardErrors.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
@@ -19,7 +23,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 error PriceOracle__AssetAlreadySupported();
 
 /// @dev Reverts when an asset is not supported/active.
-/// Used by {getPrice,getPriceData,getPrices,getAssetCoingeckoId,updatePrice,updatePrices}.
+/// Used by {getPrice,getPriceData,getPrices,getAssetSourceId,updatePrice,updatePrices}.
 error PriceOracle__AssetNotSupported();
 
 /// @dev Reverts when a stored price is considered stale per `maxPriceAgeBlocks`. Used by {getPrice,getPrices}.
@@ -67,12 +71,11 @@ error PriceOracle__InvalidAssetDecimals(uint256 decimals);
  *
  * Integration:
  * - Intended Registry key: `ModuleKeys.KEY_PRICE_ORACLE`.
- * - Typical writer: `CoinGeckoPriceUpdater` (or governance/keeper equivalents).
+ * - Typical writer: `PriceUpdater` (or governance/keeper equivalents).
  *
  * @custom:security-contact security@example.com
  */
 contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
-
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
 
     /// @dev Fixed price precision for this module: USD-8 (e.g. $1.00 == 100000000).
@@ -93,7 +96,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
     /// @dev Per-asset update block for the latest stored price (0 means unset).
     mapping(address => uint256) private _lastUpdateBlock;
 
-    /// @dev Per-asset configuration (activation, token decimals, max price age, CoinGecko id).
+    /// @dev Per-asset configuration (activation, token decimals, max price age, offchain source id).
     mapping(address => AssetConfig) private _assetConfigs;
 
     /// @dev List of all assets ever configured (may include inactive assets).
@@ -130,11 +133,11 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      */
     function initialize(address initialRegistryAddr) external initializer {
         __UUPSUpgradeable_init();
-        
+
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        
+
         _registryAddr = initialRegistryAddr;
-        
+
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
@@ -164,26 +167,37 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @return blockNumber Informational blockNumber associated with the quoted price.
      * @return assetDecimals Token decimals used for valuation scaling (see `AssetConfig.assetDecimals`).
      */
-    function getPrice(address asset)
+    function getPrice(
+        address asset
+    )
         external
         view
         override
         returns (uint256 price, uint256 blockNumber, uint256 assetDecimals)
     {
         if (asset == address(0)) revert ZeroAddress();
-        if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
-        
+        if (!_assetConfigs[asset].isActive)
+            revert PriceOracle__AssetNotSupported();
+
         PriceData memory priceData = _prices[asset];
         if (!priceData.isValid) revert PriceOracle__InvalidPrice();
 
         uint256 updatedAtBlock = _lastUpdateBlock[asset];
         // Defensive: treat missing/invalid update block as invalid.
-        if (updatedAtBlock == 0 || updatedAtBlock > block.number) revert PriceOracle__InvalidBlockNumber();
-        if (block.number - updatedAtBlock > _assetConfigs[asset].maxPriceAgeBlocks) {
+        if (updatedAtBlock == 0 || updatedAtBlock > block.number)
+            revert PriceOracle__InvalidBlockNumber();
+        if (
+            block.number - updatedAtBlock >
+            _assetConfigs[asset].maxPriceAgeBlocks
+        ) {
             revert PriceOracle__StalePrice();
         }
-        
-        return (priceData.price, priceData.blockNumber, priceData.assetDecimals);
+
+        return (
+            priceData.price,
+            priceData.blockNumber,
+            priceData.assetDecimals
+        );
     }
 
     /**
@@ -201,10 +215,13 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @param asset ERC-20 asset address.
      * @return priceData Stored price struct (includes USD-8 price, blockNumber, and token decimals used for scaling).
      */
-    function getPriceData(address asset) external view override returns (PriceData memory priceData) {
+    function getPriceData(
+        address asset
+    ) external view override returns (PriceData memory priceData) {
         if (asset == address(0)) revert ZeroAddress();
-        if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
-        
+        if (!_assetConfigs[asset].isActive)
+            revert PriceOracle__AssetNotSupported();
+
         priceData = _prices[asset];
         if (!priceData.isValid) revert PriceOracle__InvalidPrice();
     }
@@ -223,9 +240,12 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @param asset ERC-20 asset address.
      * @return updateBlock Block number at which the latest price was stored.
      */
-    function getPriceUpdateBlock(address asset) external view override returns (uint256 updateBlock) {
+    function getPriceUpdateBlock(
+        address asset
+    ) external view override returns (uint256 updateBlock) {
         if (asset == address(0)) revert ZeroAddress();
-        if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
+        if (!_assetConfigs[asset].isActive)
+            revert PriceOracle__AssetNotSupported();
         if (!_prices[asset].isValid) revert PriceOracle__InvalidPrice();
         return _lastUpdateBlock[asset];
     }
@@ -244,18 +264,16 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @param assets List of ERC-20 asset addresses.
      * @return updateBlocks Update block numbers aligned to `assets`.
      */
-    function getPriceUpdateBlocks(address[] calldata assets)
-        external
-        view
-        override
-        returns (uint256[] memory updateBlocks)
-    {
+    function getPriceUpdateBlocks(
+        address[] calldata assets
+    ) external view override returns (uint256[] memory updateBlocks) {
         uint256 length = assets.length;
         updateBlocks = new uint256[](length);
         for (uint256 i = 0; i < length; i++) {
             address asset = assets[i];
             if (asset == address(0)) revert ZeroAddress();
-            if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
+            if (!_assetConfigs[asset].isActive)
+                revert PriceOracle__AssetNotSupported();
             if (!_prices[asset].isValid) revert PriceOracle__InvalidPrice();
             updateBlocks[i] = _lastUpdateBlock[asset];
         }
@@ -272,7 +290,9 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @param asset ERC-20 asset address.
      * @return config Asset configuration struct.
      */
-    function getAssetConfig(address asset) external view override returns (AssetConfig memory config) {
+    function getAssetConfig(
+        address asset
+    ) external view override returns (AssetConfig memory config) {
         if (asset == address(0)) revert ZeroAddress();
         config = _assetConfigs[asset];
     }
@@ -308,29 +328,41 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @return blockNumbers Informational blockNumbers, aligned to `assets`.
      * @return assetDecimalsArray Token decimals used for valuation scaling, aligned to `assets`.
      */
-    function getPrices(address[] calldata assets) external view override returns (
-        uint256[] memory prices,
-        uint256[] memory blockNumbers,
-        uint256[] memory assetDecimalsArray
-    ) {
+    function getPrices(
+        address[] calldata assets
+    )
+        external
+        view
+        override
+        returns (
+            uint256[] memory prices,
+            uint256[] memory blockNumbers,
+            uint256[] memory assetDecimalsArray
+        )
+    {
         uint256 length = assets.length;
         prices = new uint256[](length);
         blockNumbers = new uint256[](length);
         assetDecimalsArray = new uint256[](length);
-        
+
         for (uint256 i = 0; i < length; i++) {
             if (assets[i] == address(0)) revert ZeroAddress();
-            if (!_assetConfigs[assets[i]].isActive) revert PriceOracle__AssetNotSupported();
-            
+            if (!_assetConfigs[assets[i]].isActive)
+                revert PriceOracle__AssetNotSupported();
+
             PriceData memory priceData = _prices[assets[i]];
             if (!priceData.isValid) revert PriceOracle__InvalidPrice();
 
             uint256 updatedAtBlock = _lastUpdateBlock[assets[i]];
-            if (updatedAtBlock == 0 || updatedAtBlock > block.number) revert PriceOracle__InvalidBlockNumber();
-            if (block.number - updatedAtBlock > _assetConfigs[assets[i]].maxPriceAgeBlocks) {
+            if (updatedAtBlock == 0 || updatedAtBlock > block.number)
+                revert PriceOracle__InvalidBlockNumber();
+            if (
+                block.number - updatedAtBlock >
+                _assetConfigs[assets[i]].maxPriceAgeBlocks
+            ) {
                 revert PriceOracle__StalePrice();
             }
-            
+
             prices[i] = priceData.price;
             blockNumbers[i] = priceData.blockNumber;
             assetDecimalsArray[i] = priceData.assetDecimals;
@@ -349,19 +381,22 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @param asset ERC-20 asset address.
      * @return isValid True if `asset` is active and its stored price is present, not in the future, and not stale.
      */
-    function isPriceValid(address asset) external view override returns (bool isValid) {
+    function isPriceValid(
+        address asset
+    ) external view override returns (bool isValid) {
         if (asset == address(0)) return false;
         if (!_assetConfigs[asset].isActive) return false;
-        
+
         PriceData memory priceData = _prices[asset];
         if (!priceData.isValid) return false;
         uint256 updatedAtBlock = _lastUpdateBlock[asset];
         if (updatedAtBlock == 0 || updatedAtBlock > block.number) return false;
-        return (block.number - updatedAtBlock <= _assetConfigs[asset].maxPriceAgeBlocks);
+        return (block.number - updatedAtBlock <=
+            _assetConfigs[asset].maxPriceAgeBlocks);
     }
 
     /**
-     * @notice Returns the configured CoinGecko asset id for `asset`.
+    * @notice Returns the configured offchain source id for `asset`.
      * @dev Reverts if:
      *      - `asset` is zero (see {ZeroAddress})
      *      - `asset` is not active (see {PriceOracle__AssetNotSupported})
@@ -370,12 +405,15 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - Read-only; does not perform any external calls.
      *
      * @param asset ERC-20 asset address.
-     * @return coingeckoId CoinGecko id string as configured via {configureAsset}.
+     * @return sourceId Offchain source id string as configured via {configureAsset}.
      */
-    function getAssetCoingeckoId(address asset) external view override returns (string memory coingeckoId) {
+    function getAssetSourceId(
+        address asset
+    ) external view override returns (string memory sourceId) {
         if (asset == address(0)) revert ZeroAddress();
-        if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
-        return _assetConfigs[asset].coingeckoId;
+        if (!_assetConfigs[asset].isActive)
+            revert PriceOracle__AssetNotSupported();
+        return _assetConfigs[asset].sourceId;
     }
 
     /**
@@ -392,7 +430,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
     }
 
     /**
-     * @notice Configures an asset (CoinGecko id, token decimals for scaling, activation, and max allowed price age).
+    * @notice Configures an asset (source id, token decimals for scaling, activation, and max allowed price age).
      * @dev Reverts if:
      *      - Registry is not configured / not a contract (see {ZeroAddress}, {NotAContract}) (via {onlyValidRegistry})
      *      - caller lacks `ActionKeys.ACTION_SET_PARAMETER` (reverts in ACM via {_requireRole})
@@ -407,13 +445,13 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      *   That read is best-effort and reverts only if decimals remain unconfigured (returns 0 / unreadable).
      *
      * @param asset ERC-20 asset address to configure.
-     * @param coingeckoId CoinGecko id used by offchain updaters (may be empty).
+    * @param sourceId Offchain source id used by updaters (may be empty).
      * @param assetDecimals Token decimals used for valuation scaling (NOT price precision).
      * @param maxPriceAgeBlocks Maximum allowed staleness in blocks (0 uses default).
      */
     function configureAsset(
         address asset,
-        string calldata coingeckoId,
+        string calldata sourceId,
         uint256 assetDecimals,
         uint256 maxPriceAgeBlocks
     ) external override onlyValidRegistry {
@@ -425,7 +463,14 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
             if (d == 0) revert PriceOracle__AssetDecimalsNotConfigured();
             assetDecimals = uint256(d);
         }
-        _configureAssetInternal(asset, coingeckoId, assetDecimals, maxPriceAgeBlocks, true, true);
+        _configureAssetInternal(
+            asset,
+            sourceId,
+            assetDecimals,
+            maxPriceAgeBlocks,
+            true,
+            true
+        );
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
@@ -448,17 +493,20 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @param asset ERC-20 asset address to update.
      * @param isActive New active flag.
      */
-    function setAssetActive(address asset, bool isActive) external override onlyValidRegistry {
+    function setAssetActive(
+        address asset,
+        bool isActive
+    ) external override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (asset == address(0)) revert ZeroAddress();
-        
+
         _assetConfigs[asset].isActive = isActive;
         emit AssetConfigUpdated(
             asset,
-            _assetConfigs[asset].coingeckoId,
+            _assetConfigs[asset].sourceId,
             isActive
         );
-        
+
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
@@ -482,14 +530,24 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - Performs an external call to `IERC20Metadata(asset).decimals()`; if unreadable, this call reverts.
      *
      * @param asset ERC-20 asset address to configure.
-     * @param coingeckoId CoinGecko id used by offchain updaters (may be empty).
+     * @param sourceId Offchain source id used by updaters (may be empty).
      */
-    function configureAsset(address asset, string calldata coingeckoId) external onlyValidRegistry {
+    function configureAsset(
+        address asset,
+        string calldata sourceId
+    ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (asset == address(0)) revert ZeroAddress();
         uint8 d = _tryReadErc20Decimals(asset);
         if (d == 0) revert PriceOracle__AssetDecimalsNotConfigured();
-        _configureAssetInternal(asset, coingeckoId, uint256(d), _DEFAULT_MAX_PRICE_AGE_BLOCKS_VALUE, true, true);
+        _configureAssetInternal(
+            asset,
+            sourceId,
+            uint256(d),
+            _DEFAULT_MAX_PRICE_AGE_BLOCKS_VALUE,
+            true,
+            true
+        );
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_SET_PARAMETER),
@@ -497,7 +555,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
             block.number
         );
     }
-    
+
     /**
      * @notice Updates the stored price for `asset`.
      * @dev Reverts if:
@@ -518,22 +576,31 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * @param price New price in USD-8.
      * @param blockNumber Informational blockNumber corresponding to the quoted price.
      */
-    function updatePrice(address asset, uint256 price, uint256 blockNumber) external override onlyValidRegistry {
+    function updatePrice(
+        address asset,
+        uint256 price,
+        uint256 blockNumber
+    ) external override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_UPDATE_PRICE, msg.sender);
         if (asset == address(0)) revert ZeroAddress();
-        if (!_assetConfigs[asset].isActive) revert PriceOracle__AssetNotSupported();
+        if (!_assetConfigs[asset].isActive)
+            revert PriceOracle__AssetNotSupported();
         if (price == 0) revert PriceOracle__InvalidPrice();
         // Prevent blockNumbers from going backwards once initialized.
-        if (_prices[asset].isValid && blockNumber < _prices[asset].blockNumber) {
+        if (
+            _prices[asset].isValid && blockNumber < _prices[asset].blockNumber
+        ) {
             revert PriceOracle__InvalidBlockNumber();
         }
 
         // assetDecimals must be configured; do NOT silently fall back to 8.
         // Otherwise, valuation would be mis-scaled by 10^(tokenDecimals-8).
         uint256 assetDecimals = _assetConfigs[asset].assetDecimals;
-        if (assetDecimals == 0) revert PriceOracle__AssetDecimalsNotConfigured();
-        if (assetDecimals > 77) revert PriceOracle__InvalidAssetDecimals(assetDecimals);
-        
+        if (assetDecimals == 0)
+            revert PriceOracle__AssetDecimalsNotConfigured();
+        if (assetDecimals > 77)
+            revert PriceOracle__InvalidAssetDecimals(assetDecimals);
+
         _prices[asset] = PriceData({
             price: price,
             blockNumber: blockNumber,
@@ -541,9 +608,9 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
             isValid: true
         });
         _lastUpdateBlock[asset] = block.number;
-        
+
         emit PriceUpdated(asset, price, blockNumber);
-        
+
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
@@ -580,22 +647,31 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
     ) external override onlyValidRegistry {
         // Same implementation as batchUpdatePrices
         _requireRole(ActionKeys.ACTION_UPDATE_PRICE, msg.sender);
-        if (assets.length != prices.length || assets.length != blockNumbers.length) {
+        if (
+            assets.length != prices.length ||
+            assets.length != blockNumbers.length
+        ) {
             revert AmountMismatch();
         }
-        
+
         for (uint256 i = 0; i < assets.length; i++) {
             if (assets[i] == address(0)) revert ZeroAddress();
-            if (!_assetConfigs[assets[i]].isActive) revert PriceOracle__AssetNotSupported();
+            if (!_assetConfigs[assets[i]].isActive)
+                revert PriceOracle__AssetNotSupported();
             if (prices[i] == 0) revert PriceOracle__InvalidPrice();
-            if (_prices[assets[i]].isValid && blockNumbers[i] < _prices[assets[i]].blockNumber) {
+            if (
+                _prices[assets[i]].isValid &&
+                blockNumbers[i] < _prices[assets[i]].blockNumber
+            ) {
                 revert PriceOracle__InvalidBlockNumber();
             }
 
             uint256 assetDecimals = _assetConfigs[assets[i]].assetDecimals;
-            if (assetDecimals == 0) revert PriceOracle__AssetDecimalsNotConfigured();
-            if (assetDecimals > 77) revert PriceOracle__InvalidAssetDecimals(assetDecimals);
-            
+            if (assetDecimals == 0)
+                revert PriceOracle__AssetDecimalsNotConfigured();
+            if (assetDecimals > 77)
+                revert PriceOracle__InvalidAssetDecimals(assetDecimals);
+
             _prices[assets[i]] = PriceData({
                 price: prices[i],
                 blockNumber: blockNumbers[i],
@@ -603,10 +679,10 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
                 isValid: true
             });
             _lastUpdateBlock[assets[i]] = block.number;
-            
+
             emit PriceUpdated(assets[i], prices[i], blockNumbers[i]);
         }
-        
+
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPDATE_PRICE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPDATE_PRICE),
@@ -628,7 +704,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - `maxPriceAgeBlocks == 0` is normalized to {_DEFAULT_MAX_PRICE_AGE_BLOCKS_VALUE}.
      *
      * @param asset ERC-20 asset address to configure.
-     * @param coingeckoId CoinGecko id used by offchain updaters (may be empty).
+    * @param sourceId Offchain source id used by updaters (may be empty).
      * @param assetDecimals Token decimals used for valuation scaling (NOT price precision).
      * @param maxPriceAgeBlocks Maximum allowed staleness in blocks (0 uses default).
      * @param setActive Whether to set `isActive` to true/false.
@@ -636,20 +712,24 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      */
     function _configureAssetInternal(
         address asset,
-        string memory coingeckoId,
+        string memory sourceId,
         uint256 assetDecimals,
         uint256 maxPriceAgeBlocks,
         bool setActive,
         bool emitConfigEvent
     ) internal {
         // assetDecimals is token decimals used for 10**assetDecimals scaling in valuation.
-        if (assetDecimals == 0) revert PriceOracle__AssetDecimalsNotConfigured();
-        if (assetDecimals > 77) revert PriceOracle__InvalidAssetDecimals(assetDecimals);
+        if (assetDecimals == 0)
+            revert PriceOracle__AssetDecimalsNotConfigured();
+        if (assetDecimals > 77)
+            revert PriceOracle__InvalidAssetDecimals(assetDecimals);
         _assetConfigs[asset] = AssetConfig({
-            coingeckoId: coingeckoId,
+            sourceId: sourceId,
             assetDecimals: assetDecimals,
             isActive: setActive,
-            maxPriceAgeBlocks: maxPriceAgeBlocks > 0 ? maxPriceAgeBlocks : _DEFAULT_MAX_PRICE_AGE_BLOCKS_VALUE
+            maxPriceAgeBlocks: maxPriceAgeBlocks > 0
+                ? maxPriceAgeBlocks
+                : _DEFAULT_MAX_PRICE_AGE_BLOCKS_VALUE
         });
         // If this is a new asset, append it to the supported list.
         if (_assetIndexPlus1[asset] == 0) {
@@ -657,7 +737,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
             _assetIndexPlus1[asset] = _supportedAssets.length;
         }
         if (emitConfigEvent) {
-            emit AssetConfigUpdated(asset, coingeckoId, setActive);
+            emit AssetConfigUpdated(asset, sourceId, setActive);
         }
     }
 
@@ -678,13 +758,17 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      */
     function _requireRole(bytes32 actionKey, address user) internal view {
         if (_registryAddr == address(0)) revert ZeroAddress();
-        
-        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+
+        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
     /// @dev Best-effort read ERC20 decimals. Returns 0 if not readable.
-    function _tryReadErc20Decimals(address asset) internal view returns (uint8 decimals) {
+    function _tryReadErc20Decimals(
+        address asset
+    ) internal view returns (uint8 decimals) {
         if (asset.code.length == 0) return 0;
         try IERC20Metadata(asset).decimals() returns (uint8 d) {
             return d;
@@ -692,7 +776,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
             return 0;
         }
     }
-    
+
     /*━━━━━━━━━━━━━━━ Upgrade authorization ━━━━━━━━━━━━━━━*/
 
     /**
@@ -711,7 +795,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        
+
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
@@ -719,5 +803,4 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
             block.number
         );
     }
-
-} 
+}

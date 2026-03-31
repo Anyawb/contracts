@@ -228,7 +228,7 @@ export async function runViewPreflight(params: {
 
   // Fallback consistency (best-effort): ValuationOracleView wraps oracle calls and returns (0,0,false) on failure.
   const vov = (await ethers.getContractAt("ValuationOracleView", primaryInfo.moduleAddr)) as any;
-  const [vp, vBlock] = (await vov.connect(adminSigner).getAssetPrice(assetForPriceCheck)) as [
+  const [vp, vBlock, vValid] = (await vov.connect(adminSigner).getAssetPrice(assetForPriceCheck)) as [
     bigint,
     bigint,
     boolean,
@@ -242,7 +242,14 @@ export async function runViewPreflight(params: {
     const verP = viP.api !== undefined ? `api=${viP.api} schema=${viP.schema} impl=${viP.impl}` : "versionInfo=n/a";
     console.log(`  [route] routePrice.primary -> VALUATION_ORACLE_VIEW @ ${primaryInfo.moduleAddr} (${verP})`);
     console.log(`  [route] routePrice.fallback -> PRICE_ORACLE @ ${fallbackInfo.moduleAddr} (versionInfo=n/a)`);
-    console.log(`  [check] price fallback asset=${assetForPriceCheck} price=${vp.toString()} block=${vBlock.toString()}`);
+    console.log(
+      `  [check] price fallback asset=${assetForPriceCheck} price=${vp.toString()} block=${vBlock.toString()} valid=${String(vValid)}`
+    );
+    if (!vValid) {
+      console.log(
+        "  [note] fallback price is invalid (0/0) — this is expected before PriceOracle is seeded via updatePrice()."
+      );
+    }
     console.log("=== View Preflight done ===\n");
   }
 

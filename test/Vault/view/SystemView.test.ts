@@ -164,8 +164,6 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
   describe('初始化与权限', function () {
     it('应正确初始化依赖', async function () {
       expect(await systemView.acm()).to.equal(await acm.getAddress());
-      expect(await systemView.registry()).to.equal(await registry.getAddress());
-      expect(await systemView.registryAddr()).to.equal(await registry.getAddress());
       expect(await systemView.registryAddrVar()).to.equal(await registry.getAddress());
       expect(await systemView.viewCache()).to.equal(await viewCache.getAddress());
       expect(await systemView.viewCacheAddrVar()).to.equal(await viewCache.getAddress());

@@ -12,7 +12,7 @@ contract MockPriceOracle is Ownable, IPriceOracle {
     mapping(address => uint256) private _priceBlocks;
     mapping(address => uint256) private _updateBlocks;
     mapping(address => uint256) private _assetDecimals;
-    mapping(address => string) private _coingeckoIds;
+    mapping(address => string) private _sourceIds;
     mapping(address => bool) private _isActive;
     mapping(address => uint256) private _maxPriceAgeBlocks;
     address[] private _supportedAssets;
@@ -100,15 +100,15 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         return _prices[token] > 0;
     }
 
-    function getAssetCoingeckoId(address token) external view override returns (string memory coingeckoId) {
+    function getAssetSourceId(address token) external view override returns (string memory sourceId) {
         if (shouldFail) revert MockFailure();
-        return _coingeckoIds[token];
+        return _sourceIds[token];
     }
 
     function getAssetConfig(address token) external view override returns (AssetConfig memory config) {
         if (shouldFail) revert MockFailure();
         config = AssetConfig({
-            coingeckoId: _coingeckoIds[token],
+            sourceId: _sourceIds[token],
             assetDecimals: _assetDecimals[token],
             isActive: _isActive[token],
             maxPriceAgeBlocks: _maxPriceAgeBlocks[token]
@@ -148,12 +148,12 @@ contract MockPriceOracle is Ownable, IPriceOracle {
 
     function configureAsset(
         address asset,
-        string calldata coingeckoId,
+        string calldata sourceId,
         uint256 assetDecimals,
         uint256 maxPriceAgeBlocks
     ) external override onlyOwner {
         if (shouldFail) revert MockFailure();
-        _coingeckoIds[asset] = coingeckoId;
+        _sourceIds[asset] = sourceId;
         _assetDecimals[asset] = assetDecimals;
         _maxPriceAgeBlocks[asset] = maxPriceAgeBlocks;
         _isActive[asset] = true;

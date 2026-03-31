@@ -186,7 +186,7 @@ describe('AccessControlView', function () {
 
     it('registryAddr 返回初始化时的 Registry 地址', async function () {
       const { accessControlView, registry } = await loadFixture(deployAccessControlViewFixture);
-      expect(await accessControlView.registryAddr()).to.equal(await registry.getAddress());
+      expect(await accessControlView.registryAddrVar()).to.equal(await registry.getAddress());
     });
   });
 

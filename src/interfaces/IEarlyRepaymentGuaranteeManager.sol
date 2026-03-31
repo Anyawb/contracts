@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IEarlyRepaymentGuaranteeManager
-/// @notice Interface for early-repayment guarantee records and settlement hooks.
-/// @dev Implemented by EarlyRepaymentGuaranteeManager; this interface is the SSOT for structs/events used by
-///      offchain indexers, frontends, and integration tests.
+/**
+ * @title IEarlyRepaymentGuaranteeManager
+ * @notice Interface for early-repayment guarantee records and settlement hooks.
+ * @dev Reverts if:
+ *      - see implementation-specific function-level conditions in EarlyRepaymentGuaranteeManager
+ *      - downstream integrations misuse block-based guarantee timing as wall-clock time
+ *
+ * Security:
+ * - This interface is the SSOT for guarantee structs, events, and lifecycle hooks consumed by offchain systems.
+ * - Timing fields in this subsystem are block-based despite legacy field names containing `Time` or `Days`.
+ */
 interface IEarlyRepaymentGuaranteeManager {
     /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
     /// @notice Guarantee record for a borrower/asset pair.
@@ -39,10 +46,11 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 actualInterestPaid;
     }
 
-    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
-    /// @notice Emitted when a guarantee record is locked for a borrower/asset pair.
-    /// @dev Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` represents
-    ///      blockNumber (block-based time axis).
+    /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
+    /**
+     * @notice Emitted when a guarantee record is locked for a borrower and asset pair.
+     * @dev Event only. Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` is a block-based time marker.
+     */
     event GuaranteeLocked(
         uint256 indexed guaranteeId,
         address indexed borrower,
@@ -56,9 +64,10 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 blockNumber
     );
 
-    /// @notice Emitted when an early repayment is settled and the guarantee is distributed.
-    /// @dev Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` represents
-    ///      blockNumber (block-based time axis).
+    /**
+     * @notice Emitted when an early repayment is settled and the guarantee is distributed.
+     * @dev Event only. Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` is a block-based time marker.
+     */
     event EarlyRepaymentProcessed(
         uint256 indexed guaranteeId,
         address indexed borrower,
@@ -71,9 +80,10 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 blockNumber
     );
 
-    /// @notice Emitted when a guarantee is forfeited due to default.
-    /// @dev Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` represents
-    ///      blockNumber (block-based time axis).
+    /**
+     * @notice Emitted when a guarantee is forfeited due to default.
+     * @dev Event only. Emitted by EarlyRepaymentGuaranteeManager; `blockNumber` is a block-based time marker.
+     */
     event GuaranteeForfeited(
         uint256 indexed guaranteeId,
         address indexed borrower,
@@ -98,7 +108,9 @@ interface IEarlyRepaymentGuaranteeManager {
      * @param guaranteeId Guarantee id.
      * @return record Guarantee record.
      */
-    function getGuaranteeRecord(uint256 guaranteeId) external view returns (GuaranteeRecord memory record);
+    function getGuaranteeRecord(
+        uint256 guaranteeId
+    ) external view returns (GuaranteeRecord memory record);
 
     /**
      * @notice Get the active (or last) guarantee id for a (user, asset) pair.
@@ -115,7 +127,10 @@ interface IEarlyRepaymentGuaranteeManager {
      * @param asset Guarantee asset address.
      * @return guaranteeId Guarantee id (0 if none).
      */
-    function getUserGuaranteeId(address user, address asset) external view returns (uint256 guaranteeId);
+    function getUserGuaranteeId(
+        address user,
+        address asset
+    ) external view returns (uint256 guaranteeId);
 
     /**
      * @notice Check whether a user currently has an active guarantee for an asset.
@@ -129,7 +144,10 @@ interface IEarlyRepaymentGuaranteeManager {
      * @param asset Guarantee asset address.
      * @return isActive True if an active guarantee exists, otherwise false.
      */
-    function hasActiveGuarantee(address user, address asset) external view returns (bool isActive);
+    function hasActiveGuarantee(
+        address user,
+        address asset
+    ) external view returns (bool isActive);
 
     /**
      * @notice Preview early repayment settlement amounts for a guarantee id.
@@ -152,7 +170,8 @@ interface IEarlyRepaymentGuaranteeManager {
     /**
      * @notice Lock a new early-repayment guarantee record for (borrower, asset).
      * @dev Reverts if:
-     *      - caller is not VaultCore or VaultBusinessLogic resolved via Registry (EarlyRepaymentGuaranteeManager__OnlyVaultCore)
+     *      - caller is not VaultCore or VaultBusinessLogic resolved via Registry
+     *        (EarlyRepaymentGuaranteeManager__OnlyVaultCore)
      *      - registry reference is zero or not a contract (ZeroAddress / NotAContract)
      *      - borrower/lender/asset is zero (ZeroAddress)
      *      - principal/promisedInterest/termDays is zero (AmountIsZero)
@@ -253,5 +272,7 @@ interface IEarlyRepaymentGuaranteeManager {
      * @param asset Guarantee asset address.
      * @return enabled True if enabled, otherwise false.
      */
-    function isGuaranteeEnabled(address asset) external view returns (bool enabled);
-} 
+    function isGuaranteeEnabled(
+        address asset
+    ) external view returns (bool enabled);
+}

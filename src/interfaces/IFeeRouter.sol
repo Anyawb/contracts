@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {IFeeRouterDistribution} from "./IFeeRouterDistribution.sol";
+
 /**
  * @title IFeeRouter
  * @notice Fee routing SSOT interface: fee calculation and fee distribution to configured treasuries.
@@ -12,9 +14,9 @@ pragma solidity ^0.8.20;
  * - Role-gated in implementation (e.g. ACTION_DEPOSIT / ACTION_SET_PARAMETER)
  * - Token transfers are performed in the implementation and must be non-reentrant / CEI-compliant as applicable
  */
-interface IFeeRouter {
+interface IFeeRouter is IFeeRouterDistribution {
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Emitted when fees are distributed to treasuries.
      * @dev Reverts if:
@@ -27,26 +29,92 @@ interface IFeeRouter {
      * @param platformAmount Amount distributed to platform treasury (token decimals)
      * @param ecoAmount Amount distributed to ecosystem vault (token decimals)
      */
-    event FeeDistributed(address indexed token, uint256 platformAmount, uint256 ecoAmount);
+    event FeeDistributed(
+        address indexed token,
+        uint256 platformAmount,
+        uint256 ecoAmount
+    );
     /**
      * @notice Emitted when fixed fee bps configuration is updated.
      * @dev Reverts if:
      *      - N/A (event emission only)
      *
-     * @param platformFeeBps Platform fee bps (\(1e4 = 100%\))
-     * @param ecoFeeBps Ecosystem fee bps (\(1e4 = 100%\))
+     * Security:
+     * - Event-only; emitted after the fixed fee configuration changes.
+     *
+     * @param platformFeeBps Platform fee bps (1e4 = 100%).
+     * @param ecoFeeBps Ecosystem fee bps (1e4 = 100%).
      */
     event FeeConfigUpdated(uint256 platformFeeBps, uint256 ecoFeeBps);
-    /// @notice Aggregated treasury update (ABI-compat; implementations may also emit granular events below).
+    /**
+     * @notice Emitted when both treasury endpoints are updated together.
+     * @dev Compatibility event retained for ABI stability; implementations may also emit granular events below.
+     */
     event TreasuryUpdated(address platformTreasury, address ecoVault);
-    /// @notice Granular treasury update events (preferred for indexing)
-    event PlatformTreasuryUpdated(address indexed oldAddr, address indexed newAddr);
-    event EcosystemVaultUpdated(address indexed oldAddr, address indexed newAddr);
-    event DynamicFeeUpdated(address indexed token, bytes32 indexed feeType, uint256 oldFee, uint256 newFee);
+
+    /**
+     * @notice Emitted when the platform treasury address changes.
+     * @dev Preferred granular treasury update event for indexing.
+     */
+    event PlatformTreasuryUpdated(
+        address indexed oldAddr,
+        address indexed newAddr
+    );
+
+    /**
+     * @notice Emitted when the ecosystem vault address changes.
+     * @dev Preferred granular treasury update event for indexing.
+     */
+    event EcosystemVaultUpdated(
+        address indexed oldAddr,
+        address indexed newAddr
+    );
+
+    /**
+     * @notice Emitted when a dynamic fee configuration changes.
+     * @dev `feeType` identifies the per-token fee bucket being updated.
+     */
+    event DynamicFeeUpdated(
+        address indexed token,
+        bytes32 indexed feeType,
+        uint256 oldFee,
+        uint256 newFee
+    );
+
+    /**
+     * @notice Emitted when support for a fee token changes.
+     * @dev `supported` is the post-update token support status.
+     */
     event TokenSupported(address indexed token, bool supported);
-    event BatchFeeDistributed(address indexed token, uint256 totalAmount, uint256 distribution);
-    event FeeStatisticsUpdated(address indexed token, bytes32 indexed feeType, uint256 totalAmount);
-    event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+
+    /**
+     * @notice Emitted when a batched fee distribution completes.
+     * @dev `distribution` is implementation-defined aggregated distribution metadata.
+     */
+    event BatchFeeDistributed(
+        address indexed token,
+        uint256 totalAmount,
+        uint256 distribution
+    );
+
+    /**
+     * @notice Emitted when fee accounting statistics are updated.
+     * @dev `totalAmount` is the post-update aggregate recorded for `token` and `feeType`.
+     */
+    event FeeStatisticsUpdated(
+        address indexed token,
+        bytes32 indexed feeType,
+        uint256 totalAmount
+    );
+
+    /**
+     * @notice Emitted when the Registry dependency changes.
+     * @dev Used as a migration and observability hook for module rebinding.
+     */
+    event RegistryUpdated(
+        address indexed oldRegistry,
+        address indexed newRegistry
+    );
 
     /*━━━━━━━━━━━━━━━ CORE FUNCTIONS ━━━━━━━━━━━━━━━*/
 
@@ -62,7 +130,10 @@ interface IFeeRouter {
      * @param amount Deposit amount (token decimals; implementation-defined)
      * @return fee Fee amount (token decimals; 0 if disabled)
      */
-    function chargeDepositFee(address user, uint256 amount) external view returns (uint256 fee);
+    function chargeDepositFee(
+        address user,
+        uint256 amount
+    ) external view returns (uint256 fee);
 
     /**
      * @notice Calculate borrow fee for a user.
@@ -76,7 +147,10 @@ interface IFeeRouter {
      * @param amount Borrow amount (token decimals; implementation-defined)
      * @return fee Fee amount (token decimals)
      */
-    function chargeBorrowFee(address user, uint256 amount) external view returns (uint256 fee);
+    function chargeBorrowFee(
+        address user,
+        uint256 amount
+    ) external view returns (uint256 fee);
 
     /**
      * @notice Distribute fee amount according to the current configuration.
@@ -107,7 +181,11 @@ interface IFeeRouter {
      * @param amount Fee amount (token decimals of `token`)
      * @param feeType Fee type identifier
      */
-    function distributeDynamic(address token, uint256 amount, bytes32 feeType) external;
+    function distributeDynamic(
+        address token,
+        uint256 amount,
+        bytes32 feeType
+    ) external;
 
     /**
      * @notice Distribute a prepaid fee amount already held by FeeRouter.
@@ -123,7 +201,12 @@ interface IFeeRouter {
      * @param feeType Fee type identifier
      * @param payer Payer address for fee statistics attribution
      */
-    function distributePrepaid(address token, uint256 amount, bytes32 feeType, address payer) external;
+    function distributePrepaid(
+        address token,
+        uint256 amount,
+        bytes32 feeType,
+        address payer
+    ) external;
 
     /**
      * @notice Batch distribute multiple fee items for a token (gas-optimized).
@@ -137,7 +220,11 @@ interface IFeeRouter {
      * @param amounts Per-item total amounts (token decimals of `token`)
      * @param feeTypes Per-item fee type identifiers (must match `amounts.length`)
      */
-    function batchDistribute(address token, uint256[] calldata amounts, bytes32[] calldata feeTypes) external;
+    function batchDistribute(
+        address token,
+        uint256[] calldata amounts,
+        bytes32[] calldata feeTypes
+    ) external;
 
     /**
      * @notice Get current fee rate (implementation-defined aggregation of fee config).
@@ -171,7 +258,10 @@ interface IFeeRouter {
      * Security:
      * - Role-gated in implementation
      */
-    function setTreasury(address platformTreasury, address ecosystemVault) external;
+    function setTreasury(
+        address platformTreasury,
+        address ecosystemVault
+    ) external;
 
     /**
      * @notice Set dynamic fee bps for (token, feeType).
@@ -181,7 +271,11 @@ interface IFeeRouter {
      * Security:
      * - Role-gated in implementation
      */
-    function setDynamicFee(address token, bytes32 feeType, uint256 feeBps) external;
+    function setDynamicFee(
+        address token,
+        bytes32 feeType,
+        uint256 feeBps
+    ) external;
 
     /**
      * @notice Add a supported token.
@@ -269,8 +363,6 @@ interface IFeeRouter {
      * @return Array of supported token addresses
      */
     function getSupportedTokens() external view returns (address[] memory);
-
-
 
     /**
      * @notice Get Registry address.
@@ -362,7 +454,10 @@ interface IFeeRouter {
      * Security:
      * - View only (may be role-gated in implementation)
      */
-    function getFeeStatistics(address token, bytes32 feeType) external view returns (uint256);
+    function getFeeStatistics(
+        address token,
+        bytes32 feeType
+    ) external view returns (uint256);
 
     /**
      * @notice Get dynamic fee config (admin view).
@@ -372,7 +467,10 @@ interface IFeeRouter {
      * Security:
      * - View only (may be role-gated in implementation)
      */
-    function getDynamicFee(address token, bytes32 feeType) external view returns (uint256);
+    function getDynamicFee(
+        address token,
+        bytes32 feeType
+    ) external view returns (uint256);
 
     /**
      * @notice Get fee cache (admin view).
@@ -382,7 +480,10 @@ interface IFeeRouter {
      * Security:
      * - View only (may be role-gated in implementation)
      */
-    function getFeeCache(address token, bytes32 feeType) external view returns (uint256);
+    function getFeeCache(
+        address token,
+        bytes32 feeType
+    ) external view returns (uint256);
 
     /**
      * @notice Get operation stats (admin view).
@@ -392,5 +493,8 @@ interface IFeeRouter {
      * Security:
      * - View only (may be role-gated in implementation)
      */
-    function getOperationStats() external view returns (uint256 distributions, uint256 totalAmount);
-} 
+    function getOperationStats()
+        external
+        view
+        returns (uint256 distributions, uint256 totalAmount);
+}

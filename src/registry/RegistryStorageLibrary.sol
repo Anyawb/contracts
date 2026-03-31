@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { 
-    ZeroAddress, 
-    AlreadyInitialized, 
-    MinDelayOverflow, 
+import {
+    ZeroAddress,
+    AlreadyInitialized,
+    MinDelayOverflow,
     NotInitialized,
     InvalidStorageVersion,
     NotGovernance
@@ -18,54 +18,51 @@ import {
 /// Security:
 /// - Uses a fixed STORAGE_SLOT (diamond storage) to keep state stable across upgrades.
 /// - Storage migrations should keep STORAGE_SLOT unchanged and use explicit migrators.
-///
-/// Notes (architecture guide alignment):
-/// - Prefer the migration strategy: keep STORAGE_SLOT stable and migrate data while bumping storageVersion.
-/// - Only change STORAGE_SLOT for destructive resets / full redeploy semantics.
+/// - Preferred migration flow keeps STORAGE_SLOT stable and bumps storageVersion after reviewed data migration.
+/// - Change STORAGE_SLOT only for destructive resets or full-redeploy semantics.
 library RegistryStorage {
-    /// @notice Storage version mismatch.
-    error RegistryStorage__IncompatibleStorageVersion(uint256 expected, uint256 actual);
+    /// @dev Reverts when a compat-gated call observes an unexpected storageVersion. Used by {requireCompatibleVersion}.
+    error RegistryStorage__IncompatibleStorageVersion(
+        uint256 expected,
+        uint256 actual
+    );
 
-    // ============ Constants ============
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     // NOTE (Time-Dependency-Refactor / Strategy A):
     // - This library intentionally does NOT hardcode "days/seconds" conversions (e.g., `X days / Y seconds`).
     // - Any policy cap for `minDelay` MUST be enforced by the Registry contract via an explicit `maxDelayBlocks`
     //   configuration (deployment/governance), not by embedding a per-block-seconds assumption in Solidity.
     struct Layout {
-        // ============ Storage versioning ============
+        /*━━━━━━━━━━━━━━━ Storage Versioning ━━━━━━━━━━━━━━━*/
         uint256 storageVersion; // Storage layout version marker (prevents incompatible upgrades)
-
-        // ============ Governance / admin ============
+        /*━━━━━━━━━━━━━━━ Governance And Admin ━━━━━━━━━━━━━━━*/
         address admin; // Governance/admin address (legacy compat mirror of Ownable owner)
         address pendingAdmin; // Pending admin address (compat; Ownable has no pending-owner concept)
-
-        // ============ Timelock config ============
+        /*━━━━━━━━━━━━━━━ Timelock Configuration ━━━━━━━━━━━━━━━*/
         uint8 paused; // Emergency pause flag (compat mirror of Pausable)
         uint64 minDelay; // Minimum timelock delay (blocks); stored as uint64 for packing
         // Storage packing notes:
         // - paused(uint8) + minDelay(uint64) share one storage slot (gas-efficient).
         // - Although uint64 supports extremely large values, protocol policy SHOULD cap minDelay in Registry logic.
 
-        // ============ Module mapping ============
+        /*━━━━━━━━━━━━━━━ Module Mapping ━━━━━━━━━━━━━━━*/
         mapping(bytes32 => address) modules; // moduleKey => moduleAddress
-
-        // ============ Timelocked upgrades ============
+        /*━━━━━━━━━━━━━━━ Timelocked Upgrades ━━━━━━━━━━━━━━━*/
         mapping(bytes32 => PendingUpgrade) pendingUpgrades;
-
-        // ============ Upgrade history (on-chain ring buffer) ============
+        /*━━━━━━━━━━━━━━━ Upgrade History ━━━━━━━━━━━━━━━*/
         mapping(bytes32 => UpgradeHistory[]) upgradeHistory;
         mapping(bytes32 => uint256) historyIndex;
         // Gas notes:
         // - UpgradeHistory[] is an on-chain ring buffer capped by Registry.sol; writes still cost gas.
         // - If upgrades become extremely frequent, prefer relying on events + off-chain indexing for deep history.
 
-        // ============ Signature / nonce ============
+        /*━━━━━━━━━━━━━━━ Signature And Nonce ━━━━━━━━━━━━━━━*/
         mapping(address => uint256) nonces; // signer => nonce (anti-replay)
         // Anti-replay notes:
         // - Current approach is monotonic ++nonce per signer (simple and safe).
         // - A bitmap nonce scheme could enable parallel nonces but increases complexity.
 
-        // ============ Storage gap ============
+        /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
         uint256[50] __gap;
     }
 
@@ -83,23 +80,22 @@ library RegistryStorage {
         address executor; // Executor address (caller)
     }
 
-    // ============ Storage slot ============
+    /*━━━━━━━━━━━━━━━ Storage Slot ━━━━━━━━━━━━━━━*/
     /// @dev Fixed diamond storage slot for the Registry family.
     ///      Do NOT change this slot unless performing a destructive reset.
     bytes32 internal constant STORAGE_SLOT = keccak256("registry.storage.v1");
 
-    // ============ Storage version ============
+    /*━━━━━━━━━━━━━━━ Storage Version ━━━━━━━━━━━━━━━*/
     uint256 internal constant CURRENT_STORAGE_VERSION = 1;
 
-    // ============ Layout access ============
+    /*━━━━━━━━━━━━━━━ Layout Access ━━━━━━━━━━━━━━━*/
     /// @notice Returns the diamond storage layout pointer.
-    /// @dev Reverts if:
-    ///      - (none)
+    /// @dev Returns the shared Registry diamond-storage pointer for the fixed STORAGE_SLOT.
     ///
     /// Security:
     /// - Uses a fixed STORAGE_SLOT for upgrade-safe state sharing.
     ///
-    /// @return layout_ Storage layout pointer.
+    /// @return layout_ Diamond-storage layout pointer for the fixed Registry storage slot.
     function layout() internal pure returns (Layout storage layout_) {
         bytes32 slot = STORAGE_SLOT;
         assembly {
@@ -107,7 +103,7 @@ library RegistryStorage {
         }
     }
 
-    // ============ Storage version helpers ============
+    /*━━━━━━━━━━━━━━━ Storage Version Helpers ━━━━━━━━━━━━━━━*/
     /**
      * @notice Requires the Registry storageVersion to match exactly.
      * @dev Reverts if:
@@ -121,7 +117,10 @@ library RegistryStorage {
     function requireCompatibleVersion(uint256 expectedVersion) internal view {
         uint256 actual = layout().storageVersion;
         if (actual != expectedVersion) {
-            revert RegistryStorage__IncompatibleStorageVersion(expectedVersion, actual);
+            revert RegistryStorage__IncompatibleStorageVersion(
+                expectedVersion,
+                actual
+            );
         }
     }
 
@@ -131,16 +130,18 @@ library RegistryStorage {
      *      - admin_ == address(0) (ZeroAddress)
      *      - storageVersion != 0 (AlreadyInitialized)
      *      - minDelay_ > type(uint64).max (MinDelayOverflow)
-     *      - minDelay_ > MAX_MIN_DELAY_BLOCKS (MinDelayTooLarge)
      *
      * Security:
      * - Intended to run exactly once on the shared STORAGE_SLOT.
-     * - minDelay is policy-capped to match Registry.MAX_DELAY().
+     * - Callers should apply any policy cap in Registry before persisting minDelay.
      *
      * @param admin_ Governance/admin address.
      * @param minDelay_ Minimum timelock delay (blocks).
      */
-    function initializeRegistryStorage(address admin_, uint256 minDelay_) internal {
+    function initializeRegistryStorage(
+        address admin_,
+        uint256 minDelay_
+    ) internal {
         if (admin_ == address(0)) revert ZeroAddress();
         Layout storage layout_ = layout();
         if (layout_.storageVersion != 0) revert AlreadyInitialized();
@@ -195,7 +196,7 @@ library RegistryStorage {
      * Security:
      * - Read-only.
      *
-     * @return Storage version marker.
+     * @return storageVersion Current storage version marker.
      */
     function getStorageVersion() internal view returns (uint256) {
         return layout().storageVersion;
@@ -209,13 +210,13 @@ library RegistryStorage {
      * Security:
      * - Read-only.
      *
-     * @return True if initialized.
+     * @return initialized True if the Registry storage has been initialized.
      */
     function isInitialized() internal view returns (bool) {
         return layout().storageVersion != 0;
     }
 
-    // ============ Admin / config getters ============
+    /*━━━━━━━━━━━━━━━ Admin And Config Getters ━━━━━━━━━━━━━━━*/
     /**
      * @notice Returns the stored governance admin (compat mirror).
      * @dev Reverts if:
@@ -224,7 +225,7 @@ library RegistryStorage {
      * Security:
      * - Read-only.
      *
-     * @return Admin address.
+     * @return admin Stored governance admin address.
      */
     function getAdmin() internal view returns (address) {
         return layout().admin;
@@ -238,7 +239,7 @@ library RegistryStorage {
      * Security:
      * - Read-only.
      *
-     * @return True if paused.
+     * @return paused_ True if the compatibility pause flag is set.
      */
     function isPaused() internal view returns (bool) {
         return layout().paused != 0;
@@ -252,7 +253,7 @@ library RegistryStorage {
      * Security:
      * - Read-only.
      *
-     * @return Minimum delay (blocks).
+     * @return minDelay Current minimum timelock delay in blocks.
      */
     function getMinDelay() internal view returns (uint256) {
         return layout().minDelay;
@@ -267,7 +268,7 @@ library RegistryStorage {
      * - Pure helper.
      *
      * @param addr Address to check.
-     * @return True if addr != address(0).
+     * @return isNonZero True if addr != address(0).
      */
     function isNonZeroAddress(address addr) internal pure returns (bool) {
         return addr != address(0);
@@ -282,7 +283,7 @@ library RegistryStorage {
      * - Read-only helper.
      *
      * @param addr Address to check.
-     * @return True if addr is admin.
+     * @return isAdmin_ True if addr matches the stored governance admin.
      */
     function isAdmin(address addr) internal view returns (bool) {
         return layout().admin == addr;
@@ -319,11 +320,10 @@ library RegistryStorage {
      * @dev Reverts if:
      *      - storageVersion == 0 (NotInitialized)
      *      - admin == address(0) (ZeroAddress)
-     *      - minDelay > MAX_MIN_DELAY_BLOCKS (MinDelayTooLarge)
      *
      * Security:
-     * - Used before/after migrations to ensure invariants remain intact.
-     * - This function must remain conservative; adding new checks can affect upgrades/migrations.
+     * - Used before and after migrations to ensure core invariants remain intact.
+     * - This function must remain conservative because new checks can block upgrades or migrations.
      */
     function validateStorageLayout() internal view {
         Layout storage layout_ = layout();
@@ -333,4 +333,4 @@ library RegistryStorage {
         // If you want to enforce presence of critical modules, add checks here.
         // Be careful: enabling such checks can break deployment flows where modules are registered later.
     }
-} 
+}

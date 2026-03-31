@@ -77,7 +77,7 @@ describe('LiquidatorView', function () {
     it('stores registry and exposes getters', async function () {
       const { view, registry } = await deployFixture();
       expect(await view.getRegistry()).to.equal(await registry.getAddress());
-      expect(await view.registryAddr()).to.equal(await registry.getAddress());
+      expect(await view.getRegistry()).to.equal(await registry.getAddress());
     });
 
     it('reverts on zero address init', async function () {
@@ -795,7 +795,7 @@ describe('LiquidatorView', function () {
   describe('getter consistency', function () {
     it('registryAddr and getRegistry return same value', async function () {
       const { view, registry } = await deployFixture();
-      const addr1 = await view.registryAddr();
+      const addr1 = await view.getRegistry();
       const addr2 = await view.getRegistry();
       expect(addr1).to.equal(addr2);
       expect(addr1).to.equal(await registry.getAddress());

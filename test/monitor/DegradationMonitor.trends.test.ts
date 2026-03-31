@@ -184,7 +184,10 @@ describe("DegradationMonitor (Scheme A trends fallback)", function () {
 
   it("reverts for callers without viewer/admin permissions", async function () {
     const { monitor, other } = await loadFixture(deployFixture);
-    await expect(monitor.connect(other).getSystemDegradationTrends()).to.be.revertedWith("DegradationMonitor: no permission");
+    await expect(monitor.connect(other).getSystemDegradationTrends()).to.be.revertedWithCustomError(
+      monitor,
+      "MissingSystemHealthViewerRole",
+    );
   });
 });
 

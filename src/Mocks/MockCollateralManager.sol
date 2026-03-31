@@ -30,7 +30,7 @@ contract MockCollateralManager is ICollateralManager {
     /// @param asset 资产地址
     /// @param amount 存入金额
     function depositCollateral(address user, address asset, uint256 amount) external override {
-        if (shouldFail) revert("MockCollateralManager: deposit failed");
+        if (shouldFail) revert("MCM: deposit fail");
         _userCollateral[user][asset] += amount;
         _totalByAsset[asset] += amount;
         _addAsset(user, asset);
@@ -42,7 +42,7 @@ contract MockCollateralManager is ICollateralManager {
     /// @param asset 资产地址
     /// @param amount 提取金额
     function withdrawCollateral(address user, address asset, uint256 amount) external override {
-        if (shouldFail) revert("MockCollateralManager: withdraw failed");
+        if (shouldFail) revert("MCM: withdraw fail");
         require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
         _userCollateral[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
@@ -50,7 +50,7 @@ contract MockCollateralManager is ICollateralManager {
     }
 
     function withdrawCollateralTo(address user, address asset, uint256 amount, address receiver) external override {
-        if (shouldFail) revert("MockCollateralManager: withdraw failed");
+        if (shouldFail) revert("MCM: withdraw fail");
         require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
         _userCollateral[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
@@ -60,27 +60,12 @@ contract MockCollateralManager is ICollateralManager {
         emit CollateralWithdrawn(user, asset, amount);
     }
 
-    /// @notice 清算扣押（方案A接口）
-    /// @dev Mock 只做账本扣减与事件记录，不做真实 ERC20 转账
-    function seizeCollateralForLiquidation(
-        address targetUser,
-        address collateralAsset,
-        uint256 collateralAmount,
-        address liquidator
-    ) external override {
-        if (shouldFail) revert("MockCollateralManager: seize failed");
-        require(_userCollateral[targetUser][collateralAsset] >= collateralAmount, "Insufficient collateral");
-        _userCollateral[targetUser][collateralAsset] -= collateralAmount;
-        _totalByAsset[collateralAsset] -= collateralAmount;
-        emit CollateralSeized(liquidator, targetUser, collateralAsset, collateralAmount, block.number);
-    }
-    
     /// @notice 获取用户抵押物数量
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @return 抵押物数量
     function getCollateral(address user, address asset) external view override returns (uint256) {
-        if (shouldFail) revert("MockCollateralManager: getCollateral failed");
+        if (shouldFail) revert("MCM: get fail");
         return _userCollateral[user][asset];
     }
     

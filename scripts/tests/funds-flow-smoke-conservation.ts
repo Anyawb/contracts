@@ -101,8 +101,8 @@ async function getTokenUniverse(opts: {
   let feeRouterTokens: string[] = [];
 
   try {
-    const aw = (await ethers.getContractAt("AssetWhitelist", opts.assetWhitelistAddr)) as any;
-    awTokens = (await aw.getAllowedAssets()) as string[];
+    const awRead = (await ethers.getContractAt("IAssetWhitelistRead", opts.assetWhitelistAddr)) as any;
+    awTokens = (await awRead.getAllowedAssets()) as string[];
   } catch {
     // skip
   }
@@ -272,7 +272,8 @@ async function createOrder(opts: {
   const settlementTokenAddrFromRegistry = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
 
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", assetWhitelistAddrFromRegistry)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", assetWhitelistAddrFromRegistry)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
   // IMPORTANT: use the FeeRouter resolved from Registry (SSOT). finalizeMatch -> SettlementMatchLib resolves FeeRouter via Registry.
   const feeRouterAddr = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
@@ -311,8 +312,8 @@ async function createOrder(opts: {
   await ensureRole(ACTION_DEPOSIT, vblAddr);
   await ensureRole(ACTION_BORROW, orderEngineAddr);
 
-  if (!(await aw.isAssetAllowed(settlementTokenAddrFromRegistry))) {
-    await aw.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
+  if (!(await awRead.isAssetAllowed(settlementTokenAddrFromRegistry))) {
+    await awAdmin.connect(deployer).addAllowedAsset(settlementTokenAddrFromRegistry);
   }
   {
     const cfg = await po.getAssetConfig(settlementTokenAddrFromRegistry);
@@ -342,8 +343,8 @@ async function createOrder(opts: {
     collateralAssetAddr = await getOrDeployNonStableCollateral(deployer);
     collateralAmt = ethers.parseUnits("1", 18); // 1 mWETH
 
-    if (!(await aw.isAssetAllowed(collateralAssetAddr))) {
-      await aw.connect(deployer).addAllowedAsset(collateralAssetAddr);
+    if (!(await awRead.isAssetAllowed(collateralAssetAddr))) {
+      await awAdmin.connect(deployer).addAllowedAsset(collateralAssetAddr);
     }
 
     // Configure/update collateral oracle based on mode
@@ -654,7 +655,8 @@ async function runOracleEdgeChecks() {
 
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", assetWhitelistAddrFromRegistry)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", assetWhitelistAddrFromRegistry)) as any;
 
   const ACTION_ADD_WHITELIST = key("ADD_WHITELIST");
   const ACTION_UPDATE_PRICE = key("UPDATE_PRICE");
@@ -668,7 +670,7 @@ async function runOracleEdgeChecks() {
   await mock.waitForDeployment();
   const token = mock.target as string;
 
-  if (!(await aw.isAssetAllowed(token))) await aw.connect(deployer).addAllowedAsset(token);
+  if (!(await awRead.isAssetAllowed(token))) await awAdmin.connect(deployer).addAllowedAsset(token);
 
   // Wrapper contract to call GracefulDegradation library in a deterministic way.
   const gdFactory = await ethers.getContractFactory("TestGracefulDegradation");

@@ -234,7 +234,6 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
   describe('初始化测试', function () {
     it('GuaranteeFundManager – 应该正确初始化合约', async function () {
       expect(await guaranteeFundManager.vaultCoreAddr()).to.equal(mockVaultCore.target);
-      expect(await guaranteeFundManager.registryAddr()).to.equal(mockRegistry.target);
       expect(await guaranteeFundManager.getRegistry()).to.equal(mockRegistry.target);
     });
 
@@ -666,7 +665,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
 
       // 验证升级后功能仍然正常
       expect(await guaranteeFundManager.vaultCoreAddr()).to.equal(mockVaultCore.target);
-      expect(await guaranteeFundManager.registryAddr()).to.equal(mockRegistry.target);
+      expect(await guaranteeFundManager.getRegistry()).to.equal(mockRegistry.target);
     });
 
     it('GuaranteeFundManager – 应该拒绝升级到零地址实现', async function () {

@@ -12,7 +12,7 @@ import { HealthFactorLib } from "../../../libraries/HealthFactorLib.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { BatchTooLarge, EmptyArray, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
-import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
+import { ILendingEngineDebtRead } from "../../../interfaces/ILendingEngineDebtRead.sol";
 import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
 import { IGuaranteeFundManager } from "../../../interfaces/IGuaranteeFundManager.sol";
 
@@ -26,17 +26,17 @@ interface IHealthViewLite {
 
 /**
  * @title RiskView
- * @notice Read-only risk view that derives coarse risk assessments from HealthView cache.
+ * @notice Risk view that derives coarse risk assessments from HealthView cache.
  * @dev Reverts if:
  *      - registry is not configured or not a contract
  *        (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
  *      - caller lacks Scheme U permission (self or VIEW_USER_DATA/ADMIN)
  *
  * Security:
- * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
- * - Upgrade authorization is role-gated (ACTION_ADMIN)
+ * - Scheme U reads (self or VIEW_USER_DATA/ADMIN).
+ * - Upgrade authorization is role-gated (ACTION_ADMIN).
  * - Best-effort HealthView dependency: falls back to healthFactor=10_000 (bps) if HealthView cache
- *   is invalid or the call fails
+ *   is invalid or the call fails.
  * @custom:security-contact security@example.com
  */
 contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
@@ -96,9 +96,9 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - initialRegistryAddr is not a contract (see {NotAContract})
      *
      * Security:
-     * - Callable once via proxy initializer
+    * - Initializer: callable once.
      *
-     * @param initialRegistryAddr Registry address used for module resolution and access control
+    * @param initialRegistryAddr Registry address used for module resolution and access control.
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -109,17 +109,17 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Get a user's risk assessment derived from HealthView cache.
+        * @notice Return a user's risk assessment derived from HealthView cache.
      * @dev Reverts if:
      *      - registry is not configured or not a contract
      *        (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller lacks Scheme U permission (self or VIEW_USER_DATA/ADMIN)
      *
      * Security:
-     * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
-     * - Best-effort HealthView read: falls back to healthFactor=10_000 (bps) if cache is invalid or the call fails
+    * - Scheme U reads (self or VIEW_USER_DATA/ADMIN).
+    * - Best-effort HealthView read: falls back to healthFactor=10_000 (bps) if the cache is invalid or the call fails.
      *
-     * @param user Target user address
+    * @param user Target user address.
      * @return a Risk assessment with cache metadata:
      *         - healthFactor: cached HF (bps; 10_000 = 100%)
      *         - liquidatable: true if healthFactor < 10_000
@@ -150,14 +150,14 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks Scheme U permission (self or VIEW_USER_DATA/ADMIN)
      *
      * Security:
-     * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
-     * - Best-effort dependency reads: missing modules / failed calls default to 0 totals/guarantee
+    * - Scheme U reads (self or VIEW_USER_DATA/ADMIN).
+    * - Best-effort dependency reads: missing modules or failed calls default to zero totals/guarantee.
      *
-     * @param user Target user address
-     * @param asset Asset address whose locked guarantee should be excluded
-     * @return healthFactor Health factor (bps; 10_000 = 100%) computed from best-effort totals/guarantee reads
-     * @return isValid Whether the read succeeded
-     * @return blockNumber Read block number (block.number)
+    * @param user Target user address.
+    * @param asset Asset address whose locked guarantee should be excluded.
+    * @return healthFactor Health factor in bps, computed from best-effort totals and guarantee reads.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function calculateHealthFactorExcludingGuarantee(address user, address asset)
         external
@@ -183,11 +183,11 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - users.length exceeds the maximum batch size (see {BatchTooLarge})
      *
      * Security:
-     * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
-     * - Best-effort HealthView reads per user (see {_healthFactor})
+    * - Scheme U batch reads (VIEW_USER_DATA/ADMIN).
+    * - Best-effort HealthView reads per user.
      *
-     * @param users Target user addresses (must be non-empty)
-     * @return arr Per-user risk assessments with meta, in the same order as input
+    * @param users Target user addresses.
+    * @return arr Per-user risk assessments with metadata, in the same order as `users`.
      */
     function batchGetRiskAssessments(address[] calldata users)
         external
@@ -209,18 +209,6 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
             unchecked { ++i; }
         }
     }
-
-    /**
-     * @notice Returns the currently configured Registry address.
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registry Current Registry address
-     */
-    function registryAddr() external view returns (address) { return _registryAddr; }
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
@@ -256,7 +244,7 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         address le = _getModule(ModuleKeys.KEY_LE);
         address pv = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         if (le != address(0)) {
-            try ILendingEngineBasic(le).getUserTotalDebtValue(user) returns (uint256 v) {
+            try ILendingEngineDebtRead(le).getUserTotalDebtValue(user) returns (uint256 v) {
                 totalDebt = v;
             } catch {
                 totalDebt = 0;
@@ -297,28 +285,26 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Returns the API version for this module.
-     * @dev Reverts if:
-     *      - (none)
+        * @notice Return the API semantic version for this module.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - Pure function.
      *
-     * @return version API version
+        * @return version API semantic version.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
     /**
-     * @notice Returns the schema version for this module's outputs/caches.
-     * @dev Reverts if:
-     *      - (none)
+        * @notice Return the schema version for this module's outputs and caches.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - Pure function.
      *
-     * @return version Schema version
+        * @return version Schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;

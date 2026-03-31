@@ -12,7 +12,7 @@ contract TestGracefulDegradation {
         address priceOracle,
         address asset,
         uint256 amount,
-        GracefulDegradation.DegradationConfig memory config
+        GracefulDegradation.DegradationConfig calldata config
     ) external view returns (GracefulDegradation.PriceResult memory) {
         return GracefulDegradation.getAssetValueWithFallback(priceOracle, asset, amount, config);
     }
@@ -32,7 +32,7 @@ contract TestGracefulDegradation {
     function validatePriceReasonableness(
         uint256 currentPrice,
         address asset,
-        GracefulDegradation.PriceValidationConfig memory config
+        GracefulDegradation.PriceValidationConfig calldata config
     ) external view returns (bool) {
         return GracefulDegradation.validatePriceReasonableness(currentPrice, asset, config, cacheStorage);
     }
@@ -46,11 +46,11 @@ contract TestGracefulDegradation {
     }
 
     function validateStablecoinPrice(
-        address stablecoin,
+        uint256 actualPrice,
         uint256 expectedPrice,
         uint256 tolerance
     ) external pure returns (bool) {
-        return GracefulDegradation.validateStablecoinPrice(stablecoin, expectedPrice, tolerance);
+        return GracefulDegradation.validateStablecoinPrice(actualPrice, expectedPrice, tolerance);
     }
 
     function createDefaultConfig(address settlementToken) external pure returns (GracefulDegradation.DegradationConfig memory) {
@@ -71,6 +71,22 @@ contract TestGracefulDegradation {
         uint256 tolerance
     ) external pure returns (GracefulDegradation.StablecoinConfig memory) {
         return GracefulDegradation.createStablecoinConfig(stablecoin, expectedPrice, tolerance);
+    }
+
+    function createStablecoinConfigWithDecimals(
+        address stablecoin,
+        uint256 expectedPrice,
+        uint256 tolerance,
+        uint256 assetDecimals
+    ) external pure returns (GracefulDegradation.StablecoinConfig memory) {
+        return GracefulDegradation.createStablecoinConfig(stablecoin, expectedPrice, tolerance, assetDecimals);
+    }
+
+    function createDefaultConfigWithStablecoins(
+        address settlementToken,
+        GracefulDegradation.StablecoinConfig[] calldata additionalStablecoinConfigs
+    ) external pure returns (GracefulDegradation.DegradationConfig memory) {
+        return GracefulDegradation.createDefaultConfigWithStablecoins(settlementToken, additionalStablecoinConfigs);
     }
 
     function MIN_DECIMALS() external pure returns (uint256) {

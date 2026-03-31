@@ -14,6 +14,7 @@ contract MockLiquidationManager is ILiquidationManager {
     mapping(address => uint256) private _userLiquidationCount;
     mapping(address => uint256) private _liquidatorTotalBonus;
     uint256 private _totalLiquidations;
+    bool private _revertSettlementPath;
     
     // 事件
     event MockLiquidationExecuted(
@@ -26,6 +27,8 @@ contract MockLiquidationManager is ILiquidationManager {
         uint256 bonus,
         uint256 blockNumber
     );
+
+    error MockLiquidationManager__ForcedSettlementRevert();
 
     /// @notice 执行清算操作（Mock：不改账本，只做输入校验与事件/计数）
     /// @dev bonus 为可选透传；若传 0 则按 debtAmount * rate 计算
@@ -77,6 +80,7 @@ contract MockLiquidationManager is ILiquidationManager {
         uint256 debtAmount,
         uint256 bonus
     ) external override {
+        if (_revertSettlementPath) revert MockLiquidationManager__ForcedSettlementRevert();
         require(liquidator != address(0), "Invalid liquidator");
         require(targetUser != address(0), "Invalid user address");
         require(collateralAsset != address(0), "Invalid collateral asset");
@@ -167,6 +171,10 @@ contract MockLiquidationManager is ILiquidationManager {
     /// @param threshold 新的清算阈值
     function setLiquidationThreshold(uint256 threshold) external {
         _liquidationThreshold = threshold;
+    }
+
+    function setRevertSettlementPath(bool shouldRevert) external {
+        _revertSettlementPath = shouldRevert;
     }
 
     /// @notice 获取用户清算次数

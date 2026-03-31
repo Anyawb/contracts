@@ -58,33 +58,20 @@ contract LiquidationRiskManager is
 {
     // NOTE: keep external/public API minimal; avoid unnecessary using-directives.
 
-    // ============ Custom Errors ============
-    /**
-     * @notice Unauthorized access attempt.
-     * @dev Thrown when caller does not have required permission (e.g., not CacheMaintenanceManager for cache refresh).
-     */
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when a caller lacks the required permission for a risk-manager operation. Used by cache refresh and governance-gated paths.
     error LiquidationRiskManager__UnauthorizedAccess();
     
-    /**
-     * @notice Invalid threshold parameter.
-     * @dev Thrown when threshold value fails validation (e.g., invalid liquidation threshold or
-     *      min health factor < liquidation threshold).
-     */
+    /// @dev Reverts when a risk threshold value fails validation. Used by liquidation-threshold and min-health-factor update paths.
     error LiquidationRiskManager__InvalidThreshold();
     
-    /**
-     * @notice Invalid batch size.
-     * @dev Thrown when batch operation array length exceeds maxBatchSizeVar limit.
-     */
+    /// @dev Reverts when a batch request exceeds maxBatchSizeVar. Used by batch risk-query helpers.
     error LiquidationRiskManager__InvalidBatchSize();
     
-    /**
-     * @notice Required module address is missing in Registry.
-     * @param key Module key that was not found in Registry
-     */
+    /// @dev Reverts when a required module key cannot be resolved from Registry. Used by core module priming and strict resolution paths.
     error LiquidationRiskManager__MissingModule(bytes32 key);
 
-    // ============ State Variables ============
+    /*━━━━━━━━━━━━━━━ State Variables ━━━━━━━━━━━━━━━*/
     /// @notice Liquidation threshold in basis points (bps, 10000 = 100%)
     uint256 public liquidationThresholdVar;
     /// @notice Minimum health factor in basis points (bps, 10000 = 100%)
@@ -103,28 +90,17 @@ contract LiquidationRiskManager is
     /// @notice Module cache - used to cache module addresses, optimizing query performance
     ModuleCache.ModuleCacheStorage private _moduleCache;
 
-    // ============ Events ============
-    /**
-     * @notice Emitted when a parameter is updated (liquidation threshold or min health factor).
-     * @param param Parameter identifier (_PARAM_LIQUIDATION_THRESHOLD or _PARAM_MIN_HEALTH_FACTOR)
-     * @param oldValue Previous parameter value (in bps for thresholds/factors)
-     * @param newValue New parameter value (in bps for thresholds/factors)
-     */
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when a risk parameter is updated.
+    /// @dev Emitted by governance-controlled threshold update flows after the parameter mirror is changed.
     event ParameterUpdated(bytes32 param, uint256 oldValue, uint256 newValue);
 
-    /**
-     * @notice Emitted when minimum health factor is updated.
-     * @param oldMinHealthFactor Previous minimum health factor (bps, 10000 = 100%)
-     * @param newMinHealthFactor New minimum health factor (bps, 10000 = 100%)
-     * @param blockNumber Update blockNumber (blocks)
-     */
+    /// @notice Emitted when the minimum health factor is updated.
+    /// @dev Emitted by governance-controlled update flows after the new minimum health factor is stored.
     event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 blockNumber);
 
-    /**
-     * @notice Emitted when module cache is refreshed via maintenance manager.
-     * @param caller Caller that performed refresh (should be CacheMaintenanceManager)
-     * @param blockNumber Refresh blockNumber (blocks)
-     */
+    /// @notice Emitted when the risk-manager module cache is refreshed.
+    /// @dev Emitted by {refreshModuleCache} after cache refresh and threshold-mirror sync complete.
     event ModuleCacheRefreshed(address indexed caller, uint256 blockNumber);
 
     /// @dev Parameter key: liquidation threshold
@@ -134,7 +110,7 @@ contract LiquidationRiskManager is
     /// @dev Parameter key: maximum LTV
     bytes32 private constant _PARAM_MAX_LTV_BPS = keccak256("MAX_LTV_BPS");
 
-    // ============ Modifiers ============
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
     /**
      * @notice Role verification modifier.
      * @param role Required role identifier
@@ -151,7 +127,7 @@ contract LiquidationRiskManager is
 
     
 
-    // ============ Constructor and Initialization ============
+    /*━━━━━━━━━━━━━━━ Constructor And Initialization ━━━━━━━━━━━━━━━*/
     /**
      * @notice Constructor that disables initializers to prevent direct calls.
      * @custom:oz-upgrades-unsafe-allow constructor
@@ -271,7 +247,7 @@ contract LiquidationRiskManager is
         if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
     }
 
-    // ============ Core Module Resolution (Registry + Cache) ============
+    /*━━━━━━━━━━━━━━━ Core Module Resolution ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Resolve and cache module address from Registry; use cache if valid, otherwise fetch from Registry.
@@ -356,7 +332,7 @@ contract LiquidationRiskManager is
         _moduleCache.cacheBlocks[key] = block.number;
     }
 
-    // ============ Registry Helper Functions (Read-Only) ============
+    /*━━━━━━━━━━━━━━━ Registry Helper Functions ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Get Registry contract address (naming follows architecture standard).
@@ -375,7 +351,7 @@ contract LiquidationRiskManager is
     // NOTE: priceOracle / settlementToken getters removed from RiskManager.
     // Oracle health + valuation concerns belong to ValuationOracleView / LendingEngine.
 
-    // ============ Risk Assessment Core Functions ============
+    /*━━━━━━━━━━━━━━━ Risk Assessment Core Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Check if a user is liquidatable based on current health factor.
@@ -583,7 +559,7 @@ contract LiquidationRiskManager is
         safetyMargin = LiquidationTypes.calculateSafetyMargin(healthFactor, threshold);
     }
 
-    // ============ Threshold Management Functions ============
+    /*━━━━━━━━━━━━━━━ Threshold Management Functions ━━━━━━━━━━━━━━━*/
     
     /**
      * @notice Get the current liquidation threshold.
@@ -727,7 +703,7 @@ contract LiquidationRiskManager is
         emit MinHealthFactorUpdated(oldFactor, newMinHealthFactor, block.number);
     }
 
-    // ============ Internal Helper Functions ============
+    /*━━━━━━━━━━━━━━━ Internal Helper Functions ━━━━━━━━━━━━━━━*/
     /// @dev SSOT migration: prefer ConfigManager, fallback to local mirror (deployment transition only).
     function _getLiquidationThresholdBps() internal view returns (uint256 threshold) {
         address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
@@ -859,7 +835,7 @@ contract LiquidationRiskManager is
         unused;
     }
 
-    // ============ Storage Gap ============
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     // NOTE: Reserved storage space to allow for layout changes in future upgrades.
     uint256[49] private __gap;
 } 

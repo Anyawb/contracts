@@ -20,4 +20,3 @@ interface IVaultCoreMinimal {
      */
     function viewContractAddrVar() external view returns (address);
 }
-

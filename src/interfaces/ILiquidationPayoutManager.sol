@@ -48,7 +48,10 @@ interface ILiquidationPayoutManager {
      *
      * @return recipients Recipient addresses (platform/reserve/lenderCompensation)
      */
-    function getRecipients() external view returns (PayoutRecipients memory recipients);
+    function getRecipients()
+        external
+        view
+        returns (PayoutRecipients memory recipients);
 
     /**
      * @notice Get current distribution ratio configuration.
@@ -74,7 +77,9 @@ interface ILiquidationPayoutManager {
      * @return lenderShare Lender-compensation share (token native decimals)
      * @return liquidatorShare Liquidator share (token native decimals; includes remainder)
      */
-    function calculateShares(uint256 collateralAmount)
+    function calculateShares(
+        uint256 collateralAmount
+    )
         external
         view
         returns (
@@ -97,7 +102,10 @@ interface ILiquidationPayoutManager {
      * @param recipients New recipient addresses
      * @param rates New distribution ratios in bps (\(1e4 = 100\%\))
      */
-    function updateConfig(PayoutRecipients calldata recipients, PayoutRates calldata rates) external;
+    function updateConfig(
+        PayoutRecipients calldata recipients,
+        PayoutRates calldata rates
+    ) external;
 
     /**
      * @notice Update recipients only (rates unchanged).

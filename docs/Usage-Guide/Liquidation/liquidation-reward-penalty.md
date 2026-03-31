@@ -3,268 +3,101 @@
 ## 🔗 References（口径来源与关联文档）
 
 - **Architecture**: [`docs/Architecture-Guide.md`](../../Architecture-Guide.md)
+- **资金链 SSOT（托管者/资产去向/内部调用串联）**: [`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`](../Funds-Flow-Architecture-Guide.md)
 - **Terminology**: [`docs/Architecture-Liquidation-DirectLedger-Terminology.md`](../../Architecture-Liquidation-DirectLedger-Terminology.md)
 - **Related**
-  - 清算机制与调用链（概要）：[`Liquidation-Mechanism-Logic.md`](./Liquidation-Mechanism-Logic.md)
-  - 完整清算逻辑（端到端口径）：[`liquidation-complete-logic.md`](./liquidation-complete-logic.md)
+  - 清算机制（职责边界版）：[`Liquidation-Mechanism-Logic.md`](./Liquidation-Mechanism-Logic.md)
+  - 清算端到端职责对齐：[`liquidation-complete-logic.md`](./liquidation-complete-logic.md)
 
-## 📋 **概述**
+## 📋 概述
 
-本文档对齐当前实现的两个事实：
+本文档只讨论“积分惩罚/奖励（Reward）”在清算场景下的现行口径与集成边界，明确以下三点：
 
-1) **清算写路径（默认入口为 SSOT）**：keeper/机器人通过 `SettlementManager.settleOrLiquidate(orderId)` 触发处置；进入清算分支后执行 `CM.withdrawCollateralTo → LE.forceReduceDebt → LiquidatorView.push*`（内部可选经 `LiquidationManager` 执行器转调）。目前该链路**不包含**“积分惩罚/清算奖励”的链上结算逻辑。  
-2) **积分系统（Reward）**主线写入口由 `ORDER_ENGINE(core/LendingEngine)` 在借/还落账后调用 `RewardManager.onLoanEvent*`；清算默认不触发。
+1) **当前实现已在 default 保证金没收完成后，由 `GuaranteeFundManager` 默认接线触发 Reward 清算惩罚**；该调用是 best-effort，不影响资金链账本落账。
+2) Reward 主线写入口仍由借/还等订单事件在落账后触发（例如 `RewardManager.onLoanEventByOrder*`）；清算场景新增的是 GFM 专用 penalty 入口，而不是复用订单事件入口。
+3) **欠分账本 SSOT 已迁移到 `RewardAccrualManager`**，所有“惩罚扣减/欠分抵扣”均由其统一执行。
 
-> 术语说明（避免误解）：本文所称“积分”在资产语义上等同于**奖励通证 / EasyToken**（SSOT = `Registry[KEY_EASY_TOKEN]`）。
+> 术语说明（避免误解）：本文所称“积分”在资产语义上等同于奖励通证 / EasyToken（SSOT = `Registry[KEY_EASY_TOKEN]`）。
 
-> 口径补充：当前架构下清算不再作为独立对外写入口；**统一由 `SettlementManager` 承接写入口**，当进入清算分支时才执行 `CM.withdrawCollateralTo + LE.forceReduceDebt` 并由 `LiquidatorView.push*` 单点推送。本文在描述“清算写路径”时，默认指该清算分支的直达账本写路径。
+> 约束：本文不描述任何清算资金链、托管者、资产去向、分配比例或清算内部调用顺序；上述内容统一以 Funds-Flow SSOT 为准。
 
-为避免误解：本文所称“清算写路径”应理解为：
-- **默认/推荐 keeper 入口（SSOT）**：`SettlementManager.settleOrLiquidate(orderId)`（统一入口，参数内部计算）
-- **清算分支执行**：`SettlementManager → (可选) LiquidationManager.liquidateFromSettlementManager → CM.withdrawCollateralTo → LE.forceReduceDebt → LiquidatorView.push*`
-- **兼容/测试/应急执行器入口（非默认）**：`LiquidationManager.liquidate/batchLiquidate(...)` 仅用于显式参数执行与回归验证
+## ✅ 当前实现口径（Reward 侧）
 
-因此：本文档中的“清算积分惩罚”仅为**可选扩展设计/参考实现**，默认未启用，需另行接入权限与写入口。
+- 清算结果的资金链/对账口径属于 Funds-Flow SSOT 范畴；Reward 侧不参与清算资产结算。
+- Reward 系统负责在“借/还”等业务事件后，根据事件类型做积分增减或状态更新；清算惩罚通过独立的 GFM 专用入口接线。
+- 当前默认接线路径：`EarlyRepaymentGuaranteeManager.processDefault` → `GuaranteeFundManager.forfeitPartialWithRewardPenalty` → `RewardManager.applyLiquidationPenalty(user)`。
+- 清算惩罚写入口已存在：
+    - `RewardManager.quoteLiquidationPenalty(user)`：按当前 `lockedEasy[user]` 与 `liquidationPenaltyBps` 预估将要处罚的 Easy 数量。
+    - `RewardManager.applyLiquidationPenalty(user)`（**仅允许 `Registry[KEY_GUARANTEE_FUND]` 调用**，内部转调 `RewardManagerCore.applyLiquidationPenaltyByCurrentLock`）。
+- 当前计量口径：`liquidationPenaltyEasy = lockedEasy[user] * liquidationPenaltyBps / 10000`，默认 `liquidationPenaltyBps = 500`。
+- 重要边界：GFM 不传“保证金币种金额”给 Reward 作为罚分值；Reward 单位只能由 Reward 域内部按 Easy 口径计算。
+- 欠分抵扣已统一为“所有 Reward 入账”，由 `RewardAccrualManager.offsetPenaltyOnReward` 在入账前执行（目前由 `RewardManagerCore` 解锁路径与 `EasyEmissionController` 铸币路径触发）。
 
-## 🔄 **清算积分惩罚流程**
+## 🧩 现行实现：清算惩罚（Penalty）
 
-### **完整清算流程（包含积分惩罚）**
+当前产品口径已经收敛为以下约束：
 
-```
-用户违约 → 健康因子低于105%
-         ↓
-Keeper触发清算
-         ↓
-扣押抵押物 + 减少债务
-         ↓
-（可选扩展）计算惩罚分值
-         ↓
-（可选扩展）执行积分惩罚（RewardManager.applyPenalty）
-         ↓
-积分扣除或记录债务
-```
+- **触发时机**：default / liquidation 结果已经确定、保证金没收已成功之后。
+- **触发方**：`GuaranteeFundManager`，用于表达“资金链已完成，Reward 跟随处罚”。
+- **输入**：仅输入 `user`；不从资金链携带任何 guarantee asset amount。
+- **输出**：对用户 Easy 执行扣减；若余额不足，记入“欠分账本”，并在后续 Reward 入账时优先抵扣。
+- **失败语义**：Reward 调用失败不回滚保证金没收，链下需根据 GFM 事件进行补偿/告警。
 
-### **积分惩罚计算**
+### 接口口径（与当前实现对应）
 
 ```solidity
-// 惩罚积分 = 债务价值的1%
-penaltyPoints = (debtValue * 100) / 10000; // 1% = 100 basis points
-```
+function quoteLiquidationPenalty(address user) external view returns (uint256 easyAmount) {
+    return rewardManagerCore.quoteLiquidationPenalty(user);
+}
 
-### **示例计算**
-
-#### **场景：用户违约清算**
-- 债务价值：95USDC
-- 惩罚积分：95 * 1% = 0.95积分
-
-## 🏗️ **技术实现**
-
-### **核心组件**
-
-#### 1. **LiquidationManager（现状说明）**
-
-当前实现中，`LiquidationManager` 仅“直达账本 + 单点 DataPush”，**不会**调用 `RewardManager.applyPenalty`。如需启用惩罚，应在清算完成后由具备权限的模块显式调用惩罚入口（示例：`RewardManager.applyPenalty`），并在链下/治理侧计算与调度。
-
-#### 2. **RewardManager** - 奖励管理器
-```solidity
-function applyPenalty(address user, uint256 amount) external {
-    // 权限验证：只允许清算模块调用
-    address guaranteeFundManager = registry.getModule(ModuleKeys.KEY_GUARANTEE_FUND);
-    if (msg.sender != guaranteeFundManager) revert MissingRole();
-    
-    // 调用核心合约的惩罚功能
-    rewardManagerCore.deductPoints(user, amount);
+function applyLiquidationPenalty(address user) external {
+    // 仅允许 Registry[KEY_GUARANTEE_FUND] 调用
+    _requireOnlyGuaranteeFund();
+    rewardManagerCore.applyLiquidationPenaltyByCurrentLock(user, msg.sender);
 }
 ```
 
-#### 3. **RewardManagerCore** - 奖励核心逻辑
 ```solidity
-function deductPoints(address user, uint256 amount) external nonReentrant {
-    // 权限检查
-    address guaranteeFundManager = registry.getModule(ModuleKeys.KEY_GUARANTEE_FUND);
-    address rewardManager = registry.getModule(ModuleKeys.KEY_RM);
-    if (msg.sender != guaranteeFundManager && msg.sender != rewardManager) {
-        revert MissingRole();
-    }
-    
-    // 尝试扣除积分（奖励通证 SSOT：Registry[KEY_EASY_TOKEN]）
-    try EasyToken(registry.getModuleOrRevert(ModuleKeys.KEY_EASY_TOKEN)).burn(user, amount) {
-        // 成功扣除积分
-    } catch {
-        // 如果积分不足，记录到惩罚账本
-        penaltyLedger[user] += amount;
-    }
+function applyLiquidationPenaltyByCurrentLock(address user, address executor)
+    external
+    returns (uint256 easyAmount)
+{
+    _requireOnlyRewardManager();
+    easyAmount = quoteLiquidationPenalty(user);
+    rewardAccrualManager.applyPenaltyFromGateway(user, easyAmount, executor);
 }
 ```
 
-### **惩罚账本机制**
-
-#### **积分债务处理**
 ```solidity
-// 当用户获得新积分时，优先抵扣惩罚债务
-uint256 debt = penaltyLedger[user];
-if (debt > 0) {
-    if (amount >= debt) {
-        amount -= debt;
-        penaltyLedger[user] = 0;
-    } else {
-        penaltyLedger[user] = debt - amount;
-        amount = 0;
-    }
+// 口径对齐当前实现：所有 Reward 入账前统一抵扣欠分
+function offsetPenaltyOnReward(address user, uint256 newlyEarned) internal returns (uint256 netEarned) {
+    return rewardAccrualManager.offsetPenaltyOnReward(user, newlyEarned, "PenaltyOffsetOnReward");
 }
 ```
 
-## 📊 **积分惩罚示例**
+## 🔎 查询与对接
 
-### **场景1：用户有足够积分**
+- 查询用户欠分：RewardView summary 的 meta 字段（例如 `pendingPenalty`）可作为聚合口径。
 
-#### **初始状态**
-- 用户积分：100积分
-- 债务价值：95USDC
-- 惩罚积分：0.95积分
-
-#### **清算执行**
-1. 扣押抵押物：95USDC RWAToken
-2. 减少债务：95USDC
-3. 计算残值：5USDC
-4. **执行积分惩罚**：扣除0.95积分
-
-#### **最终结果**
-- 用户积分：99.05积分
-- 惩罚债务：0积分
-
-### **场景2：用户积分不足**
-
-#### **初始状态**
-- 用户积分：0.5积分
-- 债务价值：95USDC
-- 惩罚积分：0.95积分
-
-#### **清算执行**
-1. 扣押抵押物：95USDC RWAToken
-2. 减少债务：95USDC
-3. 计算残值：5USDC
-4. **执行积分惩罚**：
-   - 扣除0.5积分（现有积分）
-   - 记录0.45积分债务
-
-#### **最终结果**
-- 用户积分：0积分
-- 惩罚债务：0.45积分
-
-### **场景3：后续积分抵扣**
-
-#### **用户获得新积分**
-- 新获得积分：10积分
-- 现有惩罚债务：0.45积分
-
-#### **积分处理**
-1. 抵扣惩罚债务：0.45积分
-2. 剩余积分：9.55积分
-
-#### **最终结果**
-- 用户积分：9.55积分
-- 惩罚债务：0积分
-
-## 🔧 **配置参数**
-
-### **惩罚比例**
 ```solidity
-// 惩罚积分比例：债务价值的1%
-PENALTY_RATE = 100; // 100 basis points = 1%
+// pendingPenalty 即“欠分账本”的可视化聚合字段（示例）
+(,, uint256 pendingPenalty,,,,) = rewardView.getUserRewardSummaryWithMeta(user);
 ```
 
-### **权限控制**
-```solidity
-// 写入口：RewardManager.applyPenalty 仅允许 KEY_GUARANTEE_FUND（GuaranteeFundManager）调用
-// 核心：RewardManagerCore.deductPoints 仅允许 KEY_GUARANTEE_FUND 或 KEY_RM 调用
-```
+- 清算侧集成：当前实现由 **GuaranteeFundManager（Registry[KEY_GUARANTEE_FUND]）** 在“清算结果已确定”后调用 `RewardManager.applyLiquidationPenalty(user)`。
+    - 清算资金链/托管/内部顺序仍以 Funds-Flow SSOT 为准；Reward 仅消费“结果已确定”这一事实，不定义清算过程。
+    - 若链下需要预估罚分，可先读取 `RewardManager.quoteLiquidationPenalty(user)` 或 `RewardView` 中的锁定积分聚合数据。
 
-## 📈 **优势分析**
+## 🔖 Reason 口径（链下索引/对账建议）
 
-### **1. 风险控制**
-- 清算用户受到积分惩罚，增加违约成本
-- 防止恶意违约行为
-- 维护平台信用体系
+- `LiquidationPenaltyByGFM`：清算惩罚（由 GFM 触发）
+- `LateRepayPenalty`：逾期足额还款惩罚
+- `PenaltyOffsetOnUnlock`：按期足额还款释放锁定积分时的欠分抵扣
+- `PenaltyOffsetOnReward`：其他 Reward 入账时的欠分抵扣（例如 EasyEmissionController 铸币路径）
 
-### **2. 激励机制**
-- 鼓励用户按时还款
-- 提高平台整体信用质量
-- 保护出借人利益
+## 🛠️ 可选改进（如需进一步降低误解/提升可观测性）
 
-### **3. 灵活性**
-- 支持积分不足时的债务记录
-- 后续积分自动抵扣
-- 批量处理支持
-
-### **4. 透明度**
-- 完整的惩罚记录
-- 详细的事件日志
-- 可追溯的惩罚历史
-
-## 🚀 **使用指南**
-
-### **清算人操作**
-默认不触发积分惩罚/奖励；清算执行通过统一入口 `SettlementManager.settleOrLiquidate(orderId)` 进入清算分支（内部可调用清算执行器或直达账本）。若上线惩罚扩展，应在清算完成后由具备权限的模块单独调用惩罚入口。
-
-### **查询惩罚债务**
-```solidity
-// 查询用户的惩罚债务（RewardView summary 返回带 meta）
-// pendingPenalty 即“欠分账本”的可视化聚合字段
-(,, uint256 pendingPenalty,,,,,) = rewardView.getUserRewardSummaryWithMeta(user);
-```
-
-### **管理员监控**
-```solidity
-// 监控清算惩罚事件
-event LiquidationPenaltyApplied(
-    address indexed user,
-    uint256 penaltyPoints,
-    uint256 debtValue,
-    uint256 blockNumber
-);
-```
-
-## 📝 **事件记录**
-
-### **清算惩罚事件**
-```solidity
-event LiquidationPenaltyApplied(
-    address indexed user,
-    uint256 penaltyPoints,
-    uint256 debtValue,
-    uint256 blockNumber
-);
-```
-
-### **积分扣除事件**
-```solidity
-event PenaltyPointsDeducted(
-    bytes32 indexed actionKey,
-    address indexed user,
-    uint256 points,
-    uint256 remainingDebt,
-    address indexed deductedBy,
-    uint256 blockNumber
-);
-```
-
-## 🔒 **安全考虑**
-
-1. **权限控制**：只有授权的清算模块可以执行惩罚
-2. **重入保护**：使用ReentrancyGuard防止重入攻击
-3. **参数验证**：所有输入参数都经过严格验证
-4. **债务记录**：积分不足时记录债务，确保惩罚执行
-5. **事件记录**：完整的操作记录便于审计
-
-## 📊 **监控指标**
-
-1. **惩罚频率**：单位时间内的惩罚次数
-2. **惩罚金额**：总惩罚积分统计
-3. **债务累积**：惩罚债务的累积情况
-4. **抵扣效率**：积分抵扣债务的效率
-5. **用户影响**：惩罚对用户行为的影响
-
----
-
-*本文档描述了清算情况下的积分惩罚机制，确保违约用户承担相应责任，维护平台信用体系。* 
+- **入口语义更明确**：当前已采用清算域专用入口 `applyLiquidationPenalty`；若未来再拆更多 penalty 类型，应继续保持“一个业务语义对应一个入口”。
+- **惩罚来源区分**：将“逾期扣罚”和“清算扣罚”的 reason/actionKey 做区分，方便链上追踪和运营统计。
+- **欠分抵扣范围可扩展**：当前已覆盖“所有 Reward 入账”抵扣；如需新增新的奖励入账路径，需确保调用 `RewardAccrualManager.offsetPenaltyOnReward`。
+- **失败补偿能力**：如果需要更强的运维可追踪性，可为 penaltyLedger 的 DataPush 追加 ops-only 的 retry 接口。

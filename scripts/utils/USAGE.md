@@ -102,7 +102,7 @@ await logger.stopSpinner('task-id', true, '任务完成');
   - **第 540 行**：查找 USDC 配置
     ```typescript
     const assets = loadAssetsConfig(ARBITRUM_SEPOLIA_CONFIG.name, ARBITRUM_SEPOLIA_CONFIG.chainId);
-    const usdc = assets.find((a) => a.coingeckoId === 'usd-coin');
+    const usdc = assets.find((a) => a.sourceId === 'usd-coin');
     ```
   
   - **第 568 行**：验证 Settlement Token 配置
@@ -124,7 +124,7 @@ await logger.stopSpinner('task-id', true, '任务完成');
 **使用模式**：
 1. 加载资产配置：`loadAssetsConfig(networkName, chainId)`
 2. 配置到 PriceOracle：`configureAssets(ethers, priceOracleAddress, assets)`
-3. 查找特定资产：`assets.find((a) => a.coingeckoId === 'usd-coin')`
+3. 查找特定资产：`assets.find((a) => a.sourceId === 'usd-coin')`
 
 ---
 

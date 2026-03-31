@@ -18,7 +18,7 @@ AI 层：向量库（Milvus/Pinecone）、RAG 层（memory_records）、Agent Or
 
 ### 1. 职责与目标
 
-- 提供安全的钱包连通、签名交互、交易预览与提交、借贷/抵押/赎回/积分管理 UI
+- 提供安全的钱包连通、签名交互、交易预览与提交、借贷/抵押/赎回/Easy 奖励管理 UI
 - 展示行为金融指标（情绪指数、仿真结果、策略建议）并提供 AI 聊天/建议面板
 - 支持多租户（按组织白标）、多网络（Solana、Arbitrum）切换
 
@@ -90,7 +90,7 @@ AI 层：向量库（Milvus/Pinecone）、RAG 层（memory_records）、Agent Or
 - **api-gateway**（Auth、速率限制、`request_id` 注入）
 - **user-service**（用户、KYC、权限）
 - **ledger-service**（Rust）：双边账写入、幂等检查、逆向 entry 生成、CHECK constraints enforcement（交易级事务）
-- **reward-service**（积分域，Rust）：积分发放/消耗镜像写入 `platform_ledger` 链接
+- **reward-service**（Easy 奖励域，Rust）：Easy 发放/消费镜像写入 `platform_ledger` 链接
 - **bf-service**（行为金融层，Rust）：模型管理、仿真触发、`bf_events` 管理
 - **chain-indexer-solana**（Rust）：监听 Solana program logs, parse events, write to `chain_events` 表 + Kafka
 - **chain-indexer-arbitrum**（Rust）：监听 Arbitrum L2 transactions / logs via archive node or indexer, write events

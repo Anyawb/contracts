@@ -15,13 +15,13 @@ import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
  * @title RegistryView
- * @notice Read-only Registry facade for listing module keys, checking registrations, reverse lookups, and pagination.
+ * @notice Registry facade for listing module keys, checking registrations, reverse lookups, and pagination.
  * @dev Reverts if:
  *      - registry is zero / not a contract (ZeroAddress / NotAContract)
  *      - batch size exceeds MAX_BATCH_SIZE (BatchTooLarge)
  *
  * Security:
- * - Read-only: this module does not mutate Registry state; it only reads and aggregates data for 0-gas queries.
+ * - View-only facade: this module does not mutate Registry state; it only reads and aggregates data for 0-gas queries.
  * - Best-effort dynamic key aggregation: if the dynamic key registry is missing or fails, the module falls back to
  *   static ModuleKeys only.
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
@@ -54,9 +54,9 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - initialRegistryAddr is not a contract (NotAContract)
      *
      * Security:
-     * - initializer (UUPS)
+    * - Initializer: callable once.
      *
-     * @param initialRegistryAddr Registry contract address
+    * @param initialRegistryAddr Registry contract address.
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -78,10 +78,10 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      * - Best-effort: if dynamic key registry is missing (address(0)) or the call fails, returns static keys only.
      *
-     * @return allKeys All module keys (static keys first, then dynamic keys)
+    * @return allKeys All module keys, with static keys first and dynamic keys appended.
      */
     function _getAllModuleKeys() internal view returns (bytes32[] memory) {
         bytes32[] memory staticKeys = ModuleKeys.getAllKeys();
@@ -121,7 +121,7 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      * - Best-effort: dynamic keys are included only if dynamic key registry is configured and callable.
      *
      * @return allKeys All module keys (static keys first, then dynamic keys)
@@ -136,9 +136,9 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return keys Registered module keys
+    * @return keys Registered module keys.
      */
     function getAllRegisteredModuleKeys() external view onlyValidRegistry returns (bytes32[] memory) {
         bytes32[] memory allKeys = _getAllModuleKeys();
@@ -161,10 +161,10 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return keys Registered module keys
-     * @return addrs Module addresses corresponding to keys
+    * @return keys Registered module keys.
+    * @return addrs Module addresses corresponding to `keys`.
      */
     function getAllRegisteredModules()
         external
@@ -199,10 +199,10 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - keys.length exceeds MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param keys Module keys to check
-     * @return exists Per-key existence flags (true if Registry.getModule(key) != address(0))
+    * @param keys Module keys to check.
+    * @return exists Per-key existence flags.
      */
     function checkModulesExist(bytes32[] calldata keys)
         external
@@ -223,10 +223,10 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - see {checkModulesExist}
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param keys Module keys to check
-     * @return exists Per-key existence flags
+    * @param keys Module keys to check.
+    * @return exists Per-key existence flags.
      */
     function batchModuleExists(bytes32[] calldata keys)
         external
@@ -245,13 +245,13 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      * - Best-effort: scans static keys only (ModuleKeys.getAllKeys()) to keep runtime bounded and predictable.
      *
-     * @param moduleAddr Module address to search for
-     * @param maxCount Maximum number of static keys to scan (0 means scan all static keys)
-     * @return key Matched key, or bytes32(0) if not found
-     * @return found Whether a matching key was found
+    * @param moduleAddr Module address to search for.
+    * @param maxCount Maximum number of static keys to scan. Zero means scan all static keys.
+    * @return key Matched key, or bytes32(0) if not found.
+    * @return found True if a matching key was found.
      */
     function findModuleKeyByAddress(address moduleAddr, uint256 maxCount)
         external
@@ -275,12 +275,12 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - moduleAddrs.length exceeds MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param moduleAddrs Module addresses to search for
-     * @param maxCount Maximum number of static keys to scan per address (0 means scan all static keys)
-     * @return keys Matched keys (bytes32(0) when not found)
-     * @return founds Per-address found flags
+    * @param moduleAddrs Module addresses to search for.
+    * @param maxCount Maximum number of static keys to scan per address. Zero means scan all static keys.
+    * @return keys Matched keys, or bytes32(0) for unresolved entries.
+    * @return founds Per-address resolution flags.
      */
     function batchFindModuleKeysByAddresses(address[] calldata moduleAddrs, uint256 maxCount)
         external
@@ -305,12 +305,12 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - limit exceeds MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param offset Page offset into the registered key list (0-based)
-     * @param limit Maximum number of keys to return (must be <= MAX_BATCH_SIZE)
-     * @return keys Page of registered keys
-     * @return totalCount Total number of registered keys
+    * @param offset Page offset into the registered key list.
+    * @param limit Maximum number of keys to return.
+    * @return keys Page of registered keys.
+    * @return totalCount Total number of registered keys.
      */
     function getRegisteredModuleKeysPaginated(uint256 offset, uint256 limit)
         external
@@ -343,38 +343,24 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Read APIs: registry address (legacy-compatible) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the Registry contract address (legacy `registryAddrVar` name).
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the Registry contract address using the legacy `registryAddrVar` name.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - View-only.
      *
-     * @return registryAddr Registry contract address
+        * @return registryAddr Registry contract address.
      */
     function registryAddrVar() external view returns (address) { return _registryAddr; }
 
     /**
-     * @notice Get the Registry contract address.
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the Registry contract address using the legacy `getRegistry` name.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - View-only.
      *
-     * @return registryAddr Registry contract address
-     */
-    function registryAddr() external view returns (address) { return _registryAddr; }
-
-    /**
-     * @notice Get the Registry contract address (legacy `getRegistry` name).
-     * @dev Reverts if:
-     *      - none
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddr Registry contract address
+        * @return registryAddr Registry contract address.
      */
     function getRegistry() external view returns (address) { return _registryAddr; }
 
@@ -386,10 +372,10 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      * - Best-effort: returns 0 if the underlying Registry call fails or the function is not implemented.
      *
-     * @return delay Governance minDelay (blocks), or 0 on failure
+    * @return delay Governance `minDelay`, or 0 on failure.
      */
     function minDelay() external view onlyValidRegistry returns (uint256) {
         try Registry(_registryAddr).minDelay() returns (uint256 v) { return v; } catch { return 0; }
@@ -401,10 +387,10 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      * - Best-effort: returns 0 if the underlying Registry call fails or the function is not implemented.
      *
-     * @return delay Governance MAX_DELAY (seconds), or 0 on failure
+    * @return delay Governance `MAX_DELAY`, or 0 on failure.
      */
     function maxDelay() external view onlyValidRegistry returns (uint256) {
         try Registry(_registryAddr).MAX_DELAY() returns (uint256 v) { return v; } catch { return 0; }
@@ -416,10 +402,10 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      * - Best-effort: returns address(0) if the underlying Registry call fails or the function is not implemented.
      *
-     * @return ownerAddr Owner address, or address(0) on failure
+    * @return ownerAddr Owner address, or address(0) on failure.
      */
     function owner() external view onlyValidRegistry returns (address) {
         try Registry(_registryAddr).owner() returns (address v) { return v; } catch { return address(0); }
@@ -436,9 +422,9 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - newImplementation is not a contract (NotAContract)
      *
      * Security:
-     * - Role-gated: ACTION_ADMIN
+    * - Role-gated: ACTION_ADMIN.
      *
-     * @param newImplementation New implementation address
+    * @param newImplementation New implementation address.
      */
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
@@ -451,28 +437,26 @@ contract RegistryView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the API version for this module.
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the API semantic version for this module.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - Pure function.
      *
-     * @return version API semantic version
+        * @return version API semantic version.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
     /**
-     * @notice Get the schema version for this module's outputs.
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the schema version for this module's outputs.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - Pure function.
      *
-     * @return version Schema version
+        * @return version Schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IRewardManager } from "../interfaces/IRewardManager.sol";
+import { IRewardManagerByOrder, IRewardManagerByOrderWithLender } from "../interfaces/IRewardManager.sol";
 
 /// @title MockRewardManager
 /// @notice 奖励管理器的Mock实现，用于测试
-contract MockRewardManager is IRewardManager {
+contract MockRewardManager is IRewardManagerByOrder, IRewardManagerByOrderWithLender {
     // 用户奖励映射
     mapping(address => uint256) private _userRewards;
     
@@ -15,19 +15,35 @@ contract MockRewardManager is IRewardManager {
     // 事件
     event RewardEarned(address indexed user, uint256 amount);
     
-    /// @notice 处理借贷事件（落账后触发的标准入口）
-    /// @param user 用户地址
-    /// @param amount 金额（以最小单位，USDT/USDC按 6 位，ETH 按 18 位）
-    function onLoanEvent(address user, uint256 amount, uint256, bool) external override {
-        if (!mockSuccess) revert("MockRewardManager: onLoanEvent failed");
-        // 模拟奖励计算（简化版本）
-        uint256 reward = amount / 100; // 基础奖励
-        // 简化：忽略健康因子
-        
-        if (reward > 0) {
-            _userRewards[user] += reward;
-            emit RewardEarned(user, reward);
-        }
+    /// @notice 处理借贷事件（按订单维度）
+    /// @dev 测试用：仅做最简累加，不代表真实 Reward 逻辑
+    function onLoanEventByOrder(
+        address user,
+        uint256,
+        uint256 amount,
+        uint256,
+        LoanEventOutcome outcome
+    ) public override {
+        if (!mockSuccess) revert("MRM: loan event fail");
+        if (outcome != LoanEventOutcome.Borrow) return;
+        uint256 reward = amount / 100;
+        if (reward == 0) return;
+        _userRewards[user] += reward;
+        emit RewardEarned(user, reward);
+    }
+
+    /// @notice 处理借贷事件（按订单维度，含 lender 与 asset）
+    /// @dev 测试用：直接复用 onLoanEventByOrder 的逻辑
+    function onLoanEventByOrderWithLender(
+        address borrower,
+        address,
+        address,
+        uint256 orderId,
+        uint256 amount,
+        uint256 maturity,
+        IRewardManagerByOrder.LoanEventOutcome outcome
+    ) external override {
+        onLoanEventByOrder(borrower, orderId, amount, maturity, outcome);
     }
     
     /// @notice 设置用户奖励数量（用于测试）

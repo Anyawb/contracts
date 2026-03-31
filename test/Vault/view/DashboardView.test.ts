@@ -105,11 +105,6 @@ describe('DashboardView', function () {
   }
 
   describe('initialization', function () {
-    it('stores registry address', async function () {
-      const { dashboardView, registry } = await loadFixture(deployFixture);
-      expect(await dashboardView.registryAddr()).to.equal(await registry.getAddress());
-    });
-
     it('reverts on zero address init', async function () {
       const DashboardViewFactory = await ethers.getContractFactory('DashboardView');
       await expect(upgrades.deployProxy(DashboardViewFactory, [ethers.ZeroAddress], { kind: 'uups' })).to.be
@@ -484,11 +479,9 @@ describe('DashboardView', function () {
 
   describe('UUPS upgradeability', function () {
     it('allows admin to upgrade', async function () {
-      const { dashboardView, admin, registry } = await loadFixture(deployFixture);
+      const { dashboardView } = await loadFixture(deployFixture);
       const DashboardViewFactory = await ethers.getContractFactory('DashboardView');
       await upgrades.upgradeProxy(await dashboardView.getAddress(), DashboardViewFactory);
-      // 验证状态保持
-      expect(await dashboardView.registryAddr()).to.equal(await registry.getAddress());
     });
 
     it('rejects upgrade from non-admin', async function () {
@@ -500,13 +493,11 @@ describe('DashboardView', function () {
     });
 
     it('rejects upgrade to zero address', async function () {
-      const { dashboardView, admin } = await loadFixture(deployFixture);
+      const { dashboardView } = await loadFixture(deployFixture);
       // 零地址检查在 _authorizeUpgrade 中实现
       // 通过代码审查确认: if (newImplementation == address(0)) revert ZeroAddress();
       const DashboardViewFactory = await ethers.getContractFactory('DashboardView');
       await upgrades.upgradeProxy(await dashboardView.getAddress(), DashboardViewFactory);
-      // 验证升级后功能正常
-      expect(await dashboardView.registryAddr()).to.not.equal(ethers.ZeroAddress);
     });
   });
 

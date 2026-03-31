@@ -22,7 +22,8 @@ const KEYS = {
   VAULT_CORE: 'VaultCore',
   VAULT_VIEW: 'VaultRouter',
   REWARD_VIEW: 'RewardView',
-  LENDING_ENGINE: 'LendingEngine',
+  ORDER_ENGINE: 'LendingEngine',
+  LENDING_ENGINE: 'VaultLendingEngine',
 } as const;
 
 task('registry:sync', 'Batch sync module mappings from deployments to Registry')

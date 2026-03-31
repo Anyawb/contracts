@@ -125,7 +125,8 @@ async function main() {
     const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
     const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
     const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
-    const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+    const awRead = (await ethers.getContractAt("IAssetWhitelistRead", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+    const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
 
     const viewAddr = (await registry.getModuleOrRevert(key("LENDING_ENGINE_VIEW"))) as string;
     const view = (await ethers.getContractAt("LendingEngineView", viewAddr)) as any;
@@ -169,8 +170,8 @@ async function main() {
     await ensureRole("DEPOSIT", orderEngineAddr);
 
     const assetAddr = usdc.target as string;
-    if (!(await aw.isAssetAllowed(assetAddr))) {
-      await (await aw.connect(deployer).addAllowedAsset(assetAddr)).wait();
+    if (!(await awRead.isAssetAllowed(assetAddr))) {
+      await (await awAdmin.connect(deployer).addAllowedAsset(assetAddr)).wait();
     }
 
     // Seed borrower collateral so order exists and access checks are meaningful

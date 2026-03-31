@@ -1,27 +1,36 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import { IERC1155 } from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
-import { IERC165 } from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IERC1155} from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
-import { AmountIsZero, AmountMismatch, ZeroAddress } from "../errors/StandardErrors.sol";
+import {
+    AmountIsZero,
+    AmountMismatch,
+    ZeroAddress
+} from "../errors/StandardErrors.sol";
 
 /**
  * @title TokenUtilsInternal
  * @notice Stateless token transfer helpers (ERC20/ERC721/ERC1155) and delta checks.
- * @dev Security:
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
  * - Library performs external token calls; callers must ensure approvals and permissions.
  * - ERC165 probing uses staticcall and is best-effort.
  */
 library TokenUtilsInternal {
     using SafeERC20 for IERC20;
 
-    /* -------------------------- Constants -------------------------- */
-    bytes4 private constant _ERC721_INTERFACE_ID = 0x80ac58cd;
-    bytes4 private constant _ERC1155_INTERFACE_ID = 0xd9b67a26;
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
+    bytes4 private constant _ERC721_INTERFACE_ID = type(IERC721).interfaceId;
+    bytes4 private constant _ERC1155_INTERFACE_ID = type(IERC1155).interfaceId;
+
+    /*━━━━━━━━━━━━━━━ Balance Helpers ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Snapshot this contract's ERC20 balance for a token.
@@ -29,7 +38,7 @@ library TokenUtilsInternal {
      *      - IERC20.balanceOf call fails (propagates)
      *
      * Security:
-     * - View-only external call to token.
+     * - Performs a view-only external call to the token contract.
      *
      * @param token ERC20 token interface.
      * @return balance Balance of address(this).
@@ -37,6 +46,8 @@ library TokenUtilsInternal {
     function _balanceOf(IERC20 token) internal view returns (uint256 balance) {
         return token.balanceOf(address(this));
     }
+
+    /*━━━━━━━━━━━━━━━ Validation Helpers ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Pre-validate that an expected amount is non-zero.
@@ -49,10 +60,14 @@ library TokenUtilsInternal {
      * @param expectedAmount Expected amount (token decimals).
      * @return validated Same value for convenient inlining.
      */
-    function preValidateAmount(uint256 expectedAmount) internal pure returns (uint256 validated) {
+    function preValidateAmount(
+        uint256 expectedAmount
+    ) internal pure returns (uint256 validated) {
         if (expectedAmount == 0) revert AmountIsZero();
         return expectedAmount;
     }
+
+    /*━━━━━━━━━━━━━━━ Transfer Helpers ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Verify that an ERC20 transfer resulted in an exact expected delta.
@@ -61,7 +76,7 @@ library TokenUtilsInternal {
      *      - IERC20.balanceOf calls fail (propagates)
      *
      * Security:
-     * - View-only external calls to token.
+     * - Performs view-only external calls to the token contract.
      *
      * @param beforeBalance Balance snapshot before the transfer (token decimals).
      * @param token ERC20 token interface.
@@ -109,7 +124,13 @@ library TokenUtilsInternal {
             IERC721(token).safeTransferFrom(from, address(this), id);
         } else if (_supportsInterface(token, _ERC1155_INTERFACE_ID)) {
             // ERC1155
-            IERC1155(token).safeTransferFrom(from, address(this), id, amount, "");
+            IERC1155(token).safeTransferFrom(
+                from,
+                address(this),
+                id,
+                amount,
+                ""
+            );
         } else {
             // Default to ERC20 path (incl. some non-ERC165 implementations).
             IERC20(token).safeTransferFrom(from, address(this), amount);
@@ -123,12 +144,12 @@ library TokenUtilsInternal {
      *      - IERC20.balanceOf call fails (propagates)
      *
      * Security:
-     * - View-only external call to token.
+     * - Performs a view-only external call to the token contract.
      *
      * @param token ERC20 token address.
      * @param account Account address.
      * @param beforeBalance Balance snapshot before (token decimals).
-     * @return delta afterBalance - beforeBalance.
+     * @return delta Observed balance increase relative to beforeBalance.
      */
     function _getBalanceDelta(
         address token,
@@ -142,20 +163,25 @@ library TokenUtilsInternal {
     /**
      * @notice Best-effort ERC165 interface check.
      * @dev Reverts if:
-     *      - none (returns false on failure)
+     *      - (none)
      *
      * Security:
-     * - Uses staticcall to the token; failures are treated as "unsupported".
+     * - Uses staticcall to the token and treats failures as unsupported interfaces.
      *
      * @param token Token contract address.
      * @param interfaceId ERC165 interface id.
      * @return supported True if supportsInterface(interfaceId) returns true.
      */
-    function _supportsInterface(address token, bytes4 interfaceId) private view returns (bool supported) {
+    function _supportsInterface(
+        address token,
+        bytes4 interfaceId
+    ) private view returns (bool supported) {
         (bool success, bytes memory result) = token.staticcall(
-            abi.encodeWithSelector(IERC165.supportsInterface.selector, interfaceId)
+            abi.encodeWithSelector(
+                IERC165.supportsInterface.selector,
+                interfaceId
+            )
         );
         return (success && result.length >= 32 && abi.decode(result, (bool)));
     }
 }
-

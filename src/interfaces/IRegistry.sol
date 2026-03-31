@@ -13,7 +13,6 @@ pragma solidity ^0.8.20;
  * - Reverts use custom errors and/or `StandardErrors` in the implementation (no string reverts).
  */
 interface IRegistry {
-
     /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
     /**
      * @notice Module upgrade history record.
@@ -35,7 +34,7 @@ interface IRegistry {
     }
 
     /*━━━━━━━━━━━━━━━ View Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Returns the module address for a module key (zero if unset).
      * @dev Reverts if:
@@ -47,8 +46,10 @@ interface IRegistry {
      * @param key Module key (bytes32; see ModuleKeys).
      * @return moduleAddress Module address (zero if unset).
      */
-    function getModule(bytes32 key) external view returns (address moduleAddress);
-    
+    function getModule(
+        bytes32 key
+    ) external view returns (address moduleAddress);
+
     /**
      * @notice Returns the module address for a module key, reverting if unset.
      * @dev Reverts if:
@@ -60,7 +61,9 @@ interface IRegistry {
      * @param key Module key (bytes32; see ModuleKeys).
      * @return moduleAddress Module address.
      */
-    function getModuleOrRevert(bytes32 key) external view returns (address moduleAddress);
+    function getModuleOrRevert(
+        bytes32 key
+    ) external view returns (address moduleAddress);
 
     /**
      * @notice Returns whether a module key is registered (non-zero address).
@@ -73,8 +76,10 @@ interface IRegistry {
      * @param key Module key (bytes32).
      * @return registered True if registered.
      */
-    function isModuleRegistered(bytes32 key) external view returns (bool registered);
-    
+    function isModuleRegistered(
+        bytes32 key
+    ) external view returns (bool registered);
+
     /**
      * @notice Returns the current minimum timelock delay window.
      * @dev Reverts if:
@@ -86,7 +91,7 @@ interface IRegistry {
      * @return minDelayBlocks Delay window (blocks; block.number time axis).
      */
     function minDelay() external view returns (uint256 minDelayBlocks);
-    
+
     /**
      * @notice Returns the maximum allowed delay window.
      * @dev Reverts if:
@@ -185,7 +190,7 @@ interface IRegistry {
     function owner() external view returns (address owner_);
 
     /*━━━━━━━━━━━━━━━ Admin Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Sets a module address for a module key.
      * @dev Reverts if:
@@ -203,7 +208,7 @@ interface IRegistry {
      * @param moduleAddr Module contract address.
      */
     function setModule(bytes32 key, address moduleAddr) external;
-    
+
     /**
      * @notice Sets a module address and returns whether it changed.
      * @dev Reverts if:
@@ -220,7 +225,10 @@ interface IRegistry {
      * @param moduleAddr Module contract address.
      * @return changed True if the stored address changed.
      */
-    function setModuleWithStatus(bytes32 key, address moduleAddr) external returns (bool changed);
+    function setModuleWithStatus(
+        bytes32 key,
+        address moduleAddr
+    ) external returns (bool changed);
 
     /**
      * @notice Batch sets module addresses.
@@ -239,7 +247,10 @@ interface IRegistry {
      * @param keys Module keys array.
      * @param addresses Module addresses array.
      */
-    function setModules(bytes32[] calldata keys, address[] calldata addresses) external;
+    function setModules(
+        bytes32[] calldata keys,
+        address[] calldata addresses
+    ) external;
 
     /**
      * @notice Batch sets module addresses and returns which keys changed.
@@ -260,8 +271,10 @@ interface IRegistry {
      * @return changedCount Number of keys that changed.
      * @return changedKeys Keys that changed (implementation-defined population convention).
      */
-    function setModulesWithStatus(bytes32[] calldata keys, address[] calldata addresses) external 
-        returns (uint256 changedCount, bytes32[] memory changedKeys);
+    function setModulesWithStatus(
+        bytes32[] calldata keys,
+        address[] calldata addresses
+    ) external returns (uint256 changedCount, bytes32[] memory changedKeys);
 
     /**
      * @notice Batch sets module addresses with event emission controls (compat).
@@ -300,7 +313,7 @@ interface IRegistry {
      * @param newVersion Target storage version.
      */
     function upgradeStorageVersion(uint256 newVersion) external;
-    
+
     /**
      * @notice Executes a fixed STORAGE_SLOT migration via an external migrator contract.
      * @dev Reverts if:
@@ -319,7 +332,11 @@ interface IRegistry {
      * @param toVersion Target storage version.
      * @param migrator Migrator contract address.
      */
-    function migrateStorage(uint256 fromVersion, uint256 toVersion, address migrator) external;
+    function migrateStorage(
+        uint256 fromVersion,
+        uint256 toVersion,
+        address migrator
+    ) external;
 
     /**
      * @notice Pauses the Registry (disables whenNotPaused write paths).
@@ -367,7 +384,7 @@ interface IRegistry {
      * - One-step takeover by the configured pending admin.
      */
     function acceptAdmin() external;
-    
+
     /**
      * @notice Schedules a timelocked module upgrade for a module key.
      * @dev Reverts if:
@@ -384,7 +401,7 @@ interface IRegistry {
      * @param newAddr Proposed new module address.
      */
     function scheduleModuleUpgrade(bytes32 key, address newAddr) external;
-    
+
     /**
      * @notice Cancels a scheduled module upgrade.
      * @dev Reverts if:
@@ -400,7 +417,7 @@ interface IRegistry {
      * @param key Module key.
      */
     function cancelModuleUpgrade(bytes32 key) external;
-    
+
     /**
      * @notice Executes a scheduled module upgrade after the delay window has elapsed.
      * @dev Reverts if:
@@ -417,7 +434,7 @@ interface IRegistry {
      * @param key Module key.
      */
     function executeModuleUpgrade(bytes32 key) external;
-    
+
     /**
      * @notice Sets the minimum timelock delay window.
      * @dev Reverts if:
@@ -431,7 +448,7 @@ interface IRegistry {
      * @param newDelay New delay window (blocks).
      */
     function setMinDelay(uint256 newDelay) external;
-    
+
     /**
      * @notice Transfers ownership (governance) to a new address.
      * @dev Reverts if:
@@ -467,10 +484,12 @@ interface IRegistry {
      * @param key Module key.
      * @return history Upgrade history array.
      */
-    function getAllUpgradeHistory(bytes32 key) external view returns (UpgradeHistory[] memory history);
+    function getAllUpgradeHistory(
+        bytes32 key
+    ) external view returns (UpgradeHistory[] memory history);
 
     /*━━━━━━━━━━━━━━━ Upgrade Authority (UUPS) ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Sets the upgrade admin address (UUPS authority).
      * @dev Reverts if:
@@ -483,7 +502,7 @@ interface IRegistry {
      * @param newAdmin New upgrade admin address.
      */
     function setUpgradeAdmin(address newAdmin) external;
-    
+
     /**
      * @notice Sets the emergency admin address.
      * @dev Reverts if:
@@ -496,7 +515,7 @@ interface IRegistry {
      * @param newAdmin New emergency admin address.
      */
     function setEmergencyAdmin(address newAdmin) external;
-    
+
     /**
      * @notice Returns the upgrade admin address.
      * @dev Reverts if:
@@ -508,7 +527,7 @@ interface IRegistry {
      * @return upgradeAdmin Upgrade admin address.
      */
     function getUpgradeAdmin() external view returns (address upgradeAdmin);
-    
+
     /**
      * @notice Returns the emergency admin address.
      * @dev Reverts if:
@@ -520,7 +539,7 @@ interface IRegistry {
      * @return emergencyAdmin Emergency admin address.
      */
     function getEmergencyAdmin() external view returns (address emergencyAdmin);
-    
+
     /*━━━━━━━━━━━━━━━ Upgrade Query Helpers ━━━━━━━━━━━━━━━*/
 
     /**
@@ -536,12 +555,13 @@ interface IRegistry {
      * @return executeAfter Earliest execution block (block.number).
      * @return hasPendingUpgrade True if a pending upgrade exists.
      */
-    function getPendingUpgrade(bytes32 key) external view returns (
-        address newAddr,
-        uint256 executeAfter,
-        bool hasPendingUpgrade
-    );
-    
+    function getPendingUpgrade(
+        bytes32 key
+    )
+        external
+        view
+        returns (address newAddr, uint256 executeAfter, bool hasPendingUpgrade);
+
     /**
      * @notice Returns whether a pending upgrade is ready to execute for a module key.
      * @dev Reverts if:
@@ -555,7 +575,7 @@ interface IRegistry {
      * @return ready True if ready.
      */
     function isUpgradeReady(bytes32 key) external view returns (bool ready);
-    
+
     /**
      * @notice Returns the number of stored upgrade history entries for a module key.
      * @dev Reverts if:
@@ -567,8 +587,10 @@ interface IRegistry {
      * @param key Module key.
      * @return count Upgrade history entry count.
      */
-    function getUpgradeHistoryCount(bytes32 key) external view returns (uint256 count);
-    
+    function getUpgradeHistoryCount(
+        bytes32 key
+    ) external view returns (uint256 count);
+
     /**
      * @notice Returns an upgrade history record by index.
      * @dev Reverts if:
@@ -584,13 +606,19 @@ interface IRegistry {
      * @return blockNumber Upgrade block number (block.number).
      * @return executor Upgrade executor address.
      */
-    function getUpgradeHistory(bytes32 key, uint256 index) external view returns (
-        address oldAddress,
-        address newAddress,
-        uint256 blockNumber,
-        address executor
-    );
-    
+    function getUpgradeHistory(
+        bytes32 key,
+        uint256 index
+    )
+        external
+        view
+        returns (
+            address oldAddress,
+            address newAddress,
+            uint256 blockNumber,
+            address executor
+        );
+
     /**
      * @notice Sets a module address with an explicit allowReplace flag.
      * @dev Reverts if:
@@ -608,5 +636,9 @@ interface IRegistry {
      * @param moduleAddr Module address.
      * @param allowReplace Whether to allow replacing an existing module address.
      */
-    function setModuleWithReplaceFlag(bytes32 key, address moduleAddr, bool allowReplace) external;
-} 
+    function setModuleWithReplaceFlag(
+        bytes32 key,
+        address moduleAddr,
+        bool allowReplace
+    ) external;
+}

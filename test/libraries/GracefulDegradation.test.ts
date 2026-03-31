@@ -1,286 +1,191 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { Contract } from "ethers";
-import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
 describe("GracefulDegradation Library", function () {
     let gracefulDegradation: Contract;
     let mockPriceOracle: Contract;
-    let owner: SignerWithAddress;
-    let user: SignerWithAddress;
     let asset: string;
     let settlementToken: string;
+    let hkdToken: string;
 
     beforeEach(async function () {
-        [owner, user] = await ethers.getSigners();
-        
-        // 部署 Mock 价格预言机
         const MockPriceOracle = await ethers.getContractFactory("MockPriceOracle");
         mockPriceOracle = await MockPriceOracle.deploy();
         await mockPriceOracle.waitForDeployment();
 
-        // 部署测试合约（包含 GracefulDegradation 库）
         const TestGracefulDegradation = await ethers.getContractFactory("TestGracefulDegradation");
         gracefulDegradation = await TestGracefulDegradation.deploy();
         await gracefulDegradation.waitForDeployment();
 
-        // 设置测试地址
         asset = ethers.getAddress("0x1234567890123456789012345678901234567890");
         settlementToken = ethers.getAddress("0x0987654321098765432109876543210987654321");
+        hkdToken = ethers.getAddress("0x2222222222222222222222222222222222222222");
     });
 
-    describe("安全修复测试", function () {
-        describe("1. 价格操纵风险修复", function () {
-            it("应该使用动态价格验证而不是硬编码常量", async function () {
-                const config = await gracefulDegradation.createDefaultConfig(settlementToken);
-                
-                // 验证配置包含价格验证参数
-                expect(config.priceValidation.maxPriceMultiplier).to.equal(15000); // 150%
-                expect(config.priceValidation.minPriceMultiplier).to.equal(5000);  // 50%
-                // maxReasonablePrice 在库中定义为 1e12，直接比较数值
-                expect(config.priceValidation.maxReasonablePrice).to.equal(1000000000000n); // 1e12
-            });
+    function buildDefaultConfig(overrides?: {
+        stablecoinConfig?: Record<string, unknown>;
+        additionalStablecoinConfigs?: Array<Record<string, unknown>>;
+    }) {
+        return {
+            conservativeRatio: 5000n,
+            useStablecoinFaceValue: true,
+            enablePriceCache: false,
+            settlementToken,
+            priceValidation: {
+                maxPriceMultiplier: 15000n,
+                minPriceMultiplier: 5000n,
+                priceUpdateThreshold: 300n,
+                maxPriceAgeBlocks: 300n,
+                maxReasonablePrice: 1000000000000n,
+                enableHistoricalValidation: false,
+            },
+            stablecoinConfig: {
+                stablecoin: settlementToken,
+                isWhitelisted: true,
+                enableDepegDetection: false,
+                expectedPrice: 100000000n,
+                tolerance: 100n,
+                assetDecimals: 0n,
+                ...(overrides?.stablecoinConfig ?? {}),
+            },
+            additionalStablecoinConfigs: overrides?.additionalStablecoinConfigs ?? [],
+            retryConfig: {
+                maxRetryCount: 1n,
+                retryDelay: 0n,
+                maxGasLimit: 500000n,
+                enableRetry: true,
+                retryOnNetworkError: true,
+                retryOnTimeout: true,
+            },
+        };
+    }
 
-            it("应该验证价格合理性", async function () {
-                const priceValidationConfig = await gracefulDegradation.createPriceValidationConfig(
-                    15000, // 150%
-                    5000,  // 50%
-                    ethers.parseUnits("1000000000000", 18) // 1e12 * 1e18
-                );
+    it("创建默认配置时应保持 USD-8 stablecoin fallback 语义", async function () {
+        const config = await gracefulDegradation.createDefaultConfig(settlementToken);
 
-                // validatePriceReasonableness 需要 cacheStorage，但 TestGracefulDegradation 的接口可能不匹配
-                // 这里只测试配置创建，不测试实际验证
-                expect(priceValidationConfig.maxPriceMultiplier).to.equal(15000);
-                expect(priceValidationConfig.minPriceMultiplier).to.equal(5000);
-                expect(priceValidationConfig.maxReasonablePrice).to.equal(ethers.parseUnits("1000000000000", 18));
-            });
-        });
-
-        describe("2. 精度验证不足修复", function () {
-            it("应该验证最小精度（修复：防止价格单位错乱）", async function () {
-                const minDecimals = await gracefulDegradation.MIN_DECIMALS();
-                expect(minDecimals).to.equal(6); // 修复：最小精度为6
-
-                // 测试有效精度
-                expect(await gracefulDegradation.validateDecimals(6)).to.be.true;  // 最小精度
-                expect(await gracefulDegradation.validateDecimals(8)).to.be.true;  // BTC/ETH
-                expect(await gracefulDegradation.validateDecimals(18)).to.be.true; // 最大精度
-
-                // 测试无效精度
-                expect(await gracefulDegradation.validateDecimals(0)).to.be.false;  // 太小
-                expect(await gracefulDegradation.validateDecimals(5)).to.be.false;  // 太小
-                expect(await gracefulDegradation.validateDecimals(19)).to.be.false; // 太大
-            });
-
-            it("应该验证最大精度", async function () {
-                const maxDecimals = await gracefulDegradation.MAX_DECIMALS();
-                expect(maxDecimals).to.equal(18);
-
-                // 测试边界值
-                expect(await gracefulDegradation.validateDecimals(18)).to.be.true;
-                expect(await gracefulDegradation.validateDecimals(19)).to.be.false;
-            });
-
-            it("应该提供详细的精度验证错误信息", async function () {
-                // 测试精度过低的错误信息
-                const [isValidLow, errorMessageLow] = await gracefulDegradation.validateDecimalsWithError(0);
-                expect(isValidLow).to.be.false;
-                expect(errorMessageLow).to.include("Decimals too low");
-                expect(errorMessageLow).to.include("minimum: 6");
-
-                // 测试精度过高的错误信息
-                const [isValidHigh, errorMessageHigh] = await gracefulDegradation.validateDecimalsWithError(19);
-                expect(isValidHigh).to.be.false;
-                expect(errorMessageHigh).to.include("Decimals too high");
-                expect(errorMessageHigh).to.include("maximum: 18");
-
-                // 测试有效精度
-                const [isValidGood, errorMessageGood] = await gracefulDegradation.validateDecimalsWithError(8);
-                expect(isValidGood).to.be.true;
-                expect(errorMessageGood).to.equal("");
-            });
-
-            it("应该验证资产精度合理性", async function () {
-                // 测试有效资产精度
-                expect(await gracefulDegradation.validateAssetDecimals(asset, 6)).to.be.true;  // USDC/USDT
-                expect(await gracefulDegradation.validateAssetDecimals(asset, 8)).to.be.true;  // BTC
-                expect(await gracefulDegradation.validateAssetDecimals(asset, 18)).to.be.true; // 最大精度
-
-                // 测试无效资产精度
-                expect(await gracefulDegradation.validateAssetDecimals(asset, 0)).to.be.false;  // 太小
-                expect(await gracefulDegradation.validateAssetDecimals(asset, 5)).to.be.false;  // 太小
-                expect(await gracefulDegradation.validateAssetDecimals(asset, 19)).to.be.false; // 太大
-            });
-        });
-
-        describe("3. 溢出检查不完整修复", function () {
-            it("应该使用安全的数学运算", async function () {
-                const amount = ethers.parseEther("1000");
-                const price = ethers.parseEther("2000");
-                const decimals = 18;
-
-                const calculatedValue = await gracefulDegradation.calculateAssetValue(amount, price, decimals);
-                expect(calculatedValue).to.equal(ethers.parseEther("2000000")); // 1000 * 2000
-            });
-
-            it("应该检测溢出", async function () {
-                const amount = ethers.MaxUint256;
-                const price = ethers.MaxUint256;
-                const decimals = 18;
-
-                // 溢出检测可能返回 panic 错误而不是自定义错误
-                await expect(
-                    gracefulDegradation.calculateAssetValue(amount, price, decimals)
-                ).to.be.reverted; // 可能返回 panic 错误 0x11 (Arithmetic operation overflowed)
-            });
-
-            it("应该检测无效的计算结果", async function () {
-                const amount = ethers.parseEther("1000");
-                const price = 0; // 零价格
-                const decimals = 18;
-
-                // Best-effort valuation: should not revert; returns 0 on invalid/zero price (rounding-safe).
-                const calculatedValue = await gracefulDegradation.calculateAssetValue(amount, price, decimals);
-                expect(calculatedValue).to.equal(0n);
-            });
-        });
-
-        describe("4. 稳定币面值假设修复", function () {
-            it("应该验证稳定币价格", async function () {
-                const stablecoin = settlementToken;
-                // getStablecoinPrice 返回 1e18（ONE_USD），所以 expectedPrice 也应该是 1e18
-                const expectedPrice = ethers.parseEther("1");
-                const tolerance = 100; // 1%
-
-                // validateStablecoinPrice 是 pure 函数，它调用 getStablecoinPrice 获取实际价格
-                // getStablecoinPrice 对于非零地址返回 1
-                const isValid = await gracefulDegradation.validateStablecoinPrice(
-                    stablecoin,
-                    expectedPrice,
-                    tolerance
-                );
-                // 由于 actualPrice = 1e18, expectedPrice = 1e18, tolerance = 1%
-                // minPrice = 1e18 * (10000 - 100) / 10000 = 0.99e18
-                // maxPrice = 1e18 * (10000 + 100) / 10000 = 1.01e18
-                // 1 >= 0.99 && 1 <= 1.01 = true
-                expect(isValid).to.be.true;
-            });
-
-            it("应该处理稳定币脱锚情况", async function () {
-                const stablecoin = settlementToken;
-                // getStablecoinPrice 返回 1e18，所以测试需要基于这个值
-                const tolerance = 100; // 1%
-
-                // 测试价格在容忍范围内的情况
-                // actualPrice = 1e18, expectedPrice = 1e18 (在容忍范围内)
-                // minPrice = 1e18 * (10000 - 100) / 10000 = 0.99e18
-                // maxPrice = 1e18 * (10000 + 100) / 10000 = 1.01e18
-                // 1e18 >= 0.99e18 && 1e18 <= 1.01e18 = true
-                const inRangePrice = ethers.parseEther("1");
-                const isValidInRange = await gracefulDegradation.validateStablecoinPrice(
-                    stablecoin,
-                    inRangePrice,
-                    tolerance
-                );
-                expect(isValidInRange).to.be.true;
-
-                // 测试价格超出容忍范围的情况
-                // actualPrice = 1e18, expectedPrice = 3e18 (超出容忍范围)
-                // minPrice = 3e18 * (10000 - 100) / 10000 = 2.97e18
-                // maxPrice = 3e18 * (10000 + 100) / 10000 = 3.03e18
-                // 1e18 < 2.97e18，所以返回 false
-                const outOfRangePrice = ethers.parseEther("3");
-                const isValidOutOfRange = await gracefulDegradation.validateStablecoinPrice(
-                    stablecoin,
-                    outOfRangePrice,
-                    tolerance
-                );
-                expect(isValidOutOfRange).to.be.false;
-            });
-        });
-
-        describe("5. 输入验证增强", function () {
-            it("应该验证价格预言机地址", async function () {
-                // 跳过此测试，因为结构体参数传递存在 ethers.js 兼容性问题
-                // getAssetValueWithFallback 有 require(priceOracleAddr != address(0))，所以零地址会 revert
-                // 实际功能已验证，这里只做占位测试
-                expect(true).to.be.true;
-            });
-
-            it("应该验证资产地址", async function () {
-                // 跳过此测试，因为结构体参数传递存在 ethers.js 兼容性问题
-                // getAssetValueWithFallback 有 require(assetAddr != address(0))，所以零地址会 revert
-                // 实际功能已验证，这里只做占位测试
-                expect(true).to.be.true;
-            });
-
-            it("应该验证资产数量", async function () {
-                // 跳过此测试，因为结构体参数传递存在 ethers.js 兼容性问题
-                // getAssetValueWithFallback 有 require(amountValue > 0)，所以零数量会 revert
-                // 实际功能已验证，这里只做占位测试
-                expect(true).to.be.true;
-            });
-        });
+        expect(config.conservativeRatio).to.equal(5000n);
+        expect(config.useStablecoinFaceValue).to.equal(true);
+        expect(config.enablePriceCache).to.equal(false);
+        expect(config.settlementToken).to.equal(settlementToken);
+        expect(config.stablecoinConfig.expectedPrice).to.equal(100000000n);
     });
 
-    describe("功能测试", function () {
-        it("应该创建默认配置", async function () {
-            const config = await gracefulDegradation.createDefaultConfig(settlementToken);
-            
-            expect(config.conservativeRatio).to.equal(5000); // 50%
-            expect(config.useStablecoinFaceValue).to.be.true;
-            expect(config.enablePriceCache).to.be.false;
-            expect(config.settlementToken).to.equal(settlementToken);
-        });
-
-        it("应该创建价格验证配置", async function () {
-            const config = await gracefulDegradation.createPriceValidationConfig(
-                15000, // 150%
-                5000,  // 50%
-                ethers.parseUnits("1000000000000", 18) // 1e12 * 1e18
-            );
-
-            expect(config.maxPriceMultiplier).to.equal(15000);
-            expect(config.minPriceMultiplier).to.equal(5000);
-            expect(config.maxReasonablePrice).to.equal(ethers.parseUnits("1000000000000", 18));
-        });
-
-        it("应该创建稳定币配置", async function () {
-            const config = await gracefulDegradation.createStablecoinConfig(
-                settlementToken,
-                ethers.parseEther("1"),
-                100 // 1%
-            );
-
-            expect(config.stablecoin).to.equal(settlementToken);
-            expect(config.expectedPrice).to.equal(ethers.parseEther("1"));
-            expect(config.tolerance).to.equal(100);
-            expect(config.isWhitelisted).to.be.true;
-        });
+    it("应继续校验 decimals 边界", async function () {
+        expect(await gracefulDegradation.validateDecimals(6)).to.equal(true);
+        expect(await gracefulDegradation.validateDecimals(18)).to.equal(true);
+        expect(await gracefulDegradation.validateDecimals(5)).to.equal(false);
+        expect(await gracefulDegradation.validateDecimals(19)).to.equal(false);
     });
 
-    describe("边界条件测试", function () {
-        it("应该处理零数量", async function () {
-            // 跳过此测试，因为结构体参数传递存在 ethers.js 兼容性问题
-            // getAssetValueWithFallback 有 require(amountValue > 0)，所以零数量会 revert
-            // 实际功能已验证，这里只做占位测试
-            expect(true).to.be.true;
-        });
-
-        it("应该处理价格预言机失败", async function () {
-            // 跳过此测试，因为结构体参数传递存在 ethers.js 兼容性问题
-            // getAssetValueWithFallback 是 view 函数，会捕获错误并使用降级策略
-            // 实际功能已验证，这里只做占位测试
-            expect(true).to.be.true;
-        });
+    it("应按 token decimals 计算资产 USD-8 价值", async function () {
+        const amount = 1_500_000n;
+        const priceUsd8 = 100000000n;
+        const value = await gracefulDegradation.calculateAssetValue(amount, priceUsd8, 6);
+        expect(value).to.equal(150000000n);
     });
 
-    describe("Gas 优化测试", function () {
-        it("应该在合理范围内消耗 Gas", async function () {
-            // 跳过此测试，因为结构体参数传递存在 ethers.js 兼容性问题
-            // getAssetValueWithFallback 是 view 函数，不消耗 gas
-            // 实际功能已验证，这里只做占位测试
-            expect(true).to.be.true;
+    it("应基于实际 oracle price 做 stablecoin 脱锚校验", async function () {
+        expect(
+            await gracefulDegradation.validateStablecoinPrice(100000000n, 100000000n, 100)
+        ).to.equal(true);
+        expect(
+            await gracefulDegradation.validateStablecoinPrice(97000000n, 100000000n, 100)
+        ).to.equal(false);
+    });
+
+    it("settlement token 在 oracle 返回零价时应回退到 USD-8 peg 估值", async function () {
+        await mockPriceOracle.configureAsset(settlementToken, "mock-usdc", 6, 300);
+        await mockPriceOracle.setPrice(settlementToken, 0, await ethers.provider.getBlockNumber(), 6);
+
+        const config = buildDefaultConfig();
+        const amount = 1_000_000n;
+        const result = await gracefulDegradation.getAssetValueWithFallback(
+            await mockPriceOracle.getAddress(),
+            settlementToken,
+            amount,
+            config
+        );
+
+        expect(result.usedFallback).to.equal(true);
+        expect(result.isValid).to.equal(true);
+        expect(result.value).to.equal(100000000n);
+    });
+
+    it("已显式配置的 mHKD 应按其 peg 价格做 fallback 估值", async function () {
+        await mockPriceOracle.configureAsset(hkdToken, "mock-hkd", 6, 300);
+        await mockPriceOracle.setPrice(hkdToken, 0, await ethers.provider.getBlockNumber(), 6);
+
+        const config = buildDefaultConfig({
+            additionalStablecoinConfigs: [
+                {
+                    stablecoin: hkdToken,
+                    isWhitelisted: true,
+                    enableDepegDetection: true,
+                    expectedPrice: 12800000n,
+                    tolerance: 150n,
+                    assetDecimals: 6n,
+                },
+            ],
         });
+
+        const amount = 100_000_000n;
+        const result = await gracefulDegradation.getAssetValueWithFallback(
+            await mockPriceOracle.getAddress(),
+            hkdToken,
+            amount,
+            config
+        );
+
+        expect(result.usedFallback).to.equal(true);
+        expect(result.isValid).to.equal(true);
+        expect(result.value).to.equal(1280000000n);
+    });
+
+    it("已显式配置的 stablecoin 在 oracle 明确脱锚时应转为保守估值", async function () {
+        await mockPriceOracle.configureAsset(hkdToken, "mock-hkd", 6, 300);
+        await mockPriceOracle.setPrice(hkdToken, 10000000n, await ethers.provider.getBlockNumber(), 6);
+
+        const config = buildDefaultConfig({
+            additionalStablecoinConfigs: [
+                {
+                    stablecoin: hkdToken,
+                    isWhitelisted: true,
+                    enableDepegDetection: true,
+                    expectedPrice: 12800000n,
+                    tolerance: 100n,
+                    assetDecimals: 6n,
+                },
+            ],
+        });
+
+        const amount = 100_000_000n;
+        const result = await gracefulDegradation.getAssetValueWithFallback(
+            await mockPriceOracle.getAddress(),
+            hkdToken,
+            amount,
+            config
+        );
+
+        expect(result.usedFallback).to.equal(true);
+        expect(result.reason).to.equal("Stablecoin depeg detected");
+        expect(result.value).to.equal(50000000n);
+    });
+
+    it("未配置为 stablecoin 的资产仍应走保守 fallback", async function () {
+        await mockPriceOracle.configureAsset(asset, "mock-risk", 18, 300);
+        await mockPriceOracle.setShouldFail(true);
+
+        const config = buildDefaultConfig();
+        const amount = ethers.parseEther("10");
+        const result = await gracefulDegradation.getAssetValueWithFallback(
+            await mockPriceOracle.getAddress(),
+            asset,
+            amount,
+            config
+        );
+
+        expect(result.usedFallback).to.equal(true);
+        expect(result.value).to.equal(ethers.parseEther("5"));
     });
 });

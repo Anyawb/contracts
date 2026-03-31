@@ -171,6 +171,16 @@ READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run "scripts/tests/viewcache-smo
 - `hardhat compile` / TypeChain 生成成功
 - `npx hardhat test`（或至少 `test/Reward/` + 关键 View/Registry 测试集）
 
+Reward 严格放行建议至少补跑：
+- `pnpm -s run checks:reward-monitor:registry-bindings`
+- `pnpm -s run checks:reward-monitor:role-bindings`
+- `pnpm exec hardhat test test/Reward/EasyEconomics.integration.test.ts`
+
+其中必须验证：
+- `RewardManagerCore` 不持有遗留 `BURNER_ROLE`
+- `RewardAccrualManager` 与 `EasyRecycleDistributor` 的 burn 角色绑定正确
+- recycle 合约误收 Easy 后，可通过统一恢复口按 75/15/10 完成结算
+
 > 注：本文件重点是“上线闸门标准”，单测的细分清单请以各模块测试指南为准（`docs/Test-Guide/*-testing-guide.md`）。
 
 ---

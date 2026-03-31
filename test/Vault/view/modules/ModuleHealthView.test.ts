@@ -57,7 +57,6 @@ describe('ModuleHealthView', function () {
 
   it('initializes with registry and getters', async function () {
     const { moduleHealthView, registry } = await deployFixture();
-    expect(await moduleHealthView.registryAddr()).to.equal(await registry.getAddress());
     expect(await moduleHealthView.getRegistry()).to.equal(await registry.getAddress());
   });
 
@@ -517,9 +516,8 @@ describe('ModuleHealthView', function () {
   });
 
   describe('getter consistency', function () {
-    it('registryAddr and getRegistry return same value', async function () {
+    it('getRegistry returns configured registry', async function () {
       const { moduleHealthView, registry } = await deployFixture();
-      expect(await moduleHealthView.registryAddr()).to.equal(await moduleHealthView.getRegistry());
       expect(await moduleHealthView.getRegistry()).to.equal(await registry.getAddress());
     });
   });

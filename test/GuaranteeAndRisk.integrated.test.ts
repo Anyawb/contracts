@@ -834,13 +834,6 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     });
   });
 
-  describe('VBL – 视图解析优先级', function () {
-    it('KEY_VAULT_CORE 主路径可返回 viewContractAddrVar() 地址', async function () {
-      // MockVaultCore 未实现 viewContractAddrVar，验证 RiskView 可用即可
-      expect(await riskView.registryAddr()).to.equal(registry.target);
-    });
-  });
-
   describe('集成测试 – 完整借款流程', function () {
     let vaultCoreSigner: any;
 

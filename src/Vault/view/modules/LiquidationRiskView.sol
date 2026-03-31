@@ -5,7 +5,7 @@ import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/I
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import { LiquidationRiskLib } from "../../liquidation/libraries/LiquidationRiskLib.sol";
-import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
+import { ILiquidationRiskRead } from "../../../interfaces/ILiquidationRiskRead.sol";
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
@@ -48,7 +48,7 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - _registryAddr is not a contract (see {NotAContract})
      *
      * Security:
-     * - Read-only guard
+    * - View-only guard.
      */
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
@@ -122,12 +122,11 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - collaterals.length != debts.length (see {ArrayLengthMismatch})
      *
      * Security:
-     * - Pure function
+    * - Pure function.
      *
-     * @param collaterals Collateral amounts (implementation-defined units)
-     * @param debts Debt amounts (implementation-defined units)
-     * @return healthFactors Health factors as returned by LiquidationRiskLib.calculateHealthFactor
-     *         (implementation-defined scale)
+    * @param collaterals Collateral amounts in implementation-defined units.
+    * @param debts Debt amounts in implementation-defined units.
+    * @return healthFactors Health factors returned by LiquidationRiskLib.
      */
     function batchCalculateHealthFactors(
         uint256[] calldata collaterals,
@@ -153,10 +152,10 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
-     * @param user Target user address
-     * @return liquidatable True if the RiskManager reports the user is liquidatable
-     * @return isValid Whether the read succeeded
-     * @return blockNumber Read block number (block.number)
+    * @param user Target user address.
+    * @return liquidatable True if the RiskManager reports the user as liquidatable.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function isLiquidatable(address user)
         external
@@ -180,13 +179,13 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
-     * @param user Target user address
+    * @param user Target user address.
      * @param collateral Collateral amount (asset decimals; as expected by RiskManager)
      * @param debt Debt amount (asset decimals; as expected by RiskManager)
-     * @param asset Asset address
-     * @return liquidatable True if the RiskManager reports the scenario is liquidatable
-     * @return isValid Whether the read succeeded
-     * @return blockNumber Read block number (block.number)
+    * @param asset Asset address.
+    * @return liquidatable True if the RiskManager reports the scenario as liquidatable.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function isLiquidatable(
         address user,
@@ -214,10 +213,10 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
-     * @param user Target user address
-     * @return riskScore Risk score (implementation-defined scale)
-     * @return isValid Whether the read succeeded
-     * @return blockNumber Read block number (block.number)
+    * @param user Target user address.
+    * @return riskScore Risk score in implementation-defined scale.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function getLiquidationRiskScore(address user)
         external
@@ -242,10 +241,10 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
-     * @param users Target user addresses
-     * @return liquidatableFlags Per-user liquidation flags
-     * @return isValid Whether the read succeeded
-     * @return blockNumber Read block number (block.number)
+    * @param users Target user addresses.
+    * @return liquidatableFlags Per-user liquidation flags.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function batchIsLiquidatable(address[] calldata users)
         external
@@ -275,10 +274,10 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
-     * @param users Target user addresses
-     * @return riskScores Risk scores (implementation-defined scale)
-     * @return isValid Whether the read succeeded
-     * @return blockNumber Read block number (block.number)
+    * @param users Target user addresses.
+    * @return riskScores Per-user risk scores in implementation-defined scale.
+    * @return isValid True if the read succeeded.
+    * @return blockNumber Read block number.
      */
     function batchGetLiquidationRiskScores(address[] calldata users)
         external
@@ -303,25 +302,11 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (never; may return address(0) if not initialized)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return registry Registry address
+    * @return registry Registry address.
      */
     function getRegistry() external view returns (address registry) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Returns the Registry address (legacy getter name).
-     * @dev Reverts if:
-     *      - (never; may return address(0) if not initialized)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registry Registry address
-     */
-    function registryAddr() external view returns (address registry) {
         return _registryAddr;
     }
 
@@ -331,9 +316,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         return block.number;
     }
 
-    function _rm() internal view returns (ILiquidationRiskManager) {
+    function _rm() internal view returns (ILiquidationRiskRead) {
         address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        return ILiquidationRiskManager(rm);
+        return ILiquidationRiskRead(rm);
     }
 
     /*━━━━━━━━━━━━━━━ UUPS Upgradeable ━━━━━━━━━━━━━━━*/
@@ -365,9 +350,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (never)
      *
      * Security:
-     * - Pure function
+    * - Pure function.
      *
-     * @return version API version
+    * @return version API version.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
@@ -379,9 +364,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (never)
      *
      * Security:
-     * - Pure function
+    * - Pure function.
      *
-     * @return version Schema version
+    * @return version Schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;

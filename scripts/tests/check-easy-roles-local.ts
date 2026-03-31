@@ -24,6 +24,7 @@ async function main() {
   const emissionAddr = (await registry.getModule(key("EASY_EMISSION_CONTROLLER"))) as string;
   const recycleAddr = (await registry.getModule(key("EASY_RECYCLE_DISTRIBUTOR"))) as string;
   const rmCoreAddr = (await registry.getModule(key("REWARD_MANAGER_CORE"))) as string;
+  const ramAddr = (await registry.getModule(key("REWARD_ACCRUAL_MANAGER"))) as string;
 
   const easyToken = (await ethers.getContractAt("src/Token/EasyToken.sol:EasyToken", easyTokenAddr)) as any;
 
@@ -41,6 +42,7 @@ async function main() {
   console.log(`EasyEmissionController: ${emissionAddr || "<missing>"}`);
   console.log(`EasyRecycleDistributor: ${recycleAddr || "<missing>"}`);
   console.log(`RewardManagerCore: ${rmCoreAddr || "<missing>"}`);
+  console.log(`RewardAccrualManager: ${ramAddr || "<missing>"}`);
   console.log("");
 
   console.log(`MINTER_ROLE holders (${minters.length}):`);
@@ -53,12 +55,12 @@ async function main() {
 
   const soleMinterOk = emissionAddr && emissionAddr !== ethers.ZeroAddress && minters.length === 1 &&
     minters[0].toLowerCase() === emissionAddr.toLowerCase();
-  const burnerOk = [recycleAddr, rmCoreAddr]
+  const burnerOk = [recycleAddr, ramAddr]
     .filter((v) => v && v !== ethers.ZeroAddress)
     .every((v) => burners.map((b) => b.toLowerCase()).includes((v as string).toLowerCase()));
 
   console.log(`Sole minter == EasyEmissionController: ${soleMinterOk ? "OK" : "NO"}`);
-  console.log(`Burners include EasyRecycleDistributor + RewardManagerCore: ${burnerOk ? "OK" : "NO"}`);
+  console.log(`Burners include EasyRecycleDistributor + RewardAccrualManager: ${burnerOk ? "OK" : "NO"}`);
 }
 
 main().catch((e) => {

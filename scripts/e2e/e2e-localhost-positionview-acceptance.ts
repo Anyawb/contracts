@@ -95,7 +95,8 @@ async function main() {
 
     const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
     const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-    const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+    const awRead = (await ethers.getContractAt("IAssetWhitelistRead", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+    const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
     const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
 
     await runViewPreflight({
@@ -148,11 +149,11 @@ async function main() {
     if (!(await acm.hasRole(ACTION_ADD_WHITELIST, deployer.address))) {
       await acm.connect(deployer).grantRole(ACTION_ADD_WHITELIST, deployer.address);
     }
-    if (!(await aw.isAssetAllowed(assetA))) {
-      await aw.connect(deployer).addAllowedAsset(assetA);
+    if (!(await awRead.isAssetAllowed(assetA))) {
+      await awAdmin.connect(deployer).addAllowedAsset(assetA);
     }
-    if (!(await aw.isAssetAllowed(assetB))) {
-      await aw.connect(deployer).addAllowedAsset(assetB);
+    if (!(await awRead.isAssetAllowed(assetB))) {
+      await awAdmin.connect(deployer).addAllowedAsset(assetB);
     }
 
     // Use a fresh user to avoid dirty-state interference (PositionView version may be non-zero for default signers).

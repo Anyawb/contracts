@@ -1,12 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IPriceOracleAdapter
-/// @notice Oracle adapter interface for unified price access across multiple oracle types.
-/// @dev Designed to align with docs/SmartContractStandard.md naming and error conventions.
-interface IPriceOracleAdapter {
+import {IPriceOracleAdapterRead} from "./IPriceOracleAdapterRead.sol";
+import {IPriceOracleAdapterAdmin} from "./IPriceOracleAdapterAdmin.sol";
+
+/**
+ * @title IPriceOracleAdapter
+ * @notice Legacy umbrella interface for unified price access across multiple oracle adapter types.
+ * @dev Reverts if:
+ *      - see inherited {IPriceOracleAdapterRead} and {IPriceOracleAdapterAdmin} semantics
+ *
+ * Security:
+ * - Compatibility-oriented aggregation layer retained for callers that still depend on a combined adapter surface.
+ * - New integrations should prefer the narrow read/admin split so adapter reads and governance writes remain explicit.
+ * - Designed to align with the repository's shared interface and error conventions.
+ */
+interface IPriceOracleAdapter is
+    IPriceOracleAdapterRead,
+    IPriceOracleAdapterAdmin
+{
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
-    
+
     /// @dev Reverts when an oracle type is not supported.
     error PriceOracleAdapter__UnsupportedOracle();
     /// @dev Reverts when an oracle address is invalid (e.g., zero or non-contract).
@@ -14,27 +28,18 @@ interface IPriceOracleAdapter {
     /// @dev Reverts when an oracle call fails.
     error PriceOracleAdapter__OracleCallFailed();
 
-    /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/
-
-    /// @notice Price data structure.
-    struct PriceData {
-        /// @notice Price in USD-8 (e.g., $1.00 = 100000000).
-        uint256 price;
-        /// @notice Informational block number associated with the quoted price.
-        uint256 blockNumber;
-        /// @notice Token decimals used for valuation scaling (NOT price precision).
-        uint256 assetDecimals;
-        /// @notice Whether the returned price is valid.
-        bool isValid;
-        /// @notice Oracle type identifier (e.g., "chainlink", "uniswap", "redstone").
-        string oracleType;
-    }
-
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
-    
-    /// @notice Emitted when an oracle call is performed.
-    /// @dev Emission semantics are implementation-defined; may be emitted on best-effort calls.
-    event OracleCall(address indexed asset, address indexed oracle, string oracleType, bool success);
+
+    /**
+     * @notice Emitted when an oracle call is performed.
+     * @dev Event only. Emission semantics are implementation-defined and may be used on best-effort calls.
+     */
+    event OracleCall(
+        address indexed asset,
+        address indexed oracle,
+        string oracleType,
+        bool success
+    );
 
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
 
@@ -54,7 +59,13 @@ interface IPriceOracleAdapter {
      * @return blockNumber Informational block number associated with the quoted price.
      * @return assetDecimals Token decimals used for valuation scaling (NOT price precision).
      */
-    function getPrice(address asset) external view returns (uint256 price, uint256 blockNumber, uint256 assetDecimals);
+    function getPrice(
+        address asset
+    )
+        external
+        view
+        override
+        returns (uint256 price, uint256 blockNumber, uint256 assetDecimals);
 
     /**
      * @notice Get full price data for an asset.
@@ -70,7 +81,9 @@ interface IPriceOracleAdapter {
      * @param asset Asset address.
      * @return priceData Price data struct.
      */
-    function getPriceData(address asset) external view returns (PriceData memory priceData);
+    function getPriceData(
+        address asset
+    ) external view override returns (PriceData memory priceData);
 
     /**
      * @notice Batch get prices for multiple assets.
@@ -88,11 +101,17 @@ interface IPriceOracleAdapter {
      * @return blockNumbers Informational block number list.
      * @return assetDecimalsArray Token decimals used for valuation scaling (NOT price precision).
      */
-    function getPrices(address[] calldata assets) external view returns (
-        uint256[] memory prices,
-        uint256[] memory blockNumbers,
-        uint256[] memory assetDecimalsArray
-    );
+    function getPrices(
+        address[] calldata assets
+    )
+        external
+        view
+        override
+        returns (
+            uint256[] memory prices,
+            uint256[] memory blockNumbers,
+            uint256[] memory assetDecimalsArray
+        );
 
     /**
      * @notice Check whether the price is valid (non-zero and not stale).
@@ -106,7 +125,9 @@ interface IPriceOracleAdapter {
      * @param asset Asset address.
      * @return isValid True if valid, otherwise false.
      */
-    function isPriceValid(address asset) external view returns (bool isValid);
+    function isPriceValid(
+        address asset
+    ) external view override returns (bool isValid);
 
     /**
      * @notice Get supported oracle types.
@@ -118,7 +139,11 @@ interface IPriceOracleAdapter {
      *
      * @return oracleTypes Supported oracle type identifiers.
      */
-    function getSupportedOracleTypes() external view returns (string[] memory oracleTypes);
+    function getSupportedOracleTypes()
+        external
+        view
+        override
+        returns (string[] memory oracleTypes);
 
     /**
      * @notice Check whether an oracle type is supported.
@@ -131,7 +156,9 @@ interface IPriceOracleAdapter {
      * @param oracleType Oracle type identifier.
      * @return isSupported True if supported, otherwise false.
      */
-    function isOracleTypeSupported(string calldata oracleType) external view returns (bool isSupported);
+    function isOracleTypeSupported(
+        string calldata oracleType
+    ) external view override returns (bool isSupported);
 
     /**
      * @notice Get the oracle type configured for an asset.
@@ -145,7 +172,9 @@ interface IPriceOracleAdapter {
      * @param asset Asset address.
      * @return oracleType Oracle type identifier.
      */
-    function getAssetOracleType(address asset) external view returns (string memory oracleType);
+    function getAssetOracleType(
+        address asset
+    ) external view override returns (string memory oracleType);
 
     /*━━━━━━━━━━━━━━━ ADMIN FUNCTIONS ━━━━━━━━━━━━━━━*/
 
@@ -162,7 +191,10 @@ interface IPriceOracleAdapter {
      * @param oracleType Oracle type identifier.
      * @param oracleAddress Oracle address.
      */
-    function registerOracle(string calldata oracleType, address oracleAddress) external;
+    function registerOracle(
+        string calldata oracleType,
+        address oracleAddress
+    ) external override;
 
     /**
      * @notice Configure oracle type for an asset (governance-only in implementations).
@@ -177,7 +209,10 @@ interface IPriceOracleAdapter {
      * @param asset Asset address.
      * @param oracleType Oracle type identifier.
      */
-    function configureAssetOracle(address asset, string calldata oracleType) external;
+    function configureAssetOracle(
+        address asset,
+        string calldata oracleType
+    ) external override;
 
     /**
      * @notice Batch configure oracle types for assets (governance-only in implementations).
@@ -196,5 +231,5 @@ interface IPriceOracleAdapter {
     function configureAssetOracles(
         address[] calldata assets,
         string[] calldata oracleTypes
-    ) external;
+    ) external override;
 }

@@ -61,7 +61,8 @@ async function main() {
   const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
   const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
   const acm = (await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager)) as any;
-  const whitelist = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+  const whitelistRead = (await ethers.getContractAt("IAssetWhitelistRead", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+  const whitelistAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
   const priceOracle = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
   const vaultCore = (await ethers.getContractAt("VaultCore", CONTRACT_ADDRESSES.VaultCore)) as any;
   const vaultRouter = (await ethers.getContractAt("VaultRouter", CONTRACT_ADDRESSES.VaultRouter)) as any;
@@ -125,10 +126,10 @@ async function main() {
 
   // ====== 基础配置 ======
   // 白名单资产
-  const allowed = await whitelist.isAssetAllowed(usdc.target);
+  const allowed = await whitelistRead.isAssetAllowed(usdc.target);
   if (!allowed) {
     await ensureRole(ACTION_ADD_WHITELIST, deployer.address);
-    await whitelist.connect(deployer).addAllowedAsset(usdc.target);
+    await whitelistAdmin.connect(deployer).addAllowedAsset(usdc.target);
   }
 
   // 设置价格 (1 USD = 1e8, PriceOracle uses 8 decimals)

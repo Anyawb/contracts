@@ -3,21 +3,20 @@ pragma solidity ^0.8.20;
 
 import { ModuleCache } from "./ModuleCache.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ILendingEngineBasic } from "../../../interfaces/ILendingEngineBasic.sol";
+import { ILendingEngineDebtRead } from "../../../interfaces/ILendingEngineDebtRead.sol";
 import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
 import { Registry } from "../../../registry/Registry.sol";
 
 /**
- * @title Liquidation Risk Query Library
- * @author RWA Lending Platform
- * @notice Provides module resolution and user value aggregation functions for liquidation risk assessment.
- * @dev Security:
- * - View-only library for querying ledger modules (LendingEngine + PositionView).
- * - Uses try/catch to avoid reverting the caller on downstream module failures.
+ * @title LiquidationRiskQueryLib
+ * @notice Provides best-effort liquidation risk queries and module resolution helpers.
+ * @dev Reverts if:
+ *      - see individual functions
  *
- * Architecture (SSOT):
- * - This library intentionally does NOT access oracles nor implement graceful degradation logic.
- * - Valuation (including graceful degradation) must be centralized in LendingEngine/PositionView.
+ * Security:
+ * - View-only library for querying ledger modules (LendingEngine and PositionView).
+ * - Uses try/catch to avoid reverting callers on downstream module failures.
+ * - Does not access oracles or implement graceful degradation logic; valuation remains centralized in LendingEngine and PositionView.
  */
 library LiquidationRiskQueryLib {
     using ModuleCache for ModuleCache.ModuleCacheStorage;
@@ -30,13 +29,13 @@ library LiquidationRiskQueryLib {
      * Security:
      * - View function (read-only).
      * - Best-effort: falls back to Registry if cache is stale or missing.
- * - Time-Dependency-Refactor SSOT: cache staleness is block-based (block.number), and rollback is irrelevant.
+     * - Time-Dependency-Refactor SSOT: cache staleness is block-based (block.number), and rollback is irrelevant.
      *
      * @param registryAddr Registry contract address (for fallback resolution)
      * @param moduleCache Module cache storage reference
      * @param key Module key identifier
- * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
-     * @return moduleAddr Module address (address(0) if not found)
+     * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
+    * @return moduleAddr Module address, or address(0) if the module is missing.
      */
     function _getModuleView(
         address registryAddr,
@@ -67,15 +66,15 @@ library LiquidationRiskQueryLib {
      * Security:
      * - View function (read-only).
      * - Best-effort: returns (0, 0) if modules are not registered or calls fail.
-     * - Architecture alignment: does NOT access oracles nor implement graceful degradation logic.
+    * - Does not access oracles or implement graceful degradation logic.
      * - Uses try/catch to handle external call failures gracefully.
      *
      * @param user User address to query
      * @param registryAddr Registry contract address for module resolution
      * @param moduleCache Module cache storage reference
  * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
-     * @return collateralValue Total collateral value (settlement token denominated, scaled by 1e18, 0 if query fails)
-     * @return debtValue Total debt value (settlement token denominated, scaled by 1e18, 0 if query fails)
+    * @return collateralValue Total collateral value in settlement-token units, scaled by 1e18, or 0 if the query fails.
+    * @return debtValue Total debt value in settlement-token units, scaled by 1e18, or 0 if the query fails.
      */
     function getUserValues(
         address user,
@@ -89,7 +88,7 @@ library LiquidationRiskQueryLib {
         if (lendingEngine == address(0) || positionView == address(0)) return (0, 0);
 
         // debt value (settlement token denominated; produced by LE valuation)
-        try ILendingEngineBasic(lendingEngine).getUserTotalDebtValue(user) returns (uint256 v) {
+        try ILendingEngineDebtRead(lendingEngine).getUserTotalDebtValue(user) returns (uint256 v) {
             debtValue = v;
         } catch {
             debtValue = 0;

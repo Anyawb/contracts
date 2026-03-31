@@ -14,7 +14,8 @@ pragma solidity ^0.8.20;
  * - Implementations MUST be view-layer only (emit events / cache), and MUST NOT perform ledger writes.
  *
  * Architecture:
- * - Liquidation data pushes are single-sourced here to avoid duplicate `_emitData` emissions in business modules.
+ * - Liquidation data pushes are intentionally single-sourced here so business modules do not duplicate `_emitData`
+ *   emissions.
  */
 interface ILiquidationEventsView {
     /**
@@ -108,5 +109,3 @@ interface ILiquidationEventsView {
         uint256 blockNumber
     ) external;
 }
-
-

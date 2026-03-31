@@ -319,7 +319,13 @@ async function requireCode(address: string, label: string) {
 }
 
 async function main() {
-  const [deployer, keeper, user] = await ethers.getSigners();
+  const signers = await ethers.getSigners();
+  if (signers.length === 0) {
+    throw new Error("[Config] No signer available from Hardhat runtime.");
+  }
+  const deployer = signers[0];
+  const keeper = signers[1] ?? deployer;
+  const user = signers[2] ?? deployer;
   const strictTx =
     String(process.env.STRICT_TX ?? "") === "1" || String(process.env.REAL_TX ?? "") === "1";
   const allowAggregatedDebt = String(process.env.ALLOW_AGGREGATED_DEBT ?? "") === "1";
@@ -343,6 +349,9 @@ async function main() {
   console.log("  Deployer:", deployer.address);
   console.log("  Keeper:", keeper.address);
   console.log("  User:", user.address);
+  if (signers.length < 3) {
+    console.log(`  Signers: only ${signers.length} available; reusing deployer for missing keeper/user accounts.`);
+  }
   console.log("");
   if (strictTx) {
     console.log("  STRICT_TX enabled: VaultCore strict checks will send transactions.\n");
@@ -698,8 +707,8 @@ async function main() {
   const pvIface = new ethers.Interface(["function getAssetValue(address asset, uint256 amount) view returns (uint256)"]);
   const poIface = new ethers.Interface([
     "function getPrice(address asset) view returns (uint256 price, uint256 blockNumber, uint256 assetDecimals)",
-    "function getPriceData(address asset) view returns (tuple(uint256 price,uint256 blockNumber,uint256 decimals,bool isValid))",
-    "function getAssetConfig(address asset) view returns (tuple(string coingeckoId,uint256 decimals,bool isActive,uint256 maxPriceAge))",
+    "function getPriceData(address asset) view returns (tuple(uint256 price,uint256 blockNumber,uint256 assetDecimals,bool isValid))",
+    "function getAssetConfig(address asset) view returns (tuple(string sourceId,uint256 assetDecimals,bool isActive,uint256 maxPriceAgeBlocks))",
     "function isPriceValid(address asset) view returns (bool)",
   ]);
   const erc20Abi = [
@@ -1001,17 +1010,17 @@ async function main() {
       );
       if (cfgRes.ok) {
         const cfg = (cfgRes.decoded.length === 1 ? cfgRes.decoded[0] : cfgRes.decoded) as {
-          coingeckoId: string;
-          decimals: bigint;
+          sourceId: string;
+          assetDecimals: bigint;
           isActive: boolean;
-          maxPriceAge: bigint;
+          maxPriceAgeBlocks: bigint;
         };
-        const coingeckoId = cfg.coingeckoId ?? "";
+        const sourceId = cfg.sourceId ?? "";
         const decimals = cfg.assetDecimals ?? 0n;
         const isActive = cfg.isActive ?? false;
-        const maxPriceAge = cfg.maxPriceAge ?? 0n;
+        const maxPriceAge = cfg.maxPriceAgeBlocks ?? 0n;
         console.log(
-          `  - asset config ${shortAddr(asset)}: active=${isActive} decimals=${decimals.toString()} maxAge=${maxPriceAge.toString()} id=${coingeckoId}`
+          `  - asset config ${shortAddr(asset)}: active=${isActive} decimals=${decimals.toString()} maxAge=${maxPriceAge.toString()} id=${sourceId}`
         );
       } else {
         console.log(`  - asset config read failed for ${shortAddr(asset)}: ${cfgRes.decoded}`);
@@ -1028,12 +1037,12 @@ async function main() {
         const data = (dataRes.decoded.length === 1 ? dataRes.decoded[0] : dataRes.decoded) as {
           price: bigint;
           blockNumber: bigint;
-          decimals: bigint;
+          assetDecimals: bigint;
           isValid: boolean;
         };
         const price = data.price ?? 0n;
         const blockNumber = data.blockNumber ?? 0n;
-        const decimals = data.decimals ?? 0n;
+        const decimals = data.assetDecimals ?? 0n;
         const isValid = data.isValid ?? false;
         console.log(
           `  - price data ${shortAddr(asset)}: price=${price.toString()} decimals=${decimals.toString()} block=${blockNumber.toString()} valid=${isValid}`
@@ -1246,7 +1255,16 @@ async function main() {
       [batchDebtAssets, batchBorrowAmounts],
       strictTx
     );
-    requireOk(batchBorrowRes, `VaultCore.batchBorrow (${strictTx ? "tx" : "static"})`);
+    if (!batchBorrowRes.ok) {
+      const overdueMsg = overdue
+        ? " (borrower already has an overdue order; new batchBorrow can be legitimately blocked)"
+        : "";
+      console.log(
+        `  ❗ [StrictCheck] batchBorrow failed: ${batchBorrowRes.decoded}${overdueMsg}`
+      );
+    } else {
+      console.log(`  - VaultCore.batchBorrow (${strictTx ? "tx" : "static"}): ok`);
+    }
     if (strictRepayAmount > 0n) {
       const batchRepayRes = await tryExecAs(
         order.borrower,

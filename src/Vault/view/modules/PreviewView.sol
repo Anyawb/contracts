@@ -31,12 +31,12 @@ interface IPositionViewRead {
      *      - PositionView reverts (implementation-defined)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param user User address
-     * @param asset Asset address
-     * @return collateral Collateral amount (PositionView-defined units/decimals)
-     * @return debt Debt amount (PositionView-defined units/decimals)
+    * @param user Target user address.
+    * @param asset Asset address.
+    * @return collateral Collateral amount in PositionView-defined units.
+    * @return debt Debt amount in PositionView-defined units.
      */
     function getUserPositionWithMeta(address user, address asset)
         external
@@ -46,7 +46,7 @@ interface IPositionViewRead {
 
 /**
  * @title PreviewView
- * @notice Read-only preview facade for basic deposit/withdraw/borrow/repay estimations (0-gas queries).
+ * @notice Preview facade for basic deposit, withdraw, borrow, and repay estimations.
  * @dev Reverts if:
  *      - registry is zero / not a contract (ZeroAddress / NotAContract)
  *      - caller is not the target user and lacks VIEW_USER_DATA / ADMIN (MissingRole)
@@ -54,7 +54,7 @@ interface IPositionViewRead {
  *      - asset is zero address (PreviewView__InvalidInput)
  *
  * Security:
- * - Read-only: does not perform core business writes; values are computed from PositionView snapshots.
+ * - View-only facade: does not perform core business writes; values are computed from PositionView snapshots.
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  */
 contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
@@ -108,9 +108,9 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - initialRegistryAddr is not a contract (NotAContract)
      *
      * Security:
-     * - initializer (UUPS)
+    * - Initializer: callable once.
      *
-     * @param initialRegistryAddr Registry contract address
+    * @param initialRegistryAddr Registry contract address.
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -130,16 +130,16 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param user Target user address
-     * @param asset Asset address
-     * @param amount Amount to add to collateral (PositionView-defined units/decimals)
+    * @param user Target user address.
+    * @param asset Asset address.
+    * @param amount Amount to add to collateral in PositionView-defined units.
      * @return hfAfter Health factor after the deposit (bps=1e4). Returns max uint256 if debt is zero.
-     * @return ok Whether hfAfter >= MIN threshold
-     * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
-     * @return positionVersion PositionView cache version
+    * @return ok True if `hfAfter` is at or above the minimum health-factor threshold.
+    * @return positionIsValid True if the PositionView cache is valid.
+    * @return positionUpdateBlock PositionView cache update block number.
+    * @return positionVersion PositionView cache version.
      */
     function previewDeposit(address user, address asset, uint256 amount)
         external
@@ -168,16 +168,16 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param user Target user address
-     * @param asset Asset address
-     * @param amount Amount to remove from collateral (PositionView-defined units/decimals)
+    * @param user Target user address.
+    * @param asset Asset address.
+    * @param amount Amount to remove from collateral in PositionView-defined units.
      * @return hfAfter Health factor after the withdrawal (bps=1e4). Returns max uint256 if debt is zero.
-     * @return ok Whether hfAfter >= MIN threshold
-     * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
-     * @return positionVersion PositionView cache version
+    * @return ok True if `hfAfter` is at or above the minimum health-factor threshold.
+    * @return positionIsValid True if the PositionView cache is valid.
+    * @return positionUpdateBlock PositionView cache update block number.
+    * @return positionVersion PositionView cache version.
      */
     function previewWithdraw(address user, address asset, uint256 amount)
         external
@@ -206,19 +206,19 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param user Target user address
-     * @param asset Asset address
-     * @param collateralIn Reserved/ignored for backward compatibility (currently unused)
-     * @param collateralAdd Amount to add to collateral (PositionView-defined units/decimals)
-     * @param borrowAmount Amount to add to debt (PositionView-defined units/decimals)
+    * @param user Target user address.
+    * @param asset Asset address.
+    * @param collateralIn Reserved input kept for backward compatibility. Currently unused.
+    * @param collateralAdd Amount to add to collateral in PositionView-defined units.
+    * @param borrowAmount Amount to add to debt in PositionView-defined units.
      * @return newHF Health factor after the borrow (bps=1e4). Returns max uint256 if debt is zero.
      * @return newLTV Loan-to-value ratio after the borrow (bps=1e4). Returns 0 if collateral==0 or debt==0.
-     * @return maxBorrowable Remaining borrowable headroom under MAX LTV (0 if already at/above max)
-     * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
-     * @return positionVersion PositionView cache version
+    * @return maxBorrowable Remaining borrowable headroom under the max LTV constraint.
+    * @return positionIsValid True if the PositionView cache is valid.
+    * @return positionUpdateBlock PositionView cache update block number.
+    * @return positionVersion PositionView cache version.
      */
     function previewBorrow(
         address user,
@@ -271,14 +271,14 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param user Target user address
-     * @param asset Asset address
-     * @return maxBorrowable Remaining borrowable headroom under MAX LTV (0 if already at/above max)
-     * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
-     * @return positionVersion PositionView cache version
+    * @param user Target user address.
+    * @param asset Asset address.
+    * @return maxBorrowable Remaining borrowable headroom under the max LTV constraint.
+    * @return positionIsValid True if the PositionView cache is valid.
+    * @return positionUpdateBlock PositionView cache update block number.
+    * @return positionVersion PositionView cache version.
      */
     function getMaxBorrowableWithMeta(address user, address asset)
         external
@@ -311,16 +311,16 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - PositionView module is missing (reverts in Registry.getModuleOrRevert)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @param user Target user address
-     * @param asset Asset address
-     * @param amount Amount to reduce from debt (PositionView-defined units/decimals)
+    * @param user Target user address.
+    * @param asset Asset address.
+    * @param amount Amount to reduce from debt in PositionView-defined units.
      * @return newHF Health factor after the repay (bps=1e4). Returns max uint256 if debt becomes zero.
      * @return newLTV Loan-to-value ratio after the repay (bps=1e4). Returns 0 if collateral==0 or debt==0.
-     * @return positionIsValid Whether the PositionView cache is valid
-     * @return positionUpdateBlock PositionView cache update blockNumber (block.number)
-     * @return positionVersion PositionView cache version
+    * @return positionIsValid True if the PositionView cache is valid.
+    * @return positionUpdateBlock PositionView cache update block number.
+    * @return positionVersion PositionView cache version.
      */
     function previewRepay(address user, address asset, uint256 amount)
         external
@@ -405,45 +405,29 @@ contract PreviewView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
     
-    /**
-     * @notice Get the Registry contract address.
-     * @dev Reverts if:
-     *      - none
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddr Registry contract address
-     */
-    function registryAddr() external view returns (address) {
-        return _registryAddr;
-    }
-
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Get the API version for this module.
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the API semantic version for this module.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - Pure function.
      *
-     * @return version API semantic version
+        * @return version API semantic version.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
     /**
-     * @notice Get the schema version for this module's outputs.
-     * @dev Reverts if:
-     *      - none
+        * @notice Return the schema version for this module's outputs.
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Read-only
+        * - Pure function.
      *
-     * @return version Schema version
+        * @return version Schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;

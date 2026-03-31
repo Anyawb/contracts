@@ -24,7 +24,12 @@ interface IFeeRouterView {
      * @param feeAmount Fee amount to accumulate (token decimals; same unit as writer)
      * @param personalFeeBps Applied personal fee rate in bps (\(1e4 = 100%\))
      */
-    function pushUserFeeUpdate(address user, bytes32 feeType, uint256 feeAmount, uint256 personalFeeBps) external;
+    function pushUserFeeUpdate(
+        address user,
+        bytes32 feeType,
+        uint256 feeAmount,
+        uint256 personalFeeBps
+    ) external;
 
     /**
      * @notice Push global distribution counters into the view cache (best-effort).
@@ -37,7 +42,10 @@ interface IFeeRouterView {
      * @param totalDistributions Total distribution count (unitless)
      * @param totalAmountDistributed Total distributed amount (token decimals aggregated by writer)
      */
-    function pushGlobalStatsUpdate(uint256 totalDistributions, uint256 totalAmountDistributed) external;
+    function pushGlobalStatsUpdate(
+        uint256 totalDistributions,
+        uint256 totalAmountDistributed
+    ) external;
 
     /**
      * @notice Push the FeeRouter system config into the view cache (best-effort).
@@ -73,6 +81,9 @@ interface IFeeRouterView {
      * @param feeType Fee type identifier (bytes32)
      * @param amount Total accumulated amount (token decimals)
      */
-    function pushGlobalFeeStatistic(address token, bytes32 feeType, uint256 amount) external;
+    function pushGlobalFeeStatistic(
+        address token,
+        bytes32 feeType,
+        uint256 amount
+    ) external;
 }
-

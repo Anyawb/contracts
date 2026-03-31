@@ -51,6 +51,110 @@ async function deployUUPSProxy(implName: string, initData: string) {
 }
 
 describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
+  const EIP712_DOMAIN_NAME = 'RwaLending';
+  const EIP712_DOMAIN_VERSION = '1';
+
+  const BORROW_INTENT_TYPES = {
+    BorrowIntent: [
+      { name: 'borrower', type: 'address' },
+      { name: 'collateralAsset', type: 'address' },
+      { name: 'collateralAmount', type: 'uint256' },
+      { name: 'borrowAsset', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'termDays', type: 'uint16' },
+      { name: 'rateBps', type: 'uint256' },
+      { name: 'expireAt', type: 'uint256' },
+      { name: 'salt', type: 'bytes32' },
+    ],
+  } as const;
+
+  const LEND_INTENT_TYPES = {
+    LendIntent: [
+      { name: 'lenderSigner', type: 'address' },
+      { name: 'asset', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'minTermDays', type: 'uint16' },
+      { name: 'maxTermDays', type: 'uint16' },
+      { name: 'minRateBps', type: 'uint256' },
+      { name: 'expireAt', type: 'uint256' },
+      { name: 'salt', type: 'bytes32' },
+    ],
+  } as const;
+
+  async function finalizeMatchAndGetOrderId(args: {
+    vbl: any;
+    orderEngine: any;
+    borrower: any;
+    lender: any;
+    token: any;
+    principal: bigint;
+    annualRateBps: bigint;
+    termDays: number;
+  }): Promise<bigint> {
+    const { vbl, orderEngine, borrower, lender, token, principal, annualRateBps, termDays } = args;
+
+    const network = await ethers.provider.getNetwork();
+    const domain = {
+      name: EIP712_DOMAIN_NAME,
+      version: EIP712_DOMAIN_VERSION,
+      chainId: network.chainId,
+      verifyingContract: await vbl.getAddress(),
+    };
+
+    const currentBlock = await ethers.provider.getBlockNumber();
+    const expireAt = BigInt(currentBlock + 10_000);
+
+    const borrowIntent = {
+      borrower: borrower.address,
+      collateralAsset: ethers.ZeroAddress,
+      collateralAmount: 0n,
+      borrowAsset: await token.getAddress(),
+      amount: principal,
+      termDays,
+      rateBps: annualRateBps,
+      expireAt,
+      salt: ethers.keccak256(ethers.toUtf8Bytes(`borrow-${borrower.address}-${principal}-${Date.now()}`)),
+    };
+
+    const lendIntent = {
+      lenderSigner: lender.address,
+      asset: await token.getAddress(),
+      amount: principal,
+      minTermDays: termDays,
+      maxTermDays: termDays,
+      minRateBps: annualRateBps,
+      expireAt,
+      salt: ethers.keccak256(ethers.toUtf8Bytes(`lend-${lender.address}-${principal}-${Date.now()}`)),
+    };
+
+    const lendIntentHash = ethers.TypedDataEncoder.hashStruct('LendIntent', LEND_INTENT_TYPES, lendIntent);
+
+    // Lender reserves principal into pool custody.
+    await token.connect(lender).approve(await vbl.getAddress(), principal);
+    await vbl.connect(lender).reserveForLending(lender.address, await token.getAddress(), principal, lendIntentHash);
+
+    const sigBorrower = await borrower.signTypedData(domain, BORROW_INTENT_TYPES, borrowIntent);
+    const sigLender = await lender.signTypedData(domain, LEND_INTENT_TYPES, lendIntent);
+
+    const tx = await vbl.connect(borrower).finalizeMatch(borrowIntent, [lendIntent], sigBorrower, [sigLender]);
+    const receipt = await tx.wait();
+
+    // Parse MockOrderEngineForSettlementManager.MockOrderCreated(orderId,...)
+    for (const log of receipt!.logs) {
+      if (log.address.toLowerCase() !== (await orderEngine.getAddress()).toLowerCase()) continue;
+      try {
+        const parsed = orderEngine.interface.parseLog(log);
+        if (parsed?.name === 'MockOrderCreated') {
+          return BigInt(parsed.args.orderId);
+        }
+      } catch {
+        // ignore non-matching logs
+      }
+    }
+
+    throw new Error('orderId not found in MockOrderCreated logs');
+  }
+
   async function fixture() {
     const [owner, borrower, keeper] = await ethers.getSigners();
 
@@ -85,6 +189,9 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
 
     const liquidationManager = await (await ethers.getContractFactory('MockLiquidationManager')).deploy();
     await liquidationManager.waitForDeployment();
+
+    const assetWhitelist = await (await ethers.getContractFactory('MockAssetWhitelist')).deploy();
+    await assetWhitelist.waitForDeployment();
 
     const orderEngine = await (await ethers.getContractFactory('MockOrderEngineForSettlementManager')).deploy();
     await orderEngine.waitForDeployment();
@@ -163,6 +270,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
       KEY_POSITION_VIEW: ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW')),
       KEY_LIQUIDATION_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_MANAGER')),
       KEY_FR: ethers.keccak256(ethers.toUtf8Bytes('FEE_ROUTER')),
+      KEY_ASSET_WHITELIST: ethers.keccak256(ethers.toUtf8Bytes('ASSET_WHITELIST')),
     } as const;
 
     await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, acm.target);
@@ -179,6 +287,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     await registry.setModule(ModuleKeys.KEY_POSITION_VIEW, pvVal.target);
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, liquidationManager.target);
     await registry.setModule(ModuleKeys.KEY_FR, feeRouter.target);
+    await registry.setModule(ModuleKeys.KEY_ASSET_WHITELIST, assetWhitelist.target);
 
     // Roles
     const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
@@ -190,7 +299,10 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     await acm.grantRole(ACTION_ORDER_CREATE, vbl.target);
     await acm.grantRole(ACTION_LIQUIDATE, keeper.address);
     await acm.grantRole(ACTION_DEPOSIT, gfm.target);
+    await acm.grantRole(ACTION_DEPOSIT, vbl.target);
     await feeRouter.connect(owner).addSupportedToken(token.target);
+
+    await assetWhitelist.setAssetAllowed(token.target, true);
 
     // Enable guarantee for this asset
     await ergm.connect(owner).setGuaranteeEnabled(token.target, true);
@@ -218,8 +330,8 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     };
   }
 
-  it('match borrow (borrowWithRate) -> locks custody + writes guarantee record', async function () {
-    const { borrower, token, vbl, gfm, ergm } = await loadFixture(fixture);
+  it('match borrow (finalizeMatch) -> locks custody + writes guarantee record', async function () {
+    const { owner, borrower, token, vbl, orderEngine, gfm, ergm } = await loadFixture(fixture);
 
     const principal = ethers.parseUnits('1000', 18);
     const annualRateBps = 1000n; // 10%
@@ -228,8 +340,16 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
 
     await token.connect(borrower).approve(gfm.target, principal); // plenty for guarantee pull
 
-    const orderId = await vbl.borrowWithRate.staticCall(borrower.address, ethers.ZeroAddress, token.target, principal, annualRateBps, Number(termDays));
-    await vbl.borrowWithRate(borrower.address, ethers.ZeroAddress, token.target, principal, annualRateBps, Number(termDays));
+    const orderId = await finalizeMatchAndGetOrderId({
+      vbl,
+      orderEngine,
+      borrower,
+      lender: owner,
+      token,
+      principal,
+      annualRateBps,
+      termDays: Number(termDays),
+    });
 
     expect(orderId).to.equal(0n);
     expect(await gfm.getLockedGuarantee(borrower.address, token.target)).to.equal(expectedInterest);
@@ -237,7 +357,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
   });
 
   it('early full repay -> 3-way distribution (refund / lender penalty / platform fee) and clears custody', async function () {
-    const { owner, borrower, token, vbl, vaultCore, gfm, ergm, lenderPoolVault } = await loadFixture(fixture);
+    const { owner, borrower, token, vbl, orderEngine, vaultCore, gfm, ergm, lenderPoolVault } = await loadFixture(fixture);
 
     const principal = ethers.parseUnits('1000', 18);
     const annualRateBps = 1000n; // 10%
@@ -245,8 +365,16 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     const expectedInterest = calcExpectedInterest(principal, annualRateBps, termDays);
 
     await token.connect(borrower).approve(gfm.target, principal);
-    const orderId = await vbl.borrowWithRate.staticCall(borrower.address, ethers.ZeroAddress, token.target, principal, annualRateBps, Number(termDays));
-    await vbl.borrowWithRate(borrower.address, ethers.ZeroAddress, token.target, principal, annualRateBps, Number(termDays));
+    const orderId = await finalizeMatchAndGetOrderId({
+      vbl,
+      orderEngine,
+      borrower,
+      lender: owner,
+      token,
+      principal,
+      annualRateBps,
+      termDays: Number(termDays),
+    });
 
     const guaranteeId = await ergm.getUserGuaranteeId(borrower.address, token.target);
     expect(guaranteeId).to.not.equal(0n);
@@ -256,8 +384,11 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     const recordBefore = await ergm.getGuaranteeRecord(guaranteeId);
     const feeRate = await ergm.platformFeeRate();
 
-    // Ensure borrower can repay full principal even after paying guarantee
-    await token.transfer(borrower.address, expectedInterest);
+    // Ensure borrower can repay full principal even after paying guarantee + match fees
+    const borrowerBalBeforeTopUp = await token.balanceOf(borrower.address);
+    if (borrowerBalBeforeTopUp < principal) {
+      await token.transfer(borrower.address, principal - borrowerBalBeforeTopUp);
+    }
     await token.connect(borrower).approve(vaultCore.target, principal);
 
     const userBalBefore = await token.balanceOf(borrower.address);
@@ -287,7 +418,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
   });
 
   it('settleOrLiquidate -> processes default guarantee forfeiture and clears custody', async function () {
-    const { borrower, keeper, token, vbl, gfm, ergm, lenderPoolVault, risk, cm, le, orderEngine, settlementManager } =
+    const { owner, borrower, keeper, token, vbl, gfm, ergm, lenderPoolVault, risk, cm, le, orderEngine, settlementManager } =
       await loadFixture(fixture);
 
     const principal = ethers.parseUnits('500', 18);
@@ -296,8 +427,16 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     const expectedInterest = calcExpectedInterest(principal, annualRateBps, termDays);
 
     await token.connect(borrower).approve(gfm.target, principal);
-    const orderId = await vbl.borrowWithRate.staticCall(borrower.address, ethers.ZeroAddress, token.target, principal, annualRateBps, Number(termDays));
-    await vbl.borrowWithRate(borrower.address, ethers.ZeroAddress, token.target, principal, annualRateBps, Number(termDays));
+    const orderId = await finalizeMatchAndGetOrderId({
+      vbl,
+      orderEngine,
+      borrower,
+      lender: owner,
+      token,
+      principal,
+      annualRateBps,
+      termDays: Number(termDays),
+    });
 
     // Make user liquidatable (risk branch) and ensure collateral exists
     await risk.setLiquidatable(borrower.address, true);

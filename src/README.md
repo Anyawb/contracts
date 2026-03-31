@@ -5,6 +5,8 @@
 ## 📁 目录结构
 
 ```
+
+> 价格预言机接口现按读/管边界拆分：Solidity 侧优先依赖 `IPriceOracleRead` / `IPriceOracleAdmin`，`IPriceOracle` 仅保留为兼容聚合口。
 src/
 ├── access/                    # 访问控制模块
 ├── constants/                 # 常量定义（ModuleKeys, ActionKeys等）
@@ -177,10 +179,10 @@ address vaultCore = registry.getModule(ModuleKeys.KEY_VAULT_CORE);
 **主要合约**：
 - `PriceOracle.sol` - 价格预言机
   - 支持多资产价格查询
-  - CoinGecko 价格集成
+  - 链下 source 价格集成
   - 价格时效性验证
   
-- `CoinGeckoPriceUpdater.sol` - CoinGecko 价格更新器
+- `PriceUpdater.sol` - 统一价格更新器
   - 批量价格更新
   - 价格数据验证
 

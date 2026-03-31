@@ -14,6 +14,16 @@ import './scripts/tasks/compile-filter-warnings';
 import './scripts/tasks/utils-tasks';
 import './scripts/tasks/e2e-batch-advanced';
 import './scripts/tasks/e2e-batch-10-users';
+import './scripts/tasks/e2e-reward-edgecases';
+import './scripts/tasks/e2e-liquidation-reward-penalty';
+
+const hardhatForkUrl = process.env.HARDHAT_FORK_URL;
+const hardhatForkBlockNumber = process.env.HARDHAT_FORK_BLOCK_NUMBER
+  ? Number(process.env.HARDHAT_FORK_BLOCK_NUMBER)
+  : undefined;
+const hardhatForkChainId = process.env.HARDHAT_FORK_CHAIN_ID
+  ? Number(process.env.HARDHAT_FORK_CHAIN_ID)
+  : undefined;
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -40,7 +50,13 @@ const config: HardhatUserConfig = {
   },
   networks: {
     hardhat: {
-      chainId: 1337,
+      chainId: hardhatForkChainId ?? 1337,
+      forking: hardhatForkUrl
+        ? {
+            url: hardhatForkUrl,
+            blockNumber: hardhatForkBlockNumber,
+          }
+        : undefined,
     },
     localhost: {
       // Allow smoke runners to point localhost at an ephemeral fresh node.
@@ -48,11 +64,11 @@ const config: HardhatUserConfig = {
       url: process.env.LOCALHOST_RPC_URL || 'http://127.0.0.1:8545',
     },
     arbitrum: {
-      url: process.env.ARBITRUM_RPC_URL || '',
+      url: process.env.ARBITRUM_RPC_URL || process.env.ARBITRUM_URL || '',
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
     arbitrumSepolia: {
-      url: process.env.ARBITRUM_SEPOLIA_RPC_URL || '',
+      url: process.env.ARBITRUM_SEPOLIA_RPC_URL || process.env.ARBITRUM_SEPOLIA_URL || '',
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
   },

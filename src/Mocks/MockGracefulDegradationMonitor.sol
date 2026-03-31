@@ -73,7 +73,7 @@ contract MockGracefulDegradationMonitor {
         uint256 _totalDegradations,
         uint256 _lastDegradationTime,
         address _lastDegradedModule,
-        string memory _lastDegradationReason,
+        string calldata _lastDegradationReason,
         uint256 _fallbackValueUsed,
         uint256 _totalFallbackValue,
         uint256 _averageFallbackValue

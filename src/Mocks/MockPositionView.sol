@@ -129,7 +129,7 @@ contract MockPositionView is IPositionView {
             uint64[] memory versions
         )
     {
-        require(users.length == assets.length, "MockPositionView: length mismatch");
+            require(users.length == assets.length, "MPV: len mismatch");
         uint256 len = users.length;
         collaterals = new uint256[](len);
         debts = new uint256[](len);

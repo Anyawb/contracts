@@ -651,14 +651,12 @@ describe('VaultLendingEngine – refactor regression', function () {
 
   describe('forceReduceDebt (liquidation path)', function () {
     it('should revert without ACTION_LIQUIDATE role', async function () {
-      const { vaultCoreModule, user, lending, debtAsset, acm } = await loadFixture(deployFixture);
+      const { vaultCoreModule, user, lending, debtAsset, acm, registry } = await loadFixture(deployFixture);
       await vaultCoreModule.borrow(user.address, debtAsset, 15, 0, 0);
       // Use the liquidation executor address, but revoke role by not granting it for this caller.
       // (In fixture we grant role to liquidationManager; here we simulate missing role by using `user` as executor.)
       // First, set KEY_LIQUIDATION_MANAGER to `user` (who lacks ACTION_LIQUIDATE).
       // This ensures the executor guard passes and the role gate is actually tested.
-      const registryAddr = await lending.registryAddr();
-      const registry = await ethers.getContractAt('MockRegistry', registryAddr);
       await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, user.address);
       await expect(
         lending.connect(user).forceReduceDebt(user.address, debtAsset, 5)

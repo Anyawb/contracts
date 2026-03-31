@@ -234,20 +234,6 @@ contract DegradationCore is Initializable, UUPSUpgradeable {
         return _reasonHashToText[reasonHash];
     }
 
-    /**
-     * @notice Compatibility getter for the Registry address.
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - View-only
-     *
-     * @return registry Registry address.
-     */
-    function registryAddr() external view returns (address registry) { 
-        return _registryAddr; 
-    }
-
     /*━━━━━━━━━━━━━━━ Internal Logic ━━━━━━━━━━━━━━━*/
     /**
      * @notice Register a degradation reason if new.

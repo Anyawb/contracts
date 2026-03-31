@@ -149,7 +149,7 @@
 | 文件 | 缓存字段（核心） | TTL/失效判定 | 写入者 | 权限 | 失败/重试路径 | 是否应实现 `ICacheRefreshable` |
 |---|---|---|---|---|---|---|
 | `src/registry/RegistrySignatureManager.sol` | `_domainSeparatorValue/_cachedChainId` | chainId 变化时 view 侧临时重算；可调用内部更新缓存 | 合约自身 | owner/upgradeAdmin 体系 | 无“运维刷新”必要 | ❌ |
-| `src/core/CoinGeckoPriceUpdater.sol` | 无“模块地址/权限地址缓存”（统一从 Registry 解析 ACM/模块）；内部仅保留业务必要状态（如 `_lastValidPrice`） | N/A | 合约自身 | `ActionKeys` 权限体系（每次从 Registry 解析 ACM） | 无统一失败模型 | ❌ |
+| `src/core/PriceUpdater.sol` | 无“模块地址/权限地址缓存”（统一从 Registry 解析 ACM/模块）；内部仅保留业务必要状态（如 `_lastValidPrice`） | N/A | 合约自身 | `ActionKeys` 权限体系（每次从 Registry 解析 ACM） | 无统一失败模型 | ❌ |
 | `src/Reward/RewardManagerCore.sol` | `_pointCache[user]` + `_cacheExpirationTime` | `_cacheExpirationTime`（默认 1h） | RMCore 业务逻辑内部 | 治理通过 RewardManager 调参 | 非推送失败模型 | ❌ |
 | `src/Reward/internal/RewardModuleBase.sol` | `_cachedRewardViewAddr/_cachedRewardViewTs` | `RV_CACHE_TTL = 1 hours` | Reward 模块内部 | internal | 推送失败 emit `RewardViewPushFailed` | ❌ |
 | `src/libraries/GracefulDegradation.sol` | `CacheStorage.priceCache[asset]` | `maxPriceAge` + `PriceCache.isValid` | 调用方在 non-view 路径写入 | 取决于调用合约 | 降级回退 + 监控事件 | ❌ |
@@ -216,7 +216,7 @@
 | `src/Reward/RewardManagerCore.sol` | C | `_pointCache[user]` | `_cacheExpirationTime`（如 1h） | RMCore | 治理调参；业务内部写 | 非推送失败模型 | ❌ | ❌ |
 | `src/Reward/internal/RewardModuleBase.sol` | C | `_cachedRewardViewAddr/_cachedRewardViewTs` | `RV_CACHE_TTL`（如 1h） | Reward 模块内部 | internal | 推送失败 emit `RewardViewPushFailed` | ❌ | ❌ |
 | `src/registry/RegistrySignatureManager.sol` | C | `_domainSeparatorValue/_cachedChainId` | chainId 变化时动态重算 | 合约自身 | 管理员升级体系 | 无运维刷新必要 | ❌ | ❌ |
-| `src/core/CoinGeckoPriceUpdater.sol` | C（业务内部） | `_lastValidPrice/_lastUpdateTime/_updateFailureCount`（业务内“最近值/状态”，不属于模块地址缓存） | 由业务流程覆盖更新 | 合约自身 | 内部写；外部写入口需 `ACTION_*` | N/A | ❌ | ❌ |
+| `src/core/PriceUpdater.sol` | C（业务内部） | `_lastValidPrice/_lastUpdateTime/_updateFailureCount`（业务内“最近值/状态”，不属于模块地址缓存） | 由业务流程覆盖更新 | 合约自身 | 内部写；外部写入口需 `ACTION_*` | N/A | ❌ | ❌ |
 | `src/libraries/GracefulDegradation.sol` | C | `priceCache[asset]` | `maxPriceAge` + `isValid` | 调用方写入 | 取决于调用合约 | 降级回退 + 监控 | ❌ | ❌ |
 | `[REMOVED] src/Vault/liquidation/libraries/LiquidationRiskCacheLib.sol` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | `src/Vault/view/modules/SystemView.sol` | None（门面） | `_viewCache` 存储字段保留（存储布局兼容）；getter 动态从 Registry 读 | N/A（动态读取，无 stale 风险） | initialize | 读：system viewer；写：无 | N/A | ❌ | ❌ |
@@ -269,4 +269,56 @@
 - [ ] 分页边界：`limit` 默认/上限固定；`cursor/offset` 越界返回空列表而非 500；排序稳定（按 `(blockNumber, logIndex)`）
 - [ ] 幂等键约定：跨服务透传 `X-Idempotency-Key`；链上事件幂等键格式固定为 `chain:c{chainId}:{txHash}:log-{logIndex}`
 - [ ] 重组窗口约定：明确 `finalityDepth`（如 64 blocks）与状态（`PENDING/CONFIRMED/REORGED`）；窗口内数据可回滚重算
+
+## RWA 价格与缓存补充口径
+
+### 1. PriceOracle 价格不属于 B 类快照缓存
+
+RWA 价格系统容易和 ViewCache / PositionView 这类 B 类缓存混淆，但它们不是一类东西：
+
+1. PriceOracle 是链上权威价格存储
+2. PositionView / HealthView / StatisticsView / ViewCache 是业务快照缓存
+3. Google Finance 原始行情及其归一化结果属于 D 类链下读模型
+
+因此：
+
+1. 不要把 Google Finance 原值写进链上缓存
+2. 不要把链下 source ticker、raw currency 塞进 ViewCache
+3. 链上只应保留统一的 USD-8 价格与 updateBlock
+
+### 2. 建议新增的 D 类读模型键
+
+推荐链下缓存或数据库读模型至少维护：
+
+1. price-source:{oracleAssetKey}
+2. price-publish:{chainId}:{oracleAssetKey}
+3. preflight:{registry}:{asset}
+
+### 3. 与 preflight 的关系
+
+preflight 应优先读取 D 类读模型，再按需回读链上：
+
+1. 先看最近一次采集是否成功
+2. 再看最近一次 publish 是否成功
+3. 最后抽样回读 PriceOracle.getPrice
+
+最终消费规则应统一为：
+
+1. 前端、preflight、缓存都只认链上最终价和链下发布状态
+2. raw source 价格不能直接作为 UI、风控、交易决策依据
+3. 没有 publish status 的链上价格只能被视为待确认状态，而不是完全可信的长期状态
+
+只有这样才能区分：
+
+1. 真正缺价格
+2. 写链失败
+3. 索引滞后
+4. View 缓存未热
+
+### 4. live mock 与 launch 模式下的缓存差异
+
+1. live mock 模式可以接受 bootstrap 价格写链后再由 D 类读模型追平
+2. launch 模式不接受“没有链下 price snapshot 但链上手工补了一个值”作为长期运行状态
+3. 一旦进入 launch 模式，price-source 与 price-publish 两类读模型都应变成 preflight 的硬检查项
+4. 统一发布路径下，D 类读模型应默认把 `PriceUpdater.updateAssetPrice` 视为正常写链入口，把 `PriceOracle.updatePrice` 视为例外事件并单独标注
 

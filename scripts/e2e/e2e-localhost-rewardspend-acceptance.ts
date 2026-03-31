@@ -1,4 +1,6 @@
 import { ethers, network } from "hardhat";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { runViewPreflight } from "./utils/view-preflight.ts";
 import { envBool, loadAddressMap, resolveAddress } from "../tests/_addressResolver";
 
@@ -16,6 +18,23 @@ function fmtErr(e: any) {
 
 function isMissingSelectorError(msg: string): boolean {
   return String(msg).includes("function selector was not recognized");
+}
+
+function mkArtifactsWriter() {
+  const outDir = path.join(__dirname, "artifacts");
+  try {
+    fs.mkdirSync(outDir, { recursive: true });
+  } catch {
+    // ignore
+  }
+  return {
+    writeJson: (name: string, data: unknown) => {
+      const p = path.join(outDir, name);
+      const replacer = (_k: string, v: any) => (typeof v === "bigint" ? v.toString() : v);
+      fs.writeFileSync(p, JSON.stringify(data, replacer, 2) + "\n", "utf8");
+      return p;
+    },
+  };
 }
 
 function errorSelector(sig: string): string {
@@ -96,7 +115,7 @@ function findDataPushedPayload(receipt: any, rewardViewAddr: string, expectedTyp
   throw new Error(`expected DataPushed(${expectedTypeHash}) not found in receipt`);
 }
 
-async function ensurePointsAtLeast(opts: {
+async function ensureEasyAtLeast(opts: {
   rewardManager: any;
   easyToken: any;
   easyEmissionControllerAddr?: string;
@@ -146,13 +165,20 @@ async function ensurePointsAtLeast(opts: {
     await (await easyToken.connect(ec).mint(userAddr, deficit)).wait();
   }
   const balFinal = (await easyToken.balanceOf(userAddr)) as bigint;
-  if (balFinal < minEasy) throw new Error(`cannot mint enough EASY: have=${balFinal} need>=${minEasy}`);
+  if (balFinal < minEasy) throw new Error(`cannot mint enough EasyToken: have=${balFinal} need>=${minEasy}`);
 }
 
 export async function runRewardSpendAcceptance() {
   const supportsHardhat = network.name === "localhost" || network.name === "hardhat";
   const readOnly = envBool("READ_ONLY", network.name !== "localhost");
   const enableWrite = envBool("ENABLE_WRITE", !readOnly);
+
+  const artifacts = mkArtifactsWriter();
+  const dataPushedByTypeHash: Record<string, number> = {};
+  const bump = (h: string) => {
+    const k = h.toLowerCase();
+    dataPushedByTypeHash[k] = (dataPushedByTypeHash[k] ?? 0) + 1;
+  };
 
   const addressMap = loadAddressMap(network.name);
   const registryAddr = resolveAddress({ name: "Registry", map: addressMap, envVar: "REGISTRY_ADDRESS" });
@@ -202,12 +228,27 @@ export async function runRewardSpendAcceptance() {
     if (readOnly || !enableWrite) {
       // Real-chain safety default: do not mutate state.
       console.log("  ℹ️  [read-only] skipping EasyConsumption spend (set ENABLE_WRITE=1 if you really want to write)");
+      const out = artifacts.writeJson(`rewardspend-acceptance.${Date.now()}.json`, {
+        name: "RewardSpend acceptance (read-only)",
+        generatedAt: new Date().toISOString(),
+        chainId: String((await ethers.provider.getNetwork()).chainId),
+        modules: {
+          Registry: registryAddr,
+          RewardView: rvAddr,
+          EasyToken: easyTokenAddr,
+          EasyConsumption: easyConsumptionAddr,
+        },
+        counters: {
+          dataPushedByTypeHash,
+        },
+      });
+      console.log(`Artifacts: ${out}`);
       console.log("\n✅ e2e-rewardspend (read-only) PASSED\n");
       return;
     }
 
     // Ensure we can spend/exchange without depending on dirty state.
-    await ensurePointsAtLeast({
+    await ensureEasyAtLeast({
       rewardManager: rm,
       easyToken,
       easyEmissionControllerAddr,
@@ -227,8 +268,28 @@ export async function runRewardSpendAcceptance() {
     assertOk(bal0 - bal1 === ONE_EASY, "EasyConsumption spend delta mismatch");
 
     // RewardView DataPushed observability for Easy spend + recycle split
-    findDataPushedPayload(rcptEasy, rvAddr, key("EASY_SPENT"));
-    findDataPushedPayload(rcptEasy, rvAddr, key("EASY_RECYCLED_SPLIT"));
+    const easySpent = key("EASY_SPENT");
+    const easyRecycled = key("EASY_RECYCLED_SPLIT");
+    findDataPushedPayload(rcptEasy, rvAddr, easySpent);
+    findDataPushedPayload(rcptEasy, rvAddr, easyRecycled);
+    bump(easySpent);
+    bump(easyRecycled);
+
+    const out = artifacts.writeJson(`rewardspend-acceptance.${Date.now()}.json`, {
+      name: "RewardSpend acceptance (EasyConsumption)",
+      generatedAt: new Date().toISOString(),
+      chainId: String((await ethers.provider.getNetwork()).chainId),
+      modules: {
+        Registry: registryAddr,
+        RewardView: rvAddr,
+        EasyToken: easyTokenAddr,
+        EasyConsumption: easyConsumptionAddr,
+      },
+      counters: {
+        dataPushedByTypeHash,
+      },
+    });
+    console.log(`Artifacts: ${out}`);
 
     console.log("\n✅ e2e-localhost-rewardspend-acceptance PASSED\n");
   } finally {

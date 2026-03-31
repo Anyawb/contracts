@@ -214,15 +214,16 @@ async function main() {
   // View (VaultRouter) must be resolved via VaultCore.viewContractAddrVar() per Architecture-Guide.
   const vaultRouterAddr = (await vaultCore.viewContractAddrVar()) as string;
   const vaultRouter = (await ethers.getContractAt("VaultRouter", vaultRouterAddr, deployer)) as any;
-  const assetWhitelist = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist, deployer)) as any;
+  const assetWhitelistRead = (await ethers.getContractAt("IAssetWhitelistRead", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+  const assetWhitelistAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
   const dynKeyRegistryAddr = CONTRACT_ADDRESSES.RegistryDynamicModuleKey;
   const dynKeyRegistry = dynKeyRegistryAddr
     ? ((await ethers.getContractAt("RegistryDynamicModuleKey", dynKeyRegistryAddr, deployer)) as any)
     : undefined;
-  const priceUpdater = CONTRACT_ADDRESSES.CoinGeckoPriceUpdater
+  const priceUpdater = CONTRACT_ADDRESSES.PriceUpdater
     ? ((await ethers.getContractAt(
-        "src/core/CoinGeckoPriceUpdater.sol:CoinGeckoPriceUpdater",
-        CONTRACT_ADDRESSES.CoinGeckoPriceUpdater,
+        "src/core/PriceUpdater.sol:PriceUpdater",
+        CONTRACT_ADDRESSES.PriceUpdater,
         deployer
       )) as any)
     : undefined;
@@ -464,8 +465,8 @@ async function main() {
       });
 
       // Ensure asset is allowed + oracle supported + fresh price.
-      if (!(await assetWhitelist.isAssetAllowed(asset))) {
-        await (await assetWhitelist.connect(deployer).addAllowedAsset(asset)).wait();
+      if (!(await assetWhitelistRead.isAssetAllowed(asset))) {
+        await (await assetWhitelistAdmin.connect(deployer).addAllowedAsset(asset)).wait();
       }
       if (!(await feeRouter.isTokenSupported(asset))) {
         await (await feeRouter.connect(deployer).addSupportedToken(asset)).wait();
@@ -878,8 +879,8 @@ async function main() {
       await mustSucceed("role: VIEW_SYSTEM_DATA to SettlementManager", async () => ensureRole("VIEW_SYSTEM_DATA", settlementManagerAddr));
 
       // Ensure asset is allowed + FeeRouter supported + fresh oracle price.
-      if (!(await assetWhitelist.isAssetAllowed(asset))) {
-        await (await assetWhitelist.connect(deployer).addAllowedAsset(asset)).wait();
+      if (!(await assetWhitelistRead.isAssetAllowed(asset))) {
+        await (await assetWhitelistAdmin.connect(deployer).addAllowedAsset(asset)).wait();
       }
       if (!(await feeRouter.isTokenSupported(asset))) {
         await (await feeRouter.connect(deployer).addSupportedToken(asset)).wait();
@@ -1205,7 +1206,7 @@ async function main() {
 
       if (priceUpdater) {
         const upAsAttacker = priceUpdater.connect(attacker);
-        await mustRevert("attacker: CoinGeckoPriceUpdater.updateAssetPrice()", async () => {
+        await mustRevert("attacker: PriceUpdater.updateAssetPrice()", async () => {
           await (await upAsAttacker.updateAssetPrice(asset, 1n, nowBlock)).wait();
         });
       }
@@ -1368,9 +1369,9 @@ async function main() {
       if (!(await acm.hasRole(ACTION_ADD_WHITELIST, deployer.address))) {
         await (await acm.grantRole(ACTION_ADD_WHITELIST, deployer.address)).wait();
       }
-      if (!(await assetWhitelist.isAssetAllowed(asset))) {
+      if (!(await assetWhitelistRead.isAssetAllowed(asset))) {
         await mustSucceed("governance: AssetWhitelist.addAllowedAsset(USDC) (Section 12 probe)", async () => {
-          await (await assetWhitelist.connect(deployer).addAllowedAsset(asset)).wait();
+          await (await assetWhitelistAdmin.connect(deployer).addAllowedAsset(asset)).wait();
         });
       }
 
@@ -1627,7 +1628,7 @@ async function main() {
     await scanViewModules(CONTRACT_ADDRESSES.Registry, {
       assetAddr: await usdc.getAddress(),
       sampleUser: victim.address,
-      strict: false,
+      strict: true,
     });
   }
 

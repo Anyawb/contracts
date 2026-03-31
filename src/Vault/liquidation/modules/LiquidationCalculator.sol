@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {LiquidationConfigManager} from "./LiquidationConfigManager.sol";
 
-import {ILendingEngineBasic} from "../../../interfaces/ILendingEngineBasic.sol";
+import {ILendingEngineDebtRead} from "../../../interfaces/ILendingEngineDebtRead.sol";
 import {IPositionViewValuation} from "../../../interfaces/IPositionViewValuation.sol";
 import {LiquidationRiskLib} from "../libraries/LiquidationRiskLib.sol";
 import {LiquidationRiskQueryLib} from "../libraries/LiquidationRiskQueryLib.sol";
@@ -11,34 +11,24 @@ import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
 import {ZeroAddress} from "../../../errors/StandardErrors.sol";
 import {Registry} from "../../../registry/Registry.sol";
 
-/// @title LiquidationCalculator
-/// @notice Base class for liquidation calculator.
-/// @dev Provides read-only calculations and best-effort previews for liquidation.
-/// @dev Module positioning: abstract base class for other liquidation modules to inherit; read-only only.
-/// @dev If registration in Registry is needed, use KEY_LIQUIDATION_CALCULATOR as the module key
-/// @dev Design principles:
-///     - Read-only calculations: all functions are view, do not modify on-chain state, 0 gas queries
-///     - Config & module cache: inherited from LiquidationConfigManager
-///     - Registry integration: inherited from LiquidationConfigManager (no hardcoding)
-/// @dev Integration with liquidation flow:
-///     - Subclasses inherit calculation and preview capabilities
-///     - Preview functionality: provides liquidation result preview for frontend/bots to evaluate liquidation impact
-/// @dev Architecture requirements:
-///     - Calculator stays read-only & minimal
-///     - Governance/module-cache live in ConfigManager; write paths never go through this module
-/// @dev Naming conventions (following Architecture-Guide.md §852-879):
-///     - Private state variables: _ + camelCase (e.g., _registryAddr, _moduleCache)
-///     - Public variables: camelCase + Var (e.g., registryAddrVar, liquidationBonusRateVar)
-///     - Constants: UPPER_SNAKE_CASE (e.g., CACHE_MAX_AGE)
-///     - Error names: PascalCase with __ prefix (module-specific errors should live in the module that throws them)
-abstract contract LiquidationCalculator is LiquidationConfigManager
-{
+/**
+ * @title LiquidationCalculator
+ * @notice Provides read-only liquidation calculations and best-effort previews.
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
+ * - Read-only abstract base class for liquidation modules.
+ * - Governance and module-cache writes remain in LiquidationConfigManager.
+ * - Preview paths are best-effort and return defaults if downstream valuation modules fail.
+ */
+abstract contract LiquidationCalculator is LiquidationConfigManager {
     // NOTE:
     // - Calculator is intentionally kept as a slim read-only module base.
     // - It does not implement governance/module-management entrypoints (those live in LiquidationConfigManager).
 
-    /* ============ Core Calculation Functions ============ */
-    
+    /*━━━━━━━━━━━━━━━ CORE CALCULATION FUNCTIONS ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Calculate liquidation bonus amount for a seizure.
      * @dev Reverts if:
@@ -99,7 +89,11 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
         uint256 collateralValue,
         uint256 debtValue
     ) external pure returns (uint256 healthFactor) {
-        return LiquidationRiskLib.calculateHealthFactor(collateralValue, debtValue);
+        return
+            LiquidationRiskLib.calculateHealthFactor(
+                collateralValue,
+                debtValue
+            );
     }
 
     /**
@@ -129,8 +123,8 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
         return 20;
     }
 
-    /* ============ Preview Functions ============ */
-    
+    /*━━━━━━━━━━━━━━━ PREVIEW FUNCTIONS ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Preview liquidation result (best-effort approximation).
      * @dev Reverts if:
@@ -140,7 +134,7 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
      *
      * Security:
      * - View-only function (no state changes)
-     * - Architecture alignment: does NOT access oracle directly; uses LendingEngine/PositionView valuation interfaces
+     * - Uses LendingEngine and PositionView valuation interfaces instead of direct oracle access.
      * - Best-effort: returns (0,0,0) if required modules are not registered or calls fail
      *
      * @param user User address
@@ -158,23 +152,30 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
         address debtAsset,
         uint256 collateralAmount,
         uint256 debtAmount
-    ) external view returns (
-        uint256 bonus,
-        uint256 newHealthFactor,
-        uint256 newRiskScore
-    ) {
-        if (user == address(0) || collateralAsset == address(0) || debtAsset == address(0)) revert ZeroAddress();
+    )
+        external
+        view
+        returns (uint256 bonus, uint256 newHealthFactor, uint256 newRiskScore)
+    {
+        if (
+            user == address(0) ||
+            collateralAsset == address(0) ||
+            debtAsset == address(0)
+        ) revert ZeroAddress();
 
         // 1) Bonus (amount-based; seized collateral amount is the base)
         bonus = (collateralAmount * liquidationBonusRateVar) / 10_000;
 
         // 2) Get current totals (settlement token denominated, 1e18-scaled)
-        (uint256 totalCollateralValue, uint256 totalDebtValue) = LiquidationRiskQueryLib.getUserValues(
-            user,
-            _registryAddr,
-            _moduleCache,
-            CACHE_MAX_AGE
-        );
+        (
+            uint256 totalCollateralValue,
+            uint256 totalDebtValue
+        ) = LiquidationRiskQueryLib.getUserValues(
+                user,
+                _registryAddr,
+                _moduleCache,
+                CACHE_MAX_AGE
+            );
 
         // If we cannot resolve totals, return default zeros (best-effort).
         if (totalCollateralValue == 0 && totalDebtValue == 0) {
@@ -183,10 +184,15 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
 
         // 3) Estimate seized collateral value via PositionView valuation.
         uint256 seizedCollateralValue = 0;
-        address positionView = Registry(_registryAddr).getModule(ModuleKeys.KEY_POSITION_VIEW);
+        address positionView = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_POSITION_VIEW
+        );
         if (positionView != address(0)) {
             try
-                IPositionViewValuation(positionView).getAssetValue(collateralAsset, collateralAmount)
+                IPositionViewValuation(positionView).getAssetValue(
+                    collateralAsset,
+                    collateralAmount
+                )
             returns (uint256 v) {
                 seizedCollateralValue = v;
             } catch {
@@ -196,16 +202,25 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
 
         // 4) Estimate reduced debt value via per-asset unit price derived from LendingEngine.
         uint256 reducedDebtValue = 0;
-        address lendingEngine = Registry(_registryAddr).getModule(ModuleKeys.KEY_LE);
+        address lendingEngine = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_LE
+        );
         if (lendingEngine != address(0)) {
             uint256 currentDebtAmount = 0;
             uint256 currentDebtValue = 0;
-            try ILendingEngineBasic(lendingEngine).getDebt(user, debtAsset) returns (uint256 amt) {
+            try
+                ILendingEngineDebtRead(lendingEngine).getDebt(user, debtAsset)
+            returns (uint256 amt) {
                 currentDebtAmount = amt;
             } catch {
                 currentDebtAmount = 0;
             }
-            try ILendingEngineBasic(lendingEngine).calculateDebtValue(user, debtAsset) returns (uint256 v) {
+            try
+                ILendingEngineDebtRead(lendingEngine).calculateDebtValue(
+                    user,
+                    debtAsset
+                )
+            returns (uint256 v) {
                 currentDebtValue = v;
             } catch {
                 currentDebtValue = 0;
@@ -214,17 +229,28 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
                 // unitPrice = value / amount (settlement token denominated per debt token unit)
                 uint256 unitPrice = currentDebtValue / currentDebtAmount;
                 reducedDebtValue = unitPrice * debtAmount;
-                if (reducedDebtValue > currentDebtValue) reducedDebtValue = currentDebtValue;
+                if (reducedDebtValue > currentDebtValue)
+                    reducedDebtValue = currentDebtValue;
             }
         }
 
         // 5) Compute new totals (clamped).
-        uint256 newCollateralValue =
-            totalCollateralValue > seizedCollateralValue ? totalCollateralValue - seizedCollateralValue : 0;
-        uint256 newDebtValue = totalDebtValue > reducedDebtValue ? totalDebtValue - reducedDebtValue : 0;
+        uint256 newCollateralValue = totalCollateralValue >
+            seizedCollateralValue
+            ? totalCollateralValue - seizedCollateralValue
+            : 0;
+        uint256 newDebtValue = totalDebtValue > reducedDebtValue
+            ? totalDebtValue - reducedDebtValue
+            : 0;
 
-        newHealthFactor = LiquidationRiskLib.calculateHealthFactor(newCollateralValue, newDebtValue);
-        newRiskScore = LiquidationRiskLib.calculateLiquidationRiskScore(newCollateralValue, newDebtValue);
+        newHealthFactor = LiquidationRiskLib.calculateHealthFactor(
+            newCollateralValue,
+            newDebtValue
+        );
+        newRiskScore = LiquidationRiskLib.calculateLiquidationRiskScore(
+            newCollateralValue,
+            newDebtValue
+        );
     }
 
     /**
@@ -236,7 +262,7 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
      *
      * Security:
      * - Pure function (no state changes)
-     * - Architecture alignment: does NOT access oracle; uses amount-based approximation only
+     * - Uses amount-based approximation only and does not access oracles directly.
      *
      * @param user User address
      * @param collateralAsset Collateral asset address
@@ -252,7 +278,11 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
         uint256 collateralAmount,
         uint256 debtAmount
     ) external pure returns (uint256 impact) {
-        if (user == address(0) || collateralAsset == address(0) || debtAsset == address(0)) revert ZeroAddress();
+        if (
+            user == address(0) ||
+            collateralAsset == address(0) ||
+            debtAsset == address(0)
+        ) revert ZeroAddress();
 
         // NOTE: amount-based approximation (50 bps baseline if total > 0).
         uint256 totalAmount = collateralAmount + debtAmount;
@@ -271,18 +301,24 @@ abstract contract LiquidationCalculator is LiquidationConfigManager
         uint256 length = users.length;
         riskScores = new uint256[](length);
 
-        for (uint256 i = 0; i < length;) {
+        for (uint256 i = 0; i < length; ) {
             address u = users[i];
             if (u != address(0)) {
-                (uint256 collateralValue, uint256 debtValue) = LiquidationRiskQueryLib.getUserValues(
-                    u,
-                    _registryAddr,
-                    _moduleCache,
-                    CACHE_MAX_AGE
-                );
-                riskScores[i] = LiquidationRiskLib.calculateLiquidationRiskScore(collateralValue, debtValue);
+                (
+                    uint256 collateralValue,
+                    uint256 debtValue
+                ) = LiquidationRiskQueryLib.getUserValues(
+                        u,
+                        _registryAddr,
+                        _moduleCache,
+                        CACHE_MAX_AGE
+                    );
+                riskScores[i] = LiquidationRiskLib
+                    .calculateLiquidationRiskScore(collateralValue, debtValue);
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
-} 
+}

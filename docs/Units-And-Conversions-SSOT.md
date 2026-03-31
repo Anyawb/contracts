@@ -50,7 +50,7 @@
 
 ### Oracle SSOT（底层存储）
 
-`IPriceOracle.getPrice(asset)` 返回：
+`IPriceOracleRead.getPrice(asset)` 返回：
 - `priceUsd8`：USD-8
 - `blockNumber`
 - `assetDecimals`：token decimals（用于换算缩放）

@@ -12,6 +12,20 @@
 
 ## Arbitrum 模式（默认推荐）
 
+### 文档边界
+
+为避免和 `scripts/e2e/README.md` 重复维护命令口径，这里固定职责如下：
+
+- 本 README：维护 `scripts/tests/*` 的 smoke / acceptance / prodlike / real-chain 模板
+- `scripts/e2e/README.md`：维护 fork pre-release、full strict E2E、blocks-only、advanced batch、release gate
+- 如果同一场景同时出现在两份文档中，以职责更贴近的一侧为准：
+  - fork pre-release / full strict E2E：看 `scripts/e2e/README.md`
+  - real-chain smoke / `ci-realchain-template.sh` / prodlike smoke：看本 README
+
+当前统一口径：本 README 不再重复定义 `pnpm -s run e2e:pre-release` 或 `run-all-e2e.ts` 的默认命令，只在需要说明边界时引用它们。
+
+补充边界说明：blocks-only rollout gate 继续由 `scripts/e2e/e2e-localhost-blocks-only-rollout-smoke.ts` 维护；它现在除了业务流程外，还会执行 keeper/模块角色预检、未授权 `MissingRole()` 预检，以及 `DataPushed` payload 解码对账，因此更适合作为 indexer / keeper 发布前 gate，而不是本 README 下的通用 real-chain smoke 替代品。
+
 ### 通用约定（所有 smoke 脚本统一口径）
 
 - **READ_ONLY**
@@ -23,6 +37,93 @@
 - **REGISTRY_ADDRESS**
   - 推荐：在真实网络上显式提供 `REGISTRY_ADDRESS=<your_registry>`
   - 也可通过 `deployments/addresses.<network>.json` 自动解析（见 `scripts/tests/_addressResolver.ts`）
+
+## 推荐执行清单
+
+### 1. fork 清单
+
+适用：把 real-chain smoke 的只读路径搬到 fork localhost 上复现，但不把它当成 full strict E2E / pre-release gate。
+
+```bash
+export ARBITRUM_SEPOLIA_RPC_URL="<your_rpc_url>"
+
+pnpm -s exec hardhat node --fork "$ARBITRUM_SEPOLIA_RPC_URL"
+READ_ONLY=1 pnpm -s exec hardhat run scripts/tests/verify-config-ssot-local.ts --network localhost
+GRANT_ROLE=0 REQUIRE_AUTHZ=0 pnpm -s exec hardhat run scripts/tests/view-schemeu-smoke-local.ts --network localhost
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/viewcache-smoke-local.ts --network localhost
+```
+
+说明：
+
+- 这里只覆盖 `scripts/tests/*` 的 smoke 读路径。
+- 如果目标是 fork pre-release、full strict E2E、blocks-only、advanced batch，请改看 `scripts/e2e/README.md`。
+
+### 2. real-chain 清单
+
+适用：真实链只读验收、CI 模板、最接近线上约束的 smoke 收口。
+
+```bash
+export PRIVATE_KEY="<your_private_key>"
+export ARBITRUM_SEPOLIA_RPC_URL="<your_rpc_url>"
+
+bash scripts/tests/ci-realchain-template.sh
+```
+
+说明：
+
+- `ci-realchain-template.sh` 内部会把 baseline 路径按 read-only 方式执行。
+- 只有 `RUN_CACHE_REFRESH=1` 时，才会显式打开写路径检查。
+
+### 3. localhost 清单
+
+适用：本地确定性复现、prodlike smoke、快速回归。
+
+```bash
+pnpm -s run test:smoke:quick:localhost
+pnpm -s run test:smoke:prodlike:localhost:autonode
+MODE=dirty RUN_DEPLOY=0 RUN_GRANT=0 RUN_PRECONFIG=0 pnpm -s run test:smoke:prodlike:localhost
+```
+
+### 4. localhost 多 RWA smoke
+
+当前 `test:smoke:multi-stablecoin:localhost` 已升级为“多 RWA collateral × 多稳定币 borrow”矩阵，同时保留兼容别名 `test:smoke:multi-rwa-matrix:localhost`。
+
+推荐命令：
+
+```bash
+MULTI_COLLATERAL_SYMBOLS="RWAGOLD,RWABOND,RWARE,RWAINV" \
+MULTI_STABLECOIN_SYMBOLS="mUSDC,mUSDT,mHKD,mSGD" \
+pnpm -s run test:smoke:multi-rwa-matrix:localhost
+```
+
+说明：
+
+1. 未显式传 `MULTI_COLLATERAL_SYMBOLS` / `MULTI_RWA_SYMBOLS` 时，会自动遍历 mock asset pack 中全部 `rwa-token`
+2. 价格初始化优先使用 `bootstrapPriceUsd8`，并兼容旧 pack 的 `defaultPriceUsd8`
+3. smoke 目标是校验 finalizeMatch / repay 的最小链路和基础 view，不替代 strict E2E
+
+### 5. Arbitrum Sepolia live mock price mode
+
+`scripts/tests/live-test/live-asset-precheck-arbitrum-sepolia.ts` 与 write-mode warmup 现在共享同一个显式价格模式开关：
+
+```bash
+LIVE_PRICE_MODE=bootstrap
+LIVE_PRICE_MODE=backend-required
+```
+
+语义：
+
+1. `bootstrap`：borrow/collateral 若缺少链上最终价，允许脚本按 `bootstrapPriceUsd8` 自动补价
+2. `backend-required`：borrow/collateral 若缺少链上最终价则直接 fail，要求 backend 先发布成功
+3. `ALLOW_DIRECT_PRICE_ORACLE=1` 仍然只是 break-glass；正常路径仍是 `PriceUpdater.updateAssetPrice`
+4. precheck 会直接提示当前是 `[Warning] bootstrap 可自动补价` 还是 `[Blocker] backend-required 仍缺链上最终价`
+
+说明：
+
+- 第一条适合快速 sanity。
+- 第二条适合 fresh 一键回归。
+- 第三条适合 dirty state 下贴近测试网/主网约束的复现。
+- 更细的 A/B/C/D 组合和故障排查，继续看下文 localhost 细化说明。
 
 ### 示例：在 Arbitrum Sepolia 只读跑 smoke
 
@@ -89,9 +190,10 @@ READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/reward-smoke-l
 READ_ONLY=0 ENABLE_WRITE=1 pnpm -s exec hardhat run scripts/tests/ai-credits-exchange-idempotency-smoke.ts --network arbitrumSepolia
 ```
 
-> 可写验收前请确认：  
-> - 执行账户具备对应角色（否则会 `MissingRole()`）  
-> - 账户 gas 余额充足  
+> 可写验收前请确认：
+>
+> - 执行账户具备对应角色（否则会 `MissingRole()`）
+> - 账户 gas 余额充足
 > - 你接受脚本会改变链上状态（特别是 cache / reward 相关写入）
 
 ## 冒烟运行器 “方案 A/B/C/D” （推荐） — `test:smoke:prodlike:localhost`
@@ -112,21 +214,42 @@ pnpm -s exec ts-node --project ./tsconfig.scripts.json scripts/tests/view-matrix
   - 脚本在 `scripts/e2e/README.md` 或 `scripts/tests/README.md` 中被提及（避免“孤儿脚本”）
 
 **相关脚本（本 README 覆盖）**：
+
 - `scripts/tests/phase3-positionview-acceptance.ts`
 - `scripts/tests/viewcache-smoke-local.ts`
 
 ### Runner 开关（env）
+
 - `RUN_VIEW_SMOKE=1`：新增 view + Scheme U 冒烟（`SystemRiskView` 路由、`HealthView` 公开读、`RiskView/BatchView` Scheme U gate）
 - `RUN_VIEWCACHE_SMOKE=1`：新增 ViewCache 冒烟（写权限 gate、TTL 过期、DataPushed payload 可解码）
-- `RUN_REWARD_SMOKE=1`：新增 Reward 冒烟（Earn 闸门 + GFM penalty + RewardView DataPushed + EasyToken 相关状态变更 + Easy 消耗可观测性）
+- `RUN_REWARD_SMOKE=1`：执行 `scripts/tests/reward-smoke-local.ts`；当前口径覆盖 `RewardView / EasyToken / EasyEmissionController / EasyConsumption / EasyRecycleDistributor`。在只读模式校验 Registry/角色/读模型一致性，在 localhost 写模式校验 late penalty debt、`applyLiquidationPenalty` burn/debt 与 `EASY_SPENT / EASY_RECYCLED_SPLIT` DataPushed；本地写模式的 Easy 余额自举已改为确定性的 admin mint fallback，不再依赖价格或 emission 前置
 - `RUN_CACHE_REFRESH=1`：A-class cache refresh 入口检查
 - `RUN_SSOT_VERIFY=1`：SSOT wiring 检查
 - `RUN_FUNDS=1`：funds-flow invariants suite
 - `RUN_ATTACK=1`：attack suite
 
-## 如何运行 Smoke（localhost：推荐一键）
+## localhost 细化说明
 
-> 推荐优先用 “ephemeral fresh node” 方式跑（最稳定、最接近 CI，一次命令自动起节点并执行 smoke）。
+> 对应上面的 “3. localhost 清单”。推荐优先用 “ephemeral fresh node” 方式跑（最稳定、最接近 CI，一次命令自动起节点并执行 smoke）。
+
+### dirty / fresh 规则
+
+localhost 下不要再把所有脚本都默认理解成“必须在全局空链上跑”。当前仓库要区分两类目标：
+
+- 用户链路一致性：验证当前测试用户的缓存/账本/视图是否一致
+- 系统 fresh 基线：验证 fresh deploy 后全局系统是否接近零状态、是否没有历史残留
+
+具体约定：
+
+- `scripts/e2e/e2e-localhost-full-with-views.ts` 现在属于“用户链路一致性”脚本。它会严格校验 `StatisticsView(user)`、`PositionView`、`UserView`、`DashboardView` 与当前用户账本的一致性。
+- `StatisticsView(global)` 在 dirty chain 上保留非零 `totalCollateral/totalDebt` 是允许的，只表示前序脚本留下了其他用户状态，不代表 `full-with-views` 失败。
+- `scripts/tests/funds-flow-invariants-suite.ts`、`scripts/e2e/e2e-localhost-batch-advanced-10-users.ts` 会主动累积系统状态，更适合放在 dirty chain / prodlike 回归里。
+- 如果你的目标是“检查 fresh 部署后系统全局基线”，请新起 localhost 节点并重新 deploy，不要复用已经跑过 funds-flow / batch 的链。
+
+前端/后端边界：
+
+- 这套规则主要是测试与运行口径，不要求前端为了这次修复改接口。
+- 但语义上要保持一致：全局 `StatisticsView` 是系统 totals，不应当被解释成当前用户 totals。
 
 ### 方式 0：快速 Smoke（最轻量，默认跳过 funds/attack）
 
@@ -150,7 +273,7 @@ pnpm -s run test:smoke:prodlike:localhost:autonode
 ```
 
 - **默认行为**（见 runner 输出）：`MODE=fresh RUN_DEPLOY=1 RUN_GRANT=1 RUN_PRECONFIG=1`，并执行 cache/SSOT/view/viewcache/reward/funds/attack 等步骤。
-- **只想快速验证 Reward**，可跳过 funds/attack（更快）：
+- **只想快速验证 Reward**，可跳过 funds/attack；prodlike runner 会保留 Reward smoke，但不替代 [scripts/e2e/README.md](scripts/e2e/README.md) 中的 Reward 全量 gate：
 
 ```bash
 RUN_FUNDS=0 RUN_ATTACK=0 pnpm -s run test:smoke:prodlike:localhost:autonode
@@ -190,13 +313,34 @@ MODE=dirty RUN_DEPLOY=0 RUN_GRANT=0 RUN_PRECONFIG=0 pnpm -s run test:smoke:prodl
   - **含义**：Registry 漏绑模块（常见是 EarnConfig/RewardView/LoanFlowView 等）。
   - **处理**：重新 deploy 并确认绑定阶段成功；优先用 autonode runner。
 
-### Reward smoke（本次回归总结）
-- **关键前置**：Reward 的可写参数（level multiplier / dynamic params）会通过 `RewardConfig -> Registry[REWARD_EARN_CONFIG] -> EarnConfig` 写入。
+### Reward smoke（当前口径）
+
+- **只读模式（Arbitrum / Arbitrum Sepolia）**：`reward-smoke-local.ts` 是 live-safe smoke。它会校验 `RewardView`、`EasyToken`、`EasyEmissionController`、`EasyConsumption`、`EasyRecycleDistributor` 是否已绑定且有代码，并读取 `getUserRewardSummaryWithMeta`、`getUserEasyEarnedWithMeta`、动态参数、level multiplier 与 recycle recipients。
+- **localhost 写模式**：脚本会进一步验证当前 Reward 主路径：
+  - `RewardManager -> RewardConfig -> EarnConfig` 的参数写入链路
+  - `onLoanEventByOrder(..., 1)` 触发 Easy mint，且 `RewardView.getUserEasyEarnedWithMeta` 单调不减
+  - late repay 在余额不足时进入 `RewardAccrualManager` penalty debt，并出现 `REWARD_PENALTY_LEDGER_UPDATED`
+  - `GuaranteeFundManager -> RewardManager.applyLiquidationPenalty` 分别覆盖 burn 路径与 debt 路径
+  - `EasyConsumption -> EasyRecycleDistributor` 覆盖消费与 75/15/10 split，并出现 `EASY_SPENT / EASY_RECYCLED_SPLIT`
+- **关键前置**：Reward 的可写参数（level multiplier / dynamic params）通过 `RewardConfig -> Registry[REWARD_EARN_CONFIG] -> EarnConfig` 写入。
   - 若本地链报 `ModuleNotRegistered(REWARD_EARN_CONFIG)`：说明 Registry 漏绑 `REWARD_EARN_CONFIG -> EarnConfig`，需要先修复部署/绑定流程再跑 smoke。
-- **常见失败点 1（MODE=fresh）**：`MODE=fresh` 必须在“真 fresh node”上跑，否则 runner 会拒绝执行。
+- **常见失败点 1（MODE=fresh）**：`MODE=fresh` 必须在“真 fresh node”上跑，否则 prodlike runner 会拒绝执行。
   - 推荐：重启 hardhat node，或使用 `test:smoke:prodlike:localhost:autonode`。
-- **常见失败点 2（penalty 抵扣导致余额不足）**：当存在 `pendingPenalty` 时，后续奖励会先抵扣欠分再入账，因此“mint 1 point”不一定让钱包余额立刻达到 1 point。
-  - 结论：脚本应按“余额达到阈值”为准（必要时多轮补分），而不是假设一次 mint 足够。
+- **常见失败点 2（penalty debt 抵扣）**：当存在 `pendingPenalty` 时，后续 Easy 发放会先抵扣欠 Easy 账本再体现在钱包余额里，因此单次 mint 不保证钱包立刻增加 `1 Easy`。
+  - 结论：应按“余额是否达到目标阈值 + `easyEarned` 是否单调不减”判断，而不是沿用旧的 “1 point 一次到账” 假设。
+- **角色/路径口径**：当前部署标准以 `EasyEmissionController` 为唯一 mint 路径；burn 侧以 `RewardAccrualManager` 与 `EasyRecycleDistributor` 为准，`RewardManagerCore` 不再作为直接 burn 路径。
+
+### Reward smoke / prodlike 推荐用法
+
+```bash
+# 只跑 Reward live-safe smoke（真链 / 测试网）
+READ_ONLY=1 ENABLE_WRITE=0 pnpm -s exec hardhat run scripts/tests/reward-smoke-local.ts --network arbitrumSepolia
+
+# localhost 上只跑 prodlike 的 Reward 路径（跳过 funds / attack）
+RUN_FUNDS=0 RUN_ATTACK=0 pnpm -s run test:smoke:prodlike:localhost:autonode
+```
+
+- 上述命令适合做 smoke / prodlike 收口；如果目标是 Reward 放行，请继续执行 [scripts/e2e/README.md](scripts/e2e/README.md) 中的 Reward 全量 gate，而不是仅依赖 smoke runner。
 
 ### 方案 A（dirty + 不自动准备；跑 attack 套件做安全/误配扫描）
 
@@ -214,7 +358,7 @@ pnpm -s run test:smoke:prodlike:localhost
   - 因此如果你在方案 A 下看到：
     - **资金流测试套件（funds-flow-invariants-suite）通过**
     - **攻击套件（e2e-localhost-attack-suite）通过**
-    这并不矛盾，反而说明：在当前 dirty state 上，所需 **角色/配置/链路** 已经齐备，系统能在“真实约束（不自动 grant）”下稳定跑通。
+      这并不矛盾，反而说明：在当前 dirty state 上，所需 **角色/配置/链路** 已经齐备，系统能在“真实约束（不自动 grant）”下稳定跑通。
 
 #### Shell 写法提示（避免 `\RUN_DEPLOY=...` 这种容易写错的形式）
 
@@ -248,6 +392,7 @@ pnpm -s run test:smoke:prodlike:localhost
 #### Dirty 模式下的数值变化（例如 aggregated debtValue 变化）如何解读
 
 在 dirty state 中，链上可能已经存在：
+
 - 历史订单/借贷/还款/清算导致的累计状态
 - 上一次测试留下的余额、利息、聚合债务等
 
@@ -289,8 +434,8 @@ pnpm -s run test:smoke:prodlike:localhost
 
 如果你的目标是 **funds-flow 在真实约束下运行**（不自动授角色/不自动补配置，最贴近真实上线/运维），建议：
 
-1) **先用 A 或 B 跑一遍**，让系统在真实约束下“自然失败”，从输出里定位缺口（通常是缺角色/缺白名单/缺价格/缺参数/链路未联通）。
-2) **再由你按团队真实 SOP 补齐**（例如部署后授角色、配置 oracle/whitelist、刷新 cache、核对 SSOT 绑定），然后反复跑 funds-flow，直到在“真实约束”下也能稳定通过。
+1. **先用 A 或 B 跑一遍**，让系统在真实约束下“自然失败”，从输出里定位缺口（通常是缺角色/缺白名单/缺价格/缺参数/链路未联通）。
+2. **再由你按团队真实 SOP 补齐**（例如部署后授角色、配置 oracle/whitelist、刷新 cache、核对 SSOT 绑定），然后反复跑 funds-flow，直到在“真实约束”下也能稳定通过。
 
 ## 推荐“类生产”冒烟流程（最接近真实运维）
 
@@ -322,6 +467,7 @@ pnpm -s exec hardhat run "scripts/e2e/e2e-localhost-attack-suite.ts" --network l
 
 此模式假定节点已有既有状态（此前部署/升级/用户余额）。
 最适合用来暴露：
+
 - 升级后 A 类缓存路由陈旧
 - 角色漂移/缺失角色
 - view/cache 推送尽力可观测性问题
@@ -342,11 +488,23 @@ pnpm -s exec hardhat run "scripts/e2e/e2e-localhost-attack-suite.ts" --network l
 已提供一个可直接用于 CI 的模板脚本：`scripts/tests/ci-realchain-template.sh`。
 它会根据分支名推断 `arbitrum` / `arbitrumSepolia`，并按“读路径必跑、写路径可选”的方式执行。
 
+补充口径：
+
+- baseline 读路径由脚本内部强制按 read-only 执行；一般不需要手工再导出 `READ_ONLY=1` / `ENABLE_WRITE=0`
+- 只有 `RUN_CACHE_REFRESH=1` 时，脚本才会显式执行写路径 `cache-refresh-local.ts`
+
 **推荐组合（最接近真实但安全）**：
+
 - **必跑（读路径）**：
   - `verify-config-ssot-local.ts`
   - `view-schemeu-smoke-local.ts`
   - `viewcache-smoke-local.ts`
+  - `lendingengine-smoke-local.ts`
+  - `reward-smoke-local.ts`
+  - `funds-flow-smoke-create-order.ts`
+  - `funds-flow-smoke-conservation.ts`
+  - `funds-flow-smoke-local.ts`
+  - `funds-flow-invariants-suite.ts`
 - **可选（写路径，需权限）**：
   - `cache-refresh-local.ts`（维护者入口，需要写权限）
 
@@ -357,25 +515,32 @@ bash scripts/tests/ci-realchain-template.sh
 ```
 
 **必需环境变量**：
+
 - `PRIVATE_KEY`：签名用私钥（即使只读脚本也需要 signer）
 - `ARBITRUM_RPC_URL` 或 `ARBITRUM_SEPOLIA_RPC_URL`：按网络选择其一
 
 **可选环境变量（用于覆盖部署/配置）**：
+
 - `REGISTRY_ADDRESS`：目标网络的 Registry 地址
 - `VAULT_ROUTER_ADDRESS`：cache-refresh 需要（若脚本无法自行解析）
 
 **可选开关**：
+
 - `CI_NETWORK`：`arbitrum` | `arbitrumSepolia`（覆盖分支推断）
 - `RUN_CACHE_REFRESH=1`：启用写路径 `cache-refresh-local.ts`
 - `GRANT_ROLE=1`：为 `view-schemeu-smoke-local.ts` 自动授 `VIEW_RISK_DATA`（写路径）
 - `REQUIRE_AUTHZ=0`：缺少 `VIEW_RISK_DATA` 时跳过授权读（读路径仍可执行）
 
 **权限清单（真实链）**：
+
 - **只读路径**：无额外角色需求（若 `VIEW_RISK_DATA` 不具备，将自动降级为只跑自读/未授权断言）
 - **`view-schemeu-smoke-local.ts` 授权读**：需要 `VIEW_RISK_DATA`
 - **`cache-refresh-local.ts` 写路径**：需要维护者/管理员权限（可刷新 A-class cache）
 
 **Hardhat fork（模拟 arbitrumSepolia，最接近真实但不花测试币）**：
+
+> 这组命令用于“把 real-chain smoke 读路径搬到 fork localhost 上复现”。
+> 如果你的目标是 fork pre-release、部署后全量 E2E、blocks-only 或 advanced batch，请改看 `scripts/e2e/README.md`，不要把这里的 fork 读路径模板当成发布前全量 gate。
 
 ```bash
 # 1) 启 fork 节点（从 arbitrumSepolia 拉取状态）
@@ -389,9 +554,22 @@ GRANT_ROLE=0 REQUIRE_AUTHZ=0 \
 pnpm -s exec hardhat run "scripts/tests/view-schemeu-smoke-local.ts" --network localhost
 READ_ONLY=1 ENABLE_WRITE=0 \
 pnpm -s exec hardhat run "scripts/tests/viewcache-smoke-local.ts" --network localhost
+READ_ONLY=1 ENABLE_WRITE=0 \
+pnpm -s exec hardhat run "scripts/tests/lendingengine-smoke-local.ts" --network localhost
+READ_ONLY=1 ENABLE_WRITE=0 \
+pnpm -s exec hardhat run "scripts/tests/reward-smoke-local.ts" --network localhost
+READ_ONLY=1 ENABLE_WRITE=0 \
+pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-create-order.ts" --network localhost
+READ_ONLY=1 ENABLE_WRITE=0 \
+pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-conservation.ts" --network localhost
+READ_ONLY=1 ENABLE_WRITE=0 \
+pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-local.ts" --network localhost
+READ_ONLY=1 ENABLE_WRITE=0 \
+pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --network localhost
 ```
 
 说明：
+
 - fork 模式下是本地链，**不会消耗**测试网 ETH。
 - 若合约地址无法自动解析，可用 `REGISTRY_ADDRESS` 指定目标 Registry。
 
@@ -419,6 +597,7 @@ pnpm -s exec hardhat run "scripts/tests/lendingengine-smoke-local.ts" --network 
 ```
 
 常用开关（env）：
+
 - `STRICT=1/0`：默认 1。0 时把“抵押未自动释放”等环境差异降级为 warning（不 hard fail）。
 - `E2E_ALLOW_DIRTY_STATE=1`：允许在 dirty state 运行（会优先挑选“无债务且无抵押”的 signer；找不到才回退）。
 - `NO_AUTO_GRANT=1`：production-like。脚本不自动授角色；缺角色直接失败（更贴近真实运维约束）。
@@ -438,6 +617,7 @@ pnpm -s exec hardhat run "scripts/tests/lendingengine-smoke-local.ts" --network 
 所需角色（SSOT：`AccessControlManager`）：
 
 **A) 创建订单冒烟（`funds-flow-smoke-create-order.ts`）**
+
 - **deployer**（执行安装步骤的脚本签名者）必须拥有：
   - **`ACTION_ADD_WHITELIST`**（`keccak256("ADD_WHITELIST")`）— 用于在 `AssetWhitelist` 中放行抵押/债务代币（若尚未放行）
   - **`ACTION_UPDATE_PRICE`**（`keccak256("UPDATE_PRICE")`）— 用于在 `PriceOracle` 中设置价格（若尚未设置）
@@ -449,13 +629,15 @@ pnpm -s exec hardhat run "scripts/tests/lendingengine-smoke-local.ts" --network 
   - **`ACTION_BORROW`**（`keccak256("BORROW")`）— 用于铸造 `LoanNFT` 凭证
 
 此外，协议配置必须已就绪（本脚本 **不会** 自动配置）：
+
 - **AssetWhitelist** 必须放行冒烟使用的代币（localhost 默认：`MockUSDC`）。
 - **PriceOracle** 必须具有：
-  - **已启用** 的资产配置（如 `coingeckoId="usd-coin"`、`decimals=8`、`maxPriceAge=3600`）
+  - **已启用** 的资产配置（如 `sourceId="usd-coin"`、`decimals=8`、`maxPriceAge=3600`）
   - **新鲜且有效** 的价格（使 `PriceOracle.getPrice(token)` 不会因 `StalePrice/InvalidPrice` 回滚）
 - **FeeRouter** 必须已 **支持** 该代币（即 `FeeRouter.isTokenSupported(token) == true`）。
 
 **B) Keeper 路径严格冒烟（`funds-flow-smoke-local.ts`）**
+
 - **keeper**（调用 `SettlementManager.settleOrLiquidate` 的账户）必须拥有：
   - **`ACTION_LIQUIDATE`**（`keccak256("LIQUIDATE")`）
 - **SettlementManager** 必须拥有：
@@ -486,6 +668,7 @@ ORDER_ID=<N> pnpm -s exec hardhat run "scripts/tests/setup-and-test.ts" --networ
 ```
 
 该步骤会设置：
+
 - 借款人抵押代币余额
 - 借款人债务代币余额
 - 对 `CollateralManager` 的授权（存款路径）
@@ -517,6 +700,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-conservation.ts" --netw
 ```
 
 常用开关：
+
 - 仅跑清算：`RUN_REPAY=0 ...`
 - 仅跑还款：`RUN_LIQUIDATION=0 ...`
 - 指定自有订单：
@@ -528,6 +712,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-conservation.ts" --netw
 `SettlementManager.settleOrLiquidate`。
 
 用于暴露 **真实清算入口** 中的 oracle/估值边界行为：
+
 - `stale` 抵押价格：`PriceOracle.getPrice` 回滚；`PositionView.getAssetValue` 返回 0；清算可能回滚 `SettlementManager__NoCollateral`。
 - `unreasonable` 价格：清算继续（oracle 仍可能返回价格；估值可能极端）。
 - `bad_decimals`（<6）：清算继续（PositionView 接受小精度；仅 GD 检查不同）。
@@ -594,6 +779,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-smoke-conservation.ts" --netw
 # 资金流不变量套件（更贴近真实的多场景）
 
 本套件在单条干净流程之外扩展，用于暴露真实借贷平台上会遇到的问题：
+
 - reserve → cancel（资金进出 `LenderPoolVault`）
 - partial repay → full repay（需关闭严格模式）
 - 严格全额还款模式 + 聚合债务行为（预期先回滚，关闭严格后成功）
@@ -606,14 +792,17 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --networ
 ```
 
 代币选择：
+
 - 默认：使用 `FeeRouter.getSupportedTokens()`
 - 覆盖：`TOKENS=tokenAddr1,tokenAddr2`（逗号分隔）
 
 注意：
+
 - `TOKENS` 必须是 **地址** 的逗号分隔列表（如 `TOKENS=0x...`），不能是符号名如 `MockUSDC`。
 - localhost 下可从 `frontend-config/contracts-localhost.ts` 使用 `CONTRACT_ADDRESSES.MockUSDC`。
 
 环境开关（默认均启用）：
+
 - 最小模式（关闭其余用例；仅用第一个代币）：
   - `RUN_FINALIZE_MATCH_ONLY=1`：校验 `finalizeMatch` 消耗可观测性：
     - `LendReserveConsumed`
@@ -640,6 +829,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --networ
 ```
 
 说明：
+
 - 在任意还款前断言 `getUserTotalDebtValue == 200 + 300`（按 oracle 价格）。
 - 为避免 `finalizeMatch` 时出现 `ERC20InsufficientAllowance`，请确保该资产的 guarantee extension 关闭，
   或若有意保持开启，则预先对借款人授权 `GuaranteeFundManager`。
@@ -655,6 +845,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --networ
 ```
 
 说明：
+
 - `BORROWER_INDEX` 强制复用同一 signer，以在多轮中验证脏状态累计行为。
 - `REBORROW_AFTER_REPAY=1` 在每轮增加「还款后再借」一步。
 - 若跑很多轮，可加 `ALLOW_SIGNER_REUSE=1` 避免耗尽未用 signer。
@@ -717,6 +908,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --networ
 ```
 
 说明：
+
 - 将 `<MockUSDC>` 替换为 `frontend-config/contracts-localhost.ts` 中的地址。
 - 将 `<GOLD_ADDR>`/`<SILV_ADDR>` 替换为部署输出中的地址。
 - `PRICE_REFRESH_MAP` 可避免新增资产的陈旧价格失败。
@@ -749,18 +941,20 @@ Dirty 压测：
 ```
 
 可选角色门控检查（需 AccessControlManager owner）：
+
 - `ASSERT_ROLE_GATES=1`：
   - 临时撤销/授予 `ORDER_CREATE` 和 `DEPOSIT` 角色，以确认 `finalizeMatch` 正确受角色门控。
   - 若非 ACM owner，请保持关闭（默认）。
 
 状态模式：
+
 - Clean/CI 风格：重启 localhost 节点 + 跑 deploylocal + 跑套件。
 - Dirty state（更接近测试网/主网）：设置 `E2E_ALLOW_DIRTY_STATE=1`
   （套件会尽量选用「干净」signer；若无则回退到未用 signer）。
 
 推荐最小命令（复制粘贴）：
 
-1) 最小 finalizeMatch 消耗 + RESERVE_CONSUMED DataPush（输出很短）：
+1. 最小 finalizeMatch 消耗 + RESERVE_CONSUMED DataPush（输出很短）：
 
 ```bash
 TOKENS=0x071586BA1b380B00B793Cc336fe01106B0BFbE6D \
@@ -769,7 +963,7 @@ RUN_RESERVE_CANCEL=0 RUN_PARTIAL_REPAY=0 RUN_STRICT_AGGREGATED_DEBT=0 RUN_LIQUID
 pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --network localhost
 ```
 
-2) 最小 match → 借出发放 SSOT 断言（覆盖 Funds-Flow-Architecture-Guide.md「Finalize Match」+ 发放语义）：
+2. 最小 match → 借出发放 SSOT 断言（覆盖 Funds-Flow-Architecture-Guide.md「Finalize Match」+ 发放语义）：
 
 ```bash
 TOKENS=0x071586BA1b380B00B793Cc336fe01106B0BFbE6D \
@@ -779,6 +973,7 @@ pnpm -s exec hardhat run "scripts/tests/funds-flow-invariants-suite.ts" --networ
 ```
 
 跟踪地址集：
+
 - `funds-flow-smoke-conservation.ts` 与套件均从 SSOT 配置 **自动发现** 跟踪地址集
   （Registry 模块 + FeeRouter 接收方 + LiquidationPayoutManager 接收方 + VaultCore.viewContractAddrVar()）。
   若资金泄漏到该集外的意外地址，测试会失败并打印差异。

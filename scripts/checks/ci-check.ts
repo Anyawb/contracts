@@ -12,6 +12,10 @@ const checks = [
     command: 'npx hardhat test',
   },
   {
+    name: '不变式测试',
+    command: 'npm run test:invariant',
+  },
+  {
     name: '代码风格',
     command: 'npm run format:check',
   },

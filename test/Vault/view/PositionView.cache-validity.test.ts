@@ -146,14 +146,19 @@ describe("PositionView - 缓存有效性与回退", function () {
     ).to.be.revertedWithCustomError(access, "MissingRole");
   });
 
-  it("推送数据与账本不一致时回滚", async function () {
+  it("推送数据与账本不一致时仍可写入缓存", async function () {
     const { pv, user, asset, collateral, lending } = await loadFixture(deployFixture);
     await collateral.depositCollateral(user.address, asset, 10n);
     await lending.setUserDebt(user.address, asset, 5n);
 
     await expect(
       (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 11n, 5n)
-    ).to.be.revertedWithCustomError(pv, "PositionView__LedgerMismatch");
+    ).to.not.be.reverted;
+
+    const [collateralOut, debtOut, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
+    expect(isValid).to.equal(true);
+    expect(collateralOut).to.equal(11n);
+    expect(debtOut).to.equal(5n);
   });
 
   it("账本读取失败时发出 CacheUpdateFailed 并回滚", async function () {
@@ -166,7 +171,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       .withArgs(user.address, asset, await pv.getAddress(), 1n, 1n, anyValue);
     await expect(tx)
       .to.emit(pv, "CacheUpdateFailedWithContext")
-      .withArgs(user.address, asset, anyValue, await pv.getAddress(), 1n, 1n, anyValue, anyValue, anyValue);
+      .withArgs(user.address, asset, ethers.ZeroHash, await pv.getAddress(), 1n, 1n, anyValue, 0, 0);
   });
 
   it("账本读取债务失败时发出 CacheUpdateFailed 并回滚", async function () {
@@ -178,7 +183,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       .withArgs(user.address, asset, await pv.getAddress(), 1n, 1n, anyValue);
     await expect(tx)
       .to.emit(pv, "CacheUpdateFailedWithContext")
-      .withArgs(user.address, asset, anyValue, await pv.getAddress(), 1n, 1n, anyValue, anyValue, anyValue);
+      .withArgs(user.address, asset, ethers.ZeroHash, await pv.getAddress(), 1n, 1n, anyValue, 0, 0);
     // 恢复账本读取，避免 read path 的账本回退读取直接透传 revert
     await lending.setMockSuccess(true);
     const [collateralCached, debtCached, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
@@ -225,7 +230,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     const txFail = await pv.connect(admin).retryUserPositionUpdate(user.address, asset);
     await expect(txFail)
       .to.emit(pv, "CacheUpdateFailedWithContext")
-      .withArgs(user.address, asset, anyValue, await pv.getAddress(), 0n, 0n, anyValue, 0, 0);
+      .withArgs(user.address, asset, ethers.ZeroHash, await pv.getAddress(), 0n, 0n, anyValue, 0, 1);
 
     // Restore CM and self-heal.
     await registry.setModule(KEY_CM, await collateral.getAddress());
@@ -297,6 +302,36 @@ describe("PositionView - 缓存有效性与回退", function () {
     expect(c).to.equal(123n);
     expect(d).to.equal(45n);
     expect(isValid).to.equal(true);
+  });
+
+  it("非管理员调用 retryUserPositionUpdate 会被拒绝", async function () {
+    const { pv, user, asset } = await loadFixture(deployFixture);
+    await expect(pv.connect(user).retryUserPositionUpdate(user.address, asset)).to.be.revertedWithCustomError(
+      pv,
+      "PositionView__OnlyAdmin",
+    );
+  });
+
+  it("clearUserCache 仅允许本人或管理员调用", async function () {
+    const { pv, user } = await loadFixture(deployFixture);
+    const [, , outsider] = await ethers.getSigners();
+    await expect(pv.connect(outsider).clearUserCache(user.address)).to.be.revertedWithCustomError(
+      pv,
+      "PositionView__OnlyUserOrAdmin",
+    );
+  });
+
+  it("clearUserCache 会使缓存失效并回退到账本读取", async function () {
+    const { pv, user, asset, collateral, lending } = await loadFixture(deployFixture);
+    await collateral.depositCollateral(user.address, asset, 10n);
+    await lending.setUserDebt(user.address, asset, 5n);
+    await (collateral as any).pushToPositionView(pv.getAddress(), user.address, asset, 10n, 5n);
+
+    await pv.connect(user).clearUserCache(user.address);
+    const [collateralOut, debtOut, isValid] = await pv.connect(user).getUserPositionWithMeta(user.address, asset);
+    expect(isValid).to.equal(false);
+    expect(collateralOut).to.equal(10n);
+    expect(debtOut).to.equal(5n);
   });
 
   it("Phase3 可观测性：增量 push 成功路径应发出 DataPushed", async function () {
@@ -1379,7 +1414,7 @@ describe("PositionView - 缓存有效性与回退", function () {
   it("初始化后Registry地址正确", async function () {
     const { pv, registry } = await loadFixture(deployFixture);
     expect(await pv.getRegistry()).to.equal(await registry.getAddress());
-    expect(await pv.registryAddr()).to.equal(await registry.getAddress());
+    expect(await pv.getRegistry()).to.equal(await registry.getAddress());
   });
 
   // ============ 缓存时间戳边界测试 ============

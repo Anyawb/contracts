@@ -4,22 +4,23 @@ pragma solidity ^0.8.20;
 /**
  * @title RiskUtils
  * @notice Stateless risk-scoring and risk-derivation helpers (pure functions).
- * @dev Security:
+ * @dev Reverts if:
+ *      - arithmetic overflows or underflows in pure math operations (Solidity ^0.8.x)
+ *
+ * Security:
  * - Pure library: no storage reads/writes, no external calls.
  * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
  *
  * @custom:security-contact security@example.com
  */
 library RiskUtils {
-    
-    // ====== Risk scoring lookup tables ======
+    /*━━━━━━━━━━━━━━━ Risk Scoring Lookup Tables ━━━━━━━━━━━━━━━*/
     /**
      * @notice Get health-factor thresholds used for risk scoring.
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * Security:
-     * - Pure math only.
+        * - Pure lookup only.
      *
      * @return arr Thresholds in bps, sorted descending: [12000, 11000, 10500, 10000, 9500].
      */
@@ -34,8 +35,7 @@ library RiskUtils {
     
     /**
      * @notice Get risk-score values mapped to the thresholds.
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * Security:
      * - Pure math only.
@@ -54,8 +54,7 @@ library RiskUtils {
 
     /**
      * @notice Compute a simplified risk score from a health factor.
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * Security:
      * - Pure logic only; relies on fixed threshold tables.
@@ -114,8 +113,7 @@ library RiskUtils {
 
     /**
      * @notice Return whether a position is below the liquidation threshold.
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * Security:
      * - Pure comparison only.
@@ -134,8 +132,7 @@ library RiskUtils {
 
     /**
      * @notice Derive warning level from health factor and thresholds.
-     * @dev Reverts if:
-     *      - none
+        * @dev Reverts if: (never)
      *
      * Security:
      * - Pure comparison only.

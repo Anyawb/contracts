@@ -3,10 +3,11 @@ pragma solidity ^0.8.20;
 
 /**
  * @title ILiquidationCalculator
- * @notice Liquidation calculator interface - read-only calculations and previews (does not include governance/module management/oracle degradation strategies)
+ * @notice Liquidation calculator interface for read-only calculations and previews.
+ * @dev Excludes governance, module management, and oracle degradation strategies.
  */
 interface ILiquidationCalculator {
-    /* ============ Pure / View Calculations ============ */
+    /*━━━━━━━━━━━━━━━ Pure And View Calculations ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Calculate liquidation bonus
@@ -14,7 +15,10 @@ interface ILiquidationCalculator {
      * @param reducedAmount Amount of reduced debt
      * @return bonus Liquidation bonus amount
      */
-    function calculateLiquidationBonus(uint256 seizedAmount, uint256 reducedAmount) external view returns (uint256 bonus);
+    function calculateLiquidationBonus(
+        uint256 seizedAmount,
+        uint256 reducedAmount
+    ) external view returns (uint256 bonus);
 
     /**
      * @notice Calculate liquidation threshold
@@ -22,7 +26,10 @@ interface ILiquidationCalculator {
      * @param debtValue Debt value
      * @return threshold Liquidation threshold
      */
-    function calculateLiquidationThreshold(uint256 collateralValue, uint256 debtValue) external view returns (uint256 threshold);
+    function calculateLiquidationThreshold(
+        uint256 collateralValue,
+        uint256 debtValue
+    ) external view returns (uint256 threshold);
 
     /**
      * @notice Calculate health factor
@@ -30,7 +37,10 @@ interface ILiquidationCalculator {
      * @param debtValue Debt value
      * @return healthFactor Health factor
      */
-    function calculateHealthFactor(uint256 collateralValue, uint256 debtValue) external view returns (uint256 healthFactor);
+    function calculateHealthFactor(
+        uint256 collateralValue,
+        uint256 debtValue
+    ) external view returns (uint256 healthFactor);
 
     /**
      * @notice Calculate risk score
@@ -38,9 +48,12 @@ interface ILiquidationCalculator {
      * @param collateralDiversity Collateral diversity
      * @return riskScore Risk score
      */
-    function calculateRiskScore(uint256 healthFactor, uint256 collateralDiversity) external pure returns (uint256 riskScore);
+    function calculateRiskScore(
+        uint256 healthFactor,
+        uint256 collateralDiversity
+    ) external pure returns (uint256 riskScore);
 
-    /* ============ Previews ============ */
+    /*━━━━━━━━━━━━━━━ Previews ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Preview liquidation result
@@ -59,7 +72,10 @@ interface ILiquidationCalculator {
         address debtAsset,
         uint256 collateralAmount,
         uint256 debtAmount
-    ) external view returns (uint256 bonus, uint256 newHealthFactor, uint256 newRiskScore);
+    )
+        external
+        view
+        returns (uint256 bonus, uint256 newHealthFactor, uint256 newRiskScore);
 
     /**
      * @notice Preview Flash Loan impact on liquidation
@@ -83,5 +99,7 @@ interface ILiquidationCalculator {
      * @param users Array of user addresses
      * @return riskScores Array of risk scores
      */
-    function batchCalculateUserRiskScores(address[] calldata users) external view returns (uint256[] memory riskScores);
-} 
+    function batchCalculateUserRiskScores(
+        address[] calldata users
+    ) external view returns (uint256[] memory riskScores);
+}

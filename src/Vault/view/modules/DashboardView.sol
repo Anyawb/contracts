@@ -1,37 +1,65 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { BatchTooLarge, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {
+    BatchTooLarge,
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
 
 /*━━━━━━━━━━━━━━━ Selector SSOT ━━━━━━━━━━━━━━━*/
 // Selectors are derived from the canonical module contracts in this repository (SSOT),
 // rather than hardcoding hex values or duplicating minimal interfaces in this file.
-import { HealthView } from "./HealthView.sol";
-import { PositionView } from "./PositionView.sol";
+import {HealthView} from "./HealthView.sol";
+import {PositionView} from "./PositionView.sol";
 
+/// @title IHealthViewLite
+/// @notice Minimal read interface for HealthView.
+/// @dev Used by {DashboardView} to aggregate health data without importing the full HealthView implementation.
 interface IHealthViewLite {
-    function getUserHealthFactorWithMeta(address user)
+    /// @notice Returns one user's health factor together with validity metadata.
+    function getUserHealthFactorWithMeta(
+        address user
+    )
         external
         view
         returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
 }
 
+/// @title IPositionViewLite
+/// @notice Minimal read interface for PositionView.
+/// @dev Used by {DashboardView} to aggregate position data without importing the full PositionView implementation.
 interface IPositionViewLite {
-    function getUserPositionWithMeta(address user, address asset)
+    /// @notice Returns one user's position snapshot for one asset.
+    function getUserPositionWithMeta(
+        address user,
+        address asset
+    )
         external
         view
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version);
+        returns (
+            uint256 collateral,
+            uint256 debt,
+            bool isValid,
+            uint256 blockNumber,
+            uint64 version
+        );
 }
 
+/// @title IStatisticsViewLite
+/// @notice Minimal read interface for StatisticsView.
+/// @dev Used by {DashboardView} to aggregate global statistics without
+///      importing the full StatisticsView implementation.
 interface IStatisticsViewLite {
     struct GlobalStatistics {
         uint256 totalUsers;
@@ -41,18 +69,32 @@ interface IStatisticsViewLite {
         uint256 lastUpdateBlock;
     }
 
+    /// @notice Returns the global statistics snapshot together with validity metadata.
     function getGlobalStatisticsWithMeta()
         external
         view
         returns (GlobalStatistics memory g, bool isValid, uint256 blockNumber);
 }
 
+/// @title IPriceOracleLite
+/// @notice Minimal read interface for PriceOracle.
+/// @dev Used by {DashboardView} to fetch asset price tuples without importing the full oracle implementation.
 interface IPriceOracleLite {
-    function getPrice(address asset) external view returns (uint256 price, uint256, uint256);
+    /// @notice Returns the current price tuple for one asset.
+    function getPrice(
+        address asset
+    ) external view returns (uint256 price, uint256, uint256);
 }
 
+/// @title ISystemRiskViewLite
+/// @notice Minimal read interface for system risk thresholds.
+/// @dev Used by {DashboardView} to read the system minimum health factor without importing the full risk module.
 interface ISystemRiskViewLite {
-    function getMinHealthFactor() external view returns (uint256 minHealthFactor);
+    /// @notice Returns the minimum health factor configured for the system.
+    function getMinHealthFactor()
+        external
+        view
+        returns (uint256 minHealthFactor);
 }
 
 /**
@@ -65,8 +107,8 @@ interface ISystemRiskViewLite {
  *      - caller lacks required roles for the requested data scope (MissingRole)
  *
  * Security:
- * - Read-only facade: delegates to downstream modules via external calls (`staticcall` for best-effort meta probes)
- * - UUPS upgrade is role-gated via AccessControlManager (`ActionKeys.ACTION_ADMIN`)
+ * - View-only facade: delegates to downstream modules via external calls (`staticcall` for best-effort meta probes).
+ * - UUPS upgrade is role-gated via AccessControlManager (`ActionKeys.ACTION_ADMIN`).
  */
 contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
     struct UserAssetOverview {
@@ -110,8 +152,10 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
     uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
 
     /// @dev Function selectors for downstream `staticcall` payload encoding (derived from SSOT module contracts).
-    bytes4 private constant _SEL_GET_USER_POSITION_WITH_META = PositionView.getUserPositionWithMeta.selector;
-    bytes4 private constant _SEL_GET_USER_HEALTH_FACTOR_WITH_META = HealthView.getUserHealthFactorWithMeta.selector;
+    bytes4 private constant _SEL_GET_USER_POSITION_WITH_META =
+        PositionView.getUserPositionWithMeta.selector;
+    bytes4 private constant _SEL_GET_USER_HEALTH_FACTOR_WITH_META =
+        HealthView.getUserHealthFactorWithMeta.selector;
 
     address private _registryAddr;
 
@@ -129,9 +173,16 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyUserDim(address user) {
         if (msg.sender != user) {
-            bool ok =
-                ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                    || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+            bool ok = ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) ||
+                ViewAccessLib.hasRole(
+                    _registryAddr,
+                    ActionKeys.ACTION_ADMIN,
+                    msg.sender
+                );
             if (!ok) revert MissingRole();
         }
         _;
@@ -156,22 +207,10 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
-    }
-
-    /**
-     * @notice Returns the Registry address used for module resolution.
-     * @dev Reverts if: none.
-     *
-     * Security:
-     * - Read-only.
-     *
-     * @return registry The Registry contract address.
-     */
-    function registryAddr() external view returns (address) {
-        return _registryAddr;
     }
 
     /*━━━━━━━━━━━━━━━ User queries ━━━━━━━━━━━━━━━*/
@@ -189,7 +228,7 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Scheme U user-dimensional read policy (self read allowed; non-self requires VIEW_USER_DATA or ADMIN).
-     * - Read-only; performs external view calls into PositionView and HealthView.
+     * - View-only; performs external view calls into PositionView and HealthView.
      * - Uses system-scoped risk parameters from SystemRiskView (SSOT) to derive `isRisky` (no hardcoded threshold).
      *
      * @param user The user to summarize.
@@ -200,7 +239,10 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
      * @return healthUpdateBlock HealthView blockNumber (or per HealthView semantics).
      */
-    function getUserOverview(address user, address[] calldata trackedAssets)
+    function getUserOverview(
+        address user,
+        address[] calldata trackedAssets
+    )
         external
         view
         onlyValidRegistry
@@ -243,7 +285,10 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return positionVersions Per-asset cache/position versions (best-effort; 0 may mean unknown).
      * @return healthUpdateBlock HealthView blockNumber (or per HealthView semantics).
      */
-    function getUserOverviewWithMeta(address user, address[] calldata trackedAssets)
+    function getUserOverviewWithMeta(
+        address user,
+        address[] calldata trackedAssets
+    )
         external
         view
         onlyValidRegistry
@@ -277,7 +322,10 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param assets The assets to query. Length must be \(\le MAX_BATCH_SIZE\).
      * @return items Per-asset overview items (with metadata) in the same order as `assets`.
      */
-    function getUserAssetBreakdown(address user, address[] calldata assets)
+    function getUserAssetBreakdown(
+        address user,
+        address[] calldata assets
+    )
         external
         view
         onlyValidRegistry
@@ -307,7 +355,10 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param assets The assets to query. Length must be \(\le MAX_BATCH_SIZE\).
      * @return items Per-asset overview items (with metadata) in the same order as `assets`.
      */
-    function getUserAssetBreakdownWithMeta(address user, address[] calldata assets)
+    function getUserAssetBreakdownWithMeta(
+        address user,
+        address[] calldata assets
+    )
         external
         view
         onlyValidRegistry
@@ -317,7 +368,10 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         return _getUserAssetBreakdownWithMeta(user, assets);
     }
 
-    function _getUserOverviewWithMeta(address user, address[] calldata trackedAssets)
+    function _getUserOverviewWithMeta(
+        address user,
+        address[] calldata trackedAssets
+    )
         internal
         view
         returns (
@@ -328,7 +382,8 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
             uint256 healthUpdateBlock
         )
     {
-        if (trackedAssets.length > _MAX_BATCH_SIZE) revert BatchTooLarge(trackedAssets.length, _MAX_BATCH_SIZE);
+        if (trackedAssets.length > _MAX_BATCH_SIZE)
+            revert BatchTooLarge(trackedAssets.length, _MAX_BATCH_SIZE);
 
         address pvAddr = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         uint256 len = trackedAssets.length;
@@ -339,8 +394,13 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 totalColl;
         uint256 totalDebt;
         for (uint256 i; i < len; ++i) {
-            (uint256 c, uint256 d, bool v, uint256 blockNumber, uint64 ver) =
-                _readUserPositionWithMeta(pvAddr, user, trackedAssets[i]);
+            (
+                uint256 c,
+                uint256 d,
+                bool v,
+                uint256 blockNumber,
+                uint64 ver
+            ) = _readUserPositionWithMeta(pvAddr, user, trackedAssets[i]);
             totalColl += c;
             totalDebt += d;
             positionValidFlags[i] = v;
@@ -348,7 +408,9 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
             positionVersions[i] = ver;
         }
 
-        (uint256 hf, bool hfValid, uint256 hfTs) = _readHealthFactorWithMeta(user);
+        (uint256 hf, bool hfValid, uint256 hfTs) = _readHealthFactorWithMeta(
+            user
+        );
         healthUpdateBlock = hfTs;
 
         uint256 minHf = _systemRiskView().getMinHealthFactor();
@@ -363,11 +425,10 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         });
     }
 
-    function _getUserAssetBreakdownWithMeta(address user, address[] calldata assets)
-        internal
-        view
-        returns (UserAssetOverviewMeta[] memory items)
-    {
+    function _getUserAssetBreakdownWithMeta(
+        address user,
+        address[] calldata assets
+    ) internal view returns (UserAssetOverviewMeta[] memory items) {
         _requireRole(ActionKeys.ACTION_VIEW_PRICE_DATA, msg.sender);
         uint256 len = assets.length;
         if (len > _MAX_BATCH_SIZE) revert BatchTooLarge(len, _MAX_BATCH_SIZE);
@@ -377,12 +438,21 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         IPriceOracleLite oracle = _priceOracle();
 
         for (uint256 i; i < len; ++i) {
-            (uint256 collateral, uint256 debt, bool posValid, uint256 posTs, uint64 posVer) =
-                _readUserPositionWithMeta(pvAddr, user, assets[i]);
+            (
+                uint256 collateral,
+                uint256 debt,
+                bool posValid,
+                uint256 posTs,
+                uint64 posVer
+            ) = _readUserPositionWithMeta(pvAddr, user, assets[i]);
 
             uint256 price;
             if (address(oracle) != address(0)) {
-                try oracle.getPrice(assets[i]) returns (uint256 p, uint256, uint256) {
+                try oracle.getPrice(assets[i]) returns (
+                    uint256 p,
+                    uint256,
+                    uint256
+                ) {
                     price = p;
                 } catch {
                     // Best-effort pricing: return 0 on failure.
@@ -414,7 +484,7 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Role-gated via AccessControlManager.
-     * - Read-only; performs an external view call into StatisticsView.
+     * - View-only; performs an external view call into StatisticsView.
      *
      * @return overview System-wide statistics snapshot.
      */
@@ -425,7 +495,8 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (SystemOverview memory overview)
     {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
-        (IStatisticsViewLite.GlobalStatistics memory g, , ) = _statisticsView().getGlobalStatisticsWithMeta();
+        (IStatisticsViewLite.GlobalStatistics memory g, , ) = _statisticsView()
+            .getGlobalStatisticsWithMeta();
         overview = SystemOverview({
             totalUsers: g.totalUsers,
             activeUsers: g.activeUsers,
@@ -445,7 +516,7 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Role-gated via AccessControlManager.
-     * - Read-only; performs an external view call into StatisticsView.
+     * - View-only; performs an external view call into StatisticsView.
      *
      * @return overview System-wide statistics snapshot.
      * @return isValid Cache validity as reported by StatisticsView.
@@ -455,11 +526,18 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         external
         view
         onlyValidRegistry
-        returns (SystemOverview memory overview, bool isValid, uint256 blockNumber)
+        returns (
+            SystemOverview memory overview,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
-        (IStatisticsViewLite.GlobalStatistics memory g, bool ok, uint256 statsBlockNumber) =
-            _statisticsView().getGlobalStatisticsWithMeta();
+        (
+            IStatisticsViewLite.GlobalStatistics memory g,
+            bool ok,
+            uint256 statsBlockNumber
+        ) = _statisticsView().getGlobalStatisticsWithMeta();
         overview = SystemOverview({
             totalUsers: g.totalUsers,
             activeUsers: g.activeUsers,
@@ -490,7 +568,9 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     function _priceOracle() internal view returns (IPriceOracleLite) {
-        address oracle = Registry(_registryAddr).getModule(ModuleKeys.KEY_PRICE_ORACLE);
+        address oracle = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_PRICE_ORACLE
+        );
         return IPriceOracleLite(oracle);
     }
 
@@ -499,26 +579,44 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     function _requireRole(bytes32 actionKey, address user) internal view {
-        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, user)) revert MissingRole();
+        if (!ViewAccessLib.hasRole(_registryAddr, actionKey, user))
+            revert MissingRole();
     }
 
     /*━━━━━━━━━━━━━━━ Meta passthrough helpers ━━━━━━━━━━━━━━━*/
 
-    function _readUserPositionWithMeta(address pvAddr, address user, address asset)
+    function _readUserPositionWithMeta(
+        address pvAddr,
+        address user,
+        address asset
+    )
         internal
         view
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 blockNumber, uint64 version)
+        returns (
+            uint256 collateral,
+            uint256 debt,
+            bool isValid,
+            uint256 blockNumber,
+            uint64 version
+        )
     {
         if (pvAddr == address(0)) return (0, 0, false, 0, 0);
 
-        (bool ok, bytes memory data) =
-            pvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_USER_POSITION_WITH_META, user, asset));
+        (bool ok, bytes memory data) = pvAddr.staticcall(
+            abi.encodeWithSelector(
+                _SEL_GET_USER_POSITION_WITH_META,
+                user,
+                asset
+            )
+        );
         if (ok && data.length >= 160) {
             return abi.decode(data, (uint256, uint256, bool, uint256, uint64));
         }
     }
 
-    function _readHealthFactorWithMeta(address user)
+    function _readHealthFactorWithMeta(
+        address user
+    )
         internal
         view
         returns (uint256 healthFactor, bool isValid, uint256 blockNumber)
@@ -526,8 +624,9 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         address hvAddr = _getModule(ModuleKeys.KEY_HEALTH_VIEW);
         if (hvAddr == address(0)) return (0, false, 0);
 
-        (bool ok, bytes memory data) =
-            hvAddr.staticcall(abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR_WITH_META, user));
+        (bool ok, bytes memory data) = hvAddr.staticcall(
+            abi.encodeWithSelector(_SEL_GET_USER_HEALTH_FACTOR_WITH_META, user)
+        );
         if (ok && data.length >= 96) {
             return abi.decode(data, (uint256, bool, uint256));
         }
@@ -546,10 +645,14 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation The new implementation contract address.
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
-        if (newImplementation == address(0)) revert DashboardView__ZeroImplementation();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation == address(0))
+            revert DashboardView__ZeroImplementation();
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /// @notice Storage gap reserved for future upgrades.

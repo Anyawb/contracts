@@ -1,80 +1,167 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IAssetWhitelist
-/// @notice Asset whitelist interface for supported collateral/settlement assets.
-/// @dev Implements allowlist reads and governance-gated allowlist writes.
-interface IAssetWhitelist {
+import {IAssetWhitelistRead} from "./IAssetWhitelistRead.sol";
+import {IAssetWhitelistAdmin} from "./IAssetWhitelistAdmin.sol";
+
+/**
+ * @title IAssetWhitelist
+ * @notice Legacy umbrella interface for subject-level protocol asset allowlists.
+ * @dev Reverts if:
+ *      - see inherited {IAssetWhitelistRead} and {IAssetWhitelistAdmin} semantics
+ *
+ * Security:
+ * - Compatibility-only aggregation layer.
+ * - Prefer {IAssetWhitelistRead} for ordinary checks and {IAssetWhitelistAdmin} for governance paths.
+ * - Current blocks-only integrations should reason about this surface as a compatibility wrapper around the global
+ *   asset admission gate, not as a dedicated blocks-only product registry.
+ */
+interface IAssetWhitelist is IAssetWhitelistRead, IAssetWhitelistAdmin {
     /**
-     * @notice Check whether an asset is allowed by the whitelist.
+     * @notice Returns whether `asset` is currently allowlisted.
      * @dev Reverts if:
-     *      - (none)
+     *      - see {IAssetWhitelistRead.isAssetAllowed}
      *
      * Security:
-     * - View-only.
+     * - Read-only compatibility alias for the narrow whitelist read surface.
      *
      * @param asset Asset address to query.
-     * @return allowed True if the asset is allowed.
+     * @return allowed Whether `asset` is currently allowlisted.
      */
-    function isAssetAllowed(address asset) external view returns (bool allowed);
+    function isAssetAllowed(
+        address asset
+    ) external view override returns (bool allowed);
 
     /**
-     * @notice Get the full list of allowed assets.
+     * @notice Returns the full list of currently allowlisted assets.
      * @dev Reverts if:
-     *      - (none)
+     *      - see {IAssetWhitelistRead.getAllowedAssets}
      *
      * Security:
-     * - View-only.
+     * - Read-only compatibility alias for the narrow whitelist read surface.
      *
-     * @return assets Array of allowed asset addresses.
+     * @return assets Asset list currently considered allowlisted.
      */
-    function getAllowedAssets() external view returns (address[] memory assets);
+    function getAllowedAssets()
+        external
+        view
+        override
+        returns (address[] memory assets);
 
     /**
-     * @notice Add an asset to the allowlist.
+     * @notice Returns the number of currently allowlisted assets.
      * @dev Reverts if:
-     *      - implementation-defined (e.g. caller not authorized, asset is zero, asset already allowed)
+     *      - see {IAssetWhitelistRead.getAssetCount}
      *
      * Security:
-     * - Governance/role-gated in the implementation (see ActionKeys + ACM).
+     * - Read-only compatibility alias for the narrow whitelist read surface.
+     *
+     * @return count Number of currently allowlisted assets.
+     */
+    function getAssetCount() external view override returns (uint256 count);
+
+    /**
+     * @notice Returns the allowlisted asset stored at `index`.
+     * @dev Reverts if:
+     *      - see {IAssetWhitelistRead.getAssetAtIndex}
+     *
+     * Security:
+     * - Read-only compatibility alias for the narrow whitelist read surface.
+     *
+     * @param index Index inside the allowlist set.
+     * @return asset Asset address stored at `index`.
+     */
+    function getAssetAtIndex(
+        uint256 index
+    ) external view override returns (address asset);
+
+    /**
+     * @notice Returns the registry used by the whitelist implementation.
+     * @dev Reverts if:
+     *      - see {IAssetWhitelistRead.getRegistry}
+     *
+     * Security:
+     * - Read-only metadata helper exposed for compatibility.
+     *
+     * @return registryAddr Registry address used by the whitelist implementation.
+     */
+    function getRegistry()
+        external
+        view
+        override
+        returns (address registryAddr);
+
+    /**
+     * @notice Adds `asset` to the allowlist.
+     * @dev Reverts if:
+     *      - see {IAssetWhitelistAdmin.addAllowedAsset}
+     *
+     * Security:
+     * - Governance compatibility alias for the narrow whitelist admin surface.
      *
      * @param asset Asset address to add.
      */
-    function addAllowedAsset(address asset) external;
+    function addAllowedAsset(address asset) external override;
 
     /**
-     * @notice Remove an asset from the allowlist.
+     * @notice Removes `asset` from the allowlist.
      * @dev Reverts if:
-     *      - implementation-defined (e.g. caller not authorized, asset is zero, asset not allowed)
+     *      - see {IAssetWhitelistAdmin.removeAllowedAsset}
      *
      * Security:
-     * - Governance/role-gated in the implementation (see ActionKeys + ACM).
+     * - Governance compatibility alias for the narrow whitelist admin surface.
      *
      * @param asset Asset address to remove.
      */
-    function removeAllowedAsset(address asset) external;
+    function removeAllowedAsset(address asset) external override;
 
     /**
-     * @notice Batch add assets to the allowlist.
+     * @notice Adds multiple assets to the allowlist.
      * @dev Reverts if:
-     *      - implementation-defined (e.g. caller not authorized, empty array, any asset is zero)
+     *      - see {IAssetWhitelistAdmin.batchAddAllowedAssets}
      *
      * Security:
-     * - Governance/role-gated in the implementation (see ActionKeys + ACM).
+     * - Governance compatibility alias for the narrow whitelist admin surface.
      *
      * @param assets Asset addresses to add.
      */
-    function batchAddAllowedAssets(address[] calldata assets) external;
+    function batchAddAllowedAssets(address[] calldata assets) external override;
 
     /**
-     * @notice Batch remove assets from the allowlist.
+     * @notice Removes multiple assets from the allowlist.
      * @dev Reverts if:
-     *      - implementation-defined (e.g. caller not authorized, empty array, any asset is zero)
+     *      - see {IAssetWhitelistAdmin.batchRemoveAllowedAssets}
      *
      * Security:
-     * - Governance/role-gated in the implementation (see ActionKeys + ACM).
+     * - Governance compatibility alias for the narrow whitelist admin surface.
      *
      * @param assets Asset addresses to remove.
      */
-    function batchRemoveAllowedAssets(address[] calldata assets) external;
-} 
+    function batchRemoveAllowedAssets(
+        address[] calldata assets
+    ) external override;
+
+    /**
+     * @notice Refreshes bookkeeping metadata for an allowlisted asset.
+     * @dev Reverts if:
+     *      - see {IAssetWhitelistAdmin.updateAssetInfo}
+     *
+     * Security:
+     * - Governance compatibility alias for the narrow whitelist admin surface.
+     *
+     * @param asset Asset address.
+     */
+    function updateAssetInfo(address asset) external override;
+
+    /**
+     * @notice Updates the registry used for governance resolution.
+     * @dev Reverts if:
+     *      - see {IAssetWhitelistAdmin.setRegistry}
+     *
+     * Security:
+     * - Governance compatibility alias for the narrow whitelist admin surface.
+     *
+     * @param newRegistryAddr New Registry address.
+     */
+    function setRegistry(address newRegistryAddr) external override;
+}

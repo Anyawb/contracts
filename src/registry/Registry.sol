@@ -34,112 +34,70 @@ import {RegistryCompatQuery} from "./RegistryCompatQueryLibrary.sol";
  * - Governance and module writes are owner-gated and pause-aware
  * - Timelocked module upgrades rely on block.number by design (for scheduling/execution)
  */
-contract Registry is 
+contract Registry is
     IRegistry,
-    Initializable, 
-    OwnableUpgradeable, 
+    Initializable,
+    OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
     UUPSUpgradeable,
     PausableUpgradeable
 {
-    // ============ Custom Errors ============
-    /**
-     * @notice The caller is not authorized to perform an upgrade.
-     * @param caller The caller attempting to upgrade.
-     */
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when the caller is not upgradeAdmin, emergencyAdmin, or owner. Used by {_authorizeUpgrade}.
     error Registry__NotUpgradeAdmin(address caller);
 
-    /**
-     * @notice The provided delay exceeds the maximum allowed delay.
-     * @param provided The provided delay (blocks).
-     * @param max The maximum allowed delay (blocks).
-     */
+    /// @dev Reverts when a provided delay exceeds the configured maximum block delay. Used by {initialize} and {setMinDelay}.
     error Registry__DelayTooLong(uint256 provided, uint256 max);
 
-    /**
-     * @notice The provided delay value is invalid.
-     * @param delay The provided delay (blocks).
-     */
+    /// @dev Reverts when a delay value is zero or otherwise invalid for timelock configuration. Used by {initialize} and {setMinDelay}.
     error Registry__InvalidDelayValue(uint256 delay);
 
-    /**
-     * @notice A compat-path module is not configured.
-     * @param moduleName Human-readable module name.
-     */
+    /// @dev Reverts when a legacy compatibility query expects a named module that is not configured. Reserved for compat-facing paths.
     error Registry__ModuleNotSet(string moduleName);
 
-    /**
-     * @notice The caller is not the pending admin.
-     * @param caller The caller attempting to accept admin.
-     * @param pendingAdmin The currently configured pending admin.
-     */
+    /// @dev Reverts when accept-admin flow is called by an address other than pendingAdmin. Used by {acceptAdmin}.
     error Registry__NotPendingAdmin(address caller, address pendingAdmin);
 
-    /**
-     * @notice The pending admin address is invalid.
-     * @param pendingAdmin The provided/loaded pending admin.
-     */
+    /// @dev Reverts when the pendingAdmin value is zero in a path that requires a live pending admin. Used by {acceptAdmin}.
     error Registry__InvalidPendingAdmin(address pendingAdmin);
 
-    /**
-     * @notice The caller is not authorized as emergency admin.
-     * @param caller The caller attempting the emergency action.
-     * @param emergencyAdmin The configured emergency admin.
-     */
-    error Registry__EmergencyAdminNotAuthorized(address caller, address emergencyAdmin);
+    /// @dev Reverts when the caller is not authorized for owner-or-emergency-admin actions. Used by {pause}, {cancelModuleUpgrade}, {emergencyCancelAllUpgrades}, and {emergencyRecoverUpgrade}.
+    error Registry__EmergencyAdminNotAuthorized(
+        address caller,
+        address emergencyAdmin
+    );
 
-    /**
-     * @notice A zero address was provided where it is not allowed.
-     */
+    /// @dev Reverts when a required address argument is address(0). Used by initialization, admin setters, and module-upgrade paths.
     error Registry__ZeroAddress();
 
-    /**
-     * @notice The upgrade admin address is invalid.
-     * @param newAdmin The proposed upgrade admin address.
-     */
+    /// @dev Reverts when a proposed upgradeAdmin address is invalid. Used by {setUpgradeAdmin}.
     error Registry__InvalidUpgradeAdmin(address newAdmin);
 
-    /**
-     * @notice An input parameter is invalid (tests/compat only).
-     * @param reason A human-readable reason string.
-     */
+    /// @dev Reverts when a tests-only or compatibility-only parameter is invalid. Reserved for compat and test helpers.
     error Registry__InvalidParameter(string reason);
 
-    /**
-     * @notice Array lengths mismatch in a batch operation.
-     * @param keysLength Length of the keys array.
-     * @param addressesLength Length of the addresses array.
-     */
-    error Registry__MismatchedArrayLengths(uint256 keysLength, uint256 addressesLength);
+    /// @dev Reverts when paired batch arrays have different lengths. Used by {setModulesWithStatus}, {batchSetModules}, {setModulesWithEvents}, and {setModules}.
+    error Registry__MismatchedArrayLengths(
+        uint256 keysLength,
+        uint256 addressesLength
+    );
 
-    /**
-     * @notice The migrator must be a deployed contract (EOA / empty-code is forbidden).
-     * @param migrator The migrator address.
-     */
+    /// @dev Reverts when the storage migrator address has no deployed code. Used by {migrateStorage} before delegatecall.
     error Registry__MigratorNotContract(address migrator);
 
-    /**
-     * @notice Storage version mismatch.
-     * @param expected The expected storage version.
-     * @param actual The actual storage version.
-     */
+    /// @dev Reverts when the current storageVersion does not match the expected migration source version. Used by {migrateStorage}.
     error Registry__StorageVersionMismatch(uint256 expected, uint256 actual);
 
-    /**
-     * @notice The migration target is invalid (must be strictly increasing).
-     * @param fromVersion The current/expected storage version.
-     * @param toVersion The target storage version.
-     */
-    error Registry__InvalidMigrationTarget(uint256 fromVersion, uint256 toVersion);
+    /// @dev Reverts when a migration target version is not strictly greater than the current storageVersion. Used by {migrateStorage}.
+    error Registry__InvalidMigrationTarget(
+        uint256 fromVersion,
+        uint256 toVersion
+    );
 
-    /**
-     * @notice The migrator execution failed.
-     * @param migrator The migrator contract address.
-     * @param reason Low-level revert reason bytes.
-     */
+    /// @dev Reverts when the delegatecall-based storage migrator fails. Used by {migrateStorage}.
     error Registry__MigratorFailed(address migrator, bytes reason);
 
-    // ============ Constants ============
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     /// @notice Maximum delay window (blocks).
     /// @dev Strategy A: this is an explicit blocks policy configured at deployment (no seconds→blocks conversion).
     uint256 private _maxDelayBlocks;
@@ -148,20 +106,21 @@ contract Registry is
     /// @notice Batch size cap (tests/safety).
     uint256 private constant _MAX_BATCH_SIZE = 50;
 
-    // ============ Upgrade Admin ============
+    /*━━━━━━━━━━━━━━━ Upgrade Admin ━━━━━━━━━━━━━━━*/
     /// @notice Upgrade admin address.
     address private _upgradeAdmin;
     /// @notice Emergency admin address.
     address private _emergencyAdmin;
 
-    // ============ Optional integrations ============
+    /*━━━━━━━━━━━━━━━ Optional Integrations ━━━━━━━━━━━━━━━*/
     /// @notice Dynamic module key registry address.
     address private _dynamicModuleKeyRegistry;
 
-    // ============ Constructor ============
+    /*━━━━━━━━━━━━━━━ Constructor ━━━━━━━━━━━━━━━*/
     /**
      * @notice Constructs the implementation contract and disables initializers.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Disables Initializable initializers on the implementation instance
@@ -172,7 +131,7 @@ contract Registry is
         _disableInitializers();
     }
 
-    // ============ Initializer ============
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
     /**
      * @notice Initializes the Registry and configures governance and upgrade authority.
      * @dev Reverts if:
@@ -186,6 +145,7 @@ contract Registry is
      * - Sets governance owner/admin to initialOwner (not msg.sender)
      *
      * @param minDelayBlocks Minimum delay window for timelocked module upgrades (blocks).
+     * @param maxDelayBlocks Maximum delay window accepted by {setMinDelay} and future initializations (blocks).
      * @param upgradeAdmin Address authorized to perform UUPS upgrades.
      * @param emergencyAdmin Address authorized to pause/cancel upgrades in emergencies.
      * @param initialOwner Initial governance owner/admin address.
@@ -196,23 +156,22 @@ contract Registry is
         address upgradeAdmin,
         address emergencyAdmin,
         address initialOwner
-    )
-        external
-        initializer
-    {
-        if (maxDelayBlocks == 0) revert Registry__InvalidDelayValue(maxDelayBlocks);
-        if (minDelayBlocks > maxDelayBlocks) revert Registry__DelayTooLong(minDelayBlocks, maxDelayBlocks);
+    ) external initializer {
+        if (maxDelayBlocks == 0)
+            revert Registry__InvalidDelayValue(maxDelayBlocks);
+        if (minDelayBlocks > maxDelayBlocks)
+            revert Registry__DelayTooLong(minDelayBlocks, maxDelayBlocks);
         if (upgradeAdmin == address(0)) revert Registry__ZeroAddress();
         if (emergencyAdmin == address(0)) revert Registry__ZeroAddress();
         if (initialOwner == address(0)) revert Registry__ZeroAddress();
-        
+
         __Ownable_init(initialOwner);
         __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
         __Pausable_init();
-        
+
         RegistryStorage.initializeStorageVersion();
-        
+
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         // Governance/admin (compat) should follow the explicit initial owner, not the initializer caller.
         layout.admin = initialOwner;
@@ -220,10 +179,10 @@ contract Registry is
         layout.minDelay = uint64(minDelayBlocks);
 
         _maxDelayBlocks = maxDelayBlocks;
-        
+
         _upgradeAdmin = upgradeAdmin;
         _emergencyAdmin = emergencyAdmin;
-        
+
         emit RegistryEvents.RegistryInitialized(
             initialOwner,
             minDelayBlocks,
@@ -231,7 +190,7 @@ contract Registry is
         );
     }
 
-    // ============ UUPS Upgrade Authorization ============
+    /*━━━━━━━━━━━━━━━ UUPS Upgrade Authorization ━━━━━━━━━━━━━━━*/
     /**
      * @notice Authorizes a UUPS upgrade to a new implementation.
      * @dev Reverts if:
@@ -244,16 +203,23 @@ contract Registry is
      *
      * @param newImplementation The new implementation address.
      */
-    function _authorizeUpgrade(address newImplementation) internal view override {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override {
         if (newImplementation == address(0)) revert Registry__ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
-        if (msg.sender == _upgradeAdmin || msg.sender == _emergencyAdmin || msg.sender == owner()) {
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
+        if (
+            msg.sender == _upgradeAdmin ||
+            msg.sender == _emergencyAdmin ||
+            msg.sender == owner()
+        ) {
             return;
         }
         revert Registry__NotUpgradeAdmin(msg.sender);
     }
 
-    // ============ Optional integrations ============
+    /*━━━━━━━━━━━━━━━ Optional Integrations ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Sets (or clears) the dynamic module key registry integration address.
@@ -265,27 +231,42 @@ contract Registry is
      *
      * @param dynamicModuleKeyRegistryAddr Dynamic module key registry contract address (or zero to disable).
      */
-    function setDynamicModuleKeyRegistry(address dynamicModuleKeyRegistryAddr) external onlyOwner {
-        if (dynamicModuleKeyRegistryAddr != address(0) && dynamicModuleKeyRegistryAddr.code.length == 0) {
+    function setDynamicModuleKeyRegistry(
+        address dynamicModuleKeyRegistryAddr
+    ) external onlyOwner {
+        if (
+            dynamicModuleKeyRegistryAddr != address(0) &&
+            dynamicModuleKeyRegistryAddr.code.length == 0
+        ) {
             revert NotAContract(dynamicModuleKeyRegistryAddr);
         }
-        
+
         address oldAddr = _dynamicModuleKeyRegistry;
         _dynamicModuleKeyRegistry = dynamicModuleKeyRegistryAddr;
-        emit RegistryEvents.DynamicModuleKeyRegistryChanged(oldAddr, dynamicModuleKeyRegistryAddr, msg.sender);
+        emit RegistryEvents.DynamicModuleKeyRegistryChanged(
+            oldAddr,
+            dynamicModuleKeyRegistryAddr,
+            msg.sender
+        );
     }
 
-    // ============ Interface overrides ============
+    /*━━━━━━━━━━━━━━━ Interface Overrides ━━━━━━━━━━━━━━━*/
     /**
      * @notice Returns the governance owner of the Registry.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return The owner address.
+     * @return owner_ Current governance owner address.
      */
-    function owner() public view override(IRegistry, OwnableUpgradeable) returns (address) {
+    function owner()
+        public
+        view
+        override(IRegistry, OwnableUpgradeable)
+        returns (address)
+    {
         return super.owner();
     }
 
@@ -300,8 +281,12 @@ contract Registry is
      *
      * @param newOwner The new owner address.
      */
-    function transferOwnership(address newOwner) public override(IRegistry, OwnableUpgradeable) onlyOwner {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+    function transferOwnership(
+        address newOwner
+    ) public override(IRegistry, OwnableUpgradeable) onlyOwner {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         if (newOwner == address(0)) revert Registry__ZeroAddress();
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
 
@@ -325,12 +310,12 @@ contract Registry is
      *
      * Security:
      * - onlyOwner
-     *
-     * Notes:
-     * - Keeps RegistryStorage.admin/pendingAdmin consistent with Ownable owner.
+     * - Keeps RegistryStorage.admin and pendingAdmin consistent with Ownable owner state.
      */
     function renounceOwnership() public override(OwnableUpgradeable) onlyOwner {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
 
         address oldAdmin = owner();
@@ -346,16 +331,17 @@ contract Registry is
         emit RegistryEvents.AdminChanged(oldAdmin, address(0));
     }
 
-    // ============ Read-only queries (via RegistryQuery) ============
+    /*━━━━━━━━━━━━━━━ Read-Only Queries ━━━━━━━━━━━━━━━*/
     /**
      * @notice Returns the module address for a given module key.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
      * @param key The module key.
-     * @return The module address (zero if not set).
+     * @return moduleAddr Registered module address, or address(0) if the key is unset.
      */
     function getModule(bytes32 key) external view override returns (address) {
         return RegistryQuery.getModule(key);
@@ -370,40 +356,46 @@ contract Registry is
      * - Read-only
      *
      * @param key The module key.
-     * @return The module address.
+     * @return moduleAddr Registered module address.
      */
-    function getModuleOrRevert(bytes32 key) external view override returns (address) {
+    function getModuleOrRevert(
+        bytes32 key
+    ) external view override returns (address) {
         return RegistryQuery.getModuleOrRevert(key);
     }
 
     /**
      * @notice Returns whether a module is registered for the given key.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
      * @param key The module key.
-     * @return True if registered.
+     * @return isRegistered True if the key maps to a non-zero module address.
      */
-    function isModuleRegistered(bytes32 key) external view override returns (bool) {
+    function isModuleRegistered(
+        bytes32 key
+    ) external view override returns (bool) {
         return RegistryQuery.isModuleRegistered(key);
     }
 
     /**
      * @notice Returns the current minimum delay window for timelocked module upgrades.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return The minimum delay window (blocks).
+     * @return minDelayBlocks Current minimum timelock delay in blocks.
      */
     function minDelay() external view override returns (uint256) {
         return RegistryStorage.layout().minDelay;
     }
 
-    // ============ Upgrade admin management ============
+    /*━━━━━━━━━━━━━━━ Upgrade Admin Management ━━━━━━━━━━━━━━━*/
     /**
      * @notice Sets the upgrade admin address (UUPS upgrade authority).
      * @dev Reverts if:
@@ -415,7 +407,8 @@ contract Registry is
      * @param newAdmin The new upgrade admin address.
      */
     function setUpgradeAdmin(address newAdmin) external onlyOwner {
-        if (newAdmin == address(0)) revert Registry__InvalidUpgradeAdmin(newAdmin);
+        if (newAdmin == address(0))
+            revert Registry__InvalidUpgradeAdmin(newAdmin);
         address oldAdmin = _upgradeAdmin;
         _upgradeAdmin = newAdmin;
         emit RegistryEvents.UpgradeAdminChanged(oldAdmin, newAdmin);
@@ -440,12 +433,13 @@ contract Registry is
 
     /**
      * @notice Returns the configured upgrade admin address.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return The upgrade admin address.
+     * @return upgradeAdmin Configured UUPS upgrade admin address.
      */
     function getUpgradeAdmin() external view returns (address) {
         return _upgradeAdmin;
@@ -453,12 +447,13 @@ contract Registry is
 
     /**
      * @notice Returns the configured emergency admin address.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return The emergency admin address.
+     * @return emergencyAdmin Configured emergency admin address.
      */
     function getEmergencyAdmin() external view returns (address) {
         return _emergencyAdmin;
@@ -466,26 +461,28 @@ contract Registry is
 
     /**
      * @notice Returns the dynamic module key registry integration address.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return The dynamic module key registry address (zero if disabled).
+     * @return dynamicModuleKeyRegistry Dynamic module key registry address, or address(0) if integration is disabled.
      */
     function getDynamicModuleKeyRegistry() external view returns (address) {
         return _dynamicModuleKeyRegistry;
     }
 
-    // ============ Governance (compat) ============
+    /*━━━━━━━━━━━━━━━ Governance Compatibility ━━━━━━━━━━━━━━━*/
     /**
      * @notice Returns the governance admin address (compat path).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return The governance admin (owner) address.
+     * @return admin Compatibility governance admin address, which mirrors owner().
      */
     function getAdmin() external view override returns (address) {
         return owner();
@@ -493,12 +490,13 @@ contract Registry is
 
     /**
      * @notice Returns the pending admin address (compat path).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return The pending admin address (zero if none).
+     * @return pendingAdmin Pending admin address, or address(0) if no handover is pending.
      */
     function getPendingAdmin() external view override returns (address) {
         return RegistryStorage.layout().pendingAdmin;
@@ -506,12 +504,13 @@ contract Registry is
 
     /**
      * @notice Returns whether the Registry is paused.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return True if paused.
+     * @return paused_ True if the Registry is currently paused.
      */
     function isPaused() external view override returns (bool) {
         return paused();
@@ -529,7 +528,9 @@ contract Registry is
      * @param newAdmin The new governance admin/owner address.
      */
     function setAdmin(address newAdmin) external onlyOwner {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         if (newAdmin == address(0)) revert Registry__ZeroAddress();
         address oldAdmin = owner();
         _transferOwnership(newAdmin);
@@ -553,8 +554,12 @@ contract Registry is
      *
      * @param newPendingAdmin The new pending admin address (can be zero to clear).
      */
-    function setPendingAdmin(address newPendingAdmin) external override onlyOwner {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+    function setPendingAdmin(
+        address newPendingAdmin
+    ) external override onlyOwner {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         address oldPending = layout.pendingAdmin;
         layout.pendingAdmin = newPendingAdmin;
@@ -572,11 +577,15 @@ contract Registry is
      * - Caller must be the configured pending admin
      */
     function acceptAdmin() external override {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
-        if (msg.sender != layout.pendingAdmin) revert Registry__NotPendingAdmin(msg.sender, layout.pendingAdmin);
-        if (layout.pendingAdmin == address(0)) revert Registry__InvalidPendingAdmin(layout.pendingAdmin);
-        
+        if (msg.sender != layout.pendingAdmin)
+            revert Registry__NotPendingAdmin(msg.sender, layout.pendingAdmin);
+        if (layout.pendingAdmin == address(0))
+            revert Registry__InvalidPendingAdmin(layout.pendingAdmin);
+
         address oldAdmin = owner();
         address oldPending = layout.pendingAdmin;
         _transferOwnership(msg.sender);
@@ -597,9 +606,14 @@ contract Registry is
      */
     function pause() external override {
         if (msg.sender != owner() && msg.sender != _emergencyAdmin) {
-            revert Registry__EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
+            revert Registry__EmergencyAdminNotAuthorized(
+                msg.sender,
+                _emergencyAdmin
+            );
         }
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         _pause();
         RegistryStorage.layout().paused = 1;
         emit RegistryEvents.EmergencyActionExecuted(
@@ -619,7 +633,9 @@ contract Registry is
      * - onlyOwner
      */
     function unpause() external override onlyOwner {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         _unpause();
         RegistryStorage.layout().paused = 0;
         emit RegistryEvents.EmergencyActionExecuted(
@@ -630,7 +646,7 @@ contract Registry is
         );
     }
 
-    // ============ Module management (writes to RegistryStorage) ============
+    /*━━━━━━━━━━━━━━━ Module Management ━━━━━━━━━━━━━━━*/
     /**
      * @notice Sets a module address for a given module key.
      * @dev Reverts if:
@@ -646,8 +662,13 @@ contract Registry is
      * @param key The module key.
      * @param moduleAddr The module contract address.
      */
-    function setModule(bytes32 key, address moduleAddr) external override onlyOwner whenNotPaused {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+    function setModule(
+        bytes32 key,
+        address moduleAddr
+    ) external override onlyOwner whenNotPaused {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         _setModuleInternal(key, moduleAddr, true, true);
     }
 
@@ -666,14 +687,13 @@ contract Registry is
      * @param moduleAddr The module contract address.
      * @return changed True if the stored address changed.
      */
-    function setModuleWithStatus(bytes32 key, address moduleAddr)
-        external
-        override
-        onlyOwner
-        whenNotPaused
-        returns (bool changed)
-    {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+    function setModuleWithStatus(
+        bytes32 key,
+        address moduleAddr
+    ) external override onlyOwner whenNotPaused returns (bool changed) {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         changed = _setModuleInternal(key, moduleAddr, true, true);
     }
 
@@ -693,13 +713,14 @@ contract Registry is
      * @param moduleAddr The module contract address.
      * @param allowReplace Whether to allow replacing an existing module address.
      */
-    function setModuleWithReplaceFlag(bytes32 key, address moduleAddr, bool allowReplace)
-        external
-        override
-        onlyOwner
-        whenNotPaused
-    {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+    function setModuleWithReplaceFlag(
+        bytes32 key,
+        address moduleAddr,
+        bool allowReplace
+    ) external override onlyOwner whenNotPaused {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         _setModuleInternal(key, moduleAddr, allowReplace, true);
     }
 
@@ -721,28 +742,48 @@ contract Registry is
      * @return changedCount Number of keys that changed.
      * @return changedKeys Keys that changed (only first changedCount entries are populated).
      */
-    function setModulesWithStatus(bytes32[] calldata keys, address[] calldata addresses)
+    function setModulesWithStatus(
+        bytes32[] calldata keys,
+        address[] calldata addresses
+    )
         external
         override
         onlyOwner
         whenNotPaused
         returns (uint256 changedCount, bytes32[] memory changedKeys)
     {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (keys.length != addresses.length) revert Registry__MismatchedArrayLengths(keys.length, addresses.length);
-        if (keys.length > _MAX_BATCH_SIZE) revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
+        if (keys.length != addresses.length)
+            revert Registry__MismatchedArrayLengths(
+                keys.length,
+                addresses.length
+            );
+        if (keys.length > _MAX_BATCH_SIZE)
+            revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
         // Emit only the batch event (avoid duplicate per-item events).
         address[] memory oldAddresses = new address[](keys.length);
         changedKeys = new bytes32[](keys.length);
         for (uint256 i = 0; i < keys.length; i++) {
             oldAddresses[i] = RegistryStorage.layout().modules[keys[i]];
-            bool changed = _setModuleInternal(keys[i], addresses[i], true, false);
+            bool changed = _setModuleInternal(
+                keys[i],
+                addresses[i],
+                true,
+                false
+            );
             if (changed) {
                 changedKeys[changedCount] = keys[i];
                 changedCount++;
             }
         }
-        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, addresses, msg.sender);
+        emit RegistryEvents.BatchModuleChanged(
+            keys,
+            oldAddresses,
+            addresses,
+            msg.sender
+        );
     }
 
     /**
@@ -763,20 +804,32 @@ contract Registry is
      * @param addresses Module addresses.
      * @param allowReplace Whether to allow replacing existing module addresses.
      */
-    function batchSetModules(bytes32[] calldata keys, address[] calldata addresses, bool allowReplace)
-        external
-        onlyOwner
-        whenNotPaused
-    {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (keys.length != addresses.length) revert Registry__MismatchedArrayLengths(keys.length, addresses.length);
-        if (keys.length > _MAX_BATCH_SIZE) revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
+    function batchSetModules(
+        bytes32[] calldata keys,
+        address[] calldata addresses,
+        bool allowReplace
+    ) external onlyOwner whenNotPaused {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
+        if (keys.length != addresses.length)
+            revert Registry__MismatchedArrayLengths(
+                keys.length,
+                addresses.length
+            );
+        if (keys.length > _MAX_BATCH_SIZE)
+            revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
         address[] memory oldAddresses = new address[](keys.length);
         for (uint256 i = 0; i < keys.length; i++) {
             oldAddresses[i] = RegistryStorage.layout().modules[keys[i]];
             _setModuleInternal(keys[i], addresses[i], allowReplace, false);
         }
-        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, addresses, msg.sender);
+        emit RegistryEvents.BatchModuleChanged(
+            keys,
+            oldAddresses,
+            addresses,
+            msg.sender
+        );
     }
 
     /**
@@ -796,15 +849,21 @@ contract Registry is
      * @param addresses Module addresses.
      * @param emitIndividualEvents Ignored (kept for interface compatibility).
      */
-    function setModulesWithEvents(bytes32[] calldata keys, address[] calldata addresses, bool emitIndividualEvents)
-        external
-        override
-        onlyOwner
-        whenNotPaused
-    {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (keys.length != addresses.length) revert Registry__MismatchedArrayLengths(keys.length, addresses.length);
-        if (keys.length > _MAX_BATCH_SIZE) revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
+    function setModulesWithEvents(
+        bytes32[] calldata keys,
+        address[] calldata addresses,
+        bool emitIndividualEvents
+    ) external override onlyOwner whenNotPaused {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
+        if (keys.length != addresses.length)
+            revert Registry__MismatchedArrayLengths(
+                keys.length,
+                addresses.length
+            );
+        if (keys.length > _MAX_BATCH_SIZE)
+            revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
         if (emitIndividualEvents) {
             for (uint256 i = 0; i < keys.length; i++) {
                 _setModuleInternal(keys[i], addresses[i], true, true);
@@ -817,7 +876,12 @@ contract Registry is
             oldAddresses[i] = RegistryStorage.layout().modules[keys[i]];
             _setModuleInternal(keys[i], addresses[i], true, false);
         }
-        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, addresses, msg.sender);
+        emit RegistryEvents.BatchModuleChanged(
+            keys,
+            oldAddresses,
+            addresses,
+            msg.sender
+        );
     }
 
     /**
@@ -836,28 +900,40 @@ contract Registry is
      * @param keys Module keys.
      * @param addresses Module addresses.
      */
-    function setModules(bytes32[] calldata keys, address[] calldata addresses)
-        external
-        override
-        onlyOwner
-        whenNotPaused
-    {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (keys.length != addresses.length) revert Registry__MismatchedArrayLengths(keys.length, addresses.length);
-        if (keys.length > _MAX_BATCH_SIZE) revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
+    function setModules(
+        bytes32[] calldata keys,
+        address[] calldata addresses
+    ) external override onlyOwner whenNotPaused {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
+        if (keys.length != addresses.length)
+            revert Registry__MismatchedArrayLengths(
+                keys.length,
+                addresses.length
+            );
+        if (keys.length > _MAX_BATCH_SIZE)
+            revert ModuleCapExceeded(keys.length, _MAX_BATCH_SIZE);
         address[] memory oldAddresses = new address[](keys.length);
         for (uint256 i = 0; i < keys.length; i++) {
             oldAddresses[i] = RegistryStorage.layout().modules[keys[i]];
             _setModuleInternal(keys[i], addresses[i], true, false);
         }
-        emit RegistryEvents.BatchModuleChanged(keys, oldAddresses, addresses, msg.sender);
+        emit RegistryEvents.BatchModuleChanged(
+            keys,
+            oldAddresses,
+            addresses,
+            msg.sender
+        );
     }
 
     /// @dev Internal module write; supports allowReplace and per-item event emission.
-    function _setModuleInternal(bytes32 key, address moduleAddr, bool allowReplace, bool emitEvent)
-        internal
-        returns (bool changed)
-    {
+    function _setModuleInternal(
+        bytes32 key,
+        address moduleAddr,
+        bool allowReplace,
+        bool emitEvent
+    ) internal returns (bool changed) {
         if (moduleAddr == address(0)) revert Registry__ZeroAddress();
 
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
@@ -880,15 +956,21 @@ contract Registry is
         return true;
     }
 
-    function _recordUpgradeHistory(bytes32 key, address oldAddr, address newAddr, address executor) internal {
+    function _recordUpgradeHistory(
+        bytes32 key,
+        address oldAddr,
+        address newAddr,
+        address executor
+    ) internal {
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
-        RegistryStorage.UpgradeHistory memory history = RegistryStorage.UpgradeHistory({
-            oldAddress: oldAddr,
-            newAddress: newAddr,
-            // Block number is stored for off-chain auditing/forensics; not used for business decisions.
-            blockNumber: block.number,
-            executor: executor
-        });
+        RegistryStorage.UpgradeHistory memory history = RegistryStorage
+            .UpgradeHistory({
+                oldAddress: oldAddr,
+                newAddress: newAddr,
+                // Block number is stored for off-chain auditing/forensics; not used for business decisions.
+                blockNumber: block.number,
+                executor: executor
+            });
         uint256 currentIndex = layout.historyIndex[key];
         uint256 ringIndex = currentIndex % _MAX_UPGRADE_HISTORY;
         if (layout.upgradeHistory[key].length < _MAX_UPGRADE_HISTORY) {
@@ -899,7 +981,7 @@ contract Registry is
         layout.historyIndex[key] = currentIndex + 1;
     }
 
-    // ============ Upgrade scheduling/execution ============
+    /*━━━━━━━━━━━━━━━ Upgrade Scheduling And Execution ━━━━━━━━━━━━━━━*/
     /**
      * @notice Schedules a timelocked module upgrade for a given key.
      * @dev Reverts if:
@@ -915,8 +997,13 @@ contract Registry is
      * @param key The module key.
      * @param newAddr The new module address.
      */
-    function scheduleModuleUpgrade(bytes32 key, address newAddr) external override onlyOwner whenNotPaused {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+    function scheduleModuleUpgrade(
+        bytes32 key,
+        address newAddr
+    ) external override onlyOwner whenNotPaused {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         if (newAddr == address(0)) revert Registry__ZeroAddress();
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         address oldAddress = layout.modules[key];
@@ -928,7 +1015,13 @@ contract Registry is
             proposer: msg.sender,
             minDelaySnapshot: uint256(layout.minDelay)
         });
-        emit RegistryEvents.ModuleUpgradeScheduled(key, oldAddress, newAddr, executeAfter, msg.sender);
+        emit RegistryEvents.ModuleUpgradeScheduled(
+            key,
+            oldAddress,
+            newAddr,
+            executeAfter,
+            msg.sender
+        );
     }
 
     /**
@@ -945,16 +1038,26 @@ contract Registry is
      * @param key The module key.
      */
     function cancelModuleUpgrade(bytes32 key) external override whenNotPaused {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         if (msg.sender != owner() && msg.sender != _emergencyAdmin) {
-            revert Registry__EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
+            revert Registry__EmergencyAdminNotAuthorized(
+                msg.sender,
+                _emergencyAdmin
+            );
         }
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[key];
         if (p.newAddr == address(0)) return;
         address oldAddress = layout.modules[key];
         delete layout.pendingUpgrades[key];
-        emit RegistryEvents.ModuleUpgradeCancelled(key, oldAddress, p.newAddr, msg.sender);
+        emit RegistryEvents.ModuleUpgradeCancelled(
+            key,
+            oldAddress,
+            p.newAddr,
+            msg.sender
+        );
     }
 
     /**
@@ -973,18 +1076,28 @@ contract Registry is
      *
      * @param key The module key.
      */
-    function executeModuleUpgrade(bytes32 key) external override onlyOwner whenNotPaused nonReentrant {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+    function executeModuleUpgrade(
+        bytes32 key
+    ) external override onlyOwner whenNotPaused nonReentrant {
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[key];
         if (p.newAddr == address(0)) revert ModuleUpgradeNotFound(key);
         // Timelock execution relies on block.number by design.
-        if (block.number < p.executeAfter) revert ModuleUpgradeNotReady(key, p.executeAfter, block.number);
+        if (block.number < p.executeAfter)
+            revert ModuleUpgradeNotReady(key, p.executeAfter, block.number);
         address oldAddress = layout.modules[key];
         address newAddr = p.newAddr;
         layout.modules[key] = newAddr;
         delete layout.pendingUpgrades[key];
-        emit RegistryEvents.ModuleUpgraded(key, oldAddress, newAddr, msg.sender);
+        emit RegistryEvents.ModuleUpgraded(
+            key,
+            oldAddress,
+            newAddr,
+            msg.sender
+        );
         _recordUpgradeHistory(key, oldAddress, newAddr, msg.sender);
     }
 
@@ -995,24 +1108,34 @@ contract Registry is
      *      - msg.sender != emergencyAdmin
      *
      * Security:
-     * - Callable while paused (pause-then-cancel workflow)
-     *
-     * Notes:
-     * - Iterates over ModuleKeys.getAllKeys().
+     * - Callable while paused as part of a pause-then-cancel workflow.
+     * - Iterates over ModuleKeys.getAllKeys(), so gas grows with the static key set.
      */
     function emergencyCancelAllUpgrades() external {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
         if (msg.sender != _emergencyAdmin) {
-            revert Registry__EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
+            revert Registry__EmergencyAdminNotAuthorized(
+                msg.sender,
+                _emergencyAdmin
+            );
         }
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
         bytes32[] memory keys = ModuleKeys.getAllKeys();
         for (uint256 i = 0; i < keys.length; i++) {
-            RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[keys[i]];
+            RegistryStorage.PendingUpgrade memory p = layout.pendingUpgrades[
+                keys[i]
+            ];
             if (p.newAddr == address(0)) continue;
             address oldAddress = layout.modules[keys[i]];
             delete layout.pendingUpgrades[keys[i]];
-            emit RegistryEvents.ModuleUpgradeCancelled(keys[i], oldAddress, p.newAddr, msg.sender);
+            emit RegistryEvents.ModuleUpgradeCancelled(
+                keys[i],
+                oldAddress,
+                p.newAddr,
+                msg.sender
+            );
         }
     }
 
@@ -1026,7 +1149,10 @@ contract Registry is
      */
     function emergencyRecoverUpgrade() external {
         if (msg.sender != _emergencyAdmin) {
-            revert Registry__EmergencyAdminNotAuthorized(msg.sender, _emergencyAdmin);
+            revert Registry__EmergencyAdminNotAuthorized(
+                msg.sender,
+                _emergencyAdmin
+            );
         }
         address oldAdmin = _upgradeAdmin;
         _upgradeAdmin = _emergencyAdmin;
@@ -1039,10 +1165,11 @@ contract Registry is
         );
     }
 
-    // ============ Query helpers ============
+    /*━━━━━━━━━━━━━━━ Query Helpers ━━━━━━━━━━━━━━━*/
     /**
      * @notice Returns pending upgrade information for a module key.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
@@ -1052,42 +1179,51 @@ contract Registry is
      * @return executeAfter The earliest execution block (block.number).
      * @return hasPendingUpgrade True if a pending upgrade exists.
      */
-    function getPendingUpgrade(bytes32 key) external view override returns (
-        address newAddr,
-        uint256 executeAfter,
-        bool hasPendingUpgrade
-    ) {
-        RegistryStorage.PendingUpgrade memory p = RegistryStorage.layout().pendingUpgrades[key];
+    function getPendingUpgrade(
+        bytes32 key
+    )
+        external
+        view
+        override
+        returns (address newAddr, uint256 executeAfter, bool hasPendingUpgrade)
+    {
+        RegistryStorage.PendingUpgrade memory p = RegistryStorage
+            .layout()
+            .pendingUpgrades[key];
         return (p.newAddr, p.executeAfter, p.newAddr != address(0));
     }
 
     /**
      * @notice Returns whether a pending upgrade is ready to execute for a module key.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      * - Uses block.number for readiness checks by design
      *
      * @param key The module key.
-     * @return True if ready.
+     * @return isReady True if a pending upgrade exists and block.number has reached executeAfter.
      */
     function isUpgradeReady(bytes32 key) external view override returns (bool) {
-        RegistryStorage.PendingUpgrade memory p = RegistryStorage.layout().pendingUpgrades[key];
+        RegistryStorage.PendingUpgrade memory p = RegistryStorage
+            .layout()
+            .pendingUpgrades[key];
         // Timelock readiness check relies on block.number by design.
         return p.newAddr != address(0) && block.number >= p.executeAfter;
     }
 
-    /* ============ Query helpers (tests/compat) ============ */
+    /*━━━━━━━━━━━━━━━ Query Helpers For Tests And Compatibility ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Returns all known module keys (including those not currently registered).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only (pure)
      *
-     * @return All module keys.
+     * @return keys All static module keys returned by ModuleKeys.getAllKeys().
      */
     function getAllModuleKeys() external pure returns (bytes32[] memory) {
         return ModuleKeys.getAllKeys();
@@ -1095,20 +1231,26 @@ contract Registry is
 
     /**
      * @notice Returns all currently registered module keys (compat query).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return Registered module keys.
+     * @return keys Registered module keys.
      */
-    function getAllRegisteredModuleKeys() external view returns (bytes32[] memory) {
+    function getAllRegisteredModuleKeys()
+        external
+        view
+        returns (bytes32[] memory)
+    {
         return RegistryCompatQuery.getAllRegisteredModuleKeys();
     }
 
     /**
      * @notice Returns all registered module keys and their addresses (compat query).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
@@ -1116,7 +1258,11 @@ contract Registry is
      * @return keys Registered module keys.
      * @return addresses Registered module addresses (aligned with keys).
      */
-    function getAllRegisteredModules() external view returns (bytes32[] memory keys, address[] memory addresses) {
+    function getAllRegisteredModules()
+        external
+        view
+        returns (bytes32[] memory keys, address[] memory addresses)
+    {
         keys = RegistryCompatQuery.getAllRegisteredModuleKeys();
         addresses = new address[](keys.length);
         RegistryStorage.Layout storage layout = RegistryStorage.layout();
@@ -1139,25 +1285,28 @@ contract Registry is
      * @return keys Page of registered keys.
      * @return totalCount Total number of registered keys.
      */
-    function getRegisteredModuleKeysPaginated(uint256 offset, uint256 limit)
-        external
-        view
-        returns (bytes32[] memory keys, uint256 totalCount)
-    {
-        return RegistryCompatQuery.getRegisteredModuleKeysPaginated(offset, limit);
+    function getRegisteredModuleKeysPaginated(
+        uint256 offset,
+        uint256 limit
+    ) external view returns (bytes32[] memory keys, uint256 totalCount) {
+        return
+            RegistryCompatQuery.getRegisteredModuleKeysPaginated(offset, limit);
     }
 
     /**
      * @notice Returns the number of stored upgrade history entries for a module key.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
      * @param key The module key.
-     * @return Upgrade history entry count.
+     * @return historyCount Number of stored upgrade-history entries for the key.
      */
-    function getUpgradeHistoryCount(bytes32 key) external view returns (uint256) {
+    function getUpgradeHistoryCount(
+        bytes32 key
+    ) external view returns (uint256) {
         return RegistryStorage.layout().upgradeHistory[key].length;
     }
 
@@ -1176,31 +1325,48 @@ contract Registry is
      * @return blockNumber Upgrade block number (block.number).
      * @return executor Upgrade executor address.
      */
-    function getUpgradeHistory(bytes32 key, uint256 index) external view returns (
-        address oldAddress,
-        address newAddress,
-        uint256 blockNumber,
-        address executor
-    ) {
-        RegistryStorage.UpgradeHistory[] storage history = RegistryStorage.layout().upgradeHistory[key];
-        if (index >= history.length) revert IndexOutOfBounds(index, history.length);
+    function getUpgradeHistory(
+        bytes32 key,
+        uint256 index
+    )
+        external
+        view
+        returns (
+            address oldAddress,
+            address newAddress,
+            uint256 blockNumber,
+            address executor
+        )
+    {
+        RegistryStorage.UpgradeHistory[] storage history = RegistryStorage
+            .layout()
+            .upgradeHistory[key];
+        if (index >= history.length)
+            revert IndexOutOfBounds(index, history.length);
         RegistryStorage.UpgradeHistory storage h = history[index];
         return (h.oldAddress, h.newAddress, h.blockNumber, h.executor);
     }
 
     /**
      * @notice Returns all upgrade history records for a module key.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
      * @param key The module key.
-     * @return Upgrade history records.
+     * @return out Upgrade history records in storage order.
      */
-    function getAllUpgradeHistory(bytes32 key) external view override returns (IRegistry.UpgradeHistory[] memory) {
-        RegistryStorage.UpgradeHistory[] storage history = RegistryStorage.layout().upgradeHistory[key];
-        IRegistry.UpgradeHistory[] memory out = new IRegistry.UpgradeHistory[](history.length);
+    function getAllUpgradeHistory(
+        bytes32 key
+    ) external view override returns (IRegistry.UpgradeHistory[] memory) {
+        RegistryStorage.UpgradeHistory[] storage history = RegistryStorage
+            .layout()
+            .upgradeHistory[key];
+        IRegistry.UpgradeHistory[] memory out = new IRegistry.UpgradeHistory[](
+            history.length
+        );
         for (uint256 i = 0; i < history.length; i++) {
             RegistryStorage.UpgradeHistory storage h = history[i];
             out[i] = IRegistry.UpgradeHistory({
@@ -1213,7 +1379,7 @@ contract Registry is
         return out;
     }
 
-    // ============ Utils ============
+    /*━━━━━━━━━━━━━━━ Utilities ━━━━━━━━━━━━━━━*/
     /**
      * @notice Sets the minimum delay window for timelocked module upgrades.
      * @dev Reverts if:
@@ -1227,8 +1393,11 @@ contract Registry is
      * @param newDelay New delay window (blocks).
      */
     function setMinDelay(uint256 newDelay) external override onlyOwner {
-        RegistryStorage.requireCompatibleVersion(RegistryStorage.CURRENT_STORAGE_VERSION);
-        if (newDelay > _maxDelayBlocks) revert Registry__DelayTooLong(newDelay, _maxDelayBlocks);
+        RegistryStorage.requireCompatibleVersion(
+            RegistryStorage.CURRENT_STORAGE_VERSION
+        );
+        if (newDelay > _maxDelayBlocks)
+            revert Registry__DelayTooLong(newDelay, _maxDelayBlocks);
         if (newDelay == 0) revert Registry__InvalidDelayValue(newDelay);
         uint256 oldDelay = RegistryStorage.layout().minDelay;
         RegistryStorage.layout().minDelay = uint64(newDelay);
@@ -1247,33 +1416,38 @@ contract Registry is
      * Security:
      * - onlyOwner
      * - Uses delegatecall to keep fixed STORAGE_SLOT (upgrade-safe migration pattern)
-     *
-     * Flow:
-     * - Validate currentVersion == fromVersion and toVersion is increasing
-     * - validateStorageLayout() before migration
-     * - delegatecall migrator.migrate(fromVersion,toVersion) (keep slot)
-     * - bump storageVersion to toVersion
-     * - validateStorageLayout() after migration
+     * - Validates storage invariants before and after the delegatecall-based migration.
      *
      * @param fromVersion Expected current storage version.
      * @param toVersion Target storage version (must be greater than current).
      * @param migrator Migrator contract address.
      * @custom:oz-upgrades-unsafe-allow delegatecall
      */
-    function migrateStorage(uint256 fromVersion, uint256 toVersion, address migrator) external override onlyOwner {
+    function migrateStorage(
+        uint256 fromVersion,
+        uint256 toVersion,
+        address migrator
+    ) external override onlyOwner {
         if (migrator == address(0)) revert Registry__ZeroAddress();
         // Safety: forbid delegatecall to EOA / empty-code address.
-        if (migrator.code.length == 0) revert Registry__MigratorNotContract(migrator);
+        if (migrator.code.length == 0)
+            revert Registry__MigratorNotContract(migrator);
 
         uint256 cur = RegistryStorage.getStorageVersion();
-        if (cur != fromVersion) revert Registry__StorageVersionMismatch(fromVersion, cur);
-        if (toVersion <= cur) revert Registry__InvalidMigrationTarget(fromVersion, toVersion);
+        if (cur != fromVersion)
+            revert Registry__StorageVersionMismatch(fromVersion, cur);
+        if (toVersion <= cur)
+            revert Registry__InvalidMigrationTarget(fromVersion, toVersion);
 
         // Pre-migration validation (ensure critical fields are intact).
         RegistryStorage.validateStorageLayout();
 
         // Perform migration (data move/init) via delegatecall; keep STORAGE_SLOT unchanged.
-        bytes memory data = abi.encodeWithSelector(IRegistryStorageMigrator.migrate.selector, fromVersion, toVersion);
+        bytes memory data = abi.encodeWithSelector(
+            IRegistryStorageMigrator.migrate.selector,
+            fromVersion,
+            toVersion
+        );
         // delegatecall is required for storage migration with a fixed STORAGE_SLOT.
         (bool ok, bytes memory reason) = migrator.delegatecall(data);
         if (!ok) revert Registry__MigratorFailed(migrator, reason);
@@ -1295,7 +1469,9 @@ contract Registry is
      *
      * @param newVersion New storage version.
      */
-    function upgradeStorageVersion(uint256 newVersion) external override onlyOwner {
+    function upgradeStorageVersion(
+        uint256 newVersion
+    ) external override onlyOwner {
         uint256 oldVersion = RegistryStorage.getStorageVersion();
         RegistryStorage.upgradeStorageVersion(newVersion);
         emit RegistryEvents.StorageVersionUpgraded(oldVersion, newVersion);
@@ -1315,12 +1491,13 @@ contract Registry is
 
     /**
      * @notice Returns the maximum delay window allowed for setMinDelay/initialize.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only (pure)
      *
-     * @return Maximum delay window (blocks).
+     * @return maxDelayBlocks Maximum allowed timelock delay in blocks.
      */
     // Interface requires MAX_DELAY() (legacy UPPER_SNAKE_CASE naming).
     function MAX_DELAY() external view override returns (uint256) {
@@ -1329,13 +1506,14 @@ contract Registry is
 
     /**
      * @notice Returns whether an address is an admin (compat check).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
      * @param addr Address to check.
-     * @return True if admin.
+     * @return isAdmin_ True if addr matches the stored compatibility admin.
      */
     function isAdmin(address addr) external view override returns (bool) {
         return RegistryStorage.isAdmin(addr);
@@ -1343,12 +1521,13 @@ contract Registry is
 
     /**
      * @notice Returns the current storage version marker.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return Storage version.
+     * @return storageVersion Current Registry storage version marker.
      */
     function getStorageVersion() external view override returns (uint256) {
         return RegistryStorage.getStorageVersion();
@@ -1356,17 +1535,18 @@ contract Registry is
 
     /**
      * @notice Returns whether the Registry storage has been initialized.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return True if initialized.
+     * @return initialized True if the shared Registry storage has been initialized.
      */
     function isInitialized() external view override returns (bool) {
         return RegistryStorage.isInitialized();
     }
 
-    // ============ Storage Gap ============
+    /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     uint256[50] private __gap;
 }

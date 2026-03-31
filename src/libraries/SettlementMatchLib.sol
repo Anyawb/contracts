@@ -1,24 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { IAssetWhitelist } from "../interfaces/IAssetWhitelist.sol";
-import { IOrderEngine } from "../interfaces/IOrderEngine.sol";
-import { IRegistry } from "../interfaces/IRegistry.sol";
-import { IFeeRouter } from "../interfaces/IFeeRouter.sol";
-import { ILenderPoolVault } from "../interfaces/ILenderPoolVault.sol";
-import { TermBlocksLib } from "./TermBlocksLib.sol";
-
-/**
- * @dev Minimal VaultCore interface for typed calls.
- */
-interface IVaultCoreBorrowFor {
-    function borrowFor(address borrower, address asset, uint256 amount, uint16 termDays) external;
-}
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {IAssetWhitelistRead} from "../interfaces/IAssetWhitelistRead.sol";
+import {IOrderEngine} from "../interfaces/IOrderEngine.sol";
+import {IRegistry} from "../interfaces/IRegistry.sol";
+import {IFeeRouterDistribution} from "../interfaces/IFeeRouterDistribution.sol";
+import {IBlocksOnlyCoordinator} from "../interfaces/IBlocksOnlyCoordinator.sol";
+import {ILenderPoolVault} from "../interfaces/ILenderPoolVault.sol";
+import {IVaultCoreBorrowFor} from "../interfaces/IVaultCoreBorrowFor.sol";
+import {TermBlocksLib} from "./TermBlocksLib.sol";
 
 /**
  * @title SettlementMatchLib
@@ -50,15 +45,39 @@ library SettlementMatchLib {
     /// - `termDays` is a legacy bucket identifier; mapping to blocks is explicit via {TermBlocksLib}.
 
     /*━━━━━━━━━━━━━━━ INTERNAL HELPERS ━━━━━━━━━━━━━━━*/
-    function _requireRole(address registry, bytes32 actionKey, address user) private view {
+
+    /**
+     * @dev Resolves AccessControlManager from `registry` and enforces `actionKey` for `user`.
+     *      Reverts if `registry` is zero, the ACM module is missing, or the role check fails.
+     */
+    function _requireRole(
+        address registry,
+        bytes32 actionKey,
+        address user
+    ) private view {
         if (registry == address(0)) revert SettlementMatchLib__ZeroAddress();
-        address acmAddr = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
-    function _checkAssetWhitelist(address registry, address asset) private view {
-        address assetWhitelistAddr = IRegistry(registry).getModule(ModuleKeys.KEY_ASSET_WHITELIST);
-        if (assetWhitelistAddr != address(0) && !IAssetWhitelist(assetWhitelistAddr).isAssetAllowed(asset)) {
+    /**
+     * @dev Validates `asset` against the optional AssetWhitelist module.
+     *      Reverts with {SettlementMatchLib__AssetNotAllowed} when the whitelist module is configured
+     *      and rejects the asset.
+     */
+    function _checkAssetWhitelist(
+        address registry,
+        address asset
+    ) private view {
+        address assetWhitelistAddr = IRegistry(registry).getModule(
+            ModuleKeys.KEY_ASSET_WHITELIST
+        );
+        if (
+            assetWhitelistAddr != address(0) &&
+            !IAssetWhitelistRead(assetWhitelistAddr).isAssetAllowed(asset)
+        ) {
             revert SettlementMatchLib__AssetNotAllowed();
         }
     }
@@ -104,7 +123,12 @@ library SettlementMatchLib {
         uint16 termDays,
         uint256 rateBps
     ) internal returns (uint256 orderId) {
-        if (registry == address(0) || borrower == address(0) || lender == address(0) || borrowAsset == address(0)) {
+        if (
+            registry == address(0) ||
+            borrower == address(0) ||
+            lender == address(0) ||
+            borrowAsset == address(0)
+        ) {
             revert SettlementMatchLib__ZeroAddress();
         }
         if (amount == 0) revert SettlementMatchLib__InvalidAmount();
@@ -124,13 +148,22 @@ library SettlementMatchLib {
         }
 
         // 3) Pull funds from the lender pool vault to this contract, then forward to the borrower.
-        address pool = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_LENDER_POOL_VAULT);
+        address pool = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_LENDER_POOL_VAULT
+        );
         ILenderPoolVault(pool).transferOut(borrowAsset, address(this), amount);
         IERC20(borrowAsset).safeTransfer(borrower, amount);
 
         // 4) Write debt via the canonical VaultCore entrypoint (hits onlyVaultCore in the implementation).
-        address vaultCore = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        IVaultCoreBorrowFor(vaultCore).borrowFor(borrower, borrowAsset, amount, termDays);
+        address vaultCore = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_VAULT_CORE
+        );
+        IVaultCoreBorrowFor(vaultCore).borrowFor(
+            borrower,
+            borrowAsset,
+            amount,
+            termDays
+        );
 
         // 5) Create the loan order. LoanNFT + Reward + DataPush are handled by LendingEngine.
         IOrderEngine.LoanOrder memory order = IOrderEngine.LoanOrder({
@@ -145,7 +178,9 @@ library SettlementMatchLib {
             maturity: 0,
             repaidAmount: 0
         });
-        address orderEngine = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+        address orderEngine = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_ORDER_ENGINE
+        );
         orderId = IOrderEngine(orderEngine).createLoanOrder(order);
     }
 
@@ -189,7 +224,12 @@ library SettlementMatchLib {
         uint16 termDays,
         uint256 rateBps
     ) internal returns (uint256 orderId) {
-        if (registry == address(0) || borrower == address(0) || lender == address(0) || borrowAsset == address(0)) {
+        if (
+            registry == address(0) ||
+            borrower == address(0) ||
+            lender == address(0) ||
+            borrowAsset == address(0)
+        ) {
             revert SettlementMatchLib__ZeroAddress();
         }
         if (amount == 0) revert SettlementMatchLib__InvalidAmount();
@@ -204,12 +244,21 @@ library SettlementMatchLib {
         }
 
         // 3) Pull funds from the lender pool vault to this contract.
-        address pool = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_LENDER_POOL_VAULT);
+        address pool = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_LENDER_POOL_VAULT
+        );
         ILenderPoolVault(pool).transferOut(borrowAsset, address(this), amount);
 
         // 4) Write debt via the canonical VaultCore entrypoint.
-        address vaultCore = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        IVaultCoreBorrowFor(vaultCore).borrowFor(borrower, borrowAsset, amount, termDays);
+        address vaultCore = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_VAULT_CORE
+        );
+        IVaultCoreBorrowFor(vaultCore).borrowFor(
+            borrower,
+            borrowAsset,
+            amount,
+            termDays
+        );
 
         // 5) Create the loan order. LoanNFT + Reward + DataPush are handled by LendingEngine.
         IOrderEngine.LoanOrder memory order = IOrderEngine.LoanOrder({
@@ -224,16 +273,20 @@ library SettlementMatchLib {
             maturity: 0,
             repaidAmount: 0
         });
-        address orderEngine = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_ORDER_ENGINE);
+        address orderEngine = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_ORDER_ENGINE
+        );
         orderId = IOrderEngine(orderEngine).createLoanOrder(order);
 
         // 6) Distribute borrow fees (FeeRouter pulls from msg.sender and refunds any remaining to msg.sender).
         // Use balance-delta as the SSOT net amount to avoid rounding drift across fee implementations.
-        address feeRouter = IRegistry(registry).getModuleOrRevert(ModuleKeys.KEY_FR);
+        address feeRouter = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_FR
+        );
         uint256 balBefore = IERC20(borrowAsset).balanceOf(address(this));
         // Approve FeeRouter to pull the requested amount for this distribution.
         IERC20(borrowAsset).forceApprove(feeRouter, amount);
-        IFeeRouter(feeRouter).distributeNormal(borrowAsset, amount);
+        IFeeRouterDistribution(feeRouter).distributeNormal(borrowAsset, amount);
 
         // 7) Forward the net amount to the borrower: net = refundedRemaining computed via balance-delta.
         // FeeRouter behavior: transferFrom(msg.sender, amount) then transfer remaining back to msg.sender.
@@ -244,6 +297,32 @@ library SettlementMatchLib {
             IERC20(borrowAsset).safeTransfer(borrower, netAmount);
         }
     }
+
+    /**
+     * @notice Forward blocks-only match finalization to the standalone coordinator.
+     * @dev Reverts if:
+     *      - `registry == address(0)` (SettlementMatchLib__ZeroAddress)
+     *      - Registry cannot resolve KEY_BLOCKS_ONLY_COORDINATOR
+     *      - the resolved coordinator rejects the request or any downstream settlement step reverts
+     *
+     * Security:
+     * - The coordinator is the SSOT for blocks-only order creation and product semantics.
+     * - This helper performs no validation of `params` beyond the registry address and intentionally delegates product
+     *   rules to the coordinator.
+     *
+     * @param registry Registry address used to resolve the coordinator.
+     * @param params Blocks-only match parameters forwarded unchanged to the coordinator.
+     * @return orderId Newly assigned coordinator order id.
+     */
+    function finalizeBlocksOnly(
+        address registry,
+        IBlocksOnlyCoordinator.BlocksOnlyMatchParams memory params
+    ) internal returns (uint256 orderId) {
+        if (registry == address(0)) revert SettlementMatchLib__ZeroAddress();
+
+        address coordinator = IRegistry(registry).getModuleOrRevert(
+            ModuleKeys.KEY_BLOCKS_ONLY_COORDINATOR
+        );
+        return IBlocksOnlyCoordinator(coordinator).finalizeMatchBlocks(params);
+    }
 }
-
-

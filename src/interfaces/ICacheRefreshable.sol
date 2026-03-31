@@ -18,4 +18,3 @@ interface ICacheRefreshable {
      */
     function refreshModuleCache() external;
 }
-

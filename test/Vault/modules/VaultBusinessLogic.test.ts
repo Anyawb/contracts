@@ -413,39 +413,9 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
   });
 
   describe('还款（repay / repayWithStop）', function () {
-    beforeEach(async function () {
-      await mockStatisticsView.setShouldFail(false);
-    });
-
-    it('VaultBusinessLogic – repay: 已收敛为 VaultCore 入口，应直接拒绝（避免写路径分叉/资金滞留）', async function () {
-      const amount = ethers.parseUnits('4', 18);
-      await expect(vaultBusinessLogic.repay(userAddress, TEST_ASSET, amount))
-        .to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
-    });
-
-    it('VaultBusinessLogic – repay: 应该拒绝零金额/零资产', async function () {
-      await expect(
-        vaultBusinessLogic.repay(userAddress, TEST_ASSET, 0n)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
-
-      await expect(
-        vaultBusinessLogic.repay(userAddress, ZERO_ADDRESS, 1n)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
-    });
-
-    it('VaultBusinessLogic – repay: 即使统计视图失败也应直接拒绝（已下线入口）', async function () {
-      await mockStatisticsView.setShouldFail(true);
-      await expect(
-        vaultBusinessLogic.repay(userAddress, TEST_ASSET, ethers.parseUnits('1', 18))
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
-    });
-
-    it('VaultBusinessLogic – repayWithStop: 已收敛为 SettlementManager 入口，应直接拒绝', async function () {
-      const amount = ethers.parseUnits('2', 18);
-      await expect(
-        vaultBusinessLogic.repayWithStop(userAddress, TEST_ASSET, amount, true)
-      )
-        .to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
+    it('VaultBusinessLogic – repay / repayWithStop: 已删除（Strict SSOT，无旧入口）', async function () {
+      expect((vaultBusinessLogic as any).repay).to.equal(undefined);
+      expect((vaultBusinessLogic as any).repayWithStop).to.equal(undefined);
     });
   });
 
@@ -459,18 +429,9 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       amounts = [TEST_AMOUNT, TEST_AMOUNT * 2n];
     });
 
-    it('VaultBusinessLogic – batchBorrow: 已按架构收敛（Strict SSOT），应直接拒绝', async function () {
-      await expect(vaultBusinessLogic.batchBorrow(userAddress, assets, amounts)).to.be.revertedWithCustomError(
-        vaultBusinessLogic,
-        'VaultBusinessLogic__UseVaultCoreEntry'
-      );
-    });
-
-    it('VaultBusinessLogic – batchRepay: 已按架构收敛（Strict SSOT），应直接拒绝', async function () {
-      await expect(vaultBusinessLogic.batchRepay(userAddress, assets, amounts)).to.be.revertedWithCustomError(
-        vaultBusinessLogic,
-        'VaultBusinessLogic__UseVaultCoreEntry'
-      );
+    it('VaultBusinessLogic – batchBorrow / batchRepay: 已删除（Strict SSOT，无旧入口）', async function () {
+      expect((vaultBusinessLogic as any).batchBorrow).to.equal(undefined);
+      expect((vaultBusinessLogic as any).batchRepay).to.equal(undefined);
     });
   });
 

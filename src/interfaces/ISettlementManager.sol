@@ -11,6 +11,8 @@ pragma solidity ^0.8.20;
  * Security:
  * - User entry is typically onlyVaultCore (VaultCore is the user-facing SSOT)
  * - Keeper entry is typically role-gated (e.g. ACTION_LIQUIDATE)
+ * - Current blocks-only primary maturity path does not settle through this interface; {BlocksOnlyCoordinator}
+ *   owns the blocks-only settlement/liquidation orchestration and only reuses downstream ledger/liquidation modules.
  */
 interface ISettlementManager {
     /**
@@ -24,13 +26,20 @@ interface ISettlementManager {
      *
      * Security:
      * - Role-gated / onlyVaultCore in implementation
+     * - Intended for legacy or non-blocks-only repayment flows unless an implementation explicitly documents
+     *   blocks-only routing through this surface.
      *
      * @param user Borrower/repayer address
      * @param debtAsset Debt asset address
      * @param repayAmount Repay amount (token decimals of `debtAsset`)
      * @param orderId Order/position id (SSOT; ORDER_ENGINE-generated)
      */
-    function repayAndSettle(address user, address debtAsset, uint256 repayAmount, uint256 orderId) external;
+    function repayAndSettle(
+        address user,
+        address debtAsset,
+        uint256 repayAmount,
+        uint256 orderId
+    ) external;
 
     /**
      * @notice Keeper-triggered settlement/liquidation entrypoint.
@@ -40,6 +49,8 @@ interface ISettlementManager {
      *
      * Security:
      * - Role-gated in implementation
+     * - This is not the current public entrypoint for blocks-only maturity handling; blocks-only keepers currently
+     *   route through `settleOrLiquidateBlocks(...)` on the dedicated coordinator.
      *
      * @param orderId Order/position id (SSOT; ORDER_ENGINE-generated)
      */
@@ -67,4 +78,3 @@ interface ISettlementManager {
      */
     function setRequireFullRepayRelease(bool enabled) external;
 }
-

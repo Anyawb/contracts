@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
+import { ILendingEngineDebtWrite } from "../interfaces/ILendingEngineDebtWrite.sol";
 import { IOrderEngine } from "../interfaces/IOrderEngine.sol";
 
 /// @title MockOrderEngineForSettlementManager
@@ -87,7 +87,7 @@ contract MockOrderEngineForSettlementManager {
 
         address le = lendingEngineAddrVar;
         if (le != address(0)) {
-            ILendingEngineBasic(le).repay(ord.borrower, ord.asset, repayAmount);
+            ILendingEngineDebtWrite(le).repay(ord.borrower, ord.asset, repayAmount);
         }
 
         emit MockRepaid(orderId, repayAmount);

@@ -321,7 +321,7 @@ interface IAICreditsVault {
 
 目标态：奖励通证为 `Registry[KEY_EASY_TOKEN]`（EasyToken），并采用 **MINTER/BURNER 分离**：
 - `MINTER_ROLE`：发行（`mint`），建议仅 `EasyEmissionController`（可 `setSoleMinter` 硬收口）
-- `BURNER_ROLE`：扣罚/消费/回收（`burn`），由协议内模块持有（如 `RewardManagerCore/EasyRecycleDistributor`）
+- `BURNER_ROLE`：扣罚/消费/回收（`burn`），由协议内模块持有（如 `RewardAccrualManager/EasyRecycleDistributor`）
 
 因此不适合让普通用户“直接 burn 自己的 points/Easy”来按次扣费（用户通常不具备 `BURNER_ROLE`）。
 

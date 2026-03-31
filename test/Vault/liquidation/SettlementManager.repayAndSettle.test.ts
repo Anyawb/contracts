@@ -96,6 +96,42 @@ describe('SettlementManager – repayAndSettle (SSOT)', function () {
     expect(await cm.getCollateral(user.address, collateralAsset)).to.equal(0n);
   });
 
+  it('releases collateral when debt ledger is cleared even if valuation cache remains stale', async function () {
+    const { debtToken, cm, le, orderEngine, settlementManager, vaultCore, user } = await loadFixture(deployFixture);
+
+    const orderId = 5n;
+    const repayAmount = ethers.parseUnits('10', 18);
+    const staleDebtValue = ethers.parseUnits('999', 18);
+
+    await le.setUserDebt(user.address, debtToken.target, repayAmount);
+    await le.setUserTotalDebtValue(user.address, staleDebtValue);
+
+    const collateralAsset = debtToken.target;
+    await cm.setUserCollateral(user.address, collateralAsset, ethers.parseUnits('5', 18));
+
+    await orderEngine.setOrder(orderId, {
+      principal: repayAmount,
+      rate: 0n,
+      term: 0n,
+      borrower: user.address,
+      lender: ethers.ZeroAddress,
+      asset: debtToken.target,
+      startTimestamp: 0n,
+      maturity: 0n,
+      repaidAmount: 0n
+    });
+
+    await expect(
+      vaultCore.connect(user).repayViaSettlementManager(settlementManager.target, orderId, debtToken.target, repayAmount)
+    )
+      .to.emit(settlementManager, 'RepayAndSettleProcessed')
+      .withArgs(user.address, debtToken.target, repayAmount, orderId, true, anyValue);
+
+    expect(await le.getDebt(user.address, debtToken.target)).to.equal(0n);
+    expect(await cm.getCollateral(user.address, collateralAsset)).to.equal(0n);
+    expect(await le.getUserTotalDebtValue(user.address)).to.equal(staleDebtValue - repayAmount);
+  });
+
   it('triggers OrderEngine repay (SSOT orderId path)', async function () {
     const { debtToken, le, orderEngine, settlementManager, vaultCore, user } = await loadFixture(deployFixture);
 

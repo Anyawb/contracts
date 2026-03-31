@@ -13,6 +13,16 @@
 - 触发点：`VaultLendingEngine`/`LiquidationManager` 推送 View 失败（依赖缺失/无代码/revert/账本读取失败）以及 `PositionView` guarded 读取失败。
 - 载荷：user、asset、viewAddr（可能为 0）、尝试写入的 collateral/debt、revert reason(bytes)。主流程不回滚。
 
+### RewardView 专项补偿口径（2026-03）
+- `RewardViewPushFailed(user, rewardView, op, payload, reason)` 属于 Reward 镜像层失败留痕；主账本成功与否必须以 `RewardAccrualManager` / `RewardManagerCore` 的真实账本为准。
+- `op = PENALTY_LEDGER` 时，链上管理员可调用 `RewardView.retryPushPenaltyLedger(user, pendingDebt, blockNumber)` 做幂等补偿。
+- 补偿前必须先比对：
+  - authoritative penalty debt（主账本）
+  - mirrored pending penalty（RewardView 镜像）
+  - failure payload / artifact 中记录的 penalty debt 与 blockNumber
+- 若主账本与镜像已经一致，则应记录为 `already-aligned` 并跳过补偿；这是合法的安全 no-op，不应记为失败。
+- 若 artifact / failure payload 已过期，不再对应当前主账本，则应记录为 `stale-payload` 并跳过补偿，避免旧值覆盖新状态。
+
 ## 链下处理流程
 1) 监听 `CacheUpdateFailed`，写入重试队列（含 tx hash、block time、payload，键建议 `(user, asset, view, blockNumber, logIndex)` 保证幂等）。
 2) 队列记录状态机：pending/queued/retried/deadletter/ignored，记录最后一次尝试时间与尝试次数。
@@ -23,6 +33,18 @@
    - 对同一 `(user, asset, view)` 加租约/行级锁，最小间隔限流，防多 worker 并发重放。
    - 若 view 合约版本已变更，需显式确认（防旧逻辑写入）。
 5) 连续 N 次失败转入“死亡信箱”并告警，需进一步人工排查；死信记录保留原因分类，支持批量导出与 dry-run 重放。
+
+### RewardView penalty replay 工具
+- 脚本：`scripts/e2e/tools/replay-rewardview-penalty-failures.ts`
+- 推荐模式：
+  - 日常运维可直接扫链上 `RewardViewPushFailed(PENALTY_LEDGER)` 日志
+  - fork / E2E 演示优先使用 artifact-driven 模式：`REWARDVIEW_REPLAY_ARTIFACT=<artifact>`
+- artifact-driven 模式适用原因：共享 fork RPC 常会对宽窗口 `eth_getLogs` 做限制，但 E2E artifact 已经保存了 replay 所需的 `user/blockNumber/pendingPenaltyAfter`。
+- 输出报告会明确记录：
+  - `replayed=true`：已执行补偿写入
+  - `replayed=false, skippedReason=already-aligned`：主账本与镜像已一致
+  - `replayed=false, skippedReason=stale-payload`：失败载荷过期，禁止覆盖最新状态
+- 本次 fork 演示的独立验证纪要见：`docs/Test-Guide/fork-rewardview-penalty-replay-validation.md`
 
 ## 前端提示（用户可见）
 - 当用户存在未清理的 `CacheUpdateFailed` 记录时，在账户概览显示：

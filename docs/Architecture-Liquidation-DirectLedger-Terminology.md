@@ -1,10 +1,10 @@
 ## 目标
 
-这份文档用于**统一团队沟通口径**，避免在实现与评审中把“方案A/方案B”叫乱。本文以 `docs/Architecture-Guide.md` 的主线为准，将清算与抵押托管的目标架构统一表述为：
+这份文档用于**统一团队沟通口径**，避免在实现与评审中把“方案A/方案B”叫乱。本文以 `docs/Architecture-Guide.md` 的主线为准，将清算与抵押模块边界的目标架构统一表述为：
 
 - **清算写入直达账本（Direct-to-Ledger）**
 - **清算事件/DataPush 单点（LiquidatorView 单点推送）**
-- **清算对外写入口唯一（`KEY_SETTLEMENT_MANAGER`）**
+- **清算对外写入口按产品线区分（legacy / 通用订单是 `KEY_SETTLEMENT_MANAGER`；blocks-only 是 `KEY_BLOCKS_ONLY_COORDINATOR`）**
 
 > 建议：在 PR、测试用例、脚本与讨论中，尽量使用“直达账本清算架构 / 旧路径（Legacy）”这两个词，而不是“方案A/方案B”。
 
@@ -22,36 +22,40 @@
 
 ### 术语映射（把“方案A/方案B”翻译成文档一致的说法）
 
-| 你任务里的叫法 | 建议统一叫法 | 核心特征（用于验收） |
-|---|---|---|
-| 方案A（目标） | **直达账本清算架构（Direct-to-Ledger）** | `KEY_SETTLEMENT_MANAGER` 编排 → `KEY_CM` 扣押 → `KEY_LE` 减债 → `LiquidatorView.push*` 单点 DataPush |
-| 方案B / 旧模块族 | **旧路径（Legacy）** | 任意“第二入口”、任意“VBL 托管抵押假设”、任意“LM 自己 emit DataPush/事件双发”、任意“旧 key/旧模块仍被依赖” |
+| 你任务里的叫法   | 建议统一叫法                             | 核心特征（用于验收）                                                                                                  |
+| ---------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 方案A（目标）    | **直达账本清算架构（Direct-to-Ledger）** | 清算写入直达账本（CM/LE），且清算事件/DataPush 仅保留单点推送（LiquidatorView）                                       |
+| 方案B / 旧模块族 | **旧路径（Legacy）**                     | 任意“第二入口”、任意“资金链/资产流动/调用顺序复述”、任意“LM 自己 emit DataPush/事件双发”、任意“旧 key/旧模块仍被依赖” |
 
 ---
 
 ## 目标架构（直达账本）的一句话定义（建议复制到 PR/评审）
 
-**清算由 `SettlementManager`（`KEY_SETTLEMENT_MANAGER`）作为唯一对外写入口承接；在清算分支中写入操作只直达账本模块 `CollateralManager` 与 `LendingEngine`，写入成功后仅由 `LiquidatorView.pushLiquidationUpdate/Batch` 进行单点 DataPush；任何 View 不承载写入转发，任何业务层不保留第二清算入口。**
+本文件只定义“术语与验收特征”，不复述清算资金链/调用链细节。
+
+- 清算对外写入口按产品线区分：legacy / 通用订单使用 `SettlementManager`（`KEY_SETTLEMENT_MANAGER`）；blocks-only 使用 `BlocksOnlyCoordinator`（`KEY_BLOCKS_ONLY_COORDINATOR`）
+- 写入直达账本：账本写入仅发生在 `CollateralManager` / `LendingEngine`
+- 单点推送：仅保留 `LiquidatorView.push*` 的 DataPush 入口
+
+资金链视角的完整说明以 Funds-Flow 为 SSOT：`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`。
 
 ---
 
-## 目标架构：模块职责与调用链（对齐 Architecture-Guide）
+## 目标架构：模块职责（对齐 Architecture-Guide）
 
-### 写路径（清算）
+本节只保留模块职责边界，不复述“谁调用谁/按什么顺序”的串联式调用链。
 
-- **对外写入口（SSOT）**：`Registry.KEY_SETTLEMENT_MANAGER` → `SettlementManager`
-- **清算执行器（内部）**：`Registry.KEY_LIQUIDATION_MANAGER` → `LiquidationManager`（可选：供 SettlementManager 在清算分支内部调用）
-- **扣押抵押（直达账本）**：`Registry.KEY_CM` → `ICollateralManager.withdrawCollateral(...)`（或等价的“扣押/转出”写入口）
-- **减少债务（直达账本）**：`Registry.KEY_LE` → `ILendingEngineBasic.forceReduceDebt(...)`（或 `VaultLendingEngine.forceReduceDebt`）
-- **单点推送**：`Registry.KEY_LIQUIDATION_VIEW` → `LiquidatorView.pushLiquidationUpdate/Batch`
+- **对外写入口（SSOT，按产品线区分）**：legacy / 通用订单使用 `SettlementManager`（`KEY_SETTLEMENT_MANAGER`）；blocks-only 使用 `BlocksOnlyCoordinator`（`KEY_BLOCKS_ONLY_COORDINATOR`）
+- **清算执行器（可选内部模块）**：`LiquidationManager`（`KEY_LIQUIDATION_MANAGER`）
+- **抵押账本（写入在此发生）**：`CollateralManager`（`KEY_CM`）
+- **债务账本（写入在此发生）**：`LendingEngine` / `VaultLendingEngine`（`KEY_LE`）
+- **清算单点推送**：`LiquidatorView`（`KEY_LIQUIDATION_VIEW`）
 
 > 关键原则：**LM 不直接 `_emitData`**，避免事件双发、链下重复消费；View 层不做写入放行。
 
-### 写路径（deposit/withdraw 托管）
+### deposit/withdraw 资金链（SSOT）
 
-- 用户侧：**用户 approve 的对象是 `CollateralManager`（CM）**
-- 路由：`VaultCore` → `VaultRouter.processUserOperation` → `CollateralManager.depositCollateral/withdrawCollateral`
-- 账本不变量：**CM 内部账本应与真实 ERC20 余额一致**（详见下文建议 #2）
+deposit/withdraw 的资金链口径不在此文维护，请直接参考 Funds-Flow SSOT：`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`。
 
 ### 权限（强约束）
 
@@ -67,7 +71,7 @@
 - **第二清算入口**：例如 `VaultBusinessLogic.liquidate`（或任何 VBL 内清算执行入口）
 - **旧清算模块族**：例如 `LiquidationCollateralManager` / `LiquidationRewardDistributor` / `LiquidationViewLibrary` 等（以及它们的绑定、脚本部署与测试依赖）
 - **旧 key 依赖**：例如 `KEY_LIQUIDATION_COLLATERAL_MANAGER` 等与目标架构冲突/重复的模块键
-- **“VBL 托管抵押”假设**：任何仍在业务层执行 `safeTransferFrom/safeTransfer` 来托管抵押 token 的路径
+- **资金链口径复述**：任何在非 Funds-Flow SSOT 文档中复述“资产流动/转账细节/调用顺序”的说明都属于旧口径，应删除并改为引用 Funds-Flow SSOT
 
 验收口径建议：
 
@@ -76,33 +80,16 @@
 
 ---
 
-## 建议的 4 点优化/补强（推荐写进实现与测试要求）
+## 建议的 2 点优化/补强（推荐写进实现与测试要求）
 
-### 建议 #1：统一“扣押/提现”写入口语义，减少接口分裂
-
-当前文档示例使用 `ICollateralManager.withdrawCollateral(user, asset, amount)` 来表达“扣押抵押”。如果你需要“把 token 转给清算人/接收者”，建议优先考虑把语义统一为：
-
-- **一个写入口**覆盖两种场景：提现（receiver=user）与扣押（receiver=liquidator/receiver），例如 `withdrawCollateralTo(user, asset, amount, receiver)`
-
-目标：减少 `withdraw` / `seize` 两套接口并存导致的边界差异与测试遗漏。
-
-### 建议 #2：明确“账本=真实余额”的资产约束或按实际到账记账
-
-若允许 fee-on-transfer / rebasing / 非标准 ERC20：
-
-- deposit 记账应使用 `balanceAfter - balanceBefore`，避免“账本大于真实余额”的坏状态；或
-- 在资产白名单策略中明确**禁用**此类 token（更简单、更可控）。
-
-无论选哪条路，都应在单测里覆盖并固化为协议约束。
-
-### 建议 #3：`LiquidatorView` 推送建议“最佳努力不回滚”，并提供可观测失败信号
+### 建议 #1：`LiquidatorView` 推送建议“最佳努力不回滚”，并提供可观测失败信号
 
 目标：避免“缓存/推送层问题”放大为“资金层不可用”。
 
 - 账本写入成功后再调用 `LiquidatorView.push*`
 - 若 push 失败：建议不回滚清算写入（最佳努力），同时发出一个轻量失败事件供链下告警与补推（失败事件不等同 DataPush）
 
-### 建议 #4：入口唯一性要做到“不可误用”，避免旧入口回流
+### 建议 #2：入口唯一性要做到“不可误用”，避免旧入口回流
 
 一旦决定 `SettlementManager` 为唯一对外清算/结算入口：
 
@@ -115,11 +102,8 @@
 
 你原 10 项任务可以统一改写为以下口径（用于 README/PR 描述）：
 
-- **锁定目标架构**：直达账本清算 + CM 托管 + 清算入口唯一 + LiquidatorView 单点推送；定义“旧路径（Legacy）”清单与下线策略
-- **CM 托管与账本一致性**：所有抵押 token 的转入/转出均在 CM 内完成，确保账本与余额一致；补齐清算扣押/转出语义
-- **入口链路统一**：deposit/withdraw 统一走 `VaultCore → VaultRouter → CM`，用户 approve CM；业务层移除任何抵押托管转账
-- **LM 清算编排统一**：扣押调用 CM、减债调用 LE，成功后仅 LiquidatorView 推送，失败策略与“最佳努力推送”一致
-- **权限与角色统一**：账本模块内部校验 `ACTION_LIQUIDATE`，部署脚本只给 LM 必要授权，View 写入白名单严格收敛
-- **旧路径下线**：删除/禁用第二入口与旧模块族/旧 key 依赖，确保无模块仍依赖“VBL 托管抵押”假设
-- **测试与脚本/文档更新**：以“直达账本 + 单点推送 + 权限在账本”作为验收主线更新测试与部署脚本，并在对接文档里明确 approve 对象与资产去向
-
+- **锁定目标架构**：直达账本清算 + 按产品线区分对外入口 + LiquidatorView 单点推送；定义“旧路径（Legacy）”清单与下线策略
+- **入口链路统一**：清算/结算写入口收敛到 `SettlementManager`；旧入口删除或 `revert` 并配套测试
+- **权限与角色统一**：账本模块内部校验 `ACTION_LIQUIDATE`（或等效校验），覆盖“未授权必回滚”的测试硬门槛
+- **旧路径下线**：删除/禁用第二入口与旧模块族/旧 key 依赖
+- **文档治理**：任何资金链/资产流动/调用顺序叙事统一引用 Funds-Flow SSOT

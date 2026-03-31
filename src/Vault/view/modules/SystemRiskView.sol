@@ -7,7 +7,7 @@ import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ILiquidationRiskManager } from "../../../interfaces/ILiquidationRiskManager.sol";
+import { ILiquidationRiskRead } from "../../../interfaces/ILiquidationRiskRead.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
@@ -60,7 +60,7 @@ contract SystemRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Callable once via proxy initializer
      *
-     * @param initialRegistryAddr Registry address used for module resolution
+    * @param initialRegistryAddr Registry address used for module resolution.
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -80,7 +80,7 @@ contract SystemRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Role-gated read: `ACTION_VIEW_RISK_DATA` or `ACTION_ADMIN`
      *
-     * @return threshold Liquidation threshold (implementation-defined scale; commonly bps)
+    * @return threshold Liquidation threshold in implementation-defined scale.
      */
     function getLiquidationThreshold() external view onlyValidRegistry onlyRiskViewerOrAdmin returns (uint256 threshold) {
         return _rm().getLiquidationThreshold();
@@ -96,7 +96,7 @@ contract SystemRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Role-gated read: `ACTION_VIEW_RISK_DATA` or `ACTION_ADMIN`
      *
-     * @return minHealthFactor Minimum health factor (implementation-defined scale; commonly bps)
+    * @return minHealthFactor Minimum health factor in implementation-defined scale.
      */
     function getMinHealthFactor() external view onlyValidRegistry onlyRiskViewerOrAdmin returns (uint256 minHealthFactor) {
         return _rm().getMinHealthFactor();
@@ -112,30 +112,16 @@ contract SystemRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Role-gated read: `ACTION_VIEW_RISK_DATA` or `ACTION_ADMIN`
      *
-     * @return maxLtvBps Maximum LTV (bps=1e4)
+    * @return maxLtvBps Maximum LTV in basis points.
      */
     function getMaxLtvBps() external view onlyValidRegistry onlyRiskViewerOrAdmin returns (uint256 maxLtvBps) {
         return _rm().getMaxLtvBps();
     }
 
-    /**
-     * @notice Returns the Registry address.
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registry Registry address
-     */
-    function registryAddr() external view returns (address registry) {
-        return _registryAddr;
-    }
-
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
-    function _rm() internal view returns (ILiquidationRiskManager) {
+    function _rm() internal view returns (ILiquidationRiskRead) {
         address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        return ILiquidationRiskManager(rm);
+        return ILiquidationRiskRead(rm);
     }
 
     /*━━━━━━━━━━━━━━━ UUPS ━━━━━━━━━━━━━━━*/

@@ -1,29 +1,36 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ZeroAddress, AmountIsZero, InvalidHealthFactor, InvalidLTV } from "../errors/StandardErrors.sol";
+import {
+    ZeroAddress,
+    AmountIsZero,
+    InvalidHealthFactor,
+    InvalidLTV
+} from "../errors/StandardErrors.sol";
 
 /**
  * @title VaultUtils
  * @notice Stateless validation and helper utilities shared across modules.
- * @dev Security:
+ * @dev Reverts if:
+ *      - see individual functions
+ *
+ * Security:
  * - Library functions are pure/view only; no external calls.
- * - Solidity ^0.8.x overflow/underflow checks apply (operations revert on overflow).
+ * - Solidity ^0.8.x overflow and underflow checks apply.
  */
 library VaultUtils {
-    
-    /* ============ Constants ============ */
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     /// @notice Minimum valid health factor in bps (10_000 = 100%).
     uint256 internal constant MIN_VALID_HF_BPS = 10000;
-    
+
     /// @notice Maximum valid LTV in bps (10_000 = 100%).
     uint256 internal constant MAX_VALID_LTV_BPS = 10000;
-    
+
     /// @notice Default minimum health factor in bps (11_000 = 110%).
     uint256 internal constant DEFAULT_MIN_HF_BPS = 11000;
 
-    /* ============ Validation Functions ============ */
-    
+    /*━━━━━━━━━━━━━━━ Validation Functions ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Validate an address is non-zero.
      * @dev Reverts if:
@@ -90,16 +97,19 @@ library VaultUtils {
      *
      * @param param Parameter value to validate (unit depends on caller).
      */
-    function validateNonZero(uint256 param, string memory /* paramName */) internal pure {
+    function validateNonZero(
+        uint256 param,
+        string memory /* paramName */
+    ) internal pure {
         if (param == 0) revert AmountIsZero();
     }
 
-    /* ============ Module Address Utilities ============ */
-    
+    /*━━━━━━━━━━━━━━━ Module Address Utilities ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Return whether a module address is configured (non-zero).
      * @dev Reverts if:
-     *      - none
+     *      - (none)
      *
      * Security:
      * - Pure check only.
@@ -107,23 +117,28 @@ library VaultUtils {
      * @param moduleAddr Module address.
      * @return isConfigured True if moduleAddr != address(0).
      */
-    function isModuleConfigured(address moduleAddr) internal pure returns (bool) {
+    function isModuleConfigured(
+        address moduleAddr
+    ) internal pure returns (bool) {
         return moduleAddr != address(0);
     }
 
     /**
      * @notice Get a module address, falling back to a provided default if unset.
      * @dev Reverts if:
-     *      - none (caller decides whether fallback may be zero)
+     *      - (none)
      *
      * Security:
-     * - Pure selection only.
+     * - Pure selection only. Callers decide whether a zero fallback is acceptable.
      *
      * @param moduleAddr Preferred module address (may be zero).
      * @param fallbackAddr Fallback address (may be zero).
      * @return resolved Effective address chosen.
      */
-    function getModuleAddress(address moduleAddr, address fallbackAddr) internal pure returns (address) {
+    function getModuleAddress(
+        address moduleAddr,
+        address fallbackAddr
+    ) internal pure returns (address) {
         return moduleAddr != address(0) ? moduleAddr : fallbackAddr;
     }
 
@@ -140,8 +155,8 @@ library VaultUtils {
      * @return resolved Effective address chosen (non-zero).
      */
     function getModuleAddressSafe(
-        address moduleAddr, 
-        address fallbackAddr, 
+        address moduleAddr,
+        address fallbackAddr,
         string memory /* moduleName */
     ) internal pure returns (address) {
         address result = getModuleAddress(moduleAddr, fallbackAddr);
@@ -151,8 +166,8 @@ library VaultUtils {
         return result;
     }
 
-    /* ============ Math Utilities ============ */
-    
+    /*━━━━━━━━━━━━━━━ Math Utilities ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Compute amount * bps / 10_000 (deprecated; use VaultMath).
      * @dev Reverts if:
@@ -165,7 +180,10 @@ library VaultUtils {
      * @param bps Basis points where 10_000 = 100% (0 is allowed).
      * @return result Floor(amount * bps / 10_000).
      */
-    function calculateBps(uint256 amount, uint256 bps) internal pure returns (uint256) {
+    function calculateBps(
+        uint256 amount,
+        uint256 bps
+    ) internal pure returns (uint256) {
         return (amount * bps) / 10000;
     }
 
@@ -181,7 +199,10 @@ library VaultUtils {
      * @param collateral Collateral amount/value (unit must match debt).
      * @return ltvBps LTV in bps; returns 0 if collateral == 0.
      */
-    function calculateLTV(uint256 debt, uint256 collateral) internal pure returns (uint256 ltvBps) {
+    function calculateLTV(
+        uint256 debt,
+        uint256 collateral
+    ) internal pure returns (uint256 ltvBps) {
         if (collateral == 0) return 0;
         return (debt * 10000) / collateral;
     }
@@ -199,7 +220,11 @@ library VaultUtils {
      * @param bonusBps Additive bonus in bps applied to collateral (10_000 = 100%).
      * @return healthFactorBps Health factor in bps; returns max uint if debt == 0.
      */
-    function calculateHealthFactor(uint256 collateral, uint256 debt, uint256 bonusBps) internal pure returns (uint256) {
+    function calculateHealthFactor(
+        uint256 collateral,
+        uint256 debt,
+        uint256 bonusBps
+    ) internal pure returns (uint256) {
         if (debt == 0) return type(uint256).max;
         return (collateral * (10000 + bonusBps)) / debt;
     }
@@ -216,16 +241,19 @@ library VaultUtils {
      * @param debt Total debt value (unit must match collateral).
      * @return healthFactorBps Health factor in bps; returns max uint if debt == 0.
      */
-    function calculateMinHealthFactor(uint256 collateral, uint256 debt) internal pure returns (uint256) {
+    function calculateMinHealthFactor(
+        uint256 collateral,
+        uint256 debt
+    ) internal pure returns (uint256) {
         return calculateHealthFactor(collateral, debt, 0);
     }
 
-    /* ============ Comparison Utilities ============ */
-    
+    /*━━━━━━━━━━━━━━━ Comparison Utilities ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Return whether a value is greater than zero.
      * @dev Reverts if:
-     *      - none
+     *      - (none)
      *
      * Security:
      * - Pure comparison only.
@@ -240,7 +268,7 @@ library VaultUtils {
     /**
      * @notice Return whether a value is zero.
      * @dev Reverts if:
-     *      - none
+     *      - (none)
      *
      * Security:
      * - Pure comparison only.
@@ -255,7 +283,7 @@ library VaultUtils {
     /**
      * @notice Return whether an address is the zero address.
      * @dev Reverts if:
-     *      - none
+     *      - (none)
      *
      * Security:
      * - Pure comparison only.
@@ -267,12 +295,12 @@ library VaultUtils {
         return addr == address(0);
     }
 
-    /* ============ Array Utilities ============ */
-    
+    /*━━━━━━━━━━━━━━━ Array Utilities ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Return whether two address arrays have equal length.
      * @dev Reverts if:
-     *      - none
+     *      - (none)
      *
      * Security:
      * - Pure comparison only.
@@ -281,14 +309,17 @@ library VaultUtils {
      * @param arr2 Second array.
      * @return isEqual True if arr1.length == arr2.length.
      */
-    function arraysEqualLength(address[] memory arr1, address[] memory arr2) internal pure returns (bool) {
+    function arraysEqualLength(
+        address[] memory arr1,
+        address[] memory arr2
+    ) internal pure returns (bool) {
         return arr1.length == arr2.length;
     }
 
     /**
      * @notice Return whether two uint256 arrays have equal length.
      * @dev Reverts if:
-     *      - none
+     *      - (none)
      *
      * Security:
      * - Pure comparison only.
@@ -297,7 +328,10 @@ library VaultUtils {
      * @param arr2 Second array.
      * @return isEqual True if arr1.length == arr2.length.
      */
-    function arraysEqualLength(uint256[] memory arr1, uint256[] memory arr2) internal pure returns (bool) {
+    function arraysEqualLength(
+        uint256[] memory arr1,
+        uint256[] memory arr2
+    ) internal pure returns (bool) {
         return arr1.length == arr2.length;
     }
 
@@ -328,4 +362,4 @@ library VaultUtils {
     function validateNonEmptyArray(uint256[] memory arr) internal pure {
         if (arr.length == 0) revert AmountIsZero();
     }
-} 
+}

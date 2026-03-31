@@ -806,42 +806,15 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
 
     describe('带停止标志的还款功能', function () {
       it('应该正确执行带停止标志的还款操作', async function () {
-        const userAddress = await user1.getAddress();
-        
-        await expect(
-          vaultBusinessLogic.repayWithStop(
-            userAddress,
-            TEST_ASSET,
-            TEST_AMOUNT,
-            true
-          )
-        ).to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
+        expect((vaultBusinessLogic as any).repayWithStop).to.equal(undefined);
       });
 
       it('应该拒绝零金额还款', async function () {
-        const userAddress = await user1.getAddress();
-        
-        await expect(
-          vaultBusinessLogic.repayWithStop(
-            userAddress,
-            TEST_ASSET,
-            0n,
-            false
-          )
-        ).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
+        expect((vaultBusinessLogic as any).repayWithStop).to.equal(undefined);
       });
 
       it('应该拒绝零地址资产', async function () {
-        const userAddress = await user1.getAddress();
-        
-        await expect(
-          vaultBusinessLogic.repayWithStop(
-            userAddress,
-            ZERO_ADDRESS,
-            TEST_AMOUNT,
-            false
-          )
-        ).to.be.revertedWithCustomError(vaultBusinessLogic, 'ZeroAddress');
+        expect((vaultBusinessLogic as any).repayWithStop).to.equal(undefined);
       });
     });
   });
@@ -1039,10 +1012,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       
       
       // VaultBusinessLogic 的 deposit 入口已永久下线，必须走 VaultCore → VaultRouter → CM
-      const userAddress = await user1.getAddress();
-      await expect(
-        vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-      ).to.be.revertedWithCustomError(vaultBusinessLogic, 'VaultBusinessLogic__UseVaultCoreEntry');
+      expect((vaultBusinessLogic as any).deposit).to.equal(undefined);
     });
   });
 

@@ -17,13 +17,15 @@ import { ILiquidationConfigManager } from "../interfaces/ILiquidationConfigManag
 /**
  * @title VaultAdmin
  * @notice Governance-gated dispatch surface for Vault-level parameter updates.
- * @dev Architecture SSOT:
- * - Parameter SSOT is owned by dedicated modules (e.g., LiquidationConfigManager).
- * - VaultAdmin exists to provide a stable entrypoint that forwards to SSOT modules.
+ * @dev Reverts if:
+ *      - Registry is unset or invalid when a Registry-dependent path is invoked (ZeroAddress / NotAContract)
+ *      - caller lacks the required governance role for the invoked action (via ACM)
+ *      - downstream SSOT module resolution or parameter update calls revert
  *
  * Security:
  * - UUPS upgradeable (implementation disables initializers).
  * - Governance methods are role-gated via ACM `ActionKeys` (resolved through `Registry`).
+ * - Parameter SSOT remains in dedicated modules such as LiquidationConfigManager; this contract only forwards.
  */
 contract VaultAdmin is 
     Initializable,
@@ -79,7 +81,7 @@ contract VaultAdmin is
      *      - `initialRegistryAddr` has no code (see {NotAContract})
      *
      * Security:
-     * - initializer (callable once)
+    * - Initializer: callable once.
      * - Sets the Registry used to resolve ACM and SSOT modules.
      *
      * @param initialRegistryAddr The Registry contract address.
@@ -121,14 +123,14 @@ contract VaultAdmin is
     /**
      * @notice Returns the configured Registry address.
      * @dev Reverts if:
-     *      - (none)
+        *      - (never)
      *
      * Security:
-     * - View-only function.
+        * - View-only getter.
      *
-     * @return registryAddr The Registry contract address.
+        * @return registryAddr_ The Registry contract address.
      */
-    function getRegistryAddr() external view returns (address) {
+    function getRegistryAddr() external view returns (address registryAddr_) {
         return _adminRegistryAddr;
     }
 

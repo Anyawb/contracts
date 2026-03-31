@@ -3,288 +3,275 @@ pragma solidity ^0.8.20;
 
 /**
  * @title ActionKeys
- * @notice Centralized action key constants (`bytes32`, keccak256 hashes) for permissions and auditing.
+ * @notice Define the canonical ActionKeys permission and audit identifiers
+ *         used across the protocol.
  * @dev Reverts if:
- *      - N/A (constants-only library)
+ *      - helper lookups do not revert on unknown inputs and instead return
+ *        `false`, empty strings, or fixed arrays as documented
  *
  * Security:
- * - Keys must remain stable once deployed; do not change existing values.
- * - Prefer reusing these constants instead of duplicating keccak256 literals across modules.
+ * - Existing keccak256-derived key values are part of the permission SSOT
+ *   and must remain stable after deployment.
+ * - Callers should reuse these constants instead of inlining hashes
+ *   to avoid permission drift between modules, docs, and integrations.
  *
  * @custom:security-contact security@example.com
  */
 library ActionKeys {
-    // ============ 常量定义 ============
-    /// @notice 动作Key总数常量
-    /// @dev 避免硬编码，便于维护和扩展
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
+    /// @notice Total number of canonical action keys in the static registry.
+    /// @dev Keep this value in sync with {getAllActionKeysFixed}.
     uint256 internal constant ACTION_KEY_COUNT = 49;
 
-    // ============ 基础业务动作 Key ============
-    /// @notice 存入抵押物操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("DEPOSIT")
+    /*━━━━━━━━━━━━━━━ Core User Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for deposit flows.
+    /// @dev Hash: keccak256("DEPOSIT").
     bytes32 public constant ACTION_DEPOSIT = keccak256("DEPOSIT");
-    
-    /// @notice 借款操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("BORROW")
+
+    /// @notice Canonical action key for borrow flows.
+    /// @dev Hash: keccak256("BORROW").
     bytes32 public constant ACTION_BORROW = keccak256("BORROW");
-    
-    /// @notice 还款操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("REPAY")
+
+    /// @notice Canonical action key for repay flows.
+    /// @dev Hash: keccak256("REPAY").
     bytes32 public constant ACTION_REPAY = keccak256("REPAY");
-    
-    /// @notice 提取抵押物操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("WITHDRAW")
+
+    /// @notice Canonical action key for collateral-withdraw flows.
+    /// @dev Hash: keccak256("WITHDRAW").
     bytes32 public constant ACTION_WITHDRAW = keccak256("WITHDRAW");
 
-    /// @notice 订单创建专用权限（仅用于 createLoanOrder 鉴权）
-    /// @dev 用于权限验证，不作为通用业务语义事件使用
-    /// @dev 哈希值：keccak256("ORDER_CREATE")
+    /// @notice Dedicated action key for order-creation authorization.
+    /// @dev Intended for permission checks on create-order paths, not as a generic business-action label.
+    /// @dev Hash: keccak256("ORDER_CREATE").
     bytes32 public constant ACTION_ORDER_CREATE = keccak256("ORDER_CREATE");
-    
-    /// @notice 清算操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("LIQUIDATE")
+
+    /// @notice Canonical action key for liquidation flows.
+    /// @dev Hash: keccak256("LIQUIDATE").
     bytes32 public constant ACTION_LIQUIDATE = keccak256("LIQUIDATE");
-    
-    /// @notice 部分清算操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("LIQUIDATE_PARTIAL")
-    bytes32 public constant ACTION_LIQUIDATE_PARTIAL = keccak256("LIQUIDATE_PARTIAL");
 
-    /// @notice 没收保证金操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("LIQUIDATE_GUARANTEE")
-    bytes32 public constant ACTION_LIQUIDATE_GUARANTEE = keccak256("LIQUIDATE_GUARANTEE");
+    /// @notice Canonical action key for partial-liquidation flows.
+    /// @dev Hash: keccak256("LIQUIDATE_PARTIAL").
+    bytes32 public constant ACTION_LIQUIDATE_PARTIAL =
+        keccak256("LIQUIDATE_PARTIAL");
 
-    /// @notice 锁定“提前还款保证金记录”的标识符
-    /// @dev 用于 EarlyRepaymentGuaranteeManager.lockGuaranteeRecord 的审计与权限语义
-    /// @dev 哈希值：keccak256("LOCK_EARLY_REPAYMENT_GUARANTEE")
+    /// @notice Canonical action key for guarantee-forfeiture liquidation flows.
+    /// @dev Hash: keccak256("LIQUIDATE_GUARANTEE").
+    bytes32 public constant ACTION_LIQUIDATE_GUARANTEE =
+        keccak256("LIQUIDATE_GUARANTEE");
+
+    /// @notice Canonical action key for locking an early-repayment guarantee record.
+    /// @dev Used by EarlyRepaymentGuaranteeManager guarantee-lock paths.
+    /// @dev Hash: keccak256("LOCK_EARLY_REPAYMENT_GUARANTEE").
     bytes32 public constant ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE =
         keccak256("LOCK_EARLY_REPAYMENT_GUARANTEE");
 
-    /// @notice 结算“提前还款保证金（提前还款）”的标识符
-    /// @dev 用于 EarlyRepaymentGuaranteeManager.settleEarlyRepayment 的审计与权限语义
-    /// @dev 哈希值：keccak256("SETTLE_EARLY_REPAYMENT_GUARANTEE")
+    /// @notice Canonical action key for settling early-repayment guarantees.
+    /// @dev Used by EarlyRepaymentGuaranteeManager early-settlement paths.
+    /// @dev Hash: keccak256("SETTLE_EARLY_REPAYMENT_GUARANTEE").
     bytes32 public constant ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE =
         keccak256("SETTLE_EARLY_REPAYMENT_GUARANTEE");
 
-    // ============ 奖励相关动作 Key ============
-    /// @notice 领取奖励操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("CLAIM_REWARD")
+    /*━━━━━━━━━━━━━━━ Reward Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for claiming rewards.
+    /// @dev Hash: keccak256("CLAIM_REWARD").
     bytes32 public constant ACTION_CLAIM_REWARD = keccak256("CLAIM_REWARD");
-    
-    /// @notice 消费 Easy 代币操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("CONSUME_EASY")
+
+    /// @notice Canonical action key for consuming EASY tokens.
+    /// @dev Hash: keccak256("CONSUME_EASY").
     bytes32 public constant ACTION_CONSUME_EASY = keccak256("CONSUME_EASY");
 
-    // ============ 系统管理动作 Key ============
-    /// @notice 更新价格操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("UPDATE_PRICE")
+    /*━━━━━━━━━━━━━━━ System Management Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for price-update paths.
+    /// @dev Hash: keccak256("UPDATE_PRICE").
     bytes32 public constant ACTION_UPDATE_PRICE = keccak256("UPDATE_PRICE");
-    
-    /// @notice 设置参数操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("SET_PARAMETER")
+
+    /// @notice Canonical action key for parameter updates.
+    /// @dev Hash: keccak256("SET_PARAMETER").
     bytes32 public constant ACTION_SET_PARAMETER = keccak256("SET_PARAMETER");
-    
-    /// @notice 升级模块操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("UPGRADE_MODULE")
+
+    /// @notice Canonical action key for module upgrades.
+    /// @dev Hash: keccak256("UPGRADE_MODULE").
     bytes32 public constant ACTION_UPGRADE_MODULE = keccak256("UPGRADE_MODULE");
-    
-    /// @notice 暂停系统操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("PAUSE_SYSTEM")
+
+    /// @notice Canonical action key for pause-system paths.
+    /// @dev Hash: keccak256("PAUSE_SYSTEM").
     bytes32 public constant ACTION_PAUSE_SYSTEM = keccak256("PAUSE_SYSTEM");
-    
-    /// @notice 恢复系统操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("UNPAUSE_SYSTEM")
+
+    /// @notice Canonical action key for unpause-system paths.
+    /// @dev Hash: keccak256("UNPAUSE_SYSTEM").
     bytes32 public constant ACTION_UNPAUSE_SYSTEM = keccak256("UNPAUSE_SYSTEM");
 
-    // ============ 治理动作 Key ============
-    /// @notice 创建提案操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("CREATE_PROPOSAL")
-    bytes32 public constant ACTION_CREATE_PROPOSAL = keccak256("CREATE_PROPOSAL");
-    
-    /// @notice 投票操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("VOTE")
+    /*━━━━━━━━━━━━━━━ Governance Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for proposal creation.
+    /// @dev Hash: keccak256("CREATE_PROPOSAL").
+    bytes32 public constant ACTION_CREATE_PROPOSAL =
+        keccak256("CREATE_PROPOSAL");
+
+    /// @notice Canonical action key for voting.
+    /// @dev Hash: keccak256("VOTE").
     bytes32 public constant ACTION_VOTE = keccak256("VOTE");
-    
-    /// @notice 执行提案操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("EXECUTE_PROPOSAL")
-    bytes32 public constant ACTION_EXECUTE_PROPOSAL = keccak256("EXECUTE_PROPOSAL");
-    
-    /// @notice 跨链投票操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("CROSS_CHAIN_VOTE")
-    bytes32 public constant ACTION_CROSS_CHAIN_VOTE = keccak256("CROSS_CHAIN_VOTE");
 
-    // ============ 权限管理动作 Key ============
-    /// @notice 授予角色操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("GRANT_ROLE")
+    /// @notice Canonical action key for proposal execution.
+    /// @dev Hash: keccak256("EXECUTE_PROPOSAL").
+    bytes32 public constant ACTION_EXECUTE_PROPOSAL =
+        keccak256("EXECUTE_PROPOSAL");
+
+    /// @notice Canonical action key for cross-chain voting.
+    /// @dev Hash: keccak256("CROSS_CHAIN_VOTE").
+    bytes32 public constant ACTION_CROSS_CHAIN_VOTE =
+        keccak256("CROSS_CHAIN_VOTE");
+
+    /*━━━━━━━━━━━━━━━ Permission Administration Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for role grants.
+    /// @dev Hash: keccak256("GRANT_ROLE").
     bytes32 public constant ACTION_GRANT_ROLE = keccak256("GRANT_ROLE");
-    
-    /// @notice 撤销角色操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("REVOKE_ROLE")
-    bytes32 public constant ACTION_REVOKE_ROLE = keccak256("REVOKE_ROLE");
-    
-    /// @notice 添加白名单操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("ADD_WHITELIST")
-    bytes32 public constant ACTION_ADD_WHITELIST = keccak256("ADD_WHITELIST");
-    
-    /// @notice 移除白名单操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("REMOVE_WHITELIST")
-    bytes32 public constant ACTION_REMOVE_WHITELIST = keccak256("REMOVE_WHITELIST");
 
-    // ============ 批量操作动作 Key ============
-    /// @notice 批量存入操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("BATCH_DEPOSIT")
+    /// @notice Canonical action key for role revocations.
+    /// @dev Hash: keccak256("REVOKE_ROLE").
+    bytes32 public constant ACTION_REVOKE_ROLE = keccak256("REVOKE_ROLE");
+
+    /// @notice Canonical action key for allowlist additions.
+    /// @dev Hash: keccak256("ADD_WHITELIST").
+    bytes32 public constant ACTION_ADD_WHITELIST = keccak256("ADD_WHITELIST");
+
+    /// @notice Canonical action key for allowlist removals.
+    /// @dev Hash: keccak256("REMOVE_WHITELIST").
+    bytes32 public constant ACTION_REMOVE_WHITELIST =
+        keccak256("REMOVE_WHITELIST");
+
+    /*━━━━━━━━━━━━━━━ Batch Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for batch deposits.
+    /// @dev Hash: keccak256("BATCH_DEPOSIT").
     bytes32 public constant ACTION_BATCH_DEPOSIT = keccak256("BATCH_DEPOSIT");
-    
-    /// @notice 批量借款操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("BATCH_BORROW")
+
+    /// @notice Canonical action key for batch borrows.
+    /// @dev Hash: keccak256("BATCH_BORROW").
     bytes32 public constant ACTION_BATCH_BORROW = keccak256("BATCH_BORROW");
-    
-    /// @notice 批量还款操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("BATCH_REPAY")
+
+    /// @notice Canonical action key for batch repays.
+    /// @dev Hash: keccak256("BATCH_REPAY").
     bytes32 public constant ACTION_BATCH_REPAY = keccak256("BATCH_REPAY");
-    
-    /// @notice 批量提取操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("BATCH_WITHDRAW")
+
+    /// @notice Canonical action key for batch withdrawals.
+    /// @dev Hash: keccak256("BATCH_WITHDRAW").
     bytes32 public constant ACTION_BATCH_WITHDRAW = keccak256("BATCH_WITHDRAW");
 
-    // ============ 测试网功能动作 Key ============
-    /// @notice 测试网功能配置操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("TESTNET_CONFIG")
+    /*━━━━━━━━━━━━━━━ Testnet Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for testnet configuration paths.
+    /// @dev Hash: keccak256("TESTNET_CONFIG").
     bytes32 public constant ACTION_TESTNET_CONFIG = keccak256("TESTNET_CONFIG");
-    
-    /// @notice 测试网功能激活操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("TESTNET_ACTIVATE")
-    bytes32 public constant ACTION_TESTNET_ACTIVATE = keccak256("TESTNET_ACTIVATE");
-    
-    /// @notice 测试网功能暂停操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("TESTNET_PAUSE")
+
+    /// @notice Canonical action key for testnet activation paths.
+    /// @dev Hash: keccak256("TESTNET_ACTIVATE").
+    bytes32 public constant ACTION_TESTNET_ACTIVATE =
+        keccak256("TESTNET_ACTIVATE");
+
+    /// @notice Canonical action key for testnet pause paths.
+    /// @dev Hash: keccak256("TESTNET_PAUSE").
     bytes32 public constant ACTION_TESTNET_PAUSE = keccak256("TESTNET_PAUSE");
 
-    // ============ 数据查询权限动作 Key ============
-    /// @notice 查看用户数据操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("VIEW_USER_DATA")
+    /*━━━━━━━━━━━━━━━ View and Query Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for viewing user data.
+    /// @dev Hash: keccak256("VIEW_USER_DATA").
     bytes32 public constant ACTION_VIEW_USER_DATA = keccak256("VIEW_USER_DATA");
-    
-    /// @notice 查看风险数据操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("VIEW_RISK_DATA")
-    bytes32 public constant ACTION_VIEW_RISK_DATA = keccak256("VIEW_RISK_DATA");
-    
-    /// @notice 查看系统数据操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("VIEW_SYSTEM_DATA")
-    bytes32 public constant ACTION_VIEW_SYSTEM_DATA = keccak256("VIEW_SYSTEM_DATA");
-    
-    /// @notice 查看清算数据操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("VIEW_LIQUIDATION_DATA")
-    bytes32 public constant ACTION_VIEW_LIQUIDATION_DATA = keccak256("VIEW_LIQUIDATION_DATA");
-    
-    /// @notice 查看缓存数据操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("VIEW_CACHE_DATA")
-    bytes32 public constant ACTION_VIEW_CACHE_DATA = keccak256("VIEW_CACHE_DATA");
-    
-    /// @notice 推送缓存更新操作的标识符（专用于 View 推送入口）
-    /// @dev 用于权限验证，限制谁可以向 View 推送缓存数据
-    /// @dev 哈希值：keccak256("ACTION_VIEW_PUSH")
-    bytes32 public constant ACTION_VIEW_PUSH = keccak256("ACTION_VIEW_PUSH");
-    
-    /// @notice 管理事件历史操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("MANAGE_EVENT_HISTORY")
-    bytes32 public constant ACTION_MANAGE_EVENT_HISTORY = keccak256("MANAGE_EVENT_HISTORY");
-    
-    /// @notice 查看价格数据操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("VIEW_PRICE_DATA")
-    bytes32 public constant ACTION_VIEW_PRICE_DATA = keccak256("VIEW_PRICE_DATA");
-    
-    /// @notice 查看降级数据操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("VIEW_DEGRADATION_DATA")
-    bytes32 public constant ACTION_VIEW_DEGRADATION_DATA = keccak256("VIEW_DEGRADATION_DATA");
 
-    // ============ 管理员权限动作 Key ============
-    /// @notice 管理员权限操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("ACTION_ADMIN")
+    /// @notice Canonical action key for viewing risk data.
+    /// @dev Hash: keccak256("VIEW_RISK_DATA").
+    bytes32 public constant ACTION_VIEW_RISK_DATA = keccak256("VIEW_RISK_DATA");
+
+    /// @notice Canonical action key for viewing system data.
+    /// @dev Hash: keccak256("VIEW_SYSTEM_DATA").
+    bytes32 public constant ACTION_VIEW_SYSTEM_DATA =
+        keccak256("VIEW_SYSTEM_DATA");
+
+    /// @notice Canonical action key for viewing liquidation data.
+    /// @dev Hash: keccak256("VIEW_LIQUIDATION_DATA").
+    bytes32 public constant ACTION_VIEW_LIQUIDATION_DATA =
+        keccak256("VIEW_LIQUIDATION_DATA");
+
+    /// @notice Canonical action key for viewing cache data.
+    /// @dev Hash: keccak256("VIEW_CACHE_DATA").
+    bytes32 public constant ACTION_VIEW_CACHE_DATA =
+        keccak256("VIEW_CACHE_DATA");
+
+    /// @notice Canonical action key for authorized view-cache push paths.
+    /// @dev Used to restrict who may push updates into view-layer write endpoints.
+    /// @dev Hash: keccak256("ACTION_VIEW_PUSH").
+    bytes32 public constant ACTION_VIEW_PUSH = keccak256("ACTION_VIEW_PUSH");
+
+    /// @notice Canonical action key for event-history management.
+    /// @dev Hash: keccak256("MANAGE_EVENT_HISTORY").
+    bytes32 public constant ACTION_MANAGE_EVENT_HISTORY =
+        keccak256("MANAGE_EVENT_HISTORY");
+
+    /// @notice Canonical action key for viewing price data.
+    /// @dev Hash: keccak256("VIEW_PRICE_DATA").
+    bytes32 public constant ACTION_VIEW_PRICE_DATA =
+        keccak256("VIEW_PRICE_DATA");
+
+    /// @notice Canonical action key for viewing degradation data.
+    /// @dev Hash: keccak256("VIEW_DEGRADATION_DATA").
+    bytes32 public constant ACTION_VIEW_DEGRADATION_DATA =
+        keccak256("VIEW_DEGRADATION_DATA");
+
+    /*━━━━━━━━━━━━━━━ Administrative Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for admin-level access.
+    /// @dev Hash: keccak256("ACTION_ADMIN").
     bytes32 public constant ACTION_ADMIN = keccak256("ACTION_ADMIN");
 
-    /// @notice RewardConfig 配置紧急旁路（break-glass）操作的标识符（可撤销）
-    /// @dev 用于 RewardConfig / 配置子模块的强约束旁路：
-    ///      - 默认只允许治理写入口（如 `Registry[KEY_REWARD_CONFIG]`）调用；
-    ///      - 若授予该角色，则允许具备该角色的地址直接调用（用于早期调试/救火）。
-    /// @dev 哈希值：keccak256("ACTION_REWARD_CONFIG_EMERGENCY")
-    bytes32 public constant ACTION_REWARD_CONFIG_EMERGENCY = keccak256("ACTION_REWARD_CONFIG_EMERGENCY");
-    
-    /// @notice 设置升级管理员操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("SET_UPGRADE_ADMIN")
-    bytes32 public constant ACTION_SET_UPGRADE_ADMIN = keccak256("SET_UPGRADE_ADMIN");
-    
-    /// @notice 紧急设置参数操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("EMERGENCY_SET_PARAMETER")
-    bytes32 public constant ACTION_EMERGENCY_SET_PARAMETER = keccak256("EMERGENCY_SET_PARAMETER");
-    
-    /// @notice 修改用户数据操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("ACTION_MODIFY_USER_DATA")
-    bytes32 public constant ACTION_MODIFY_USER_DATA = keccak256("ACTION_MODIFY_USER_DATA");
-    
-    /// @notice 查看系统状态操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("ACTION_VIEW_SYSTEM_STATUS")
-    bytes32 public constant ACTION_VIEW_SYSTEM_STATUS = keccak256("ACTION_VIEW_SYSTEM_STATUS");
+    /// @notice Canonical action key for RewardConfig emergency break-glass paths.
+    /// @dev Intended for tightly controlled emergency overrides on RewardConfig-related modules.
+    /// @dev Hash: keccak256("ACTION_REWARD_CONFIG_EMERGENCY").
+    bytes32 public constant ACTION_REWARD_CONFIG_EMERGENCY =
+        keccak256("ACTION_REWARD_CONFIG_EMERGENCY");
 
-    // ============ 查询管理权限动作 Key ============
-    /// @notice 查询管理权限操作的标识符
-    /// @dev 用于事件记录和权限验证
-    /// @dev 哈希值：keccak256("QUERY_MANAGER")
+    /// @notice Canonical action key for setting the upgrade admin.
+    /// @dev Hash: keccak256("SET_UPGRADE_ADMIN").
+    bytes32 public constant ACTION_SET_UPGRADE_ADMIN =
+        keccak256("SET_UPGRADE_ADMIN");
+
+    /// @notice Canonical action key for emergency parameter updates.
+    /// @dev Hash: keccak256("EMERGENCY_SET_PARAMETER").
+    bytes32 public constant ACTION_EMERGENCY_SET_PARAMETER =
+        keccak256("EMERGENCY_SET_PARAMETER");
+
+    /// @notice Canonical action key for privileged user-data modifications.
+    /// @dev Hash: keccak256("ACTION_MODIFY_USER_DATA").
+    bytes32 public constant ACTION_MODIFY_USER_DATA =
+        keccak256("ACTION_MODIFY_USER_DATA");
+
+    /// @notice Canonical action key for viewing system-status snapshots.
+    /// @dev Hash: keccak256("ACTION_VIEW_SYSTEM_STATUS").
+    bytes32 public constant ACTION_VIEW_SYSTEM_STATUS =
+        keccak256("ACTION_VIEW_SYSTEM_STATUS");
+
+    /*━━━━━━━━━━━━━━━ Query Management Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for query-management privileges.
+    /// @dev Hash: keccak256("QUERY_MANAGER").
     bytes32 public constant ACTION_QUERY_MANAGER = keccak256("QUERY_MANAGER");
 
-    // ============ 出借资金池（Reserve Flow）动作 Key ============
-    /// @notice 出借资金入池/预留（reserveForLending）的标识符
-    /// @dev 哈希值：keccak256("RESERVE_FOR_LENDING")
-    bytes32 public constant ACTION_RESERVE_FOR_LENDING = keccak256("RESERVE_FOR_LENDING");
+    /*━━━━━━━━━━━━━━━ Reserve Flow Actions ━━━━━━━━━━━━━━━*/
+    /// @notice Canonical action key for reserve-for-lending flows.
+    /// @dev Hash: keccak256("RESERVE_FOR_LENDING").
+    bytes32 public constant ACTION_RESERVE_FOR_LENDING =
+        keccak256("RESERVE_FOR_LENDING");
 
-    /// @notice 出借资金撤回/取消预留（cancelReserve）的标识符
-    /// @dev 哈希值：keccak256("CANCEL_RESERVE")
+    /// @notice Canonical action key for reserve-cancellation flows.
+    /// @dev Hash: keccak256("CANCEL_RESERVE").
     bytes32 public constant ACTION_CANCEL_RESERVE = keccak256("CANCEL_RESERVE");
 
-    /// @notice 检查是否为有效的动作Key
-    /// @param key 待检查的动作Key
-    /// @return 是否为有效动作Key
+    /**
+     * @notice Return whether `key` exists in the canonical ActionKeys set.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure validation helper; returns `false` for unknown keys instead of reverting.
+     * - Uses the fixed static list from {getAllActionKeysFixed}, so ACTION_KEY_COUNT must stay in sync with that list.
+     *
+     * @param key Action key hash to validate.
+     * @return isKnown True if `key` is part of the canonical static set.
+     */
     function isValidActionKey(bytes32 key) internal pure returns (bool) {
         bytes32[ACTION_KEY_COUNT] memory keys = getAllActionKeysFixed();
         for (uint256 i = 0; i < ACTION_KEY_COUNT; i++) {
@@ -295,10 +282,21 @@ library ActionKeys {
         return false;
     }
 
-    /// @notice 获取动作Key的字符串名称
-    /// @param key 动作Key
-    /// @return 对应的字符串名称
-    function getActionKeyString(bytes32 key) internal pure returns (string memory) {
+    /**
+     * @notice Convert an ActionKeys hash to its legacy lowerCamelCase audit string.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure compatibility helper for logs and human-readable action traces.
+     * - Returns an empty string for unknown keys, so callers must not treat empty output as a valid action name.
+     *
+     * @param key Action key hash.
+     * @return actionName Legacy lowerCamelCase action name, or an empty string if unknown.
+     */
+    function getActionKeyString(
+        bytes32 key
+    ) internal pure returns (string memory) {
         if (key == ACTION_DEPOSIT) return "deposit";
         if (key == ACTION_BORROW) return "borrow";
         if (key == ACTION_REPAY) return "repay";
@@ -307,8 +305,10 @@ library ActionKeys {
         if (key == ACTION_LIQUIDATE) return "liquidate";
         if (key == ACTION_LIQUIDATE_PARTIAL) return "liquidatePartial";
         if (key == ACTION_LIQUIDATE_GUARANTEE) return "liquidateGuarantee";
-        if (key == ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE) return "lockEarlyRepaymentGuarantee";
-        if (key == ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE) return "settleEarlyRepaymentGuarantee";
+        if (key == ACTION_LOCK_EARLY_REPAYMENT_GUARANTEE)
+            return "lockEarlyRepaymentGuarantee";
+        if (key == ACTION_SETTLE_EARLY_REPAYMENT_GUARANTEE)
+            return "settleEarlyRepaymentGuarantee";
         if (key == ACTION_CLAIM_REWARD) return "claimReward";
         if (key == ACTION_CONSUME_EASY) return "consumeEasy";
         if (key == ACTION_UPDATE_PRICE) return "updatePrice";
@@ -340,10 +340,12 @@ library ActionKeys {
         if (key == ACTION_VIEW_DEGRADATION_DATA) return "viewDegradationData";
         if (key == ACTION_VIEW_PUSH) return "actionViewPush";
         if (key == ACTION_ADMIN) return "actionAdmin";
-        if (key == ACTION_REWARD_CONFIG_EMERGENCY) return "actionRewardConfigEmergency";
+        if (key == ACTION_REWARD_CONFIG_EMERGENCY)
+            return "actionRewardConfigEmergency";
         if (key == ACTION_MODIFY_USER_DATA) return "actionModifyUserData";
         if (key == ACTION_SET_UPGRADE_ADMIN) return "setUpgradeAdmin";
-        if (key == ACTION_EMERGENCY_SET_PARAMETER) return "emergencySetParameter";
+        if (key == ACTION_EMERGENCY_SET_PARAMETER)
+            return "emergencySetParameter";
         if (key == ACTION_VIEW_SYSTEM_STATUS) return "actionViewSystemStatus";
         if (key == ACTION_QUERY_MANAGER) return "queryManager";
         if (key == ACTION_RESERVE_FOR_LENDING) return "reserveForLending";
@@ -351,9 +353,23 @@ library ActionKeys {
         return "";
     }
 
-    /// @notice 获取所有动作Key的固定数组
-    /// @return 动作Key数组
-    function getAllActionKeysFixed() internal pure returns (bytes32[ACTION_KEY_COUNT] memory) {
+    /**
+     * @notice Return the fixed canonical ActionKeys array.
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - Pure static registry helper.
+     * - Array ordering is part of the local helper contract between
+     *   {ACTION_KEY_COUNT}, {isValidActionKey}, and external tooling expectations.
+     *
+     * @return keys Fixed ActionKeys array.
+     */
+    function getAllActionKeysFixed()
+        internal
+        pure
+        returns (bytes32[ACTION_KEY_COUNT] memory)
+    {
         bytes32[ACTION_KEY_COUNT] memory keys;
         keys[0] = ACTION_DEPOSIT;
         keys[1] = ACTION_BORROW;
@@ -406,4 +422,4 @@ library ActionKeys {
         keys[48] = ACTION_REWARD_CONFIG_EMERGENCY;
         return keys;
     }
-} 
+}

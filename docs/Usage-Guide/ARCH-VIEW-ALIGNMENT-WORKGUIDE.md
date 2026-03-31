@@ -333,7 +333,7 @@
 
 - `price` 固定为 **USD-8**（例如 $1.00 = `100000000`）。
 - `assetDecimals` 必须是**资产自身 decimals**（用于把 token base units 归一为 “1 token”）。
-- 当前 `IPriceOracle.getPrice(asset)` 返回值里的 `decimals` 在实现/调用方中被用作 `assetDecimals`（用于上述除数），**不是** “price 的精度”。（price 精度固定为 USD-8）
+- 当前 `IPriceOracleRead.getPrice(asset)` 第三个返回值在实现/调用方中被用作 `assetDecimals`（用于上述除数），**不是** “price 的精度”。（price 精度固定为 USD-8）
 
 #### 4.4.2 系统性校验清单（Value 口径统一：接口注释 / 文档 / 写入来源 / 前端解码）
 
@@ -527,7 +527,7 @@
 ### 4.14 `RewardView`（✅ 已确认）
 - **脚本**：`scripts/e2e/e2e-localhost-reward-edgecases.ts`
 - **MUST**：作为 Reward 系统对外的只读聚合与缓存加速层，外部消费者（前端/索引/机器人）应仅依赖 `RewardView` 的只读接口，不应直接调用 `RewardManagerCore` 的查询接口（除“协议内硬约束校验”入口外）。
-- **MUST**：写入口（`push*`）必须严格白名单（writer allowlist），仅允许架构指南指定的写入方调用（当前口径：`RewardManagerCore` / `EasyConsumption` / `EasyRecycleDistributor` / `EasyEmissionController` / `EasyEmissionConfig` / `EasyStaking`）。
+- **MUST**：写入口（`push*`）必须严格白名单（writer allowlist），仅允许架构指南指定的写入方调用（当前口径：`RewardManagerCore` / `RewardAccrualManager` / `EasyConsumption` / `EasyRecycleDistributor` / `EasyEmissionController` / `EasyEmissionConfig` / `EasyStaking`）。
 - **MUST**：所有写入口必须触发统一 DataPush：`DataPushLibrary._emitData(...)`，`dataTypeHash` 使用集中常量口径（推荐 `DataPushTypes`）。
 - **MUST**：作为 B 类缓存模块，对外读取必须返回缓存有效性信息：至少 `isValid` + `blockNumber`（并发敏感时附带 `version`）。不得仅返回业务字段而缺失有效性元信息（Facade 也不得丢失）。
 - **MUST**：对外权限策略必须遵循“用户私域口径”：用户本人可读；非本人读需具备 `ACTION_VIEW_USER_DATA` 或 admin，失败必须 `MissingRole()`（不得 revert string / 自定义 Unauthorized 分叉）。
@@ -535,9 +535,9 @@
 
 **验证（MUST，可验收）**
 - **写入口权限**：
-  - 非 writer（例如既不是 `RewardManagerCore` 也不是 `EasyConsumption/EasyRecycleDistributor` 等白名单模块）调用任意 `push*` 必须 revert（推荐 `RewardView__UnauthorizedWriter()` 或等效）。
+  - 非 writer（例如既不是 `RewardManagerCore`/`RewardAccrualManager`，也不是 `EasyConsumption/EasyRecycleDistributor` 等白名单模块）调用任意 `push*` 必须 revert（推荐 `RewardView__UnauthorizedWriter()` 或等效）。
 - **DataPush 可观测性**：
-  - 任意一次成功 `pushRewardEarned/pushPointsBurned/pushPenaltyLedger/pushUserLevel/pushUserPrivilege/pushSystemStats`，必须能观察到对应的 `DataPushed` 事件，且 `dataTypeHash` 与架构指南/常量表一致。
+  - 任意一次成功 `pushEasyMinted/pushEasyBurned/pushPenaltyLedger/pushUserLevel/pushEarnState/pushSystemStats`，必须能观察到对应的 `DataPushed` 事件，且 `dataTypeHash` 与架构指南/常量表一致。
 - **B 类缓存有效性输出**：
   - `getUserRewardSummary`（或等效对外主查询）返回值必须包含 `isValid/blockNumber`（至少可判断新鲜度/是否需要链下重试），并在脚本中可被断言。
 - **读权限**：
@@ -783,8 +783,8 @@
 - **脚本**：`scripts/e2e/e2e-localhost-reward-edgecases.ts`
 | 用例 | 前置条件 | 操作 | 期望事件 | 期望返回字段 | 断言 |
 |---|---|---|---|---|---|
-| RV-01 写入口白名单（writer allowlist） | `RewardManagerCore` 与 Easy 系列 writer 已部署；`unauthorized` 非 writer | `unauthorized` 调用任一 `push*`（`pushRewardEarned/pushPointsBurned/pushPenaltyLedger/pushUserLevel/pushUserPrivilege/pushSystemStats`） | 无成功 `DataPushed` | N/A | 必须 revert（推荐 `RewardView__UnauthorizedWriter()` 或等效）；不得用 `MissingRole()` 混淆读权限与写白名单 |
-| RV-02 写入成功必须 DataPush（type 统一） | 调用方为 writer（例如 `RewardManagerCore` / `EasyConsumption` 等） | 逐个调用上述 `push*`（每次至少 1 个有效样本） | 必须 `DataPushed(dataTypeHash,payload)` | N/A | 每个 push 成功都必须观察到 `DataPushed`；`dataTypeHash` 必须来自集中常量口径（推荐 `DataPushTypes.*`），且语义可唯一定位 |
+| RV-01 写入口白名单（writer allowlist） | `RewardManagerCore` 与 Easy 系列 writer 已部署；`unauthorized` 非 writer | `unauthorized` 调用任一 `push*`（`pushEasyMinted/pushEasyBurned/pushPenaltyLedger/pushUserLevel/pushEarnState/pushSystemStats`） | 无成功 `DataPushed` | N/A | 必须 revert（推荐 `RewardView__UnauthorizedWriter()` 或等效）；不得用 `MissingRole()` 混淆读权限与写白名单 |
+| RV-02 写入成功必须 DataPush（type 统一） | 调用方为 writer（例如 `RewardManagerCore` / `RewardAccrualManager` / `EasyConsumption` 等） | 逐个调用上述 `push*`（每次至少 1 个有效样本） | 必须 `DataPushed(dataTypeHash,payload)` | N/A | 每个 push 成功都必须观察到 `DataPushed`；`dataTypeHash` 必须来自集中常量口径（推荐 `DataPushTypes.*`），且语义可唯一定位 |
 | RV-03 私域读权限：非本人必须 MissingRole | `userA/userB`；`unauthorized` 无 `ACTION_VIEW_USER_DATA` | `unauthorized` 读取 `userA` 的 Reward 私域主查询（如 `getUserRewardSummary(userA)`） | 无 | N/A | 必须 `revert MissingRole()`（断言 selector） |
 | RV-04 私域读权限：本人/ops 可读 | `userA`；`ops/admin` 具备 `ACTION_VIEW_USER_DATA` 或 admin | `userA` 读取自身；`ops` 读取 `userA` | 无 | 返回值必须包含 `isValid/blockNumber`（并发敏感时含 `version`） | 均成功；有效性信息不缺失（Facade 也不得丢失） |
 | RV-05 B 类缓存有效性：blockNumber 单调 & isValid 语义正确 | 已至少 push 一次；可推进时间（按测试工具能力） | `writer` push → 读 `getUserRewardSummary`（或等效）→ 再次 push → 再读 | `DataPushed`（push 时） | `isValid/blockNumber` | blockNumber 单调推进；`isValid` 与缓存窗口/实现一致（过期后变 false 或等效表达），且可脚本断言 |

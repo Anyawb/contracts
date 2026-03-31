@@ -1,6 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+interface ILoanFlowPushManagerMock {
+    function notifyBorrow(address user, address asset, uint256 amount, uint256 orderId) external;
+    function notifyRepay(
+        address user,
+        address asset,
+        uint256 amount,
+        uint256 orderId,
+        uint256 repaidAmountAfter
+    ) external;
+}
+
 /**
  * @title MockOrderEngineCaller
  * @notice Test helper contract that simulates the ORDER_ENGINE calling notify APIs.
@@ -11,9 +22,9 @@ contract MockOrderEngineCaller {
         external
     {
         (bool ok, ) = loanFlowPushManager.call(
-            abi.encodeWithSignature("notifyBorrow(address,address,uint256,uint256)", user, asset, amount, orderId)
+            abi.encodeCall(ILoanFlowPushManagerMock.notifyBorrow, (user, asset, amount, orderId))
         );
-        require(ok, "MockOrderEngineCaller: borrow notify failed");
+        require(ok, "MOEC: borrow fail");
     }
 
     function callNotifyRepay(
@@ -25,11 +36,12 @@ contract MockOrderEngineCaller {
         uint256 repaidAmountAfter
     ) external {
         (bool ok, ) = loanFlowPushManager.call(
-            abi.encodeWithSignature(
-                "notifyRepay(address,address,uint256,uint256,uint256)", user, asset, amount, orderId, repaidAmountAfter
+            abi.encodeCall(
+                ILoanFlowPushManagerMock.notifyRepay,
+                (user, asset, amount, orderId, repaidAmountAfter)
             )
         );
-        require(ok, "MockOrderEngineCaller: repay notify failed");
+        require(ok, "MOEC: repay fail");
     }
 }
 

@@ -265,13 +265,14 @@ async function main() {
 
     const asset = CONTRACT_ADDRESSES.MockUSDC;
     // Ensure asset is whitelisted for deposit path (some localhost deploy configs keep whitelist empty).
-    const aw = (await ethers.getContractAt("AssetWhitelist", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+    const awRead = (await ethers.getContractAt("IAssetWhitelistRead", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+    const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
     const ACTION_ADD_WHITELIST = key("ADD_WHITELIST");
     if (!(await acm.hasRole(ACTION_ADD_WHITELIST, deployer.address))) {
       await acm.connect(deployer).grantRole(ACTION_ADD_WHITELIST, deployer.address);
     }
-    if (!(await aw.isAssetAllowed(asset))) {
-      await aw.connect(deployer).addAllowedAsset(asset);
+    if (!(await awRead.isAssetAllowed(asset))) {
+      await awAdmin.connect(deployer).addAllowedAsset(asset);
     }
 
     // Bring ledger to a consistent state first; PositionView rejects pushes that don't match ledger.

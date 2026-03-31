@@ -1,57 +1,67 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import { AmountIsZero, AmountMismatch, NotAContract, NotEnoughGuarantee, ZeroAddress } from "../../errors/StandardErrors.sol";
-import { ActionKeys } from "../../constants/ActionKeys.sol";
-import { ModuleKeys } from "../../constants/ModuleKeys.sol";
-import { SystemEvents } from "../SystemEvents.sol";
-import { CacheEvents } from "../CacheEvents.sol";
-import { LoanEvents } from "../../core/LoanEvents.sol";
-import { Registry } from "../../registry/Registry.sol";
-import { IAccessControlManager } from "../../interfaces/IAccessControlManager.sol";
-import { DataPushLibrary } from "../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../constants/DataPushTypes.sol";
-import { IGuaranteeFundManager } from "../../interfaces/IGuaranteeFundManager.sol";
-import { IFeeRouter } from "../../interfaces/IFeeRouter.sol";
-import { FeeTypes } from "../../constants/FeeTypes.sol";
+import {
+    AmountIsZero,
+    AmountMismatch,
+    NotAContract,
+    NotEnoughGuarantee,
+    ZeroAddress
+} from "../../errors/StandardErrors.sol";
+import {ActionKeys} from "../../constants/ActionKeys.sol";
+import {ModuleKeys} from "../../constants/ModuleKeys.sol";
+import {SystemEvents} from "../SystemEvents.sol";
+import {CacheEvents} from "../CacheEvents.sol";
+import {LoanEvents} from "../../core/LoanEvents.sol";
+import {Registry} from "../../registry/Registry.sol";
+import {IAccessControlManager} from "../../interfaces/IAccessControlManager.sol";
+import {DataPushLibrary} from "../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../constants/DataPushTypes.sol";
+import {IGuaranteeFundManager} from "../../interfaces/IGuaranteeFundManager.sol";
+import {IFeeRouterDistribution} from "../../interfaces/IFeeRouterDistribution.sol";
+import {FeeTypes} from "../../constants/FeeTypes.sol";
 
+/// @title IStatisticsPushManagerMinimal
+/// @notice Minimal notification interface for StatisticsPushManager.
+/// @dev Used by {GuaranteeFundManager} to trigger best-effort guarantee statistics refreshes.
 interface IStatisticsPushManagerMinimal {
+    /// @notice Requests a guarantee statistics refresh for one user and asset.
     function notifyGuarantee(address user, address asset) external;
+}
+
+/// @title IRewardManagerLiquidationPenalty
+/// @notice Minimal liquidation-penalty interface exposed by RewardManager.
+/// @dev Used by {GuaranteeFundManager} to trigger Reward-side liquidation
+///      penalties without importing the full RewardManager implementation.
+interface IRewardManagerLiquidationPenalty {
+    /// @notice Applies liquidation penalty for one user and returns the deducted Easy amount.
+    function applyLiquidationPenalty(
+        address user
+    ) external returns (uint256 easyAmount);
 }
 
 /**
  * @title GuaranteeFundManager
- * @notice Custody & transfer SSOT for the early-repayment guarantee fund.
- * @dev SSOT / boundaries (Architecture-Guide):
- *      - This module is the SSOT for real guarantee fund custody and transfers:
- *        lock (custody in), release (refund), forfeit (distribution).
- *      - Guarantee records & rules are SSOT in `EarlyRepaymentGuaranteeManager` (KEY_EARLY_REPAYMENT_GUARANTEE).
- *      - Module address resolution SSOT is always `Registry.getModuleOrRevert(...)`; do NOT cache module addresses.
- *
- * Observability:
- * - Canonical guarantee events are inherited from `LoanEvents` (GuaranteeLocked/Released/Forfeited).
- * - Emits `DataPush` payloads for offchain consumers (`DataPushTypes.DATA_TYPE_GUARANTEE_*`).
- * - Best-effort `StatisticsView.pushGuaranteeUpdate`; failures emit `CacheUpdateFailed` and do NOT revert.
+ * @notice Serves as the custody and transfer source of truth for the early-repayment guarantee fund.
+ * @dev Reverts if:
+ *      - see individual functions
  *
  * Security:
- * - Write entrypoints restricted to VaultCore (KEY_VAULT_CORE) or ERGM orchestrator where applicable.
- * - Reentrancy protection on all external state-changing entrypoints.
- * - UUPS upgrades are role-gated via AccessControlManager ActionKeys.
- *
- * Units:
- * - All token amounts use the ERC20 token's native decimals.
- *
- * @custom:security-contact security@example.com
+ * - This module is the SSOT for guarantee-fund custody and transfers: lock, release, and forfeit.
+ * - Guarantee records and rules remain in EarlyRepaymentGuaranteeManager.
+ * - Module address resolution is centralized in Registry and must not be cached here.
+ * - Write entrypoints are restricted to VaultCore or the configured orchestration module where applicable.
+ * - Canonical guarantee events come from LoanEvents, and Statistics pushes remain best-effort.
  */
-contract GuaranteeFundManager is 
-    Initializable, 
-    UUPSUpgradeable, 
+contract GuaranteeFundManager is
+    Initializable,
+    UUPSUpgradeable,
     ReentrancyGuardUpgradeable,
     IGuaranteeFundManager,
     LoanEvents,
@@ -62,18 +72,19 @@ contract GuaranteeFundManager is
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     /// @dev user => asset => locked guarantee amount (token decimals).
     mapping(address => mapping(address => uint256)) private _userGuarantees;
-    
+
     /// @dev asset => total locked guarantee amount across all users (token decimals).
     mapping(address => uint256) private _totalGuaranteesByAsset;
-    
+
     /// @dev user => list of assets with current locked balance > 0 (for getUserGuaranteeAssets).
     mapping(address => address[]) private _userGuaranteeAssets;
     /// @dev user => asset => index+1 in `_userGuaranteeAssets[user]` (0 means not present).
-    mapping(address => mapping(address => uint256)) private _userGuaranteeAssetIndexPlusOne;
-    
+    mapping(address => mapping(address => uint256))
+        private _userGuaranteeAssetIndexPlusOne;
+
     /// @dev Registry address for module resolution and access control.
     address private _registryAddr;
-    
+
     /// @dev Max batch size to keep gas bounded.
     uint256 internal constant _MAX_BATCH_SIZE = 50;
 
@@ -84,19 +95,37 @@ contract GuaranteeFundManager is
         _disableInitializers();
     }
 
-    /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
-    /// @notice Caller is not the current VaultCore registered in Registry (KEY_VAULT_CORE).
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when a caller is not the current VaultCore registered in Registry.
+    ///      Used by VaultCore-only write paths.
     error GuaranteeFundManager__OnlyVaultCore();
-    /// @notice Caller is neither VaultCore nor the EarlyRepaymentGuaranteeManager registered in Registry.
+    /// @dev Reverts when a caller is neither VaultCore nor the configured
+    ///      EarlyRepaymentGuaranteeManager. Used by settlement orchestration paths.
     error GuaranteeFundManager__OnlyAuthorizedCaller();
-    /// @notice Batch arrays length mismatch.
+    /// @dev Reverts when paired batch arrays have different lengths. Used by batch guarantee operations.
     error GuaranteeFundManager__LengthMismatch();
-    /// @notice Batch arrays are empty.
+    /// @dev Reverts when a required batch input is empty. Used by batch guarantee operations.
     error GuaranteeFundManager__EmptyArrays();
-    /// @notice Batch size exceeds _MAX_BATCH_SIZE.
+    /// @dev Reverts when a batch operation exceeds _MAX_BATCH_SIZE. Used by bounded batch guarantee operations.
     error GuaranteeFundManager__BatchTooLarge();
-    /// @notice New implementation address is invalid (no code).
+    /// @dev Reverts when a UUPS upgrade target has no deployed code. Used by {_authorizeUpgrade}.
     error GuaranteeFundManager__InvalidImplementation();
+
+    /// @notice Best-effort Reward liquidation penalty applied after default settlement.
+    event RewardLiquidationPenaltyApplied(
+        address indexed user,
+        address indexed rewardManager,
+        uint256 easyAmount,
+        uint256 blockNumber
+    );
+
+    /// @notice Best-effort Reward liquidation penalty failed after default settlement.
+    event RewardLiquidationPenaltyApplyFailed(
+        address indexed user,
+        address indexed rewardManager,
+        bytes reason,
+        uint256 blockNumber
+    );
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
     /**
@@ -110,8 +139,11 @@ contract GuaranteeFundManager is
      */
     modifier onlyVaultCore() {
         if (_registryAddr == address(0)) revert ZeroAddress();
-        address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-        if (msg.sender != vaultCore) revert GuaranteeFundManager__OnlyVaultCore();
+        address vaultCore = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_VAULT_CORE
+        );
+        if (msg.sender != vaultCore)
+            revert GuaranteeFundManager__OnlyVaultCore();
         _;
     }
 
@@ -127,12 +159,16 @@ contract GuaranteeFundManager is
     modifier onlyVaultCoreOrBusinessLogic() {
         if (_registryAddr == address(0)) revert ZeroAddress();
         // Backward compat: do not depend on Registry having KEY_VAULT_CORE configured for custom error matching.
-        address vaultCore = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE);
+        address vaultCore = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_VAULT_CORE
+        );
         if (msg.sender == vaultCore) {
             _;
             return;
         }
-        address vbl = Registry(_registryAddr).getModule(ModuleKeys.KEY_VAULT_BUSINESS_LOGIC);
+        address vbl = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_VAULT_BUSINESS_LOGIC
+        );
         if (msg.sender != vbl) revert GuaranteeFundManager__OnlyVaultCore();
         _;
     }
@@ -149,14 +185,19 @@ contract GuaranteeFundManager is
      */
     modifier onlyVaultCoreOrEarlyRepaymentGuaranteeManager() {
         if (_registryAddr == address(0)) revert ZeroAddress();
-        address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
+        address vaultCore = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_VAULT_CORE
+        );
         // Short-circuit: if caller is VaultCore, do NOT require ERGM to be configured.
         if (msg.sender == vaultCore) {
             _;
             return;
         }
-        address ergm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE);
-        if (msg.sender != ergm) revert GuaranteeFundManager__OnlyAuthorizedCaller();
+        address ergm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE
+        );
+        if (msg.sender != ergm)
+            revert GuaranteeFundManager__OnlyAuthorizedCaller();
         _;
     }
 
@@ -174,7 +215,6 @@ contract GuaranteeFundManager is
         _;
     }
 
-
     /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
     /**
      * @notice Initialize the GuaranteeFundManager module.
@@ -191,7 +231,7 @@ contract GuaranteeFundManager is
      * @param initialRegistryAddr Registry address (non-zero).
      */
     function initialize(
-        address initialVaultCoreAddr, 
+        address initialVaultCoreAddr,
         address initialRegistryAddr,
         address /* upgradeAdmin */
     ) external initializer {
@@ -199,7 +239,7 @@ contract GuaranteeFundManager is
         __ReentrancyGuard_init();
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
         uint256 blockNumber = block.number;
-        
+
         // Keep strict non-zero guards for backward-compatible deploy & test flows.
         if (initialVaultCoreAddr == address(0)) revert ZeroAddress();
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -209,7 +249,7 @@ contract GuaranteeFundManager is
         // - Deploy scripts may bind KEY_VAULT_CORE later; enforcing it here can break deployment order.
         // - Runtime modifiers enforce VaultCore SSOT via Registry.
         initialVaultCoreAddr; // silence unused-param warning
-        
+
         // Emit a standardized action event for observability (business SSOT is Guarantee* + DataPush).
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -222,32 +262,87 @@ contract GuaranteeFundManager is
     /*━━━━━━━━━━━━━━━ Internal Functions ━━━━━━━━━━━━━━━*/
     /// @dev Role check via Registry -> AccessControlManager (SSOT).
     function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
     /**
      * @notice Return the Registry address reference used by this module.
-     * @dev Reverts if: (none)
-     * Security: (read-only)
-     * @return Registry address
+     * @dev Reverts if:
+     *      - (none)
+     *
+     * Security:
+     * - View-only.
+     *
+     * @return registryAddr Registry address.
      */
-    function getRegistry() external view returns (address) {
+    function getRegistry() external view returns (address registryAddr) {
         return _registryAddr;
     }
 
     /// @dev Best-effort notify the single Statistics push orchestrator (strict B+).
-    ///      This module MUST NOT call StatisticsView directly (centralize seq/requestId/nextVersion and failure events).
-    function _tryNotifyGuaranteeStatsPushManager(address user, address asset) internal {
-        address mgr = Registry(_registryAddr).getModule(ModuleKeys.KEY_STATS_PUSH_MANAGER);
+    ///      This module MUST NOT call StatisticsView directly so seq, requestId,
+    ///      nextVersion, and failure events stay centralized.
+    function _tryNotifyGuaranteeStatsPushManager(
+        address user,
+        address asset
+    ) internal {
+        address mgr = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_STATS_PUSH_MANAGER
+        );
         if (mgr == address(0) || mgr.code.length == 0) return;
         try IStatisticsPushManagerMinimal(mgr).notifyGuarantee(user, asset) {
+            return;
         } catch {
-            // Best-effort: do not revert; failure observability is handled by the push manager.
+            return;
         }
     }
 
-    function _trackAssetIfNeeded(address user, address asset, uint256 newBalance) internal {
+    /// @dev Best-effort: default/liquidation reward penalty is triggered only after guarantee-fund settlement is final.
+    ///      Reward is not part of the custody SSOT and must not block funds movement.
+    function _tryApplyLiquidationRewardPenalty(address user) internal {
+        address rewardManager = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_RM
+        );
+        if (rewardManager == address(0) || rewardManager.code.length == 0) {
+            emit RewardLiquidationPenaltyApplyFailed(
+                user,
+                rewardManager,
+                bytes("reward manager unavailable"),
+                block.number
+            );
+            return;
+        }
+
+        try
+            IRewardManagerLiquidationPenalty(rewardManager)
+                .applyLiquidationPenalty(user)
+        returns (uint256 easyAmount) {
+            if (easyAmount > 0) {
+                emit RewardLiquidationPenaltyApplied(
+                    user,
+                    rewardManager,
+                    easyAmount,
+                    block.number
+                );
+            }
+        } catch (bytes memory reason) {
+            emit RewardLiquidationPenaltyApplyFailed(
+                user,
+                rewardManager,
+                reason,
+                block.number
+            );
+        }
+    }
+
+    function _trackAssetIfNeeded(
+        address user,
+        address asset,
+        uint256 newBalance
+    ) internal {
         uint256 idxPlusOne = _userGuaranteeAssetIndexPlusOne[user][asset];
         if (newBalance == 0) {
             if (idxPlusOne == 0) return;
@@ -267,9 +362,10 @@ contract GuaranteeFundManager is
         // newBalance > 0
         if (idxPlusOne != 0) return;
         _userGuaranteeAssets[user].push(asset);
-        _userGuaranteeAssetIndexPlusOne[user][asset] = _userGuaranteeAssets[user].length;
+        _userGuaranteeAssetIndexPlusOne[user][asset] = _userGuaranteeAssets[
+            user
+        ].length;
     }
-
 
     /**
      * @notice Return the current VaultCore address resolved via Registry (SSOT).
@@ -277,22 +373,17 @@ contract GuaranteeFundManager is
      *      - registry is zero (ZeroAddress)
      *      - KEY_VAULT_CORE is not registered (propagated)
      *
-     * Security: (read-only)
-     * @return VaultCore address
+     * Security:
+     * - View-only.
+     *
+     * @return vaultCore Current VaultCore address resolved from Registry.
      */
-    function vaultCoreAddr() external view returns (address) {
+    function vaultCoreAddr() external view returns (address vaultCore) {
         if (_registryAddr == address(0)) revert ZeroAddress();
-        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
-    }
-
-    /**
-     * @notice Alias getter for Registry address.
-     * @dev Reverts if: (none)
-     * Security: (read-only)
-     * @return Registry address
-     */
-    function registryAddr() external view returns (address) {
-        return _registryAddr;
+        return
+            Registry(_registryAddr).getModuleOrRevert(
+                ModuleKeys.KEY_VAULT_CORE
+            );
     }
 
     /*━━━━━━━━━━━━━━━ View Functions ━━━━━━━━━━━━━━━*/
@@ -302,13 +393,17 @@ contract GuaranteeFundManager is
      *      - user == address(0) (ZeroAddress)
      *      - asset == address(0) (ZeroAddress)
      *
-     * Security: (read-only)
+     * Security:
+     * - View-only.
      *
      * @param user User address.
      * @param asset ERC20 guarantee asset address.
-     * @return amount Locked amount (token decimals).
+     * @return amount Current locked guarantee amount in token base units.
      */
-    function getLockedGuarantee(address user, address asset) external view override returns (uint256 amount) {
+    function getLockedGuarantee(
+        address user,
+        address asset
+    ) external view override returns (uint256 amount) {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         return _userGuarantees[user][asset];
@@ -319,12 +414,15 @@ contract GuaranteeFundManager is
      * @dev Reverts if:
      *      - asset == address(0) (ZeroAddress)
      *
-     * Security: (read-only)
+     * Security:
+     * - View-only.
      *
      * @param asset ERC20 guarantee asset address.
-     * @return totalAmount Total locked amount (token decimals).
+     * @return totalAmount Current total locked guarantee amount in token base units.
      */
-    function getTotalGuaranteeByAsset(address asset) external view override returns (uint256 totalAmount) {
+    function getTotalGuaranteeByAsset(
+        address asset
+    ) external view override returns (uint256 totalAmount) {
         if (asset == address(0)) revert ZeroAddress();
         return _totalGuaranteesByAsset[asset];
     }
@@ -334,12 +432,15 @@ contract GuaranteeFundManager is
      * @dev Reverts if:
      *      - user == address(0) (ZeroAddress)
      *
-     * Security: (read-only)
+     * Security:
+     * - View-only.
      *
      * @param user User address.
-     * @return assets Asset addresses with current locked balance > 0.
+     * @return assets Asset addresses for which the user currently has a non-zero locked balance.
      */
-    function getUserGuaranteeAssets(address user) external view override returns (address[] memory assets) {
+    function getUserGuaranteeAssets(
+        address user
+    ) external view override returns (address[] memory assets) {
         if (user == address(0)) revert ZeroAddress();
         return _userGuaranteeAssets[user];
     }
@@ -350,13 +451,17 @@ contract GuaranteeFundManager is
      *      - user == address(0) (ZeroAddress)
      *      - asset == address(0) (ZeroAddress)
      *
-     * Security: (read-only)
+     * Security:
+     * - View-only.
      *
      * @param user User address.
      * @param asset ERC20 guarantee asset address.
-     * @return paid True if locked balance > 0.
+     * @return paid True if the user currently has a non-zero locked balance for the asset.
      */
-    function isGuaranteePaid(address user, address asset) external view override returns (bool paid) {
+    function isGuaranteePaid(
+        address user,
+        address asset
+    ) external view override returns (bool paid) {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         return _userGuarantees[user][asset] > 0;
@@ -381,7 +486,11 @@ contract GuaranteeFundManager is
      * @param asset ERC20 guarantee asset address.
      * @param amount Amount to lock (token decimals).
      */
-    function lockGuarantee(address user, address asset, uint256 amount)
+    function lockGuarantee(
+        address user,
+        address asset,
+        uint256 amount
+    )
         external
         override
         onlyVaultCoreOrBusinessLogic
@@ -393,7 +502,7 @@ contract GuaranteeFundManager is
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
-        
+
         // SSOT fund movement: pull funds from `user` into this contract (custody).
         IERC20(asset).safeTransferFrom(user, address(this), amount);
 
@@ -402,10 +511,10 @@ contract GuaranteeFundManager is
         _userGuarantees[user][asset] = newBal;
         _totalGuaranteesByAsset[asset] += amount;
         _trackAssetIfNeeded(user, asset, newBal);
-        
+
         emit GuaranteeLocked(user, asset, amount, blockNumber);
 
-        // DataPush + View 缓存（best-effort）
+        // Best-effort data push and StatisticsView cache update.
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_GUARANTEE_LOCKED,
             abi.encode(user, asset, amount, blockNumber)
@@ -423,47 +532,43 @@ contract GuaranteeFundManager is
      *      - amount == 0 (AmountIsZero)
      *      - ERC20 transfer fails (propagated)
      *
-     * Notes:
-     * - If `amount` exceeds current locked balance, this function releases the full balance (best-effort refund).
-     *
      * Security:
      * - nonReentrant
      * - onlyVaultCore (SSOT entrypoint)
+     * - If amount exceeds current locked balance, this function releases the full available balance.
      *
      * @param user Borrower address to receive the refund.
      * @param asset ERC20 guarantee asset address.
      * @param amount Requested release amount (token decimals).
      */
-    function releaseGuarantee(address user, address asset, uint256 amount)
-        external
-        override
-        onlyVaultCore
-        onlyValidRegistry
-        nonReentrant
-    {
+    function releaseGuarantee(
+        address user,
+        address asset,
+        uint256 amount
+    ) external override onlyVaultCore onlyValidRegistry nonReentrant {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
         uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountIsZero();
-        
+
         uint256 currentGuarantee = _userGuarantees[user][asset];
         if (currentGuarantee < amount) {
             amount = currentGuarantee; // Release full available balance.
         }
-        
+
         if (amount > 0) {
             uint256 newBal = currentGuarantee - amount;
             _userGuarantees[user][asset] = newBal;
             _totalGuaranteesByAsset[asset] -= amount;
             _trackAssetIfNeeded(user, asset, newBal);
-            
+
             // Transfer to user (refund).
             IERC20(asset).safeTransfer(user, amount);
-            
+
             emit GuaranteeReleased(user, asset, amount, blockNumber);
 
-            // DataPush + View 缓存（best-effort）
+            // Best-effort data push and StatisticsView cache update.
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_RELEASED,
                 abi.encode(user, asset, amount, blockNumber)
@@ -482,45 +587,53 @@ contract GuaranteeFundManager is
      *      - feeReceiver == address(0) (ZeroAddress)
      *      - ERC20 transfer fails (propagated)
      *
-     * Notes:
-     * - If current locked balance is 0, this function is a no-op (does not revert, does not emit GuaranteeForfeited).
-     *
      * Security:
      * - nonReentrant
      * - onlyVaultCore (SSOT entrypoint)
+     * - If current locked balance is 0, this function is a no-op and emits nothing.
      *
      * @param user Borrower address whose guarantee is forfeited.
      * @param asset ERC20 guarantee asset address.
      * @param feeReceiver Receiver of the forfeited funds.
      */
-    function forfeitGuarantee(address user, address asset, address feeReceiver)
-        external
-        override
-        onlyVaultCore
-        onlyValidRegistry
-        nonReentrant
-    {
+    function forfeitGuarantee(
+        address user,
+        address asset,
+        address feeReceiver
+    ) external override onlyVaultCore onlyValidRegistry nonReentrant {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
         uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         if (feeReceiver == address(0)) revert ZeroAddress();
-        
+
         uint256 currentGuarantee = _userGuarantees[user][asset];
         if (currentGuarantee > 0) {
             _userGuarantees[user][asset] = 0;
             _totalGuaranteesByAsset[asset] -= currentGuarantee;
             _trackAssetIfNeeded(user, asset, 0);
-            
+
             // Transfer to fee receiver (forfeit).
             IERC20(asset).safeTransfer(feeReceiver, currentGuarantee);
-            
-            emit GuaranteeForfeited(user, asset, currentGuarantee, feeReceiver, blockNumber);
 
-            // DataPush + View 缓存（best-effort）
+            emit GuaranteeForfeited(
+                user,
+                asset,
+                currentGuarantee,
+                feeReceiver,
+                blockNumber
+            );
+
+            // Best-effort data push and StatisticsView cache update.
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
-                abi.encode(user, asset, currentGuarantee, feeReceiver, blockNumber)
+                abi.encode(
+                    user,
+                    asset,
+                    currentGuarantee,
+                    feeReceiver,
+                    blockNumber
+                )
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
@@ -548,7 +661,7 @@ contract GuaranteeFundManager is
      * @param lender Lender address receiving `penaltyToLender`.
      * @param refundToBorrower Amount refunded to borrower (token decimals).
      * @param penaltyToLender Amount paid to lender as penalty (token decimals).
-    * @param platformFee Amount routed as platform fee (token decimals).
+     * @param platformFee Amount routed as platform fee (token decimals).
      */
     function settleEarlyRepayment(
         address user,
@@ -557,14 +670,22 @@ contract GuaranteeFundManager is
         uint256 refundToBorrower,
         uint256 penaltyToLender,
         uint256 platformFee
-    ) external override onlyVaultCoreOrEarlyRepaymentGuaranteeManager onlyValidRegistry nonReentrant {
+    )
+        external
+        override
+        onlyVaultCoreOrEarlyRepaymentGuaranteeManager
+        onlyValidRegistry
+        nonReentrant
+    {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
         uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         uint256 total = _userGuarantees[user][asset];
         uint256 sum;
-        unchecked { sum = refundToBorrower + penaltyToLender + platformFee; }
+        unchecked {
+            sum = refundToBorrower + penaltyToLender + platformFee;
+        }
         if (sum != total) revert AmountMismatch();
 
         // Clear internal balance before external transfers (CEI).
@@ -585,7 +706,13 @@ contract GuaranteeFundManager is
         if (penaltyToLender > 0) {
             if (lender == address(0)) revert ZeroAddress();
             IERC20(asset).safeTransfer(lender, penaltyToLender);
-            emit GuaranteeForfeited(user, asset, penaltyToLender, lender, blockNumber);
+            emit GuaranteeForfeited(
+                user,
+                asset,
+                penaltyToLender,
+                lender,
+                blockNumber
+            );
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
                 abi.encode(user, asset, penaltyToLender, lender, blockNumber)
@@ -594,15 +721,23 @@ contract GuaranteeFundManager is
         }
 
         if (platformFee > 0) {
-            address feeRouter = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
+            address feeRouter = Registry(_registryAddr).getModuleOrRevert(
+                ModuleKeys.KEY_FR
+            );
             IERC20(asset).safeTransfer(feeRouter, platformFee);
-            IFeeRouter(feeRouter).distributePrepaid(
+            IFeeRouterDistribution(feeRouter).distributePrepaid(
                 asset,
                 platformFee,
                 FeeTypes.FEE_TYPE_EARLY_REPAYMENT_PLATFORM,
                 user
             );
-            emit GuaranteeForfeited(user, asset, platformFee, feeRouter, blockNumber);
+            emit GuaranteeForfeited(
+                user,
+                asset,
+                platformFee,
+                feeRouter,
+                blockNumber
+            );
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
                 abi.encode(user, asset, platformFee, feeRouter, blockNumber)
@@ -637,7 +772,13 @@ contract GuaranteeFundManager is
         address asset,
         address receiver,
         uint256 amount
-    ) external override onlyVaultCoreOrEarlyRepaymentGuaranteeManager onlyValidRegistry nonReentrant {
+    )
+        external
+        override
+        onlyVaultCoreOrEarlyRepaymentGuaranteeManager
+        onlyValidRegistry
+        nonReentrant
+    {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
         uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
@@ -659,6 +800,45 @@ contract GuaranteeFundManager is
             abi.encode(user, asset, amount, receiver, blockNumber)
         );
         _tryNotifyGuaranteeStatsPushManager(user, asset);
+    }
+
+    /**
+     * @notice Forfeit a partial amount and then best-effort trigger Reward liquidation penalty.
+     * @dev Reward-unit calculation remains inside Reward domain to avoid mixing guarantee asset units with Easy units.
+     */
+    function forfeitPartialWithRewardPenalty(
+        address user,
+        address asset,
+        address receiver,
+        uint256 amount
+    )
+        external
+        override
+        onlyVaultCoreOrEarlyRepaymentGuaranteeManager
+        onlyValidRegistry
+        nonReentrant
+    {
+        uint256 blockNumber = block.number;
+        if (user == address(0)) revert ZeroAddress();
+        if (asset == address(0)) revert ZeroAddress();
+        if (receiver == address(0)) revert ZeroAddress();
+        if (amount == 0) revert AmountIsZero();
+        uint256 bal = _userGuarantees[user][asset];
+        if (amount > bal) revert NotEnoughGuarantee();
+
+        uint256 newBal = bal - amount;
+        _userGuarantees[user][asset] = newBal;
+        _totalGuaranteesByAsset[asset] -= amount;
+        _trackAssetIfNeeded(user, asset, newBal);
+
+        IERC20(asset).safeTransfer(receiver, amount);
+        emit GuaranteeForfeited(user, asset, amount, receiver, blockNumber);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_GUARANTEE_FORFEITED,
+            abi.encode(user, asset, amount, receiver, blockNumber)
+        );
+        _tryNotifyGuaranteeStatsPushManager(user, asset);
+        _tryApplyLiquidationRewardPenalty(user);
     }
 
     /**
@@ -696,7 +876,8 @@ contract GuaranteeFundManager is
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
         uint256 len = receivers.length;
-        if (len == 0 || len != amounts.length) revert GuaranteeFundManager__LengthMismatch();
+        if (len == 0 || len != amounts.length)
+            revert GuaranteeFundManager__LengthMismatch();
         if (len > _MAX_BATCH_SIZE) revert GuaranteeFundManager__BatchTooLarge();
 
         uint256 bal = _userGuarantees[user][asset];
@@ -726,6 +907,8 @@ contract GuaranteeFundManager is
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
+
+        _tryApplyLiquidationRewardPenalty(user);
     }
 
     /*━━━━━━━━━━━━━━━ Batch Operations ━━━━━━━━━━━━━━━*/
@@ -741,12 +924,10 @@ contract GuaranteeFundManager is
      *      - any asset == address(0) for a non-zero amount (ZeroAddress)
      *      - ERC20 transferFrom fails (propagated)
      *
-     * Notes:
-     * - Entries with amount == 0 are skipped.
-     *
      * Security:
      * - nonReentrant
      * - onlyVaultCore
+     * - Entries with amount == 0 are skipped.
      *
      * @param user Borrower address.
      * @param assets ERC20 guarantee asset addresses.
@@ -756,22 +937,30 @@ contract GuaranteeFundManager is
         address user,
         address[] calldata assets,
         uint256[] calldata amounts
-    ) external override onlyVaultCoreOrBusinessLogic onlyValidRegistry nonReentrant {
+    )
+        external
+        override
+        onlyVaultCoreOrBusinessLogic
+        onlyValidRegistry
+        nonReentrant
+    {
         // NOTE (Time-Dependency-Refactor): use block number as the onchain time axis marker.
         uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         uint256 length = assets.length;
-        if (length != amounts.length) revert GuaranteeFundManager__LengthMismatch();
+        if (length != amounts.length)
+            revert GuaranteeFundManager__LengthMismatch();
         if (length == 0) revert GuaranteeFundManager__EmptyArrays();
-        if (length > _MAX_BATCH_SIZE) revert GuaranteeFundManager__BatchTooLarge();
-        
+        if (length > _MAX_BATCH_SIZE)
+            revert GuaranteeFundManager__BatchTooLarge();
+
         for (uint256 i = 0; i < length; i++) {
             address asset = assets[i];
             uint256 amount = amounts[i];
-            
+
             if (amount == 0) continue;
             if (asset == address(0)) revert ZeroAddress();
-            
+
             // SSOT fund movement: pull funds from `user` into this contract (custody).
             IERC20(asset).safeTransferFrom(user, address(this), amount);
 
@@ -779,7 +968,7 @@ contract GuaranteeFundManager is
             _userGuarantees[user][asset] = newBal;
             _totalGuaranteesByAsset[asset] += amount;
             _trackAssetIfNeeded(user, asset, newBal);
-            
+
             emit GuaranteeLocked(user, asset, amount, blockNumber);
 
             // DataPush + StatisticsView cache update (per-item, best-effort).
@@ -789,7 +978,7 @@ contract GuaranteeFundManager is
             );
             _tryNotifyGuaranteeStatsPushManager(user, asset);
         }
-        
+
         // DataPush (batch summary).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_GUARANTEE_LOCKED,
@@ -809,13 +998,11 @@ contract GuaranteeFundManager is
      *      - any asset == address(0) for a non-zero amount (ZeroAddress)
      *      - ERC20 transfer fails (propagated)
      *
-     * Notes:
-     * - Entries with amount == 0 are skipped.
-     * - If an entry's requested amount exceeds current balance, it releases the full balance for that asset.
-     *
      * Security:
      * - nonReentrant
      * - onlyVaultCore
+     * - Entries with amount == 0 are skipped.
+     * - If an entry's requested amount exceeds current balance, it releases the full balance for that asset.
      *
      * @param user Borrower address.
      * @param assets ERC20 guarantee asset addresses.
@@ -830,34 +1017,36 @@ contract GuaranteeFundManager is
         uint256 blockNumber = block.number;
         if (user == address(0)) revert ZeroAddress();
         uint256 length = assets.length;
-        if (length != amounts.length) revert GuaranteeFundManager__LengthMismatch();
+        if (length != amounts.length)
+            revert GuaranteeFundManager__LengthMismatch();
         if (length == 0) revert GuaranteeFundManager__EmptyArrays();
-        if (length > _MAX_BATCH_SIZE) revert GuaranteeFundManager__BatchTooLarge();
-        
+        if (length > _MAX_BATCH_SIZE)
+            revert GuaranteeFundManager__BatchTooLarge();
+
         for (uint256 i = 0; i < length; i++) {
             address asset = assets[i];
             uint256 amount = amounts[i];
-            
+
             if (amount == 0) continue;
             if (asset == address(0)) revert ZeroAddress();
-            
+
             uint256 currentGuarantee = _userGuarantees[user][asset];
             if (currentGuarantee < amount) {
                 amount = currentGuarantee;
             }
-            
+
             if (amount > 0) {
                 uint256 newBal = currentGuarantee - amount;
                 _userGuarantees[user][asset] = newBal;
                 _totalGuaranteesByAsset[asset] -= amount;
                 _trackAssetIfNeeded(user, asset, newBal);
-                
+
                 // Transfer to user (refund).
                 IERC20(asset).safeTransfer(user, amount);
-                
+
                 emit GuaranteeReleased(user, asset, amount, blockNumber);
 
-                // DataPush + View 缓存（逐条）
+                // Best-effort per-item data push and StatisticsView cache update.
                 DataPushLibrary._emitData(
                     DataPushTypes.DATA_TYPE_GUARANTEE_RELEASED,
                     abi.encode(user, asset, amount, blockNumber)
@@ -865,7 +1054,7 @@ contract GuaranteeFundManager is
                 _tryNotifyGuaranteeStatsPushManager(user, asset);
             }
         }
-        
+
         // DataPush (batch summary).
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_BATCH_GUARANTEE_RELEASED,
@@ -891,21 +1080,21 @@ contract GuaranteeFundManager is
         uint256 blockNumber = block.number;
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        
+
         // Validate new implementation contract.
-        if (newImplementation.code.length == 0) revert GuaranteeFundManager__InvalidImplementation();
-        
+        if (newImplementation.code.length == 0)
+            revert GuaranteeFundManager__InvalidImplementation();
+
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
             ActionKeys.getActionKeyString(ActionKeys.ACTION_UPGRADE_MODULE),
             msg.sender,
             blockNumber
         );
-
     }
 
     /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
     /// @notice Storage gap for upgrade safety
     /// @dev SmartContractStandard baseline: keep `uint256[50] __gap` at the end to preserve upgrade flexibility.
     uint256[50] private __gap;
-} 
+}

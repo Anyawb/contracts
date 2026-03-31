@@ -9,7 +9,7 @@
  * ⚠️ Do not modify manually, run: pnpm generate:module-keys to update
  *
  * SSOT: contracts/src/constants/ModuleKeys.sol
- * 生成时间 / Generated at: 2026-03-03T11:19:29.801Z
+ * 生成时间 / Generated at: 2026-03-06T04:57:15.858Z
  *
  * 设计原则:
  *   - 零硬编码哈希：仅保存 keccak256 的输入字符串
@@ -63,6 +63,8 @@ export const MODULE_KEY_INPUTS = {
   KEY_RM: 'REWARD_MANAGER',
   /** Reward manager core module key. Used by Registry to store the RewardManagerCore contract address. Hash: keccak256("REWARD_MANAGER_CORE") */
   KEY_REWARD_MANAGER_CORE: 'REWARD_MANAGER_CORE',
+  /** Reward accrual manager module key. Used by Registry to store the RewardAccrualManager contract address. Hash: keccak256("REWARD_ACCRUAL_MANAGER") */
+  KEY_REWARD_ACCRUAL_MANAGER: 'REWARD_ACCRUAL_MANAGER',
   /** Reward configuration module key. Used by Registry to store the RewardConfig contract address. Hash: keccak256("REWARD_CONFIG") */
   KEY_REWARD_CONFIG: 'REWARD_CONFIG',
   /** Reward earn-configuration submodule key. Used by Registry to store the EarnConfig contract address. Hash: keccak256("REWARD_EARN_CONFIG") */
@@ -147,10 +149,10 @@ export const MODULE_KEY_INPUTS = {
   KEY_VAULT_UTILS: 'VAULT_UTILS',
   /** Price oracle module key. Used by Registry to store the PriceOracle contract address. Hash: keccak256("PRICE_ORACLE") */
   KEY_PRICE_ORACLE: 'PRICE_ORACLE',
-  /** CoinGecko price updater module key. Used by Registry to store the CoinGeckoPriceUpdater contract address. Hash: keccak256("COINGECKO_PRICE_UPDATER") */
-  KEY_COINGECKO_UPDATER: 'COINGECKO_PRICE_UPDATER',
-  /** CoinGecko price updater view module key. Used by Registry to store the CoinGeckoPriceUpdaterView contract address. Hash: keccak256("COINGECKO_PRICE_UPDATER_VIEW") */
-  KEY_COINGECKO_PRICE_UPDATER_VIEW: 'COINGECKO_PRICE_UPDATER_VIEW',
+  /** Price updater module key. Uses the legacy registry hash input for onchain compatibility. Hash: keccak256("COINGECKO_PRICE_UPDATER") */
+  KEY_PRICE_UPDATER: 'COINGECKO_PRICE_UPDATER',
+  /** Price updater view module key. Uses the legacy registry hash input for onchain compatibility. Hash: keccak256("COINGECKO_PRICE_UPDATER_VIEW") */
+  KEY_PRICE_UPDATER_VIEW: 'COINGECKO_PRICE_UPDATER_VIEW',
   /** Settlement token module key. Used by Registry to store the SettlementToken contract address. Hash: keccak256("SETTLEMENT_TOKEN") */
   KEY_SETTLEMENT_TOKEN: 'SETTLEMENT_TOKEN',
   /** RWA auto leveraged strategy module key. Used by Registry to store the RWAAutoLeveragedStrategy contract address. Hash: keccak256("RWA_AUTO_LEVERAGED_STRATEGY") */
@@ -224,6 +226,7 @@ export const MODULE_KEY_STRINGS = [
   'KEY_FRV',
   'KEY_RM',
   'KEY_REWARD_MANAGER_CORE',
+  'KEY_REWARD_ACCRUAL_MANAGER',
   'KEY_REWARD_CONFIG',
   'KEY_REWARD_EARN_CONFIG',
   'KEY_EASY_EMISSION_CONFIG',
@@ -266,8 +269,8 @@ export const MODULE_KEY_STRINGS = [
   'KEY_REVERT_DECODER',
   'KEY_VAULT_UTILS',
   'KEY_PRICE_ORACLE',
-  'KEY_COINGECKO_UPDATER',
-  'KEY_COINGECKO_PRICE_UPDATER_VIEW',
+  'KEY_PRICE_UPDATER',
+  'KEY_PRICE_UPDATER_VIEW',
   'KEY_SETTLEMENT_TOKEN',
   'KEY_RWA_STRATEGY',
   'KEY_VAULT_BUSINESS_LOGIC',

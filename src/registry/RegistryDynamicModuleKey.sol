@@ -7,7 +7,11 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {ModuleKeys} from "../constants/ModuleKeys.sol";
-import {ZeroAddress, EmptyArray, IndexOutOfBounds} from "../errors/StandardErrors.sol";
+import {
+    ZeroAddress,
+    EmptyArray,
+    IndexOutOfBounds
+} from "../errors/StandardErrors.sol";
 import {RegistryEvents} from "./RegistryEventsLibrary.sol";
 
 /**
@@ -21,102 +25,94 @@ import {RegistryEvents} from "./RegistryEventsLibrary.sol";
  * - Module key registration is role-gated (registrationAdmin / systemAdmin) and pause-aware (whenNotPaused)
  * - Names are normalized/validated before deriving keys to prevent ambiguity
  */
-contract RegistryDynamicModuleKey is 
-    Initializable, 
-    OwnableUpgradeable, 
+contract RegistryDynamicModuleKey is
+    Initializable,
+    OwnableUpgradeable,
     UUPSUpgradeable,
     PausableUpgradeable
 {
-    // ============ Custom Errors ============
-    /**
-     * @notice The derived module key already exists.
-     * @param moduleKey The existing module key.
-     */
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when a normalized name or derived module key is already registered. Used by {registerModuleKey}, {_registerModuleKeyCalldata}, and batch registration flows.
     error RegistryDynamicModuleKey__ModuleKeyAlreadyExists(bytes32 moduleKey);
-    /**
-     * @notice The module key does not exist.
-     * @param moduleKey The missing module key.
-     */
+
+    /// @dev Reverts when a requested dynamic module key is not registered. Used by {unregisterModuleKey}, {getModuleKeyName}, and {getDynamicModuleKeyName}.
     error RegistryDynamicModuleKey__ModuleKeyNotExists(bytes32 moduleKey);
-    /**
-     * @notice The module name does not exist.
-     * @param nameHash The keccak256 hash of the normalized name.
-     */
+
+    /// @dev Reverts when a normalized module name hash is not mapped to any dynamic module key. Used by {getModuleKeyByName}.
     error RegistryDynamicModuleKey__ModuleNameNotExists(bytes32 nameHash);
-    /**
-     * @notice The module key name is invalid (e.g., length constraints).
-     */
+
+    /// @dev Reverts when a module-key name violates length requirements after normalization. Used by {_normalizeAndValidate}.
     error RegistryDynamicModuleKey__InvalidModuleKeyName();
-    /**
-     * @notice The dynamic module key limit would be exceeded.
-     * @param current Current number of registered dynamic keys.
-     * @param limit Maximum allowed number of dynamic keys.
-     */
-    error RegistryDynamicModuleKey__ModuleKeyLimitExceeded(uint256 current, uint256 limit);
-    /**
-     * @notice The batch size limit would be exceeded.
-     * @param batchSize Provided batch size.
-     * @param limit Maximum allowed batch size.
-     */
-    error RegistryDynamicModuleKey__BatchSizeLimitExceeded(uint256 batchSize, uint256 limit);
-    /**
-     * @notice Caller is not the registration admin.
-     */
+
+    /// @dev Reverts when registering more dynamic module keys would exceed the configured registry cap. Used by {_registerModuleKeyCalldata} and {batchRegisterModuleKeys}.
+    error RegistryDynamicModuleKey__ModuleKeyLimitExceeded(
+        uint256 current,
+        uint256 limit
+    );
+
+    /// @dev Reverts when a batch registration request exceeds the configured maximum batch size. Used by {batchRegisterModuleKeys}.
+    error RegistryDynamicModuleKey__BatchSizeLimitExceeded(
+        uint256 batchSize,
+        uint256 limit
+    );
+
+    /// @dev Reverts when a registration-admin-gated path is called by any other address. Used by {onlyRegistrationAdmin}.
     error RegistryDynamicModuleKey__OnlyRegistrationAdmin();
-    /**
-     * @notice Caller is not the system admin.
-     */
+
+    /// @dev Reverts when a system-admin-gated path is called by any other address. Used by {onlySystemAdmin}.
     error RegistryDynamicModuleKey__OnlySystemAdmin();
-    /**
-     * @notice The name contains an invalid character.
-     * @param position The 0-based byte position of the first invalid character.
-     */
+
+    /// @dev Reverts when a normalized module-key name contains a character outside the allowed ASCII set. Used by {_normalizeAndValidate}.
     error RegistryDynamicModuleKey__InvalidCharacterInName(uint256 position);
 
-    // ============ Constants ============
+    /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     uint256 private constant _MAX_DYNAMIC_KEYS = 100; // Max dynamic module keys.
     uint256 private constant _MIN_NAME_LENGTH = 3; // Min module key name length (bytes).
     uint256 private constant _MAX_NAME_LENGTH = 50; // Max module key name length (bytes).
     uint256 private constant _MAX_BATCH_SIZE = 20; // Max batch registration size.
     /// @notice Salt used to derive dynamic module keys.
     // NOTE: Keep this exact string for backwards-compatible key derivation.
-    bytes32 private constant _MODULE_KEY_SALT = keccak256("rwa.registry.dynamic.module.key.v1");
+    bytes32 private constant _MODULE_KEY_SALT =
+        keccak256("rwa.registry.dynamic.module.key.v1");
 
-    // ============ State Variables ============
+    /*━━━━━━━━━━━━━━━ State Variables ━━━━━━━━━━━━━━━*/
     /// @notice Registration admin address.
     address private _registrationAdminAddr;
     /// @notice System admin address.
     address private _systemAdminAddr;
-    
+
     /// @notice Dynamic module key membership.
     mapping(bytes32 => bool) private _dynamicModuleKeys;
     /// @notice Module key => normalized name.
     mapping(bytes32 => string) private _moduleKeyNames;
     /// @notice nameHash (keccak256(normalizedName)) => moduleKey.
     mapping(bytes32 => bytes32) private _nameHashToModuleKey;
-    
+
     /// @notice Dynamic module key list.
     bytes32[] private _dynamicModuleKeyList;
     /// @notice Index mapping (index + 1; 0 means not present).
     mapping(bytes32 => uint256) private _keyIndexPlus1;
 
-    // ============ Modifiers ============
-    /// @notice Only registration admin can call.
+    /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
+    /// @dev Restricts calls to the configured registration admin. Used by registration entrypoints.
     modifier onlyRegistrationAdmin() {
-        if (msg.sender != _registrationAdminAddr) revert RegistryDynamicModuleKey__OnlyRegistrationAdmin();
+        if (msg.sender != _registrationAdminAddr)
+            revert RegistryDynamicModuleKey__OnlyRegistrationAdmin();
         _;
     }
 
-    /// @notice Only system admin can call.
+    /// @dev Restricts calls to the configured system admin. Used by unregister entrypoints.
     modifier onlySystemAdmin() {
-        if (msg.sender != _systemAdminAddr) revert RegistryDynamicModuleKey__OnlySystemAdmin();
+        if (msg.sender != _systemAdminAddr)
+            revert RegistryDynamicModuleKey__OnlySystemAdmin();
         _;
     }
 
-    // ============ Constructor ============
+    /*━━━━━━━━━━━━━━━ Constructor ━━━━━━━━━━━━━━━*/
     /**
      * @notice Constructs the implementation contract and disables initializers.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Disables Initializable initializers on the implementation instance
@@ -127,7 +123,7 @@ contract RegistryDynamicModuleKey is
         _disableInitializers();
     }
 
-    // ============ Initializer ============
+    /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
     /**
      * @notice Initializes the dynamic module key registry and configures admin roles.
      * @dev Reverts if:
@@ -151,19 +147,22 @@ contract RegistryDynamicModuleKey is
         if (initialRegistrationAdmin == address(0)) revert ZeroAddress();
         if (initialSystemAdmin == address(0)) revert ZeroAddress();
         if (initialOwner == address(0)) revert ZeroAddress();
-        
+
         __Ownable_init(initialOwner);
         __UUPSUpgradeable_init();
         __Pausable_init();
-        
+
         _registrationAdminAddr = initialRegistrationAdmin;
         _systemAdminAddr = initialSystemAdmin;
-        
-        emit RegistryEvents.RegistrationAdminChanged(address(0), initialRegistrationAdmin);
+
+        emit RegistryEvents.RegistrationAdminChanged(
+            address(0),
+            initialRegistrationAdmin
+        );
         emit RegistryEvents.SystemAdminChanged(address(0), initialSystemAdmin);
     }
 
-    // ============ UUPS Upgrade Authorization ============
+    /*━━━━━━━━━━━━━━━ UUPS Upgrade Authorization ━━━━━━━━━━━━━━━*/
     /**
      * @notice Authorizes a UUPS upgrade to a new implementation.
      * @dev Reverts if:
@@ -176,12 +175,14 @@ contract RegistryDynamicModuleKey is
      *
      * @param newImplementation The new implementation address.
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyOwner {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyOwner {
         if (newImplementation == address(0)) revert ZeroAddress();
     }
 
-    // ============ Internal Helper Functions ============
-    
+    /*━━━━━━━━━━━━━━━ Internal Helper Functions ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Normalizes and validates a module key name.
      * @dev Reverts if:
@@ -192,19 +193,21 @@ contract RegistryDynamicModuleKey is
      * - Pure helper; input validation only
      *
      * @param name Raw input name.
-     * @return normalizedName Normalized name (trimmed, lowercased).
+     * @return normalizedName Normalized name after trimming ASCII spaces and lowercasing ASCII letters.
      * @return nameHash keccak256 hash of normalizedName.
      */
-    function _normalizeAndValidate(string memory name)
-        internal
-        pure
-        returns (string memory normalizedName, bytes32 nameHash)
-    {
+    function _normalizeAndValidate(
+        string memory name
+    ) internal pure returns (string memory normalizedName, bytes32 nameHash) {
         bytes memory nameBytes = bytes(name);
         uint256 start = 0;
         uint256 end = nameBytes.length;
-        while (start < end && nameBytes[start] == 0x20) { start++; }
-        while (end > start && nameBytes[end - 1] == 0x20) { end--; }
+        while (start < end && nameBytes[start] == 0x20) {
+            start++;
+        }
+        while (end > start && nameBytes[end - 1] == 0x20) {
+            end--;
+        }
         uint256 length = end - start;
         if (length < _MIN_NAME_LENGTH || length > _MAX_NAME_LENGTH) {
             revert RegistryDynamicModuleKey__InvalidModuleKeyName();
@@ -213,11 +216,20 @@ contract RegistryDynamicModuleKey is
         uint256 invalidPos = type(uint256).max;
         for (uint256 i = 0; i < length; ) {
             uint8 c = uint8(nameBytes[start + i]);
-            if (c >= 65 && c <= 90) { c = c + 32; }
-            bool ok = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || (c == 95) || (c == 45);
-            if (!ok && invalidPos == type(uint256).max) { invalidPos = i; }
+            if (c >= 65 && c <= 90) {
+                c = c + 32;
+            }
+            bool ok = (c >= 97 && c <= 122) ||
+                (c >= 48 && c <= 57) ||
+                (c == 95) ||
+                (c == 45);
+            if (!ok && invalidPos == type(uint256).max) {
+                invalidPos = i;
+            }
             normalizedBytes[i] = bytes1(c);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         normalizedName = string(normalizedBytes);
         if (invalidPos != type(uint256).max) {
@@ -228,7 +240,8 @@ contract RegistryDynamicModuleKey is
 
     /**
      * @notice Generates a module key for a normalized name.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Pure helper
@@ -236,13 +249,15 @@ contract RegistryDynamicModuleKey is
      * @param name Normalized module key name.
      * @return moduleKey Derived module key.
      */
-    function _generateModuleKey(string memory name) internal pure returns (bytes32 moduleKey) {
+    function _generateModuleKey(
+        string memory name
+    ) internal pure returns (bytes32 moduleKey) {
         // Use fixed salt + encodePacked to avoid concatenation ambiguity and save gas.
         moduleKey = keccak256(abi.encodePacked(_MODULE_KEY_SALT, name));
     }
 
-    // ============ Module Key Registration ============
-    
+    /*━━━━━━━━━━━━━━━ Module Key Registration ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Registers a new dynamic module key from a human-readable name.
      * @dev Reverts if:
@@ -258,14 +273,11 @@ contract RegistryDynamicModuleKey is
      * - whenNotPaused
      *
      * @param name Module key name (will be normalized; ASCII [a-z0-9_-] after normalization).
-     * @return moduleKey The newly registered module key.
+     * @return moduleKey Newly registered dynamic module key.
      */
-    function registerModuleKey(string calldata name)
-        external
-        onlyRegistrationAdmin
-        whenNotPaused
-        returns (bytes32 moduleKey)
-    {
+    function registerModuleKey(
+        string calldata name
+    ) external onlyRegistrationAdmin whenNotPaused returns (bytes32 moduleKey) {
         return _registerModuleKeyCalldata(name);
     }
 
@@ -281,39 +293,53 @@ contract RegistryDynamicModuleKey is
      * - Must be called from a role-gated external entrypoint
      *
      * @param name Module key name (calldata).
-     * @return moduleKey The newly registered module key.
+     * @return moduleKey Newly registered dynamic module key.
      */
-    function _registerModuleKeyCalldata(string calldata name) internal returns (bytes32 moduleKey) {
+    function _registerModuleKeyCalldata(
+        string calldata name
+    ) internal returns (bytes32 moduleKey) {
         // Normalize and validate name (single pass).
-        (string memory normalizedName, bytes32 nameHash) = _normalizeAndValidate(name);
-        
+        (
+            string memory normalizedName,
+            bytes32 nameHash
+        ) = _normalizeAndValidate(name);
+
         // Ensure normalized name isn't already registered.
         bytes32 existingKey = _nameHashToModuleKey[nameHash];
         if (existingKey != bytes32(0)) {
-            revert RegistryDynamicModuleKey__ModuleKeyAlreadyExists(existingKey);
+            revert RegistryDynamicModuleKey__ModuleKeyAlreadyExists(
+                existingKey
+            );
         }
-        
+
         // Enforce registry cap.
         if (_dynamicModuleKeyList.length >= _MAX_DYNAMIC_KEYS) {
-            revert RegistryDynamicModuleKey__ModuleKeyLimitExceeded(_dynamicModuleKeyList.length, _MAX_DYNAMIC_KEYS);
+            revert RegistryDynamicModuleKey__ModuleKeyLimitExceeded(
+                _dynamicModuleKeyList.length,
+                _MAX_DYNAMIC_KEYS
+            );
         }
-        
+
         // Derive module key.
         moduleKey = _generateModuleKey(normalizedName);
-        
+
         // Ensure derived key isn't already registered.
         if (_dynamicModuleKeys[moduleKey]) {
             revert RegistryDynamicModuleKey__ModuleKeyAlreadyExists(moduleKey);
         }
-        
+
         // Register.
         _dynamicModuleKeys[moduleKey] = true;
         _moduleKeyNames[moduleKey] = normalizedName;
         _nameHashToModuleKey[nameHash] = moduleKey;
         _dynamicModuleKeyList.push(moduleKey);
         _keyIndexPlus1[moduleKey] = _dynamicModuleKeyList.length; // Record position (index+1).
-        
-        emit RegistryEvents.ModuleKeyRegistered(moduleKey, nameHash, msg.sender);
+
+        emit RegistryEvents.ModuleKeyRegistered(
+            moduleKey,
+            nameHash,
+            msg.sender
+        );
     }
 
     /**
@@ -331,9 +357,11 @@ contract RegistryDynamicModuleKey is
      * - whenNotPaused
      *
      * @param names Module key names to register.
-     * @return moduleKeys Derived module keys (aligned with names).
+     * @return moduleKeys Newly registered dynamic module keys aligned with names.
      */
-    function batchRegisterModuleKeys(string[] calldata names)
+    function batchRegisterModuleKeys(
+        string[] calldata names
+    )
         external
         onlyRegistrationAdmin
         whenNotPaused
@@ -342,16 +370,24 @@ contract RegistryDynamicModuleKey is
         uint256 len = names.length;
         if (len == 0) revert EmptyArray();
         if (len > _MAX_BATCH_SIZE) {
-            revert RegistryDynamicModuleKey__BatchSizeLimitExceeded(len, _MAX_BATCH_SIZE);
+            revert RegistryDynamicModuleKey__BatchSizeLimitExceeded(
+                len,
+                _MAX_BATCH_SIZE
+            );
         }
         uint256 current = _dynamicModuleKeyList.length;
         if (len + current > _MAX_DYNAMIC_KEYS) {
-            revert RegistryDynamicModuleKey__ModuleKeyLimitExceeded(len + current, _MAX_DYNAMIC_KEYS);
+            revert RegistryDynamicModuleKey__ModuleKeyLimitExceeded(
+                len + current,
+                _MAX_DYNAMIC_KEYS
+            );
         }
         moduleKeys = new bytes32[](len);
         for (uint256 i = 0; i < len; ) {
             moduleKeys[i] = _registerModuleKeyCalldata(names[i]);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -364,7 +400,7 @@ contract RegistryDynamicModuleKey is
      * - Private helper; mutates storage
      *
      * @param moduleKey The module key to remove.
-     * @return found True if the key was found and removed.
+     * @return found True if the key was present and removed from the storage list.
      */
     function _removeFromList(bytes32 moduleKey) private returns (bool found) {
         uint256 idxPlus1 = _keyIndexPlus1[moduleKey];
@@ -396,55 +432,63 @@ contract RegistryDynamicModuleKey is
      *
      * @param moduleKey The module key to unregister.
      */
-    function unregisterModuleKey(bytes32 moduleKey) external onlySystemAdmin whenNotPaused {
+    function unregisterModuleKey(
+        bytes32 moduleKey
+    ) external onlySystemAdmin whenNotPaused {
         if (!_dynamicModuleKeys[moduleKey]) {
             revert RegistryDynamicModuleKey__ModuleKeyNotExists(moduleKey);
         }
-        
+
         string memory name = _moduleKeyNames[moduleKey];
         bytes32 nameHash = keccak256(abi.encodePacked(name));
-        
+
         // Clear mappings.
         delete _dynamicModuleKeys[moduleKey];
         delete _moduleKeyNames[moduleKey];
         delete _nameHashToModuleKey[nameHash];
-        
+
         // Remove from list using swap-and-pop helper.
         if (!_removeFromList(moduleKey)) {
             revert RegistryDynamicModuleKey__ModuleKeyNotExists(moduleKey);
         }
-        
+
         emit RegistryEvents.ModuleKeyUnregistered(moduleKey, name, msg.sender);
     }
 
-    // ============ Core Dynamic Module Key Functions ============
-    
+    /*━━━━━━━━━━━━━━━ Core Dynamic Module Key Functions ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Returns whether a module key is registered as a dynamic module key.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
      * @param moduleKey The module key to check.
-     * @return True if the key is a registered dynamic module key.
+     * @return isDynamic True if the key is a registered dynamic module key.
      */
-    function isDynamicModuleKey(bytes32 moduleKey) external view returns (bool) {
+    function isDynamicModuleKey(
+        bytes32 moduleKey
+    ) external view returns (bool) {
         return _dynamicModuleKeys[moduleKey];
     }
 
     /**
      * @notice Returns whether a module key is valid (static or registered dynamic).
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
      * @param moduleKey The module key to check.
-     * @return True if the key is a known static key or a registered dynamic key.
+     * @return isValid True if the key is a known static key or a registered dynamic key.
      */
     function isValidModuleKey(bytes32 moduleKey) external view returns (bool) {
-        return ModuleKeys.isValidModuleKey(moduleKey) || _dynamicModuleKeys[moduleKey];
+        return
+            ModuleKeys.isValidModuleKey(moduleKey) ||
+            _dynamicModuleKeys[moduleKey];
     }
 
     /**
@@ -459,7 +503,9 @@ contract RegistryDynamicModuleKey is
      * @param name Module key name (will be normalized).
      * @return moduleKey The registered module key.
      */
-    function getModuleKeyByName(string calldata name) external view returns (bytes32 moduleKey) {
+    function getModuleKeyByName(
+        string calldata name
+    ) external view returns (bytes32 moduleKey) {
         (, bytes32 nameHash) = _normalizeAndValidate(name);
         moduleKey = _nameHashToModuleKey[nameHash];
         if (moduleKey == bytes32(0)) {
@@ -479,7 +525,9 @@ contract RegistryDynamicModuleKey is
      * @param moduleKey Module key (static or dynamic).
      * @return name Name string (static key string or normalized dynamic name).
      */
-    function getModuleKeyName(bytes32 moduleKey) external view returns (string memory name) {
+    function getModuleKeyName(
+        bytes32 moduleKey
+    ) external view returns (string memory name) {
         if (ModuleKeys.isValidModuleKey(moduleKey)) {
             return ModuleKeys.getModuleKeyString(moduleKey);
         } else if (_dynamicModuleKeys[moduleKey]) {
@@ -489,34 +537,42 @@ contract RegistryDynamicModuleKey is
         }
     }
 
-    // ============ Dynamic Module Key Management Functions ============
-    
+    /*━━━━━━━━━━━━━━━ Dynamic Module Key Management Functions ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Returns all registered dynamic module keys.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return keys Dynamic module keys.
+     * @return keys Registered dynamic module keys in storage-list order.
      */
-    function getDynamicModuleKeys() external view returns (bytes32[] memory keys) {
+    function getDynamicModuleKeys()
+        external
+        view
+        returns (bytes32[] memory keys)
+    {
         uint256 len = _dynamicModuleKeyList.length;
         keys = new bytes32[](len);
         for (uint256 i = 0; i < len; ) {
             keys[i] = _dynamicModuleKeyList[i];
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
     /**
      * @notice Returns the total count of registered dynamic module keys.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return The dynamic module key count.
+     * @return dynamicKeyCount Total number of registered dynamic module keys.
      */
     function getDynamicKeyCount() external view returns (uint256) {
         return _dynamicModuleKeyList.length;
@@ -531,9 +587,11 @@ contract RegistryDynamicModuleKey is
      * - Read-only
      *
      * @param moduleKey Dynamic module key.
-     * @return name Normalized name.
+     * @return name Stored normalized name.
      */
-    function getDynamicModuleKeyName(bytes32 moduleKey) external view returns (string memory name) {
+    function getDynamicModuleKeyName(
+        bytes32 moduleKey
+    ) external view returns (string memory name) {
         if (!_dynamicModuleKeys[moduleKey]) {
             revert RegistryDynamicModuleKey__ModuleKeyNotExists(moduleKey);
         }
@@ -542,15 +600,18 @@ contract RegistryDynamicModuleKey is
 
     /**
      * @notice Returns the module key mapped from a normalized name hash.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
      * @param nameHash keccak256 hash of the normalized name.
-     * @return moduleKey Registered module key (zero if not registered).
+     * @return moduleKey Registered module key, or bytes32(0) if the name hash is unmapped.
      */
-    function getNameHashToModuleKey(bytes32 nameHash) external view returns (bytes32 moduleKey) {
+    function getNameHashToModuleKey(
+        bytes32 nameHash
+    ) external view returns (bytes32 moduleKey) {
         return _nameHashToModuleKey[nameHash];
     }
 
@@ -565,21 +626,25 @@ contract RegistryDynamicModuleKey is
      * @param index 0-based index.
      * @return moduleKey Dynamic module key at index.
      */
-    function getDynamicModuleKeyByIndex(uint256 index) external view returns (bytes32 moduleKey) {
-        if (index >= _dynamicModuleKeyList.length) revert IndexOutOfBounds(index, _dynamicModuleKeyList.length);
+    function getDynamicModuleKeyByIndex(
+        uint256 index
+    ) external view returns (bytes32 moduleKey) {
+        if (index >= _dynamicModuleKeyList.length)
+            revert IndexOutOfBounds(index, _dynamicModuleKeyList.length);
         return _dynamicModuleKeyList[index];
     }
 
-    // ============ Admin Functions ============
-    
+    /*━━━━━━━━━━━━━━━ Admin Functions ━━━━━━━━━━━━━━━*/
+
     /**
      * @notice Returns the registration admin address.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return Registration admin address.
+     * @return registrationAdmin Configured registration admin address.
      */
     function getRegistrationAdmin() external view returns (address) {
         return _registrationAdminAddr;
@@ -587,12 +652,13 @@ contract RegistryDynamicModuleKey is
 
     /**
      * @notice Returns the system admin address.
-     * @dev Reverts if: (none)
+     * @dev Reverts if:
+     *      - (none)
      *
      * Security:
      * - Read-only
      *
-     * @return System admin address.
+     * @return systemAdmin Configured system admin address.
      */
     function getSystemAdmin() external view returns (address) {
         return _systemAdminAddr;
@@ -609,13 +675,18 @@ contract RegistryDynamicModuleKey is
      *
      * @param newRegistrationAdmin New registration admin address.
      */
-    function setRegistrationAdmin(address newRegistrationAdmin) external onlyOwner {
+    function setRegistrationAdmin(
+        address newRegistrationAdmin
+    ) external onlyOwner {
         if (newRegistrationAdmin == address(0)) revert ZeroAddress();
-        
+
         address oldAdmin = _registrationAdminAddr;
         _registrationAdminAddr = newRegistrationAdmin;
-        
-        emit RegistryEvents.RegistrationAdminChanged(oldAdmin, newRegistrationAdmin);
+
+        emit RegistryEvents.RegistrationAdminChanged(
+            oldAdmin,
+            newRegistrationAdmin
+        );
     }
 
     /**
@@ -631,10 +702,10 @@ contract RegistryDynamicModuleKey is
      */
     function setSystemAdmin(address newSystemAdmin) external onlyOwner {
         if (newSystemAdmin == address(0)) revert ZeroAddress();
-        
+
         address oldAdmin = _systemAdminAddr;
         _systemAdminAddr = newSystemAdmin;
-        
+
         emit RegistryEvents.SystemAdminChanged(oldAdmin, newSystemAdmin);
     }
 
@@ -662,8 +733,8 @@ contract RegistryDynamicModuleKey is
         _unpause();
     }
 
-    // ============ Internal Functions ============
-    
+    /*━━━━━━━━━━━━━━━ Internal Functions ━━━━━━━━━━━━━━━*/
+
     /// @dev Storage gap for upgrade safety (prevents storage layout collisions).
     uint256[49] private __gap;
-} 
+}

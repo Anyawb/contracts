@@ -10,12 +10,13 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 import { IOrderEngine } from "../../../interfaces/IOrderEngine.sol";
 import { IOrderEngineViewAdapter } from "../../../interfaces/IOrderEngineViewAdapter.sol";
+import { ILoanNFT } from "../../../interfaces/ILoanNFT.sol";
 import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 
 /**
  * @title LendingEngineView
- * @notice Read-only view module for lending/order-engine data (0-gas queries).
+ * @notice View module for lending and order-engine data.
  * @dev This module is decoupled from the core engine and resolves dependencies via Registry.
  *
  * Reverts if:
@@ -23,8 +24,8 @@ import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
  * - caller lacks required role for a gated read (MissingRole)
  *
  * Security:
- * - Read-only: this module does not perform business writes
- * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM)
+ * - View-only module: this module does not perform business writes.
+ * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  */
 contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
@@ -72,9 +73,9 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - initialRegistryAddr is not a contract (NotAContract)
      *
      * Security:
-     * - initializer (UUPS)
+    * - Initializer: callable once.
      *
-     * @param initialRegistryAddr Registry contract address
+    * @param initialRegistryAddr Registry contract address.
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
@@ -93,7 +94,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller is not authorized to view the order (MissingRole)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param orderId Engine order identifier
      * @return order Loan order struct snapshot (see IOrderEngine.LoanOrder)
@@ -112,7 +113,8 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         order = _engine().getLoanOrderForView(orderId);
         bool isBorrower = order.borrower != address(0) && msg.sender == order.borrower;
         bool isLender = order.lender != address(0) && msg.sender == order.lender;
-        if (!isOps && !isBorrower && !isLender) revert MissingRole();
+        bool isCurrentLoanNftOwner = _isCurrentLoanNftOwner(orderId, msg.sender);
+        if (!isOps && !isBorrower && !isLender && !isCurrentLoanNftOwner) revert MissingRole();
         return order;
     }
 
@@ -123,7 +125,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param orderId Engine order identifier
      * @return feeAmount Failed fee amount (engine-defined units/decimals)
@@ -145,7 +147,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param orderId Engine order identifier
      * @return retryCount Retry count
@@ -167,7 +169,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyAuthorizedUser)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param orderId Engine order identifier
      * @param user Target user address
@@ -185,7 +187,8 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (user == address(0)) return (false, true, _now());
         IOrderEngine.LoanOrder memory order = _engine().getLoanOrderForView(orderId);
         hasAccess = (order.borrower != address(0) && user == order.borrower)
-            || (order.lender != address(0) && user == order.lender);
+            || (order.lender != address(0) && user == order.lender)
+            || _isCurrentLoanNftOwner(orderId, user);
         return (hasAccess, true, _now());
     }
 
@@ -196,7 +199,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
      * @param account Account address to check
      * @return isMatch Whether the account is the match engine
@@ -218,9 +221,9 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks VIEW_SYSTEM_DATA / ADMIN (MissingRole via onlyOps)
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return registry Registry contract address as reported by the engine adapter
+    * @return registry Registry contract address as reported by the engine adapter.
      */
     function getRegistryFromEngine()
         external
@@ -233,28 +236,15 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Get the Registry contract address.
+    * @notice Return the Registry contract address.
      * @dev This getter may return address(0) if the contract is not initialized.
      *
      * Security:
-     * - Read-only
+    * - View-only.
      *
-     * @return registryAddrVar Registry contract address
+    * @return registryAddrVar Registry contract address.
      */
     function getRegistry() external view returns (address registryAddrVar) {
-        return _registryAddr;
-    }
-
-    /**
-     * @notice Get the Registry contract address (legacy getter).
-     * @dev This function is kept for backward compatibility; prefer `getRegistry()`.
-     *
-     * Security:
-     * - Read-only
-     *
-     * @return registryAddrVar Registry contract address
-     */
-    function registryAddr() external view returns (address registryAddrVar) {
         return _registryAddr;
     }
 
@@ -270,6 +260,28 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         return IOrderEngineViewAdapter(engineAddr);
     }
 
+    function _isCurrentLoanNftOwner(uint256 orderId, address viewer) internal view returns (bool) {
+        if (viewer == address(0)) return false;
+
+        address loanNftAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_LOAN_NFT);
+        if (loanNftAddr == address(0) || loanNftAddr.code.length == 0) return false;
+
+        try ILoanNFT(loanNftAddr).getUserTokens(viewer) returns (uint256[] memory tokenIds) {
+            for (uint256 i; i < tokenIds.length; ) {
+                try ILoanNFT(loanNftAddr).getLoanMetadata(tokenIds[i]) returns (ILoanNFT.LoanMetadata memory metadata) {
+                    if (metadata.loanId == orderId) return true;
+                } catch {
+                    // Best-effort owner lookup: skip broken token metadata instead of blocking reads.
+                }
+                unchecked { ++i; }
+            }
+        } catch {
+            return false;
+        }
+
+        return false;
+    }
+
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
         if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
             revert MissingRole();
@@ -280,11 +292,29 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
 
-    function apiVersion() public pure override returns (uint256) {
+    /**
+     * @notice Return the API semantic version for this module.
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - Pure function.
+     *
+     * @return version API semantic version.
+     */
+    function apiVersion() public pure override returns (uint256 version) {
         return 1;
     }
 
-    function schemaVersion() public pure override returns (uint256) {
+    /**
+     * @notice Return the schema version for this module's outputs.
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - Pure function.
+     *
+     * @return version Schema version.
+     */
+    function schemaVersion() public pure override returns (uint256 version) {
         return 1;
     }
 

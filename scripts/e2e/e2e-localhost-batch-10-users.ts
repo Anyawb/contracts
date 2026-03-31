@@ -3,8 +3,10 @@ import type { Addressable } from "ethers";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { fundErc20Users } from "./utils/fork-token-funding.ts";
 import { scanViewModules } from "./utils/view-scan.ts";
 import { runViewPreflight } from "./utils/view-preflight.ts";
+import { refreshPriceOracleBlock } from "./utils/price-oracle-refresh.ts";
 
 const { ethers, network } = hardhat;
 
@@ -293,10 +295,14 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     console.log(`  [Diag] CONTRACT_ADDRESSES.VaultCore != Registry.KEY_VAULT_CORE (${CONTRACT_ADDRESSES.VaultCore} != ${vaultCoreFromRegistryAddr})`);
   }
   const acm = (await ethers.getContractAt("AccessControlManager", acmAddrFromRegistry)) as any;
-  const aw = (await ethers.getContractAt("AssetWhitelist", assetWhitelistAddrFromRegistry)) as any;
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", assetWhitelistAddrFromRegistry)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", assetWhitelistAddrFromRegistry)) as any;
   const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", priceOracleAddrFromRegistry)) as any;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddrFromRegistry)) as any;
   const usdc = (await ethers.getContractAt("MockERC20", settlementTokenAddrFromRegistry)) as any;
+  const fundUsdcUsers = async (recipients: string[], amount: bigint, label: string) => {
+    await fundErc20Users({ token: usdc, deployer, recipients, amount, label });
+  };
   const vaultCore = (await ethers.getContractAt("VaultCore", vaultCoreFromRegistryAddr)) as any;
   const platformFeeBps = (await feeRouter.getPlatformFeeBps()) as bigint;
   const ecosystemFeeBps = (await feeRouter.getEcosystemFeeBps()) as bigint;
@@ -326,17 +332,6 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     "src/Vault/modules/VaultLendingEngine.sol:VaultLendingEngine",
     vaultLendingEngineAddrFromRegistry
   )) as any;
-  try {
-    const vleReg = (await vle.registryAddr()) as string;
-    console.log("  [Diag] VaultLendingEngine.registryAddr():", vleReg);
-    if (vleReg.toLowerCase() !== String(CONTRACT_ADDRESSES.Registry).toLowerCase()) {
-      throw new Error(
-        `[Diag] VaultLendingEngine is wired to a DIFFERENT Registry (${vleReg}) than CONTRACT_ADDRESSES.Registry (${CONTRACT_ADDRESSES.Registry})`
-      );
-    }
-  } catch {
-    // ignore
-  }
 
   // LiquidationManager (Direct-to-ledger, single entry)
   const liquidationManagerAddr = (await registry.getModule(key("LIQUIDATION_MANAGER"))) as string;
@@ -790,8 +785,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
 
     // Fund actors
     const seed = ethers.parseUnits("30000", 6);
-    await (await usdc.connect(deployer).transfer(alice.address, seed)).wait();
-    await (await usdc.connect(deployer).transfer(bob.address, seed)).wait();
+    await fundUsdcUsers([alice.address, bob.address], seed, "feeRouter actors");
 
     // Ensure token supported
     if (!(await feeRouter.isTokenSupported(assetAddr))) {
@@ -941,7 +935,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   }
 
   async function logLEVOrder(step: string, orderId: bigint, borrowerSigner: any) {
-    const ord = await lendingEngineView.connect(borrowerSigner).getLoanOrder(orderId);
+    const ord = await lendingEngineView.connect(deployer).getLoanOrder(orderId);
     console.log(
       `  [LEV] ${step}: orderId=${orderId.toString()} principal=${ethers.formatUnits(
         ord.principal,
@@ -951,27 +945,27 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   }
 
   async function logOrderSnapshot(step: string, orderId: bigint, borrowerSigner: any) {
-    const ord = await lendingEngineView.connect(borrowerSigner).getLoanOrder(orderId);
-    const rateBps = (ord as any).rateBps ?? (ord as any).interestRateBps ?? null;
-    const termDaysValue = (ord as any).termDays ?? null;
-    const maturity = (ord as any).maturity ?? null;
-    const collateralAsset = (ord as any).collateralAsset ?? null;
-    const collateralAmount = (ord as any).collateralAmount ?? null;
-    const borrowAsset = (ord as any).borrowAsset ?? null;
+    const ord = await lendingEngineView.connect(deployer).getLoanOrder(orderId);
+    // IOrderEngine.LoanOrder fields (SSOT): principal, rate(bps), term(blocks), borrower, lender, asset, startTimestamp(startBlock), maturity(maturityBlock), repaidAmount.
+    // Be defensive: ethers may return both named fields and tuple indices.
+    const principal = (ord as any).principal ?? (ord as any)[0];
+    const rateBps = (ord as any).rate ?? (ord as any)[1];
+    const termBlocks = (ord as any).term ?? (ord as any)[2];
+    const borrower = (ord as any).borrower ?? (ord as any)[3];
+    const lender = (ord as any).lender ?? (ord as any)[4];
+    const orderAsset = (ord as any).asset ?? (ord as any)[5];
+    const startBlock = (ord as any).startTimestamp ?? (ord as any)[6];
+    const maturityBlock = (ord as any).maturity ?? (ord as any)[7];
+    const repaidAmount = (ord as any).repaidAmount ?? (ord as any)[8];
 
     console.log(
       `  [Order] ${step}: orderId=${orderId.toString()} principal=${ethers.formatUnits(
-        ord.principal,
+        principal,
         6
-      )} repaid=${ethers.formatUnits(ord.repaidAmount, 6)} borrower=${ord.borrower} lender=${ord.lender}`
+      )} repaid=${ethers.formatUnits(repaidAmount, 6)} borrower=${borrower} lender=${lender}`
     );
     console.log(
-      `  [Order] ${step}: rateBps=${rateBps ?? "n/a"} termDays=${termDaysValue ?? "n/a"} maturity=${maturity ?? "n/a"}`
-    );
-    console.log(
-      `  [Order] ${step}: collateralAsset=${collateralAsset ?? "n/a"} collateral=${
-        collateralAmount === null ? "n/a" : ethers.formatUnits(collateralAmount, 6)
-      } borrowAsset=${borrowAsset ?? "n/a"}`
+      `  [Order] ${step}: asset=${orderAsset} rateBps=${rateBps?.toString?.() ?? String(rateBps)} termBlocks=${termBlocks?.toString?.() ?? String(termBlocks)} startBlock=${startBlock?.toString?.() ?? String(startBlock)} maturityBlock=${maturityBlock?.toString?.() ?? String(maturityBlock)}`
     );
 
     const tokenId = await findLoanNftTokenIdByLoanId(borrowerSigner.address, orderId);
@@ -984,8 +978,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       console.log(`  [LoanNFT] ${step}: tokenId=${tokenId.toString()} status=${stLabel}`);
     }
 
-    const [pvCol, pvDebt] = await positionView.getUserPositionWithMeta(borrowerSigner.address, assetAddr);
-    const [uvCol, uvDebt] = await userView.getUserPosition(borrowerSigner.address, assetAddr);
+    const [pvCol, pvDebt] = await positionView.getUserPositionWithMeta(borrowerSigner.address, orderAsset);
+    const [uvCol, uvDebt] = await userView.getUserPosition(borrowerSigner.address, orderAsset);
     const rewardSummary = await rewardView.connect(deployer).getUserRewardSummaryWithMeta(borrowerSigner.address);
     const [stats] = await statisticsView.getGlobalStatisticsWithMeta();
     console.log(
@@ -995,8 +989,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       `  [UserView] ${step}: col=${ethers.formatUnits(uvCol, 6)} debt=${ethers.formatUnits(uvDebt, 6)}`
     );
     console.log(
-      `  [RewardView] ${step}: earned=${fmtEasy(rewardSummary[0])} burned=${fmtEasy(rewardSummary[1])} pendingPenalty=${fmtEasy(
-        rewardSummary[2]
+      `  [RewardView] ${step}: burned=${fmtEasy(rewardSummary[0])} pendingPenalty=${fmtEasy(
+        rewardSummary[1]
       )}`
     );
     console.log(
@@ -1022,13 +1016,23 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   await ensureRole("SET_PARAMETER", deployer.address);
   await ensureRole("PAUSE_SYSTEM", deployer.address);
   await ensureRole("UNPAUSE_SYSTEM", deployer.address);
+  const vaultRouterAddr = (await vaultCore.viewContractAddrVar()) as string;
+  // Fresh official-fork deployments route PositionView pushes through VaultRouter,
+  // while stats/cache notifications can also originate from SSOT ledger modules.
+  await ensureRole("ACTION_VIEW_PUSH", cmAddrFromRegistry);
   await ensureRole("ACTION_VIEW_PUSH", vaultLendingEngineAddrFromRegistry);
+  await ensureRole("ACTION_VIEW_PUSH", settlementManagerAddr);
+  await ensureRole("ACTION_VIEW_PUSH", liquidationManagerAddr);
+  await ensureRole("ACTION_VIEW_PUSH", vaultRouterAddr);
   // Health push path reads LiquidationRiskManager.getMinHealthFactor (risk-gated).
   await ensureRole("VIEW_RISK_DATA", vaultLendingEngineAddrFromRegistry);
   // Allow the deployer to refresh View caches in E2E when needed (e.g., after time travel).
   await ensureRole("ACTION_VIEW_PUSH", deployer.address);
   await ensureRole("VIEW_SYSTEM_DATA", deployer.address);
   await ensureRole("VIEW_USER_DATA", deployer.address);
+  await ensureRole("VIEW_SYSTEM_DATA", lendingEngineViewAddr);
+  await ensureRole("VIEW_SYSTEM_DATA", vblAddrFromRegistry);
+  await ensureRole("VIEW_SYSTEM_DATA", vaultRouterAddr);
   // View-gated reads used by liquidation/settlement flows.
   await ensureRole("VIEW_SYSTEM_DATA", settlementManagerAddr);
   await ensureRole("VIEW_USER_DATA", settlementManagerAddr);
@@ -1037,6 +1041,29 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   await ensureRole("VIEW_RISK_DATA", liquidationManagerAddr);
   await ensureRole("VIEW_USER_DATA", liquidationRiskManagerAddr);
   await ensureRole("VIEW_RISK_DATA", liquidationRiskManagerAddr);
+
+  {
+    const whitelistRegistryAddr = (await registry.getModuleOrRevert(key("WHITELIST_REGISTRY"))) as string;
+    const whitelistRegistry = (await ethers.getContractAt("WhitelistRegistry", whitelistRegistryAddr)) as any;
+    const participants = Array.from(
+      new Set(pairs.flatMap(({ borrower, lender }) => [borrower.address, lender.address]))
+    );
+    const missing: string[] = [];
+    for (const account of participants) {
+      if (!(await whitelistRegistry.isWhitelisted(account))) missing.push(account);
+    }
+    if (missing.length === 1) {
+      await (await whitelistRegistry.connect(deployer).addAddress(missing[0])).wait();
+    } else if (missing.length > 1) {
+      await (await whitelistRegistry.connect(deployer).batchAddAddresses(missing)).wait();
+    }
+    for (const account of participants) {
+      if (!(await whitelistRegistry.isWhitelisted(account))) {
+        throw new Error(`[WhitelistRegistry] participant not registered: ${account}`);
+      }
+    }
+    console.log(`  ✅ WhitelistRegistry preflight passed: ${participants.length} batch participants registered`);
+  }
 
   // match orchestration
   await ensureRole("ORDER_CREATE", vblAddrFromRegistry);
@@ -1069,8 +1096,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   }
 
   // ============ Asset/price setup ============
-  if (!(await aw.isAssetAllowed(assetAddr))) {
-    await (await aw.connect(deployer).addAllowedAsset(assetAddr)).wait();
+  if (!(await awRead.isAssetAllowed(assetAddr))) {
+    await (await awAdmin.connect(deployer).addAllowedAsset(assetAddr)).wait();
   }
   const assetDecimals = 6;
   const USD8_DECIMALS = 8;
@@ -1105,8 +1132,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     .deploy("MockUSDC2", "mUSDC2", 6, ethers.parseUnits("1000000000", 6))) as any;
   await altToken.waitForDeployment();
   const altAssetAddr = await altToken.getAddress();
-  if (!(await aw.isAssetAllowed(altAssetAddr))) {
-    await (await aw.connect(deployer).addAllowedAsset(altAssetAddr)).wait();
+  if (!(await awRead.isAssetAllowed(altAssetAddr))) {
+    await (await awAdmin.connect(deployer).addAllowedAsset(altAssetAddr)).wait();
   }
   {
     const cfg = await po.getAssetConfig(altAssetAddr);
@@ -1227,10 +1254,11 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
 
   // ============ Fund users (simple) ============
   console.log("💵 Funding 10 users...");
-  for (const { borrower, lender } of pairs) {
-    await (await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("20000", 6))).wait();
-    await (await usdc.connect(deployer).transfer(lender.address, ethers.parseUnits("20000", 6))).wait();
-  }
+  await fundUsdcUsers(
+    pairs.flatMap(({ borrower, lender }) => [borrower.address, lender.address]),
+    ethers.parseUnits("20000", 6),
+    "fund batch users"
+  );
   // Ensure fresh users have ETH for gas (some random wallets start at 0).
   const ensureGas = async (addr: string, minEth: string, topUpEth: string) => {
     const bal = await ethers.provider.getBalance(addr);
@@ -1304,16 +1332,19 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   // Reward baseline snapshot (reward-qualifying borrower = Pair#1 borrower)
   const rewardBorrower = pairs[0].borrower;
   const easyBalBefore = (await easyToken.balanceOf(rewardBorrower.address)) as bigint;
+  const [easyEarnedBefore] = (await rewardView
+    .connect(deployer)
+    .getUserEasyEarnedWithMeta(rewardBorrower.address)) as [bigint, bigint, boolean];
   const rewardSummaryBefore = await rewardView.connect(deployer).getUserRewardSummaryWithMeta(rewardBorrower.address);
   const easyBorrowerBefore = easyBalBefore;
   const easyLenderBefore = (await easyToken.balanceOf(pairs[0].lender.address)) as bigint;
-  const MIN_ELIGIBLE_PRINCIPAL = 1_000e6; // 与 RewardManagerCore 中的常量保持一致
+  const MIN_ELIGIBLE_PRINCIPAL = 1_000n * 1_000_000n; // 与 RewardManagerCore 中的常量保持一致
   const shouldEarnReward = principal >= MIN_ELIGIBLE_PRINCIPAL;
   console.log(
-    `  [Reward] baseline: borrower=${rewardBorrower.address} easyBalance=${fmtEasy(easyBalBefore)} (raw=${easyBalBefore.toString()}) totalEarned=${fmtEasy(
-      rewardSummaryBefore[0]
-    )} (raw=${rewardSummaryBefore[0].toString()}) totalBurned=${fmtEasy(rewardSummaryBefore[1])} pendingPenalty=${fmtEasy(
-      rewardSummaryBefore[2]
+    `  [Reward] baseline: borrower=${rewardBorrower.address} easyBalance=${fmtEasy(easyBalBefore)} (raw=${easyBalBefore.toString()}) easyEarned=${fmtEasy(
+      easyEarnedBefore
+    )} (raw=${easyEarnedBefore.toString()}) totalBurned=${fmtEasy(rewardSummaryBefore[0])} pendingPenalty=${fmtEasy(
+      rewardSummaryBefore[1]
     )}`
   );
   console.log(
@@ -1822,8 +1853,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     await ethers.provider.send("hardhat_mine", ["0x" + delta.toString(16)]);
   }
 
-  // 加速时间到接近到期日（在 ON_TIME_WINDOW 内），以便触发"按期还款"奖励
-  // ON_TIME_WINDOW = 24 hours，我们提前 1 小时还款（在窗口内）
+  // 加速区块高度到接近到期块（在 `_ON_TIME_WINDOW_BLOCKS` 判定窗口内），以便触发“按期还款”奖励。
+  // 注意：窗口 SSOT 是 blocks（`_ON_TIME_WINDOW_BLOCKS`），这里的“≈24h”只是本地链参数下的直觉换算。
   console.log(`  ⏰ Mining to near-maturity block (termDays=${termDays}) to simulate on-time repayment...`);
 
   // IMPORTANT: LendingEngine uses block-based maturity. Mine blocks to near-maturity
@@ -1848,11 +1879,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   // - repay 内部的 HealthView push 失败（LendingEngineCore 会 emit HealthPushFailed/CacheUpdateFailed）
   // 所以在 repay 之前先刷新一次价格区块号（价格本身不变即可）。
   try {
-    const nowAfterWarp = await latestBlockNumber();
-    const pd = await po.getPriceData(assetAddr);
-    const price = toBigInt((pd as any).price);
-    await (await po.connect(deployer).updatePrice(assetAddr, price, nowAfterWarp)).wait();
-    console.log(`  ✅ Refreshed PriceOracle blockNumber for ${assetAddr.slice(0, 10)} (price unchanged)`);
+    await refreshPriceOracleBlock({ priceOracle: po, asset: assetAddr, signer: deployer, print: true });
   } catch (e: any) {
     throw new Error(`[PriceOracle] Failed to refresh price after time travel: ${e?.message ?? String(e)}`);
   }
@@ -2064,8 +2091,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     extraUsed.add(earlyLender.address.toLowerCase());
 
     // Fund users
-    await (await usdc.connect(deployer).transfer(earlyBorrower.address, ethers.parseUnits("20000", 6))).wait();
-    await (await usdc.connect(deployer).transfer(earlyLender.address, ethers.parseUnits("20000", 6))).wait();
+    await fundUsdcUsers([earlyBorrower.address, earlyLender.address], ethers.parseUnits("20000", 6), "fund early pair");
 
     // Deposit collateral
     await (await usdc.connect(earlyBorrower).approve(cmAddrFromRegistry, collateralAmt)).wait();
@@ -2125,7 +2151,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     // Auto Reward expectations: mint yes (if enabled), no penalty/burn
     assertRewardAutoTriggers("Early repay", repayRc, { expectMinted: true, expectPenalty: "none" });
     const earlySummary = await rewardView.connect(deployer).getUserRewardSummaryWithMeta(earlyBorrower.address);
-    if (earlySummary[2] !== 0n) throw new Error("[Reward] Early repay: pendingPenalty should be 0");
+    if (earlySummary[1] !== 0n) throw new Error("[Reward] Early repay: pendingPenalty should be 0");
 
     console.log("  ✅ Early repay auto-reward check completed");
   }
@@ -2166,9 +2192,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       const at = threshold;
 
       // Fund users
-      await (await usdc.connect(deployer).transfer(b1.address, ethers.parseUnits("20000", 6))).wait();
-      await (await usdc.connect(deployer).transfer(b2.address, ethers.parseUnits("20000", 6))).wait();
-      await (await usdc.connect(deployer).transfer(l1.address, ethers.parseUnits("20000", 6))).wait();
+      await fundUsdcUsers([b1.address, b2.address, l1.address], ethers.parseUnits("20000", 6), "fund split users");
 
       // Deposit collateral
       await (await usdc.connect(b1).approve(cmAddrFromRegistry, collateralAmt)).wait();
@@ -2279,8 +2303,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
         throw new Error("Partial repay test: cannot find fresh borrower/lender; restart localhost node for a clean state.");
       }
 
-      await (await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("20000", 6))).wait();
-      await (await usdc.connect(deployer).transfer(lender.address, ethers.parseUnits("20000", 6))).wait();
+      await fundUsdcUsers([borrower.address, lender.address], ethers.parseUnits("20000", 6), "fund borrower-lender pair");
       await (await usdc.connect(borrower).approve(cmAddrFromRegistry, collateralAmt)).wait();
       await (await vaultCore.connect(borrower).deposit(assetAddr, collateralAmt)).wait();
 
@@ -2377,8 +2400,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       const amount1 = ethers.parseUnits("1000", 6);
       const amount2 = ethers.parseUnits("1000", 6);
 
-      await (await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("20000", 6))).wait();
-      await (await usdc.connect(deployer).transfer(lender.address, ethers.parseUnits("20000", 6))).wait();
+      await fundUsdcUsers([borrower.address, lender.address], ethers.parseUnits("20000", 6), "fund borrower-lender pair");
 
       await (await usdc.connect(borrower).approve(cmAddrFromRegistry, collateralAmt2)).wait();
       await (await vaultCore.connect(borrower).deposit(assetAddr, collateralAmt2)).wait();
@@ -2443,8 +2465,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
           `  [Snapshot] after borrow #1: UserView col=${ethers.formatUnits(uvCol, 6)} debt=${ethers.formatUnits(uvDebt, 6)}`
         );
         console.log(
-          `  [Snapshot] after borrow #1: RewardView earned=${fmtEasy(rewardSummary[0])} burned=${fmtEasy(rewardSummary[1])} pendingPenalty=${fmtEasy(
-            rewardSummary[2]
+          `  [Snapshot] after borrow #1: RewardView burned=${fmtEasy(rewardSummary[0])} pendingPenalty=${fmtEasy(
+            rewardSummary[1]
           )}`
         );
       }
@@ -2463,8 +2485,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
           `  [Snapshot] after borrow #2: UserView col=${ethers.formatUnits(uvCol, 6)} debt=${ethers.formatUnits(uvDebt, 6)}`
         );
         console.log(
-          `  [Snapshot] after borrow #2: RewardView earned=${fmtEasy(rewardSummary[0])} burned=${fmtEasy(rewardSummary[1])} pendingPenalty=${fmtEasy(
-            rewardSummary[2]
+          `  [Snapshot] after borrow #2: RewardView burned=${fmtEasy(rewardSummary[0])} pendingPenalty=${fmtEasy(
+            rewardSummary[1]
           )}`
         );
       }
@@ -2523,8 +2545,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       }
 
       // Fund + deposit collateral for both assets
-      await (await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("20000", 6))).wait();
-      await (await usdc.connect(deployer).transfer(lender.address, ethers.parseUnits("20000", 6))).wait();
+      await fundUsdcUsers([borrower.address, lender.address], ethers.parseUnits("20000", 6), "fund mixed-asset pair");
       await (await altToken.connect(deployer).transfer(borrower.address, ethers.parseUnits("20000", 6))).wait();
       await (await altToken.connect(deployer).transfer(lender.address, ethers.parseUnits("20000", 6))).wait();
 
@@ -2633,18 +2654,21 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
 
   // Reward assertion: borrower#1 should have earned EasyToken after on-time full repay (only if amount >= 1000e6)
   const easyBalAfter = (await easyToken.balanceOf(rewardBorrower.address)) as bigint;
+  const [easyEarnedAfter] = (await rewardView
+    .connect(deployer)
+    .getUserEasyEarnedWithMeta(rewardBorrower.address)) as [bigint, bigint, boolean];
   const rewardSummaryAfter = await rewardView.connect(deployer).getUserRewardSummaryWithMeta(rewardBorrower.address);
   console.log(
-    `  [Reward] after repay: borrower=${rewardBorrower.address} easyBalance=${fmtEasy(easyBalAfter)} (raw=${easyBalAfter.toString()}) totalEarned=${fmtEasy(
-      rewardSummaryAfter[0]
-    )} (raw=${rewardSummaryAfter[0].toString()}) totalBurned=${fmtEasy(rewardSummaryAfter[1])} pendingPenalty=${fmtEasy(
-      rewardSummaryAfter[2]
+    `  [Reward] after repay: borrower=${rewardBorrower.address} easyBalance=${fmtEasy(easyBalAfter)} (raw=${easyBalAfter.toString()}) easyEarned=${fmtEasy(
+      easyEarnedAfter
+    )} (raw=${easyEarnedAfter.toString()}) totalBurned=${fmtEasy(rewardSummaryAfter[0])} pendingPenalty=${fmtEasy(
+      rewardSummaryAfter[1]
     )}`
   );
   const balDelta = easyBalAfter - easyBalBefore;
-  const earnedDelta = (rewardSummaryAfter[0] as bigint) - (rewardSummaryBefore[0] as bigint);
+  const easyEarnedDelta = easyEarnedAfter - easyEarnedBefore;
   let finalBalDelta = balDelta;
-  let finalEarnedDelta = earnedDelta;
+  let finalEasyEarnedDelta = easyEarnedDelta;
   let fallbackRcpt: any | null = null;
   
   let minted = false;
@@ -2655,7 +2679,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     // 借款金额 >= 1000 USDC，应该发放 Easy；若未观察到，尝试补触发 OrderEngine→RewardManager hook。
     const repayPushes = pair1RepayReceipt ? extractDataPushed(pair1RepayReceipt) : [];
     const hasEasyMintedInRepay = repayPushes.some((p) => p.dataTypeHash.toLowerCase() === DATA_TYPE_EASY_MINTED);
-    if (!hasEasyMintedInRepay && (finalBalDelta <= 0n || finalEarnedDelta <= 0n)) {
+    if (!hasEasyMintedInRepay && (finalBalDelta <= 0n || finalEasyEarnedDelta <= 0n)) {
       fallbackRcpt = await fallbackTriggerRewardEarnByOrder({
         borrower: rewardBorrower.address,
         lender: pairs[0].lender.address,
@@ -2663,11 +2687,14 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
         orderId: orderIds[0],
         amount: principal,
       });
+      const [easyEarnedAfter2] = (await rewardView
+        .connect(deployer)
+        .getUserEasyEarnedWithMeta(rewardBorrower.address)) as [bigint, bigint, boolean];
       const easyBalAfter2 = (await easyToken.balanceOf(rewardBorrower.address)) as bigint;
       const rewardSummaryAfter2 = await rewardView.connect(deployer).getUserRewardSummaryWithMeta(rewardBorrower.address);
       finalBalDelta = easyBalAfter2 - easyBalBefore;
-      finalEarnedDelta = (rewardSummaryAfter2[0] as bigint) - (rewardSummaryBefore[0] as bigint);
-      if (rewardSummaryAfter2[2] !== 0n) throw new Error("[Reward] expected pendingPenalty == 0 for on-time full repay (pair#1)");
+      finalEasyEarnedDelta = easyEarnedAfter2 - easyEarnedBefore;
+      if (rewardSummaryAfter2[1] !== 0n) throw new Error("[Reward] expected pendingPenalty == 0 for on-time full repay (pair#1)");
     }
 
     if (!hasEasyMintedInRepay && finalBalDelta <= 0n) {
@@ -2693,28 +2720,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     }
 
     if (minted) {
-      if (finalEarnedDelta <= 0n) {
-        logNotice(`  [Notice] [Reward] totalEarned did not increase (got ${fmtEasy(finalEarnedDelta)} raw=${finalEarnedDelta.toString()}); Easy mint path may be separate`);
-      }
-
-      if (finalEarnedDelta > 0n) {
-        const rewardEarnedType = ethers.keccak256(ethers.toUtf8Bytes("REWARD_EARNED")).toLowerCase();
-        const pushes1 = pair1RepayReceipt ? extractDataPushed(pair1RepayReceipt) : [];
-        let earnedPush = pushes1.find((p) => p.dataTypeHash === rewardEarnedType);
-        if (!earnedPush && fallbackRcpt) {
-          const pushes2 = extractDataPushed(fallbackRcpt);
-          earnedPush = pushes2.find((p) => p.dataTypeHash === rewardEarnedType);
-        }
-        if (!earnedPush) throw new Error("[Reward] expected DataPushed(REWARD_EARNED) for eligible repay (pair#1)");
-
-        const [u, amt] = coder.decode(["address", "uint256", "string", "uint256"], earnedPush.payload) as unknown as [
-          string,
-          bigint,
-          string,
-          bigint,
-        ];
-        if (u.toLowerCase() !== rewardBorrower.address.toLowerCase()) throw new Error("[Reward] REWARD_EARNED payload user mismatch");
-        if (amt <= 0n) throw new Error("[Reward] REWARD_EARNED payload amount must be > 0");
+      if (finalEasyEarnedDelta <= 0n) {
+        logNotice(`  [Notice] [Reward] easyEarned did not increase (got ${fmtEasy(finalEasyEarnedDelta)} raw=${finalEasyEarnedDelta.toString()}); Easy mint path may be separate`);
       }
 
       let easyPush = repayPushes.find((p) => p.dataTypeHash.toLowerCase() === DATA_TYPE_EASY_MINTED);
@@ -2759,9 +2766,11 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       console.log("  ✅ Reward assertion passed: Easy minted + earned as expected (principal >= 1000 USDC)");
     }
   } else {
-    // 借款金额 < 1000 USDC，不应该发放积分（但程序应该正常运行）
+    // 借款金额 < 1000 USDC，不应发放奖励（EasyToken），但程序应正常运行
     if (balDelta !== 0n) throw new Error(`[Reward] expected no Easy for principal < 1000 USDC (got ${fmtEasy(balDelta)} raw=${balDelta.toString()})`);
-    if (earnedDelta !== 0n) throw new Error(`[Reward] expected no totalEarned delta for principal < 1000 USDC (got ${fmtEasy(earnedDelta)} raw=${earnedDelta.toString()})`);
+    if (easyEarnedDelta !== 0n) {
+      throw new Error(`[Reward] expected no easyEarned delta for principal < 1000 USDC (got easyEarnedDelta=${fmtEasy(easyEarnedDelta)} raw=${easyEarnedDelta.toString()})`);
+    }
     console.log("  ✅ Reward assertion passed: no Easy earned as expected (principal < 1000 USDC)");
   }
 
@@ -2902,7 +2911,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     const systemView = (await ethers.getContractAt("SystemView", systemViewAddr)) as any;
     console.log("  [SystemView] Testing unified entry point...");
     // SystemView should provide registry access
-    const regAddr = await systemView.registry();
+    const regAddr = await systemView.registryAddrVar();
     console.log(`    [SystemView] Registry address: ${regAddr}`);
     // Try to get a module through SystemView
     const cmKey = key("COLLATERAL_MANAGER");
@@ -2929,7 +2938,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     if (!user) throw new Error("Stale price: cannot find unused signer; restart localhost node for a clean state.");
 
     const depositAmt = ethers.parseUnits("100", 6);
-    await (await usdc.connect(deployer).transfer(user.address, ethers.parseUnits("20000", 6))).wait();
+    await fundUsdcUsers([user.address], ethers.parseUnits("20000", 6), "fund user");
     await (await usdc.connect(user).approve(cmAddrFromRegistry, depositAmt)).wait();
     await (await vaultCore.connect(user).deposit(assetAddr, depositAmt)).wait();
 
@@ -2972,7 +2981,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   console.log("\n✅ Batch E2E Completed!");
 
   // ============ Additional Test Case: Small Amount Loan (< 1000 USDC) ============
-  // 测试用例：验证借款金额 < 1000 USDC 时，不发放积分，但程序正常运行
+  // 测试用例：验证借款金额 < 1000 USDC 时，不发放奖励（EasyToken），但程序正常运行
   console.log("\n=== Additional Test: Small Amount Loan (< 1000 USDC) ===");
   const used = new Set<string>([
     deployer.address,
@@ -2999,19 +3008,20 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     throw new Error("Small amount test: cannot find unused borrower/lender; restart localhost node for a clean state.");
   }
   const smallCollateralAmt = ethers.parseUnits("1000", 6);
-  const smallPrincipal = ethers.parseUnits("500", 6); // < 1000 USDC，不应该发放积分
+  const smallPrincipal = ethers.parseUnits("500", 6); // < 1000 USDC，不应发放奖励（EasyToken）
   const smallTermDays = 5;
 
   console.log(`  Testing borrower: ${smallAmountBorrower.address.slice(0, 10)}`);
   console.log(`  Principal: ${ethers.formatUnits(smallPrincipal, 6)} USDC (should NOT earn reward)`);
 
   // Fund fresh borrower/lender for this isolated test.
-  await (await usdc.connect(deployer).transfer(smallAmountBorrower.address, ethers.parseUnits("20000", 6))).wait();
-  await (await usdc.connect(deployer).transfer(smallAmountLender.address, ethers.parseUnits("20000", 6))).wait();
+  await fundUsdcUsers([smallAmountBorrower.address, smallAmountLender.address], ethers.parseUnits("20000", 6), "fund small amount pair");
 
   // Baseline for small amount test
   const smallEasyBalBefore = (await easyToken.balanceOf(smallAmountBorrower.address)) as bigint;
-  const smallRewardSummaryBefore = await rewardView.connect(deployer).getUserRewardSummaryWithMeta(smallAmountBorrower.address);
+  const [smallEasyEarnedBefore] = (await rewardView
+    .connect(deployer)
+    .getUserEasyEarnedWithMeta(smallAmountBorrower.address)) as [bigint, bigint, boolean];
 
   // Deposit collateral
   // VaultCore.deposit -> VaultRouter -> CollateralManager, so approve CollateralManager.
@@ -3093,10 +3103,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
 
   // Refresh price after time travel to avoid stale oracle
   try {
-    const nowAfterWarp = await latestBlockNumber();
-    const pd = await po.getPriceData(assetAddr);
-    const price = toBigInt((pd as any).price);
-    await (await po.connect(deployer).updatePrice(assetAddr, price, nowAfterWarp)).wait();
+    await refreshPriceOracleBlock({ priceOracle: po, asset: assetAddr, signer: deployer });
   } catch (e: any) {
     throw new Error(`[PriceOracle] Small amount test failed to refresh price: ${e?.message ?? String(e)}`);
   }
@@ -3125,14 +3132,16 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
 
   // Verify no EasyToken was earned
   const smallEasyBalAfter = (await easyToken.balanceOf(smallAmountBorrower.address)) as bigint;
-  const smallRewardSummaryAfter = await rewardView.connect(deployer).getUserRewardSummaryWithMeta(smallAmountBorrower.address);
+  const [smallEasyEarnedAfter] = (await rewardView
+    .connect(deployer)
+    .getUserEasyEarnedWithMeta(smallAmountBorrower.address)) as [bigint, bigint, boolean];
   const smallBalDelta = smallEasyBalAfter - smallEasyBalBefore;
-  const smallEarnedDelta = (smallRewardSummaryAfter[0] as bigint) - (smallRewardSummaryBefore[0] as bigint);
+  const smallEasyEarnedDelta = smallEasyEarnedAfter - smallEasyEarnedBefore;
 
   console.log(
-    `  [Reward] small amount test: easyBalance=${fmtEasy(smallEasyBalAfter)} (delta=${fmtEasy(smallBalDelta)}) totalEarned=${fmtEasy(
-      smallRewardSummaryAfter[0]
-    )} (delta=${fmtEasy(smallEarnedDelta)})`
+    `  [Reward] small amount test: easyBalance=${fmtEasy(smallEasyBalAfter)} (delta=${fmtEasy(smallBalDelta)}) easyEarned=${fmtEasy(
+      smallEasyEarnedAfter
+    )} (delta=${fmtEasy(smallEasyEarnedDelta)})`
   );
 
   if (smallBalDelta !== 0n) {
@@ -3140,9 +3149,9 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       `[Reward] Small amount test failed: expected no Easy for principal < 1000 USDC (got ${fmtEasy(smallBalDelta)} raw=${smallBalDelta.toString()})`
     );
   }
-  if (smallEarnedDelta !== 0n) {
+  if (smallEasyEarnedDelta !== 0n) {
     throw new Error(
-      `[Reward] Small amount test failed: expected no totalEarned delta for principal < 1000 USDC (got ${fmtEasy(smallEarnedDelta)} raw=${smallEarnedDelta.toString()})`
+      `[Reward] Small amount test failed: expected no easyEarned delta for principal < 1000 USDC (got easyEarnedDelta=${fmtEasy(smallEasyEarnedDelta)} raw=${smallEasyEarnedDelta.toString()})`
     );
   }
 
@@ -3193,8 +3202,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   // to the executor (deployer), which would pollute the "liquidation received amount" assertion.
 
   // Fund fresh borrower/lender and ensure enough collateral for this scenario (deposit via VaultCore)
-  await (await usdc.connect(deployer).transfer(liqBorrower.address, ethers.parseUnits("20000", 6))).wait();
-  await (await usdc.connect(deployer).transfer(liqLender.address, ethers.parseUnits("20000", 6))).wait();
+  await fundUsdcUsers([liqBorrower.address, liqLender.address], ethers.parseUnits("20000", 6), "fund liquidation pair");
 
   // Ensure enough collateral for this scenario (deposit extra collateral into CM via VaultCore)
   // VaultCore.deposit -> VaultRouter -> CollateralManager, so approve CollateralManager.
@@ -3292,11 +3300,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   }
   // PriceOracle maxPriceAge=3600s; refresh blockNumber after time travel to avoid stale price reverts in risk/value paths.
   try {
-    const nowAfterWarp = await latestBlockNumber();
-    const pd = await po.getPriceData(assetAddr);
-    const price = toBigInt((pd as any).price);
-    await (await po.connect(deployer).updatePrice(assetAddr, price, nowAfterWarp)).wait();
-    console.log(`  ✅ Refreshed PriceOracle blockNumber for ${assetAddr.slice(0, 10)} (price unchanged)`);
+    await refreshPriceOracleBlock({ priceOracle: po, asset: assetAddr, signer: deployer, print: true });
   } catch (e: any) {
     throw new Error(`[PriceOracle] Failed to refresh price after time travel: ${e?.message ?? String(e)}`);
   }
@@ -3428,8 +3432,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     const collateral2 = ethers.parseUnits("500", 6);
     const expireAt = (await latestBlockNumber()) + ONE_HOUR_BLOCKS;
 
-    await (await usdc.connect(deployer).transfer(u.address, ethers.parseUnits("20000", 6))).wait();
-    await (await usdc.connect(deployer).transfer(l.address, ethers.parseUnits("20000", 6))).wait();
+    await fundUsdcUsers([u.address, l.address], ethers.parseUnits("20000", 6), "fund rolling pair");
 
     await (await usdc.connect(u).approve(cmAddrFromRegistry, collateral2)).wait();
     await (await vaultCore.connect(u).deposit(assetAddr, collateral2)).wait();
@@ -3518,8 +3521,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     const collateral3 = ethers.parseUnits("500", 6);
     const expireAt = (await latestBlockNumber()) + ONE_HOUR_BLOCKS;
 
-      await (await usdc.connect(deployer).transfer(u.address, ethers.parseUnits("20000", 6))).wait();
-      await (await usdc.connect(deployer).transfer(l.address, ethers.parseUnits("20000", 6))).wait();
+      await fundUsdcUsers([u.address, l.address], ethers.parseUnits("20000", 6), "fund rolling pair");
 
       await (await usdc.connect(u).approve(cmAddrFromRegistry, collateral3)).wait();
       await (await vaultCore.connect(u).deposit(assetAddr, collateral3)).wait();

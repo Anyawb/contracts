@@ -81,7 +81,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应记录 registry 地址且 getter 一致', async function () {
-      expect(await viewCache.registryAddr()).to.equal(await registry.getAddress());
+      expect(await viewCache.registryAddrVar()).to.equal(await registry.getAddress());
       expect(await viewCache.registryAddrVar()).to.equal(await registry.getAddress());
     });
   });

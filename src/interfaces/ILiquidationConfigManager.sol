@@ -9,7 +9,7 @@ pragma solidity ^0.8.20;
  */
 interface ILiquidationConfigManager {
     /*━━━━━━━━━━━━━━━ Module Management Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Get a module address using the cache (best-effort).
      * @dev Reverts if:
@@ -22,7 +22,9 @@ interface ILiquidationConfigManager {
      * @param moduleKey Module key (see ModuleKeys).
      * @return moduleAddress Cached module address (best-effort).
      */
-    function getModule(bytes32 moduleKey) external view returns (address moduleAddress);
+    function getModule(
+        bytes32 moduleKey
+    ) external view returns (address moduleAddress);
 
     /*━━━━━━━━━━━━━━━ Liquidation Parameter Governance ━━━━━━━━━━━━━━━*/
 
@@ -49,7 +51,10 @@ interface ILiquidationConfigManager {
      *
      * @return bonusRate Bonus rate (bps, 10_000 = 100%).
      */
-    function getLiquidationBonusRate() external view returns (uint256 bonusRate);
+    function getLiquidationBonusRate()
+        external
+        view
+        returns (uint256 bonusRate);
 
     /**
      * @notice Update liquidation threshold.
@@ -74,14 +79,18 @@ interface ILiquidationConfigManager {
      *
      * @return threshold Threshold (bps, 10_000 = 100%).
      */
-    function getLiquidationThreshold() external view returns (uint256 threshold);
+    function getLiquidationThreshold()
+        external
+        view
+        returns (uint256 threshold);
 
     /**
      * @notice Update minimum health factor.
      * @dev Reverts if:
      *      - Registry missing KEY_ACCESS_CONTROL (Registry.getModuleOrRevert)
      *      - caller lacks ACTION_SET_PARAMETER (via AccessControlManager.requireRole)
-     *      - newMinHealthFactor is zero or below liquidationThreshold (LiquidationConfigManager__InvalidMinHealthFactor)
+     *      - newMinHealthFactor is zero or below liquidationThreshold
+     *        (LiquidationConfigManager__InvalidMinHealthFactor)
      *
      * Security:
      * - Role-gated (ACTION_SET_PARAMETER)
@@ -100,7 +109,10 @@ interface ILiquidationConfigManager {
      *
      * @return minHealthFactor Minimum health factor (bps, 10_000 = 100%).
      */
-    function getMinHealthFactor() external view returns (uint256 minHealthFactor);
+    function getMinHealthFactor()
+        external
+        view
+        returns (uint256 minHealthFactor);
 
     /**
      * @notice Update maximum LTV.
@@ -129,7 +141,7 @@ interface ILiquidationConfigManager {
     function getMaxLtvBps() external view returns (uint256 maxLtvBps);
 
     /*━━━━━━━━━━━━━━━ Query Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Get cached liquidation orchestrator address (best-effort).
      * @dev Reverts if:
@@ -141,7 +153,10 @@ interface ILiquidationConfigManager {
      *
      * @return orchestrator Orchestrator address.
      */
-    function getCachedOrchestrator() external view returns (address orchestrator);
+    function getCachedOrchestrator()
+        external
+        view
+        returns (address orchestrator);
 
     /**
      * @notice Get cached liquidation calculator address (best-effort).
@@ -184,16 +199,19 @@ interface ILiquidationConfigManager {
      * @return collateralManager Collateral manager address.
      * @return debtManager Debt manager address.
      */
-    function getAllCachedModules() external view returns (
-        address orchestrator,
-        address calculator,
-        address riskManager,
-        address collateralManager,
-        address debtManager
-    );
+    function getAllCachedModules()
+        external
+        view
+        returns (
+            address orchestrator,
+            address calculator,
+            address riskManager,
+            address collateralManager,
+            address debtManager
+        );
 
     /*━━━━━━━━━━━━━━━ Emergency Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Emergency pause liquidation operations.
      * @dev Reverts if:
@@ -228,4 +246,4 @@ interface ILiquidationConfigManager {
      * @return paused True if paused, otherwise false.
      */
     function isPaused() external view returns (bool paused);
-} 
+}

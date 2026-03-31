@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Registry } from "./Registry.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { ICacheRefreshable } from "../interfaces/ICacheRefreshable.sol";
-import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
+import {Registry} from "./Registry.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {ICacheRefreshable} from "../interfaces/ICacheRefreshable.sol";
+import {NotAContract, ZeroAddress} from "../errors/StandardErrors.sol";
 
 /**
  * @title CacheMaintenanceManager
@@ -17,65 +17,32 @@ import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
  *      - Registry.KEY_CACHE_MAINTENANCE_MANAGER is unset or not equal to this contract
  *
  * Security:
- * - Single on-chain entrypoint for A-class module-address cache refresh
- * - Best-effort: one target failure does not stop the batch
- * - Emits per-target audit events with raw revert data (if any)
- *
- * Architecture guide alignment:
- * - A-class cache refresh is centralized:
- *   ICacheRefreshable.refreshModuleCache() + CacheMaintenanceManager.batchRefresh()
+ * - Single on-chain entrypoint for A-class module-address cache refresh.
+ * - Best-effort: one target failure does not stop the batch.
+ * - Emits per-target audit events with raw revert data for off-chain forensics.
+ * - A-class cache refresh is centralized through ICacheRefreshable.refreshModuleCache() and batchRefresh().
  */
 contract CacheMaintenanceManager {
-    // ============ Custom Errors ============
-    /**
-     * @notice CacheMaintenanceManager is not registered as the maintainer in Registry.
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Thrown to ensure this contract is the single on-chain entrypoint for A-class cache refresh.
-     *
-     * @param configuredMaintainer The address currently configured in Registry for KEY_CACHE_MAINTENANCE_MANAGER.
-     */
-    error CacheMaintenanceManager__NotRegisteredAsMaintainer(address configuredMaintainer);
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when Registry does not map KEY_CACHE_MAINTENANCE_MANAGER to this contract. Used by {batchRefresh}.
+    error CacheMaintenanceManager__NotRegisteredAsMaintainer(
+        address configuredMaintainer
+    );
 
-    /**
-     * @notice A zero target address was provided in a refresh batch.
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Used to encode failure reasons in audit events without reverting the whole batch.
-     */
+    /// @dev Reverts when a batch entry contains address(0). Used for per-target failure encoding in {batchRefresh}.
     error CacheMaintenanceManager__ZeroTarget();
 
-    /**
-     * @notice Emitted for every refresh attempt (success or failure).
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - This is an audit event for off-chain monitoring and incident response.
-     *
-     * @param target Target contract address that was called.
-     * @param ok Whether the call succeeded.
-     * @param reason Raw revert data if failed; empty if succeeded.
-     */
+    /// @notice Emitted for each cache refresh attempt.
+    /// @dev Emitted by {batchRefresh} for both successful and failed targets to support off-chain monitoring.
     event CacheRefreshAttempted(address indexed target, bool ok, bytes reason);
 
-    /**
-     * @notice Emitted after a batch refresh completes.
-     * @dev Reverts if:
-     *      - (none)
-     *
-     * Security:
-     * - Off-chain consumers can use this as a cheap per-tx summary of batch results.
-     *
-     * @param total Total targets attempted.
-     * @param okCount Successful refresh count.
-     * @param failedCount Failed refresh count.
-     */
-    event CacheRefreshBatchCompleted(uint256 total, uint256 okCount, uint256 failedCount);
+    /// @notice Emitted when a cache refresh batch finishes.
+    /// @dev Summarizes the per-target results emitted through {CacheRefreshAttempted} for the same transaction.
+    event CacheRefreshBatchCompleted(
+        uint256 total,
+        uint256 okCount,
+        uint256 failedCount
+    );
 
     /// @notice Registry address (authoritative module registry).
     address private immutable _registryAddr;
@@ -95,7 +62,7 @@ contract CacheMaintenanceManager {
         _registryAddr = registryAddr;
     }
 
-    // ============ Access control ============
+    /*━━━━━━━━━━━━━━━ Access Control ━━━━━━━━━━━━━━━*/
     /**
      * @notice Requires a role via the global AccessControlManager resolved from Registry.
      * @dev Reverts if:
@@ -109,7 +76,9 @@ contract CacheMaintenanceManager {
      * @param user Caller address.
      */
     function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
@@ -118,7 +87,7 @@ contract CacheMaintenanceManager {
         _;
     }
 
-    // ============ Public ops ============
+    /*━━━━━━━━━━━━━━━ Public Operations ━━━━━━━━━━━━━━━*/
 
     /**
      * @notice Batch refresh targets (best-effort; one failure does not stop others).
@@ -133,22 +102,27 @@ contract CacheMaintenanceManager {
      * @return okCount Number of successful refreshes.
      * @return failedCount Number of failed refreshes.
      */
-    function batchRefresh(address[] calldata targets)
-        external
-        onlyGovernance
-        returns (uint256 okCount, uint256 failedCount)
-    {
+    function batchRefresh(
+        address[] calldata targets
+    ) external onlyGovernance returns (uint256 okCount, uint256 failedCount) {
         // Safety: ensure targets that enforce "CacheMaintenanceManager-only" are compatible.
-        address configuredMaint = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER);
+        address configuredMaint = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER
+        );
         if (configuredMaint != address(this)) {
-            revert CacheMaintenanceManager__NotRegisteredAsMaintainer(configuredMaint);
+            revert CacheMaintenanceManager__NotRegisteredAsMaintainer(
+                configuredMaint
+            );
         }
 
         uint256 total = targets.length;
         for (uint256 i; i < total; ) {
             bool ok = _refreshTarget(targets[i]);
-            if (ok) okCount++; else failedCount++;
-            unchecked { ++i; }
+            if (ok) okCount++;
+            else failedCount++;
+            unchecked {
+                ++i;
+            }
         }
         emit CacheRefreshBatchCompleted(total, okCount, failedCount);
     }
@@ -160,25 +134,33 @@ contract CacheMaintenanceManager {
      *
      * Security:
      * - Read-only.
+     *
+     * @return registryAddr Authoritative Registry address used for role checks and module resolution.
      */
     function getRegistry() external view returns (address) {
         return _registryAddr;
     }
 
-    // ============ Internal ============
+    /*━━━━━━━━━━━━━━━ Internal Helpers ━━━━━━━━━━━━━━━*/
 
     function _refreshTarget(address target) internal returns (bool ok) {
         if (target == address(0)) {
             emit CacheRefreshAttempted(
                 target,
                 false,
-                abi.encodeWithSelector(CacheMaintenanceManager__ZeroTarget.selector)
+                abi.encodeWithSelector(
+                    CacheMaintenanceManager__ZeroTarget.selector
+                )
             );
             return false;
         }
         if (target.code.length == 0) {
             // Reuse the standard error shape for consistent off-chain decoding.
-            emit CacheRefreshAttempted(target, false, abi.encodeWithSelector(NotAContract.selector, target));
+            emit CacheRefreshAttempted(
+                target,
+                false,
+                abi.encodeWithSelector(NotAContract.selector, target)
+            );
             return false;
         }
         try ICacheRefreshable(target).refreshModuleCache() {
@@ -190,4 +172,3 @@ contract CacheMaintenanceManager {
         }
     }
 }
-

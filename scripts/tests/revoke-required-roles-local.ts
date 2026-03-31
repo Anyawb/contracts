@@ -13,6 +13,7 @@ async function main() {
   const vaultBusinessLogicAddr = (CONTRACT_ADDRESSES as any)?.VaultBusinessLogic as string | undefined;
   const liquidationManagerAddr = (CONTRACT_ADDRESSES as any)?.LiquidationManager as string | undefined;
   const guaranteeFundManagerAddr = (CONTRACT_ADDRESSES as any)?.GuaranteeFundManager as string | undefined;
+  const vaultLendingEngineAddr = (CONTRACT_ADDRESSES as any)?.VaultLendingEngine as string | undefined;
   const registryAddr = (CONTRACT_ADDRESSES as any)?.Registry as string | undefined;
 
   if (!acmAddr) throw new Error("[Config] Missing CONTRACT_ADDRESSES.AccessControlManager (run deploy:localhost first).");
@@ -20,6 +21,7 @@ async function main() {
   if (!vaultBusinessLogicAddr) throw new Error("[Config] Missing CONTRACT_ADDRESSES.VaultBusinessLogic (run deploy:localhost first).");
   if (!liquidationManagerAddr) throw new Error("[Config] Missing CONTRACT_ADDRESSES.LiquidationManager (run deploy:localhost first).");
   if (!guaranteeFundManagerAddr) throw new Error("[Config] Missing CONTRACT_ADDRESSES.GuaranteeFundManager (run deploy:localhost first).");
+  if (!vaultLendingEngineAddr) throw new Error("[Config] Missing CONTRACT_ADDRESSES.VaultLendingEngine (run deploy:localhost first).");
   if (!registryAddr) throw new Error("[Config] Missing CONTRACT_ADDRESSES.Registry (run deploy:localhost first).");
 
   const registry = await ethers.getContractAt(["function getModuleOrRevert(bytes32) view returns (address)"], registryAddr);
@@ -43,6 +45,8 @@ async function main() {
     ACTION_LIQUIDATE: key("LIQUIDATE"),
     ACTION_REPAY: key("REPAY"),
     ACTION_VIEW_SYSTEM_DATA: key("VIEW_SYSTEM_DATA"),
+    ACTION_VIEW_RISK_DATA: key("VIEW_RISK_DATA"),
+    ACTION_VIEW_PUSH: key("ACTION_VIEW_PUSH"),
   };
 
   // By default, revoke only a small subset to demonstrate fail-fast behavior.
@@ -61,6 +65,8 @@ async function main() {
         { role: roles.ACTION_DEPOSIT, who: guaranteeFundManagerAddr, label: "GuaranteeFundManager ACTION_DEPOSIT" },
         { role: roles.ACTION_REPAY, who: settlementManagerAddr, label: "settlementManager ACTION_REPAY" },
         { role: roles.ACTION_VIEW_SYSTEM_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_SYSTEM_DATA" },
+        { role: roles.ACTION_VIEW_PUSH, who: vaultLendingEngineAddr, label: "VaultLendingEngine ACTION_VIEW_PUSH" },
+        { role: roles.ACTION_VIEW_RISK_DATA, who: vaultLendingEngineAddr, label: "VaultLendingEngine ACTION_VIEW_RISK_DATA" },
       ]
     : [
         // Minimal demo: revoke one critical role used by create-order
@@ -76,6 +82,7 @@ async function main() {
   console.log("  vaultBusinessLogic:", vaultBusinessLogicAddr);
   console.log("  liquidationManager:", liquidationManagerAddr);
   console.log("  guaranteeFundManager:", guaranteeFundManagerAddr);
+  console.log("  vaultLendingEngine:", vaultLendingEngineAddr);
   console.log("  orderEngine:", orderEngineAddr);
   console.log("  mode:", full ? "FULL=1" : "minimal");
   console.log("");

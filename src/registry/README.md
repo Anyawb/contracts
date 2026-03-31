@@ -146,3 +146,53 @@ This module is **strongly aligned** with the Architecture-Guide principles:
 Remaining caveat (important):
 - "Perfect alignment" depends on the scope you mean. The code in `src/registry/` is aligned; however, the architecture guide also governs **how other modules consume Registry** (e.g., cache refresh patterns, view modules, scripts). Those are outside this folder.
 
+---
+
+## Registry key layering (static vs deploy-time extension)
+
+When auditing scripts, separate these two categories strictly:
+
+- **Static ModuleKeys SSOT**: keys defined in `src/constants/ModuleKeys.sol` and mirrored by `frontend-config/moduleKeys.ts`.
+- **Deploy-time Registry extension keys**: raw strings bound by deploy scripts for view/helper modules that are intentionally **not** static constants in `ModuleKeys.sol`.
+
+### Static ModuleKeys examples (SSOT)
+
+- `VAULT_STATISTICS` (`KEY_STATS`)
+- `STATISTICS_PUSH_MANAGER` (`KEY_STATS_PUSH_MANAGER`)
+- `REWARD_VIEW` (`KEY_REWARD_VIEW`)
+- `LIQUIDATION_VIEW` (`KEY_LIQUIDATION_VIEW`)
+- `GUARANTEE_FUND_MANAGER` (`KEY_GUARANTEE_FUND`)
+- `EARLY_REPAYMENT_GUARANTEE_MANAGER` (`KEY_EARLY_REPAYMENT_GUARANTEE`)
+
+These keys must match `ModuleKeys.sol` raw strings exactly. Test scripts that call `key("...")` do a plain `keccak256(utf8(name))` and have no alias layer.
+
+### Deploy-time extension view keys
+
+The following Registry keys are intentionally bound by deploy scripts and frontend/e2e tooling, but are **not** static constants in `ModuleKeys.sol`:
+
+- `ACCESS_CONTROL_VIEW`
+- `CACHE_OPTIMIZED_VIEW`
+- `LENDING_ENGINE_VIEW`
+- `LOAN_NFT_VIEW`
+- `LIQUIDATION_RISK_VIEW`
+
+Audit rule:
+
+- Treat mismatches against `ModuleKeys.sol` as errors only for **static ModuleKeys SSOT**.
+- Do **not** classify the five extension view keys above as `ModuleKeys.sol` drift; instead audit whether deploy scripts bind them consistently.
+
+### Deploy script consistency baseline
+
+Current deploy-script baseline that should stay aligned across:
+
+- `scripts/deploy/deploylocal.ts`
+- `scripts/deploy/deploy-arbitrum.ts`
+- `scripts/deploy/deploy-arbitrum-sepolia.ts`
+
+Expected invariants:
+
+- `StatisticsView` must bind to `VAULT_STATISTICS` because it is the static `KEY_STATS` SSOT.
+- `StatisticsPushManager` must bind to `STATISTICS_PUSH_MANAGER`.
+- All five extension view keys listed above must use the same raw strings in all three deploy scripts.
+- `CacheMaintenanceManager` should be deployed and bound as `CACHE_MAINTENANCE_MANAGER` in all three deploy scripts because it is the A-class cache refresh entrypoint.
+

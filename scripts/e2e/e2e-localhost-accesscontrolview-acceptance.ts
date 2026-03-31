@@ -82,8 +82,9 @@ async function main() {
 
     // ====== VersionInfo + Registry sanity ======
     assertOk(
-      (await mustSucceed("AccessControlView.registryAddr()", async () => acv.registryAddr())) === CONTRACT_ADDRESSES.Registry,
-      "AccessControlView.registryAddr mismatch"
+      (await mustSucceed("AccessControlView.registryAddrVar()", async () => acv.registryAddrVar())) ===
+        CONTRACT_ADDRESSES.Registry,
+      "AccessControlView.registryAddrVar mismatch"
     );
     const [apiV, schemaV] = (await mustSucceed("AccessControlView.getVersionInfo()", async () => acv.getVersionInfo())) as [
       bigint,

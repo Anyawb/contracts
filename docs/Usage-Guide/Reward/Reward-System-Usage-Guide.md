@@ -22,16 +22,17 @@
 
 Reward 系统是一个完整的用户激励和特权管理系统，通过奖励机制激励用户参与平台活动，并提供基于通证余额的特权服务。
 
-> 重要口径（与 `docs/Usage-Guide/Reward/EasiToken-Guide.md` 对齐）：本文所称“积分/奖励通证”均指 **Easy（`EasyToken`）**。
+> 重要口径（与 `docs/Usage-Guide/Reward/EasiToken-Guide.md` 对齐）：本文所称奖励通证均指 **Easy（`EasyToken`）**。
 > 奖励通证地址 SSOT：`Registry[KEY_EASY_TOKEN]`。
 
 ### 核心组件（按现行实现）
 
 - **RewardManager（Earn gateway）**：**借贷触发的奖励写入口门面 + 参数治理入口**（仅供 `OrderEngine` 落账后回调触发奖励（Easy）；治理权限走 ACM）
-- **RewardManagerCore（Earn core）**：**发放与惩罚核心**（借款锁定/还款释放、欠分账本、等级/统计；向 `RewardView` 推送）
-- **RewardView**：**统一只读 + 统一 DataPush**（前端/链下查询与订阅的推荐入口；链下统一订阅 `DataPushed + DATA_TYPE_REWARD_*`）
+- **RewardManagerCore（Earn core）**：**Earn 侧核心**（借款锁定/还款释放、等级/统计；惩罚执行委托给 `RewardAccrualManager`；向 `RewardView` 推送）
+- **RewardAccrualManager（Penalty SSOT）**：**扣罚与欠账账本单一事实来源**（优先 burn Easy；余额不足则记入 penalty ledger；统一向 `RewardView` 推送）
+- **RewardView**：**统一只读 + 统一 DataPush**（前端/链下查询与订阅的推荐入口；链下统一订阅 `DataPushed`，并覆盖 `DATA_TYPE_REWARD_*` 与 `DATA_TYPE_EASY_*`）
 - **RewardConfig**：**Reward 域治理写入口聚合**（EarnConfig / FeatureRegistry / GovernanceGate 等）
-- **GovernanceGate**：**治理资格门控 SSOT**（`minLevel + stEASY votes`；用户 level 由治理/运维写入）
+- **GovernanceGate**：**治理资格门控 SSOT**（`minLevel + stEASY votes`；这里的 level 指 `ServiceLevel`，由治理/运维写入）
 - **FeatureRegistry**：**功能开关门控 SSOT**（`featureKey -> (enabled, minLevel, uri)`）
 - **奖励通证（SSOT）**：`Registry[KEY_EASY_TOKEN]` 指向的 **EasyToken（Easy）**。
 - **EasyToken**：生态通证（ERC20Votes，18 decimals；`mint*` 由 `MINTER_ROLE` 控制；`burn*` 由 `BURNER_ROLE` 控制）
@@ -59,12 +60,26 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
 
 1. **落账**：`LendingEngine (OrderEngine)` 在 borrow/repay 业务链路中驱动 debt ledger（`KEY_LE`）成功更新后，才触发 Reward 回调（“先落账，再触发 Reward”）。  
 2. **奖励入口（推荐主路径，按订单维度）**：`LendingEngine (OrderEngine)` 调用 `RewardManager.onLoanEventByOrder(user, orderId, amount, maturity, outcome)`（按订单锁定/释放/扣罚；其中 `maturity` 语义为 `maturityBlock`，到期区块高度）。  
-  - **兼容路径（V1）**：仍允许调用 `RewardManager.onLoanEvent(user, amount, duration, flag)`，但仅用于历史兼容/过渡（详见 `docs/Usage-Guide/Reward/Reward-Best-Practices-Guide.md` 与 `Architecture-Guide.md` 的方案 B 口径）。  
   - **Easy 发行入口**：若上游能提供 `lender + asset`，使用 `RewardManager.onLoanEventByOrderWithLender(...)`（在任意“结清足额” repay outcome 下触发发行；并按白皮书门槛/口径计算）。
-3. **核心处理**：`RewardManager` 转发到 `RewardManagerCore.onLoanEvent*`（外部直接调会被拒绝并 **no-op**：不会改状态/不会 mint/burn；并会记录审计事件 `DeprecatedDirectEntryAttempt`，用于观测与排查）  
+3. **核心处理**：`RewardManager` 转发到 `RewardManagerCore.onLoanEventByOrder*`（外部直接调会被拒绝并 `revert RewardManagerCore__UseRewardManagerEntry()`；不会再保留 no-op 或兼容审计事件）  
 4. **只读聚合与推送**：  
    - **发放（Earn）侧**：`RewardManagerCore` 调用 `RewardView.push*`（writer 白名单）→ `RewardView` 统一发出 `DataPushed(dataTypeHash,payload)`  
   - **按次消耗（Spend/Recycle）侧**：`EasyConsumption` / `EasyRecycleDistributor` 调用 `RewardView.push*`（writer 白名单）→ `RewardView` 统一发出 `DataPushed(dataTypeHash,payload)`
+
+### Earn 状态统一观测（新增硬约束）
+
+- `RewardView.getUserEarnStateWithMeta(user)` 是 Earn 账本状态的统一只读入口，返回：
+  - `lockedEasy`
+  - `eligibleLoanCount`
+  - `onTimeRepayCount`
+- `RewardManagerCore` 在 borrow / repay 关键分支上必须 best-effort 推送上述状态到 `RewardView`，避免前端和链下回退读取内部存储。
+- 前端/链下不要直接依赖 `RewardManagerCore` 内部状态变量或历史遗留 getter。
+
+### Recycle 异常余额恢复（新增运维约束）
+
+- 正常消费主路径仍然必须是：`EasyConsumption -> EasyRecycleDistributor.handleEasyIncome(...)`。
+- 如果用户误把 Easy 直接转到 `EasyRecycleDistributor`，运维应调用 `settleOutstandingEasyBalance()` 做恢复结算。
+- 恢复结算仍走统一 75/15/10（burn/team/eco），不得手工转账或旁路 burn。
 
 ### 等级体系（两条口径并存）
 
@@ -135,26 +150,37 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
     - **RepayOnTimeFull**：释放锁定并抵扣欠分账本，计入按期履约次数（RMCore **不 mint**）
     - **RepayEarlyFull**：锁定作废，不发放、不处罚
     - **RepayLateFull**：锁定作废，按 `latePenaltyBps` 扣罚（不足则进入欠分账本）
-  - **V1 兼容口径（legacy）**：
-    - **借款（duration > 0）**：锁定 1 Easy（= 1e18）
-    - **还款（duration = 0 且 flag=true）**：释放锁定并增加履约计数
-    - **还款（flag=false）**：按 `latePenaltyBps` 走扣罚；提前还款仍不处罚
   - **Easy 发行**：由 `EasyEmissionController` 处理（RMCore 不直接 mint）。
 - **提前/逾期扣罚**（仅针对“结清足额”的 repay outcome）：
   - **提前还款**：不发放、不处罚（order-based 直接跳过；V1 逻辑也不处罚）
   - **逾期还款**：按 `latePenaltyBps` 扣罚（默认 500 = 5%）
   - **余额不足**：若 burn 失败，扣罚累积到**欠分账本**（`penaltyLedger`），后续发放时会先抵扣欠分再铸币
+- **清算扣罚**（与资金链解耦的 Reward 边界）：
+  - 触发方：`GuaranteeFundManager` 在 default 结果确定后调用 `RewardManager.applyLiquidationPenalty(user)`。
+  - 权限：仅允许 `Registry[KEY_GUARANTEE_FUND]` 调用。
+  - 计量口径：由 `RewardManagerCore` 在 Reward 域内部按 `lockedEasy[user] * liquidationPenaltyBps / 10000` 计算，默认 `liquidationPenaltyBps = 500`。
+  - 重要约束：不得把保证金币种金额或清算资金金额直接当作 Easy 扣罚值；Reward 单位必须在 Reward 域内换算与落账。
+  - 失败语义：该调用为 best-effort，失败不会回滚保证金没收；链下应结合 GuaranteeFundManager 事件与 RewardView 观测补偿/告警。
 - **Easy 发行（EasyEmissionController）**：
   - 触发条件：`RepayOnTimeFull / RepayEarlyFull / RepayLateFull`（任意“结清足额”）
   - 门槛：借款金额折算为 USD-8 后 **≥ 1000U**（白皮书基线）
-  - 费率：发行基于 **净借款额**（先扣 6 bps 费用）
+  - 费率：发行基于 **净借款额**（先扣借款侧 0.3% = 30 bps 费用；平台总费率为 0.6%，还款侧另计 0.3%）
   - 分配：borrower/lender **50/50**
   - 价格来源：`PriceOracle`（若价格不可用则跳过发行）
 - **期限白名单（链上硬约束）**：`LendingEngine (OrderEngine)` 仅允许 `5/10/15/30/60/90/180/360` 天。
   - 链上判定是 **block-based**：订单的 `term/maturity` 以“区块数/区块高度”口径存储与校验（不是秒时间戳）。
   - 前端可用“天（days）”做 UX 输入，但必须按合约口径转换/对齐（见下方 `TermGuard.ts` 注释）。
-  - **统一结算/清算边界（SSOT 规则）**：对外构造 `maturityBlock` 时，建议额外 **+1 区块确认**：`maturityBlock = openBlock + termBlocks + 1`。
-    - 含义：只要 borrow 形成已经被区块确认（至少 1 个区块），即可在同一套 `block.number >= maturityBlock` 语义下进行结算/清算边界检查；避免“形成区块=0 确认”导致的边界歧义。
+  - **借贷形式（Borrow modes，按现行实现）**：
+    - **A) 白名单期限借贷（主路径 / Order-based / legacy day buckets）**：用户选择期限 `5/10/15/30/60/90/180/360` 天；上链与风控判断一律按 block 口径（`termBlocks` / `maturityBlock`）。
+      - **legacy 1 区块确认偏移（仅用于 day-bucket 产品的 maturity 消歧）**：若产品仍保留旧的确认偏移口径，则对外构造 `maturityBlock` 时可额外 **+1 区块确认**：`maturityBlock = openBlock + termBlocks + 1`。
+        - 含义：借贷形成后（borrow 至少被 1 个区块确认）才进入同一套 `block.number >= maturityBlock` 的结算/清算边界检查轴；避免“形成区块=0 确认”带来的边界歧义。
+        - 注意：这不是新增一种“1 区块期限”的借贷产品；它只服务于 day-bucket 产品的边界兼容语义。
+    - **B) blocks-only 即时产品（新增设计 / 待合约实施）**：协议新增一条独立产品线，期限不再通过 `termDays` 桶表达，而是直接使用显式 `termBlocks`。
+      - 首个产品选项为 **`termBlocks = 1`**，即“借贷形成后下一个区块即成熟”。
+      - 该产品的 `maturityBlock` 语义应保持最小惊讶原则：**`maturityBlock = openBlock + 1`**，不得再叠加上述 day-bucket 的 `+1 confirmation offset`，否则会把“1 block 产品”变成实际 2 blocks 才成熟。
+      - 该产品的设计目标是让撮合、清算、Reward 发放、后续 AMM/RFQ/RWA 自动交易都直接消费显式 blocks duration，而不是复用 `5/10/15/...` 天数桶。
+      - 对应的 lender 约束也应采用显式 blocks 范围（例如 `minTermBlocks = 1`、`maxTermBlocks = 1`），不要把 `minTermDays/maxTermDays` 里的数值 `1` 误解为“1 block 产品”。
+      - 当 `block.number >= maturityBlock` 时，该产品即可进入既有的“结算 / 清算 / Reward outcome”判定轴；因此只要风控与价格条件满足，1 block 产品会天然更快完成清算与 EasiToken 发放闭环。
 - **期限门槛（链上硬约束）**：当期限为 `90/180/360` 天时，`LendingEngine (OrderEngine)` 会读取 `RewardView.getUserLevelForBorrowCheck(borrower)`（从 `Registry.getModuleOrRevert(ModuleKeys.KEY_REWARD_VIEW)` 解析），要求 **Reward Level ≥ 4**。
   - 说明：`RewardView.getUserLevelForBorrowCheck` 是**协议内校验入口**（内部再透传读取 `RewardManagerCore` 的等级），其 caller gate **必须与真实调用方对齐**：
     - **必须允许**：`KEY_ORDER_ENGINE`（OrderEngine）
@@ -162,136 +188,53 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
   - 若 caller gate 口径与调用方不一致，会导致创建长周期订单直接 revert（属于功能性 bug）。架构级 SSOT 见 `docs/Architecture-Guide.md` Reward 章节 “BorrowCheck 读路径”。
 - **按期窗口（现行实现细节）**：
   - **时间口径（强约束）**：任何门槛/窗口/到期语义一律使用 **block 口径**（见 `docs/Architecture-Guide.md` “时间依赖改造原则”）。
-  - “是否按期且足额还清”的权威判定发生在 `LendingEngine (OrderEngine)`（当前固定 `ON_TIME_WINDOW_BLOCKS = 7200` blocks）。
+  - “是否按期且足额还清”的权威判定发生在 `LendingEngine (OrderEngine)`（当前固定 `_ON_TIME_WINDOW_BLOCKS = 7200` blocks）。
     - 解释：在约 \(12s/block\) 基线下，`7200` blocks \(\approx\) 24h；该“24h”仅用于理解/展示，不作为链上门槛语义。
-  - `RewardManager.setOnTimeWindow(...)` 仅影响 **V1 兼容入口** 的提前/逾期判定窗口；order-based 入口使用 `outcome`，不依赖该窗口。
 
-> 注意（重要一致性）：**当前链上实现已强制“本金 < 1000 USDC 不计分/不锁定”**（`RewardManagerCore` 在 `onLoanEvent` / `onLoanEventByOrder` 中直接 return）。如果你需要不同的门槛，请同时更新合约与测试，并同步前后端说明。
+> 注意（重要一致性）：**当前链上实现已强制“本金 < 1000 USDC 不计分/不锁定”**（`RewardManagerCore` 在 `onLoanEventByOrder` 中直接 return）。如果你需要不同的门槛，请同时更新合约与测试，并同步前后端说明。
+
+### 部署后硬检查（建议作为放行前必跑）
+
+- `pnpm -s run checks:reward-monitor:registry-bindings`
+- `pnpm -s run checks:reward-monitor:role-bindings`
+- `pnpm exec hardhat test test/Reward/EasyEconomics.integration.test.ts`
+
+上述检查必须共同证明：
+- `MINTER_ROLE` 仅在 `EasyEmissionController`
+- `BURNER_ROLE` 仅在 `RewardAccrualManager` 与 `EasyRecycleDistributor`
+- `RewardManagerCore` 不持有遗留 `BURNER_ROLE`
+- recycle 异常余额恢复路径可按统一 75/15/10 成功结算
 
 ---
 
 ## SSOT：EasyToken 语义与命名规范（并入）
 
-> 目的：在 **EasyToken-only** 目标态下，统一“奖励通证数量”的语义与命名，避免历史 `points` 词根导致的误读。
->
-> 说明：本节内容并入自 `docs/Usage-Guide/Reward/EasyToken-SSOT-Semantics.md`；当本文其他章节仍出现历史 `points/积分` 字样时，按本节 **强制解释为 EasyToken 数量（18 decimals）**。
+> 本节只保留目标态规范。历史 `points/积分` 口径不再作为正文叙事，若旧材料里仍出现该命名，统一视为 Easy 数量的历史遗留别名。
 
-### 1. 术语与范围
+### 1. 资产与单位
 
-#### 1.1 SSOT（Single Source of Truth）定义
+- Reward 域唯一资产 SSOT：`Registry[KEY_EASY_TOKEN]`
+- 资产语义统一为 `EasyToken`
+- 单位统一为 Easy 最小单位（18 decimals）
 
-- **奖励通证（Reward Token）唯一 SSOT**：`Registry[KEY_EASY_TOKEN]` 解析得到的 `EasyToken` 合约地址。
-- 本文中出现的 **easy** / **EasyToken** / **reward token** 语义均指向同一资产：`EasyToken`。
+### 2. 对外命名规范
 
-#### 1.2 本文覆盖的“points”
+- 对外 surface 必须使用 `easy*` 或明确 `amount` + NatSpec 单位说明
+- 推荐命名：`easyAmount`、`easySpent`、`easyBurned`、`lockedEasy`、`pendingEasyDebt`
+- 禁止新增任何业务语义的 `points*` / `积分*` 字段、事件参数或 getter 名称
 
-本文只约束 **业务语义 points**（即“奖励通证数量 / 消耗 / 汇率”这类）。
+### 3. 边界与职责
 
-重要澄清：Reward 域 **不存在** 独立的 “points 资产/积分币”。
-- 业务语义 `points` 只是历史命名，其含义 **始终等价于 EasyToken 数量**（18 decimals，SSOT 为 `Registry[KEY_EASY_TOKEN]`）。
+- 所有 Reward 相关地址都必须从 `Registry` 解析，禁止硬编码或兼容 fallback
+- Reward 域只负责 Easy 的发行、消费、回收、扣罚与只读聚合
+- AI Credits 计费与结算不属于 Reward 域，按 [docs/Usage-Guide/AI-Credits-Billing-Guide.md](docs/Usage-Guide/AI-Credits-Billing-Guide.md) 执行
 
-本文不涵盖以下非业务 points：
+### 4. PR 检查清单
 
-- 金融比例术语：**basis points（bps）**（例如 `multiplierBps`、`feeBps`、注释中的 “basis points”）。
-- 英文表达：`A points to B`（表示“指向/映射”，不是积分）。
-- 治理/技术术语：`checkpoints`（OpenZeppelin Votes 相关）。
-- 数据/风控语义：price “points”（历史价格点位/采样点，例如 `minimum historical price points`），不是奖励通证。
-- 风险评分语义：risk “penalty points”（用于风险分扣减/评分，不是 EasyToken 数量）。
-
-### 2. EasyToken 的资产语义（统一口径）
-
-#### 2.1 基本语义
-
-- `EasyToken` 是 **ERC20 奖励通证**（资产语义）。
-- 在 Reward 域内，历史遗留字段名可能仍叫 `points`，但其资产语义必须解释为 **EasyToken 数量**（不是另一种积分/计分资产）。
-
-#### 2.2 单位与精度
-
-- **默认精度**：18 decimals（与当前合约/文档口径一致）。
-- 凡涉及数量的字段/参数，应在注释中明确：
-  - `easyAmount` / `easySpent` / `easyBurned` 等均为 **EasyToken 最小单位（18 decimals）**。
-
-### 3. 命名规范（强制）
-
-> 原则：**对外 surface（ABI/事件/结构体字段）优先使用 `easy*` 前缀**；内部局部变量可用 `amount`，但不得把“业务语义 points”暴露为 `points*`。
-
-#### 3.1 强制范围：对外接口 / 事件 / ABI
-
-以下位置 **必须** 使用 `easy*` 前缀（或等价明确 EasyToken 的命名）：
-
-- 外部函数的参数名（Solidity ABI 可读部分）
-- 事件参数名
-- `struct` 字段名（尤其是返回给 view / 供 offchain 消费的结构）
-- 对外 view 的 getter 返回值命名
-
-##### 3.1.1 推荐字段/参数命名
-
-- `easyAmount`：泛指某次操作涉及的 EasyToken 数量
-- `easySpent`：表示“消耗的 EasyToken 数量”
-- `easyBurned`：表示“burn 的 EasyToken 数量”
-- `lockedEasy`：锁定额度（以 EasyToken 最小单位计量；通常为账本锁定/额度锁定，不代表已发生 mint）
-- `pendingEasyDebt`：欠分/罚分账本（仍是 EasyToken 计量）
-
-##### 3.1.2 典型对照（从 points → easy）
-
-- `pointsSpent` → `easySpent`
-- `pointsBurned` → `easyBurned`
-- `pointsCost` → `easyCost`
-- `PenaltyApplied(..., points, ...)` → `PenaltyApplied(..., easyAmount, ...)`
-
-> 注：如果某处对外 API 不想绑定特定 token，也可采用 `amount`，但必须在接口/事件的 NatSpec 中写清：单位为 `EasyToken`（并且 SSOT 来自 `Registry[KEY_EASY_TOKEN]`）。在 EasyToken-only 阶段，默认优先 `easy*`。
-
-#### 3.2 允许范围：内部局部变量（实现细节）
-
-内部实现中允许使用更通用的命名：
-
-- `amount` / `burnAmount` / `spentAmount`
-
-但满足以下约束：
-
-- 只要该变量会出现在 **外部接口/事件/struct 字段/ABI 可见参数名** 中，就必须升级为 `easy*`。
-- 不得在对外 surface 中出现 `points*` 作为业务语义（否则属于“误读风险源”）。
-
-### 4. 数据流与职责边界（SSOT 约束）
-
-#### 4.1 SSOT：地址解析
-
-- 所有需要奖励通证地址的地方，必须通过：`Registry[KEY_EASY_TOKEN]` 获取。
-- 禁止：硬编码地址、从旧模块 key 推导、或通过“兼容 fallback”读取历史 key。
-
-#### 4.2 SSOT：计费边界
-
-Reward 域只负责 Easy 的发行与按次消耗；AI 调用计费与结算请以 `docs/Usage-Guide/AI-Credits-Billing-Guide.md` 为准。
-
-### 5. 事件与 offchain 解析约定
-
-#### 5.1 事件字段的资产语义
-
-- 所有 reward 相关事件中出现的 `easy*` 字段，均表示 **EasyToken 数量**。
-- 链下索引/后端落库的列名建议：
-  - `easy_spent` / `easy_burned` / `easy_per_credit` / `pending_easy_debt`
-
-#### 5.2 兼容性声明（避免误解）
-
-- 如果历史事件/ABI 参数名仍存在 `points`（未完成重命名时），链下必须将其解释为 **EasyToken 数量**。
-- 但目标态：对外 surface 不再暴露 `points*`（业务语义）。
-
-### 6. PR 检查清单（强制）
-
-变更涉及 Reward 域、AI Credits 计费与结算、消费/扣罚、View 数据推送时：
-
-- [ ] 是否所有对外 surface（函数参数名/事件参数名/struct 字段名）都使用 `easy*` 表示 EasyToken 数量？
-- [ ] 是否仍有 `points*` 暴露为业务语义（需要改为 `easy*`）？
-- [ ] 是否所有奖励通证地址都来自 `Registry[KEY_EASY_TOKEN]`？
-- [ ] 是否在 NatSpec 明确单位为 18 decimals 的 EasyToken 最小单位？
-- [ ] 是否误改了 `basis points (bps)` / `A points to B` / `checkpoints` 等非业务 points？（不应修改）
-
----
-
-### 7. 兼容性说明（历史 points）
-
-- 若历史文档/注释仍出现业务语义 `points/积分`，在 Reward 域内一律按 **EasyToken 数量（18 decimals）** 解释。
-- 不要把 `bps / basis points`、英文表达里的 points、或治理 checkpoints 等非业务 points 误判为奖励通证。
+- [ ] 对外 surface 是否只使用 `easy*` 或有明确单位说明的 `amount`
+- [ ] 奖励通证地址是否全部来自 `Registry[KEY_EASY_TOKEN]`
+- [ ] NatSpec 是否明确写明 Easy 的 18 decimals 单位
+- [ ] 是否误改了 bps、checkpoints 或其它非 Reward 语义字段
 
 ## ⚙️ 部署后配置
 
@@ -317,7 +260,15 @@ const rmCore = RewardManagerCore.attach((await (await proxy.deploy(
   implRMCore.interface.encodeFunctionData('initialize', [registry])
 )).getAddress()));
 
-// 3) 部署并初始化 RewardManager（registry）
+// 3) 部署并初始化 RewardAccrualManager（registry）
+const RewardAccrualManager = await ethers.getContractFactory('RewardAccrualManager');
+const implRAM = await RewardAccrualManager.deploy();
+const rewardAccrualManager = RewardAccrualManager.attach((await (await proxy.deploy(
+  await implRAM.getAddress(),
+  implRAM.interface.encodeFunctionData('initialize', [registry])
+)).getAddress()));
+
+// 4) 部署并初始化 RewardManager（registry）
 const RewardManager = await ethers.getContractFactory('RewardManager');
 const implRM = await RewardManager.deploy();
 const rm = RewardManager.attach((await (await proxy.deploy(
@@ -325,7 +276,7 @@ const rm = RewardManager.attach((await (await proxy.deploy(
   implRM.interface.encodeFunctionData('initialize', [registry])
 )).getAddress()));
 
-// 4) 部署并初始化 RewardView（registry）
+// 5) 部署并初始化 RewardView（registry）
 const RewardView = await ethers.getContractFactory('RewardView');
 const implView = await RewardView.deploy();
 const rewardView = RewardView.attach((await (await proxy.deploy(
@@ -333,14 +284,20 @@ const rewardView = RewardView.attach((await (await proxy.deploy(
   implView.interface.encodeFunctionData('initialize', [registry])
 )).getAddress()));
 
-// 5) 部署并初始化 RewardConfig / EarnConfig / FeatureRegistry / GovernanceGate
+// 6) 在 Registry 中设置 Reward 主模块键
+//    - KEY_RM -> RewardManager
+//    - KEY_REWARD_MANAGER_CORE -> RewardManagerCore
+//    - KEY_REWARD_ACCRUAL_MANAGER -> RewardAccrualManager
+//    - KEY_REWARD_VIEW -> RewardView
+
+// 7) 部署并初始化 RewardConfig / EarnConfig / FeatureRegistry / GovernanceGate
 //    - RewardConfig.initialize(registry)
 //    - EarnConfig.initialize(registry)
 //    - FeatureRegistry.initialize(registry)
 //    - GovernanceGate.initialize(registry)
 //    并在 Registry 中设置 KEY_REWARD_CONFIG / KEY_REWARD_EARN_CONFIG / KEY_FEATURE_REGISTRY / KEY_GOVERNANCE_GATE
 
-// 6) 部署并初始化 EasyEmissionConfig / EasyEmissionController / EasyConsumption / EasyRecycleDistributor / EasyStaking
+// 8) 部署并初始化 EasyEmissionConfig / EasyEmissionController / EasyConsumption / EasyRecycleDistributor / EasyStaking
 //    - EasyEmissionConfig.initialize(registry)
 //    - EasyEmissionController.initialize(registry)
 //    - EasyConsumption.initialize(registry)
@@ -405,7 +362,7 @@ const BURNER_ROLE = await easyToken.BURNER_ROLE();
 await easyToken.setSoleMinter(await easyEmissionController.getAddress());
 
 // 2) 扣罚/回收 burn
-await easyToken.grantRole(BURNER_ROLE, await rmCore.getAddress());
+await easyToken.grantRole(BURNER_ROLE, await rewardAccrualManager.getAddress());
 await easyToken.grantRole(BURNER_ROLE, await easyRecycleDistributor.getAddress());
 ```
 
@@ -531,13 +488,12 @@ const getUserDashboard = async (userAddress: string) => {
     balance: bal[0].toString(),
     balanceMeta: { cacheBlock: Number(bal[1]), isValid: Boolean(bal[2]) },
     summary: {
-      totalEarned: summary[0],
-      totalBurned: summary[1],
-      pendingPenalty: summary[2],
-      level: summary[3],
-      lastActivity: summary[4],
-      cacheBlock: summary[5],
-      isValid: summary[6],
+      totalBurned: summary[0],
+      pendingPenalty: summary[1],
+      level: summary[2],
+      lastActivity: summary[3],
+      cacheBlock: summary[4],
+      isValid: summary[5],
     },
     easyEarned: easyEarned[0].toString(),
     easyEarnedMeta: { cacheBlock: Number(easyEarned[1]), isValid: Boolean(easyEarned[2]) },
@@ -546,6 +502,14 @@ const getUserDashboard = async (userAddress: string) => {
   };
 };
 ```
+
+#### Dashboard 字段口径说明
+
+- `balance`：当前钱包中的 EasyToken 余额，对应 `EasyToken.balanceOf(user)` 的 View 透传。
+- `easyEarned`：累计净发放给该用户的 Easy 数量，主发奖路径由 `EasyEmissionController -> RewardView.pushEasyMinted(...)` 写入，单调不减。
+- `summary.pendingPenalty`：待抵扣 penalty 账本；后续奖励会优先抵扣该值，因此“本次奖励发放”不一定等于“钱包净增”。
+- `summary.totalBurned`：累计已实际 burn 的 Easy。
+- `summary`：当前只承载 `totalBurned`、`pendingPenalty`、`level`、`lastActivity` 等摘要字段；累计发放主指标统一读取 `easyEarned`。
 
 ### 2. 按次消耗 Easy（EasiM / Strategy API）
 
@@ -581,6 +545,17 @@ const getRewardHistory = async (userAddress: string) => {
   }));
 };
 ```
+
+#### DataPush 观测语义（2026-03 补充）
+
+- `RewardView.DataPushed(...)` 是 **统一推荐订阅入口**；当前实现会同时产出 `DATA_TYPE_REWARD_*` 与 `DATA_TYPE_EASY_*`，而它的写入在协议主链路里仍属于 **best-effort 可观测层**。
+- 也就是说：Reward 主账本/主流程成功，并不等于每次都一定能看到对应的 `RewardView.DataPushed`；当 push 失败时，排障与监控必须同时检查 `RewardViewPushFailed(...)` 或等价失败留痕，而不是只盯 `DataPushed`。
+- 同一笔交易里，可能出现多条相同 `dataTypeHash` 的 push，尤其是 `REWARD_PENALTY_LEDGER_UPDATED`。常见情形是同 tx 里先写入欠分，再被后续逻辑抵扣或清零。
+- 因此链下解码/严格断言时必须遵守：
+  - 先收集该 tx 的全部同类型 push；
+  - 逐条解码打印关键字段；
+  - 以 **最后一条 push** 作为最终落库状态；
+  - 若最后状态仍与 `RewardView` read 不一致，再判定为真实错误。
 
 ---
 
@@ -728,22 +703,39 @@ export const RewardDashboard: React.FC<{ userAddress: string }> = ({ userAddress
 // - 合约内部对 term/maturity 的判定是 block-based（区块口径）
 // - 前端可用 termDays 作为 UX 输入（5/10/15/.../360）
 // - 上链时必须按合约口径转换/对齐（例如使用与合约一致的“days -> blocks”映射/常量），不要在前端/后端自行引入另一套“秒时间戳”语义
-// - **统一结算/清算边界**：建议对外构造 `maturityBlock` 时额外 +1 区块确认：
-//   `maturityBlock = openBlock + termBlocks + 1`
+// - **借贷形式（Borrow modes）**：
+//   - 白名单期限借贷（主路径 / Order-based）：期限为 5/10/15/.../360 天，链上按 block 口径存储与校验。
+//   - blocks-only 即时产品（新增设计）：例如 1 block 产品，直接使用显式 termBlocks，不复用 termDays 桶。
 export const ALLOWED_TERMS_DAYS = [5, 10, 15, 30, 60, 90, 180, 360] as const;
 export type AllowedTerm = typeof ALLOWED_TERMS_DAYS[number];
 
+export const BLOCKS_ONLY_TERM_OPTIONS = [1n] as const;
+export type BlocksOnlyTerm = typeof BLOCKS_ONLY_TERM_OPTIONS[number];
+
+export type BorrowProductMode = 'day-bucket' | 'blocks-only';
+
 export const MIN_LEVEL_FOR_LONG_TERMS = 4; // 90/180/360 天的最低等级
 
-// 至少 1 个区块确认：借贷形成后（borrow 已被区块确认）才进入“可结算/可清算”的统一检查轴。
-export const MATURITY_CONFIRMATION_BLOCKS = 1n;
+// legacy day-bucket 产品可选的 maturity 确认偏移；仅用于兼容旧边界语义。
+export const LEGACY_MATURITY_CONFIRMATION_BLOCKS = 1n;
 
-export function computeMaturityBlock(openBlock: bigint, termBlocks: bigint): bigint {
-  return openBlock + termBlocks + MATURITY_CONFIRMATION_BLOCKS;
+export function computeMaturityBlock(
+  openBlock: bigint,
+  termBlocks: bigint,
+  mode: BorrowProductMode
+): bigint {
+  if (mode === 'blocks-only') {
+    return openBlock + termBlocks;
+  }
+  return openBlock + termBlocks + LEGACY_MATURITY_CONFIRMATION_BLOCKS;
 }
 
 export function isAllowedTerm(termDays: number): termDays is AllowedTerm {
   return (ALLOWED_TERMS_DAYS as readonly number[]).includes(termDays);
+}
+
+export function isAllowedBlocksOnlyTerm(termBlocks: bigint): termBlocks is BlocksOnlyTerm {
+  return (BLOCKS_ONLY_TERM_OPTIONS as readonly bigint[]).includes(termBlocks);
 }
 
 export function canBorrowTerm(userLevel: number, termDays: AllowedTerm): {
@@ -801,10 +793,6 @@ export async function preSubmitBorrowCheck(userLevel: number, termDays: number, 
 ### RewardManager 主要方法（按现行）
 
 ```typescript
-// 标准写入口（唯一路径：LendingEngine 落账后触发；duration 为 block 数）
-// flag 语义：isOnTimeAndFullyRepaid（按期且足额还清）
-function onLoanEvent(address user, uint256 amount, uint256 duration, bool flag) external;
-
 // 推荐：订单维度入口（orderId）
 function onLoanEventByOrder(address user, uint256 orderId, uint256 amount, uint256 maturity, uint8 outcome) external;
 
@@ -824,9 +812,12 @@ function setLevelMultiplier(uint8 level, uint256 newMultiplier) external;
 function setDynamicRewardParams(uint256 newThreshold, uint256 newMultiplier) external;
 
 // 惩罚与窗口
-function applyPenalty(address user, uint256 easyAmount) external;
-function setOnTimeWindow(uint256 newWindow) external;
-function setPenaltyBps(uint256 earlyBps, uint256 lateBps) external;
+function setLatePenaltyBps(uint256 lateBps) external;
+
+// 清算惩罚（仅 KEY_GUARANTEE_FUND）
+function quoteLiquidationPenalty(address user) external view returns (uint256);
+function applyLiquidationPenalty(address user) external;
+function setLiquidationPenaltyBps(uint256 liquidationBps) external;
 
 // 缓存与等级管理
 function updateUserLevel(address user, uint8 newLevel) external;
@@ -862,7 +853,6 @@ function getUserRewardSummaryWithMeta(address user)
   external
   view
   returns (
-    uint256 totalEarned,
     uint256 totalBurned,
     uint256 pendingPenalty,
     uint8 level,
@@ -870,6 +860,8 @@ function getUserRewardSummaryWithMeta(address user)
     uint256 cacheBlock,
     bool isValid
   );
+
+// 注意：主奖励累计请读 getUserEasyEarnedWithMeta(user)。
 
 // 用户余额（奖励通证 balanceOf 的 best-effort 透传 + meta）
 function getUserBalanceWithMeta(address user) external view returns (uint256 balance, uint256 cacheBlock, bool isValid);
@@ -972,6 +964,25 @@ useEffect(() => {
   };
 }, []);
 ```
+
+补充排障规则：
+
+- 如果主流程成功但前端/链下没有等到 `RewardView.DataPushed`，不要立刻把它判成“奖励没执行”。
+- 先检查：
+  - `RewardViewPushFailed` 是否留痕；
+  - `getUserEasyEarnedWithMeta`、`getUserRewardSummaryWithMeta`、`getUserBalanceWithMeta` 等最终只读结果是否已经更新；
+  - 同 tx 内是否出现了多条相同类型的 push（例如 `DATA_TYPE_REWARD_*` 或 `DATA_TYPE_EASY_*`），而你的监听器只消费了第一条。
+
+#### 5. strict E2E 下 penalty / earned 状态“看起来不一致”
+
+**高频根因**：把 `RewardView.DataPushed` 的首条事件当成最终状态，或者把 `summary` 摘要字段错当作主发奖累计。
+
+**正确排障顺序**：
+
+- 主发奖累计优先读 `getUserEasyEarnedWithMeta(user)`；
+- 不要再从 `summary` 推导累计发放，`summary` 只用于 burned / penalty / level / activity 摘要；
+- penalty 相关严格对比时，以同 tx 最后一条 `REWARD_PENALTY_LEDGER_UPDATED` 为准；
+- 若 `DataPushed` 缺失，但账本与只读结果正确，应优先按“best-effort push 失败”处理，而不是按“主流程失败”处理。
 
 ### 调试工具（按现行模块）
 

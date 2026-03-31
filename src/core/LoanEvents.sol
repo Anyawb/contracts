@@ -10,44 +10,52 @@ pragma solidity ^0.8.20;
  * - Contracts can `is LoanEvents` to include event ABIs without re-declaring them.
  * - Offchain indexers can rely on stable signatures across modules.
  */
+// solhint-disable-next-line interface-starts-with-i
 interface LoanEvents {
     /**
      * @notice Emitted when a guarantee amount is locked.
-     * @dev Reverts if:
-     *      - (none)
+     * @dev Event only.
      *
      * Security:
-     * - Emitted by the guarantee ledger/manager after it updates state
+     * - Emitted by the guarantee ledger or manager after it updates state.
      *
      * @param user User address
      * @param asset Guarantee asset address
      * @param amount Locked amount (token decimals)
      * @param blockNumber Emission time-axis marker (blockNumber)
      */
-    event GuaranteeLocked(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber);
+    event GuaranteeLocked(
+        address indexed user,
+        address indexed asset,
+        uint256 amount,
+        uint256 blockNumber
+    );
 
     /**
      * @notice Emitted when a guarantee amount is released.
-     * @dev Reverts if:
-     *      - (none)
+     * @dev Event only.
      *
      * Security:
-     * - Emitted by the guarantee ledger/manager after it updates state
+     * - Emitted by the guarantee ledger or manager after it updates state.
      *
      * @param user User address
      * @param asset Guarantee asset address
      * @param amount Released amount (token decimals)
      * @param blockNumber Emission time-axis marker (blockNumber)
      */
-    event GuaranteeReleased(address indexed user, address indexed asset, uint256 amount, uint256 blockNumber);
+    event GuaranteeReleased(
+        address indexed user,
+        address indexed asset,
+        uint256 amount,
+        uint256 blockNumber
+    );
 
     /**
      * @notice Emitted when a guarantee amount is forfeited (e.g., penalty/fee distribution).
-     * @dev Reverts if:
-     *      - (none)
+     * @dev Event only.
      *
      * Security:
-     * - Emitted by the guarantee ledger/manager after it updates state
+     * - Emitted by the guarantee ledger or manager after it updates state.
      *
      * @param user User address
      * @param asset Guarantee asset address

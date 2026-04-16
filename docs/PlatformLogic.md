@@ -51,8 +51,10 @@ graph TB
     end
 
     subgraph "业务逻辑层"
-        VaultBusinessLogic[VaultBusinessLogic<br/>业务逻辑模块]
+        LendingEngineCore[LendingEngineCore<br/>核心借贷逻辑]
+        SettlementManager[SettlementManager<br/>撮合与结算模块]
         SettlementMatchLib[SettlementMatchLib<br/>撮合结算库]
+        PushManagers[PushManagers<br/>严格B+推送编排]
     end
 
     subgraph "账本层"
@@ -77,7 +79,7 @@ graph TB
 
     subgraph "权限管理层"
         ACM[AccessControlManager<br/>统一权限控制]
-        ActionKeys[ActionKeys<br/>44个动作键]
+        ActionKeys[ActionKeys<br/>50个动作键]
         ModuleKeys[ModuleKeys<br/>模块键]
     end
 
@@ -88,21 +90,27 @@ graph TB
 
     User --> VaultCore
     VaultCore --> VaultRouter
-    VaultRouter --> VaultBusinessLogic
-    VaultBusinessLogic --> SettlementMatchLib
-    VaultBusinessLogic --> CollateralManager
-    VaultBusinessLogic --> LendingEngine
-    VaultBusinessLogic --> GuaranteeFundManager
-    VaultBusinessLogic --> EarlyRepaymentGM
+    VaultRouter --> LendingEngineCore
+    VaultRouter --> SettlementManager
+    LendingEngineCore --> SettlementMatchLib
+    SettlementManager --> SettlementMatchLib
+    SettlementManager --> CollateralManager
+    SettlementManager --> LendingEngine
+    SettlementManager --> GuaranteeFundManager
+    SettlementManager --> EarlyRepaymentGM
+    SettlementManager --> LiquidationManager
+    SettlementManager --> PushManagers
+    LendingEngineCore --> PushManagers
     LendingEngine --> CollateralManager
     LendingEngine --> FeeRouter
     LendingEngine --> RewardManager
-    VaultRouter --> StatisticsView
-    VaultRouter --> HealthView
-    VaultBusinessLogic --> AssetWhitelist
-    VaultBusinessLogic --> PriceOracle
+    PushManagers --> StatisticsView
+    PushManagers --> HealthView
+    LendingEngineCore --> AssetWhitelist
+    LendingEngineCore --> PriceOracle
     VaultCore --> ACM
-    VaultBusinessLogic --> ACM
+    SettlementManager --> ACM
+    LendingEngineCore --> ACM
     Registry --> ModuleKeys
     Registry --> ActionKeys
     ACM --> Registry
@@ -110,30 +118,31 @@ graph TB
 
 ### 1.3 模块职责分工
 
-| 模块                     | 职责                         | 状态      | 特性                                      |
-| ------------------------ | ---------------------------- | --------- | ----------------------------------------- |
-| **VaultCore**            | 极简入口，传送数据至 View 层 | ✅ 已实现 | 双架构设计、极简实现、Registry 升级能力   |
-| **VaultRouter**          | 双架构智能协调器             | ✅ 已实现 | 事件驱动、View 层缓存、模块分发、免费查询 |
-| **VaultBusinessLogic**   | 业务逻辑模块                 | ✅ 已实现 | 撮合结算、SafeERC20、批量操作             |
-| **SettlementMatchLib**   | 撮合结算库                   | ✅ 已实现 | 原子化操作、订单落地、保证金锁定          |
-| **CollateralManager**    | 抵押物管理，记录用户余额     | ✅ 已实现 | 事件记录、账本维护                        |
-| **LendingEngine**        | 借贷引擎，管理贷款订单       | ✅ 已实现 | 订单生命周期、SafeERC20、LoanNFT          |
-| **GuaranteeFundManager** | 保证金基金管理               | ✅ 已实现 | 批量操作、账本维护                        |
-| **EarlyRepaymentGM**     | 提前还款保证金管理           | ✅ 已实现 | 记录管理、规则计算、早偿结算              |
-| **LiquidationManager**   | 清算管理                     | ✅ 已实现 | 模块化清算、风险评估                      |
-| **AssetWhitelist**       | 资产白名单管理               | ✅ 已实现 | 治理控制、批量操作                        |
-| **FeeRouter**            | 费用路由与配置               | ✅ 已实现 | 多币种支持、暂停机制                      |
-| **RewardManager**        | 积分奖励管理                 | ✅ 已实现 | 动态积分、惩罚机制                        |
-| **PriceOracle**          | 价格预言机                   | ✅ 已实现 | 多预言机支持、缓存机制、优雅降级          |
-| **StatisticsView**       | 统计视图                     | ✅ 已实现 | 数据聚合、保证金统计、活跃用户统计        |
-| **HealthView**           | 健康因子视图                 | ✅ 已实现 | 健康因子缓存、风险状态推送                |
-| **AccessControlManager** | 统一权限控制中心             | ✅ 已实现 | 多级权限、角色管理、权限缓存、批量操作    |
-| **Registry**             | 模块注册中心                 | ✅ 已实现 | 延时升级、模块管理、Registry 家族         |
-| **VaultAdmin**           | 极简治理入口                 | ✅ 已实现 | 健康因子下发、升级鉴权                    |
-| **ModuleKeys**           | 模块常量库                   | ✅ 已实现 | 模块标识、字符串映射、类型安全            |
-| **ActionKeys**           | 动作常量库                   | ✅ 已实现 | **44个**标准化动作、权限分发、事件追踪    |
-| **SystemEvents**         | 标准化事件                   | ✅ 已实现 | 跨模块共享事件 SSOT（原 VaultTypes）      |
-| **VaultMath**            | 数学计算库                   | ✅ 已实现 | 统一数学计算、健康因子、LTV、百分比计算   |
+| 模块                     | 职责                         | 状态      | 特性                                       |
+| ------------------------ | ---------------------------- | --------- | ------------------------------------------ |
+| **VaultCore**            | 极简入口，传送数据至 View 层 | ✅ 已实现 | 双架构设计、极简实现、Registry 升级能力    |
+| **VaultRouter**          | 双架构智能协调器             | ✅ 已实现 | 事件驱动、View 层缓存、模块分发、免费查询  |
+| **SettlementManager**    | 结算与清算收口模块           | ✅ 已实现 | 早偿、清算提取、统一结算路由               |
+| **PushManagers**         | 视图推送编排器               | ✅ 已实现 | 统一快照推送、严格 B+ 重试机制 (Strict B+) |
+| **SettlementMatchLib**   | 撮合结算库                   | ✅ 已实现 | 原子化操作、订单落地、保证金锁定           |
+| **CollateralManager**    | 抵押物管理，记录用户余额     | ✅ 已实现 | 事件记录、账本维护                         |
+| **LendingEngine**        | 借贷引擎，管理贷款订单       | ✅ 已实现 | 订单生命周期、SafeERC20、LoanNFT           |
+| **GuaranteeFundManager** | 保证金基金管理               | ✅ 已实现 | 批量操作、账本维护                         |
+| **EarlyRepaymentGM**     | 提前还款保证金管理           | ✅ 已实现 | 记录管理、规则计算、早偿结算               |
+| **LiquidationManager**   | 清算管理                     | ✅ 已实现 | 模块化清算、风险评估                       |
+| **AssetWhitelist**       | 资产白名单管理               | ✅ 已实现 | 治理控制、批量操作                         |
+| **FeeRouter**            | 费用路由与配置               | ✅ 已实现 | 多币种支持、暂停机制                       |
+| **RewardManager**        | 积分奖励管理                 | ✅ 已实现 | 动态积分、惩罚机制                         |
+| **PriceOracle**          | 价格预言机                   | ✅ 已实现 | 多预言机支持、缓存机制、优雅降级           |
+| **StatisticsView**       | 统计视图                     | ✅ 已实现 | 数据聚合、保证金统计、活跃用户统计         |
+| **HealthView**           | 健康因子视图                 | ✅ 已实现 | 健康因子缓存、风险状态推送                 |
+| **AccessControlManager** | 统一权限控制中心             | ✅ 已实现 | 多级权限、角色管理、权限缓存、批量操作     |
+| **Registry**             | 模块注册中心                 | ✅ 已实现 | 延时升级、模块管理、Registry 家族          |
+| **VaultAdmin**           | 极简治理入口                 | ✅ 已实现 | 健康因子下发、升级鉴权                     |
+| **ModuleKeys**           | 模块常量库                   | ✅ 已实现 | 模块标识、字符串映射、类型安全             |
+| **ActionKeys**           | 动作常量库                   | ✅ 已实现 | **50个**标准化动作、权限分发、事件追踪     |
+| **SystemEvents**         | 标准化事件                   | ✅ 已实现 | 跨模块共享事件 SSOT（原 VaultTypes）       |
+| **VaultMath**            | 数学计算库                   | ✅ 已实现 | 统一数学计算、健康因子、LTV、百分比计算    |
 
 ---
 
@@ -454,7 +463,7 @@ function refreshModuleCache() external onlyAdmin
 ```solidity
 // 订单创建（由 SettlementMatchLib 调用，需要 ACTION_ORDER_CREATE 权限）
 function createLoanOrder(LoanOrder calldata order) external returns (uint256 orderId)
-// LoanOrder 结构体包含：principal, rate, term, borrower, lender, asset, startTimestamp, maturity, repaidAmount
+// LoanOrder 结构体包含：principal, rate, termBlocks, borrower, lender, asset, startBlock, maturityBlock, repaidAmount
 
 // 还款处理（需要 ACTION_REPAY 权限）
 function repay(uint256 orderId, uint256 repayAmount) external
@@ -1124,9 +1133,9 @@ interface IPriceOracle {
 
 ```solidity
 struct PriceData {
-    uint256 price;        // 价格（SSOT: USD-8；例如 $1.00 = 100000000）
+    uint256 price;        // 价格（SSOT: 按 assetDecimals 缩放的 USD 价格）
     uint256 blockNumber;    // 价格更新区块
-    uint256 assetDecimals; // 资产精度（token decimals；用于 amount(base units) → valueUSD8 换算；不是 price 精度）
+    uint256 assetDecimals; // 资产精度（token decimals；用于 amount(base units) → valueUsd 换算，并同时决定 price/value 精度）
     bool isValid;         // 价格是否有效
 }
 

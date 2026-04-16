@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {AssetDecimalMath} from "../libraries/AssetDecimalMath.sol";
 
 import {Registry} from "../registry/Registry.sol";
 import {ModuleKeys} from "../constants/ModuleKeys.sol";
@@ -26,10 +27,11 @@ interface IEasyEmissionConfigView {
         external
         view
         returns (
-            uint256 thresholdUsd8,
+            uint256 thresholdValue,
             uint256 mintPer1000Usd,
             uint256 kNum,
             uint256 kDen,
+            uint8 valuationDecimals,
             uint256 updateBlock
         );
 }
@@ -43,8 +45,8 @@ interface ILoanFlowViewGlobalRead {
         external
         view
         returns (
-            uint256 totalBorrowVolumeUsd8,
-            uint256 totalRepayVolumeUsd8,
+            uint256 totalBorrowVolumeValue,
+            uint256 totalRepayVolumeValue,
             uint256 totalBorrowCount,
             uint256 totalRepayCount,
             bool isValid,
@@ -78,18 +80,19 @@ contract EasyEmissionController is
 
     /// @notice Emitted when Easy is minted for a repaid order.
     /// @dev flowValid mirrors LoanFlowView validity.
-    ///      retainedEasy and totalBorrowVolumeUsd8 capture the formula inputs used for the mint.
+    ///      retainedEasy and totalBorrowVolumeValue capture the formula inputs used for the mint.
     event EasyMinted(
         address indexed borrower,
         address indexed lender,
         uint256 indexed orderId,
-        uint256 amountUsd8,
+        uint256 amountValue,
+        uint8 valuationDecimals,
         uint256 totalMinted,
         uint256 borrowerShare,
         uint256 lenderShare,
         uint8 stage,
         uint256 retainedEasy,
-        uint256 totalBorrowVolumeUsd8,
+        uint256 totalBorrowVolumeValue,
         bool flowValid,
         uint256 blockNumber
     );
@@ -104,8 +107,9 @@ contract EasyEmissionController is
         string reason
     );
 
-    // WhitePaper: borrow amount minimum is 1000U.
-    uint256 private constant _MIN_BORROW_USD8 = 1000 * 1e8;
+    // WhitePaper: borrow amount minimum is 1000U in the shared 18-decimal valuation unit.
+    uint256 private constant _MIN_BORROW_VALUE = 1000 * 1e18;
+    uint8 private constant _SYSTEM_VALUATION_DECIMALS = 18;
     // Fee SSOT (see docs/WhitePaper.md and docs/Usage-Guide/Funds-Flow-Architecture-Guide.md):
     // - Platform total fee is 0.6%.
     // - Borrow-side fee is 0.3% (30 bps) via FeeRouter; repay-side fee is 0.3% via LendingEngine.repay.
@@ -153,8 +157,8 @@ contract EasyEmissionController is
      * - Only RewardManager may call.
      * - Non-mint cases are deliberately best-effort and emit {EasyMintSkipped}
      *   instead of reverting.
-     * - Price reads and penalty offsets are best-effort; a failed price read
-     *   returns amountUsd8 == 0 and skips minting.
+    * - Price reads and penalty offsets are best-effort; a failed price read
+    *   returns amountValue == 0 and skips minting.
      *
      * @param borrower Borrower account for the repaid order.
      * @param lender Lender account for the repaid order.
@@ -182,6 +186,60 @@ contract EasyEmissionController is
         // Outcome mapping (from RewardManagerCore):
         // 0=Borrow,1=RepayOnTimeFull,2=RepayEarlyFull,3=RepayLateFull
         if (outcome != 1 && outcome != 2 && outcome != 3) return;
+        _mintEasyForCompletedFlow(
+            borrower,
+            lender,
+            asset,
+            orderId,
+            amountBaseUnits
+        );
+    }
+
+    /**
+     * @notice Mints Easy for a completed blocks-only trade settlement.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - caller is not Registry[KEY_BLOCKS_ONLY_COORDINATOR]
+     *      - EasyToken mint reverts
+     *
+     * Security:
+     * - Only the registered BlocksOnlyCoordinator may call.
+     * - Uses the same valuation and emission formulas as the RewardManager order path, but does not write through
+     *   RewardManagerCore.
+     *
+     * @param borrower Borrower account for the completed blocks-only order.
+     * @param lender Lender account for the completed blocks-only order.
+     * @param asset Principal asset used for price conversion.
+     * @param orderId Order identifier.
+     * @param amountBaseUnits Completed order amount in asset base units.
+     */
+    function onBlocksOnlyTradeSettlement(
+        address borrower,
+        address lender,
+        address asset,
+        uint256 orderId,
+        uint256 amountBaseUnits
+    ) external onlyValidRegistry {
+        address coordinator = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_BLOCKS_ONLY_COORDINATOR
+        );
+        if (msg.sender != coordinator) revert MissingRole();
+        _mintEasyForCompletedFlow(
+            borrower,
+            lender,
+            asset,
+            orderId,
+            amountBaseUnits
+        );
+    }
+
+    function _mintEasyForCompletedFlow(
+        address borrower,
+        address lender,
+        address asset,
+        uint256 orderId,
+        uint256 amountBaseUnits
+    ) internal {
         if (borrower == address(0) || lender == address(0)) {
             emit EasyMintSkipped(borrower, lender, orderId, "zero-address");
             return;
@@ -191,8 +249,8 @@ contract EasyEmissionController is
             return;
         }
 
-        uint256 amountUsd8Gross = _toUsd8(asset, amountBaseUnits);
-        if (amountUsd8Gross == 0) {
+        uint256 amountValue = _toSystemValue(asset, amountBaseUnits);
+        if (amountValue == 0) {
             emit EasyMintSkipped(
                 borrower,
                 lender,
@@ -202,29 +260,40 @@ contract EasyEmissionController is
             return;
         }
 
-        if (amountUsd8Gross < _MIN_BORROW_USD8) {
+        if (amountValue < _MIN_BORROW_VALUE) {
             emit EasyMintSkipped(borrower, lender, orderId, "below-min-1000u");
             return;
         }
 
         // Apply WhitePaper fee rule: mint is based on net amount after total fee.
-        uint256 amountUsd8 = Math.mulDiv(
-            amountUsd8Gross,
+        amountValue = Math.mulDiv(
+            amountValue,
             (_BPS_DENOM - _BORROW_FEE_BPS),
             _BPS_DENOM
         );
 
         (
-            uint256 thresholdUsd8,
+            uint256 thresholdValue,
             uint256 mintPer1000Usd,
             uint256 kNum,
             uint256 kDen,
+            uint8 valuationDecimals,
 
         ) = IEasyEmissionConfigView(_getEasyEmissionConfig())
                 .getEmissionParams();
 
+        if (valuationDecimals != _SYSTEM_VALUATION_DECIMALS) {
+            emit EasyMintSkipped(
+                borrower,
+                lender,
+                orderId,
+                "unsupported-valuation-decimals"
+            );
+            return;
+        }
+
         (
-            uint256 totalBorrowVolumeUsd8,
+            uint256 totalBorrowVolumeValue,
             ,
             ,
             ,
@@ -233,16 +302,16 @@ contract EasyEmissionController is
         ) = ILoanFlowViewGlobalRead(_getLoanFlowView())
                 .getGlobalLoanFlowWithMeta();
 
-        uint8 stage = totalBorrowVolumeUsd8 < thresholdUsd8 ? 0 : 1;
+        uint8 stage = totalBorrowVolumeValue < thresholdValue ? 0 : 1;
 
         uint256 totalMinted;
         if (stage == 0) {
-            // bootstrap: amountUsd8 / (1000*1e8) * mintPer1000Usd
-            totalMinted = Math.mulDiv(amountUsd8, mintPer1000Usd, 1000 * 1e8);
+            // bootstrap: amountValue / (1000 * 1e18) * mintPer1000Usd
+            totalMinted = Math.mulDiv(amountValue, mintPer1000Usd, 1000 * 1e18);
         } else {
-            // deflation: (amountUsd8 / 100) / (1 + k * retainedEasy)
+            // deflation: (amountValue / 100) / (1 + k * retainedEasy)
             uint256 retainedEasy = _getRetainedEasy();
-            uint256 base = Math.mulDiv(amountUsd8, 1e10, 100); // amountUsd8 * 1e18 / 1e8 / 100
+            uint256 base = Math.mulDiv(amountValue, 1, 100);
             uint256 denom = kDen + (kNum * retainedEasy);
             if (denom == 0) {
                 emit EasyMintSkipped(
@@ -318,13 +387,14 @@ contract EasyEmissionController is
             borrower,
             lender,
             orderId,
-            amountUsd8,
+            amountValue,
+            _SYSTEM_VALUATION_DECIMALS,
             totalMinted,
             borrowerShare,
             lenderShare,
             stage,
             _getRetainedEasy(),
-            totalBorrowVolumeUsd8,
+            totalBorrowVolumeValue,
             flowValid,
             block.number
         );
@@ -336,15 +406,16 @@ contract EasyEmissionController is
             borrowerShare,
             lenderShare,
             orderId,
-            amountUsd8
+            amountValue,
+            _SYSTEM_VALUATION_DECIMALS
         );
     }
 
     /*━━━━━━━━━━━━━━━ Internal Helpers ━━━━━━━━━━━━━━━*/
 
-    /// @dev Converts an asset amount into USD-8 using the best-effort oracle
+    /// @dev Converts an asset amount into the shared 18-decimal system valuation unit using the best-effort oracle
     ///      read. Returns 0 on failure or invalid oracle data.
-    function _toUsd8(
+    function _toSystemValue(
         address asset,
         uint256 amountBaseUnits
     ) internal view returns (uint256) {
@@ -356,11 +427,44 @@ contract EasyEmissionController is
             uint256,
             uint256 assetDecimals
         ) {
-            if (price == 0 || assetDecimals == 0) return 0;
-            return Math.mulDiv(amountBaseUnits, price, 10 ** assetDecimals);
+            return _normalizeToSystemValue(
+                amountBaseUnits,
+                price,
+                assetDecimals
+            );
         } catch {
-            return 0;
+            try
+                IPriceOracleRead(priceOracle).getPriceData(asset)
+            returns (IPriceOracleRead.PriceData memory priceData) {
+                if (!priceData.isValid) return 0;
+                return _normalizeToSystemValue(
+                    amountBaseUnits,
+                    priceData.price,
+                    priceData.assetDecimals
+                );
+            } catch {
+                return 0;
+            }
         }
+    }
+
+    function _normalizeToSystemValue(
+        uint256 amountBaseUnits,
+        uint256 price,
+        uint256 assetDecimals
+    ) internal pure returns (uint256) {
+        if (price == 0 || assetDecimals == 0 || assetDecimals > 77) return 0;
+        uint256 assetValue = AssetDecimalMath.calcValue(
+            amountBaseUnits,
+            price,
+            uint8(assetDecimals)
+        );
+        return
+            AssetDecimalMath.normalizeValueDown(
+                assetValue,
+                uint8(assetDecimals),
+                _SYSTEM_VALUATION_DECIMALS
+            );
     }
 
     /// @dev Returns retained Easy as totalSupply / 1e18, matching the deflation formula input.

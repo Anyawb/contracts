@@ -11,11 +11,12 @@ pragma solidity ^0.8.20;
  * Security:
  * - Preferred dependency for view modules and valuation consumers.
  * - Freshness is block-based: implementations are expected to enforce `maxPriceAgeBlocks`, not wall-clock seconds.
- * - `price` is protocol-defined price data; `assetDecimals` describes token scaling, not oracle price precision.
+ * - For the protocol's current valuation SSOT, canonical implementations are expected to return `price` in the
+ *   asset's valuation unit and `assetDecimals` as the shared amount/price/value scaling basis.
  */
 interface IPriceOracleRead {
     /// @notice Canonical stored price record returned by authoritative oracle implementations.
-    /// @param price Asset price in the implementation's canonical unit.
+    /// @param price Asset price in the implementation's canonical valuation unit.
     /// @param blockNumber Informational block reference attached to the stored quote.
     /// @param assetDecimals Token decimals used when converting token base units into value.
     /// @param isValid Whether the stored record is marked valid by the implementation.
@@ -50,7 +51,7 @@ interface IPriceOracleRead {
      * - Implementations are expected to apply block-based staleness checks before returning.
      *
      * @param asset Asset address being queried.
-     * @return price Latest price for `asset` in the implementation's canonical price unit.
+    * @return price Latest price for `asset` in the implementation's canonical valuation unit.
      * @return blockNumber Informational block reference attached to the stored quote.
      * @return assetDecimals Token decimals used for valuation scaling.
      */

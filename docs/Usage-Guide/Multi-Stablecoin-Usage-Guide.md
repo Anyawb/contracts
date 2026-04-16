@@ -33,8 +33,8 @@
 
 当前统一口径为：
 
-1. Value Unit SSOT = USD-8
-2. Statistics、Health、Liquidation、ViewCache、System Risk 等聚合视图必须回到同一个估值基准
+1. Value Unit SSOT = 同一资产内按 `assetDecimals` 解释的 USD value
+2. Statistics、Health、Liquidation、ViewCache、System Risk 等聚合视图必须回到同一个估值基准，跨资产比较前显式归一化
 3. 一个部署实例内只能有一个系统级 SettlementToken 配置，用作系统参考基准与兼容旧接口
 
 这意味着：
@@ -94,12 +94,12 @@
 
 ### 4.2 value SSOT
 
-跨资产聚合值一律按 USD-8 输出。
+同一资产内的 value 按其 `assetDecimals` 输出；跨资产聚合前必须显式归一化到业务指定精度。
 
 公式口径与 [docs/Usage-Guide/Funds-Flow-Architecture-Guide.md](docs/Usage-Guide/Funds-Flow-Architecture-Guide.md) 一致：
 
 $$
-valueUSD8 = amountBaseUnits \times priceUSD8 / 10^{assetDecimals}
+valueUsd = amountBaseUnits \times priceUsd / 10^{assetDecimals}
 $$
 
 因此：
@@ -151,7 +151,7 @@ $$
 
 ### 6.2 对 mHKD 和 mSGD 的要求
 
-1. 必须提供到 USD-8 的价格映射
+1. 必须提供到 USD 的价格映射，链上精度按资产 `assetDecimals`
 2. 推荐由 PriceOracle 正常喂价
 3. 如果进入 fallback，必须使用各自 peg 对应的 USD 参考价，而不是复用 1 USD
 
@@ -178,7 +178,7 @@ $$
 
 1. 多个稳定币资产
 2. 各自 decimals
-3. 各自 defaultPriceUsd8
+3. 各自 defaultPriceValue�值语义按资产 `assetDecimals` 解释）
 4. 其中唯一一个 settlementToken=true
 
 ### 第二步：部署实例
@@ -206,11 +206,11 @@ $$
 2. 用 mUSDT 做 borrowAsset 的链路
 3. 用 mHKD 做 borrowAsset 的链路
 4. 用 mSGD 做 borrowAsset 的链路
-5. 统一 preflight 下的 Statistics/Health/Position 视图是否仍按 USD-8 一致输出
+5. 统一 preflight 下的 Statistics/Health/Position 视图是否仍按统一 value 语义输出，并在跨资产场景显式归一化
 
 ### 第五步：localhost 最小可运行序列
 
-如果要在本地链直接验证四类稳定币的 borrow/repay 与 USD-8 聚合估值，可按下面顺序执行：
+如果要在本地链直接验证四类稳定币的 borrow/repay 与统一 value 聚合估值，可按下面顺序执行：
 
 ```bash
 pnpm -s hardhat node --hostname 127.0.0.1 --port 8545
@@ -239,7 +239,7 @@ pnpm -s run test:smoke:multi-stablecoin:localhost
 1. 将资产接入 AssetWhitelist / PriceOracle / FeeRouter
 2. 逐个稳定币执行 deposit collateral -> reserveForLending -> finalizeMatch -> repay
 3. 校验 borrowAsset 维度的 PositionView debt
-4. 校验 `VaultLendingEngine.getUserTotalDebtValue(user)` 的 USD-8 聚合债务在还款后清零
+4. 校验 `VaultLendingEngine.getUserTotalDebtValue(user)` 的聚合债务在还款后清零，并确认归一化口径一致
 
 ### 第六步：fork 最小可运行序列
 
@@ -284,7 +284,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<borrow_asset_address>" \
 BORROW_SYMBOL="mUSDT" \
 BORROW_ASSET_DECIMALS=6 \
-BORROW_PRICE_UNITS_8="1" \
+BORROW_PRICE_VALUE="1" \
 BORROW_SOURCE_ID="mock-usdt" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -325,7 +325,7 @@ pnpm -s run test:smoke:multi-stablecoin:arbitrum-sepolia-live
 1. 扩充 mock 资产包，加入多稳定币
 2. 允许部署时选择本次实例唯一 SettlementToken
 3. 保持借贷主链路继续按具体 asset 运作
-4. 保持系统聚合 value 继续按 USD-8 统一输出
+4. 保持系统聚合 value 继续按统一归一化目标精度输出
 
 本轮不应直接做的高风险改造：
 
@@ -337,7 +337,7 @@ pnpm -s run test:smoke:multi-stablecoin:arbitrum-sepolia-live
 
 一句话总结：
 
-本系统的多稳定币方案应是“多稳定币资产并存，单实例保留一个系统级 SettlementToken，所有跨资产聚合继续统一到 USD-8”。
+本系统的多稳定币方案应是“多稳定币资产并存，单实例保留一个系统级 SettlementToken，所有跨资产聚合继续统一到业务明确指定的归一化精度”。
 
 这才同时符合：
 
@@ -351,9 +351,9 @@ pnpm -s run test:smoke:multi-stablecoin:arbitrum-sepolia-live
 
 当 borrower 用 RWA 抵押并借稳定币时：
 
-1. RWA collateral 只维护一份 USD-8 价格
-2. 稳定币 debt side 各自维护到 USD-8 的价格
-3. Health / Liquidation / Statistics 仍然在统一 USD-8 口径下比较
+1. RWA collateral 只维护一份 USD 价格语义
+2. 稳定币 debt side 各自维护到 USD 的价格映射，精度按各自 `assetDecimals`
+3. Health / Liquidation / Statistics 仍然在统一归一化口径下比较
 
 不要为同一个 RWA 资产分别维护：
 
@@ -369,7 +369,7 @@ pnpm -s run test:smoke:multi-stablecoin:arbitrum-sepolia-live
 如果 RWA 价格来源来自 Google Finance：
 
 1. Google Finance 负责提供链下原始报价
-2. 后端负责把原始报价归一化成 USD-8
+2. 后端负责把原始报价归一化成目标资产 `assetDecimals` 对应的链上价格
 3. PriceOracle 负责存储链上统一价格
 
 也就是说：
@@ -383,4 +383,4 @@ pnpm -s run test:smoke:multi-stablecoin:arbitrum-sepolia-live
 2. 一个实例里只能有一个系统级 SettlementToken。
 3. 非 USD peg 稳定币必须按各自对 USD 汇率估值，不能统一按 1 USD 处理。
 4. 借贷主路径应该按具体 borrowAsset / debtAsset 运行，而不是强行回退到 SettlementToken。
-5. RWA collateral 的价格来源可以不同，但写链后必须统一回到 USD-8，不能按稳定币种类再分叉一套估值。
+5. RWA collateral 的价格来源可以不同，但写链后必须统一回到同一套 USD 语义，不能按稳定币种类再分叉一套估值。

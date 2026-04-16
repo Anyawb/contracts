@@ -1,3 +1,370 @@
+# 智能合约部署与升级指南
+
+## 概述
+
+本目录不仅包含部署脚本，也包含升级后必须执行的同步、审计和上线前验证入口。
+
+从当前仓库状态看，单次部署成功并不自动等于以下内容都已经完成：
+
+1. core deploy output 已更新。
+2. manifest 与 mock-suite 已刷新。
+3. 前端网络配置已同步。
+4. module keys、contract errors、ABI 已同步生成。
+5. 链上 Registry 路由与 deploy output 已对齐。
+6. implementation hash 与本地 artifact 已对齐。
+7. live 所需角色已补齐。
+8. fork、gate 9、gate 10 已按顺序通过。
+
+因此，部署或升级完成后，必须继续执行“统一同步与审计入口”。
+
+## 当前支持的网络与入口
+
+### Localhost
+
+1. 部署入口：[scripts/deploy/deploylocal.ts](deploylocal.ts)
+2. 输出文件：[scripts/deployments/localhost.json](../deployments/localhost.json)
+
+### Arbitrum Sepolia
+
+1. 部署入口：[scripts/deploy/networks/arbitrum-sepolia/deploy.ts](networks/arbitrum-sepolia/deploy.ts)
+2. preflight：[scripts/deploy/deploy-preflight.ts](deploy-preflight.ts)
+3. 主要输出：
+  [scripts/deployments/arbitrum-sepolia.json](../deployments/arbitrum-sepolia.json)
+  [scripts/deployments/arbitrum-sepolia.manifest.json](../deployments/arbitrum-sepolia.manifest.json)
+  [scripts/deployments/arbitrum-sepolia.mock-suite.json](../deployments/arbitrum-sepolia.mock-suite.json)
+
+### BNB Testnet
+
+1. 部署 wrapper：[scripts/deploy/deploy-bnb-testnet.ts](deploy-bnb-testnet.ts)
+2. 核心部署脚本：[scripts/deploy/deploy-bnb-testnet-core.ts](deploy-bnb-testnet-core.ts)
+3. 网络入口：[scripts/deploy/networks/bnb-testnet/deploy.ts](networks/bnb-testnet/deploy.ts)
+4. preflight：[scripts/deploy/deploy-preflight.ts](deploy-preflight.ts)
+5. 统一同步与审计入口：[scripts/deploy/sync-and-verify-bnb-testnet.ts](sync-and-verify-bnb-testnet.ts)
+
+## 升级或部署后的强制要求
+
+任何合约变更后，必须按下面顺序执行，不允许只跑其中一部分就视为完成。
+
+### 1. 部署或升级合约
+
+BNB Testnet：
+
+```bash
+pnpm -s run deploy:preflight:bnb-testnet
+pnpm -s run deploy:bnb-testnet
+```
+
+### 2. 刷新部署产物
+
+升级后必须刷新以下文件：
+
+1. [scripts/deployments/bnb-testnet/core.json](../deployments/bnb-testnet/core.json)
+2. [scripts/deployments/bnb-testnet/manifest.json](../deployments/bnb-testnet/manifest.json)
+3. [scripts/deployments/bnb-testnet/baseline.json](../deployments/bnb-testnet/baseline.json)
+4. [scripts/deployments/bnb-testnet/history](../deployments/bnb-testnet/history)
+5. [scripts/deployments/bnb-testnet/mock-suite.json](../deployments/bnb-testnet/mock-suite.json)
+
+其中：
+
+1. `core.json` 只表示当前地址映射，不足以单独承担部署基线。
+2. `baseline.json` 才是稳定部署基线，必须包含 releaseId、git commit、dirty 状态、compiler/build-info 锚点，以及 proxy -> implementation 快照。
+3. `manifest.json` 和前端 release 产物应引用同一个 `baseline.json`，而不是各自独立漂移。
+4. 每次同步还必须额外归档一份按 releaseId 命名的历史副本到 [scripts/deployments/bnb-testnet/history](../deployments/bnb-testnet/history)，否则下次刷新会覆盖掉上一次 release 的 baseline。
+5. Arbitrum Sepolia 同样必须刷新 [scripts/deployments/arbitrum-sepolia.baseline.json](../deployments/arbitrum-sepolia.baseline.json)，不能只保留 [scripts/deployments/arbitrum-sepolia.json](../deployments/arbitrum-sepolia.json)。
+
+### 3. 重新生成消费侧文件
+
+升级后必须重新生成或刷新：
+
+1. [frontend-config/networks/bnb-testnet.ts](../../frontend-config/networks/bnb-testnet.ts)
+2. [frontend-config/networks/bnb-testnet.release.json](../../frontend-config/networks/bnb-testnet.release.json)
+3. [frontend-config/contracts-bnb-testnet.ts](../../frontend-config/contracts-bnb-testnet.ts)
+4. [frontend-config/moduleKeys.ts](../../frontend-config/moduleKeys.ts)
+5. [frontend-config/contractErrors.ts](../../frontend-config/contractErrors.ts)
+6. 必要 ABI 文档与 ABI 产物
+
+对应命令：
+
+```bash
+pnpm -s run generate:module-keys
+pnpm -s run generate:contract-errors
+pnpm -s run docs:abi
+```
+
+### 4. 自动对账与阻断
+
+升级后必须自动执行以下审计，任何关键差异直接阻断：
+
+1. 链上 Registry 对 deploy output。
+2. frontend config 对 deploy output。
+3. implementation hash 对本地 artifact。
+4. 关键运行时角色是否齐全。
+
+不允许继续推进的情况包括：
+
+1. deploy output 与链上 Registry 漂移。
+2. frontend network config 与 deploy output 漂移。
+3. 关键代理 implementation 与本地编译产物不匹配。
+4. relayer、updater 或关键模块缺角色。
+
+### 5. 自动按顺序跑 fork、gate 9、gate 10
+
+升级后的标准顺序必须是：
+
+1. fork
+2. gate 9 blocks-only funds-chain
+3. gate 10 ops extension modules
+
+gate 9 未稳定通过前，不允许进入 gate 10。
+
+## 统一同步与审计入口
+
+BNB Testnet 已新增统一入口：
+
+```bash
+pnpm -s run deploy:sync-and-verify:bnb-testnet
+```
+
+只做链上对账、不重新 build/deploy/fork/live 时，可使用：
+
+```bash
+pnpm -s run deploy:sync-and-verify:bnb-testnet:audit-only
+```
+
+如果要在 audit-only 过程中顺手把 relayer/updater/viewer 的关键角色补齐，可使用：
+
+```bash
+pnpm -s run deploy:sync-and-verify:bnb-testnet:audit-repair-roles
+```
+
+当前默认 reference baseline 已固定回退到最接近已确认 release 的历史归档：
+
+```bash
+scripts/deployments/bnb-testnet/history/bnb-testnet-20260414011126528.baseline.json
+```
+
+如果不想使用这份默认 reference baseline，可显式关闭：
+
+```bash
+RELEASE_SYNC_DISABLE_DEFAULT_REFERENCE_BASELINE=1 \
+pnpm -s run deploy:sync-and-verify:bnb-testnet:audit-only
+```
+
+如果当前 checkout 已经继续演进，而链上仍停留在旧 release，可额外提供历史 baseline：
+
+```bash
+RELEASE_SYNC_REFERENCE_BASELINE_FILE=scripts/deployments/bnb-testnet/history/<releaseId>.baseline.json \
+pnpm -s run deploy:sync-and-verify:bnb-testnet:audit-only
+```
+
+这不会放松正常发布校验；它只是在 audit-only 模式下，把“当前 artifacts 漂移”与“链上实际偏差”区分开来。若链上 runtime / implementation 命中 reference baseline，脚本会把这些失败解释为历史 release 命中，而不是直接把整次审计判为不可解释失败。
+
+该入口按顺序执行：
+
+1. compile、typecheck、e2e:typecheck
+2. deploy preflight
+3. deploy 或 upgrade
+4. 刷新 `core.json`、`manifest.json`、`mock-suite.json`
+5. 重新生成 `bnb-testnet.ts`、module keys、contract errors、ABI 文档
+6. 自动对账链上 Registry、deploy output、frontend config、implementation hash
+7. 自动检查关键角色
+8. 自动运行 OrderEngine 实现一致性专项审计
+9. 自动运行 live role readiness 专项审计
+10. 自动跑 fork
+11. 自动跑 gate 9
+12. gate 9 通过后自动跑 gate 10
+
+## 前端读取方式
+
+前端不要自己去拼接或猜测本次升级结果，统一读取同步入口生成的稳定产物：
+
+1. 构建期或代码内静态导入：[frontend-config/networks/bnb-testnet.ts](../../frontend-config/networks/bnb-testnet.ts)
+2. 非 TypeScript 消费方、配置中心或 CI 分发优先读取：[frontend-config/networks/bnb-testnet.release.json](../../frontend-config/networks/bnb-testnet.release.json)
+3. 部署取证、CI 归档、回滚锚点优先读取：[scripts/deployments/bnb-testnet/baseline.json](../deployments/bnb-testnet/baseline.json)
+4. 地址读取用 `contracts`
+5. 版本/发布时间/事实源读取用 `releaseId`、`generatedAt`、`sourceFiles`
+6. 若需要知道某个地址对应哪个 Registry key，读取 `contracts.<ContractName>.registryKey`
+
+推荐约束：
+
+1. 前端页面运行时只消费一次同步入口生成的单一文件，不要分别读取 `core.json` 和前端地址表再自行比对。
+2. 如果前端仓库是通过子模块或 CI 拉取本仓库产物，优先分发 `bnb-testnet.release.json`，因为它比纯地址表多了版本锚点。
+3. 若当前前端直接 import TS 配置，则使用 `DEPLOYMENT_METADATA` + `CONTRACT_ADDRESSES` 作为统一入口，不再只读裸地址对象。
+
+dry-run 入口：
+
+```bash
+pnpm -s run deploy:sync-and-verify:bnb-testnet:dry-run
+```
+
+用途：
+
+1. 只验证编排与命令链条。
+2. 不真正发起链上部署或 live 执行。
+
+baseline 完整性检查：
+
+```bash
+pnpm -s run checks:deploy-baselines
+```
+
+该检查会阻断以下情况：
+
+1. 已存在 `core.json`，但缺少配套 `baseline.json`。
+2. `manifest.json` 或前端 release 产物没有引用同一个 `baseline.json`。
+3. `baseline.json` 缺少 `git.commit`、compiler/build-info、或 proxy implementation 快照。
+
+## 环境变量与协作要求
+
+### 必需环境变量
+
+至少需要：
+
+1. `BNB_TESTNET_RPC_URL` 或 `BSC_TESTNET_RPC_URL`
+2. `PRIVATE_KEY`
+
+如需更精细角色区分，可额外设置：
+
+1. `RELAYER_PRIVATE_KEY`
+2. `UPDATER_PRIVATE_KEY`
+3. `RELAYER_ADDRESS`
+4. `UPDATER_ADDRESS`
+5. `VIEWER_PRIVATE_KEY`
+6. `VIEWER_ADDRESS`
+
+### 推荐 live 严格参数
+
+统一入口默认会使用或继承以下关键参数：
+
+1. `LIVE_FAIL_ON_MISSING_RUNTIME_ROLES=1`
+2. `LIVE_STRICT_FEE_ROUTER_GATE=1`
+3. `LIVE_STRICT_BLOCKS_ONLY_DATAPUSH=1`
+4. `LIVE_STRICT_BLOCKS_ONLY_PREMATURITY=0`
+
+### 需要配合的角色
+
+#### 协议研发
+
+1. 明确本次升级涉及哪些代理、模块、Registry key。
+2. 明确是否引入新 initializer / reinitializer。
+3. 明确 rollback 是否允许以及限制条件。
+
+#### 部署负责人
+
+1. 执行 deploy 或 upgrade。
+2. 确认 deploy output 与链上 Registry 一致。
+3. 确认 implementation hash 与本地 artifact 一致。
+
+#### 前端 / 集成方
+
+1. 同步最新地址表。
+2. 同步 module keys、ABI、错误码。
+3. 确认读模型、事件、DataPush 语义没有沿用旧版本假设。
+
+#### QA / 测试
+
+1. 验证 fork。
+2. 验证 gate 9。
+3. gate 9 通过后验证 gate 10。
+
+## 重要事实源说明
+
+当前仓库中，BNB Testnet 的 live / fork 默认读取：
+
+1. [scripts/deployments/bnb-testnet/core.json](../deployments/bnb-testnet/core.json)
+
+不是读取前端网络配置作为唯一事实源。
+
+但用于确认“这批地址对应哪次源码/哪套编译参数/哪些 implementation”的稳定事实源，应该是：
+
+1. [scripts/deployments/bnb-testnet/baseline.json](../deployments/bnb-testnet/baseline.json)
+
+这意味着：
+
+1. `frontend-config/networks/bnb-testnet.ts` 过期，不会自动改变 live 读取地址。
+2. 但它一旦过期，就会误导前端和人工排查，因此仍然必须同步。
+3. `core.json` 如果没有配套 `baseline.json`，只能说明“现在指向哪里”，不能说明“它是从哪次源码和哪套 artifacts 生成的”。
+
+## 不允许继续推进的条件
+
+以下任一出现，直接阻断，不允许继续 fork/live：
+
+1. `core.json` 缺失或不完整。
+2. `manifest.json` 缺失或 `contracts` 为空。
+3. `baseline.json` 缺失，或缺少 `git.commit`、compiler/build-info、implementation 快照。
+4. `mock-suite.json` 为空或不可消费。
+5. frontend network config 与 deploy output 不一致。
+6. Registry key 与 deploy output 不一致。
+7. implementation hash 与本地 artifact 不一致。
+8. 关键角色缺失。
+9. fork 未在当前 deploy output 基线上运行。
+10. gate 9 未通过却继续进入 gate 10。
+
+## 推荐日常命令
+
+### 标准执行
+
+```bash
+pnpm -s run deploy:sync-and-verify:bnb-testnet
+```
+
+### 只验证编排
+
+```bash
+pnpm -s run deploy:sync-and-verify:bnb-testnet:dry-run
+```
+
+### 单独部署
+
+```bash
+pnpm -s run deploy:bnb-testnet
+```
+
+### 单独 fork
+
+```bash
+pnpm -s run test:live:release-gates:fork:bnb-testnet
+```
+
+### 单独完整 live Layer-A
+
+```bash
+pnpm -s run test:live:release-gates:bnb-testnet:layer-a
+```
+
+### 单独 gate 9
+
+```bash
+pnpm -s run test:live:release-gate9:bnb-testnet
+```
+
+### 单独 gate 10
+
+```bash
+pnpm -s run test:live:release-gate10:bnb-testnet
+```
+
+## 相关文档
+
+1. [docs/Test-Guide/README.md](../../docs/Test-Guide/README.md)
+2. [docs/Test-Guide/pre-launch-comprehensive-testing-requirements.md](../../docs/Test-Guide/pre-launch-comprehensive-testing-requirements.md)
+3. [scripts/deploy/deploy-preflight.ts](deploy-preflight.ts)
+4. [scripts/debug/audit-order-engine-deployment-consistency.ts](../debug/audit-order-engine-deployment-consistency.ts)
+5. [scripts/tools/repair-registry-from-deploy-output.ts](../tools/repair-registry-from-deploy-output.ts)
+
+## 结论
+
+部署或升级不是一个“发完交易就结束”的动作，而是一条完整流水线：
+
+1. 升级合约。
+2. 刷新产物。
+3. 生成消费侧文件。
+4. 做链上与本地一致性审计。
+5. 补齐角色。
+6. 按顺序跑 fork、gate 9、gate 10。
+7. 任一关键差异直接阻断。
+
+当前仓库已经有统一入口承担这条流水线，但后续仍应继续加强自动化覆盖面，尤其是 manifest、mock-suite 和更全面的 implementation 审计。
 # 智能合约部署脚本 (Smart Contract Deployment Scripts)
 
 本目录包含 RWA Lending Platform 智能合约系统的部署脚本，支持部署到本地网络、Arbitrum Sepolia 测试网和 Arbitrum 主网。

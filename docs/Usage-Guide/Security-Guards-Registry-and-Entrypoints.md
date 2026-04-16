@@ -245,6 +245,7 @@ function forceReduceDebt(...) external onlyValidRegistry onlyLiquidationExecutor
 - **Registry 安全**：
   - 关键路径下是否统一 `onlyValidRegistry`（含 `code.length`）？
   - best-effort push 是否避免 strict guard，并对 `addr==0 || code.length==0` 做分支处理？
+  - `src/constants/ModuleKeys.sol` 变更后，是否重新运行正式生成链 `pnpm -s run generate:module-keys`，并确认 `frontend-config/moduleKeys.ts` 没有漏掉多行声明的 key？
 - **入口收敛**：
   - 是否存在“EOA 直接写账本”的入口（即使有 role）？如有，是否能收敛到 `SettlementManager`/执行器模块？
   - 强制写入口是否具备 executor gate + role gate？
@@ -257,6 +258,17 @@ function forceReduceDebt(...) external onlyValidRegistry onlyLiquidationExecutor
 - **可观测性**：
   - 推送失败事件是否携带足够 payload（用户、资产、目标 view、期望写入值、reason）用于链下重放？
   - 是否明确区分 strict vs best-effort：账本/资金/custody/结算交割必须 strict；View/统计/监控推送必须 best-effort 且可观测？
+  - 钱包直连写入口是否已经同步最新 ABI / TypeChain / custom errors，并明确 `finalizeMatch(...)` 成功后没有独立成交成功事件，不能靠不存在的事件做收敛判断？
+
+### 前端钱包直连附加发布门禁
+
+如果本次发布包含“前端钱包直接调用链上入口”，除了上面的通用守卫，还必须额外满足：
+
+- 共享 ABI / TypeChain / `frontend-config/moduleKeys.ts` 必须视为同一批制品发布，不允许只发 ABI 不发 key，或只发 key 不发 errors。
+- `KEY_VAULT_BUSINESS_LOGIC`、`KEY_BLOCKS_ONLY_COORDINATOR`、`KEY_BLOCKS_ONLY_VIEW` 缺任意一项，都应直接阻断联调或发布。
+- `VaultBusinessLogic.finalizeMatch(...)` / `finalizeMatchBlocks(...)` 的 tuple 顺序必须以前链上 canonical struct 为准，不能在 SDK/BFF 里重新包装后改序。
+- keeper / liquidation 路径仍应保持后端或运营域隔离；不要因为钱包直连发布就把 `settleOrLiquidate(...)` 一并暴露到普通用户前端。
+- 详细联调步骤、灰度、回滚和三仓签字要求，统一参见 [Frontend-Wallet-Direct-Migration-Launch-Checklist.md](Frontend-Wallet-Direct-Migration-Launch-Checklist.md)。
 
 ### 推荐一键脚本
 
@@ -273,3 +285,6 @@ function forceReduceDebt(...) external onlyValidRegistry onlyLiquidationExecutor
   - `pnpm -s test test/VaultRouter.test.ts test/Vault/modules/VaultBusinessLogic.test.ts`
 - **P2（View/监控）定向测试**：
   - `pnpm -s test test/Vault/view test/Vault/view/modules test/core/PriceUpdater.test.ts`
+- **ModuleKeys 产物校验**：
+  - `pnpm -s run generate:module-keys`
+  - `rg -n "KEY_BLOCKS_ONLY_COORDINATOR|KEY_BLOCKS_ONLY_VIEW" frontend-config/moduleKeys.ts`

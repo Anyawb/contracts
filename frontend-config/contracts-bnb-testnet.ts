@@ -1,0 +1,397 @@
+// Auto-generated contract configuration file - BNB Testnet
+// Generated at: 2026-04-14T08:50:07.023Z
+// Release ID: bnb-testnet-20260414085007022
+//
+// Naming:
+// - OrderEngine = core/LendingEngine (Registry KEY_ORDER_ENGINE)
+// - VaultLendingEngine = debt ledger engine (Registry KEY_LE)
+// - LendingEngine is a legacy alias of OrderEngine (kept for backward compatibility)
+
+export const DEPLOYMENT_METADATA = {
+  "network": "bnb-testnet",
+  "chainId": 97,
+  "releaseId": "bnb-testnet-20260414085007022",
+  "generatedAt": "2026-04-14T08:50:07.023Z",
+  "registry": "0xd51D68ae91298b744d6C31BC5609BA060AA943F5",
+  "sourceFiles": {
+    "deployOutputFile": "scripts/deployments/bnb-testnet/core.json",
+    "manifestFile": "scripts/deployments/bnb-testnet/manifest.json",
+    "baselineFile": "scripts/deployments/bnb-testnet/baseline.json",
+    "mockSuiteFile": "scripts/deployments/bnb-testnet/mock-suite.json",
+    "frontendConfigFile": "frontend-config/networks/bnb-testnet.ts",
+    "frontendReleaseFile": "frontend-config/networks/bnb-testnet.release.json"
+  }
+} as const;
+
+export const CONTRACT_METADATA = {
+  "SettlementToken": {
+    "address": "0x98346Da0CBF871E62E20c5aac9Af0D8A98a4fCBA",
+    "registryKey": "SETTLEMENT_TOKEN"
+  },
+  "Registry": {
+    "address": "0xd51D68ae91298b744d6C31BC5609BA060AA943F5",
+    "registryKey": null
+  },
+  "RegistryDynamicModuleKey": {
+    "address": "0x82294F49938A85EbA241e50D76D7A6ba3c448916",
+    "registryKey": "DYNAMIC_MODULE_REGISTRY"
+  },
+  "AccessControlManager": {
+    "address": "0x37d5fE9ED6090b0288c5ff9BD440c68f3cb02246",
+    "registryKey": "ACCESS_CONTROL_MANAGER"
+  },
+  "CacheMaintenanceManager": {
+    "address": "0xBEd01022fe821B03b3bb4F62647c2c80392DF4B0",
+    "registryKey": "CACHE_MAINTENANCE_MANAGER"
+  },
+  "AssetWhitelist": {
+    "address": "0xDcfB2EA62EDb1f729f9Fdcc429Fb59b3B443Ef42",
+    "registryKey": "ASSET_WHITELIST"
+  },
+  "WhitelistRegistry": {
+    "address": "0x036Cf28b9c9ABA47aef2AACa8c42e44789148cDA",
+    "registryKey": "WHITELIST_REGISTRY"
+  },
+  "AuthorityWhitelist": {
+    "address": "0xAC41F9043C9bF55849aDf558186f94668882911b",
+    "registryKey": "AUTHORITY_WHITELIST"
+  },
+  "PriceOracle": {
+    "address": "0xEBa53598F5Ec95C331b74CD10abDa28ABD2302f1",
+    "registryKey": "PRICE_ORACLE"
+  },
+  "PriceUpdater": {
+    "address": "0x7B6d1Bf30D8A0c2c9C0Dd7a6Df36EFAcfAc0F93D",
+    "registryKey": "COINGECKO_PRICE_UPDATER"
+  },
+  "FeeRouter": {
+    "address": "0xf9118636f036fb2655BD11A2413E76F011F6a939",
+    "registryKey": "FEE_ROUTER"
+  },
+  "AICreditsVault": {
+    "address": "0x5552f1116A82aBF9c6A49b37A07644D469cf1145",
+    "registryKey": "AI_CREDITS_VAULT"
+  },
+  "RewardManagerCore": {
+    "address": "0x3653A75cAf4e58BcD771684C7dCABe84b33d7212",
+    "registryKey": "REWARD_MANAGER_CORE"
+  },
+  "RewardAccrualManager": {
+    "address": "0xb9A77B856c3a1729375c116c272bEb1d6c9A1f26",
+    "registryKey": "REWARD_ACCRUAL_MANAGER"
+  },
+  "RewardManager": {
+    "address": "0xC75D28317F4bbF73cC57803Af2F9b0de586a8DD6",
+    "registryKey": "REWARD_MANAGER"
+  },
+  "RewardConfig": {
+    "address": "0x49Ee3dA42d2fd567D576bA6959106480788Ac8bf",
+    "registryKey": "REWARD_CONFIG"
+  },
+  "EarnConfig": {
+    "address": "0xDdfC8A57D72feDEb1811d77a6e61f59CF62D19EE",
+    "registryKey": "REWARD_EARN_CONFIG"
+  },
+  "RewardView": {
+    "address": "0xfEac5bB0f75E5859996ef8B5f27D278EF1E028BC",
+    "registryKey": "REWARD_VIEW"
+  },
+  "EasyToken": {
+    "address": "0x29Cca2cB7121620E28f4799BDC1B989D3e8b3FA9",
+    "registryKey": "EASY_TOKEN"
+  },
+  "EasyEmissionConfig": {
+    "address": "0x4e826b50aC6f84B12b5F0c1eF9404e699c0B62ac",
+    "registryKey": "EASY_EMISSION_CONFIG"
+  },
+  "EasyEmissionController": {
+    "address": "0x77A5a788319034ee287D12d849a93F730A6445c6",
+    "registryKey": "EASY_EMISSION_CONTROLLER"
+  },
+  "EasyConsumption": {
+    "address": "0xDBB91E87dC31b7A2CAdfbaF0Fb6d0f57D7cB6EE5",
+    "registryKey": "EASY_CONSUMPTION"
+  },
+  "EasyRecycleDistributor": {
+    "address": "0x12D07bB021C59B550ADD41Ba5c71c3b8B088cf44",
+    "registryKey": "EASY_RECYCLE_DISTRIBUTOR"
+  },
+  "EasyStaking": {
+    "address": "0xc5cB76883f8dB50F9403F84f88deC1cDd27540f4",
+    "registryKey": "EASY_STAKING"
+  },
+  "FeatureRegistry": {
+    "address": "0x3BAE80706C73c28374ecB6579A35a4E62c2a5444",
+    "registryKey": "FEATURE_REGISTRY"
+  },
+  "GovernanceGate": {
+    "address": "0xB5e95649a1F9cc330F0bbeF93D766fd36d1066d2",
+    "registryKey": "GOVERNANCE_GATE"
+  },
+  "CrossChainGovernance": {
+    "address": "0x32368f949adf0E5600eAD6458677DADeB6Fa9CCb",
+    "registryKey": "CROSS_CHAIN_GOVERNANCE"
+  },
+  "GovernanceGuardian": {
+    "address": "0xe8a87c766E5612E47dCbb403b1551108910E12D3",
+    "registryKey": "GOVERNANCE_GUARDIAN"
+  },
+  "CollateralManager": {
+    "address": "0xA5c260bf025Bc805F8ff5fFDa3FaB54b08cD77b0",
+    "registryKey": "COLLATERAL_MANAGER"
+  },
+  "LendingEngine": {
+    "address": "0xc2fdD00C2f8D5553f85Feae474448c59006C6dd5",
+    "registryKey": "ORDER_ENGINE"
+  },
+  "LiquidationManager": {
+    "address": "0xFC221aD360b860940F16044352eb57De84213A7f",
+    "registryKey": "LIQUIDATION_MANAGER"
+  },
+  "SettlementManager": {
+    "address": "0x46832CDaF793F2ea28cBb0899CF2D2bB33A37695",
+    "registryKey": "SETTLEMENT_MANAGER"
+  },
+  "LenderPoolVault": {
+    "address": "0x573092b4078bb773e9D93cB040e9b23857b47E12",
+    "registryKey": "LENDER_POOL_VAULT"
+  },
+  "BlocksOnlyCoordinator": {
+    "address": "0x514B380ed0e938f1b7EC9211B8288d47BE2DeDD0",
+    "registryKey": "BLOCKS_ONLY_COORDINATOR"
+  },
+  "BlocksOnlyView": {
+    "address": "0x83815ec4982c7aeBc54e0D6cc0bae0e79C6Fd7Ff",
+    "registryKey": "BLOCKS_ONLY_VIEW"
+  },
+  "LiquidationPayoutManager": {
+    "address": "0xda359F618f584154E3B68f37d2eD516b96635D45",
+    "registryKey": "LIQUIDATION_PAYOUT_MANAGER"
+  },
+  "VaultLendingEngine": {
+    "address": "0x57054e71E7F5407CCA565cF5f45Ee7Caec1BcE46",
+    "registryKey": "LENDING_ENGINE"
+  },
+  "EarlyRepaymentGuaranteeManager": {
+    "address": "0x7CeCB0816Dd61c8736e1E3312e1FdE243586e61c",
+    "registryKey": "EARLY_REPAYMENT_GUARANTEE_MANAGER"
+  },
+  "VaultBusinessLogic": {
+    "address": "0x57D33098498aFF352D7Ac1140e8d0f5A551ADF7A",
+    "registryKey": "VAULT_BUSINESS_LOGIC"
+  },
+  "VaultRouter": {
+    "address": "0x233eC388124fA8bddb2199D65a7d7B1C837bB014",
+    "registryKey": null
+  },
+  "VaultCore": {
+    "address": "0xD4e91312DEF574402f0456cfCd3F2333aDBea10e",
+    "registryKey": "VAULT_CORE"
+  },
+  "GuaranteeFundManager": {
+    "address": "0x36A785C079Fff73b07a79fB1Eeca2fa794f3F269",
+    "registryKey": "GUARANTEE_FUND_MANAGER"
+  },
+  "HealthView": {
+    "address": "0xF3feb9B54327b083E932A92a2b7C1DBE33a704c5",
+    "registryKey": "HEALTH_VIEW"
+  },
+  "LiquidationRiskManager": {
+    "address": "0x5b648928F0319719050a6E402899028cff16Ec7d",
+    "registryKey": "LIQUIDATION_RISK_MANAGER"
+  },
+  "SystemView": {
+    "address": "0x443a6c9643C9C7E05f1bf097934EE32599f19d36",
+    "registryKey": "SYSTEM_VIEW"
+  },
+  "RegistryView": {
+    "address": "0xBFf5d8335B235426d5a0F2d440CCB92FDDB514a1",
+    "registryKey": "REGISTRY_VIEW"
+  },
+  "StatisticsView": {
+    "address": "0xb55c0E10141d7ef050c327c0F715bd3dd48CA69c",
+    "registryKey": "VAULT_STATISTICS"
+  },
+  "StatisticsPushManager": {
+    "address": "0xc0c11E3FD2653a27B3ebe014F3Ac15A411e94F42",
+    "registryKey": "STATISTICS_PUSH_MANAGER"
+  },
+  "LoanFlowView": {
+    "address": "0xb327380420fab6d7e8Fb336cb657bae00fC174Bd",
+    "registryKey": "LOAN_FLOW_VIEW"
+  },
+  "LoanFlowPushManager": {
+    "address": "0x1f84B54c448cEaD28e51FAB9bA9587C05552d805",
+    "registryKey": "LOAN_FLOW_PUSH_MANAGER"
+  },
+  "PositionView": {
+    "address": "0x13d75cfD143DD47216FfEB5B87d69Eb28F76bD5E",
+    "registryKey": "POSITION_VIEW"
+  },
+  "PreviewView": {
+    "address": "0x329dF47e53137A304E9c476c8Acc4c0e98E5425A",
+    "registryKey": "PREVIEW_VIEW"
+  },
+  "DashboardView": {
+    "address": "0xa3fCa6B2610827BC709f958BE7fC5f27D54ad7DE",
+    "registryKey": "DASHBOARD_VIEW"
+  },
+  "UserView": {
+    "address": "0xC4620f422Afb38189EC9DcC4C1D6dd2d7c4B991b",
+    "registryKey": "USER_VIEW"
+  },
+  "AccessControlView": {
+    "address": "0xbe6490a3e981948f6605F01cfD49CB88CF0d730e",
+    "registryKey": "ACCESS_CONTROL_VIEW"
+  },
+  "CacheOptimizedView": {
+    "address": "0x3ed7d40637a7fA94B3850576fcde1944Febd95bB",
+    "registryKey": "CACHE_OPTIMIZED_VIEW"
+  },
+  "LendingEngineView": {
+    "address": "0x65C57Bd1767fDb62fB361aD9757b725138eed179",
+    "registryKey": "LENDING_ENGINE_VIEW"
+  },
+  "LoanNFTView": {
+    "address": "0xA127Add8Eb37273B3cDDD15c025875DF424530E4",
+    "registryKey": "LOAN_NFT_VIEW"
+  },
+  "FeeRouterView": {
+    "address": "0x3835778Fd92584503d840961a6e19ffBF2dAf3C4",
+    "registryKey": "FEE_ROUTER_VIEW"
+  },
+  "RiskView": {
+    "address": "0xb46ABb87D24A67A58d9491b1e4C736BadCC47048",
+    "registryKey": "RISK_VIEW"
+  },
+  "SystemRiskView": {
+    "address": "0x0316a0c4a92c2B39c40a1D48fA163203772d7de8",
+    "registryKey": "SYSTEM_RISK_VIEW"
+  },
+  "ViewCache": {
+    "address": "0x3aBe91bDB6053b9BeDCBD9Df9b6088Da65f7EB3b",
+    "registryKey": "VIEW_CACHE"
+  },
+  "EventHistoryManager": {
+    "address": "0x692C06B5897dC979c18Df09DE6383E1a6991167A",
+    "registryKey": "EVENT_HISTORY_MANAGER"
+  },
+  "ValuationOracleView": {
+    "address": "0xc9316678Ea3730AC0303E70eBBfAE9D5245079a6",
+    "registryKey": "VALUATION_ORACLE_VIEW"
+  },
+  "LiquidationRiskView": {
+    "address": "0x71844ff882917Cf1608D756413C48C46e8B269c8",
+    "registryKey": "LIQUIDATION_RISK_VIEW"
+  },
+  "DegradationCore": {
+    "address": "0x3D398CbC05Af00c0C4836860305a9C0C900F393b",
+    "registryKey": "DEGRADATION_CORE"
+  },
+  "DegradationStorage": {
+    "address": "0x66344EF57C825330490442e8839fF08940933590",
+    "registryKey": "DEGRADATION_STORAGE"
+  },
+  "ModuleHealthView": {
+    "address": "0xf1e1B2B8AFe098370E7dA1fe49727de48350fC8F",
+    "registryKey": "MODULE_HEALTH_VIEW"
+  },
+  "DegradationMonitor": {
+    "address": "0x046471914c387f9dd19A04Ce930d8f10363756C7",
+    "registryKey": "DEGRADATION_MONITOR"
+  },
+  "BatchView": {
+    "address": "0xEe9B92361C4FA24cc23705Dc243678ECf1bfCBB2",
+    "registryKey": "BATCH_VIEW"
+  },
+  "LoanNFT": {
+    "address": "0x7abc6750c3D08fA1d0F126083C30A0cD2b4d684f",
+    "registryKey": "LOAN_NFT"
+  },
+  "LiquidatorView": {
+    "address": "0x56247eD81901B5030DDA971AAd8233d3BBd3cA60",
+    "registryKey": "LIQUIDATION_VIEW"
+  }
+} as const;
+
+export const CONTRACT_ADDRESSES = {
+  SettlementToken: '0x98346Da0CBF871E62E20c5aac9Af0D8A98a4fCBA',
+  Registry: '0xd51D68ae91298b744d6C31BC5609BA060AA943F5',
+  RegistryDynamicModuleKey: '0x82294F49938A85EbA241e50D76D7A6ba3c448916',
+  AccessControlManager: '0x37d5fE9ED6090b0288c5ff9BD440c68f3cb02246',
+  CacheMaintenanceManager: '0xBEd01022fe821B03b3bb4F62647c2c80392DF4B0',
+  AssetWhitelist: '0xDcfB2EA62EDb1f729f9Fdcc429Fb59b3B443Ef42',
+  WhitelistRegistry: '0x036Cf28b9c9ABA47aef2AACa8c42e44789148cDA',
+  AuthorityWhitelist: '0xAC41F9043C9bF55849aDf558186f94668882911b',
+  PriceOracle: '0xEBa53598F5Ec95C331b74CD10abDa28ABD2302f1',
+  PriceUpdater: '0x7B6d1Bf30D8A0c2c9C0Dd7a6Df36EFAcfAc0F93D',
+  FeeRouter: '0xf9118636f036fb2655BD11A2413E76F011F6a939',
+  AICreditsVault: '0x5552f1116A82aBF9c6A49b37A07644D469cf1145',
+  RewardManagerCore: '0x3653A75cAf4e58BcD771684C7dCABe84b33d7212',
+  RewardAccrualManager: '0xb9A77B856c3a1729375c116c272bEb1d6c9A1f26',
+  RewardManager: '0xC75D28317F4bbF73cC57803Af2F9b0de586a8DD6',
+  RewardConfig: '0x49Ee3dA42d2fd567D576bA6959106480788Ac8bf',
+  EarnConfig: '0xDdfC8A57D72feDEb1811d77a6e61f59CF62D19EE',
+  RewardView: '0xfEac5bB0f75E5859996ef8B5f27D278EF1E028BC',
+  EasyToken: '0x29Cca2cB7121620E28f4799BDC1B989D3e8b3FA9',
+  EasyEmissionConfig: '0x4e826b50aC6f84B12b5F0c1eF9404e699c0B62ac',
+  EasyEmissionController: '0x77A5a788319034ee287D12d849a93F730A6445c6',
+  EasyConsumption: '0xDBB91E87dC31b7A2CAdfbaF0Fb6d0f57D7cB6EE5',
+  EasyRecycleDistributor: '0x12D07bB021C59B550ADD41Ba5c71c3b8B088cf44',
+  EasyStaking: '0xc5cB76883f8dB50F9403F84f88deC1cDd27540f4',
+  FeatureRegistry: '0x3BAE80706C73c28374ecB6579A35a4E62c2a5444',
+  GovernanceGate: '0xB5e95649a1F9cc330F0bbeF93D766fd36d1066d2',
+  CrossChainGovernance: '0x32368f949adf0E5600eAD6458677DADeB6Fa9CCb',
+  GovernanceGuardian: '0xe8a87c766E5612E47dCbb403b1551108910E12D3',
+  CollateralManager: '0xA5c260bf025Bc805F8ff5fFDa3FaB54b08cD77b0',
+  LendingEngine: '0xc2fdD00C2f8D5553f85Feae474448c59006C6dd5',
+  LiquidationManager: '0xFC221aD360b860940F16044352eb57De84213A7f',
+  SettlementManager: '0x46832CDaF793F2ea28cBb0899CF2D2bB33A37695',
+  LenderPoolVault: '0x573092b4078bb773e9D93cB040e9b23857b47E12',
+  BlocksOnlyCoordinator: '0x514B380ed0e938f1b7EC9211B8288d47BE2DeDD0',
+  BlocksOnlyView: '0x83815ec4982c7aeBc54e0D6cc0bae0e79C6Fd7Ff',
+  LiquidationPayoutManager: '0xda359F618f584154E3B68f37d2eD516b96635D45',
+  VaultLendingEngine: '0x57054e71E7F5407CCA565cF5f45Ee7Caec1BcE46',
+  EarlyRepaymentGuaranteeManager: '0x7CeCB0816Dd61c8736e1E3312e1FdE243586e61c',
+  VaultBusinessLogic: '0x57D33098498aFF352D7Ac1140e8d0f5A551ADF7A',
+  VaultRouter: '0x233eC388124fA8bddb2199D65a7d7B1C837bB014',
+  VaultCore: '0xD4e91312DEF574402f0456cfCd3F2333aDBea10e',
+  GuaranteeFundManager: '0x36A785C079Fff73b07a79fB1Eeca2fa794f3F269',
+  HealthView: '0xF3feb9B54327b083E932A92a2b7C1DBE33a704c5',
+  LiquidationRiskManager: '0x5b648928F0319719050a6E402899028cff16Ec7d',
+  SystemView: '0x443a6c9643C9C7E05f1bf097934EE32599f19d36',
+  RegistryView: '0xBFf5d8335B235426d5a0F2d440CCB92FDDB514a1',
+  StatisticsView: '0xb55c0E10141d7ef050c327c0F715bd3dd48CA69c',
+  StatisticsPushManager: '0xc0c11E3FD2653a27B3ebe014F3Ac15A411e94F42',
+  LoanFlowView: '0xb327380420fab6d7e8Fb336cb657bae00fC174Bd',
+  LoanFlowPushManager: '0x1f84B54c448cEaD28e51FAB9bA9587C05552d805',
+  PositionView: '0x13d75cfD143DD47216FfEB5B87d69Eb28F76bD5E',
+  PreviewView: '0x329dF47e53137A304E9c476c8Acc4c0e98E5425A',
+  DashboardView: '0xa3fCa6B2610827BC709f958BE7fC5f27D54ad7DE',
+  UserView: '0xC4620f422Afb38189EC9DcC4C1D6dd2d7c4B991b',
+  AccessControlView: '0xbe6490a3e981948f6605F01cfD49CB88CF0d730e',
+  CacheOptimizedView: '0x3ed7d40637a7fA94B3850576fcde1944Febd95bB',
+  LendingEngineView: '0x65C57Bd1767fDb62fB361aD9757b725138eed179',
+  LoanNFTView: '0xA127Add8Eb37273B3cDDD15c025875DF424530E4',
+  FeeRouterView: '0x3835778Fd92584503d840961a6e19ffBF2dAf3C4',
+  RiskView: '0xb46ABb87D24A67A58d9491b1e4C736BadCC47048',
+  SystemRiskView: '0x0316a0c4a92c2B39c40a1D48fA163203772d7de8',
+  ViewCache: '0x3aBe91bDB6053b9BeDCBD9Df9b6088Da65f7EB3b',
+  EventHistoryManager: '0x692C06B5897dC979c18Df09DE6383E1a6991167A',
+  ValuationOracleView: '0xc9316678Ea3730AC0303E70eBBfAE9D5245079a6',
+  LiquidationRiskView: '0x71844ff882917Cf1608D756413C48C46e8B269c8',
+  DegradationCore: '0x3D398CbC05Af00c0C4836860305a9C0C900F393b',
+  DegradationStorage: '0x66344EF57C825330490442e8839fF08940933590',
+  ModuleHealthView: '0xf1e1B2B8AFe098370E7dA1fe49727de48350fC8F',
+  DegradationMonitor: '0x046471914c387f9dd19A04Ce930d8f10363756C7',
+  BatchView: '0xEe9B92361C4FA24cc23705Dc243678ECf1bfCBB2',
+  LoanNFT: '0x7abc6750c3D08fA1d0F126083C30A0cD2b4d684f',
+  LiquidatorView: '0x56247eD81901B5030DDA971AAd8233d3BBd3cA60'
+};
+
+export const NETWORK_CONFIG = {
+  chainId: 97,
+  rpcUrl: 'https://bsc-testnet.bnbchain.org',
+  explorer: 'https://testnet.bscscan.com',
+  name: 'bnb-testnet'
+};

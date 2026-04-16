@@ -1,0 +1,45 @@
+{
+  "assets": [
+    {
+      "id": "mock-usdc",
+      "name": "Mock USDC",
+      "symbol": "mUSDC",
+      "kind": "mock-erc20",
+      "decimals": 6,
+      "initialSupply": "1000000000",
+      "sourceId": "mock-usdc",
+      "maxPriceAge": 3600,
+      "active": true,
+      "bootstrapPriceUsd8": "1",
+      "sourceProvider": "bootstrap-manual",
+      "pricingCurrency": "USD",
+      "quoteToUsdPair": "USD/USD",
+      "fallbackPolicy": "bootstrap-only",
+      "launchPriceRequired": false,
+      "settlementToken": true
+    },
+    {
+      "id": "mock-wbnb",
+      "name": "Mock WBNB",
+      "symbol": "mWBNB",
+      "kind": "mock-erc20",
+      "decimals": 18,
+      "initialSupply": "1000000000",
+      "sourceId": "mock-wbnb",
+      "maxPriceAge": 3600,
+      "active": true,
+      "bootstrapPriceUsd8": "600",
+      "sourceProvider": "bootstrap-manual",
+      "pricingCurrency": "USD",
+      "quoteToUsdPair": "USD/USD",
+      "fallbackPolicy": "bootstrap-only",
+      "launchPriceRequired": false
+    }
+  ],
+  "settlementToken": "0x0000000000000000000000000000000000000001",
+  "settlementTokenDecimals": 6,
+  "settlementTokenMeta": {
+    "symbol": "mUSDC",
+    "decimals": 6
+  }
+}

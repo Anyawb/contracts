@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import { ILoanNFT } from "../interfaces/ILoanNFT.sol";
+
 /// @notice Minimal mock implementing LendingEngineView adapter surface for tests
 contract MockLendingEngineViewAdapter {
     struct LoanOrder {
@@ -21,6 +23,7 @@ contract MockLendingEngineViewAdapter {
     mapping(address => uint256) private _userLoanCount;
     mapping(uint256 => uint256) private _failedFeeAmount;
     mapping(uint256 => uint256) private _nftRetryCount;
+    mapping(uint256 => ILoanNFT.LoanStatus) private _orderStatus;
     mapping(uint256 => mapping(address => bool)) private _orderAccess;
     mapping(address => bool) private _matchEngine;
 
@@ -32,6 +35,11 @@ contract MockLendingEngineViewAdapter {
 
     function setLoanOrder(uint256 orderId, LoanOrder calldata order) external {
         _orders[orderId] = order;
+        _orderStatus[orderId] = ILoanNFT.LoanStatus.Active;
+    }
+
+    function setOrderStatus(uint256 orderId, ILoanNFT.LoanStatus status) external {
+        _orderStatus[orderId] = status;
     }
 
     function setUserLoanCount(address user, uint256 count) external {
@@ -58,6 +66,12 @@ contract MockLendingEngineViewAdapter {
 
     function getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order) {
         return _orders[orderId];
+    }
+
+    function getOrderStatusForView(uint256 orderId) external view returns (ILoanNFT.LoanStatus status) {
+        LoanOrder memory order = _orders[orderId];
+        require(order.borrower != address(0) || order.lender != address(0), "MockLendingEngineViewAdapter: invalid order");
+        return _orderStatus[orderId];
     }
 
     function getUserLoanCountForView(address user) external view returns (uint256 count) {

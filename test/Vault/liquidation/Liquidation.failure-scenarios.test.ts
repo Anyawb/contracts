@@ -143,6 +143,32 @@ describe("LiquidationManager (Scheme A) - failure & edge scenarios", function ()
       .to.be.revertedWithCustomError(access, "MissingRole");
   });
 
+  it("rejects self-liquidation on explicit executor even when borrower has ACTION_LIQUIDATE", async function () {
+    const { liquidationManager, access, user, asset } = await loadFixture(deployFixture);
+
+    await access.grantRole(ACTION_LIQUIDATE, user.address);
+
+    await expect(liquidationManager.connect(user).liquidate(user.address, asset, asset, 10n, 10n, 0n))
+      .to.be.revertedWithCustomError(liquidationManager, "LiquidationManager__BorrowerCannotSelfLiquidate");
+  });
+
+  it("rejects self-liquidation item in batch executor", async function () {
+    const { liquidationManager, access, user, asset } = await loadFixture(deployFixture);
+
+    await access.grantRole(ACTION_LIQUIDATE, user.address);
+
+    await expect(
+      liquidationManager.connect(user).batchLiquidate(
+        [user.address],
+        [asset],
+        [asset],
+        [10n],
+        [10n],
+        [0n],
+      ),
+    ).to.be.revertedWithCustomError(liquidationManager, "LiquidationManager__BorrowerCannotSelfLiquidate");
+  });
+
   it("rejects zero-address params", async function () {
     const { liquidationManager, liquidator, user, asset } = await loadFixture(deployFixture);
 

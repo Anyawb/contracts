@@ -21,10 +21,10 @@
 
 当前默认规则：
 
-1. 面向索引器和后端投影的统一消费入口，优先使用 `DataPushed`。
+1. 面向跨业务、跨模块的统一投影总线，优先使用 `DataPushed`。
 2. 面向部署治理和模块升级审计，优先使用 Registry 事件。
 3. 面向观测、缓存失败、自愈补偿，使用失败类事件。
-4. 如某业务模块同时发“模块专属事件”和 `DataPushed`，链下主消费口径优先 `DataPushed`，模块专属事件作为辅助审计依据。
+4. 如某业务模块同时发“模块专属事件”和 `DataPushed`，是否以 `DataPushed` 为主，取决于它是否携带了消费侧所需的完整语义；若专属事件额外携带 `version`、最终写入确认或更强顺序语义，则应以专属成功事件为主，`DataPushed` 退为统一总线与辅助审计依据。
 
 ## 3. 关键事件分层
 
@@ -32,7 +32,7 @@
 
 | 事件/数据类型 | 来源 | 语义 | 权威性 |
 |---|---|---|---|
-| `DataPushed(dataTypeHash, payload)` | `IDataPush` / 各业务模块 | 统一链下消费入口，按 `dataTypeHash` 解码具体业务载荷 | 高 |
+| `DataPushed(dataTypeHash, payload)` | `IDataPush` / 各业务模块 | 统一链下消费总线，按 `dataTypeHash` 解码具体业务载荷；适合跨模块投影，不自动替代带版本或最终写入确认的专属事件 | 高 |
 | `DEPOSIT_PROCESSED` | 抵押主路径 | 用户完成抵押入金后的统一投影事件 | 高 |
 | `WITHDRAW_PROCESSED` | 抵押主路径 | 用户完成抵押提取后的统一投影事件 | 高 |
 | `RESERVE_FOR_LENDING` | Reserve 主路径 | 资金预留成功后的统一投影事件 | 高 |
@@ -46,6 +46,12 @@
 | `GUARANTEE_LOCKED` | 保证金主路径 | 保证金锁定结果 | 高 |
 | `GUARANTEE_RELEASED` | 保证金主路径 | 保证金释放结果 | 高 |
 | `GUARANTEE_FORFEITED` | 保证金主路径 | 保证金没收结果 | 高 |
+| `BLOCKS_ONLY_MATCH_FINALIZED` | blocks-only 主路径 | blocks-only 订单创建完成后的统一投影事件 | 高 |
+| `BLOCKS_ONLY_REPAID` | blocks-only 主路径 | blocks-only 还款记录与剩余债务投影 | 高 |
+| `BLOCKS_ONLY_TRADE_CLOSED` | blocks-only 主路径 | debt-free 订单通过交易收尾（trade closeout）路径关闭 | 高 |
+| `BLOCKS_ONLY_SETTLED` | blocks-only 主路径 | matured 且 debt-free 订单通过到期收尾路径关闭 | 高 |
+| `BLOCKS_ONLY_DELIVERED` | blocks-only 主路径 | matured 且仍有剩余交割额的订单通过到期交付收尾把 bound collateral 交付给 lender | 高 |
+| `BLOCKS_ONLY_LIQUIDATED` | blocks-only 主路径 | 兼容保留哈希常量，当前路径不再发出 | 低 |
 | `EASY_MINTED` | Reward 主路径 | 奖励代币发放镜像事件 | 中 |
 | `REWARD_PENALTY_LEDGER_UPDATED` | Reward 主路径 | 奖励惩罚台账更新 | 中 |
 
@@ -53,7 +59,8 @@
 
 1. 以上数据类型名称来自当前仓库已对齐的业务文档与实现口径。
 2. 索引器应按 `dataTypeHash` 建立解码表，而不是零散订阅多个业务模块 ABI。
-3. 业务投影和对账系统优先消费这层事件。
+3. 业务投影和对账系统通常优先消费这层事件；但当模块专属成功事件额外承载 `version`、最终写入成功确认或更强顺序语义时，应以该专属事件作为主口径。
+4. 当前 `PositionView` 属于这一例外：`UserPositionCachedWithVersion` 比 `DATA_TYPE_USER_POSITION_UPDATE` 更适合作为强一致镜像落库信号，因为前者包含 `version`。
 
 ### 3.2 模块专属业务事件
 
@@ -67,13 +74,18 @@
 | `GuaranteeLocked` | `EarlyRepaymentGuaranteeManager` / `GuaranteeFundManager` 相关链路 | 保证金锁定 | 保证金审计 |
 | `EarlyRepaymentProcessed` | `EarlyRepaymentGuaranteeManager` | 提前还款保证金结算 | 保证金与提前还款核对 |
 | `GuaranteeForfeited` | 保证金链路 | 保证金没收 | 违约/清算补充核对 |
+| `BlocksOnlyMatchFinalized` | `BlocksOnlyCoordinator` | blocks-only 订单创建成功 | blocks-only 订单建档与对账 |
+| `BlocksOnlyRepaymentRecorded` | `BlocksOnlyCoordinator` | blocks-only 还款落账 | 剩余债务核对与还款明细 |
+| `BlocksOnlyOrderTradeClosed` | `BlocksOnlyCoordinator` | debt-free order 通过交易收尾（trade closeout）关闭 | trade-like 生命周期审计 |
+| `BlocksOnlyOrderSettled` | `BlocksOnlyCoordinator` | matured debt-free order 通过到期收尾关闭 | maturity 收尾审计 |
+| `BlocksOnlyOrderDelivered` | `BlocksOnlyCoordinator` | matured 且仍有剩余交割额的订单完成到期交付收尾 | maturity 交付审计与客服排障 |
 | `EasyMinted` | `EasyEmissionController` | Easy 发放 | 奖励核对 |
 | `PenaltyApplied` | `RewardAccrualManager` / `RewardManager` | 奖励惩罚落账 | 奖励惩罚链路审计 |
 
 默认规则：
 
 1. 这层事件可被索引器消费，但不应替代 `DataPushed` 作为统一入口。
-2. 若专属事件与 `DataPushed` 同时存在，`DataPushed` 优先承担统一投影职责。
+2. 若专属事件与 `DataPushed` 同时存在，需按字段完备性决定主口径；例如 `PositionView.UserPositionCachedWithVersion` 应优先于不带 `version` 的 `DATA_TYPE_USER_POSITION_UPDATE`。
 3. 专属事件主要用于链路排障、审计追踪、字段交叉验证。
 
 ### 3.3 部署与治理事件
@@ -107,6 +119,14 @@
 1. 失败类事件默认是“观测失败”或“镜像失败”信号，不直接等价于业务主账本失败。
 2. 链下消费方收到这类事件时，应优先走补偿、重试、回源链上读取，而不是直接把订单置为业务失败。
 
+## 4.1 Blocks-Only 补充解释
+
+blocks-only 事件当前必须按统一词典理解：
+
+1. `BlocksOnlyOrderTradeClosed` / `BLOCKS_ONLY_TRADE_CLOSED` 表示订单在债务归零后直接关闭，不要求等待 maturity。
+2. `BlocksOnlyOrderSettled` / `BLOCKS_ONLY_SETTLED` 表示 maturity-gated 的 debt-free 到期收尾（maturity closeout），与交易收尾（trade closeout）分开统计。
+3. `BlocksOnlyOrderDelivered` / `BLOCKS_ONLY_DELIVERED` 表示 maturity 时存在剩余交割额，执行到期交付收尾并将 bound collateral 直接交付给 lender。
+
 ## 4. 索引与消费建议
 
 ### 4.1 前端
@@ -122,16 +142,18 @@
 后端默认应：
 
 1. 使用 `DataPushed` 作为统一业务事件总线。
-2. 使用 Registry 事件监控升级、变更、模块漂移。
-3. 使用失败类事件驱动补偿任务、重试任务和人工告警。
+2. 对需要 `version`、最终写入成功确认或更强顺序语义的镜像表，消费对应模块专属成功事件。
+3. 使用 Registry 事件监控升级、变更、模块漂移。
+4. 使用失败类事件驱动补偿任务、重试任务和人工告警。
 
 ### 4.3 索引器
 
 索引器默认应：
 
-1. 主订阅 `DataPushed`。
-2. 辅助订阅 Registry 事件、关键模块专属事件、失败类事件。
-3. 为每个关键 `dataTypeHash` 建立固定 schema 与版本说明。
+1. 主订阅 `DataPushed` 作为跨模块统一总线。
+2. 同时订阅 Registry 事件、关键模块专属成功事件、失败类事件。
+3. 对 `PositionView` 等带版本写入信号的模块，以专属成功事件驱动物化视图落库。
+4. 为每个关键 `dataTypeHash` 建立固定 schema 与版本说明。
 
 ## 5. 兼容规则
 

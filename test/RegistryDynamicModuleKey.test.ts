@@ -17,9 +17,6 @@ import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers'
 import type { ContractFactory } from 'ethers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
-// 导入合约类型
-import type { RegistryDynamicModuleKey } from '../../types/contracts/registry/RegistryDynamicModuleKey';
-
 // 导入常量
 import { ModuleKeys } from '../frontend-config/moduleKeys';
 
@@ -45,7 +42,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
   const TEST_NAME_DIFFERENT = 'differentmodule';
   
   // 合约实例
-  let registryDynamicModuleKey: RegistryDynamicModuleKey;
+  let registryDynamicModuleKey: any;
   
   // 账户
   let owner: SignerWithAddress;
@@ -90,7 +87,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
 
     // 部署 RegistryDynamicModuleKey 代理
     const { proxyContract } = await deployProxyContract('RegistryDynamicModuleKey');
-    registryDynamicModuleKey = proxyContract as RegistryDynamicModuleKey;
+    registryDynamicModuleKey = proxyContract as any;
 
     // 初始化合约
     await registryDynamicModuleKey.initialize(
@@ -116,7 +113,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
   describe('初始化测试', function () {
     it('RegistryDynamicModuleKey – 应该正确初始化合约', async function () {
       const { proxyContract } = await deployProxyContract('RegistryDynamicModuleKey');
-      const registry = proxyContract as RegistryDynamicModuleKey;
+      const registry = proxyContract as any;
       
       await expect(
         registry.initialize(
@@ -135,7 +132,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
 
     it('RegistryDynamicModuleKey – 应该拒绝零地址初始化', async function () {
       const { proxyContract } = await deployProxyContract('RegistryDynamicModuleKey');
-      const registry = proxyContract as RegistryDynamicModuleKey;
+      const registry = proxyContract as any;
       
       // 测试零地址参数
       await expect(
@@ -149,7 +146,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
 
     it('RegistryDynamicModuleKey – 应该拒绝重复初始化', async function () {
       const { proxyContract } = await deployProxyContract('RegistryDynamicModuleKey');
-      const registry = proxyContract as RegistryDynamicModuleKey;
+      const registry = proxyContract as any;
       
       await registry.initialize(
         await registrationAdmin.getAddress(),
@@ -516,7 +513,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
       const receipt = await tx.wait();
       
       // 验证 gas 消耗在合理范围内（小于 10M gas）
-      expect(receipt!.gasUsed).to.be.lt(BigInt(10000000));
+      expect(receipt!.gasUsed < 10000000n).to.equal(true);
       
       // 验证所有模块键都已注册
       expect(await registryDynamicModuleKey.getDynamicKeyCount()).to.equal(MAX_BATCH_SIZE);
@@ -529,7 +526,7 @@ describe('RegistryDynamicModuleKey – 动态模块键注册管理器测试', fu
         const receipt = await tx.wait();
         
         // 验证单次注册的 gas 消耗在合理范围内（小于 500K gas）
-        expect(receipt!.gasUsed).to.be.lt(BigInt(500000));
+        expect(receipt!.gasUsed < 500000n).to.equal(true);
       }
 
       expect(await registryDynamicModuleKey.getDynamicKeyCount()).to.equal(50);

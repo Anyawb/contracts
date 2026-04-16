@@ -4,23 +4,69 @@
 
 本指南详细说明如何将前端应用与 RWA Lending Platform 智能合约进行连接，包括测试网部署、合约调用和前端集成。
 
-如果当前任务是接入 blocks-only 前端或撮合链路，先读 [Usage-Guide/Blocks-Only-Frontend-Matching-Checklist.md](Usage-Guide/Blocks-Only-Frontend-Matching-Checklist.md)，再回到本指南查具体 ABI、权限与调用细节。
+当前这份总指南覆盖 legacy / 通用订单、AI Credits 与 blocks-only 三条主线读写口径。blocks-only 已纳入默认前端接入、默认上线 checklist 与默认联调要求，并按“交易收尾（trade closeout）/到期收尾（maturity closeout）+ 三层状态模型”实施。
+
+### 前后端职责边界（2026-04-01）
+
+当前仓库已经明确了前端、后端、索引器三层职责，本指南需要与以下两份文档保持一致：
+
+1. [frontend-backend-unified-schema-ssot.md](frontend-backend-unified-schema-ssot.md)：定义表名、字段语义、模块归属、金额/时间/幂等口径。
+2. [Usage-Guide/SaaS-Backend-Implementation-Guide.md](Usage-Guide/SaaS-Backend-Implementation-Guide.md)：定义 Prisma、迁移、索引器、RLS、多租户与链下读模型实现。
+
+前端应按下面的边界工作：
+
+1. 钱包发起的普通用户写操作，优先直连明确用户入口：`VaultCore`、`AICreditsVault`。
+2. 借款成交不是 `VaultCore.borrow(...)` 直达账本模式，而是意向签名 + 公开撮合入口模式：`VaultBusinessLogic.finalizeMatch(...)`。谁来广播这笔成交交易，不由链上权限强制限定为“后端”；任何拿到完整 borrower/lender 签名、reserve 与撮合参数的一侧都可以发起。
+3. `SettlementManager` 需要按角色区分：普通用户还款应走 `VaultCore.repay(...) -> SettlementManager.repayAndSettle(...)` 内部桥接；keeper/运营侧到期结算或清算才直接调用 `SettlementManager.settleOrLiquidate(orderId)`。
+4. 用户当前态与系统当前态，应优先调用**按权限允许的专属链上 View**：普通钱包页默认主读 `PositionView`、`HealthView`、`StatisticsView`、`RewardView`；`SystemView`、`ValuationOracleView`、`ModuleHealthView`、部分 `LoanFlowView` / `LiquidatorView` / `FeeRouterView` 接口则更多属于后台、运维或诊断读面。
+5. 历史列表、活动流、榜单、审计、跨页聚合、跨钱包搜索，不应由前端直接扫链拼装，应优先读取后端 read model / indexer API。
+
+### 当前合约对齐补充（2026-04-01）
+
+1. `Registry` 是模块地址唯一来源；前端不得再把手写地址表当作最高权威。
+2. `KEY_STATS` 的 canonical key 是 `VAULT_STATISTICS`，当前读面对应 `StatisticsView`；不要创造 `STATISTICS_VIEW` 作为注册键。
+3. `KEY_PRICE_UPDATER` 的业务名称统一叫 `PRICE_UPDATER`，但链上兼容 raw key 仍是 `COINGECKO_PRICE_UPDATER`。
+4. `KEY_LIQUIDATION_VIEW` 的对外名称统一叫 `LiquidatorView`，不要把 `LiquidationView` 当正式契约名。
+5. blocks-only 已纳入这份总指南的默认建模要求；字段、事件与 UX 必须按 `lifecycle + closeReason + shortfallStatus + collateralDisposition` 与 Funds-Flow 主线术语执行。
+
+### 当前 legacy 清算补充（2026-04-15）
+
+1. legacy / 通用订单的自动风险、自动清算、自动结算，当前必须按 strict authoritative valuation 理解；兼容读口 `getUserTotalDebtValue(...)` / `calculateDebtValue(...)` 只应当作 best-effort 兼容读。
+2. legacy / 通用订单在抵押不足时，剩余债务不会再被隐式吞没；链上会显式写入 `IShortfallLedger`。`LiquidatedWithShortfall` / `DefaultedWithShortfall` 仅作为兼容读面标签，主终态判定必须回到三层状态快照。
+3. 前端、客服、后端读模型都不得再用“liquidation 后 debt 看起来接近 0”去推断订单已经 clean close，必须读取显式 status 与 shortfall ledger。
+4. blocks-only 已进入当前主线实施范围；应在本指南中按 trade closeout / maturity closeout 与三层状态模型展开具体接入步骤。
 
 ### 统一价格消费规则（新增 SSOT）
 
 价格相关前端逻辑必须统一遵循下面这条链路：
 
 1. 链下价格采集
-2. 统一归一化成 USD-8
+2. 按目标资产 `assetDecimals` 归一化成链上价格
 3. 统一调用 `PriceUpdater.updateAssetPrice`
 4. 统一由 `PriceOracle` 存储
 5. 前端只认链上最终价和链下发布状态
 
 这意味着：
 
-1. 前端不得直接消费 Google Finance、CoinGecko 或其他 source 的 raw 值做业务判断
-2. 前端不得把 `defaultPriceUsd8` 当成权威价格
-3. 前端显示“价格可用”至少要同时满足：链上可读 + 链下 publish status 正常
+1. 前端不得直接消费 Google Finance、CoinGecko 或其他 source 的 raw 值做业务判断。
+2. 前端不得把 `defaultPriceValue` 当成权威价格；这是字段名，值语义也要按资产 `assetDecimals` 解释。
+3. 前端显示“价格可用”至少要同时满足：链上可读 + 链下 publish status 正常。
+
+### 多链运行时配置规则（2026-04-13）
+
+前端运行时配置现在统一按单一 release artifact 消费，规则文件见 [frontend-config/networks/README.md](../frontend-config/networks/README.md) 和 [frontend-config/networks/release-schema.ts](../frontend-config/networks/release-schema.ts)。
+
+必须遵守：
+
+1. 前端运行时不得直接读取 `core.json`。
+2. 前端运行时不得自己拼接多个部署文件。
+3. EVM 网络优先消费 `frontend-config/networks/<network>.release.json`。
+4. 直接依赖本仓库代码的 TypeScript 前端读取 `frontend-config/networks/<network>.ts`。
+5. 地址读取统一走 `contracts`。
+6. 版本锚点统一走 `releaseId` 和 `generatedAt`。
+7. 来源追踪统一走 `sourceFiles`。
+8. 若需要知道某个地址对应哪个 Registry key，读取 `contracts.<ContractName>.registryKey`。
+9. 当前这套统一规则仅覆盖本仓库维护的 EVM 网络，不包含 SVM。
 
 ## 📋 目录
 
@@ -64,18 +110,7 @@ REPORT_GAS=true
 
 ### 2. 检查环境配置
 
-使用我们的脚本检查环境配置：
-
-```bash
-# 检查环境变量
-npm run script checks env
-
-# 检查合约一致性
-npm run script checks contract-consistency
-
-# 运行所有检查
-npm run script checks all
-```
+请参考 `docs/Usage-Guide/runbook/README.md` 中的标准检查流程。
 
 ### 3. 安全配置与钱包管理
 
@@ -104,13 +139,7 @@ cp env.example .env
 
 **部署前备份钱包资产**：
 
-```bash
-# 备份指定网络的钱包资产
-npm run script utils backup-wallet-assets --action backup --network arbitrum-sepolia
-
-# 查看所有备份文件
-npm run script utils backup-wallet-assets --action list
-```
+请参考 `docs/Usage-Guide/runbook/README.md` 中的钱包资产与水龙头要求流程。
 
 **备份功能特性**：
 
@@ -153,22 +182,7 @@ scripts/secrets/backups/
 
 **部署前检查清单**：
 
-```bash
-# 1. 检查环境配置
-npm run script checks env
-
-# 2. 备份钱包资产
-npm run script utils backup-wallet-assets --action backup --network arbitrum-sepolia
-
-# 3. 验证网络连接
-npm run script utils network-config
-
-# 4. 运行完整检查
-npm run script checks all
-
-# 5. 确认钱包余额充足
-# 检查备份文件中的余额信息
-```
+请根据需要查阅 `docs/Usage-Guide/runbook/README.md` 中的 `pnpm run cli` 与对应网络的测试流程。
 
 ## 🚀 智能合约部署流程
 
@@ -251,50 +265,21 @@ npm run script checks all
 
 ### 3. 自动化部署脚本
 
-#### 选择测试网络
+部署动作现已由对应的 `pnpm run deploy:*` 和集成 Runbook 管理。具体部署与验证指令（如 `localhost` 测试或 `arbitrum-sepolia`/`bnb-testnet`），请**强制参考**并执行以下 SSOT：
 
-推荐使用 **Arbitrum Sepolia** 测试网：
+- `docs/Usage-Guide/runbook/README.md`
+- `docs/Usage-Guide/runbook/Deploy-Testnet-BNB.md`
 
-```bash
-# 查看网络配置
-npm run script utils network-config
+#### 选择测试网络与执行部署
 
-# 验证网络连接
-npm run script utils network-utils
-```
-
-#### 分批部署命令
+请不要尝试直接在命令行拼接参数，而是调用 `pnpm` 中声明的 preflight 与 deploy 脚本：
 
 ```bash
-# 1. 部署 Registry（注册表）
-npm run script deploy registry
+# 执行 BNB Testnet Live Deploy Preflight
+pnpm run deploy:preflight:bnb-testnet
 
-# 2. 部署 Oracle 系统
-npm run script deploy oracle-system
-
-# 3. 部署奖励配置模块
-npm run script deploy reward-config-modules
-
-# 4. 部署完整的 Vault 系统
-npm run script deploy vault-system
-
-# 5. 部署 Vault Router（可选）
-npm run script deploy vault-router
-
-# 6. 部署到 Arbitrum（一键部署）
-npm run script deploy arbitrum
-```
-
-#### 一键部署（推荐）
-
-使用我们的集成部署脚本：
-
-```bash
-# 部署到 Arbitrum Sepolia
-npm run script deploy arbitrum
-
-# 或者使用完整的 Vault 系统部署
-npm run script deploy vault-system
+# 实际执行部署
+pnpm run deploy:bnb-testnet
 ```
 
 ### 4. 典型部署依赖关系图
@@ -340,82 +325,91 @@ graph TD
 
 #### 环境检查
 
-部署前请确保环境配置正确：
-
-```bash
-# 检查环境变量
-npm run script checks check-env
-
-# 检查合约一致性
-npm run script checks check-contract-consistency
-
-# 运行所有检查
-npm run script checks all
-```
+部署与依赖一致性的检查已经内置在 `deploy:preflight` 和 `test:live:preflight` 脚本流程中。具体要求请参考 `runbook`。
 
 ## 📍 合约地址管理
 
 ### 1. 部署记录文件
 
-部署完成后，合约地址会保存在以下文件中：
+部署完成后，前端相关的地址与模块键权威来源如下：
 
 ```bash
-# 查看部署记录
-cat scripts/deployments/vault-system.json
+# 链地址快照（前端推荐直接消费）
+frontend-config/contracts-arbitrum-sepolia.ts
+frontend-config/contracts-arbitrum.ts
+frontend-config/contracts-localhost.ts
+
+# 模块键 SSOT
+frontend-config/moduleKeys.ts
+
+# Registry 查询辅助
+frontend-config/registry-service.ts
+
+# 部署/链下记录
+deployments/*.json
 ```
+
+前端如果在独立仓库中开发，建议把 `frontend-config/` 作为同步产物引入，而不是在应用侧再维护一份手写地址常量。
 
 ### 2. 地址格式示例
 
 ```json
 {
   "Registry": "0x...",
-  "AccessControlManager": "0x...",
-  "AssetWhitelist": "0x...",
-  "VaultStorage": "0x...",
   "VaultCore": "0x...",
-  "VaultBusinessLogic": "0x...",
-  "VaultAdmin": "0x...",
+  "SettlementManager": "0x...",
+  "BlocksOnlyCoordinator": "0x...",
   "VaultRouter": "0x...",
-  "VaultModules": "0x...",
-  "StatisticsView": "0x..."
+  "PositionView": "0x...",
+  "HealthView": "0x...",
+  "StatisticsView": "0x...",
+  "LoanFlowView": "0x...",
+  "RewardView": "0x...",
+  "FeeRouterView": "0x...",
+  "LiquidatorView": "0x...",
+  "BlocksOnlyView": "0x...",
+  "AICreditsVault": "0x...",
+  "EasyToken": "0x..."
 }
 ```
 
 ### 3. 前端地址配置
 
-创建前端配置文件 `src/config/contracts.ts`：
+推荐直接基于仓库现有 `frontend-config/contracts-*.ts` 生成运行时映射，而不是在应用层再创建第二份手写配置：
 
 ```typescript
-export const CONTRACT_ADDRESSES = {
-  // 测试网地址
-  arbitrumSepolia: {
-    Registry: "0x...",
-    VaultCore: "0x...",
-    VaultStorage: "0x...",
-    // ... 其他合约地址
-  },
-  // 主网地址
-  arbitrum: {
-    Registry: "0x...",
-    VaultCore: "0x...",
-    VaultStorage: "0x...",
-    // ... 其他合约地址
-  },
-};
+import {
+  CONTRACT_ADDRESSES as ARBITRUM_SEPOLIA_ADDRESSES,
+  NETWORK_CONFIG as ARBITRUM_SEPOLIA_NETWORK,
+} from "../../frontend-config/contracts-arbitrum-sepolia";
+import {
+  CONTRACT_ADDRESSES as ARBITRUM_ADDRESSES,
+  NETWORK_CONFIG as ARBITRUM_NETWORK,
+} from "../../frontend-config/contracts-arbitrum";
 
-export const NETWORK_CONFIG = {
+export const ADDRESS_BOOK = {
   arbitrumSepolia: {
-    chainId: 421614,
-    rpcUrl: "https://sepolia-rollup.arbitrum.io/rpc",
-    explorer: "https://sepolia.arbiscan.io",
+    addresses: ARBITRUM_SEPOLIA_ADDRESSES,
+    network: ARBITRUM_SEPOLIA_NETWORK,
   },
   arbitrum: {
-    chainId: 42161,
-    rpcUrl: "https://arb1.arbitrum.io/rpc",
-    explorer: "https://arbiscan.io",
+    addresses: ARBITRUM_ADDRESSES,
+    network: ARBITRUM_NETWORK,
   },
-};
+} as const;
+
+export type SupportedNetwork = keyof typeof ADDRESS_BOOK;
+
+export function getAddressBook(network: SupportedNetwork) {
+  return ADDRESS_BOOK[network];
+}
 ```
+
+补充约束：
+
+1. `frontend-config/contracts-*.ts` 是“已解析地址快照”；适合首屏加载、降级模式和离线环境。
+2. 真正的模块权威来源仍然是 `Registry`；对于经常升级的 View，前端应支持按 module key 动态解析并做本地缓存。
+3. `frontend-config/moduleKeys.ts` 与 `src/constants/ModuleKeys.sol` 必须视为同一份 SSOT，禁止在前端重写第三套 key 字符串。
 
 ## 🌐 前端集成方案
 
@@ -423,44 +417,99 @@ export const NETWORK_CONFIG = {
 
 ```typescript
 // src/utils/contracts.ts
-import { ethers } from "ethers";
-import { CONTRACT_ADDRESSES, NETWORK_CONFIG } from "../config/contracts";
+import { BrowserProvider, Contract } from "ethers";
+import { getAddressBook, type SupportedNetwork } from "../config/contracts";
+import { getModuleKeyHash, type ModuleKeyName } from "../../frontend-config/moduleKeys";
 
-export class ContractManager {
-  private provider: ethers.Provider;
-  private signer: ethers.Signer;
-  private contracts: Record<string, ethers.Contract> = {};
+const REGISTRY_ABI = [
+  "function getModule(bytes32 key) external view returns (address)",
+];
 
-  constructor(network: "arbitrumSepolia" | "arbitrum") {
-    const config = NETWORK_CONFIG[network];
-    this.provider = new ethers.JsonRpcProvider(config.rpcUrl);
+export class RegistryAwareContractManager {
+  private provider!: BrowserProvider;
+  private signer: any;
+  private readonly network: SupportedNetwork;
+  private moduleAddressCache = new Map<string, string>();
+
+  constructor(network: SupportedNetwork) {
+    this.network = network;
   }
 
   async connectWallet() {
     if (typeof window.ethereum !== "undefined") {
       await window.ethereum.request({ method: "eth_requestAccounts" });
+      this.provider = new BrowserProvider(window.ethereum);
       this.signer = await this.provider.getSigner();
     } else {
       throw new Error("MetaMask not found");
     }
   }
 
-  async getContract(contractName: string, address: string, abi: any[]) {
-    if (!this.contracts[contractName]) {
-      this.contracts[contractName] = new ethers.Contract(
-        address,
-        abi,
-        this.signer || this.provider,
-      );
+  private getRegistry() {
+    const { addresses } = getAddressBook(this.network);
+    return new Contract(addresses.Registry, REGISTRY_ABI, this.signer ?? this.provider);
+  }
+
+  async getModuleAddress(moduleKeyName: ModuleKeyName) {
+    if (this.moduleAddressCache.has(moduleKeyName)) {
+      return this.moduleAddressCache.get(moduleKeyName)!;
     }
-    return this.contracts[contractName];
+
+    const registry = this.getRegistry();
+    const addr = await registry.getModule(getModuleKeyHash(moduleKeyName));
+    if (!addr || /^0x0{40}$/i.test(addr)) {
+      throw new Error(`Module ${moduleKeyName} is not registered`);
+    }
+
+    this.moduleAddressCache.set(moduleKeyName, addr);
+    return addr;
+  }
+
+  async getStatisticsView() {
+    const address = await this.getModuleAddress("KEY_STATS");
+    return new Contract(
+      address,
+      [
+        "function getGlobalStatisticsWithMeta() view returns ((uint256 totalUsers, uint256 activeUsers, uint256 totalCollateral, uint256 totalDebt, uint256 lastUpdateBlock), bool isValid, uint256 blockNumber)",
+      ],
+      this.signer ?? this.provider,
+    );
+  }
+
+  async getHealthView() {
+    const address = await this.getModuleAddress("KEY_HEALTH_VIEW");
+    return new Contract(
+      address,
+      [
+        "function getUserHealthFactorWithMeta(address user) view returns (uint256 healthFactor, bool isValid, uint256 blockNumber)",
+      ],
+      this.signer ?? this.provider,
+    );
+  }
+
+  async getRewardView() {
+    const address = await this.getModuleAddress("KEY_REWARD_VIEW");
+    return new Contract(
+      address,
+      [
+        "function getUserBalanceWithMeta(address user) view returns (uint256 balance, uint256 blockNumber, bool isValid)",
+        "function getUserRewardSummaryWithMeta(address user) view returns (uint256 totalBurned, uint256 pendingPenalty, uint8 level, uint256 lastActivity, uint256 blockNumber, bool isValid)",
+      ],
+      this.signer ?? this.provider,
+    );
   }
 
   async getVaultCore() {
-    const address = CONTRACT_ADDRESSES.arbitrumSepolia.VaultCore;
-    // 这里需要导入 VaultCore 的 ABI
-    const abi = []; // 从 typechain-types 导入
-    return this.getContract("VaultCore", address, abi);
+    const { addresses } = getAddressBook(this.network);
+    return new Contract(
+      addresses.VaultCore,
+      [
+        "function deposit(address asset, uint256 amount) external",
+        "function withdraw(address asset, uint256 amount) external",
+        "function repay(uint256 orderId, address debtAsset, uint256 amount) external",
+      ],
+      this.signer ?? this.provider,
+    );
   }
 }
 ```
@@ -470,18 +519,18 @@ export class ContractManager {
 ```typescript
 // src/hooks/useContracts.ts
 import { useState, useEffect } from "react";
-import { ContractManager } from "../utils/contracts";
+import { RegistryAwareContractManager } from "../utils/contracts";
 
 export function useContracts() {
   const [contractManager, setContractManager] =
-    useState<ContractManager | null>(null);
+    useState<RegistryAwareContractManager | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const initContracts = async () => {
       try {
-        const manager = new ContractManager("arbitrumSepolia");
+        const manager = new RegistryAwareContractManager("arbitrumSepolia");
         await manager.connectWallet();
         setContractManager(manager);
         setIsConnected(true);
@@ -508,22 +557,25 @@ import { useContracts } from '../hooks/useContracts';
 
 export function VaultInterface() {
   const { contractManager, isConnected, loading } = useContracts();
-  const [vaultData, setVaultData] = useState(null);
+  const [stats, setStats] = useState<any>(null);
 
   useEffect(() => {
     if (contractManager && isConnected) {
-      loadVaultData();
+      loadStats();
     }
   }, [contractManager, isConnected]);
 
-  const loadVaultData = async () => {
+  const loadStats = async () => {
     try {
-      const vaultCore = await contractManager!.getVaultCore();
-      // 调用合约方法获取数据
-      const data = await vaultCore.getVaultInfo();
-      setVaultData(data);
+      const statisticsView = await contractManager!.getStatisticsView();
+      const [globalStats, isValid, blockNumber] =
+        await statisticsView.getGlobalStatisticsWithMeta();
+      setStats({
+        data: globalStats,
+        meta: { isValid, blockNumber },
+      });
     } catch (error) {
-      console.error('Failed to load vault data:', error);
+      console.error('Failed to load statistics:', error);
     }
   };
 
@@ -532,77 +584,592 @@ export function VaultInterface() {
 
   return (
     <div>
-      <h2>Vault Interface</h2>
-      {/* 显示 Vault 数据 */}
+      <h2>Protocol Statistics</h2>
+      <pre>{JSON.stringify(stats, null, 2)}</pre>
     </div>
   );
 }
 ```
 
+### 4. 前端直连链上 vs 读取后端读模型
+
+前端不要把所有页面都做成“浏览器直接扫链”。当前推荐分层如下：
+
+| 场景 | 首选来源 | 说明 |
+| --- | --- | --- |
+| 用户发起交易 | 链上写入口合约 | 普通用户资金动作走 `VaultCore` / `AICreditsVault`；借款成交默认由前端收集 borrower/lender 签名、确认 reserve、组装参数后直接调用公开撮合入口 `VaultBusinessLogic.finalizeMatch(...)`；`SettlementManager` 仅在 keeper/运营结算清算时直接调用 |
+| 钱包当前仓位、健康因子、单用户奖励 | 链上 View | 默认主读 `PositionView` / `HealthView` / `RewardView`；`FeeRouterView` 只作费用补充与同步诊断 |
+| 系统总览卡片 | 链上 View | 首屏与单页当前态优先读取 `StatisticsView`；`LoanFlowView` 仅在确实需要流量/资格分析时补充，不应替代统计主卡 |
+| 历史记录、活动流、榜单、后台筛选 | 后端 read model API | 由 `chain_events` + 各类读模型表提供，不要前端自己扫日志 |
+| Registry/模块调试页 | `RegistryView` 或后端 `registry_modules` | 调试界面可以直连链上；运营后台更建议读后端快照 |
+
+### 4.1 前端-合约接入矩阵（目标架构）
+
+状态口径：
+
+- `已接入`：当前合约已经有适合前端直连的真实入口或主读面，且本指南要求前端按该入口接入。
+- `未接入`：规范希望前端使用，但当前合约或现有接入层还缺少适合直接承接该职责的入口。
+- `仅诊断使用`：已有 ABI/地址与只读聚合能力，但不应作为普通业务主路径。
+
+| 合约 / 模块 | 规范定位 | 当前状态 | 前端接入要求 |
+| --- | --- | --- | --- |
+| `VaultCore` | 标准产品线普通用户写入口 | 已接入 | 前端钱包直接调用 `deposit(...)` / `withdraw(...)` / `repay(...)`；不要再把普通用户资金动作回退为“前端签名 + 后端命令执行”。 |
+| `SettlementManager` | keeper / 运营结算与清算写入口 | 已接入 | 真实公开交易入口是 `settleOrLiquidate(orderId)`；但普通用户还款仍应走 `VaultCore.repay(...) -> SettlementManager.repayAndSettle(...)`，不要把 `repayAndSettle(...)` 暴露成普通用户按钮。 |
+| `BlocksOnlyCoordinator` | blocks-only 产品写入口 | 已接入 | blocks-only 已进入主线接入范围，但必须按 trade-like 交割实现接入：`finalizeMatchBlocks(...)` 创建 `ACTIVE + COORDINATOR_CUSTODY`，`repayBlocks(...)` 只会把订单推进到 debt-free 的 `REPAID`，真正关闭要么走 `closeRepaidTradeBlocks(...)`，要么到 maturity 后走 `settleOrLiquidateBlocks(...)`。 |
+| `FeeRouter` | 费用路由写入口 | 仅诊断使用 | 协议内部会写入 FeeRouter，但普通业务前端不应直接调用它作为主入口；保留给运维、对账、专项调试。 |
+| `AICreditsVault` | AI Credits 钱包购买入口 | 已接入 | 前端钱包直接调用 `buyCredits(...)`；后端只保留 usage 扣次、批量结算与审计。 |
+| `PositionView` | 用户仓位主读面 | 已接入 | 当前仓位、抵押、债务、order 相关用户当前态优先直读链上，不再以 backend projection 为主。 |
+| `HealthView` | 用户健康度主读面 | 已接入 | 用户风险、健康因子、清算边界等当前态直读链上；跨用户筛选或后台巡检才使用后端聚合。 |
+| `DashboardView` | 聚合仪表盘读面 | 仅诊断使用 | 可以用于调试页、诊断页、可选聚合页，但不应替代 Position/Health/Statistics/Reward 这些专属 SSOT 读面。 |
+| `RewardView` | 奖励当前态主读面 | 已接入 | 单用户奖励余额、锁仓、罚金、资格状态以链上主读；后端只保留历史、排行、审计和大分页聚合。 |
+| `StatisticsView` | 系统当前态统计主读面 | 已接入 | 单页系统统计卡片优先链上读取；只有跨页快照固化、历史趋势和榜单聚合才下沉到后端 read model。 |
+
+### 4.1.1 读权限收紧版矩阵（按源码真实 gate）
+
+这一张表不是按“模块名字听起来像前端还是后端”分类，而是按**当前合约真实权限语义**分类。判断规则如下：
+
+1. `普通用户可直读`：普通钱包在不持有额外运营角色时，仍可通过 self-read 或 public read 读到自己页面所需的主数据。
+2. `仅后台可读`：默认依赖 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`、`ActionKeys.ACTION_VIEW_PRICE_DATA`、`ActionKeys.ACTION_VIEW_RISK_DATA`、`ActionKeys.ACTION_VIEW_SYSTEM_STATUS`、`ActionKeys.ACTION_VIEW_LIQUIDATION_DATA` 或 admin 级角色，不应作为普通钱包页主读。
+3. `仅诊断使用`：模块内可能有部分 self-read 或 public read，但它的默认职责是路由、聚合、权限探测、诊断或运营辅助，不应取代专属 SSOT 读面。
+
+> 注意：同一个模块里可能同时存在 self-read 和 ops/admin read。本表按**普通产品前端默认落点**归类，不代表该模块全部方法都同权。
+
+| 模块 | 默认归类 | 典型可用方法 | 权限事实 | 前端落点 |
+| --- | --- | --- | --- | --- |
+| `PositionView` | 普通用户可直读 | `getUserPositionWithMeta(user, asset)`、`getUserCacheStatusWithMeta(user)` | 单用户仓位走 Scheme U self-read；但 `batchGetUserPositionsWithMeta(...)` 是 ops/admin，`getUserTotalCollateralValue(user)` 还要求 `ActionKeys.ACTION_VIEW_RISK_DATA` 或 admin。 | 作为仓位页、抵押/债务卡片主读；不要把估值口径方法误当成所有钱包页都可直读。 |
+| `HealthView` | 普通用户可直读 | `getUserHealthFactorWithMeta(user)` | 单用户健康因子走 Scheme U self-read；`batchGetHealthFactorsWithMeta(...)` 仅 ops/admin。 | 作为用户风险页、健康因子提示主读。 |
+| `RewardView` | 普通用户可直读 | `getUserBalanceWithMeta(user)`、`getUserRewardSummaryWithMeta(user)`、`getUserEarnStateWithMeta(user)` | 用户奖励相关读面走 Scheme U self-read；`getSystemRewardStatsWithMeta()` 等系统统计需要 `ActionKeys.ACTION_VIEW_SYSTEM_DATA` / admin。 | 作为奖励中心、锁仓/罚金/等级主读。 |
+| `StatisticsView` | 普通用户可直读 | `getGlobalStatisticsWithMeta()`、`getGlobalSnapshotWithMeta()`、`getUserSnapshotWithMeta(user)` | 全局统计快照是 public read；用户快照、担保余额、最后活跃块高走 Scheme U self-read。 | 适合首页统计卡片和用户自己的统计快照。 |
+| `BlocksOnlyView` | 普通用户可直读 | `getBlocksOnlyOrder(orderId)`、`getBlocksOnlyOrderState(orderId)`、`getBorrowerOrdersPaginated(...)`、`getSystemOrdersPaginated(...)` | borrower/lender 可读取自己参与的订单，非参与者仍需 `ACTION_VIEW_USER_DATA` 或 `ACTION_ADMIN`；显式生命周期必须以 `getBlocksOnlyOrderState(orderId)` 为准；分页接口当前返回三层状态对象（`runtime + lifecycle + closeReason + shortfallStatus + collateralDisposition + hasLoss`），不再返回纯 runtime 数组。 | 作为 blocks-only 订单详情、列表页、trade close / maturity close 当前态、keeper 收敛校验的主读面。 |
+| `DashboardView` | 仅诊断使用 | `getUserOverviewWithMeta(user, trackedAssets)` | 聚合总览本身走 Scheme U self-read，但它是 Position/Health/SystemRisk 的聚合门面；`getUserAssetBreakdownWithMeta(...)` 还叠加 `ActionKeys.ACTION_VIEW_PRICE_DATA`。 | 可做个人 dashboard 或调试页，但不应替代 Position/Health/Statistics/Reward 专属读面。 |
+| `FeeRouterView` | 仅诊断使用 | `getSyncStatus()`、`getUserFeeStatisticsWithMeta(user, feeType)`、`getUserStatsWithMeta(user)` | 有 self-read 用户费率/费用统计，也有 admin-only 全局统计；同时承担同步健康检查。 | 适合作为费用中心补充页和 observability 页，不是主业务首页读面。 |
+| `UserView` | 仅诊断使用 | 用户聚合类接口 | 模块整体走 Scheme U；但职责是聚合门面而非底层 SSOT。 | 只适合聚合页或过渡层，不应替代 Position/Health/Reward/Statistics。 |
+| `LoanFlowView` | 仅诊断使用 | 用户维度 loan-flow 接口 | 用户维度接口走 Scheme U；系统级或批量统计需要 `ActionKeys.ACTION_VIEW_SYSTEM_DATA` / admin。 | 适合作为资金流分析、奖励资格分析、诊断补充，不是普通钱包页首选主读。 |
+| `AccessControlView` | 仅诊断使用 | `getUserPermissionWithMeta(user, actionKey)`、`getUserPermissionLevelWithMeta(user)` | 读权限缓存走 Scheme U self-read。 | 只用于权限 preflight、调试、BFF 诊断，不是业务数据读面。 |
+| `RegistryView` | 仅诊断使用 | `getAllRegisteredModules()`、`getRegisteredModuleKeysPaginated(...)` | 目前是 public read，无额外 view role。 | 适合地址发现、预检、版本排障；不承载业务当前态。 |
+| `SystemView` | 仅后台可读 | `getModule(...)`、`routeStatistics()`、`routeReward()`、`routePosition()` | 几乎所有模块路由/发现接口都要求 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`。 | 给后台、运维、只读网关做模块路由和预检；普通钱包页不要把它当首选入口。 |
+| `ModuleHealthView` | 仅后台可读 | `getModuleHealthStatus(module)` | 需要 `ActionKeys.ACTION_VIEW_SYSTEM_STATUS` 或 admin。 | 纯运维/监控页。 |
+| `ValuationOracleView` | 仅后台可读 | `getAssetPrice(...)`、`getAssetPriceWithDecimals(...)`、`getAssetPrices(...)` | 价格读面要求 `ActionKeys.ACTION_VIEW_PRICE_DATA`。 | 给后台估值、风控、预检或只读网关使用；普通钱包页不要默认直连。 |
+| `LiquidatorView` | 仅诊断使用 | `getUserLiquidationStats(user)`、`getSeizableCollaterals(user)`、`getSystemLiquidationSnapshot()` | 用户维度统计走 Scheme U self-read，但清算估值/排行榜/系统视图分别要求 `ActionKeys.ACTION_VIEW_LIQUIDATION_DATA`、`ActionKeys.ACTION_VIEW_SYSTEM_DATA`、`ActionKeys.ACTION_VIEW_RISK_DATA` 等更高权限。 | 适合清算控制台、诊断页、收益页；不应替代普通用户主仓位读面。 |
+
+### 4.2 源码核对版前端接入清单（按方法级）
+
+这一节直接对照当前仓库合约源码，回答三个问题：
+
+1. 前端真正应该接哪个合约。
+2. 应该调用哪些公开方法。
+3. 哪些方法虽然存在，但不应当作为普通前端主路径。
+
+#### A. 成交广播主入口：VaultBusinessLogic
+
+这是借贷主流程里最容易被说错的模块。当前主线里，legacy / 通用订单的成交广播不应表述成“只能后端命令执行”。当前真实公开入口如下：
+
+| 合约 | 前端应接方法 | 前端必须准备的输入 | 前端不要误用的点 |
+| --- | --- | --- | --- |
+| `VaultBusinessLogic` | `finalizeMatch(...)` | `BorrowIntent`、`LendIntent[]`、borrower 签名、lender 签名数组 | 不要把 `VaultCore.borrowFor(...)` 当成普通用户入口；它是下游编排点。 |
+
+前端对照源码必须满足的撮合职责：
+
+1. 自己收 borrower 签名，也自己拿 lenderSigner 的签名。
+2. 先确认 lender reserve 已经存在，且被消费的 reserve 资产必须等于 borrowAsset。
+3. 自己组装完整参数，再发交易。
+4. 自己处理签名过期、reserve 不足、asset mismatch、term/rate 不匹配等失败场景。
+
+`finalizeMatch(...)` 对应的标准 intent 结构来自 [src/libraries/SettlementIntentLib.sol](src/libraries/SettlementIntentLib.sol)：
+
+| 结构体 | 字段 |
+| --- | --- |
+| `BorrowIntent` | `borrower`、`collateralAsset`、`collateralAmount`、`borrowAsset`、`amount`、`termDays`、`rateBps`、`expireAt`、`salt` |
+| `LendIntent` | `lenderSigner`、`asset`、`amount`、`minTermDays`、`maxTermDays`、`minRateBps`、`expireAt`、`salt` |
+
+前端签名口径必须与源码保持一致：
+
+1. EIP-712 domain 固定是 `name = "RwaLending"`、`version = "1"`、`chainId = 当前链`、`verifyingContract = VaultBusinessLogic 地址`。
+2. `expireAt` 在当前仓库里语义是 expireBlock，不是 unix timestamp。
+3. 本节聚焦 legacy / 通用订单的 `finalizeMatch(...)` 签名口径；blocks-only 撮合与收尾请按本指南 blocks-only 专节及 Funds-Flow 主线口径执行。
+
+#### B. 普通用户资金写入口：VaultCore
+
+`VaultCore` 是普通用户最主要的钱包直连接口。对照 [src/interfaces/IVaultCore.sol](src/interfaces/IVaultCore.sol) 和 [src/Vault/VaultCore.sol](src/Vault/VaultCore.sol)，前端应接下面这些方法：
+
+| 方法 | 用途 | 前置条件 | 备注 |
+| --- | --- | --- | --- |
+| `deposit(asset, amount)` | 单资产存入抵押 | `asset != 0`、`amount > 0`，并且用户先给 `CollateralManager` 做 ERC20 approve | `VaultCore` 会走 `VaultRouter.processUserOperation(...)`；不要把 approve spender 配成 VaultCore。 |
+| `withdraw(asset, amount)` | 单资产提取抵押 | `asset != 0`、`amount > 0` | 仍然走 `VaultRouter -> CollateralManager`。 |
+| `repay(orderId, asset, amount)` | 普通订单还款 | `asset != 0`、`amount > 0`，并且用户先给 `VaultCore` 做 debt asset approve | `VaultCore` 会先把钱转给 `SettlementManager`，再调用 `repayAndSettle(...)`。 |
+| `batchDeposit(assets, amounts)` | 批量存款 | 长度一致、非空、不能超过 batch cap | 适合资产篮子充值页。 |
+| `batchWithdraw(assets, amounts)` | 批量提款 | 长度一致、非空、不能超过 batch cap | 适合批量释放抵押。 |
+| `batchRepay(orderIds, assets, amounts)` | 批量还款 | 长度一致、非空、不能超过 batch cap | 前端可做批量债务处理，但要控制 gas。 |
+
+`VaultCore` 里这些方法不应被前端当作主入口：
+
+| 方法 | 原因 |
+| --- | --- |
+| `borrowFor(...)` | 只允许业务编排模块调用，不是普通用户借款入口。 |
+| `repayFor(...)` | 只允许 `OrderEngine` 做内部账本同步。 |
+
+#### C. keeper / 运营写入口：SettlementManager
+
+`SettlementManager` 在前端文案里不能再被笼统描述成“普通用户入口”。对照 [src/interfaces/ISettlementManager.sol](src/interfaces/ISettlementManager.sol) 和 [src/Vault/liquidation/modules/SettlementManager.sol](src/Vault/liquidation/modules/SettlementManager.sol)，它有两条完全不同的路径：
+
+| 方法 | 前端是否应直接调用 | 谁来调 | 说明 |
+| --- | --- | --- | --- |
+| `repayAndSettle(user, debtAsset, repayAmount, orderId)` | 否 | 仅 VaultCore | 这是内部桥接函数，源码有 `onlyVaultCore`。普通用户不要直接碰。 |
+| `settleOrLiquidate(orderId)` | 是，但只限 keeper/运营前端 | keeper、机器人、运营钱包 | 真实公开清算入口，需要 `ActionKeys.ACTION_LIQUIDATE`；borrower 不能 self-liquidate。 |
+
+前端实现 keeper 控制面时，必须额外理解这些行为：
+
+1. 只有到期或风险可清算时才能成功，否则会触发 `SettlementManager__NotLiquidatable()`。
+2. 普通订单走这里；blocks-only 当前不在这份总指南的默认 keeper/前端范围内。
+3. 清算入口内部会读 `ORDER_ENGINE`、`PositionView`、`LiquidationRiskManager`、`LiquidationManager`，因此前端只负责交易发起和错误解码，不要在浏览器里复制一套清算逻辑。
+4. 对 legacy / 通用订单，`settleOrLiquidate(orderId)` 成功后并不保证一定 clean close；若抵押不足，终态要通过 `LendingEngineView.getOrderStateSnapshot(orderId)` 中的 `lifecycle + shortfallStatus + collateralDisposition` 联合判定，而不是再依赖旧的混合枚举名。
+5. keeper UI 在交易确认后应额外读取 `SettlementManager.getShortfallLedger(orderId)` / `hasActiveShortfall(orderId)`，并与 `LendingEngineView.getOrderStateSnapshot(orderId)` 对齐，而不是只看 `PayoutExecuted` 或 debt delta。
+6. 兼容的 `getUserTotalDebtValue(...)` / `calculateDebtValue(...)` 不能再作为 keeper 预检的 authoritative 数据源；自动决策应依赖链上 strict 路径。
+
+#### D. blocks-only 产品写入口：BlocksOnlyCoordinator
+
+当前 blocks-only 已纳入主线接入范围，但必须按它独立的 trade-like 交割模型接入，不能再套用 legacy / 通用订单的 keeper/liquidation 语义。对照 [src/interfaces/IBlocksOnlyCoordinator.sol](src/interfaces/IBlocksOnlyCoordinator.sol) 与 [src/blocks-only/BlocksOnlyCoordinator.sol](src/blocks-only/BlocksOnlyCoordinator.sol)，前端/keeper 需要把下面几条当成当前实现事实：
+
+1. `finalizeMatchBlocks(...)` 创建的是 `ACTIVE + COORDINATOR_CUSTODY`，而不是传统贷款的“创建后等待 settleOrLiquidate”。
+2. `repayBlocks(...)` 只会把订单推进到 debt-free 但仍 open 的 `REPAID`；不得从 `remainingDebt == 0` 或 `repaidPrincipal` 反推订单已 closed。
+3. debt-free trade close 必须显式调用 `closeRepaidTradeBlocks(orderId)`，对应 `CLOSED + BLOCKS_TRADE_CLOSE + RETURNED_TO_BORROWER`。
+4. maturity 之后 keeper 走 `settleOrLiquidateBlocks(orderId)`，其结果是 blocks-only maturity close，而不是通用 liquidation：
+  - debt-free maturity close：`CLOSED + BLOCKS_MATURITY_CLOSE + RETURNED_TO_BORROWER`
+  - unpaid maturity close：`CLOSED + BLOCKS_MATURITY_CLOSE + DELIVERED_TO_LENDER`
+5. 显式状态必须读取 `BlocksOnlyView.getBlocksOnlyOrderState(orderId)`；`getBlocksOnlyOrder(orderId)` 里的 `status / remainingDebt / canCloseTrade` 只用于运行时辅助显示与兼容校验。
+
+#### E. AI Credits 钱包写入口：AICreditsVault
+
+对照 [src/interfaces/IAICreditsVault.sol](src/interfaces/IAICreditsVault.sol) 和 [src/core/AICreditsVault.sol](src/core/AICreditsVault.sol)：
+
+| 方法 | 前端用途 | 关键限制 |
+| --- | --- | --- |
+| `creditsBalance(tenantId, user)` | 查询链上审计余额 | 返回的是 credits 自然数，不是 ERC20 decimals。 |
+| `buyCredits(tenantId, payToken, payAmount, credits, clientOrderId)` | 用户钱包购买 credits | `clientOrderId` 不能为 0；同一 `(tenantId, user, clientOrderId)` 只能用一次；`payAmount` 必须精确等于 `credits * unitPrice`。 |
+| `settleBatch(...)` | 否，普通前端不接 | 这是 operator 批量扣次入口，需要 `ACTION_SET_PARAMETER`。 |
+
+#### F. 当前态主读：PositionView / HealthView / RewardView / StatisticsView
+
+这些 View 才是用户当前态页面的主读面。后端 projection 不应再抢主读职责。
+
+`PositionView` 对照 [src/interfaces/IPositionView.sol](src/interfaces/IPositionView.sol) 和 [src/Vault/view/modules/PositionView.sol](src/Vault/view/modules/PositionView.sol)：
+
+| 方法 | 页面用途 | 权限语义 |
+| --- | --- | --- |
+| `getUserPositionWithMeta(user, asset)` | 单资产仓位卡片 | self-read 允许；跨用户读通常需要 `ACTION_VIEW_USER_DATA` / `ACTION_ADMIN`。 |
+| `batchGetUserPositionsWithMeta(users, assets)` | 批量运维视图 | 普通用户前端不要拿它枚举全站用户。 |
+| `getUserTotalCollateralValue(user)` | 汇总抵押值 | 这是估值读口径，源码要求 `ACTION_VIEW_RISK_DATA` 或 admin；不能默认当成普通钱包页稳定主读。 |
+| `getUserCacheStatusWithMeta(user)` | 诊断缓存有效性 | 真实签名只有 `user` 一个参数，适合 debug/diagnostic 页。 |
+
+`HealthView` 对照 [src/Vault/view/modules/HealthView.sol](src/Vault/view/modules/HealthView.sol)：
+
+| 方法 | 页面用途 | 权限语义 |
+| --- | --- | --- |
+| `getUserHealthFactorWithMeta(user)` | 用户健康因子、风险提示 | self-read 允许；跨用户读需要 viewer/admin。 |
+| `batchGetHealthFactorsWithMeta(users)` | 风控后台、运营批量看盘 | 这是枚举型批量读取，不适合普通钱包页。 |
+
+`RewardView` 对照 [src/Vault/view/modules/RewardView.sol](src/Vault/view/modules/RewardView.sol)：
+
+| 方法 | 页面用途 | 权限语义 |
+| --- | --- | --- |
+| `getUserBalanceWithMeta(user)` | Easy 余额卡片 | 用户自查主入口。 |
+| `getUserRewardSummaryWithMeta(user)` | 奖励中心摘要 | 返回 `totalBurned`、`pendingPenalty`、`level`、`lastActivity` 等。 |
+| `getUserEarnStateWithMeta(user)` | 锁仓/资格状态 | 返回 `lockedEasy`、`eligibleLoanCount`、`onTimeRepayCount`。 |
+| `getUserEasyEarnedWithMeta(user)` | 已赚取 Easy | 适合奖励流水总览。 |
+| `getUserEasyStakedWithMeta(user)` | 已质押 Easy | 适合 staking 卡片。 |
+| `getUserEasySpentWithMeta(user)` | 已消费 Easy | 适合消费/回收页面。 |
+| `getUserRecentActivitiesWithMeta(user, fromBlock, toBlock, limit)` | 用户近期奖励活动 | 适合近 N 条活动窗口；全量历史仍建议后端索引。 |
+| `getSystemRewardStatsWithMeta()` | 否，普通前端不应主用 | system-only 读，更适合运营后台。 |
+
+`StatisticsView` 对照 [src/Vault/view/modules/StatisticsView.sol](src/Vault/view/modules/StatisticsView.sol)：
+
+| 方法 | 页面用途 | 权限语义 |
+| --- | --- | --- |
+| `getGlobalStatisticsWithMeta()` | 协议首页统计卡片 | 适合首屏当前态。 |
+| `getGlobalSnapshotWithMeta()` | 全局快照详情 | 适合系统概览页。 |
+| `getUserSnapshotWithMeta(user)` | 用户统计快照 | 需要遵守 user-scoped 读取权限。 |
+| `getUserGuaranteeBalanceWithMeta(user, asset)` | 保证金/担保余额展示 | 适合担保相关详情页。 |
+| `getUserLastActiveTimeWithMeta(user)` | 用户最近活跃块高 | 适合用户状态摘要。 |
+
+#### G. 前端钱包直连迁移最小 Registry Key / 权限 / Spender 清单
+
+上面的章节已经覆盖了方法级接入，但如果是另一仓要真正把主流程切成“前端钱包直接调用链上入口”，还需要一张更短的实施表。下面这些项没有逐条落地，就不能算迁移完成。
+
+| 用途 | 最小合约 / 模块 | Registry key | 前端必须知道的权限或前置条件 |
+| --- | --- | --- | --- |
+| 普通用户存款/提款/还款 | `VaultCore` | `KEY_VAULT_CORE` | `deposit` 前先给 `CollateralManager` approve；`repay` 前先给 `VaultCore` approve。 |
+| 抵押 approve spender | `CollateralManager` | `KEY_CM` | 抵押类 ERC20 存入的 spender 应解析到 `KEY_CM`，不要错配成 `VaultCore`。 |
+| 普通借款成交广播 | `VaultBusinessLogic` | `KEY_VAULT_BUSINESS_LOGIC` | 公开 `external` 入口，无 onlyRole；但前端必须自己准备 borrower/lender 签名、reserve 与完整撮合参数。 |
+| 普通订单 keeper 结算/清算 | `SettlementManager` | `KEY_SETTLEMENT_MANAGER` | 仅 keeper/运营侧使用；执行方必须具备 `ActionKeys.ACTION_LIQUIDATE`。 |
+| AI Credits 购买 | `AICreditsVault` | `KEY_AI_CREDITS_VAULT` | `clientOrderId != 0`，且 `(tenantId, user, clientOrderId)` 不可复用。 |
+| 仓位主读 | `PositionView` | `KEY_POSITION_VIEW` | 普通钱包页主读；跨用户读取不是默认前端权限。 |
+| 健康度主读 | `HealthView` | `KEY_HEALTH_VIEW` | 普通钱包页主读；批量风险读取属于后台/运维。 |
+| 奖励主读 | `RewardView` | `KEY_REWARD_VIEW` | 用户维度 self-read 可用；系统统计需要 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`。 |
+| 统计主读 | `StatisticsView` | `KEY_STATS` | canonical raw key 是 `VAULT_STATISTICS`，不要创造 `STATISTICS_VIEW`。 |
+| 价格/估值预检 | `ValuationOracleView` | `KEY_VALUATION_ORACLE_VIEW` | 默认要求 `ActionKeys.ACTION_VIEW_PRICE_DATA`；不要把它当普通钱包页默认主读。 |
+
+迁移期间前端至少要在启动 preflight 中校验上表里的 key 是否都能通过 Registry 解析。如果缺任意一项，UI 应显式进入降级或阻断，而不是继续发交易。
+
+另外有两个容易漏掉的事实：
+
+1. `KEY_VAULT_BUSINESS_LOGIC` 对当前主线的前端钱包直连成交是核心必需项，不能只在别的文档里顺手提到。
+2. 共享的前端 ModuleKeys 产物必须与 Solidity SSOT 保持一致；如果你们前端 SDK 或生成文件里缺少这些当前主线 key，应该视为迁移阻断项，而不是运行时再兜底。
+
+#### G.1 前端钱包直连最小 ABI / 事件 / 错误码 契约
+
+上面的表已经说明“该调谁”，但前端真实开发还需要再锁死三件事：参数 tuple 顺序、事件字段语义、custom error selector 归类。之前文档在这里还不够工程化，尤其是 `finalizeMatch(...)` 成功后没有独立成功事件、AICredits 购买路径使用通用错误名、以及 blocks-only 字段全是 block 轴语义，这些都容易在联调时踩坑。
+
+`VaultBusinessLogic.finalizeMatch(...)` 的 ABI 输入顺序必须严格按 [src/libraries/SettlementIntentLib.sol](src/libraries/SettlementIntentLib.sol) 来，不允许前端自己改名后再重排：
+
+| tuple | 字段顺序 | 前端必须知道的语义 |
+| --- | --- | --- |
+| `BorrowIntent` | `borrower`, `collateralAsset`, `collateralAmount`, `borrowAsset`, `amount`, `termDays`, `rateBps`, `expireAt`, `salt` | `expireAt` 语义是 `expireBlock`，不是 unix timestamp。 |
+| `LendIntent` | `lenderSigner`, `asset`, `amount`, `minTermDays`, `maxTermDays`, `minRateBps`, `expireAt`, `salt` | `lenderSigner` 是签名人，不是最终 `LoanOrder.lender`。 |
+
+`finalizeMatch(...)` 还有三个实现事实必须写死到前端联调文档里：
+
+1. `sigLenders.length` 必须和 `lendIntents.length` 完全相等，否则会先触发 `ArrayLengthMismatch`。
+2. `VaultBusinessLogic` 自己不再发“成交成功”专属事件，成功判定不能依赖不存在的 `MatchFinalized` / `LoanMatched` 事件，而要依赖 `tx receipt + downstream 事件 + 主读面收敛`。
+3. `LendReserveConsumed` / `LendReserveConsumedAtBlock` 只代表 reserve 被消费，不等于 UI 可以直接把订单视为最终成功；订单落地仍应以后续读面和链上结果为准。
+
+前端至少要识别下面这些关键事件，不能只记事件名，不记字段：
+
+| 事件 | 合约 | 字段级语义 |
+| --- | --- | --- |
+| `LendReserveConsumed(lendIntentHash, lenderSigner, asset, amount, blockNumber)` | `VaultBusinessLogic` | `amount` 是 token base units；`blockNumber` 是区块轴，不是时间戳。 |
+| `RepayAndSettleProcessed(user, debtAsset, repayAmount, orderId, releasedAllCollateral, blockNumber)` | `SettlementManager` | 普通用户还款成功后的主确认事件；`releasedAllCollateral` 决定 UI 是否立即刷新抵押展示。 |
+| `CollateralReleased(user, collateralAsset, collateralAmount, blockNumber)` | `SettlementManager` | collateral release 是单独事件，不要从 `RepayAndSettleProcessed` 猜释放数量。 |
+| `LiquidationShortfallOpened(orderId, borrower, debtAsset, status, pricingMode, coveredDebt, remainingDebt, shortfallAmount, valuationBlock, liquidationBlock, evidenceHash)` | `SettlementManager` / `IShortfallLedger` | legacy / 通用订单发生 shortfall 的权威事实；UI/后端不得再把这类订单压平成普通 liquidated。 |
+| `LiquidationShortfallRecoveryApplied(orderId, recoverySource, recoveryAmount, remainingDebt, shortfallAmount, lastRecoveryBlock, evidenceHash)` | `SettlementManager` / `IShortfallLedger` | 这是 `SettlementManager` 显式记账减债后的权威事实。当前实现只证明有权限调用方按 `recoverySource` / `evidenceHash` 申请了 shortfall 减债，不等于准备金、补偿池、GuaranteeFundManager 或链下追偿已自动接入协议执行链。 |
+| `LiquidationShortfallStatusChanged(orderId, previousStatus, newStatus, remainingDebt, shortfallAmount, evidenceHash)` | `SettlementManager` / `IShortfallLedger` | shortfall 生命周期变化的权威事实。若 `newStatus = WRITTEN_OFF`，应展示为显式运营/治理核销，而不是“真实回款已完成”。 |
+| blocks-only 事件族 | `BlocksOnlyCoordinator` / `BlocksOnlyView` | 已纳入主线前端订阅与收敛范围。`BLOCKS_ONLY_MATCH_FINALIZED`、`BLOCKS_ONLY_REPAID`、`BLOCKS_ONLY_TRADE_CLOSED`、`BLOCKS_ONLY_DELIVERED` 只负责证明写路径发生；订单终态仍必须以 `BlocksOnlyView.getBlocksOnlyOrderState(orderId)` 收敛。 |
+| `CreditsPurchased(tenantId, buyer, payToken, payAmount, credits, clientOrderId, blockNumber)` | `AICreditsVault` | `clientOrderId` 是链上幂等锚点；`credits` 是自然数协议单位，不是 ERC20 decimals。 |
+
+错误码这部分之前也不够集中。前端至少要把下面这批 selector 归成稳定语义，而不是每个页面各自猜：
+
+| 错误码 | 来源 | 前端语义 |
+| --- | --- | --- |
+| `SettlementIntentLib__InvalidSignature()` | `VaultBusinessLogic` 路径 | 签名错误、签名人错误或签名与参数不匹配。 |
+| `SettlementIntentLib__IntentExpired()` | `VaultBusinessLogic` 路径 | `expireAt` 已过，前端应提示“订单已过期”，不是“节点故障”。 |
+| `SettlementIntentLib__AlreadyMatched()` | `VaultBusinessLogic` 路径 | 订单已被成交或 reserve 已被消费，属于业务冲突。 |
+| `VaultBusinessLogic__AssetMismatch(expected, got)` | `VaultBusinessLogic` | lender reserve 资产与 borrow asset 不一致。 |
+| `VaultBusinessLogic__InsufficientReservedSum(totalReserved, requiredBorrow)` | `VaultBusinessLogic` | reserve 不足，前端应提示补 reserve 或改报价。 |
+| `VaultBusinessLogic__InsufficientCollateral(current, required)` | `VaultBusinessLogic` | 抵押不足，应先走 `deposit(...)`。 |
+| `SettlementManager__OnlyVaultCore()` | `SettlementManager` | 前端或后端错误地直接调用了 `repayAndSettle(...)`。 |
+| `SettlementManager__NotLiquidatable()` | `SettlementManager` | keeper 触发过早，或当前风险条件不满足。 |
+| `SettlementManager__BorrowerCannotSelfLiquidate()` | `SettlementManager` | borrower 不能把 keeper 清算入口当普通用户入口。 |
+| `SettlementManager__NoCollateral()` | `SettlementManager` | 对 legacy / 通用订单，常见含义是 strict collateral valuation 不可用或不存在可估值抵押，不等于账本一定没有抵押。 |
+| `SettlementManager__ShortfallMissing(orderId)` | `SettlementManager` | 运营/治理试图读取或推进不存在的 shortfall ledger。 |
+| `SettlementManager__ShortfallAlreadyExists(orderId)` | `SettlementManager` | 同一 legacy 订单 shortfall 被重复创建，属于写路径一致性问题。 |
+| `ZeroAddress()` | `AICreditsVault` 等共享错误 | 参数缺失或地址未配置。 |
+| `InvalidCaller()` | `AICreditsVault` | 当前实现把 `credits=0`、`clientOrderId=0`、重复订单、未配置价格、支付金额不精确都折叠到这个错误里，前端必须结合 preflight 上下文做二次分类。 |
+
+如果你们前端还缺少一份“页面 -> selector -> UX 提示”的映射表，建议直接以上表为基线生成，而不是继续依赖节点吐出来的英文原始报错。
+
+#### H. 聚合读面：DashboardView 与 FeeRouterView
+
+这两个模块可以接，但要明确它们的定位不是替代专属 View 的底层 SSOT。
+
+`DashboardView` 对照 [src/Vault/view/modules/DashboardView.sol](src/Vault/view/modules/DashboardView.sol)：
+
+| 方法 | 适合页面 | 注意事项 |
+| --- | --- | --- |
+| `getUserOverviewWithMeta(user, trackedAssets)` | 单用户聚合总览页 | 内部会组合 `PositionView` 和 `HealthView`；适合 dashboard，不适合替代底层专属读面。 |
+| `getUserAssetBreakdownWithMeta(user, assets)` | 单用户资产分解页 | 读取价格时需要 `ACTION_VIEW_PRICE_DATA`；若 price read 失败，价格可能回落为 0。 |
+
+`FeeRouterView` 对照 [src/Vault/view/modules/FeeRouterView.sol](src/Vault/view/modules/FeeRouterView.sol)：
+
+| 方法 | 适合页面 | 注意事项 |
+| --- | --- | --- |
+| `getSyncStatus()` | 诊断 FeeRouterView 是否已同步 | 非常适合健康检查与 observability 页。 |
+| `getUserFeeStatisticsWithMeta(user, feeType)` | 用户费用统计 | user-scoped 读，遵守 self / viewer / admin 语义。 |
+| `getUserDynamicFeeWithMeta(user, feeType)` | 用户动态费率 | 用于费率说明页。 |
+| `getUserStatsWithMeta(user)` | 用户费路由摘要 | 适合用户费用中心。 |
+| `getUserFeeConfigWithMeta(user)` | 用户费率配置展示 | 适合展示 VIP / 折扣档位。 |
+| `getGlobalFeeStatisticsWithMeta(...)` | 否，普通前端不应主用 | 这是 admin 视角全局统计。 |
+| `getGlobalOperationStatsWithMeta()` | 否，普通前端不应主用 | 也是 admin 视角。 |
+
+#### I. FeeRouter 本体只做配置/诊断，不做普通前端主写入口
+
+对照 [src/interfaces/IFeeRouter.sol](src/interfaces/IFeeRouter.sol) 与 [src/Vault/FeeRouter.sol](src/Vault/FeeRouter.sol)，前端若要接 Fee 相关“配置读取”，最有用的是：
+
+| 方法 | 用途 |
+| --- | --- |
+| `isTokenSupported(token)` | 判断某 token 是否支持费路由 |
+| `getSupportedTokens()` | 拿 fee routing 支持 token 列表 |
+| `getPlatformTreasury()` / `getEcosystemVault()` | 运维/诊断展示 |
+
+但普通用户业务前端不要把 `FeeRouter` 写入口当主路径，实际业务写交易仍应走 `VaultCore` / `VaultBusinessLogic` / `AICreditsVault`。
+
+### 4.3 前端接入落地规则（源码对齐后）
+
+为了避免再次漂移，前端实现必须遵守下面这些硬规则：
+
+1. 普通用户写交易默认只从 `VaultCore`、`VaultBusinessLogic`、`AICreditsVault` 中选，不要再造一层“后端命令执行入口”。
+2. 普通订单还款只能调 `VaultCore.repay(...)`，不要绕过 VaultCore 直接调 `SettlementManager.repayAndSettle(...)`。
+3. 普通订单成交广播默认调 `VaultBusinessLogic.finalizeMatch(...)`。
+4. 当前态主读默认走 `PositionView`、`HealthView`、`RewardView`、`StatisticsView`；`DashboardView` 和 `FeeRouterView` 只做聚合补充，不替代底层专属 View。
+5. 所有用户维度的批量读取 API 都要谨慎使用；很多函数虽然是 `view`，但设计语义是 viewer/admin 批量枚举，不是浏览器普通页面主路径。
+6. 任何需要“跨页历史、全局排行、活动流、模糊搜索、审计留痕”的页面，都应走后端索引与 read model，而不是前端直接扫链。
+
+推荐与后端表的一一对应关系：
+
+| 前端页面 / 功能 | 后端读模型 / 事实表 | 消费规则 |
+| --- | --- | --- |
+| 我的仓位列表 | `user_positions_current` | 金额字段读 `amount/amountRaw`，估值字段读 `valueUsd`（或字段名 `valueValue`，但必须结合 decimals 解释） |
+| 风险页 / 清算预警 | `user_health_current` / `liquidation_records` | 门槛一律按 `blockNumber/maturityBlock`，不要用 `timestamp` |
+| 首页统计卡片 | `system_statistics_current` / `loan_flow_global_current` | 跨资产聚合值只认统一归一化后的 value |
+| 奖励中心 | `reward_user_cache` | Easy 余额/锁定/惩罚字段不要再使用 `points` 旧命名 |
+| 费用分账页 | `fee_distributions` | 事件历史与统计统一从后端聚合，不要本地重复拆账 |
+| 资产可用性页 | `assets` / `asset_whitelist_snapshots` / `price_snapshots` | “可用价格”至少要求链上可读 + publish status 正常 |
+| 模块健康页 | `module_health_snapshots` / `cache_retry_queue` | 用于运维告警与重试状态展示 |
+
+字段消费约束：
+
+1. `amount` 只表示 token base units，跨资产汇总必须读 `valueUsd`。
+2. `price` 一律读链上 price 值并结合 `assetDecimals` 解释；若底层历史字段仍叫 `priceValue`，也不要把它当成“固定 8 位”语义。
+3. 协议门槛、到期、可执行判断统一用 `openBlock / maturityBlock / closeBlock / updatedBlock / termBlocks`。
+4. 事件唯一键与活动流去重统一用 `(chainId, txHash, logIndex)`；不要在前端自造第二套 eventId。
+
+### 5. 前端消费后端 API DTO 契约
+
+本节用于锁定前端读取后端 read model API 时的字段契约。规则如下：
+
+1. 后端 DTO 字段名应优先与前端统一业务名、链上读面语义保持一致；若底层表字段不同，应在后端 adapter 层完成映射，不把库表命名直接暴露给前端。
+2. `numeric / bigint` 字段对前端统一按字符串返回，避免 JS 精度丢失。
+3. 地址统一返回 checksum 或小写字符串都可以，但同一 API 内必须保持一致。
+4. `updatedAt` 使用 ISO 8601 字符串；链上业务门槛判断仍只认 block 字段。
+
+#### 5.1 `user_positions_current` DTO
+
+用途：仓位页、资产页、用户总览页当前态。
+
+```ts
+export interface UserPositionCurrentDto {
+  chainId: number;
+  userAddress: string;
+  assetAddress: string;
+  collateralAmount: string;
+  debtAmount: string;
+  collateralValueUsd: string | null;
+  debtValueUsd: string | null;
+  isValid: boolean;
+  blockNumber: number | null;
+  version: string | null;
+  requestId: string | null;
+  seq: string | null;
+  updatedAt: string;
+}
+```
+
+前端消费约束：
+
+1. `collateralAmount` / `debtAmount` 只用于单资产展示，不应用于跨资产总值汇总。
+2. 跨资产汇总、排序、风控卡片优先读 `collateralValueUsd` / `debtValueUsd`。
+3. `isValid=false` 或 `blockNumber=null` 时，页面应展示“缓存可能陈旧”而不是继续当实时值使用。
+4. `version / requestId / seq` 主要用于诊断和并发排障，普通 UI 可不展示，但不能擅自删除。
+
+推荐 API 形状：
+
+```json
+{
+  "items": [
+    {
+      "chainId": 421614,
+      "userAddress": "0x1234...abcd",
+      "assetAddress": "0xabcd...1234",
+      "collateralAmount": "150000000",
+      "debtAmount": "50000000",
+      "collateralValueUsd": "15000000000",
+      "debtValueUsd": "5000000000",
+      "isValid": true,
+      "blockNumber": 12456789,
+      "version": "42",
+      "requestId": "position:0x1234...abcd:0xabcd...1234:42",
+      "seq": "108",
+      "updatedAt": "2026-04-01T09:30:00.000Z"
+    }
+  ]
+}
+```
+
+#### 5.2 `reward_user_cache` DTO
+
+用途：奖励中心、等级页、消费校验、用户概览。
+
+```ts
+export interface RewardUserCacheDto {
+  chainId: number;
+  userAddress: string;
+  level: number | null;
+  walletEasyBalance: string | null;
+  lockedEasy: string | null;
+  pendingPenalty: string | null;
+  eligibleLoanCount: string | null;
+  onTimeRepayCount: string | null;
+  totalEasyEarned: string | null;
+  lastUpdateBlock: number | null;
+  updatedAt: string;
+}
+```
+
+字段映射说明：
+
+1. 若底层表仍为 `penalty_debt` 一类命名，API 层统一映射为 `pendingPenalty`，不要把存储命名继续传给前端。
+2. 如果后端同时聚合了钱包余额读面，允许补充 `walletEasyBalance`；若该值直接来自 `RewardView.getUserBalanceWithMeta`，应在接口文档里明确它不是表内原生列，而是组合字段。
+3. 禁止重新引入 `points`、`walletPoints`、`availablePoints` 等旧命名。
+
+前端消费约束：
+
+1. `level`、`lockedEasy`、`pendingPenalty`、`eligibleLoanCount`、`onTimeRepayCount` 应与 `RewardView` 读面语义保持一致。
+2. “可消费余额”应由前端或后端显式派生为 `max(walletEasyBalance - pendingPenalty, 0)`；不要覆盖底层原字段。
+3. 若要展示奖励活动流，应单独请求 read model / activities API，不要塞进本 DTO。
+
+#### 5.3 blocks-only DTO
+
+blocks-only 已进入默认前端实施范围，但 DTO 必须按三层状态模型建，而不是继续暴露单一 `status` 作为业务真相。推荐最小字段集合：
+
+1. `runtime`：直接映射 `BlocksOnlyView.getBlocksOnlyOrderState(orderId).runtime`，保留 `termBlocks`、`maturityBlock`、`remainingDebt`、`canCloseTrade`、`canSettleOrLiquidate` 等运行时辅助字段。
+2. `lifecycle`：映射 `ACTIVE / REPAID / CLOSED`。
+3. `closeReason`：映射 `BLOCKS_TRADE_CLOSE / BLOCKS_MATURITY_CLOSE`，未关闭时为 `NONE`。
+4. `shortfallStatus`：当前 blocks-only 主路径固定应为 `NONE`。
+5. `collateralDisposition`：映射 `COORDINATOR_CUSTODY / RETURNED_TO_BORROWER / DELIVERED_TO_LENDER`。
+6. `hasLoss`：直接使用 view 返回值，不要再从 `remainingDebt` 或旧 `status` 推导。
+
+分页接口升级提示（2026-04）：
+
+1. `BlocksOnlyView.getBorrowerOrdersPaginated(...)` 与 `getSystemOrdersPaginated(...)` 已从“纯 runtime 列表”升级为“三层状态对象列表”。
+2. 分页列表项字段统一从 `item.runtime.*` 读取，例如 `item.runtime.orderId`、`item.runtime.status`、`item.runtime.remainingDebt`。
+3. 列表页若要判断终态，不应再只看 `item.runtime.status`，必须联合读取 `item.lifecycle + item.closeReason + item.shortfallStatus + item.collateralDisposition + item.hasLoss`。
+
+#### 5.4 推荐 API 路由
+
+```ts
+GET /api/read-model/user-positions/current?chainId=421614&user=0x...
+GET /api/read-model/reward/user-cache?chainId=421614&user=0x...
+```
+
+返回规范：
+
+1. 列表接口返回 `items + nextCursor`。
+2. 单条详情接口直接返回 DTO 对象，找不到返回 `404`。
+3. 若数据来自缓存层，允许附带 `meta: { source: "cache" | "indexer", updatedAt: string }`，但不得覆盖 DTO 主字段语义。
+
 ## 📞 合约调用示例
+
+### 0. 最终版返回约定
+
+- 链上 `view`/`WithMeta` 接口：前端应用层统一封装为 `{ data, meta }`。
+- `meta` 统一字段：`isValid`、`blockNumber`，如合约还返回 `version / requestId / seq`，继续放在 `meta` 下。
+- 后端 read-model DTO：继续保持表字段平铺，不额外包一层 `data/meta`，避免 API 二次抽象。
+- 若链上 ABI 使用 tuple 返回，前端应在**解包后立即重命名**为最终版字段，不要把 `cacheBlock`、`summary[0]` 这类中间态继续向上传播。
+
+```ts
+type ChainReadMeta = {
+  isValid: boolean;
+  blockNumber: number | null;
+  version?: string | null;
+  requestId?: string | null;
+  seq?: string | null;
+};
+
+type ChainReadResult<T> = {
+  data: T;
+  meta: ChainReadMeta;
+};
+```
 
 ### 1. 读取数据
 
 ```typescript
-// 获取 Vault 信息
-async function getVaultInfo() {
-  const vaultCore = await contractManager.getVaultCore();
-  const info = await vaultCore.getVaultInfo();
-  return info;
+type ChainReadMeta = {
+  isValid: boolean;
+  blockNumber: bigint | null;
+  version?: bigint | null;
+  requestId?: string | null;
+  seq?: bigint | null;
+};
+
+type ChainReadResult<T> = {
+  data: T;
+  meta: ChainReadMeta;
+};
+
+// 获取协议统计（首页卡片推荐）
+async function readProtocolStatistics(): Promise<
+  ChainReadResult<{
+    totalUsers: bigint;
+    activeUsers: bigint;
+    totalCollateral: bigint;
+    totalDebt: bigint;
+    lastUpdateBlock: bigint;
+  }>
+> {
+  const statisticsView = await contractManager.getStatisticsView();
+  const [stats, isValid, blockNumber] =
+    await statisticsView.getGlobalStatisticsWithMeta();
+  return {
+    data: stats,
+    meta: { isValid, blockNumber },
+  };
 }
 
 // 获取用户余额（RewardView）
-async function getUserBalance(userAddress: string) {
+async function readUserEasyBalance(
+  userAddress: string,
+): Promise<ChainReadResult<{ balance: bigint }>> {
   const rewardView = await contractManager.getRewardView();
-  const [balance] = await rewardView.getUserBalanceWithMeta(userAddress);
-  return balance;
+  const [balance, blockNumber, isValid] =
+    await rewardView.getUserBalanceWithMeta(userAddress);
+  return {
+    data: { balance },
+    meta: { isValid, blockNumber },
+  };
 }
 
-// 获取健康因子（UserView）
-async function getHealthFactor(userAddress: string) {
-  const userView = await contractManager.getUserView();
-  const [healthFactor] = await userView.getHealthFactor(userAddress);
-  return healthFactor;
-}
-
-// ===== 新增：Reward 只读统一从 RewardView 查询 =====
-import { RewardView__factory } from "@/types/factories";
-
-async function getRewardView(provider: ethers.Provider, address: string) {
-  return RewardView__factory.connect(address, provider);
+// 获取健康因子（HealthView 权威入口）
+async function readUserHealthFactor(
+  userAddress: string,
+): Promise<ChainReadResult<{ healthFactor: bigint }>> {
+  const healthView = await contractManager.getHealthView();
+  const [healthFactor, isValid, blockNumber] =
+    await healthView.getUserHealthFactorWithMeta(userAddress);
+  return {
+    data: { healthFactor },
+    meta: { isValid, blockNumber },
+  };
 }
 
 // 查询用户汇总（唯一推荐入口：RewardView）
-async function getUserRewardSummary(
-  viewAddr: string,
-  provider: ethers.Provider,
+async function readUserRewardSummary(
   user: string,
-) {
-  const rv = await getRewardView(provider, viewAddr);
-  return rv.getUserRewardSummaryWithMeta(user);
+): Promise<
+  ChainReadResult<{
+    totalBurned: bigint;
+    pendingPenalty: bigint;
+    level: number;
+    lastActivity: bigint;
+  }>
+> {
+  const rewardView = await contractManager.getRewardView();
+  const [totalBurned, pendingPenalty, level, lastActivity, blockNumber, isValid] =
+    await rewardView.getUserRewardSummaryWithMeta(user);
+  return {
+    data: {
+      totalBurned,
+      pendingPenalty,
+      level,
+      lastActivity,
+    },
+    meta: { isValid, blockNumber },
+  };
 }
 
-// 查询最近活动（block 口径过滤）
-async function getUserRecentActivities(
-  viewAddr: string,
-  provider: ethers.Provider,
-  user: string,
-  fromBlock: bigint,
-  toBlock: bigint,
-  limit: bigint,
-) {
-  const rv = await getRewardView(provider, viewAddr);
-  return rv.getUserRecentActivitiesWithMeta(user, fromBlock, toBlock, limit);
-}
-
-// 查询用户消费记录
-async function getUserEasySpent(
-  viewAddr: string,
-  provider: ethers.Provider,
-  user: string,
-) {
-  const rv = await getRewardView(provider, viewAddr);
-  return rv.getUserEasySpentWithMeta(user);
+// 查询历史活动流
+// 推荐：优先调用后端 read model API，而不是在浏览器中自己分页扫链。
+async function listUserActivities(user: string) {
+  const response = await fetch(`/api/read-model/reward-activities?user=${user}`);
+  return response.json();
 }
 ```
 
@@ -633,14 +1200,19 @@ async function withdraw(asset: string, amount: bigint) {
 // 借款（SSOT：撮合/订单化路径）
 //
 // ⚠️ 当前架构已**移除** `VaultCore.borrow(asset, amount)`（直达账本会绕开 orderId/费用/Reward 编排）。
-// 借款必须由撮合/keeper 走（推荐：订单化撮合主路径），并在内部完成债务账本写入与订单创建（orderId 为 SSOT，由 ORDER_ENGINE 生成/管理）。
+// 借款不是用户直接点 `VaultCore.borrow(...)` 的单入口模式，而是“意向签名 + 公开撮合入口”模式。
+// 当前目标架构里由前端自己调 `VaultBusinessLogic.finalizeMatch(...)`；
+// 前端不仅收 borrower 签名，还要拿 lender 签名、确认 reserve、组装参数并自己广播成交交易。
+// 链上权限模型也支持这一点：任何拿到完整 borrower/lender 签名、reserve 与匹配参数的一侧都可以广播这笔成交交易。
 // 资金链与内部调用串联请以 Funds-Flow 文档为唯一权威（本集成文档不复述）：
 //   `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`
 //
-// 前端通常只负责：
+// 前端至少需要负责：
 // - borrower/lenderSigner 的意向签名（EIP-712）
+// - reserve 检查与匹配参数组装
 // - 展示撮合结果与 orderId
 // - 还款时携带 orderId 调用 `VaultCore.repay(orderId, ...)`
+// - 直接调用 finalizeMatch 广播成交交易。
 
 /**
  * ===========================
@@ -727,9 +1299,11 @@ async function withdraw(asset: string, amount: bigint) {
 //   [typeHashLend, lendIntentBlocks.lenderSigner, lendIntentBlocks.asset, lendIntentBlocks.amount, lendIntentBlocks.minTermBlocks, lendIntentBlocks.maxTermBlocks, lendIntentBlocks.minRateBps, lendIntentBlocks.expireAt, lendIntentBlocks.salt]
 // ));
 
-// 还款/结算（legacy / 通用订单入口：SettlementManager 由 VaultCore 代为转入并调用）
+// 还款/结算（普通用户入口是 VaultCore；SettlementManager 负责内部结算桥接）
 async function repay(orderId: bigint, debtAsset: string, amount: bigint) {
-  // 注意：repay 的 approve spender 是 VaultCore（VaultCore 会转入结算入口处理；资金链细节见 Funds-Flow SSOT）
+  // 注意：repay 的 approve spender 是 VaultCore。
+  // 用户不要直接调用 SettlementManager.repayAndSettle(...)；
+  // 正确路径是 VaultCore.repay(...) 先把资金转入 SettlementManager，再由 SettlementManager 完成 orderId 校验、账本清算与可能的抵押释放。
   // await ERC20(debtAsset).approve(vaultCoreAddr, amount)
   const vaultCore = await contractManager.getVaultCore();
   const tx = await vaultCore.repay(orderId, debtAsset, amount);
@@ -737,24 +1311,30 @@ async function repay(orderId: bigint, debtAsset: string, amount: bigint) {
   return tx;
 }
 
-// 清算/处置（keeper/机器人入口，legacy / 通用订单 SSOT）
-async function settleOrLiquidate(orderId: bigint) {
-  // 这个 helper 只适用于 legacy / 通用 ORDER_ENGINE 订单。
-  // 对 blocks-only 订单，keeper 默认入口应改为
-  // BlocksOnlyCoordinator.settleOrLiquidateBlocks(orderId)。
-  // 约束：调用者必须具备 ACTION_LIQUIDATE 权限；且 keeper/liquidator 必须与 borrower 不同（否则会因权限/接收者约束而被拒绝）
+// 清算/处置（keeper/机器人入口，通用订单 SSOT）
+async function settleOrLiquidate(
+  orderId: bigint,
+  provider: ethers.Provider,
+  keeperSigner: ethers.Signer,
+  registryAddress: string,
+  accessControlManagerAddress: string,
+) {
+  // 这个 helper 只适用于通用 ORDER_ENGINE 订单。
+  // 这不是普通借款用户“还款”入口，而是具备 ActionKeys.ACTION_LIQUIDATE 权限的一侧在到期或风险触发时执行的 keeper/运营入口。
+  // 约束：调用者必须具备 ActionKeys.ACTION_LIQUIDATE 权限；且 keeper/liquidator 必须与 borrower 不同（否则会因权限/接收者约束而被拒绝）
   //
   // ActionKey（与 src/constants/ActionKeys.sol 对齐）：
-  //   bytes32 ACTION_LIQUIDATE = keccak256("LIQUIDATE")
+  //   bytes32 actionKey = ActionKeys.ACTION_LIQUIDATE
   //
   // 推荐做法：先检查 role，再调用入口，避免链上无意义 revert。
-  const provider = contractManager.provider; // 你们的 provider/Signer 管理方式不同的话，请按项目实际改造
-  const keeperSigner = contractManager.signer; // keeper 钱包对应的 signer（机器人/多签执行器）
-
   const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes("LIQUIDATE"));
 
   // 通过 Registry 拿 SettlementManager 地址（避免写死地址）
-  const registry = await contractManager.getRegistry();
+  const registry = new ethers.Contract(
+    registryAddress,
+    ["function getModule(bytes32 key) external view returns (address)"],
+    provider,
+  );
   const settlementManagerAddr: string = await registry.getModule(
     ethers.keccak256(ethers.toUtf8Bytes("SETTLEMENT_MANAGER")),
   );
@@ -762,14 +1342,18 @@ async function settleOrLiquidate(orderId: bigint) {
     throw new Error("Registry missing SETTLEMENT_MANAGER");
   }
 
-  const acm = await contractManager.getAccessControlManager();
+  const acm = new ethers.Contract(
+    accessControlManagerAddress,
+    ["function hasRole(bytes32 role, address account) external view returns (bool)"],
+    provider,
+  );
   const has = await acm.hasRole(
     ACTION_LIQUIDATE,
     await keeperSigner.getAddress(),
   );
   if (!has) {
     throw new Error(
-      `MissingRole(): keeper lacks ACTION_LIQUIDATE (${ACTION_LIQUIDATE}). ` +
+      `MissingRole(): keeper lacks ActionKeys.ACTION_LIQUIDATE (${ACTION_LIQUIDATE}). ` +
         `Ask admin to grant this role to keeper.`,
     );
   }
@@ -791,23 +1375,33 @@ async function settleOrLiquidate(orderId: bigint) {
 ### 3. 事件监听
 
 ```typescript
-// 监听存款事件
-async function listenToDepositEvents() {
-  const vaultCore = await contractManager.getVaultCore();
+import { AbiCoder, Interface, keccak256, toUtf8Bytes } from "ethers";
 
-  vaultCore.on("Deposit", (user, amount, blockNumber) => {
-    console.log(`User ${user} deposited ${amount} at block ${blockNumber}`);
-    // 更新 UI
-  });
-}
+const dataPushIface = new Interface([
+  "event DataPushed(bytes32 indexed dataTypeHash, bytes payload)",
+]);
 
-// 监听借款事件
-async function listenToBorrowEvents() {
-  const vaultCore = await contractManager.getVaultCore();
+async function listenToRewardEvents(provider: any, currentUser: string) {
+  const rewardEarnStateHash = keccak256(toUtf8Bytes("REWARD_EARN_STATE_UPDATED"));
+  const topic0 = dataPushIface.getEvent("DataPushed").topicHash;
 
-  vaultCore.on("Borrow", (user, amount, blockNumber) => {
-    console.log(`User ${user} borrowed ${amount} at block ${blockNumber}`);
-    // 更新 UI
+  provider.on({ topics: [topic0, rewardEarnStateHash] }, (log: any) => {
+    const parsed = dataPushIface.parseLog(log);
+    const [user, lockedEasy, eligibleLoanCount, onTimeRepayCount, blockNumber] =
+      AbiCoder.defaultAbiCoder().decode(
+        ["address", "uint256", "uint256", "uint256", "uint256"],
+        parsed.args.payload,
+      );
+
+    if (user.toLowerCase() !== currentUser.toLowerCase()) return;
+
+    console.log("reward earn state updated", {
+      user,
+      lockedEasy,
+      eligibleLoanCount,
+      onTimeRepayCount,
+      blockNumber,
+    });
   });
 }
 ```
@@ -816,50 +1410,42 @@ async function listenToBorrowEvents() {
 
 ### 1. 使用我们的测试脚本
 
-```bash
-# 运行集成测试
-npm run script test integration
+所有集成测试和系统验证均已整合至 Live Tests（例如 `test:live:platform-baseline`，`test:live:reward-baseline` 等）。
 
-# 测试 Oracle 系统
-npm run script test oracle-system
-
-# 运行健康因子统计
-npm run script test health-factor-stats
-```
-
-### 2. 创建测试账户
+请务必查阅 `docs/Usage-Guide/runbook/Test-Live-Local.md` 和 `Test-Live-BNB.md` 了解最新测试套件规范：
 
 ```bash
-# 创建测试账户
-npm run script test create-accounts
-
-# 查看测试账户使用示例
-npm run script test test-accounts-usage
+# 执行 BNB 测试网全流程 Baseline (配合 Autonode 或单边执行)
+pnpm run test:live:platform-baseline:bnb-testnet
+pnpm run test:live:reward-baseline:bnb-testnet
 ```
 
-### 3. 前端测试
+### 2. 前端测试
 
 ```typescript
 // src/tests/contracts.test.ts
-import { ContractManager } from "../utils/contracts";
+import { RegistryAwareContractManager } from "../utils/contracts";
 
 describe("Contract Integration Tests", () => {
-  let contractManager: ContractManager;
+  let contractManager: RegistryAwareContractManager;
 
   beforeEach(async () => {
-    contractManager = new ContractManager("arbitrumSepolia");
+    contractManager = new RegistryAwareContractManager("arbitrumSepolia");
     await contractManager.connectWallet();
   });
 
-  test("should connect to VaultCore contract", async () => {
-    const vaultCore = await contractManager.getVaultCore();
-    expect(vaultCore).toBeDefined();
+  test("should resolve statistics view from registry", async () => {
+    const statisticsView = await contractManager.getStatisticsView();
+    expect(statisticsView).toBeDefined();
   });
 
-  test("should get vault info", async () => {
-    const vaultCore = await contractManager.getVaultCore();
-    const info = await vaultCore.getVaultInfo();
-    expect(info).toBeDefined();
+  test("should get protocol statistics snapshot", async () => {
+    const statisticsView = await contractManager.getStatisticsView();
+    const [stats, isValid, blockNumber] =
+      await statisticsView.getGlobalStatisticsWithMeta();
+    expect(stats).toBeDefined();
+    expect(typeof isValid).toBe("boolean");
+    expect(blockNumber).toBeDefined();
   });
 });
 ```
@@ -868,34 +1454,24 @@ describe("Contract Integration Tests", () => {
 
 ### 1. 主网部署
 
-```bash
-# 部署到 Arbitrum 主网
-npm run script deploy arbitrum
-
-# 验证合约
-npm run script utils verification-utils
-```
+请参考主网/测试网的专门流程。所有 `pnpm` 发版和验证均合并至 Hardhat 流程并由 CI 接管。
 
 ### 2. 前端生产配置
 
 ```typescript
 // src/config/production.ts
+import { getAddressBook } from "./contracts";
+
 export const PRODUCTION_CONFIG = {
   network: "arbitrum",
   rpcUrl: process.env.REACT_APP_ARBITRUM_RPC_URL,
-  contracts: CONTRACT_ADDRESSES.arbitrum,
+  addresses: getAddressBook("arbitrum").addresses,
 };
 ```
 
 ### 3. 监控和日志
 
-```bash
-# 运行性能监控
-npm run script utils performance-monitor
-
-# 运行监控工具
-npm run script utils monitoring-utils
-```
+已更新至新基础设施（如 Graph/Subquery 或后端 SaaS Read model 同步）。相关事件同步链路参阅 `manifest.json` 与 `events.md`。
 
 ## 🔍 模块键解码与前端配合
 
@@ -1005,7 +1581,7 @@ const vaultCoreAddr = await registry.getModule(KEY_VAULT_CORE);
 - 视图与只读入口：
   - `REWARD_VIEW`：统一 Reward 只读与 DataPush 入口，查询 0 gas；
   - `VAULT_CORE`：后续如需“由 Core 解析 View 地址”的路径，可通过 `KEY_VAULT_CORE → VaultCore.viewContractAddrVar()`；
-  - `VAULT_STATISTICS (KEY_STATS)`：迁移阶段指向 `StatisticsView`（只读聚合）。不要使用 `STATISTICS_VIEW` 作为注册键（非 canonical）。
+  - `VAULT_STATISTICS (KEY_STATS)`：当前指向 `StatisticsView`（只读聚合）。不要使用 `STATISTICS_VIEW` 作为注册键（非 canonical）。
 - 多环境与热更新：
   - 首屏可读取 `frontend-config/contracts-*.ts` 作为初值，随后立即用 Registry 解析结果更新状态；
   - 监听 `ModuleAddressUpdated` 保持前端地址热更新；
@@ -1383,14 +1959,14 @@ async function estimateGas(
 
 ```typescript
 // 使用 React Context 管理合约状态
-const ContractContext = React.createContext<ContractManager | null>(null);
+const ContractContext = React.createContext<RegistryAwareContractManager | null>(null);
 
 export function ContractProvider({ children }: { children: React.ReactNode }) {
-  const [contractManager, setContractManager] = useState<ContractManager | null>(null);
+  const [contractManager, setContractManager] = useState<RegistryAwareContractManager | null>(null);
 
   useEffect(() => {
     const initContracts = async () => {
-      const manager = new ContractManager('arbitrumSepolia');
+      const manager = new RegistryAwareContractManager('arbitrumSepolia');
       await manager.connectWallet();
       setContractManager(manager);
     };
@@ -1438,30 +2014,31 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
 
 ## 🔄 VaultRouter 协调器接口（简化版 2025-08）
 
-> ⚠️ 重要说明：根据 `docs/Architecture-Guide.md` 及视图模块拆分方案，从 2025-08 起 `VaultRouter` 不再承担任何读操作，也不再缓存业务数据。所有查询均由 `UserView`、`SystemView`、`AccessControlView`、`ViewCache` 等子模块提供。前端集成应遵循以下约定：
+> ⚠️ 重要说明：根据 `docs/Architecture-Guide.md` 及视图模块拆分方案，从 2025-08 起 `VaultRouter` 不再承担任何读操作，也不再缓存业务数据。当前前端查询必须优先对齐 **专属 View + ActionKeys + Registry SSOT**：普通钱包页默认走 `PositionView`、`HealthView`、`StatisticsView`、`RewardView`；`UserView`、`DashboardView`、`FeeRouterView`、`LoanFlowView`、`LiquidatorView` 更偏聚合/诊断；`SystemView`、`ValuationOracleView`、`ModuleHealthView` 则默认属于后台或运维读面。blocks-only 默认读面为 `BlocksOnlyView.getBlocksOnlyOrderState(...)` 与分页三层状态对象。
 
 ### 1. 只写不读
 
 - `VaultRouter` 仅对外暴露 **4 个写入/路由函数**，全部为 `non-view` 调用：
   | 函数 | 调用方(合约) | 说明 |
   | --- | --- | --- |
-  | `processUserOperation(user, operationType, asset, amount, blockNumber)` | 前端 → 业务合约（转发） | 用户发起的 DEPOSIT / BORROW / REPAY / WITHDRAW 操作由前端直接调用业务模块；同时业务模块应调用本函数写链上事件，供离线索引与监听。 |
+  | `processUserOperation(user, operationType, asset, amount, blockNumber)` | 兼容路由层 | 仅保留给兼容脚本/旧入口。新前端不要再把它当主写入口；正常用户写路径应直接调用 `VaultCore`、`SettlementManager` 等明确入口。 |
   | `pushUserPositionUpdate(user, asset, collateral, debt)` | CollateralManager / LendingEngine | 业务模块更新完抵押/债务后推送最新快照；前端 **不会** 直接调用。 |
   | `HealthView.pushRiskStatus(user, hfBps, minHFBps, under, blockNumber)` | LendingEngine / LiquidationRiskManager 等 | 健康因子/风险状态推送；前端不调用（best-effort + 链下重试）。 |
-  | `pushAssetStatsUpdate(asset, totalCollateral, totalDebt, price)` | VaultStatistics | 资产聚合数据推送；前端不调用。 |
+  | `pushAssetStatsUpdate(asset, totalCollateral, totalDebt, price)` | StatisticsView / 推送编排模块 | 资产聚合数据推送；前端不调用。 |
 
 ### 2. 前端应调用的查询接口
 
-- **用户数据**：`UserView` ⇒ `getUserPositionWithMeta`, `getHealthFactorWithMeta`, `getUserStats`, `previewBorrow/Deposit/...` 等。
+- **普通钱包主读**：`PositionView`、`HealthView`、`RewardView`、`StatisticsView`。
+- **用户聚合补充**：`UserView` / `DashboardView` 只作为聚合门面或轻量页补充，不替代专属 SSOT 读面。
 - **系统数据（更新）**：
-  - `ValuationOracleView` ⇒ `getAssetPrice/getAssetPrices/isPriceValid`（价格/预言机，返回 [price, blockNumber]）
-  - `HealthView` ⇒ `getUserHealthFactorWithMeta/batchGetHealthFactors`；系统健康/降级读取由 `HealthView` 提供
+  - `ValuationOracleView` ⇒ `getAssetPrice/getAssetPrices/isPriceValid`，但默认要求 `ActionKeys.ACTION_VIEW_PRICE_DATA`
+  - `HealthView` ⇒ `getUserHealthFactorWithMeta/batchGetHealthFactors`；其中 batch/system 类接口仍受相应 role gate 约束
   - `SystemRiskView` ⇒ `getLiquidationThreshold/getMinHealthFactor`（system-only 风险参数；**公开只读**）
   - `StatisticsView` ⇒ 全局统计聚合
   - `BatchView` ⇒ `batchGetAssetPrices/batchGetModuleHealth` 等批量查询
   - `RegistryView` ⇒ 模块键枚举/反查/分页
-  - `SystemView` ⇒ **系统级只读聚合门面（推荐可选）**：用于“一次性系统总览查询/兼容旧调用”。对性能敏感或需要更细粒度数据时，仍建议直接调用上述专属 View。
-- **清算数据（更新）**：`LiquidatorView` ⇒ `getLiquidatorProfitView`, `getGlobalLiquidationView`, `batchGetLiquidatorProfitViews`, `getLiquidatorLeaderboard`, `getLiquidatorTempDebt`, `getLiquidatorProfitRate`。
+  - `SystemView` ⇒ **系统级路由/聚合门面（仅后台或只读网关默认使用）**：地址真相仍然只认 `Registry` / `ModuleKeys`。
+- **清算/诊断数据（更新）**：`LiquidatorView` ⇒ 用户维度统计可走 Scheme U self-read；排行榜、系统快照、估值等接口按 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`、`ActionKeys.ACTION_VIEW_LIQUIDATION_DATA`、`ActionKeys.ACTION_VIEW_RISK_DATA` 分层。
 - **权限数据**：`AccessControlView` ⇒ `getUserPermissionWithMeta`, `getUserPermissionLevelWithMeta` 等。
 - **系统级快照(可选)**：`ViewCache` ⇒ `getSystemStatus` / `batchGetSystemStatus`。
   （用户维度缓存已并入 `UserView`，前端无需单独调用 ViewCache 获取用户缓存。）
@@ -1487,25 +2064,25 @@ export function ContractProvider({ children }: { children: React.ReactNode }) {
 
 #### 2.1.2 权限（Read Gate）：前端必须按 `VIEW_*_DATA` 口径设计调用链
 
-多数 View 读接口是 **role-gated** 的（典型错误为 `MissingRole()`）。你有两种可落地的集成方案：
+多数 View 读接口是 **role-gated** 的（典型错误为 `MissingRole()`），但这不应被误解成“产品当前态默认回退为后端主读”。当前正确分工如下：
 
-- **方案 A（推荐）：前端 → 后端 Read Service（持有角色）→ 链上 View**
-  - **优点**：用户无需链上授予权限；可统一做缓存、限流、批量合并、错误归一化；适配隐私/运维接口
-  - **缺点**：需要额外的后端服务与密钥管理
-  - **适用**：生产环境默认选项
+- **默认路径：前端直连链上 View**
+  - **适用**：普通用户当前态、自查页、单页系统当前态。
+  - **要求**：优先选用 self-read 或 public 的专属 View 方法，并按 `isValid/blockNumber/version` 做前端降级。
+  - **说明**：若某个方法本身带 `VIEW_*_DATA` gate，而当前钱包不具备权限，前端应改用同职责下更适合钱包直连的专属读面或降级展示，不要因此把整条主读路径重新改成 backend projection。
 
-- **方案 B：前端直连链上 View（为每个用户授予角色）**
-  - **优点**：去中心化/无后端依赖
-  - **缺点**：需要为每个用户地址单独 grant；用户换钱包/多端同步成本高；不适合大规模用户
-  - **适用**：内部工具、少量白名单用户
+- **补充路径：后端 View Read Gateway**
+  - **适用**：system-level 读面、跨用户读、admin/ops 页面、需要持有专门 read role 的只读代理。
+  - **边界**：这里只是“后端代发 `eth_call` 到链上 View”，不是 projection 主读，也不是把链下缓存重新定义成当前态真相。
+  - **限制**：只在权限、限流、审计或 SSR 明确需要时使用，不能覆盖普通用户当前态主路径。
 
 #### 2.1.2.1 权限 Preflight（可复制；推荐前端/后端都实现）
 
-目标：在发起大量 `eth_call` 之前，先判断“当前调用方（钱包或后端 Read Service）是否具备读取能力”，并把“权限缺失/缓存未就绪”的状态以产品语义展示给用户。
+目标：在发起大量 `eth_call` 之前，先判断“当前调用方（钱包或只读网关）是否具备读取能力”，并把“权限缺失/缓存未就绪”的状态以产品语义展示给用户。
 
 **推荐数据源：`AccessControlView`（权限缓存）**
 
-- `AccessControlView` 提供 user-dim 权限缓存读取（Scheme U：self read 允许；非 self 需要 `VIEW_USER_DATA/ADMIN`）。
+- `AccessControlView` 提供 user-dim 权限缓存读取（Scheme U：self read 允许；非 self 需要 `ActionKeys.ACTION_VIEW_USER_DATA` 或 `ActionKeys.ACTION_ADMIN`）。
 - 返回值包含 `isValid/blockNumber`（缓存 TTL 以 `ViewConstants.CACHE_DURATION` 为准），前端需按 meta 语义降级处理。
 
 可复制代码（ethers v6 + TypeChain）：
@@ -1527,7 +2104,7 @@ export async function preflightPermissions(
   );
 
   // 只检查“当前调用方自己的权限位”：self-read 永远允许，不会因为 Scheme U 被拒绝。
-  const [canViewUser, userMetaValid] = await Promise.all([
+  const [canViewUser, canViewSystem] = await Promise.all([
     acv.getUserPermissionWithMeta(caller, ActionKeys.ACTION_VIEW_USER_DATA),
     acv.getUserPermissionWithMeta(caller, ActionKeys.ACTION_VIEW_SYSTEM_DATA),
   ]);
@@ -1536,11 +2113,10 @@ export async function preflightPermissions(
   return {
     caller,
     canViewUserData: canViewUser[0],
-    canViewSystemData: userMetaValid[0],
-    // 注意：tuple 为 (hasPermission, isValid, blockNumber)
+    canViewSystemData: canViewSystem[0],
     meta: {
       userData: { isValid: canViewUser[1], blockNumber: canViewUser[2] },
-      systemData: { isValid: userMetaValid[1], blockNumber: userMetaValid[2] },
+      systemData: { isValid: canViewSystem[1], blockNumber: canViewSystem[2] },
     },
   };
 }
@@ -1549,7 +2125,7 @@ export async function preflightPermissions(
 > 实操建议：
 >
 > - 若 `AccessControlView` meta `isValid=false`：先提示“权限缓存未就绪”，并在真正调用 View 时依然捕获 `MissingRole()` 做兜底。
-> - 生产推荐走“方案 A（后端 Read Service）”：前端 preflight 只用于 UI 告知“当前钱包直连是否可用”，避免误导。
+> - 若某个页面必须经过只读网关，应在产品文案里明确“这是链上 View 代理读取，不是后端 projection 主读”。
 
 #### 2.1.2.2 价格 Preflight（新增，前端必须实现）
 
@@ -1568,12 +2144,15 @@ export async function preflightPermissions(
 
 前端需要明确知道（并在 UI 中处理）以下只读权限键（见 `src/constants/ActionKeys.sol`）：
 
-- `VIEW_USER_DATA`：用户私域（Position/User/Preview/RiskView（user-scope）等；Scheme U）
-- `VIEW_RISK_DATA`：风险/健康的**系统级/运维侧**读权限（HealthView system APIs、Liquidation/Risk 运维视图等）
-- `VIEW_PRICE_DATA`：价格（ValuationOracleView/BatchView prices 等）
-- `VIEW_SYSTEM_DATA`：系统级信息（SystemView/RegistryView/RewardView system stats 等）
-  > 说明：`SystemRiskView` 的 system-only 风险参数默认公开只读（不要求 `VIEW_RISK_DATA`）。
-  > 说明：`RewardView.getSystemRewardStats*` 为 system-only 读取，需 `VIEW_SYSTEM_DATA` 或 `ACTION_ADMIN`。
+- `ActionKeys.ACTION_VIEW_USER_DATA`：用户私域（PositionView/UserView/PreviewView/RiskView 的 user-scope 读取等；Scheme U）
+- `ActionKeys.ACTION_VIEW_RISK_DATA`：风险/健康的系统级或运维侧读取（如 PositionView 估值口径、部分 LiquidatorView / RiskView 读取）
+- `ActionKeys.ACTION_VIEW_PRICE_DATA`：价格与估值预检（ValuationOracleView/BatchView 价格类接口、DashboardView 的价格拆分读取等）
+- `ActionKeys.ACTION_VIEW_SYSTEM_DATA`：系统级信息（SystemView、RewardView system stats、LoanFlowView system totals 等）
+- `ActionKeys.ACTION_VIEW_LIQUIDATION_DATA`：清算估值和清算专门视图（LiquidatorView 的 liquidation-scoped 读取）
+- `ActionKeys.ACTION_VIEW_SYSTEM_STATUS`：模块健康和系统状态观测（ModuleHealthView 等）
+  > 说明：`RegistryView` 当前是 public read，不依赖 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`。
+  > 说明：`SystemRiskView` 的 system-only 风险参数当前公开只读，不要求 `ActionKeys.ACTION_VIEW_RISK_DATA`。
+  > 说明：`RewardView.getSystemRewardStats*` 为 system-only 读取，需 `ActionKeys.ACTION_VIEW_SYSTEM_DATA` 或 `ActionKeys.ACTION_ADMIN`。
 
 > **强制要求**：同一类数据，无论走“聚合器入口”还是“专属 View 入口”，权限行为必须一致（见 `scripts/e2e/e2e-localhost-batch-aggregators-acceptance.ts` 的验收口径）。
 
@@ -1605,7 +2184,7 @@ export async function preflightPermissions(
 
 > 说明：`PreviewView.preview*` 已透传 `PositionView` 的 `isValid/blockNumber/version`，请与 PositionView 的 meta 语义一致处理。
 >
-> 必须授权：`PreviewView` 合约地址在部署时**必须**授予 `ACTION_VIEW_USER_DATA`，用于其内部调用 `PositionView.getUserPositionWithMeta`。
+> 必须授权：`PreviewView` 合约地址在部署时**必须**授予 `ActionKeys.ACTION_VIEW_USER_DATA`，用于其内部调用 `PositionView.getUserPositionWithMeta`。
 > 否则外部调用 `preview*` 会因内部读权限失败而回滚（`MissingRole()`）。
 
 > TTL/过期窗口以链上 `ViewConstants.CACHE_DURATION` 为准（当前为 5 minutes）；前端不要自行硬编码另一个 TTL。
@@ -1625,7 +2204,7 @@ export async function preflightPermissions(
   - 若失败原因包含 `StatisticsView__OutOfOrderSeq`：通常是上游乱序或并发 bug，优先告警人工处理（默认不自动重试）。
 - **权限要求（部署必须配置）**：
   - 重试服务地址需要具备 `ActionKeys.ACTION_VIEW_PUSH`（用于调用 `StatisticsPushManager.retry*`）
-  - `StatisticsPushManager` 合约地址需要具备 `ActionKeys.ACTION_VIEW_PRICE_DATA`（用于读取 `PositionView` 的 USD-8 估值快照；B+ 链路以 USD-8 作为 value unit SSOT）
+  - `StatisticsPushManager` 合约地址需要具备 `ActionKeys.ACTION_VIEW_PRICE_DATA`（用于读取 `PositionView` 的估值快照；B+ 链路以统一 value unit SSOT 作为估值基准）
 
 > 实施清单与验收脚本建议见：  
 > `docs/Usage-Guide/StatisticsView-Strict-B-Push-Pipeline-Implementation-Checklist.md`
@@ -1646,86 +2225,223 @@ export async function preflightPermissions(
 > ⚠️ ABI 强约束：下方列出的 struct 字段顺序即 ABI tuple 顺序。未来前端必须使用最新 ABI/TypeChain 重新生成类型；
 > 严禁按旧字段顺序做手工 `abi.decode`/跨语言解码。
 
-**UserView（用户维度）**
+**View 模块清单（按实际合约补全，2026-04-01）**
 
-- `getUserPosition(user, asset)` → `(collateral, debt, isValid, blockNumber, version)`
-- `getUserPositionService(user, asset)` → `(collateral, debt, isValid, blockNumber, version)`
-- `getUserCollateral(user, asset)` → `(collateral, isValid, blockNumber, version)`
-- `getUserDebt(user, asset)` → `(debt, isValid, blockNumber, version)`
-- `getUserTotalCollateral(user)` → `(totalCollateral, isValid, blockNumber, version, seq)`
-- `getUserTotalDebt(user)` → `(totalDebt, isValid, blockNumber, version, seq)`
-- `getHealthFactor(user)` → `(healthFactor, isValid, blockNumber)`
-- `getUserHealthFactor(user)` → `(healthFactor, isValid, blockNumber)`
-- `getUserStats(user, asset)` → `(stats, isValid, blockNumber)`
-- `previewBorrow/previewDeposit/previewRepay/previewWithdraw(...)` →
-  `(newHF, newLTV, maxBorrowable, positionIsValid, positionBlockNumber, positionVersion)`
+以下清单按当前仓库 `src/Vault/view/modules/` 的实际 View 合约整理。目标不是穷举每一个 helper，而是锁定前端真正需要知道的权威入口、典型接口、meta 字段和容易写错的点。
 
-**DashboardView（用户聚合）**
+**1) PositionView（仓位 SSOT）**
 
-- `getUserOverview(user, assets[])` →
-  `(overview, positionValidFlags[], positionBlockNumbers[], positionVersions[], healthBlockNumber)`
-- `getUserAssetBreakdown(user, assets[])` → `UserAssetOverviewMeta[]`（每项包含 `positionIsValid/positionBlockNumber/positionVersion`）
+- 文件：`src/Vault/view/modules/PositionView.sol`
+- 典型接口：
+  - `getUserPositionWithMeta(user, asset)` → `(collateral, debt, isValid, blockNumber, version)`
+  - `getUserCollateral(user, asset)` / `getUserDebt(user, asset)`
+  - `batchGetUserPositions(...)`
+- 前端用途：仓位页、资产持仓卡片、抵押/债务当前态。
+- 必须理解：`blockNumber` 是快照块；`version` 是并发版本；`isValid=false` 代表缓存不可直接当实时值用。
 
-**CacheOptimizedView（批量用户维度）**
+**2) HealthView（健康因子 SSOT）**
 
-- `batchGetUserPositions(users[], assets[])` → `UserPositionItemMeta[]`
-- `getUserSummary(user, assets[])` →
-  `(summary, positionValidFlags[], positionBlockNumbers[], positionVersions[], healthBlockNumber)`
+- 文件：`src/Vault/view/modules/HealthView.sol`
+- 典型接口：
+  - `getUserHealthFactorWithMeta(user)` → `(healthFactor, isValid, blockNumber)`
+  - `batchGetHealthFactors(users[])`
+- 前端用途：健康因子、风险提示、清算预警。
+- 必须理解：`healthFactor` 口径是 bps，`10_000 = 100%`，不是 18 decimals。
 
-**RiskView（用户维度风险评估）**
+**3) UserView（用户聚合入口）**
 
-- `getUserRiskAssessment(user)` → `RiskAssessmentWithMeta`
-- `batchGetRiskAssessments(users[])` → `RiskAssessmentWithMeta[]`
-- `RiskAssessmentWithMeta` 字段（顺序固定）：
-  - `liquidatable`：`bool`（当 `isValid=true` 且 `healthFactor < 10_000` 时为 true）
-  - `isValid`：`bool`（来自 `HealthView` cache validity）
-  - `warningLevel`：`uint8`（枚举：`NONE=0`、`WARNING=1`、`CRITICAL=2`）
-  - `healthFactor`：`uint256`（bps；`10_000=100%`；当 `isValid=false` 时为 best-effort fallback）
-  - `blockNumber`：`uint256`（`HealthView` cache block；`0` 视为未知/不可用）
+- 文件：`src/Vault/view/modules/UserView.sol`
+- 典型接口：
+  - `getUserPosition(user, asset)` / `getUserPositionService(user, asset)`
+  - `getUserTotalCollateral(user)` / `getUserTotalDebt(user)`
+  - `getHealthFactor(user)` / `getUserHealthFactor(user)`
+  - `getUserStats(user, asset)`
+- 前端用途：单用户聚合读取、轻量用户中心、兼容层。
+- 必须理解：UserView 走 Scheme U（`ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN` 的非 self 读取），但它只是聚合门面，不替代 PositionView / HealthView / RewardView / StatisticsView 的底层 SSOT。
 
-**BatchView（轻量 batch：risk / system-status）**
+**4) PreviewView（交易前预演）**
 
-- `batchGetRiskAssessments(users[])` → `RiskItem[]`
-- `batchGetModuleHealth(modules[])` → `ModuleHealthItem[]`
-- `RiskItem` 字段（顺序固定）：
-  - `user`：`address`
-  - `liquidatable`：`bool`
-  - `isValid`：`bool`
-  - `warningLevel`：`uint8`（同 RiskView 的枚举含义）
-  - `healthFactor`：`uint256`（bps；`10_000=100%`）
-  - `blockNumber`：`uint256`（来自 RiskView/HealthView 的 meta）
-- `ModuleHealthItem` 字段（顺序固定）：
-  - `module`：`address`
-  - `lastCheckTime`：`uint32`
-  - `consecutiveFailures`：`uint32`
-  - `isHealthy`：`bool`
-  - `isValid`：`bool`
-  - `detailsHash`：`bytes32`（诊断摘要，供 UI/监控展示或链下映射）
-  - `blockNumber`：`uint256`（模块健康快照区块；`0` 视为未知/不可用）
+- 文件：`src/Vault/view/modules/PreviewView.sol`
+- 典型接口：
+  - `previewBorrow(...)`
+  - `previewDeposit(...)`
+  - `previewRepay(...)`
+  - `previewWithdraw(...)`
+- 返回重点：`newHF`、`newLTV`、`maxBorrowable`，并透传 `positionIsValid/positionBlockNumber/positionVersion`。
+- 前端用途：交易确认页预估、风险提示、按钮可用性判断。
+- 必须理解：PreviewView 依赖 PositionView 读权限；部署时必须有对应 `ActionKeys.ACTION_VIEW_USER_DATA` 授权。
 
-**LiquidatorView（用户维度）**
+**5) DashboardView（UI 聚合）**
 
-- `getUserLiquidationStats(user)` → `(stats, blockNumber, isValid)`
-- `batchGetLiquidationStats(users[])` → `(stats[], blockNumber, isValid)`
-- `getSeizableCollateralAmount(user, asset)` → `(amount, blockNumber, isValid)`
-- `getSeizableCollaterals(user)` → `(assets[], amounts[], blockNumber, isValid)`
-- `getUserTotalCollateralValue(user)` → `(totalValue, blockNumber, isValid)`
+- 文件：`src/Vault/view/modules/DashboardView.sol`
+- 典型接口：
+  - `getUserOverview(user, assets[])`
+  - `getUserAssetBreakdown(user, assets[])`
+- 返回重点：`positionValidFlags[]`、`positionBlockNumbers[]`、`positionVersions[]`、`healthBlockNumber`。
+- 前端用途：个人概览页、资产总览卡片、诊断型 dashboard 页面。
+- 必须理解：`getUserOverview*` 走 Scheme U；`getUserAssetBreakdown*` 还额外依赖 `ActionKeys.ACTION_VIEW_PRICE_DATA`，因此不应被当成普通钱包页默认必经入口。
 
-**RewardView（用户维度）**
+**6) CacheOptimizedView（大批量页面）**
 
-- `getUserBalanceWithMeta(user)` → `(balance, cacheBlock, isValid)`
-- `getUserRewardSummaryWithMeta(user)` → `(totalBurned, pendingPenalty, level, lastActivity, blockNumber, isValid)`
-- `getUserEarnStateWithMeta(user)` → `(lockedEasy, eligibleLoanCount, onTimeRepayCount, blockNumber, isValid)`
-- `getUserEasyEarnedWithMeta(user)` → `(easyEarned, blockNumber, isValid)`
-- `getUserEasyStakedWithMeta(user)` → `(easyStaked, blockNumber, isValid)`
-- `getUserEasySpentWithMeta(user)` → `(easySpent, blockNumber, isValid)`
-- `getUserRecentActivitiesWithMeta(user, fromBlock, toBlock, limit)` → `(activities[], cacheBlock, isValid)`
+- 文件：`src/Vault/view/modules/CacheOptimizedView.sol`
+- 典型接口：
+  - `batchGetUserPositions(users[], assets[])`
+  - `getUserSummary(user, assets[])`
+- 前端用途：多用户监控页、列表页、批量面板。
+- 必须理解：适合减少 RPC 次数，但不是所有字段都比专属 View 更权威。
+
+**7) StatisticsView（协议统计 SSOT）**
+
+- 文件：`src/Vault/view/modules/StatisticsView.sol`
+- 典型接口：
+  - `getGlobalStatisticsWithMeta()`
+  - `getUserSnapshotWithMeta(user)`
+  - `getTotalUsersWithMeta()` / `getActiveUsersWithMeta()`
+- 返回重点：用户统计读面带 `version`、`seq`、`lastAppliedRequestId`；全局读面带 `isValid/blockNumber`。
+- 前端用途：首页协议统计、用户统计概览、后台总览。
+- 必须理解：`KEY_STATS` 对应 Registry raw key `VAULT_STATISTICS`；不要在前端引入 `STATISTICS_VIEW` 新名字。
+
+**8) LoanFlowView（借还流量 SSOT）**
+
+- 文件：`src/Vault/view/modules/LoanFlowView.sol`
+- 典型接口：
+  - `getUserLoanFlowWithMeta(user)`
+  - `getGlobalLoanFlowWithMeta()`
+- 返回重点：`borrowVolumeValue`、`repayVolumeValue`、`borrowCount`、`repayCount`、`version`、`seq`、`lastAppliedRequestId`、`isValid`、`blockNumber`。
+- 前端用途：借还流量分析、奖励资格分析、增长看板、诊断补充。
+- 必须理解：`getUserLoanFlowWithMeta(user)` 走 Scheme U；`getGlobalLoanFlowWithMeta()` 当前是 public read，但模块整体更适合作为分析/诊断补充，而不是首页主统计卡的默认数据源。value 字段仍必须按统一 value 口径解释，不能假设成固定 8 位。
+
+**9) RewardView（奖励读面 SSOT）**
+
+- 文件：`src/Vault/view/modules/RewardView.sol`
+- 典型接口：
+  - `getUserBalanceWithMeta(user)`
+  - `getUserRewardSummaryWithMeta(user)`
+  - `getUserEarnStateWithMeta(user)`
+  - `getUserEasyEarnedWithMeta(user)` / `getUserEasySpentWithMeta(user)`
+  - `getUserRecentActivitiesWithMeta(user, fromBlock, toBlock, limit)`
+- 前端用途：奖励中心、等级页、消费页、最近活动。
+- 必须理解：
+  - `walletEasyBalance = readUserEasyBalance(user).data.balance`
+  - `availableEasyBalance = max(walletEasyBalance - pendingPenalty, 0)`
+  - 不得重新使用 `points`、`walletPoints`、`availablePoints` 旧命名。
+
+**10) FeeRouterView（费用读面 SSOT）**
+
+- 文件：`src/Vault/view/modules/FeeRouterView.sol`
+- 典型接口：
+  - `batchGetUserFeeStatisticsWithMeta(users[])`
+  - `batchGetGlobalFeeStatisticsWithMeta(tokens[], feeTypes[])`
+  - `getUserFeeAnalyticsWithMeta(user, feeTypes[])`
+- 前端用途：费用中心补充页、账户级费用统计、同步诊断页。
+- 必须理解：用户维度读取走 Scheme U；全局统计与系统配置类读取默认只给 `ActionKeys.ACTION_ADMIN`。空数组必须 `revert EmptyArray()`；前端必须先做空数组防御。
+
+**11) LiquidatorView（清算读面 SSOT）**
+
+- 文件：`src/Vault/view/modules/LiquidatorView.sol`
+- 典型接口：
+  - `getUserLiquidationStats(user)`
+  - `batchGetLiquidationStats(users[])`
+  - `getSeizableCollateralAmount(user, asset)`
+  - `getSeizableCollaterals(user)`
+  - `getUserTotalCollateralValue(user)`
+  - `getGlobalLiquidationView()` / `getLiquidatorProfitView(user)`
+- 前端用途：清算控制台、可清算资产页、排行榜、收益页、诊断页。
+- 必须理解：对外权威名是 `LiquidatorView`，不是 `LiquidationView`。用户维度统计接口走 Scheme U；`calculateCollateralValue(...)` 需要 `ActionKeys.ACTION_VIEW_LIQUIDATION_DATA`，排行榜/系统快照走 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`，委托 PositionView 的估值还会间接受 `ActionKeys.ACTION_VIEW_RISK_DATA` 影响，因此不要把整个模块误判为“普通钱包页默认主读”。
+
+**12) LiquidationRiskView / SystemRiskView / RiskView（风险三分层）**
+
+- 文件：
+  - `src/Vault/view/modules/RiskView.sol`
+  - `src/Vault/view/modules/SystemRiskView.sol`
+  - `src/Vault/view/modules/LiquidationRiskView.sol`
+- 分工：
+  - `RiskView`：用户维度风险评估，如 `getUserRiskAssessment(user)`、`batchGetRiskAssessments(users[])`
+  - `SystemRiskView`：system-only 风险参数，如 `getLiquidationThreshold()`、`getMinHealthFactor()`
+  - `LiquidationRiskView`：清算相关布尔判断与分数，如 `isLiquidatable(...)`、`getLiquidationRiskScore(user)`
+- 前端用途：风险看板、参数展示、清算前检查。
+- 必须理解：`SystemRiskView` 是系统参数权威入口；`LiquidationRiskView` 不再承担 system-only 参数接口。
+
+**13) ValuationOracleView（价格只读 SSOT）**
+
+- 文件：`src/Vault/view/modules/ValuationOracleView.sol`
+- 典型接口：
+  - `getAssetPrice(asset)`
+  - `getAssetPrices(assets[])`
+  - `isPriceValid(asset)`
+  - `checkPriceOracleHealth(...)` / `batchCheckPriceOracleHealth(...)`
+  - `hasUpgradePermission(user)`
+- 前端用途：价格展示、价格健康状态、后台预检、升级权限诊断。
+- 必须理解：价格类方法默认要求 `ActionKeys.ACTION_VIEW_PRICE_DATA`；价格是否可用不能只看 `price > 0`，还要同时看 `isValid/blockNumber` 和链下 publish status。普通钱包页不要把这个模块当默认直连前提。
+
+**14) BatchView（轻量批量接口）**
+
+- 文件：`src/Vault/view/modules/BatchView.sol`
+- 典型接口：
+  - `batchGetHealthFactors(users[])`
+  - `batchGetRiskAssessments(users[])`
+  - `batchGetAssetPrices(assets[])`
+  - `batchGetModuleHealth(modules[])`
+- 前端用途：批量价格、批量风险、模块健康与系统面板。
+- 必须理解：所有多数组接口都要遵守 `MAX_BATCH_SIZE`；超限会触发 `BatchTooLarge`。
+
+**15) RegistryView / SystemView（地址与路由层）**
+
+- 文件：
+  - `src/Vault/view/modules/RegistryView.sol`
+  - `src/Vault/view/modules/SystemView.sol`
+- 分工：
+  - `RegistryView`：模块枚举、地址反查、批量地址查询。
+  - `SystemView`：系统级只读聚合与路由门面。
+- 前端用途：启动预热、模块调试页、路由校验。
+- 必须理解：Registry 是地址 SSOT，模块 key 统一以 `ModuleKeys` 为准；`RegistryView` 当前是 public read，而 `SystemView` 大多数路由/发现接口要求 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`。SystemView 只做聚合/路由，不是地址真相源。
+
+**16) AccessControlView（读权限预检）**
+
+- 文件：`src/Vault/view/modules/AccessControlView.sol`
+- 典型接口：
+  - `getUserPermissionWithMeta(user, permission)`
+  - `getUserPermissionLevelWithMeta(...)`
+- 前端用途：读权限预检、隐藏无权限菜单、直连链上模式的调用前检查。
+- 必须理解：这是权限缓存读面，不是业务数据读面。其 self/non-self 语义也走 Scheme U；即便预检通过，真正调用 View 时仍需捕获 `MissingRole()` 做最终兜底。
+
+**17) ModuleHealthView / ViewCache（系统观测层）**
+
+- 文件：
+  - `src/Vault/view/modules/ModuleHealthView.sol`
+  - `src/Vault/view/modules/ViewCache.sol`
+- 典型接口：
+  - `ModuleHealthView`：模块健康、失败次数、详情哈希等只读查询
+  - `ViewCache`：`getSystemStatus` / `batchGetSystemStatus`
+- 前端用途：运维页、系统健康页、降级提示。
+- 必须理解：`ModuleHealthView` 默认要求 `ActionKeys.ACTION_VIEW_SYSTEM_STATUS` 或 `ActionKeys.ACTION_ADMIN`，天然属于后台/运维页；`detailsHash` 只是诊断摘要，真正可读原因通常要靠链下映射或日志。
+
+**18) BlocksOnlyView**
+
+- 当前不纳入这份总指南的默认前端读面清单。
+- 若后续 trade-like 方案恢复推进，再单列其接口、权限与 DTO 约束。
+
+**19) LendingEngineView / LoanNFTView（辅助只读）**
+
+- 文件：
+  - `src/Vault/view/modules/LendingEngineView.sol`
+  - `src/Vault/view/modules/LoanNFTView.sol`
+- 典型接口：
+  - `LendingEngineView.canAccessLoanOrder(orderId, user)`
+  - `LoanNFTView.getUserLoanCount(user)`
+- 前端用途：订单访问控制、用户 loan 数量、详情页辅助字段。
+
+**20) View 层统一 meta 约束**
+
+- 只要接口返回 `isValid/blockNumber/version/seq/requestId`，前端就必须把它当产品字段处理，而不是调试字段。
+- `blockNumber=0` 或 `isValid=false` 时，UI 应展示“未知/陈旧/待刷新”。
+- `version/seq/requestId` 主要服务于后端重试、并发诊断和缓存一致性；前端至少要在诊断页或日志中保留它们。
 
 **Reward 前端配合（必做）**
 
 - 展示口径建议：
-  - `walletEasyBalance = getUserBalanceWithMeta(user).balance`
-  - `pendingPenalty = getUserRewardSummaryWithMeta(user).pendingPenalty`
+  - `walletEasyBalance = readUserEasyBalance(user).data.balance`
+  - `pendingPenalty = readUserRewardSummary(user).data.pendingPenalty`
   - `availableEasyBalance = max(walletEasyBalance - pendingPenalty, 0)`（用于“可消费”展示）
 - 关键语义：当存在 `pendingPenalty` 时，后续奖励入账会先抵扣欠分，再增加钱包 Easy 余额；因此“本次赚取”不一定等于“钱包净增”。
 - 事件联动（推荐最小集合）：
@@ -1762,12 +2478,12 @@ export async function preflightPermissions(
 - 余额只读：`creditsBalance(tenantId, user)`（单位：credit，1=1次）
 - 链上购买/充值入口：`buyCredits(...)`（以当前 AICreditsVault 合约实现为准）
 
-**LoanFlowView（协议借贷流量，USD-8 SSOT）**
+**LoanFlowView（协议借贷流量，value SSOT）**
 
-- `getUserLoanFlowWithMeta(user)` → `(borrowVolumeUsd8, repayVolumeUsd8, borrowCount, repayCount, version, seq, lastAppliedRequestId, isValid, blockNumber)`
-  - 口径：**protocol-level** borrow+repay flow（USD-8）
-  - 访问：用户本人可读；非本人需 `VIEW_USER_DATA` / `ACTION_ADMIN`
-- `getGlobalLoanFlowWithMeta()` → `(totalBorrowVolumeUsd8, totalRepayVolumeUsd8, totalBorrowCount, totalRepayCount, isValid, blockNumber)`
+- `getUserLoanFlowWithMeta(user)` → `(borrowVolumeValue, repayVolumeValue, borrowCount, repayCount, version, seq, lastAppliedRequestId, isValid, blockNumber)`
+  - 口径：**protocol-level** borrow+repay flow�但必须按统一 value 口径解释）
+  - 访问：用户本人可读；非本人需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`
+- `getGlobalLoanFlowWithMeta()` → `(totalBorrowVolumeValue, totalRepayVolumeValue, totalBorrowCount, totalRepayCount, isValid, blockNumber)`
   - 访问：**公开只读**（适合前端公开展示“协议总量”类指标；如需敏感化可在后续版本再加 gate）
 
 **非缓存 user-dim（同样要求 meta）**
@@ -1831,7 +2547,7 @@ export async function preflightPermissions(
 **C) 写入路径与权限**
 
 - 业务写入走 `VaultCore` / `VaultBusinessLogic`；前端不要调用只读 View 作为写入入口。
-- 读接口是 `VIEW_*_DATA` gated；生产建议使用后端 Read Service 代持角色。
+- 读接口若带 `VIEW_*_DATA` gate，应优先选择 self-read / public 的链上专属 View 方法；只有 system-level、跨用户或 admin/ops 读面才考虑只读网关代发 `eth_call`。
 
 **D) Guarantee Extension（如启用）**
 
@@ -1842,39 +2558,38 @@ export async function preflightPermissions(
 
 **E) 清算相关（Liquidation）**
 
-- 前端只读使用 `LiquidatorView`；legacy / 通用订单的 keeper 入口为 `SettlementManager.settleOrLiquidate(...)`，但 blocks-only 订单的 keeper 入口是 `BlocksOnlyCoordinator.settleOrLiquidateBlocks(...)`。
-- 若遇到 `MissingRole()`，需要检查 `ACTION_LIQUIDATE` 与 `VIEW_RISK_DATA` 是否授予给执行方与 SettlementManager。
+- 前端只读使用 `LiquidatorView`；当前主线里，通用订单的 keeper 入口为 `SettlementManager.settleOrLiquidate(...)`。
+- 若遇到 `MissingRole()`，需要检查 `ActionKeys.ACTION_LIQUIDATE` 与 `ActionKeys.ACTION_VIEW_RISK_DATA` 是否授予给执行方与 SettlementManager。
   - **平台份额路由**：清算残值中的 platform share 先进入 `FeeRouter` 再分发（feeType = `FEE_TYPE_LIQUIDATION_PLATFORM`）。
 
 ### 3. 实现示例（TypeScript / Ethers v6）
 
 ```ts
 import { ethers } from "ethers";
-import { VaultRouter__factory } from "@/types/factories";
+import { VaultCore__factory } from "@/types/factories";
 
 const signer = provider.getSigner();
-const vaultRouter = VaultRouter__factory.connect(addresses.VaultRouter, signer);
+const vaultCore = VaultCore__factory.connect(addresses.VaultCore, signer);
 
 // 用户存款操作
 export async function deposit(asset: string, amount: bigint) {
-  // 注意：本项目的“到期/过期/门槛语义”统一基于 block.number（见下方 Block-based Deadline 章节）。
-  // 这里传入的 blockNumber 仅用于链下审计/可观测性（observability），不得被业务逻辑用于资金门槛判断。
-  const clientObservedBlock = await provider.getBlockNumber();
-  const tx = await vaultRouter.processUserOperation(
-    await signer.getAddress(),
-    utils.id("DEPOSIT"), // bytes32("DEPOSIT")
-    asset,
-    amount,
-    clientObservedBlock,
-  );
+  const tx = await vaultCore.deposit(asset, amount);
+  await tx.wait();
+}
+
+// 用户还款操作
+export async function repay(orderId: bigint, debtAsset: string, amount: bigint) {
+  const tx = await vaultCore.repay(orderId, debtAsset, amount);
   await tx.wait();
 }
 ```
 
-### 4. 过渡期兼容
+> 新前端业务不要再把 `VaultRouter.processUserOperation(...)` 当主入口。Router 仅保留兼容/协调角色；当前主线的正常用户写路径应直接走 `VaultCore`、`VaultBusinessLogic`、`AICreditsVault` 等明确写入口；keeper/运营清算则走 `SettlementManager`。
 
-- 若后端或脚本仍依赖旧版 `IVaultRouter` 的只读接口，请 **迁移到对应子模块** 并删除旧调用。
-- `VaultRouter` 合约已瘦身，但 ABI 变更会导致旧前端编译失败；务必同步更新 `@/types` 代码生成与合约地址配置。
+### 4. 调用方同步要求
+
+- 若后端或脚本仍依赖旧版 `IVaultRouter` 的只读接口，请改到对应 View 子模块。
+- `VaultRouter` 已瘦身为写路由/协调器；同步更新 `@/types` 代码生成与合约地址配置，避免旧 ABI 残留。
 
 ---
 
@@ -1882,7 +2597,7 @@ export async function deposit(asset: string, amount: bigint) {
 
 ## 🧱 CollateralManager（抵押账本）前端配合要点（2026-01）
 
-> 目标：避免前端“误把业务模块当 View 用”，同时保留必要的账本只读兼容能力（供清算/视图/统计/排障/过渡期使用）。
+> 目标：避免前端“误把业务模块当 View 用”，同时明确账本 getter 只用于排障、枚举与少量兜底读取。
 
 ### 1) 查询入口选择（推荐顺序）
 
@@ -1890,7 +2605,7 @@ export async function deposit(asset: string, amount: bigint) {
   - 用户仓位/资产维度：`PositionView` / `UserView`
   - 系统统计：`StatisticsView`
   - 价格：`ValuationOracleView` / 批量价格：`BatchView`
-- **账本只读兼容（谨慎使用）**：仅在“排障 / 兜底 / 过渡期兼容 / 枚举资产列表”时使用 `CollateralManager` 的 getter：
+- **账本 getter（谨慎使用）**：仅在“排障 / 兜底 / 枚举资产列表”时使用 `CollateralManager` 的 getter：
   - `getCollateral(user, asset)`：返回 **抵押账本数量**（不含估值）
   - `getTotalCollateralByAsset(asset)`：返回 **该资产全局抵押总量**（不含估值）
   - `getUserCollateralAssets(user)`：返回用户抵押过的资产列表（用于枚举；列表随抵押为 0 会移除）
@@ -1904,7 +2619,7 @@ export async function deposit(asset: string, amount: bigint) {
 ### 3) 事件 / DataPush 订阅（前端/监听服务）
 
 - `CollateralManager` 会发出业务事件：`DepositProcessed` / `WithdrawProcessed` / `BatchDepositProcessed` / `BatchWithdrawProcessed`（可用于 UI/索引服务同步）。
-- 同时会通过统一入口 `DataPushed(bytes32 dataTypeHash, bytes payload)` 推送同等信息（建议监听服务统一只订阅 `DataPushed`，再按 `dataTypeHash` 解码）。
+- 同时会通过统一入口 `DataPushed(bytes32 dataTypeHash, bytes payload)` 推送同等信息。前端轻量活动流/提醒可优先监听 `DataPushed`；后端索引器、强一致消费者或补偿服务不应只订阅 `DataPushed`，还应补充核心业务事件与失败事件。
 - View 推送失败告警（不回滚主流程）：`ViewCachePushFailed(address user, address asset, bytes reason)`
   - 含义：抵押账本写入成功，但 **View 层快照推送失败**；UI 侧应优先以 View 查询为主，如发现缓存陈旧可提示“数据可能延迟”，并配合后端重试/告警闭环（另见本文档 `CacheUpdateFailed` 章节）。
 
@@ -1953,6 +2668,46 @@ export async function deposit(asset: string, amount: bigint) {
 建议：
 
 - `avgBlockTimeSeconds` 作为**网络配置**（例如 Arbitrum/Arbitrum Sepolia），可在运行时按最近 N 个 block 采样做平滑更新。
+
+### 交易确认数口径（前端必须与 Time-Dependency SSOT 一致）
+
+> 对齐文档：`docs/Usage-Guide/Time-Dependency-Refactor-Guide.md` 新增的“链下确认数口径（新增 SSOT）”。
+
+- **确认数的权威口径**：
+  - 已上链交易的确认数统一按“最新块高 - 交易所在块高 + 1”计算
+  - 若 `receipt.blockNumber` 为空，表示交易尚未被打包，确认数必须视为 `0`
+- **前端优先接口**：
+  - 优先使用 `eth_getTransactionReceipt` 读取 `receipt.blockNumber`
+  - 优先使用 `eth_blockNumber` 读取最新块高
+  - **不要**为了只拿最新块高而优先调用 `eth_getBlockByNumber("latest")`
+- **标准公式**：
+  - `confirmations = latestBlock - txBlockNumber + 1`
+  - 不要写成 `latestBlock - txBlockNumber`，否则会少算当前所在块
+- **状态分层建议**：
+  - `receipt.blockNumber == null`：UI 展示“已广播，待打包”
+  - `confirmations > 0` 但未达到业务阈值：UI 展示“已上链，等待更多确认”
+  - 达到业务阈值后：UI 才展示“已确认”
+- **高价值动作的 finality 分层**：
+  - 普通交易进度可用 `latest`
+  - 风险更高的资金动作、批量结算、清算结果页，前端应允许后端或配置层切换到 `safe` / `finalized` 口径
+  - UI 文案应明确区分“已上链”“已确认”“已最终确认”，不要混成一个状态
+
+#### 前端实现建议（ethers / viem 都适用）
+
+- 轮询顺序建议：先拿 `tx receipt`，再拿最新块高，最后计算确认数
+- 若只需要确认数，不要额外拉整块对象；只有在要显示完整区块时间、出块者、gas 等信息时才读取 block 对象
+- 本地缓存状态建议至少区分：`submitted`、`mined`、`confirmed`、`finalized`
+
+#### UI 文案建议（避免把“打包”误写成“确认”）
+
+- 推荐：
+  - “交易已广播，等待打包”
+  - “交易已上链，已确认 X 个区块”
+  - “交易已达到业务确认阈值”
+  - “交易已最终确认”
+- 不推荐：
+  - “交易成功”用于仅拿到 txHash 的阶段
+  - “已确认”用于仅拿到第一个 receipt 的阶段（除非该页面业务阈值就是 1）
 
 #### 同一套 ETA 映射也适用于 “ageBlocks”（缓存/快照年龄展示）
 
@@ -2011,9 +2766,9 @@ export async function estimateAgeApproxFromUpdateBlock(
 - 不要展示：
   - “到期时间戳：xxxxx” 作为门槛语义
 
-### 兼容迁移清单（legacy 字段名：`blockNumber` / `ts` 等）
+### 字段约束清单（`blockNumber` / `ts` 等）
 
-> 目标：在不立即破坏旧 ABI/旧前端的情况下，把所有“门槛/有效性”语义收敛到 `...Block/...Blocks`，并把遗留字段**降级为观测/索引字段**，防止被误用成 deadline。
+> 目标：把所有“门槛/有效性”语义收敛到 `...Block/...Blocks`，并把遗留字段明确降级为观测/索引字段，防止被误用成 deadline。
 
 #### 1) 先做“字段语义归类”：新增字段 vs 保留字段
 
@@ -2042,6 +2797,9 @@ export async function estimateAgeApproxFromUpdateBlock(
 - [ ] **`ts` 只用于展示/索引**：UI/keeper 禁止用 `ts/timestamp` 做门槛判断或调度判定。
 - [ ] **UI 展示统一走 ETA 映射**：对 `deadlineBlock` 或 `ageBlocks` 展示“约 X 分钟/天”时，必须标注“估计值”，并在拥堵/停摆时提示 ETA 漂移。
 - [ ] **兼容期双读**（如果同时存在新旧字段）：优先使用 `...Block/...Blocks`；旧字段仅用于观测展示或 debug。
+- [ ] **确认数统一公式**：所有交易进度页、结果页、轮询 hook 必须统一使用 `confirmations = latestBlock - txBlockNumber + 1`。
+- [ ] **接口统一**：确认数场景优先用 `eth_getTransactionReceipt + eth_blockNumber`；不要把 `eth_getBlockByNumber("latest")` 当默认实现。
+- [ ] **状态文案统一**：区分“已广播 / 已上链 / 已确认 / 已最终确认”，禁止把 receipt 已返回直接写成“最终成功”。
 
 #### 4) ABI 演进建议（不破坏旧前端的最小策略）
 
@@ -2081,7 +2839,7 @@ export async function estimateAgeApproxFromUpdateBlock(
 
 - **approve（必须）**：`ERC20(collateralAsset).approve(CollateralManager, amount)`
 - **写入口（用户）**：`VaultCore.deposit(...)` / `VaultCore.withdraw(...)`
-- **UI 查询（推荐）**：`UserView` / `PositionView`（0 gas）
+- **UI 查询（推荐）**：优先 `PositionView`；需要轻量聚合时可补充 `UserView`（0 gas `eth_call`）
 - **资金链 SSOT**：`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`
 
 ### 2) 出借 reserve（写入口速查）
@@ -2100,59 +2858,9 @@ export async function estimateAgeApproxFromUpdateBlock(
 > - `reserveForLending(..., lendHash)` 的幂等键
 > - 撮合入口里与签名一起复现校验
 
-#### TermBlocks 快照 SSOT（前端/keeper 集成规范）
+#### TermBlocks 快照 SSOT
 
-在继续阅读本节前，建议先用 [Usage-Guide/Blocks-Only-Frontend-Matching-Checklist.md](Usage-Guide/Blocks-Only-Frontend-Matching-Checklist.md) 校验你当前接入的是“前端职责”“撮合职责”还是“keeper 职责”，避免把 legacy keeper 入口与 blocks-only coordinator 入口混用。
-
-目标：在“链上只认 blocks”的前提下，让 `termDays` 的 UX 更贴近墙钟天数，同时保证 borrower/lender 使用**同一版本映射**，避免撮合失败。
-
-- **SSOT 发布者（推荐）**：撮合服务/keeper（中心化服务可用；关键是要可审计、可复现）
-- **快照频率**：建议每日 1 次（或每 N 小时一次，但不要过频导致版本碎片化）
-- **前端原则**：
-  - 只消费快照，不自行推导 `days -> blocks`
-  - UI 必须同时展示：
-    - `termBlocks` / `maturityBlock` / `blocksLeft`（确定值）
-    - ETA（估计值，基于快照里的 `avgBlockTimeSeconds` 或前端采样值）
-
-**推荐 API 结构（示例）**：
-
-```json
-{
-  "chainId": 42161,
-  "snapshotId": "arb1-2026-02-07",
-  "window": {
-    "fromBlock": 312345678,
-    "toBlock": 312355678,
-    "method": "EMA",
-    "alpha": 0.2
-  },
-  "avgBlockTimeSeconds": 0.26,
-  "termBuckets": [
-    { "termDays": 5, "termBlocks": 166000 },
-    { "termDays": 10, "termBlocks": 332000 }
-  ],
-  "blocksOnlyProducts": [
-    {
-      "productCode": "BLOCKS_ONLY_1",
-      "label": "1 block maturity",
-      "termBlocks": 1,
-      "settlementMode": "immediate-after-maturity"
-    }
-  ],
-  "generatedAtBlock": 312355700
-}
-```
-
-说明：
-
-- `termBuckets` 继续服务 legacy day-bucket 产品（5/10/15/.../360 天）。
-- `blocksOnlyProducts` 用于显式 blocks-only 产品目录，不应被折叠进 `termDays` 桶。
-- 对于 `BLOCKS_ONLY_1`，签名、撮合、风险与前端展示都应直接使用 `termBlocks = 1`；不要再套用 day-bucket 的 `maturityBlock = openBlock + termBlocks + 1` 兼容偏移。
-
-**缓存/失败处理（必须）**：
-
-- **缓存键**：`(chainId, snapshotId)`
-- **取快照失败**：
+blocks-only 已纳入这份总指南的默认前端/keeper 集成范围。本节 termBlocks 快照结构、产品目录和 API 示例按默认主线执行，并要求消费方显式区分 debt-free open 与 closeout 终态。
   - 不建议继续签名新 intent（否则 borrower/lender 可能用不同版本）
   - 可允许用户“继续使用本地缓存的上一版快照”签名，但 UI 必须强提示“使用旧快照，可能降低撮合成功率”
 
@@ -2177,11 +2885,14 @@ export function buildSaltWithSnapshot(snapshotId: string, userNonce: bigint) {
 
 ### 3) 撮合放款（Finalize Match / Borrow Disbursement）
 
-- **典型模式（推荐）**：由撮合服务/keeper 调 `VaultBusinessLogic.finalizeMatch(...)` 完成原子撮合（前端只负责签名与展示状态）。
-- **兼容模式（legacy）**：仍可调 `VaultBusinessLogic.finalizeMatch(...)`（termDays bucket），但不再推荐；termBlocks 迁移后应尽快停用。
+- **目标模式（推荐）**：由前端钱包直接调用 `VaultBusinessLogic.finalizeMatch(...)` 完成原子撮合与成交广播。
+- **链上权限事实**：`VaultBusinessLogic.finalizeMatch(...)` 是公开 `external` 入口，只带 registry / pause / reentrancy 防护，不带 onlyRole 或 onlyBusinessModule；因此谁来发起成交落链，取决于谁掌握完整签名、reserve 与参数，而不是链上强制“只能后端”。
+- **前端职责**：前端不只收 borrower 签名，还要拿到 lender 侧签名、确认 reserve、组装参数、发起 `finalizeMatch(...)` 交易，并处理失败重试与错误解码。
+- **后端保留职责**：后端可保留报价目录、签名中继、审计记录、历史查询和跨页聚合 API，但不再代替用户提交成交交易。
+- **若当前部署仍是 termDays 版本**：可以继续调用现有 `VaultBusinessLogic.finalizeMatch(...)`，但新接入与新部署应统一按 termBlocks 方案实现。
 - **如何判断是否已启用 termBlocks 方案**：
-  - 你的前端 ABI/TypeChain 若找不到 blocks-term 的结构体/签名（例如 `BorrowIntentBlocks/LendIntentBlocks`），说明当前部署仍在 legacy；需要先升级合约再切 termBlocks 签名与调用。
-- **前端需要保证**：borrower 与 lenders 的签名数据可复现（用于追责与排障）
+  - 你的前端 ABI/TypeChain 若找不到 blocks-term 的结构体/签名（例如 `BorrowIntentBlocks/LendIntentBlocks`），说明当前部署仍是旧版 termDays 接口；需要先升级合约再切 termBlocks 签名与调用。
+- **前端需要保证**：borrower 与 lenders 的签名数据、reserve 选择结果和最终撮合参数都可复现（用于追责与排障）
 
 撮合放款的资金拨付、费用分发与 `LoanOrder` 字段语义等资金链口径请以 Funds-Flow 为唯一权威（本文件不复述）。
 
@@ -2191,31 +2902,60 @@ termBlocks 方案必须满足：
 - **BorrowIntentBlocks/LendIntentBlocks.expireAt** 语义为 expireBlock（`block.number > expireAt` 过期）
 - EIP-712 域：`name="RwaLending"`, `version="1"`, `chainId`, `verifyingContract=VaultBusinessLogic`
 
+#### 3.1 前端自带撮合广播 vs 保留撮合服务
+
+这一节只回答一个争议点：既然 `VaultBusinessLogic.finalizeMatch(...)` 是公开链上入口，那么借款成交到底应由谁来广播。
+
+先给结论：**从合约角度看，两种模式都可执行，但本仓库当前文档的目标架构已经切到“前端自带撮合广播”**。保留撮合服务广播只作为兼容阶段或过渡方案，而不是新的默认模式。
+
+| 模式 | 谁负责广播成交交易 | 前端职责 | 后端/撮合服务职责 | 适用场景 | 主要代价 |
+| --- | --- | --- | --- | --- | --- |
+| 前端自带撮合广播 | 前端钱包 / 用户本人 | 借款人与出借人的意向签名收集、报价选择、对手方签名收集、reserve 对齐、`finalizeMatch(...)` 广播、失败重试与错误解码 | 可选地提供报价目录、签名中继、只读聚合 API；不再代替用户发成交交易 | 这是当前推荐目标；成交广播完全回到前端钱包，符合“前端钱包直接调用链上入口” | 前端复杂度明显上升；需要处理撮合失败、签名过期、reserve 竞争、MEV/报价时效、广播重试 |
+| 保留撮合服务 | 撮合服务 / keeper | 生成 borrower 签名、展示报价与成交结果、在 UI 中展示 orderId / 状态；可选地让 lender 在独立界面签名 | 收集 borrower/lender 签名、做匹配与报价、校验 reserve、统一广播 `finalizeMatch(...)`、处理失败重放与监控 | 仅适合迁移过渡期、灰度切流或应急兜底 | 仍然保留服务端执行层；产品和前后端容易误把它说成“没有公开链上入口” |
+
+无论选哪一种模式，下面这些事实都不变：
+
+1. 借款成交的公开链上入口是 `VaultBusinessLogic.finalizeMatch(...)`，不是 `VaultCore.borrow(...)`。
+2. `VaultCore.borrowFor(...)` 属于编排下游调用点，不是普通用户直接面对的成交入口。
+3. borrower/lender 的意向签名、reserve 状态、termBlocks 快照版本、orderId 展示，都是撮合链路的一部分；只是这些职责可以在前端或撮合服务之间重新分配。
+
+推荐的决策口径：
+
+1. 用户普通资金动作必须先完成钱包直连：`VaultCore.deposit / withdraw / repay`、`AICreditsVault.buyCredits`。
+2. 成交广播默认切到“前端自带撮合广播”：前端负责 borrower/lender 双边签名、reserve 校验、参数组装和最终交易提交。
+3. 如果仍保留撮合服务广播，必须把它标注为兼容过渡层，而不是新的标准主路径，并在产品口径里明确：这是职责选择，不是链上权限限制。
+
 ### 4) 还款/结算（Repay → Settle）
 
 - **approve（必须）**：`ERC20(debtAsset).approve(VaultCore, amount)`
 - **写入口（用户）**：`VaultCore.repay(orderId, debtAsset, amount)`
 
+这里需要特别区分两条路径：
+
+1. **普通用户还款路径**：用户调 `VaultCore.repay(...)`，由 `VaultCore` 把 debt asset 转入 `SettlementManager`，再内部调用 `SettlementManager.repayAndSettle(...)`。`repayAndSettle(...)` 的 `onlyVaultCore` 语义是“把普通用户入口统一收敛到 VaultCore”，不是“前端永远不能用 SettlementManager”。
+2. **keeper / 运营结算清算路径**：`SettlementManager.settleOrLiquidate(orderId)` 是独立的 keeper 入口，只适用于有 `ActionKeys.ACTION_LIQUIDATE` 权限的一侧，不是普通用户自助还款入口。
+
 还款后的结算分支、抵押释放与费用去向等资金链细节请以 Funds-Flow 为唯一权威（本文件不复述）。
 
 ### 5) 违约清算（写入口速查）
 
-- **legacy / 通用订单入口（keeper 推荐，SSOT）**：`SettlementManager.settleOrLiquidate(orderId)`（需要 `ACTION_LIQUIDATE`）
-- **blocks-only 订单入口（keeper 推荐，SSOT）**：`BlocksOnlyCoordinator.settleOrLiquidateBlocks(orderId)`（同样需要 `ACTION_LIQUIDATE`）
+- **通用订单入口（keeper 推荐，SSOT）**：`SettlementManager.settleOrLiquidate(orderId)`（需要 `ActionKeys.ACTION_LIQUIDATE`）
+- **blocks-only 订单入口**：默认 keeper / 后端范围内必须覆盖 `closeRepaidTradeBlocks(orderId)` 与 `settleOrLiquidateBlocks(orderId)` 两条收尾路径，并按三层状态回读收敛。
 - **用户侧前端**：
   - 不应提供“直接清算”按钮给普通用户
   - 应校验 `keeper != borrower`，否则提示“清算需由第三方 keeper 执行”
   - 只读展示与事件订阅以 `LiquidatorView`/`LiquidationRiskManager`/`HealthView` 为准
+  - legacy / 通用订单若出现 shortfall，必须额外展示“已清算但仍有剩余债务待处理”的状态，而不是直接显示为 clean closed
 
 #### 5.1 重要：`SettlementManager__NoCollateral` 不一定代表“用户没抵押”
 
-我们在真实链路测试中观察到（非稳定币抵押 + `COLLATERAL_PRICE_MODE=stale`）：
+我们在真实链路测试和新实现语义下都要按下面的 fail-closed 口径理解：
 
-`PriceOracle.getPrice` stale revert → `PositionView.getAssetValue` catch 返回 0 → `SettlementManager` 选不出 `bestAsset` → `SettlementManager__NoCollateral()`
+`PriceOracle.getPrice` 不可用或 strict collateral valuation 失败 → `SettlementManager` 无法选出可估值抵押 → `SettlementManager__NoCollateral()`
 
 因此，对前端/keeper UI 来说：
 
-- `NoCollateral` 可能是 **估值不可用 / 价格过期 / 资产未配置价格**导致抵押价值为 0（而不是账本里没有抵押）
+- `NoCollateral` 可能是 **估值不可用 / 价格过期 / 资产未配置价格 / 没有任何 strict 可估值抵押**，而不是账本里没有抵押
 - 不能直接把 `NoCollateral` 翻译成“你没有抵押物”，否则会误导用户与运营
 
 #### 5.2 前端/keeper UI 的推荐排障与提示（按 SSOT 分层）
@@ -2225,7 +2965,7 @@ termBlocks 方案必须满足：
 - **先查账本是否有抵押（数量口径）**（不依赖价格）：
   - `CollateralManager.getUserCollateralAssets(user)` + `CollateralManager.getCollateral(user, asset)`
 - **再查价格是否可用（价格口径）**：
-  - 推荐：`ValuationOracleView.isPriceValid(asset)`（返回 `isValid, blockNumber`；或 `BatchView.batchGetAssetPrices` 批量查）
+  - 推荐：`ValuationOracleView.isPriceValid(asset)`（返回 `isValid, blockNumber`；该模块默认要求 `ActionKeys.ACTION_VIEW_PRICE_DATA`，或走 `BatchView.batchGetAssetPrices` 批量查）
   - 同时展示 `getAssetPrice` 返回的 blockNumber（提示 stale）
 - **最后给出 UI 提示文案**（建议）：
   - “清算失败：系统无法对抵押资产估值（价格可能过期或未配置）。请刷新价格/检查预言机状态后重试。”
@@ -2447,7 +3187,7 @@ const registryAddr2 = await batchView.registryAddrVar(); // 推荐
 
 ## 🔄 接口变更与迁移指南（2026-01 · Breaking Changes）
 
-本次升级对前端是 **破坏性变更**，请务必同步更新 TypeChain/ABI 与解包逻辑：
+本次升级对前端是 **破坏性变更**，请务必同步更新 `types/` 强类型产物 / ABI 与解包逻辑：
 
 1. **UserView 用户维度新增 meta**
    - `getUserPosition/getUserPositionService/getUserCollateral/getUserDebt/getUserTotalCollateral/getUserTotalDebt`
@@ -2481,7 +3221,7 @@ const registryAddr2 = await batchView.registryAddrVar(); // 推荐
 
 前端迁移建议：
 
-- 先更新 TypeChain/ABI，再逐处替换解包（例如 `const [value] = await view.fn(...)`）。
+- 先更新 `types/` 强类型产物 / ABI，再逐处替换解包（例如 `const [value] = await view.fn(...)`）。
 - UI 必须处理 `isValid=false` / `blockNumber=0` 的降级展示（详见 §2.1.4）。
 
 ## 📦 监控相关新模块 (2025-08 升级)
@@ -2521,7 +3261,13 @@ const registryAddr2 = await batchView.registryAddrVar(); // 推荐
 
 ### 9. Unified DataPush Integration (v1)
 
-所有前端监听服务应仅订阅 `DataPushed(bytes32 indexed dataTypeHash, bytes payload)`。
+前端活动流 / 轻量监听服务可以优先订阅 `DataPushed(bytes32 indexed dataTypeHash, bytes payload)`，但这条规则只适用于前端展示层，不适用于后端索引器全量落库。
+
+必须区分：
+
+1. 前端 UI 活动流、Toast、用户侧轻量提醒：可以优先监听 `DataPushed`。
+2. 后端 indexer / read service：必须同时订阅 `DataPushed` 与核心业务事件，不能再把 `DataPushed` 当唯一事实来源。当前至少要覆盖 `RewardView`、`StatisticsView`、`LoanFlowView`、`LoanNFT`、`FeeRouter`、`AICreditsVault` 等模块的业务事件。
+3. 前端若需要历史分页、后台筛选、审计查询，应直接调用后端 read model API，而不是在浏览器里自己补一套事件索引。
 
 > Reward 事件解码口径：下表中的 Reward/Easy 数值字段都表示 Easy 数量（SSOT = `Registry[KEY_EASY_TOKEN]`；18 decimals）。前端/索引层只按当前 schema 解码；若本地历史 decoder 仍使用旧字段名，只允许在解析层做一次映射，不再在事件表逐项维护兼容别名。
 
@@ -2549,7 +3295,7 @@ provider.on({ topics: [iface.getEvent("DataPushed").topic] }, (log) => {
 | ------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `USER_FEE`                      | `FeeRouterView`                                       | `(address user, bytes32 feeType, uint256 amount, uint256 personalFeeBps)`                                                                                       |
 | `GLOBAL_FEE_STATS`              | `FeeRouterView`                                       | `(uint256 totalDistributions, uint256 totalAmount)`                                                                                                             |
-| `EASY_MINTED`                   | `RewardView`                                          | `(address borrower, address lender, uint256 totalMinted, uint256 borrowerShare, uint256 lenderShare, uint256 orderId, uint256 amountUsd8, uint256 blockNumber)` |
+| `EASY_MINTED`                   | `RewardView`                                          | `(address borrower, address lender, uint256 totalMinted, uint256 borrowerShare, uint256 lenderShare, uint256 orderId, uint256 amountValue, uint256 blockNumber)`（`amountValue` 为字段名） |
 | `REWARD_BURNED`                 | `RewardView`                                          | `(address user, uint256 amount, string reason, uint256 blockNumber)`                                                                                            |
 | `REWARD_LEVEL_UPDATED`          | `RewardView`                                          | `(address user, uint8 level, uint256 blockNumber)`                                                                                                              |
 | `REWARD_STATS_UPDATED`          | `RewardView`                                          | `(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 blockNumber)`                                                                                      |
@@ -2576,14 +3322,14 @@ provider.on({ topics: [iface.getEvent("DataPushed").topic] }, (log) => {
 | `ASSET_WHITELIST_INFO_UPDATED` | `AssetWhitelist` | `(address asset, address actor, uint256 ts)` |
 | `ASSET_WHITELIST_REGISTRY_UPDATED` | `AssetWhitelist` | `(address oldRegistry, address newRegistry, address actor, uint256 ts)` |
 
-Reward 事件表只保留当前 payload schema；不要再把 `points`、`walletPoints`、`availablePoints` 一类历史字段名写进前端契约文档。
+Reward 事件表只保留当前 payload schema；不要再把 `points`、`walletPoints`、`availablePoints` 一类字段名写进前端契约文档。
 
 #### Reward 字段命名对照表（前端强约束）
 
 | 旧名（应移除）                                                 | 标准名（必须保留）                                                                | 适用范围                        | 约束说明                                                                                                        |
 | -------------------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | `points` / `rewardPoints` / `userPoints`                       | `easyAmount` 或按语义拆分为 `walletEasyBalance` / `lockedEasy` / `pendingPenalty` | 通用 Reward 数值字段            | 禁止继续用 points 泛指 Reward 数量；进入前端业务层后必须改成 Easy 语义名。                                      |
-| `walletPoints` / `rewardBalance`                               | `walletEasyBalance`                                                               | 用户钱包可见 Reward 余额        | 对应 `RewardView.getUserBalanceWithMeta(user).balance`；展示、store、selector、DTO 统一使用该名。               |
+| `walletPoints` / `rewardBalance`                               | `walletEasyBalance`                                                               | 用户钱包可见 Reward 余额        | 对应 `readUserEasyBalance(user).data.balance`；展示、store、selector、DTO 统一使用该名。                        |
 | `availablePoints` / `spendablePoints`                          | `availableEasyBalance`                                                            | 前端消费前校验、消费页展示      | 表示 `max(walletEasyBalance - pendingPenalty, 0)`；不要再创造第二套“可消费积分”命名。                           |
 | `penaltyPoints` / `debtPoints`                                 | `pendingPenalty`                                                                  | Penalty 读模型、消费前校验      | 对应 `REWARD_PENALTY_LEDGER_UPDATED.pendingDebt` 和 RewardSummary 里的待抵扣负债；前端统一叫 `pendingPenalty`。 |
 | `lockedPoints` / `frozenPoints`                                | `lockedEasy`                                                                      | Earn 状态、借贷锁定观测         | 对应 `getUserEarnStateWithMeta(user)` 与 `REWARD_EARN_STATE_UPDATED`。                                          |
@@ -2704,7 +3450,7 @@ provider.on({ topics: [TOPIC, USER_DEGRADATION] }, (log) => {
 
 #### 11.3 后端协同（调用约定）
 
-- 后端监听事件 → 写 `cache_retry_jobs` 队列 → 值班/自动策略调用链上 `PositionView.retryUserPositionUpdate(user, asset)`（仅 admin）。若推送因模块缓存过期被拒，可要求运维调用 `PositionView.refreshModuleCache()` 或 `VaultRouter.refreshModuleCache()` 后再重试。
+- 后端监听事件 → 写 `cache_retry_queue` 队列 → 值班/自动策略调用链上 `PositionView.retryUserPositionUpdate(user, asset)`（仅 admin）。若推送因模块缓存过期被拒，可要求运维调用 `PositionView.refreshModuleCache()` 或 `VaultRouter.refreshModuleCache()` 后再重试。
 - 前端调用后端 API：
   - `POST /cache-retry/request` `{ user, asset, viewAddr, blockNumber, logIndex }`
   - `GET /cache-retry/status?user=&asset=` 返回队列状态、最近重试时间、尝试次数

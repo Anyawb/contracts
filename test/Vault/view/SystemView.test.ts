@@ -2,18 +2,6 @@ import { expect } from 'chai';
 import * as hardhat from 'hardhat';
 const { ethers, upgrades } = hardhat;
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import type {
-  SystemView,
-  MockAccessControlManager,
-  MockRegistry,
-  ViewCache,
-  MockCollateralManager,
-  MockLendingEngineConcrete,
-  MockPriceOracle,
-  MockStatisticsView,
-  MockRewardManager,
-  MockGuaranteeFundManager
-} from '../../../types';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const MAX_BATCH_SIZE = 50;
@@ -22,16 +10,16 @@ describe('SystemView – view-only aggregator (architecture aligned)', function 
   let owner: SignerWithAddress;
   let alice: SignerWithAddress;
 
-  let systemView: SystemView;
-  let acm: MockAccessControlManager;
-  let registry: MockRegistry;
-  let viewCache: ViewCache;
-  let collateralManager: MockCollateralManager;
-  let lendingEngine: MockLendingEngineConcrete;
-  let priceOracle: MockPriceOracle;
-  let statisticsView: MockStatisticsView;
-  let rewardManager: MockRewardManager;
-  let guaranteeFundManager: MockGuaranteeFundManager;
+  let systemView: any;
+  let acm: any;
+  let registry: any;
+  let viewCache: any;
+  let collateralManager: any;
+  let lendingEngine: any;
+  let priceOracle: any;
+  let statisticsView: any;
+  let rewardManager: any;
+  let guaranteeFundManager: any;
 
   let TEST_ASSET: string;
 

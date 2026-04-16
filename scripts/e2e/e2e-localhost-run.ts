@@ -123,7 +123,8 @@ async function main() {
   }
   const now = await ethers.provider.getBlockNumber();
   await ensureRole(ACTION_UPDATE_PRICE, deployer.address);
-  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now);
+  const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+  await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", usdcDecimals), now);
 
   // Optional (legacy): enable router testing mode if the deployed VaultRouter supports it.
   // Newer deployments may not expose setTestingMode(); smoke should still run without it.
@@ -231,7 +232,8 @@ async function main() {
   await runRewardManagerGovernance();
 
   try {
-    const mod = await import("./e2e-localhost-crosschaingov-gate-veto");
+    const modPath = "./e2e-localhost-crosschaingov-gate-veto";
+    const mod = await import(modPath);
     if (typeof mod.runCrossChainGovernanceGateVeto === "function") {
       await mod.runCrossChainGovernanceGateVeto();
     }

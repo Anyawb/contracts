@@ -4,12 +4,12 @@ pragma solidity ^0.8.20;
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {Registry} from "../../registry/Registry.sol";
 import {ModuleKeys} from "../../constants/ModuleKeys.sol";
 import {ActionKeys} from "../../constants/ActionKeys.sol";
 import {CacheEvents} from "../CacheEvents.sol";
+import {AssetDecimalMath} from "../../libraries/AssetDecimalMath.sol";
 import {IAccessControlManager} from "../../interfaces/IAccessControlManager.sol";
 import {IPriceOracleRead} from "../../interfaces/IPriceOracleRead.sol";
 import {
@@ -31,8 +31,8 @@ interface ILoanFlowViewMinimal {
     /// @notice Pushes one user loan-flow delta into LoanFlowView.
     function pushUserLoanFlowUpdate(
         address user,
-        uint256 borrowDeltaUsd8,
-        uint256 repayDeltaUsd8,
+        uint256 borrowDeltaValue,
+        uint256 repayDeltaValue,
         uint64 borrowCountDelta,
         uint64 repayCountDelta,
         bytes32 requestId,
@@ -49,7 +49,8 @@ interface ILoanFlowViewMinimal {
  *
  * Security:
  * - Single on-chain entrypoint for LoanFlowView pushes.
- * - Uses KEY_PRICE_ORACLE as the USD-8 valuation source of truth.
+ * - Uses KEY_PRICE_ORACLE as the asset-native valuation source of truth and normalizes
+ *   cross-asset flow into the shared 18-decimal system valuation unit.
  * - Best-effort push failures emit CacheUpdateFailedWithContext and must not block ledger writes.
  * - Uses strict optimistic concurrency with nextVersion equal to current version plus one.
  * - This module is a view-cache orchestrator only and is not the SSOT for loan state.
@@ -60,6 +61,8 @@ contract LoanFlowPushManager is
     ReentrancyGuardUpgradeable,
     CacheEvents
 {
+    uint8 private constant _SYSTEM_VALUATION_DECIMALS = 18;
+
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
     address private _registryAddr;
@@ -113,7 +116,7 @@ contract LoanFlowPushManager is
      *
      * Security:
      * - Restricted to the order-engine source of truth via `_requireNotifier()`.
-     * - Converts token-native debt amounts into USD-8 before pushing.
+    * - Converts token-native debt amounts into the shared 18-decimal valuation unit before pushing.
      *
      * @param user Borrower address
      * @param asset Borrowed asset address
@@ -149,7 +152,7 @@ contract LoanFlowPushManager is
      *
      * Security:
      * - Restricted to the order-engine source of truth via `_requireNotifier()`.
-     * - Converts token-native debt amounts into USD-8 before pushing.
+    * - Converts token-native debt amounts into the shared 18-decimal valuation unit before pushing.
      *
      * @param user Borrower address
      * @param asset Repaid asset address
@@ -183,7 +186,7 @@ contract LoanFlowPushManager is
     /*━━━━━━━━━━━━━━━ Retry APIs (role-gated) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Retry a borrow delta push by recomputing USD-8 valuation and replaying the view update.
+    * @notice Retry a borrow delta push by recomputing the normalized valuation delta and replaying the view update.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract
      *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
@@ -213,7 +216,7 @@ contract LoanFlowPushManager is
     }
 
     /**
-     * @notice Retry a repay delta push by recomputing USD-8 valuation and replaying the view update.
+    * @notice Retry a repay delta push by recomputing the normalized valuation delta and replaying the view update.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract
      *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
@@ -321,16 +324,16 @@ contract LoanFlowPushManager is
             return;
         }
 
-        // USD-8 conversion (SSOT): valueUsd8 = amountBaseUnits * priceUsd8 / 10**assetDecimals.
-        uint256 valueUsd8;
-        uint256 priceUsd8;
+        // Asset-native valuation first, then normalize into the shared 18-decimal system valuation unit.
+        uint256 normalizedValue;
+        uint256 priceValue;
         uint256 assetDecimals;
         try IPriceOracleRead(oracleAddr).getPrice(asset) returns (
             uint256 p,
             uint256,
             uint256 d
         ) {
-            priceUsd8 = p;
+            priceValue = p;
             assetDecimals = d;
         } catch (bytes memory reason) {
             emit CacheUpdateFailedWithContext(
@@ -346,7 +349,7 @@ contract LoanFlowPushManager is
             );
             return;
         }
-        if (priceUsd8 == 0) {
+        if (priceValue == 0) {
             emit CacheUpdateFailedWithContext(
                 user,
                 asset,
@@ -375,8 +378,16 @@ contract LoanFlowPushManager is
             );
             return;
         }
-        uint256 denom = 10 ** assetDecimals;
-        valueUsd8 = Math.mulDiv(amountBaseUnits, priceUsd8, denom);
+        uint256 value = AssetDecimalMath.calcValue(
+            amountBaseUnits,
+            priceValue,
+            uint8(assetDecimals)
+        );
+        normalizedValue = AssetDecimalMath.normalizeValueDown(
+            value,
+            uint8(assetDecimals),
+            _SYSTEM_VALUATION_DECIMALS
+        );
 
         // Strict optimistic concurrency: read current version, nextVersion = cur + 1.
         uint64 nextVersion;
@@ -390,8 +401,8 @@ contract LoanFlowPushManager is
                 asset,
                 requestId,
                 viewAddr,
-                isBorrow ? valueUsd8 : 0,
-                isBorrow ? 0 : valueUsd8,
+                isBorrow ? normalizedValue : 0,
+                isBorrow ? 0 : normalizedValue,
                 reason,
                 0,
                 0
@@ -399,8 +410,8 @@ contract LoanFlowPushManager is
             return;
         }
 
-        uint256 borrowDelta = isBorrow ? valueUsd8 : 0;
-        uint256 repayDelta = isBorrow ? 0 : valueUsd8;
+        uint256 borrowDelta = isBorrow ? normalizedValue : 0;
+        uint256 repayDelta = isBorrow ? 0 : normalizedValue;
         uint64 borrowCountDelta = isBorrow ? 1 : 0;
         uint64 repayCountDelta = isBorrow ? 0 : 1;
 

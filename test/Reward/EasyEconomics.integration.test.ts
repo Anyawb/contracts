@@ -50,19 +50,21 @@ describe("Easy economics milestones (A-D)", function () {
     }
 
     // EasyEmissionConfig defaults
-    const [thr0, mintPer0, kNum0, kDen0] = await easyEmissionConfig.getEmissionParams();
-    expect(thr0).to.equal(100_000_000n * 10n ** 8n);
+    const [thr0, mintPer0, kNum0, kDen0, valuationDecimals0] = await easyEmissionConfig.getEmissionParams();
+    expect(thr0).to.equal(100_000_000n * 10n ** 18n);
     expect(mintPer0).to.equal(10n * 10n ** 18n);
     expect(kNum0).to.equal(1n);
     expect(kDen0).to.equal(10_000_000n);
+    expect(valuationDecimals0).to.equal(18n);
 
     // Update params
     await easyEmissionConfig.connect(admin).setEmissionParams(123n, 456n, 7n, 9n);
-    const [thr1, mintPer1, kNum1, kDen1] = await easyEmissionConfig.getEmissionParams();
+    const [thr1, mintPer1, kNum1, kDen1, valuationDecimals1] = await easyEmissionConfig.getEmissionParams();
     expect(thr1).to.equal(123n);
     expect(mintPer1).to.equal(456n);
     expect(kNum1).to.equal(7n);
     expect(kDen1).to.equal(9n);
+    expect(valuationDecimals1).to.equal(18n);
 
     // EasyToken mint/burn via sole minter
     await easyToken.connect(admin).setSoleMinter(admin.address);
@@ -120,7 +122,7 @@ describe("Easy economics milestones (A-D)", function () {
       await loadFixture(deployEmissionFixture);
 
     const asset = ethers.Wallet.createRandom().address;
-    await priceOracle.setPrice(asset, 10n ** 8n, 1n, 6n); // $1, assetDecimals=6
+    await priceOracle.setPrice(asset, 10n ** 6n, 1n, 6n); // $1, assetDecimals=6
     await loanFlowView.setGlobalLoanFlow(0n, 0n, 0n, 0n, true, 1n);
 
     // NOTE: mint is based on net amount after borrow-side fee (0.3% = 30 bps), and net must be >= 1000U.
@@ -131,9 +133,9 @@ describe("Easy economics milestones (A-D)", function () {
       .onLoanEventByOrderWithLender(borrower.address, lender.address, asset, 1n, amountBaseUnits, 0n, 1);
 
     const [, mintPer1000Usd] = await easyEmissionConfig.getEmissionParams();
-    const amountUsd8Gross = (amountBaseUnits * 10n ** 8n) / 10n ** 6n; // $1, assetDecimals=6
-    const amountUsd8Net = (amountUsd8Gross * (10_000n - 30n)) / 10_000n;
-    const totalMinted = (amountUsd8Net * mintPer1000Usd) / (1_000n * 10n ** 8n);
+    const amountValueGross = (amountBaseUnits * 10n ** 18n) / 10n ** 6n; // $1, assetDecimals=6
+    const amountValueNet = (amountValueGross * (10_000n - 30n)) / 10_000n;
+    const totalMinted = (amountValueNet * mintPer1000Usd) / (1_000n * 10n ** 18n);
     const borrowerShare = totalMinted / 2n;
     const lenderShare = totalMinted - borrowerShare;
 
@@ -164,7 +166,7 @@ describe("Easy economics milestones (A-D)", function () {
 
     const [thr, mintPer, kNum, kDen] = await easyEmissionConfig.getEmissionParams();
     const asset = ethers.Wallet.createRandom().address;
-    await priceOracle.setPrice(asset, 10n ** 8n, 1n, 6n);
+    await priceOracle.setPrice(asset, 10n ** 6n, 1n, 6n);
     await loanFlowView.setGlobalLoanFlow(thr + 1n, 0n, 0n, 0n, true, 1n);
 
     // Seed retained supply = 100 EASY
@@ -178,9 +180,9 @@ describe("Easy economics milestones (A-D)", function () {
       .onLoanEventByOrderWithLender(borrower.address, lender.address, asset, 9n, amountBaseUnits, 0n, 1);
 
     const retainedEasy = 100n;
-    const amountUsd8Gross = (amountBaseUnits * 10n ** 8n) / 10n ** 6n;
-    const amountUsd8Net = (amountUsd8Gross * (10_000n - 30n)) / 10_000n;
-    const base = (amountUsd8Net * 10n ** 10n) / 100n; // amountUsd8 * 1e18 / 1e8 / 100
+    const amountValueGross = (amountBaseUnits * 10n ** 18n) / 10n ** 6n;
+    const amountValueNet = (amountValueGross * (10_000n - 30n)) / 10_000n;
+    const base = amountValueNet / 100n;
     const expectedTotal = (base * kDen) / (kDen + kNum * retainedEasy);
 
     const borrowerBal = await easyToken.balanceOf(borrower.address);

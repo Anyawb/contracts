@@ -12,19 +12,6 @@ import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 import { ethers, upgrades } from 'hardhat';
 import { loadFixture, mine } from '@nomicfoundation/hardhat-network-helpers';
 
-import type {
-  MockAccessControlManager,
-  MockCollateralManager,
-  MockLendingEngineBasic,
-  MockPriceOracle,
-  MockRegistry,
-  MockVaultCoreView,
-  PositionView,
-  VaultRouter,
-} from '../../../types';
-
-import type { CacheMaintenanceManager } from '../../../types';
-
 const ModuleKeys = {
   KEY_CM: ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER')),
   KEY_LE: ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE')),
@@ -44,19 +31,19 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
     const [admin, user, maint] = await ethers.getSigners();
 
     const RegistryFactory = await ethers.getContractFactory('MockRegistry');
-    const registry = (await RegistryFactory.deploy()) as MockRegistry;
+    const registry = (await RegistryFactory.deploy()) as any;
 
     const ACMFactory = await ethers.getContractFactory('MockAccessControlManager');
-    const acm = (await ACMFactory.deploy()) as MockAccessControlManager;
+    const acm = (await ACMFactory.deploy()) as any;
 
     const CMFactory = await ethers.getContractFactory('MockCollateralManager');
-    const cm = (await CMFactory.deploy()) as MockCollateralManager;
+    const cm = (await CMFactory.deploy()) as any;
 
     const LEFactory = await ethers.getContractFactory('MockLendingEngineBasic');
-    const le = (await LEFactory.deploy()) as MockLendingEngineBasic;
+    const le = (await LEFactory.deploy()) as any;
 
     const PriceOracleFactory = await ethers.getContractFactory('MockPriceOracle');
-    const priceOracle = (await PriceOracleFactory.deploy()) as MockPriceOracle;
+    const priceOracle = (await PriceOracleFactory.deploy()) as any;
 
     const AssetWhitelistFactory = await ethers.getContractFactory('MockAssetWhitelist');
     const assetWhitelist = await AssetWhitelistFactory.deploy();
@@ -76,11 +63,11 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
         admin.address, // initialOwner
       ],
       { kind: 'uups', initializer: 'initialize' }
-    )) as VaultRouter;
+    )) as any;
 
     // Deploy CacheMaintenanceManager (A-class cache SSOT entrypoint)
     const CacheMaintF = await ethers.getContractFactory('CacheMaintenanceManager');
-    const cacheMaint = (await CacheMaintF.deploy(await registry.getAddress())) as CacheMaintenanceManager;
+    const cacheMaint = (await CacheMaintF.deploy(await registry.getAddress())) as any;
     await cacheMaint.waitForDeployment();
 
     // Deploy PositionView
@@ -88,11 +75,11 @@ describe('PositionView – cache consistency and ledger fallback (strict)', func
     const positionView = (await upgrades.deployProxy(PositionViewFactory, [await registry.getAddress()], {
       kind: 'uups',
       initializer: 'initialize',
-    })) as PositionView;
+    })) as any;
 
     // VaultCore mock resolves VaultRouter address for PositionView.onlyBusinessContract and satisfies VaultRouter.onlyVaultCore.
     const VaultCoreViewFactory = await ethers.getContractFactory('MockVaultCoreView');
-    const vaultCoreModule = (await VaultCoreViewFactory.deploy()) as MockVaultCoreView;
+    const vaultCoreModule = (await VaultCoreViewFactory.deploy()) as any;
     await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
     await vaultCoreModule.setLendingEngine(await le.getAddress());
 

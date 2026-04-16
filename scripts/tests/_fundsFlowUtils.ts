@@ -1,5 +1,6 @@
-import { ethers } from "hardhat";
-import { CONTRACT_ADDRESSES } from "../../frontend-config/contracts-localhost.ts";
+import { ethers, network } from "hardhat";
+
+import { loadAddressMap, resolveAddress } from "./_addressResolver";
 
 export function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -124,7 +125,13 @@ export async function discoverTrackedAddresses(opts: {
   const lender = opts.lender ?? ethers.ZeroAddress;
   const keeper = opts.keeper ?? ethers.ZeroAddress;
 
-  const registry = (await ethers.getContractAt("Registry", CONTRACT_ADDRESSES.Registry)) as any;
+  const addressMap = loadAddressMap(network.name === "hardhat" ? "localhost" : network.name);
+  const registryAddr = resolveAddress({
+    name: "Registry",
+    map: addressMap,
+    envVar: "REGISTRY_ADDRESS",
+  });
+  const registry = (await ethers.getContractAt("Registry", registryAddr)) as any;
   const feeRouterAddr = (await registry.getModuleOrRevert(key("FEE_ROUTER"))) as string;
   const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", feeRouterAddr)) as any;
 

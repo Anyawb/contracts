@@ -60,9 +60,9 @@ abstract contract LiquidationCalculator is LiquidationConfigManager {
      * - View-only function (no state changes)
      * - Uses `liquidationThresholdVar` (bps) from ConfigManager (SSOT)
      *
-     * @param collateralValue Current collateral value (settlement token denominated, 1e18-scaled)
-     * @param debtValue Current debt value (settlement token denominated, 1e18-scaled)
-     * @return threshold Required collateral value (settlement token denominated, 1e18-scaled)
+    * @param collateralValue Current collateral value (shared 18-decimal system valuation unit)
+    * @param debtValue Current debt value (shared 18-decimal system valuation unit)
+    * @return threshold Required collateral value (shared 18-decimal system valuation unit)
      */
     function calculateLiquidationThreshold(
         uint256 collateralValue,
@@ -81,8 +81,8 @@ abstract contract LiquidationCalculator is LiquidationConfigManager {
      * Security:
      * - Pure function (no state changes)
      *
-     * @param collateralValue Total collateral value (settlement token denominated, 1e18-scaled)
-     * @param debtValue Total debt value (settlement token denominated, 1e18-scaled)
+    * @param collateralValue Total collateral value (shared 18-decimal system valuation unit)
+    * @param debtValue Total debt value (shared 18-decimal system valuation unit)
      * @return healthFactor Health factor in bps (10_000 = 100%, type(uint256).max if debtValue == 0)
      */
     function calculateHealthFactor(
@@ -166,7 +166,7 @@ abstract contract LiquidationCalculator is LiquidationConfigManager {
         // 1) Bonus (amount-based; seized collateral amount is the base)
         bonus = (collateralAmount * liquidationBonusRateVar) / 10_000;
 
-        // 2) Get current totals (settlement token denominated, 1e18-scaled)
+        // 2) Get current totals (shared 18-decimal system valuation unit)
         (
             uint256 totalCollateralValue,
             uint256 totalDebtValue
@@ -216,7 +216,7 @@ abstract contract LiquidationCalculator is LiquidationConfigManager {
                 currentDebtAmount = 0;
             }
             try
-                ILendingEngineDebtRead(lendingEngine).calculateDebtValue(
+                ILendingEngineDebtRead(lendingEngine).calculateDebtValueStrict(
                     user,
                     debtAsset
                 )
@@ -226,7 +226,7 @@ abstract contract LiquidationCalculator is LiquidationConfigManager {
                 currentDebtValue = 0;
             }
             if (currentDebtAmount != 0 && currentDebtValue != 0) {
-                // unitPrice = value / amount (settlement token denominated per debt token unit)
+                // unitPrice = value / amount (shared valuation-unit amount per debt token base unit)
                 uint256 unitPrice = currentDebtValue / currentDebtAmount;
                 reducedDebtValue = unitPrice * debtAmount;
                 if (reducedDebtValue > currentDebtValue)

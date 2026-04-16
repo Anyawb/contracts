@@ -73,8 +73,8 @@ library LiquidationRiskQueryLib {
      * @param registryAddr Registry contract address for module resolution
      * @param moduleCache Module cache storage reference
  * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
-    * @return collateralValue Total collateral value in settlement-token units, scaled by 1e18, or 0 if the query fails.
-    * @return debtValue Total debt value in settlement-token units, scaled by 1e18, or 0 if the query fails.
+    * @return collateralValue Total collateral value in the shared 18-decimal system valuation unit, or 0 if the query fails.
+    * @return debtValue Total debt value in the shared 18-decimal system valuation unit, or 0 if the query fails.
      */
     function getUserValues(
         address user,
@@ -87,14 +87,14 @@ library LiquidationRiskQueryLib {
 
         if (lendingEngine == address(0) || positionView == address(0)) return (0, 0);
 
-        // debt value (settlement token denominated; produced by LE valuation)
-        try ILendingEngineDebtRead(lendingEngine).getUserTotalDebtValue(user) returns (uint256 v) {
+        // debt value for automatic risk decisions must come from the strict oracle-backed route.
+        try ILendingEngineDebtRead(lendingEngine).getUserTotalDebtValueStrict(user) returns (uint256 v) {
             debtValue = v;
         } catch {
             debtValue = 0;
         }
 
-        // collateral value (settlement token denominated; produced by PositionView valuation)
+        // collateral value (shared 18-decimal system valuation unit; produced by PositionView valuation)
         try IPositionViewValuation(positionView).getUserTotalCollateralValue(user) returns (uint256 v) {
             collateralValue = v;
         } catch {

@@ -60,7 +60,7 @@ describe('LoanNFTView', function () {
         .map((f) => (f as any).name);
       expect(eventNames).to.not.include('DataPushed');
 
-      const selectors = functionFragments.map((f) => view.interface.getFunction(f.format()).selector);
+      const selectors = functionFragments.map((f) => view.interface.getFunction(f.format())!.selector);
       expect(selectors.length).to.equal(new Set(selectors).size);
     });
   });

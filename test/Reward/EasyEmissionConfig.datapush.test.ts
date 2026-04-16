@@ -107,12 +107,12 @@ describe("Reward – EasyEmissionConfig params update datapush", function () {
   it("setEmissionParams emits RewardView DataPushed(EASY_EMISSION_PARAMS_UPDATED) with correct payload and updates RewardView cache", async function () {
     const { governance, ops, rewardView, easyEmissionConfig } = await loadFixture(fixture);
 
-    const thresholdUsd8 = 123n;
+    const thresholdValue = 123n;
     const mintPer1000Usd = 456n;
     const kNum = 7n;
     const kDen = 8n;
 
-    const tx = await easyEmissionConfig.connect(governance).setEmissionParams(thresholdUsd8, mintPer1000Usd, kNum, kDen);
+    const tx = await easyEmissionConfig.connect(governance).setEmissionParams(thresholdValue, mintPer1000Usd, kNum, kDen);
     const receipt = await tx.wait();
     if (!receipt) throw new Error("missing receipt");
 
@@ -121,20 +121,22 @@ describe("Reward – EasyEmissionConfig params update datapush", function () {
     expect(match, "missing DataPushed(EASY_EMISSION_PARAMS_UPDATED)").to.not.be.undefined;
 
     const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-      ["uint256", "uint256", "uint256", "uint256", "uint256"],
+      ["uint256", "uint8", "uint256", "uint256", "uint256", "uint256"],
       (match as any).payload
     );
-    expect(decoded[0]).to.equal(thresholdUsd8);
-    expect(decoded[1]).to.equal(mintPer1000Usd);
-    expect(decoded[2]).to.equal(kNum);
-    expect(decoded[3]).to.equal(kDen);
-    expect(decoded[4]).to.equal(BigInt(receipt.blockNumber));
+    expect(decoded[0]).to.equal(thresholdValue);
+    expect(decoded[1]).to.equal(18n);
+    expect(decoded[2]).to.equal(mintPer1000Usd);
+    expect(decoded[3]).to.equal(kNum);
+    expect(decoded[4]).to.equal(kDen);
+    expect(decoded[5]).to.equal(BigInt(receipt.blockNumber));
 
-    const [t, m, kn, kd, cacheBlock, isValid] = await rewardView.connect(ops).getEasyEmissionParamsWithMeta();
-    expect(t).to.equal(thresholdUsd8);
+    const [t, m, kn, kd, valuationDecimals, cacheBlock, isValid] = await rewardView.connect(ops).getEasyEmissionParamsWithMeta();
+    expect(t).to.equal(thresholdValue);
     expect(m).to.equal(mintPer1000Usd);
     expect(kn).to.equal(kNum);
     expect(kd).to.equal(kDen);
+    expect(valuationDecimals).to.equal(18n);
     expect(cacheBlock).to.equal(BigInt(receipt.blockNumber));
     expect(isValid).to.equal(true);
   });
@@ -152,21 +154,22 @@ describe("Reward – EasyEmissionConfig params update datapush", function () {
     const wrong = ethers.Wallet.createRandom().address;
     await registry.setModule(KEY_EASY_EMISSION_CONFIG, wrong);
 
-    const thresholdUsd8 = 10n;
+    const thresholdValue = 10n;
     const mintPer1000Usd = 11n;
     const kNum = 12n;
     const kDen = 13n;
 
-    const tx = await easyEmissionConfig.connect(governance).setEmissionParams(thresholdUsd8, mintPer1000Usd, kNum, kDen);
+    const tx = await easyEmissionConfig.connect(governance).setEmissionParams(thresholdValue, mintPer1000Usd, kNum, kDen);
     const receipt = await tx.wait();
     if (!receipt) throw new Error("missing receipt");
 
     // Main write succeeded (no revert) and config storage updated.
-    const [t, m, kn, kd] = await easyEmissionConfig.getEmissionParams();
-    expect(t).to.equal(thresholdUsd8);
+    const [t, m, kn, kd, valuationDecimals] = await easyEmissionConfig.getEmissionParams();
+    expect(t).to.equal(thresholdValue);
     expect(m).to.equal(mintPer1000Usd);
     expect(kn).to.equal(kNum);
     expect(kd).to.equal(kDen);
+    expect(valuationDecimals).to.equal(18n);
 
     // Push failed event emitted by RewardModuleBase.
     await expect(tx)

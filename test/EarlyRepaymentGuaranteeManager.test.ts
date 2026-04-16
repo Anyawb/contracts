@@ -19,6 +19,7 @@ const MODULE_KEYS = {
   ACCESS_CONTROL: ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')),
   GUARANTEE_FUND: ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER')),
   VAULT_CORE: ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE')),
+  SETTLEMENT_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('SETTLEMENT_MANAGER')),
 } as const;
 
 const ACTION_SET_PARAMETER = ethers.keccak256(ethers.toUtf8Bytes('SET_PARAMETER'));
@@ -35,6 +36,7 @@ interface DeploymentFixture {
   guaranteeFund: MockGuaranteeFundForEarlyRepayment;
   ergm: EarlyRepaymentGuaranteeManager;
   vaultCore: SignerWithAddress;
+  settlementManager: SignerWithAddress;
   borrower: SignerWithAddress;
   lender: SignerWithAddress;
   platformFeeReceiver: SignerWithAddress;
@@ -68,7 +70,7 @@ async function deployRegistryProxy(
 }
 
 async function deploySystemFixture(): Promise<DeploymentFixture> {
-  const [deployer, vaultCore, borrower, lender, platformFeeReceiver, admin] =
+  const [deployer, vaultCore, settlementManager, borrower, lender, platformFeeReceiver, admin] =
     await ethers.getSigners();
 
   const registry = await deployRegistryProxy(0, deployer.address, deployer.address, deployer.address);
@@ -78,6 +80,7 @@ async function deploySystemFixture(): Promise<DeploymentFixture> {
   await accessControl.waitForDeployment();
   await registry.setModule(MODULE_KEYS.ACCESS_CONTROL, await accessControl.getAddress());
   await registry.setModule(MODULE_KEYS.VAULT_CORE, vaultCore.address);
+  await registry.setModule(MODULE_KEYS.SETTLEMENT_MANAGER, settlementManager.address);
 
   const GuaranteeFundFactory = await ethers.getContractFactory('MockGuaranteeFundForEarlyRepayment');
   const guaranteeFund = (await GuaranteeFundFactory.deploy()) as MockGuaranteeFundForEarlyRepayment;
@@ -104,6 +107,7 @@ async function deploySystemFixture(): Promise<DeploymentFixture> {
     guaranteeFund,
     ergm,
     vaultCore,
+    settlementManager,
     borrower,
     lender,
     platformFeeReceiver,
@@ -182,7 +186,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
           PROMISED_INTEREST,
           anyValue, // startTime
           anyValue, // maturityTime
-          14400n, // DEFAULT_EARLY_REPAY_PENALTY_BLOCKS (legacy field name: earlyRepayPenaltyDays)
+          14400n, // DEFAULT_EARLY_REPAY_PENALTY_BLOCKS (field name: earlyRepayPenaltyDays)
           anyValue // blockNumber
         );
 
@@ -218,7 +222,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
 
   describe('settleEarlyRepayment', function () {
     it('settles early repayment and deactivates record', async function () {
-      const { ergm, vaultCore, borrower, lender, testAsset } = await loadFixture(deploySystemFixture);
+      const { ergm, vaultCore, settlementManager, borrower, lender, testAsset } = await loadFixture(deploySystemFixture);
       await lockGuarantee(ergm, vaultCore, borrower.address, lender.address, testAsset);
 
       // Time-Dependency-Refactor: advance by blocks (not wall-clock seconds).
@@ -226,7 +230,7 @@ describe('EarlyRepaymentGuaranteeManager', function () {
 
       await expect(
         ergm
-          .connect(vaultCore)
+          .connect(settlementManager)
           .settleEarlyRepayment(borrower.address, testAsset, PRINCIPAL + PROMISED_INTEREST)
       )
         .to.emit(ergm, 'EarlyRepaymentProcessed')
@@ -247,19 +251,26 @@ describe('EarlyRepaymentGuaranteeManager', function () {
     });
 
     it('reverts when guarantee not found', async function () {
-      const { ergm, vaultCore, lender, testAsset } = await loadFixture(deploySystemFixture);
+      const { ergm, settlementManager, lender, testAsset } = await loadFixture(deploySystemFixture);
       await expect(
-        ergm.connect(vaultCore).settleEarlyRepayment(lender.address, testAsset, PRINCIPAL)
+        ergm.connect(settlementManager).settleEarlyRepayment(lender.address, testAsset, PRINCIPAL)
       ).to.be.revertedWithCustomError(ergm, 'GuaranteeRecordNotFound');
+    });
+
+    it('rejects VaultCore direct settlement calls', async function () {
+      const { ergm, vaultCore, borrower, testAsset } = await loadFixture(deploySystemFixture);
+      await expect(
+        ergm.connect(vaultCore).settleEarlyRepayment(borrower.address, testAsset, PRINCIPAL)
+      ).to.be.revertedWithCustomError(ergm, 'EarlyRepaymentGuaranteeManager__OnlySettlementManager');
     });
   });
 
   describe('processDefault', function () {
     it('forfeits promised interest to lender', async function () {
-      const { ergm, vaultCore, borrower, lender, testAsset } = await loadFixture(deploySystemFixture);
+      const { ergm, vaultCore, settlementManager, borrower, lender, testAsset } = await loadFixture(deploySystemFixture);
       await lockGuarantee(ergm, vaultCore, borrower.address, lender.address, testAsset);
 
-      await expect(ergm.connect(vaultCore).processDefault(borrower.address, testAsset))
+      await expect(ergm.connect(settlementManager).processDefault(borrower.address, testAsset))
         .to.emit(ergm, 'GuaranteeForfeited')
         .withArgs(1n, borrower.address, lender.address, testAsset, PROMISED_INTEREST, anyValue);
 
@@ -267,10 +278,17 @@ describe('EarlyRepaymentGuaranteeManager', function () {
     });
 
     it('reverts when record missing', async function () {
+      const { ergm, settlementManager, borrower, testAsset } = await loadFixture(deploySystemFixture);
+      await expect(
+        ergm.connect(settlementManager).processDefault(borrower.address, testAsset)
+      ).to.be.revertedWithCustomError(ergm, 'GuaranteeRecordNotFound');
+    });
+
+    it('rejects VaultCore direct default processing', async function () {
       const { ergm, vaultCore, borrower, testAsset } = await loadFixture(deploySystemFixture);
       await expect(
         ergm.connect(vaultCore).processDefault(borrower.address, testAsset)
-      ).to.be.revertedWithCustomError(ergm, 'GuaranteeRecordNotFound');
+      ).to.be.revertedWithCustomError(ergm, 'EarlyRepaymentGuaranteeManager__OnlySettlementManager');
     });
   });
 
@@ -285,9 +303,9 @@ describe('EarlyRepaymentGuaranteeManager', function () {
     });
 
     it('reverts when record inactive', async function () {
-      const { ergm, vaultCore, borrower, lender, testAsset } = await loadFixture(deploySystemFixture);
+      const { ergm, vaultCore, settlementManager, borrower, lender, testAsset } = await loadFixture(deploySystemFixture);
       await lockGuarantee(ergm, vaultCore, borrower.address, lender.address, testAsset);
-      await ergm.connect(vaultCore).processDefault(borrower.address, testAsset);
+      await ergm.connect(settlementManager).processDefault(borrower.address, testAsset);
 
       await expect(ergm.previewEarlyRepayment(1n, PRINCIPAL)).to.be.revertedWithCustomError(
         ergm,

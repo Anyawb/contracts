@@ -150,7 +150,7 @@
 建议对外稳定暴露至少以下结构：
 
 1. `abi/`
-2. `typechain/`
+2. `types/`（或等价的强类型产物目录，例如 `typechain/`）
 3. `frontend-config/moduleKeys.ts`
 4. `deployments/<env>/addresses.json`
 5. `deployments/<env>/manifest.json`
@@ -213,41 +213,41 @@ EVM 现阶段最需要补齐的不是“更多接口”，而是“可被统一�
 
 ---
 
-## 8. 当前仓库验收表（截至 2026-03-25）
+## 8. 当前仓库验收表（截至 2026-04-06）
 
 下表基于当前工作区可见产物进行核查，目的是回答一个更落地的问题：按本文档口径，现阶段 EVM 合约仓库是否已经具备“可交付给前端、后端、索引层统一消费”的产物。
 
 | 验收项 | 当前状态 | 依据 | 备注 |
 |---|---|---|---|
-| ABI 可由前端、后端、索引器共同消费 | 部分满足 | 仓库已有 `abi/` 目录，且存在 `types/` 强类型产物 | 基础产物已存在，但是否已被前端、后端、索引器统一锁定到同一发布版本，当前仓库内看不到完整发布闭环 |
-| 地址清单按环境发布且可追溯 | 部分满足 | 已存在 `scripts/deployments/localhost.json`、`scripts/deployments/arbitrum-sepolia.json`、`frontend-config/contracts-localhost.ts`、`frontend-config/contracts-arbitrum-sepolia.ts` | `localhost` 口径基本一致；`arbitrum-sepolia` 前端配置与脚本部署产物存在漂移，不满足“统一权威地址源” |
-| module keys 和 Registry 绑定关系可机器读取 | 部分满足 | 已有 `frontend-config/moduleKeys.ts`，且标注 SSOT 来自 `contracts/src/constants/ModuleKeys.sol` | module keys 产物基本成立，但部分消费侧仍有手写 keccak 常量，说明尚未完全收口到唯一来源 |
-| 业务动作到合约入口映射已固定 | 部分满足 | 多份架构文档已经描述 `deposit`/`withdraw`/`repay`/`liquidate` 等主路径 | 当前更多是分散在说明文档中，尚未形成单独、稳定、可直接交付的 action-to-entry 映射表 |
-| 关键事件具备业务语义说明 | 未满足 | 仓库存在若干事件相关说明文档和实现文档 | 本文建议的 `docs/events.md` 尚未形成固定交付件，索引层统一消费口径仍不够集中 |
-| 错误分类和 finality 口径已固定 | 未满足 | 仓库存在错误生成脚本、部分模块错误文档、监控说明文档 | 本文建议的 `docs/errors.md` 尚未形成固定交付件；finality、确认、补偿口径也未看到单一权威文档 |
-| 当前工作区不再依赖 mock ABI 和 mock 地址作为生产依据 | 部分满足 | 仓库同时存在真实部署产物、mock 资产清单、mock suite 产物 | 当前目录结构中 mock 与非 mock 产物并存，且 `arbitrum-sepolia` 存在多份地址口径，生产依据仍需进一步收口 |
-| manifest 版本信息可对外发布 | 未满足 | 当前仓库未见 `deployments/<env>/manifest.json` 固定产物 | 缺少版本号、发布时间、commit hash、环境元信息这一层可追溯发布件 |
-| 前端、后端、索引器消费同一版本 | 部分满足 | 本地 `localhost` 前端配置与脚本部署产物基本一致 | 远端环境仍存在配置漂移；当前更像“仓库内可联调”，还不是“统一版本可签收” |
-| 发布后具备最小验收闭环 | 部分满足 | 仓库内已有 smoke / e2e / 预发布脚本 | 脚本能力较强，但未与本文要求的 manifest、事件字典、错误字典、统一地址清单组成单一发布包 |
+| ABI 可由前端、后端、索引器共同消费 | 部分满足 | 仓库已有 `abi/` 目录，且存在 `types/` 强类型产物 | ABI 与类型产物已经存在，但是否已经被前端、后端、索引器统一锁定到同一发布版本，仓库内仍看不到完整发布闭环 |
+| 地址清单按环境发布且可追溯 | 部分满足 | 已存在 `scripts/deployments/localhost.json`、`scripts/deployments/arbitrum-sepolia.json`、`frontend-config/contracts-localhost.ts`、`frontend-config/contracts-arbitrum-sepolia.ts`，同时也存在顶层 `deployments/` 地址文件 | 地址产物已经存在，但当前仍有 `scripts/deployments/`、`deployments/`、`frontend-config/` 多套口径并存，权威源尚未完全收口 |
+| module keys 和 Registry 绑定关系可机器读取 | 部分满足 | 已有 `frontend-config/moduleKeys.ts`，且标注 SSOT 来自 `src/constants/ModuleKeys.sol` | module keys 产物基本成立，但部分消费侧仍可能保留手写 keccak 或本地常量，说明尚未完全收口到唯一来源 |
+| 业务动作到合约入口映射已固定 | 部分满足 | 多份架构与集成文档已经描述 `deposit`、`withdraw`、`repay`、`settleOrLiquidate`、`finalizeMatch` 等主路径 | 主路径语义已经逐步稳定，但 action-to-entry 仍分散在多份文档中，尚未形成单独、稳定、可直接交付的映射表 |
+| 关键事件具备业务语义说明 | 部分满足 | 已存在 `docs/events.md` | 事件字典已经落地，但是否已被索引层、后端投影和运维共同当作唯一消费口径，仍需继续验证与收口 |
+| 错误分类和 finality 口径已固定 | 部分满足 | 已存在 `docs/errors.md` | 错误字典已经落地，但 finality、确认阈值、补偿/告警策略是否在所有运行环境共享同一权威口径，仍需进一步收口 |
+| 当前工作区不再依赖 mock ABI 和 mock 地址作为生产依据 | 部分满足 | 仓库同时存在真实部署产物、mock 资产清单、mock suite 产物 | 当前目录结构中 mock 与非 mock 产物并存，且同环境存在多类地址文件，生产消费边界仍需继续明确 |
+| manifest 版本信息可对外发布 | 部分满足 | 已存在 `scripts/deployments/localhost.manifest.json`、`scripts/deployments/arbitrum-sepolia.manifest.json`、`scripts/deployments/bnb-testnet/manifest.json` | manifest 已开始落地，但目录结构尚未完全统一到本文建议的单一形态，且仍处于过渡状态 |
+| 前端、后端、索引器消费同一版本 | 部分满足 | `localhost.manifest.json` 已显式记录地址源、前端配置文件、events/errors 文档 | 本地环境已经出现统一消费锚点，但远端环境是否完全对齐、是否所有消费方都真的跟随 manifest，仍需验证 |
+| 发布后具备最小验收闭环 | 部分满足 | 仓库内已有 smoke / e2e / 预发布脚本，并开始具备 manifest、事件字典、错误字典 | 交付闭环比 2026-03-25 时更完整，但仍未完全收敛为单一发布包和单一权威地址源 |
 
 ### 8.1 当前判断
 
-如果判断标准是“仓库是否已经具备联调能力”，答案是：**基本具备**。
+如果判断标准是“仓库是否已经具备联调能力”，答案仍然是：**基本具备**。
 
-如果判断标准是“仓库是否已经具备可稳定对外发布的 EVM 对接产物包”，答案是：**尚未完全具备**。
+如果判断标准是“仓库是否已经具备可稳定对外发布的 EVM 对接产物包”，答案是：**比 2026-03-25 更接近，但仍未完全具备**。
 
 更准确地说，当前状态属于：
 
-1. ABI、类型、module keys、部署产物、脚本验证能力已经有基础。
-2. 但权威地址源、manifest、事件字典、错误/finality 字典这几项仍未形成稳定发布出口。
-3. 因此现在更接近“工程上可联调”，而不是“交付上可签收”。
+1. ABI、类型、module keys、部署产物、manifest、事件字典、错误字典都已经出现明确基础产物。
+2. 但权威地址源、manifest 目录规则、远端环境一致性、前后端索引器是否统一跟随同一发布锚点，仍未完全收口。
+3. 因此现在已经不只是“工程上可联调”，而是进入“可形成交付包雏形，但尚未完全达到统一签收”的阶段。
 
 ### 8.2 当前最缺的 4 件事
 
-1. 收口为唯一权威地址源，消除前端配置、脚本部署文件、对外地址文件之间的漂移。
-2. 补齐 `manifest.json`，把版本、环境、发布时间、commit hash 固定为机器可读产物。
-3. 补齐 `docs/events.md`，把关键事件、业务语义、索引映射、兼容策略收口为单一文档。
-4. 补齐 `docs/errors.md`，把常见 revert、自定义错误、错误分类、确认/finality 口径收口为单一文档。
+1. 收口为唯一权威地址源，消除 `scripts/deployments/`、`deployments/`、`frontend-config/` 之间的漂移。
+2. 统一 manifest 的目录结构与生成规则，避免不同网络继续出现不同摆放方式。
+3. 让前端、后端、索引器明确以同一份 manifest 和同一组地址源作为消费锚点，而不是“文件存在但各自仍手工挑选”。
+4. 继续把 events/errors 文档从“已存在”推进到“被统一执行与验收流程实际引用的权威文档”。
 
 ### 8.3 部署前必须确认的内容
 

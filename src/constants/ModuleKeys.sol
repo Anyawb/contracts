@@ -49,6 +49,12 @@ library ModuleKeys {
     /// @dev Hash: keccak256("ORDER_ENGINE")
     bytes32 internal constant KEY_ORDER_ENGINE = keccak256("ORDER_ENGINE");
 
+    /// @notice Canonical multi-product order-state SSOT module key.
+    /// @dev Used by Registry to store the OrderStateStoreV2 contract address.
+    /// @dev Hash: keccak256("ORDER_STATE_STORE")
+    bytes32 internal constant KEY_ORDER_STATE_STORE =
+        keccak256("ORDER_STATE_STORE");
+
     /// @notice Deprecated: health factor calculator module key.
     /// @dev Replaced by LiquidationRiskManager / HealthView.
     /// @dev Preserved as a placeholder to avoid breaking legacy data/scripts; new code must not use it.
@@ -69,7 +75,7 @@ library ModuleKeys {
     bytes32 internal constant KEY_STATS_PUSH_MANAGER =
         keccak256("STATISTICS_PUSH_MANAGER");
 
-    /// @notice Loan flow view module key (protocol loan flow metrics, USD-8 SSOT).
+    /// @notice Loan flow view module key (protocol loan flow metrics, shared valuation-unit SSOT).
     /// @dev Used by Registry to store the LoanFlowView contract address.
     /// @dev Hash: keccak256("LOAN_FLOW_VIEW")
     bytes32 internal constant KEY_LOAN_FLOW_VIEW = keccak256("LOAN_FLOW_VIEW");
@@ -77,7 +83,8 @@ library ModuleKeys {
     /// @notice Loan flow push orchestrator module key (strict B+).
     /// @dev Used by Registry to store the LoanFlowPushManager contract address.
     ///      This module is the single on-chain entrypoint responsible for generating `requestId/seq/nextVersion`,
-    ///      computing USD-8 value from the price-oracle SSOT, and pushing deltas into LoanFlowView.
+    ///      computing asset-native value from the price-oracle SSOT, normalizing it into the shared
+    ///      18-decimal system valuation unit, and pushing deltas into LoanFlowView.
     /// @dev Hash: keccak256("LOAN_FLOW_PUSH_MANAGER")
     bytes32 internal constant KEY_LOAN_FLOW_PUSH_MANAGER =
         keccak256("LOAN_FLOW_PUSH_MANAGER");
@@ -441,7 +448,7 @@ library ModuleKeys {
 
     /// @notice Registry key for the standalone blocks-only coordinator module.
     /// @dev Used to resolve the BlocksOnlyCoordinator contract that owns blocks-only order creation,
-    ///      repayment orchestration, maturity settlement, and liquidation entrypoints.
+    ///      repayment orchestration, debt-free trade-close, and maturity-gated settlement/liquidation entrypoints.
     /// @dev Hash: keccak256("BLOCKS_ONLY_COORDINATOR")
     bytes32 internal constant KEY_BLOCKS_ONLY_COORDINATOR =
         keccak256("BLOCKS_ONLY_COORDINATOR");
@@ -547,7 +554,7 @@ library ModuleKeys {
      */
     function getAllKeys() internal pure returns (bytes32[] memory) {
         // NOTE: Keep this list dense (no holes) and in sync with getAllKeyStrings().
-        bytes32[] memory keys = new bytes32[](83);
+        bytes32[] memory keys = new bytes32[](84);
         uint256 i = 0;
 
         /*━━━━━━━━━━━━━━━ Core Modules ━━━━━━━━━━━━━━━*/
@@ -558,6 +565,7 @@ library ModuleKeys {
         keys[i++] = KEY_VAULT_CONFIG;
         keys[i++] = KEY_VAULT_CORE;
         keys[i++] = KEY_ORDER_ENGINE;
+        keys[i++] = KEY_ORDER_STATE_STORE;
 
         /*━━━━━━━━━━━━━━━ Supporting Modules ━━━━━━━━━━━━━━━*/
         keys[i++] = KEY_FR;
@@ -655,7 +663,7 @@ library ModuleKeys {
         keys[i++] = KEY_SYSTEM_RISK_VIEW;
         // Statistics push orchestrator (strict B+)
         keys[i++] = KEY_STATS_PUSH_MANAGER;
-        // Loan flow view (protocol flow stats, USD-8)
+        // Loan flow view (protocol flow stats, shared valuation unit)
         keys[i++] = KEY_LOAN_FLOW_VIEW;
         // Loan flow push orchestrator (strict B+)
         keys[i++] = KEY_LOAN_FLOW_PUSH_MANAGER;
@@ -693,7 +701,7 @@ library ModuleKeys {
      */
     function getAllKeyStrings() internal pure returns (string[] memory) {
         // NOTE: Keep this list dense (no holes) and in sync with getAllKeys().
-        string[] memory names = new string[](82);
+        string[] memory names = new string[](84);
         uint256 i = 0;
 
         /*━━━━━━━━━━━━━━━ Core Modules ━━━━━━━━━━━━━━━*/
@@ -704,6 +712,7 @@ library ModuleKeys {
         names[i++] = "KEY_VAULT_CONFIG";
         names[i++] = "KEY_VAULT_CORE";
         names[i++] = "KEY_ORDER_ENGINE";
+        names[i++] = "KEY_ORDER_STATE_STORE";
 
         /*━━━━━━━━━━━━━━━ Supporting Modules ━━━━━━━━━━━━━━━*/
         names[i++] = "KEY_FR";
@@ -864,6 +873,7 @@ library ModuleKeys {
         if (key == KEY_CM) return "collateralManager";
         if (key == KEY_LE) return "lendingEngine";
         if (key == KEY_ORDER_ENGINE) return "orderEngine";
+        if (key == KEY_ORDER_STATE_STORE) return "orderStateStore";
         // Deprecated: do not return "hfCalculator" mapping anymore.
         // Phase 1: KEY_STATS points to StatisticsView.
         if (key == KEY_STATS) return "statisticsView";
@@ -967,6 +977,7 @@ library ModuleKeys {
         if (key == KEY_CM) return "KEY_CM";
         if (key == KEY_LE) return "KEY_LE";
         if (key == KEY_ORDER_ENGINE) return "KEY_ORDER_ENGINE";
+        if (key == KEY_ORDER_STATE_STORE) return "KEY_ORDER_STATE_STORE";
         // Deprecated: do not return KEY_HF_CALC anymore.
         if (key == KEY_STATS) return "KEY_STATS";
         if (key == KEY_VAULT_CONFIG) return "KEY_VAULT_CONFIG";
@@ -1081,6 +1092,8 @@ library ModuleKeys {
             return KEY_LE;
         if (nameHash == keccak256(abi.encodePacked("orderEngine")))
             return KEY_ORDER_ENGINE;
+        if (nameHash == keccak256(abi.encodePacked("orderStateStore")))
+            return KEY_ORDER_STATE_STORE;
         // Deprecated: do not support "hfCalculator" name mapping anymore.
         // Preserved: keep "statisticsView" mapping for backward compatibility.
         if (nameHash == keccak256(abi.encodePacked("statisticsView")))

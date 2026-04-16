@@ -146,14 +146,9 @@ node scripts/tests/tools/run-full-live-rerun.js
 1. 每轮新的 full-live 都会由 runner 自动重新生成一次 mnemonic。
 2. 每轮新的 full-live 都会由 runner 自动使用新的 state file 路径。
 3. 不要把上一轮的 mnemonic 留给下一轮继续复用。
-4. 如果批次异常中断，但当前终端里的两个环境变量还在，可以手动补跑 sweep：
-
-```bash
-pnpm -s exec hardhat run scripts/tests/live-test/sweep-fresh-borrowers.ts --network arbitrumSepolia
-```
-
-5. 如果你只跑单个 write-mode live 脚本，也建议用 [scripts/tests/tools/run-live-script-with-sweep.js](scripts/tests/tools/run-live-script-with-sweep.js) 这类按轮生成 fresh 配置的 wrapper，再执行对应脚本。
-6. `sweep-fresh-borrowers.ts` 当前自动 sweep 的是 fresh borrower 剩余原生币；如果 borrower 地址上还残留 mock ERC20，需要按资产维度单独处理，不要默认认为 sweep 已经把 ERC20 也回收了。
+4. 如果你只跑单个 write-mode live 脚本，也建议用 [scripts/tests/tools/run-live-script-with-sweep.js](scripts/tests/tools/run-live-script-with-sweep.js) 这类按轮生成 fresh 配置且内置 `EXIT cleanup` 的 wrapper，再执行对应脚本。
+5. 统一口径：单轮只保留一次 sweep，且只在退出清理阶段触发；不要再手工补跑 sweep。
+6. 以 runner 生成的 sweep 日志作为回流证据，不再额外追加手工 sweep 日志。
 
 ### liquidation case 的自动 seed 行为
 
@@ -269,7 +264,7 @@ pnpm -s run deploy:mock-assets:arbitrum-sepolia
       "sourceId": "mock-usdc",
       "maxPriceAge": 3600,
       "active": true,
-      "bootstrapPriceUsd8": "1",
+      "bootstrapPriceValue": "1",
       "sourceProvider": "bootstrap-manual",
       "pricingCurrency": "USD",
       "fallbackPolicy": "bootstrap-only",
@@ -284,7 +279,7 @@ pnpm -s run deploy:mock-assets:arbitrum-sepolia
 
 1. `kind` 只能是 `mock-erc20` 或 `rwa-token`
 2. 必须且只能有一个 `settlementToken=true`
-3. `bootstrapPriceUsd8` 是 bootstrap / live warmup 阶段使用的价格字符串，单位是普通十进制美元值，不需要自己写 8 位精度
+3. `bootstrapPriceValue` 是 bootstrap / live warmup 阶段使用的价格字符串，属于字段名；单位仍是普通十进制美元值，实际写链时会按目标资产 `assetDecimals` 解释，不需要自己手写 8 位精度
 4. 可选的 `sourceProvider`、`sourceTicker`、`pricingCurrency`、`quoteToUsdPair`、`updateCadence`、`staleAfterSeconds`、`fallbackPolicy`、`launchPriceRequired` 会写入资产包 JSON，供 runbook、后端 price job 和 price catalog 读取
 
 当前仓库内置了一份 Google Finance 口径的可改模板，可直接作为自定义 asset pack 起点：
@@ -504,8 +499,8 @@ pnpm -s run test:live:release-gates:arbitrum-sepolia
 
 这个入口会顺序执行：
 
-1. `live-liquidation-arbitrum-sepolia.ts`
-2. `live-liquidation-fallback-arbitrum-sepolia.ts`
+1. `live-platform-runtime-baseline-arbitrum-sepolia.ts`
+2. `live-platform-observability-evidence-arbitrum-sepolia.ts`
 3. `live-fee-prepaid-gate-arbitrum-sepolia.ts`
 4. `live-fee-remaining-gate-arbitrum-sepolia.ts`
 5. `live-fee-dynamic-gate-arbitrum-sepolia.ts`
@@ -531,6 +526,16 @@ LIVE_RELEASE_CONTINUE_ON_ERROR=0
   - legacy overdue liquidation 对齐 `SettlementManager` 的实际 fallback 行为
   - fallback liquidation 的 pause / restore 改成幂等
   - fee gate 兼容 `relayer == platformTreasury == ecosystemVault` 的地址重合场景
+
+如果你不想一次性跑完整 release gate，也可以按域使用新的总入口：
+
+```bash
+pnpm -s run test:live:platform-runtime-baseline:arbitrum-sepolia
+pnpm -s run test:live:platform-observability-evidence:arbitrum-sepolia
+pnpm -s run test:live:fee-baseline:arbitrum-sepolia
+pnpm -s run test:live:reward-baseline:arbitrum-sepolia
+pnpm -s run test:live:guarantee-baseline:arbitrum-sepolia
+```
 
 如果你希望失败后继续把剩余 gate 也跑完，便于一次性收集完整失败面，可改成：
 
@@ -559,8 +564,8 @@ LIQUIDATION_ORDER_ID=17
 2. 该订单对应 borrower 必须仍有可 reducer 的债务
 3. `.env` 里必须写纯数字，不要加引号
 4. 这个值不是脚本自动生成的，而是你为当前实例挑选好的现有 orderId
-5. keeper signer 必须具备 `LIQUIDATE`
-6. keeper signer 还需要具备 `UPDATE_PRICE`，因为脚本会在清算前按 runbook 刷新债务资产和可处分抵押价格
+5. keeper signer 必须具备 `ActionKeys.ACTION_LIQUIDATE`
+6. keeper signer 还需要具备 `ActionKeys.ACTION_UPDATE_PRICE`，因为脚本会在清算前按 runbook 刷新债务资产和可处分抵押价格
 
 如果你在 Arbitrum Sepolia 上直跑 liquidation 相关脚本，还要额外控制日志扫描窗口；这里默认沿用前置条件里的免费档 RPC 口径。
 
@@ -706,9 +711,9 @@ pnpm -s run e2e:pre-release:arbitrum-sepolia-live
 推荐先从高风险专项开始：
 
 1. 统一 release gates
-2. blocks-only liquidation
-3. reward 专项
-4. guarantee / facade / registry routes / consistency 专项
+2. blocks-only closeout
+3. reward 总入口
+4. guarantee 总入口 / facade / registry routes / consistency 专项
 
 建议顺序：
 
@@ -719,9 +724,11 @@ ALLOW_LIQUIDATION_MANAGER_PAUSE=1 \
 ALLOW_DYNAMIC_FEE_WRITE=1 \
 pnpm -s run test:live:release-gates:arbitrum-sepolia
 
-pnpm -s exec hardhat run scripts/tests/live-test/live-blocks-only-liquidation-arbitrum-sepolia.ts --network arbitrumSepolia
+pnpm -s exec hardhat run scripts/tests/live-test/networks/arbitrum-sepolia/live-blocks-only-liquidation.ts --network arbitrumSepolia
 
-pnpm -s run test:live:platform-baseline:arbitrum-sepolia
+pnpm -s run test:live:reward-baseline:arbitrum-sepolia
+
+pnpm -s run test:live:guarantee-baseline:arbitrum-sepolia
 ```
 
 继续补齐时，按失败点单独回放对应脚本，不要每次都重跑全集。
@@ -759,7 +766,7 @@ pnpm -s exec hardhat run scripts/tests/live-test/live-view-reward-loanflow-bound
 1. RWA 价格为什么要先从 Google Finance 采集
 2. 为什么链上仍然通过 PriceOracle / PriceUpdater 写价
 3. 多稳定币借款和 RWA 抵押为什么不会把估值系统拆成多份
-4. live mock 阶段和测试网上线阶段为什么不能继续共用 defaultPriceUsd8
+4. live mock 阶段和测试网上线阶段为什么不能继续共用 defaultPriceValue
 5. 后端 price job 与缓存 read model 应该怎么配合
 
 请以 [RWA-Price-System-Guide.md](../RWA-Price-System-Guide.md) 为 SSOT。
@@ -774,7 +781,7 @@ pnpm -s exec hardhat run scripts/tests/live-test/live-view-reward-loanflow-bound
 在后续统一链路下，正常价格路径应收敛为：
 
 1. 链下价格采集
-2. 统一归一化成 USD-8
+2. 按目标资产 `assetDecimals` 归一化成链上价格
 3. 统一调用 `PriceUpdater.updateAssetPrice`
 4. 统一由 `PriceOracle` 存储
 5. preflight 与消费方同时检查链上最终价和链下发布状态
@@ -786,7 +793,7 @@ pnpm -s exec hardhat run scripts/tests/live-test/live-view-reward-loanflow-bound
 
 作用：
 
-1. 从 mock 资产部署结果里读取每个资产的 `bootstrapPriceUsd8`
+1. 从 mock 资产部署结果里读取每个资产的 `bootstrapPriceValue`
 2. 给 deployer 自动补 `UPDATE_PRICE`（仅当 deployer 同时是 ACM owner 且设置了 `AUTO_GRANT_UPDATE_PRICE=1`）
 3. 默认通过 `PriceUpdater.updateAssetPrice` 发布全部 mock 资产 bootstrap 价格
 4. 仅在 `SEED_ALLOW_DIRECT_PRICE_ORACLE=1` 时，使用 `PriceOracle.updatePrice` 作为 break-glass 回退
@@ -849,7 +856,7 @@ LIVE_PRICE_MODE=backend-required
 
 1. 链上缺少最终价
 2. 当前模式是 `LIVE_PRICE_MODE=backend-required`
-3. warmup 不允许再自动从 `bootstrapPriceUsd8` 补价
+3. warmup 不允许再自动从 `bootstrapPriceValue` 补价
 4. 预期失败文案固定为：
 
 ```text
@@ -1106,14 +1113,14 @@ pnpm -s run e2e:pre-release:arbitrum-sepolia-live
 
 对于当前健康实例 `Registry=0xaE0455077051c9ca532D4B63DD9B35BafAA1B352`，2026-03-21 实测通过的角色基线如下：
 
-1. `SettlementManager` 必须有 `LIQUIDATE`、`VIEW_RISK_DATA`、`REPAY`
-2. `BlocksOnlyCoordinator` 必须有 `LIQUIDATE`、`VIEW_RISK_DATA`
-3. `LiquidationManager` 必须有 `LIQUIDATE`、`DEPOSIT`
-4. `GuaranteeFundManager` 必须有 `DEPOSIT`
-5. `VaultBusinessLogic` 必须有 `ORDER_CREATE`、`DEPOSIT`
-6. `LendingEngine` 必须有 `BORROW`
-7. 当前用于 live 脚本的 relayer `0x381fE833cceac267AB0e41d17373D9e16e7118a7` 还需要有 `LIQUIDATE`、`DEPOSIT`
-8. 如果 full-live / release-gates 里出现 seed liquidatable order、keeper settle 或 liquidation fallback 相关失败，先检查运行脚本的 relayer 是否真的具备 `LIQUIDATE`；不要只看模块角色完整就默认外部 keeper/relayer 也已经有权限
+1. `SettlementManager` 的 repay 侧当前不再依赖 `ActionKeys.ACTION_REPAY`；若执行 keeper 触发的 `settleOrLiquidate`，仍需 `ActionKeys.ACTION_LIQUIDATE`，并按调用链补齐 `ActionKeys.ACTION_VIEW_RISK_DATA` / 其他必要只读角色。
+2. `BlocksOnlyCoordinator` 必须有 `ActionKeys.ACTION_LIQUIDATE`、`ActionKeys.ACTION_VIEW_RISK_DATA`
+3. `LiquidationManager` 必须有 `ActionKeys.ACTION_LIQUIDATE`、`ActionKeys.ACTION_DEPOSIT`
+4. `GuaranteeFundManager` 必须有 `ActionKeys.ACTION_DEPOSIT`
+5. `VaultBusinessLogic` 必须有 `ActionKeys.ACTION_ORDER_CREATE`、`ActionKeys.ACTION_DEPOSIT`
+6. `LendingEngine` 必须有 `ActionKeys.ACTION_BORROW`
+7. 当前用于 live 脚本的 relayer `0x381fE833cceac267AB0e41d17373D9e16e7118a7` 还需要有 `ActionKeys.ACTION_LIQUIDATE`、`ActionKeys.ACTION_DEPOSIT`
+8. 如果 full-live / release-gates 里出现 seed liquidatable order、keeper settle 或 liquidation fallback 相关失败，先检查运行脚本的 relayer 是否真的具备 `ActionKeys.ACTION_LIQUIDATE`；不要只看模块角色完整就默认外部 keeper/relayer 也已经有权限
 
 推荐用下面这条命令做一次只读审计：
 
@@ -1200,7 +1207,7 @@ pnpm -s exec hardhat run scripts/debug/resolve-live-guarantee.ts --network arbit
 
 语义：
 
-1. `bootstrap`：borrow/collateral 没有链上最终价时，允许脚本按 `bootstrapPriceUsd8` 自动补价
+1. `bootstrap`：borrow/collateral 没有链上最终价时，允许脚本按 `bootstrapPriceValue` 自动补价�值语义按资产 `assetDecimals` 解释）
 2. `backend-required`：borrow/collateral 没有链上最终价时直接 fail，不允许自动补 bootstrap 价
 3. `FORCE_PRICE_UPDATE=1` 仍然保留人工强制覆盖能力，属于显式操作，不是默认自动补价
 
@@ -1222,7 +1229,7 @@ BORROW_AMOUNT_UNITS=1200 \
 2. lender 地址必须同时有两样东西：
   - 足够支付 gas 的 Arbitrum Sepolia ETH
   - 足够的 mock `mUSDC` 用于 `reserveForLending`
-3. `VIEWER_ADDRESS` 最好指向有 `VIEW_SYSTEM_DATA` / `VIEW_USER_DATA` / `VIEW_PRICE_DATA` 的 deployer/ops 地址，否则 preflight 里的部分 view 读数可能不是协议真实状态，而是权限导致的假冷。
+3. `VIEWER_ADDRESS` 最好指向有 `ActionKeys.ACTION_VIEW_SYSTEM_DATA` / `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_VIEW_PRICE_DATA` 的 deployer/ops 地址，否则 preflight 里的部分 view 读数可能不是协议真实状态，而是权限导致的假冷。
 4. 不要把所有 read 都机械地绑定到 `VIEWER_ADDRESS`。当前 live 脚本里，用户维度的 facade/read 适合用 viewer 身份，但 `ValuationOracleView.getAssetPrice(...)` 这类系统价读如果 isolated call 能过、脚本里却直接 revert，优先检查 read caller 选型是否错误；实测应优先用 relayer/ops signer，而不是把 valuation path 也强绑到 viewer。
 5. 如果目标是验证 `RewardView` 的 borrower 缓存真的被写热，`BORROW_AMOUNT_UNITS` 不能低于 `1000`。当前实现里 `RewardManagerCore` 对 `< 1000e6` 的借款会直接跳过 reward lock / earn-state 处理。
 6. `RewardView` 的“lender 奖励”不要拿出资 EOA 直接判断。当前订单里的 `order.lender` 是 `LenderPoolVault`，不是出资 EOA，本次脚本里 lender EOA 的 reward 读数保持冷并不代表 Reward 主链路失败。
@@ -1288,8 +1295,8 @@ pnpm -s exec hardhat run scripts/tests/live-test/live-warmup-arbitrum-sepolia.ts
 | `COLLATERAL_SOURCE_ID` | 可选 | 按 sourceId 选资产时 | 备用资产选择方式 |
 | `COLLATERAL_COINGECKO_ID` | 兼容旧名 | 仅旧脚本/旧命令 | 向后兼容别名 |
 | `MOCK_ASSET_PACK_OUTPUT` | 可选 | 切换 mock asset pack 文件时 | 指向新的 mock asset pack JSON |
-| `SETTLEMENT_PRICE_UNITS_8` | 可选 | 需要覆盖默认价格 seed 时 | 覆盖 settlement 的价格提示 |
-| `COLLATERAL_PRICE_UNITS_8` | 可选 | 需要覆盖默认价格 seed 时 | 覆盖 collateral 的价格提示 |
+| `SETTLEMENT_PRICE_VALUE` | 可选 | 需要覆盖默认价格 seed 时 | 覆盖 settlement 的价格提示 |
+| `COLLATERAL_PRICE_VALUE` | 可选 | 需要覆盖默认价格 seed 时 | 覆盖 collateral 的价格提示 |
 | `ALLOW_DIRECT_PRICE_ORACLE` | 仅 break-glass 时 | live warmup 需要绕过 updater 时 | 允许 `_mockLiveIgnition.ts` 直接写 `PriceOracle.updatePrice` |
 | `SEED_ALLOW_DIRECT_PRICE_ORACLE` | 仅 break-glass 时 | seed 脚本需要绕过 updater 时 | 允许 `seed-mock-asset-prices.ts` 直接写 `PriceOracle.updatePrice` |
 | `AUTO_GRANT_UPDATE_PRICE` | 按需 | 当前 relayer/deployer 缺 `UPDATE_PRICE`，且它同时是 ACM owner 时 | 自动补 `UPDATE_PRICE` 角色 |
@@ -1385,7 +1392,7 @@ pnpm -s exec hardhat run scripts/tests/live-test/live-preflight-arbitrum-sepolia
 1. `PositionView`/订单创建/还款主链路已经打通。
 2. borrower 的 `RewardView` 会在 `BORROW_AMOUNT_UNITS >= 1000` 的双地址成功路径上变热；`500 mUSDC` 这一档不会触发 reward lock / earn-state 写入。
 3. `RewardDynamicParamsCache` 和 `RewardLevel1Cache` 仍然是冷的，这不是借还款失败，而是因为当前链路没有触发治理侧 `pushDynamicRewardParams` / `pushLevelMultiplier` writer。
-4. `HealthView` 当前不会自动变热。根因不是业务路径失败，而是当前 live mock-suite Registry 上的 `LendingEngine` 没有 `ACTION_VIEW_PUSH`，也没有 `VIEW_RISK_DATA`，因此 `LendingEngineCore._pushHealthStatus(...)` 的 best-effort 推送会被吞掉。
+4. `HealthView` 当前不会自动变热。根因不是业务路径失败，而是当前 live mock-suite Registry 上的 `LendingEngine` 没有 `ActionKeys.ACTION_VIEW_PUSH`，也没有 `ActionKeys.ACTION_VIEW_RISK_DATA`，因此 `LendingEngineCore._pushHealthStatus(...)` 的 best-effort 推送会被吞掉。
 5. `ViewCache` 当前不会因为 `deposit -> reserve -> finalizeMatch -> repay` 自动变热。根因是当前借还款主链路没有调用 `ViewCache.setSystemStatus(...)`，所以它应被视为显式 prime / keeper 维护路径，而不是这条最小资金链的自动副产物。
 6. 当前 runbook 对 `ViewCache` 的推荐做法是两段式：先跑双地址 1200 mUSDC warmup 写热 `RewardView/HealthView`，再跑内置或独立的 `ViewCache` prime，把 settlement leg 与 collateral leg 的系统快照显式写入缓存。
 7. 当前 live mock-suite 还需要把 fee/view 修复的两条新结论纳入操作习惯：
@@ -1429,7 +1436,7 @@ pnpm -s exec hardhat run scripts/tests/live-test/live-prime-viewcache-arbitrum-s
 1. `BORROW_ASSET_ADDRESS`
 2. `BORROW_SYMBOL`
 3. `BORROW_ASSET_DECIMALS`
-4. `BORROW_PRICE_UNITS_8`
+4. `BORROW_PRICE_VALUE`
 5. `BORROW_SOURCE_ID`
 
 兼容说明：旧变量 `BORROW_COINGECKO_ID`、`COLLATERAL_COINGECKO_ID`、`SETTLEMENT_TOKEN_COINGECKO_ID` 仍可用，但新的 live 脚本优先读取对应的 `*_SOURCE_ID`。
@@ -1448,7 +1455,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<mUSDC_address>" \
 BORROW_SYMBOL="mUSDC" \
 BORROW_ASSET_DECIMALS=6 \
-BORROW_PRICE_UNITS_8="1" \
+BORROW_PRICE_VALUE="1" \
 BORROW_SOURCE_ID="mock-usdc" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -1471,7 +1478,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<mUSDC_address>" \
 BORROW_SYMBOL="mUSDC" \
 BORROW_ASSET_DECIMALS=6 \
-BORROW_PRICE_UNITS_8="1" \
+BORROW_PRICE_VALUE="1" \
 BORROW_SOURCE_ID="mock-usdc" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -1492,7 +1499,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<mUSDT_address>" \
 BORROW_SYMBOL="mUSDT" \
 BORROW_ASSET_DECIMALS=6 \
-BORROW_PRICE_UNITS_8="1" \
+BORROW_PRICE_VALUE="1" \
 BORROW_SOURCE_ID="mock-usdt" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -1515,7 +1522,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<mUSDT_address>" \
 BORROW_SYMBOL="mUSDT" \
 BORROW_ASSET_DECIMALS=6 \
-BORROW_PRICE_UNITS_8="1" \
+BORROW_PRICE_VALUE="1" \
 BORROW_SOURCE_ID="mock-usdt" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -1536,7 +1543,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<mHKD_address>" \
 BORROW_SYMBOL="mHKD" \
 BORROW_ASSET_DECIMALS=18 \
-BORROW_PRICE_UNITS_8="0.128" \
+BORROW_PRICE_VALUE="0.128" \
 BORROW_SOURCE_ID="mock-hkd" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -1559,7 +1566,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<mHKD_address>" \
 BORROW_SYMBOL="mHKD" \
 BORROW_ASSET_DECIMALS=18 \
-BORROW_PRICE_UNITS_8="0.128" \
+BORROW_PRICE_VALUE="0.128" \
 BORROW_SOURCE_ID="mock-hkd" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -1580,7 +1587,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<mSGD_address>" \
 BORROW_SYMBOL="mSGD" \
 BORROW_ASSET_DECIMALS=18 \
-BORROW_PRICE_UNITS_8="0.74" \
+BORROW_PRICE_VALUE="0.74" \
 BORROW_SOURCE_ID="mock-sgd" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -1603,7 +1610,7 @@ SETTLEMENT_TOKEN_ADDRESS="<system_settlement_token_address>" \
 BORROW_ASSET_ADDRESS="<mSGD_address>" \
 BORROW_SYMBOL="mSGD" \
 BORROW_ASSET_DECIMALS=18 \
-BORROW_PRICE_UNITS_8="0.74" \
+BORROW_PRICE_VALUE="0.74" \
 BORROW_SOURCE_ID="mock-sgd" \
 COLLATERAL_SYMBOL="RWAGOLD" \
 VIEWER_ADDRESS="<viewer_address>" \
@@ -1773,7 +1780,7 @@ pnpm -s exec hardhat run scripts/tests/live-test/live-warmup-arbitrum-sepolia.ts
 
 set -a && source .env && set +a && ALLOW_LIQUIDATION_MANAGER_PAUSE=1 ALLOW_DYNAMIC_FEE_WRITE=1 pnpm -s run test:live:release-gates:arbitrum-sepolia
 
-set -a && source .env && set +a && pnpm -s exec hardhat run scripts/tests/live-test/live-blocks-only-liquidation-arbitrum-sepolia.ts --network arbitrumSepolia
+set -a && source .env && set +a && pnpm -s exec hardhat run scripts/tests/live-test/networks/arbitrum-sepolia/live-blocks-only-liquidation.ts --network arbitrumSepolia
 ```
 
 其中：

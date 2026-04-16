@@ -11,7 +11,9 @@ const KEY_LENDER_POOL_VAULT = ethers.id("LENDER_POOL_VAULT");
 const KEY_VAULT_BUSINESS_LOGIC = ethers.id("VAULT_BUSINESS_LOGIC");
 const KEY_BLOCKS_ONLY_COORDINATOR = ethers.id("BLOCKS_ONLY_COORDINATOR");
 const KEY_BLOCKS_ONLY_VIEW = ethers.id("BLOCKS_ONLY_VIEW");
+const KEY_ORDER_STATE_STORE = ethers.id("ORDER_STATE_STORE");
 const KEY_CM = ethers.id("COLLATERAL_MANAGER");
+const KEY_POSITION_VIEW = ethers.id("POSITION_VIEW");
 const KEY_LIQUIDATION_MANAGER = ethers.id("LIQUIDATION_MANAGER");
 const KEY_LIQUIDATION_PAYOUT_MANAGER = ethers.id("LIQUIDATION_PAYOUT_MANAGER");
 
@@ -87,8 +89,8 @@ describe("BlocksOnlyView", function () {
 
     const borrowIntent = {
       borrower: borrower.address,
-      collateralAsset: collateralAsset ?? ethers.ZeroAddress,
-      collateralAmount: collateralAmount ?? 0n,
+      collateralAsset: collateralAsset ?? (await token.getAddress()),
+      collateralAmount: collateralAmount ?? 1n,
       borrowAsset: await token.getAddress(),
       amount: principal,
       termBlocks,
@@ -110,7 +112,7 @@ describe("BlocksOnlyView", function () {
 
     const lendIntentHash = ethers.TypedDataEncoder.hashStruct(
       "LendIntentBlocks",
-      LEND_INTENT_TYPES,
+      LEND_INTENT_TYPES as any,
       lendIntent,
     );
     const sigBorrower = await borrower.signTypedData(
@@ -120,7 +122,7 @@ describe("BlocksOnlyView", function () {
     );
     const sigLender = await lender.signTypedData(
       domain,
-      LEND_INTENT_TYPES,
+      LEND_INTENT_TYPES as any,
       lendIntent,
     );
 
@@ -152,6 +154,9 @@ describe("BlocksOnlyView", function () {
     const le = await (
       await ethers.getContractFactory("MockLendingEngineBasic")
     ).deploy();
+    const pv = await (
+      await ethers.getContractFactory("MockPositionViewValuation")
+    ).deploy();
     const vaultRouter = await (
       await ethers.getContractFactory("MockVaultRouter")
     ).deploy();
@@ -178,6 +183,11 @@ describe("BlocksOnlyView", function () {
     );
     const blocksOnlyView = await upgrades.deployProxy(
       await ethers.getContractFactory("BlocksOnlyView"),
+      [await registry.getAddress()],
+      { kind: "uups", initializer: "initialize" },
+    );
+    const orderStateStore = await upgrades.deployProxy(
+      await ethers.getContractFactory("OrderStateStoreV2"),
       [await registry.getAddress()],
       { kind: "uups", initializer: "initialize" },
     );
@@ -226,7 +236,12 @@ describe("BlocksOnlyView", function () {
       KEY_BLOCKS_ONLY_VIEW,
       await blocksOnlyView.getAddress(),
     );
+    await registry.setModule(
+      KEY_ORDER_STATE_STORE,
+      await orderStateStore.getAddress(),
+    );
     await registry.setModule(KEY_CM, await cm.getAddress());
+    await registry.setModule(KEY_POSITION_VIEW, await pv.getAddress());
     await registry.setModule(
       KEY_LIQUIDATION_MANAGER,
       await liquidationManager.getAddress(),
@@ -255,6 +270,22 @@ describe("BlocksOnlyView", function () {
     await token.transfer(lender.address, ethers.parseUnits("100000", 18));
     await token.transfer(borrower.address, ethers.parseUnits("1000", 18));
     await token.transfer(secondBorrower.address, ethers.parseUnits("1000", 18));
+    await token.transfer(await cm.getAddress(), ethers.parseUnits("10000", 18));
+    await cm.setUserCollateral(
+      borrower.address,
+      await token.getAddress(),
+      ethers.parseUnits("1000", 18),
+    );
+    await cm.setUserCollateral(
+      secondBorrower.address,
+      await token.getAddress(),
+      ethers.parseUnits("1000", 18),
+    );
+    await cm.setUserCollateral(
+      outsider.address,
+      await token.getAddress(),
+      ethers.parseUnits("1000", 18),
+    );
     await collateralToken.transfer(
       admin.address,
       ethers.parseUnits("1000", 18),
@@ -276,9 +307,11 @@ describe("BlocksOnlyView", function () {
       token,
       collateralToken,
       le,
+      pv,
       vbl,
       coordinator,
       blocksOnlyView,
+      orderStateStore,
       lenderPoolVault,
     };
   }
@@ -383,6 +416,7 @@ describe("BlocksOnlyView", function () {
       expect(order.remainingDebt).to.equal(ethers.parseUnits("100", 18));
       expect(order.isMatured).to.equal(false);
       expect(order.canSettleOrLiquidate).to.equal(false);
+      expect(order.canCloseTrade).to.equal(false);
 
       const [hasAccess] = await blocksOnlyView
         .connect(borrower)
@@ -413,6 +447,7 @@ describe("BlocksOnlyView", function () {
       expect(beforeMaturity.status).to.equal(1n);
       expect(beforeMaturity.isMatured).to.equal(false);
       expect(beforeMaturity.canSettleOrLiquidate).to.equal(false);
+      expect(beforeMaturity.canCloseTrade).to.equal(false);
 
       await mine(1);
 
@@ -426,6 +461,70 @@ describe("BlocksOnlyView", function () {
         ethers.parseUnits("150", 18),
       );
       expect(afterMaturity.canSettleOrLiquidate).to.equal(true);
+      expect(afterMaturity.canCloseTrade).to.equal(false);
+    });
+
+    it("marks a debt-free open order as trade-closeable before explicit close", async function () {
+      const { lender, borrower, token, vbl, coordinator, blocksOnlyView } =
+        await loadFixture(deployFixture);
+
+      const principal = ethers.parseUnits("175", 18);
+
+      await finalizeBlocksOnlyOrder({
+        vbl,
+        borrower,
+        lender,
+        token,
+        principal,
+        saltSuffix: "trade-closeable-0",
+      });
+
+      await token
+        .connect(borrower)
+        .approve(await coordinator.getAddress(), principal);
+      await coordinator.connect(borrower).repayBlocks(0, principal);
+
+      const runtime = await blocksOnlyView
+        .connect(borrower)
+        .getBlocksOnlyOrder(0);
+      expect(runtime.status).to.equal(1n);
+      expect(runtime.remainingDebt).to.equal(0n);
+      expect(runtime.isClosed).to.equal(false);
+      expect(runtime.isMatured).to.equal(true);
+      expect(runtime.canSettleOrLiquidate).to.equal(true);
+      expect(runtime.canCloseTrade).to.equal(true);
+    });
+
+    it("exposes three-layer state for a debt-free but still-open order", async function () {
+      const { lender, borrower, token, vbl, coordinator, blocksOnlyView } =
+        await loadFixture(deployFixture);
+
+      const principal = ethers.parseUnits("125", 18);
+
+      await finalizeBlocksOnlyOrder({
+        vbl,
+        borrower,
+        lender,
+        token,
+        principal,
+        saltSuffix: "state-open-0",
+      });
+
+      await token
+        .connect(borrower)
+        .approve(await coordinator.getAddress(), principal);
+      await coordinator.connect(borrower).repayBlocks(0, principal);
+
+      const stateRuntime = await blocksOnlyView
+        .connect(borrower)
+        .getBlocksOnlyOrderState(0);
+      expect(stateRuntime.runtime.remainingDebt).to.equal(0n);
+      expect(stateRuntime.runtime.isClosed).to.equal(false);
+      expect(stateRuntime.lifecycle).to.equal(2n);
+      expect(stateRuntime.closeReason).to.equal(0n);
+      expect(stateRuntime.shortfallStatus).to.equal(0n);
+      expect(stateRuntime.collateralDisposition).to.equal(1n);
+      expect(stateRuntime.hasLoss).to.equal(false);
     });
 
     it("supports borrower order count and paginated borrower order pages", async function () {
@@ -464,9 +563,11 @@ describe("BlocksOnlyView", function () {
         .connect(ops)
         .getBorrowerOrdersPaginated(borrower.address, 0, 2);
       expect(items.length).to.equal(2);
-      expect(items[0].orderId).to.equal(0n);
-      expect(items[1].orderId).to.equal(1n);
-      expect(items[1].principal).to.equal(ethers.parseUnits("200", 18));
+      expect(items[0].runtime.orderId).to.equal(0n);
+      expect(items[1].runtime.orderId).to.equal(1n);
+      expect(items[1].runtime.principal).to.equal(ethers.parseUnits("200", 18));
+      expect(items[1].lifecycle).to.equal(1n);
+      expect(items[1].shortfallStatus).to.equal(0n);
 
       await expect(
         blocksOnlyView
@@ -477,32 +578,60 @@ describe("BlocksOnlyView", function () {
   });
 
   describe("BOV-03 registry-bound lifecycle visibility", function () {
-    it("tracks finalize -> repay -> settle and finalize -> liquidate through system view pages", async function () {
+    it("tracks trade-close and both maturity settlement outcomes through system view pages", async function () {
       const {
         admin,
         lender,
         borrower,
         secondBorrower,
+        outsider,
         token,
         collateralToken,
         cm,
+        pv,
         vbl,
         coordinator,
         blocksOnlyView,
       } = await loadFixture(deployFixture);
 
-      const settlePrincipal = ethers.parseUnits("250", 18);
-      const settleCollateral = ethers.parseUnits("5", 18);
-      await collateralToken.transfer(await cm.getAddress(), settleCollateral);
+      const tradeClosePrincipal = ethers.parseUnits("250", 18);
+      const tradeCloseCollateral = ethers.parseUnits("5", 18);
+      await collateralToken.transfer(await cm.getAddress(), tradeCloseCollateral);
       await cm.setUserCollateral(
         borrower.address,
+        await collateralToken.getAddress(),
+        tradeCloseCollateral,
+      );
+
+      await finalizeBlocksOnlyOrder({
+        vbl,
+        borrower,
+        lender,
+        token,
+        principal: tradeClosePrincipal,
+        saltSuffix: "trade-close-flow",
+        collateralAsset: await collateralToken.getAddress(),
+        collateralAmount: tradeCloseCollateral,
+      });
+
+      await token
+        .connect(borrower)
+        .approve(await coordinator.getAddress(), tradeClosePrincipal);
+      await coordinator.connect(borrower).repayBlocks(0, tradeClosePrincipal);
+      await coordinator.connect(outsider).closeRepaidTradeBlocks(0);
+
+      const settlePrincipal = ethers.parseUnits("275", 18);
+      const settleCollateral = ethers.parseUnits("6", 18);
+      await collateralToken.transfer(await cm.getAddress(), settleCollateral);
+      await cm.setUserCollateral(
+        secondBorrower.address,
         await collateralToken.getAddress(),
         settleCollateral,
       );
 
       await finalizeBlocksOnlyOrder({
         vbl,
-        borrower,
+        borrower: secondBorrower,
         lender,
         token,
         principal: settlePrincipal,
@@ -512,11 +641,11 @@ describe("BlocksOnlyView", function () {
       });
 
       await token
-        .connect(borrower)
+        .connect(secondBorrower)
         .approve(await coordinator.getAddress(), settlePrincipal);
-      await coordinator.connect(borrower).repayBlocks(0, settlePrincipal);
+      await coordinator.connect(secondBorrower).repayBlocks(1, settlePrincipal);
       await mine(1);
-      await coordinator.connect(admin).settleOrLiquidateBlocks(0);
+      await coordinator.connect(admin).settleOrLiquidateBlocks(1);
 
       const liquidatePrincipal = ethers.parseUnits("300", 18);
       const liquidateCollateral = ethers.parseUnits("7", 18);
@@ -525,14 +654,18 @@ describe("BlocksOnlyView", function () {
         liquidateCollateral,
       );
       await cm.setUserCollateral(
-        secondBorrower.address,
+        outsider.address,
         await collateralToken.getAddress(),
         liquidateCollateral,
+      );
+      await pv.setAssetValue(
+        await collateralToken.getAddress(),
+        liquidatePrincipal,
       );
 
       await finalizeBlocksOnlyOrder({
         vbl,
-        borrower: secondBorrower,
+        borrower: outsider,
         lender,
         token,
         principal: liquidatePrincipal,
@@ -542,39 +675,248 @@ describe("BlocksOnlyView", function () {
       });
 
       await mine(1);
-      await coordinator.connect(admin).settleOrLiquidateBlocks(1);
+      await coordinator.connect(admin).settleOrLiquidateBlocks(2);
 
       const [systemCount] = await blocksOnlyView
         .connect(admin)
         .getSystemOrderCount();
-      expect(systemCount).to.equal(2n);
+      expect(systemCount).to.equal(3n);
 
       const [items, totalCount] = await blocksOnlyView
         .connect(admin)
         .getSystemOrdersPaginated(0, 10);
-      expect(totalCount).to.equal(2n);
-      expect(items.length).to.equal(2);
+      expect(totalCount).to.equal(3n);
+      expect(items.length).to.equal(3);
 
-      expect(items[0].orderId).to.equal(0n);
-      expect(items[0].status).to.equal(3n);
-      expect(items[0].remainingDebt).to.equal(0n);
-      expect(items[0].isMatured).to.equal(true);
-      expect(items[0].isClosed).to.equal(true);
-      expect(items[0].canSettleOrLiquidate).to.equal(false);
+      expect(items[0].runtime.orderId).to.equal(0n);
+      expect(items[0].runtime.status).to.equal(4n);
+      expect(items[0].runtime.remainingDebt).to.equal(0n);
+      expect(items[0].runtime.isMatured).to.equal(true);
+      expect(items[0].runtime.isClosed).to.equal(true);
+      expect(items[0].runtime.canSettleOrLiquidate).to.equal(false);
+      expect(items[0].runtime.canCloseTrade).to.equal(false);
+      expect(items[0].lifecycle).to.equal(5n);
+      expect(items[0].closeReason).to.equal(4n);
+      expect(items[0].shortfallStatus).to.equal(0n);
+      expect(items[0].collateralDisposition).to.equal(2n);
 
-      expect(items[1].orderId).to.equal(1n);
-      expect(items[1].status).to.equal(4n);
-      expect(items[1].isMatured).to.equal(true);
-      expect(items[1].isClosed).to.equal(true);
-      expect(items[1].closeBlock).to.be.gt(0n);
-      expect(items[1].canSettleOrLiquidate).to.equal(false);
+      expect(items[1].runtime.orderId).to.equal(1n);
+      expect(items[1].runtime.status).to.equal(3n);
+      expect(items[1].runtime.isMatured).to.equal(true);
+      expect(items[1].runtime.isClosed).to.equal(true);
+      expect(items[1].runtime.canCloseTrade).to.equal(false);
+      expect(items[1].runtime.canSettleOrLiquidate).to.equal(false);
+      expect(items[1].runtime.closeBlock).to.be.gt(0n);
+      expect(items[1].lifecycle).to.equal(5n);
+      expect(items[1].closeReason).to.equal(5n);
+      expect(items[1].shortfallStatus).to.equal(0n);
+      expect(items[1].collateralDisposition).to.equal(2n);
+
+      expect(items[2].runtime.orderId).to.equal(2n);
+      expect(items[2].runtime.status).to.equal(3n);
+      expect(items[2].runtime.isMatured).to.equal(true);
+      expect(items[2].runtime.isClosed).to.equal(true);
+      expect(items[2].runtime.remainingDebt).to.equal(0n);
+      expect(items[2].runtime.closeBlock).to.be.gt(0n);
+      expect(items[2].runtime.canSettleOrLiquidate).to.equal(false);
+      expect(items[2].runtime.canCloseTrade).to.equal(false);
+      expect(items[2].lifecycle).to.equal(5n);
+      expect(items[2].closeReason).to.equal(5n);
+      expect(items[2].shortfallStatus).to.equal(0n);
+      expect(items[2].collateralDisposition).to.equal(3n);
 
       const [borrowerItems] = await blocksOnlyView
-        .connect(secondBorrower)
-        .getBorrowerOrdersPaginated(secondBorrower.address, 0, 10);
+        .connect(outsider)
+        .getBorrowerOrdersPaginated(outsider.address, 0, 10);
       expect(borrowerItems.length).to.equal(1);
-      expect(borrowerItems[0].orderId).to.equal(1n);
-      expect(borrowerItems[0].status).to.equal(4n);
+      expect(borrowerItems[0].runtime.orderId).to.equal(2n);
+      expect(borrowerItems[0].runtime.status).to.equal(3n);
+      expect(borrowerItems[0].lifecycle).to.equal(5n);
+    });
+
+    it("maps debt-free matured SETTLED to borrower-return in legacy fallback when ORDER_STATE_STORE is disabled", async function () {
+      const {
+        admin,
+        lender,
+        secondBorrower,
+        token,
+        collateralToken,
+        cm,
+        vbl,
+        coordinator,
+        blocksOnlyView,
+        registry,
+      } = await loadFixture(deployFixture);
+
+      const settlePrincipal = ethers.parseUnits("175", 18);
+      const settleCollateral = ethers.parseUnits("4", 18);
+      await collateralToken.transfer(await cm.getAddress(), settleCollateral);
+      await cm.setUserCollateral(
+        secondBorrower.address,
+        await collateralToken.getAddress(),
+        settleCollateral,
+      );
+
+      await finalizeBlocksOnlyOrder({
+        vbl,
+        borrower: secondBorrower,
+        lender,
+        token,
+        principal: settlePrincipal,
+        saltSuffix: "legacy-fallback-settle",
+        collateralAsset: await collateralToken.getAddress(),
+        collateralAmount: settleCollateral,
+      });
+
+      await token
+        .connect(secondBorrower)
+        .approve(await coordinator.getAddress(), settlePrincipal);
+      await coordinator.connect(secondBorrower).repayBlocks(0, settlePrincipal);
+      await mine(1);
+      await coordinator.connect(admin).settleOrLiquidateBlocks(0);
+
+      const stateWithStore = await blocksOnlyView
+        .connect(secondBorrower)
+        .getBlocksOnlyOrderState(0);
+      expect(stateWithStore.runtime.status).to.equal(3n);
+      expect(stateWithStore.lifecycle).to.equal(5n);
+      expect(stateWithStore.closeReason).to.equal(5n);
+      expect(stateWithStore.shortfallStatus).to.equal(0n);
+      expect(stateWithStore.collateralDisposition).to.equal(2n);
+      expect(stateWithStore.hasLoss).to.equal(false);
+
+      await registry.setModule(KEY_ORDER_STATE_STORE, ethers.ZeroAddress);
+
+      const stateViaLegacyFallback = await blocksOnlyView
+        .connect(secondBorrower)
+        .getBlocksOnlyOrderState(0);
+      expect(stateViaLegacyFallback.runtime.status).to.equal(3n);
+      expect(stateViaLegacyFallback.lifecycle).to.equal(5n);
+      expect(stateViaLegacyFallback.closeReason).to.equal(5n);
+      expect(stateViaLegacyFallback.shortfallStatus).to.equal(0n);
+      expect(stateViaLegacyFallback.collateralDisposition).to.equal(2n);
+      expect(stateViaLegacyFallback.hasLoss).to.equal(false);
+    });
+
+    it("maps matured SETTLED with outstanding debt to lender-delivery in legacy fallback", async function () {
+      const {
+        admin,
+        lender,
+        outsider,
+        token,
+        collateralToken,
+        cm,
+        vbl,
+        coordinator,
+        blocksOnlyView,
+        registry,
+      } = await loadFixture(deployFixture);
+
+      const unsettledPrincipal = ethers.parseUnits("180", 18);
+      const unsettledCollateral = ethers.parseUnits("5", 18);
+
+      await collateralToken.transfer(await cm.getAddress(), unsettledCollateral);
+      await cm.setUserCollateral(
+        outsider.address,
+        await collateralToken.getAddress(),
+        unsettledCollateral,
+      );
+
+      await finalizeBlocksOnlyOrder({
+        vbl,
+        borrower: outsider,
+        lender,
+        token,
+        principal: unsettledPrincipal,
+        saltSuffix: "legacy-fallback-outstanding-debt",
+        collateralAsset: await collateralToken.getAddress(),
+        collateralAmount: unsettledCollateral,
+      });
+
+      await mine(1);
+      await coordinator.connect(admin).settleOrLiquidateBlocks(0);
+
+      const stateWithStore = await blocksOnlyView
+        .connect(outsider)
+        .getBlocksOnlyOrderState(0);
+      expect(stateWithStore.runtime.status).to.equal(3n);
+      expect(stateWithStore.lifecycle).to.equal(5n);
+      expect(stateWithStore.closeReason).to.equal(5n);
+      expect(stateWithStore.shortfallStatus).to.equal(0n);
+      expect(stateWithStore.collateralDisposition).to.equal(3n);
+      expect(stateWithStore.hasLoss).to.equal(true);
+
+      await registry.setModule(KEY_ORDER_STATE_STORE, ethers.ZeroAddress);
+
+      const stateViaLegacyFallback = await blocksOnlyView
+        .connect(outsider)
+        .getBlocksOnlyOrderState(0);
+      expect(stateViaLegacyFallback.runtime.status).to.equal(3n);
+      expect(stateViaLegacyFallback.lifecycle).to.equal(5n);
+      expect(stateViaLegacyFallback.closeReason).to.equal(5n);
+      expect(stateViaLegacyFallback.shortfallStatus).to.equal(0n);
+      expect(stateViaLegacyFallback.collateralDisposition).to.equal(3n);
+      expect(stateViaLegacyFallback.hasLoss).to.equal(true);
+    });
+
+    it("keeps TRADE_CLOSED mapped to RETURNED_TO_BORROWER in legacy fallback", async function () {
+      const {
+        lender,
+        borrower,
+        token,
+        collateralToken,
+        cm,
+        vbl,
+        coordinator,
+        blocksOnlyView,
+        registry,
+      } = await loadFixture(deployFixture);
+
+      const principal = ethers.parseUnits("190", 18);
+      const collateralAmount = ethers.parseUnits("5", 18);
+      await collateralToken.transfer(await cm.getAddress(), collateralAmount);
+      await cm.setUserCollateral(
+        borrower.address,
+        await collateralToken.getAddress(),
+        collateralAmount,
+      );
+
+      await finalizeBlocksOnlyOrder({
+        vbl,
+        borrower,
+        lender,
+        token,
+        principal,
+        saltSuffix: "legacy-fallback-trade-closed",
+        collateralAsset: await collateralToken.getAddress(),
+        collateralAmount,
+      });
+
+      await token.connect(borrower).approve(await coordinator.getAddress(), principal);
+      await coordinator.connect(borrower).repayBlocks(0, principal);
+      await coordinator.connect(lender).closeRepaidTradeBlocks(0);
+
+      const stateWithStore = await blocksOnlyView
+        .connect(borrower)
+        .getBlocksOnlyOrderState(0);
+      expect(stateWithStore.runtime.status).to.equal(4n);
+      expect(stateWithStore.lifecycle).to.equal(5n);
+      expect(stateWithStore.closeReason).to.equal(4n);
+      expect(stateWithStore.shortfallStatus).to.equal(0n);
+      expect(stateWithStore.collateralDisposition).to.equal(2n);
+      expect(stateWithStore.hasLoss).to.equal(false);
+
+      await registry.setModule(KEY_ORDER_STATE_STORE, ethers.ZeroAddress);
+
+      const stateViaLegacyFallback = await blocksOnlyView
+        .connect(borrower)
+        .getBlocksOnlyOrderState(0);
+      expect(stateViaLegacyFallback.runtime.status).to.equal(4n);
+      expect(stateViaLegacyFallback.lifecycle).to.equal(5n);
+      expect(stateViaLegacyFallback.closeReason).to.equal(4n);
+      expect(stateViaLegacyFallback.shortfallStatus).to.equal(0n);
+      expect(stateViaLegacyFallback.collateralDisposition).to.equal(2n);
+      expect(stateViaLegacyFallback.hasLoss).to.equal(false);
     });
   });
 
@@ -611,7 +953,7 @@ describe("BlocksOnlyView", function () {
         await registry.getAddress(),
       );
       expect(await blocksOnlyView.apiVersion()).to.equal(1n);
-      expect(await blocksOnlyView.schemaVersion()).to.equal(1n);
+      expect(await blocksOnlyView.schemaVersion()).to.equal(2n);
 
       await upgrades.upgradeProxy(
         await blocksOnlyView.getAddress(),

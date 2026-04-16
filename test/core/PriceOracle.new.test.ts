@@ -59,11 +59,27 @@ describe('PriceOracle - 瘦身后核心功能验证 (No GD, No DataPush)', funct
     ).to.emit(priceOracle, 'PriceUpdated')
      .withArgs(usdc, price, blockNumber);
 
-    // 查询价格（应成功，且为8位精度）
+    // 查询价格（应成功，且 price/value 语义与 assetDecimals 对齐）
     const [p, t, assetDecimals] = await priceOracle.getPrice(usdc);
     expect(p).to.equal(price);
     expect(t).to.equal(blockNumber);
     expect(assetDecimals).to.equal(8);
+  });
+
+  it('应保留非 8 位资产的原生价格精度', async function () {
+    const { governance, updater, priceOracle } = await deployFixture();
+
+    const weth = ethers.Wallet.createRandom().address;
+    await priceOracle.connect(governance).configureAsset(weth, 'wrapped-eth', 18, 3600);
+
+    const price = ethers.parseUnits('2500', 18);
+    const blockNumber = BigInt(await ethers.provider.getBlockNumber());
+    await priceOracle.connect(updater).updatePrice(weth, price, blockNumber);
+
+    const [storedPrice, storedBlock, assetDecimals] = await priceOracle.getPrice(weth);
+    expect(storedPrice).to.equal(price);
+    expect(storedBlock).to.equal(blockNumber);
+    expect(assetDecimals).to.equal(18);
   });
 
   it('应在价格过期时拒绝严格查询，并通过 isPriceValid 返回 false', async function () {

@@ -18,20 +18,6 @@ import { ethers, upgrades } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import type {
-  VaultCore,
-  VaultLendingEngine,
-  MockCollateralManager,
-  VaultBusinessLogic,
-  MockRegistry,
-  MockAccessControlManager,
-  MockVaultRouter,
-  MockHealthView,
-  MockPriceOracle,
-  MockERC20,
-  MockVaultCoreView,
-  MockLiquidationRiskManager,
-} from '../../types';
 
 // Module keys
 const ModuleKeys = {
@@ -54,35 +40,35 @@ describe('viewContractAddrVar - 全面功能测试', function () {
 
     // Deploy Registry
     const Registry = await ethers.getContractFactory('MockRegistry');
-    const registry = (await Registry.deploy()) as MockRegistry;
+    const registry = (await Registry.deploy()) as any;
     await registry.waitForDeployment();
 
     // Deploy AccessControlManager
     const ACM = await ethers.getContractFactory('MockAccessControlManager');
-    const acm = (await ACM.deploy()) as MockAccessControlManager;
+    const acm = (await ACM.deploy()) as any;
     await acm.waitForDeployment();
 
     // Deploy VaultRouter
     const VaultRouter = await ethers.getContractFactory('MockVaultRouter');
-    const vaultRouter = (await VaultRouter.deploy()) as MockVaultRouter;
+    const vaultRouter = (await VaultRouter.deploy()) as any;
     await vaultRouter.waitForDeployment();
 
     // Deploy HealthView
     const HealthView = await ethers.getContractFactory('MockHealthView');
-    const healthView = (await HealthView.deploy()) as MockHealthView;
+    const healthView = (await HealthView.deploy()) as any;
     await healthView.waitForDeployment();
 
     // Deploy LiquidationRiskManager mock
     const LRM = await ethers.getContractFactory('MockLiquidationRiskManager');
-    const lrm = (await LRM.deploy()) as MockLiquidationRiskManager;
+    const lrm = (await LRM.deploy()) as any;
 
     // Deploy PriceOracle
     const PriceOracle = await ethers.getContractFactory('MockPriceOracle');
-    const priceOracle = (await PriceOracle.deploy()) as MockPriceOracle;
+    const priceOracle = (await PriceOracle.deploy()) as any;
 
     // Deploy Settlement Token
     const ERC20 = await ethers.getContractFactory('MockERC20');
-    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as MockERC20;
+    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as any;
 
     // Configure price oracle
     // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
@@ -94,7 +80,7 @@ describe('viewContractAddrVar - 全面功能测试', function () {
 
     // Deploy VaultCore（UUPS：必须通过 Proxy 初始化；实现合约 constructor 已禁用 initialize）
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
-    const vaultCoreImpl = (await VaultCoreFactory.deploy()) as VaultCore;
+    const vaultCoreImpl = (await VaultCoreFactory.deploy()) as any;
     await vaultCoreImpl.waitForDeployment();
     const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
     const initData = vaultCoreImpl.interface.encodeFunctionData('initialize', [
@@ -103,11 +89,11 @@ describe('viewContractAddrVar - 全面功能测试', function () {
     ]);
     const vaultCoreProxy = await ProxyFactory.deploy(vaultCoreImpl.target, initData);
     await vaultCoreProxy.waitForDeployment();
-    const vaultCore = VaultCoreFactory.attach(vaultCoreProxy.target) as VaultCore;
+    const vaultCore = VaultCoreFactory.attach(vaultCoreProxy.target) as any;
 
     // Deploy MockCollateralManager (no onlyVaultRouter guard)
     const CM = await ethers.getContractFactory('MockCollateralManager');
-    const collateralManager = (await CM.deploy()) as MockCollateralManager;
+    const collateralManager = (await CM.deploy()) as any;
     await collateralManager.waitForDeployment();
 
     // Deploy VaultLendingEngine
@@ -116,7 +102,7 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       LE,
       [await priceOracle.getAddress(), await settlementToken.getAddress(), await registry.getAddress()],
       { kind: 'uups', initializer: 'initialize' }
-    )) as VaultLendingEngine;
+    )) as any;
     await lendingEngine.waitForDeployment();
 
     // Deploy VaultBusinessLogic (optional for this test, can be skipped if not needed)
@@ -426,7 +412,7 @@ describe('viewContractAddrVar - 全面功能测试', function () {
       await registry.setModule(ModuleKeys.KEY_VAULT_CORE, await newVaultCore.getAddress());
       
       // 验证新地址可访问
-      const viewAddr = await newVaultCore.viewContractAddrVar();
+      const viewAddr = await (newVaultCore as any).viewContractAddrVar();
       expect(viewAddr).to.equal(await newView.getAddress());
     });
   });

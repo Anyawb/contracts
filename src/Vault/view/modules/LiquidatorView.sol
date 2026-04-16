@@ -35,7 +35,9 @@ import { ViewVersioned } from "../ViewVersioned.sol";
  *
  * Security:
  * - Role-gated reads via {ViewAccessLib} and {ActionKeys}
- * - Writer-gated pushes: only Registry-resolved liquidation modules may push updates
+ * - Writer-gated pushes: only Registry-resolved liquidation modules may push updates.
+ * - Push payloads preserve writer-provided token-native amounts and reporting fields; this module does not
+ *   reinterpret bonus or payout amounts as normalized valuation-unit fields.
  * - Not an SSOT for ledger state; this is a view/cache push surface
  */
 contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsView, ViewVersioned {
@@ -114,25 +116,28 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     }
 
     /**
-     * @notice Restrict push entrypoints to the liquidation manager module.
+     * @notice Restrict liquidation-update push entrypoints to the configured liquidation writers.
      * @dev Reverts if:
-     *      - caller is not Registry.KEY_LIQUIDATION_MANAGER
+     *      - caller is neither Registry.KEY_LIQUIDATION_MANAGER nor Registry.KEY_SETTLEMENT_MANAGER
      */
-    modifier onlyBusinessModule() {
-        address lm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_MANAGER);
-        if (msg.sender != lm) revert InvalidCaller();
+    modifier onlyLiquidationWriter() {
+        address lm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_MANAGER);
+        address sm = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        if (msg.sender != lm && msg.sender != sm) revert InvalidCaller();
         _;
     }
 
     /**
-     * @notice Restrict payout push entrypoint to liquidation manager or payout manager.
+     * @notice Restrict payout push entrypoint to liquidation manager, settlement manager, or payout manager.
      * @dev Reverts if:
-     *      - caller is neither Registry.KEY_LIQUIDATION_MANAGER nor Registry.KEY_LIQUIDATION_PAYOUT_MANAGER
+     *      - caller is none of Registry.KEY_LIQUIDATION_MANAGER, Registry.KEY_SETTLEMENT_MANAGER,
+     *        or Registry.KEY_LIQUIDATION_PAYOUT_MANAGER
      */
     modifier onlyLiquidationOrPayoutModule() {
         address lm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_MANAGER);
+        address sm = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
         address pm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_PAYOUT_MANAGER);
-        if (msg.sender != lm && msg.sender != pm) revert InvalidCaller();
+        if (msg.sender != lm && msg.sender != sm && msg.sender != pm) revert InvalidCaller();
         _;
     }
 
@@ -207,19 +212,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @notice Push a single liquidation update into the unified DataPush stream.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not the registered liquidation manager (see {InvalidCaller})
+    *      - caller is not an authorized liquidation writer (see {InvalidCaller})
      *
      * Security:
-     * - Writer-gated: only the liquidation manager module may push updates
+    * - Writer-gated: only the liquidation manager or settlement manager module may push updates
      * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_UPDATE} for off-chain consumers
      *
      * @param user User address
      * @param collateralAsset Collateral asset address
      * @param debtAsset Debt asset address
-     * @param collateralAmount Collateral amount seized (asset decimals; as provided by writer)
-     * @param debtAmount Debt amount repaid (asset decimals; as provided by writer)
+    * @param collateralAmount Collateral amount seized (collateral-token native decimals; as provided by writer)
+    * @param debtAmount Debt amount reduced (debt-token native decimals; as provided by writer)
      * @param liquidator Liquidator address
-     * @param bonus Liquidation bonus value (implementation-defined units; as provided by writer)
+    * @param bonus Liquidation bonus reporting value. Current writers treat this as a collateral-side token-native
+    *        amount hint; consumers MUST NOT assume it is a normalized value-unit field.
      * @param blockNumber Event block number (as provided by writer)
      */
     function pushLiquidationUpdate(
@@ -231,7 +237,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         address liquidator,
         uint256 bonus,
         uint256 blockNumber
-    ) external override onlyValidRegistry onlyBusinessModule {
+    ) external override onlyValidRegistry onlyLiquidationWriter {
         DataPushLibrary._emitData(
             DATA_TYPE_LIQUIDATION_UPDATE,
             abi.encode(user, collateralAsset, debtAsset, collateralAmount, debtAmount, liquidator, bonus, blockNumber)
@@ -242,20 +248,21 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @notice Push a batch liquidation update into the unified DataPush stream.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not the registered liquidation manager (see {InvalidCaller})
+    *      - caller is not an authorized liquidation writer (see {InvalidCaller})
      *
      * Security:
-     * - Writer-gated: only the liquidation manager module may push updates
+    * - Writer-gated: only the liquidation manager or settlement manager module may push updates
      * - Assumes writer provides aligned arrays (this function does not validate lengths)
      * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_BATCH_UPDATE} for off-chain consumers
      *
      * @param users User addresses
      * @param collateralAssets Collateral asset addresses
      * @param debtAssets Debt asset addresses
-     * @param collateralAmounts Collateral amounts seized (asset decimals; as provided by writer)
-     * @param debtAmounts Debt amounts repaid (asset decimals; as provided by writer)
+    * @param collateralAmounts Collateral amounts seized (collateral-token native decimals; as provided by writer)
+    * @param debtAmounts Debt amounts reduced (debt-token native decimals; as provided by writer)
      * @param liquidator Liquidator address (applies to the batch)
-     * @param bonuses Liquidation bonus values (implementation-defined units; as provided by writer)
+    * @param bonuses Liquidation bonus reporting values; consumers MUST NOT assume these entries share the
+    *        normalized valuation-unit semantics of protocol value totals.
      * @param blockNumber Event block number (as provided by writer)
      */
     function pushBatchLiquidationUpdate(
@@ -267,7 +274,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         address liquidator,
         uint256[] calldata bonuses,
         uint256 blockNumber
-    ) external override onlyValidRegistry onlyBusinessModule {
+    ) external override onlyValidRegistry onlyLiquidationWriter {
         DataPushLibrary._emitData(
             DATA_TYPE_LIQUIDATION_BATCH_UPDATE,
             abi.encode(
@@ -287,10 +294,10 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @notice Push liquidation payout distribution into the unified DataPush stream.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-     *      - caller is not liquidation manager or payout manager (see {InvalidCaller})
+    *      - caller is not liquidation manager, settlement manager, or payout manager (see {InvalidCaller})
      *
      * Security:
-     * - Writer-gated: only liquidation/payout modules may push updates
+    * - Writer-gated: only liquidation/settlement/payout modules may push updates
      * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_PAYOUT} for off-chain consumers
      *
      * @param user User address
@@ -299,10 +306,10 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param reserve Reserve payout recipient address
      * @param lender Lender payout recipient address
      * @param liquidator Liquidator payout recipient address
-     * @param platformShare Platform share amount (asset decimals; as provided by writer)
-     * @param reserveShare Reserve share amount (asset decimals; as provided by writer)
-     * @param lenderShare Lender share amount (asset decimals; as provided by writer)
-     * @param liquidatorShare Liquidator share amount (asset decimals; as provided by writer)
+    * @param platformShare Platform share amount (collateral-token native decimals; as provided by writer)
+    * @param reserveShare Reserve share amount (collateral-token native decimals; as provided by writer)
+    * @param lenderShare Lender share amount (collateral-token native decimals; as provided by writer)
+    * @param liquidatorShare Liquidator share amount (collateral-token native decimals; as provided by writer)
      * @param blockNumber Event block number (as provided by writer)
      */
     function pushLiquidationPayout(

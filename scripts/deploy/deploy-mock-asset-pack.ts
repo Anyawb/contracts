@@ -25,7 +25,7 @@ type AssetSpec = {
   sourceId: string;
   maxPriceAge: number;
   active: boolean;
-  bootstrapPriceUsd8: string;
+  bootstrapPriceValue: string;
   settlementToken?: boolean;
 } & PriceCatalogMetadata;
 
@@ -53,7 +53,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-usdc",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "1",
+    bootstrapPriceValue: "1",
     sourceProvider: "bootstrap-manual",
     pricingCurrency: "USD",
     fallbackPolicy: "bootstrap-only",
@@ -70,7 +70,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-usdt",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "1",
+    bootstrapPriceValue: "1",
     sourceProvider: "bootstrap-manual",
     pricingCurrency: "USD",
     fallbackPolicy: "bootstrap-only",
@@ -86,7 +86,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-hkd",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "0.128",
+    bootstrapPriceValue: "0.128",
     sourceProvider: "bootstrap-manual",
     pricingCurrency: "USD",
     fallbackPolicy: "bootstrap-only",
@@ -102,7 +102,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-sgd",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "0.74",
+    bootstrapPriceValue: "0.74",
     sourceProvider: "bootstrap-manual",
     pricingCurrency: "USD",
     fallbackPolicy: "bootstrap-only",
@@ -118,7 +118,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-bitcoin",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "85000",
+    bootstrapPriceValue: "85000",
     sourceProvider: "bootstrap-manual",
     pricingCurrency: "USD",
     fallbackPolicy: "bootstrap-only",
@@ -134,7 +134,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-ethereum",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "2200",
+    bootstrapPriceValue: "2200",
     sourceProvider: "bootstrap-manual",
     pricingCurrency: "USD",
     fallbackPolicy: "bootstrap-only",
@@ -150,7 +150,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-rwa-gold",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "2000",
+    bootstrapPriceValue: "2000",
     sourceProvider: "google-finance",
     sourceTicker: "GLD:NYSEARCA",
     pricingCurrency: "USD",
@@ -170,7 +170,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-rwa-bond",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "100",
+    bootstrapPriceValue: "100",
     sourceProvider: "google-finance",
     sourceTicker: "IEF:NASDAQ",
     pricingCurrency: "USD",
@@ -190,7 +190,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-rwa-real-estate",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "500",
+    bootstrapPriceValue: "500",
     sourceProvider: "google-finance",
     sourceTicker: "VNQ:NYSEARCA",
     pricingCurrency: "USD",
@@ -210,7 +210,7 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
     sourceId: "mock-rwa-invoice",
     maxPriceAge: 3600,
     active: true,
-    bootstrapPriceUsd8: "50",
+    bootstrapPriceValue: "50",
     sourceProvider: "google-finance",
     sourceTicker: "MINT:NYSEARCA",
     pricingCurrency: "USD",
@@ -223,7 +223,31 @@ const DEFAULT_ASSET_SPECS: AssetSpec[] = [
 ];
 
 function networkSlug(name: string) {
-  return name === "arbitrumSepolia" ? "arbitrum-sepolia" : name;
+  if (name === "arbitrumSepolia") return "arbitrum-sepolia";
+  if (name === "bnbTestnet") return "bnb-testnet";
+  return name;
+}
+
+function resolvePackOutputFile(slug: string) {
+  const explicit = process.env.MOCK_ASSET_PACK_OUTPUT?.trim();
+  if (explicit) {
+    return path.isAbsolute(explicit)
+      ? explicit
+      : path.join(process.cwd(), explicit);
+  }
+
+  return path.join(process.cwd(), "deployments", `mock-assets.${slug}.json`);
+}
+
+function resolveAssetsOutputFile(slug: string) {
+  const explicit = process.env.ASSETS_FILE?.trim();
+  if (explicit) {
+    return path.isAbsolute(explicit)
+      ? explicit
+      : path.join(process.cwd(), explicit);
+  }
+
+  return path.join(process.cwd(), "deployments", `assets.${slug}.mock.json`);
 }
 
 function applyDefaultSettlementTokenSelection(raw: AssetSpec[]): AssetSpec[] {
@@ -255,8 +279,8 @@ function applyDefaultSettlementTokenSelection(raw: AssetSpec[]): AssetSpec[] {
 function normalizeSpecs(raw: AssetSpec[]): AssetSpec[] {
   const specs = raw.map((item) => ({
     ...item,
-    bootstrapPriceUsd8: (item as AssetSpec & { defaultPriceUsd8?: string }).bootstrapPriceUsd8
-      ?? (item as AssetSpec & { defaultPriceUsd8?: string }).defaultPriceUsd8
+    bootstrapPriceValue: (item as AssetSpec & { defaultPriceValue?: string }).bootstrapPriceValue
+      ?? (item as AssetSpec & { defaultPriceValue?: string }).defaultPriceValue
       ?? "0",
     sourceProvider: item.sourceProvider ?? (item.kind === "rwa-token" ? "google-finance" : "bootstrap-manual"),
     pricingCurrency: item.pricingCurrency ?? "USD",
@@ -344,13 +368,12 @@ async function main() {
     assets: deployedAssets,
   };
 
-  const deploymentsDir = path.join(process.cwd(), "deployments");
-  fs.mkdirSync(deploymentsDir, { recursive: true });
-
-  const packFile = path.join(deploymentsDir, `mock-assets.${slug}.json`);
+  const packFile = resolvePackOutputFile(slug);
+  const assetsFile = resolveAssetsOutputFile(slug);
+  fs.mkdirSync(path.dirname(packFile), { recursive: true });
+  fs.mkdirSync(path.dirname(assetsFile), { recursive: true });
   fs.writeFileSync(packFile, JSON.stringify(output, null, 2));
 
-  const assetsFile = path.join(deploymentsDir, `assets.${slug}.mock.json`);
   fs.writeFileSync(
     assetsFile,
     JSON.stringify(
@@ -364,7 +387,7 @@ async function main() {
           decimals: asset.decimals,
           maxPriceAge: asset.maxPriceAge,
           active: asset.active,
-          bootstrapPriceUsd8: asset.bootstrapPriceUsd8,
+          bootstrapPriceValue: asset.bootstrapPriceValue,
           sourceProvider: asset.sourceProvider,
           sourceTicker: asset.sourceTicker,
           pricingCurrency: asset.pricingCurrency,
@@ -386,9 +409,9 @@ async function main() {
   console.log(`SettlementToken=${settlement.address}`);
   console.log(`AssetPackFile=${packFile}`);
   console.log(`AssetsConfigFile=${assetsFile}`);
-  console.log("Bootstrap prices (USD-8 strings):");
+  console.log("Bootstrap prices (asset-decimal strings):");
   for (const asset of deployedAssets) {
-    console.log(`- ${asset.symbol}: ${asset.bootstrapPriceUsd8}`);
+    console.log(`- ${asset.symbol}: ${asset.bootstrapPriceValue}`);
   }
 }
 

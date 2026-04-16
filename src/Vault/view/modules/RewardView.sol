@@ -33,6 +33,9 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Reverts when caller is not an authorized writer module (as resolved via Registry).
     error RewardView__UnauthorizedWriter();
 
+    /// @notice Provided Reward level is outside the supported 1..5 range.
+    error RewardView__InvalidLevel(uint8 level);
+
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
     address private _registryAddr;
@@ -64,7 +67,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Easy emission params cache (RewardView-only) ━━━━━━━━━━━━━━━*/
 
-    uint256 private _easyEmissionThresholdUsd8;
+    uint256 private _easyEmissionThresholdValue;
     uint256 private _easyEmissionMintPer1000Usd;
     uint256 private _easyEmissionKNum;
     uint256 private _easyEmissionKDen;
@@ -273,7 +276,8 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param borrowerShare Borrower share
      * @param lenderShare Lender share
      * @param orderId Order id
-     * @param amountUsd8 Borrow amount (USD-8)
+    * @param amountValue Borrow amount in the shared system valuation unit
+    * @param valuationDecimals Shared valuation precision for amountValue
      * @param blockNumber Business blockNumber (block number)
      */
     function pushEasyMinted(
@@ -283,7 +287,8 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 borrowerShare,
         uint256 lenderShare,
         uint256 orderId,
-        uint256 amountUsd8,
+        uint256 amountValue,
+        uint8 valuationDecimals,
         uint256 blockNumber
     ) external onlyWriter {
         address ec = _getModule(ModuleKeys.KEY_EASY_EMISSION_CONTROLLER);
@@ -307,7 +312,17 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_EASY_MINTED,
-            abi.encode(borrower, lender, totalMinted, borrowerShare, lenderShare, orderId, amountUsd8, blockNumber)
+            abi.encode(
+                borrower,
+                lender,
+                totalMinted,
+                borrowerShare,
+                lenderShare,
+                orderId,
+                amountValue,
+                valuationDecimals,
+                blockNumber
+            )
         );
     }
 
@@ -350,11 +365,12 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Push Easy emission parameters update (from EasyEmissionConfig).
+    * @notice Push Easy emission parameters update (from EasyEmissionConfig).
      * @dev Writer: EasyEmissionConfig
      */
     function pushEasyEmissionParamsUpdated(
-        uint256 thresholdUsd8,
+        uint256 thresholdValue,
+        uint8 valuationDecimals,
         uint256 mintPer1000Usd,
         uint256 kNum,
         uint256 kDen,
@@ -363,7 +379,7 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         address econf = _getModule(ModuleKeys.KEY_EASY_EMISSION_CONFIG);
         if (msg.sender != econf) revert RewardView__UnauthorizedWriter();
 
-        _easyEmissionThresholdUsd8 = thresholdUsd8;
+        _easyEmissionThresholdValue = thresholdValue;
         _easyEmissionMintPer1000Usd = mintPer1000Usd;
         _easyEmissionKNum = kNum;
         _easyEmissionKDen = kDen;
@@ -371,7 +387,14 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_EASY_EMISSION_PARAMS_UPDATED,
-            abi.encode(thresholdUsd8, mintPer1000Usd, kNum, kDen, blockNumber)
+            abi.encode(
+                thresholdValue,
+                valuationDecimals,
+                mintPer1000Usd,
+                kNum,
+                kDen,
+                blockNumber
+            )
         );
     }
 
@@ -504,6 +527,82 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
+     * @notice Admin retry helper: replay a user-level push (manual recovery).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     * - Mirrors the same local write path as {pushUserLevel}, without requiring the original writer.
+     *
+     * @param user User address
+     * @param newLevel Latest authoritative Reward level
+     * @param blockNumber Business blockNumber (block number; admin-defined)
+     */
+    function retryPushUserLevel(address user, uint8 newLevel, uint256 blockNumber)
+        external
+        onlyValidRegistry
+    {
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
+        if (newLevel < 1 || newLevel > 5) {
+            revert RewardView__InvalidLevel(newLevel);
+        }
+
+        _userSummary[user].level = newLevel;
+        if (blockNumber > _userSummary[user].lastActivity) _userSummary[user].lastActivity = blockNumber;
+        _touchUserCache(user);
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_LEVEL_UPDATED,
+            abi.encode(user, newLevel, blockNumber)
+        );
+    }
+
+    /**
+     * @notice Admin retry helper: replay an earn-state push (manual recovery / backend compensation).
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller lacks ACTION_ADMIN (MissingRole)
+     *
+     * Security:
+     * - Role-gated: ACTION_ADMIN
+     * - Overwrites the mirrored earn-state snapshot to align RewardView with RewardManagerCore.
+     *
+     * @param user User address
+     * @param lockedEasy Locked Easy amount
+     * @param eligibleLoanCount Eligible-loan counter
+     * @param onTimeRepayCount On-time full-repay counter
+     * @param blockNumber Business blockNumber (block number; admin-defined)
+     */
+    function retryPushEarnState(
+        address user,
+        uint256 lockedEasy,
+        uint256 eligibleLoanCount,
+        uint256 onTimeRepayCount,
+        uint256 blockNumber
+    ) external onlyValidRegistry {
+        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+            revert MissingRole();
+        }
+
+        _userEarnState[user] = EarnState({
+            lockedEasy: lockedEasy,
+            eligibleLoanCount: eligibleLoanCount,
+            onTimeRepayCount: onTimeRepayCount
+        });
+        if (blockNumber > _userSummary[user].lastActivity) _userSummary[user].lastActivity = blockNumber;
+        if (!_isActiveUser[user]) { _isActiveUser[user] = true; _systemStats.activeUsers++; }
+        _touchUserCache(user);
+
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_REWARD_EARN_STATE_UPDATED,
+            abi.encode(user, lockedEasy, eligibleLoanCount, onTimeRepayCount, blockNumber)
+        );
+    }
+
+    /**
         * @notice Push a penalty ledger (pending Easy debt) update for a user.
      * @dev Reverts if:
         *      - caller is not an authorized writer module (RewardView__UnauthorizedWriter)
@@ -533,10 +632,10 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
     /**
      * @notice Push a user level update and emit a unified DataPush event.
      * @dev Reverts if:
-    *      - caller is not an authorized writer module (RewardView__UnauthorizedWriter)
+    *      - caller is not RewardManagerCore (RewardView__UnauthorizedWriter)
      *
      * Security:
-        * - onlyWriter (authorized writer modules via Registry)
+        * - writer restricted to Registry[KEY_REWARD_MANAGER_CORE]
      * - Emits DataPushed(DATA_TYPE_REWARD_LEVEL_UPDATED, abi.encode(user, newLevel, blockNumber))
      *
      * @param user User address
@@ -544,6 +643,8 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param blockNumber Business blockNumber (block number; writer-defined)
      */
     function pushUserLevel(address user, uint8 newLevel, uint256 blockNumber) external onlyWriter {
+        address rmc = _getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
+        if (msg.sender != rmc) revert RewardView__UnauthorizedWriter();
         _userSummary[user].level = newLevel;
         if (blockNumber > _userSummary[user].lastActivity) _userSummary[user].lastActivity = blockNumber;
         _touchUserCache(user);
@@ -771,18 +872,20 @@ contract RewardView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyValidRegistry
         onlyOps
         returns (
-            uint256 thresholdUsd8,
+            uint256 thresholdValue,
             uint256 mintPer1000Usd,
             uint256 kNum,
             uint256 kDen,
+            uint8 valuationDecimals,
             uint256 blockNumber,
             bool isValid
         )
     {
-        thresholdUsd8 = _easyEmissionThresholdUsd8;
+        thresholdValue = _easyEmissionThresholdValue;
         mintPer1000Usd = _easyEmissionMintPer1000Usd;
         kNum = _easyEmissionKNum;
         kDen = _easyEmissionKDen;
+        valuationDecimals = 18;
         blockNumber = _easyEmissionCacheBlock;
         isValid = _isUserCacheValid(blockNumber);
     }

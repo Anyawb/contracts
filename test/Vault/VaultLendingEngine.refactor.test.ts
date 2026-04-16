@@ -15,20 +15,6 @@ import { ethers, upgrades } from 'hardhat';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import type {
-  VaultLendingEngine,
-  MockRegistry,
-  MockAccessControlManager,
-  MockCollateralManager,
-  MockVaultRouter,
-  MockHealthView,
-  MockRewardManager,
-  MockPriceOracle,
-  MockERC20,
-  MockVaultCoreView,
-  MockLiquidationRiskManager,
-  PositionView,
-} from '../../types';
 
 // Module keys（与 ModuleKeys.sol 保持一致）
 const ModuleKeys = {
@@ -54,39 +40,39 @@ describe('VaultLendingEngine – refactor regression', function () {
 
     // Deploy mocks
     const Registry = await ethers.getContractFactory('MockRegistry');
-    const registry = (await Registry.deploy()) as MockRegistry;
+    const registry = (await Registry.deploy()) as any;
     await registry.waitForDeployment();
 
     const ACM = await ethers.getContractFactory('MockAccessControlManager');
-    const acm = (await ACM.deploy()) as MockAccessControlManager;
+    const acm = (await ACM.deploy()) as any;
     await acm.waitForDeployment();
 
     const CM = await ethers.getContractFactory('MockCollateralManager');
-    const cm = (await CM.deploy()) as MockCollateralManager;
+    const cm = (await CM.deploy()) as any;
     await cm.waitForDeployment();
 
     const VaultRouter = await ethers.getContractFactory('MockVaultRouter');
-    const vaultRouter = (await VaultRouter.deploy()) as MockVaultRouter;
+    const vaultRouter = (await VaultRouter.deploy()) as any;
     await vaultRouter.waitForDeployment();
 
     const HealthView = await ethers.getContractFactory('MockHealthView');
-    const healthView = (await HealthView.deploy()) as MockHealthView;
+    const healthView = (await HealthView.deploy()) as any;
     await healthView.waitForDeployment();
 
     const RewardManager = await ethers.getContractFactory('MockRewardManager');
-    const rewardManager = (await RewardManager.deploy()) as MockRewardManager;
+    const rewardManager = (await RewardManager.deploy()) as any;
     await rewardManager.waitForDeployment();
 
     const PriceOracle = await ethers.getContractFactory('MockPriceOracle');
-    const priceOracle = (await PriceOracle.deploy()) as MockPriceOracle;
+    const priceOracle = (await PriceOracle.deploy()) as any;
     await priceOracle.waitForDeployment();
 
     const LRM = await ethers.getContractFactory('MockLiquidationRiskManager');
-    const lrm = (await LRM.deploy()) as MockLiquidationRiskManager;
+    const lrm = (await LRM.deploy()) as any;
     await lrm.waitForDeployment();
 
     const ERC20 = await ethers.getContractFactory('MockERC20');
-    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as MockERC20;
+    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as any;
     await settlementToken.waitForDeployment();
 
     // Configure oracle price
@@ -105,7 +91,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       LendingEngine,
       [await priceOracle.getAddress(), await settlementToken.getAddress(), await registry.getAddress()],
       { kind: 'uups', initializer: 'initialize' }
-    )) as VaultLendingEngine;
+    )) as any;
     await lending.waitForDeployment();
 
     // Deploy PositionView for collateral valuation used by health push
@@ -114,7 +100,7 @@ describe('VaultLendingEngine – refactor regression', function () {
       PositionViewFactory,
       [await registry.getAddress()],
       { kind: 'uups' }
-    )) as PositionView;
+    )) as any;
     await positionView.waitForDeployment();
 
     // VaultCore mock with view resolver + forwarder
@@ -190,7 +176,7 @@ describe('VaultLendingEngine – refactor regression', function () {
               'error ZeroAddress()',
             ]);
             const decoded = iface.parseError(error.data);
-            console.log('Decoded error:', decoded.name);
+            console.log('Decoded error:', decoded?.name);
           } catch (decodeErr) {
             console.log('Could not decode error');
           }
@@ -465,7 +451,7 @@ describe('VaultLendingEngine – refactor regression', function () {
               'error AmountIsZero()',
             ]);
             const decoded = iface.parseError(error.data);
-            console.log('Decoded error:', decoded.name);
+            console.log('Decoded error:', decoded?.name);
           } catch (decodeErr: any) {
             console.log('Could not decode as custom error');
           }
@@ -627,25 +613,66 @@ describe('VaultLendingEngine – refactor regression', function () {
       expect(afterRepay).to.be.lt(afterBorrow);
     });
 
+    it('should normalize non-8-decimal debt assets into the 18-decimal system unit', async function () {
+      const { vaultCoreModule, vaultCore, user, lending, priceOracle } = await loadFixture(deployFixture);
+      const debtAsset6 = ethers.Wallet.createRandom().address;
+
+      const nowBlock = await ethers.provider.getBlockNumber();
+      await priceOracle.connect(vaultCore).setPrice(debtAsset6, 1_500_000n, nowBlock, 6);
+
+      await vaultCoreModule.borrow(user.address, debtAsset6, 2_000_000, 0, 0);
+
+      const normalizedValue = ethers.parseUnits('3', 18);
+      expect(await lending.calculateDebtValue(user.address, debtAsset6)).to.equal(normalizedValue);
+      expect(await lending.calculateDebtValueBestEffort(user.address, debtAsset6)).to.equal(normalizedValue);
+      expect(await lending.calculateDebtValueStrict(user.address, debtAsset6)).to.equal(normalizedValue);
+      expect(await lending.getUserTotalDebtValue(user.address)).to.equal(normalizedValue);
+      expect(await lending.getUserTotalDebtValueBestEffort(user.address)).to.equal(normalizedValue);
+      expect(await lending.getUserTotalDebtValueStrict(user.address)).to.equal(normalizedValue);
+      expect(await lending.getTotalDebtValue()).to.equal(normalizedValue);
+    });
+
     it('should support multiple debt assets per user', async function () {
       const { vaultCoreModule, vaultCore, user, lending, debtAsset, priceOracle } = await loadFixture(deployFixture);
       const debtAsset2 = ethers.Wallet.createRandom().address;
+      const debtAssetAmount = 30n * 10n ** 8n;
+      const debtAsset2Amount = ethers.parseUnits('20', 18);
 
       const nowBlock = await ethers.provider.getBlockNumber();
       await priceOracle.connect(vaultCore).setPrice(debtAsset2, ethers.parseEther('1'), nowBlock, 18);
 
-      await vaultCoreModule.borrow(user.address, debtAsset, 30, 0, 0);
-      await vaultCoreModule.borrow(user.address, debtAsset2, 20, 0, 0);
+      await vaultCoreModule.borrow(user.address, debtAsset, debtAssetAmount, 0, 0);
+      await vaultCoreModule.borrow(user.address, debtAsset2, debtAsset2Amount, 0, 0);
 
-      expect(await lending.getDebt(user.address, debtAsset)).to.equal(30);
-      expect(await lending.getDebt(user.address, debtAsset2)).to.equal(20);
-      expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(30);
-      expect(await lending.getTotalDebtByAsset(debtAsset2)).to.equal(20);
+      expect(await lending.getDebt(user.address, debtAsset)).to.equal(debtAssetAmount);
+      expect(await lending.getDebt(user.address, debtAsset2)).to.equal(debtAsset2Amount);
+      expect(await lending.getTotalDebtByAsset(debtAsset)).to.equal(debtAssetAmount);
+      expect(await lending.getTotalDebtByAsset(debtAsset2)).to.equal(debtAsset2Amount);
 
       const assets = await lending.getUserDebtAssets(user.address);
       expect(assets.length).to.equal(2);
       expect(assets).to.include(debtAsset);
       expect(assets).to.include(debtAsset2);
+      expect(await lending.getUserTotalDebtValue(user.address)).to.equal(50n * 10n ** 18n);
+      expect(await lending.getTotalDebtValue()).to.equal(50n * 10n ** 18n);
+    });
+
+    it('should aggregate mixed-decimal debt assets in the shared 18-decimal system unit', async function () {
+      const { vaultCoreModule, vaultCore, user, lending, priceOracle } = await loadFixture(deployFixture);
+      const debtAsset6 = ethers.Wallet.createRandom().address;
+      const debtAsset18 = ethers.Wallet.createRandom().address;
+
+      const nowBlock = await ethers.provider.getBlockNumber();
+      await priceOracle.connect(vaultCore).setPrice(debtAsset6, 1_500_000n, nowBlock, 6);
+      await priceOracle.connect(vaultCore).setPrice(debtAsset18, ethers.parseUnits('2', 18), nowBlock, 18);
+
+      await vaultCoreModule.borrow(user.address, debtAsset6, 2_000_000, 0, 0);
+      await vaultCoreModule.borrow(user.address, debtAsset18, ethers.parseUnits('1', 18), 0, 0);
+
+      expect(await lending.getUserTotalDebtValue(user.address)).to.equal(ethers.parseUnits('5', 18));
+      expect(await lending.getUserTotalDebtValueBestEffort(user.address)).to.equal(ethers.parseUnits('5', 18));
+      expect(await lending.getUserTotalDebtValueStrict(user.address)).to.equal(ethers.parseUnits('5', 18));
+      expect(await lending.getTotalDebtValue()).to.equal(ethers.parseUnits('5', 18));
     });
   });
 

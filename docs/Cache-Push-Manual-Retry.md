@@ -16,10 +16,13 @@
 ### RewardView 专项补偿口径（2026-03）
 - `RewardViewPushFailed(user, rewardView, op, payload, reason)` 属于 Reward 镜像层失败留痕；主账本成功与否必须以 `RewardAccrualManager` / `RewardManagerCore` 的真实账本为准。
 - `op = PENALTY_LEDGER` 时，链上管理员可调用 `RewardView.retryPushPenaltyLedger(user, pendingDebt, blockNumber)` 做幂等补偿。
+- `op = USER_LEVEL` 时，链上管理员可调用 `RewardView.retryPushUserLevel(user, newLevel, blockNumber)` 修复 USER_LEVEL 镜像一致性与观测口径；该类失败应直接进入告警，而不是仅做普通观测。
+- `op = EARN_STATE` 时，链上管理员可调用 `RewardView.retryPushEarnState(user, lockedEasy, eligibleLoanCount, onTimeRepayCount, blockNumber)` 补齐 RewardView 的 earn-state 镜像。
 - 补偿前必须先比对：
   - authoritative penalty debt（主账本）
   - mirrored pending penalty（RewardView 镜像）
   - failure payload / artifact 中记录的 penalty debt 与 blockNumber
+- 对 `USER_LEVEL` / `EARN_STATE` 的补偿前，同样必须先比对 RewardManagerCore 主账本与 RewardView 镜像；若镜像已与主账本一致，则记录为 `already-aligned` 并跳过。
 - 若主账本与镜像已经一致，则应记录为 `already-aligned` 并跳过补偿；这是合法的安全 no-op，不应记为失败。
 - 若 artifact / failure payload 已过期，不再对应当前主账本，则应记录为 `stale-payload` 并跳过补偿，避免旧值覆盖新状态。
 
@@ -38,6 +41,7 @@
 - 脚本：`scripts/e2e/tools/replay-rewardview-penalty-failures.ts`
 - 推荐模式：
   - 日常运维可直接扫链上 `RewardViewPushFailed(PENALTY_LEDGER)` 日志
+  - `RewardViewPushFailed(USER_LEVEL)` 仍应接入告警队列；其主要影响是 BorrowCheck 镜像一致性与观测口径，不再是 `90/180/360` 天借款创建的直接阻断条件（准入以 `RewardManagerCore` canonical level 为准）
   - fork / E2E 演示优先使用 artifact-driven 模式：`REWARDVIEW_REPLAY_ARTIFACT=<artifact>`
 - artifact-driven 模式适用原因：共享 fork RPC 常会对宽窗口 `eth_getLogs` 做限制，但 E2E artifact 已经保存了 replay 所需的 `user/blockNumber/pendingPenaltyAfter`。
 - 输出报告会明确记录：
@@ -52,23 +56,23 @@
   - 最近失败时间、原因摘要（映射自 reason 枚举）与预计处理 SLA/状态
   - 若已重试成功，清除提示或展示“已恢复时间”
 
-## 治理/维护入口（已实现 & 建议）
-- 链上：`PositionView.retryUserPositionUpdate(user, asset)`（**ACTION_ADMIN**），读取 CM/LE 最新账本→写入 PositionView 缓存→ emit `UserPositionCached`；失败再 emit `CacheUpdateFailed`，幂等。
-- 链上：`VaultRouter.refreshModuleCache()`（将收口为**仅统一维护器可调用**）用于刷新 VaultRouter 内部的模块地址缓存（CM/LE）。
-- 建议新增：统一缓存维护器（见下一节）用于批量刷新所有“带模块缓存”的合约，避免各处零散运维入口与权限面扩大。
+## 治理/维护入口（当前源码已实现）
+- 链上：`PositionView.retryUserPositionUpdate(user, asset)`（**ACTION_ADMIN**），读取最新账本并重写 PositionView 缓存；成功时发出 `UserPositionCached`、`UserPositionCachedWithVersion` 与对应 `DataPushed`，失败时沿 guarded fetch 路径发出 `CacheUpdateFailed` / `CacheUpdateFailedWithContext`。
+- 链上：`VaultRouter.refreshModuleCache()` 已经收口为**仅 `Registry[KEY_CACHE_MAINTENANCE_MANAGER]` 可调用**，用于刷新 VaultRouter 内部模块地址缓存。
+- 链上：`CacheMaintenanceManager.batchRefresh(targets)` 已实现，用于批量刷新实现了 `ICacheRefreshable` 的目标合约，并以 best-effort 方式持续处理后续 target。
 - 链下：提供脚本/API 封装上述入口，鉴权与审计（操作者、输入、输出、理由），避免循环重试。
 
 ## 模块缓存“保活刷新”（严格治理版，推荐实施方案）
 > 目标：在不引入“公开 refresh 导致垃圾 tx”的情况下，保证长跑网络中各类**模块缓存**不会因为过期而影响只读查询/推送入口的可用性。
 
 ### 统一接口：ICacheRefreshable
-- 定义一个统一接口（建议路径：`src/interfaces/ICacheRefreshable.sol`）：
+- 统一接口已落地于 `src/interfaces/ICacheRefreshable.sol`：
   - `function refreshModuleCache() external;`
 - 任何“内部维护模块地址缓存”的合约都实现该接口（不要求暴露缓存细节，只负责把缓存更新时间戳刷新到最新）。
 
 ### 统一维护器：CacheMaintenanceManager（best-effort + 批量）
-- 新增合约：`CacheMaintenanceManager`（建议归类为 **Registry/治理运维模块**，放到 `src/registry/CacheMaintenanceManager.sol`）
-- 权限：仅允许 `ACTION_SET_PARAMETER`（未来可迁移到 Timelock 轨）
+- 已实现合约：`CacheMaintenanceManager`，归类为 **Registry/治理运维模块**，位于 `src/registry/CacheMaintenanceManager.sol`
+- 权限：维护器入口受 `ACTION_SET_PARAMETER` 保护；目标合约侧再校验调用者必须是 `Registry[KEY_CACHE_MAINTENANCE_MANAGER]`
 - 行为：提供批量入口对一组合约执行 `ICacheRefreshable.refreshModuleCache()`，并采用 **best-effort**：
   - 单个 target 刷新失败时不回滚整笔交易，而是记录失败原因并继续刷新下一个 target。
   - 维护器自身应发出统一事件，便于链下监控/审计：`CacheRefreshAttempted(target, ok, reason)`。
@@ -77,19 +81,19 @@
 - 模块升级/Registry 变更后：由治理脚本立即调用维护器批量刷新一次（减少首次调用失败）
 - 长跑网络：定时（例如每日/每周）执行一次批量刷新，作为“保活”动作
 
-## 修改方案更改为
-- **强一致 + 事件打点**：清算/借还路径的视图推送失败会回滚主交易；缓存视图读取失败以 `CacheUpdateFailed` 打点，主流程可继续。
-- **1h 模块缓存 + 自动刷新**：推送白名单基于 1h 模块缓存（CM/LE/VBL），失效时自动刷新；模块升级后应由治理通过 `CacheMaintenanceManager` 主动批量 `refreshModuleCache()`。
-- **链下重试**：保持“事件告警 + 人工/脚本重推”模式，重推前重读账本，避免旧值覆盖。
+## 当前源码口径
+- **best-effort + 事件打点**：清算/借还路径的视图推送、Health 推送、Reward 镜像推送失败默认不回滚主交易；失败通过 `CacheUpdateFailed`、`CacheUpdateFailedWithContext`、`HealthPushFailed`、`RewardViewPushFailed` 留痕，供链下补偿与告警。
+- **模块缓存维护器 + 批量刷新**：模块缓存的统一维护入口已经是 `CacheMaintenanceManager.batchRefresh(targets)`；单个 target 刷新失败不会回滚整批交易。
+- **链下重试**：继续采用“事件告警 + 人工/脚本重推”模式，重推前重读账本，避免旧值覆盖。
 
 ---
 
-## 本次方案落地：需要修改/新增的智能合约清单（供审计）
-- `src/registry/CacheMaintenanceManager.sol`（新增）：统一缓存维护器，治理 gate + best-effort 批量刷新 + 事件审计。
-- `src/interfaces/ICacheRefreshable.sol`（新增）：统一接口 `refreshModuleCache()`。
-- `src/constants/ModuleKeys.sol`（修改）：新增 `KEY_CACHE_MAINTENANCE_MANAGER`，供目标合约侧“仅允许维护器调用 refresh”使用。
-- `src/Vault/VaultRouter.sol`（修改）：`refreshModuleCache()` 权限收口为仅维护器可调用，并对齐 `ICacheRefreshable` 语义。
-- `src/Vault/liquidation/modules/LiquidationRiskManager.sol`（修改）：新增 `refreshModuleCache()`（实现 `ICacheRefreshable`），移除 `refreshCoreModules()`（只保留统一入口）。
+## 当前源码已落地的相关智能合约（供审计）
+- `src/registry/CacheMaintenanceManager.sol`：统一缓存维护器，治理 gate + best-effort 批量刷新 + 事件审计。
+- `src/interfaces/ICacheRefreshable.sol`：统一接口 `refreshModuleCache()`。
+- `src/constants/ModuleKeys.sol`：已包含 `KEY_CACHE_MAINTENANCE_MANAGER`，供目标合约侧“仅允许维护器调用 refresh”使用。
+- `src/Vault/VaultRouter.sol`：`refreshModuleCache()` 已收口为仅维护器可调用，并对齐 `ICacheRefreshable` 语义。
+- `src/Vault/liquidation/modules/LiquidationRiskManager.sol`：已实现 `refreshModuleCache()` 并通过维护器地址收口统一入口。
 
 ## 观测与审计要点
 - 监控指标：`CacheUpdateFailed` 事件数、按视图合约/资产/用户分布，重试成功率，平均修复时间，队列长度/年龄分布，死信率。
@@ -160,15 +164,15 @@
 
 ---
 
-## 需要修改/新增的智能合约（基于代码检索）
-> 以下清单用于落地“统一接口 + 统一维护器”方案。后续如引入更多模块缓存合约，可继续补充实现 `ICacheRefreshable`。
+## 当前已实现的相关智能合约（基于代码检索）
+> 以下清单用于审计“统一接口 + 统一维护器”现状。后续如引入更多模块缓存合约，可继续补充实现 `ICacheRefreshable`。
 
-- `src/interfaces/ICacheRefreshable.sol`（新增）：统一缓存刷新接口
-- `src/registry/CacheMaintenanceManager.sol`（新增）：治理运维入口，批量调用 `ICacheRefreshable.refreshModuleCache()`（best-effort）
-- `src/Vault/liquidation/modules/LiquidationRiskManager.sol`（修改）：
-  - 实现 `ICacheRefreshable`
-  - 将“核心模块缓存刷新”改为 `refreshModuleCache()`，并使用 `ACTION_SET_PARAMETER` gate（严格治理）
-- `src/Vault/VaultRouter.sol`（修改）：
-  - 实现 `ICacheRefreshable`
-  - `refreshModuleCache()` 权限由 `ACTION_ADMIN` 调整为 `ACTION_SET_PARAMETER`（统一治理口径）
+- `src/interfaces/ICacheRefreshable.sol`：统一缓存刷新接口
+- `src/registry/CacheMaintenanceManager.sol`：治理运维入口，批量调用 `ICacheRefreshable.refreshModuleCache()`（best-effort）
+- `src/Vault/liquidation/modules/LiquidationRiskManager.sol`：
+  - 已实现 `ICacheRefreshable`
+  - `refreshModuleCache()` 已存在，并通过维护器地址校验统一入口
+- `src/Vault/VaultRouter.sol`：
+  - 已实现 `ICacheRefreshable`
+  - `refreshModuleCache()` 已收口为仅 `Registry[KEY_CACHE_MAINTENANCE_MANAGER]` 可调用
 

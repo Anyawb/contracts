@@ -53,13 +53,43 @@ function parseModuleKeysSol(solPath: string): ModuleKeyEntry[] {
   const entries: ModuleKeyEntry[] = [];
 
   // 匹配: bytes32 internal constant KEY_XXX = keccak256("YYY");
-  const constantRegex = /bytes32\s+internal\s+constant\s+(KEY_\w+)\s*=\s*keccak256\("([^"]+)"\)\s*;/;
+  // 允许 `=`、`keccak256(...)` 跨行，避免多行声明被漏掉。
+  const constantRegex = /bytes32\s+internal\s+constant\s+(KEY_\w+)\s*=\s*keccak256\(\s*"([^"]+)"\s*\)\s*;/;
 
   let pendingComment = '';
   let pendingDeprecated = false;
+  let pendingDeclaration = '';
+
+  const flushDeclaration = () => {
+    if (!pendingDeclaration) {
+      return;
+    }
+
+    const match = pendingDeclaration.match(constantRegex);
+    if (match) {
+      entries.push({
+        constantName: match[1],
+        hashInput: match[2],
+        deprecated: pendingDeprecated,
+        comment: pendingComment.trim(),
+      });
+    }
+
+    pendingDeclaration = '';
+    pendingComment = '';
+    pendingDeprecated = false;
+  };
 
   for (const line of lines) {
     const trimmed = line.trim();
+
+    if (pendingDeclaration) {
+      pendingDeclaration += ` ${trimmed}`;
+      if (trimmed.includes(';')) {
+        flushDeclaration();
+      }
+      continue;
+    }
 
     // 收集注释
     if (trimmed.startsWith('///') || trimmed.startsWith('*')) {
@@ -73,16 +103,11 @@ function parseModuleKeysSol(solPath: string): ModuleKeyEntry[] {
       continue;
     }
 
-    const match = trimmed.match(constantRegex);
-    if (match) {
-      entries.push({
-        constantName: match[1],
-        hashInput: match[2],
-        deprecated: pendingDeprecated,
-        comment: pendingComment.trim(),
-      });
-      pendingComment = '';
-      pendingDeprecated = false;
+    if (trimmed.startsWith('bytes32 internal constant KEY_')) {
+      pendingDeclaration = trimmed;
+      if (trimmed.includes(';')) {
+        flushDeclaration();
+      }
     } else if (!trimmed.startsWith('//')) {
       // 非注释非常量行，重置注释缓冲
       if (trimmed.length > 0 && !trimmed.startsWith('//')) {

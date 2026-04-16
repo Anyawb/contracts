@@ -8,6 +8,7 @@ describe("VaultBusinessLogic - liquidation entry is deprecated", function () {
   const KEY_CM = ethers.id("COLLATERAL_MANAGER");
   const KEY_LE = ethers.id("LENDING_ENGINE");
   const KEY_LIQUIDATION_RISK_MANAGER = ethers.id("LIQUIDATION_RISK_MANAGER");
+  const KEY_PRICE_ORACLE = ethers.id("PRICE_ORACLE");
   const KEY_POSITION_VIEW = ethers.id("POSITION_VIEW");
   const KEY_ORDER_ENGINE = ethers.id("ORDER_ENGINE");
   const KEY_LIQUIDATION_MANAGER = ethers.id("LIQUIDATION_MANAGER");
@@ -40,6 +41,7 @@ describe("VaultBusinessLogic - liquidation entry is deprecated", function () {
     const cm = await (await ethers.getContractFactory("MockCollateralManager")).deploy();
     const le = await (await ethers.getContractFactory("MockLendingEngineBasic")).deploy();
     const risk = await (await ethers.getContractFactory("MockLiquidationRiskManager")).deploy();
+    const priceOracle = await (await ethers.getContractFactory("MockPriceOracle")).deploy();
     const pvVal = await (await ethers.getContractFactory("MockPositionViewValuation")).deploy();
     const orderEngine = await (await ethers.getContractFactory("MockOrderEngineForSettlementManager")).deploy();
     const liquidationManager = await (await ethers.getContractFactory("MockLiquidationManager")).deploy();
@@ -54,6 +56,7 @@ describe("VaultBusinessLogic - liquidation entry is deprecated", function () {
     await registry.setModule(KEY_CM, await cm.getAddress());
     await registry.setModule(KEY_LE, await le.getAddress());
     await registry.setModule(KEY_LIQUIDATION_RISK_MANAGER, await risk.getAddress());
+    await registry.setModule(KEY_PRICE_ORACLE, await priceOracle.getAddress());
     await registry.setModule(KEY_POSITION_VIEW, await pvVal.getAddress());
     await registry.setModule(KEY_ORDER_ENGINE, await orderEngine.getAddress());
     await registry.setModule(KEY_LIQUIDATION_MANAGER, await liquidationManager.getAddress());
@@ -61,6 +64,8 @@ describe("VaultBusinessLogic - liquidation entry is deprecated", function () {
     await acm.grantRole(ACTION_LIQUIDATE, keeper.address);
 
     const debtAsset = ethers.Wallet.createRandom().address;
+    const currentBlock = await ethers.provider.getBlockNumber();
+    await priceOracle.setPrice(debtAsset, 10n ** 18n, BigInt(currentBlock), 18);
     await orderEngine.setOrder(0, {
       principal: 100n,
       rate: 0n,
@@ -77,7 +82,7 @@ describe("VaultBusinessLogic - liquidation entry is deprecated", function () {
     await le.setUserDebt(borrower.address, debtAsset, 50n);
     await risk.setLiquidatable(borrower.address, true);
 
-    return { settlementManager, liquidationManager, keeper, borrower, debtAsset };
+    return { settlementManager, liquidationManager, keeper, borrower, debtAsset, orderEngine };
   }
 
   it("VBL.liquidate should revert and force using LiquidationManager", async function () {
@@ -87,13 +92,14 @@ describe("VaultBusinessLogic - liquidation entry is deprecated", function () {
   });
 
   it("清算入口走 SettlementManager（SSOT）", async function () {
-    const { settlementManager, liquidationManager, keeper, borrower, debtAsset } =
+    const { settlementManager, liquidationManager, keeper, borrower, debtAsset, orderEngine } =
       await loadFixture(deploySettlementFixture);
 
     const tx = await settlementManager.connect(keeper).settleOrLiquidate(0);
     await expect(tx)
       .to.emit(liquidationManager, "MockLiquidationExecuted")
       .withArgs(keeper.address, borrower.address, debtAsset, debtAsset, anyValue, anyValue, anyValue, anyValue);
+    expect(await orderEngine.getOrderStatusForView(0)).to.equal(3n);
   });
 });
 

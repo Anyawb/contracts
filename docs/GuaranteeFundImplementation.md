@@ -17,19 +17,26 @@
 **功能**: 保证金相关写入口与账本维护模块（资金语义与资产去向以 Funds-Flow SSOT 为准）
 
 **核心功能**:
-- ✅ `lockGuarantee()` - 锁定保证金记录/状态（资金语义见 Funds-Flow SSOT）
+
+- ✅ `lockGuarantee()` - 锁定保证金金额（资金语义见 Funds-Flow SSOT）
+- ✅ `batchLockGuarantees()` - 批量锁定保证金
 - ✅ `releaseGuarantee()` - 释放保证金（资金语义见 Funds-Flow SSOT）
-- ✅ `forfeitGuarantee()` - 没收保证金（资金语义见 Funds-Flow SSOT）
-- ✅ `settleEarlyRepayment()` - 提前还款相关保证金结算（资金语义见 Funds-Flow SSOT）
+- ✅ `batchReleaseGuarantees()` - 批量释放保证金
+- ✅ `forfeitGuarantee()` - 没收全部保证金（资金语义见 Funds-Flow SSOT）
 - ✅ `forfeitPartial()` - 部分没收保证金（资金语义见 Funds-Flow SSOT）
+- ✅ `forfeitPartialWithRewardPenalty()` - 部分没收保证金并联动触发奖金罚分
+- ✅ `settleEarlyRepayment()` - 提前还款相关保证金结算与资金转账
+- ✅ `settleDefault()` - 违约相关保证金罚没与资金结算
 
 **查询功能**:
+
 - ✅ `getLockedGuarantee()` - 获取用户锁定保证金金额
 - ✅ `getTotalGuaranteeByAsset()` - 获取资产总保证金
 - ✅ `isGuaranteePaid()` - 检查保证金支付状态
 - ✅ `getUserGuaranteeAssets()` - 获取用户保证金资产列表
 
 **权限控制**:
+
 - 仅 `VaultCore` 可调用核心功能（`onlyVaultCore` 修饰符）
 - 通过 `Registry` 获取 `AccessControlManager` 进行权限验证
 
@@ -40,18 +47,21 @@
 **功能**: 提前还款保证金记录与规则计算模块（不作为资金链 SSOT）
 
 **核心功能**:
+
+- ✅ `previewEarlyRepayment()` - 预览提前还款计算结果
 - ✅ `lockGuaranteeRecord()` - 记录保证金信息（borrower/lender/asset/principal/promisedInterest/termDays）
 - ✅ `settleEarlyRepayment()` - 计算提前还款结果并关闭记录（资金执行语义见 Funds-Flow SSOT）
-- ✅ `processDefault()` - 处理违约（资金执行语义见 Funds-Flow SSOT）
+- ✅ `processDefault()` - 处理违约记录关闭（资金执行语义见 Funds-Flow SSOT）
 
 **数据结构**:
+
 ```solidity
 struct GuaranteeRecord {
-    uint256 principal;                    // 借款本金
-    uint256 promisedInterest;             // 承诺的利息（保证金）
-    uint256 startTime;                    // 借款开始时间
-    uint256 maturityTime;                 // 到期时间
-    uint256 earlyRepayPenaltyDays;       // 提前还款罚金天数（默认2天）
+    uint256 principal;                    // 借款本金 (asset units)
+    uint256 promisedInterest;             // 承诺的利息（保证金） (asset units)
+    uint256 startTime;                    // Start block (block.number，非 unix time)
+    uint256 maturityTime;                 // Maturity block (block.number，非 unix time)
+    uint256 earlyRepayPenaltyDays;        // 提前罚金判定阈值 (为兼容而保留命名，实为 block 数量)
     bool isActive;                        // 是否活跃
     address lender;                       // 贷款方地址
     address asset;                        // 资产地址
@@ -59,13 +69,14 @@ struct GuaranteeRecord {
 
 struct EarlyRepaymentResult {
     uint256 penaltyToLender;              // 结果组件：penalty
-    uint256 refundToBorrower;            // 结果组件：refund
+    uint256 refundToBorrower;             // 结果组件：refund
     uint256 platformFee;                  // 平台手续费
-    uint256 actualInterestPaid;          // 实际支付的利息
+    uint256 actualInterestPaid;           // 实际支付的利息
 }
 ```
 
 **权限控制**:
+
 - 仅 `VaultCore` 可调用核心功能
 - 通过 `Registry` 获取 `AccessControlManager` 进行权限验证
 
@@ -76,6 +87,7 @@ struct EarlyRepaymentResult {
 **功能**: 业务编排模块，协调保证金锁定和释放
 
 **核心功能**:
+
 - ✅ 撮合/保证金相关的编排入口（不在本文件复述资金链与内部调用串联）
 
 **实现说明**:
@@ -91,6 +103,7 @@ struct EarlyRepaymentResult {
 **功能**: 撮合原子落地相关库（资金链细节与资产去向以 Funds-Flow SSOT 为准）
 
 **核心功能**:
+
 - ✅ 撮合原子落地相关逻辑（细节与资金去向以 Funds-Flow SSOT 为准）
 
 ## 📊 事件系统
@@ -100,6 +113,7 @@ struct EarlyRepaymentResult {
 **位置**: `src/core/LoanEvents.sol`
 
 **定义的事件**:
+
 ```solidity
 event GuaranteeLocked(
     address indexed user,
@@ -160,6 +174,7 @@ event EarlyRepaymentProcessed(
 **位置**: `src/errors/StandardErrors.sol`
 
 **保证金相关错误**:
+
 ```solidity
 error GuaranteeNotPaid();
 error GuaranteeAlreadyReleased();
@@ -173,6 +188,20 @@ error GuaranteeIdOverflow();
 error InvalidGuaranteeTerm();
 error GuaranteeInterestTooHigh();
 error BorrowerCannotBeLender();
+
+// 模块内部自定义错误
+error EarlyRepaymentGuaranteeManager__OnlyVaultCore();
+error EarlyRepaymentGuaranteeManager__InvalidImplementation();
+error EarlyRepaymentGuaranteeManager__RateTooHigh();
+error EarlyRepaymentGuaranteeManager__RateUnchanged();
+error EarlyRepaymentGuaranteeManager__GuaranteeNotEnabled();
+
+error GuaranteeFundManager__OnlyVaultCore();
+error GuaranteeFundManager__OnlyAuthorizedCaller();
+error GuaranteeFundManager__LengthMismatch();
+error GuaranteeFundManager__EmptyArrays();
+error GuaranteeFundManager__BatchTooLarge();
+error GuaranteeFundManager__InvalidImplementation();
 ```
 
 ## 🔄 业务流程
@@ -191,7 +220,7 @@ error BorrowerCannotBeLender();
 
 ### 模块化设计
 
-- ✅ **职责分离**: 
+- ✅ **职责分离**:
   - `EarlyRepaymentGuaranteeManager` - 记录和计算
     - `GuaranteeFundManager` - 写入口执行与状态维护
   - `VaultBusinessLogic` - 业务编排
@@ -216,12 +245,13 @@ error BorrowerCannotBeLender();
 
 ```solidity
 function calculateHealthFactorExcludingGuarantee(
-    address user, 
+    address user,
     address asset
 ) external view returns (uint256 healthFactorExcludingGuarantee)
 ```
 
 **计算逻辑**:
+
 1. 读取用户总抵押物和总债务
 2. 读取用户保证金
 3. 计算有效抵押物（排除保证金）
@@ -231,18 +261,22 @@ function calculateHealthFactorExcludingGuarantee(
 
 ### 测试文件
 
-| 测试文件 | 位置 | 测试内容 |
-|---------|------|---------|
-| **EarlyRepaymentGuaranteeManager.test.ts** | `test/EarlyRepaymentGuaranteeManager.test.ts` | 提前还款保证金管理器核心功能测试 |
-| **EarlyRepaymentGuaranteeManager.security.test.ts** | `test/EarlyRepaymentGuaranteeManager.security.test.ts` | 安全性和边界条件测试 |
-| **GuaranteeFundManager.test.ts** | `test/Vault/modules/GuaranteeFundManager.test.ts` | 保证金基金管理器测试 |
-| **GuaranteeAndRisk.integrated.test.ts** | `test/GuaranteeAndRisk.integrated.test.ts` | 保证金与风险模块集成测试 |
-| **StatisticsView.guarantee-aggregation.test.ts** | `test/StatisticsView.guarantee-aggregation.test.ts` | 保证金统计聚合测试 |
+| 测试文件                                            | 位置                                                                     | 测试内容                                                                                   |
+| --------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| **EarlyRepaymentGuaranteeManager.test.ts**          | `test/EarlyRepaymentGuaranteeManager.test.ts`                            | 提前还款保证金管理器核心功能测试                                                           |
+| **EarlyRepaymentGuaranteeManager.security.test.ts** | `test/EarlyRepaymentGuaranteeManager.security.test.ts`                   | 安全性和边界条件测试                                                                       |
+| **SettlementManager.real-ergm.integration.test.ts** | `test/Vault/liquidation/SettlementManager.real-ergm.integration.test.ts` | 真实 `SettlementManager -> ERGM -> GFM` 集成回归，覆盖 guarantee maturity 与 strict revert |
+| **GuaranteeFundManager.test.ts**                    | `test/Vault/modules/GuaranteeFundManager.test.ts`                        | 保证金基金管理器测试                                                                       |
+| **GuaranteeAndRisk.integrated.test.ts**             | `test/GuaranteeAndRisk.integrated.test.ts`                               | 保证金与风险模块集成测试                                                                   |
+| **StatisticsView.guarantee-aggregation.test.ts**    | `test/StatisticsView.guarantee-aggregation.test.ts`                      | 保证金统计聚合测试                                                                         |
 
 ### 测试场景
 
 - ✅ 保证金锁定和释放
 - ✅ 提前还款结算
+- ✅ `SettlementManager -> EarlyRepaymentGuaranteeManager -> GuaranteeFundManager` 路由集成
+- ✅ same-asset 多订单场景下按 guarantee record maturity 判定 early/late
+- ✅ GuaranteeFund 下游失败时 strict revert，不吞掉主流程错误
 - ✅ 清算时保证金没收
 - ✅ 重复操作防护
 - ✅ 事件触发验证
@@ -259,9 +293,9 @@ function calculateHealthFactorExcludingGuarantee(
 
 ```typescript
 await guaranteeFundManager.initialize(
-    vaultCoreAddress,      // VaultCore 合约地址
-    registryAddress,       // Registry 合约地址
-    upgradeAdmin          // 升级管理员地址（可选，已迁移）
+  vaultCoreAddress, // VaultCore 合约地址
+  registryAddress, // Registry 合约地址
+  upgradeAdmin, // 升级管理员地址（可选，已迁移）
 );
 ```
 
@@ -269,10 +303,9 @@ await guaranteeFundManager.initialize(
 
 ```typescript
 await earlyRepaymentGuaranteeManager.initialize(
-    vaultCoreAddress,           // VaultCore 合约地址
-    registryAddress,            // Registry 合约地址
-    platformFeeReceiverAddress, // 平台费用接收者地址
-    platformFeeRate            // 保证金结算的“平台分成费率”（bps，默认 100 = 1%），注意：不是借/还款手续费
+  registryAddress, // Registry 合约地址（自动解析 VaultCore 等依赖）
+  platformFeeReceiverAddress, // 平台费用接收者地址
+  platformFeeRate, // 保证金结算的“平台分成费率”（bps，默认 100 = 1%），注意：不是借/还款手续费
 );
 ```
 
@@ -280,7 +313,7 @@ await earlyRepaymentGuaranteeManager.initialize(
 
 - **保证金结算平台分成费率**: 默认 100 bps (1%)，可通过治理调整（与协议借/还款手续费口径无关）
 - **提前还款罚金天数**: 默认 2 天
-- **最大借款期限**: 10 年（365 * 10 天）
+- **最大借款期限**: 10 年（365 \* 10 天）
 - **最大利息比例**: 利息不超过本金的 2 倍
 
 ## 📊 监控和统计
@@ -313,6 +346,7 @@ await earlyRepaymentGuaranteeManager.initialize(
 **位置**: `src/interfaces/IGuaranteeFundManager.sol`
 
 **主要接口**:
+
 ```solidity
 function lockGuarantee(address user, address asset, uint256 amount) external;
 function releaseGuarantee(address user, address asset, uint256 amount) external;
@@ -328,6 +362,7 @@ function batchReleaseGuarantees(address user, address[] calldata assets, uint256
 **位置**: `src/interfaces/IEarlyRepaymentGuaranteeManager.sol`
 
 **主要接口**:
+
 ```solidity
 function lockGuaranteeRecord(
     address borrower,
@@ -356,9 +391,9 @@ function processDefault(
 
 保证金系统在 Registry 中注册的模块键：
 
-| 模块键 | 模块名称 | 说明 |
-|--------|----------|------|
-| `KEY_GUARANTEE_FUND` | GuaranteeFundManager | 保证金基金管理器 |
+| 模块键                          | 模块名称                       | 说明                 |
+| ------------------------------- | ------------------------------ | -------------------- |
+| `KEY_GUARANTEE_FUND`            | GuaranteeFundManager           | 保证金基金管理器     |
 | `KEY_EARLY_REPAYMENT_GUARANTEE` | EarlyRepaymentGuaranteeManager | 提前还款保证金管理器 |
 
 ### 依赖模块
@@ -378,20 +413,19 @@ function processDefault(
 ```typescript
 // 查询用户锁定保证金
 const lockedAmount = await guaranteeFundManager.getLockedGuarantee(
-    userAddress,
-    assetAddress
+  userAddress,
+  assetAddress,
 );
 
 // 检查是否已支付保证金
 const isPaid = await guaranteeFundManager.isGuaranteePaid(
-    userAddress,
-    assetAddress
+  userAddress,
+  assetAddress,
 );
 
 // 查询资产总保证金
-const totalGuarantee = await guaranteeFundManager.getTotalGuaranteeByAsset(
-    assetAddress
-);
+const totalGuarantee =
+  await guaranteeFundManager.getTotalGuaranteeByAsset(assetAddress);
 ```
 
 ### 3. 提前还款结算
@@ -401,17 +435,14 @@ const totalGuarantee = await guaranteeFundManager.getTotalGuaranteeByAsset(
 ### 4. 计算排除保证金的健康因子
 
 ```typescript
-import { RiskView } from '../types/contracts';
+import { RiskView } from "../types/contracts";
 
-const riskView = await ethers.getContractAt(
-    'RiskView',
-    riskViewAddress
-);
+const riskView = await ethers.getContractAt("RiskView", riskViewAddress);
 
 // 计算排除保证金后的健康因子（新版返回带 meta）
 const [healthFactor] = await riskView.calculateHealthFactorExcludingGuarantee(
-    userAddress,
-    assetAddress
+  userAddress,
+  assetAddress,
 );
 ```
 

@@ -41,7 +41,7 @@ describe("RiskView", function () {
     await acm.grantRole(ACTION_VIEW_USER_DATA, admin.address);
 
     const RiskView = await ethers.getContractFactory("RiskView");
-    const rv = await upgrades.deployProxy(RiskView, [await registry.getAddress()], { kind: "uups" });
+    const rv = (await upgrades.deployProxy(RiskView, [await registry.getAddress()], { kind: "uups" })) as any;
 
     return { admin, user, other, registry, acm, hv, le, pv, gf, rv };
   }
@@ -123,7 +123,7 @@ describe("RiskView", function () {
       expect(names.some((n) => n.toLowerCase().startsWith("push"))).to.equal(false);
 
       const writable = funcFragments.filter((f: any) => !["view", "pure"].includes(String(f.stateMutability)));
-      const writableNames = Array.from(new Set(writable.map((f: any) => f.name)));
+      const writableNames = Array.from(new Set(writable.map((f: any) => f.name))) as string[];
       const allowed = new Set(["initialize", "upgradeTo", "upgradeToAndCall"]);
       expect(writableNames.every((n) => allowed.has(n))).to.equal(true);
     });

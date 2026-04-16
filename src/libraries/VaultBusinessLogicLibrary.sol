@@ -192,13 +192,13 @@ library VaultBusinessLogicLibrary {
         }
     }
 
-    // Removed: legacy ledger write paths (safeRecordBorrow/safeRepay).
+    // Removed direct ledger write paths (safeRecordBorrow/safeRepay).
 
     /**
      * @notice Safely notify the single Statistics push orchestrator.
-     * @dev The legacy direct `StatisticsView.pushUserStatsUpdate(...)` delta path is intentionally retired here.
+        * @dev The direct `StatisticsView.pushUserStatsUpdate(...)` delta path is intentionally retired here.
      *      Batch flows must route through `StatisticsPushManager -> StatisticsView.pushUserStatsSnapshot(...)`
-     *      so localhost and production share the same authoritative USD-8 semantics.
+        *      so localhost and production share the same authoritative value semantics.
      * @param registryAddr Registry address used to resolve `KEY_STATS_PUSH_MANAGER`.
      * @param statsView StatisticsView address, kept for failure-event context.
      * @param user User address.

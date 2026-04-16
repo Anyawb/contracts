@@ -1,7 +1,7 @@
 import { ethers, network } from "hardhat";
 
 import { envBool } from "../tests/_addressResolver";
-import { createFundsFlowLiveContext, getGuaranteeState } from "../tests/live-test/_fundsFlowLive";
+import { createFundsFlowLiveContext, getGuaranteeState } from "../tests/live-test/networks/arbitrum-sepolia/core/_fundsFlowLive";
 
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";

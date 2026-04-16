@@ -120,8 +120,10 @@ export async function runRewardExtendedChecks(opts: {
   deployer: any;
   waitTx: (p: Promise<any>, label: string) => Promise<any>;
   strictReward: boolean;
+  rewardManager: any | null;
   rewardView: any | null;
   rewardViewAddr: string;
+  orderEngineAddr?: string;
   easyEmissionConfig: any | null;
   easyEmissionConfigAddr: string;
   rewardAccrualManager: any | null;
@@ -137,6 +139,7 @@ export async function runRewardExtendedChecks(opts: {
     reasonDecode: { skipped: false },
     multiPushLastWins: { skipped: false },
     missingRewardViewBestEffort: { skipped: false },
+    userLevelReplayRecovery: { skipped: false },
   };
 
   const strictReward = opts.strictReward;
@@ -425,9 +428,110 @@ export async function runRewardExtendedChecks(opts: {
     }
   }
 
+  if (!opts.rewardManager || !opts.rewardView || !opts.rewardViewAddr || opts.rewardViewAddr === ethers.ZeroAddress) {
+    out.userLevelReplayRecovery = { skipped: true, reason: "missing reward modules in registry" };
+    if (strictReward) throw new Error("[Reward] extended checks: missing modules for user-level replay recovery");
+    logNotice("  [Notice] [Reward] extended checks: missing modules for user-level replay recovery");
+  } else {
+    const hasParam = (await opts.acm.hasRole(key("SET_PARAMETER"), opts.deployer.address)) as boolean;
+    const hasAdmin = (await opts.acm.hasRole(key("ACTION_ADMIN"), opts.deployer.address)) as boolean;
+    if (!hasParam || !hasAdmin) {
+      out.userLevelReplayRecovery = {
+        skipped: true,
+        reason: `deployer missing ${!hasParam ? "SET_PARAMETER" : "ACTION_ADMIN"}`,
+      };
+      if (strictReward) {
+        throw new Error("[Reward] extended checks: deployer missing SET_PARAMETER/ACTION_ADMIN for user-level replay recovery");
+      }
+      logNotice("  [Notice] [Reward] extended checks: deployer missing SET_PARAMETER/ACTION_ADMIN for user-level replay recovery");
+    } else {
+      const repairUser = ethers.Wallet.createRandom().address;
+      const unavailableRewardView = await deployUnavailableRewardView(opts.deployer);
+
+      await opts.waitTx(
+        opts.registry.connect(opts.deployer).setModule(key("REWARD_VIEW"), unavailableRewardView),
+        "Reward extended: replace REWARD_VIEW for user-level replay"
+      );
+      await advanceRewardViewCacheTtl();
+
+      try {
+        const txFail = await opts.rewardManager.connect(opts.deployer).updateUserLevel(repairUser, 4);
+        const rcptFail = await txFail.wait();
+
+        const failed = extractRewardViewPushFailed(rcptFail, opts.rmCoreAddr).filter(
+          (entry) => entry.op.toLowerCase() === key("USER_LEVEL").toLowerCase()
+        );
+        if (failed.length === 0) {
+          throw new Error("[Reward] extended user-level replay: missing RewardViewPushFailed(USER_LEVEL)");
+        }
+
+        const staleSummary = await opts.rewardView.connect(opts.deployer).getUserRewardSummaryWithMeta(repairUser);
+        if ((staleSummary[2] as bigint) !== 0n) {
+          throw new Error(
+            `[Reward] extended user-level replay: stale RewardView level mismatch got=${staleSummary[2].toString()} expect=0`
+          );
+        }
+
+        await opts.waitTx(
+          opts.rewardView.connect(opts.deployer).retryPushUserLevel(repairUser, 4, BigInt(rcptFail?.blockNumber ?? 0)),
+          "Reward extended: retry user-level replay"
+        );
+
+        const repairedSummary = await opts.rewardView.connect(opts.deployer).getUserRewardSummaryWithMeta(repairUser);
+        if ((repairedSummary[2] as bigint) !== 4n) {
+          throw new Error(
+            `[Reward] extended user-level replay: repaired RewardView level mismatch got=${repairedSummary[2].toString()} expect=4`
+          );
+        }
+
+        let canonicalBorrowCheckLevel = repairedSummary[2].toString();
+        if (opts.orderEngineAddr) {
+          await network.provider.send("hardhat_impersonateAccount", [opts.orderEngineAddr]);
+          await network.provider.send("hardhat_setBalance", [opts.orderEngineAddr, "0x56BC75E2D63100000"]);
+          try {
+            const oe = await ethers.getSigner(opts.orderEngineAddr);
+            const rmCoreBorrowCheck = (await ethers.getContractAt(
+              [
+                "function getUserLevelForBorrowCheck(address user) view returns (uint8)",
+              ],
+              opts.rmCoreAddr,
+              oe,
+            )) as any;
+            const level = (await rmCoreBorrowCheck.getUserLevelForBorrowCheck(repairUser)) as bigint;
+            if (level !== 4n) {
+              throw new Error(
+                `[Reward] extended user-level replay: canonical borrow-check level mismatch got=${level.toString()} expect=4`
+              );
+            }
+            canonicalBorrowCheckLevel = level.toString();
+          } finally {
+            await stopImpersonating(opts.orderEngineAddr);
+          }
+        }
+
+        out.userLevelReplayRecovery = {
+          skipped: false,
+          txHash: txFail.hash,
+          user: repairUser,
+          failedRewardView: String(failed[failed.length - 1].rewardView),
+          failureReason: ethers.hexlify(ethers.getBytes(failed[failed.length - 1].reason)).toLowerCase(),
+          repairedLevel: repairedSummary[2].toString(),
+          canonicalBorrowCheckLevel,
+          replayBlockNumber: String(rcptFail?.blockNumber ?? 0),
+        };
+      } finally {
+        await opts.waitTx(
+          opts.registry.connect(opts.deployer).setModule(key("REWARD_VIEW"), opts.rewardViewAddr),
+          "Reward extended: restore REWARD_VIEW after user-level replay"
+        );
+        await advanceRewardViewCacheTtl();
+      }
+    }
+  }
+
   if (opts.artifactTarget) opts.artifactTarget[artifactKey] = out;
   log(
-    `  [Reward] extended checks: reasonDecode=${out.reasonDecode.skipped ? "skipped" : "ok"} multiPushLastWins=${out.multiPushLastWins.skipped ? "skipped" : "ok"} missingRewardViewBestEffort=${out.missingRewardViewBestEffort.skipped ? "skipped" : "ok"}`
+    `  [Reward] extended checks: reasonDecode=${out.reasonDecode.skipped ? "skipped" : "ok"} multiPushLastWins=${out.multiPushLastWins.skipped ? "skipped" : "ok"} missingRewardViewBestEffort=${out.missingRewardViewBestEffort.skipped ? "skipped" : "ok"} userLevelReplayRecovery=${out.userLevelReplayRecovery.skipped ? "skipped" : "ok"}`
   );
   return out;
 }

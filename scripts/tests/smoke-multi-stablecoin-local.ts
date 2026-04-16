@@ -8,10 +8,10 @@ import {
   BORROW_INTENT_TYPES,
   LEND_INTENT_TYPES,
   buildLendIntentHash,
-  getAssetBootstrapPriceUsd8,
+  parseAssetBootstrapPrice,
   parseLoanOrderId,
-} from "./live-test/_mockLiveUtils";
-import { runViewPreflight } from "../e2e/utils/view-preflight";
+} from "./live-test/networks/arbitrum-sepolia/core/_mockLiveUtils";
+import { runViewPreflight } from "./_viewPreflight";
 
 type MockAssetPackAsset = {
   id: string;
@@ -23,8 +23,8 @@ type MockAssetPackAsset = {
   sourceId: string;
   maxPriceAge: number;
   active: boolean;
-  bootstrapPriceUsd8?: string;
-  defaultPriceUsd8?: string;
+  bootstrapPriceValue?: string;
+  defaultPriceValue?: string;
   settlementToken?: boolean;
   address: string;
 };
@@ -119,7 +119,7 @@ async function ensureAssetConfigured(params: {
   await (
     await priceOracle.updatePrice(
       asset.address,
-      ethers.parseUnits(getAssetBootstrapPriceUsd8(asset as any), 8),
+      parseAssetBootstrapPrice(asset as any),
       blockNumber,
     )
   ).wait();
@@ -415,7 +415,7 @@ async function main() {
         throw new Error(`${collateralAsset.symbol}/${borrowAsset.symbol}: debt not cleared after repay (${postDebt})`);
       }
       if (debtValueAfter !== 0n) {
-        throw new Error(`${collateralAsset.symbol}/${borrowAsset.symbol}: USD-8 debt value not cleared after repay (${debtValueAfter})`);
+        throw new Error(`${collateralAsset.symbol}/${borrowAsset.symbol}: value debt value not cleared after repay (${debtValueAfter})`);
       }
 
       console.log(

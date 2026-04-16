@@ -41,7 +41,7 @@ import {IEarlyRepaymentGuaranteeManager} from "../../interfaces/IEarlyRepaymentG
  * Security:
  * - This module is the SSOT for guarantee records but not for guarantee-fund custody.
  * - GuaranteeFundManager remains the SSOT for guarantee-fund custody and transfers.
- * - Business write entrypoints are restricted to VaultCore, while governance paths are gated through ACM roles.
+ * - Borrow-time guarantee record writes are restricted to VaultCore/VaultBusinessLogic; repay/default settlement writes are restricted to SettlementManager.
  * - Module address resolution remains centralized in Registry and must not be proxied through this module.
  * - State-changing external entrypoints are non-reentrant and upgrades are role-gated.
  */
@@ -233,14 +233,6 @@ contract EarlyRepaymentGuaranteeManager is
     /// @notice Restricts calls to SettlementManager (repay/default-time orchestration).
     modifier onlySettlementManager() {
         if (_registryAddr == address(0)) revert ZeroAddress();
-        // Backward compat: allow VaultCore to call settlement functions directly in legacy tests.
-        address vaultCoreAddr = Registry(_registryAddr).getModule(
-            ModuleKeys.KEY_VAULT_CORE
-        );
-        if (vaultCoreAddr != address(0) && msg.sender == vaultCoreAddr) {
-            _;
-            return;
-        }
         address sm = Registry(_registryAddr).getModule(
             ModuleKeys.KEY_SETTLEMENT_MANAGER
         );
@@ -639,7 +631,7 @@ contract EarlyRepaymentGuaranteeManager is
         record.principal = principal;
         record.promisedInterest = promisedInterest;
         // NOTE (Time-Dependency-Refactor):
-        // - `startTime/maturityTime` are legacy field names; semantics are startBlock/maturityBlock (block.number).
+        // - `startTime/maturityTime` are interpreted as startBlock/maturityBlock (block.number).
         // - maturity is expressed in explicit blocks (no days/seconds arithmetic onchain).
         record.startTime = blockNumber;
         record.maturityTime = blockNumber + termBlocks;
@@ -686,7 +678,7 @@ contract EarlyRepaymentGuaranteeManager is
      *      - GuaranteeFundManager settlement reverts (ExternalModuleRevertedRaw)
      *
      * Security:
-     * - onlyVaultCore
+    * - onlySettlementManager
      * - nonReentrant
      * - CEI: state is updated before calling external module
      *
@@ -788,7 +780,7 @@ contract EarlyRepaymentGuaranteeManager is
      *      - GuaranteeFundManager forfeiture reverts (ExternalModuleRevertedRaw)
      *
      * Security:
-     * - onlyVaultCore
+    * - onlySettlementManager
      * - nonReentrant
      * - CEI: state is updated before calling external module
      *

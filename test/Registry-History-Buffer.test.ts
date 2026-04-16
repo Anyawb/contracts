@@ -14,11 +14,8 @@ import { ethers } from 'hardhat';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
-// 导入合约类型
-import type { Registry } from '../../types';
-
 describe('Registry History Buffer', function () {
-  let registry: Registry;
+  let registry: any;
   let owner: SignerWithAddress;
   let addr1: SignerWithAddress;
   let addr2: SignerWithAddress;
@@ -48,7 +45,7 @@ describe('Registry History Buffer', function () {
     );
     await proxy.waitForDeployment();
         
-    const registry = implementation.attach(await proxy.getAddress()) as Registry;
+    const registry = implementation.attach(await proxy.getAddress()) as any;
         
     return { registry, owner, addr1, addr2 };
   }

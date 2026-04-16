@@ -1,0 +1,6 @@
+import { runBnbSharedLiveScript } from './_run-shared';
+
+void runBnbSharedLiveScript('../../live-fee-runtime-baseline').catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

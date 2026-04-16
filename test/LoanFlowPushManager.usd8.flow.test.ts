@@ -5,7 +5,7 @@ import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
 
 const { ethers, upgrades } = hardhat;
 
-describe("LoanFlowPushManager (strict B+) – USD-8 flow deltas", function () {
+describe("LoanFlowPushManager (strict B+) – normalized 18-decimal flow deltas", function () {
   const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes("ACCESS_CONTROL_MANAGER"));
   const KEY_LOAN_FLOW_VIEW = ethers.keccak256(ethers.toUtf8Bytes("LOAN_FLOW_VIEW"));
   const KEY_LOAN_FLOW_PUSH_MANAGER = ethers.keccak256(ethers.toUtf8Bytes("LOAN_FLOW_PUSH_MANAGER"));
@@ -55,14 +55,14 @@ describe("LoanFlowPushManager (strict B+) – USD-8 flow deltas", function () {
     return { admin, outsider, registry, acm, view, pushMgr, oracle, orderEngine };
   }
 
-  it("retryBorrow converts token amount into USD-8 and updates user + global totals", async function () {
+  it("retryBorrow normalizes token amount into the shared 18-decimal value unit and updates user + global totals", async function () {
     const { admin, view, pushMgr, oracle } = await loadFixture(deployFixture);
 
     const user = ethers.Wallet.createRandom().address;
     const asset = ethers.Wallet.createRandom().address;
 
-    // priceUsd8 = $2.00, decimals=18
-    await oracle.setPrice(asset, 200_000_000n, 123n, 18);
+    // price = $2.00 in 18-decimal asset-native precision
+    await oracle.setPrice(asset, 2n * 10n ** 18n, 123n, 18);
 
     const principal = 10n * 10n ** 18n;
     const orderId = 7n;
@@ -72,15 +72,15 @@ describe("LoanFlowPushManager (strict B+) – USD-8 flow deltas", function () {
     const tx = await pushMgr.connect(admin).retryBorrow(user, asset, principal, orderId);
     await expect(tx).to.emit(view, "DataPushed").withArgs(DATA_TYPE_LOAN_FLOW_UPDATED, anyValue);
 
-    const [uBorrowUsd8, uRepayUsd8, uBorrowCount, uRepayCount] = await view.getUserLoanFlowWithMeta(user);
-    expect(uBorrowUsd8).to.equal(2_000_000_000n); // 10 * $2, USD-8
-    expect(uRepayUsd8).to.equal(0n);
+    const [uBorrowValue, uRepayValue, uBorrowCount, uRepayCount] = await view.getUserLoanFlowWithMeta(user);
+    expect(uBorrowValue).to.equal(20n * 10n ** 18n);
+    expect(uRepayValue).to.equal(0n);
     expect(uBorrowCount).to.equal(1n);
     expect(uRepayCount).to.equal(0n);
 
-    const [gBorrowUsd8, gRepayUsd8, gBorrowCount, gRepayCount] = await view.getGlobalLoanFlowWithMeta();
-    expect(gBorrowUsd8).to.equal(2_000_000_000n);
-    expect(gRepayUsd8).to.equal(0n);
+    const [gBorrowValue, gRepayValue, gBorrowCount, gRepayCount] = await view.getGlobalLoanFlowWithMeta();
+    expect(gBorrowValue).to.equal(20n * 10n ** 18n);
+    expect(gRepayValue).to.equal(0n);
     expect(gBorrowCount).to.equal(1n);
     expect(gRepayCount).to.equal(0n);
   });
@@ -90,13 +90,13 @@ describe("LoanFlowPushManager (strict B+) – USD-8 flow deltas", function () {
     await expect(view.connect(outsider).getGlobalLoanFlowWithMeta()).to.not.be.reverted;
   });
 
-  it("retryRepay preserves count even when USD-8 rounds down to 0", async function () {
+  it("retryRepay preserves count even when normalized valuation rounds down to 0", async function () {
     const { admin, view, pushMgr, oracle } = await loadFixture(deployFixture);
 
     const user = ethers.Wallet.createRandom().address;
     const asset = ethers.Wallet.createRandom().address;
 
-    // priceUsd8 = 1 (=$0.00000001), decimals=18; 1 wei -> valueUsd8=0
+    // Extremely small asset-native price; 1 wei still normalizes to 0 at 18 decimals.
     await oracle.setPrice(asset, 1n, 1n, 18);
 
     const repayAmount = 1n;
@@ -105,9 +105,9 @@ describe("LoanFlowPushManager (strict B+) – USD-8 flow deltas", function () {
 
     await pushMgr.connect(admin).retryRepay(user, asset, repayAmount, orderId, repaidAmountAfter);
 
-    const [uBorrowUsd8, uRepayUsd8, uBorrowCount, uRepayCount] = await view.getUserLoanFlowWithMeta(user);
-    expect(uBorrowUsd8).to.equal(0n);
-    expect(uRepayUsd8).to.equal(0n);
+    const [uBorrowValue, uRepayValue, uBorrowCount, uRepayCount] = await view.getUserLoanFlowWithMeta(user);
+    expect(uBorrowValue).to.equal(0n);
+    expect(uRepayValue).to.equal(0n);
     expect(uBorrowCount).to.equal(0n);
     expect(uRepayCount).to.equal(1n);
   });

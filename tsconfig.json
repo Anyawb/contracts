@@ -2,7 +2,6 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "CommonJS",
-    "moduleResolution": "node",
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "allowImportingTsExtensions": true,
@@ -13,7 +12,6 @@
     "strict": true,
     "skipLibCheck": true,
     "noImplicitAny": false,
-    "downlevelIteration": true,
     "lib": ["ES2022", "DOM"],
     "types": [
       "node",
@@ -26,7 +24,6 @@
   },
   "include": [
     "test/**/*", 
-    "types/**/*", 
     "hardhat.config.ts", 
     "scripts/**/*", 
     "frontend-config/**/*",

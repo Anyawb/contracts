@@ -2,11 +2,12 @@ const hre = require("hardhat");
 
 async function main() {
   // Test edge cases where calculatedValue might be 0
+  const decimals = 6n;
   const testCases = [
-    { amount: 1n, price: hre.ethers.parseUnits("1", 8), decimals: 8n },
-    { amount: 10n, price: hre.ethers.parseUnits("1", 8), decimals: 8n },
-    { amount: 50n, price: hre.ethers.parseUnits("1", 8), decimals: 8n },
-    { amount: 1n, price: hre.ethers.parseUnits("0.1", 8), decimals: 8n }, // 0.1 * 10^8 = 1e7
+    { amount: 1n, price: hre.ethers.parseUnits("1", Number(decimals)), decimals },
+    { amount: 10n, price: hre.ethers.parseUnits("1", Number(decimals)), decimals },
+    { amount: 50n, price: hre.ethers.parseUnits("1", Number(decimals)), decimals },
+    { amount: 1n, price: hre.ethers.parseUnits("0.1", Number(decimals)), decimals },
   ];
   
   for (const testCase of testCases) {

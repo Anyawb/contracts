@@ -1,40 +1,67 @@
-# LiquidationCollateralManager 优雅降级实施报告（对齐 Architecture-Guide）
+# LiquidationCollateralManager 优雅降级报告（归档说明）
 
-> ⚠️ **归档说明（Legacy）**：`LiquidationCollateralManager` 属于旧清算模块族，已在当前实现中下线/移除。  
-> 当前清算写路径为 `SettlementManager`（SSOT）→ `CollateralManager`/`VaultLendingEngine`（直达账本）→ `LiquidatorView`（DataPush 单点）。  
-> 本文仅保留为历史设计记录，勿作为当前代码实现/测试入口依据。
+## 归档结论
 
-## 🎯 概述
+`LiquidationCollateralManager` 已经不是当前清算实现里的活跃模块。把“优雅降级”继续写成它的运行时职责，会误导读者去找一个现在并不承担主路径责任的模块。
 
-本版报告已按 `docs/Architecture-Guide.md` 对齐：抵押物管理仅负责账本扣押，不在合约内执行价格获取或优雅降级；估值与降级统一由 `LendingEngine` 估值路径完成；写入口统一由 `SettlementManager` 承接，在进入清算分支时直达账本；事件/DataPush 由 `LiquidatorView.pushLiquidationUpdate/Batch` 单点触发。
+当前正确口径是：
 
-## 🔧 主要改动
+- collateral 扣押与 debt reduce 的主写路径已经收敛到 `SettlementManager` / `BlocksOnlyCoordinator` 调度下的现有账本模块
+- 估值降级不在旧的 `LiquidationCollateralManager` 中执行
+- 只读估值和清算预览相关的 best-effort 行为，分散在 `VaultLendingEngine`、`SettlementManager`、`BlocksOnlyCoordinator` 与 `LiquidatorView` 的当前实现里
 
-- **职责收敛**：抵押扣押/划转仅做账本写入（`withdrawCollateralTo`），不挂载 `GracefulDegradation`、不直接调用预言机、不过度缓存。
-- **估值归口**：价格与降级仅在 `LendingEngine` 估值路径执行（如 `getAssetValueWithFallback*`）；只读/预览由清算只读聚合层（例如 `LiquidationRiskManager` / 相关 View façade）调用 `LendingEngine` 只读估值接口完成。
-- **事件单点**：清算写入成功后，仅通过 `LiquidatorView.pushLiquidationUpdate/Batch` 推送事件/DataPush，避免在 `CollateralManager` 重复发事件。
-- **权限与命名**：账本层内部做权限校验（如 `ACM.requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender)`）；存储命名遵循统一规范（`s`、`moduleCache` 等）。
+## 当前实现中“优雅降级”真正发生在哪里
 
-## 🧭 设计修订（示意代码）
+### 1. 风险判断阶段
 
-```solidity
-// 账本层：仅执行扣押，权限/余额校验在账本内
-function seizeCollateral(address user, address asset, uint256 amount) internal {
-    _seize(user, asset, amount);
-}
+`LiquidationRiskManager.isLiquidatable(user)` 依赖 `HealthView` 缓存：
 
-// 只读层：估值与降级由 LendingEngine 提供
-function getCollateralValue(address asset, uint256 amount) external view returns (uint256 value) {
-    return ILendingEngineView(lendingEngine).getAssetValueWithFallback(asset, amount);
-}
-```
+- 如果缓存有效，则按 `healthFactor < liquidationThreshold` 判断
+- 如果缓存无效，则直接返回 `false`
 
-> 如仍存在 `calculateCollateralValue*`、批量估值或降级事件等实现位于 `CollateralManager`，应迁移/删除，改为调用 `LendingEngine` 估值接口或通过视图层只读聚合完成。
+这是一种当前仍在使用的保守降级语义。
 
-## ✅ 对齐清单
+### 2. collateral 候选选择阶段
 
-- [x] 移除 CollateralManager 内的优雅降级实现与相关事件
-- [x] 清算写路径：`SettlementManager`（进入清算分支）→ `CollateralManager.withdrawCollateralTo` / `LendingEngine.forceReduceDebt`
-- [x] 事件/DataPush：仅 `LiquidatorView.pushLiquidationUpdate/Batch`
-- [x] 预言机健康/降级：仅在 `LendingEngine` 估值路径
-- [x] 存储/命名/权限：遵循统一规范，不经 View 放行写权限
+无论是 `SettlementManager` 还是 `BlocksOnlyCoordinator`，当前都遵循“优先使用估值成功的 collateral 候选”这一思路：
+
+- 能拿到 valuation 的资产优先进入选择
+- valuation 失败或返回 0 的资产，不应被当作可靠的估值依据
+
+这部分不是旧 `LiquidationCollateralManager` 的职责，而是当前清算编排路径的职责。
+
+### 3. payout / DataPush 阶段
+
+`LiquidatorView` 当前承担的是 liquidation 的只读聚合与 best-effort 推送职责：
+
+- 可以做估值辅助
+- 可以为链下提供统一 push 口径
+- 但不是账本写入 SSOT
+
+因此，它的失败或降级也不应回滚主账本写路径。
+
+## 不应再保留的旧口径
+
+以下说法如果还出现在其他文档里，应视为过时：
+
+1. “LiquidationCollateralManager 负责当前清算估值降级”。
+2. “CollateralManager 内部有一套独立的 graceful degradation 事件与策略”。
+3. “清算写入先经过 LiquidationCollateralManager 再进入账本”。
+
+这些说法都不符合当前代码。
+
+## 当前应如何理解模块边界
+
+- `SettlementManager`：legacy / 通用订单的清算编排与入口。
+- `BlocksOnlyCoordinator`：blocks-only 产品线的到期收尾编排（trade-close / maturity delivery）。
+- `LiquidationManager`：共享 direct-ledger 清算执行器。
+- `VaultLendingEngine`：估值和 debt 相关核心能力的承载者之一。
+- `LiquidatorView`：只读聚合与 best-effort DataPush。
+
+旧的 `LiquidationCollateralManager` 只应被视为历史设计痕迹，而不是现行 runbook 或测试入口。
+
+## 对运维与文档维护的建议
+
+1. 后续 runbook 不要再把 `LiquidationCollateralManager` 当成排查入口。
+2. 如需分析“为什么这次 liquidation 没放行”，应先看 `HealthView` 缓存有效性和当前估值结果，而不是寻找旧模块的降级开关。
+3. 如需分析“为什么分账或 push 缺失”，应分别检查主账本写入与 `LiquidatorView` 的 best-effort 推送，而不是把两者混成一个模块职责。

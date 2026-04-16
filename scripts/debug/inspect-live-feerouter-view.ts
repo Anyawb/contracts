@@ -3,7 +3,7 @@ import path from "path";
 
 import { ethers } from "hardhat";
 
-import { createFundsFlowLiveContext } from "../tests/live-test/_fundsFlowLive";
+import { createFundsFlowLiveContext } from "../tests/live-test/networks/arbitrum-sepolia/core/_fundsFlowLive";
 
 const EIP1967_IMPLEMENTATION_SLOT = "0x360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D382BBC";
 

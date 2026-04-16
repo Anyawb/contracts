@@ -534,7 +534,7 @@ contract VaultBusinessLogic is
         );
         // Validate borrow intent state (expired / already matched)
         bytes32 bHash = SettlementIntentLib.hashBorrowIntent(borrowIntent);
-        // NOTE (Time-Dependency-Refactor): `expireAt` is a legacy field name; semantics are expireBlock (block.number).
+        // NOTE (Time-Dependency-Refactor): `expireAt` is interpreted as expireBlock (block.number).
         SettlementIntentLib.validateOpen(
             _matchedIntents,
             bHash,
@@ -864,6 +864,8 @@ contract VaultBusinessLogic is
             IBlocksOnlyCoordinator.BlocksOnlyMatchParams({
                 borrower: borrowIntent.borrower,
                 lender: pool,
+                collateralAsset: borrowIntent.collateralAsset,
+                collateralAmount: borrowIntent.collateralAmount,
                 borrowAsset: borrowIntent.borrowAsset,
                 amount: borrowIntent.amount,
                 termBlocks: borrowIntent.termBlocks,

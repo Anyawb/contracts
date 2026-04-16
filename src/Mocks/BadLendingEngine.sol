@@ -34,6 +34,16 @@ contract BadLendingEngine is ILendingEngineBasic {
         return 0;
     }
 
+    function getUserTotalDebtValueBestEffort(address user) external pure returns (uint256 totalValue) {
+        user;
+        return 0;
+    }
+
+    function getUserTotalDebtValueStrict(address user) external pure returns (uint256 totalValue) {
+        user;
+        return 0;
+    }
+
     function getTotalDebtValue() external pure returns (uint256 totalValue) {
         return 0;
     }
@@ -54,6 +64,14 @@ contract BadLendingEngine is ILendingEngineBasic {
     }
 
     function calculateDebtValue(address user, address asset) external pure returns (uint256 value) {
+        user; asset; return 0;
+    }
+
+    function calculateDebtValueBestEffort(address user, address asset) external pure returns (uint256 value) {
+        user; asset; return 0;
+    }
+
+    function calculateDebtValueStrict(address user, address asset) external pure returns (uint256 value) {
         user; asset; return 0;
     }
 

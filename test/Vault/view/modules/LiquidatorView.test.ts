@@ -3,6 +3,8 @@ import { ethers, upgrades } from 'hardhat';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const KEY_LIQUIDATION_MANAGER = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_MANAGER'));
+const KEY_SETTLEMENT_MANAGER = ethers.keccak256(ethers.toUtf8Bytes('SETTLEMENT_MANAGER'));
+const KEY_LIQUIDATION_PAYOUT_MANAGER = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_PAYOUT_MANAGER'));
 const KEY_CM = ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER'));
 const KEY_LE = ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE'));
 const KEY_PRICE_ORACLE = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
@@ -16,10 +18,11 @@ const ACTION_VIEW_SYSTEM_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_SYSTEM
 const ACTION_VIEW_LIQUIDATION_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_LIQUIDATION_DATA'));
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
 const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
+const VALUE_SCALE_DELTA = 10n ** 10n;
 
 describe('LiquidatorView', function () {
   async function deployFixture() {
-    const [admin, viewer, other, business, user2] = await ethers.getSigners();
+    const [admin, viewer, other, business, settlementManager, payoutManager, user2] = await ethers.getSigners();
 
     const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
     const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
@@ -33,6 +36,8 @@ describe('LiquidatorView', function () {
 
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(KEY_LIQUIDATION_MANAGER, business.address);
+    await registry.setModule(KEY_SETTLEMENT_MANAGER, settlementManager.address);
+    await registry.setModule(KEY_LIQUIDATION_PAYOUT_MANAGER, payoutManager.address);
     await registry.setModule(KEY_CM, await collateralMgr.getAddress());
     await registry.setModule(KEY_LE, await lendingEngine.getAddress());
     await registry.setModule(KEY_PRICE_ORACLE, await priceOracle.getAddress());
@@ -70,7 +75,25 @@ describe('LiquidatorView', function () {
     // Grant risk role to the LiquidatorView contract itself so those internal calls succeed.
     await acm.grantRole(ACTION_VIEW_RISK_DATA, await view.getAddress());
 
-    return { view, registry, acm, admin, viewer, other, business, user2, collateralMgr, lendingEngine, priceOracle, positionView, profitStats, recordMgr, asset };
+    return {
+      view,
+      registry,
+      acm,
+      admin,
+      viewer,
+      other,
+      business,
+      settlementManager,
+      payoutManager,
+      user2,
+      collateralMgr,
+      lendingEngine,
+      priceOracle,
+      positionView,
+      profitStats,
+      recordMgr,
+      asset,
+    };
   }
 
   describe('initialization', function () {
@@ -224,13 +247,13 @@ describe('LiquidatorView', function () {
     it('returns user total collateral value', async function () {
       const { view, admin } = await deployFixture();
       const [totalValue] = await view.connect(admin).getUserTotalCollateralValue(admin.address);
-      expect(totalValue).to.equal(1_000n);
+      expect(totalValue).to.equal(1_000n * VALUE_SCALE_DELTA);
     });
 
     it('batch calculates collateral values', async function () {
       const { view, viewer, asset } = await deployFixture();
       const values = await view.connect(viewer).batchCalculateCollateralValues([asset], [1_000n]);
-      expect(values[0]).to.equal(1_000n);
+      expect(values[0]).to.equal(1_000n * VALUE_SCALE_DELTA);
     });
   });
 
@@ -293,6 +316,34 @@ describe('LiquidatorView', function () {
       const { view, business } = await deployFixture();
       await expect(
         view.connect(business).pushLiquidationUpdate(business.address, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, business.address, 0, 0),
+      ).to.not.be.reverted;
+    });
+
+    it('allows settlement manager to push liquidation update', async function () {
+      const { view, settlementManager } = await deployFixture();
+      await expect(
+        view
+          .connect(settlementManager)
+          .pushLiquidationUpdate(settlementManager.address, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, settlementManager.address, 0, 0),
+      ).to.not.be.reverted;
+    });
+
+    it('allows settlement manager to push liquidation payout', async function () {
+      const { view, settlementManager } = await deployFixture();
+      await expect(
+        view.connect(settlementManager).pushLiquidationPayout(
+          settlementManager.address,
+          ethers.ZeroAddress,
+          settlementManager.address,
+          settlementManager.address,
+          settlementManager.address,
+          settlementManager.address,
+          0,
+          0,
+          0,
+          0,
+          0,
+        ),
       ).to.not.be.reverted;
     });
   });
@@ -447,7 +498,7 @@ describe('LiquidatorView', function () {
     it('calculates collateral value correctly', async function () {
       const { view, viewer, asset } = await deployFixture();
       const value = await view.connect(viewer).calculateCollateralValue(asset, 1_000n);
-      expect(value).to.equal(1_000n); // Mock returns 1:1
+      expect(value).to.equal(1_000n * VALUE_SCALE_DELTA); // 1:1 price, normalized to 18-dec value
     });
 
     it('handles zero amount in collateral value calculation', async function () {
@@ -470,15 +521,15 @@ describe('LiquidatorView', function () {
       await priceOracle.connect(admin).configureAsset(asset2, 'a2', 8, 3600);
       await priceOracle.connect(admin).setPrice(asset2, ethers.parseUnits('1', 8), nowBlock, 8);
       const values = await view.connect(viewer).batchCalculateCollateralValues([asset1, asset2], [1_000n, 2_000n]);
-      expect(values[0]).to.equal(1_000n);
-      expect(values[1]).to.equal(2_000n);
+      expect(values[0]).to.equal(1_000n * VALUE_SCALE_DELTA);
+      expect(values[1]).to.equal(2_000n * VALUE_SCALE_DELTA);
     });
 
     it('handles zero amounts in batch collateral value calculation', async function () {
       const { view, viewer, asset } = await deployFixture();
       const values = await view.connect(viewer).batchCalculateCollateralValues([asset, asset], [0n, 1_000n]);
       expect(values[0]).to.equal(0n);
-      expect(values[1]).to.equal(1_000n);
+      expect(values[1]).to.equal(1_000n * VALUE_SCALE_DELTA);
     });
   });
 
@@ -744,11 +795,11 @@ describe('LiquidatorView', function () {
     });
 
     it('handles missing liquidation manager for push operations', async function () {
-      const { view, business, registry, acm } = await deployFixture();
+      const { view, business, registry } = await deployFixture();
       await registry.setModule(KEY_LIQUIDATION_MANAGER, ethers.ZeroAddress);
       await expect(
         view.connect(business).pushLiquidationUpdate(business.address, ethers.ZeroAddress, ethers.ZeroAddress, 0, 0, business.address, 0, 0),
-      ).to.be.revertedWith('MockRegistry: module not found');
+      ).to.be.revertedWithCustomError(view, 'InvalidCaller');
     });
   });
 
@@ -776,9 +827,9 @@ describe('LiquidatorView', function () {
         [asset, ethers.ZeroAddress, asset],
         [1_000n, 2_000n, 3_000n],
       );
-      expect(values[0]).to.equal(1_000n);
+      expect(values[0]).to.equal(1_000n * VALUE_SCALE_DELTA);
       expect(values[1]).to.equal(0n); // Zero address
-      expect(values[2]).to.equal(3_000n);
+      expect(values[2]).to.equal(3_000n * VALUE_SCALE_DELTA);
     });
 
     it('handles batch user liquidation stats with zero addresses', async function () {

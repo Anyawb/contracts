@@ -10,7 +10,7 @@ StatisticsView 的测试文件包括：
 
 ```
 test/
-├── StatisticsPushManager.usd8.snapshot.test.ts     # Strict B+：USD-8 snapshot + 单入口写入（推荐）
+├── StatisticsPushManager.usd8.snapshot.test.ts     # Strict B+：历史文件名；测试的是 value snapshot + 单入口写入（推荐）
 ├── StatisticsView.active-users.test.ts          # 活跃用户统计测试
 ├── StatisticsView.guarantee-aggregation.test.ts  # 保证金聚合测试
 ├── StatisticsView.migration.test.ts              # 迁移测试
@@ -113,7 +113,7 @@ npx hardhat test test/VaultStatistics.test.ts
 ```
 
 ```bash
-# 运行 Strict B+（推荐主链路）：编排器重算 USD-8 快照并推送到 StatisticsView
+# 运行 Strict B+（推荐主链路）：编排器重算 value 快照并推送到 StatisticsView
 npx hardhat test test/StatisticsPushManager.usd8.snapshot.test.ts
 ```
 

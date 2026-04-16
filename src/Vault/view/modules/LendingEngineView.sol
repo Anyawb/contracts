@@ -11,13 +11,20 @@ import { ViewVersioned } from "../ViewVersioned.sol";
 import { IOrderEngine } from "../../../interfaces/IOrderEngine.sol";
 import { IOrderEngineViewAdapter } from "../../../interfaces/IOrderEngineViewAdapter.sol";
 import { ILoanNFT } from "../../../interfaces/ILoanNFT.sol";
+import { IOrderStateStoreV2 } from "../../../interfaces/IOrderStateStoreV2.sol";
+import { IShortfallLedger } from "../../../interfaces/IShortfallLedger.sol";
 import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 
 /**
  * @title LendingEngineView
- * @notice View module for lending and order-engine data.
+ * @notice View module for order-centric lending-engine reads.
  * @dev This module is decoupled from the core engine and resolves dependencies via Registry.
+ *      Architecture-Guide alignment:
+ *      - View layer only exposes read/cache/aggregation helpers and must not perform business writes.
+ *      - Order lifecycle state-machine writes remain in ORDER_ENGINE / SettlementManager.
+ *      - This module is the order-level read facade for explicit lifecycle status, while LoanNFTView
+ *        remains the user-enumeration facade (user -> tokenIds -> orderId/status).
  *
  * Reverts if:
  * - registry is zero / not a contract (ZeroAddress / NotAContract)
@@ -28,6 +35,18 @@ import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
  * - UUPS upgradeability is role-gated (ACTION_ADMIN via ACM).
  */
 contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
+    struct OrderStateSnapshot {
+        IOrderStateStoreV2.OrderProductType productType;
+        IOrderStateStoreV2.LifecycleStatus lifecycle;
+        IOrderStateStoreV2.CloseReason closeReason;
+        IShortfallLedger.ShortfallStatus shortfallStatus;
+        IOrderStateStoreV2.CollateralDispositionStatus collateralDisposition;
+        bool hasLoss;
+        uint256 createdBlock;
+        uint256 updatedBlock;
+        uint256 closedBlock;
+    }
+
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
     /// @notice Registry contract address (internal use only).
@@ -105,17 +124,61 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyValidRegistry
         returns (IOrderEngine.LoanOrder memory order)
     {
-        // Permission alignment: allow borrower/lender access, or ops/admin (VIEW_USER_DATA / ADMIN).
-        bool isOps = ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-            || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        return _getAuthorizedLoanOrder(orderId);
+    }
 
-        // Treat adapter as a data source; enforce borrower/lender access at the view boundary.
-        order = _engine().getLoanOrderForView(orderId);
-        bool isBorrower = order.borrower != address(0) && msg.sender == order.borrower;
-        bool isLender = order.lender != address(0) && msg.sender == order.lender;
-        bool isCurrentLoanNftOwner = _isCurrentLoanNftOwner(orderId, msg.sender);
-        if (!isOps && !isBorrower && !isLender && !isCurrentLoanNftOwner) revert MissingRole();
-        return order;
+    /**
+     * @notice Get the explicit business lifecycle status for a loan order.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not authorized to view the order (MissingRole)
+     *      - the underlying adapter rejects the order as invalid
+        *
+        * Architecture-Guide alignment:
+        * - This is a read-only projection of the ORDER_ENGINE / LoanNFT lifecycle SSOT.
+        * - It must not be treated as a write hook or secondary lifecycle owner.
+        * - Downstream consumers should prefer this explicit status over inferring closed state from
+        *   repaidAmount, debt-ledger deltas, or liquidation side effects.
+     *
+     * Security:
+        * - View-only.
+     *
+     * @param orderId Engine order identifier
+     * @return status Loan lifecycle status from the ORDER_ENGINE / LoanNFT SSOT
+     */
+    function getOrderStatus(uint256 orderId)
+        external
+        view
+        onlyValidRegistry
+        returns (ILoanNFT.LoanStatus status)
+    {
+        _getAuthorizedLoanOrder(orderId);
+        return _engine().getOrderStatusForView(orderId);
+    }
+
+    function getOrderStateSnapshot(uint256 orderId)
+        external
+        view
+        onlyValidRegistry
+        returns (OrderStateSnapshot memory snapshot)
+    {
+        IOrderEngine.LoanOrder memory order = _getAuthorizedLoanOrder(orderId);
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+            _tryOrderStateStore();
+        if (
+            hasOrderStateStore
+                && orderStateStore.hasOrderState(IOrderStateStoreV2.OrderProductType.LOAN, orderId)
+        ) {
+            return
+                _toOrderStateSnapshot(
+                    orderStateStore.getOrderState(
+                        IOrderStateStoreV2.OrderProductType.LOAN,
+                        orderId
+                    )
+                );
+        }
+
+        return _buildLegacyOrderStateSnapshot(orderId, order);
     }
 
     /**
@@ -260,6 +323,29 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         return IOrderEngineViewAdapter(engineAddr);
     }
 
+    function _tryOrderStateStore() internal view returns (IOrderStateStoreV2 orderStateStore, bool hasStore) {
+        address orderStateStoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_ORDER_STATE_STORE);
+        if (orderStateStoreAddr == address(0) || orderStateStoreAddr.code.length == 0) {
+            return (IOrderStateStoreV2(address(0)), false);
+        }
+
+        return (IOrderStateStoreV2(orderStateStoreAddr), true);
+    }
+
+    function _getAuthorizedLoanOrder(uint256 orderId) internal view returns (IOrderEngine.LoanOrder memory order) {
+        // Permission alignment: allow borrower/lender access, or ops/admin (VIEW_USER_DATA / ADMIN).
+        bool isOps = ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
+            || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+
+        // Treat adapter as a data source; enforce borrower/lender access at the view boundary.
+        order = _engine().getLoanOrderForView(orderId);
+        bool isBorrower = order.borrower != address(0) && msg.sender == order.borrower;
+        bool isLender = order.lender != address(0) && msg.sender == order.lender;
+        bool isCurrentLoanNftOwner = _isCurrentLoanNftOwner(orderId, msg.sender);
+        if (!isOps && !isBorrower && !isLender && !isCurrentLoanNftOwner) revert MissingRole();
+        return order;
+    }
+
     function _isCurrentLoanNftOwner(uint256 orderId, address viewer) internal view returns (bool) {
         if (viewer == address(0)) return false;
 
@@ -270,6 +356,7 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
             for (uint256 i; i < tokenIds.length; ) {
                 try ILoanNFT(loanNftAddr).getLoanMetadata(tokenIds[i]) returns (ILoanNFT.LoanMetadata memory metadata) {
                     if (metadata.loanId == orderId) return true;
+                // solhint-disable-next-line no-empty-blocks
                 } catch {
                     // Best-effort owner lookup: skip broken token metadata instead of blocking reads.
                 }
@@ -280,6 +367,90 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
 
         return false;
+    }
+
+    function _toOrderStateSnapshot(IOrderStateStoreV2.OrderState memory state)
+        internal
+        pure
+        returns (OrderStateSnapshot memory snapshot)
+    {
+        return OrderStateSnapshot({
+            productType: state.productType,
+            lifecycle: state.lifecycle,
+            closeReason: state.closeReason,
+            shortfallStatus: state.shortfallStatus,
+            collateralDisposition: state.collateralDisposition,
+            hasLoss: state.shortfallStatus != IShortfallLedger.ShortfallStatus.NONE,
+            createdBlock: state.createdBlock,
+            updatedBlock: state.updatedBlock,
+            closedBlock: state.closedBlock
+        });
+    }
+
+    function _buildLegacyOrderStateSnapshot(
+        uint256 orderId,
+        IOrderEngine.LoanOrder memory order
+    ) internal view returns (OrderStateSnapshot memory snapshot) {
+        ILoanNFT.LoanStatus status = _engine().getOrderStatusForView(orderId);
+        IShortfallLedger.ShortfallStatus shortfallStatus = _legacyShortfallStatus(orderId);
+        IOrderStateStoreV2.LifecycleStatus lifecycle = IOrderStateStoreV2.LifecycleStatus.ACTIVE;
+        IOrderStateStoreV2.CloseReason closeReason = IOrderStateStoreV2.CloseReason.NONE;
+        IOrderStateStoreV2.CollateralDispositionStatus collateralDisposition =
+            IOrderStateStoreV2.CollateralDispositionStatus.NONE;
+
+        if (status == ILoanNFT.LoanStatus.Repaid) {
+            lifecycle = IOrderStateStoreV2.LifecycleStatus.REPAID;
+            closeReason = IOrderStateStoreV2.CloseReason.FULL_REPAY;
+        } else if (
+            status == ILoanNFT.LoanStatus.Liquidated ||
+            status == ILoanNFT.LoanStatus.LiquidatedWithShortfall
+        ) {
+            lifecycle = IOrderStateStoreV2.LifecycleStatus.LIQUIDATED;
+            closeReason = IOrderStateStoreV2.CloseReason.KEEPER_LIQUIDATION;
+            collateralDisposition = IOrderStateStoreV2
+                .CollateralDispositionStatus
+                .SEIZED_AND_DISTRIBUTED;
+        } else if (
+            status == ILoanNFT.LoanStatus.Defaulted ||
+            status == ILoanNFT.LoanStatus.DefaultedWithShortfall
+        ) {
+            lifecycle = IOrderStateStoreV2.LifecycleStatus.DEFAULTED;
+            closeReason = IOrderStateStoreV2.CloseReason.MATURITY_DEFAULT;
+            collateralDisposition = IOrderStateStoreV2
+                .CollateralDispositionStatus
+                .SEIZED_AND_DISTRIBUTED;
+        }
+
+        return OrderStateSnapshot({
+            productType: IOrderStateStoreV2.OrderProductType.LOAN,
+            lifecycle: lifecycle,
+            closeReason: closeReason,
+            shortfallStatus: shortfallStatus,
+            collateralDisposition: collateralDisposition,
+            hasLoss: shortfallStatus != IShortfallLedger.ShortfallStatus.NONE,
+            createdBlock: order.startTimestamp,
+            updatedBlock: order.startTimestamp,
+            closedBlock: 0
+        });
+    }
+
+    function _legacyShortfallStatus(uint256 orderId)
+        internal
+        view
+        returns (IShortfallLedger.ShortfallStatus shortfallStatus)
+    {
+        address settlementManagerAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        if (settlementManagerAddr == address(0) || settlementManagerAddr.code.length == 0) {
+            return IShortfallLedger.ShortfallStatus.NONE;
+        }
+
+        try IShortfallLedger(settlementManagerAddr).getShortfallLedger(orderId) returns (
+            IShortfallLedger.ShortfallLedger memory ledger
+        ) {
+            return ledger.status;
+        } catch {
+            return IShortfallLedger.ShortfallStatus.NONE;
+        }
     }
 
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
@@ -302,7 +473,8 @@ contract LendingEngineView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return version API semantic version.
      */
     function apiVersion() public pure override returns (uint256 version) {
-        return 1;
+        // v2: adds explicit order lifecycle status read via getOrderStatus(orderId).
+        return 2;
     }
 
     /**

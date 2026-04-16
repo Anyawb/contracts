@@ -8,20 +8,25 @@ type MockAssetPack = {
   assets: Array<{
     symbol: string;
     address: string;
-    bootstrapPriceUsd8?: string;
-    defaultPriceUsd8?: string;
+    decimals: number;
+    bootstrapPriceValue?: string;
+    defaultPriceValue?: string;
   }>;
 };
 
 type SeedAsset = {
   symbol: string;
   address: string;
-  bootstrapPriceUsd8?: string;
-  defaultPriceUsd8?: string;
+  decimals: number;
+  bootstrapPriceValue?: string;
+  defaultPriceValue?: string;
 };
 
-function getBootstrapPriceUsd8(asset: { bootstrapPriceUsd8?: string; defaultPriceUsd8?: string }) {
-  return asset.bootstrapPriceUsd8 ?? asset.defaultPriceUsd8 ?? "0";
+function getBootstrapPriceValue(asset: {
+  bootstrapPriceValue?: string;
+  defaultPriceValue?: string;
+}) {
+  return asset.bootstrapPriceValue ?? asset.defaultPriceValue ?? "0";
 }
 
 function key(name: string) {
@@ -31,7 +36,32 @@ function key(name: string) {
 const PRICE_UPDATER_REGISTRY_RAW_KEY = "COINGECKO_PRICE_UPDATER";
 
 function networkSlug(name: string) {
-  return name === "arbitrumSepolia" ? "arbitrum-sepolia" : name;
+  if (name === "arbitrumSepolia") return "arbitrum-sepolia";
+  if (name === "bnbTestnet") return "bnb-testnet";
+  return name;
+}
+
+function resolveDeployFile() {
+  const explicit = process.env.DEPLOY_OUTPUT_FILE?.trim();
+  if (explicit) {
+    return path.isAbsolute(explicit)
+      ? explicit
+      : path.join(process.cwd(), explicit);
+  }
+
+  const slug = networkSlug(network.name);
+  const candidates = [
+    path.join(process.cwd(), "scripts", "deployments", `${slug}.json`),
+    path.join(process.cwd(), "scripts", "deployments", slug, "core.json"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
 }
 
 function loadJson(filePath: string) {
@@ -66,12 +96,7 @@ function resolveRegistryAddress(): string {
   const explicit = process.env.REGISTRY_ADDRESS?.trim();
   if (explicit) return explicit;
 
-  const deployFile = path.join(
-    process.cwd(),
-    "scripts",
-    "deployments",
-    `${networkSlug(network.name)}.json`,
-  );
+  const deployFile = resolveDeployFile();
   if (!fs.existsSync(deployFile)) {
     throw new Error(
       `缺少 REGISTRY_ADDRESS，且未找到部署输出文件 ${deployFile}`,
@@ -163,8 +188,9 @@ async function main() {
     seedAssets.unshift({
       symbol: process.env.SETTLEMENT_TOKEN_SYMBOL?.trim() || "SETTLEMENT",
       address: settlementTokenAddr,
-      bootstrapPriceUsd8: process.env.SETTLEMENT_PRICE_UNITS_8?.trim() || "1",
-      defaultPriceUsd8: process.env.SETTLEMENT_PRICE_UNITS_8?.trim() || "1",
+      decimals: envInt("SETTLEMENT_TOKEN_DECIMALS", 18),
+      bootstrapPriceValue: process.env.SETTLEMENT_PRICE_VALUE?.trim() || "1",
+      defaultPriceValue: process.env.SETTLEMENT_PRICE_VALUE?.trim() || "1",
     });
   }
 
@@ -178,14 +204,14 @@ async function main() {
   console.log(`SeedRoute=${allowDirectOracle ? "PriceOracle.updatePrice (break-glass)" : "PriceUpdater.updateAssetPrice"}`);
 
   for (const asset of seedAssets) {
-    const bootstrapPriceUsd8 = getBootstrapPriceUsd8(asset);
-    const price = ethers.parseUnits(bootstrapPriceUsd8, 8);
+    const bootstrapPriceValue = getBootstrapPriceValue(asset);
+    const price = ethers.parseUnits(bootstrapPriceValue, asset.decimals);
     if (allowDirectOracle) {
       await (await priceOracle.updatePrice(asset.address, price, blockNumber)).wait();
-      console.log(`✅ Seeded ${asset.symbol} @ ${asset.address} => ${bootstrapPriceUsd8} USD-8 via PriceOracle.updatePrice`);
+      console.log(`✅ Seeded ${asset.symbol} @ ${asset.address} => ${bootstrapPriceValue} price-value(decimals=${asset.decimals}) via PriceOracle.updatePrice`);
     } else {
       await (await updater.updateAssetPrice(asset.address, price, blockNumber)).wait();
-      console.log(`✅ Seeded ${asset.symbol} @ ${asset.address} => ${bootstrapPriceUsd8} USD-8 via PriceUpdater.updateAssetPrice`);
+      console.log(`✅ Seeded ${asset.symbol} @ ${asset.address} => ${bootstrapPriceValue} price-value(decimals=${asset.decimals}) via PriceUpdater.updateAssetPrice`);
     }
   }
 }

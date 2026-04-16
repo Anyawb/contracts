@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { Registry } from "../../../registry/Registry.sol";
 import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
@@ -12,6 +11,7 @@ import { IAccessControlManager } from "../../../interfaces/IAccessControlManager
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 import { IPriceOracleRead } from "../../../interfaces/IPriceOracleRead.sol";
 import { GracefulDegradation } from "../../../libraries/GracefulDegradation.sol";
+import { AssetDecimalMath } from "../../../libraries/AssetDecimalMath.sol";
 import { SystemEvents } from "../../SystemEvents.sol";
 import { BatchTooLarge, EmptyArray, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewConstants } from "../ViewConstants.sol";
@@ -127,7 +127,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     * - Best-effort oracle call: returns `(0, 0, false)` if the oracle call fails.
      *
     * @param asset Asset address.
-    * @return price Asset price in USD-8.
+    * @return price Asset price in the asset's valuation unit.
     * @return blockNumber Oracle update block number.
     * @return isValid True if the oracle call succeeded.
      */
@@ -149,10 +149,10 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /**
      * @notice Returns the latest price, blockNumber, and token decimals for a single asset, with metadata.
-     * @dev This is the canonical "ERC-20 aware" read: `assetDecimals` is required to convert
-     *      `amount(token base units)` into `valueUSD8`.
+    * @dev This is the canonical "ERC-20 aware" read: `assetDecimals` is required to convert
+    *      `amount(token base units)` into asset-native value.
      *
-    * @return price Asset price in USD-8.
+    * @return price Asset price in the asset's valuation unit.
     * @return blockNumber Oracle update block number.
     * @return assetDecimals ERC-20 token decimals returned by the oracle.
     * @return isValid True if the oracle call succeeded.
@@ -173,17 +173,18 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Convert an ERC-20 `amount` into USD-8 value using the PriceOracle SSOT.
+    * @notice Convert an ERC-20 `amount` into asset-native value using the PriceOracle SSOT.
      * @dev Best-effort: returns (0,0,false) if the oracle call fails.
      *
      * Value Unit SSOT:
-     * - price is USD-8 per 1 token
-     * - assetDecimals is ERC-20 decimals
-     * - valueUSD8 = amount(token base units) * price(USD-8) / 10**assetDecimals
+    * - price is scaled by `assetDecimals`
+    * - assetDecimals is the ERC-20 decimals
+    * - value(assetDecimals) = amount(token base units) * price(assetDecimals) / 10**assetDecimals
+    * - the function name is retained for ABI compatibility only
      *
     * @param asset ERC-20 asset address.
     * @param amount Amount in token base units.
-    * @return valueUsd8 Converted value in USD-8.
+    * @return valueUsd8 Converted value in the asset's valuation unit.
     * @return priceUpdateBlock Oracle update block number.
     * @return isValid True if the oracle call succeeded.
      */
@@ -199,10 +200,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         try IPriceOracleRead(priceOracle).getPrice(asset) returns (uint256 p, uint256 blockNumber, uint256 dAsset) {
             if (p == 0) return (0, blockNumber, true);
             if (dAsset > 77) return (0, blockNumber, false);
-            uint256 scale = 10 ** dAsset;
-            if (scale == 0) return (0, blockNumber, false);
-            // Use mulDiv to avoid overflow on amount * price.
-            return (Math.mulDiv(amount, p, scale), blockNumber, true);
+            return (AssetDecimalMath.calcValue(amount, p, uint8(dAsset)), blockNumber, true);
         } catch {
             return (0, 0, false);
         }
@@ -256,6 +254,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
                 }
                 return (prices, blockNumbers, validFlags);
             }
+        // solhint-disable-next-line no-empty-blocks
         } catch {
             // Fall through to per-asset best-effort reads.
         }

@@ -79,6 +79,43 @@ function registryLabel(keyUpperSnake: string): string {
   return keyUpperSnake;
 }
 
+async function ensureVaultRouterFeeRouterViewBinding(deployed: DeployMap) {
+  if (!deployed.VaultCore || !deployed.VaultRouter || !deployed.FeeRouterView) {
+    return;
+  }
+
+  const vaultCore = (await ethers.getContractAt(
+    ["function viewContractAddrVar() view returns (address)"],
+    deployed.VaultCore,
+  )) as any;
+  const viewGatewayAddr = (await vaultCore.viewContractAddrVar()) as string;
+  if (!viewGatewayAddr || viewGatewayAddr === ethers.ZeroAddress) {
+    throw new Error("VaultCore.viewContractAddrVar() is zero before FeeRouterView binding");
+  }
+
+  const vaultRouter = (await ethers.getContractAt(
+    [
+      "function feeRouterViewAddrVar() view returns (address)",
+      "function setFeeRouterView(address newFeeRouterView)",
+    ],
+    viewGatewayAddr,
+  )) as any;
+  const before = (await vaultRouter.feeRouterViewAddrVar()) as string;
+  if (before.toLowerCase() === deployed.FeeRouterView.toLowerCase()) {
+    console.log("↪️ VaultRouter FeeRouterView binding already set");
+    return;
+  }
+
+  await (await vaultRouter.setFeeRouterView(deployed.FeeRouterView)).wait();
+  const after = (await vaultRouter.feeRouterViewAddrVar()) as string;
+  if (after.toLowerCase() !== deployed.FeeRouterView.toLowerCase()) {
+    throw new Error(
+      `VaultRouter FeeRouterView binding mismatch after set: after=${after} expected=${deployed.FeeRouterView}`,
+    );
+  }
+  logBound("VaultRouter.FeeRouterView", after);
+}
+
 type BindModuleOptions = {
   /** If provided, used in logs instead of keyUpperSnake */
   label?: string;
@@ -302,6 +339,7 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     CollateralManager: "COLLATERAL_MANAGER",
     // core/LendingEngine is the order engine (createLoanOrder/repay order) => KEY_ORDER_ENGINE
     LendingEngine: "ORDER_ENGINE",
+    OrderStateStoreV2: "ORDER_STATE_STORE",
     LendingEngineView: "LENDING_ENGINE_VIEW",
     LoanNFTView: "LOAN_NFT_VIEW",
     VaultBusinessLogic: "VAULT_BUSINESS_LOGIC",
@@ -315,7 +353,7 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     StatisticsView: "VAULT_STATISTICS",
     // Strict B+ (snapshot + single-entry orchestrator)
     StatisticsPushManager: "STATISTICS_PUSH_MANAGER",
-    // Protocol flow cache (USD-8 SSOT, strict B+)
+    // Protocol flow cache (value SSOT, strict B+)
     LoanFlowView: "LOAN_FLOW_VIEW",
     LoanFlowPushManager: "LOAN_FLOW_PUSH_MANAGER",
     PositionView: "POSITION_VIEW",
@@ -388,6 +426,7 @@ async function phaseBBindRegistry(registry: any, deployed: DeployMap) {
     "FeeRouterView",
     "CollateralManager",
     "LendingEngine",
+    "OrderStateStoreV2",
     "LendingEngineView",
     "LoanNFTView",
     "VaultBusinessLogic",
@@ -482,6 +521,8 @@ async function phaseCValidateAndWriteOutputs(
   // - View address must be resolved via KEY_VAULT_CORE -> viewContractAddrVar()
   // - Avoid binding/depending on extra keys like VAULT_VIEW to prevent multi-source drift.
   try {
+    await ensureVaultRouterFeeRouterViewBinding(deployed);
+
     if (!deployed.VaultCore || !deployed.VaultRouter)
       throw new Error("Missing VaultCore or VaultRouter address");
 
@@ -503,6 +544,24 @@ async function phaseCValidateAndWriteOutputs(
     if (viewAddr.toLowerCase() !== deployed.VaultRouter.toLowerCase()) {
       throw new Error(
         `VaultCore.viewContractAddrVar mismatch: core=${viewAddr} expected VaultRouter=${deployed.VaultRouter}`,
+      );
+    }
+    if (deployed.FeeRouterView) {
+      const vaultRouter = await ethers.getContractAt(
+        ["function feeRouterViewAddrVar() view returns (address)"],
+        viewAddr,
+      );
+      const feeRouterViewAddr = (await vaultRouter.feeRouterViewAddrVar()) as string;
+      if (!feeRouterViewAddr || feeRouterViewAddr === ethers.ZeroAddress) {
+        throw new Error("VaultRouter.feeRouterViewAddrVar() is zero");
+      }
+      if (feeRouterViewAddr.toLowerCase() !== deployed.FeeRouterView.toLowerCase()) {
+        throw new Error(
+          `VaultRouter.feeRouterViewAddrVar mismatch: router=${feeRouterViewAddr} expected FeeRouterView=${deployed.FeeRouterView}`,
+        );
+      }
+      console.log(
+        "✅ Architecture check: VaultRouter.feeRouterViewAddrVar matches deployed FeeRouterView",
       );
     }
     console.log(
@@ -1135,7 +1194,7 @@ async function main() {
     }
 
     // Grant required read roles to StatisticsPushManager (strict B+ snapshot orchestrator).
-    // - VIEW_PRICE_DATA: needed to read PositionView USD-8 valuations.
+    // - VIEW_PRICE_DATA: needed to read PositionView value valuations.
     // - VIEW_SYSTEM_DATA: kept for backward compatibility with older helpers/scripts (not strictly required by Scheme B).
     try {
       if (deployed.StatisticsPushManager && deployed.AccessControlManager) {
@@ -1202,7 +1261,7 @@ async function main() {
       console.log("⚠️ Grant roles to StatisticsPushManager skipped/failed:", e);
     }
 
-    // Strict B+ protocol flow cache: LoanFlowView + LoanFlowPushManager (USD-8 SSOT)
+    // Strict B+ protocol flow cache: LoanFlowView + LoanFlowPushManager (value SSOT)
     // - LendingEngine best-effort notifies LoanFlowPushManager on borrow/repay.
     // - RewardManagerCore best-effort reads LoanFlowView for user level auto-upgrades.
     if (!deployed.LoanFlowView) {
@@ -1611,7 +1670,7 @@ async function main() {
 
     // LiquidatorView（需要 SystemView）
     if (!deployed.LiquidatorView) {
-      // 第二个参数为历史兼容位（LiquidatorView.initialize 的 legacy SystemView），不再使用，这里使用非零占位（Registry）
+      // 第二个参数为 SystemView 占位参数，这里使用非零占位（Registry）
       try {
         deployed.LiquidatorView = await deployProxy("LiquidatorView", [
           deployed.Registry,
@@ -2090,6 +2149,19 @@ async function main() {
       }
     }
 
+    // 2.99.0.1) 部署 OrderStateStoreV2（三层订单状态 SSOT）
+    if (!deployed.OrderStateStoreV2) {
+      try {
+        deployed.OrderStateStoreV2 = await deployProxy("OrderStateStoreV2", [
+          deployed.Registry,
+        ]);
+        save(deployed);
+        console.log("✅ OrderStateStoreV2 ready");
+      } catch (error) {
+        console.log("⚠️ OrderStateStoreV2 deployment failed:", error);
+      }
+    }
+
     // 2.99.0.5) 部署 LenderPoolVault（线上流动性资金池，推荐）
     if (!deployed.LenderPoolVault) {
       try {
@@ -2105,7 +2177,7 @@ async function main() {
     }
 
     // 2.99.0.6) 部署 BlocksOnlyCoordinator（blocks-only 独立产品协调器）
-    // - 该模块是当前 blocks-only 写路径 SSOT：负责 finalize / repay / maturity 后 settle-or-liquidate。
+    // - 该模块是当前 blocks-only 写路径 SSOT：负责 finalize / repay / debt-free trade-close / maturity 后 settle-or-liquidate。
     // - 它不是 legacy SettlementManager 的别名，因此部署成功后应视为独立产品入口已经存在。
     if (!deployed.BlocksOnlyCoordinator) {
       try {

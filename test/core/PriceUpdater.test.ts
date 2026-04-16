@@ -200,6 +200,21 @@ describe('PriceUpdater / PriceUpdater – 价格更新器测试', function () {
        .withArgs(asset, sourceId, price, blockNumber);
     });
 
+    it('应按资产 decimals 归一化价格上限，而不是固定按 8 位拒绝', async function () {
+      const { priceUpdater, governance, updater } = await deployFixture();
+      const asset = ethers.Wallet.createRandom().address;
+      const sourceId = 'wrapped-eth';
+      const price = ethers.parseUnits('1000', 18);
+      const blockNumber = await ethers.provider.getBlockNumber();
+
+      await priceUpdater.connect(governance).configureAssetWithDecimals(asset, sourceId, 18);
+
+      await expect(
+        priceUpdater.connect(updater).updateAssetPrice(asset, price, blockNumber)
+      ).to.emit(priceUpdater, 'PriceUpdated')
+       .withArgs(asset, sourceId, price, blockNumber);
+    });
+
     it('应拒绝更新未配置资产的价格', async function () {
       const { priceUpdater, updater } = await deployFixture();
       const asset = ethers.Wallet.createRandom().address;

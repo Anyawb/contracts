@@ -323,7 +323,12 @@ async function createOrder(opts: {
     }
   }
   const now = await latestBlockNumber();
-  await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), now);
+  const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
+  await po.connect(deployer).updatePrice(
+    settlementTokenAddrFromRegistry,
+    ethers.parseUnits("1", settlementTokenDecimals),
+    now,
+  );
   if (!(await feeRouter.isTokenSupported(settlementTokenAddrFromRegistry))) {
     await feeRouter.connect(deployer).addSupportedToken(settlementTokenAddrFromRegistry);
   }
@@ -351,7 +356,7 @@ async function createOrder(opts: {
     const now2 = await latestBlockNumber();
     if (collateralPriceMode === "stale") {
       await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 18, 1);
-      await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 8), now2 - 10);
+      await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 18), now2 - 10n);
     } else if (collateralPriceMode === "unreasonable") {
       await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 18, 3600);
       await po.connect(deployer).updatePrice(collateralAssetAddr, 10n ** 13n, now2); // > 1e12 => unreasonable (GD path), PV will return 0 if getPrice reverts
@@ -360,7 +365,7 @@ async function createOrder(opts: {
       await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 4), now2);
     } else {
       await po.connect(deployer).configureAsset(collateralAssetAddr, "mock-weth", 18, 3600);
-      await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 8), now2);
+      await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 18), now2);
     }
 
     // Fund borrower with collateral token from deployer (moves funds only; totalSupply unchanged across actions)
@@ -618,11 +623,15 @@ async function createOrder(opts: {
     const ord = await orderEngine.getLoanOrderForView(orderId);
     await mineToBlock(BigInt(ord.maturity) + ONE_HOUR_BLOCKS);
     const nowAfter = await latestBlockNumber();
-    await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), nowAfter);
+    await po.connect(deployer).updatePrice(
+      settlementTokenAddrFromRegistry,
+      ethers.parseUnits("1", settlementTokenDecimals),
+      nowAfter,
+    );
     if (useNonStableCollateral) {
       // Best-effort: refresh collateral price in fresh/unreasonable/bad_decimals modes (stale mode intentionally stays stale)
       if (collateralPriceMode === "fresh") {
-        await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 8), nowAfter);
+        await po.connect(deployer).updatePrice(collateralAssetAddr, ethers.parseUnits("2000", 18), nowAfter);
       } else if (collateralPriceMode === "unreasonable") {
         await po.connect(deployer).updatePrice(collateralAssetAddr, 10n ** 13n, nowAfter);
       } else if (collateralPriceMode === "bad_decimals") {
@@ -685,7 +694,7 @@ async function runOracleEdgeChecks() {
 
   // 1) Fresh price -> strict oracle ok, GD usedFallback=false.
   await po.connect(deployer).configureAsset(token, "mock-weth", 18, 3600);
-  await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 8), now);
+  await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 18), now);
   const strict = await po.getPrice(token);
   if ((strict[0] as bigint) === 0n) throw new Error("[OracleEdge] strict getPrice returned zero price unexpectedly");
   const rFresh = await gd.getAssetValueWithFallback(po.target, token, amount, cfg);
@@ -693,7 +702,7 @@ async function runOracleEdgeChecks() {
 
   // 2) Stale price -> strict oracle should revert, GD should fallback to conservative value.
   await po.connect(deployer).configureAsset(token, "mock-weth", 18, 1); // maxPriceAge = 1 sec
-  await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 8), now - 10);
+  await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 18), now - 10n);
   await mustRevert("OracleEdge.strictStale", po.getPrice(token), ["StalePrice", "PriceOracle__StalePrice"]);
   const rStale = await gd.getAssetValueWithFallback(po.target, token, amount, cfg);
   if (!rStale.usedFallback || (rStale.value as bigint) !== expectedFallback) {
@@ -715,7 +724,7 @@ async function runOracleEdgeChecks() {
   // 4) Invalid decimals (<6) -> strict oracle config allows it, but GD should treat it as invalid and fallback.
   // SSOT: oracle.getPrice().decimals is token decimals (assetDecimals), not price precision.
   await po.connect(deployer).configureAsset(token, "mock-weth", 4, 3600);
-  await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 8), now);
+  await po.connect(deployer).updatePrice(token, ethers.parseUnits("2000", 4), now);
   const rBadDecimals = await gd.getAssetValueWithFallback(po.target, token, amount, cfg);
   if (!rBadDecimals.usedFallback || (rBadDecimals.value as bigint) !== expectedFallback) {
     throw new Error(
@@ -752,6 +761,10 @@ async function main() {
   const addressMap3 = loadAddressMap(network.name);
   const registryAddr3 = resolveAddress({ name: "Registry", map: addressMap3, envVar: "REGISTRY_ADDRESS" });
   const registry = (await ethers.getContractAt("Registry", registryAddr3)) as any;
+  const acmAddrFromRegistry = (await registry.getModuleOrRevert(key("ACCESS_CONTROL_MANAGER"))) as string;
+  const assetWhitelistAddrFromRegistry = (await registry.getModuleOrRevert(key("ASSET_WHITELIST"))) as string;
+  const priceOracleAddrFromRegistry = (await registry.getModuleOrRevert(key("PRICE_ORACLE"))) as string;
+  const settlementTokenAddrFromRegistry = (await registry.getModuleOrRevert(key("SETTLEMENT_TOKEN"))) as string;
 
   const vaultCoreAddr = (await registry.getModuleOrRevert(key("VAULT_CORE"))) as string;
   const settlementManagerAddr = (await registry.getModuleOrRevert(key("SETTLEMENT_MANAGER"))) as string;

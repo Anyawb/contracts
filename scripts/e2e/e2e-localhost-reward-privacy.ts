@@ -90,9 +90,11 @@ export async function runRewardPrivacy() {
   });
 
   const rewardViewAddr = (await registry.getModuleOrRevert(key("REWARD_VIEW"))) as string;
+  const rewardManagerCoreAddr = (await registry.getModuleOrRevert(key("REWARD_MANAGER_CORE"))) as string;
   const orderEngineAddr = (await registry.getModuleOrRevert(key("ORDER_ENGINE"))) as string;
 
   const rewardView = (await ethers.getContractAt("RewardView", rewardViewAddr)) as any;
+  const rewardManagerCore = (await ethers.getContractAt("RewardManagerCore", rewardManagerCoreAddr)) as any;
 
   const missingRoleSel = "MissingRole()";
 
@@ -118,8 +120,8 @@ export async function runRewardPrivacy() {
   await rewardView.connect(admin).getEasyEmissionParamsWithMeta();
 
   await mustRevertWithSelector(
-    "RewardView.getUserLevelForBorrowCheck(non-ORDER_ENGINE)",
-    async () => rewardView.connect(bob).getUserLevelForBorrowCheck(alice.address),
+    "RewardManagerCore.getUserLevelForBorrowCheck(non-ORDER_ENGINE)",
+    async () => rewardManagerCore.connect(bob).getUserLevelForBorrowCheck(alice.address),
     missingRoleSel
   );
 
@@ -127,7 +129,7 @@ export async function runRewardPrivacy() {
     await network.provider.send("hardhat_impersonateAccount", [orderEngineAddr]);
     await network.provider.send("hardhat_setBalance", [orderEngineAddr, "0x56BC75E2D63100000"]);
     const oe = await ethers.getSigner(orderEngineAddr);
-    await rewardView.connect(oe).getUserLevelForBorrowCheck(alice.address);
+    await rewardManagerCore.connect(oe).getUserLevelForBorrowCheck(alice.address);
   } else {
     console.log("  [Notice] skip ORDER_ENGINE read-gate check (impersonation not supported)");
   }

@@ -98,6 +98,7 @@ library RegistryStorage {
     /// @return layout_ Diamond-storage layout pointer for the fixed Registry storage slot.
     function layout() internal pure returns (Layout storage layout_) {
         bytes32 slot = STORAGE_SLOT;
+        // solhint-disable-next-line no-inline-assembly
         assembly {
             layout_.slot := slot
         }

@@ -44,7 +44,7 @@ describe("GracefulDegradation Library", function () {
                 stablecoin: settlementToken,
                 isWhitelisted: true,
                 enableDepegDetection: false,
-                expectedPrice: 100000000n,
+                expectedPrice: 0n,
                 tolerance: 100n,
                 assetDecimals: 0n,
                 ...(overrides?.stablecoinConfig ?? {}),
@@ -61,14 +61,14 @@ describe("GracefulDegradation Library", function () {
         };
     }
 
-    it("创建默认配置时应保持 USD-8 stablecoin fallback 语义", async function () {
+    it("创建默认配置时应延迟到 assetDecimals 决定 stablecoin peg 精度", async function () {
         const config = await gracefulDegradation.createDefaultConfig(settlementToken);
 
         expect(config.conservativeRatio).to.equal(5000n);
         expect(config.useStablecoinFaceValue).to.equal(true);
         expect(config.enablePriceCache).to.equal(false);
         expect(config.settlementToken).to.equal(settlementToken);
-        expect(config.stablecoinConfig.expectedPrice).to.equal(100000000n);
+        expect(config.stablecoinConfig.expectedPrice).to.equal(0n);
     });
 
     it("应继续校验 decimals 边界", async function () {
@@ -78,23 +78,23 @@ describe("GracefulDegradation Library", function () {
         expect(await gracefulDegradation.validateDecimals(19)).to.equal(false);
     });
 
-    it("应按 token decimals 计算资产 USD-8 价值", async function () {
+    it("应按 token decimals 计算 asset-native 价值", async function () {
         const amount = 1_500_000n;
-        const priceUsd8 = 100000000n;
-        const value = await gracefulDegradation.calculateAssetValue(amount, priceUsd8, 6);
-        expect(value).to.equal(150000000n);
+        const price = 1_000_000n;
+        const value = await gracefulDegradation.calculateAssetValue(amount, price, 6);
+        expect(value).to.equal(1_500_000n);
     });
 
     it("应基于实际 oracle price 做 stablecoin 脱锚校验", async function () {
         expect(
-            await gracefulDegradation.validateStablecoinPrice(100000000n, 100000000n, 100)
+            await gracefulDegradation.validateStablecoinPrice(1_000_000n, 1_000_000n, 100)
         ).to.equal(true);
         expect(
-            await gracefulDegradation.validateStablecoinPrice(97000000n, 100000000n, 100)
+            await gracefulDegradation.validateStablecoinPrice(970_000n, 1_000_000n, 100)
         ).to.equal(false);
     });
 
-    it("settlement token 在 oracle 返回零价时应回退到 USD-8 peg 估值", async function () {
+    it("settlement token 在 oracle 返回零价时应回退到 asset-native peg 估值", async function () {
         await mockPriceOracle.configureAsset(settlementToken, "mock-usdc", 6, 300);
         await mockPriceOracle.setPrice(settlementToken, 0, await ethers.provider.getBlockNumber(), 6);
 
@@ -109,7 +109,7 @@ describe("GracefulDegradation Library", function () {
 
         expect(result.usedFallback).to.equal(true);
         expect(result.isValid).to.equal(true);
-        expect(result.value).to.equal(100000000n);
+        expect(result.value).to.equal(1_000_000n);
     });
 
     it("已显式配置的 mHKD 应按其 peg 价格做 fallback 估值", async function () {
@@ -122,7 +122,7 @@ describe("GracefulDegradation Library", function () {
                     stablecoin: hkdToken,
                     isWhitelisted: true,
                     enableDepegDetection: true,
-                    expectedPrice: 12800000n,
+                    expectedPrice: 128000n,
                     tolerance: 150n,
                     assetDecimals: 6n,
                 },
@@ -139,12 +139,12 @@ describe("GracefulDegradation Library", function () {
 
         expect(result.usedFallback).to.equal(true);
         expect(result.isValid).to.equal(true);
-        expect(result.value).to.equal(1280000000n);
+        expect(result.value).to.equal(12_800_000n);
     });
 
     it("已显式配置的 stablecoin 在 oracle 明确脱锚时应转为保守估值", async function () {
         await mockPriceOracle.configureAsset(hkdToken, "mock-hkd", 6, 300);
-        await mockPriceOracle.setPrice(hkdToken, 10000000n, await ethers.provider.getBlockNumber(), 6);
+        await mockPriceOracle.setPrice(hkdToken, 100000n, await ethers.provider.getBlockNumber(), 6);
 
         const config = buildDefaultConfig({
             additionalStablecoinConfigs: [
@@ -152,7 +152,7 @@ describe("GracefulDegradation Library", function () {
                     stablecoin: hkdToken,
                     isWhitelisted: true,
                     enableDepegDetection: true,
-                    expectedPrice: 12800000n,
+                    expectedPrice: 128000n,
                     tolerance: 100n,
                     assetDecimals: 6n,
                 },

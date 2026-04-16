@@ -1,0 +1,32 @@
+{
+  "network": "bnb-testnet",
+  "chainId": 97,
+  "assets": [
+    {
+      "address": "0x0000000000000000000000000000000000000001",
+      "oracleAssetKey": "mock-usdc",
+      "sourceId": "mock-usdc",
+      "decimals": 6,
+      "maxPriceAge": 3600,
+      "active": true,
+      "bootstrapPriceUsd8": "1",
+      "sourceProvider": "bootstrap-manual",
+      "pricingCurrency": "USD",
+      "fallbackPolicy": "bootstrap-only",
+      "launchPriceRequired": false
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000002",
+      "oracleAssetKey": "mock-wbnb",
+      "sourceId": "mock-wbnb",
+      "decimals": 18,
+      "maxPriceAge": 3600,
+      "active": true,
+      "bootstrapPriceUsd8": "600",
+      "sourceProvider": "bootstrap-manual",
+      "pricingCurrency": "USD",
+      "fallbackPolicy": "bootstrap-only",
+      "launchPriceRequired": false
+    }
+  ]
+}

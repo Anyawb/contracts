@@ -11,6 +11,7 @@
 
 import fs from "fs";
 import path from "path";
+import { JsonRpcProvider } from "ethers";
 import {
   configureAssets,
   resolveSettlementAssetConfig,
@@ -21,6 +22,13 @@ import {
   ensureRewardConfigEmergencyRevoked,
 } from "./utils/reward-config-emergency";
 import { configureDynamicEip1559Fees } from "../utils/eip1559-fees";
+import {
+  buildFrontendReleaseArtifact,
+  EVM_NAME_TO_KEY,
+  writeFrontendArtifacts,
+  writeJson,
+} from "./utils/evm-frontend-release";
+import { writeDeployBaseline } from "./utils/deploy-baseline";
 
 // Must run BEFORE requiring Hardhat to prevent redraw-style output from polluting logs.
 initStableDeploymentOutput();
@@ -32,22 +40,43 @@ const { ethers, upgrades, network } = hre;
 type DeployMap = Record<string, string>;
 type EnsureRoleOutcome = "granted" | "already-granted";
 
-/**
- * Arbitrum Sepolia 网络配置
- * Arbitrum Sepolia network configuration
- */
 const ARBITRUM_SEPOLIA_CONFIG = {
   name: "arbitrum-sepolia",
   chainId: 421614,
-  rpcUrl: "https://sepolia-rollup.arbitrum.io/rpc",
+  rpcUrl:
+    process.env.ARBITRUM_SEPOLIA_RPC_URL?.trim() ||
+    process.env.ARBITRUM_SEPOLIA_URL?.trim() ||
+    "https://sepolia-rollup.arbitrum.io/rpc",
   explorer: "https://sepolia.arbiscan.io",
+  frontendSlug: "arbitrum-sepolia",
+  verifyApiKeyEnv: "ARBISCAN_API_KEY",
+  backupPrefix: "arbitrum-sepolia",
+  displayLabel: "Arbitrum Sepolia",
+  nativeSymbol: "ETH",
 };
 
 const DEPLOY_DIR = path.join(__dirname, "..", "deployments");
 const DEPLOY_FILE = resolveDeployFile();
+const MANIFEST_FILE = path.join(DEPLOY_DIR, "arbitrum-sepolia.manifest.json");
+const BASELINE_FILE = path.join(DEPLOY_DIR, "arbitrum-sepolia.baseline.json");
+const MOCK_SUITE_FILE = path.join(DEPLOY_DIR, "arbitrum-sepolia.mock-suite.json");
 // 将前端配置输出到当前仓库的 frontend-config，避免写到工作区外部路径
 const FRONTEND_DIR = path.join(__dirname, "..", "..", "frontend-config");
-const FRONTEND_FILE = path.join(FRONTEND_DIR, "contracts-arbitrum-sepolia.ts");
+const FRONTEND_FILE = path.join(
+  FRONTEND_DIR,
+  `contracts-${ARBITRUM_SEPOLIA_CONFIG.frontendSlug}.ts`,
+);
+const CANONICAL_FRONTEND_FILE = path.join(
+  FRONTEND_DIR,
+  "networks",
+  `${ARBITRUM_SEPOLIA_CONFIG.frontendSlug}.ts`,
+);
+const FRONTEND_RELEASE_FILE = path.join(
+  FRONTEND_DIR,
+  "networks",
+  `${ARBITRUM_SEPOLIA_CONFIG.frontendSlug}.release.json`,
+);
+const ARTIFACTS_DIR = path.join(process.cwd(), "artifacts");
 const DEFAULT_PAYOUT_BPS = {
   platform: 300,
   reserve: 200,
@@ -56,6 +85,17 @@ const DEFAULT_PAYOUT_BPS = {
 };
 const EIP1967_IMPLEMENTATION_SLOT =
   "0x360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D382BBC";
+const NO_CODE_ALLOWED = new Set(["GovernanceGuardian"]);
+const IMPLEMENTATION_ARTIFACT_ALIASES: Record<string, string[]> = {
+  PriceUpdater: ["CoinGeckoPriceUpdater", "CoingeckoPriceUpdater"],
+  LiquidatorView: ["LiquidationView"],
+  StatisticsView: ["VaultStatistics"],
+  UserView: ["UserViewFacade"],
+  EarnConfig: ["RewardEarnConfig"],
+  RewardConfig: ["RewardManagerConfig"],
+  RegistryDynamicModuleKey: ["DynamicModuleRegistry"],
+  LendingEngine: ["OrderEngine"],
+};
 
 function resolveConfiguredSettlementAsset() {
   return resolveSettlementAssetConfig(
@@ -64,12 +104,36 @@ function resolveConfiguredSettlementAsset() {
   );
 }
 
+function shouldStrictlyFailAssetConfig() {
+  return process.env.DEPLOY_STRICT_ASSET_CONFIG === "1"
+    || process.env.DEPLOY_PRODUCTION_STYLE === "1";
+}
+
+function shouldAssertPriceUpdaterAfterDeploy() {
+  return process.env.DEPLOY_ASSERT_PRICE_UPDATER === "1"
+    || process.env.DEPLOY_PRODUCTION_STYLE === "1";
+}
+
+function formatDeployError(error: unknown) {
+  if (error instanceof Error) {
+    return error.stack || error.message;
+  }
+  return String(error);
+}
+
+function handleConfiguredAssetsFailure(stage: string, error: unknown): never | void {
+  if (shouldStrictlyFailAssetConfig()) {
+    throw new Error(
+      `Configured assets failed during ${stage} for ${ARBITRUM_SEPOLIA_CONFIG.name}: ${formatDeployError(error)}`,
+    );
+  }
+  console.log(`⚠️ ${stage} failed:`, error);
+}
+
 function resolveDeployFile() {
   const explicit = process.env.DEPLOY_OUTPUT_FILE?.trim();
   if (!explicit) return path.join(DEPLOY_DIR, "arbitrum-sepolia.json");
-  return path.isAbsolute(explicit)
-    ? explicit
-    : path.resolve(DEPLOY_DIR, explicit);
+  return path.isAbsolute(explicit) ? explicit : path.resolve(process.cwd(), explicit);
 }
 
 function shouldFreshDeploy() {
@@ -92,7 +156,7 @@ function load(): DeployMap {
 }
 
 function save(map: DeployMap) {
-  fs.mkdirSync(DEPLOY_DIR, { recursive: true });
+  fs.mkdirSync(path.dirname(DEPLOY_FILE), { recursive: true });
   fs.writeFileSync(DEPLOY_FILE, JSON.stringify(map, null, 2));
 }
 
@@ -149,6 +213,76 @@ async function deployRegular(
   const addr = await c.getAddress();
   console.log(`✅ ${name} deployed @ ${addr}`);
   return addr;
+}
+
+async function assertPriceUpdaterReadyForConfiguredAssets(deployed: DeployMap) {
+  if (!shouldAssertPriceUpdaterAfterDeploy()) return;
+  if (!deployed.PriceUpdater || !deployed.AccessControlManager) {
+    throw new Error(
+      `PriceUpdater readiness assert requires deployed PriceUpdater and AccessControlManager on ${ARBITRUM_SEPOLIA_CONFIG.name}`,
+    );
+  }
+
+  const { assets } = resolveConfiguredSettlementAsset();
+  if (!assets.length) {
+    throw new Error(
+      `PriceUpdater readiness assert found no configured assets for ${ARBITRUM_SEPOLIA_CONFIG.name}`,
+    );
+  }
+
+  const [deployer] = await ethers.getSigners();
+  const acm = await ethers.getContractAt(
+    "AccessControlManager",
+    deployed.AccessControlManager,
+  );
+  const updater = await ethers.getContractAt(
+    ["function updateAssetPrice(address asset,uint256 price,uint256 blockNumber)"],
+    deployed.PriceUpdater,
+  );
+
+  const updatePriceRole = keyOf("UPDATE_PRICE");
+  const owner = ((await acm.owner()) as string).toLowerCase();
+  const deployerAddress = deployer.address.toLowerCase();
+  let grantedTemporarily = false;
+
+  if (!((await acm.hasRole(updatePriceRole, deployer.address)) as boolean)) {
+    if (owner !== deployerAddress) {
+      throw new Error(
+        `PriceUpdater readiness assert requires deployer ${deployer.address} to hold UPDATE_PRICE or be ACM owner`,
+      );
+    }
+    await (await acm.grantRole(updatePriceRole, deployer.address)).wait();
+    grantedTemporarily = true;
+    console.log(`✅ Granted temporary UPDATE_PRICE to deployer for PriceUpdater assert`);
+  }
+
+  try {
+    const blockNumber = await ethers.provider.getBlockNumber();
+
+    for (const asset of assets) {
+      const probePrice = ethers.parseUnits(
+        process.env.DEPLOY_ASSERT_PRICE_VALUE?.trim() || "1",
+        asset.decimals,
+      );
+      await updater.connect(deployer).updateAssetPrice.staticCall(
+        asset.address,
+        probePrice,
+        blockNumber,
+      );
+      console.log(
+        `✅ PriceUpdater assert passed for asset ${asset.address} sourceId=${asset.sourceId} decimals=${asset.decimals}`,
+      );
+    }
+  } finally {
+    if (grantedTemporarily) {
+      try {
+        await (await acm.revokeRole(updatePriceRole, deployer.address)).wait();
+        console.log(`↩️ Revoked temporary UPDATE_PRICE from deployer after PriceUpdater assert`);
+      } catch (error) {
+        console.log("⚠️ Failed to revoke temporary UPDATE_PRICE after PriceUpdater assert:", error);
+      }
+    }
+  }
 }
 
 async function deployProxy(
@@ -483,6 +617,43 @@ async function ensureVaultRouterOperationalRoles(deployed: DeployMap) {
   ]);
 }
 
+async function ensureVaultRouterFeeRouterViewBinding(deployed: DeployMap) {
+  if (!deployed.VaultCore || !deployed.VaultRouter || !deployed.FeeRouterView) {
+    return;
+  }
+
+  const vaultCore = (await ethers.getContractAt(
+    ["function viewContractAddrVar() view returns (address)"],
+    deployed.VaultCore,
+  )) as any;
+  const viewGatewayAddr = (await vaultCore.viewContractAddrVar()) as string;
+  if (!viewGatewayAddr || viewGatewayAddr === ethers.ZeroAddress) {
+    throw new Error("VaultCore.viewContractAddrVar() is zero before FeeRouterView binding");
+  }
+
+  const vaultRouter = (await ethers.getContractAt(
+    [
+      "function feeRouterViewAddrVar() view returns (address)",
+      "function setFeeRouterView(address newFeeRouterView)",
+    ],
+    viewGatewayAddr,
+  )) as any;
+  const before = (await vaultRouter.feeRouterViewAddrVar()) as string;
+  if (before.toLowerCase() === deployed.FeeRouterView.toLowerCase()) {
+    console.log("↪️ VaultRouter FeeRouterView binding already set");
+    return;
+  }
+
+  await (await vaultRouter.setFeeRouterView(deployed.FeeRouterView)).wait();
+  const after = (await vaultRouter.feeRouterViewAddrVar()) as string;
+  if (after.toLowerCase() !== deployed.FeeRouterView.toLowerCase()) {
+    throw new Error(
+      `VaultRouter FeeRouterView binding mismatch after set: after=${after} expected=${deployed.FeeRouterView}`,
+    );
+  }
+  console.log(`✅ VaultRouter FeeRouterView bound -> ${after}`);
+}
+
 async function ensureVaultBusinessLogicMatchRoles(deployed: DeployMap) {
   if (!deployed.AccessControlManager || !deployed.VaultBusinessLogic) return;
   const acm = await ethers.getContractAt(
@@ -615,11 +786,13 @@ async function validateDeployerNativeBalance(
   const provider = deployer.provider ?? ethers.provider;
   const balance = await provider.getBalance(deployer.address);
   console.log(`部署账户 Deployer: ${deployer.address}`);
-  console.log(`账户余额 Balance: ${ethers.formatEther(balance)} ETH`);
+  console.log(
+    `账户余额 Balance: ${ethers.formatEther(balance)} ${ARBITRUM_SEPOLIA_CONFIG.nativeSymbol}`,
+  );
 
   if (balance < minBalanceWei) {
     throw new Error(
-      `部署账户余额不足，至少需要 ${ethers.formatEther(minBalanceWei)} ETH 支付 Gas，当前仅有 ${ethers.formatEther(balance)} ETH`,
+      `部署账户余额不足，至少需要 ${ethers.formatEther(minBalanceWei)} ${ARBITRUM_SEPOLIA_CONFIG.nativeSymbol} 支付 Gas，当前仅有 ${ethers.formatEther(balance)} ${ARBITRUM_SEPOLIA_CONFIG.nativeSymbol}`,
     );
   }
 }
@@ -629,8 +802,8 @@ async function validateDeployerNativeBalance(
  * Check environment configuration
  */
 async function checkEnvironment(): Promise<void> {
-  console.log("🔍 检查 Arbitrum Sepolia 环境配置...");
-  console.log("🔍 Checking Arbitrum Sepolia environment...");
+  console.log(`🔍 检查 ${ARBITRUM_SEPOLIA_CONFIG.displayLabel} 环境配置...`);
+  console.log(`🔍 Checking ${ARBITRUM_SEPOLIA_CONFIG.displayLabel} environment...`);
 
   const runtimeNet = await ethers.provider.getNetwork();
   const isLocalFork =
@@ -646,8 +819,8 @@ async function checkEnvironment(): Promise<void> {
     );
   }
 
-  if (!process.env.ARBISCAN_API_KEY) {
-    console.log("⚠️ 建议配置环境变量: ARBISCAN_API_KEY");
+  if (!process.env[ARBITRUM_SEPOLIA_CONFIG.verifyApiKeyEnv]) {
+    console.log(`⚠️ 建议配置环境变量: ${ARBITRUM_SEPOLIA_CONFIG.verifyApiKeyEnv}`);
   }
 
   try {
@@ -663,7 +836,7 @@ async function checkEnvironment(): Promise<void> {
       `✅ 当前网络连接正常: ${network.name} (chainId=${runtimeNet.chainId})`,
     );
   } catch (error) {
-    throw new Error("Arbitrum Sepolia 网络连接失败");
+    throw new Error(`${ARBITRUM_SEPOLIA_CONFIG.displayLabel} 网络连接失败`);
   }
 
   await validateDeployerNativeBalance(ethers.parseEther("0.01"));
@@ -690,7 +863,7 @@ async function backupWalletAssets(): Promise<void> {
   const backupBlock = await deployer.provider.getBlockNumber();
   const backupFile = path.join(
     backupDir,
-    `arbitrum-sepolia-backup-${backupBlock}.json`,
+    `${ARBITRUM_SEPOLIA_CONFIG.backupPrefix}-backup-${backupBlock}.json`,
   );
 
   // 保存备份信息 Save backup information
@@ -712,7 +885,7 @@ async function main() {
   await configureDynamicEip1559Fees({
     ethers,
     networkName: network.name,
-    label: "deploy-arbitrum-sepolia",
+    label: `deploy-${ARBITRUM_SEPOLIA_CONFIG.name}`,
   });
   // 确保 artifacts 可用：在脚本开始时编译（适配 CI/冷启动）
   try {
@@ -1007,7 +1180,7 @@ async function main() {
           console.log("ℹ️ 未检测到资产配置文件，跳过资产配置");
         }
       } catch (error) {
-        console.log("⚠️ 资产配置失败:", error);
+        handleConfiguredAssetsFailure("initial configured assets", error);
       }
 
       // 6. 验证预言机系统部署
@@ -1071,8 +1244,10 @@ async function main() {
         console.log("ℹ️ No configured assets found for oracle reconciliation");
       }
     } catch (error) {
-      console.log("⚠️ Oracle reconciliation failed:", error);
+      handleConfiguredAssetsFailure("oracle reconciliation", error);
     }
+
+    await assertPriceUpdaterReadyForConfiguredAssets(deployed);
 
     if (!deployed.FeeRouter) {
       // platformBps / ecoBps：30 (=0.30%), 0 (=0.00%)
@@ -1410,6 +1585,21 @@ async function main() {
         );
       } catch (error) {
         console.log("⚠️ SettlementManager deployment failed:", error);
+      }
+    }
+
+    if (!deployed.OrderStateStoreV2) {
+      try {
+        deployed.OrderStateStoreV2 = await deployProxy("OrderStateStoreV2", [
+          deployed.Registry,
+        ]);
+        save(deployed);
+        console.log(
+          "✅ OrderStateStoreV2 deployed @",
+          deployed.OrderStateStoreV2,
+        );
+      } catch (error) {
+        console.log("⚠️ OrderStateStoreV2 deployment failed:", error);
       }
     }
 
@@ -2027,7 +2217,7 @@ async function main() {
       );
     }
 
-    // Strict B+ protocol flow cache: LoanFlowView + LoanFlowPushManager (USD-8 SSOT)
+    // Strict B+ protocol flow cache: LoanFlowView + LoanFlowPushManager (value SSOT)
     // - LendingEngine best-effort notifies LoanFlowPushManager on borrow/repay.
     // - RewardManagerCore / EasyEmissionController read LoanFlowView during reward flows.
     if (!deployed.LoanFlowView) {
@@ -2344,7 +2534,7 @@ async function main() {
 
     // LiquidatorView（需要 SystemView）
     if (!deployed.LiquidatorView) {
-      // 第二个参数为历史兼容位（LiquidatorView.initialize 的 legacy SystemView），不再使用，这里使用非零占位（Registry）
+      // 第二个参数为 SystemView 占位参数，这里使用非零占位（Registry）
       try {
         deployed.LiquidatorView = await deployProxy("LiquidatorView", [
           deployed.Registry,
@@ -2408,6 +2598,7 @@ async function main() {
       CollateralManager: "COLLATERAL_MANAGER",
       // core/LendingEngine is the OrderEngine -> ModuleKeys.KEY_ORDER_ENGINE = keccak256("ORDER_ENGINE")
       LendingEngine: "ORDER_ENGINE",
+      OrderStateStoreV2: "ORDER_STATE_STORE",
       LendingEngineView: "LENDING_ENGINE_VIEW",
       LoanNFTView: "LOAN_NFT_VIEW",
       VaultBusinessLogic: "VAULT_BUSINESS_LOGIC",
@@ -2482,6 +2673,7 @@ async function main() {
       "FeeRouterView",
       "CollateralManager",
       "LendingEngine",
+      "OrderStateStoreV2",
       "LendingEngineView",
       "LoanNFTView",
       "VaultBusinessLogic",
@@ -2708,6 +2900,8 @@ async function main() {
     // 3.2 断言校验（严格版）：
     // - 禁止引入 KEY_VAULT_VIEW（多来源）；VaultRouter 的权威来源是 VaultCore.viewContractAddrVar()
     try {
+      await ensureVaultRouterFeeRouterViewBinding(deployed);
+
       if (!deployed.VaultCore || !deployed.VaultRouter)
         throw new Error("Missing VaultCore or VaultRouter address");
 
@@ -2733,6 +2927,22 @@ async function main() {
           `VaultCore.viewContractAddrVar mismatch: core=${viewAddr} expected VaultRouter=${deployed.VaultRouter}`,
         );
       }
+      if (deployed.FeeRouterView) {
+        const vaultRouter = await ethers.getContractAt(
+          ["function feeRouterViewAddrVar() view returns (address)"],
+          viewAddr,
+        );
+        const feeRouterViewAddr = (await vaultRouter.feeRouterViewAddrVar()) as string;
+        if (!feeRouterViewAddr || feeRouterViewAddr === ethers.ZeroAddress) {
+          throw new Error("VaultRouter.feeRouterViewAddrVar() is zero");
+        }
+        if (feeRouterViewAddr.toLowerCase() !== deployed.FeeRouterView.toLowerCase()) {
+          throw new Error(
+            `VaultRouter.feeRouterViewAddrVar mismatch: router=${feeRouterViewAddr} expected FeeRouterView=${deployed.FeeRouterView}`,
+          );
+        }
+        console.log("✅ Architecture check: VaultRouter.feeRouterViewAddrVar matches deployed FeeRouterView");
+      }
       console.log(
         "✅ Architecture check: VaultCore.viewContractAddrVar matches deployed VaultRouter",
       );
@@ -2741,39 +2951,66 @@ async function main() {
       throw e;
     }
 
-    // 4) 生成前端配置
-    fs.mkdirSync(FRONTEND_DIR, { recursive: true });
-    const frontendContent = `// 自动生成的合约配置文件 - Arbitrum Sepolia
-// Auto-generated contract configuration file - Arbitrum Sepolia
-// 生成时间 Generated at: ${new Date().toISOString()}
-//
-// Naming:
-// - OrderEngine = core/LendingEngine (Registry KEY_ORDER_ENGINE)
-// - VaultLendingEngine = debt ledger engine (Registry KEY_LE)
-// - LendingEngine is a legacy alias of OrderEngine (kept for backward compatibility)
-
-export const CONTRACT_ADDRESSES = {
-  ${Object.entries(deployed)
-    .map(([k, v]) => `  ${k}: '${v}'`)
-    .join(",\n")}
-};
-
-export const NETWORK_CONFIG = {
-  chainId: ${ARBITRUM_SEPOLIA_CONFIG.chainId},
-  rpcUrl: '${ARBITRUM_SEPOLIA_CONFIG.rpcUrl}',
-  explorer: '${ARBITRUM_SEPOLIA_CONFIG.explorer}',
-  name: '${ARBITRUM_SEPOLIA_CONFIG.name}'
-};
-
-// 使用示例 Usage example:
-// import { CONTRACT_ADDRESSES, NETWORK_CONFIG } from './contracts-arbitrum-sepolia';
-// const vaultCoreAddress = CONTRACT_ADDRESSES.VaultCore;
-`;
-    fs.writeFileSync(FRONTEND_FILE, frontendContent);
+    // 4) 生成前端配置与 release 产物
+    const generatedAt = new Date().toISOString();
+    const releaseId = process.env.RELEASE_SYNC_RELEASE_ID?.trim() || `${ARBITRUM_SEPOLIA_CONFIG.name}-${generatedAt.replace(/[-:TZ.]/g, "")}`;
+    const sourceFiles = {
+      deployOutputFile: path.relative(process.cwd(), DEPLOY_FILE),
+      manifestFile: path.relative(process.cwd(), MANIFEST_FILE),
+      baselineFile: path.relative(process.cwd(), BASELINE_FILE),
+      mockSuiteFile: path.relative(process.cwd(), MOCK_SUITE_FILE),
+      frontendConfigFile: path.relative(process.cwd(), CANONICAL_FRONTEND_FILE),
+      frontendReleaseFile: path.relative(process.cwd(), FRONTEND_RELEASE_FILE),
+    };
+    await writeDeployBaseline({
+      filePath: BASELINE_FILE,
+      rootDir: process.cwd(),
+      artifactsDir: ARTIFACTS_DIR,
+      network: ARBITRUM_SEPOLIA_CONFIG.name,
+      chainId: ARBITRUM_SEPOLIA_CONFIG.chainId,
+      releaseId,
+      generatedAt,
+      registry: deployed.Registry,
+      core: deployed,
+      sourceFiles,
+      nameToKey: EVM_NAME_TO_KEY,
+      provider: new JsonRpcProvider(ARBITRUM_SEPOLIA_CONFIG.rpcUrl),
+      eip1967ImplementationSlot: EIP1967_IMPLEMENTATION_SLOT,
+      noCodeAllowed: NO_CODE_ALLOWED,
+      artifactAliases: IMPLEMENTATION_ARTIFACT_ALIASES,
+    });
+    const releaseArtifact = buildFrontendReleaseArtifact({
+      network: ARBITRUM_SEPOLIA_CONFIG.name,
+      chainId: ARBITRUM_SEPOLIA_CONFIG.chainId,
+      releaseId,
+      generatedAt,
+      registry: deployed.Registry,
+      sourceFiles,
+      core: deployed,
+    });
+    writeFrontendArtifacts({
+      frontendFile: FRONTEND_FILE,
+      canonicalFrontendFile: CANONICAL_FRONTEND_FILE,
+      frontendReleaseFile: FRONTEND_RELEASE_FILE,
+      manifestFile: MANIFEST_FILE,
+      mockSuiteFile: MOCK_SUITE_FILE,
+      core: deployed,
+      releaseArtifact,
+      displayLabel: ARBITRUM_SEPOLIA_CONFIG.displayLabel,
+      network: ARBITRUM_SEPOLIA_CONFIG.name,
+      chainId: ARBITRUM_SEPOLIA_CONFIG.chainId,
+      rpcUrl: ARBITRUM_SEPOLIA_CONFIG.rpcUrl,
+      explorer: ARBITRUM_SEPOLIA_CONFIG.explorer,
+    });
+    writeJson(MOCK_SUITE_FILE, deployed);
+    console.log(`📝 Baseline written: ${BASELINE_FILE}`);
+    console.log(`📝 Manifest written: ${MANIFEST_FILE}`);
     console.log(`📝 Frontend config written: ${FRONTEND_FILE}`);
+    console.log(`📝 Canonical frontend config written: ${CANONICAL_FRONTEND_FILE}`);
+    console.log(`📝 Frontend release written: ${FRONTEND_RELEASE_FILE}`);
 
     // 5) 输出摘要
-    console.log("\n==== Deployment Addresses (arbitrum-sepolia) ====");
+    console.log(`\n==== Deployment Addresses (${ARBITRUM_SEPOLIA_CONFIG.name}) ====`);
     Object.entries(deployed).forEach(([n, a]) => console.log(`${n}: ${a}`));
     console.log("========================================\n");
   } catch (error) {

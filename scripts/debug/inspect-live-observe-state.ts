@@ -1,7 +1,7 @@
 import { ethers, network } from "hardhat";
 
 import { envStr, loadAddressMap, resolveAddress } from "../tests/_addressResolver";
-import { getActorSigner, getReadCaller, key, loadMockAssetPack } from "../tests/live-test/_mockLiveUtils";
+import { getActorSigner, getReadCaller, key, loadMockAssetPack } from "../tests/live-test/networks/arbitrum-sepolia/core/_mockLiveUtils";
 
 async function step<T>(label: string, run: () => Promise<T>) {
   try {

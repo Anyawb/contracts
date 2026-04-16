@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.scripts.json",
+  "include": [
+    "scripts/tests/live-test/networks/**/*.ts",
+    "scripts/tests/_addressResolver.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

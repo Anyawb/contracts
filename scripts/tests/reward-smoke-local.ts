@@ -371,7 +371,7 @@ async function main() {
         throw new Error("[Reward] EASY_MINTED DataPushed not observed; mint path may be miswired");
       }
     } else {
-      console.log("  [skip] earn mint assertion not enforced: localhost smoke no longer depends on price/emission availability");
+      console.log("  ℹ️  earn mint assertion not enforced on localhost: smoke no longer depends on price/emission availability");
     }
 
     // ---- Late penalty scales with locked Easy (multiplier affects base) ----

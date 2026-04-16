@@ -7,7 +7,7 @@ import { ActionKeys } from "../constants/ActionKeys.sol";
 import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
 import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
 import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
-import "../interfaces/IAssetWhitelistRead.sol";
+import { IAssetWhitelistRead } from "../interfaces/IAssetWhitelistRead.sol";
 import { NotAContract, ZeroAddress, AmountIsZero, AssetNotAllowed } from "../errors/StandardErrors.sol";
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";

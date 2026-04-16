@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.scripts.json",
+  "include": [
+    "scripts/e2e/**/*",
+    "scripts/tests/_addressResolver.ts",
+    "test/types/**/*.d.ts",
+    "frontend-config/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "scripts/tests/live-test/networks/**/cases/**/*"
+  ]
+}

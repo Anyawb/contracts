@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 import { ethers, upgrades } from 'hardhat';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 import { ModuleKeys } from '../frontend-config/moduleKeys';
 
@@ -17,11 +17,13 @@ describe('Interest Accounting – full repay posts interest', function () {
   const ACTION_UNPAUSE_SYSTEM = ethers.keccak256(ethers.toUtf8Bytes('UNPAUSE_SYSTEM'));
   const ACTION_BORROW = ethers.keccak256(ethers.toUtf8Bytes('BORROW')); // LoanNFT minter role
 
-  const YEAR = 365n * 24n * 60n * 60n;
+  const TERM_5D_BLOCKS = 36_000n;
+  const YEAR_BLOCKS = 2_628_000n;
+  const BPS_DENOM = 10_000n;
   const REPAY_FEE_BPS = 30n; // src/core/LendingEngine.sol constant (repay-side fee: 0.3%)
 
-  function calcInterest(principal: bigint, rateBps: bigint, termSec: bigint): bigint {
-    return (principal * rateBps * termSec) / (YEAR * 10000n);
+  function calcInterest(principal: bigint, rateBps: bigint, termBlocks: bigint): bigint {
+    return (principal * rateBps * termBlocks) / (YEAR_BLOCKS * BPS_DENOM);
   }
 
   async function deployFixture() {
@@ -95,9 +97,9 @@ describe('Interest Accounting – full repay posts interest', function () {
 
     const principal = ethers.parseEther('1000');
     const rateBps = 1000n; // 10%
-    const termSec = 5n * 24n * 60n * 60n; // 5 days (whitelisted)
+    const termBlocks = TERM_5D_BLOCKS; // Current SSOT uses block-based loan terms.
 
-    const interest = calcInterest(principal, rateBps, termSec);
+    const interest = calcInterest(principal, rateBps, termBlocks);
     const totalDue = principal + interest;
     const fee = (totalDue * REPAY_FEE_BPS) / 10000n;
     const lenderAmount = totalDue - fee;
@@ -106,7 +108,7 @@ describe('Interest Accounting – full repay posts interest', function () {
     await orderEngine.connect(governance).createLoanOrder({
       principal,
       rate: rateBps,
-      term: termSec,
+      term: termBlocks,
       borrower: borrower.address,
       lender: await pool.getAddress(),
       asset: await token.getAddress(),
@@ -115,9 +117,6 @@ describe('Interest Accounting – full repay posts interest', function () {
       repaidAmount: 0n,
     });
     const orderId = 0n;
-
-    // Advance time beyond maturity (not strictly required for interest math here, but matches "interest has accrued" expectation).
-    await time.increase(Number(termSec + 1n));
 
     // Fund borrower and approve order engine (spender is the order engine contract).
     await token.mint(borrower.address, totalDue);
@@ -145,7 +144,8 @@ describe('Interest Accounting – full repay posts interest', function () {
     const ord = await orderEngine.connect(governance).getLoanOrderForView(orderId);
     expect(ord.principal).to.equal(principal);
     expect(ord.rate).to.equal(rateBps);
-    expect(ord.term).to.equal(termSec);
+    expect(ord.term).to.equal(termBlocks);
+    expect(await orderEngine.connect(governance).getOrderStatusForView(orderId)).to.equal(1n);
     expect(ord.repaidAmount).to.equal(totalDue);
     expect(ord.repaidAmount - ord.principal).to.equal(interest);
   });

@@ -53,11 +53,15 @@ contract MockLendingEngineReentrant {
     function getDebt(address, address) external pure returns (uint256) { return 0; }
     function getTotalDebtByAsset(address) external pure returns (uint256) { return 0; }
     function getUserTotalDebtValue(address) external pure returns (uint256) { return 0; }
+    function getUserTotalDebtValueBestEffort(address) external pure returns (uint256) { return 0; }
+    function getUserTotalDebtValueStrict(address) external pure returns (uint256) { return 0; }
     function getTotalDebtValue() external pure returns (uint256) { return 0; }
     function getUserDebtAssets(address) external pure returns (address[] memory) { return new address[](0); }
     function calculateExpectedInterest(address, address, uint256) external pure returns (uint256) { return 0; }
     function getReducibleDebtAmount(address, address) external pure returns (uint256) { return 0; }
     function calculateDebtValue(address, address) external pure returns (uint256) { return 0; }
+    function calculateDebtValueBestEffort(address, address) external pure returns (uint256) { return 0; }
+    function calculateDebtValueStrict(address, address) external pure returns (uint256) { return 0; }
 }
 
 

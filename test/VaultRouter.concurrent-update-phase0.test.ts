@@ -18,19 +18,6 @@ import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 
-// 导入合约类型
-import type {
-  VaultRouter,
-  VaultCore,
-  MockAccessControlManager,
-  MockCollateralManager,
-  MockLendingEngineBasic,
-  MockPriceOracle,
-  MockRegistry,
-  MockAssetWhitelist,
-  MockERC20,
-} from '../../types';
-
 describe('VaultRouter – 并发更新 Phase 0 测试', function () {
   // 测试常量
   const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -44,15 +31,15 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
   let unauthorizedCaller: SignerWithAddress;
 
   // 合约实例
-  let vaultRouter: VaultRouter;
-  let vaultCore: VaultCore;
-  let mockRegistry: MockRegistry;
-  let mockAccessControlManager: MockAccessControlManager;
-  let mockCollateralManager: MockCollateralManager;
-  let mockLendingEngineBasic: MockLendingEngineBasic;
-  let mockPriceOracle: MockPriceOracle;
-  let mockAssetWhitelist: MockAssetWhitelist;
-  let mockSettlementToken: MockERC20;
+  let vaultRouter: any;
+  let vaultCore: any;
+  let mockRegistry: any;
+  let mockAccessControlManager: any;
+  let mockCollateralManager: any;
+  let mockLendingEngineBasic: any;
+  let mockPriceOracle: any;
+  let mockAssetWhitelist: any;
+  let mockSettlementToken: any;
 
   // 测试资产
   let testAsset: string;
@@ -95,7 +82,7 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
     mockSettlementToken = await MockERC20Factory.deploy('Settlement Token', 'SETTLE', 18, ethers.parseUnits('1000000', 18));
 
     const MockRegistryFactory = await ethers.getContractFactory('MockRegistry');
-    mockRegistry = await MockRegistryFactory.deploy() as unknown as MockRegistry;
+    mockRegistry = await MockRegistryFactory.deploy();
 
     // 部署 VaultRouter（UUPS proxy）
     const VaultRouterFactory = await ethers.getContractFactory('VaultRouter');
@@ -109,7 +96,7 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
         owner.address, // initialOwner
       ],
       { kind: 'uups', initializer: 'initialize' }
-    )) as VaultRouter;
+    )) as any;
 
     // 部署 VaultCore（UUPS：必须通过 Proxy 初始化；实现合约 constructor 已禁用 initialize）
     const VaultCoreFactory = await ethers.getContractFactory('VaultCore');
@@ -122,7 +109,7 @@ describe('VaultRouter – 并发更新 Phase 0 测试', function () {
     ]);
     const vaultCoreProxy = await ProxyFactory.deploy(vaultCoreImpl.target, initData);
     await vaultCoreProxy.waitForDeployment();
-    vaultCore = VaultCoreFactory.attach(vaultCoreProxy.target);
+    vaultCore = VaultCoreFactory.attach(vaultCoreProxy.target) as any;
 
     // 注册模块到 MockRegistry
     const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE'));

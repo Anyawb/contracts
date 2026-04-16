@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IOrderEngine} from "./IOrderEngine.sol";
+import {ILoanNFT} from "./ILoanNFT.sol";
 
 /**
  * @title IOrderEngineViewAdapter
@@ -29,6 +30,38 @@ interface IOrderEngineViewAdapter {
     function getLoanOrderForView(
         uint256 orderId
     ) external view returns (IOrderEngine.LoanOrder memory order);
+
+    /**
+     * @notice View-only read of the ORDER_ENGINE-authoritative total due for a loan order.
+     * @dev Downstream settlement helpers must consume this SSOT instead of reimplementing interest math locally.
+     *
+     * Security:
+     * - View-only; must not mutate state.
+     *
+     * @param orderId Loan order id.
+     * @return totalDue Total due amount (token decimals of order.asset).
+     */
+    function getOrderTotalDueForView(
+        uint256 orderId
+    ) external view returns (uint256 totalDue);
+
+    /**
+     * @notice View-only read of the business lifecycle status for a loan order.
+     * @dev This status is the order-level terminal-state gate for repay/liquidation flows.
+     *      Downstream callers should use it for business-state decisions rather than inferring
+     *      closure from debt-ledger overpay/force-reduce side effects.
+        *      This is the ORDER_ENGINE-side source consumed by LendingEngineView for order-centric
+        *      read access; it does not move the lifecycle state machine into the View layer.
+     *
+     * Security:
+     * - View-only; must not mutate state.
+     *
+     * @param orderId Loan order id.
+     * @return status Loan lifecycle status from LoanNFT-backed SSOT.
+     */
+    function getOrderStatusForView(
+        uint256 orderId
+    ) external view returns (ILoanNFT.LoanStatus status);
 
     /**
      * @notice View-only read of a user's loan count (borrower perspective).

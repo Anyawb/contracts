@@ -118,6 +118,7 @@ function runHardhatScript(label: string, scriptPath: string, extraEnv?: Record<s
  * - RUN_PRECONFIG=1: idempotent local preconfig for strict smoke (default 0; production-like keeps this off)
  * - RUN_CACHE_REFRESH=1: run CacheMaintenanceManager.batchRefresh checks (default 1)
  * - RUN_SSOT_VERIFY=1: run SSOT wiring checks (default 1)
+ * - RUN_SETTLEMENT_BRIDGE_SMOKE=1: run SettlementManager -> ORDER_ENGINE bridge regression (default 1)
  * - RUN_FUNDS=1: run funds-flow invariants suite (default 1)
  * - RUN_ATTACK=1: run attack suite (default 1)
  */
@@ -139,6 +140,8 @@ async function main() {
   const RUN_VIEW_SMOKE = envBool("RUN_VIEW_SMOKE", true);
   const RUN_VIEWCACHE_SMOKE = envBool("RUN_VIEWCACHE_SMOKE", true);
   const RUN_REWARD_SMOKE = envBool("RUN_REWARD_SMOKE", true);
+  const RUN_SETTLEMENT_BRIDGE_SMOKE = envBool("RUN_SETTLEMENT_BRIDGE_SMOKE", true);
+  const RUN_BLOCKS_ONLY_STATE_SMOKE = envBool("RUN_BLOCKS_ONLY_STATE_SMOKE", true);
   const RUN_LE_SMOKE = envBool("RUN_LE_SMOKE", false);
   const RUN_FUNDS = envBool("RUN_FUNDS", true);
   const RUN_ATTACK = envBool("RUN_ATTACK", true);
@@ -147,7 +150,7 @@ async function main() {
   console.log(`  network=${network.name}`);
   console.log(`  MODE=${mode}`);
   console.log(
-    `  steps: deploy=${RUN_DEPLOY} grant=${RUN_GRANT} preconfig=${RUN_PRECONFIG} cacheRefresh=${RUN_CACHE_REFRESH} ssot=${RUN_SSOT_VERIFY} viewSmoke=${RUN_VIEW_SMOKE} viewCacheSmoke=${RUN_VIEWCACHE_SMOKE} rewardSmoke=${RUN_REWARD_SMOKE} leSmoke=${RUN_LE_SMOKE} funds=${RUN_FUNDS} attack=${RUN_ATTACK}`
+    `  steps: deploy=${RUN_DEPLOY} grant=${RUN_GRANT} preconfig=${RUN_PRECONFIG} cacheRefresh=${RUN_CACHE_REFRESH} ssot=${RUN_SSOT_VERIFY} viewSmoke=${RUN_VIEW_SMOKE} viewCacheSmoke=${RUN_VIEWCACHE_SMOKE} rewardSmoke=${RUN_REWARD_SMOKE} settlementBridgeSmoke=${RUN_SETTLEMENT_BRIDGE_SMOKE} blocksOnlyStateSmoke=${RUN_BLOCKS_ONLY_STATE_SMOKE} leSmoke=${RUN_LE_SMOKE} funds=${RUN_FUNDS} attack=${RUN_ATTACK}`
   );
 
   // Fresh-mode guard: "fresh" means the node itself is fresh (restart hardhat node).
@@ -184,6 +187,18 @@ async function main() {
   }
   if (RUN_REWARD_SMOKE) {
     runHardhatScript("reward-smoke-local (RewardManager/RewardView/EasyToken)", "scripts/tests/reward-smoke-local.ts");
+  }
+  if (RUN_SETTLEMENT_BRIDGE_SMOKE) {
+    runHardhatScript(
+      "settlement-role-bridge-local (SettlementManager->ORDER_ENGINE)",
+      "scripts/tests/settlement-role-bridge-local.ts"
+    );
+  }
+  if (RUN_BLOCKS_ONLY_STATE_SMOKE) {
+    runHardhatScript(
+      "blocks-only-state-machine-smoke-local (OrderStateStoreV2 + BlocksOnlyView)",
+      "scripts/tests/blocks-only-state-machine-smoke-local.ts"
+    );
   }
   if (RUN_LE_SMOKE) {
     runHardhatScript("lendingengine-smoke-local (LendingEngineView focused)", "scripts/tests/lendingengine-smoke-local.ts");

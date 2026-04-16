@@ -23,7 +23,7 @@ interface ILoanFlowViewRewardRead {
         external
         view
         returns (
-            uint256 borrowVolumeUsd8,
+            uint256 borrowVolumeValue,
             uint256 borrowCount,
             bool isValid,
             uint256 blockNumber
@@ -92,8 +92,9 @@ contract RewardManagerCore is
     address private _registryAddr;
 
     // NOTE (strict read boundary):
-    // RewardManagerCore exposes NO external/public view getters for frontends/off-chain consumers.
-    // External reads MUST go through RewardView.
+    // RewardManagerCore does not expose frontend-facing read APIs.
+    // External/off-chain consumers MUST read RewardView. A protocol-internal borrow-check
+    // getter exists for OrderEngine only to avoid using RewardView mirror as a hard gate.
 
     /// @notice DEPRECATED: penalty ledger moved to RewardAccrualManager (kept for storage compatibility).
     mapping(address => uint256) private _penaltyLedger;
@@ -576,6 +577,30 @@ contract RewardManagerCore is
         _tryPushUserLevel(user, newLevel);
     }
 
+    /**
+     * @notice Protocol-enforced read: returns canonical user level for long-term borrow admission.
+     * @dev Reverts if:
+     *      - Registry validation fails in {onlyValidRegistry}
+     *      - Registry missing KEY_ORDER_ENGINE
+     *      - caller is not Registry[KEY_ORDER_ENGINE] (see {MissingRole})
+     *
+     * Security:
+     * - Reads canonical level from RewardManagerCore storage, not RewardView mirror cache.
+     * - Role-gated to OrderEngine only; not a frontend/off-chain read surface.
+     *
+     * @param user Target user address.
+     * @return level Canonical level in RewardManagerCore storage.
+     */
+    function getUserLevelForBorrowCheck(
+        address user
+    ) external view onlyValidRegistry returns (uint8 level) {
+        address orderEngine = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ORDER_ENGINE
+        );
+        if (msg.sender != orderEngine) revert MissingRole();
+        return _userLevels[user];
+    }
+
     /*━━━━━━━━━━━━━━━ Internal Helpers ━━━━━━━━━━━━━━━*/
 
     function _getRewardAccrualManager()
@@ -591,17 +616,17 @@ contract RewardManagerCore is
             );
     }
 
-    /// @dev Best-effort: observe protocol flow (USD-8 SSOT) and auto-upgrade level.
+    /// @dev Best-effort: observe protocol flow in the shared 18-decimal valuation unit and auto-upgrade level.
     function _updateUserActivity(address user, uint256 /* amount */) internal {
         // SSOT boundary:
-        // - Protocol borrow statistics MUST come from LoanFlowView (USD-8 SSOT).
+        // - Protocol borrow statistics MUST come from LoanFlowView (shared 18-decimal valuation unit).
         // - RewardManagerCore may read those values for gating/level logic,
         //   without attempting to re-derive cross-asset value locally.
         (
             bool ok,
             uint256 borrowCount,
-            uint256 borrowVolumeUsd8
-        ) = _readBorrowFlowUsd8BestEffort(user);
+            uint256 borrowVolumeValue
+        ) = _readBorrowFlowValueBestEffort(user);
         if (!ok) {
             // Deliberately do NOT fabricate protocol flow stats inside RMCore.
             // If LoanFlowView is unavailable/invalid, activity totals remain unchanged.
@@ -610,7 +635,7 @@ contract RewardManagerCore is
         }
 
         borrowCount; // silence unused-variable warning (kept for potential future rule changes)
-        _autoUpgradeUserLevelFromLoanFlowUsd8(user, borrowVolumeUsd8);
+        _autoUpgradeUserLevelFromLoanFlowValue(user, borrowVolumeValue);
     }
 
     /// @dev Best-effort read: EarnConfig parameters.
@@ -663,40 +688,40 @@ contract RewardManagerCore is
         }
     }
 
-    /// @dev Best-effort auto-upgrades a user level from LoanFlowView USD-8
+    /// @dev Best-effort auto-upgrades a user level from LoanFlowView
     ///      SSOT metrics.
-    function _autoUpgradeUserLevelFromLoanFlowUsd8(
+    function _autoUpgradeUserLevelFromLoanFlowValue(
         address user,
-        uint256 borrowVolumeUsd8
+        uint256 borrowVolumeValue
     ) internal {
         uint8 currentLevel = _userLevels[user];
         uint256 eligibleLoans = _eligibleLoanCount[user];
         uint256 onTimeCount = _onTimeRepayCount[user];
         uint8 newLevel = currentLevel;
-        // Thresholds are in USD-8 (SSOT): 10k/50k/100k/500k USD.
+        // Thresholds are in the shared 18-decimal valuation unit: 10k/50k/100k/500k USD.
         if (
-            borrowVolumeUsd8 >= 10000 * 1e8 &&
+            borrowVolumeValue >= 10000 * 1e18 &&
             eligibleLoans >= 3 &&
             onTimeCount >= 1 &&
             currentLevel < 2
         ) {
             newLevel = 2;
         } else if (
-            borrowVolumeUsd8 >= 50000 * 1e8 &&
+            borrowVolumeValue >= 50000 * 1e18 &&
             eligibleLoans >= 10 &&
             onTimeCount >= 5 &&
             currentLevel < 3
         ) {
             newLevel = 3;
         } else if (
-            borrowVolumeUsd8 >= 100000 * 1e8 &&
+            borrowVolumeValue >= 100000 * 1e18 &&
             eligibleLoans >= 20 &&
             onTimeCount >= 10 &&
             currentLevel < 4
         ) {
             newLevel = 4;
         } else if (
-            borrowVolumeUsd8 >= 500000 * 1e8 &&
+            borrowVolumeValue >= 500000 * 1e18 &&
             eligibleLoans >= 50 &&
             onTimeCount >= 30 &&
             currentLevel < 5
@@ -717,13 +742,13 @@ contract RewardManagerCore is
         }
     }
 
-    /// @dev Best-effort read: borrow-only protocol flow from LoanFlowView (USD-8 SSOT).
-    function _readBorrowFlowUsd8BestEffort(
+    /// @dev Best-effort read: borrow-only protocol flow from LoanFlowView in the shared 18-decimal valuation unit.
+    function _readBorrowFlowValueBestEffort(
         address user
     )
         internal
         view
-        returns (bool ok, uint256 borrowCount, uint256 borrowVolumeUsd8)
+        returns (bool ok, uint256 borrowCount, uint256 borrowVolumeValue)
     {
         address viewAddr;
         try
@@ -739,13 +764,13 @@ contract RewardManagerCore is
         try
             ILoanFlowViewRewardRead(viewAddr).getUserBorrowFlowForReward(user)
         returns (
-            uint256 volUsd8,
+            uint256 volumeValue,
             uint256 cnt,
             bool isValid,
             uint256 /* blockNumber */
         ) {
             if (!isValid) return (false, 0, 0);
-            return (true, cnt, volUsd8);
+            return (true, cnt, volumeValue);
         } catch {
             return (false, 0, 0);
         }

@@ -1,9 +1,6 @@
 import * as hardhat from "hardhat";
 import { expect } from "chai";
 import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import type { Registry } from "../types/contracts/registry";
-import type { MockCollateralManager, MockLendingEngineConcrete, MockPriceOracle } from "../types/contracts/Mocks";
-import type { ERC1967Proxy } from "../types/@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy";
 
 const { ethers } = hardhat;
 
@@ -30,21 +27,21 @@ describe("Registry - invariant fuzz", function () {
       owner.address,
       owner.address,
     ]);
-    const registryProxy = (await ProxyFactory.deploy(registryImplementation.target, initData)) as ERC1967Proxy;
+    const registryProxy = (await ProxyFactory.deploy(registryImplementation.target, initData)) as any;
     await registryProxy.waitForDeployment();
 
-    const registry = registryImplementation.attach(registryProxy.target) as Registry;
+    const registry = registryImplementation.attach(registryProxy.target) as any;
 
     const MockLendingEngineConcreteFactory = await ethers.getContractFactory("MockLendingEngineConcrete");
-    const mockLendingEngine = (await MockLendingEngineConcreteFactory.deploy()) as MockLendingEngineConcrete;
+    const mockLendingEngine = (await MockLendingEngineConcreteFactory.deploy()) as any;
     await mockLendingEngine.waitForDeployment();
 
     const MockCollateralManagerFactory = await ethers.getContractFactory("MockCollateralManager");
-    const mockCollateralManager = (await MockCollateralManagerFactory.deploy()) as MockCollateralManager;
+    const mockCollateralManager = (await MockCollateralManagerFactory.deploy()) as any;
     await mockCollateralManager.waitForDeployment();
 
     const MockPriceOracleFactory = await ethers.getContractFactory("MockPriceOracle");
-    const mockPriceOracle = (await MockPriceOracleFactory.deploy()) as MockPriceOracle;
+    const mockPriceOracle = (await MockPriceOracleFactory.deploy()) as any;
     await mockPriceOracle.waitForDeployment();
 
     return {

@@ -10,6 +10,7 @@ import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
 import { ViewConstants } from "../ViewConstants.sol";
 import { ViewVersioned } from "../ViewVersioned.sol";
 import { ILoanNFT } from "../../../interfaces/ILoanNFT.sol";
+import { IOrderStateStoreV2 } from "../../../interfaces/IOrderStateStoreV2.sol";
 import { BatchTooLarge, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
 import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
 
@@ -17,7 +18,13 @@ import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
  * @title LoanNFTView
  * @notice View module for enumerating LoanNFTs owned by a user through view-only queries.
  * @dev Motivation: frontends should enumerate a user's loans via LoanNFT (user -> tokenIds -> loanId/status)
- *      and then fetch order details by orderId via LendingEngineView.
+ *      and then fetch order-centric details via LendingEngineView.
+ *
+ *      Architecture-Guide alignment:
+ *      - This module stays in the View layer and only exposes user-scoped enumeration.
+ *      - The returned `status` field is a read-only snapshot of the LoanNFT lifecycle SSOT.
+ *      - Business lifecycle transitions are still written by ORDER_ENGINE / SettlementManager,
+ *        not by this module.
  *
  * Reverts if:
  * - registry is zero / not a contract (ZeroAddress / NotAContract)
@@ -31,7 +38,7 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
 
-    /// @notice Minimal per-token info for frontend enumeration.
+    /// @notice Minimal per-token info for frontend enumeration, including lifecycle status snapshot.
     struct UserLoanNftItem {
         uint256 tokenId;
         uint256 orderId;
@@ -87,7 +94,9 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /**
     * @notice Return the number of LoanNFTs held by a user, together with metadata.
-     * @dev This is the preferred replacement for legacy `LendingEngineView.getUserLoanCount`.
+    * @dev This is the preferred replacement for legacy `LendingEngineView.getUserLoanCount`.
+    *      Use this module for user -> token/order enumeration, and use LendingEngineView for
+    *      order-centric reads such as `getLoanOrder(...)` / `getOrderStatus(orderId)`.
      *
     * Security:
     * - Scheme U user-scoped read gate.
@@ -160,6 +169,9 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
     *      - limit is zero (LoanNFTView__InvalidLimit)
     *      - limit exceeds `_MAX_BATCH_SIZE` (BatchTooLarge)
     *
+    *      Each item includes the current LoanNFT-backed lifecycle status snapshot so user-scoped UIs
+    *      do not need to infer coarse order state from unrelated accounting fields.
+    *
     * Security:
     * - Scheme U user-scoped read gate.
     * - View-only.
@@ -189,10 +201,18 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
         items = new UserLoanNftItem[](pageLen);
 
         ILoanNFT loanNft = _loanNft();
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) = _tryOrderStateStore();
         for (uint256 i; i < pageLen; ) {
             uint256 tokenId = _loanNftEnumerable().tokenOfOwnerByIndex(user, offset + i);
             ILoanNFT.LoanMetadata memory meta = loanNft.getLoanMetadata(tokenId);
-            items[i] = UserLoanNftItem({ tokenId: tokenId, orderId: meta.loanId, status: meta.status });
+            ILoanNFT.LoanStatus status = meta.status;
+            if (
+                hasOrderStateStore
+                    && orderStateStore.hasOrderState(IOrderStateStoreV2.OrderProductType.LOAN, meta.loanId)
+            ) {
+                status = orderStateStore.getLegacyLoanStatus(meta.loanId);
+            }
+            items[i] = UserLoanNftItem({ tokenId: tokenId, orderId: meta.loanId, status: status });
             unchecked { ++i; }
         }
         return (items, totalCount, true, _now());
@@ -233,6 +253,15 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
         address loanNftAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LOAN_NFT);
         if (loanNftAddr.code.length == 0) revert NotAContract(loanNftAddr);
         return IERC721EnumerableLike(loanNftAddr);
+    }
+
+    function _tryOrderStateStore() internal view returns (IOrderStateStoreV2 orderStateStore, bool hasStore) {
+        address orderStateStoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_ORDER_STATE_STORE);
+        if (orderStateStoreAddr == address(0) || orderStateStoreAddr.code.length == 0) {
+            return (IOrderStateStoreV2(address(0)), false);
+        }
+
+        return (IOrderStateStoreV2(orderStateStoreAddr), true);
     }
 
     function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {

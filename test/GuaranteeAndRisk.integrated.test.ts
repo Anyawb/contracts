@@ -14,43 +14,29 @@ const { ethers } = hardhat;
 import { expect } from 'chai';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
-// 合约类型（从 types 生成）
-import type {
-  ERC1967Proxy,
-  MockERC20,
-  MockAccessControlManager,
-  MockRegistry,
-  MockVaultCore,
-  MockCollateralManager,
-  MockLendingEngineBasic,
-  EarlyRepaymentGuaranteeManager,
-  GuaranteeFundManager,
-  FeeRouter,
-  RiskView
-} from '../../types';
-
 describe('Guarantee & Risk – 保证金与风险模块集成测试', function () {
   // 常量
   const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
   const ONE_ETH = ethers.parseUnits('1', 18);
   const TEST_AMOUNT = ethers.parseUnits('1000', 18);
   const KEY_GUARANTEE_FUND = ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER'));
+  const KEY_SETTLEMENT_MANAGER = ethers.keccak256(ethers.toUtf8Bytes('SETTLEMENT_MANAGER'));
   const KEY_FR = ethers.keccak256(ethers.toUtf8Bytes('FEE_ROUTER'));
 
   // 动态地址
   let TEST_ASSET: string;
 
   // 实例
-  let erc20: MockERC20;
-  let registry: MockRegistry;
-  let acm: MockAccessControlManager;
-  let vaultCore: MockVaultCore;
-  let collateralManager: MockCollateralManager;
-  let lendingEngine: MockLendingEngineBasic;
-  let guaranteeFund: GuaranteeFundManager;
-  let earlyRepayGM: EarlyRepaymentGuaranteeManager;
-  let feeRouter: FeeRouter;
-  let riskView: RiskView;
+  let erc20: any;
+  let registry: any;
+  let acm: any;
+  let vaultCore: any;
+  let collateralManager: any;
+  let lendingEngine: any;
+  let guaranteeFund: any;
+  let earlyRepayGM: any;
+  let feeRouter: any;
+  let riskView: any;
   let healthViewLite: any;
 
   // 账户
@@ -65,7 +51,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     const impl = await ImplF.deploy();
     await impl.waitForDeployment();
     const ProxyF = await ethers.getContractFactory('ERC1967Proxy');
-    const proxy = (await ProxyF.deploy(impl.target, initData)) as unknown as ERC1967Proxy;
+    const proxy = (await ProxyF.deploy(impl.target, initData)) as any;
     await proxy.waitForDeployment();
     const instance = impl.attach(proxy.target);
     return { impl, proxy, instance };
@@ -77,12 +63,12 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
 
     // 1. 基础模块
     const MockRegistryF = await ethers.getContractFactory('MockRegistry');
-    registry = (await MockRegistryF.deploy()) as unknown as MockRegistry;
+    registry = (await MockRegistryF.deploy()) as any;
     await registry.waitForDeployment();
 
     // ACM 代理
     const { instance: acmProxy } = await deployProxyContract('MockAccessControlManager');
-    acm = acmProxy as unknown as MockAccessControlManager;
+    acm = acmProxy as any;
 
     // 注册 ACM
     const ACCESS_CONTROL_KEY = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
@@ -90,42 +76,43 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
 
     // 2. MockVaultCore（带 viewContractAddrVar）
     const MockVaultCoreF = await ethers.getContractFactory('MockVaultCore');
-    vaultCore = (await MockVaultCoreF.deploy()) as unknown as MockVaultCore;
+    vaultCore = (await MockVaultCoreF.deploy()) as any;
     await vaultCore.waitForDeployment();
 
     // 3. Mock 子模块
     const MockERC20F = await ethers.getContractFactory('MockERC20');
-    erc20 = (await MockERC20F.deploy('Mock', 'MOCK', 18, ethers.parseUnits('100000000', 18))) as unknown as MockERC20;
+    erc20 = (await MockERC20F.deploy('Mock', 'MOCK', 18, ethers.parseUnits('100000000', 18))) as any;
     await erc20.waitForDeployment();
 
     const CollateralF = await ethers.getContractFactory('MockCollateralManager');
-    collateralManager = (await CollateralF.deploy()) as unknown as MockCollateralManager;
+    collateralManager = (await CollateralF.deploy()) as any;
     await collateralManager.waitForDeployment();
 
     const LendingF = await ethers.getContractFactory('MockLendingEngineBasic');
-    lendingEngine = (await LendingF.deploy()) as unknown as MockLendingEngineBasic;
+    lendingEngine = (await LendingF.deploy()) as any;
     await lendingEngine.waitForDeployment();
 
     const { instance: gfmProxy } = await deployProxyContract('GuaranteeFundManager');
-    guaranteeFund = gfmProxy as unknown as GuaranteeFundManager;
+    guaranteeFund = gfmProxy as any;
     await guaranteeFund.initialize(vaultCore.target, registry.target, await owner.getAddress());
 
     const { instance: feeRouterProxy } = await deployProxyContract('FeeRouter');
-    feeRouter = feeRouterProxy as unknown as FeeRouter;
+    feeRouter = feeRouterProxy as any;
     await feeRouter.initialize(registry.target, await platform.getAddress(), await ecoVault.getAddress(), 1, 0);
 
     const { instance: ergmProxy } = await deployProxyContract('EarlyRepaymentGuaranteeManager');
-    earlyRepayGM = ergmProxy as unknown as EarlyRepaymentGuaranteeManager;
+    earlyRepayGM = ergmProxy as any;
     await earlyRepayGM.initialize(registry.target, await platform.getAddress(), 100); // 1%
 
     const { instance: riskViewProxy } = await deployProxyContract('RiskView');
-    riskView = riskViewProxy as unknown as RiskView;
+    riskView = riskViewProxy as any;
     await riskView.initialize(registry.target);
 
     // 4. 注册业务模块与 View
     const KEY_VAULT_CORE = ethers.keccak256(ethers.toUtf8Bytes('VAULT_CORE'));
     const KEY_HEALTH_VIEW = ethers.keccak256(ethers.toUtf8Bytes('HEALTH_VIEW'));
     await registry.setModule(KEY_VAULT_CORE, vaultCore.target);
+    await registry.setModule(KEY_SETTLEMENT_MANAGER, await owner.getAddress());
     await registry.setModule(KEY_GUARANTEE_FUND, guaranteeFund.target);
     await registry.setModule(KEY_FR, feeRouter.target);
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')), acm.target);
@@ -419,7 +406,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     it('应正确执行三方结算', async function () {
       const refundToBorrower = ONE_ETH;
       const penaltyToLender = ONE_ETH * 2n;
-      const platformFee = TEST_AMOUNT - refundToBorrower - penaltyToLender;
+      const platformFee = (TEST_AMOUNT as bigint) - refundToBorrower - penaltyToLender;
       
       const borrowerBalanceBefore = await erc20.balanceOf(await user.getAddress());
       const lenderBalanceBefore = await erc20.balanceOf(await lender.getAddress());
@@ -481,7 +468,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       try {
         await earlyRepayGM.connect(vaultCoreSigner).lockGuaranteeRecord(await user.getAddress(), await lender.getAddress(), erc20.target, ONE_ETH, ONE_ETH / 10n, 30);
         await guaranteeFund.connect(vaultCoreSigner).lockGuarantee(await user.getAddress(), erc20.target, ONE_ETH / 10n);
-        await earlyRepayGM.connect(vaultCoreSigner).settleEarlyRepayment(await user.getAddress(), erc20.target, ONE_ETH);
+        await earlyRepayGM.connect(owner).settleEarlyRepayment(await user.getAddress(), erc20.target, ONE_ETH);
       } catch (err) {
         // 允许因 Mock 不完整导致的 revert，但不应抛出意外类型
         expect(err).to.be.instanceOf(Error);
@@ -672,7 +659,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       
       // 先结算一次使其变为非活跃
       try {
-        await earlyRepayGM.connect(vaultCoreSigner).settleEarlyRepayment(await user.getAddress(), erc20.target, ONE_ETH);
+        await earlyRepayGM.connect(owner).settleEarlyRepayment(await user.getAddress(), erc20.target, ONE_ETH);
       } catch {}
       
       // 尝试计算已结算的记录应失败（可能因为记录不存在或非活跃）
@@ -714,7 +701,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       
       try {
         await expect(
-          earlyRepayGM.connect(vaultCoreSigner).settleEarlyRepayment(await user.getAddress(), erc20.target, actualRepayAmount)
+          earlyRepayGM.connect(owner).settleEarlyRepayment(await user.getAddress(), erc20.target, actualRepayAmount)
         ).to.emit(earlyRepayGM, 'EarlyRepaymentProcessed');
       } catch (err) {
         // 允许因 Mock 不完整导致的 revert
@@ -724,24 +711,24 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
 
     it('应拒绝零地址参数', async function () {
       await expect(
-        earlyRepayGM.connect(vaultCoreSigner).settleEarlyRepayment(ZERO_ADDRESS, erc20.target, ONE_ETH)
+        earlyRepayGM.connect(owner).settleEarlyRepayment(ZERO_ADDRESS, erc20.target, ONE_ETH)
       ).to.be.revertedWithCustomError(earlyRepayGM, 'ZeroAddress');
       
       await expect(
-        earlyRepayGM.connect(vaultCoreSigner).settleEarlyRepayment(await user.getAddress(), ZERO_ADDRESS, ONE_ETH)
+        earlyRepayGM.connect(owner).settleEarlyRepayment(await user.getAddress(), ZERO_ADDRESS, ONE_ETH)
       ).to.be.revertedWithCustomError(earlyRepayGM, 'ZeroAddress');
     });
 
     it('应拒绝零金额', async function () {
       await expect(
-        earlyRepayGM.connect(vaultCoreSigner).settleEarlyRepayment(await user.getAddress(), erc20.target, 0)
+        earlyRepayGM.connect(owner).settleEarlyRepayment(await user.getAddress(), erc20.target, 0)
       ).to.be.revertedWithCustomError(earlyRepayGM, 'AmountIsZero');
     });
 
     it('应拒绝不存在的保证金记录', async function () {
       const [user2] = await ethers.getSigners();
       await expect(
-        earlyRepayGM.connect(vaultCoreSigner).settleEarlyRepayment(await user2.getAddress(), erc20.target, ONE_ETH)
+        earlyRepayGM.connect(owner).settleEarlyRepayment(await user2.getAddress(), erc20.target, ONE_ETH)
       ).to.be.revertedWithCustomError(earlyRepayGM, 'GuaranteeRecordNotFound');
     });
   });
@@ -873,7 +860,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       
       // 4. 执行提前还款结算（如果Mock环境支持）
       try {
-        await earlyRepayGM.connect(vaultCoreSigner).settleEarlyRepayment(
+        await earlyRepayGM.connect(owner).settleEarlyRepayment(
           await user.getAddress(),
           erc20.target,
           principal / 2n
@@ -908,7 +895,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
   describe('集成测试 – 多用户多资产场景', function () {
     let vaultCoreSigner: any;
     let user2: any;
-    let asset2: MockERC20;
+    let asset2: any;
 
     beforeEach(async function () {
       vaultCoreSigner = await ethers.getImpersonatedSigner(vaultCore.target as string);
@@ -916,7 +903,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
       
       [user2] = await ethers.getSigners();
       const MockERC20F = await ethers.getContractFactory('MockERC20');
-      asset2 = (await MockERC20F.deploy('Asset2', 'AST2', 18, ethers.parseUnits('100000000', 18))) as unknown as MockERC20;
+      asset2 = (await MockERC20F.deploy('Asset2', 'AST2', 18, ethers.parseUnits('100000000', 18))) as any;
       await asset2.waitForDeployment();
       
       await asset2.transfer(await user.getAddress(), TEST_AMOUNT * 10n);

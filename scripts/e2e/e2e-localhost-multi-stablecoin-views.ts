@@ -9,9 +9,9 @@ import {
   BORROW_INTENT_TYPES,
   LEND_INTENT_TYPES,
   buildLendIntentHash,
-  getAssetBootstrapPriceUsd8,
+  parseAssetBootstrapPrice,
   parseLoanOrderId,
-} from "../tests/live-test/_mockLiveUtils";
+} from "../tests/live-test/networks/arbitrum-sepolia/core/_mockLiveUtils";
 import { runViewPreflight } from "./utils/view-preflight";
 
 type MockAssetPackAsset = {
@@ -24,8 +24,8 @@ type MockAssetPackAsset = {
   sourceId: string;
   maxPriceAge: number;
   active: boolean;
-  bootstrapPriceUsd8?: string;
-  defaultPriceUsd8?: string;
+  bootstrapPriceValue?: string;
+  defaultPriceValue?: string;
   address: string;
 };
 
@@ -178,7 +178,7 @@ async function ensureAssetConfigured(params: {
     ).wait();
   }
   await (
-    await priceOracle.updatePrice(asset.address, ethers.parseUnits(getAssetBootstrapPriceUsd8(asset as any), 8), blockNumber)
+    await priceOracle.updatePrice(asset.address, parseAssetBootstrapPrice(asset as any), blockNumber)
   ).wait();
   if (!(await feeRouter.isTokenSupported(asset.address))) {
     await (await feeRouter.addSupportedToken(asset.address)).wait();

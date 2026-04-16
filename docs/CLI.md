@@ -21,13 +21,13 @@ ARBISCAN_API_KEY=your_api_key                    # 区块浏览器 API 密钥（
 ### 安装依赖
 
 ```bash
-npm install
+pnpm install
 ```
 
 ### 编译合约
 
 ```bash
-npm run compile
+pnpm run compile
 ```
 
 ## 🚀 使用方法

@@ -1,7 +1,7 @@
 import { ethers } from "hardhat";
 
 import { envStr } from "../tests/_addressResolver";
-import { createFundsFlowLiveContext } from "../tests/live-test/_fundsFlowLive";
+import { createFundsFlowLiveContext } from "../tests/live-test/networks/arbitrum-sepolia/core/_fundsFlowLive";
 
 async function main() {
   const ctx = await createFundsFlowLiveContext({
@@ -28,9 +28,9 @@ async function main() {
     return;
   }
 
-  let remainingTopUp = minBalanceWei - beforeBalance;
+  let remainingTopUp = BigInt(minBalanceWei - beforeBalance);
   const seenSponsors = new Set<string>();
-  const sponsors = [ctx.lender, ctx.viewer, ctx.updater].filter((signer): signer is NonNullable<typeof signer> => {
+  const sponsors = [ctx.borrower, ctx.lender, ctx.viewer, ctx.updater].filter((signer): signer is NonNullable<typeof signer> => {
     if (!signer?.address) {
       return false;
     }
@@ -48,16 +48,26 @@ async function main() {
     }
     const sponsorBalance = await ethers.provider.getBalance(sponsor.address);
     const transferable = sponsorBalance > sponsorReserveWei ? sponsorBalance - sponsorReserveWei : 0n;
-    const sendAmount = transferable > remainingTopUp ? remainingTopUp : transferable;
+    const sendAmount = BigInt(transferable > remainingTopUp ? remainingTopUp : transferable);
     console.log(
       `Sponsor=${sponsor.address} balance=${ethers.formatEther(sponsorBalance)} ETH transferable=${ethers.formatEther(transferable)} ETH send=${ethers.formatEther(sendAmount)} ETH`,
     );
     if (sendAmount === 0n) {
       continue;
     }
-    const receipt = await (await sponsor.sendTransaction({ to: targetAddress, value: sendAmount })).wait();
-    console.log(`TopUpTx=${receipt?.hash ?? "unknown"}`);
-    remainingTopUp -= sendAmount;
+    try {
+      const receipt = await (await sponsor.sendTransaction({ to: targetAddress, value: sendAmount })).wait();
+      console.log(`TopUpTx=${receipt?.hash ?? "unknown"}`);
+      remainingTopUp -= sendAmount;
+    } catch (error: any) {
+      const message = String(error?.message ?? error?.shortMessage ?? "").toLowerCase();
+      const code = String(error?.code ?? "").toUpperCase();
+      if (code === "UNSUPPORTED_OPERATION" || message.includes("missing provider") || message.includes("unsupported operation") || message.includes("cannot sign transactions")) {
+        console.log(`Sponsor=${sponsor.address} skipped: unusable signer for native top-up`);
+        continue;
+      }
+      throw error;
+    }
   }
 
   const afterBalance = await ethers.provider.getBalance(targetAddress);

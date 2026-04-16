@@ -12,10 +12,10 @@ async function main() {
   const silver = await MockERC20.deploy("MockSilver", "SILV", decimals, initialSupply);
   await silver.waitForDeployment();
 
-  const awRead = await ethers.getContractAt("IAssetWhitelistRead", CONTRACT_ADDRESSES.AssetWhitelist);
-  const awAdmin = await ethers.getContractAt("IAssetWhitelistAdmin", CONTRACT_ADDRESSES.AssetWhitelist);
-  const po = await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle);
-  const feeRouter = await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter);
+  const awRead = (await ethers.getContractAt("IAssetWhitelistRead", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+  const awAdmin = (await ethers.getContractAt("IAssetWhitelistAdmin", CONTRACT_ADDRESSES.AssetWhitelist)) as any;
+  const po = (await ethers.getContractAt("src/core/PriceOracle.sol:PriceOracle", CONTRACT_ADDRESSES.PriceOracle)) as any;
+  const feeRouter = (await ethers.getContractAt("src/Vault/FeeRouter.sol:FeeRouter", CONTRACT_ADDRESSES.FeeRouter)) as any;
   const acm = await ethers.getContractAt("AccessControlManager", CONTRACT_ADDRESSES.AccessControlManager);
 
   const ensureRole = async (role: string, who: string) => {
@@ -36,7 +36,7 @@ async function main() {
       await (await po.connect(deployer).configureAsset(tokenAddr, symbol.toLowerCase(), decimals, 3600)).wait();
     }
     const now = await ethers.provider.getBlockNumber();
-    await (await po.connect(deployer).updatePrice(tokenAddr, ethers.parseUnits(priceUsd, 8), now)).wait();
+    await (await po.connect(deployer).updatePrice(tokenAddr, ethers.parseUnits(priceUsd, decimals), now)).wait();
     if (!(await feeRouter.isTokenSupported(tokenAddr))) {
       await (await feeRouter.connect(deployer).addSupportedToken(tokenAddr)).wait();
     }

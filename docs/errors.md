@@ -45,12 +45,19 @@
 6. `GuaranteeAlreadyProcessed()`
 7. `GuaranteeNotActive()`
 8. `BorrowerCannotBeLender()`
+9. `BlocksOnlyCoordinator__TradeCloseRequiresZeroDebt(...)`
+10. `BlocksOnlyCoordinator__NotMatured(...)`
 
 处理规则：
 
 1. 前端应给出明确业务提示，不应默认提示“稍后重试”。
 2. 后端不应盲目重试同一命令。
 3. 运维无需按基础设施故障升级处理，除非该错误异常激增。
+
+补充说明：
+
+1. `BlocksOnlyCoordinator__TradeCloseRequiresZeroDebt(...)` 表示 blocks-only 订单还未还清，不能调用 `closeRepaidTradeBlocks(...)`；这是业务状态未满足，不是节点故障。
+2. `BlocksOnlyCoordinator__NotMatured(...)` 只约束 maturity-gated 的 `settleOrLiquidateBlocks(...)`，不约束 debt-free 的 trade-close 路径。
 
 ### 3.2 权限与配置错误
 
@@ -68,6 +75,7 @@
 5. `ModuleKeys__UnknownModuleKey(...)`
 6. `PriceUpdater__AssetNotConfigured()`
 7. `PriceOracle__AssetNotSupported()`
+8. `MissingRole()` when keeper 调用 legacy 清算入口（如 `SettlementManager.settleOrLiquidate(...)`）但缺少 `ACTION_LIQUIDATE`
 
 处理规则：
 
@@ -216,5 +224,12 @@
 2. Registry/角色/模块配置错误。
 3. 广播、确认、finality 口径。
 4. 缓存与镜像失败的补偿原则。
+
+## 8. Blocks-Only 补充口径
+
+blocks-only 当前需要额外统一下面两条错误解释：
+
+1. `closeRepaidTradeBlocks(...)` 失败且错误为 `BlocksOnlyCoordinator__TradeCloseRequiresZeroDebt(...)` 时，前后端应直接提示“订单仍有剩余债务”，不得提示“等待 maturity”。
+2. `settleOrLiquidateBlocks(...)` 失败且错误为 `BlocksOnlyCoordinator__NotMatured(...)` 时，只能说明 maturity-gated 收尾过早；若此时 `remainingDebt = 0`，调用方仍可改走 `closeRepaidTradeBlocks(...)`。
 
 更细粒度的模块专属错误可在后续版本中继续追加，但不得与本文件冲突。

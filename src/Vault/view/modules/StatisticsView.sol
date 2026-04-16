@@ -29,6 +29,8 @@ import { ViewVersioned } from "../ViewVersioned.sol";
  * - Guarantee amounts are tracked in raw token base units.
  */
 contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
+    uint8 private constant _SYSTEM_VALUATION_DECIMALS = 18;
+
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
     /// @notice Thrown when an incoming user stats version is not the expected next version.
     /// @dev Reverts when `incomingVersion != currentVersion + 1`. Used by {pushUserStatsUpdate} overloads that
@@ -44,8 +46,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Types ━━━━━━━━━━━━━━━*/
     /// @notice Per-user cached snapshot (kept compatible with legacy VaultStatistics for migration).
     struct UserSnapshot {
-        uint256 collateral;      // Collateral value (must match `debt` unit)
-        uint256 debt;            // Debt value (must match `collateral` unit)
+        uint256 collateral;      // Collateral value in the shared 18-decimal system valuation unit
+        uint256 debt;            // Debt value in the shared 18-decimal system valuation unit
         uint256 ltv;             // Loan-to-value (bps, 10_000 = 100%)
         uint256 healthFactor;    // Health factor (bps, 10_000 = 100%; max uint if debt==0 in VaultMath)
         uint256 blockNumber;     // Snapshot blockNumber (block.number)
@@ -54,8 +56,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @notice Global cached snapshot (kept compatible with legacy VaultStatistics for migration).
     struct GlobalSnapshot {
-        uint256 totalCollateral;       // Total collateral value
-        uint256 totalDebt;             // Total debt value
+        uint256 totalCollateral;       // Total collateral value in the shared 18-decimal system valuation unit
+        uint256 totalDebt;             // Total debt value in the shared 18-decimal system valuation unit
         uint256 averageLTV;            // Average LTV (bps, 10_000 = 100%) (currently best-effort / may be 0)
         uint256 averageHealthFactor;   // Average health factor (bps) (currently best-effort / may be 0)
         uint256 activeUsers;           // Active user count (position > 0)
@@ -543,10 +545,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *   requirements and enable deterministic off-chain replay/diagnostics.
      *
      * @param user User address.
-     * @param collateralIn Collateral value delta added (USD-8).
-     * @param collateralOut Collateral value delta removed (USD-8).
-     * @param borrow Debt value delta added (USD-8).
-     * @param repay Debt value delta removed (USD-8).
+    * @param collateralIn Collateral value delta added (18-decimal valuation unit).
+    * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
+    * @param borrow Debt value delta added (18-decimal valuation unit).
+    * @param repay Debt value delta removed (18-decimal valuation unit).
      */
     function pushUserStatsUpdate(
         address user,
@@ -571,10 +573,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Strict optimistic concurrency when nextVersion != 0.
      *
      * @param user User address.
-     * @param collateralIn Collateral value delta added (USD-8).
-     * @param collateralOut Collateral value delta removed (USD-8).
-     * @param borrow Debt value delta added (USD-8).
-     * @param repay Debt value delta removed (USD-8).
+    * @param collateralIn Collateral value delta added (18-decimal valuation unit).
+    * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
+    * @param borrow Debt value delta added (18-decimal valuation unit).
+    * @param repay Debt value delta removed (18-decimal valuation unit).
      * @param nextVersion Expected next version (must be current + 1).
      */
     function pushUserStatsUpdate(
@@ -603,10 +605,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *   this function emits `IdempotentRequestIgnored` and returns without writing.
      *
      * @param user User address.
-     * @param collateralIn Collateral value delta added (USD-8).
-     * @param collateralOut Collateral value delta removed (USD-8).
-     * @param borrow Debt value delta added (USD-8).
-     * @param repay Debt value delta removed (USD-8).
+    * @param collateralIn Collateral value delta added (18-decimal valuation unit).
+    * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
+    * @param borrow Debt value delta added (18-decimal valuation unit).
+    * @param repay Debt value delta removed (18-decimal valuation unit).
      * @param requestId Offchain idempotency key (bytes32(0) disables idempotency short-circuit).
      * @param seq Optional monotonic sequence (0 disables sequence enforcement).
      * @param nextVersion Expected next version (0 means auto-increment).
@@ -643,8 +645,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *   `(requestId, nextVersion)` can be made idempotent.
      *
      * @param user User address.
-     * @param collateralValue New authoritative total collateral value (USD-8).
-     * @param debtValue New authoritative total debt value (USD-8).
+    * @param collateralValue New authoritative total collateral value (18-decimal valuation unit).
+    * @param debtValue New authoritative total debt value (18-decimal valuation unit).
      * @param requestId Idempotency key (recommended non-zero).
      * @param seq Monotonic ordering sequence (recommended non-zero).
      * @param nextVersion Expected next version (must be current + 1).
@@ -658,6 +660,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint64 nextVersion
     ) external onlyValidRegistry onlyStatsPusherOrAdmin {
         _pushUserStatsSnapshot(user, collateralValue, debtValue, requestId, seq, nextVersion);
+    }
+
+    function valuationDecimals() external pure returns (uint8) {
+        return _SYSTEM_VALUATION_DECIMALS;
     }
 
     function _pushUserStatsUpdate(
@@ -1036,7 +1042,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         GlobalSnapshot memory g = _globalSnapshot;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_STATS_UPDATE,
-            abi.encode(user, version, requestId, seq, u, g)
+            abi.encode(user, version, requestId, seq, _SYSTEM_VALUATION_DECIMALS, u, g)
         );
     }
 

@@ -17,7 +17,7 @@ function runSmokeQuick() {
   const cmd = pnpmBin();
   const args = ["-s", "exec", "hardhat", "run", "scripts/tests/smoke-productionlike-local.ts", "--network", "localhost"];
 
-  const env = {
+  const env: Record<string, string | undefined> = {
     ...process.env,
     MODE: process.env.MODE ?? "dirty",
     RUN_DEPLOY: process.env.RUN_DEPLOY ?? "0",

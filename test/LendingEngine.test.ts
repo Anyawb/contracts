@@ -51,6 +51,10 @@ describe('LendingEngine – 贷款引擎测试', function () {
     await rewardManager.waitForDeployment();
     await registry.setModule(ModuleKeys.KEY_RM, await rewardManager.getAddress());
 
+    const rewardManagerCoreBorrowCheck = await (await ethers.getContractFactory('MockRewardManagerCoreBorrowCheck')).deploy();
+    await rewardManagerCoreBorrowCheck.waitForDeployment();
+    await registry.setModule(ModuleKeys.KEY_REWARD_MANAGER_CORE, await rewardManagerCoreBorrowCheck.getAddress());
+
     const feeRouter = await (await ethers.getContractFactory('MockFeeRouter')).deploy();
     await feeRouter.waitForDeployment();
     await registry.setModule(ModuleKeys.KEY_FR, await feeRouter.getAddress());
@@ -90,7 +94,21 @@ describe('LendingEngine – 贷款引擎测试', function () {
     await mockToken.transfer(bob.address, ethers.parseEther('1000'));
     await mockToken.transfer(charlie.address, ethers.parseEther('1000'));
 
-    return { lendingEngine, loanNFT, feeRouter, mockToken, rewardManager, pool, registry, acm, governance, alice, bob, charlie };
+    return {
+      lendingEngine,
+      loanNFT,
+      feeRouter,
+      mockToken,
+      rewardManager,
+      rewardManagerCoreBorrowCheck,
+      pool,
+      registry,
+      acm,
+      governance,
+      alice,
+      bob,
+      charlie,
+    };
   }
 
   describe('初始化测试', function () {
@@ -214,6 +232,70 @@ describe('LendingEngine – 贷款引擎测试', function () {
   });
 
   describe('集成测试', function () {
+    it('长期限准入应读取 RewardManagerCore 权威等级，而不是 RewardView 镜像', async function () {
+      const { lendingEngine, governance, alice, pool, mockToken, registry, rewardManagerCoreBorrowCheck } = await loadFixture(
+        deployFixture,
+      );
+
+      const unavailableView = await (await ethers.getContractFactory('MockRewardViewUnavailable')).deploy();
+      await unavailableView.waitForDeployment();
+      await registry.setModule(ModuleKeys.KEY_REWARD_VIEW, await unavailableView.getAddress());
+
+      const longTermOrder = {
+        principal: ethers.parseEther('100'),
+        rate: 500n,
+        term: 648000n,
+        borrower: alice.address,
+        lender: await pool.getAddress(),
+        asset: await mockToken.getAddress(),
+        startTimestamp: 0n,
+        maturity: 0n,
+        repaidAmount: 0n,
+      };
+
+      await rewardManagerCoreBorrowCheck.setUserLevelForBorrowCheck(alice.address, 3);
+      await expect(lendingEngine.connect(governance).createLoanOrder(longTermOrder)).to.be.revertedWithCustomError(
+        lendingEngine,
+        'LendingEngine__LevelTooLow',
+      );
+
+      await rewardManagerCoreBorrowCheck.setUserLevelForBorrowCheck(alice.address, 4);
+      await expect(lendingEngine.connect(governance).createLoanOrder(longTermOrder)).to.not.be.reverted;
+    });
+
+    it('RewardView 镜像被抬高时，仍应以 RewardManagerCore 权威等级拒绝 90/180/360 天期限', async function () {
+      const { lendingEngine, governance, alice, pool, mockToken, registry, rewardManagerCoreBorrowCheck } = await loadFixture(
+        deployFixture,
+      );
+
+      const mirror = await (await ethers.getContractFactory('MockRewardViewBorrowCheckMirror')).deploy();
+      await mirror.waitForDeployment();
+      await registry.setModule(ModuleKeys.KEY_REWARD_VIEW, await mirror.getAddress());
+      await mirror.setUserLevelForBorrowCheck(alice.address, 8);
+
+      await rewardManagerCoreBorrowCheck.setUserLevelForBorrowCheck(alice.address, 3);
+
+      const terms = [648000n, 1296000n, 2592000n];
+      for (const term of terms) {
+        const order = {
+          principal: ethers.parseEther('50'),
+          rate: 500n,
+          term,
+          borrower: alice.address,
+          lender: await pool.getAddress(),
+          asset: await mockToken.getAddress(),
+          startTimestamp: 0n,
+          maturity: 0n,
+          repaidAmount: 0n,
+        };
+
+        await expect(lendingEngine.connect(governance).createLoanOrder(order)).to.be.revertedWithCustomError(
+          lendingEngine,
+          'LendingEngine__LevelTooLow',
+        );
+      }
+    });
+
     it('应该正确设置匹配引擎角色', async function () {
       const { lendingEngine, acm, alice } = await loadFixture(deployFixture);
       await acm.grantRole(ACTION_ORDER_CREATE, alice.address);
@@ -225,9 +307,101 @@ describe('LendingEngine – 贷款引擎测试', function () {
 
     it('应该正确查询贷款订单信息', async function () {
       const { lendingEngine, governance } = await loadFixture(deployFixture);
-      const order = await lendingEngine.connect(governance).getLoanOrderForView(0);
-      expect(order.borrower).to.equal(ZERO_ADDRESS);
-      expect(order.principal).to.equal(0n);
+      await expect(
+        lendingEngine.connect(governance).getLoanOrderForView(0)
+      ).to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__InvalidOrder');
+    });
+
+    it('应该允许 Registry 中的 SettlementManager 读取最小订单视图而不额外授予 VIEW_SYSTEM_DATA', async function () {
+      const { lendingEngine, registry, alice } = await loadFixture(deployFixture);
+
+      await registry.setModule(ModuleKeys.KEY_SETTLEMENT_MANAGER, alice.address);
+
+      await expect(
+        lendingEngine.connect(alice).getLoanOrderForView(0)
+      ).to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__InvalidOrder');
+
+      await expect(
+        lendingEngine.connect(alice).getOrderTotalDueForView(0)
+      ).to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__InvalidOrder');
+    });
+
+    it('应该保证无效订单在两个 order-level view 接口上使用同一失败语义', async function () {
+      const { lendingEngine, governance, registry, alice } = await loadFixture(deployFixture);
+
+      await registry.setModule(ModuleKeys.KEY_SETTLEMENT_MANAGER, alice.address);
+
+      await expect(
+        lendingEngine.connect(governance).getLoanOrderForView(999999)
+      ).to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__InvalidOrder');
+      await expect(
+        lendingEngine.connect(governance).getOrderTotalDueForView(999999)
+      ).to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__InvalidOrder');
+
+      await expect(
+        lendingEngine.connect(alice).getLoanOrderForView(999999)
+      ).to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__InvalidOrder');
+      await expect(
+        lendingEngine.connect(alice).getOrderTotalDueForView(999999)
+      ).to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__InvalidOrder');
+    });
+
+    it('应该允许 Registry 中的 SettlementManager 调用 repay 而不额外授予 ACTION_REPAY', async function () {
+      const { lendingEngine, registry, alice } = await loadFixture(deployFixture);
+
+      await registry.setModule(ModuleKeys.KEY_SETTLEMENT_MANAGER, alice.address);
+
+      await expect(
+        lendingEngine.connect(alice).repay(0, ethers.parseEther('1'))
+      ).to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__InvalidOrder');
+    });
+
+    it('应该允许 SettlementManager 写入清算终态并通过 view 读取', async function () {
+      const { lendingEngine, registry, governance, alice, mockToken, pool } = await loadFixture(deployFixture);
+
+      await registry.setModule(ModuleKeys.KEY_SETTLEMENT_MANAGER, alice.address);
+
+      const order = {
+        principal: ethers.parseEther('100'),
+        rate: 500n,
+        term: 36000n,
+        borrower: governance.address,
+        lender: await pool.getAddress(),
+        asset: await mockToken.getAddress(),
+        startTimestamp: 0n,
+        maturity: 0n,
+        repaidAmount: 0n,
+      };
+
+      await lendingEngine.connect(governance).createLoanOrder(order);
+      await lendingEngine.connect(alice).markOrderLiquidationStatus(0n, 2);
+
+      expect(await lendingEngine.connect(governance).getOrderStatusForView(0n)).to.equal(2n);
+    });
+
+    it('应该在 Liquidated 终态下阻止 repay，而不是继续走金额路径', async function () {
+      const { lendingEngine, registry, governance, alice, mockToken, pool } = await loadFixture(deployFixture);
+
+      await registry.setModule(ModuleKeys.KEY_SETTLEMENT_MANAGER, alice.address);
+
+      const order = {
+        principal: ethers.parseEther('100'),
+        rate: 500n,
+        term: 36000n,
+        borrower: governance.address,
+        lender: await pool.getAddress(),
+        asset: await mockToken.getAddress(),
+        startTimestamp: 0n,
+        maturity: 0n,
+        repaidAmount: 0n,
+      };
+
+      await lendingEngine.connect(governance).createLoanOrder(order);
+      await lendingEngine.connect(alice).markOrderLiquidationStatus(0n, 2);
+
+      await expect(lendingEngine.connect(alice).repay(0n, ethers.parseEther('1')))
+        .to.be.revertedWithCustomError(lendingEngine, 'LendingEngine__RepayBlockedByOrderStatus')
+        .withArgs(2n);
     });
   });
 

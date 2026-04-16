@@ -12,6 +12,26 @@ function callBySignature(contract: unknown, signature: string) {
   return (...args: unknown[]) => (contract as { [k: string]: (...xs: unknown[]) => Promise<unknown> })[signature](...args);
 }
 
+const PUSH_FAILED_IFACE = new ethers.Interface([
+  'event RewardViewPushFailed(address indexed user, address indexed rewardView, bytes32 indexed op, bytes payload, bytes reason)',
+]);
+const REWARD_VIEW_UNAVAILABLE_HEX = ethers.hexlify(ethers.toUtf8Bytes('rewardView unavailable')).toLowerCase();
+const REWARD_VIEW_OP_USER_LEVEL = ethers.id('USER_LEVEL');
+
+function getRewardViewPushFailed(receipt: any, emitter: string) {
+  return (receipt?.logs ?? [])
+    .filter((log: any) => String(log.address ?? '').toLowerCase() === emitter.toLowerCase())
+    .map((log: any) => {
+      try {
+        const parsed = PUSH_FAILED_IFACE.parseLog(log);
+        return parsed?.args ?? null;
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
 describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)', function () {
   const SIG_ON_LOAN_EVENT_BY_ORDER = REWARD_ON_LOAN_EVENT_BY_ORDER_FULL_SIGNATURE;
 
@@ -112,7 +132,7 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     await rewardViewProxy.waitForDeployment();
     const rewardView: any = RewardView.attach(await rewardViewProxy.getAddress());
 
-    // LoanFlowView proxy (protocol USD-8 SSOT). RMCore reads best-effort.
+    // LoanFlowView proxy (protocol value SSOT). RMCore reads best-effort.
     const LoanFlowView = await ethers.getContractFactory('LoanFlowView');
     const loanFlowViewImpl: any = await LoanFlowView.deploy();
     await loanFlowViewImpl.waitForDeployment();
@@ -165,7 +185,7 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
     // Penalty SSOT moved to RewardAccrualManager: it attempts EasyToken.burn first, then falls back to penalty ledger.
     await easyToken.connect(governance).grantRole(await easyToken.BURNER_ROLE(), await rewardAccrualManager.getAddress());
 
-    return { easyToken, rewardManagerCore, rewardAccrualManager, rewardManager, rewardView, rewardConfig, earnConfig };
+    return { registry, easyToken, rewardManagerCore, rewardAccrualManager, rewardManager, rewardView, rewardConfig, earnConfig };
   }
 
   it('RewardManager write entry only allows OrderEngine (order-based)', async function () {
@@ -395,6 +415,38 @@ describe('RewardManager ↔ RewardManagerCore (architecture-aligned integration)
       rewardManager,
       'RewardManager__InvalidLevel',
     );
+  });
+
+  it('best-effort USER_LEVEL push failure emits RewardViewPushFailed and admin replay repairs RewardView cache', async function () {
+    const { registry, rewardManager, rewardManagerCore, rewardView } = await loadFixture(fixture);
+
+    const MockRewardViewUnavailable = await ethers.getContractFactory('MockRewardViewUnavailable');
+    const unavailableRewardView: any = await MockRewardViewUnavailable.deploy();
+    await unavailableRewardView.waitForDeployment();
+
+    await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('REWARD_VIEW')), await unavailableRewardView.getAddress());
+
+    const tx = await rewardManager.connect(governance).updateUserLevel(alice.address, 4);
+    const receipt = await tx.wait();
+
+    const events = getRewardViewPushFailed(receipt, await rewardManagerCore.getAddress());
+    expect(events).to.have.length(1);
+    expect(events[0].user).to.equal(alice.address);
+    expect(String(events[0].rewardView)).to.equal(await unavailableRewardView.getAddress());
+    expect(String(events[0].op).toLowerCase()).to.equal(REWARD_VIEW_OP_USER_LEVEL.toLowerCase());
+    expect(ethers.hexlify(events[0].reason).toLowerCase()).to.equal(REWARD_VIEW_UNAVAILABLE_HEX);
+
+    const [, , staleLevel] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
+    expect(staleLevel).to.equal(0n);
+
+    expect(await rewardView.connect(orderEngine).getUserLevelForBorrowCheck(alice.address)).to.equal(0n);
+
+    await rewardView.connect(governance).retryPushUserLevel(alice.address, 4, BigInt(receipt!.blockNumber));
+
+    const [, , repairedLevel, lastActivity] = await rewardView.connect(alice).getUserRewardSummaryWithMeta(alice.address);
+    expect(repairedLevel).to.equal(4n);
+    expect(lastActivity).to.equal(BigInt(receipt!.blockNumber));
+    expect(await rewardView.connect(orderEngine).getUserLevelForBorrowCheck(alice.address)).to.equal(4n);
   });
 });
 

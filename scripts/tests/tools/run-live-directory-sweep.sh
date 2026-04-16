@@ -2,19 +2,28 @@
 
 setopt errexit pipefail
 
+NETWORK_NAME="${LIVE_TEST_NETWORK:-}"
+if [[ -z "$NETWORK_NAME" ]]; then
+  echo "run-live-directory-sweep: LIVE_TEST_NETWORK is required" >&2
+  exit 64
+fi
+
 RUN_TS="$(date +%Y%m%d%H%M%S)"
 RUN_DIR="scripts/tests/logs/manual-live-directory-sweep-${RUN_TS}"
 mkdir -p "$RUN_DIR"
+
+pnpm -s ts-node --project ./tsconfig.scripts.json scripts/tests/tools/shared/network-profile.ts env --network "$NETWORK_NAME" > "$RUN_DIR/network-profile.env"
 
 cleanup() {
   set +e
   if [[ -f "$RUN_DIR/fresh.env" ]]; then
     set -a
     source .env
+    source "$RUN_DIR/network-profile.env"
     source "$RUN_DIR/fresh.env"
     set +a
     export LIVE_FRESH_BORROWER_STATE_FILE="$PWD/$RUN_DIR/fresh-borrowers.json"
-    pnpm -s exec hardhat run scripts/tests/live-test/sweep-fresh-borrowers.ts --network arbitrumSepolia \
+    pnpm -s exec hardhat run "$LIVE_SWEEP_SCRIPT" --network "$LIVE_SWEEP_NETWORK" \
       | tee "$RUN_DIR/99-sweep.log"
   fi
 }
@@ -35,20 +44,33 @@ NODE
 
 set -a
 source .env
+source "$RUN_DIR/network-profile.env"
 source "$RUN_DIR/fresh.env"
 set +a
 
-export DEPLOY_OUTPUT_FILE="${DEPLOY_OUTPUT_FILE:-scripts/deployments/arbitrum-sepolia.mock-suite.json}"
-export LIVE_USE_MOCK_ASSET_PACK="${LIVE_USE_MOCK_ASSET_PACK:-1}"
-export LIVE_PRICE_MODE="${LIVE_PRICE_MODE:-bootstrap}"
-export MOCK_ASSET_PACK_OUTPUT="${MOCK_ASSET_PACK_OUTPUT:-deployments/mock-assets.arbitrum-sepolia.json}"
-export ASSETS_FILE="${ASSETS_FILE:-deployments/assets.arbitrum-sepolia.mock.json}"
-export REGISTRY_ADDRESS="${REGISTRY_ADDRESS:-$(node -e 'process.stdout.write(require("./scripts/deployments/arbitrum-sepolia.mock-suite.json").Registry)')}"
-export SETTLEMENT_TOKEN_ADDRESS="${SETTLEMENT_TOKEN_ADDRESS:-$(node -e 'process.stdout.write(require("./deployments/mock-assets.arbitrum-sepolia.json").settlementToken)')}"
-export SETTLEMENT_TOKEN_DECIMALS="${SETTLEMENT_TOKEN_DECIMALS:-$(node -e 'const m=require("./deployments/mock-assets.arbitrum-sepolia.json"); process.stdout.write(String(m.settlementTokenDecimals ?? m.settlementTokenMeta?.decimals ?? 6))')}"
-export ALLOW_LIQUIDATION_MANAGER_PAUSE="${ALLOW_LIQUIDATION_MANAGER_PAUSE:-1}"
-export ALLOW_DYNAMIC_FEE_WRITE="${ALLOW_DYNAMIC_FEE_WRITE:-1}"
-export LIVE_RUNNER_NETWORK_MAX_ATTEMPTS="${LIVE_RUNNER_NETWORK_MAX_ATTEMPTS:-2}"
+export DEPLOY_OUTPUT_FILE="${DEPLOY_OUTPUT_FILE}"
+export LIVE_USE_MOCK_ASSET_PACK="${LIVE_USE_MOCK_ASSET_PACK}"
+export LIVE_PRICE_MODE="${LIVE_PRICE_MODE}"
+export MOCK_ASSET_PACK_OUTPUT="${MOCK_ASSET_PACK_OUTPUT:-}"
+export ASSETS_FILE="${ASSETS_FILE}"
+export REGISTRY_ADDRESS="${REGISTRY_ADDRESS:-}"
+export SETTLEMENT_TOKEN_ADDRESS="${SETTLEMENT_TOKEN_ADDRESS:-}"
+export SETTLEMENT_TOKEN_DECIMALS="${SETTLEMENT_TOKEN_DECIMALS:-}"
+export ALLOW_LIQUIDATION_MANAGER_PAUSE="${ALLOW_LIQUIDATION_MANAGER_PAUSE}"
+export ALLOW_DYNAMIC_FEE_WRITE="${ALLOW_DYNAMIC_FEE_WRITE}"
+export LIVE_RUNNER_NETWORK_MAX_ATTEMPTS="${LIVE_RUNNER_NETWORK_MAX_ATTEMPTS}"
+
+run_network_case() {
+  local label="$1"
+  local case_name="$2"
+  run_step "$label" pnpm -s exec hardhat run "scripts/tests/live-test/networks/${LIVE_PROFILE_SLUG}/${case_name}.ts" --network "$LIVE_PROFILE_NETWORK"
+}
+
+run_shared_case() {
+  local label="$1"
+  local file="$2"
+  run_step "$label" pnpm -s exec hardhat run "$file" --network "$LIVE_PROFILE_NETWORK"
+}
 
 is_retryable_network_failure() {
   local logfile="$1"
@@ -76,14 +98,28 @@ run_step() {
   done
 }
 
-run_step "00-view-facade-gate" pnpm -s exec hardhat run scripts/tests/live-test/live-view-facade-gate-arbitrum-sepolia.ts --network arbitrumSepolia
-run_step "01-fee-prepaid-gate" pnpm -s exec hardhat run scripts/tests/live-test/live-fee-prepaid-gate-arbitrum-sepolia.ts --network arbitrumSepolia
-run_step "02-fee-remaining-gate" pnpm -s exec hardhat run scripts/tests/live-test/live-fee-remaining-gate-arbitrum-sepolia.ts --network arbitrumSepolia
-run_step "03-fee-dynamic-gate" pnpm -s exec hardhat run scripts/tests/live-test/live-fee-dynamic-gate-arbitrum-sepolia.ts --network arbitrumSepolia
-run_step "04-ignite-minimal" pnpm -s exec hardhat run scripts/tests/live-test/live-ignite-minimal-arbitrum-sepolia.ts --network arbitrumSepolia
-run_step "05-prime-viewcache" pnpm -s exec hardhat run scripts/tests/live-test/live-prime-viewcache-arbitrum-sepolia.ts --network arbitrumSepolia
-run_step "06-read-pressure" pnpm -s exec hardhat run scripts/tests/live-test/live-read-pressure.ts --network arbitrumSepolia
-run_step "07-warmup" pnpm -s exec hardhat run scripts/tests/live-test/live-warmup-arbitrum-sepolia.ts --network arbitrumSepolia
-run_step "08-smoke-multi-stablecoin" pnpm -s run test:smoke:multi-stablecoin:arbitrum-sepolia-live
+if [[ "$LIVE_PROFILE_NETWORK" == "bnbTestnet" ]]; then
+  run_network_case "00-preflight" "live-preflight"
+  run_network_case "01-settlement-role-bridge" "live-settlement-role-bridge"
+  run_network_case "02-warmup" "live-warmup"
+  run_network_case "03-platform-baseline" "live-platform-baseline"
+  run_network_case "04-guarantee-baseline" "live-guarantee-baseline"
+  run_network_case "05-release-gates-layer-a" "live-release-gates"
+  run_network_case "06-release-gates-layer-b" "live-release-gates-layer-b"
+  run_network_case "07-blocks-only-state-machine" "live-blocks-only-liquidation"
+  echo "RUN_DIR=$RUN_DIR"
+  exit 0
+fi
+
+run_network_case "00-view-facade-gate" "live-view-facade-gate"
+run_network_case "01-fee-prepaid-gate" "live-fee-prepaid-gate"
+run_network_case "02-fee-remaining-gate" "live-fee-remaining-gate"
+run_network_case "03-fee-dynamic-gate" "live-fee-dynamic-gate"
+run_network_case "04-ignite-minimal" "live-ignite-minimal"
+run_network_case "05-prime-viewcache" "live-prime-viewcache"
+run_shared_case "06-read-pressure" "scripts/tests/live-test/networks/arbitrum-sepolia/live-read-pressure.ts"
+run_network_case "07-settlement-role-bridge" "live-settlement-role-bridge"
+run_network_case "08-warmup" "live-warmup"
+run_network_case "09-smoke-multi-stablecoin" "live-smoke-multi-stablecoin"
 
 echo "RUN_DIR=$RUN_DIR"

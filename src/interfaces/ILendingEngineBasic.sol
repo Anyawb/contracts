@@ -88,8 +88,8 @@ interface ILendingEngineBasic is ILendingEngineDebtRead, ILendingEngineDebtWrite
         address asset
     ) external view returns (uint256 totalDebt);
 
-     /**
-      * @notice Get user's total debt value (USD-8 value).
+    /**
+    * @notice Get user's total debt value in the normalized system valuation unit.
       * @dev Reverts if:
           *      - see {ILendingEngineDebtRead.getUserTotalDebtValue}
       *
@@ -97,21 +97,51 @@ interface ILendingEngineBasic is ILendingEngineDebtRead, ILendingEngineDebtWrite
           * - Compatibility alias for the narrow debt-read surface.
       *
       * @param user User address.
-      * @return totalValue Debt value in USD-8.
+    * @return totalValue Debt value normalized to 18 decimals.
       */
     function getUserTotalDebtValue(
         address user
     ) external view returns (uint256 totalValue);
 
-     /**
-      * @notice Get system total debt value (USD-8 value).
+    /**
+     * @notice Get user's best-effort total debt value in the normalized system valuation unit.
+     * @dev Reverts if:
+     *      - see {ILendingEngineDebtRead.getUserTotalDebtValueBestEffort}
+     *
+     * Security:
+     *      - Compatibility alias for the narrow debt-read surface.
+     *
+     * @param user User address.
+     * @return totalValue Debt value normalized to 18 decimals.
+     */
+    function getUserTotalDebtValueBestEffort(
+        address user
+    ) external view returns (uint256 totalValue);
+
+    /**
+     * @notice Get user's strict total debt value in the normalized system valuation unit.
+     * @dev Reverts if:
+     *      - see {ILendingEngineDebtRead.getUserTotalDebtValueStrict}
+     *
+     * Security:
+     *      - Compatibility alias for the narrow debt-read surface.
+     *
+     * @param user User address.
+     * @return totalValue Debt value normalized to 18 decimals.
+     */
+    function getUserTotalDebtValueStrict(
+        address user
+    ) external view returns (uint256 totalValue);
+
+    /**
+    * @notice Get system total debt value in the normalized system valuation unit.
       * @dev Reverts if:
           *      - see {ILendingEngineDebtRead.getTotalDebtValue}
       *
       * Security:
           * - Compatibility alias for the narrow debt-read surface.
       *
-      * @return totalValue Debt value in USD-8.
+    * @return totalValue Debt value normalized to 18 decimals.
       */
     function getTotalDebtValue() external view returns (uint256 totalValue);
 
@@ -187,7 +217,7 @@ interface ILendingEngineBasic is ILendingEngineDebtRead, ILendingEngineDebtWrite
     ) external view returns (uint256 reducibleAmount);
 
     /**
-     * @notice Calculate debt value for a user on an asset (USD-8 value).
+    * @notice Calculate debt value for a user on an asset in the normalized system valuation unit.
      * @dev Reverts if:
         *      - see implementation-specific valuation/oracle requirements
      *
@@ -196,9 +226,43 @@ interface ILendingEngineBasic is ILendingEngineDebtRead, ILendingEngineDebtWrite
      *
      * @param user User address.
      * @param asset Debt asset address.
-     * @return value Debt value in USD-8.
+    * @return value Debt value normalized to 18 decimals.
      */
     function calculateDebtValue(
+        address user,
+        address asset
+    ) external view returns (uint256 value);
+
+    /**
+     * @notice Calculate best-effort debt value for a user on an asset in the normalized system valuation unit.
+     * @dev Reverts if:
+     *      - see {ILendingEngineDebtRead.calculateDebtValueBestEffort}
+     *
+     * Security:
+     *      - Read-only helper retained for compatibility and non-decision consumers.
+     *
+     * @param user User address.
+     * @param asset Debt asset address.
+     * @return value Debt value normalized to 18 decimals.
+     */
+    function calculateDebtValueBestEffort(
+        address user,
+        address asset
+    ) external view returns (uint256 value);
+
+    /**
+     * @notice Calculate strict debt value for a user on an asset in the normalized system valuation unit.
+     * @dev Reverts if:
+     *      - see {ILendingEngineDebtRead.calculateDebtValueStrict}
+     *
+     * Security:
+     *      - Read-only helper for automated fail-closed decisions.
+     *
+     * @param user User address.
+     * @param asset Debt asset address.
+     * @return value Debt value normalized to 18 decimals.
+     */
+    function calculateDebtValueStrict(
         address user,
         address asset
     ) external view returns (uint256 value);

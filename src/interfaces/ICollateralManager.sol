@@ -11,8 +11,8 @@ pragma solidity ^0.8.20;
  * Security:
  * - User-path writes are typically routed via VaultCore -> VaultRouter -> CollateralManager (onlyVaultRouter)
  * - Seizure/exit paths are typically role-gated (e.g. ACTION_LIQUIDATE) and/or restricted callers.
- * - Blocks-only flows may rely on the implementation's unified exit path to release collateral back to the borrower
- *   after debt-free settlement.
+ * - Blocks-only flows may rely on the implementation's unified exit path to stage bound collateral into
+ *   product custody at match time and to release it after debt-free settlement.
  */
 interface ICollateralManager {
     /**
@@ -73,7 +73,8 @@ interface ICollateralManager {
      * - If `receiver == user`, this is a user withdraw or settlement-release path.
      * - Implementations may allow VaultRouter, SettlementManager, and BlocksOnlyCoordinator on the borrower-release
      *   path while still restricting third-party receivers.
-     * - If `receiver != user`, this is a seizure/liquidation path (typically role-gated).
+    * - If `receiver != user`, this is usually a seizure/liquidation path, but the blocks-only coordinator may also
+    *   use it to stage order-bound collateral into its own custody before trade close or maturity delivery.
      *
      * @param user User whose collateral balance is reduced
      * @param asset Collateral asset address

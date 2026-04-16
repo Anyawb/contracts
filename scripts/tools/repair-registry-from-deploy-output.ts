@@ -169,7 +169,7 @@ function resolveDeployFile(): string {
   if (explicit) {
     return path.isAbsolute(explicit)
       ? explicit
-      : path.resolve(__dirname, "..", "deployments", explicit);
+      : path.resolve(process.cwd(), explicit);
   }
   return path.resolve(__dirname, "..", "deployments", "arbitrum-sepolia.mock-suite.json");
 }

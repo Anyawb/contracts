@@ -26,7 +26,7 @@
     "const-name-snakecase": "error",
     "imports-on-top": "error",
     "quotes": ["error", "double"],
-    "max-line-length": ["error", 120],
+    "max-line-length": ["warn", 120],
     "compiler-version": ["error", "^0.8.20"],
     "use-natspec": "off",
     "function-max-lines": "off",

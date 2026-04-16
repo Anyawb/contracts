@@ -40,6 +40,7 @@ interface IStatisticsPushManagerMinimal {
  * - This contract holds real ERC20 collateral.
  * - User-path writes route VaultCore -> VaultRouter -> CollateralManager.
  * - Seizure paths remain role-gated by ACTION_LIQUIDATE at the ledger layer.
+ * - Blocks-only order finalization may stage bound collateral into the registered BlocksOnlyCoordinator custody.
  * - View and cache pushes are best-effort and must not block ledger writes.
  */
 contract CollateralManager is
@@ -209,8 +210,8 @@ contract CollateralManager is
 
     /// @notice Allow VaultRouter, LiquidationManager, SettlementManager, or BlocksOnlyCoordinator to perform
     ///         collateral exits.
-    /// @dev SettlementManager and BlocksOnlyCoordinator may return collateral to the borrower after debt-free
-    ///      settlement,
+    /// @dev SettlementManager may return collateral to the borrower after debt-free settlement.
+    ///      BlocksOnlyCoordinator may either stage bound collateral into product custody or return it to the borrower,
     ///      while LiquidationManager remains the seizure executor for liquidation paths.
     modifier onlyAuthorizedCollateralExitCaller() {
         if (_registryAddr == address(0))
@@ -448,13 +449,15 @@ contract CollateralManager is
      *      - receiver == address(0) (CollateralManager__ZeroAddress)
      *      - receiver == user and caller is not VaultRouter, SettlementManager, or BlocksOnlyCoordinator
      *        (CollateralManager__UnauthorizedAccess)
-     *      - receiver != user and caller lacks ACTION_LIQUIDATE
+    *      - receiver != user and caller lacks ACTION_LIQUIDATE, except for the registered BlocksOnlyCoordinator
+    *        staging collateral into its own custody
      *      - user, asset, amount, balance, or token-transfer checks fail in `_withdrawCollateralTo`
      *
      * Security:
      * - Non-reentrant collateral exit point shared by withdrawal, settlement, and seizure flows.
-     * - BlocksOnlyCoordinator access is limited to returning collateral to the borrower for blocks-only repay or
-     *   maturity settlement flows; it does not bypass liquidation role checks for third-party receivers.
+    * - BlocksOnlyCoordinator access is limited to staging order-bound collateral into coordinator custody during
+    *   match finalization or returning collateral to the borrower after debt-free close; it does not bypass
+    *   liquidation role checks for arbitrary third-party receivers.
      *
      * @param user Collateral owner address.
      * @param asset Collateral asset address.
@@ -471,7 +474,7 @@ contract CollateralManager is
         // If receiver == user, only VaultRouter, SettlementManager, or BlocksOnlyCoordinator may call:
         // - VaultRouter: user-initiated withdraw
         // - SettlementManager: automatic collateral release after settle/repay
-        // - BlocksOnlyCoordinator: blocks-only product-native repay/maturity settlement
+        // - BlocksOnlyCoordinator: blocks-only product-native repay / debt-free trade-close / maturity settlement
         address vaultRouter = _resolveVaultRouterAddr();
         address settlementManager = _resolveSettlementManagerAddr();
         address blocksOnlyCoordinator = _resolveBlocksOnlyCoordinatorAddr();
@@ -483,9 +486,15 @@ contract CollateralManager is
         ) {
             revert CollateralManager__UnauthorizedAccess();
         }
-        // Seizure path must be role-gated at the ledger layer (Architecture-Guide SSOT).
+        // Seizure path must be role-gated at the ledger layer (Architecture-Guide SSOT), except for the registered
+        // BlocksOnlyCoordinator staging already-bound collateral into its own custody.
         if (receiver != user) {
-            _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
+            bool isBlocksOnlyCustodyStage =
+                msg.sender == blocksOnlyCoordinator &&
+                receiver == blocksOnlyCoordinator;
+            if (!isBlocksOnlyCustodyStage) {
+                _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
+            }
         }
         _withdrawCollateralTo(user, asset, amount, receiver);
     }

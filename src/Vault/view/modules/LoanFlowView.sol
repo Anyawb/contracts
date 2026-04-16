@@ -16,9 +16,9 @@ import { ViewVersioned } from "../ViewVersioned.sol";
 
 /**
  * @title LoanFlowView
- * @notice View-cache for protocol loan flow statistics (borrow/repay volumes) in USD-8 SSOT.
+ * @notice View-cache for protocol loan flow statistics (borrow/repay volumes) in the shared 18-decimal system valuation unit.
  * @dev Architecture SSOT:
- * - Cross-asset aggregates MUST be expressed in USD-8 value (see `docs/Units-And-Conversions-SSOT.md`).
+ * - Cross-asset aggregates MUST be expressed in the shared 18-decimal system valuation unit.
  * - Writes MUST be single-entry orchestrated (Scheme B) via `KEY_LOAN_FLOW_PUSH_MANAGER` (best-effort, retryable).
  *
  * Security:
@@ -49,20 +49,21 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     address private _registryAddr;
 
-    // Per-user volumes (USD-8).
-    mapping(address => uint256) private _borrowVolumeUsd8;
-    mapping(address => uint256) private _repayVolumeUsd8;
+    // Per-user volumes in the shared 18-decimal system valuation unit.
+    mapping(address => uint256) private _borrowVolumeValue;
+    mapping(address => uint256) private _repayVolumeValue;
 
     // Per-user metadata (packed) + last applied requestId.
     mapping(address => uint256) private _userMetaPacked;
     mapping(address => bytes32) private _lastAppliedRequestId;
 
-    // Global volumes (USD-8).
-    uint256 private _totalBorrowVolumeUsd8;
-    uint256 private _totalRepayVolumeUsd8;
+    // Global volumes in the shared 18-decimal system valuation unit.
+    uint256 private _totalBorrowVolumeValue;
+    uint256 private _totalRepayVolumeValue;
     uint256 private _globalMetaPacked;
 
     uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION_BLOCKS;
+    uint8 private constant _SYSTEM_VALUATION_DECIMALS = 18;
 
     /*━━━━━━━━━━━━━━━ Packing constants ━━━━━━━━━━━━━━━*/
     // userMetaPacked layout (low -> high bits):
@@ -167,7 +168,7 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Push APIs (single-entry orchestrated) ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Push a per-user loan-flow delta (USD-8) into the cache with concurrency metadata.
+    * @notice Push a per-user loan-flow delta in the shared 18-decimal valuation unit into the cache with concurrency metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not `Registry[KEY_LOAN_FLOW_PUSH_MANAGER]` and lacks ACTION_ADMIN (MissingRole)
@@ -180,12 +181,12 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Idempotent replay (no revert): if (nextVersion == currentVersion) AND (requestId matches lastAppliedRequestId),
      *   emits {IdempotentRequestIgnored} and returns without writing.
      *
-     * Units (SSOT):
-     * - All USD values are USD-8 (e.g. $1.00 = 100000000).
+    * Units (SSOT):
+    * - All flow values use the shared 18-decimal system valuation unit.
      *
      * @param user Target user address
-     * @param borrowDeltaUsd8 Borrow flow delta to add (USD-8)
-     * @param repayDeltaUsd8 Repay flow delta to add (USD-8)
+    * @param borrowDeltaValue Borrow flow delta to add (18-decimal valuation unit)
+    * @param repayDeltaValue Repay flow delta to add (18-decimal valuation unit)
      * @param borrowCountDelta Borrow event count delta to add (unitless; typically 1 for a borrow event)
      * @param repayCountDelta Repay event count delta to add (unitless; typically 1 for a repay event)
      * @param requestId Idempotency key for replay detection (recommended non-zero)
@@ -194,8 +195,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function pushUserLoanFlowUpdate(
         address user,
-        uint256 borrowDeltaUsd8,
-        uint256 repayDeltaUsd8,
+        uint256 borrowDeltaValue,
+        uint256 repayDeltaValue,
         uint64 borrowCountDelta,
         uint64 repayCountDelta,
         bytes32 requestId,
@@ -229,10 +230,10 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
 
         // Update user aggregates.
-        if (borrowDeltaUsd8 != 0) _borrowVolumeUsd8[user] += borrowDeltaUsd8;
-        if (repayDeltaUsd8 != 0) _repayVolumeUsd8[user] += repayDeltaUsd8;
+        if (borrowDeltaValue != 0) _borrowVolumeValue[user] += borrowDeltaValue;
+        if (repayDeltaValue != 0) _repayVolumeValue[user] += repayDeltaValue;
 
-        // Count deltas are explicit to preserve counting semantics even when USD-8 delta rounds to 0.
+        // Count deltas are explicit to preserve counting semantics even when value delta rounds to 0.
         borrowCount = uint48(uint256(borrowCount) + uint256(borrowCountDelta));
         repayCount = uint48(uint256(repayCount) + uint256(repayCountDelta));
 
@@ -242,14 +243,23 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
             _lastAppliedRequestId[user] = requestId;
         }
 
-        // Update global aggregates (USD-8 SSOT).
-        if (borrowDeltaUsd8 != 0) _totalBorrowVolumeUsd8 += borrowDeltaUsd8;
-        if (repayDeltaUsd8 != 0) _totalRepayVolumeUsd8 += repayDeltaUsd8;
+        // Update global aggregates in the shared 18-decimal valuation unit.
+        if (borrowDeltaValue != 0) _totalBorrowVolumeValue += borrowDeltaValue;
+        if (repayDeltaValue != 0) _totalRepayVolumeValue += repayDeltaValue;
         _updateGlobalCountsAndBlock(borrowCountDelta, repayCountDelta, updateBlock);
 
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_FLOW_UPDATED,
-            abi.encode(user, borrowDeltaUsd8, repayDeltaUsd8, newVersion, requestId, seq, block.number)
+            abi.encode(
+                user,
+                borrowDeltaValue,
+                repayDeltaValue,
+                _SYSTEM_VALUATION_DECIMALS,
+                newVersion,
+                requestId,
+                seq,
+                block.number
+            )
         );
     }
 
@@ -265,8 +275,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     * - View-only.
      *
      * @param user Target user address
-     * @return borrowVolumeUsd8 Total borrow volume (USD-8)
-     * @return repayVolumeUsd8 Total repay volume (USD-8)
+    * @return borrowVolumeValue Total borrow volume (18-decimal valuation unit)
+    * @return repayVolumeValue Total repay volume (18-decimal valuation unit)
      * @return borrowCount Total borrow event count (unitless)
      * @return repayCount Total repay event count (unitless)
      * @return version Current optimistic concurrency version
@@ -281,8 +291,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyValidRegistry
         onlyUserOrViewer(user)
         returns (
-            uint256 borrowVolumeUsd8,
-            uint256 repayVolumeUsd8,
+            uint256 borrowVolumeValue,
+            uint256 repayVolumeValue,
             uint256 borrowCount,
             uint256 repayCount,
             uint64 version,
@@ -292,8 +302,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
             uint256 blockNumber
         )
     {
-        borrowVolumeUsd8 = _borrowVolumeUsd8[user];
-        repayVolumeUsd8 = _repayVolumeUsd8[user];
+        borrowVolumeValue = _borrowVolumeValue[user];
+        repayVolumeValue = _repayVolumeValue[user];
         uint48 bc;
         uint48 rc;
         uint32 lastBlock;
@@ -313,8 +323,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
     * - View-only.
      *
-     * @return totalBorrowVolumeUsd8 Total borrow volume (USD-8)
-     * @return totalRepayVolumeUsd8 Total repay volume (USD-8)
+    * @return totalBorrowVolumeValue Total borrow volume (18-decimal valuation unit)
+    * @return totalRepayVolumeValue Total repay volume (18-decimal valuation unit)
      * @return totalBorrowCount Total borrow event count (unitless)
      * @return totalRepayCount Total repay event count (unitless)
      * @return isValid Cache validity flag (TTL heuristic; see ViewConstants.CACHE_DURATION_BLOCKS)
@@ -325,16 +335,16 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         returns (
-            uint256 totalBorrowVolumeUsd8,
-            uint256 totalRepayVolumeUsd8,
+            uint256 totalBorrowVolumeValue,
+            uint256 totalRepayVolumeValue,
             uint256 totalBorrowCount,
             uint256 totalRepayCount,
             bool isValid,
             uint256 blockNumber
         )
     {
-        totalBorrowVolumeUsd8 = _totalBorrowVolumeUsd8;
-        totalRepayVolumeUsd8 = _totalRepayVolumeUsd8;
+        totalBorrowVolumeValue = _totalBorrowVolumeValue;
+        totalRepayVolumeValue = _totalRepayVolumeValue;
         (uint48 bc, uint48 rc, uint32 lastBlock) = _unpackGlobalMeta(_globalMetaPacked);
         totalBorrowCount = uint256(bc);
         totalRepayCount = uint256(rc);
@@ -343,7 +353,7 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-     * @notice Internal read helper for RewardManagerCore: borrow-only flow (USD-8) + cache validity meta.
+    * @notice Internal read helper for RewardManagerCore: borrow-only flow in the shared 18-decimal valuation unit + cache validity meta.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not `Registry[KEY_REWARD_MANAGER_CORE]` and lacks ACTION_ADMIN (MissingRole)
@@ -351,11 +361,11 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
     * - View-only, module-gated.
      *
-     * Units (SSOT):
-     * - USD-8 (e.g. $1.00 = 100000000)
+    * Units (SSOT):
+    * - Shared 18-decimal system valuation unit.
      *
      * @param user Target user address
-     * @return borrowVolumeUsd8 Total borrow volume (USD-8)
+    * @return borrowVolumeValue Total borrow volume (18-decimal valuation unit)
      * @return borrowCount Total borrow event count (unitless)
      * @return isValid Cache validity flag (TTL heuristic)
      * @return blockNumber Last cache update blockNumber (block.number; packed as uint32)
@@ -365,13 +375,17 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyRewardManagerCoreOrAdmin
-        returns (uint256 borrowVolumeUsd8, uint256 borrowCount, bool isValid, uint256 blockNumber)
+        returns (uint256 borrowVolumeValue, uint256 borrowCount, bool isValid, uint256 blockNumber)
     {
-        borrowVolumeUsd8 = _borrowVolumeUsd8[user];
+        borrowVolumeValue = _borrowVolumeValue[user];
         (, , uint48 bc, , uint32 lastBlock) = _unpackUserMeta(_userMetaPacked[user]);
         borrowCount = uint256(bc);
         blockNumber = uint256(lastBlock);
         isValid = _isValid(lastBlock);
+    }
+
+    function valuationDecimals() external pure returns (uint8) {
+        return _SYSTEM_VALUATION_DECIMALS;
     }
 
     /**

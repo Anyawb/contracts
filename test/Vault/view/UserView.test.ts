@@ -1,15 +1,6 @@
 import { expect } from 'chai';
 import { ethers, upgrades } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-toolbox/network-helpers';
-import type {
-  UserView,
-  MockRegistry,
-  MockAccessControlManager,
-  MockPositionViewBatch,
-  MockHealthViewBatch,
-  MockPreviewView,
-  MockERC20
-} from '../../../types';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const KEY_POSITION_VIEW = ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW'));
@@ -25,20 +16,20 @@ describe('UserView', function () {
     const [admin, user, other] = await ethers.getSigners();
 
     const RegistryF = await ethers.getContractFactory('MockRegistry');
-    const registry = (await RegistryF.deploy()) as unknown as MockRegistry;
+    const registry = (await RegistryF.deploy()) as any;
 
     const ACMF = await ethers.getContractFactory('MockAccessControlManager');
-    const acm = (await ACMF.deploy()) as unknown as MockAccessControlManager;
+    const acm = (await ACMF.deploy()) as any;
     await acm.grantRole(ACTION_ADMIN, admin.address);
 
     const PositionF = await ethers.getContractFactory('MockPositionViewBatch');
-    const position = (await PositionF.deploy()) as unknown as MockPositionViewBatch;
+    const position = (await PositionF.deploy()) as any;
 
     const HealthF = await ethers.getContractFactory('MockHealthViewBatch');
-    const health = (await HealthF.deploy()) as unknown as MockHealthViewBatch;
+    const health = (await HealthF.deploy()) as any;
 
     const PreviewF = await ethers.getContractFactory('MockPreviewView');
-    const preview = (await PreviewF.deploy()) as unknown as MockPreviewView;
+    const preview = (await PreviewF.deploy()) as any;
 
     const StatsF = await ethers.getContractFactory('MockStatisticsViewUserSnapshot');
     const stats = await StatsF.deploy();
@@ -49,7 +40,7 @@ describe('UserView', function () {
       'TEST',
       18,
       ethers.parseUnits('1000000', 18)
-    )) as unknown as MockERC20;
+    )) as any;
 
     const tokenAddr = await token.getAddress();
     await position.setPosition(user.address, tokenAddr, ethers.parseUnits('100', 18), ethers.parseUnits('40', 18));
@@ -67,7 +58,7 @@ describe('UserView', function () {
     await registry.setModule(KEY_SETTLEMENT_TOKEN, tokenAddr);
 
     const UserViewF = await ethers.getContractFactory('UserView');
-    const userView = (await upgrades.deployProxy(UserViewF, [await registry.getAddress()])) as unknown as UserView;
+    const userView = (await upgrades.deployProxy(UserViewF, [await registry.getAddress()])) as any;
 
     return { admin, user, other, registry, acm, position, health, preview, token, userView, stats };
   }
@@ -257,7 +248,7 @@ describe('UserView', function () {
       const writable = funcFragments.filter(
         (f: any) => !['view', 'pure'].includes(String(f.stateMutability))
       );
-      const writableNames = Array.from(new Set(writable.map((f: any) => f.name)));
+      const writableNames = Array.from(new Set(writable.map((f: any) => f.name))) as string[];
 
       const allowed = new Set(['initialize', 'upgradeTo', 'upgradeToAndCall']);
       for (const n of writableNames) {

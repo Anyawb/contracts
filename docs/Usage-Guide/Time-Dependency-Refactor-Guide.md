@@ -62,6 +62,28 @@
   - `ageSecondsApprox = ageBlocks * avgBlockTimeSeconds`
 - keeper 的“计算机时间/NTP 时间”**只用于调度**（什么时候发交易），不用于链上判定。
 
+### 链下确认数口径（新增 SSOT）
+
+- **交易确认数的标准做法**：按“最新区块高度减去交易所在区块高度”计算确认数。
+- **推荐接口组合**：优先使用 `eth_blockNumber + eth_getTransactionReceipt`，不要优先使用 `eth_getBlockByNumber("latest")`。
+  - `eth_blockNumber`：只读取最新块高，开销更轻，语义也更直接。
+  - `eth_getTransactionReceipt`：读取交易是否已上链、是否成功，以及交易所在 `blockNumber`。
+- **标准公式**：
+  - 若 `receipt.blockNumber` 为空：确认数视为 `0`
+  - 若 `receipt.blockNumber` 非空：`confirmations = latestBlock - txBlockNumber + 1`
+- **禁止误写**：不要只写成 `latestBlock - txBlockNumber`，否则会少算 1 个确认。
+- **适用范围**：
+  - 普通展示、状态轮询：可使用 `latest`
+  - 充值、清算、放款、提现、跨系统入账等资金动作：应区分 `latest`、`safe`、`finalized`
+- **建议语义**：
+  - `latest`：最新观测块，适合 UI 实时展示
+  - `safe`：更稳妥的链上已确认视角，适合较重要的自动化流程
+  - `finalized`：最终性最强，适合高价值或强审计要求的资金确认
+- **实现建议**：
+  - 前端或后端服务如果只是想得到“最新高度”，使用 `eth_blockNumber`
+  - 只有在确实需要整块内容时，才使用 `eth_getBlockByNumber`
+  - 交易未上链、receipt 不存在、或 `blockNumber == null` 时，必须显式返回 `0 confirmations`，不得伪造“待 1 确认”之类中间态
+
 ### 命名规范（强制；避免前端/keeper 误用）
 
 - **门槛语义字段必须用**：`...Block` / `...Blocks`
@@ -242,7 +264,8 @@
 - **测试/脚本里的“时间推进/取链上时间”（本仓库命中项）**
   - 时间推进：`evm_increaseTime`（通常配合 `evm_mine`）
   - OZ helpers：`time.increase` / `time.increaseTo`
-- 读区块号：`getBlock(...).number` / `latestBlock.number`
+- 读区块号：优先 `eth_blockNumber`；只有确实需要整块数据时才使用 `getBlock(...).number` / `latestBlock.number`
+- 算确认数：优先 `eth_getTransactionReceipt + eth_blockNumber`，不要优先 `eth_getBlockByNumber("latest")`
 - **补充：本仓库实际出现的“窗口/到期语义命名”（用于排查非 `blockNumber` 字段的时间门槛）**
   - `expireAt`, `maturity`, `_lockedMaturityByOrderId`
   - `_cooldown`, `_initializeCooldown`, `setCooldown`, `getCooldown`
@@ -536,7 +559,7 @@ src/Vault/VaultAdmin.sol: 116
 - `DegradationMonitor.getSystemDegradationTrends().recentEvents` 的 “recent window” 以 **blocks** 表示，并与 view 层缓存语义对齐：
   - 默认窗口：`ViewConstants.CACHE_DURATION_BLOCKS`
   - 这是链无关的 Strategy A（不要用 seconds/minutes/days）。
-| **贷款到期 / 还款窗口 / 提前-按时判定**（`maturity` / `ON_TIME_WINDOW`） | **A**（秒→块）+（可选）**D**（单调性） | **谨慎允许**：若 ABI 历史字段名叫 `blockNumber/maturity` | 把 `maturity` 改为 `maturityBlock`；窗口改为 `windowBlocks`；任何 “+window < maturity” 全部以块计算；如外部仍传入 blockNumber，仅做**单调不回退**约束（D），不得与 `block.number` 比较。 |
+| **贷款到期 / 还款窗口 / 提前-按时判定**（`maturity` / `ON_TIME_WINDOW`） | **A**（秒→块）+（可选）**D**（单调性） | **谨慎允许**：若 ABI 字段名叫 `blockNumber/maturity` | 把 `maturity` 改为 `maturityBlock`；窗口改为 `windowBlocks`；任何 “+window < maturity” 全部以块计算；如外部仍传入 blockNumber，仅做**单调不回退**约束（D），不得与 `block.number` 比较。 |
 | **意向单过期**（`expireAt`） | **A**（秒→块）或 **D**（单调性/序列号） | **不建议保留**（门槛语义） | 把 `expireAt`（blockNumber）迁移为 `expireBlock`；或改为 seq/nonce + 链下调度（D + offchain）。 |
 | **预言机/价格新鲜度与更新间隔**（`PriceOracle` / `PriceUpdater`） | **B**（边界强制过期）+ **A**（updateBlock/ageBlocks）+（可选）**D**（单调 blockNumber） | **允许**：仅作为“数据源观测字段” | SSOT 放在 `IPriceOracleRead.getPrice`（B）；链上缓存写入存 `lastUpdateBlock`（A）；如仍保留 `PriceData.blockNumber`/`updatePrice(..., blockNumber)`，只能做单调性约束（D），不得秒差门槛。 |
 | **Reward / 冷却期 / feature unlock / service config**（`cooldown` 等） | **A**（秒→块）或 **C**（epoch） | **允许**：用于 UI/审计展示 | 若本质是“窗口/周期”，优先 epoch（C）；否则用 `cooldownBlocks`/`unlockBlock`（A）；避免在核心资金路径用 blockNumber。 |
@@ -572,7 +595,7 @@ src/Vault/VaultAdmin.sol: 116
 ### 0) 术语与单一事实来源（SSOT）
 
 - **termDays（legacy）**：
-  - 仅允许作为 **UX 输入 / 旧 ABI 兼容字段**存在（bucket id / 历史字段名）。
+  - 仅允许作为 **UX 输入 / 旧 ABI 兼容字段**存在（bucket id / 字段名）。
   - termBlocks 方案语义中不再允许链上推导 `termBlocks`，更不得出现 `termDays * BLOCKS_PER_DAY` 这类隐含换算。
 - **termBlocks（SSOT）**：
   - 唯一允许进入链上门槛/账本/订单/保证金的期限输入。

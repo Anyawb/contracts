@@ -125,6 +125,7 @@ contract EasyToken is
     // =================== Upgrades ===================
     function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {
         // UUPS authorization enforced by role
+        newImplementation;
     }
 
     uint256[45] private __gap;

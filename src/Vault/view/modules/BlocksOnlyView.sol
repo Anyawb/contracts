@@ -8,7 +8,8 @@ import {Registry} from "../../../registry/Registry.sol";
 import {ActionKeys} from "../../../constants/ActionKeys.sol";
 import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
 import {IBlocksOnlyCoordinator} from "../../../interfaces/IBlocksOnlyCoordinator.sol";
-import {ILendingEngineDebtRead} from "../../../interfaces/ILendingEngineDebtRead.sol";
+import {IOrderStateStoreV2} from "../../../interfaces/IOrderStateStoreV2.sol";
+import {IShortfallLedger} from "../../../interfaces/IShortfallLedger.sol";
 import {
     BatchTooLarge,
     MissingRole,
@@ -26,11 +27,14 @@ import {ViewVersioned} from "../ViewVersioned.sol";
  *      - registry-dependent module resolution fails or resolves to an invalid contract where required
  *      - callers fail the view-layer role checks for user-scoped or system-scoped data
  *      - requested order ids or paging limits violate the module's validation rules
- *      - downstream coordinator or lending-engine reads revert
+ *      - downstream coordinator or order-state-store reads revert
  *
  * Security:
  * - This module is read-only but still permissioned through ViewAccessLib and ActionKeys role checks.
- * - Order runtime state combines coordinator storage with live debt-ledger reads; `remainingDebt` is not cached here.
+ * - Order runtime state is derived from coordinator storage; `remainingDebt` is computed from
+ *   `principal - repaidPrincipal` and is not an external debt-ledger read.
+ * - Legacy compatibility fallback (when OrderStateStore is unavailable) derives `SETTLED` collateral disposition from
+ *   the coordinator's persisted maturity outcome marker: borrower-return vs lender-delivery.
  * - Maturity, close-state, and returned `blockNumber` values are block-based rather than timestamp-based.
  */
 contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
@@ -70,7 +74,7 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 closeBlock;
         /// @notice Stored lifecycle status from the coordinator.
         IBlocksOnlyCoordinator.BlocksOnlyOrderStatus status;
-        /// @notice Live debt balance returned by the lending engine in debt-asset base units.
+        /// @notice Remaining settlement amount derived from coordinator-local accounting in debt-asset base units.
         uint256 remainingDebt;
         /// @notice Whether the current block is at or beyond `maturityBlock`.
         bool isMatured;
@@ -78,6 +82,17 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
         bool isClosed;
         /// @notice Whether the order is currently both open and matured.
         bool canSettleOrLiquidate;
+        /// @notice Whether the order is currently open but debt-free, so the trade-style close path can run.
+        bool canCloseTrade;
+    }
+
+    struct BlocksOnlyOrderStateRuntime {
+        BlocksOnlyOrderRuntime runtime;
+        IOrderStateStoreV2.LifecycleStatus lifecycle;
+        IOrderStateStoreV2.CloseReason closeReason;
+        IShortfallLedger.ShortfallStatus shortfallStatus;
+        IOrderStateStoreV2.CollateralDispositionStatus collateralDisposition;
+        bool hasLoss;
     }
 
     /*━━━━━━━━━━━━━━━ STORAGE ━━━━━━━━━━━━━━━*/
@@ -162,18 +177,17 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Returns the runtime view for `orderId`, combining stored order data with live debt state.
+     * @notice Returns the runtime view for `orderId`, combining stored order data with derived runtime flags.
      * @dev Reverts if:
      *      - the registry is unset or not a contract
      *      - `orderId` is not lower than the coordinator's total order count
      *      - the caller is neither the borrower, the lender, nor a holder of `ACTION_VIEW_USER_DATA` or
      *        `ACTION_ADMIN`
-     *      - coordinator or lending-engine reads revert
+    *      - coordinator reads revert
      *
      * Security:
-     * - Permissioned user-data read.
-     * - `remainingDebt` is fetched live from the lending engine and may diverge from local coordinator accounting if
-     *   downstream state changes independently.
+    * - Permissioned user-data read.
+    * - `remainingDebt` is derived from coordinator-local accounting (`principal - repaidPrincipal`).
      *
      * @param orderId Coordinator order id.
      * @return orderRuntime Enriched runtime order view.
@@ -191,6 +205,64 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
         );
         _requireOrderViewer(order);
         return _buildOrderRuntime(orderId, order);
+    }
+
+    /**
+     * @notice Returns the enriched lifecycle snapshot for `orderId`, including close reason and collateral disposition.
+     * @dev Reverts if:
+     *      - the registry is unset or not a contract
+     *      - `orderId` is not lower than the coordinator's total order count
+     *      - the caller is neither the borrower, the lender, nor a holder of `ACTION_VIEW_USER_DATA` or
+     *        `ACTION_ADMIN`
+     *      - coordinator or state-store reads revert
+     *
+     * Security:
+     * - Permissioned user-data read.
+    * - Uses OrderStateStore when available; otherwise derives a runtime-based compatibility projection.
+    * - In legacy compatibility mode, `SETTLED` maps by the coordinator's persisted maturity outcome marker:
+    *   borrower-return vs lender-delivery.
+     *
+     * @param orderId Coordinator order id.
+     * @return orderStateRuntime Runtime plus lifecycle/close/disposition projection.
+     */
+    function getBlocksOnlyOrderState(
+        uint256 orderId
+    )
+        external
+        view
+        onlyValidRegistry
+        returns (BlocksOnlyOrderStateRuntime memory orderStateRuntime)
+    {
+        IBlocksOnlyCoordinator.BlocksOnlyOrder memory order = _getExistingOrder(
+            orderId
+        );
+        _requireOrderViewer(order);
+
+        BlocksOnlyOrderRuntime memory runtime = _buildOrderRuntime(orderId, order);
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+            _tryOrderStateStore();
+        if (
+            hasOrderStateStore
+                && orderStateStore.hasOrderState(
+                    IOrderStateStoreV2.OrderProductType.BLOCKS_ONLY,
+                    orderId
+                )
+        ) {
+            return
+                _toBlocksOnlyOrderStateRuntime(
+                    runtime,
+                    orderStateStore.getOrderState(
+                        IOrderStateStoreV2.OrderProductType.BLOCKS_ONLY,
+                        orderId
+                    )
+                );
+        }
+
+        return
+            _buildFailClosedLegacyBlocksOnlyOrderStateRuntime(
+                runtime,
+                order.maturityDeliveredToLender
+            );
     }
 
     /**
@@ -312,11 +384,11 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - the registry is unset or not a contract
      *      - the caller is neither `borrower` nor a holder of `ACTION_VIEW_USER_DATA` or `ACTION_ADMIN`
      *      - `limit == 0` or `limit > ViewConstants.MAX_BATCH_SIZE`
-     *      - coordinator or lending-engine reads revert
+    *      - coordinator reads revert
      *
      * Security:
      * - Permissioned borrower-scoped batch read.
-     * - Runtime items are rebuilt from live debt data for each returned order id.
+    * - Runtime items are rebuilt from coordinator-local accounting for each returned order id.
      *
      * @param borrower Borrower address.
      * @param offset Zero-based page start within the borrower's order-id list.
@@ -336,7 +408,7 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyValidRegistry
         onlyAuthorizedUser(borrower)
         returns (
-            BlocksOnlyOrderRuntime[] memory items,
+            BlocksOnlyOrderStateRuntime[] memory items,
             uint256 totalCount,
             bool isValid,
             uint256 blockNumber
@@ -350,7 +422,7 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
             offset,
             limit
         );
-        items = _buildOrderRuntimeBatch(orderIds);
+        items = _buildOrderStateRuntimeBatch(orderIds);
         return (items, totalCount, true, _now());
     }
 
@@ -385,7 +457,7 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - the registry is unset or not a contract
      *      - the caller lacks `ACTION_VIEW_SYSTEM_DATA` and `ACTION_ADMIN`
      *      - `limit == 0` or `limit > ViewConstants.MAX_BATCH_SIZE`
-     *      - coordinator or lending-engine reads revert
+    *      - coordinator reads revert
      *
      * Security:
      * - Permissioned operator/admin batch read.
@@ -408,7 +480,7 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
         onlyValidRegistry
         onlyOps
         returns (
-            BlocksOnlyOrderRuntime[] memory items,
+            BlocksOnlyOrderStateRuntime[] memory items,
             uint256 totalCount,
             bool isValid,
             uint256 blockNumber
@@ -418,7 +490,7 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         totalCount = _coordinator().getBlocksOnlyOrderCount();
         if (offset >= totalCount) {
-            return (new BlocksOnlyOrderRuntime[](0), totalCount, true, _now());
+            return (new BlocksOnlyOrderStateRuntime[](0), totalCount, true, _now());
         }
 
         uint256 end = offset + limit;
@@ -427,12 +499,18 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
 
         uint256 pageLen = end - offset;
-        items = new BlocksOnlyOrderRuntime[](pageLen);
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+            _tryOrderStateStore();
+        items = new BlocksOnlyOrderStateRuntime[](pageLen);
         for (uint256 i; i < pageLen; ) {
             uint256 orderId = offset + i;
-            items[i] = _buildOrderRuntime(
+            IBlocksOnlyCoordinator.BlocksOnlyOrder memory order =
+                _coordinator().getBlocksOnlyOrder(orderId);
+            items[i] = _buildOrderStateRuntime(
                 orderId,
-                _coordinator().getBlocksOnlyOrder(orderId)
+                order,
+                orderStateStore,
+                hasOrderStateStore
             );
             unchecked {
                 ++i;
@@ -533,10 +611,10 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
     /**
      * @notice Builds runtime order views for a batch of coordinator order ids.
      * @dev Reverts if:
-     *      - coordinator or lending-engine reads revert for any order id in the batch
+    *      - coordinator reads revert for any order id in the batch
      *
      * Security:
-     * - Internal batch helper that performs one live debt read per order.
+    * - Internal batch helper that composes runtime flags from coordinator-local accounting per order.
      *
      * @param orderIds Coordinator order ids.
      * @return items Runtime order views corresponding to `orderIds`.
@@ -557,34 +635,107 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
     }
 
-    /**
-     * @notice Builds a runtime order view from stored coordinator data and live debt state.
-     * @dev Reverts if:
-     *      - the lending-engine debt read reverts
+    function _buildOrderStateRuntimeBatch(
+        uint256[] memory orderIds
+    ) internal view returns (BlocksOnlyOrderStateRuntime[] memory items) {
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+            _tryOrderStateStore();
+        items = new BlocksOnlyOrderStateRuntime[](orderIds.length);
+        for (uint256 i; i < orderIds.length; ) {
+            uint256 orderId = orderIds[i];
+            IBlocksOnlyCoordinator.BlocksOnlyOrder memory order =
+                _coordinator().getBlocksOnlyOrder(orderId);
+            items[i] = _buildOrderStateRuntime(
+                orderId,
+                order,
+                orderStateStore,
+                hasOrderStateStore
+            );
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    function _buildOrderStateRuntime(
+        uint256 orderId,
+        IBlocksOnlyCoordinator.BlocksOnlyOrder memory order,
+        IOrderStateStoreV2 orderStateStore,
+        bool hasOrderStateStore
+    ) internal view returns (BlocksOnlyOrderStateRuntime memory orderStateRuntime) {
+        BlocksOnlyOrderRuntime memory runtime = _buildOrderRuntime(orderId, order);
+        if (
+            hasOrderStateStore
+                && orderStateStore.hasOrderState(
+                    IOrderStateStoreV2.OrderProductType.BLOCKS_ONLY,
+                    orderId
+                )
+        ) {
+            return
+                _toBlocksOnlyOrderStateRuntime(
+                    runtime,
+                    orderStateStore.getOrderState(
+                        IOrderStateStoreV2.OrderProductType.BLOCKS_ONLY,
+                        orderId
+                    )
+                );
+        }
+
+        return
+            _buildFailClosedLegacyBlocksOnlyOrderStateRuntime(
+                runtime,
+                order.maturityDeliveredToLender
+            );
+    }
+
+    function _tryOrderStateStore()
+        internal
+        view
+        returns (IOrderStateStoreV2 orderStateStore, bool hasStore)
+    {
+        address orderStateStoreAddr = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_ORDER_STATE_STORE
+        );
+        if (
+            orderStateStoreAddr == address(0) ||
+            orderStateStoreAddr.code.length == 0
+        ) {
+            return (IOrderStateStoreV2(address(0)), false);
+        }
+
+        return (IOrderStateStoreV2(orderStateStoreAddr), true);
+    }
+
+     /**
+      * @notice Builds a runtime order view from stored coordinator data and local settlement state.
+      * @dev Reverts if:
+      *      - (none expected)
      *
      * Security:
-     * - Read-only composition helper.
-     * - `canSettleOrLiquidate` only indicates that the order is open and matured; it does not perform permission or
-     *   collateral availability checks.
+      * - Read-only composition helper.
+      * - `canSettleOrLiquidate` only indicates that the order is open and matured; it does not perform permission or
+      *   collateral availability checks.
+      * - `canCloseTrade` only indicates that the order is open and debt-free; it does not perform caller authorization
+      *   checks beyond the coordinator's own close-path rules.
      *
-     * @param orderId Coordinator order id.
-     * @param order Stored coordinator order.
-     * @return orderRuntime Enriched runtime order view.
+      * @param orderId Coordinator order id.
+      * @param order Stored coordinator order.
+      * @return orderRuntime Enriched runtime order view.
      */
     function _buildOrderRuntime(
         uint256 orderId,
         IBlocksOnlyCoordinator.BlocksOnlyOrder memory order
     ) internal view returns (BlocksOnlyOrderRuntime memory orderRuntime) {
-        uint256 remainingDebt = _debtRead().getDebt(
-            order.borrower,
-            order.asset
-        );
+        uint256 remainingDebt = order.repaidPrincipal >= order.principal
+            ? 0
+            : order.principal - order.repaidPrincipal;
         bool isClosed = order.status ==
             IBlocksOnlyCoordinator.BlocksOnlyOrderStatus.SETTLED ||
             order.status ==
-                IBlocksOnlyCoordinator.BlocksOnlyOrderStatus.LIQUIDATED;
+                IBlocksOnlyCoordinator.BlocksOnlyOrderStatus.TRADE_CLOSED;
         bool isMatured = order.maturityBlock != 0 &&
             block.number >= order.maturityBlock;
+        bool canCloseTrade = !isClosed && remainingDebt == 0;
 
         orderRuntime = BlocksOnlyOrderRuntime({
             orderId: orderId,
@@ -602,8 +753,88 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
             remainingDebt: remainingDebt,
             isMatured: isMatured,
             isClosed: isClosed,
-            canSettleOrLiquidate: !isClosed && isMatured
+            canSettleOrLiquidate: !isClosed && isMatured,
+            canCloseTrade: canCloseTrade
         });
+    }
+
+    function _toBlocksOnlyOrderStateRuntime(
+        BlocksOnlyOrderRuntime memory runtime,
+        IOrderStateStoreV2.OrderState memory state
+    ) internal pure returns (BlocksOnlyOrderStateRuntime memory orderStateRuntime) {
+        bool hasLoss =
+            state.shortfallStatus != IShortfallLedger.ShortfallStatus.NONE
+                || state.collateralDisposition
+                    == IOrderStateStoreV2
+                        .CollateralDispositionStatus
+                        .DELIVERED_TO_LENDER;
+
+        return
+            BlocksOnlyOrderStateRuntime({
+                runtime: runtime,
+                lifecycle: state.lifecycle,
+                closeReason: state.closeReason,
+                shortfallStatus: state.shortfallStatus,
+                collateralDisposition: state.collateralDisposition,
+                hasLoss: hasLoss
+            });
+    }
+
+    function _buildFailClosedLegacyBlocksOnlyOrderStateRuntime(
+        BlocksOnlyOrderRuntime memory runtime,
+        bool maturityDeliveredToLender
+    )
+        internal
+        pure
+        returns (BlocksOnlyOrderStateRuntime memory orderStateRuntime)
+    {
+        IOrderStateStoreV2.LifecycleStatus lifecycle =
+            IOrderStateStoreV2.LifecycleStatus.ACTIVE;
+        IOrderStateStoreV2.CloseReason closeReason =
+            IOrderStateStoreV2.CloseReason.NONE;
+        IShortfallLedger.ShortfallStatus shortfallStatus =
+            IShortfallLedger.ShortfallStatus.NONE;
+        IOrderStateStoreV2.CollateralDispositionStatus collateralDisposition =
+            IOrderStateStoreV2.CollateralDispositionStatus.COORDINATOR_CUSTODY;
+
+        if (runtime.isClosed) {
+            lifecycle = IOrderStateStoreV2.LifecycleStatus.CLOSED;
+            if (
+                runtime.status ==
+                IBlocksOnlyCoordinator.BlocksOnlyOrderStatus.TRADE_CLOSED
+            ) {
+                closeReason = IOrderStateStoreV2.CloseReason.BLOCKS_TRADE_CLOSE;
+                collateralDisposition = IOrderStateStoreV2
+                    .CollateralDispositionStatus
+                    .RETURNED_TO_BORROWER;
+            } else if (
+                runtime.status == IBlocksOnlyCoordinator.BlocksOnlyOrderStatus.SETTLED
+            ) {
+                closeReason =
+                    IOrderStateStoreV2.CloseReason.BLOCKS_MATURITY_CLOSE;
+                collateralDisposition = maturityDeliveredToLender
+                    ? IOrderStateStoreV2.CollateralDispositionStatus
+                        .DELIVERED_TO_LENDER
+                    : IOrderStateStoreV2.CollateralDispositionStatus
+                        .RETURNED_TO_BORROWER;
+            }
+        } else if (runtime.remainingDebt == 0) {
+            lifecycle = IOrderStateStoreV2.LifecycleStatus.REPAID;
+        }
+
+        return
+            BlocksOnlyOrderStateRuntime({
+                runtime: runtime,
+                lifecycle: lifecycle,
+                closeReason: closeReason,
+                shortfallStatus: shortfallStatus,
+                collateralDisposition: collateralDisposition,
+                hasLoss: shortfallStatus != IShortfallLedger.ShortfallStatus.NONE
+                    || collateralDisposition
+                        == IOrderStateStoreV2
+                            .CollateralDispositionStatus
+                            .DELIVERED_TO_LENDER
+            });
     }
 
     /**
@@ -624,26 +855,6 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (coordinatorAddr.code.length == 0)
             revert NotAContract(coordinatorAddr);
         return IBlocksOnlyCoordinator(coordinatorAddr);
-    }
-
-    /**
-     * @notice Returns the registered lending-engine debt-read interface.
-     * @dev Reverts if:
-     *      - the registry is missing `ModuleKeys.KEY_LE`
-     *      - the resolved address is not a contract
-     *
-     * Security:
-     * - Internal registry-bound module resolver for live debt state.
-     *
-     * @return debtRead Registered debt-read interface.
-     */
-    function _debtRead() internal view returns (ILendingEngineDebtRead) {
-        address lendingEngineAddr = Registry(_registryAddr).getModuleOrRevert(
-            ModuleKeys.KEY_LE
-        );
-        if (lendingEngineAddr.code.length == 0)
-            revert NotAContract(lendingEngineAddr);
-        return ILendingEngineDebtRead(lendingEngineAddr);
     }
 
     /**
@@ -718,7 +929,7 @@ contract BlocksOnlyView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return version Current schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
-        return 1;
+        return 2;
     }
 
     uint256[50] private __gap;

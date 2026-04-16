@@ -284,7 +284,7 @@ RWA 价格系统容易和 ViewCache / PositionView 这类 B 类缓存混淆，�
 
 1. 不要把 Google Finance 原值写进链上缓存
 2. 不要把链下 source ticker、raw currency 塞进 ViewCache
-3. 链上只应保留统一的 USD-8 价格与 updateBlock
+3. 链上只应保留按各资产 `assetDecimals` 缩放后的价格与 updateBlock
 
 ### 2. 建议新增的 D 类读模型键
 

@@ -112,7 +112,8 @@ async function main() {
   }
   if (enableWrite) {
     const now = await ethers.provider.getBlockNumber();
-    const tx2 = await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now);
+    const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+    const tx2 = await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", usdcDecimals), now);
     await tx2.wait();
     console.log("  ✅ PriceOracle price updated for MockUSDC (fresh)");
   } else {

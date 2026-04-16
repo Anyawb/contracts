@@ -28,6 +28,8 @@ import {
  * - All entrypoints require a valid Registry reference.
  */
 contract DegradationCore is Initializable, UUPSUpgradeable {
+    error DegradationCoreNoPermission();
+
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     /// @notice Registry address used for module resolution and access control.
     address private _registryAddr;
@@ -60,7 +62,7 @@ contract DegradationCore is Initializable, UUPSUpgradeable {
      * @param reasonHash Hash of the degradation reason.
      * @param fallbackValue Fallback value used.
      * @param usedFallback Whether a fallback strategy was used.
-     * @param legacyBlockNumber Event block number (block.number, legacy field name).
+    * @param legacyBlockNumber Event block number (block.number).
      * @param blockNumber Event block number.
      */
     struct DegradationEvent {
@@ -134,11 +136,10 @@ contract DegradationCore is Initializable, UUPSUpgradeable {
             return;
         }
         address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        require(
-            IAccessControlManager(acm).hasRole(ActionKeys.ACTION_ADMIN,msg.sender) ||
-            IAccessControlManager(acm).hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS,msg.sender),
-            "DegradationCore: no permission"
-        ); 
+        bool isAllowed =
+            IAccessControlManager(acm).hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
+                || IAccessControlManager(acm).hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender);
+        if (!isAllowed) revert DegradationCoreNoPermission();
         _; 
     }
     

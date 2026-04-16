@@ -54,7 +54,7 @@ async function main() {
     "src/Vault/FeeRouter.sol:FeeRouter",
     CONTRACT_ADDRESSES.FeeRouter
   )) as any;
-  const usdc = await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC);
+  const usdc = (await ethers.getContractAt("MockERC20", CONTRACT_ADDRESSES.MockUSDC)) as any;
 
   console.log("📋 Contract Addresses:");
   console.log(`  Registry: ${await registry.getAddress()}`);

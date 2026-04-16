@@ -1,7 +1,7 @@
 const hre = require("hardhat");
 
 async function main() {
-  const price = hre.ethers.parseUnits("1", 8); // 1e8
+  const price = hre.ethers.parseUnits("1", 6);
   const DEFAULT_MAX_REASONABLE_PRICE = 1e12;
   
   console.log("Price:", price.toString());

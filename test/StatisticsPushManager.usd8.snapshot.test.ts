@@ -5,7 +5,7 @@ import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
 
 const { ethers, upgrades } = hardhat;
 
-describe("StatisticsPushManager (strict B+) – USD-8 snapshot pipeline", function () {
+describe("StatisticsPushManager (strict B+) – normalized 18-decimal snapshot pipeline", function () {
   const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes("ACCESS_CONTROL_MANAGER"));
   const KEY_STATS = ethers.keccak256(ethers.toUtf8Bytes("VAULT_STATISTICS"));
   const KEY_LE = ethers.keccak256(ethers.toUtf8Bytes("LENDING_ENGINE"));
@@ -77,15 +77,15 @@ describe("StatisticsPushManager (strict B+) – USD-8 snapshot pipeline", functi
       .withArgs(user, ethers.ZeroAddress, anyValue, await stats.getAddress(), 0n, 0n, anyValue, anyValue, 0);
   });
 
-  it("retryUserStats pushes USD-8 totals from PositionView + LendingEngine into StatisticsView snapshot", async function () {
+  it("retryUserStats pushes normalized 18-decimal totals from PositionView + LendingEngine into StatisticsView snapshot", async function () {
     const { admin, stats, pushMgr, pv, le } = await loadFixture(deployFixture);
 
     const user = ethers.Wallet.createRandom().address;
-    const collateralUSD8 = 123_456_789n;
-    const debtUSD8 = 42_000_000n;
+    const collateralValue = 123_456_789n * 10n ** 10n;
+    const debtValue = 42_000_000n * 10n ** 10n;
 
-    await pv.setTotal(user, collateralUSD8);
-    await le.borrow(user, ethers.Wallet.createRandom().address, debtUSD8, 0n, 0); // increments mock total value
+    await pv.setTotal(user, collateralValue);
+    await le.borrow(user, ethers.Wallet.createRandom().address, debtValue, 0n, 0); // increments mock total value
 
     const DATA_TYPE_USER_STATS_UPDATE = ethers.keccak256(ethers.toUtf8Bytes("USER_STATS_UPDATE"));
 
@@ -93,12 +93,12 @@ describe("StatisticsPushManager (strict B+) – USD-8 snapshot pipeline", functi
     await expect(tx).to.emit(stats, "DataPushed").withArgs(DATA_TYPE_USER_STATS_UPDATE, anyValue);
 
     const [snap] = await stats.getUserSnapshotWithMeta(user);
-    expect(snap.collateral).to.equal(collateralUSD8);
-    expect(snap.debt).to.equal(debtUSD8);
+    expect(snap.collateral).to.equal(collateralValue);
+    expect(snap.debt).to.equal(debtValue);
 
     const [g] = await stats.getGlobalSnapshotWithMeta();
-    expect(g.totalCollateral).to.equal(collateralUSD8);
-    expect(g.totalDebt).to.equal(debtUSD8);
+    expect(g.totalCollateral).to.equal(collateralValue);
+    expect(g.totalDebt).to.equal(debtValue);
   });
 
   it("only StatsPushManager or ACTION_ADMIN can push to StatisticsView (Scheme B)", async function () {

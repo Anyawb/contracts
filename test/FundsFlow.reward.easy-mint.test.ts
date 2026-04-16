@@ -133,7 +133,7 @@ describe("Funds-Flow – Reward EasyToken mint", function () {
     await easyToken.connect(admin).grantRole(await easyToken.BURNER_ROLE(), rewardAccrualManager.target);
 
     const currentBlock = await ethers.provider.getBlockNumber();
-    await priceOracle.setPrice(asset.target, ethers.parseUnits("1", 8), currentBlock, 18);
+    await priceOracle.setPrice(asset.target, ethers.parseUnits("1", 18), currentBlock, 18);
 
     return {
       admin,

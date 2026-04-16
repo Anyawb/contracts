@@ -1,3 +1,4 @@
+import { Interface } from "ethers";
 import { ethers, network } from "hardhat";
 
 import { decodeRevert } from "../utils/decodeRevert";
@@ -14,7 +15,7 @@ function extractRevertData(error: any): string {
   return "0x";
 }
 
-function explain(error: any, ifaces: ethers.Interface[]) {
+function explain(error: any, ifaces: Interface[]) {
   const revertData = extractRevertData(error);
   for (const iface of ifaces) {
     try {

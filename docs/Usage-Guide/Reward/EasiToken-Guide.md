@@ -4,6 +4,10 @@
 >
 > 目标态口径：**平台唯一通证 = Easy（`EasyToken`）**，不引入第二套奖励资产。
 >
+> 本文已并入原 `EasyToken-SSOT-Semantics.md` 的语义、命名和读模型约束，作为 Easy 资产边界的单一说明文件。
+>
+> `docs/Usage-Guide/Reward/Reward-System-Usage-Guide.md` 已改为引用本文作为 Easy 资产语义、Spend 边界、Stake/Vote 语义的 canonical 说明；如两文出现重复，以本文为准。
+>
 > 相关架构 SSOT：`docs/Architecture-Guide.md`（Reward 章节、View 权限方案、block 口径）。
 
 ---
@@ -133,7 +137,7 @@ Reward 的写入口 SSOT：
 - 只读入口：统一走 `RewardView`
 - 订阅入口：统一订阅 `RewardView.DataPushed(dataTypeHash, payload)`，同时覆盖 `DATA_TYPE_REWARD_*` 与 `DATA_TYPE_EASY_*`
 
-> 参考：`docs/Usage-Guide/Reward/Reward-Best-Practices-Guide.md`
+> 参考：`docs/Usage-Guide/Reward/Reward-System-Usage-Guide.md`
 
 ### 5.2 stEASY（治理投票权）只读（IVotes / ERC20Votes）
 
@@ -164,7 +168,50 @@ Reward 的写入口 SSOT：
 
 ---
 
-## 7) 常见问题（FAQ）
+## 7) EasyToken 语义与命名规范（并入）
+
+### 7.1 资产语义 SSOT
+
+- 奖励通证唯一 SSOT：`Registry[KEY_EASY_TOKEN]`
+- 本文中的 `Easy`、`EasyToken`、`reward token` 统一指向同一资产
+- Reward 域不存在第二套奖励资产；历史 `points/积分` 仅视为旧命名残留
+
+### 7.2 单位与精度
+
+- Easy 的标准精度为 18 decimals
+- 对外数量字段若未特别说明，均表示 Easy 最小单位
+- 推荐字段命名：`easyAmount`、`easySpent`、`easyBurned`、`lockedEasy`、`pendingEasyDebt`
+
+### 7.3 对外命名规范
+
+- ABI、事件参数、结构体字段、对外 getter 返回值，优先使用 `easy*` 前缀
+- 若必须使用 `amount`，需在 NatSpec 中显式写明单位为 Easy
+- 禁止新增任何业务语义的 `points*`、`积分*` 对外字段
+
+### 7.4 RewardView 读模型语义
+
+- `getUserBalanceWithMeta(user).balance`：当前钱包 Easy 余额
+- `getUserEasyEarnedWithMeta(user).easyEarned`：累计净发放到用户的 Easy 数量
+- `getUserRewardSummaryWithMeta(user).pendingPenalty`：待抵扣的 penalty ledger
+- `getUserRewardSummaryWithMeta(user).totalBurned`：累计已实际 burn 的 Easy
+- `getUserRewardSummaryWithMeta(user)` 不再承担“累计发放”口径；展示累计奖励应统一读取 `easyEarned`
+
+推荐展示口径：
+
+- `walletEasyBalance = getUserBalanceWithMeta(user).balance`
+- `lifetimeEasyEarned = getUserEasyEarnedWithMeta(user).easyEarned`
+- `pendingPenalty = getUserRewardSummaryWithMeta(user).pendingPenalty`
+
+### 7.5 PR 检查清单
+
+- [ ] 对外 surface 是否统一使用 `easy*` 或明确 Easy 单位说明
+- [ ] 奖励通证地址是否全部来自 `Registry[KEY_EASY_TOKEN]`
+- [ ] 是否误把 `pendingPenalty`、`balance`、`easyEarned` 混成同一个业务指标
+- [ ] 是否仍有历史 `points*` 对外暴露为当前业务语义
+
+---
+
+## 8) 常见问题（FAQ）
 
 ### Q1：为什么我持有 stEASY，但 `getVotes` 还是 0？
 

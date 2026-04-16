@@ -160,6 +160,9 @@ async function main() {
   const rewardAccrualManager = rewardAccrualManagerAddr && rewardAccrualManagerAddr !== ethers.ZeroAddress
     ? (((await ethers.getContractAt("RewardAccrualManager", rewardAccrualManagerAddr)) as any) ?? null)
     : null;
+  const rewardManager = rewardManagerCoreAddr && rewardManagerCoreAddr !== ethers.ZeroAddress
+    ? (((await ethers.getContractAt("RewardManager", rewardManagerCoreAddr)) as any) ?? null)
+    : null;
   const easyEmissionConfig = easyEmissionConfigAddr && easyEmissionConfigAddr !== ethers.ZeroAddress
     ? (((await ethers.getContractAt("EasyEmissionConfig", easyEmissionConfigAddr)) as any) ?? null)
     : null;
@@ -197,6 +200,7 @@ async function main() {
     deployer,
     waitTx,
     strictReward: STRICT_REWARD,
+    rewardManager,
     rewardView,
     rewardViewAddr,
     easyEmissionConfig,
@@ -254,7 +258,11 @@ async function main() {
 
   // Set a fresh price using keeper.
   const nowBlock = await latestBlockNumber();
-  await waitTx(po.connect(keeper).updatePrice(settlementTokenAddr, ethers.parseUnits("1", 8), nowBlock), "keeper.updatePrice");
+  const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
+  await waitTx(
+    po.connect(keeper).updatePrice(settlementTokenAddr, ethers.parseUnits("1", settlementTokenDecimals), nowBlock),
+    "keeper.updatePrice"
+  );
 
   const [freshPriceRaw, freshUpdatedAtBlock, freshAssetDecimals] = (await po.getPrice(settlementTokenAddr)) as [bigint, bigint, bigint];
   console.log(
@@ -320,7 +328,10 @@ async function main() {
 
   // Keeper refreshes price (Arbitrum keeper model).
   const nowAfter = await latestBlockNumber();
-  await waitTx(po.connect(keeper).updatePrice(settlementTokenAddr, ethers.parseUnits("1", 8), nowAfter), "keeper.updatePrice(refresh)");
+  await waitTx(
+    po.connect(keeper).updatePrice(settlementTokenAddr, ethers.parseUnits("1", settlementTokenDecimals), nowAfter),
+    "keeper.updatePrice(refresh)"
+  );
 
   const [refreshedPriceRaw, refreshedUpdatedAtBlock, refreshedAssetDecimals] = (await po.getPrice(settlementTokenAddr)) as [bigint, bigint, bigint];
   console.log(

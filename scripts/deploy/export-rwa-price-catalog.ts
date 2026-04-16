@@ -12,8 +12,8 @@ type MockAssetPackAsset = {
   sourceId: string;
   maxPriceAge: number;
   active: boolean;
-  bootstrapPriceUsd8?: string;
-  defaultPriceUsd8?: string;
+  bootstrapPriceValue?: string;
+  defaultPriceValue?: string;
   sourceProvider?: string;
   sourceTicker?: string;
   pricingCurrency?: string;
@@ -37,8 +37,8 @@ function networkSlug(name: string) {
   return name === "arbitrumSepolia" ? "arbitrum-sepolia" : name;
 }
 
-function getBootstrapPriceUsd8(asset: MockAssetPackAsset) {
-  return asset.bootstrapPriceUsd8 ?? asset.defaultPriceUsd8 ?? "0";
+function getBootstrapPriceValue(asset: MockAssetPackAsset) {
+  return asset.bootstrapPriceValue ?? asset.defaultPriceValue ?? "0";
 }
 
 function getDefaultCatalogMetadata(asset: MockAssetPackAsset) {
@@ -162,7 +162,7 @@ async function main() {
     chainId: pack.chainId,
     generatedAt: new Date().toISOString(),
     sourcePack: path.relative(process.cwd(), inputFile),
-    targetPriceUnit: "USD-8",
+    targetPriceUnit: "asset-decimals",
     defaultWriteTarget: "PriceUpdater.updateAssetPrice",
     rwaAssetCatalog: rwaAssets.map((asset) => {
       const source = resolveCatalogSource(asset);
@@ -174,7 +174,7 @@ async function main() {
         updaterAssetId: asset.sourceId,
         publishMode: getPublishMode(asset),
         source,
-        bootstrapPriceUsd8: getBootstrapPriceUsd8(asset),
+        bootstrapPriceValue: getBootstrapPriceValue(asset),
         updateCadence: cadence.updateCadence,
         staleAfterSeconds: cadence.staleAfterSeconds,
       };
@@ -191,8 +191,8 @@ async function main() {
         publishMode: getPublishMode(asset),
         writeTarget: "PriceUpdater.updateAssetPrice",
         enabled: true,
-        bootstrapPriceUsd8: getBootstrapPriceUsd8(asset),
-        targetPriceUnit: "USD-8",
+        bootstrapPriceValue: getBootstrapPriceValue(asset),
+        targetPriceUnit: "asset-decimals",
         source,
         updateCadence: cadence.updateCadence,
         staleAfterSeconds: cadence.staleAfterSeconds,

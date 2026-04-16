@@ -471,7 +471,12 @@ async function main() {
     }
     {
       const blockNumber = await ethers.provider.getBlockNumber();
-      await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), blockNumber);
+      const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
+      await po.connect(deployer).updatePrice(
+        settlementTokenAddrFromRegistry,
+        ethers.parseUnits("1", settlementTokenDecimals),
+        blockNumber,
+      );
     }
 
     // FeeRouter needs supported token for matchflow
@@ -754,7 +759,7 @@ async function main() {
     await ledgerSnapshot("initial");
 
     // Step 1: deposit A
-    const depA = ethers.parseUnits("2000", 6);
+    const depA: bigint = ethers.parseUnits("2000", 6);
     const rDepA = await (await vaultCore.connect(borrowerA).deposit(assetAddr, depA)).wait();
     assertOk(!!rDepA, "missing receipt deposit A");
     recordFailureEvents(rDepA);
@@ -763,7 +768,7 @@ async function main() {
     await ledgerSnapshot("after deposit A");
 
     // Step 2: deposit B
-    const depB = ethers.parseUnits("1500", 6);
+    const depB: bigint = ethers.parseUnits("1500", 6);
     const rDepB = await (await vaultCore.connect(borrowerB).deposit(assetAddr, depB)).wait();
     assertOk(!!rDepB, "missing receipt deposit B");
     recordFailureEvents(rDepB);
@@ -772,7 +777,7 @@ async function main() {
     await ledgerSnapshot("after deposit B");
 
     // Step 3: withdraw A (still no debt)
-    const wdA = ethers.parseUnits("200", 6);
+    const wdA: bigint = ethers.parseUnits("200", 6);
     const rWdA = await (await vaultCore.connect(borrowerA).withdraw(assetAddr, wdA)).wait();
     assertOk(!!rWdA, "missing receipt withdraw A");
     recordFailureEvents(rWdA);
@@ -781,7 +786,7 @@ async function main() {
     await ledgerSnapshot("after withdraw A");
 
     // Step 4: borrow A via matchflow finalizeMatch
-    const principalA = ethers.parseUnits("500", 6);
+    const principalA: bigint = ethers.parseUnits("500", 6);
     const { orderId: orderA, totalDue: dueA, finalizeReceipt: rMatchA } = await finalizeMatchFor(
       borrowerA,
       lenderA,
@@ -792,10 +797,10 @@ async function main() {
     recordDataPushCounts("finalizeMatch A", rMatchA, countsByType);
     await assertTriBatchConsistency("after borrow A (match finalized)");
     await ledgerSnapshot("after borrow A");
-    await logLEVOrder("after finalizeMatch A", orderA);
+    await logLEVOrder("after finalizeMatch A", BigInt(orderA));
 
     // Step 5: withdraw B (still no debt)
-    const wdB = ethers.parseUnits("100", 6);
+    const wdB: bigint = ethers.parseUnits("100", 6);
     const rWdB = await (await vaultCore.connect(borrowerB).withdraw(assetAddr, wdB)).wait();
     assertOk(!!rWdB, "missing receipt withdraw B");
     recordFailureEvents(rWdB);
@@ -804,7 +809,7 @@ async function main() {
     await ledgerSnapshot("after withdraw B");
 
     // Step 6: borrow B via matchflow finalizeMatch
-    const principalB = ethers.parseUnits("400", 6);
+    const principalB: bigint = ethers.parseUnits("400", 6);
     const { orderId: orderB, totalDue: dueB, finalizeReceipt: rMatchB } = await finalizeMatchFor(
       borrowerB,
       lenderB,
@@ -815,7 +820,7 @@ async function main() {
     recordDataPushCounts("finalizeMatch B", rMatchB, countsByType);
     await assertTriBatchConsistency("after borrow B (match finalized)");
     await ledgerSnapshot("after borrow B");
-    await logLEVOrder("after finalizeMatch B", orderB);
+    await logLEVOrder("after finalizeMatch B", BigInt(orderB));
 
     // Step 7: repay A (VaultCore -> SettlementManager SSOT)
     const rRepayA = await (await vaultCore.connect(borrowerA).repay(orderA, assetAddr, dueA)).wait();

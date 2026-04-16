@@ -3,13 +3,13 @@ const hre = require("hardhat");
 async function main() {
   // Test the exact values from the test
   const amount = 50n;
-  const price = hre.ethers.parseUnits("1", 8); // 1e8
-  const decimals = 8n;
+  const decimals = 6n;
+  const price = hre.ethers.parseUnits("1", Number(decimals));
   
   // Calculate as Solidity would
-  const priceMultiplier = 10n ** decimals; // 1e8
-  const numerator = amount * price; // 50 * 1e8 = 5e9
-  const calculatedValue = numerator / priceMultiplier; // 5e9 / 1e8 = 50
+  const priceMultiplier = 10n ** decimals;
+  const numerator = amount * price;
+  const calculatedValue = numerator / priceMultiplier;
   
   console.log("Amount:", amount.toString());
   console.log("Price:", price.toString());

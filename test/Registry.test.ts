@@ -17,9 +17,6 @@ const { ethers } = hardhat;
 import { expect } from 'chai';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
-import type { Registry } from '../../types/contracts/registry';
-import type { MockLendingEngineConcrete, MockCollateralManager, MockPriceOracle } from '../../types/contracts/Mocks';
-import type { ERC1967Proxy } from '../../types/@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy';
 
 describe('Registry – 核心功能测试', function () {
   // 测试常量定义
@@ -36,12 +33,12 @@ describe('Registry – 核心功能测试', function () {
   let emergencyAdmin: SignerWithAddress;
   
   // 合约实例
-  let registry: Registry;
-  let registryImplementation: Registry;
-  let registryProxy: ERC1967Proxy;
-  let mockLendingEngine: MockLendingEngineConcrete;
-  let mockCollateralManager: MockCollateralManager;
-  let mockPriceOracle: MockPriceOracle;
+  let registry: any;
+  let registryImplementation: any;
+  let registryProxy: any;
+  let mockLendingEngine: any;
+  let mockCollateralManager: any;
+  let mockPriceOracle: any;
   
   // 测试模块键 - 使用与ModuleKeys.sol中一致的哈希值
   const KEY_LE = ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE'));
@@ -72,7 +69,7 @@ describe('Registry – 核心功能测试', function () {
     await registryProxy.waitForDeployment();
 
     // 通过代理访问 Registry
-    registry = registryImplementation.attach(registryProxy.target) as Registry;
+    registry = registryImplementation.attach(registryProxy.target) as any;
 
     // 部署 Mock 合约
     const MockLendingEngineConcreteFactory = await ethers.getContractFactory('MockLendingEngineConcrete');
@@ -153,78 +150,78 @@ describe('Registry – 核心功能测试', function () {
 
   describe('权限管理测试', function () {
     it('Registry – 应该正确设置升级管理员', async function () {
-      await (registry as unknown as Registry).setUpgradeAdmin(admin.address);
+      await (registry as any).setUpgradeAdmin(admin.address);
       
-      expect(await (registry as unknown as Registry).getUpgradeAdmin()).to.equal(admin.address);
+      expect(await (registry as any).getUpgradeAdmin()).to.equal(admin.address);
     });
 
     it('Registry – 应该正确设置紧急管理员', async function () {
-      await (registry as unknown as Registry).setEmergencyAdmin(emergencyAdmin.address);
+      await (registry as any).setEmergencyAdmin(emergencyAdmin.address);
       
-      expect(await (registry as unknown as Registry).getEmergencyAdmin()).to.equal(emergencyAdmin.address);
+      expect(await (registry as any).getEmergencyAdmin()).to.equal(emergencyAdmin.address);
     });
 
     it('Registry – 应该拒绝零地址管理员设置', async function () {
       await expect(
-        (registry as unknown as Registry).setUpgradeAdmin(ZERO_ADDRESS)
+        (registry as any).setUpgradeAdmin(ZERO_ADDRESS)
       ).to.be.revertedWithCustomError(registry, 'Registry__InvalidUpgradeAdmin')
         .withArgs(ZERO_ADDRESS);
     });
 
     it('Registry – 应该正确设置主治理地址', async function () {
-      await (registry as unknown as Registry).setAdmin(admin.address);
+      await (registry as any).setAdmin(admin.address);
       
-      expect(await (registry as unknown as Registry).getAdmin()).to.equal(admin.address);
+      expect(await (registry as any).getAdmin()).to.equal(admin.address);
       expect(await registry.owner()).to.equal(admin.address);
     });
 
     it('Registry – 应该正确设置待接管管理员', async function () {
-      await (registry as unknown as Registry).setPendingAdmin(admin.address);
+      await (registry as any).setPendingAdmin(admin.address);
       
-      expect(await (registry as unknown as Registry).getPendingAdmin()).to.equal(admin.address);
+      expect(await (registry as any).getPendingAdmin()).to.equal(admin.address);
     });
 
     it('Registry – 应该正确接受管理员权限', async function () {
-      await (registry as unknown as Registry).setPendingAdmin(admin.address);
-      await (registry as unknown as Registry).connect(admin).acceptAdmin();
+      await (registry as any).setPendingAdmin(admin.address);
+      await (registry as any).connect(admin).acceptAdmin();
       
-      expect(await (registry as unknown as Registry).getAdmin()).to.equal(admin.address);
+      expect(await (registry as any).getAdmin()).to.equal(admin.address);
       expect(await registry.owner()).to.equal(admin.address);
-      expect(await (registry as unknown as Registry).getPendingAdmin()).to.equal(ZERO_ADDRESS);
+      expect(await (registry as any).getPendingAdmin()).to.equal(ZERO_ADDRESS);
     });
 
     it('Registry – 应该拒绝非待接管管理员接受权限', async function () {
-      await (registry as unknown as Registry).setPendingAdmin(admin.address);
+      await (registry as any).setPendingAdmin(admin.address);
       
       await expect(
-        (registry as unknown as Registry).connect(user1).acceptAdmin()
+        (registry as any).connect(user1).acceptAdmin()
       ).to.be.revertedWithCustomError(registry, 'Registry__NotPendingAdmin')
         .withArgs(await user1.getAddress(), await admin.getAddress());
     });
 
     it('Registry – 应该拒绝非管理员设置权限', async function () {
       await expect(
-        (registry as unknown as Registry).connect(user1).setAdmin(admin.address)
+        (registry as any).connect(user1).setAdmin(admin.address)
       ).to.be.revertedWithCustomError(registry, 'OwnableUnauthorizedAccount');
     });
   });
 
   describe('暂停状态管理测试', function () {
     it('Registry – 应该正确暂停合约', async function () {
-      await (registry as unknown as Registry).pause();
+      await (registry as any).pause();
       
       expect(await registry.paused()).to.be.true;
     });
 
     it('Registry – 应该正确恢复合约', async function () {
-      await (registry as unknown as Registry).pause();
-      await (registry as unknown as Registry).unpause();
+      await (registry as any).pause();
+      await (registry as any).unpause();
       
       expect(await registry.paused()).to.be.false;
     });
 
     it('Registry – 暂停状态下应该阻止模块设置', async function () {
-      await (registry as unknown as Registry).pause();
+      await (registry as any).pause();
       
       await expect(
         registry.setModule(KEY_LE, mockLendingEngine.target)
@@ -232,21 +229,21 @@ describe('Registry – 核心功能测试', function () {
     });
 
     it('Registry – 暂停状态下应该阻止批量模块设置', async function () {
-      await (registry as unknown as Registry).pause();
+      await (registry as any).pause();
       
       const keys = [KEY_LE, KEY_CM];
       const addresses = [mockLendingEngine.target, mockCollateralManager.target];
       
       await expect(
-        (registry as unknown as Registry).batchSetModules(keys, addresses, true)
+        (registry as any).batchSetModules(keys, addresses, true)
       ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
     });
 
     it('Registry – 暂停状态下应该阻止升级排期', async function () {
-      await (registry as unknown as Registry).pause();
+      await (registry as any).pause();
       
       await expect(
-        (registry as unknown as Registry).scheduleModuleUpgrade(KEY_LE, mockLendingEngine.target)
+        (registry as any).scheduleModuleUpgrade(KEY_LE, mockLendingEngine.target)
       ).to.be.revertedWithCustomError(registry, 'EnforcedPause');
     });
   });

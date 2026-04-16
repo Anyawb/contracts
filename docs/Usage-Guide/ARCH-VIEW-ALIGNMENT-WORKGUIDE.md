@@ -312,82 +312,82 @@
   - 批量接口长度 > `MAX_BATCH_SIZE` 必须按统一错误口径失败；
   - 用无权限账号读取（默认策略下）不应 revert。
 
-### 4.4 `StatisticsView`（✅ 已确认：Strict B+ 单入口编排器 + USD-8 已落地）
+### 4.4 `StatisticsView`（✅ 已确认：Strict B+ 单入口编排器 + value SSOT 已落地）
 - **脚本**：`scripts/e2e/e2e-localhost-statisticsview-acceptance.ts`
 - **MUST**：系统级聚合缓存对外只读（0 gas）。
 - **MUST**：用户统计写入入口具备 `nextVersion`（严格）并发控制。
 - **MUST**：保证金聚合/活跃用户等口径与文档一致。
 
-#### 4.4.1 Value Unit SSOT（USD-8，必须统一）
+#### 4.4.1 Value Unit SSOT（按资产原生 decimals，必须统一）
 
 > 背景：Stats/风险/HF/LTV/清算等模块需要跨资产聚合。若把不同资产的 **amount（token base units）** 直接相加，会在数学上失真。  
-> 因此本仓库把 **value 输出口径** 统一收敛为：**USD value with 8 decimals（USD-8）**。
+> 因此本仓库把 **value 输出口径** 统一收敛为：**同一资产内按 `assetDecimals` 解释的 USD value**；跨资产聚合前必须显式归一化到业务指定精度。
 
 **换算公式（SSOT）**：
 
-\[
-\text{valueUSD8}=\frac{\text{amount(token base units)}\times\text{price(USD-8 per 1 token)}}{10^{\text{assetDecimals}}}
-\]
+$$
+valueUsd = \frac{amount(token\ base\ units) \times priceUsd}{10^{assetDecimals}}
+$$
 
 **关键防分叉说明（必须落到注释/接口）**：
 
-- `price` 固定为 **USD-8**（例如 $1.00 = `100000000`）。
-- `assetDecimals` 必须是**资产自身 decimals**（用于把 token base units 归一为 “1 token”）。
-- 当前 `IPriceOracleRead.getPrice(asset)` 第三个返回值在实现/调用方中被用作 `assetDecimals`（用于上述除数），**不是** “price 的精度”。（price 精度固定为 USD-8）
+- `price` 必须按该资产 `assetDecimals` 缩放。
+- `assetDecimals` 必须是**资产自身 decimals**（用于把 token base units 归一为 “1 token”，并同时决定 price/value 精度）。
+- 当前 `IPriceOracleRead.getPrice(asset)` 第三个返回值在实现/调用方中被用作 `assetDecimals`，调用方不能再假设 price 固定 8 位。
 
 #### 4.4.2 系统性校验清单（Value 口径统一：接口注释 / 文档 / 写入来源 / 前端解码）
 
-> 目标：把“value=USD-8”的口径从隐含推导变成显式 SSOT，避免新贡献者按“settlement token units / price decimals=8”等误解导致口径分叉。
+> 目标：把“value 遵循 assetDecimals，跨资产前显式归一化”的口径从隐含推导变成显式 SSOT，避免新贡献者按“settlement token units / price decimals=8”等误解导致口径分叉。
 
-**A. 接口注释/命名（必须修正为 USD-8）**
+**A. 接口注释/命名（必须修正为 assetDecimals 口径）**
 
 - `src/interfaces/IPriceOracle.sol`
-  - **要求**：明确 `price` 为 USD-8；`decimals` 为 `assetDecimals`（用于换算），不是 price 精度。
+  - **要求**：明确 `price` 按 `assetDecimals` 缩放；`decimals` 为 `assetDecimals`（用于换算并解释 price/value 精度）。
 - `src/interfaces/IPriceOracleAdapter.sol`
   - **要求**：同上。
 - `src/interfaces/IPositionViewValuation.sol`
-  - **要求**：把 “settlement token units” 全部改为 **USD-8 value**。
+  - **要求**：把 “settlement token units” 全部改为 **USD value**，并补充 decimals 语义。
 - `src/Vault/view/modules/PositionView.sol`
-  - **要求**：`getUserTotalCollateralValue/getTotalCollateralValue/getAssetValue` 的 NatSpec 返回值单位统一写为 **USD-8 value**；
-    并在注释中点明其换算使用 `valueUSD8 = amount * price / 10**assetDecimals`。
+  - **要求**：`getUserTotalCollateralValue/getTotalCollateralValue/getAssetValue` 的 NatSpec 返回值单位统一写为 **USD value**；
+    并在注释中点明其换算使用 `valueUsd = amount * price / 10**assetDecimals`。
 
 **B. 文档 SSOT（必须只保留一个口径）**
 
 - `docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`
-  - **要求**：明确 Value Unit SSOT=USD-8，并固化换算公式（见本节 4.4.1）。
+  - **要求**：明确 Value Unit SSOT 按资产 `assetDecimals` 解释，并固化换算公式（见本节 4.4.1）。
 - `docs/CollateralValuation-Migration-Plan.md`
-  - **要求**：将“settlement token units”等表述统一为 **USD-8**，并指向 Value Unit SSOT（避免多处重复口径）。
+  - **要求**：将“settlement token units”等表述统一为 **USD value**，并指向 Value Unit SSOT（避免多处重复口径）。
 
-**C. StatisticsPushManager 的读数来源（必须从 amount 改为 USD-8 value）**
+**C. StatisticsPushManager 的读数来源（必须从 amount 改为 value）**
 
-> 目标：Stats snapshot 必须 push USD-8 value（与 `StatisticsView` 注释、HF/LTV 数学前提一致）。  
-> **已落地（2026-01-30）**：StatsPushManager 已改为读取估值 SSOT（USD-8），不再对多资产 token amount 做数学上无意义的累加。
+> 目标：Stats snapshot 必须 push value（与 `StatisticsView` 注释、HF/LTV 数学前提一致），跨资产聚合前显式归一化。  
+> **已落地（2026-01-30）**：StatsPushManager 已改为读取估值 SSOT，不再对多资产 token amount 做数学上无意义的累加。
 
 - `src/Vault/modules/StatisticsPushManager.sol`
   - **已实现**：
-    - `collateralValueUSD8`：通过 `KEY_POSITION_VIEW → IPositionViewValuation.getUserTotalCollateralValue(user)` 读取（USD-8）。
-    - `debtValueUSD8`：通过 `KEY_LE → ILendingEngineBasic.getUserTotalDebtValue(user)` 读取（USD-8）。
-    - `push`：仍沿用 `StatisticsView.pushUserStatsSnapshot` 的 “global - old + new” 聚合逻辑（输入为 USD-8 snapshot）。
+    - `collateralValue`：通过 `KEY_POSITION_VIEW → IPositionViewValuation.getUserTotalCollateralValue(user)` 读取。
+    - `debtValue`：通过 `KEY_LE → ILendingEngineBasic.getUserTotalDebtValue(user)` 读取。
+    - `push`：仍沿用 `StatisticsView.pushUserStatsSnapshot` 的 “global - old + new” 聚合逻辑（输入为 value snapshot；跨资产消费前需显式归一化）。
   - **权限/部署注意（必须）**：
   - `StatisticsPushManager` 需要具备 `ActionKeys.ACTION_VIEW_PRICE_DATA`，否则会在读取 `PositionView` 估值时触发 `MissingRole()` 并走 `CacheUpdateFailedWithContext`（best-effort）。
     - 本仓库已在部署脚本中补齐该授权（`scripts/deploy/deploylocal.blockNumber` / `scripts/deploy/deploy-arbitrum*.blockNumber`）。
 
 **E. 落地状态与变更摘要（本节对应）**
 
-- **已落地（✅）**：Value Unit SSOT（USD-8）+ StatsPushManager 推送 USD-8 snapshot
-  - **核心改动**：`StatisticsPushManager` 从 “amount 累加” 改为 “USD-8 估值 SSOT”（PositionView + LendingEngine）。
+- **已落地（✅）**：Value Unit SSOT + StatsPushManager 推送 value snapshot
+  - **核心改动**：`StatisticsPushManager` 从 “amount 累加” 改为 “估值 SSOT”（PositionView + LendingEngine）。
   - **写入口收敛（Scheme B / Strict B+）**：`StatisticsView.push*` 写入口仅允许 `StatisticsPushManager` 或 `ACTION_ADMIN`（避免旁路写导致口径漂移）。
   - **部署/权限**：给 `StatisticsPushManager` 授权 `ACTION_VIEW_PRICE_DATA`；重试服务地址授权 `ACTION_VIEW_PUSH`。
   - **测试/验收**：
-    - 单测：`test/StatisticsPushManager.usd8.snapshot.test.blockNumber`（USD-8 snapshot 推送 + 写入口权限）
+    - 单测：`test/StatisticsPushManager.usd8.snapshot.test.blockNumber`（历史文件名；测试 value snapshot 推送 + 写入口权限）
     - e2e：`scripts/e2e/e2e-localhost-statisticsview-acceptance.blockNumber`（retry 路径 + 版本/seq 断言）
 
-**D. 前端/索引解码与展示（必须标注 USD-8）**
+**D. 前端/索引解码与展示（必须标注 value 口径与 decimals）**
 
 - `DataPushed(DATA_TYPE_USER_STATS_UPDATE, payload)`：
-  - **要求**：`UserSnapshot.collateral/debt` 与 `GlobalSnapshot.totalCollateral/totalDebt` 统一解释为 **USD-8 value**。
-  - **展示**：UI 将其作为 “USD 值（8 decimals）” 展示；不要当作 token amount，也不要当作 settlement token base units。
-- 建议在前端 schema map/decoder 文档中注明：`USER_STATS_UPDATE` 的 value 字段单位为 USD-8（避免解析端二次口径分叉）。
+  - **要求**：`UserSnapshot.collateral/debt` 与 `GlobalSnapshot.totalCollateral/totalDebt` 统一解释为 **USD value**。
+  - **展示**：UI 必须结合对应 decimals 或业务归一化目标精度展示；不要当作 token amount，也不要当作 settlement token base units。
+- 建议在前端 schema map/decoder 文档中注明：`USER_STATS_UPDATE` 的 value 字段必须带 decimals 语义（避免解析端二次口径分叉）。
 
 **验证（MUST，可验收）**
 - **返回字段**：系统级/用户级统计读取必须包含 `blockNumber/lastUpdateTime`（或等效字段），并可用于判断新鲜度。
@@ -500,7 +500,7 @@
 **验证（MUST，可验收）**
 - **职责边界**：ABI 中不存在 `push*`；除 `initialize/upgradeTo*` 外无非 `view/pure` 外部函数。
 - **权限**：
-  - `getLoanOrder(orderId)`：仅订单相关方（borrower/lender）可读；或 ops/admin（具备 `VIEW_USER_DATA` 或 admin）可读；否则 `MissingRole()`
+  - `getLoanOrder(orderId)`：仅订单相关方（borrower/lender）可读；或 ops/admin（具备 `ActionKeys.ACTION_VIEW_USER_DATA` 或 admin）可读；否则 `MissingRole()`
   - `LoanNFTView.getUserLoanCount(user)` / `LendingEngineView.canAccessLoanOrder(orderId,user)`：仅 `user` 本人或 ops/admin 可读，否则 `MissingRole()`
   - `getFailedFeeAmount(orderId)` / `getNftRetryCount(orderId)` / `isMatchEngine(account)` / `getRegistryFromEngine()`：仅 ops/admin 可读，否则 `MissingRole()`
 - **脚本断言**：
@@ -511,9 +511,9 @@
 - **脚本**：`scripts/e2e/e2e-localhost-previewview-acceptance.ts`
 - **MUST**：只读预览门面；不得存在任何 push\* 写入口与业务状态写入。
 - **MUST**：用户私域口径：仅允许 `user` 本人或具备 `ACTION_VIEW_USER_DATA`/admin 的 caller 调用预览（失败必须 `MissingRole()`）。
-- **MUST**：不得绕过下游专属 View 的权限策略：当 `PositionView` 对仓位读取施加 `VIEW_USER_DATA` gate 时，`PreviewView` 的实现必须保证：
+- **MUST**：不得绕过下游专属 View 的权限策略：当 `PositionView` 对仓位读取施加 `ActionKeys.ACTION_VIEW_USER_DATA` gate 时，`PreviewView` 的实现必须保证：
   - 外部 caller 的权限校验发生在 PreviewView 入口（按上条）
-  - 模块间调用不会被误拦（部署脚本需为 `PreviewView` 合约地址授予 `VIEW_USER_DATA`，仅用于内部调用；外部 caller 仍需通过入口校验）
+  - 模块间调用不会被误拦（部署脚本需为 `PreviewView` 合约地址授予 `ActionKeys.ACTION_VIEW_USER_DATA`，仅用于内部调用；外部 caller 仍需通过入口校验）
 
 **验证（MUST，可验收）**
 - **权限**：
@@ -617,8 +617,8 @@
 - **脚本**：`scripts/e2e/e2e-localhost-systemview-routing.ts`
 | 用例 | 前置条件 | 操作 | 期望事件 | 期望返回字段 | 断言 |
 |---|---|---|---|---|---|
-| SV-01 路由/发现性（route\*，SSOT=Registry） | Registry 已注册各 View 模块；caller 具备 `ACTION_VIEW_SYSTEM_DATA`（即 `keccak256("VIEW_SYSTEM_DATA")`）（✅ 已确认） | 调用 `routeStatistics/routeReward/routeLiquidation/routeRisk/routeUser/routePosition/routeBatch/routeDashboard/routePreview` 以及 `routePrice()` | 无 `DataPushed` | `RouteInfo(moduleKey,moduleAddr)`；`routePrice` 返回 `RouteHint(primaryRoute,fallbackRoute)` | `moduleKey == keccak256("...")` 且 `moduleAddr == Registry.getModuleOrRevert(moduleKey)`；地址非零；`getVersionInfo()` 可读用于定位实现 |
-| SV-02 权限 gate（统一 MissingRole） | `unauthorized` 不具备 `ACTION_VIEW_SYSTEM_DATA`（即 `keccak256("VIEW_SYSTEM_DATA")`）（✅ 已确认） | `unauthorized` 调用任一 `route*()` / `getModuleOptional(bytes32)` | 无 | N/A | 必须 `revert MissingRole()`（断言 selector，不依赖 revert string） |
+| SV-01 路由/发现性（route\*，SSOT=Registry） | Registry 已注册各 View 模块；caller 具备 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`（✅ 已确认） | 调用 `routeStatistics/routeReward/routeLiquidation/routeRisk/routeUser/routePosition/routeBatch/routeDashboard/routePreview` 以及 `routePrice()` | 无 `DataPushed` | `RouteInfo(moduleKey,moduleAddr)`；`routePrice` 返回 `RouteHint(primaryRoute,fallbackRoute)` | `moduleKey == keccak256("...")` 且 `moduleAddr == Registry.getModuleOrRevert(moduleKey)`；地址非零；`getVersionInfo()` 可读用于定位实现 |
+| SV-02 权限 gate（统一 MissingRole） | `unauthorized` 不具备 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`（✅ 已确认） | `unauthorized` 调用任一 `route*()` / `getModuleOptional(bytes32)` | 无 | N/A | 必须 `revert MissingRole()`（断言 selector，不依赖 revert string） |
 | SV-03 模块查询 API（getModule/getNamedModule） | 同 SV-01 | 调用 `getModule(bytes32)` / `getModuleOptional(bytes32)`；调用 `getNamedModule(string)` / `getNamedModuleOptional(string)` | 无 | 返回 module address | `getModuleOptional` 未注册返回 `0x0`；`getModule` 未注册 revert；`getNamedModule` 支持标准映射（`ModuleKeys.getModuleKeyFromString`）+ legacy `keccak256(name)` fallback |
 | SV-04 Deprecated getters（允许 revert，但禁止作为集成路径） | 无 | 调用 `getAssetPrice/getTotalCollateral/getTotalDebt/getRewardSystemView/getGuaranteeSystemView` | 无 | N/A | 允许 revert（兼容债务）；但必须证明 route\* API 可用，且脚本/前端/SDK 不依赖 revert 文本做集成 |
 | SV-05 无业务写入职责边界（静态合规） | 无 | 对 ABI/源代码做静态检查 | 无 | N/A | 除 `initialize/upgrade` 外不应存在非 `view/pure` 的 external/public；不得出现 `push*` 写入口 |
@@ -631,7 +631,7 @@
 - **脚本**：`scripts/tests/phase3-positionview-acceptance.ts`
 | 用例 | 前置条件 | 操作 | 期望事件 | 期望返回字段 | 断言 |
 |---|---|---|---|---|---|
-| PV-01 读取快照与有效性（推荐 Meta API） | caller 具备 `VIEW_USER_DATA`；准备 `(user,asset)` | 调用 `getUserPositionWithMeta(user, asset)`（兼容：`getUserPositionWithValidity`） | 无（仅读） | `collateral/debt/isValid/blockNumber/version` | 字段齐全；`blockNumber` 为该 `(user,asset)` 最近一次写入缓存的区块号；`version` 可读 |
+| PV-01 读取快照与有效性（推荐 Meta API） | caller 具备 `ActionKeys.ACTION_VIEW_USER_DATA`；准备 `(user,asset)` | 调用 `getUserPositionWithMeta(user, asset)`（兼容：`getUserPositionWithValidity`） | 无（仅读） | `collateral/debt/isValid/blockNumber/version` | 字段齐全；`blockNumber` 为该 `(user,asset)` 最近一次写入缓存的区块号；`version` 可读 |
 | PV-02 严格并发 nextVersion（CAS） | caller 是业务模块（`VaultRouter/CM/LE/...`）且具备 `ACTION_VIEW_PUSH`；可读 currentVersion | `v0 = getPositionVersion(user,asset)` → 调用 `pushUserPositionUpdate(user,asset,collateral,debt,requestId,seq,nextVersion=v0+1)` → 再读 meta | 必须 `DataPushed(DATA_TYPE_USER_POSITION_UPDATE, payload)` | 同 PV-01 | `version == v0+1`；payload 可 ABI 解码为 `(user,asset,collateral,debt)` 且与写入一致 |
 | PV-03 错误版本必须失败 | 同 PV-02 | 使用错误 `nextVersion`（例如 `nextVersion=currentVersion` 且 `requestId` 不同）调用 push | 无成功 `DataPushed` | N/A | 必须 `revert PositionView__StaleVersion(uint64,uint64)`（脚本断言 selector，不依赖 revert string）；不得静默覆盖 |
 | PV-04 幂等重放 requestId（version-bound, O(1)） | 同 PV-02 | 成功 push 后，重放同一笔：`requestId` 不变，`nextVersion==currentVersion`，payload 相同（`seq` 可任意） | 必须 emit `IdempotentRequestIgnored`；不得 emit `DataPushed` | 同 PV-01 | `version` 不变；数据不变；无重复写入副作用 |
@@ -644,7 +644,7 @@
 - **脚本**：`scripts/tests/view-schemeu-smoke-local.ts`
 | 用例 | 前置条件 | 操作 | 期望事件 | 期望返回字段 | 断言 |
 |---|---|---|---|---|---|
-| HV-01 只读查询（Scheme U + meta 输出） | `user` 与 `outsider`；另备 `ops/admin`（具备 `VIEW_USER_DATA` 或 `ADMIN`） | `getUserHealthFactorWithMeta(user)` / `isUserLiquidatableWithMeta(user)` / `batchGetHealthFactorsWithMeta(users)` | 无（仅读） | `(healthFactor,isValid,blockNumber)`；batch 返回数组 | self read 必须成功；non-self outsider 必须 `revert MissingRole()`；ops/admin 代查必须成功；batch(users[]) 无 self-bypass（caller 必须 ops/admin） |
+| HV-01 只读查询（Scheme U + meta 输出） | `user` 与 `outsider`；另备 `ops/admin`（具备 `ActionKeys.ACTION_VIEW_USER_DATA` 或 `ActionKeys.ACTION_ADMIN`） | `getUserHealthFactorWithMeta(user)` / `isUserLiquidatableWithMeta(user)` / `batchGetHealthFactorsWithMeta(users)` | 无（仅读） | `(healthFactor,isValid,blockNumber)`；batch 返回数组 | self read 必须成功；non-self outsider 必须 `revert MissingRole()`；ops/admin 代查必须成功；batch(users[]) 无 self-bypass（caller 必须 ops/admin） |
 | HV-02 push 更新后可读（writer=ACTION_VIEW_PUSH） | `VaultRouter`（或 keeper）具备 `ACTION_VIEW_PUSH`；读取方为 `user` 本人或 ops/admin | `pushRiskStatus(user,hf,minHF,flag,blockNumber)`（或 batch）→ 再读 | 必须 `DataPushed(DATA_TYPE_RISK_STATUS, payload)` | 同 HV-01 | push 后 `healthFactor` 更新、`blockNumber` 单调（blockNumber=0 时归一为 block.number）；payload 可 ABI 解码为 `(user,hf,minHF,flag,blockNumber)` |
 | HV-03 批量边界（统一错误口径） | 有 users 数组 | 调用 `batchGetHealthFactorsWithMeta(users)`：空数组 / 长度 `MAX_BATCH_SIZE+1` | 无 | N/A | 空数组必须 `revert EmptyArray()`；超限必须 `revert BatchTooLarge(len,max)`（脚本断言 selector，不依赖 revert string） |
 
@@ -657,7 +657,7 @@
 | 用例 | 前置条件 | 操作 | 期望事件 | 期望返回字段 | 断言 |
 |---|---|---|---|---|---|
 | ST-01 系统聚合只读（含 meta） | 无 | `getGlobalStatisticsWithMeta()` | 无（仅读） | `GlobalStatistics{totalUsers,activeUsers,totalCollateral,totalDebt,lastUpdateTime}` + `(isValid,blockNumber)` | 字段齐全；`lastUpdateTime == meta.blockNumber`；无需权限 gate |
-| ST-02 推送后单调推进（user stats；Strict B+ 推荐路径） | caller 具备 `ACTION_VIEW_PUSH`（调用编排器 retry）；Registry 已绑定 `KEY_STATS_PUSH_MANAGER`；且 `StatisticsPushManager` 已被授予 `ACTION_VIEW_PRICE_DATA` | 调用 `StatisticsPushManager.retryUserStats(user)` → 再读 `getGlobalStatisticsWithMeta()` | 必须 `DataPushed(DATA_TYPE_USER_STATS_UPDATE, payload)`（由 `StatisticsView` 发出） | 同 ST-01 | `lastUpdateTime` 单调；payload 可 ABI 解码并匹配 `(user,version,requestId,seq,UserSnapshot,GlobalSnapshot)`；并且 `collateral/debt` 口径为 USD-8 snapshot |
+| ST-02 推送后单调推进（user stats；Strict B+ 推荐路径） | caller 具备 `ACTION_VIEW_PUSH`（调用编排器 retry）；Registry 已绑定 `KEY_STATS_PUSH_MANAGER`；且 `StatisticsPushManager` 已被授予 `ACTION_VIEW_PRICE_DATA` | 调用 `StatisticsPushManager.retryUserStats(user)` → 再读 `getGlobalStatisticsWithMeta()` | 必须 `DataPushed(DATA_TYPE_USER_STATS_UPDATE, payload)`（由 `StatisticsView` 发出） | 同 ST-01 | `lastUpdateTime` 单调；payload 可 ABI 解码并匹配 `(user,version,requestId,seq,UserSnapshot,GlobalSnapshot)`；并且 `collateral/debt` 口径为 value snapshot |
 | ST-03 并发/幂等（nextVersion + requestId + seq） | caller 为 `ACTION_ADMIN` 或 StatsPushManager（Registry `KEY_STATS_PUSH_MANAGER`）（✅ 已确认） | 直接调用 `StatisticsView.pushUserStatsSnapshot(...)`：错误 `nextVersion`、同 `requestId` 重放、乱序 `seq` | `IdempotentRequestIgnored`（重放） | 同 ST-01 | 错误版本必须 `revert StatisticsView__StaleUserStatsVersion(uint64,uint64)`；重放不得 emit `DataPushed` 且版本不变；乱序必须 `revert StatisticsView__OutOfOrderSeq(uint64,uint64)` |
 
 **自动化脚本（推荐，可直接验收）**
@@ -731,7 +731,7 @@
 |---|---|---|---|---|---|
 | LQ-01 单点 DataPush | 清算写路径可触发 | 触发清算流程（按仓库现有脚本/测试骨架） | 观察到由 `LiquidatorView.push*` 发出的 `DataPushed` | 输出如含聚合应带 staleness/版本（按实现） | DataPush 发起点唯一（不得多点重复发）；权限口径不混用 |
 | SRV-01 system risk 读权限 gate（已启用） | `unauthorized` 无 `ACTION_VIEW_RISK_DATA`；另备 `operator` 具备 `ACTION_VIEW_RISK_DATA` | `unauthorized` 调用 `SystemRiskView` 的 system-only getter（如 `get*Threshold/getMinHealthFactor`） | 无（仅读） | N/A | `unauthorized` 必须 `revert MissingRole()`（断言 selector） |
-| SRV-02 system risk 读权限（VIEW_RISK_DATA / ADMIN） | `operator` 具备 `ACTION_VIEW_RISK_DATA`；或 `admin` 具备 `ACTION_ADMIN` | `operator/admin` 调用上述 getter | 无（仅读） | 返回阈值/参数（按实现） | 调用必须成功（✅ 已确认） |
+| SRV-02 system risk 读权限（ActionKeys.ACTION_VIEW_RISK_DATA / ActionKeys.ACTION_ADMIN） | `operator` 具备 `ACTION_VIEW_RISK_DATA`；或 `admin` 具备 `ACTION_ADMIN` | `operator/admin` 调用上述 getter | 无（仅读） | 返回阈值/参数（按实现） | 调用必须成功（✅ 已确认） |
 
 **自动化脚本（推荐，可直接验收）**
 - `pnpm -s hardhat run scripts/e2e/e2e-localhost-liquidatorview-acceptance.blockNumber --network localhost`
@@ -757,7 +757,7 @@
 | LEV-01 职责边界（只读、无 push\*） | 无 | 对 ABI/源代码做静态检查；并在运行时枚举外部函数 selector（按测试骨架能力） | 无 `DataPushed` | N/A | ABI 中不存在 `push*`；除 `initialize/upgradeTo*` 外不存在 non-view 外部函数；不得写入业务状态 |
 | LEV-02 订单私域：相关方可读 | 存在可查询的 `orderId`，并已知 `borrower/lender/outsider` | `borrower` 调用 `getLoanOrder(orderId)`；`lender` 调用同接口 | 无 | `LoanOrder`（按实现） | `borrower` 与 `lender` 均成功；返回值与账本一致（如可对照 LendingEngine/LoanNFT 的只读口径） |
 | LEV-03 订单私域：非相关方必须拒绝（MissingRole） | 同 LEV-02，`outsider` 无任何角色 | `outsider` 调用 `getLoanOrder(orderId)` | 无 | N/A | 必须 `revert MissingRole()`（断言 selector，不依赖 revert string） |
-| LEV-04 用户统计私域：仅本人或 ops/admin | `user` 存在订单；准备 `unauthorized` 与 `ops`（具备 `VIEW_USER_DATA` 或 admin） | `user` 调用 `LoanNFTView.getUserLoanCount(user)`；`unauthorized` 调用 `LoanNFTView.getUserLoanCount(user)`；`ops` 调用 `LoanNFTView.getUserLoanCount(user)` | 无 | `count`（按实现） | `user/ops` 成功；`unauthorized` 必须 `MissingRole()`；同时 `LendingEngineView.canAccessLoanOrder(orderId,user)` 同样口径 |
+| LEV-04 用户统计私域：仅本人或 ops/admin | `user` 存在订单；准备 `unauthorized` 与 `ops`（具备 `ActionKeys.ACTION_VIEW_USER_DATA` 或 admin） | `user` 调用 `LoanNFTView.getUserLoanCount(user)`；`unauthorized` 调用 `LoanNFTView.getUserLoanCount(user)`；`ops` 调用 `LoanNFTView.getUserLoanCount(user)` | 无 | `count`（按实现） | `user/ops` 成功；`unauthorized` 必须 `MissingRole()`；同时 `LendingEngineView.canAccessLoanOrder(orderId,user)` 同样口径 |
 | LEV-05 运维/诊断只允许 ops/admin | `orderId` 可用；准备 `ops/admin` 与 `unauthorized/outsider` | 调用 `getFailedFeeAmount(orderId)` / `getNftRetryCount(orderId)` / `isMatchEngine(account)` / `getRegistryFromEngine()` | 无 | N/A（或返回值按实现） | `ops/admin` 成功；其余 caller 必须 `MissingRole()`；不得出现 revert string / 自定义 Unauthorized 分叉 |
 
 **自动化脚本（推荐，可直接验收）**
@@ -773,7 +773,7 @@
 | PRV-03 私域入口校验：本人允许 | `userA` 存在可预览场景（余额/仓位/订单等按实现） | `userA` 调用上述 preview 系列（目标 user=userA） | 无 | 至少包含 `hfAfter/newHF/newLTV`（按实现） | 调用成功；返回结构稳定（字段存在且单位符合文档约定） |
 | PRV-04 ops/admin 可代查 | `ops` 具备 `ACTION_VIEW_USER_DATA` 或 admin | `ops` 调用 preview 系列，目标 user 为 `userA` | 无 | 同 PRV-03 | 调用成功；行为与 `userA` 自查一致（除“caller==user”相关分支外） |
 | PRV-05 输入校验（非法输入） | 无 | asset=0 / amount=0 / orderId=0 等非法输入（按实现覆盖）调用 preview 系列 | 无 | N/A | 必须按实现 revert（例如 `PreviewView__InvalidInput()`）；不得静默返回 0 值误导 |
-| PRV-06 不绕过下游权限（内部调用通行，外部仍 gate） | 部署脚本已为 `PreviewView` 合约地址授予下游所需角色（如 `VIEW_USER_DATA`），仅用于内部模块间调用 | 外部 `unauthorized` 调用 PreviewView（目标非本人）；以及外部 `userA` 自查 | 无 | N/A / 同 PRV-03 | 外部 `unauthorized` 仍必须 `MissingRole()`；证明“内部 grant 不会导致外部绕过” |
+| PRV-06 不绕过下游权限（内部调用通行，外部仍 gate） | 部署脚本已为 `PreviewView` 合约地址授予下游所需角色（如 `ActionKeys.ACTION_VIEW_USER_DATA`），仅用于内部模块间调用 | 外部 `unauthorized` 调用 PreviewView（目标非本人）；以及外部 `userA` 自查 | 无 | N/A / 同 PRV-03 | 外部 `unauthorized` 仍必须 `MissingRole()`；证明“内部 grant 不会导致外部绕过” |
 
 **自动化脚本（推荐，可直接验收）**
 - `pnpm -s hardhat run scripts/e2e/e2e-localhost-previewview-acceptance.blockNumber --network localhost`
@@ -860,11 +860,11 @@
 
 ### A.-1 已落地状态与变更摘要（2026-01-30）
 
-- **已落地（✅）**：Scheme U 的“self 放行 / non-self 需 VIEW_USER_DATA 或 ADMIN / batch 无 self-bypass / 失败 MissingRole()”已在主干 user-dimensional view 中收口
+- **已落地（✅）**：Scheme U 的“self 放行 / non-self 需 ActionKeys.ACTION_VIEW_USER_DATA 或 ActionKeys.ACTION_ADMIN / batch 无 self-bypass / 失败 MissingRole()”已在主干 user-dimensional view 中收口
   - **代表性合约**：`UserView`（façade）、`PositionView`、`FeeRouterView`、`RewardView`、`LiquidatorView`、`StatisticsView` 等均已使用 `MissingRole()` 作为统一失败口径，并遵循 self/non-self/batch 规则（以各自 `onlyAuthorizedFor` / `onlyUserDim` / `onlyUserDimBatch` 等 gate 为准）。
   - **测试覆盖（示例）**：对应 View 的 unit tests 与 localhost acceptance 脚本已包含“self 成功 / non-self outsider 失败 / batch 无 self-bypass”的权限矩阵断言（详见本附录 A.2）。
 
-> 备注：本次（2026-01-30）主要变更聚焦于 **Statistics（USD-8 + Strict B+ 单入口写入）**，Scheme U 本身属于“此前已完成并已验证”的对齐项；此处补齐的是 Workguide 的 SSOT 记录与可追溯摘要。
+> 备注：本次（2026-01-30）主要变更聚焦于 **Statistics（value SSOT + Strict B+ 单入口写入）**，Scheme U 本身属于“此前已完成并已验证”的对齐项；此处补齐的是 Workguide 的 SSOT 记录与可追溯摘要。
 
 ### A.0 适用范围与例外（与 `docs/Architecture-Guide.md` 保持一致）
 
@@ -873,8 +873,8 @@
 - **非用户维度不适用**：系统级/全局快照、模块注册查询、纯计算等接口不在 Scheme U 范围内，勿强行套用（避免把 system-scoped 接口错误改成 user-data gate）。
 
 #### A.0.2 更新：`HealthView` 健康因子读取已按 Scheme U 收口（当前口径）
-- `HealthView.getUserHealthFactorWithMeta/isUserLiquidatableWithMeta`：按 Scheme U（self 放行；non-self 需 `ACTION_VIEW_USER_DATA`/`ACTION_ADMIN`，失败 `MissingRole()`）。
-- `HealthView.batchGetHealthFactorsWithMeta(users)`：users[] 枚举能力（无 self-bypass），需 `ACTION_VIEW_USER_DATA`/`ACTION_ADMIN`。
+- `HealthView.getUserHealthFactorWithMeta/isUserLiquidatableWithMeta`：按 Scheme U（self 放行；non-self 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`，失败 `MissingRole()`）。
+- `HealthView.batchGetHealthFactorsWithMeta(users)`：users[] 枚举能力（无 self-bypass），需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`。
 - 说明：该变更用于隐私强化与统一用户维度读权限；任何前端/脚本/测试中“默认公开可读”的假设都必须移除并同步更新断言。
 
 ### A.0.3 本附录涉及文件（汇总清单）
@@ -920,14 +920,14 @@
 
 #### A.1.1 MUST 修复（✅ 已确认：历史冲突已修复）
 - `src/Vault/view/modules/FeeRouterView.sol`
-  - **历史问题（已修复）**：self 读曾被强制要求 `VIEW_USER_DATA`；non-self 曾只允许 admin；且无权限使用自定义 Unauthorized。
+  - **历史问题（已修复）**：self 读曾被强制要求 `ActionKeys.ACTION_VIEW_USER_DATA`；non-self 曾只允许 admin；且无权限使用自定义 Unauthorized。
   - **已落地改法（✅）**：`onlyAuthorizedFor(user)` 已按 Scheme U 收口；对外无权限统一 `MissingRole()`。
 - `src/Vault/view/modules/PositionView.sol`
-  - **历史问题（已修复）**：所有 user-scoped read 曾强制 `VIEW_USER_DATA`（self 也不例外）；batch 也同样如此；与 Scheme U 冲突。
+  - **历史问题（已修复）**：所有 user-scoped read 曾强制 `ActionKeys.ACTION_VIEW_USER_DATA`（self 也不例外）；batch 也同样如此；与 Scheme U 冲突。
   - **已落地改法（✅）**：单用户入口按 Scheme U；batch(users[]) 入口按 Scheme U batch（no self-bypass，ops/admin）。
 - `src/Vault/view/modules/RewardView.sol`
   - **历史问题（已修复）**：non-self 曾未纳入 admin（`ACTION_ADMIN`）旁路。
-  - **已落地改法（✅）**：non-self 允许 `VIEW_USER_DATA` 或 admin；失败 `MissingRole()`。
+  - **已落地改法（✅）**：non-self 允许 `ActionKeys.ACTION_VIEW_USER_DATA` 或 admin；失败 `MissingRole()`。
 - `src/Vault/view/modules/AccessControlView.sol`
   - **历史问题（已修复）**：读权限与错误口径曾不符合 Scheme U。
   - **已落地改法（✅）**：user-scoped reads 已按 Scheme U；失败统一 `MissingRole()`。
@@ -945,26 +945,26 @@
 
 #### A.2.1 单元测试（Hardhat）
 - `test/Vault/view/FeeRouterView.test.blockNumber`
-  - **需要改**：self-read 不应需要 `VIEW_USER_DATA`；补齐 ops/admin/non-self/outsider 的权限矩阵；无权限断言改为 `MissingRole()`。
+  - **需要改**：self-read 不应需要 `ActionKeys.ACTION_VIEW_USER_DATA`；补齐 ops/admin/non-self/outsider 的权限矩阵；无权限断言改为 `MissingRole()`。
 - `test/Vault/view/PositionView.cache-validity.test.blockNumber`
   - **需要改**：移除/改写“任何地址都可以免费查询他人仓位”的断言；改为 Scheme U（self allowed; non-self outsider -> `MissingRole()`）。
 - `test/Vault/view/AccessControlView.test.blockNumber`
   - **需要改**：无权限断言统一为 `MissingRole()`，并按 Scheme U 补齐 admin/ops 行为。
 - `test/Vault/view/modules/LiquidatorView.test.blockNumber`
-  - **需要改**：self user-scoped reads 不应强制 `VIEW_USER_DATA`；补齐 ops/admin/non-self/outsider 的权限矩阵；无权限断言 `MissingRole()`。
+  - **需要改**：self user-scoped reads 不应强制 `ActionKeys.ACTION_VIEW_USER_DATA`；补齐 ops/admin/non-self/outsider 的权限矩阵；无权限断言 `MissingRole()`。
 - **风险/系统风险收敛相关（新增/已改）**
   - `test/Vault/view/HealthView.test.blockNumber`
     - **新增口径（已更新）**：`getUserHealthFactorWithMeta/isUserLiquidatableWithMeta` 按 Scheme U；
-      `batchGetHealthFactorsWithMeta(users)` 无 self-bypass，需 `VIEW_USER_DATA`/`ACTION_ADMIN`。
+      `batchGetHealthFactorsWithMeta(users)` 无 self-bypass，需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`。
     - **保留 gate**：`push*` 仍需 `ACTION_VIEW_PUSH`；系统健康相关仍需 `ACTION_VIEW_SYSTEM_STATUS`/`ACTION_ADMIN`。
   - `test/Vault/view/RiskView.test.blockNumber`
-    - **改为 Scheme U**：self read 允许；non-self 需 `VIEW_USER_DATA`/`ACTION_ADMIN`；`batchGetRiskAssessments` 无 self-bypass。
+    - **改为 Scheme U**：self read 允许；non-self 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`；`batchGetRiskAssessments` 无 self-bypass。
     - **无权限断言**：统一 `MissingRole()`。
   - `test/Vault/view/LiquidationRiskView.test.blockNumber`
-    - **改为 Scheme U**：self read 允许；non-self 需 `VIEW_USER_DATA`/`ACTION_ADMIN`；batch 无 self-bypass。
+    - **改为 Scheme U**：self read 允许；non-self 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`；batch 无 self-bypass。
     - **无权限断言**：`MissingRole()`（来自 view 合约自身）。
   - `test/Vault/view/BatchView.test.blockNumber`
-    - **改为 Scheme U batch**：`batchGetHealthFactorsWithMeta/batchGetRiskAssessments` 需 `VIEW_USER_DATA`/`ACTION_ADMIN`。
+    - **改为 Scheme U batch**：`batchGetHealthFactorsWithMeta/batchGetRiskAssessments` 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`。
     - **无权限断言**：`MissingRole()`（来自 BatchView）。
   - `test/Vault/view/SystemView.test.blockNumber`
     - **新增**：`routeSystemRisk()` 路由一致性断言（moduleKey + Registry 解析一致）。
@@ -973,7 +973,7 @@
 - `scripts/e2e/e2e-localhost-feerouterview-acceptance.blockNumber`
   - **需要补/改**：增加 Scheme U 权限矩阵断言（self 无 role 成功；ops/admin 代查成功；outsider non-self 必须 `MissingRole()`）。
 - `scripts/e2e/e2e-localhost-positionview-acceptance.blockNumber`
-  - **需要改**：更新“PositionView 读必须 VIEW_USER_DATA”的断言为 Scheme U + batch 规则。
+  - **需要改**：更新“PositionView 读必须 ActionKeys.ACTION_VIEW_USER_DATA”的断言为 Scheme U + batch 规则。
 - `scripts/e2e/e2e-localhost-liquidatorview-acceptance.blockNumber`
   - **需要改**：更新 self/non-self 行为与 `MissingRole()` 断言，使其符合 Scheme U（self 无 role 成功；ops/admin 代查成功；outsider non-self 失败）。
 - `scripts/e2e/e2e-localhost-rewardview-acceptance.blockNumber`
@@ -982,8 +982,8 @@
   - `scripts/e2e/e2e-localhost-healthview-acceptance.blockNumber`
     - **改为公开只读**：`getUserHealthFactorWithMeta/batchGetHealthFactorsWithMeta` 不应要求 role；保留 push 入口 `ACTION_VIEW_PUSH` gate 断言。
   - `scripts/e2e/e2e-localhost-batch-aggregators-acceptance.blockNumber`
-    - **改为 Scheme U batch**：`BatchView.batchGetHealthFactorsWithMeta/batchGetRiskAssessments` 需 `VIEW_USER_DATA`/`ACTION_ADMIN`，并保持 batch 无 self-bypass。
-    - **RiskView 自身**：self read 允许；non-self 需 `VIEW_USER_DATA`/`ACTION_ADMIN`；batch 无 self-bypass。
+    - **改为 Scheme U batch**：`BatchView.batchGetHealthFactorsWithMeta/batchGetRiskAssessments` 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`，并保持 batch 无 self-bypass。
+    - **RiskView 自身**：self read 允许；non-self 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`；batch 无 self-bypass。
   - `scripts/e2e/e2e-localhost-systemview-routing.blockNumber`
     - **新增**：`routeSystemRisk()` 与 Registry 一致性校验（moduleKey + address）。
   - `scripts/e2e/utils/view-preflight.blockNumber` / `scripts/e2e/utils/view-scan.blockNumber`
@@ -1017,7 +1017,7 @@
     - 无权限失败：统一 `revert MissingRole()`。
 
 - **特别说明（已更新）：HealthView 健康因子读取已按 Scheme U 收口（当前口径）**
-  - `HealthView.getUserHealthFactorWithMeta/isUserLiquidatableWithMeta`：Scheme U（self 放行；non-self 需 `VIEW_USER_DATA`/`ACTION_ADMIN`）。
+  - `HealthView.getUserHealthFactorWithMeta/isUserLiquidatableWithMeta`：Scheme U（self 放行；non-self 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`）。
   - `HealthView.batchGetHealthFactorsWithMeta(users)`：users[] 枚举能力（无 self-bypass；ops/admin only）。
 
 ### B.2 现状盘点：当前“系统风险数据”分散在哪
@@ -1113,7 +1113,7 @@
   - **测试覆盖**：`scripts/e2e/e2e-localhost-systemview-routing.blockNumber` 已覆盖路由一致性断言。
 - **`BatchView`（✅ 已实现）**
   - 通过 `ModuleKeys.KEY_RISK_VIEW` 解析 risk view，调用 `RiskView.batchGetRiskAssessments`。
-  - **权限确认**：BatchView 的 `batchGetRiskAssessments` 入口已按 Scheme U batch 规则 gate（`onlyUserBatchViewer`：不得 self-bypass，必须 `VIEW_USER_DATA`/`ADMIN`）。
+  - **权限确认**：BatchView 的 `batchGetRiskAssessments` 入口已按 Scheme U batch 规则 gate（`onlyUserBatchViewer`：不得 self-bypass，必须 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`）。
   - **测试覆盖**：`scripts/e2e/e2e-localhost-batch-aggregators-acceptance.blockNumber` 已覆盖 Scheme U batch 断言。
 
 ### B.6 部署/配置/测试（✅ 已落地 Checklist）
@@ -1148,7 +1148,7 @@
   - `SystemRiskView`（system-only，`ACTION_VIEW_RISK_DATA` gate）与 `RiskView`（user-private，Scheme U）命名与路由已清晰区分。
   - `SystemView.routeSystemRisk()` 与 `SystemView.routeRisk()` 分别指向不同模块，避免前端误用。
 - **Batch 能力的敏感性（✅ 已按架构指南实现）**：
-  - 所有 `users[]` 枚举能力均按 Scheme U batch 实现（`VIEW_USER_DATA/ADMIN`，无 self-bypass）。
+  - 所有 `users[]` 枚举能力均按 Scheme U batch 实现（`ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`，无 self-bypass）。
   - `SystemRiskView` 不包含任何 `users[]` 接口，避免口径冲突。
   - `BatchView.batchGetRiskAssessments` 调用 `RiskView.batchGetRiskAssessments`，权限 gate 在 BatchView 入口层（Scheme U batch）。
 - **健康因子的一致性（✅ 已收敛）**：
@@ -1270,8 +1270,8 @@ B：无权限 caller 必须 MissingRole()；有 ACTION_VIEW_RISK_DATA 必须成�
 状态：✅ 已落地
 **落地完成项（验收通过）**：
 - ✅ `SystemRiskView` 已实现、部署、注册（system-only 接口，`ACTION_VIEW_RISK_DATA` gate）
-- ✅ `RiskView` 已按 Scheme U 实现（user-private，self-read allowed，non-self requires `VIEW_USER_DATA`/`ADMIN`）
-- ✅ `BatchView` 已按 Scheme U batch 实现（users[] 枚举无 self-bypass，必须 `VIEW_USER_DATA`/`ADMIN`）
+- ✅ `RiskView` 已按 Scheme U 实现（user-private，self-read allowed，non-self requires `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`）
+- ✅ `BatchView` 已按 Scheme U batch 实现（users[] 枚举无 self-bypass，必须 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`）
 - ✅ `HealthView` 已按 Scheme U 收口（健康因子读取，self/non-self/batch 规则一致）
 - ✅ `SystemView.routeSystemRisk()` 已实现并测试（路由一致性断言通过）
 - ✅ ModuleKeys、部署脚本、测试脚本已全部对齐

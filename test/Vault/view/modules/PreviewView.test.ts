@@ -1154,7 +1154,7 @@ describe("PreviewView", function () {
       const { user, preview, position, asset } = await loadFixture(deployFixture);
       // collateral = 1000, debt = 749
       // maxDebt = 750, maxBorrowable = 1
-      await position.pushUserPositionUpdate(user.address, asset, 1000n, 749n);
+      await (position as any).pushUserPositionUpdate(user.address, asset, 1000n, 749n);
       
       const [, , maxBorrowable] = await preview.previewBorrow(user.address, asset, 0, 0, 0);
       expect(maxBorrowable).to.equal(1n);
@@ -1167,7 +1167,7 @@ describe("PreviewView", function () {
 
     it("previewWithdraw - 提取 1 wei 的边界情况", async function () {
       const { user, preview, position, asset } = await loadFixture(deployFixture);
-      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      await (position as any).pushUserPositionUpdate(user.address, asset, 100n, 50n);
       
       const [hf, ok] = await preview.previewWithdraw(user.address, asset, 1n);
       expect(hf).to.equal((99n * 10_000n) / 50n);
@@ -1176,7 +1176,7 @@ describe("PreviewView", function () {
 
     it("previewRepay - 还款 1 wei 的边界情况", async function () {
       const { user, preview, position, asset } = await loadFixture(deployFixture);
-      await position.pushUserPositionUpdate(user.address, asset, 100n, 50n);
+      await (position as any).pushUserPositionUpdate(user.address, asset, 100n, 50n);
       
       const [hf, ltv] = await preview.previewRepay(user.address, asset, 1n);
       expect(hf).to.equal((100n * 10_000n) / 49n);

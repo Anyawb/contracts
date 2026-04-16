@@ -1,6 +1,6 @@
 # Reward 系统使用说明
 
-> 最后更新：2026-03-04  
+> 最后更新：2026-04-06  
 > 本文档提供 Reward（EasyToken-only）奖励系统的完整使用指南
 
 ---
@@ -8,7 +8,7 @@
 ## 📋 目录
 
 1. [系统概述](#系统概述)
-2. [SSOT：EasyToken 语义与命名规范（并入）](#ssot-easytoken-语义与命名规范并入)
+2. [Easy 资产语义引用](#easy-资产语义引用)
 3. [部署后配置](#部署后配置)
 4. [管理员操作](#管理员操作)
 5. [用户操作](#用户操作)
@@ -30,7 +30,7 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
 - **RewardManager（Earn gateway）**：**借贷触发的奖励写入口门面 + 参数治理入口**（仅供 `OrderEngine` 落账后回调触发奖励（Easy）；治理权限走 ACM）
 - **RewardManagerCore（Earn core）**：**Earn 侧核心**（借款锁定/还款释放、等级/统计；惩罚执行委托给 `RewardAccrualManager`；向 `RewardView` 推送）
 - **RewardAccrualManager（Penalty SSOT）**：**扣罚与欠账账本单一事实来源**（优先 burn Easy；余额不足则记入 penalty ledger；统一向 `RewardView` 推送）
-- **RewardView**：**统一只读 + 统一 DataPush**（前端/链下查询与订阅的推荐入口；链下统一订阅 `DataPushed`，并覆盖 `DATA_TYPE_REWARD_*` 与 `DATA_TYPE_EASY_*`）
+- **RewardView**：**统一只读 + 统一 DataPush**（前端/链下查询与订阅的推荐入口；链下可把 `DataPushed` 作为 Reward 镜像统一总线，但补偿/审计链路仍需同时关注 `RewardViewPushFailed` 与主账本侧事件）
 - **RewardConfig**：**Reward 域治理写入口聚合**（EarnConfig / FeatureRegistry / GovernanceGate 等）
 - **GovernanceGate**：**治理资格门控 SSOT**（`minLevel + stEASY votes`；这里的 level 指 `ServiceLevel`，由治理/运维写入）
 - **FeatureRegistry**：**功能开关门控 SSOT**（`featureKey -> (enabled, minLevel, uri)`）
@@ -41,20 +41,31 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
 - **EasyStaking**：质押 Easy 获得投票权（stEASY / IVotes），并推送 `RewardView`
 
 > 重要：**前端/链下只读查询统一从 `RewardView` 读取**（或透传），**不要直接依赖 `RewardManagerCore` 的事件/存储/查询接口**；写入路径严格遵循“落账后触发”。  
-> 说明：`RewardManagerCore` 不提供面向前端/链下的只读接口；协议内校验（如 `LendingEngine` 期限门槛）统一走 `RewardView.getUserLevelForBorrowCheck`。
+> 说明：`RewardManagerCore` 不提供面向前端/链下的通用只读面；但协议内强制校验（如 `LendingEngine` 期限门槛）会由 `OrderEngine` 直接读取 `RewardManagerCore.getUserLevelForBorrowCheck`（canonical level）。
 
 ### ✅ 最佳实践与边界（强烈推荐先读）
 
 为了避免把“Reward 奖励通证（目标态=Easy）”与“AI 按次计费（credits）”混用，本仓库提供了更清晰的口径文档：
 
-- **Reward 最佳实践（本仓库推荐口径）**：`docs/Usage-Guide/Reward/Reward-Best-Practices-Guide.md`
-  - 结论摘要：目标态为**单通证 Easy**；Earn 以订单维度（orderId）为主；只读统一走 `RewardView`；Reward 不做 tenant 差异化。
 - **AI Credits 计费规范（1 次 = 1 credit）**：`docs/Usage-Guide/AI-Credits-Billing-Guide.md`
   - 关键边界：AI 调用**不应**通过逐次 burn “奖励通证（SSOT：Registry[KEY_EASY_TOKEN]）” 扣费；应使用 `AICreditsVault + 链下 usage ledger`（高频扣次、失败必退款、批量结算上链审计）。
 - **上线/合并验收标准（E2E / Smoke / CI）**：`docs/Test-Guide/release-acceptance-standard.md`
   - 最短本地闸门（E2E strict）：`npx hardhat run scripts/e2e/e2e-localhost-full-with-views.ts --network localhost`
   - 最短 CI（real-chain read-path）：`bash scripts/tests/ci-realchain-template.sh`
 - **Easy 通证与消费（EasiToken Guide）**：`docs/Usage-Guide/Reward/EasiToken-Guide.md`
+  - 本文不再重复维护 Easy 资产语义、单位命名、1 Easy spend 细则、stEASY 投票权语义；这些内容以 EasiToken Guide 为准。
+
+本节已并入原 `Reward-Best-Practices-Guide.md` 的核心约束，当前推荐长期维护的主路径如下：
+
+- **资产 SSOT**：`Registry[KEY_EASY_TOKEN]` 指向的 `EasyToken`（18 decimals）
+- **模块地址 SSOT**：所有 Reward/Governance 模块统一从 `Registry[KEY_*]` 解析
+- **配置写入口 SSOT**：`RewardConfig` 统一写 `EarnConfig` / `FeatureRegistry` / `GovernanceGate`
+- **只读与链下订阅 SSOT**：统一从 `RewardView` 读取与订阅，且同时覆盖 `DATA_TYPE_REWARD_*` 与 `DATA_TYPE_EASY_*`
+- **Earn 主路径**：订单落账成功后，由 `OrderEngine -> RewardManager.onLoanEventByOrderWithLender(...)` 触发；`RewardManagerCore` 负责锁定/释放/扣罚账本，`EasyEmissionController` 负责实际 mint
+- **Spend 主路径**：`EasyConsumption.consumeEasiMCall` / `consumeStrategyApiCall`，每次固定扣 `1e18` Easy，并进入 `EasyRecycleDistributor` 按 75/15/10 结算
+- **Penalty 边界**：逾期和清算扣罚都必须统一落到 `RewardAccrualManager`；不得把保证金金额、债务金额直接映射为 Easy 扣罚值
+- **治理与功能门控**：`FeatureRegistry` 负责 feature 语义，`GovernanceGate` 负责 propose/vote 门控；两者的治理写入口统一由 `RewardConfig` 承担
+- **工程硬约束**：`RewardManagerCore` 只能通过 `RewardManager` 进入；`RewardManagerCore` 不持有 `BURNER_ROLE`；若同一交易出现多条同类型 `DataPushed`，链下必须以最后一条作为最终状态
 
 ### 唯一路径（强约束，和合约一致）
 
@@ -100,9 +111,9 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
 
 - Borrow 长期限门槛（见下文“期限门槛”）
 - Earn 侧锁定 Easy 的等级倍数（`EarnConfig.getLevelMultiplierBps`）
-- 由 `LoanFlowView`（USD-8 SSOT）驱动的自动升级（非治理）
+- 由 `LoanFlowView`（value SSOT；字段名可能仍沿用 `Value`）驱动的自动升级（非治理）
 
-自动升级当前使用以下门槛（USD-8 SSOT + 订单计数）：
+自动升级当前使用以下门槛（统一 value 口径 + 订单计数）：
 
 - Level 2：借款量 ≥ 10k U，合格借款 ≥ 3，按期 ≥ 1
 - Level 3：借款量 ≥ 50k U，合格借款 ≥ 10，按期 ≥ 5
@@ -113,7 +124,7 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
 
 #### GovernanceAccess 门控（SSOT，合约级硬约束）
 
-统一治理方案下（见 `docs/Usage-Guide/Governance-FeatureRegistry-SSOT-Design.md`）：
+统一治理方案下（见 `docs/Usage-Guide/Reward/Governance-FeatureRegistry-SSOT-Design.md`）：
 
 - 治理参与（`createProposal` / `vote`）以 `GovernanceGate` 为 **链上 SSOT** 做硬门控。
 - 当前 Gate 的默认 policy（实现默认值）为：
@@ -121,26 +132,16 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
   - 可叠加 **EasyStaking 投票权（IVotes.getPastVotes 快照）阈值**（口径 A：`proposal.startBlock - 1`）
   - Gate 启用时若 `votesToken` 为零地址，将直接判定为 **不合格**（防止错误配置）
 
-#### 治理投票权（SSOT：EasyStaking / IVotes，集成必读）
+#### 治理投票权（引用 EasiToken Guide）
 
-> 本小节用于把“投票权 token / 快照口径 / 委托激活 / CrossChainGovernance 绑定口径”一次讲清楚，避免集成时出现“有余额但投票权为 0”的常见误解。
+stEASY 的 stake / delegate / 非转让性语义已收敛到 `docs/Usage-Guide/Reward/EasiToken-Guide.md`，这里仅保留 Reward 系统集成必须知道的两条约束：
 
-- **投票权 token（SSOT）**：`EasyStaking (stEASY)`（`ERC20Votes` / `IVotes`）。
-- **快照口径（block）**：
-  - `GovernanceGate` / `CrossChainGovernance` 都基于 `IVotes.getPastVotes(user, snapshotBlock)`。
-  - 推荐 `snapshotBlock = proposal.startBlock - 1`（避免同区块快照限制与边界条件）。
-- **委托激活（非常重要）**：
-  - `ERC20Votes` 默认采用“委托激活”模型；EasyStaking 在 `stake` 时会自动 self-delegate（若尚未 delegate）。
-  - 若用户自行 delegate 给其他地址，投票权将按委托地址计。
-- **CrossChainGovernance 的 SSOT 绑定（Scheme B：缓存 + 强约束）**：
-  - 初始化口径：`CrossChainGovernance.initialize(admin, registry)`（registry 必填）。
-  - `CrossChainGovernance` 的**唯一治理 token SSOT** 是 `Registry[KEY_EASY_STAKING]`（stEASY）。
-  - 合约内部会缓存 `governanceToken`，但在 `createProposal/vote` 等关键路径会强校验一致性；若 Registry 更新了 `KEY_EASY_STAKING` 且未同步缓存，关键路径会 revert（防止使用 stale token）。
-  - 运维要求：Registry 更新 `KEY_EASY_STAKING` 后，应调用 `CrossChainGovernance.syncGovernanceTokenFromRegistry()` 刷新缓存。
+- `GovernanceGate` / `CrossChainGovernance` 的投票快照都走 `IVotes.getPastVotes(user, snapshotBlock)`，推荐 `snapshotBlock = proposal.startBlock - 1`。
+- `CrossChainGovernance` 的治理 token SSOT 是 `Registry[KEY_EASY_STAKING]`；若 Registry 更新了该键，必须调用 `syncGovernanceTokenFromRegistry()`，否则 `createProposal/vote` 会因缓存 stale 而失败。
 
 ### Easy 奖励规则与期限门槛（现行）
 
-- **奖励通证精度（SSOT）**：`Registry[KEY_EASY_TOKEN]` 指向的 `EasyToken` 的 `decimals() = 18`，因此当前“1 Easy（最小单位口径）”在链上表示为 `1e18`。
+- **奖励通证精度（SSOT）**：`Registry[KEY_EASY_TOKEN]` 指向 `EasyToken`，`decimals() = 18`；更完整的资产与命名约束见 `docs/Usage-Guide/Reward/EasiToken-Guide.md`。
 - **锁定-释放（当前链上基线）**：
   - **Order-based（推荐口径）**：
     - **Borrow**：`RewardManagerCore` 按订单维度锁定 Easy。
@@ -163,7 +164,7 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
   - 失败语义：该调用为 best-effort，失败不会回滚保证金没收；链下应结合 GuaranteeFundManager 事件与 RewardView 观测补偿/告警。
 - **Easy 发行（EasyEmissionController）**：
   - 触发条件：`RepayOnTimeFull / RepayEarlyFull / RepayLateFull`（任意“结清足额”）
-  - 门槛：借款金额折算为 USD-8 后 **≥ 1000U**（白皮书基线）
+  - 门槛：借款金额折算为统一 value 后 **≥ 1000U**（白皮书基线；字段名可能仍写作 `thresholdValue`）
   - 费率：发行基于 **净借款额**（先扣借款侧 0.3% = 30 bps 费用；平台总费率为 0.6%，还款侧另计 0.3%）
   - 分配：borrower/lender **50/50**
   - 价格来源：`PriceOracle`（若价格不可用则跳过发行）
@@ -181,11 +182,15 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
       - 该产品的设计目标是让撮合、清算、Reward 发放、后续 AMM/RFQ/RWA 自动交易都直接消费显式 blocks duration，而不是复用 `5/10/15/...` 天数桶。
       - 对应的 lender 约束也应采用显式 blocks 范围（例如 `minTermBlocks = 1`、`maxTermBlocks = 1`），不要把 `minTermDays/maxTermDays` 里的数值 `1` 误解为“1 block 产品”。
       - 当 `block.number >= maturityBlock` 时，该产品即可进入既有的“结算 / 清算 / Reward outcome”判定轴；因此只要风控与价格条件满足，1 block 产品会天然更快完成清算与 EasiToken 发放闭环。
-- **期限门槛（链上硬约束）**：当期限为 `90/180/360` 天时，`LendingEngine (OrderEngine)` 会读取 `RewardView.getUserLevelForBorrowCheck(borrower)`（从 `Registry.getModuleOrRevert(ModuleKeys.KEY_REWARD_VIEW)` 解析），要求 **Reward Level ≥ 4**。
-  - 说明：`RewardView.getUserLevelForBorrowCheck` 是**协议内校验入口**（内部再透传读取 `RewardManagerCore` 的等级），其 caller gate **必须与真实调用方对齐**：
+- **期限门槛（链上硬约束）**：当期限为 `90/180/360` 天时，`LendingEngine (OrderEngine)` 会从 `Registry.getModuleOrRevert(ModuleKeys.KEY_REWARD_MANAGER_CORE)` 解析 `RewardManagerCore`，并读取 `RewardManagerCore.getUserLevelForBorrowCheck(borrower)`，要求 **Reward Level ≥ 4**。
+  - 说明：BorrowCheck 使用的是 `RewardManagerCore` canonical level，不依赖 `RewardView` 镜像缓存。
+  - 因此，`RewardViewPushFailed(USER_LEVEL)` 的影响是“镜像一致性与观测准确性”风险，而不是长周期借款准入阻断；若 canonical level 已满足门槛，`90/180/360` 天借款不会因 USER_LEVEL 镜像失败被拒绝。
+  - 运维修复口径：管理员仍应核对 `RewardManagerCore` 主账本等级，并调用 `RewardView.retryPushUserLevel(user, newLevel, blockNumber)` 回补镜像；若同时发现 earn-state 镜像缺失，可再调用 `RewardView.retryPushEarnState(...)`。
+  - 当前实现的 caller gate **必须与真实调用方对齐**：
     - **必须允许**：`KEY_ORDER_ENGINE`（OrderEngine）
     - **禁止**：其它任意地址（应 `revert MissingRole()`）
-  - 若 caller gate 口径与调用方不一致，会导致创建长周期订单直接 revert（属于功能性 bug）。架构级 SSOT 见 `docs/Architecture-Guide.md` Reward 章节 “BorrowCheck 读路径”。
+  - 若 caller gate 口径与调用方不一致，会导致创建长周期订单直接 revert（属于功能性 bug）。
+  - BorrowCheck 准入读取的是 `RewardManagerCore` canonical level；`RewardView` 推送未到位只会影响镜像一致性与观测准确性，不改变长周期借款准入判定。架构级 SSOT 见 `docs/Architecture-Guide.md` Reward 章节 “BorrowCheck 读路径”。
 - **按期窗口（现行实现细节）**：
   - **时间口径（强约束）**：任何门槛/窗口/到期语义一律使用 **block 口径**（见 `docs/Architecture-Guide.md` “时间依赖改造原则”）。
   - “是否按期且足额还清”的权威判定发生在 `LendingEngine (OrderEngine)`（当前固定 `_ON_TIME_WINDOW_BLOCKS = 7200` blocks）。
@@ -205,36 +210,59 @@ Reward 系统是一个完整的用户激励和特权管理系统，通过奖励�
 - `RewardManagerCore` 不持有遗留 `BURNER_ROLE`
 - recycle 异常余额恢复路径可按统一 75/15/10 成功结算
 
+### 配置写路径 vs 升级路径（并入）
+
+本节已并入原 `Reward-Config-Write-vs-Upgrade-Path-Guide.md` 的核心结论，用于避免把“参数治理写入”和“实现升级”混为一谈。
+
+#### A) 配置写路径
+
+用于修改业务参数，而不是替换实现。当前推荐链路：
+
+- Earn 参数：`RewardManager -> RewardConfig -> EarnConfig`
+- Feature / Governance gate 参数：`RewardConfig -> FeatureRegistry / GovernanceGate`
+- RewardManagerCore 内部治理参数：`RewardManager -> RewardManagerCore`
+
+设计目的：
+
+- 保证配置写入口单一
+- 避免直接调用子模块导致口径漂移
+- 方便审计、脚本和测试统一
+
+#### B) 升级路径
+
+用于替换合约实现，而不直接承载日常参数变更。当前推荐链路：
+
+- 对目标代理执行 `upgradeTo` / `upgradeToAndCall`
+- 由目标模块自己的 `_authorizeUpgrade(...)` 校验 `ACTION_UPGRADE_MODULE`
+- 升级后继续沿用 Registry 解析与既有写入口
+
+#### 常见误区
+
+- 不要把 `RewardConfig` 当成全局升级器；它是配置治理聚合器，不是统一代理升级器
+- 不要常态化直接写 `EarnConfig`；默认应由 `RewardConfig` 聚合写入
+- 不要在 Reward 域重新引入“价格/时长/升级/资产转换”的二级状态机
+- 不要混用 `ACTION_SET_PARAMETER` 与 `ACTION_UPGRADE_MODULE`
+
+#### Review 检查清单
+
+- [ ] 配置写是否仍通过 `RewardManager / RewardConfig` 聚合
+- [ ] 是否不存在新的旁路直写入口
+- [ ] 升级是否仍由目标模块自己的 UUPS 鉴权处理
+- [ ] 是否未把参数治理角色与升级角色混用
+
 ---
 
-## SSOT：EasyToken 语义与命名规范（并入）
+## Easy 资产语义引用
 
-> 本节只保留目标态规范。历史 `points/积分` 口径不再作为正文叙事，若旧材料里仍出现该命名，统一视为 Easy 数量的历史遗留别名。
+为减少重复维护，以下内容统一以 `docs/Usage-Guide/Reward/EasiToken-Guide.md` 为准；本文只保留 Reward 系统主路径所必需的约束摘要。
 
-### 1. 资产与单位
+- **资产 SSOT**：奖励通证唯一来源仍是 `Registry[KEY_EASY_TOKEN] -> EasyToken`。
+- **Spend 边界**：`EasyConsumption.consumeEasiMCall` / `consumeStrategyApiCall` 每次固定扣 `1e18` Easy，进入 `EasyRecycleDistributor`，异常直转恢复口是 `settleOutstandingEasyBalance()`。
+- **治理投票权 SSOT**：`Registry[KEY_EASY_STAKING] -> EasyStaking(stEASY)`；`stEASY` 为 1:1 stake 包装、不可在非零地址间转移，投票快照依赖 `getPastVotes`。
+- **命名与读模型**：对外 `easy*` 命名、`balance / easyEarned / pendingPenalty / lockedEasy` 的口径区分，以及 `RewardView` 各 getter 的展示语义，统一看 EasiToken Guide。
+- **AI Credits 边界**：AI Credits 不属于 Reward 域，不应与 Easy spend 混算；按 [docs/Usage-Guide/AI-Credits-Billing-Guide.md](docs/Usage-Guide/AI-Credits-Billing-Guide.md) 执行。
 
-- Reward 域唯一资产 SSOT：`Registry[KEY_EASY_TOKEN]`
-- 资产语义统一为 `EasyToken`
-- 单位统一为 Easy 最小单位（18 decimals）
-
-### 2. 对外命名规范
-
-- 对外 surface 必须使用 `easy*` 或明确 `amount` + NatSpec 单位说明
-- 推荐命名：`easyAmount`、`easySpent`、`easyBurned`、`lockedEasy`、`pendingEasyDebt`
-- 禁止新增任何业务语义的 `points*` / `积分*` 字段、事件参数或 getter 名称
-
-### 3. 边界与职责
-
-- 所有 Reward 相关地址都必须从 `Registry` 解析，禁止硬编码或兼容 fallback
-- Reward 域只负责 Easy 的发行、消费、回收、扣罚与只读聚合
-- AI Credits 计费与结算不属于 Reward 域，按 [docs/Usage-Guide/AI-Credits-Billing-Guide.md](docs/Usage-Guide/AI-Credits-Billing-Guide.md) 执行
-
-### 4. PR 检查清单
-
-- [ ] 对外 surface 是否只使用 `easy*` 或有明确单位说明的 `amount`
-- [ ] 奖励通证地址是否全部来自 `Registry[KEY_EASY_TOKEN]`
-- [ ] NatSpec 是否明确写明 Easy 的 18 decimals 单位
-- [ ] 是否误改了 bps、checkpoints 或其它非 Reward 语义字段
+本轮已按当前实现复核以上摘要，核对来源包括：`EasyToken.sol`、`EasyConsumption.sol`、`EasyRecycleDistributor.sol`、`EasyStaking.sol`、`CrossChainGovernance.sol`、`RewardView.sol`。
 
 ## ⚙️ 部署后配置
 
@@ -320,8 +348,9 @@ await acm.grantRole(UPGRADE_MODULE, governanceAddress);
 await acm.grantRole(CONSUME_EASY, operatorAddress); // 可选：允许后台/服务端代用户消耗 Easy
 
 // 可选：运营/后台读取其他用户的 RewardView 数据（否则仅本人可查）
-const VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
-await acm.grantRole(VIEW_USER_DATA, operatorAddress);
+// 这里为了演示直接写 keccak；工程代码应优先复用 ActionKeys.ACTION_VIEW_USER_DATA 或共享常量封装，避免权限 key 漂移。
+const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA')); // 对应 ActionKeys.ACTION_VIEW_USER_DATA
+await acm.grantRole(ACTION_VIEW_USER_DATA, operatorAddress);
 ```
 
 ### 3. 配置奖励参数（按现行接口）
@@ -340,7 +369,7 @@ await rewardManager.setDynamicRewardParams(
 
 // Easy 发行参数（SSOT：EasyEmissionConfig）
 await easyEmissionConfig.setEmissionParams(
-  100_000_000n * 10n ** 8n,       // thresholdUsd8
+  100_000_000n * 10n ** 18n,      // thresholdValue（统一 18 decimals valuation）
   ethers.parseUnits('10', 18),    // mintPer1000Usd
   1,                               // kNum
   10_000_000                       // kDen
@@ -352,7 +381,7 @@ await easyEmissionConfig.setEmissionParams(
 目标态：奖励通证就是 `EasyToken`，并且 `Registry[KEY_EASY_TOKEN]` 绑定到该地址。
 
 - **发行（mint）**：仅 `EasyEmissionController`（推荐 `setSoleMinter`）
-- **销毁（burn，用于扣罚/消费/回收）**：`RewardManagerCore` + `EasyRecycleDistributor`
+- **销毁（burn，用于扣罚/消费/回收）**：`RewardAccrualManager` + `EasyRecycleDistributor`
 
 ```typescript
 const MINTER_ROLE = await easyToken.MINTER_ROLE();
@@ -405,7 +434,7 @@ const updateEasyEmissionParams = async () => {
   );
 
   await easyEmissionConfig.setEmissionParams(
-    100_000_000n * 10n ** 8n,
+    100_000_000n * 10n ** 18n,
     ethers.parseUnits('10', 18),
     1,
     10_000_000
@@ -449,7 +478,7 @@ const getSystemStats = async () => {
     provider
   );
 
-  // 注意：系统级统计为 ops-only（需要 VIEW_SYSTEM_DATA / ADMIN）。
+  // 注意：系统级统计为 ops-only（需要 ActionKeys.ACTION_VIEW_SYSTEM_DATA / ActionKeys.ACTION_ADMIN）。
   const [totalSupply, stats] = await Promise.all([
     easyToken.totalSupply(),
     rewardView.getSystemRewardStatsWithMeta()
@@ -515,6 +544,9 @@ const getUserDashboard = async (userAddress: string) => {
 
 当前实现的“消费”仅包含 **按次消耗 1 Easy** 并进入 `EasyRecycleDistributor` 做 75/15/10 分配与回收。
 
+> 边界说明：`EasiMart` 排行榜奖励、模拟盘结算以及 AI 高频调用计费，不属于当前 Reward spend 主路径。
+> 其中 AI 高频计费的链上审计余额 SSOT 是 `AICreditsVault`，而不是 `EasyConsumption`。
+
 ```typescript
 // 1) 用户授权（transferFrom 到 recycle distributor）
 await easyToken.approve(easyConsumptionAddress, ethers.parseUnits('1', 18));
@@ -524,6 +556,41 @@ await easyConsumption.consumeEasiMCall(userAddress);
 // 或
 await easyConsumption.consumeStrategyApiCall(userAddress);
 ```
+
+### 3. 质押 Easy 与治理资格检查
+
+当前治理投票权不直接读取钱包中的 `Easy` 余额，而是读取 `EasyStaking` 铸造的 `stEASY` 投票权快照。
+
+```typescript
+// 1) 质押前先授权 EasyStaking
+await easyToken.approve(easyStakingAddress, ethers.parseUnits('100', 18));
+
+// 2) 质押 100 Easy，铸造 100 stEASY
+await easyStaking.stake(ethers.parseUnits('100', 18));
+
+// 3) 读取 RewardView 中的质押镜像
+const [easyStaked, cacheBlock, isValid] = await rewardView.getUserEasyStakedWithMeta(userAddress);
+
+// 4) 读取治理门控资格（snapshot block 推荐使用 proposal.startBlock - 1）
+const [canVote, voteReason] = await governanceGate.isEligibleToVote(
+  userAddress,
+  snapshotBlock,
+  easyStakingAddress
+);
+
+const [canPropose, proposeReason] = await governanceGate.isEligibleToPropose(
+  userAddress,
+  snapshotBlock,
+  easyStakingAddress
+);
+```
+
+关键规则：
+
+- `EasyStaking.stake(amount)` 会 1:1 铸造 `stEASY`，并在首次质押时自动 self-delegate。
+- `stEASY` 是不可在普通地址之间转移的投票包装资产，只能 mint / burn。
+- `GovernanceGate` 默认策略是 `VIP` 用户可 vote / propose，且支持叠加 `IVotes.getPastVotes` 阈值。
+- 治理里的 `ServiceLevel`（Basic / Standard / Premium / VIP）和 Reward 域里的 `Reward Level`（1..5）不是同一套等级。
 
 ### 4. 奖励历史查询（监听 View 层统一 DataPush）
 
@@ -548,7 +615,7 @@ const getRewardHistory = async (userAddress: string) => {
 
 #### DataPush 观测语义（2026-03 补充）
 
-- `RewardView.DataPushed(...)` 是 **统一推荐订阅入口**；当前实现会同时产出 `DATA_TYPE_REWARD_*` 与 `DATA_TYPE_EASY_*`，而它的写入在协议主链路里仍属于 **best-effort 可观测层**。
+- `RewardView.DataPushed(...)` 是 **Reward 镜像层的统一推荐订阅入口**；当前实现会同时产出 `DATA_TYPE_REWARD_*` 与 `DATA_TYPE_EASY_*`，而它的写入在协议主链路里仍属于 **best-effort 可观测层**。
 - 也就是说：Reward 主账本/主流程成功，并不等于每次都一定能看到对应的 `RewardView.DataPushed`；当 push 失败时，排障与监控必须同时检查 `RewardViewPushFailed(...)` 或等价失败留痕，而不是只盯 `DataPushed`。
 - 同一笔交易里，可能出现多条相同 `dataTypeHash` 的 push，尤其是 `REWARD_PENALTY_LEDGER_UPDATED`。常见情形是同 tx 里先写入欠分，再被后续逻辑抵扣或清零。
 - 因此链下解码/严格断言时必须遵守：
@@ -845,6 +912,32 @@ function consumeEasiMCall(address user) external;
 function consumeStrategyApiCall(address user) external;
 ```
 
+### EasyRecycleDistributor 主要方法（按现行）
+
+```typescript
+function handleEasyIncome(address payer, uint256 easyAmount, uint8 spendType) external;
+function settleOutstandingEasyBalance() external returns (uint256 amountSettled);
+function setRecipients(address teamRecipient, address ecoRecipient) external;
+function getRecipients() external view returns (address teamRecipient, address ecoRecipient);
+```
+
+### EasyStaking / GovernanceGate 主要方法（按现行）
+
+```typescript
+function stake(uint256 amount) external;
+function unstake(uint256 amount) external;
+
+function isEligibleToVote(address user, uint256 snapshotBlock, address votesToken)
+  external
+  view
+  returns (bool ok, bytes32 reason);
+
+function isEligibleToPropose(address user, uint256 snapshotBlock, address votesToken)
+  external
+  view
+  returns (bool ok, bytes32 reason);
+```
+
 ### RewardView（推荐只读入口）
 
 ```typescript
@@ -882,7 +975,7 @@ function getSystemRewardStatsWithMeta() external view returns (uint256 totalBatc
 function getTopEarnersWithMeta() external view returns (address[] addrs, uint256[] amounts, uint256 cacheBlock, bool isValid);
 
 // Easy 发行/消费统计（ops-only，带 meta）
-function getEasyEmissionParamsWithMeta() external view returns (uint256 thresholdUsd8, uint256 mintPer1000Usd, uint256 kNum, uint256 kDen, uint256 cacheBlock, bool isValid);
+function getEasyEmissionParamsWithMeta() external view returns (uint256 thresholdValue, uint256 mintPer1000Usd, uint256 kNum, uint256 kDen, uint8 valuationDecimals, uint256 cacheBlock, bool isValid); // thresholdValue 为字段名
 function getEasySpendStatsWithMeta() external view returns (uint256 totalSpent, uint256 totalRecycled, uint256 totalBurned, uint256 totalTeam, uint256 totalEco, uint256 cacheBlock, bool isValid);
 
 // EarnConfig 观测（带 meta）
@@ -906,8 +999,10 @@ function getLevelMultiplierWithMeta(uint8 level) external view returns (uint256 
 // Easy mint 由 EasyEmissionController 在“结清足额”时触发（RepayOnTimeFull/EarlyFull/LateFull）。
 // 请检查：
 // 1) EasyEmissionController/EasyEmissionConfig 是否已注册到 Registry（KEY_EASY_EMISSION_*）
-// 2) 借款金额折算为 USD-8 后是否 >= 1000U（PriceOracle 可用、价格非 0）
-// 3) RewardView 是否收到 DataPushed(EASY_MINTED)
+// 2) 借款金额折算为统一 value 后是否 >= 1000U（PriceOracle 可用、价格非 0）
+// 3) 是否存在 pending penalty debt，导致本次 mint 被先抵扣
+// 4) RewardView 是否收到 DataPushed(EASY_MINTED)
+// 5) 最终以 getUserEasyEarnedWithMeta / getUserBalanceWithMeta 为准，不要只看事件
 ```
 
 #### 2. 服务购买失败
@@ -946,7 +1041,8 @@ const setupEventListeners = () => {
   // 推荐：统一订阅 RewardView 的 DataPushed（EASY_* / REWARD_*）
   rewardView.on('DataPushed', (dataTypeHash, payload) => {
     if (dataTypeHash === DataPushTypes.DATA_TYPE_EASY_MINTED) {
-      // payload = abi.encode(borrower, lender, totalMinted, borrowerShare, lenderShare, orderId, amountUsd8, blockNumber)
+      // payload = abi.encode(borrower, lender, totalMinted, borrowerShare, lenderShare, orderId, amountValue, blockNumber)
+      // amountValue 为字段名，消费时应按统一 value 口径解释
     } else if (dataTypeHash === DataPushTypes.DATA_TYPE_REWARD_BURNED) {
       // payload = abi.encode(user, amount, reason, blockNumber)
     } else if (dataTypeHash === DataPushTypes.DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED) {
@@ -991,7 +1087,7 @@ useEffect(() => {
 ```typescript
 const debugContractState = async () => {
   const [managerAddress, managerCoreAddress, easyTokenAddress] = await Promise.all([
-    registry.getModule(ModuleKeys.KEY_REWARD_MANAGER),
+    registry.getModule(ModuleKeys.KEY_RM),
     registry.getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE),
     registry.getModule(ModuleKeys.KEY_EASY_TOKEN),
   ]);
@@ -1014,7 +1110,7 @@ const debugUserState = async (userAddress: string) => {
     easyToken.balanceOf(userAddress),
     rewardView.getUserRewardSummaryWithMeta(userAddress)
   ]);
-  const level = levelMeta[3];
+  const level = levelMeta[2];
 
   console.log('User state:', {
     easy: easyBal.toString(),

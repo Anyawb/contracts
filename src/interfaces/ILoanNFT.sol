@@ -21,12 +21,18 @@ interface ILoanNFT {
      * - Repaid: loan is fully repaid
      * - Liquidated: loan was liquidated
      * - Defaulted: loan is in default
+     *
+     * Architecture-Guide alignment:
+     * - This enum is the coarse business lifecycle SSOT consumed by view-layer readers.
+     * - View modules may expose it, but must not own lifecycle transitions.
      */
     enum LoanStatus {
         Active,
         Repaid,
         Liquidated,
-        Defaulted
+        Defaulted,
+        LiquidatedWithShortfall,
+        DefaultedWithShortfall
     }
 
     /*━━━━━━━━━━━━━━━ STRUCTS ━━━━━━━━━━━━━━━*/

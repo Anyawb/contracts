@@ -3,8 +3,8 @@ const hre = require("hardhat");
 async function main() {
   // Test the exact calculation that would happen in borrow
   const amount = 50n;
-  const price = hre.ethers.parseUnits("1", 8); // 1e8
-  const decimals = 8n;
+  const decimals = 6n;
+  const price = hre.ethers.parseUnits("1", Number(decimals));
   
   // This is what calculateAssetValue does:
   const priceMultiplier = 10n ** decimals;

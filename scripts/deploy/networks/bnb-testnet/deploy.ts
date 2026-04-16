@@ -1,0 +1,1 @@
+import '../../deploy-bnb-testnet';

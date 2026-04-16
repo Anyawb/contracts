@@ -1,7 +1,10 @@
-import { runCrossChainGovernanceGateVeto } from "../e2e/e2e-localhost-crosschaingov-gate-veto";
-
 async function main() {
-  await runCrossChainGovernanceGateVeto();
+  const modPath = "../e2e/e2e-localhost-crosschaingov-gate-veto";
+  const mod = await import(modPath).catch(() => null);
+  if (!mod || typeof mod.runCrossChainGovernanceGateVeto !== "function") {
+    throw new Error("Missing e2e-localhost-crosschaingov-gate-veto script");
+  }
+  await mod.runCrossChainGovernanceGateVeto();
 }
 
 if (require.main === module) {

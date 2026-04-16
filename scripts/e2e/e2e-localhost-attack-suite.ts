@@ -478,7 +478,7 @@ async function main() {
           await (await priceOracle.connect(deployer).configureAsset(asset, "usd-coin", d, 3600n)).wait();
         }
       }
-      await (await priceOracle.connect(deployer).updatePrice(asset, ethers.parseUnits("1", 8), nowBlock)).wait();
+      await (await priceOracle.connect(deployer).updatePrice(asset, ethers.parseUnits("1", 6), nowBlock)).wait();
 
       // Fund borrower + lender and set approvals.
       await (await usdc.connect(deployer).transfer(victim.address, ethers.parseUnits("100000", 6))).wait();
@@ -893,7 +893,7 @@ async function main() {
         }
       }
       const now = await latestBlockNumber();
-      await (await priceOracle.connect(deployer).updatePrice(asset, ethers.parseUnits("1", 8), now)).wait();
+      await (await priceOracle.connect(deployer).updatePrice(asset, ethers.parseUnits("1", 6), now)).wait();
 
       // Deployment sanity: if ERGM toggle is missing (old localhost), skip with a clear note.
       let toggleSupported = true;
@@ -1098,11 +1098,11 @@ async function main() {
 
       // 6) SSOT trigger: VaultCore.repay -> SettlementManager should emit EarlyRepaymentProcessed and clear custody.
       // Ensure full-repay release is enabled so ERGM settlement path is exercised.
-      const sm = await ethers.getContractAt(["function setRequireFullRepayRelease(bool) external"], settlementManagerAddr);
+      const sm = (await ethers.getContractAt(["function setRequireFullRepayRelease(bool) external"], settlementManagerAddr)) as any;
       await (await sm.connect(deployer).setRequireFullRepayRelease(true)).wait();
       const ordForRepay = await orderEngine.getLoanOrderForView(orderId);
       const YEAR_BLOCKS = 2_628_000n;
-      const interest = (ordForRepay.principal * ordForRepay.rate * ordForRepay.term) / (YEAR_BLOCKS * 10_000n);
+      const interest = ((ordForRepay.principal as bigint) * BigInt(ordForRepay.rate) * BigInt(ordForRepay.term)) / (YEAR_BLOCKS * 10_000n);
       const totalDueRaw = ordForRepay.principal + interest;
       const totalDue =
         ordForRepay.repaidAmount >= totalDueRaw ? 0n : totalDueRaw - (ordForRepay.repaidAmount as bigint);

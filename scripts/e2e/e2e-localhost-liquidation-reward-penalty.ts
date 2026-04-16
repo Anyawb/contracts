@@ -308,11 +308,12 @@ export async function runLiquidationRewardPenalty() {
 
     // Ensure price is written for valuation helpers used by liquidation.
     // NOTE: PriceOracle.getPrice() reverts if price is missing/invalid, so we cannot probe it first.
-    // SSOT: price is USD-8 ($1.00 = 100000000).
+    // SSOT: price follows asset decimals ($1.00 => 1 * 10**assetDecimals).
     try {
       const bn = await ethers.provider.getBlockNumber();
+      const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
       await waitTx(
-        po.connect(deployer).updatePrice(settlementTokenAddr, ethers.parseUnits("1", 8), bn),
+        po.connect(deployer).updatePrice(settlementTokenAddr, ethers.parseUnits("1", settlementTokenDecimals), bn),
         "updatePrice settlement"
       );
     } catch {
@@ -438,8 +439,9 @@ export async function runLiquidationRewardPenalty() {
     // Refresh price after mining; otherwise PriceOracle.getPrice may revert as stale.
     try {
       const bn = await ethers.provider.getBlockNumber();
+      const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
       await waitTx(
-        po.connect(deployer).updatePrice(settlementTokenAddr, ethers.parseUnits("1", 8), bn),
+        po.connect(deployer).updatePrice(settlementTokenAddr, ethers.parseUnits("1", settlementTokenDecimals), bn),
         "refreshPrice settlement"
       );
     } catch {
@@ -686,8 +688,9 @@ export async function runLiquidationRewardPenalty() {
     await mineToBlock(BigInt(ord2.maturity) + 1n);
     try {
       const bn = await ethers.provider.getBlockNumber();
+        const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
       await waitTx(
-        po.connect(deployer).updatePrice(settlementTokenAddr, ethers.parseUnits("1", 8), bn),
+          po.connect(deployer).updatePrice(settlementTokenAddr, ethers.parseUnits("1", settlementTokenDecimals), bn),
         "refreshPrice degrade"
       );
     } catch {
@@ -828,8 +831,9 @@ export async function runLiquidationRewardPenalty() {
       await mineToBlock(BigInt(ord3.maturity) + 1n);
       try {
         const bn = await ethers.provider.getBlockNumber();
+        const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
         await waitTx(
-          po.connect(deployer).updatePrice(settlementTokenAddr, ethers.parseUnits("1", 8), bn),
+          po.connect(deployer).updatePrice(settlementTokenAddr, ethers.parseUnits("1", settlementTokenDecimals), bn),
           "refreshPrice degrade post-cache"
         );
       } catch {

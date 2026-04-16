@@ -205,7 +205,7 @@ contract SystemView is Initializable, UUPSUpgradeable, ViewVersioned {
             return Registry(_registryAddr).getModuleOrRevert(key);
         }
 
-        // Legacy fallback: some historical scripts stored keccak256(name) directly as the module key.
+        // Fallback: resolve modules keyed by keccak256(name).
         address legacyModuleAddr = Registry(_registryAddr).getModule(keccak256(bytes(name)));
         if (legacyModuleAddr == address(0)) revert SystemView__UnknownModuleName();
         return legacyModuleAddr;

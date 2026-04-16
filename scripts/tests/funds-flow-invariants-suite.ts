@@ -100,6 +100,22 @@ async function getOrderForView(orderEngineAddr: string, orderId: bigint) {
   };
 }
 
+async function getOrderTotalDueForView(orderEngineAddr: string, orderId: bigint) {
+  const orderEngineView = await ethers.getContractAt(
+    ["function getOrderTotalDueForView(uint256) view returns (uint256)"],
+    orderEngineAddr
+  );
+  return (await orderEngineView.getOrderTotalDueForView(orderId)) as bigint;
+}
+
+async function getOrderStatusForView(orderEngineAddr: string, orderId: bigint) {
+  const orderEngineView = await ethers.getContractAt(
+    ["function getOrderStatusForView(uint256) view returns (uint8)"],
+    orderEngineAddr
+  );
+  return BigInt(await orderEngineView.getOrderStatusForView(orderId));
+}
+
 function calcInterest(principal: bigint, rateBps: bigint, termSec: bigint) {
   const YEAR = 365n * ONE_DAY;
   return (principal * rateBps * termSec) / (10_000n * YEAR);
@@ -275,16 +291,46 @@ async function main() {
     tokensToTest.push(usdc.target as string);
   }
 
-  // ---- helper: pick clean users (no debt, no collateral) to avoid noisy aggregated state ----
+  // ---- helper: pick clean users (no debt, no collateral, and no lingering guarantee state) ----
   const isCleanUser = async (addr: string) => {
     const [debtValue, assets] = await Promise.all([
       (vLe.getUserTotalDebtValue(addr) as Promise<bigint>),
       (cm.getUserCollateralAssets(addr) as Promise<string[]>).catch(() => [] as string[]),
     ]);
-    return debtValue === 0n && (assets?.length ?? 0) === 0;
+    if (debtValue !== 0n || (assets?.length ?? 0) !== 0) {
+      return false;
+    }
+    if (!hasGuaranteeModules) {
+      return true;
+    }
+    for (const asset of tokensToTest) {
+      const [locked, active] = await Promise.all([
+        gfmAny.getLockedGuarantee(addr, asset).catch(() => 0n),
+        ergmAny.hasActiveGuarantee(addr, asset).catch(() => false),
+      ]);
+      if (BigInt(locked) !== 0n || Boolean(active)) {
+        return false;
+      }
+    }
+    return true;
   };
 
   const exclude = new Set<string>([deployer.address.toLowerCase(), keeper.address.toLowerCase()]);
+  const reclaimCleanExcludedSigners = async () => {
+    if (!allowDirtyState) {
+      return;
+    }
+    for (let i = 2; i < signers.length; i++) {
+      const signer = signers[i];
+      const signerKey = signer.address.toLowerCase();
+      if (!exclude.has(signerKey)) {
+        continue;
+      }
+      if (await isCleanUser(signer.address)) {
+        exclude.delete(signerKey);
+      }
+    }
+  };
   const borrowerIndexes = borrowerIndexesEnv
     ? borrowerIndexesEnv
         .split(",")
@@ -298,17 +344,12 @@ async function main() {
     }
   }
 
-  const priceRefreshMap = new Map<string, bigint>();
+  const priceRefreshMap = new Map<string, string>();
   if (priceRefreshMapEnv) {
     for (const entry of priceRefreshMapEnv.split(",")) {
       const [addrRaw, priceRaw] = entry.split(":").map((s) => s.trim());
       if (!addrRaw || !priceRaw) continue;
-      try {
-        const price = ethers.parseUnits(priceRaw, 8);
-        priceRefreshMap.set(addrRaw.toLowerCase(), price);
-      } catch {
-        throw new Error(`Invalid PRICE_REFRESH_MAP entry: ${entry}`);
-      }
+      priceRefreshMap.set(addrRaw.toLowerCase(), priceRaw);
     }
   }
 
@@ -322,6 +363,61 @@ async function main() {
     tokenDecimalsCache.set(k, dec);
     return dec;
   };
+  const refreshPriceForAsset = async (asset: string) => {
+    const decimals = Number(await getTokenDecimals(asset));
+    const blockNumber = await latestBlockNumber();
+    const fallback = priceRefreshMap.get(asset.toLowerCase());
+
+    if (fallback) {
+      await (await po.connect(deployer).updatePrice(asset, ethers.parseUnits(fallback, decimals), blockNumber)).wait();
+      return "explicit-fallback" as const;
+    }
+
+    try {
+      const priceData = await po.getPriceData(asset);
+      const storedPrice = BigInt(priceData?.price ?? 0);
+      if (storedPrice > 0n) {
+        await (await po.connect(deployer).updatePrice(asset, storedPrice, blockNumber)).wait();
+        return "stored-price" as const;
+      }
+    } catch {
+      // Fall through to deterministic unit-price refresh below.
+    }
+
+    await (await po.connect(deployer).updatePrice(asset, ethers.parseUnits("1", decimals), blockNumber)).wait();
+    return "unit-price" as const;
+  };
+  const ensureTokenBalance = async (erc20: any, recipient: { address: string }, targetBalance: bigint, label: string) => {
+    const currentBalance = (await erc20.balanceOf(recipient.address)) as bigint;
+    if (currentBalance >= targetBalance) {
+      return currentBalance;
+    }
+
+    let remaining = targetBalance - currentBalance;
+    for (const source of signers) {
+      if (source.address.toLowerCase() === recipient.address.toLowerCase()) {
+        continue;
+      }
+      const sourceBalance = (await erc20.balanceOf(source.address)) as bigint;
+      if (sourceBalance === 0n) {
+        continue;
+      }
+      const transferAmount = sourceBalance >= remaining ? remaining : sourceBalance;
+      await (await erc20.connect(source).transfer(recipient.address, transferAmount)).wait();
+      remaining -= transferAmount;
+      if (remaining === 0n) {
+        break;
+      }
+    }
+
+    const finalBalance = (await erc20.balanceOf(recipient.address)) as bigint;
+    if (finalBalance < targetBalance) {
+      throw new Error(
+        `${label}: insufficient token liquidity for ${recipient.address} target=${targetBalance.toString()} current=${finalBalance.toString()}`,
+      );
+    }
+    return finalBalance;
+  };
 
   const getPriceValue = async (asset: string) => {
     try {
@@ -332,7 +428,8 @@ async function main() {
       if (fallback) {
         // SSOT: `IPriceOracle.getPrice().decimals` is assetDecimals (token decimals), not "price decimals".
         // Keep `amount * price / 10**assetDecimals` consistent on the fallback path.
-        return { price: fallback, decimals: await getTokenDecimals(asset) };
+        const decimals = await getTokenDecimals(asset);
+        return { price: ethers.parseUnits(fallback, Number(decimals)), decimals };
       }
       throw e;
     }
@@ -359,7 +456,14 @@ async function main() {
     reuseCursor += 1;
     return signer;
   };
+  const provisionFreshSigner = async () => {
+    const wallet = ethers.Wallet.createRandom().connect(ethers.provider);
+    await (await deployer.sendTransaction({ to: wallet.address, value: ethers.parseEther("1") })).wait();
+    exclude.add(wallet.address.toLowerCase());
+    return wallet;
+  };
   const pickCleanSigner = async () => {
+    await reclaimCleanExcludedSigners();
     for (let i = 2; i < signers.length; i++) {
       const s = signers[i];
       const k = s.address.toLowerCase();
@@ -375,14 +479,16 @@ async function main() {
       }
       throw new Error("No clean signer found. Restart localhost node for a clean state, or set E2E_ALLOW_DIRTY_STATE=1.");
     }
-    // fallback: any unused signer
+    // In dirty-state mode, preserve the "clean signer" contract of this helper.
+    // Reuse any signer that is currently clean before provisioning a fresh signer.
     for (let i = 2; i < signers.length; i++) {
       const s = signers[i];
-      const k = s.address.toLowerCase();
-      if (exclude.has(k)) continue;
-      exclude.add(k);
-      return s;
+      if (await isCleanUser(s.address)) {
+        exclude.add(s.address.toLowerCase());
+        return s;
+      }
     }
+    return provisionFreshSigner();
     if (allowSignerReuse) {
       return nextReusableSigner();
     }
@@ -433,12 +539,23 @@ async function main() {
       // Reuse a rotating non-deployer/keeper signer to avoid exhaustion in long loops.
       return nextReusableSigner();
     }
+    await reclaimCleanExcludedSigners();
     for (let i = 2; i < signers.length; i++) {
       const s = signers[i];
       const k = s.address.toLowerCase();
       if (exclude.has(k)) continue;
       exclude.add(k);
       return s;
+    }
+    if (allowDirtyState) {
+      for (let i = 2; i < signers.length; i++) {
+        const s = signers[i];
+        if (await isCleanUser(s.address)) {
+          exclude.add(s.address.toLowerCase());
+          return s;
+        }
+      }
+      return provisionFreshSigner();
     }
     throw new Error("No unused signer available.");
   };
@@ -484,7 +601,8 @@ async function main() {
         return;
       }
     } else {
-      await (await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), now)).wait();
+      const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+      await (await po.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", usdcDecimals), now)).wait();
     }
   }
 
@@ -565,12 +683,18 @@ async function main() {
   }> {
     const erc20 = (await getErc20(opts.asset)) as any;
     const decimals = Number(await erc20.decimals().catch(() => 6));
-    const fundAmt = ethers.parseUnits("20000", decimals);
+    const termSec = BigInt(opts.termDays) * ONE_DAY;
+    const promisedInterest = opts.enableGuarantee && runGuaranteeExtension
+      ? calcInterest(opts.principal, opts.rateBps, termSec)
+      : 0n;
+    const borrowerTargetBalance = opts.collateral + opts.principal + promisedInterest + (opts.principal / 2n);
+    const lenderTargetBalance = opts.principal + (opts.principal / 4n);
+    const keeperTargetBalance = opts.principal;
 
-    // fund borrower/lender so their balances are available (totalSupply unchanged)
-    await (await erc20.connect(deployer).transfer(opts.borrower.address, fundAmt)).wait();
-    await (await erc20.connect(deployer).transfer(opts.lender.address, fundAmt)).wait();
-    await (await erc20.connect(deployer).transfer(keeper.address, fundAmt)).wait();
+    // Fund only up to the actual scenario requirement to avoid draining the canonical holder in dirty multi-asset runs.
+    await ensureTokenBalance(erc20, opts.borrower, borrowerTargetBalance, "borrower funding");
+    await ensureTokenBalance(erc20, opts.lender, lenderTargetBalance, "lender funding");
+    await ensureTokenBalance(erc20, keeper, keeperTargetBalance, "keeper funding");
 
     // deposit collateral via VaultCore (SSOT)
     await (await erc20.connect(opts.borrower).approve(cmAddr, opts.collateral)).wait();
@@ -641,8 +765,6 @@ async function main() {
 
     // Extension Flow: if guarantee is enabled, borrower MUST approve GFM for promisedInterest before finalizeMatch.
     if (opts.enableGuarantee && runGuaranteeExtension) {
-      const termSec = BigInt(opts.termDays) * ONE_DAY;
-      const promisedInterest = calcInterest(opts.principal, opts.rateBps, termSec);
       if (promisedInterest > 0n) {
         await (await erc20.connect(opts.borrower).approve(gfmAddr, promisedInterest)).wait();
       }
@@ -692,7 +814,7 @@ async function main() {
       const ord = await getOrderForView(orderEngineAddr, orderId);
       await mineToBlock(BigInt(ord.maturity) + ONE_HOUR_BLOCKS);
       const nowAfter = await latestBlockNumber();
-      await (await po.connect(deployer).updatePrice(opts.asset, ethers.parseUnits("1", 8), nowAfter)).wait();
+      await (await po.connect(deployer).updatePrice(opts.asset, ethers.parseUnits("1", decimals), nowAfter)).wait();
     }
 
     let balancesAfterFinalize:
@@ -744,8 +866,7 @@ async function main() {
     try {
       const cfg = await po.getAssetConfig(assetAddr);
       if (!cfg.isActive) await (await po.connect(deployer).configureAsset(assetAddr, "usd-coin", decimals, 3600)).wait();
-      const blockNumber = await latestBlockNumber();
-      await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), blockNumber)).wait();
+      await refreshPriceForAsset(assetAddr);
     } catch {}
     try {
       if (!(await feeRouter.isTokenSupported(assetAddr))) await (await feeRouter.connect(deployer).addSupportedToken(assetAddr)).wait();
@@ -759,7 +880,7 @@ async function main() {
 
     // Guarantee baseline: always try to disable guarantee unless we are explicitly running the extension-flow tests.
     // This avoids finalizeMatch coupling on borrower -> GFM allowance when guarantee happens to be enabled in the deployment.
-    if (hasGuaranteeModules && !runGuaranteeExtension) {
+    if (hasGuaranteeModules) {
       try {
         await ensureRole(key("SET_PARAMETER"), deployer.address);
         await (await ergmAny.connect(deployer).setGuaranteeEnabled(assetAddr, false)).wait();
@@ -941,7 +1062,7 @@ async function main() {
 
       // (C) Funding + fees + net disbursement (SSOT).
       const poolDelta = res.balancesAfterFinalize.pool - res.balancesBeforeFinalize.pool;
-      if (poolDelta !== -principal) {
+      if (poolDelta !== 0n - principal) {
         throw new Error(`matchDisbursement: expected pool delta -${principal.toString()}, got ${poolDelta.toString()}`);
       }
       const vblDelta = res.balancesAfterFinalize.vbl - res.balancesBeforeFinalize.vbl;
@@ -1008,7 +1129,12 @@ async function main() {
     if (runReserveCancel) {
       console.log("=== Case: reserve -> cancel (conservation) ===");
       const lender = await pickCleanSigner();
-      await (await erc20.connect(deployer).transfer(lender.address, ethers.parseUnits("5000", decimals))).wait();
+      await ensureTokenBalance(
+        erc20,
+        lender,
+        ethers.parseUnits("5000", decimals),
+        "reserve-cancel lender funding",
+      );
 
       const tracked = uniqAddrs(
         await discoverTrackedAddresses({
@@ -1043,7 +1169,7 @@ async function main() {
       if (poolBalDelta !== amount) {
         throw new Error(`reserveForLending: expected pool balance +${amount.toString()}, got ${poolBalDelta.toString()}`);
       }
-      if (lenderBalDelta !== -amount) {
+      if (lenderBalDelta !== 0n - amount) {
         throw new Error(`reserveForLending: expected lender balance -${amount.toString()}, got ${lenderBalDelta.toString()}`);
       }
 
@@ -1080,7 +1206,7 @@ async function main() {
       // Directional sanity: pool -> lender on cancel.
       const poolBalDelta2 = (after.balances.get(lenderPoolVaultAddr) ?? 0n) - (mid.balances.get(lenderPoolVaultAddr) ?? 0n);
       const lenderBalDelta2 = (after.balances.get(lender.address) ?? 0n) - (mid.balances.get(lender.address) ?? 0n);
-      if (poolBalDelta2 !== -amount) {
+      if (poolBalDelta2 !== 0n - amount) {
         throw new Error(`cancelReserve: expected pool balance -${amount.toString()}, got ${poolBalDelta2.toString()}`);
       }
       if (lenderBalDelta2 !== amount) {
@@ -1181,7 +1307,7 @@ async function main() {
 
       // (C) Early full repay should trigger 3-way distribution and clear custody+record (SettlementManager SSOT path).
       const ord = await getOrderForView(orderEngineAddr, res.orderId);
-      const totalDue = (ord.principal - ord.repaidAmount) + calcInterest(ord.principal, ord.rate, ord.term);
+      const totalDue = await getOrderTotalDueForView(orderEngineAddr, res.orderId);
       await (await erc20.connect(borrower).approve(vaultCoreAddr, totalDue)).wait();
 
       const gid2 = (await ergmAny.getUserGuaranteeId(borrower.address, assetAddr)) as bigint;
@@ -1422,8 +1548,7 @@ async function main() {
         makeOverdue: false,
       });
     const ord = await getOrderForView(orderEngineAddr, orderId);
-    const remainingPrincipal = ord.principal > ord.repaidAmount ? ord.principal - ord.repaidAmount : 0n;
-    const totalDue = remainingPrincipal + calcInterest(ord.principal, ord.rate, ord.term);
+    const totalDue = await getOrderTotalDueForView(orderEngineAddr, orderId);
 
     const half = totalDue / 2n;
       // partial
@@ -1441,6 +1566,9 @@ async function main() {
       const afterFull = await snapshotBalances(ord.asset, tracked);
       assertConservation("fullRepay", before, afterFull);
       const ordAfter2 = await getOrderForView(orderEngineAddr, orderId);
+      if (await getOrderStatusForView(orderEngineAddr, orderId) !== 1n) {
+        throw new Error("expected Repaid order status after full repay");
+      }
       if (ordAfter2.repaidAmount < totalDue) throw new Error("expected fully repaid order (repaidAmount < totalDue)");
       console.log("  ✅ OK\n");
     }
@@ -1459,21 +1587,16 @@ async function main() {
         // Refresh price blockNumbers for all tokens to keep valuation stable across dirty, multi-asset runs.
         for (const t of tokensToRun) {
           try {
-            const [p, , dec] = (await po.getPrice(t)) as [bigint, bigint, bigint];
-            const blockNumber = await latestBlockNumber();
-            await (await po.connect(deployer).updatePrice(t, p, blockNumber)).wait();
-            if (dec === 0n) {
+            const refreshMode = await refreshPriceForAsset(t);
+            const decimalsForToken = await getTokenDecimals(t);
+            if (decimalsForToken === 0n) {
               console.log("  ⚠️  price decimals returned 0; valuation may be unstable");
             }
-          } catch (e) {
-            const fallback = priceRefreshMap.get(t.toLowerCase());
-            if (fallback) {
-              const blockNumber = await latestBlockNumber();
-              await (await po.connect(deployer).updatePrice(t, fallback, blockNumber)).wait();
-              console.log(`  ℹ️  price refresh used fallback for ${t}`);
-            } else {
-              console.log(`  ⚠️  price refresh skipped for ${t}: ${String((e as any)?.message ?? e)}`);
+            if (refreshMode === "explicit-fallback") {
+              console.log(`  ℹ️  price refresh used explicit fallback for ${t}`);
             }
+          } catch (e) {
+            throw new Error(`price refresh failed for ${t}: ${String((e as any)?.message ?? e)}`);
           }
         }
 
@@ -1555,7 +1678,7 @@ async function main() {
         }
 
         const ordA = await getOrderForView(orderEngineAddr, orderA);
-        const dueA = (ordA.principal - ordA.repaidAmount) + calcInterest(ordA.principal, ordA.rate, ordA.term);
+        const dueA = await getOrderTotalDueForView(orderEngineAddr, orderA);
         await (await erc20.connect(borrower).approve(vaultCoreAddr, dueA)).wait();
 
         const before = await snapshotBalances(ordA.asset, tracked2);

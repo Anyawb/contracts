@@ -23,6 +23,10 @@ import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
  * - All entrypoints require a valid Registry reference.
  */
 contract DegradationStorage is Initializable, UUPSUpgradeable {
+    error DegradationStorageNoPermission();
+    error DegradationStorageAdminOnly();
+    error DegradationStorageIndexOOB();
+
     /*━━━━━━━━━━━━━━━ Registry ━━━━━━━━━━━━━━━*/
     /// @notice Registry address used for module resolution and access control.
     address private _registryAddr;
@@ -35,7 +39,7 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param reasonHash Hash of the degradation reason.
      * @param fallbackValue Fallback value used.
      * @param usedFallback Whether a fallback strategy was used.
-     * @param legacyBlockNumber Event block number (block.number, legacy field name).
+    * @param legacyBlockNumber Event block number (block.number).
      * @param blockNumber Event block number.
      */
     struct DegradationEvent {
@@ -88,23 +92,23 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
 
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     /// @notice Max number of degradation events (buffer capacity).
-    uint256 private constant MAX_DEGRADATION_EVENTS = 100;
+    uint256 private constant _MAX_DEGRADATION_EVENTS = 100;
     
     /// @notice Max health details length.
-    uint256 private constant MAX_DETAILS_LENGTH    = 128;
+    uint256 private constant _MAX_DETAILS_LENGTH = 128;
     
     /// @notice Min health details length.
-    uint256 private constant MIN_DETAILS_LENGTH    = 5;
+    uint256 private constant _MIN_DETAILS_LENGTH = 5;
 
     /*━━━━━━━━━━━━━━━ Predefined Health Detail Hashes ━━━━━━━━━━━━━━━*/
     /// @notice Predefined health detail hashes (kept in sync with ModuleHealthView).
-    bytes32 private constant DETAILS_HEALTHY        = keccak256("Module is healthy");
-    bytes32 private constant DETAILS_ZERO_ADDRESS   = keccak256("Module address is zero");
-    bytes32 private constant DETAILS_NO_CODE        = keccak256("Module has no code");
-    bytes32 private constant DETAILS_FAILED_CHECK   = keccak256("Module failed health check");
-    bytes32 private constant DETAILS_TIMEOUT        = keccak256("Health check timeout");
-    bytes32 private constant DETAILS_CALL_FAILED    = keccak256("External call failed");
-    bytes32 private constant DETAILS_NOT_RESPONDING = keccak256("Module not responding");
+    bytes32 private constant _DETAILS_HEALTHY = keccak256("Module is healthy");
+    bytes32 private constant _DETAILS_ZERO_ADDRESS = keccak256("Module address is zero");
+    bytes32 private constant _DETAILS_NO_CODE = keccak256("Module has no code");
+    bytes32 private constant _DETAILS_FAILED_CHECK = keccak256("Module failed health check");
+    bytes32 private constant _DETAILS_TIMEOUT = keccak256("Health check timeout");
+    bytes32 private constant _DETAILS_CALL_FAILED = keccak256("External call failed");
+    bytes32 private constant _DETAILS_NOT_RESPONDING = keccak256("Module not responding");
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     /// @notice Circular buffer: index => degradation event.
@@ -158,7 +162,10 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
             _;
             return;
         }
-        require(_hasRole(ActionKeys.ACTION_ADMIN,msg.sender)||_hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS,msg.sender),"DegradationStorage: no permission"); 
+        bool isAllowed =
+            _hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
+                || _hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender);
+        if (!isAllowed) revert DegradationStorageNoPermission();
         _; 
     }
     
@@ -167,7 +174,7 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @dev Reverts if caller lacks ACTION_ADMIN.
      */
     modifier onlyAdmin(){ 
-        require(_hasRole(ActionKeys.ACTION_ADMIN,msg.sender),"DegradationStorage: admin only"); 
+        if (!_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)) revert DegradationStorageAdminOnly();
         _; 
     }
 
@@ -244,11 +251,11 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
             IAccessControlManager(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL))
                 .requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
         }
-        uint256 pos = _currentEventIndex % MAX_DEGRADATION_EVENTS;
-        bool overwrite = _actualEventCount >= MAX_DEGRADATION_EVENTS;
+        uint256 pos = _currentEventIndex % _MAX_DEGRADATION_EVENTS;
+        bool overwrite = _actualEventCount >= _MAX_DEGRADATION_EVENTS;
         _circularEvents[pos] = degradationEvent;
         _currentEventIndex++;
-        if(_actualEventCount<MAX_DEGRADATION_EVENTS){ 
+        if(_actualEventCount < _MAX_DEGRADATION_EVENTS){ 
             _actualEventCount++; 
         }
         emit CircularBufferEventAdded(_currentEventIndex-1,pos,degradationEvent.module,overwrite,block.number);
@@ -269,13 +276,13 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @return evt Degradation event record.
      */
     function getEventFromCircularBuffer(uint256 index) external view onlyValidRegistry onlySystemHealthViewer returns(DegradationEvent memory evt){
-        require(index < _actualEventCount, "DegradationStorage: index OOB");
+        if (index >= _actualEventCount) revert DegradationStorageIndexOOB();
         uint256 actualIndex;
         if(_currentEventIndex>index){ 
-            actualIndex = (_currentEventIndex-1-index)%MAX_DEGRADATION_EVENTS; 
+            actualIndex = (_currentEventIndex - 1 - index) % _MAX_DEGRADATION_EVENTS; 
         }
         else { 
-            actualIndex = (MAX_DEGRADATION_EVENTS+_currentEventIndex-1-index)%MAX_DEGRADATION_EVENTS; 
+            actualIndex = (_MAX_DEGRADATION_EVENTS + _currentEventIndex - 1 - index) % _MAX_DEGRADATION_EVENTS; 
         }
         return _circularEvents[actualIndex];
     }
@@ -296,7 +303,12 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @return isFull Whether the buffer is full.
      */
     function getCircularBufferStats() external view onlyValidRegistry onlySystemHealthViewer returns(uint256 currentIndex,uint256 actualCount,uint256 maxCapacity,bool isFull){
-        return (_currentEventIndex,_actualEventCount,MAX_DEGRADATION_EVENTS,_actualEventCount>=MAX_DEGRADATION_EVENTS);
+        return (
+            _currentEventIndex,
+            _actualEventCount,
+            _MAX_DEGRADATION_EVENTS,
+            _actualEventCount >= _MAX_DEGRADATION_EVENTS
+        );
     }
 
     /**
@@ -311,7 +323,7 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
     function clearCircularBuffer() external onlyValidRegistry onlyAdmin {
         _currentEventIndex=0; 
         _actualEventCount=0;
-        emit CircularBufferStats(0,0,MAX_DEGRADATION_EVENTS,block.number);
+        emit CircularBufferStats(0, 0, _MAX_DEGRADATION_EVENTS, block.number);
     }
 
     /*━━━━━━━━━━━━━━━ Health Detail Helpers ━━━━━━━━━━━━━━━*/
@@ -320,13 +332,13 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @dev Internal helper called during initialization.
      */
     function _initializePredefinedHealthDetails() internal {
-        _detailsHashToText[DETAILS_HEALTHY] = "Module is healthy";
-        _detailsHashToText[DETAILS_ZERO_ADDRESS] = "Module address is zero";
-        _detailsHashToText[DETAILS_NO_CODE] = "Module has no code";
-        _detailsHashToText[DETAILS_FAILED_CHECK] = "Module failed health check";
-        _detailsHashToText[DETAILS_TIMEOUT] = "Health check timeout";
-        _detailsHashToText[DETAILS_CALL_FAILED] = "External call failed";
-        _detailsHashToText[DETAILS_NOT_RESPONDING] = "Module not responding";
+        _detailsHashToText[_DETAILS_HEALTHY] = "Module is healthy";
+        _detailsHashToText[_DETAILS_ZERO_ADDRESS] = "Module address is zero";
+        _detailsHashToText[_DETAILS_NO_CODE] = "Module has no code";
+        _detailsHashToText[_DETAILS_FAILED_CHECK] = "Module failed health check";
+        _detailsHashToText[_DETAILS_TIMEOUT] = "Health check timeout";
+        _detailsHashToText[_DETAILS_CALL_FAILED] = "External call failed";
+        _detailsHashToText[_DETAILS_NOT_RESPONDING] = "Module not responding";
         emit StorageOptimizationStats("HealthDetails",7*32,7*32,0,block.number);
     }
 

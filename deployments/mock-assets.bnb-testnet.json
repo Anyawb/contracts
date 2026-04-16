@@ -1,0 +1,47 @@
+{
+  "network": "bnb-testnet",
+  "chainId": 97,
+  "deployer": "0xe8a87c766E5612E47dCbb403b1551108910E12D3",
+  "deployedAt": "2026-03-31T04:11:27.503Z",
+  "settlementToken": "0x98346Da0CBF871E62E20c5aac9Af0D8A98a4fCBA",
+  "assets": [
+    {
+      "id": "mock-usdc",
+      "name": "Mock USDC",
+      "symbol": "mUSDC",
+      "kind": "mock-erc20",
+      "decimals": 6,
+      "initialSupply": "1000000000",
+      "sourceId": "mock-usdc",
+      "maxPriceAge": 3600,
+      "active": true,
+      "bootstrapPriceUsd8": "1",
+      "sourceProvider": "bootstrap-manual",
+      "pricingCurrency": "USD",
+      "quoteToUsdPair": "USD/USD",
+      "fallbackPolicy": "bootstrap-only",
+      "launchPriceRequired": false,
+      "settlementToken": true,
+      "address": "0x98346Da0CBF871E62E20c5aac9Af0D8A98a4fCBA"
+    },
+    {
+      "id": "mock-wbnb",
+      "name": "Mock WBNB",
+      "symbol": "mWBNB",
+      "kind": "mock-erc20",
+      "decimals": 18,
+      "initialSupply": "1000000000",
+      "sourceId": "mock-wbnb",
+      "maxPriceAge": 3600,
+      "active": true,
+      "bootstrapPriceUsd8": "600",
+      "sourceProvider": "bootstrap-manual",
+      "pricingCurrency": "USD",
+      "quoteToUsdPair": "USD/USD",
+      "fallbackPolicy": "bootstrap-only",
+      "launchPriceRequired": false,
+      "settlementToken": false,
+      "address": "0xDe42A233a678DfDd99D0fA64f987C90B8bCa5D02"
+    }
+  ]
+}

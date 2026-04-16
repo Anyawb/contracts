@@ -18,15 +18,6 @@ import { expect } from 'chai';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
-// 导入合约类型
-import type { 
-  MockERC20,
-  MockAccessControlManager,
-  MockVaultCore,
-  MockRegistry,
-  GuaranteeFundManager
-} from '../../../types';
-
 describe('GuaranteeFundManager – 保证金管理模块测试', function () {
   // 测试常量定义
   const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -40,11 +31,11 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
   let TEST_FEE_RECEIVER: string;
 
   // 合约实例
-  let guaranteeFundManager: GuaranteeFundManager;
-  let mockERC20: MockERC20;
-  let mockAccessControlManager: MockAccessControlManager;
-  let mockVaultCore: MockVaultCore;
-  let mockRegistry: MockRegistry;
+  let guaranteeFundManager: any;
+  let mockERC20: any;
+  let mockAccessControlManager: any;
+  let mockVaultCore: any;
+  let mockRegistry: any;
 
   // 签名者
   let owner: SignerWithAddress;
@@ -104,7 +95,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     const PAUSE_SYSTEM_ROLE = ethers.keccak256(ethers.toUtf8Bytes('PAUSE_SYSTEM'));
     const UNPAUSE_SYSTEM_ROLE = ethers.keccak256(ethers.toUtf8Bytes('UNPAUSE_SYSTEM'));
     
-    const accessControlManagerTyped = accessControlManager as unknown as MockAccessControlManager;
+    const accessControlManagerTyped = accessControlManager as any;
     await accessControlManagerTyped.grantRole(SET_PARAMETER_ROLE, ownerAddress);
     await accessControlManagerTyped.grantRole(UPGRADE_MODULE_ROLE, ownerAddress);
     await accessControlManagerTyped.grantRole(PAUSE_SYSTEM_ROLE, ownerAddress);
@@ -148,7 +139,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
 
     // 4. 部署 GuaranteeFundManager
     const { proxyContract: guaranteeFundManager } = await deployProxyContract('GuaranteeFundManager');
-    const guaranteeFundManagerTyped = guaranteeFundManager as unknown as GuaranteeFundManager;
+    const guaranteeFundManagerTyped = guaranteeFundManager as any;
     await guaranteeFundManagerTyped.initialize(
       vaultCore.target,
       registry.target,
@@ -156,12 +147,12 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
     );
 
     // 5. 设置 MockVaultCore 的 guaranteeFundManager 和 Registry
-    const vaultCoreTyped = vaultCore as unknown as MockVaultCore;
+    const vaultCoreTyped = vaultCore as any;
     await vaultCoreTyped.setGuaranteeFundManager(guaranteeFundManager.target);
     // MockVaultCore 仅用于提供 vaultCoreAddr 身份，无需持有 registry
 
     // 6. 确保合约有足够的代币
-    const erc20Typed = erc20 as unknown as MockERC20;
+    const erc20Typed = erc20 as any;
     await erc20Typed.mint(guaranteeFundManager.target, TEST_AMOUNT * 10n);
     await erc20Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
     // user2 is used in "multiple users" tests; ensure balance is enough
@@ -174,8 +165,8 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       guaranteeFundManager: guaranteeFundManagerTyped,
       mockERC20: erc20Typed,
       mockAccessControlManager: accessControlManager,
-      mockVaultCore: vaultCore as unknown as MockVaultCore,
-      mockRegistry: registry as unknown as MockRegistry,
+      mockVaultCore: vaultCore as any,
+      mockRegistry: registry as any,
       owner,
       user1,
       user2,
@@ -245,7 +236,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
 
     it('GuaranteeFundManager – 应该拒绝零地址初始化', async function () {
       const { proxyContract } = await deployProxyContract('GuaranteeFundManager');
-      const newGuaranteeFundManager = proxyContract as unknown as GuaranteeFundManager;
+      const newGuaranteeFundManager = proxyContract as any;
       
       await expect(
         newGuaranteeFundManager.initialize(ZERO_ADDRESS, mockRegistry.target, await owner.getAddress())
@@ -446,7 +437,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
       const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
-      const erc20_2Typed = erc20_2 as unknown as MockERC20;
+      const erc20_2Typed = erc20_2 as any;
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
       await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
 
@@ -471,7 +462,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       const MockERC20Factory2 = await ethers.getContractFactory('MockERC20');
       const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
-      const erc20_2Typed = erc20_2 as unknown as MockERC20;
+      const erc20_2Typed = erc20_2 as any;
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
       await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
 
@@ -538,7 +529,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await erc20_2.waitForDeployment();
       
       // 给第二个合约铸造代币
-      const erc20_2Typed = erc20_2 as unknown as MockERC20;
+      const erc20_2Typed = erc20_2 as any;
       await erc20_2Typed.mint(guaranteeFundManager.target, TEST_AMOUNT * 10n);
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
       await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
@@ -574,7 +565,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await erc20_2.waitForDeployment();
       
       // 给第二个合约铸造代币
-      const erc20_2Typed = erc20_2 as unknown as MockERC20;
+      const erc20_2Typed = erc20_2 as any;
       await erc20_2Typed.mint(guaranteeFundManager.target, TEST_AMOUNT * 10n);
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
       await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
@@ -739,7 +730,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       const erc20_2 = await MockERC20Factory2.deploy('Mock Token 2', 'MTK2', 18, ethers.parseUnits('1000000', 18));
       await erc20_2.waitForDeployment();
       const asset2 = erc20_2.target;
-      const erc20_2Typed = erc20_2 as unknown as MockERC20;
+      const erc20_2Typed = erc20_2 as any;
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
       await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);
       
@@ -797,7 +788,7 @@ describe('GuaranteeFundManager – 保证金管理模块测试', function () {
       await erc20_2.waitForDeployment();
       
       // 给第二个合约铸造代币
-      const erc20_2Typed = erc20_2 as unknown as MockERC20;
+      const erc20_2Typed = erc20_2 as any;
       await erc20_2Typed.mint(guaranteeFundManager.target, TEST_AMOUNT * 10n);
       await erc20_2Typed.mint(TEST_USER, TEST_AMOUNT * 10n);
       await erc20_2Typed.connect(user1).approve(guaranteeFundManager.target, ethers.MaxUint256);

@@ -82,8 +82,8 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
     // Configure oracle supported assets + price
     // Time-Dependency-Refactor SSOT: MockPriceOracle.setPrice(..., blockNumber, ...) expects a block number marker.
     const nowBlock = await ethers.provider.getBlockNumber();
-    await oracle.configureAsset(await asset.getAddress(), 'tst', 8, 3600);
-    await oracle.setPrice(await asset.getAddress(), ethers.parseUnits('1', 8), nowBlock, 8);
+    await oracle.configureAsset(await asset.getAddress(), 'tst', 18, 3600);
+    await oracle.setPrice(await asset.getAddress(), ethers.parseUnits('1', 18), nowBlock, 18);
 
     // Fund user + approve CM
     const depositAmount = ethers.parseUnits('1000', 18);
@@ -167,8 +167,52 @@ describe('CollateralManager / PositionView – migration-aligned', function () {
 
     await collateralManager.connect(routerEOA).depositCollateral(user.address, assetAddr, depositAmount);
 
-    // With price=1 and decimals=8, value = amount * 1e8 / 1e8 = amount.
+    // With price=1 and decimals=18, normalized system value remains equal to the token base-unit amount.
     expect(await positionView.getUserTotalCollateralValue(user.address)).to.equal(depositAmount);
+  });
+
+  it('PositionView: getUserTotalCollateralValue normalizes non-8-decimal assets to the 18-decimal system unit', async function () {
+    const { collateralManager, routerEOA, user, positionView, oracle, asset } = await loadFixture(deployFixture);
+
+    const assetAddr = await asset.getAddress();
+    const nowBlock = await ethers.provider.getBlockNumber();
+    const depositAmount = 2_000_000n;
+
+    await oracle.configureAsset(assetAddr, 'tst-6', 6, 3600);
+    await oracle.setPrice(assetAddr, 1_500_000n, nowBlock, 6);
+
+    await collateralManager.connect(routerEOA).depositCollateral(user.address, assetAddr, depositAmount);
+
+    const normalizedValue = ethers.parseUnits('3', 18);
+
+    expect(await positionView.getUserTotalCollateralValue(user.address)).to.equal(normalizedValue);
+    expect(await positionView.getTotalCollateralValue()).to.equal(normalizedValue);
+    expect(await positionView.getAssetValue(assetAddr, depositAmount)).to.equal(normalizedValue);
+  });
+
+  it('PositionView: mixed-decimal collateral totals are normalized before aggregation', async function () {
+    const { collateralManager, routerEOA, user, positionView, oracle, asset } = await loadFixture(deployFixture);
+
+    const asset6Addr = await asset.getAddress();
+    const nowBlock = await ethers.provider.getBlockNumber();
+    const ERC20 = await ethers.getContractFactory('MockERC20');
+    const asset18 = await ERC20.deploy('Asset18', 'A18', 18, ethers.parseUnits('1000000', 18));
+    await asset18.waitForDeployment();
+    const asset18Addr = await asset18.getAddress();
+
+    await oracle.configureAsset(asset6Addr, 'tst-6', 6, 3600);
+    await oracle.setPrice(asset6Addr, 1_500_000n, nowBlock, 6);
+    await oracle.configureAsset(asset18Addr, 'tst-18', 18, 3600);
+    await oracle.setPrice(asset18Addr, ethers.parseUnits('2', 18), nowBlock, 18);
+
+    await asset18.mint(user.address, ethers.parseUnits('4', 18));
+    await asset18.connect(user).approve(await collateralManager.getAddress(), ethers.parseUnits('4', 18));
+
+    await collateralManager.connect(routerEOA).depositCollateral(user.address, asset6Addr, 2_000_000n);
+    await collateralManager.connect(routerEOA).depositCollateral(user.address, asset18Addr, ethers.parseUnits('4', 18));
+
+    expect(await positionView.getUserTotalCollateralValue(user.address)).to.equal(ethers.parseUnits('11', 18));
+    expect(await positionView.getTotalCollateralValue()).to.equal(ethers.parseUnits('11', 18));
   });
 
   it('PositionView: oracle failure falls back to 0 (best-effort)', async function () {

@@ -159,9 +159,9 @@ export async function runRewardManagerGovernance() {
 
     if (easyEmissionConfigAddr && easyEmissionConfigAddr !== ethers.ZeroAddress) {
       const econf = (await ethers.getContractAt("EasyEmissionConfig", easyEmissionConfigAddr)) as any;
-      const [thr, mintPer, kNum, kDen] = await econf.getEmissionParams();
+      const [thr, mintPer, kNum, kDen, valuationDecimals] = await econf.getEmissionParams();
       console.log(
-        `  EasyEmissionConfig: thr=${thr.toString()} mintPer=${mintPer.toString()} k=${kNum.toString()}/${kDen.toString()}`
+        `  EasyEmissionConfig: thr=${thr.toString()} mintPer=${mintPer.toString()} valuationDecimals=${valuationDecimals.toString()} k=${kNum.toString()}/${kDen.toString()}`
       );
     } else {
       console.log("  ⚠️  EasyEmissionConfig not bound; skipping emission config read");

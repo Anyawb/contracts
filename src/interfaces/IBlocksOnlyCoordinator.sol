@@ -11,7 +11,7 @@ pragma solidity ^0.8.20;
  *        the requested action
  *
  * Security:
- * - This interface spans both write paths and privileged settlement flows for the blocks-only product.
+ * - This interface spans both write paths and permissionless close/settlement flows for the blocks-only product.
  * - Integrators should treat the implementation as registry-bound and ActionKeys-gated rather than a free-standing
  *   coordinator.
  * - Order lifecycle state is block-based; callers must not reinterpret maturity or close fields as timestamp values.
@@ -20,20 +20,27 @@ interface IBlocksOnlyCoordinator {
     /*━━━━━━━━━━━━━━━ TYPES ━━━━━━━━━━━━━━━*/
 
     /// @notice Canonical lifecycle status for a blocks-only order.
+    /// @dev Closed/terminal reads must only treat SETTLED and TRADE_CLOSED as closed.
+    ///      Consumers must not infer closure from `REPAID`,
+    ///      `repaidPrincipal`, or the compatibility field name `remainingDebt` alone.
     enum BlocksOnlyOrderStatus {
         NONE,
         ACTIVE,
         REPAID,
         SETTLED,
-        LIQUIDATED
+        TRADE_CLOSED
     }
 
-    /// @notice Input bundle used when finalizing a matched blocks-only borrowing order.
+    /// @notice Input bundle used when finalizing a matched blocks-only trade-like order.
     struct BlocksOnlyMatchParams {
-        /// @notice Borrower that receives principal and debt booking.
+        /// @notice Borrower that receives principal and provides the pledged collateral.
         address borrower;
         /// @notice Expected funding source. Current implementation requires the registered lender pool vault.
         address lender;
+        /// @notice Collateral asset explicitly bound to the matched order.
+        address collateralAsset;
+        /// @notice Collateral amount explicitly bound to the matched order.
+        uint256 collateralAmount;
         /// @notice Debt asset transferred to the borrower and booked in VaultCore.
         address borrowAsset;
         /// @notice Principal amount in debt-asset base units.
@@ -49,6 +56,8 @@ interface IBlocksOnlyCoordinator {
         /// @notice Original principal in debt-asset base units.
         uint256 principal;
         /// @notice Cumulative principal repayments observed by the coordinator in debt-asset base units.
+        /// @dev Maturity-close settlement normalizes this field to `principal` to extinguish local remaining settlement
+        ///      amount and keep closed-state amount semantics consistent.
         uint256 repaidPrincipal;
         /// @notice Matched rate in basis points using a 1e4 denominator.
         uint256 rateBps;
@@ -58,22 +67,30 @@ interface IBlocksOnlyCoordinator {
         address borrower;
         /// @notice Funding source that received repayments.
         address lender;
+        /// @notice Collateral asset explicitly bound to the order.
+        address collateralAsset;
+        /// @notice Collateral amount explicitly bound to the order.
+        uint256 collateralAmount;
         /// @notice Debt asset for principal and repayment accounting.
         address asset;
         /// @notice Block number at which the order became active.
         uint256 startBlock;
-        /// @notice Block number at which settlement or liquidation becomes eligible.
+        /// @notice Block number at which maturity close becomes eligible.
         uint256 maturityBlock;
-        /// @notice Block number at which the order was settled or liquidated, or zero while still open.
+        /// @notice Block number at which the order was closed, or zero while still open.
         uint256 closeBlock;
         /// @notice Current lifecycle status.
         BlocksOnlyOrderStatus status;
+        /// @notice Whether maturity close settled through lender-delivery (`true`) instead of borrower-return (`false`).
+        /// @dev Used by compatibility readers when external state stores are unavailable.
+        bool maturityDeliveredToLender;
     }
 
     /*━━━━━━━━━━━━━━━ WRITE API ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Finalizes a matched blocks-only loan, transfers principal, and books debt in VaultCore.
+    * @notice Finalizes a matched blocks-only trade-like order, stores the pledged collateral binding, and stages
+    *         the pledged collateral into coordinator custody.
      * @dev Reverts if:
      *      - the caller is not the registered Vault business logic module
      *      - the coordinator is paused or its registry is unset / not a contract
@@ -82,11 +99,13 @@ interface IBlocksOnlyCoordinator {
      *      - `params.termBlocks` or `params.rateBps` violates the product constraints enforced by the implementation
      *      - `params.lender` does not match the registered lender pool vault
      *      - the borrow asset is not allowed by the asset whitelist
-     *      - registry lookups or downstream pool / vault-core calls revert
+    *      - registry lookups or downstream pool calls revert
      *
      * Security:
      * - Write path gated by the registry-bound Vault business logic module.
-     * - Transfers funds before recording the order and relies on downstream VaultCore bookkeeping as the debt SSOT.
+    * - Stages the bound collateral out of the borrower's collateral ledger into coordinator custody before
+    *   recording the order.
+    * - The coordinator, not the generic debt ledger, is the product-state SSOT for remaining settlement amount.
      *
      * @param params Matched order inputs, including participants, asset, principal, and block term.
      * @return orderId Newly assigned coordinator order id.
@@ -96,22 +115,24 @@ interface IBlocksOnlyCoordinator {
     ) external returns (uint256 orderId);
 
     /**
-     * @notice Repays a blocks-only order and forwards the repayment to the recorded lender.
+    * @notice Repays a blocks-only order and forwards the repayment to the recorded lender.
      * @dev Reverts if:
      *      - the coordinator is paused or its registry is unset / not a contract
      *      - `repayAmount == 0`
      *      - `orderId` does not reference an open order
      *      - the caller is not the recorded borrower
-     *      - token transfer, registry lookups, VaultCore repayment, or lending-engine debt reads revert
+    *      - token transfer or registry lookups revert
      *
      * Security:
      * - Borrower-only write path.
-     * - Repayment completeness is determined by the downstream lending-engine debt read, not solely by the local
-     *   `repaidPrincipal` accumulator.
+    * - Repayment completeness is determined by the coordinator-local remaining settlement amount.
+    * - A debt-free repay does not itself close the order; closed-state consumers must read the explicit close
+    *   transition via coordinator/view status.
      *
      * @param orderId Coordinator order id.
      * @param repayAmount Repayment amount in debt-asset base units.
-     * @return remainingDebt Remaining debt reported by the lending engine after repayment.
+    * @return remainingDebt Remaining open settlement amount after repayment. The field name is retained for
+    *         compatibility with existing consumers.
      */
     function repayBlocks(
         uint256 orderId,
@@ -119,19 +140,39 @@ interface IBlocksOnlyCoordinator {
     ) external returns (uint256 remainingDebt);
 
     /**
-     * @notice Settles a matured order with zero remaining debt or liquidates collateral for remaining debt.
+     * @notice Closes a debt-free blocks-only order through the trade-style close path without waiting for maturity.
      * @dev Reverts if:
      *      - the coordinator is paused or its registry is unset / not a contract
-     *      - the caller lacks the implementation's liquidation role gate
      *      - `orderId` does not reference an open order
-     *      - the order has not yet reached its maturity block
-     *      - required lending-engine, collateral, position-view, or liquidation-manager dependencies revert
-     *      - the liquidation path cannot identify non-zero collateral for the borrower
+    *      - the coordinator-local remaining settlement amount is non-zero
+     *      - collateral release dependencies revert
      *
      * Security:
-     * - Privileged settlement path gated by the liquidation role.
-     * - The collateral selection helper may best-effort consult valuation modules but ultimately depends on current
-     *   collateral balances and downstream liquidation-manager enforcement.
+    * - Intended for the trade-like blocks-only path where a filled order should close as soon as the remaining
+    *   settlement amount is zero.
+    * - Does not alter the maturity-gated product-settlement semantics of {settleOrLiquidateBlocks}.
+    * - Releases the coordinator-held order-bound collateral back to the borrower and marks the order as
+    *   `TRADE_CLOSED`.
+    * - This explicit close path, rather than a zero-balance observation alone, is what turns a debt-free open order
+    *   into a closed order.
+     *
+     * @param orderId Coordinator order id.
+     */
+    function closeRepaidTradeBlocks(uint256 orderId) external;
+
+    /**
+        * @notice Completes maturity-gated trade-like close for a blocks-only order.
+     * @dev Reverts if:
+     *      - the coordinator is paused or its registry is unset / not a contract
+     *      - `orderId` does not reference an open order
+     *      - the order has not yet reached its maturity block
+    *      - required collateral release dependencies revert
+     *
+     * Security:
+        * - Permissionless maturity-close path.
+        * - If the order is fully repaid, the coordinator-held order-bound collateral returns to the borrower.
+        * - Otherwise the coordinator-held order-bound collateral is delivered to the recorded lender as the
+        *   product-defined maturity settlement outcome.
      *
      * @param orderId Coordinator order id.
      */

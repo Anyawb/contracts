@@ -56,8 +56,8 @@
   - `requestId`：与 seq 绑定（确定性）
   - `nextVersion`：读取 `StatisticsView` 当前版本后 `+1`
 - **读 SSOT 快照（MUST）**
-  - collateralTotal（**USD-8 value**）：调用 `PositionView.getUserTotalCollateralValue(user)`（估值 SSOT，跨资产聚合必须统一到 USD-8）
-  - debtTotal（**USD-8 value**）：调用 `LendingEngine.getUserTotalDebtValue(user)`（估值 SSOT，跨资产聚合必须统一到 USD-8）
+  - collateralTotal（**USD value**）：调用 `PositionView.getUserTotalCollateralValue(user)`（估值 SSOT，跨资产聚合前必须显式归一化）
+  - debtTotal（**USD value**）：调用 `LendingEngine.getUserTotalDebtValue(user)`（估值 SSOT，跨资产聚合前必须显式归一化）
   - guarantee：`GuaranteeFundManager.getLockedGuarantee/getTotalGuaranteeByAsset`
 - **try/catch push（MUST）**
   - 成功：由 `StatisticsView` 发 `DataPushed`
@@ -99,7 +99,7 @@
 #### 3.2 权限（MUST）
 
 - 给 `StatisticsPushManager` 授权：
-  - `ActionKeys.ACTION_VIEW_PRICE_DATA`（用于读取 `PositionView` 的 USD-8 估值快照）
+  - `ActionKeys.ACTION_VIEW_PRICE_DATA`（用于读取 `PositionView` 的估值快照）
 - 给 keeper/后端重试服务地址授权：
   - `ActionKeys.ACTION_VIEW_PUSH`（用于调用 `StatisticsPushManager.retry*`）
 
@@ -153,7 +153,7 @@
 | 规范级别 | 条目（要求） | 证据（文件:行） | 状态 | 差异/备注（如未通过，给出修复方向） |
 |---|---|---|---|---|
 | MUST | **B 类缓存对外读取必须带有效性信息**（至少 `isValid + blockNumber`；并发敏感建议含 `version`） | `src/Vault/view/modules/StatisticsView.sol:260-273`（global meta）；`src/Vault/view/modules/StatisticsView.sol:339-359`（user meta） | ✅ | - |
-| MUST | **用户维度读取遵循 Scheme U**（self 放行；non-self 需 `VIEW_USER_DATA`/`ADMIN`；失败 `MissingRole()`） | `src/Vault/view/modules/StatisticsView.sol:200-207`（`onlyUserOrViewer`）；`src/Vault/view/modules/StatisticsView.sol:339-379`（user-scoped reads） | ✅ | - |
+| MUST | **用户维度读取遵循 Scheme U**（self 放行；non-self 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`；失败 `MissingRole()`） | `src/Vault/view/modules/StatisticsView.sol:200-207`（`onlyUserOrViewer`）；`src/Vault/view/modules/StatisticsView.sol:339-379`（user-scoped reads） | ✅ | - |
 | MUST | **UUPS + 初始化安全**（实现合约禁用 initializer；proxy initializer 做 registry 校验；保留 storage gap） | `src/Vault/view/modules/StatisticsView.sol:208-241`（constructor+initialize）；`src/Vault/view/modules/StatisticsView.sol:156-158`（`__gap`） | ✅ | - |
 | MUST | **View 模块统一版本信息入口 `getVersionInfo()`** | `src/Vault/view/ViewVersioned.sol:15-28`（`getVersionInfo`）；`src/Vault/view/modules/StatisticsView.sol:31`（继承 `ViewVersioned`） | ✅ | - |
 | MUST | **DataPush 统一常量口径**（优先 `DataPushTypes`） | `src/constants/DataPushTypes.sol:115-121`（stats types）；`src/Vault/view/modules/StatisticsView.sol:1064-1077`（emit `DATA_TYPE_GUARANTEE_STATS_UPDATE`）；`src/Vault/view/modules/StatisticsView.sol:1079-1085`（emit `DATA_TYPE_USER_STATS_UPDATE`） | ✅ | - |
@@ -167,6 +167,6 @@
 | MUST | **调用方改造：CM/LE/GFM 写入成功后只做 notify（best-effort）** | `src/Vault/modules/CollateralManager.sol:262-268`（notifyUserStats）；`src/Vault/modules/VaultLendingEngine.sol:189-195`（notifyUserStats）；`src/Vault/modules/GuaranteeFundManager.sol:240-246`（notifyGuarantee） | ✅ | - |
 | MUST | **保证金 key 维度为 (user,asset)**（meta 不得被“同 asset 的别的用户更新”污染） | `src/Vault/view/modules/StatisticsView.sol:117-123`（`_guaranteeLastUpdate[user][asset]`）；`src/Vault/view/modules/StatisticsView.sol:1167-1177`（user-guarantee meta blockNumber） | ✅ | - |
 | MUST | **本地 e2e 验收脚本不得依赖已不存在的 ABI（避免 selector not recognized）** | `scripts/e2e/e2e-localhost-statisticsview-acceptance.ts:106-216`（仅使用 `getGlobalStatisticsWithMeta` + `StatisticsPushManager.retry*`） | ✅ | - |
-| SHOULD | **验收应覆盖“失败→自愈”闭环**（撤销权限触发 `CacheUpdateFailedWithContext`，恢复后 retry 成功） | 本清单：`docs/Usage-Guide/StatisticsView-Strict-B-Push-Pipeline-Implementation-Checklist.md:140-145`（要求）；当前脚本未覆盖“撤权→失败事件”分支 | ⚠️ | 建议在 `e2e-localhost-statisticsview-acceptance.ts` 补一段：临时撤销 `StatisticsPushManager` 的 `VIEW_PRICE_DATA`（或将 `POSITION_VIEW` registry key 指向 0 地址以模拟依赖缺失）→ 断言 `CacheUpdateFailedWithContext` → 恢复后 retry 再断言 `DataPushed`。 |
+| SHOULD | **验收应覆盖“失败→自愈”闭环**（撤销权限触发 `CacheUpdateFailedWithContext`，恢复后 retry 成功） | 本清单：`docs/Usage-Guide/StatisticsView-Strict-B-Push-Pipeline-Implementation-Checklist.md:140-145`（要求）；当前脚本未覆盖“撤权→失败事件”分支 | ⚠️ | 建议在 `e2e-localhost-statisticsview-acceptance.ts` 补一段：临时撤销 `StatisticsPushManager` 的 `ActionKeys.ACTION_VIEW_PRICE_DATA`（或将 `POSITION_VIEW` registry key 指向 0 地址以模拟依赖缺失）→ 断言 `CacheUpdateFailedWithContext` → 恢复后 retry 再断言 `DataPushed`。 |
 | SHOULD | **删除/标记 legacy helper，避免新代码误用旧 delta 推送路径** | `src/libraries/VaultBusinessLogicLibrary.sol:18-37`（legacy stats interfaces）；`src/libraries/VaultBusinessLogicLibrary.sol:172-234`（`safeUpdateStats/safeUpdateGuarantee` 直接调用 delta push） | ⚠️ | 建议：明确标记 `DEPRECATED` 并在注释中指向 `StatisticsPushManager.notify*/retry*`；或在业务合约中完全移除引用，防回归。 |
-| MUST | **统计口径（SSOT）：collateral/debt 必须是跨资产统一的 value（USD-8）** | `src/Vault/modules/StatisticsPushManager.sol`：`_readUserTotalsValueUSD8()` 通过 `PositionView.getUserTotalCollateralValue(user)` + `LendingEngine.getUserTotalDebtValue(user)` 推送 snapshot；`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`：Value Unit SSOT（USD-8） | ✅ | 已统一为 USD-8；禁止再以 token base units 做跨资产累加。 |
+| MUST | **统计口径（SSOT）：collateral/debt 必须是跨资产统一的 value** | `src/Vault/modules/StatisticsPushManager.sol`：`_readUserTotalsValue统一 VALUE()` 通过 `PositionView.getUserTotalCollateralValue(user)` + `LendingEngine.getUserTotalDebtValue(user)` 推送 snapshot；`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`：Value Unit SSOT | ✅ | 已统一为 value SSOT；禁止再以 token base units 做跨资产累加，消费前必须显式归一化。 |

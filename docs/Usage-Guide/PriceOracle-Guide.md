@@ -56,9 +56,8 @@ await priceOracle.configureAsset(
 ```typescript
 // 获取价格（读取路径语义：IPriceOracleRead）
 const [price, blockNumber, assetDecimals] = await priceOracle.getPrice(assetAddress);
-// price 是 USD-8（$1.00 = 100000000），始终用 8 来格式化
-// assetDecimals 是 token decimals，用于 amount(token base units) → valueUSD8 换算，不是 price 的精度
-const priceUSD = ethers.formatUnits(price, 8);
+// price 按 assetDecimals 缩放；assetDecimals 同时决定 amount / price / value 的精度
+const priceUSD = ethers.formatUnits(price, assetDecimals);
 console.log(`价格: $${priceUSD}`);
 ```
 
@@ -66,7 +65,8 @@ console.log(`价格: $${priceUSD}`);
 
 ```typescript
 // 更新价格（需要 UPDATE_PRICE 权限）
-const price = ethers.parseUnits("1.00", 8); // $1.00
+const assetDecimals = 6n; // 例如 USDC
+const price = ethers.parseUnits("1.00", Number(assetDecimals));
 const blockNumber = await ethers.provider.getBlockNumber();
 await priceOracle.updatePrice(assetAddress, price, blockNumber);
 ```
@@ -555,8 +555,8 @@ async function getAssetPrice(asset: string) {
             price: price.toString(),
             blockNumber: blockNumber.toString(),
             assetDecimals: assetDecimals.toString(),
-            // price 是 USD-8；assetDecimals 是 token decimals（用于 amount 换算）
-            priceUSD: ethers.formatUnits(price, 8)
+            // price 与 value 的精度跟随 assetDecimals
+            priceUSD: ethers.formatUnits(price, assetDecimals)
         };
     } catch (error) {
         console.error(`获取资产 ${asset} 价格失败:`, error);
@@ -587,7 +587,7 @@ async function getAssetPrices(assets: string[]) {
             price: prices[index].toString(),
             blockNumber: blockNumbers[index].toString(),
             assetDecimals: assetDecimalsArray[index].toString(),
-            priceUSD: ethers.formatUnits(prices[index], 8)
+            priceUSD: ethers.formatUnits(prices[index], assetDecimalsArray[index])
         }));
     } catch (error) {
         console.error("批量获取价格失败:", error);
@@ -640,9 +640,8 @@ async function getPriceData(asset: string) {
             blockNumber: priceData.blockNumber.toString(),
             assetDecimals: priceData.assetDecimals.toString(),
             isValid: priceData.isValid,
-            // price 是 USD-8（$1.00 = 100000000）
-            // assetDecimals 是 token decimals，用于 amount→valueUSD8 换算，不是 price 精度
-            priceUSD: ethers.formatUnits(priceData.price, 8)
+            // price 与 value 的精度跟随 assetDecimals
+            priceUSD: ethers.formatUnits(priceData.price, priceData.assetDecimals)
         };
     } catch (error) {
         console.error(`获取资产 ${asset} 价格数据失败:`, error);
@@ -704,7 +703,7 @@ async function getSupportedAssets(): Promise<string[]> {
 /**
  * 手动更新资产价格
  * @param asset 资产地址
- * @param price 新价格（8位精度）
+ * @param price 新价格（按该资产 assetDecimals 缩放）
  * @param blockNumber 价格区块号
  */
 async function updateAssetPrice(
@@ -719,7 +718,8 @@ async function updateAssetPrice(
 }
 
 // 使用示例
-const price = ethers.parseUnits("1.00", 8); // $1.00 (8位精度)
+const assetDecimals = 6;
+const price = ethers.parseUnits("1.00", assetDecimals); // $1.00（按资产精度）
 const blockNumber = await ethers.provider.getBlockNumber();
 await updateAssetPrice(usdcAddress, price, blockNumber);
 ```
@@ -730,7 +730,7 @@ await updateAssetPrice(usdcAddress, price, blockNumber);
 /**
  * 批量更新多个资产价格
  * @param assets 资产地址数组
- * @param prices 价格数组（8位精度）
+ * @param prices 价格数组（按各资产 assetDecimals 缩放）
  * @param blockNumbers 区块号数组
  */
 async function updateAssetPrices(
@@ -751,8 +751,8 @@ async function updateAssetPrices(
 // 使用示例
 const assets = [usdcAddress, wethAddress];
 const prices = [
-    ethers.parseUnits("1.00", 8),  // USDC: $1.00
-    ethers.parseUnits("2000.00", 8) // WETH: $2000.00
+    ethers.parseUnits("1.00", 6),   // USDC: $1.00
+    ethers.parseUnits("2000.00", 18) // WETH: $2000.00
 ];
 const blockNumbers = [
     await ethers.provider.getBlockNumber(),
@@ -774,7 +774,7 @@ PriceUpdater 在当前仓库中的权威定位不是“自己去外部 API 抓�
 标准链路必须是：
 
 1. 链下价格采集
-2. 统一归一化成 USD-8
+2. 按目标资产 `assetDecimals` 归一化成链上价格
 3. 统一调用 `PriceUpdater.updateAssetPrice` 或 `updateAssetPrices`
 4. 统一由 `PriceOracle` 存储最终价格
 
@@ -847,7 +847,7 @@ await acm.grantRole(ActionKeys.ACTION_UPDATE_PRICE, priceUpdaterAddress);
 为避免文档与实现再次漂移，价格系统必须按下面的职责拆层：
 
 1. collector：从 CoinGecko、Google Finance 或其他许可源拉取原始价格
-2. normalizer：把所有资产统一换算成 USD-8
+2. normalizer：把所有资产按目标 `assetDecimals` 统一换算成链上价格
 3. publisher：只负责调用 `PriceUpdater.updateAssetPrice`
 4. oracle：只负责存储 `PriceOracle` 最终价格
 5. consumer：前端、preflight、缓存、监控都只认链上最终价和链下发布状态
@@ -967,7 +967,7 @@ contract LendingContract {
      * 计算抵押品价值
      * @param asset 资产地址
      * @param amount 资产数量
-     * @return 价值（USD，8位精度）
+    * @return 价值（USD value，精度按资产 `assetDecimals` 解释）
      */
     function calculateCollateralValue(address asset, uint256 amount) 
         external 
@@ -1425,7 +1425,7 @@ const priceAgeBlocks = nowBlock - Number(blockNumber);
 console.log(`价格年龄: ${priceAgeBlocks} blocks，最大年龄: ${config.maxPriceAge} blocks`);
 
 // 2. 更新价格
-const newPrice = ethers.parseUnits("1.00", 8);
+const newPrice = ethers.parseUnits("1.00", Number(config.assetDecimals));
 await priceOracle.updatePrice(assetAddress, newPrice, await ethers.provider.getBlockNumber());
 
 // 3. 或调整 maxPriceAge（如果需要）
@@ -1474,7 +1474,7 @@ if (!hasConfigPermission) {
 
 **排查步骤**：
 1. 检查权限
-2. 检查价格格式（必须是8位精度）
+2. 检查价格格式（必须与该资产 `assetDecimals` 一致）
 3. 检查 `blockNumber`（不能是未来块高；并建议保持单调不回退）
 4. 检查资产是否已配置
 
@@ -1501,8 +1501,9 @@ async function safeUpdatePrice(
             throw new Error("资产未配置");
         }
         
-        // 3. 格式化价格（8位精度）
-        const price = ethers.parseUnits(priceUSD, 8);
+        // 3. 按资产精度格式化价格
+        const config = await priceOracle.getAssetConfig(asset);
+        const price = ethers.parseUnits(priceUSD, Number(config.assetDecimals));
         const blockNumber = await ethers.provider.getBlockNumber();
         
         // 4. 更新价格
@@ -1582,7 +1583,7 @@ await acm.grantRole(ADD_WHITELIST_ROLE, whitelistManagerAddress);
 - [PriceOracle 合约源码](../src/core/PriceOracle.sol)
 - [PriceUpdater 合约源码](../src/core/PriceUpdater.sol)
 - [IPriceOracle 接口](../src/interfaces/IPriceOracle.sol)
-- [Units & Conversions SSOT（USD-8）](../Units-And-Conversions-SSOT.md)
+- [Units & Conversions SSOT（按资产原生精度，不统一到 8）](../Units-And-Conversions-SSOT.md)
 - [多稳定币使用指南（SSOT）](./Multi-Stablecoin-Usage-Guide.md)
 - [RWA 价格体系指南（SSOT）](./RWA-Price-System-Guide.md)
 - [权限管理指南](./permission-management-guide.md)
@@ -1605,19 +1606,19 @@ await acm.grantRole(ADD_WHITELIST_ROLE, whitelistManagerAddress);
 
 ### 2. 多稳定币实例下的价格口径
 
-PriceOracle 的权威输出始终是 USD-8，而不是“按借款稳定币分别存一套价格”。
+PriceOracle 的权威输出始终是统一 USD 语义下的链上价格，而不是“按借款稳定币分别存一套价格”；精度遵循各资产 `assetDecimals`。
 
 这意味着：
 
 1. mUSDC、mUSDT 的 price 接近 1.0 USD
-2. mHKD、mSGD 的 price 分别是 HKDUSD、SGDUSD 的 USD-8
-3. RWAGOLD、RWABOND、RWARE、RWAINV 等 RWA 资产同样只维护一份 USD-8 价格
+2. mHKD、mSGD 的 price 分别是 HKDUSD、SGDUSD 的 USD 价格语义，精度遵循各自 `assetDecimals`
+3. RWAGOLD、RWABOND、RWARE、RWAINV 等 RWA 资产同样只维护一份 USD 价格语义
 
 随后由 Health、Liquidation、Statistics、ViewCache 等模块统一消费。
 
 ### 3. live mock 与 testnet-launch 的差异
 
-当前仓库里的 defaultPriceUsd8 只适合作为：
+当前仓库里的 defaultPriceValue 只适合作为：
 
 1. mock asset pack 的 bootstrap 值
 2. 紧急人工补价值
@@ -1626,7 +1627,7 @@ PriceOracle 的权威输出始终是 USD-8，而不是“按借款稳定币分�
 
 建议规则：
 
-1. live mock 阶段可以允许 defaultPriceUsd8 在链上无价时临时写入
+1. live mock 阶段可以允许 defaultPriceValue 在链上无价时临时写入，但其值语义按资产 `assetDecimals` 解释
 2. testnet-launch 阶段必须改为“后端权威写价必需”，如果没有链上有效价格则 preflight 直接失败
 
 ### 4. 统一链路的最终要求
@@ -1634,7 +1635,7 @@ PriceOracle 的权威输出始终是 USD-8，而不是“按借款稳定币分�
 后续所有资产必须收敛成同一条链路：
 
 1. 链下价格采集
-2. 统一归一化成 USD-8
+2. 按目标资产 `assetDecimals` 归一化成链上价格
 3. 统一调用 `PriceUpdater.updateAssetPrice`
 4. 统一由 `PriceOracle` 存储
 5. 前端、preflight、缓存都只认链上最终价和链下发布状态

@@ -2,18 +2,22 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 
+const workspaceRoot = process.cwd();
+const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
+const logDir = path.join(workspaceRoot, "scripts/tests/logs", `live-individual-rerun-${timestamp}`);
+const summaryFile = path.join(logDir, "summary.log");
+const wrapperPath = path.join(workspaceRoot, "scripts/tests/tools/run-live-script-with-sweep.js");
+const network = process.env.LIVE_TEST_NETWORK;
+if (!network || !network.trim()) {
+  throw new Error("LIVE_TEST_NETWORK is required for live individual reruns");
+}
+process.env.LIVE_TEST_NETWORK = network;
 const {
   seedCase,
   liquidationSeedCase,
   liveTestCases,
   seededLiquidationCaseLabels,
 } = require("./live-test-cases");
-
-const workspaceRoot = process.cwd();
-const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-const logDir = path.join(workspaceRoot, "scripts/tests/logs", `live-individual-rerun-${timestamp}`);
-const summaryFile = path.join(logDir, "summary.log");
-const wrapperPath = path.join(workspaceRoot, "scripts/tests/tools/run-live-script-with-sweep.js");
 const seedRequired = (process.env.LIVE_INDIVIDUAL_SEED_REQUIRED?.trim() || "") === "1";
 const networkRetryPatterns = [
   "ECONNRESET",
@@ -135,7 +139,7 @@ function runWrappedCase(label, command, extraEnv = {}) {
     attempt += 1;
     result = spawnSync(
       process.execPath,
-      [wrapperPath, "--label", label, "--command", command, "--network", "arbitrumSepolia"],
+      [wrapperPath, "--label", label, "--command", command, "--network", network],
       {
         cwd: workspaceRoot,
         encoding: "utf8",

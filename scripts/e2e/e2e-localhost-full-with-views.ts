@@ -331,6 +331,8 @@ async function main() {
 
     const ledgerCollateral = (await cm.getCollateral(user, asset)) as bigint;
     const ledgerDebt = (await vle.getDebt(user, asset)) as bigint;
+    const ledgerCollateralValue = (await positionView.getUserTotalCollateralValue(user)) as bigint;
+    const ledgerDebtValue = (await vle.getUserTotalDebtValue(user)) as bigint;
 
     const [collateral, debt, isValid, blockNumber, ver] = await positionView.getUserPositionWithMeta(user, asset);
     console.log(
@@ -357,15 +359,15 @@ async function main() {
     const [userStats, userStatsVersion, userStatsSeq, userStatsRequestId, userStatsValid, userStatsBlock] =
       await statisticsView.getUserSnapshotWithMeta(user);
     console.log(
-      `  StatisticsView(user): collateral=${ethers.formatUnits(userStats.collateral, 6)}, debt=${ethers.formatUnits(userStats.debt, 6)}, version=${userStatsVersion.toString()}, seq=${userStatsSeq.toString()}, isValid=${userStatsValid}, block=${userStatsBlock.toString()}`
+      `  StatisticsView(user): collateral=${ethers.formatUnits(userStats.collateral, 18)}, debt=${ethers.formatUnits(userStats.debt, 18)}, version=${userStatsVersion.toString()}, seq=${userStatsSeq.toString()}, isValid=${userStatsValid}, block=${userStatsBlock.toString()}`
     );
     assertView(userStatsValid, `${step}: StatisticsView user snapshot should be valid after retryUserStats`);
-    assertView(userStats.collateral === ledgerCollateral, `${step}: StatisticsView user collateral mismatch`);
-    assertView(userStats.debt === ledgerDebt, `${step}: StatisticsView user debt mismatch`);
+    assertView(userStats.collateral === ledgerCollateralValue, `${step}: StatisticsView user collateral mismatch`);
+    assertView(userStats.debt === ledgerDebtValue, `${step}: StatisticsView user debt mismatch`);
 
     const [stats, statsValid, statsBlock] = await statisticsView.getGlobalStatisticsWithMeta();
     console.log(
-      `  StatisticsView(global): totalUsers=${stats.totalUsers}, totalCollateral=${ethers.formatUnits(stats.totalCollateral, 6)}, totalDebt=${ethers.formatUnits(stats.totalDebt, 6)}, isValid=${statsValid}, block=${statsBlock.toString()}`
+      `  StatisticsView(global): totalUsers=${stats.totalUsers}, totalCollateral=${ethers.formatUnits(stats.totalCollateral, 18)}, totalDebt=${ethers.formatUnits(stats.totalDebt, 18)}, isValid=${statsValid}, block=${statsBlock.toString()}`
     );
     assertView(statsValid, `${step}: StatisticsView global snapshot should be valid after retryUserStats`);
 

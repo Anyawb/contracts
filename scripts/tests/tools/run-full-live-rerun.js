@@ -2,12 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const { Wallet } = require("ethers");
-const {
-  seedCase,
-  liquidationSeedCase,
-  liveTestCases,
-  seededLiquidationCaseLabels,
-} = require("./live-test-cases");
+const { loadNetworkProfile } = require("./shared/network-profile");
 
 const workspaceRoot = process.cwd();
 const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
@@ -26,6 +21,18 @@ const networkRetryPatterns = [
   "Headers Timeout Error",
 ];
 const maxNetworkAttempts = Number(process.env.LIVE_RUNNER_NETWORK_MAX_ATTEMPTS || 2);
+const network = process.env.LIVE_TEST_NETWORK;
+if (!network || !network.trim()) {
+  throw new Error("LIVE_TEST_NETWORK is required for full live reruns");
+}
+process.env.LIVE_TEST_NETWORK = network;
+const profile = loadNetworkProfile(network);
+const {
+  seedCase,
+  liquidationSeedCase,
+  liveTestCases,
+  seededLiquidationCaseLabels,
+} = require("./live-test-cases");
 
 const tests = [seedCase, ...liveTestCases];
 
@@ -36,6 +43,7 @@ const freshBorrowerMnemonic = Wallet.createRandom().mnemonic.phrase;
 
 const sharedEnv = {
   ...process.env,
+  ...profile,
   LIVE_FRESH_BORROWER_MNEMONIC: freshBorrowerMnemonic,
   LIVE_FRESH_BORROWER_STATE_FILE: freshBorrowerStateFile,
   FULL_LIVE_LOGDIR: logdir,
@@ -133,33 +141,42 @@ function runSeededLiquidationCase(targetLabel) {
   return env;
 }
 
-for (const [label, command] of tests) {
-  let extraEnv = {};
-  if (seededLiquidationCaseLabels.includes(label)) {
-    const seededEnv = runSeededLiquidationCase(label);
-    if (!seededEnv) {
-      continue;
-    }
-    extraEnv = seededEnv;
+function runSweepOnce() {
+  appendSummary("=== START sweep-fresh-borrowers ===");
+  const sweepCommand = `pnpm -s exec hardhat run ${profile.LIVE_SWEEP_SCRIPT} --network ${profile.LIVE_SWEEP_NETWORK}`;
+  const sweepResult = spawnSync(sweepCommand, {
+    shell: true,
+    cwd: workspaceRoot,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 16,
+    env: sharedEnv,
+  });
+  fs.writeFileSync(
+    path.join(logdir, "sweep-fresh-borrowers.log"),
+    `${sweepResult.stdout || ""}${sweepResult.stderr || ""}`,
+  );
+  const sweepPassed = sweepResult.status === 0;
+  if (!sweepPassed) {
+    failCount += 1;
   }
-  runLoggedCommand(label, command, extraEnv);
+  appendSummary(`${sweepPassed ? "PASS" : `FAIL(${sweepResult.status ?? 1})`} sweep-fresh-borrowers`);
 }
 
-appendSummary("=== START sweep-fresh-borrowers ===");
-const sweepCommand = "pnpm -s exec hardhat run scripts/tests/live-test/sweep-fresh-borrowers.ts --network arbitrumSepolia";
-const sweepResult = spawnSync(sweepCommand, {
-  shell: true,
-  cwd: workspaceRoot,
-  encoding: "utf8",
-  maxBuffer: 1024 * 1024 * 16,
-  env: sharedEnv,
-});
-fs.writeFileSync(path.join(logdir, "sweep-fresh-borrowers.log"), `${sweepResult.stdout || ""}${sweepResult.stderr || ""}`);
-const sweepPassed = sweepResult.status === 0;
-if (!sweepPassed) {
-  failCount += 1;
+try {
+  for (const [label, command] of tests) {
+    let extraEnv = {};
+    if (seededLiquidationCaseLabels.includes(label)) {
+      const seededEnv = runSeededLiquidationCase(label);
+      if (!seededEnv) {
+        continue;
+      }
+      extraEnv = seededEnv;
+    }
+    runLoggedCommand(label, command, extraEnv);
+  }
+} finally {
+  runSweepOnce();
 }
-appendSummary(`${sweepPassed ? "PASS" : `FAIL(${sweepResult.status ?? 1})`} sweep-fresh-borrowers`);
 
 appendSummary(`LOGDIR=${logdir}`);
 appendSummary(`LIVE_FRESH_BORROWER_STATE_FILE=${freshBorrowerStateFile}`);

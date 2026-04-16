@@ -42,7 +42,8 @@ interface IRewardViewWriter {
         uint256 borrowerShare,
         uint256 lenderShare,
         uint256 orderId,
-        uint256 amountUsd8,
+        uint256 amountValue,
+        uint8 valuationDecimals,
         uint256 blockNumber
     ) external;
     function pushEasyStaked(
@@ -58,7 +59,8 @@ interface IRewardViewWriter {
         uint256 blockNumber
     ) external;
     function pushEasyEmissionParamsUpdated(
-        uint256 thresholdUsd8,
+        uint256 thresholdValue,
+        uint8 valuationDecimals,
         uint256 mintPer1000Usd,
         uint256 kNum,
         uint256 kDen,
@@ -290,7 +292,8 @@ abstract contract RewardModuleBase {
         uint256 borrowerShare,
         uint256 lenderShare,
         uint256 orderId,
-        uint256 amountUsd8
+        uint256 amountValue,
+        uint8 valuationDecimals
     ) internal {
         address rv = _getRewardViewCached();
         bytes memory payload = abi.encode(
@@ -300,7 +303,8 @@ abstract contract RewardModuleBase {
             borrowerShare,
             lenderShare,
             orderId,
-            amountUsd8,
+            amountValue,
+            valuationDecimals,
             block.number
         );
         if (rv == address(0)) {
@@ -321,7 +325,8 @@ abstract contract RewardModuleBase {
                 borrowerShare,
                 lenderShare,
                 orderId,
-                amountUsd8,
+                amountValue,
+                valuationDecimals,
                 block.number
             )
         {
@@ -425,14 +430,16 @@ abstract contract RewardModuleBase {
     }
 
     function _tryPushEasyEmissionParamsUpdated(
-        uint256 thresholdUsd8,
+        uint256 thresholdValue,
+        uint8 valuationDecimals,
         uint256 mintPer1000Usd,
         uint256 kNum,
         uint256 kDen
     ) internal {
         address rv = _getRewardViewCached();
         bytes memory payload = abi.encode(
-            thresholdUsd8,
+            thresholdValue,
+            valuationDecimals,
             mintPer1000Usd,
             kNum,
             kDen,
@@ -450,7 +457,8 @@ abstract contract RewardModuleBase {
         }
         try
             IRewardViewWriter(rv).pushEasyEmissionParamsUpdated(
-                thresholdUsd8,
+                thresholdValue,
+                valuationDecimals,
                 mintPer1000Usd,
                 kNum,
                 kDen,

@@ -25,7 +25,7 @@ function calcExpectedEarlyRepaymentSplit(
   const promised = record.promisedInterest;
   const actualInterestPaid = (promised * elapsedBlocks) / totalBlocks;
 
-  const penaltyBlocks = record.earlyRepayPenaltyDays; // legacy field name; semantics are penaltyBlocks
+  const penaltyBlocks = record.earlyRepayPenaltyDays; // field name; semantics are penaltyBlocks
   let penaltyInterest = (promised * penaltyBlocks) / totalBlocks;
 
   const remainingGuarantee = promised - actualInterestPaid;
@@ -127,14 +127,14 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
       salt: ethers.keccak256(ethers.toUtf8Bytes(`lend-${lender.address}-${principal}-${Date.now()}`)),
     };
 
-    const lendIntentHash = ethers.TypedDataEncoder.hashStruct('LendIntent', LEND_INTENT_TYPES, lendIntent);
+    const lendIntentHash = ethers.TypedDataEncoder.hashStruct('LendIntent', LEND_INTENT_TYPES as any, lendIntent);
 
     // Lender reserves principal into pool custody.
     await token.connect(lender).approve(await vbl.getAddress(), principal);
     await vbl.connect(lender).reserveForLending(lender.address, await token.getAddress(), principal, lendIntentHash);
 
     const sigBorrower = await borrower.signTypedData(domain, BORROW_INTENT_TYPES, borrowIntent);
-    const sigLender = await lender.signTypedData(domain, LEND_INTENT_TYPES, lendIntent);
+    const sigLender = await lender.signTypedData(domain, LEND_INTENT_TYPES as any, lendIntent);
 
     const tx = await vbl.connect(borrower).finalizeMatch(borrowIntent, [lendIntent], sigBorrower, [sigLender]);
     const receipt = await tx.wait();
@@ -183,6 +183,9 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
 
     const risk = await (await ethers.getContractFactory('MockLiquidationRiskManager')).deploy();
     await risk.waitForDeployment();
+
+    const priceOracle = await (await ethers.getContractFactory('MockPriceOracle')).deploy();
+    await priceOracle.waitForDeployment();
 
     const pvVal = await (await ethers.getContractFactory('MockPositionViewValuation')).deploy();
     await pvVal.waitForDeployment();
@@ -267,6 +270,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
       KEY_GUARANTEE_FUND: ethers.keccak256(ethers.toUtf8Bytes('GUARANTEE_FUND_MANAGER')),
       KEY_EARLY_REPAYMENT_GUARANTEE: ethers.keccak256(ethers.toUtf8Bytes('EARLY_REPAYMENT_GUARANTEE_MANAGER')),
       KEY_LIQUIDATION_RISK_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_RISK_MANAGER')),
+      KEY_PRICE_ORACLE: ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE')),
       KEY_POSITION_VIEW: ethers.keccak256(ethers.toUtf8Bytes('POSITION_VIEW')),
       KEY_LIQUIDATION_MANAGER: ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATION_MANAGER')),
       KEY_FR: ethers.keccak256(ethers.toUtf8Bytes('FEE_ROUTER')),
@@ -284,6 +288,7 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     await registry.setModule(ModuleKeys.KEY_GUARANTEE_FUND, gfm.target);
     await registry.setModule(ModuleKeys.KEY_EARLY_REPAYMENT_GUARANTEE, ergm.target);
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER, risk.target);
+    await registry.setModule(ModuleKeys.KEY_PRICE_ORACLE, priceOracle.target);
     await registry.setModule(ModuleKeys.KEY_POSITION_VIEW, pvVal.target);
     await registry.setModule(ModuleKeys.KEY_LIQUIDATION_MANAGER, liquidationManager.target);
     await registry.setModule(ModuleKeys.KEY_FR, feeRouter.target);
@@ -301,6 +306,8 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
     await acm.grantRole(ACTION_DEPOSIT, gfm.target);
     await acm.grantRole(ACTION_DEPOSIT, vbl.target);
     await feeRouter.connect(owner).addSupportedToken(token.target);
+    const currentBlock = await ethers.provider.getBlockNumber();
+    await priceOracle.connect(owner).setPrice(token.target, 10n ** 18n, BigInt(currentBlock), 18);
 
     await assetWhitelist.setAssetAllowed(token.target, true);
 
@@ -375,6 +382,10 @@ describe('Guarantee Extension Flow (Funds-Flow Guide §5)', function () {
       annualRateBps,
       termDays: Number(termDays),
     });
+
+    // This scenario treats principal repayment as the full-repay authority and
+    // settles the promised interest out of guarantee custody.
+    await orderEngine.setOrderTotalDueOverride(orderId, principal);
 
     const guaranteeId = await ergm.getUserGuaranteeId(borrower.address, token.target);
     expect(guaranteeId).to.not.equal(0n);

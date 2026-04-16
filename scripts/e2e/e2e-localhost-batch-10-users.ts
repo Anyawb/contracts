@@ -1108,7 +1108,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     }
   }
   const nowBlock = await latestBlockNumber();
-  await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), nowBlock)).wait();
+  await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", assetDecimals), nowBlock)).wait();
   try {
     await po.connect(deployer).updatePrice(assetAddr, 0, nowBlock);
     throw new Error("Expected PriceOracle__InvalidPrice, but updatePrice succeeded");
@@ -1141,7 +1141,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       await (await po.connect(deployer).configureAsset(altAssetAddr, "usd-coin", 6, 3600)).wait();
     }
   }
-  await (await po.connect(deployer).updatePrice(altAssetAddr, ethers.parseUnits("1", 8), nowBlock)).wait();
+  await (await po.connect(deployer).updatePrice(altAssetAddr, ethers.parseUnits("1", 6), nowBlock)).wait();
   if (!(await feeRouter.isTokenSupported(altAssetAddr))) {
     await (await feeRouter.connect(deployer).addSupportedToken(altAssetAddr)).wait();
   }
@@ -1149,7 +1149,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   // FeeRouter coverage (aligned with standalone FeeRouter script)
   await runFeeRouterFlow();
 
-  // StatisticsView stores values in USD-8; convert token-decimal amounts to USD-8 using PriceOracle.
+  // StatisticsView stores values in value; convert token-decimal amounts to value using PriceOracle.
   // (This is the same conversion strategy used in the advanced batch script.)
   const [priceUsd8Raw, , priceAssetDecimalsRaw] = await po.getPrice(assetAddr);
   const priceUsd8 = toBigInt(priceUsd8Raw);
@@ -1164,6 +1164,20 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     await statisticsView
       .connect(deployer)
       .pushUserStatsUpdate(user, toUsd8(collateralIn), toUsd8(collateralOut), toUsd8(borrow), toUsd8(repay));
+  };
+
+  const pushAuthoritativeStatsSnapshot = async (user: string, label: string) => {
+    const collateralValue = toBigInt(await positionView.getUserTotalCollateralValue(user));
+    const debtValue = toBigInt(await vle.getUserTotalDebtValue(user));
+    const currentVersion = (await statisticsView.getUserStatsVersion(user)) as bigint;
+    await statisticsView.connect(deployer).pushUserStatsSnapshot(
+      user,
+      collateralValue,
+      debtValue,
+      ethers.id(`${label}-${user}-${Date.now()}`),
+      0n,
+      currentVersion + 1n,
+    );
   };
 
   const refreshViewCache = async (label: string) => {
@@ -1312,7 +1326,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   for (const { borrower } of pairs) {
     baselineBorrowerCollateralSum += await cm.getCollateral(borrower.address, assetAddr);
     baselineBorrowerDebtSum += await vle.getDebt(borrower.address, assetAddr);
-    // SSOT valuation (USD-8): use PositionView (collateral) and LendingEngine (debt value).
+    // SSOT valuation (value): use PositionView (collateral) and LendingEngine (debt value).
     baselineBorrowerCollateralValueSumUsd8 += toBigInt(await positionView.getUserTotalCollateralValue(borrower.address));
     baselineBorrowerDebtValueSumUsd8 += toBigInt(await vle.getUserTotalDebtValue(borrower.address));
   }
@@ -1793,7 +1807,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   console.log("  totalDebt:", ethers.formatUnits(ledgerDebtSum, 6));
   console.log("  deltaCollateral:", ethers.formatUnits(ledgerCollateralDelta, 6));
   console.log("  deltaDebt:", ethers.formatUnits(ledgerDebtDelta, 6));
-  console.log("📙 SSOT valuation (USD-8, sum over 5 borrowers):");
+  console.log("📙 SSOT valuation (value, sum over 5 borrowers):");
   console.log("  totalCollateralValue(usd8):", ethers.formatUnits(ledgerCollateralValueSumUsd8, USD8_DECIMALS));
   console.log("  totalDebtValue(usd8):", ethers.formatUnits(ledgerDebtValueSumUsd8, USD8_DECIMALS));
   console.log("  deltaCollateralValue(usd8):", ethers.formatUnits(expectedCollateralUsd8, USD8_DECIMALS));
@@ -1812,10 +1826,6 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
   if (statsDebtDeltaAfter !== expectedDebtUsd8) throw new Error("StatisticsView debt delta mismatch vs expected (usd8)");
 
   console.log("✅ Checkpoint 1 passed: ledger == statistics == expected");
-  // Track expected StatisticsView collateral delta across subsequent steps.
-  // After Checkpoint 1, we have asserted StatisticsView.totalCollateral delta (usd8) is correct.
-  // In the new SSOT flow, full repay can auto-release collateral (CM.withdrawCollateralTo) which should reduce this delta back to 0.
-  let expectedStatsCollateralDelta = expectedCollateralUsd8;
   await logPositionViewVersion("checkpoint 1 (after matches)");
   await refreshViewCache("after matches");
 
@@ -1912,24 +1922,6 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       );
     }
 
-    // StatisticsView 的 debt 口径按「本金」统计；repay 的利息/费用不应作为 debt 减项推送，否则会出现负 delta。
-    // Collateral release after full repay may happen automatically; we reconcile StatisticsView based on observed behavior.
-    let collateralOutToPush = collateralOut;
-    try {
-      const [statsCur] = await statisticsView.getGlobalStatisticsWithMeta();
-      const statsColDeltaCur = toBigInt(statsCur.totalCollateral) - toBigInt(baselineStats.totalCollateral);
-      const expectedAfter = expectedStatsCollateralDelta - toUsd8(collateralOut);
-      // If StatisticsView already reflects the collateral decrease (auto-pushed by some module), don't double-push.
-      if (statsColDeltaCur === expectedAfter) {
-        collateralOutToPush = 0n;
-      }
-      expectedStatsCollateralDelta = expectedAfter;
-    } catch {
-      // If Stats query fails, fall back to manual push to keep it closer to ledger.
-      expectedStatsCollateralDelta = expectedStatsCollateralDelta - toUsd8(collateralOut);
-    }
-
-    await pushStats(borrower.address, 0n, collateralOutToPush, 0n, principal);
     console.log(`  ✅ Pair ${i + 1}: repaid orderId=${orderId.toString()} totalDue=${ethers.formatUnits(totalDue, 6)}`);
 
     // LoanNFT: ensure status updated to Repaid after repay
@@ -1996,10 +1988,12 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     throw new Error("Ledger collateral delta mismatch after repay (expect collateral auto-released back to baseline)");
   }
 
-  // Backfill StatisticsView if it didn't reflect the collateral release.
-  if (statsCollateralDelta2 !== 0n) {
+  // Repay path now relies on StatisticsPushManager snapshot updates when available.
+  // If the global snapshot still diverges from the SSOT after all repays, repair each batch borrower
+  // with an authoritative snapshot instead of applying another delta push.
+  if (statsCollateralDelta2 !== 0n || statsDebtDelta2 !== 0n) {
     for (const { borrower } of pairs) {
-      await pushStats(borrower.address, 0n, collateralAmt, 0n, 0n);
+      await pushAuthoritativeStatsSnapshot(borrower.address, "batch10-repay-reconcile");
     }
   }
 
@@ -2259,7 +2253,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       if (maxMaturity > 0n) {
         await mineToBlock(maxMaturity - 1n);
         const nowAfterWarp = await latestBlockNumber();
-        await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), nowAfterWarp)).wait();
+        await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", assetDecimals), nowAfterWarp)).wait();
       }
 
       const dueBelow = calcTotalDue(below, rateBps, termBlocks);
@@ -2355,7 +2349,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       const ord = await orderEngine.getLoanOrderForView(orderId);
       await mineToBlock(BigInt(ord.maturity) - 1n);
       const nowAfterWarp = await latestBlockNumber();
-      await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), nowAfterWarp)).wait();
+      await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", assetDecimals), nowAfterWarp)).wait();
 
       const totalDue = calcTotalDue(amount, rateBps, termBlocks);
       const partial = totalDue / 2n;
@@ -2500,7 +2494,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       if (maxMaturity > 0n) {
         await mineToBlock(maxMaturity - 1n);
         const nowAfterWarp = await latestBlockNumber();
-        await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), nowAfterWarp)).wait();
+        await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", assetDecimals), nowAfterWarp)).wait();
       }
 
       const due1 = calcTotalDue(amount1, rateBps, termBlocks);
@@ -2612,8 +2606,8 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
       if (maxMaturity > 0n) {
         await mineToBlock(maxMaturity - 1n);
         const nowAfterWarp = await latestBlockNumber();
-        await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), nowAfterWarp)).wait();
-        await (await po.connect(deployer).updatePrice(altAssetAddr, ethers.parseUnits("1", 8), nowAfterWarp)).wait();
+        await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", assetDecimals), nowAfterWarp)).wait();
+        await (await po.connect(deployer).updatePrice(altAssetAddr, ethers.parseUnits("1", 6), nowAfterWarp)).wait();
       }
 
       const dueUsdc = calcTotalDue(ethers.parseUnits("1000", 6), rateBps, termBlocks);
@@ -2943,7 +2937,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     await (await vaultCore.connect(user).deposit(assetAddr, depositAmt)).wait();
 
     const nowBlock = await latestBlockNumber();
-    await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), nowBlock)).wait();
+    await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", assetDecimals), nowBlock)).wait();
 
     // PriceOracle staleness is block-number based (maxPriceAgeBlocks).
     const cfg: any = await po.getAssetConfig(assetAddr);
@@ -2965,7 +2959,7 @@ export async function runBatch10Users(opts?: { sampleBorrowerIndex?: number }) {
     }
 
     const nowAfter = await latestBlockNumber();
-    await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), nowAfter)).wait();
+    await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", assetDecimals), nowAfter)).wait();
     await positionView.getUserTotalCollateralValue(user.address);
 
     const colNow = (await cm.getCollateral(user.address, assetAddr)) as bigint;

@@ -14,11 +14,8 @@ import { ethers } from 'hardhat';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
-// 导入合约类型
-import type { Registry } from '../../types';
-
 describe('Registry 紧急管理员测试', function () {
-  let registry: Registry;
+  let registry: any;
   let emergencyAdmin: SignerWithAddress;
   let user1: SignerWithAddress;
   let user2: SignerWithAddress;
@@ -49,7 +46,7 @@ describe('Registry 紧急管理员测试', function () {
     );
     await proxy.waitForDeployment();
         
-    const registry = implementation.attach(await proxy.getAddress()) as Registry;
+    const registry = implementation.attach(await proxy.getAddress()) as any;
         
     // 设置紧急管理员
     await registry.setEmergencyAdmin(await emergencyAdmin.getAddress());

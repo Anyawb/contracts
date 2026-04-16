@@ -18,7 +18,7 @@ import {LendingEngineValuation} from "./LendingEngineValuation.sol";
  *      - see individual functions
  *
  * Security:
- * - This library mutates debt-ledger state and updates cached valuation through LendingEngineValuation.
+ * - This library mutates debt-ledger state and updates cached debt value through LendingEngineValuation.
  * - Higher layers remain responsible for best-effort view and health pushes.
  */
 library LendingEngineAccounting {
@@ -37,7 +37,7 @@ library LendingEngineAccounting {
     );
 
     /**
-     * @notice Records a borrow by increasing debt balances and updating cached valuation.
+    * @notice Records a borrow by increasing debt balances and updating cached debt value.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)
@@ -83,7 +83,7 @@ library LendingEngineAccounting {
     }
 
     /**
-     * @notice Records a repayment by decreasing debt balances and updating cached valuation.
+    * @notice Records a repayment by decreasing debt balances and updating cached debt value.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)
@@ -132,7 +132,7 @@ library LendingEngineAccounting {
     }
 
     /**
-     * @notice Records a forced debt reduction for liquidation and updates cached valuation.
+    * @notice Records a forced debt reduction for liquidation and updates cached debt value.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)

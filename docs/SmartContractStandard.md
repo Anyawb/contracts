@@ -873,14 +873,14 @@ contract MyContract is Pausable {
     ```solidity
     function _getCollateralValue(address user) internal view returns (uint256) {
         // ...
-        try priceOracle.getPrice(address(rwaToken)) returns (uint256 price) {
+        try priceOracle.getPrice(address(rwaToken)) returns (uint256 price, uint256, uint256 assetDecimals) {
             // 1. 检查价格是否为零
             require(price > 0, "Oracle: Invalid price");
             // 2. 检查价格是否过时
             require(block.number - priceOracle.lastUpdateBlock() < PRICE_TIMEOUT_BLOCKS, "Oracle: Stale price");
             // 3. (可选) 检查价格波动是否在合理范围内
             
-            return (collateralAmount * price) / 1e8;
+          return (collateralAmount * price) / (10 ** assetDecimals);
         } catch {
             revert("Oracle: Failed to get price");
         }

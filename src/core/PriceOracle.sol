@@ -49,7 +49,7 @@ error PriceOracle__InvalidAssetDecimals(uint256 decimals);
 
 /**
  * @title PriceOracle
- * @notice Stores and serves per-asset USD-8 prices, with governance-controlled configuration and role-gated updates.
+ * @notice Stores and serves per-asset prices in the asset's valuation unit, with governance-controlled configuration and role-gated updates.
  * @dev Reverts if:
  *      - Registry is not configured (see {ZeroAddress}) (via {onlyValidRegistry} on admin paths)
  *
@@ -64,10 +64,10 @@ error PriceOracle__InvalidAssetDecimals(uint256 decimals);
  *     `VaultLendingEngine` and view facades (e.g. `ValuationOracleView`).
  *
  * Units / semantics (SSOT):
- * - `price` is USD-8 (e.g. $1.00 == 100000000).
- * - `assetDecimals` is token decimals used for valuation scaling:
- *   `valueUSD8 = amount(token base units) * price(USD-8) / 10**assetDecimals`.
- *   It is NOT the price precision (price precision is fixed to USD-8).
+ * - `price` is scaled by `assetDecimals` (for example, a $1.00 asset with 6 decimals uses `price = 1_000_000`).
+ * - `assetDecimals` is token decimals used for both price/value scaling:
+ *   `value(assetDecimals) = amount(token base units) * price(assetDecimals) / 10**assetDecimals`.
+ * - Cross-asset comparisons MUST normalize explicitly at higher layers; this contract is only the authoritative store.
  *
  * Integration:
  * - Intended Registry key: `ModuleKeys.KEY_PRICE_ORACLE`.
@@ -77,9 +77,6 @@ error PriceOracle__InvalidAssetDecimals(uint256 decimals);
  */
 contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
-
-    /// @dev Fixed price precision for this module: USD-8 (e.g. $1.00 == 100000000).
-    uint256 internal constant _PRICE_DECIMALS_VALUE = 8;
 
     /// @dev Default maximum allowed staleness for stored prices in blocks.
     /// NOTE: This is chain-dependent; governance SHOULD configure per-asset values explicitly.
@@ -163,9 +160,9 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      *   health policy (this contract is a price store).
      *
      * @param asset ERC-20 asset address.
-     * @return price Price in USD-8 (e.g. $1.00 == 100000000).
+    * @return price Price in the asset's valuation unit.
      * @return blockNumber Informational blockNumber associated with the quoted price.
-     * @return assetDecimals Token decimals used for valuation scaling (see `AssetConfig.assetDecimals`).
+    * @return assetDecimals Token decimals used for price/value scaling (see `AssetConfig.assetDecimals`).
      */
     function getPrice(
         address asset
@@ -213,7 +210,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      *   their own staleness policy using `AssetConfig.maxPriceAgeBlocks` and {block.number}.
      *
      * @param asset ERC-20 asset address.
-     * @return priceData Stored price struct (includes USD-8 price, blockNumber, and token decimals used for scaling).
+    * @return priceData Stored price struct (includes price, blockNumber, and token decimals used for scaling).
      */
     function getPriceData(
         address asset
@@ -324,7 +321,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - This function fails atomically: one invalid asset causes the entire call to revert.
      *
      * @param assets List of ERC-20 asset addresses.
-     * @return prices Prices in USD-8, aligned to `assets`.
+    * @return prices Prices in each asset's valuation unit, aligned to `assets`.
      * @return blockNumbers Informational blockNumbers, aligned to `assets`.
      * @return assetDecimalsArray Token decimals used for valuation scaling, aligned to `assets`.
      */
@@ -446,7 +443,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      *
      * @param asset ERC-20 asset address to configure.
     * @param sourceId Offchain source id used by updaters (may be empty).
-     * @param assetDecimals Token decimals used for valuation scaling (NOT price precision).
+    * @param assetDecimals Token decimals used for price/value scaling.
      * @param maxPriceAgeBlocks Maximum allowed staleness in blocks (0 uses default).
      */
     function configureAsset(
@@ -573,7 +570,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - This is a write path; consumers should treat written values as untrusted input guarded by governance/keepers.
      *
      * @param asset ERC-20 asset address to update.
-     * @param price New price in USD-8.
+    * @param price New price in the asset's valuation unit.
      * @param blockNumber Informational blockNumber corresponding to the quoted price.
      */
     function updatePrice(
@@ -593,8 +590,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
             revert PriceOracle__InvalidBlockNumber();
         }
 
-        // assetDecimals must be configured; do NOT silently fall back to 8.
-        // Otherwise, valuation would be mis-scaled by 10^(tokenDecimals-8).
+        // assetDecimals must be configured; do NOT silently fall back to legacy 8-decimal assumptions.
         uint256 assetDecimals = _assetConfigs[asset].assetDecimals;
         if (assetDecimals == 0)
             revert PriceOracle__AssetDecimalsNotConfigured();
@@ -637,7 +633,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - This function emits one {PriceUpdated} per asset and a single {SystemEvents.ActionExecuted} for the batch.
      *
      * @param assets List of ERC-20 asset addresses to update.
-     * @param prices List of USD-8 prices aligned to `assets`.
+    * @param prices List of prices aligned to `assets`, each in the asset's valuation unit.
      * @param blockNumbers List of informational blockNumbers aligned to `assets`.
      */
     function updatePrices(
@@ -705,7 +701,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      *
      * @param asset ERC-20 asset address to configure.
     * @param sourceId Offchain source id used by updaters (may be empty).
-     * @param assetDecimals Token decimals used for valuation scaling (NOT price precision).
+    * @param assetDecimals Token decimals used for price/value scaling.
      * @param maxPriceAgeBlocks Maximum allowed staleness in blocks (0 uses default).
      * @param setActive Whether to set `isActive` to true/false.
      * @param emitConfigEvent Whether to emit {AssetConfigUpdated}.

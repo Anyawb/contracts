@@ -44,6 +44,7 @@ const DEPLOY_FILE = path.join(DEPLOY_DIR, "arbitrum.json");
 // 将前端配置输出到当前仓库的 frontend-config，避免写到工作区外部路径
 const FRONTEND_DIR = path.join(__dirname, "..", "..", "frontend-config");
 const FRONTEND_FILE = path.join(FRONTEND_DIR, "contracts-arbitrum.ts");
+const CANONICAL_FRONTEND_FILE = path.join(FRONTEND_DIR, "networks", "arbitrum.ts");
 const DEFAULT_PAYOUT_BPS = {
   platform: 300,
   reserve: 200,
@@ -166,6 +167,43 @@ async function ensureConfiguredAssetsProtocolEnabled(deployed: DeployMap) {
       asset.sourceId,
     );
   }
+}
+
+async function ensureVaultRouterFeeRouterViewBinding(deployed: DeployMap) {
+  if (!deployed.VaultCore || !deployed.VaultRouter || !deployed.FeeRouterView) {
+    return;
+  }
+
+  const vaultCore = (await ethers.getContractAt(
+    ["function viewContractAddrVar() view returns (address)"],
+    deployed.VaultCore,
+  )) as any;
+  const viewGatewayAddr = (await vaultCore.viewContractAddrVar()) as string;
+  if (!viewGatewayAddr || viewGatewayAddr === ethers.ZeroAddress) {
+    throw new Error("VaultCore.viewContractAddrVar() is zero before FeeRouterView binding");
+  }
+
+  const vaultRouter = (await ethers.getContractAt(
+    [
+      "function feeRouterViewAddrVar() view returns (address)",
+      "function setFeeRouterView(address newFeeRouterView)",
+    ],
+    viewGatewayAddr,
+  )) as any;
+  const before = (await vaultRouter.feeRouterViewAddrVar()) as string;
+  if (before.toLowerCase() === deployed.FeeRouterView.toLowerCase()) {
+    console.log("↪️ VaultRouter FeeRouterView binding already set");
+    return;
+  }
+
+  await (await vaultRouter.setFeeRouterView(deployed.FeeRouterView)).wait();
+  const after = (await vaultRouter.feeRouterViewAddrVar()) as string;
+  if (after.toLowerCase() !== deployed.FeeRouterView.toLowerCase()) {
+    throw new Error(
+      `VaultRouter FeeRouterView binding mismatch after set: after=${after} expected=${deployed.FeeRouterView}`,
+    );
+  }
+  console.log(`✅ VaultRouter FeeRouterView bound -> ${after}`);
 }
 
 async function ensureAcmRole(
@@ -877,7 +915,7 @@ async function main() {
       );
     }
 
-    // Strict B+ protocol flow cache: LoanFlowView + LoanFlowPushManager (USD-8 SSOT)
+    // Strict B+ protocol flow cache: LoanFlowView + LoanFlowPushManager (value SSOT)
     // - LendingEngine best-effort notifies LoanFlowPushManager on borrow/repay.
     // - RewardManagerCore / EasyEmissionController read LoanFlowView during reward flows.
     if (!deployed.LoanFlowView) {
@@ -1144,7 +1182,7 @@ async function main() {
 
     // LiquidatorView（需要 SystemView）
     if (!deployed.LiquidatorView) {
-      // 第二个参数为历史兼容位（LiquidatorView.initialize 的 legacy SystemView），不再使用，这里使用非零占位（Registry）
+      // 第二个参数为 SystemView 占位参数，这里使用非零占位（Registry）
       try {
         deployed.LiquidatorView = await deployProxy("LiquidatorView", [
           deployed.Registry,
@@ -1510,6 +1548,21 @@ async function main() {
       }
     }
 
+    if (!deployed.OrderStateStoreV2) {
+      try {
+        deployed.OrderStateStoreV2 = await deployProxy("OrderStateStoreV2", [
+          deployed.Registry,
+        ]);
+        save(deployed);
+        console.log(
+          "✅ OrderStateStoreV2 deployed @",
+          deployed.OrderStateStoreV2,
+        );
+      } catch (error) {
+        console.log("⚠️ OrderStateStoreV2 deployment failed:", error);
+      }
+    }
+
     // 4.99.1.5) 部署 LenderPoolVault（线上流动性资金池，推荐）
     if (!deployed.LenderPoolVault) {
       try {
@@ -1764,6 +1817,7 @@ async function main() {
       CollateralManager: "COLLATERAL_MANAGER",
       // core/LendingEngine is the OrderEngine -> ModuleKeys.KEY_ORDER_ENGINE = keccak256("ORDER_ENGINE")
       LendingEngine: "ORDER_ENGINE",
+      OrderStateStoreV2: "ORDER_STATE_STORE",
       LendingEngineView: "LENDING_ENGINE_VIEW",
       LoanNFTView: "LOAN_NFT_VIEW",
       VaultBusinessLogic: "VAULT_BUSINESS_LOGIC",
@@ -1849,6 +1903,7 @@ async function main() {
       "FeeRouterView",
       "CollateralManager",
       "LendingEngine",
+      "OrderStateStoreV2",
       "LendingEngineView",
       "LoanNFTView",
       "VaultBusinessLogic",
@@ -2038,6 +2093,8 @@ async function main() {
     // 3.2 断言校验（严格版）：
     // - 禁止引入 KEY_VAULT_VIEW（多来源）；VaultRouter 的权威来源是 VaultCore.viewContractAddrVar()
     try {
+      await ensureVaultRouterFeeRouterViewBinding(deployed);
+
       if (!deployed.VaultCore || !deployed.VaultRouter)
         throw new Error("Missing VaultCore or VaultRouter address");
 
@@ -2062,6 +2119,22 @@ async function main() {
         throw new Error(
           `VaultCore.viewContractAddrVar mismatch: core=${viewAddr} expected VaultRouter=${deployed.VaultRouter}`,
         );
+      }
+      if (deployed.FeeRouterView) {
+        const vaultRouter = await ethers.getContractAt(
+          ["function feeRouterViewAddrVar() view returns (address)"],
+          viewAddr,
+        );
+        const feeRouterViewAddr = (await vaultRouter.feeRouterViewAddrVar()) as string;
+        if (!feeRouterViewAddr || feeRouterViewAddr === ethers.ZeroAddress) {
+          throw new Error("VaultRouter.feeRouterViewAddrVar() is zero");
+        }
+        if (feeRouterViewAddr.toLowerCase() !== deployed.FeeRouterView.toLowerCase()) {
+          throw new Error(
+            `VaultRouter.feeRouterViewAddrVar mismatch: router=${feeRouterViewAddr} expected FeeRouterView=${deployed.FeeRouterView}`,
+          );
+        }
+        console.log("✅ Architecture check: VaultRouter.feeRouterViewAddrVar matches deployed FeeRouterView");
       }
       console.log(
         "✅ Architecture check: VaultCore.viewContractAddrVar matches deployed VaultRouter",
@@ -2101,6 +2174,9 @@ export const NETWORK_CONFIG = {
 `;
     fs.writeFileSync(FRONTEND_FILE, frontendContent);
     console.log(`📝 Frontend config written: ${FRONTEND_FILE}`);
+  fs.mkdirSync(path.dirname(CANONICAL_FRONTEND_FILE), { recursive: true });
+  fs.writeFileSync(CANONICAL_FRONTEND_FILE, frontendContent);
+  console.log(`📝 Canonical frontend config written: ${CANONICAL_FRONTEND_FILE}`);
 
     // 5) 输出摘要
     console.log("\n==== Deployment Addresses (arbitrum) ====");

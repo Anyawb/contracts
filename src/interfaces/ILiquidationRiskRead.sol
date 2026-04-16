@@ -39,11 +39,12 @@ interface ILiquidationRiskRead {
         *
         * Security:
         * - Read-only pure/view-style threshold probe.
-        * - `collateral` and `debt` must already be expressed in the same value unit expected by the implementation.
+        * - `collateral` and `debt` must already be expressed in the shared 18-decimal system valuation unit,
+        *   or in another same-unit pair explicitly normalized by the caller before invocation.
         *
      * @param user User address.
-     * @param collateral Collateral value (same precision as debt).
-     * @param debt Debt value (same precision as collateral).
+    * @param collateral Collateral value, normalized to the same unit as `debt`.
+    * @param debt Debt value, normalized to the same unit as `collateral`.
      * @param asset Asset address.
      * @return liquidatable True if liquidatable, otherwise false.
      */
@@ -78,10 +79,11 @@ interface ILiquidationRiskRead {
         *
         * Security:
         * - Pure/view helper that does not mutate protocol state.
-        * - `collateral` and `debt` must already be expressed in the same value unit.
+        * - `collateral` and `debt` must already be expressed in the shared 18-decimal system valuation unit,
+        *   or in another same-unit pair explicitly normalized by the caller before invocation.
         *
-     * @param collateral Collateral value (same precision as debt).
-     * @param debt Debt value (same precision as collateral).
+    * @param collateral Collateral value, normalized to the same unit as `debt`.
+    * @param debt Debt value, normalized to the same unit as `collateral`.
      * @return riskScore Risk score in [0,100] (0 = lowest risk, 100 = highest).
      */
     function calculateLiquidationRiskScore(

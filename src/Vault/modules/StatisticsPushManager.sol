@@ -265,15 +265,15 @@ contract StatisticsPushManager is
         }
 
         // Compute authoritative snapshot (SSOT-derived).
-        // IMPORTANT (Architecture-Guide SSOT): collateral/debt totals MUST be expressed in the unified value unit
-        // (USD-8), not as raw token amounts. Therefore we read:
-        // - collateralValueUSD8 from PositionView valuation
-        // - debtValueUSD8 from LendingEngine valuation
+        // IMPORTANT (Architecture-Guide SSOT): collateral/debt totals MUST be expressed in the
+        // shared 18-decimal system valuation unit, not as raw token amounts. Therefore we read:
+        // - collateralValue from PositionView valuation
+        // - debtValue from LendingEngine valuation
         (
             uint256 collateralTotal,
             uint256 debtTotal,
             bytes memory snapErr
-        ) = _readUserTotalsValueUSD8(pvAddr, leAddr, user);
+        ) = _readUserTotalsValue(pvAddr, leAddr, user);
         if (snapErr.length != 0) {
             emit CacheUpdateFailedWithContext(
                 user,
@@ -484,7 +484,7 @@ contract StatisticsPushManager is
         }
     }
 
-    function _readUserTotalsValueUSD8(
+    function _readUserTotalsValue(
         address positionViewAddr,
         address leAddr,
         address user
@@ -492,17 +492,17 @@ contract StatisticsPushManager is
         internal
         view
         returns (
-            uint256 collateralValueUSD8,
-            uint256 debtValueUSD8,
+            uint256 collateralValue,
+            uint256 debtValue,
             bytes memory err
         )
     {
-        // Collateral total value (USD-8) from PositionView valuation.
+        // Collateral total value in the shared 18-decimal system valuation unit.
         try
             IPositionViewValuation(positionViewAddr)
                 .getUserTotalCollateralValue(user)
         returns (uint256 v) {
-            collateralValueUSD8 = v;
+            collateralValue = v;
         } catch (bytes memory reason) {
             return (
                 0,
@@ -511,14 +511,14 @@ contract StatisticsPushManager is
             );
         }
 
-        // Debt total value (USD-8) from LendingEngine valuation.
+        // Debt total value in the shared 18-decimal system valuation unit.
         try ILendingEngineDebtRead(leAddr).getUserTotalDebtValue(user) returns (
             uint256 v
         ) {
-            debtValueUSD8 = v;
+            debtValue = v;
         } catch (bytes memory reason) {
             return (
-                collateralValueUSD8,
+                collateralValue,
                 0,
                 abi.encode("getUserTotalDebtValue failed", reason)
             );

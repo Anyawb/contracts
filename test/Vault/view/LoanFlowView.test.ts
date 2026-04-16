@@ -47,21 +47,21 @@ describe('LoanFlowView', function () {
     const requestId = ethers.keccak256(ethers.toUtf8Bytes('loan-flow-1'));
     const tx = await loanFlowView
       .connect(pushManager)
-      .pushUserLoanFlowUpdate(user.address, 150_00000000n, 25_00000000n, 2n, 1n, requestId, 7n, 1n);
+      .pushUserLoanFlowUpdate(user.address, 150n * 10n ** 18n, 25n * 10n ** 18n, 2n, 1n, requestId, 7n, 1n);
 
     const receipt = await tx.wait();
     const block = await ethers.provider.getBlock(receipt!.blockNumber!);
     const payload = ethers.AbiCoder.defaultAbiCoder().encode(
-      ['address', 'uint256', 'uint256', 'uint64', 'bytes32', 'uint64', 'uint256'],
-      [user.address, 150_00000000n, 25_00000000n, 1n, requestId, 7n, block!.number],
+      ['address', 'uint256', 'uint256', 'uint8', 'uint64', 'bytes32', 'uint64', 'uint256'],
+      [user.address, 150n * 10n ** 18n, 25n * 10n ** 18n, 18, 1n, requestId, 7n, block!.number],
     );
 
     await expect(tx).to.emit(loanFlowView, 'DataPushed').withArgs(DATA_TYPE_LOAN_FLOW_UPDATED, payload);
 
     const [borrowVolume, repayVolume, borrowCount, repayCount, version, seq, lastRequestId, isValid, blockNumber] =
       await loanFlowView.connect(user).getUserLoanFlowWithMeta(user.address);
-    expect(borrowVolume).to.equal(150_00000000n);
-    expect(repayVolume).to.equal(25_00000000n);
+    expect(borrowVolume).to.equal(150n * 10n ** 18n);
+    expect(repayVolume).to.equal(25n * 10n ** 18n);
     expect(borrowCount).to.equal(2n);
     expect(repayCount).to.equal(1n);
     expect(version).to.equal(1n);
@@ -72,8 +72,8 @@ describe('LoanFlowView', function () {
 
     const [globalBorrow, globalRepay, globalBorrowCount, globalRepayCount, globalValid, globalBlockNumber] =
       await loanFlowView.getGlobalLoanFlowWithMeta();
-    expect(globalBorrow).to.equal(150_00000000n);
-    expect(globalRepay).to.equal(25_00000000n);
+    expect(globalBorrow).to.equal(150n * 10n ** 18n);
+    expect(globalRepay).to.equal(25n * 10n ** 18n);
     expect(globalBorrowCount).to.equal(2n);
     expect(globalRepayCount).to.equal(1n);
     expect(globalValid).to.equal(true);

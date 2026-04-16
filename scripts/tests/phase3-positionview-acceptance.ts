@@ -76,12 +76,19 @@ async function main() {
   const v1 = await pv.getPositionVersion(user.address, asset);
   if (v1 !== 1n) throw new Error(`expected version=1, got ${v1}`);
 
-  const dataPushedTopic = pv.interface.getEvent("DataPushed").topicHash;
+  const dataPushedFragment = pv.interface.getEvent("DataPushed");
+  if (!dataPushedFragment) {
+    throw new Error("expected PositionView interface to expose DataPushed");
+  }
+  const dataPushedTopic = dataPushedFragment.topicHash;
   const dataPushedLogs = r1.logs
     .filter((l) => l.address.toLowerCase() === (pv.target as string).toLowerCase())
     .filter((l) => l.topics?.[0] === dataPushedTopic);
   if (dataPushedLogs.length === 0) throw new Error("expected DataPushed on success");
   const parsed = pv.interface.parseLog(dataPushedLogs[0]);
+  if (!parsed) {
+    throw new Error("expected PositionView DataPushed log to be decodable");
+  }
   if (parsed.args[0] !== DATA_TYPE_USER_POSITION_UPDATE) {
     throw new Error(`unexpected dataTypeHash: ${parsed.args[0]}`);
   }

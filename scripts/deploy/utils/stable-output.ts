@@ -26,7 +26,7 @@ export function initStableDeploymentOutput(): void {
           typeof chunk === 'string'
             ? chunk
             : Buffer.isBuffer(chunk)
-              ? chunk.toString(typeof encoding === 'string' ? encoding : 'utf8')
+              ? chunk.toString(typeof encoding === 'string' ? (encoding as BufferEncoding) : 'utf8')
               : String(chunk);
 
         // Drop redraw frames (spinner/progress updates) that do not end a line.
@@ -36,7 +36,8 @@ export function initStableDeploymentOutput(): void {
 
         // Prevent overwrite semantics in captured logs.
         const cleaned = str.replace(/\r/g, '');
-        return write(cleaned, typeof encoding === 'string' ? encoding : undefined, cb);
+        const normalizedEncoding = typeof encoding === 'string' ? (encoding as BufferEncoding) : undefined;
+        return write(cleaned, normalizedEncoding, cb);
       } catch {
         return write(chunk, encoding, cb);
       }

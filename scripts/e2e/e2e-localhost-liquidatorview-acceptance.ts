@@ -186,7 +186,7 @@ async function main() {
     const now1 = BigInt((await ethers.provider.getBlock("latest"))!.number);
     const user1 = ethers.Wallet.createRandom().address;
     const coll1 = CONTRACT_ADDRESSES.MockUSDC;
-    const debt1 = CONTRACT_ADDRESSES.MockUSDT ?? CONTRACT_ADDRESSES.MockUSDC; // fallback if USDT not present in config
+    const debt1 = (CONTRACT_ADDRESSES as any).MockUSDT ?? CONTRACT_ADDRESSES.MockUSDC; // fallback if USDT not present in config
     const liq1 = ethers.Wallet.createRandom().address;
 
     const tx1 = await mustSucceed("authorized pushLiquidationUpdate", async () =>

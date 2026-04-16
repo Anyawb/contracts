@@ -98,6 +98,7 @@ async function main() {
 
     // ====== MUST: HealthView HF reads follow Scheme U (not public) ======
     const user = ethers.Wallet.createRandom().address;
+    const freshSelf = ethers.Wallet.createRandom().connect(ethers.provider);
     const missingRoleSel = ethers.id("MissingRole()").slice(0, 10);
 
     // Non-self read without VIEW_USER_DATA/ADMIN must revert.
@@ -109,7 +110,7 @@ async function main() {
     );
 
     // Self read must succeed (even without any role).
-    const [hfSelf0, validSelf0, tsSelf0] = (await hv.connect(other).getUserHealthFactorWithMeta(other.address)) as [
+    const [hfSelf0, validSelf0, tsSelf0] = (await hv.connect(freshSelf).getUserHealthFactorWithMeta(freshSelf.address)) as [
       bigint,
       boolean,
       bigint,

@@ -19,7 +19,7 @@ function parsePositiveIntEnv(name: string, fallback: number): bigint {
 function shouldPatchFees(networkName: string, force?: boolean) {
   if (force === true) return true;
   if (force === false) return false;
-  return networkName === "arbitrumSepolia" || networkName === "arbitrum";
+  return networkName === "arbitrumSepolia" || networkName === "arbitrum" || networkName === "bnbTestnet";
 }
 
 export async function configureDynamicEip1559Fees(opts: {

@@ -1449,6 +1449,7 @@ contract Registry is
             toVersion
         );
         // delegatecall is required for storage migration with a fixed STORAGE_SLOT.
+        // solhint-disable-next-line avoid-low-level-calls
         (bool ok, bytes memory reason) = migrator.delegatecall(data);
         if (!ok) revert Registry__MigratorFailed(migrator, reason);
 
@@ -1500,6 +1501,7 @@ contract Registry is
      * @return maxDelayBlocks Maximum allowed timelock delay in blocks.
      */
     // Interface requires MAX_DELAY() (legacy UPPER_SNAKE_CASE naming).
+    // solhint-disable-next-line func-name-mixedcase
     function MAX_DELAY() external view override returns (uint256) {
         return _maxDelayBlocks;
     }

@@ -15,21 +15,6 @@ import { ethers, upgrades } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import type {
-  VaultLendingEngine,
-  MockRegistry,
-  MockAccessControlManager,
-  MockCollateralManager,
-  MockRewardManager,
-  MockPriceOracle,
-  MockERC20,
-  MockVaultCoreView,
-  MockLiquidationRiskManager,
-  MockAssetWhitelist,
-  VaultRouter,
-  PositionView,
-  HealthView,
-} from '../../types';
 
 const ModuleKeys = {
   KEY_CM: ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER')),
@@ -49,6 +34,7 @@ const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes('LIQUIDATE'));
 const ACTION_VIEW_PUSH = ethers.keccak256(ethers.toUtf8Bytes('ACTION_VIEW_PUSH'));
 const ACTION_VIEW_RISK_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_RISK_DATA'));
 const ACTION_VIEW_USER_DATA = ethers.keccak256(ethers.toUtf8Bytes('VIEW_USER_DATA'));
+const VALUE_SCALE_DELTA = 10n ** 10n;
 
 describe('VaultLendingEngine – dual entry invariants', function () {
   async function deployDualEntryFixture() {
@@ -56,35 +42,35 @@ describe('VaultLendingEngine – dual entry invariants', function () {
 
     // Deploy mocks
     const Registry = await ethers.getContractFactory('MockRegistry');
-    const registry = (await Registry.deploy()) as MockRegistry;
+    const registry = (await Registry.deploy()) as any;
     await registry.waitForDeployment();
 
     const ACM = await ethers.getContractFactory('MockAccessControlManager');
-    const acm = (await ACM.deploy()) as MockAccessControlManager;
+    const acm = (await ACM.deploy()) as any;
     await acm.waitForDeployment();
 
     const CM = await ethers.getContractFactory('MockCollateralManager');
-    const cm = (await CM.deploy()) as MockCollateralManager;
+    const cm = (await CM.deploy()) as any;
     await cm.waitForDeployment();
 
     const RewardManager = await ethers.getContractFactory('MockRewardManager');
-    const rewardManager = (await RewardManager.deploy()) as MockRewardManager;
+    const rewardManager = (await RewardManager.deploy()) as any;
     await rewardManager.waitForDeployment();
 
     const PriceOracle = await ethers.getContractFactory('MockPriceOracle');
-    const priceOracle = (await PriceOracle.deploy()) as MockPriceOracle;
+    const priceOracle = (await PriceOracle.deploy()) as any;
     await priceOracle.waitForDeployment();
 
     const LRM = await ethers.getContractFactory('MockLiquidationRiskManager');
-    const lrm = (await LRM.deploy()) as MockLiquidationRiskManager;
+    const lrm = (await LRM.deploy()) as any;
     await lrm.waitForDeployment();
 
     const ERC20 = await ethers.getContractFactory('MockERC20');
-    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as MockERC20;
+    const settlementToken = (await ERC20.deploy('Settlement', 'ST', 18, ethers.parseEther('1000000'))) as any;
     await settlementToken.waitForDeployment();
 
     const AssetWhitelist = await ethers.getContractFactory('MockAssetWhitelist');
-    const assetWhitelist = (await AssetWhitelist.deploy()) as MockAssetWhitelist;
+    const assetWhitelist = (await AssetWhitelist.deploy()) as any;
     await assetWhitelist.waitForDeployment();
 
     // Deploy VaultRouter (UUPS proxy)
@@ -99,7 +85,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
         vaultCore.address, // initialOwner
       ],
       { kind: 'uups', initializer: 'initialize' }
-    )) as VaultRouter;
+    )) as any;
     await vaultRouter.waitForDeployment();
 
     // Configure oracle price (ensure within GracefulDegradation limit)
@@ -116,21 +102,21 @@ describe('VaultLendingEngine – dual entry invariants', function () {
       LendingEngine,
       [await priceOracle.getAddress(), await settlementToken.getAddress(), await registry.getAddress()],
       { kind: 'uups', initializer: 'initialize' }
-    )) as VaultLendingEngine;
+    )) as any;
     await lending.waitForDeployment();
 
     const PositionViewFactory = await ethers.getContractFactory('PositionView');
     const positionView = (await upgrades.deployProxy(PositionViewFactory, [await registry.getAddress()], {
       kind: 'uups',
       initializer: 'initialize',
-    })) as PositionView;
+    })) as any;
     await positionView.waitForDeployment();
 
     const HealthViewFactory = await ethers.getContractFactory('HealthView');
     const healthView = (await upgrades.deployProxy(HealthViewFactory, [await registry.getAddress()], {
       kind: 'uups',
       initializer: 'initialize',
-    })) as HealthView;
+    })) as any;
     await healthView.waitForDeployment();
 
     // VaultCore mock (resolves view + forwards borrow/repay)
@@ -287,7 +273,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
           user.address,
           randomCaller.address,
           anyValue, // totalCollateral
-          10n,      // totalDebt
+          10n * VALUE_SCALE_DELTA, // totalDebt (normalized to 18-dec value)
           anyValue  // reason bytes
         );
     });
@@ -309,7 +295,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
           user.address,
           anyValue,   // healthView address
           anyValue,   // totalCollateral
-          12n,        // totalDebt
+          12n * VALUE_SCALE_DELTA, // totalDebt (normalized to 18-dec value)
           anyValue    // reason bytes
         );
     });
@@ -331,7 +317,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
           user.address,
           await revertingHV.getAddress(),
           anyValue,
-          14n,
+          14n * VALUE_SCALE_DELTA,
           anyValue
         );
     });
@@ -354,7 +340,7 @@ describe('VaultLendingEngine – dual entry invariants', function () {
           user.address,
           anyValue, // healthView address
           0n,       // totalCollateral default before revert
-          16n,
+          16n * VALUE_SCALE_DELTA,
           anyValue
         );
     });

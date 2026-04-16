@@ -4,6 +4,8 @@
 
 本指南以 `docs/Architecture-Guide.md` 为准，面向“当前清算域实现”的回归测试与排障：
 
+> blocks-only 术语与状态映射词典以 [pre-launch-comprehensive-testing-requirements.md](pre-launch-comprehensive-testing-requirements.md) 第 5 章 Gate 9 的“词典约束（blocks-only）”为准（主术语：交易收尾 / 到期收尾 / 到期交付收尾；“交割收尾”仅作同义注释）。
+
 - **对外写入口（按产品线区分）**：legacy / 通用订单是 `SettlementManager`；blocks-only 订单是 `BlocksOnlyCoordinator`
 - **清算执行器**：`LiquidationManager`（直达账本写入 + best-effort 单点推送）
 - **DataPush 单点**：`LiquidatorView`（`KEY_LIQUIDATION_VIEW`）

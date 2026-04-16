@@ -443,8 +443,6 @@ async function main() {
   console.log(`--- Keeper path: settleOrLiquidate(orderId=${orderId}) ---`);
 
   const ACTION_LIQUIDATE = actionKey("LIQUIDATE");
-  const ACTION_VIEW_SYSTEM_DATA = actionKey("VIEW_SYSTEM_DATA");
-  const ACTION_REPAY = actionKey("REPAY");
   const acmAbi = [
     "function hasRole(bytes32 role, address caller) external view returns (bool)",
   ];
@@ -466,28 +464,6 @@ async function main() {
     );
   }
   console.log("");
-
-  if (acm) {
-    const hasView = await acm.hasRole(ACTION_VIEW_SYSTEM_DATA, settlementManagerAddr);
-    console.log("  settlementManager hasRole(ACTION_VIEW_SYSTEM_DATA):", hasView);
-    if (!hasView) {
-      throw new Error(
-        "[AccessControl] SettlementManager missing ACTION_VIEW_SYSTEM_DATA. " +
-          "Production-like mode: this smoke does not auto-grant roles. " +
-          "Grant the role before running (see scripts/tests/README.md)."
-      );
-    }
-    const hasRepay = await acm.hasRole(ACTION_REPAY, settlementManagerAddr);
-    console.log("  settlementManager hasRole(ACTION_REPAY):", hasRepay);
-    if (!hasRepay) {
-      throw new Error(
-        "[AccessControl] SettlementManager missing ACTION_REPAY. " +
-          "Production-like mode: this smoke does not auto-grant roles. " +
-          "Grant the role before running (see scripts/tests/README.md)."
-      );
-    }
-    console.log("");
-  }
 
   console.log("  Preflight checks:");
   const orderEngineAddr: string = await registry.getModule(KEY_ORDER_ENGINE);
@@ -524,6 +500,43 @@ async function main() {
   const smImpl = await readEip1967Implementation(settlementManagerAddr);
   console.log("  - liquidationManager impl:", lmImpl);
   console.log("  - settlementManager impl:", smImpl);
+
+  const orderEngineBridgeAbi = [
+    "function getLoanOrderForView(uint256 orderId) view returns ((uint256,uint256,uint256,address,address,address,uint256,uint256,uint256))",
+    "function getOrderTotalDueForView(uint256 orderId) view returns (uint256)",
+    "function repay(uint256 orderId,uint256 repayAmount)",
+  ];
+  const orderEngineBridge = new ethers.Interface(orderEngineBridgeAbi);
+  const bridgeChecks = [
+    {
+      label: "SettlementManager -> ORDER_ENGINE getLoanOrderForView",
+      data: orderEngineBridge.encodeFunctionData("getLoanOrderForView", [0n]),
+    },
+    {
+      label: "SettlementManager -> ORDER_ENGINE getOrderTotalDueForView",
+      data: orderEngineBridge.encodeFunctionData("getOrderTotalDueForView", [0n]),
+    },
+    {
+      label: "SettlementManager -> ORDER_ENGINE repay",
+      data: orderEngineBridge.encodeFunctionData("repay", [0n, 1n]),
+    },
+  ];
+
+  for (const check of bridgeChecks) {
+    try {
+      await callAs(settlementManagerAddr, orderEngineAddr, check.data);
+      console.log(`  - ${check.label}: OK (call succeeded)`);
+    } catch (error: any) {
+      const decoded = decodeRevert(extractRevertData(error));
+      console.log(`  - ${check.label}: ${decoded.decoded}`);
+      if (decoded.selector === ethers.id("MissingRole()").slice(0, 10).toLowerCase()) {
+        throw new Error(
+          `[AccessControl] ${check.label} still reverts with MissingRole(). ` +
+            "SettlementManager should no longer require extra REPAY/VIEW_SYSTEM_DATA grants.",
+        );
+      }
+    }
+  }
 
   if (
     orderEngineAddr === ethers.ZeroAddress ||

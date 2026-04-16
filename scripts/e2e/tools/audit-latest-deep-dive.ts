@@ -315,7 +315,7 @@ function main() {
     ["blocks-only-embedded", blocksOnlyEmbedded!],
   ] as const) {
     assertOk(artifact.data?.preflight?.prematureSettleRejected === true, `${label}: premature settle revert coverage missing`);
-    assertOk(artifact.data?.checkpoints?.repayAndSettle?.settled === true, `${label}: repay-settle checkpoint missing`);
+    assertOk(artifact.data?.checkpoints?.repayAndTradeClose?.tradeClosed === true, `${label}: repay-trade-close checkpoint missing`);
     assertOk(artifact.data?.checkpoints?.liquidation?.liquidated === true, `${label}: liquidation checkpoint missing`);
     assertOk(Object.keys(artifact.data?.dataPushCounts ?? {}).length > 0, `${label}: dataPushCounts missing`);
   }

@@ -13,16 +13,6 @@ import { expect } from 'chai';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
-import type { Registry } from '../types/src/registry/Registry';
-import type { ERC1967Proxy } from '../types/@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy';
-import type { RegistryStorageMigratorMock } from '../types/src/Mocks/RegistryStorageMigratorMock.sol/RegistryStorageMigratorMock';
-import type { RegistryStorageMigratorReverter } from '../types/src/Mocks/RegistryStorageMigratorMock.sol/RegistryStorageMigratorReverter';
-import type { RegistryStorageMigratorAdminWiper } from '../types/src/Mocks/RegistryStorageMigratorMock.sol/RegistryStorageMigratorAdminWiper';
-import type { RegistryStorageMigratorImplementationHijack } from '../types/src/Mocks/RegistryStorageMigratorMock.sol/RegistryStorageMigratorImplementationHijack';
-import type { RegistryStorageMigratorExternalCall } from '../types/src/Mocks/RegistryStorageMigratorMock.sol/RegistryStorageMigratorExternalCall';
-import type { RegistryStorageMigratorReentrant } from '../types/src/Mocks/RegistryStorageMigratorMock.sol/RegistryStorageMigratorReentrant';
-import type { RegistryStorageMigratorVersionBump } from '../types/src/Mocks/RegistryStorageMigratorMock.sol/RegistryStorageMigratorVersionBump';
-
 describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', function () {
   // 常量
   const TEST_MIN_DELAY = 3600; // 1h
@@ -35,16 +25,16 @@ describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', f
   let other: SignerWithAddress;
 
   // 合约
-  let registryImpl: Registry;
-  let registry: Registry;
-  let proxy: ERC1967Proxy;
-  let migrator: RegistryStorageMigratorMock;
-  let reverter: RegistryStorageMigratorReverter;
-  let adminWiper: RegistryStorageMigratorAdminWiper;
-  let implHijack: RegistryStorageMigratorImplementationHijack;
-  let externalCallMigrator: RegistryStorageMigratorExternalCall;
-  let reentrantMigrator: RegistryStorageMigratorReentrant;
-  let versionBumpMigrator: RegistryStorageMigratorVersionBump;
+  let registryImpl: any;
+  let registry: any;
+  let proxy: any;
+  let migrator: any;
+  let reverter: any;
+  let adminWiper: any;
+  let implHijack: any;
+  let externalCallMigrator: any;
+  let reentrantMigrator: any;
+  let versionBumpMigrator: any;
 
   async function deployFixture() {
     [owner, upgradeAdmin, emergencyAdmin, other] = await ethers.getSigners();
@@ -63,38 +53,38 @@ describe('RegistryStorageMigration – 存储迁移（固定 STORAGE_SLOT）', f
       emergencyAdmin.address,
       owner.address,
     ]);
-    proxy = (await ProxyFactory.deploy(registryImpl.target, initData)) as ERC1967Proxy;
+    proxy = (await ProxyFactory.deploy(registryImpl.target, initData)) as any;
     await proxy.waitForDeployment();
 
-    registry = registryImpl.attach(proxy.target) as Registry;
+    registry = registryImpl.attach(proxy.target) as any;
 
     // 部署迁移器
     const MigratorFactory = await ethers.getContractFactory('RegistryStorageMigratorMock');
-    migrator = (await MigratorFactory.deploy(other.address)) as RegistryStorageMigratorMock;
+    migrator = (await MigratorFactory.deploy(other.address)) as any;
     await migrator.waitForDeployment();
 
     const ReverterFactory = await ethers.getContractFactory('RegistryStorageMigratorReverter');
-    reverter = (await ReverterFactory.deploy()) as RegistryStorageMigratorReverter;
+    reverter = (await ReverterFactory.deploy()) as any;
     await reverter.waitForDeployment();
 
     const AdminWiperFactory = await ethers.getContractFactory('RegistryStorageMigratorAdminWiper');
-    adminWiper = (await AdminWiperFactory.deploy()) as RegistryStorageMigratorAdminWiper;
+    adminWiper = (await AdminWiperFactory.deploy()) as any;
     await adminWiper.waitForDeployment();
 
     const ImplHijackFactory = await ethers.getContractFactory('RegistryStorageMigratorImplementationHijack');
-    implHijack = (await ImplHijackFactory.deploy()) as RegistryStorageMigratorImplementationHijack;
+    implHijack = (await ImplHijackFactory.deploy()) as any;
     await implHijack.waitForDeployment();
 
     const ExternalCallFactory = await ethers.getContractFactory('RegistryStorageMigratorExternalCall');
-    externalCallMigrator = (await ExternalCallFactory.deploy()) as RegistryStorageMigratorExternalCall;
+    externalCallMigrator = (await ExternalCallFactory.deploy()) as any;
     await externalCallMigrator.waitForDeployment();
 
     const ReentrantFactory = await ethers.getContractFactory('RegistryStorageMigratorReentrant');
-    reentrantMigrator = (await ReentrantFactory.deploy(proxy.target)) as RegistryStorageMigratorReentrant;
+    reentrantMigrator = (await ReentrantFactory.deploy(proxy.target)) as any;
     await reentrantMigrator.waitForDeployment();
 
     const VersionBumpFactory = await ethers.getContractFactory('RegistryStorageMigratorVersionBump');
-    versionBumpMigrator = (await VersionBumpFactory.deploy()) as RegistryStorageMigratorVersionBump;
+    versionBumpMigrator = (await VersionBumpFactory.deploy()) as any;
     await versionBumpMigrator.waitForDeployment();
 
     return {

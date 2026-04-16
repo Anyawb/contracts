@@ -13,11 +13,8 @@ import { ethers } from 'hardhat';
 import { Signer } from 'ethers';
 import { loadFixture } from '@nomicfoundation/hardhat-toolbox/network-helpers';
 
-// 导入合约类型
-import type { Registry } from '../../types';
-
 describe('Registry Admin Events', function () {
-  let registry: Registry;
+  let registry: any;
   let owner: Signer;
   let admin: Signer;
   let pendingAdmin: Signer;
@@ -49,7 +46,7 @@ describe('Registry Admin Events', function () {
     );
     await proxy.waitForDeployment();
         
-    const registry = implementation.attach(await proxy.getAddress()) as Registry;
+    const registry = implementation.attach(await proxy.getAddress()) as any;
         
     return { registry, owner, admin, pendingAdmin, emergencyAdmin, upgradeAdmin };
   }

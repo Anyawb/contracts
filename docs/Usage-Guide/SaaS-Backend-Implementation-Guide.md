@@ -2,7 +2,7 @@
 
 > **文档定位**：本文档是 RWA Lending Platform 链下 SaaS 后端的**权威实施总纲**。
 > 它基于对现有 `contracts/` 链上架构（`docs/Architecture-Guide.md`、`docs/FRONTEND_CONTRACTS_INTEGRATION.md`）、
-> 链上 Reward 系统（`docs/Usage-Guide/Reward-Best-Practices-Guide.md`、`docs/Usage-Guide/AI-Credits-Billing-Guide.md`）、
+> 链上 Reward 系统（`docs/Usage-Guide/Reward/Reward-System-Usage-Guide.md`、`docs/Usage-Guide/AI-Credits-Billing-Guide.md`）、
 > 以及 `easifi-monorepo-wt/` 先行系统（`api-server` + `ai-services`）的完整审计而编写。
 >
 > **核心策略**：**在现有 `easifi-monorepo-wt/` 代码库上原地修正**，而非从零搭建新系统。
@@ -11,14 +11,184 @@
 > 修这两个点比推倒重来快 3 倍。
 >
 > **核心目标**：在 2.5–3 周内完成修正并部署，**统一幂等 Key 规范**，修复账本隔离漏洞，
-> 新增链上事件索引（Ponder）和 Stripe 计费，杜绝"多服务幂等口径分叉"问题。
+> 新增链上事件索引（Indexer，必要时可用 Ponder 实现）和 Stripe 计费，杜绝"多服务幂等口径分叉"问题。
 
-> **blocks-only keeper/撮合速查**：若当前工作重点是 blocks-only 对接，请先看 [Blocks-Only-Frontend-Matching-Checklist.md](Blocks-Only-Frontend-Matching-Checklist.md)，其中把前端、撮合服务与 keeper 的当前责任边界压缩成了一页式清单。
+> **当前范围说明**：本文当前主线覆盖 legacy / 通用订单、AI Credits 与 blocks-only 的链下后端实施。blocks-only 已纳入默认后端建模、默认 read model、默认索引和默认上线验收要求，并按 trade closeout / maturity closeout / maturity delivery closeout 三分法与三层状态模型执行。
 
 > **本次变更说明（2026-03-23）**：
 > 1. 统一价格发布路径继续维持为 `PriceUpdater.updateAssetPrice`，且该命名已经脱离 CoinGecko 专属语义。
 > 2. 前后端共享的 module key 口径需要跟随当前仓库主名：`KEY_PRICE_UPDATER` / `KEY_PRICE_UPDATER_VIEW`；若底层仍看到 `COINGECKO_PRICE_UPDATER`，那是 Registry 历史字符串兼容，不应再作为业务命名向上扩散。
 > 3. 外围部署/联调环境变量主名已收敛为 `*_SOURCE_ID`，后端若消费前端或运维脚本注入的 source 标识，应优先读取新变量名，仅将 `*_COINGECKO_ID` 视为兼容输入。
+
+> **与“前后端统一建表 SSOT”的边界（2026-04-01）**：
+> 1. [../frontend-backend-unified-schema-ssot.md](../frontend-backend-unified-schema-ssot.md) 是表名、字段语义、模块归属、金额/时间/幂等口径的权威文档。
+> 2. 本文档只负责后端实施：Prisma 模型命名建议、迁移顺序、索引器落库方式、RLS、多租户、幂等、运维与回退。
+> 3. 当两份文档看起来有重叠时，以 SSOT 文档定义“是什么”，以本文定义“在后端里怎么实现”。
+> 4. 本文不再重复逐字段解释所有读模型含义；字段语义统一回链到 SSOT 文档，避免后续双写双漂移。
+
+> **当前合约对齐补充（2026-04-01）**：
+> 1. 后端建表与索引方案现在必须遵循 [../frontend-backend-unified-schema-ssot.md](../frontend-backend-unified-schema-ssot.md) 的四层 SSOT：链上写入真相、链上读取镜像、链下事实表、链下读模型必须严格分层。
+> 2. 写入真相只认 `VaultCore / SettlementManager / CollateralManager / VaultLendingEngine / OrderEngine / LenderPoolVault / FeeRouter / LiquidationManager / LiquidationPayoutManager / RewardManagerCore / RewardAccrualManager / EasyToken / AICreditsVault`，View 不得被当作主账本来源。
+> 3. 当前态读取只认链上专属 View，但要按权限分层使用：普通钱包页优先 `PositionView / HealthView / StatisticsView / RewardView`；`UserView / DashboardView / FeeRouterView / LoanFlowView / LiquidatorView / BatchView / ViewCache` 主要做聚合或诊断；`SystemView / ValuationOracleView / ModuleHealthView` 默认属于后台或运维读面；`RegistryView` 负责地址发现与排障，不承载业务当前态。
+> 4. 索引器不得再把 `VaultRouter.DataPushed` 当作唯一统一事件入口。当前合约结构要求后端同时订阅多合约 `DataPushed` 与核心业务事件，尤其是 `RewardView`、`StatisticsView`、`LoanFlowView`、`LoanNFT`、`FeeRouter`、`AICreditsVault` 等。
+> 5. blocks-only 已纳入本文默认后端实施范围；相关表结构、事件和 read model 必须与 legacy / 通用订单并行建模，统一按三层状态对象落库与读模型消费。
+
+> **legacy 清算与 shortfall 对齐补充（2026-04-15）**：
+> 1. legacy / 通用订单的自动风险、自动清算、自动结算读取，当前必须使用 strict debt valuation；`getUserTotalDebtValue(...)` / `calculateDebtValue(...)` 这类兼容读口只能按 best-effort 兼容读理解。
+> 2. legacy / 通用订单清算后若抵押不足，剩余债务不会再被隐式吞没；链上会显式写入 `IShortfallLedger`。`LiquidatedWithShortfall` / `DefaultedWithShortfall` 仅作为兼容标签，主终态判定必须使用 `lifecycle + shortfallStatus + collateralDisposition`。
+> 3. 后端索引、读模型、告警和客服工具必须把 shortfall 当成一等事实对象建模，而不是继续用“liquidated 且 debt 接近 0”去猜业务结论。
+> 4. blocks-only 的状态机文档已并入本轮主线：后端落库和读模型必须显式区分 debt-free open、trade closeout、maturity closeout、maturity delivery closeout 四类业务状态，并保持第二层 shortfallStatus 的显式表达。
+
+## 前端直连链上可行性与接入矩阵（2026-04-07）
+
+本节用于回答一个非常具体的问题：把借贷主流程从“前端签名 + 后端命令执行”调整为“前端钱包直接调用链上入口”，在当前仓库里是否可行。
+
+结论先行：**方向可行，而且本文档已经把目标架构收敛为“前端钱包直接广播成交交易”**。当前不能简单说成“标准借款没有公开链上入口”；更准确的说法是：普通用户资金动作与借款成交走的是两类不同入口，而借款成交的公开入口已经足够支持前端自己完成广播。
+
+原因如下：
+
+1. `VaultCore` 已经提供用户钱包可直接调用的 `deposit(...)`、`withdraw(...)`、`repay(...)` 公开写入口，适合作为标准产品线的普通用户资金入口。
+2. `SettlementManager` 必须拆成两条路径理解：`repayAndSettle(...)` 是 `VaultCore.repay(...)` 背后的内部桥接结算函数；`settleOrLiquidate(orderId)` 才是 keeper/运营侧的到期结算或清算公开入口。
+3. 标准借款主流程里，`VaultCore.borrowFor(...)` 仍然只允许 `VaultBusinessLogic` 调用。但这不等于“没有公开入口”，因为真正对外公开的借款成交入口是 `VaultBusinessLogic.finalizeMatch(...)`，任何拿到完整 borrower/lender 签名、reserve 与参数的人都可以发起成交落链。
+4. 因此前端现在应把“存款 / 提款 / 还款 / AI Credits 购买”直接切到钱包直连；而“标准借款创建/成交”也可以由前端承担 borrower/lender 双边签名收集、reserve 确认、订单参数组装和最终广播，直接调用 `VaultBusinessLogic.finalizeMatch(...)`。后端不再作为成交交易的默认执行者，只保留报价、历史、审计、排行榜、跨页聚合和可选签名中继。
+
+### 后端 read model 的保留边界
+
+若前端改为链上 View 主读，后端 projection / read model 应只保留以下场景：
+
+1. 历史列表、活动流、审计追踪。
+2. 榜单、跨用户搜索、后台筛选。
+3. 跨页聚合、长列表分页、全站统计快照。
+4. 需要把多合约事件、链下业务状态、运营标签拼接成统一 DTO 的场景。
+
+并且要额外明确两条硬边界：
+
+1. 后端不再代替用户钱包提交 `finalizeMatch(...)`；若仍保留该能力，只能视为过渡或应急兜底。
+2. 单页当前态展示应优先回源链上 View，而不是优先命中 backend projection 缓存。
+
+下面这些不应再让后端 projection 充当主读：
+
+1. 当前用户仓位。
+2. 当前健康因子与风险状态。
+3. 当前奖励余额、锁仓、惩罚债务。
+5. 当前系统统计卡片在可接受 RPC 成本下的单页展示。
+
+### 状态定义
+
+- `已接入`：当前仓库已经具备前端直连所需的公开 ABI/地址配置/规范示例，且适合作为该角色的正式业务入口或主读面。
+- `未接入`：规范希望前端使用，但当前仓库仍缺少适合该角色的公开链上入口，或者仍被内部模块/后端编排拦住。
+- `仅诊断使用`：仓库里已有地址、ABI 或聚合门面，但它更适合诊断、运营、可视化或可选聚合，不应作为业务主路径。
+
+### 前端-合约接入矩阵（按当前仓库事实，不假设外部业务前端另有私有代码）
+
+| 合约 / 模块 | 规范定位 | 当前状态 | 说明 |
+| --- | --- | --- | --- |
+| `VaultCore` | 标准产品线钱包写入口 | 已接入 | 公开 `deposit(...)`、`withdraw(...)`、`repay(...)` 已具备；但借款创建不走 `VaultCore.borrowFor(...)`，而是走公开的 `VaultBusinessLogic.finalizeMatch(...)` 撮合入口。 |
+| `SettlementManager` | keeper / 运营结算与清算写入口 | 已接入 | 真实公开交易入口是 `settleOrLiquidate(orderId)`；但普通用户还款仍应走 `VaultCore.repay(...) -> SettlementManager.repayAndSettle(...)`，不要把内部桥接函数误当成普通用户入口。 |
+| `BlocksOnlyCoordinator` | blocks-only 产品写入口 | 已接入 | blocks-only 已进入默认实施范围，但后端必须按 trade-like 交割实现索引与收敛：`repayBlocks(...)` 之后订单可能是 debt-free 的 `REPAID` 但仍 open，真正 closed 只能来自 `closeRepaidTradeBlocks(...)` 或 maturity close。 |
+| `FeeRouter` | 费用路由写入口 | 仅诊断使用 | 协议写入 SSOT 没问题，但文档已经明确“前端通常不直接调用写入口”；更适合作为运维/对账/诊断配套，而不是普通业务前端主写入口。 |
+| `AICreditsVault` | AI Credits 钱包购买入口 | 已接入 | `buyCredits(...)` 是公开用户入口，天然适合钱包直连；链下只保留高频 usage 扣次与批量结算。 |
+| `PositionView` | 用户仓位主读面 | 已接入 | 已有专属读面与前端解析示例，应替代 backend projection 的当前态主读。 |
+| `HealthView` | 用户健康度主读面 | 已接入 | 已有专属读面；但跨用户枚举不是浏览器主路径，应交给有权限的后端或运维面。 |
+| `DashboardView` | 前端聚合仪表盘读面 | 仅诊断使用 | 合约与地址已存在，但当前仓库里更明确、已落地的主读范式仍是 Position/Health/Statistics/Reward 等专属 View；Dashboard 更适合可选聚合或调试页。 |
+| `RewardView` | 奖励当前态主读面 | 已接入 | 已有专属读面、事件推送和前端规范；单用户奖励当前态应读链上，不应再以 backend projection 为主。 |
+| `StatisticsView` | 系统统计主读面 | 已接入 | 前端配置与 `Registry -> KEY_STATS / KEY_VAULT_CORE -> viewContractAddrVar()` 回退解析已存在，应作为系统当前态统计卡片主读面。 |
+
+### 对前端改造的实施建议
+
+建议按下面顺序推进，而不是一次性推翻现有前后端协作：
+
+1. 第一阶段：把 `VaultCore.deposit / withdraw / repay`、`AICreditsVault.buyCredits` 切到前端钱包直连。
+2. 第一阶段同步完成：把当前态读取切到 `PositionView / HealthView / RewardView / StatisticsView`，backend 只保留规范允许的 read model 场景。
+3. 第二阶段：把成交广播切到前端，前端负责 borrower/lender 双边签名收集、reserve 确认、报价选择、参数组装，并直接调用 `VaultBusinessLogic.finalizeMatch(...)`。
+4. 后端降级为辅助层：保留报价目录、签名中继、历史审计、排行、跨页聚合和运营控制面；不再代替用户发成交交易。
+5. 最后再按角色开放 keeper/运营前端直连 `SettlementManager.settleOrLiquidate(...)`。
+
+### 架构判断标准
+
+只有同时满足下面三点，才能认为前端已经真正完成“链上直连主流程”迁移：
+
+1. 用户发起的普通资金动作不再依赖“先签名、再由后端命令执行”，而是直接由钱包调用链上入口；借款成交也由前端完成 borrower/lender 双边签名收集、reserve 校验和 `finalizeMatch(...)` 广播。
+2. 用户当前态页面不再以 backend projection 作为主读源。
+3. 后端只承担历史、排行、审计、跨页聚合、索引与运营控制面，而不是代替用户钱包发起标准业务写交易。
+
+### 前端方法级接入以哪份文档为准
+
+为了避免后端实施文档再次把前端接入职责说粗或说偏，前端真正应该接哪些合约、具体接哪些公开方法、哪些方法不能作为普通用户主路径，统一以 [../FRONTEND_CONTRACTS_INTEGRATION.md](../FRONTEND_CONTRACTS_INTEGRATION.md) 的“4.2 源码核对版前端接入清单（按方法级）”为准。
+
+后端在实施时必须默认下面这些边界：
+
+1. 不要再为 `VaultCore.deposit / withdraw / repay`、`VaultBusinessLogic.finalizeMatch`、`AICreditsVault.buyCredits` 设计新的“命令执行代理层”。
+2. 不要把 `SettlementManager.repayAndSettle(...)` 暴露为普通用户 API；普通用户仍应走 `VaultCore.repay(...)`。
+3. 不要把 `VaultCore.borrowFor(...)`、`VaultCore.borrowForBlocks(...)`、`VaultCore.repayForBlocks(...)` 这类内部编排入口包装成前端 SDK 主方法。
+4. 若后端提供前端 SDK、BFF 或聚合 API，它们也必须遵循前端文档里的方法级边界，而不是重新发明一套“更方便但偏离合约职责”的接入层。
+
+### 前后端仓库在这次迁移里最少要共享什么
+
+如果问题不是“方向是否可行”，而是“另一仓现在是否已经拿到足够的信息去落地”，那么最少必须共享下面这三类信息；缺任意一类，迁移都会变成口头共识而不是可执行方案。
+
+| 类别 | 最小集合 | 谁负责消费 |
+| --- | --- | --- |
+| 正式写入口 | `KEY_VAULT_CORE`、`KEY_VAULT_BUSINESS_LOGIC`、`KEY_SETTLEMENT_MANAGER`、`KEY_AI_CREDITS_VAULT` | 前端钱包写交易、后端 SDK / BFF / 审计层 |
+| 正式主读入口 | `KEY_POSITION_VIEW`、`KEY_HEALTH_VIEW`、`KEY_REWARD_VIEW`、`KEY_STATS` | 前端当前态页、后端只读聚合与收敛校验 |
+| blocks-only 额外集合 | `KEY_BLOCKS_ONLY_COORDINATOR`、`KEY_BLOCKS_ONLY_VIEW`、`KEY_ORDER_STATE_STORE` | blocks-only 当前态、DataPush 与显式状态收敛都依赖这组三元：写入口、读面、状态 SSOT。 |
+
+后端团队在这次迁移里还必须同步接受四条硬边界：
+
+1. 前端自己发 `finalizeMatch(...)` 时，后端不再拥有“成交广播默认执行权”。
+2. 后端继续保留的只是报价、签名中继、历史、排行、审计、索引与 post-write reconciliation，不是用户交易代理。
+3. keeper / liquidation / 运营控制面的权限仍然留在后端或运营域，至少要单独校验 `ActionKeys.ACTION_LIQUIDATE` 与相关只读权限，不可混入普通用户前端能力包。
+4. 共享的 ModuleKeys 产物必须与 Solidity SSOT 一致；如果前端或后端生成文件缺少 `KEY_VAULT_BUSINESS_LOGIC` 这类迁移关键键，应直接判定为联调阻断项。
+
+因此，这份后端文档负责回答“后端该退到哪里、保留什么、校验什么”，而真正的前端方法级接入与 approve / 权限 / Registry key 细节，仍然应该以 [../FRONTEND_CONTRACTS_INTEGRATION.md](../FRONTEND_CONTRACTS_INTEGRATION.md) 中新增的“前端钱包直连迁移最小 Registry Key / 权限 / Spender 清单”为执行基线。
+
+### 迁移联调里 ABI / 事件 / 错误码 还必须补到什么粒度
+
+前面的文档已经说明了职责边界，但如果要支撑真实联调，之前还有三处不够落地：
+
+1. 关键写入口的 tuple 顺序虽然在源码里存在，但没有被压缩成“前后端都必须共享”的 ABI 契约。
+2. 事件映射表里若继续写“以当前 ABI 为准”，前端和后端还是会各自猜字段名。
+3. custom error 之前更多停留在“前端可以 parseError”，缺少一份前后端共用的 selector 语义表。
+
+后端仓至少要把下面这些 ABI 产物当成一组原子发布物，而不是零散同步：
+
+| 类别 | 最小集合 | 为什么不能缺 |
+| --- | --- | --- |
+| 写入口 ABI | `VaultCore`、`VaultBusinessLogic`、`SettlementManager`、`AICreditsVault` | 决定钱包直连参数编码、keeper 调用边界和 AICredits 购买路径。 |
+| 主读 ABI | `PositionView`、`HealthView`、`RewardView`、`StatisticsView` | 决定 post-write reconciliation 的真实读面。 |
+| 错误解码 ABI | 至少要包含上述写入口的 `error ...` 定义 | 没有 custom error ABI，前后端就会退回字符串猜测。 |
+
+后端索引和审计层需要明确落库的关键事件字段，不应再写成“以当前 ABI 为准”：
+
+| 事件 | 后端最少要落哪些字段 | 工程约束 |
+| --- | --- | --- |
+| `LendReserveConsumed` | `lendIntentHash`, `lenderSigner`, `asset`, `amount`, `blockNumber` | 这是 reserve 消耗事实，不等于订单最终成功；只能做 reserve 维度审计。 |
+| `RepayAndSettleProcessed` | `user`, `debtAsset`, `repayAmount`, `orderId`, `releasedAllCollateral`, `blockNumber` | 普通还款主确认事件；`releasedAllCollateral` 不可丢。 |
+| `CollateralReleased` | `user`, `collateralAsset`, `collateralAmount`, `blockNumber` | collateral release 要单独落库，不要靠上一个事件推导数量。 |
+| blocks-only 事件族 | `BLOCKS_ONLY_MATCH_FINALIZED`、`BLOCKS_ONLY_REPAID`、`BLOCKS_ONLY_TRADE_CLOSED`、`BLOCKS_ONLY_DELIVERED` | 必须落库，但只能作为写路径事实；终态收敛仍要回读 `BlocksOnlyView.getBlocksOnlyOrderState(orderId)`。 |
+| `CreditsPurchased` | `tenantId`, `buyer`, `payToken`, `payAmount`, `credits`, `clientOrderId`, `blockNumber` | `clientOrderId` 是链上幂等锚点；不能在索引层丢掉。 |
+
+后端与前端还必须共享一份最小错误语义表，至少覆盖：
+
+| 错误码 | 后端分类 | 推荐动作 |
+| --- | --- | --- |
+| `SettlementIntentLib__InvalidSignature` | 用户/签名业务错误 | 不重试，返回明确业务错误。 |
+| `SettlementIntentLib__IntentExpired` | 订单过期 | 不重试，引导重新签名。 |
+| `SettlementIntentLib__AlreadyMatched` | 并发成交冲突 | 不自动重试，刷新当前态。 |
+| `VaultBusinessLogic__InsufficientReservedSum` | reserve 不足 | 不自动重试，等待新 reserve 或新报价。 |
+| `VaultBusinessLogic__InsufficientCollateral` | 抵押不足 | 不自动重试，引导先补抵押。 |
+| `SettlementManager__NotLiquidatable` | keeper 过早执行 | 延迟后重试或等待新风险信号。 |
+| blocks-only 专属错误 | trade-close / maturity-close 业务错误 | 至少要区分“prematurity 调用”“非参与者读权限错误”“keeper 角色不足”“order 已关闭”，并在回放/重试时结合 `BlocksOnlyView.getBlocksOnlyOrderState(orderId)` 二次分类。 |
+| `InvalidCaller` | AICredits 购买参数错误或重复单 | 不要盲重试，结合本地 preflight 和 clientOrderId 排查。 |
+
+还有一个非常容易被误判的点：`VaultBusinessLogic.finalizeMatch(...)` 成功后并不会发专属“成交成功事件”。因此后端若要给前端一个稳定状态流，应该定义成：
+
+1. `submitted`: 钱包已广播，拿到 `txHash`。
+2. `mined`: receipt 成功。
+3. `indexed`: 下游关键事件或读面已可见。
+4. `converged`: `PositionView / HealthView / RewardView` 等主读面已经与交易结果一致。
+
+如果后端 BFF 还只暴露 `submitted / failed` 两态，那仍然不够支撑钱包直连迁移。
 
 ---
 
@@ -80,7 +250,7 @@ ai-services 生成 requestId (格式 A)
 | `platform_ledger` | 有                 | 平台账户 `platform_pool` 是全局的，多租户共享               |
 | `ai_usage_detail` | 有                 | 但 `requestId` 格式与 `api-server` 不统一                   |
 
-**核心问题**：`accounts` 表的主键是 `(account_id, currency)`，缺少 `tenant_id` 维度。多租户环境下 `user:123` 的“奖励通证余额”（目标态对应 Registry[KEY_EASY_TOKEN] 指向的奖励通证，即 EasyToken）会在所有租户间共享——这是数据隔离的致命漏洞。
+**核心问题**：`accounts` 表的主键是 `(account_id, currency)`，缺少 `tenant_id` 维度。多租户环境下 `user:123` 的“奖励通证余额”（当前对应 Registry[KEY_EASY_TOKEN] 指向的 EasyToken）会在所有租户间共享——这是数据隔离的致命漏洞。
 
 ### 1.3 教训总结（必须在本次修正中解决）
 
@@ -486,7 +656,7 @@ AI Credits:  ai_credits:{userId}
 
 ## 4. 双边账本与复式记账统一
 
-> **重要架构变更**：链上 Reward 系统现已完备（详见 `docs/Usage-Guide/Reward-Best-Practices-Guide.md`），
+> **重要架构变更**：链上 Reward 系统现已完备（详见 `docs/Usage-Guide/Reward/Reward-System-Usage-Guide.md`），
 > 包含完整的 Earn/Spend/View 三层架构、per-order 幂等、penalty ledger（负余额追踪）、
 > 以及通过 `RewardView.DataPushed` 的统一事件流。
 >
@@ -539,7 +709,7 @@ AI Credits:  ai_credits:{userId}
 │  │    → 幂等 Level 1 防御层                                          │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
-│  数据流向：链上事件 → Ponder 索引 → 链下镜像（单向派生，不可逆写）       │
+│  数据流向：链上事件 → indexer（Ponder 或同类实现）→ 链下镜像（单向派生，不可逆写） │
 │  对账方向：链下 → 链上（链上为准，链下必须对齐）                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -548,17 +718,17 @@ AI Credits:  ai_credits:{userId}
 
 | 数据类型            | SSOT                                                      | 链下角色                                             | 对账方向       |
 | ------------------- | --------------------------------------------------------- | ---------------------------------------------------- | -------------- |
-| 奖励通证余额        | `IERC20(Registry[KEY_EASY_TOKEN]).balanceOf(user)`        | 镜像（Ponder 索引奖励通证 `Transfer` 的 mint/burn）  | 链下 → 链上    |
+| 奖励通证余额        | `IERC20(Registry[KEY_EASY_TOKEN]).balanceOf(user)`        | 镜像（indexer 索引奖励通证 `Transfer` 的 mint/burn） | 链下 → 链上    |
 | 锁定点数            | `RewardView.getUserEarnStateWithMeta(user).lockedEasy`    | 镜像（`DataPushed: REWARD_EARN_STATE_UPDATED`）      | 链下 → 链上    |
 | 负余额/欠分         | `RewardAccrualManager._penaltyLedger[user]`               | 镜像（`DataPushed: REWARD_PENALTY_LEDGER_UPDATED`）  | 链下 → 链上    |
 | 用户等级            | `RewardManagerCore._userLevels[user]`                     | 镜像（`DataPushed: REWARD_LEVEL_UPDATED`）           | 链下 → 链上    |
 | Easy 消费观测       | `RewardView.DataPushed(EASY_SPENT / EASY_RECYCLED_SPLIT)` | 镜像（用于分析/对账辅助；最终以 ERC20 balance 为准） | 链下 → 链上    |
 | AI Credits 审计余额 | `AICreditsVault.creditsBalance(tenantId, user)`           | 镜像 + 高频扣次层                                    | 链下 → 链上    |
 | AI 用量明细         | 链下 `ai_requests` 表                                     | **链下原生**                                         | 链上← 批量结算 |
-| 抵押/手续费         | `CollateralManager / FeeRouter`                           | 镜像（Ponder 索引）                                  | 链下 → 链上    |
+| 抵押/手续费         | `CollateralManager / FeeRouter`                           | 镜像（indexer 索引）                                 | 链下 → 链上    |
 | Stripe 计费         | 链下 `billing_subscriptions`                              | **链下原生**                                         | 无链上对应     |
 
-### 4.1 链上 Reward 会计模型（按 `Reward-Best-Practices-Guide.md` 对齐）
+### 4.1 链上 Reward 会计模型（按 `Reward-System-Usage-Guide.md` 对齐）
 
 > 以下模型已在链上完整实现，链下只需**镜像**，不需要重新实现。
 
@@ -633,7 +803,7 @@ EasiM / Strategy API 按次消费（每次 1 Easy）:
 
 | 链上操作                         | 幂等机制                                            | 链下对应                                     |
 | -------------------------------- | --------------------------------------------------- | -------------------------------------------- |
-| `onLoanEventByOrder(orderId)`    | `_lockedPointsByOrderId[orderId] != 0 → return`     | Ponder 索引天然幂等（同一 event 只处理一次） |
+| `onLoanEventByOrder(orderId)`    | `_lockedPointsByOrderId[orderId] != 0 → return`     | indexer 天然幂等（同一 event 只处理一次） |
 | `buyCredits(clientOrderId)`      | `_usedClientOrderId[tenantId][user][clientOrderId]` | 同上                                         |
 | `settleBatch(settlementBatchId)` | `_appliedSettlementBatch[settlementBatchId]`        | 链下以 `settlement_batch_id` 做幂等          |
 
@@ -641,13 +811,13 @@ EasiM / Strategy API 按次消费（每次 1 Easy）:
 
 > **定位**：链下复式记账有两个职责：
 >
-> 1. **镜像链上事件**为链下分录（通过 Ponder 索引 `DataPushed` 事件）
+> 1. **镜像链上事件**为链下分录（通过 indexer 索引 `DataPushed` 事件）
 > 2. **处理链下原生计费**（AI 高频扣次、Stripe 订阅）
 
-#### 4.2.1 镜像分录流程（Ponder → PostgreSQL）
+#### 4.2.1 镜像分录流程（Indexer → PostgreSQL）
 
 ```
-Ponder 索引服务（自动，无需手动触发）:
+Indexer 服务（自动，无需手动触发）:
   RewardView.DataPushed(dataTypeHash, payload)
     │
     ├── EASY_MINTED → INSERT ledger_entries (platform:reward_pool → user)
@@ -660,7 +830,7 @@ Ponder 索引服务（自动，无需手动触发）:
     └── REWARD_LEVEL_MULTIPLIER_UPDATED → UPDATE config_cache
 
 每条链上事件的幂等 Key = chain:c{chainId}:tx-{txHash}:log-{logIndex}
-Ponder 天然保证：同一 (block, txIndex, logIndex) 只处理一次
+Indexer 天然保证：同一 (block, txIndex, logIndex) 只处理一次
 ```
 
 #### 4.2.2 链下原生计费流程（AI Credits 高频扣次）
@@ -727,24 +897,31 @@ Ponder 天然保证：同一 (block, txIndex, logIndex) 只处理一次
 
 ### 4.3 完整链上/链下事件映射表
 
-> 链下系统**应优先**订阅 `RewardView.DataPushed(bytes32 indexed dataTypeHash, bytes payload)` 作为镜像更新主事件流。
-> 它不是主账本 SSOT；主账本真相仍以 RewardManagerCore / RewardAccrualManager / EasyToken 等链上状态为准。
-> 若 `RewardViewPushFailed` 出现，链下必须走补偿、重试与读模型修复，而不是把镜像延迟误判为真实状态延迟。
-> **禁止**直接依赖 `RewardEvents.sol` 中的 legacy 事件作为生产镜像来源（仅 debug 用途）。
+> 链下索引必须遵循“多来源事件 + 统一事实表”的当前合约口径：
+> 1. `RewardView.DataPushed` 仍是 Reward 镜像主入口，但不是主账本真相。
+> 2. `StatisticsView`、`LoanFlowView`、`PositionView`、`HealthView`、`LiquidatorView`、`FeeRouter`、`AICreditsVault`、`LoanNFT` 与 blocks-only 事件族都应进入索引范围，并以 `BlocksOnlyView` 三层状态回读完成终态收敛。
+> 3. `chain_events` 是统一事实表，所有业务读模型应从这里派生，不能把单个 View 或单个 helper 当成唯一索引入口。
+> 4. **禁止**继续把 `RewardEvents.sol` 或 `VaultRouter.DataPushed` 当作“全协议唯一生产事件源”。它们在当前架构里都不是完整覆盖面。
 
-| dataTypeHash                                  | 链上触发模块                                                     | payload schema                                                                                                                                                  | 链下处理                                                          | 链下幂等 Key                           |
-| --------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------- |
-| `EASY_MINTED`                                 | `RewardView` (from EasyEmissionController)                       | `(address borrower, address lender, uint256 totalMinted, uint256 borrowerShare, uint256 lenderShare, uint256 orderId, uint256 amountUsd8, uint256 blockNumber)` | INSERT `ledger_entries`（platform:reward_pool → borrower/lender） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_BURNED`                               | `RewardView`（上游来源通常为 RewardAccrualManager penalty burn） | `(address user, uint256 amount, string reason, uint256 blockNumber)`                                                                                            | INSERT `ledger_entries`（user → platform:burn_pool）              | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `EASY_SPENT`                                  | `RewardView` (from EasyConsumption)                              | `(address user, uint8 spendType, uint256 amount, uint256 blockNumber)`                                                                                          | INSERT `ledger_entries`（user → platform:recycle_pool）           | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `EASY_RECYCLED_SPLIT`                         | `RewardView` (from EasyRecycleDistributor)                       | `(address payer, uint256 amount, uint256 burnAmount, uint256 teamAmount, uint256 ecoAmount, uint8 spendType, uint256 blockNumber)`                              | INSERT `ledger_entries`（recycle_pool → burn/team/eco）           | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_LEVEL_UPDATED`                        | `RewardView`（上游来源通常为 RewardManagerCore）                 | `(address user, uint8 level, uint256 blockNumber)`                                                                                                              | UPDATE `user_reward_cache.level`                                  | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_EARN_STATE_UPDATED`                   | `RewardView`                                                     | `(address user, uint256 lockedEasy, uint256 eligibleLoanCount, uint256 onTimeRepayCount, uint256 blockNumber)`                                                  | UPDATE `user_reward_cache.locked_easy / earn_counters`            | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_PENALTY_LEDGER_UPDATED`               | `RewardView`（上游来源通常为 RewardAccrualManager）              | `(address user, uint256 pendingDebt, uint256 blockNumber)`                                                                                                      | UPDATE `user_reward_cache.penalty_debt`                           | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_STATS_UPDATED`                        | `RewardView` (aggregation)                                       | `(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 blockNumber)`                                                                                      | UPDATE `system_stats_cache`                                       | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_DYNAMIC_REWARD_PARAMS_UPDATED`        | `RewardView`（上游来源由 writer push）                           | `(uint256 threshold, uint256 multiplierBps, uint256 blockNumber)`                                                                                               | UPDATE `config_cache.dynamic_params`                              | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `REWARD_LEVEL_MULTIPLIER_UPDATED`             | `RewardView`（上游来源由 writer push）                           | `(uint8 level, uint256 multiplierBps, uint256 blockNumber)`                                                                                                     | UPDATE `config_cache.level_multipliers`                           | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-| `CreditsPurchased`（AICreditsVault 原生事件） | `AICreditsVault`                                                 | `(tenantId, buyer, payToken, payAmount, credits, clientOrderId, blockNumber)`                                                                                   | UPDATE `credit_balances` + INSERT `credit_purchases`              | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| 事件 / dataTypeHash | 链上触发模块 | payload / 参数 schema | 链下处理 | 链下幂等 Key |
+| --- | --- | --- | --- | --- |
+| `EASY_MINTED` | `RewardView`（上游来自 `EasyEmissionController`） | `(address borrower, address lender, uint256 totalMinted, uint256 borrowerShare, uint256 lenderShare, uint256 orderId, uint256 amountValue, uint256 blockNumber)`（`amountValue` 为字段名） | INSERT `ledger_entries`（platform:reward_pool → borrower/lender） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_BURNED` | `RewardView`（上游通常来自 `RewardAccrualManager` penalty burn） | `(address user, uint256 amount, string reason, uint256 blockNumber)` | INSERT `ledger_entries`（user → platform:burn_pool） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `EASY_SPENT` | `RewardView`（上游来自 `EasyConsumption`） | `(address user, uint8 spendType, uint256 amount, uint256 blockNumber)` | INSERT `ledger_entries`（user → platform:recycle_pool） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `EASY_RECYCLED_SPLIT` | `RewardView`（上游来自 `EasyRecycleDistributor`） | `(address payer, uint256 amount, uint256 burnAmount, uint256 teamAmount, uint256 ecoAmount, uint8 spendType, uint256 blockNumber)` | INSERT `ledger_entries`（recycle_pool → burn/team/eco） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_LEVEL_UPDATED` | `RewardView` | `(address user, uint8 level, uint256 blockNumber)` | UPDATE `user_reward_cache.level` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_EARN_STATE_UPDATED` | `RewardView` | `(address user, uint256 lockedEasy, uint256 eligibleLoanCount, uint256 onTimeRepayCount, uint256 blockNumber)` | UPDATE `user_reward_cache` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_PENALTY_LEDGER_UPDATED` | `RewardView` | `(address user, uint256 pendingDebt, uint256 blockNumber)` | UPDATE `user_reward_cache.penalty_debt` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_STATS_UPDATED` | `RewardView` | `(uint256 totalBatchOps, uint256 totalCachedRewards, uint256 blockNumber)` | UPDATE `system_statistics_current` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_DYNAMIC_REWARD_PARAMS_UPDATED` | `RewardView` | `(uint256 threshold, uint256 multiplierBps, uint256 blockNumber)` | UPDATE `config_cache.dynamic_params` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `REWARD_LEVEL_MULTIPLIER_UPDATED` | `RewardView` | `(uint8 level, uint256 multiplierBps, uint256 blockNumber)` | UPDATE `config_cache.level_multipliers` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `DEPOSIT_PROCESSED` | `CollateralManager` / deposit 路径 DataPush | `(address user, address asset, uint256 amount, uint256 blockNumber)` | INSERT `ledger_entries`（user → collateral_pool） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `FeeDistributed` | `FeeRouter` | `(address token, uint256 amount, ...)` | INSERT `ledger_entries`（多腿分账）+ UPDATE `fee_distributions` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `LOAN_FLOW_UPDATED` | `LoanFlowView` | 以当前 ABI 为准，核心字段必须能还原 user / asset / value / version / requestId / seq（若字段名仍为 `valueValue`，按历史命名处理） | UPDATE `loan_flow_user_current` / `loan_flow_global_current` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `USER_STATS_UPDATE` / `GUARANTEE_STATS_UPDATE` / `DEGRADATION_STATS_UPDATE` | `StatisticsView` | 以当前 ABI 为准，核心字段必须能还原 user/system snapshot + version/requestId/seq | UPDATE `system_statistics_current` / stats 类读模型 | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| blocks-only 事件族 | `BlocksOnlyCoordinator` / `BlocksOnlyView` | 必须纳入默认事件映射与落库；事件只作为写路径事实，终态收敛需回读 `getBlocksOnlyOrderState(...)` 与分页三层状态对象 | INSERT/UPDATE `blocks_only_orders` 与关联事实表 | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `CreditsPurchased` | `AICreditsVault` | `(tenantId, buyer, payToken, payAmount, credits, clientOrderId, blockNumber)` | UPDATE `credit_balances` + INSERT `credit_purchases` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
+| `CreditsSettled` | `AICreditsVault` | `(tenantId, settlementBatchId, userCount, totalCredits, merkleRoot, blockNumber)` | UPDATE `credit_settlement_batches` | `chain:c{chainId}:tx-{hash}:log-{idx}` |
 
 #### 4.3.1 Reward 镜像延迟与真实状态边界（强制）
 
@@ -770,9 +947,6 @@ Ponder 天然保证：同一 (block, txIndex, logIndex) 只处理一次
 - 链上：保持 best-effort，不因为 RewardView 异常回滚 repay / liquidation / guarantee / penalty 主链路。
 - 链下：把 `RewardViewPushFailed` 视为可恢复观测缺口，而不是资金账本差错。
 - 前端/客服：若用户追问“是否成功”，应优先展示链上主账本结论；镜像视图晚到属于观测延迟，不属于业务失败。
-  | `CreditsSettled`（AICreditsVault 原生事件） | `AICreditsVault` | `(tenantId, settlementBatchId, userCount, totalCredits, merkleRoot, blockNumber)` | UPDATE `credit_settlement_batches` status | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-  | `DEPOSIT_PROCESSED` | `CollateralManager` (via VaultRouter DataPushed) | `(address user, address asset, uint256 amount, uint256 blockNumber)` | INSERT `ledger_entries`（user → collateral_pool） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
-  | `FeeDistributed` | `FeeRouter` | `(address token, uint256 amount, ...)` | INSERT `ledger_entries`（多腿分账） | `chain:c{chainId}:tx-{hash}:log-{idx}` |
 
 **Reason 口径（链下分类）**：
 
@@ -815,7 +989,7 @@ CREATE TABLE ai_requests (
   UNIQUE (tenant_id, idempotency_key)
 );
 
--- 链上购买镜像（由 Ponder 索引 CreditsPurchased 事件回填）
+-- 链上购买镜像（由 Indexer 回填 CreditsPurchased 事件；若采用独立实现，可由 Ponder 处理）
 CREATE TABLE credit_purchases (
   tenant_id       TEXT NOT NULL,
   user_address    TEXT NOT NULL,
@@ -880,7 +1054,7 @@ CREATE POLICY tenant_isolation_ai_requests ON ai_requests
 | **负余额/欠分**                    | RewardAccrualManager.\_penaltyLedger                         | 镜像 PENALTY_LEDGER_UPDATED                    | 链下不得维护独立 penalty 账本                                       |
 | **按次消费（Easy）**               | EasyConsumption + EasyRecycleDistributor                     | 镜像 EASY_SPENT/EASY_RECYCLED_SPLIT            | 链下不得维护独立消费记录                                            |
 | **AI Credits 购买**                | AICreditsVault.buyCredits                                    | 索引 CreditsPurchased → credit_purchases       | —                                                                   |
-| **AI 高频扣次**                    | **不在链上**                                                 | ai_requests + credit_balances                  | 禁止每次 AI 调用上链 burn 奖励通证（目标态 EasyToken；legacy: RLP） |
+| **AI 高频扣次**                    | **不在链上**                                                 | ai_requests + credit_balances                  | 禁止每次 AI 调用上链 burn 奖励通证（当前奖励通证为 EasyToken，不再使用 RLP 旧口径） |
 | **AI 批量结算**                    | AICreditsVault.settleBatch                                   | 生成 batch → 提交链上                          | —                                                                   |
 | **对账**                           | 链上为准                                                     | 链下 → 链上对齐                                | 链下余额不得高于链上余额                                            |
 
@@ -889,7 +1063,7 @@ CREATE POLICY tenant_isolation_ai_requests ON ai_requests
 ## 5. 整体技术架构（基于现有系统修正）
 
 > **关键决策**：保留并修正 `easifi-monorepo-wt/api-server` 和 `easifi-monorepo-wt/ai-services`，
-> 新增 `packages/shared`（统一幂等层）和 `ponder-indexer`（链上事件索引）。
+> 新增 `packages/shared`（统一幂等层）和 `indexer`（链上事件索引；Ponder 只是其中一种实现）。
 
 ### 5.0 Monorepo 目录结构（修正后）
 
@@ -932,11 +1106,13 @@ easifi-monorepo-wt/
 │               ├── IdempotencyKey.ts      # 统一幂等 Key 生成器
 │               └── IdempotencyGuard.ts    # 三级防御检查
 │
-├── ponder-indexer/                # 【新增】链上事件索引
-│   ├── ponder.config.ts
-│   ├── ponder.schema.ts
-│   └── src/
-│       └── index.ts
+├── indexer/                       # 【新增】链上事件索引
+│   ├── worker/                    # 默认：后端内嵌或同仓 worker
+│   └── ponder/                    # 可选：独立 Ponder 实现
+│       ├── ponder.config.ts
+│       ├── ponder.schema.ts
+│       └── src/
+│           └── index.ts
 │
 └── infrastructure/                # 【新增】部署配置
     ├── docker-compose.yml
@@ -972,7 +1148,7 @@ easifi-monorepo-wt/
               └──────────┘  └──────────┘  └──────────────┘
                                 │
                          ┌──────▼──────┐
-                         │   Ponder    │     【新增】链上索引
+                         │   Indexer   │     【新增】链上索引
                          │  ECS Task   │
                          └──────┬──────┘
                                 │
@@ -989,12 +1165,12 @@ easifi-monorepo-wt/
 | **SaaS 应用层** | **现有 `api-server`（Express + Prisma）** | 已有完整的路由/中间件/账本，修正即可上线               |
 | **AI 服务层**   | **现有 `ai-services`**                    | 67 个服务文件、RAG/Embedding/向量搜索、Worker 全部保留 |
 | **统一幂等层**  | **新增 `packages/shared`**                | api-server 和 ai-services 共同引用，消除幂等分叉       |
-| **链上索引**    | **新增 Ponder**                           | TypeScript；EVM 原生；比 The Graph 快 10x              |
+| **链上索引**    | **新增 Indexer（默认 worker，可选 Ponder）** | 与当前后端最易集成；需要独立进程时可切 Ponder 实现 |
 | **数据库**      | PostgreSQL 16                             | RLS；分区表；JSONB；现有系统已用                       |
 | **缓存**        | Redis 7                                   | 幂等锁；余额缓存；限流；现有系统已用                   |
 | **ORM**         | Prisma                                    | 类型安全；迁移管理；现有系统已用                       |
 | **计费**        | **新增 Stripe 集成**                      | 订阅/Webhook/发票；在 api-server 中新增路由            |
-| **区块链交互**  | ethers.js v6                              | 与 contracts/ 共享 TypeChain/ABI                       |
+| **区块链交互**  | ethers.js v6                              | 与 contracts/ 共享 `types/` 强类型产物与 ABI           |
 
 ---
 
@@ -1034,11 +1210,11 @@ easifi-monorepo-wt/
 | 组件                  | 用途                   | 实现方式                                                             |
 | --------------------- | ---------------------- | -------------------------------------------------------------------- |
 | **`packages/shared`** | 统一幂等 Key + Guard   | 新建 npm workspace 包，api-server 和 ai-services 共同引用            |
-| **Ponder 索引服务**   | 链上 EVM 事件索引      | `npm create ponder@latest ponder-indexer`；TypeScript；支持 Arbitrum |
+| **Indexer 服务**      | 链上 EVM 事件索引      | 默认放在后端 worker；若需独立进程，可采用 Ponder 实现                |
 | **Stripe 路由**       | 订阅计费 + Webhook     | 在 api-server 中新增 `src/routes/stripe.ts`                          |
 | **Admin Dashboard**   | 租户/用量/链上数据管理 | 后期可用 React Admin 或轻量 UI，初期用 API + 脚本                    |
 
-### 6.4 Ponder（链上索引层，新增）
+### 6.4 链上 Indexer（Ponder 为可选实现）
 
 | 属性  | 值                                  |
 | ----- | ----------------------------------- |
@@ -1100,7 +1276,7 @@ easifi-monorepo-wt/
 - [ ] RLS 策略通过：租户 A 无法读取租户 B 的 `ledger_entries`
 - [ ] 旧的 `IdempotencyKeyRegistry` 已无任何引用
 
-### Phase 2: ai-services 幂等统一 + Ponder 链上索引 + Stripe（Day 6–12）
+### Phase 2: ai-services 幂等统一 + 链上 Indexer + Stripe（Day 6–12）
 
 | 日  | 任务                                   | 涉及文件/操作                                                                                                                                                                                                                       | 产出                      |
 | --- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
@@ -1108,11 +1284,11 @@ easifi-monorepo-wt/
 | D6  | **修正 `usageLedger.ts` 幂等机制**     | `ai-services/src/services/quota/usageLedger.ts`：① 用 `IdempotencyKeys.aiUsage(...)` 替换旧的 `(tenant_id, request_id, category)` 组合键；② 用 `idempotency_registry` 表替代 `usage_idempotency` 表                                 | ai-services 幂等统一      |
 | D7  | **修正 `idempotencyService.ts`**       | `ai-services/src/services/idempotencyService.ts`：① Redis key 格式改为统一 `IdempotencyKey.value`；② 保留 TTL 机制但与 DB 层对齐                                                                                                    | 信号去重也统一            |
 | D7  | **api-server 接收端适配**              | `api-server/src/routes/rewards.ts`（或对应 controller）：① 从 `X-Idempotency-Key` Header 读取 key；② 直接用于 `LedgerService.postDoubleEntry()` 的 `idempotencyKey` 参数                                                            | api-server 侧接收统一     |
-| D8  | **初始化 Ponder 索引服务**             | 在 monorepo 根目录：`npm create ponder@latest ponder-indexer`；配置 `ponder.config.ts`（本文第 8.1 节）；连接 Arbitrum RPC                                                                                                          | Ponder 冷启动成功         |
-| D9  | **实现 `DataPushed` 事件索引**         | `ponder-indexer/src/index.ts`：实现 DEPOSIT_PROCESSED、EASY_MINTED、REWARD_PENALTY_LEDGER_UPDATED 等事件的索引函数（本文第 8.2 节）                                                                                                 | PostgreSQL 可查询链上事件 |
+| D8  | **初始化链上 Indexer**                 | 默认先落后端内嵌 worker；若选择独立实现，可初始化 `indexer/ponder` 并配置 `ponder.config.ts`（本文第 8.1 节）与 Arbitrum RPC                                                                                                         | Indexer 冷启动成功        |
+| D9  | **实现 `DataPushed` 事件索引**         | 在 `src/services/indexer/*` 或 `indexer/ponder/src/index.ts` 中实现 DEPOSIT_PROCESSED、EASY_MINTED、REWARD_PENALTY_LEDGER_UPDATED 等事件处理（本文第 8.2 节）                                                                      | PostgreSQL 可查询链上事件 |
 | D10 | **新增 Stripe 路由**                   | `api-server/src/routes/stripe.ts`（新增）：① Stripe 产品/价格配置；② Webhook 处理（`subscription.created/updated/deleted`）；③ 幂等处理（Stripe event ID 作为 `IdempotencyKeys.billingStatement(...)` 的 nonce）                    | 订阅计费可用              |
 | D11 | **AI Credits 余额同步**                | `api-server/src/services/` 新增 `chainSync.ts`：链上 `AICreditsVault.creditsBalance()` → Redis `credits_balance:{tenantId}:{userId}`；定时同步（cron job）                                                                          | 按次扣费可用              |
-| D12 | **集成测试**                           | 新增/修改 e2e 测试：链上事件 → Ponder 索引 → 账本记录 → 对账验证；跨服务幂等 Key 端到端                                                                                                                                             | E2E 测试通过              |
+| D12 | **集成测试**                           | 新增/修改 e2e 测试：链上事件 → Indexer → 账本记录 → 对账验证；跨服务幂等 Key 端到端                                                                                                                                                  | E2E 测试通过              |
 
 **验收标准**：
 
@@ -1127,8 +1303,8 @@ easifi-monorepo-wt/
 
 | 日     | 任务                               | 涉及文件/操作                                                                                                                                                                                       | 产出                         |
 | ------ | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| D13-14 | **Docker 化所有服务**              | 新建/更新各服务 `Dockerfile`：`api-server/Dockerfile`、`ai-services/Dockerfile`、`ponder-indexer/Dockerfile`；新建 `infrastructure/docker-compose.yml`（dev 环境）+ `docker-compose.production.yml` | `docker-compose up` 一键启动 |
-| D15-16 | **AWS 基础设施**                   | 新建 `infrastructure/terraform/`：ECS Fargate（api-server × 2 + ai-services × 1 + Ponder × 1）、RDS PostgreSQL、ElastiCache Redis、ALB、安全组                                                      | Terraform apply 可执行       |
+| D13-14 | **Docker 化所有服务**              | 新建/更新各服务 `Dockerfile`：`api-server/Dockerfile`、`ai-services/Dockerfile`、`indexer/Dockerfile`；新建 `infrastructure/docker-compose.yml`（dev 环境）+ `docker-compose.production.yml` | `docker-compose up` 一键启动 |
+| D15-16 | **AWS 基础设施**                   | 新建 `infrastructure/terraform/`：ECS Fargate（api-server × 2 + ai-services × 1 + indexer × 1）、RDS PostgreSQL、ElastiCache Redis、ALB、安全组                                                      | Terraform apply 可执行       |
 | D17-18 | **CI/CD Pipeline**                 | `.github/workflows/deploy.yml`：test → build → push ECR → ECS rolling deploy（本文第 11.1 节）                                                                                                      | Push to main 自动部署        |
 | D19    | **监控 + 告警**                    | CloudWatch Metrics + Dashboard；幂等命中率、账本延迟、索引器落后、对账差异等告警规则（本文第 11.2 节）                                                                                              | Dashboard 可观测             |
 | D20    | **安全加固**                       | WAF 配置；Secrets Manager 管理 DB/Redis/Stripe/RPC 密钥；VPC 内网通信；安全组最小权限                                                                                                               | 安全审计通过                 |
@@ -1147,7 +1323,7 @@ easifi-monorepo-wt/
 | 方案                      | 总工期       | 原因                                 |
 | ------------------------- | ------------ | ------------------------------------ |
 | ~~推倒重来（Open SaaS）~~ | ~~4–5 周~~   | ~~需重新搭建全部业务逻辑~~           |
-| **原地修正（本方案）**    | **2.5–3 周** | 只修幂等 + 隔离 + 新增 Ponder/Stripe |
+| **原地修正（本方案）**    | **2.5–3 周** | 只修幂等 + 隔离 + 新增 Indexer/Stripe |
 
 ---
 
@@ -1185,7 +1361,7 @@ easifi-monorepo-wt/
 
 ### 8.0 当前落地情况（基于 `lending-backend` / `lending-frontend`）
 
-本节的“目标态”描述了 **链下索引 + 数据库 + 分页 API**（浏览器能力）的理想形态。
+本节描述的是 **当前应落地的链下索引 + 数据库 + 分页 API**（浏览器能力）方案。
 在你们当前的实现中（本机目录：`/Volumes/AI-hosts/EasiFi-workspace/lending-backend`、`/Volumes/AI-hosts/EasiFi-workspace/lending-frontend`），已经能看到以下**最小闭环能力**：
 
 1. **数据库 + 读模型表**（Prisma）：
@@ -1221,7 +1397,7 @@ easifi-monorepo-wt/
 - **价格新鲜度校验**：对订单涉及的 collateral/debt 资产读取 `PriceOracle.getPriceUpdateBlock` 或 `getAssetConfig`。
 - **强制刷新**：若 `block.number - updateBlock > maxPriceAgeBlocks`，先调用价格更新器刷新价格；失败则跳过该订单并告警。
 - **口径建议（团队需确认语义取舍）**：清算/风险关键路径遇到 stale/invalid price 时，长期更可控的策略是“显式 revert + 可识别错误”，而不是静默 0 化；否则 keeper 的“漏刷/断更”更容易被误判为“用户无抵押/无风险”。
-- **权限检查**：keeper EOA 具备 `ACTION_LIQUIDATE`；`SettlementManager/LiquidationManager` 具备 `ACTION_LIQUIDATE` + `VIEW_*`；`LiquidationManager` 具备 `ACTION_DEPOSIT`。
+- **权限检查**：keeper EOA 具备 `ActionKeys.ACTION_LIQUIDATE`；`SettlementManager/LiquidationManager` 具备 `ActionKeys.ACTION_LIQUIDATE`，并按调用链补齐 `ActionKeys.ACTION_VIEW_RISK_DATA` / `ActionKeys.ACTION_VIEW_LIQUIDATION_DATA` / 其他实际所需只读角色；`LiquidationManager` 具备 `ActionKeys.ACTION_DEPOSIT`。
 - **失败预警**：对 `PriceOracle__StalePrice`、`SettlementManager__NotLiquidatable`、`MissingRole`、`CacheUpdateFailed` 建立告警与重试队列（含 orderId/asset/blockNumber）。
 
 > 可执行回归参考：见 [scripts/e2e/e2e-fork-arbitrum-stale-price-keeper.ts](scripts/e2e/e2e-fork-arbitrum-stale-price-keeper.ts)（基于 `maxPriceAgeBlocks` 的相对 staleness + keeper 刷新）。
@@ -1247,7 +1423,7 @@ easifi-monorepo-wt/
    - 这意味着：后端如果提供 `/api/view/*?user=0xVictim` 这类接口，而不做强鉴权，攻击者可以把 `from=user` 伪造为 Victim，从而绕过 Scheme U 的“self-read”门槛。
 2. 因此后端代理用户私域数据时必须二选一（推荐第 1 个）：
    - **方案 1（推荐）**：只对“已认证为该地址的用户”开放代理读取（例如 SIWE / 钱包签名登录后绑定 session），并强制 `req.userAddress === query.user`。
-   - **方案 2（更保守）**：后端不代理任何 Scheme U 用户私域 View，只代理 system-level View（后端 own signer 持有 `VIEW_SYSTEM_DATA/VIEW_PRICE_DATA/...`）。用户私域仍走前端直连。
+  - **方案 2（更保守）**：后端不代理任何 Scheme U 用户私域 View，只代理 system-level View（后端 own signer 持有 `ActionKeys.ACTION_VIEW_SYSTEM_DATA`、`ActionKeys.ACTION_VIEW_PRICE_DATA` 等）。用户私域仍走前端直连。
 
 #### C) 后端代理读取的最小实现要点（TypeScript / ethers v6）
 
@@ -1294,7 +1470,7 @@ async function getUserLoansViaViewGateway(params: {
 }
 ```
 
-补充：`LoanNFTView.getUserLoansPaginated(...)` 只返回 `(tokenId, orderId, status)` 的分页枚举；订单详情必须再通过 `LendingEngineView.getLoanOrder(orderId)` 取回。当前 `LendingEngineView` 允许 borrower、lender、当前 LoanNFT 持有人，或具备 `VIEW_USER_DATA` / admin 的调用者读取订单详情。
+补充：`LoanNFTView.getUserLoansPaginated(...)` 只返回 `(tokenId, orderId, status)` 的分页枚举；订单详情必须再通过 `LendingEngineView.getLoanOrder(orderId)` 取回。当前 `LendingEngineView` 允许 borrower、lender、当前 LoanNFT 持有人，或具备 `ActionKeys.ACTION_VIEW_USER_DATA` / admin 的调用者读取订单详情。
 
 #### D) 什么时候必须走后端读模型（Explorer API），不要试图用 View 解决？
 
@@ -1305,17 +1481,23 @@ async function getUserLoansViaViewGateway(params: {
 
 你们目前的后端形态更接近“API Server + DB + cron/worker”。在此基础上补齐索引层，有两条可选路线：
 
-- **路线 A：Ponder 独立索引器（推荐，目标态）**
+- **路线 A：Ponder 独立索引器（可选，适合需要强解耦的部署）**
   - 单独进程订阅/回放链上 logs，写入 PostgreSQL 的 `chain_events/*` 与派生表。
   - 与 API Server 解耦：索引器只写库，API 只读库（外加必要的鉴权与多租户隔离）。
 
-- **路线 B：先在后端内嵌一个 indexer worker（过渡方案）**
+- **路线 B：后端内嵌 indexer worker（当前默认推荐）**
   - 延续 `chainSync.ts` 的风格，新增 `services/indexer/*`：按区间拉 `getLogs`，并将 `(chainId, txHash, logIndex)` 作为天然幂等键写库。
-  - 优点：落地快；缺点：与 API 进程耦合更强，后续要拆分。
+  - 优点：落地快、能直接复用 Prisma/Redis/配置体系；缺点：与 API 进程耦合更强，后续若有需要再拆分。
 
-### 8.0.3 目标态（直接可用，无过渡）：后端全量接管 View 数据
+### 8.0.3 后端承接的当前态读模型（与前端同口径）
 
-你要求“**能直接用、不做过渡、按当前后端情况落地**”，因此这里给出**唯一推荐方案**：
+当前推荐口径不是“把所有 View 原样搬进一个通用快照表”，而是：
+
+- View 合约负责链上当前态读取与 `meta`（`isValid/blockNumber/version/requestId/seq` 等）。
+- 后端负责把这些当前态整理为**面向业务的读模型表**，供前端 API、分页、筛选、聚合与审计使用。
+- 只有在内部调试或局部缓存场景下，才保留通用 snapshot/cache 思路；它不是前后端共享 SSOT，也不应替代业务读模型。
+
+因此这里给出**唯一推荐方案**：
 
 **在 lending-backend 内部常驻两类任务**，并与现有路由体系/幂等体系完全一致：
 
@@ -1325,54 +1507,55 @@ async function getUserLoansViaViewGateway(params: {
 - 输出：`chain_events` + 派生读模型（如 `loan_orders`）
 - 幂等：`(chainId, txHash, logIndex)` 唯一；冲突即幂等命中
 
-2. **Snapshotter（View 快照）**：负责当前态与 meta
+2. **Snapshotter（View 拉取/刷新）**：负责当前态与 meta
 
 - 输入：链上 View 合约（Position/Health/LoanNFT/Reward/Fee/Stats/...）
-- 输出：`view_snapshots`（最新快照）+ 现有 `portfolio_*` 读模型
+- 输出：按业务域拆分的 current/read-model 表，如 `user_positions_current`、`user_health_current`、`system_statistics_current`、`loan_flow_user_current`、`reward_user_cache`
 - 触发：定时 + 事件驱动（DataPushed 触发局部刷新）
 
-#### 8.0.3.1 数据源范围（全量 View 模块）
+#### 8.0.3.1 数据源范围（按实际 View 模块分组）
 
-- **用户维度**：`PositionView`、`HealthView`、`LoanNFTView`、`RewardView`、`FeeRouterView`、`AccessControlView`
-- **系统维度**：`StatisticsView`、`ViewCache`、`ModuleHealthView`、`SystemView`、`RegistryView`、`ValuationOracleView`
-- **门面聚合**（可选但建议保留）：`DashboardView`、`CacheOptimizedView`、`UserView`、`BatchView`
+- **用户/仓位维度**：`PositionView`、`HealthView`、`LoanFlowView`、`LoanNFTView`、`RewardView`、`FeeRouterView`
+- **系统/模块维度**：`StatisticsView`、`ModuleHealthView`、`RegistryView`、`SystemView`、`ValuationOracleView`
+- **门面/批量聚合**：`UserView`、`DashboardView`、`CacheOptimizedView`、`BatchView`、`PreviewView`
+- **权限/风控辅助**：`AccessControlView`、`RiskView`、`SystemRiskView`、`LiquidationRiskView`、`LiquidatorView`
 
-#### 8.0.3.2 存储结构（与现有 DB 风格一致）
+原则：`UserView` / `DashboardView` / `BatchView` 更适合作为聚合查询入口，不建议把它们的返回 JSON 原样入库；后端应拆分并归档到明确的业务读模型。
+
+#### 8.0.3.2 存储结构（与 SSOT 一致）
 
 **A. 事件事实表（历史/审计）**
 
 - `chain_events`：已在 §8.3.1 设计（`chainId/txHash/logIndex` 幂等）
 
-**B. View 最新快照表（当前态）**
+**B. 当前态读模型表（前端/API 高频使用）**
 
-建议新增通用快照表（避免每个 View 都建一张表）：
+优先落以下明确表，而不是依赖单一 `view_snapshots` 通用表：
 
-```
-view_snapshots
-  chain_id        int
-  view_name       varchar(64)
-  scope           varchar(32)  -- user|asset|system|module
-  subject         varchar(128) -- user addr / asset addr / module key
-  payload         jsonb
-  is_valid        boolean
-  block_number    int
-  version         int
-  updated_at      timestamp
-  UNIQUE (chain_id, view_name, scope, subject)
-```
+- `user_positions_current`：来自 `PositionView` / `UserView`，保存用户-资产维度的 collateral/debt/meta。
+- `user_health_current`：来自 `HealthView`，保存 healthFactor、threshold、risk flags、meta。
+- `system_statistics_current`：来自 `StatisticsView`，保存协议级统计快照与版本信息。
+- `loan_flow_user_current` / `loan_flow_global_current`：来自 `LoanFlowView`，保存统一 value 口径的用户/全局流量累计；若底层字段名仍沿用 `Value`，应在 adapter 层解释为历史命名。
+- `reward_user_cache`：来自 `RewardView`，保存用户奖励等级、锁仓、罚金、可得奖励摘要。
+- `blocks_only_orders`：来自 `BlocksOnlyView.getBlocksOnlyOrderState(orderId)`，至少保存 `runtime`、`lifecycle`、`closeReason`、`shortfallStatus`、`collateralDisposition`、`hasLoss`；不得把 `status` 单独当作业务真相。
+- `registry_modules_current` / `module_health_snapshot`：分别来自 `RegistryView`、`ModuleHealthView`。
+- `loan_orders` / `liquidation_records` / `fee_distributions`：由事件事实表派生，必要时再用对应 View 校准当前状态。
 
-**C. 业务读模型表（前端高频用）**
+blocks-only 分页接口升级适配（2026-04）：
 
-保留现有 `portfolio_*` 表作为“高频读模型”，并增加：
+1. 后端若通过 `BlocksOnlyView.getBorrowerOrdersPaginated(...)` / `getSystemOrdersPaginated(...)` 批量拉取列表，返回项已升级为三层状态对象，不再是纯 runtime。
+2. read-model 适配层必须统一从 `item.runtime.*` 读取列表字段，例如 `item.runtime.orderId`、`item.runtime.status`、`item.runtime.remainingDebt`。
+3. 列表终态文案和筛选规则必须基于 `lifecycle + closeReason + shortfallStatus + collateralDisposition + hasLoss`，不得继续把 `runtime.status` 当作唯一业务真相。
 
-- `loan_orders`（已在 §8.3.1 设计，来自 LoanNFT/LoanOrder 组合）
-- 需要时再补 `reward_user_summary` / `fee_user_summary`（从 `view_snapshots` 聚合）
+如需内部排障缓存，可以额外维护 `raw_view_cache` 一类内部表，但它只服务 worker/debug，不作为对前端和业务方暴露的主模型。
 
 #### 8.0.3.3 路由与鉴权（遵循现有 /api 体系）
 
 **现有路由保持不变**（前端已依赖）：
 
 - `/api/portfolio/*`、`/api/rewards/*`、`/api/ai-credits/balance`、`/api/cache-retry/*`
+
+这些路由背后建议直接读取上面的业务读模型表；不要把前端 API 绑定到某个通用 `view_snapshots.payload` 结构，否则前端与后端会重新耦合到 View ABI 细节。
 
 **新增路由（Explorer 能力，必须实现）**：
 
@@ -1404,14 +1587,14 @@ src/routes/explorer/loan-orders.ts
 - **历史/时间线**：走 `/api/explorer/*`（由 Indexer 提供）
 - **余额与账本**：继续走 `/api/rewards/*` 与 `/api/ai-credits/balance`
 
-### 8.1 Ponder 配置示例
+### 8.1 Indexer 配置示例（Ponder 版本）
 
-> 重要：本文档上游历史沿用了 `easifi-monorepo-wt/ponder-indexer` 的“目标态命名”。
+> 说明：本文档保留 Ponder 示例，是为了给“独立 indexer 进程”提供一套可执行实现。
 > 但你们当前实际后端仓库是 `lending-backend`（本机路径：`/Volumes/AI-hosts/EasiFi-workspace/lending-backend`），且默认启动入口为 `pnpm dev → src/index.ts → src/server.ts`。
 > 本节将给出与 **当前后端目录结构/启动方式完全对齐** 的可执行落地步骤：
 >
 > - 先用 **后端内嵌 indexer worker**（最快落地、可直接复用 Prisma/Express）
-> - 再可选升级为 **独立 ponder-indexer 进程**（目标态，解耦写库/读库）
+> - 若后续需要解耦写库/读库，再拆成 **独立 Ponder 进程**
 
 ### 8.1.1 本地可执行：启动依赖（Postgres/Redis）
 
@@ -1470,18 +1653,19 @@ pnpm dev
 > 示例：Portfolio API 实际路径为 `/api/portfolio/positions`、`/api/portfolio/history`。
 
 ```typescript
-// 目标态：独立 indexer 进程（可选升级）
+// 可选实现：独立 indexer 进程（Ponder 版本）
 // 建议目录（与当前 lending-backend 对齐）：
 //   /Volumes/AI-hosts/EasiFi-workspace/lending-backend/indexer/ponder/
-// 说明：lending-backend 目前不是 pnpm workspace（无 pnpm-workspace.yaml），因此独立 indexer 最简单的方式是“单独目录 + 单独 package.json”。
+// 说明：当前协议不再适合“只盯一个 VaultRouter 事件入口”的老写法。
+// 后端应同时订阅多合约 DataPushed 与核心业务事件。
 
 // lending-backend/indexer/ponder/ponder.config.ts
 import { createConfig, http } from "ponder";
 
-// 直接复用 contracts/ 的 ABI（TypeChain 生成）
-import { VaultRouterAbi } from "../contracts/typechain-types/VaultRouter";
 import { RewardViewAbi } from "../contracts/typechain-types/RewardView";
-import { CollateralManagerAbi } from "../contracts/typechain-types/CollateralManager";
+import { StatisticsViewAbi } from "../contracts/typechain-types/StatisticsView";
+import { LoanNFTAbi } from "../contracts/typechain-types/LoanNFT";
+import { AICreditsVaultAbi } from "../contracts/typechain-types/AICreditsVault";
 
 export default createConfig({
   networks: {
@@ -1495,17 +1679,28 @@ export default createConfig({
     },
   },
   contracts: {
-    // DataPushed 是统一事件入口
-    VaultRouter: {
-      network: "arbitrum",
-      abi: VaultRouterAbi,
-      address: process.env.VAULT_ROUTER_ADDRESS! as `0x${string}`,
-      startBlock: Number(process.env.START_BLOCK || 0),
-    },
     RewardView: {
       network: "arbitrum",
       abi: RewardViewAbi,
       address: process.env.REWARD_VIEW_ADDRESS! as `0x${string}`,
+      startBlock: Number(process.env.START_BLOCK || 0),
+    },
+    StatisticsView: {
+      network: "arbitrum",
+      abi: StatisticsViewAbi,
+      address: process.env.STATISTICS_VIEW_ADDRESS! as `0x${string}`,
+      startBlock: Number(process.env.START_BLOCK || 0),
+    },
+    LoanNFT: {
+      network: "arbitrum",
+      abi: LoanNFTAbi,
+      address: process.env.LOAN_NFT_ADDRESS! as `0x${string}`,
+      startBlock: Number(process.env.START_BLOCK || 0),
+    },
+    AICreditsVault: {
+      network: "arbitrum",
+      abi: AICreditsVaultAbi,
+      address: process.env.AI_CREDITS_VAULT_ADDRESS! as `0x${string}`,
       startBlock: Number(process.env.START_BLOCK || 0),
     },
   },
@@ -1520,85 +1715,92 @@ import { ponder } from "ponder:registry";
 import { keccak256, toUtf8Bytes, AbiCoder } from "ethers";
 import { IdempotencyKeys } from "@shared/idempotency";
 
-// DataPushed 统一事件处理
-ponder.on("VaultRouter:DataPushed", async ({ event, context }) => {
+const decoder = new AbiCoder();
+const EASY_MINTED = keccak256(toUtf8Bytes("EASY_MINTED"));
+const USER_STATS_UPDATE = keccak256(toUtf8Bytes("USER_STATS_UPDATE"));
+
+async function insertChainEvent(params: {
+  context: any;
+  chainId: number;
+  txHash: string;
+  logIndex: number;
+  blockNumber: number;
+  address: string;
+  eventName: string;
+  argsJson: any;
+  userAddress?: string;
+  asset?: string;
+  orderId?: string;
+}) {
+  const id = IdempotencyKeys.chainEvent(params.chainId, params.txHash, params.logIndex).value;
+  await params.context.db.ChainEvent.upsert({
+    id,
+    create: {
+      id,
+      chainId: params.chainId,
+      blockNumber: params.blockNumber,
+      txHash: params.txHash,
+      logIndex: params.logIndex,
+      address: params.address.toLowerCase(),
+      eventName: params.eventName,
+      argsJson: params.argsJson,
+      userAddress: params.userAddress?.toLowerCase(),
+      asset: params.asset?.toLowerCase(),
+      orderId: params.orderId,
+      indexedAt: new Date(),
+      status: "CONFIRMED",
+    },
+    update: {},
+  });
+}
+
+ponder.on("RewardView:DataPushed", async ({ event, context }) => {
   const { dataTypeHash, payload } = event.args;
   const chainId = context.network.chainId;
-  const txHash = event.transaction.hash;
-  const logIndex = event.log.logIndex;
-
-  // 幂等 Key：每条链上日志全局唯一
-  const idemKey = IdempotencyKeys.chainEvent(chainId, txHash, logIndex);
-
-  // 按 dataTypeHash 分发处理
-  const decoder = new AbiCoder();
-
-  const DEPOSIT = keccak256(toUtf8Bytes("DEPOSIT_PROCESSED"));
-  const EASY_MINTED = keccak256(toUtf8Bytes("EASY_MINTED"));
-
-  if (dataTypeHash === DEPOSIT) {
-    const [user, asset, amount, blockNumber] = decoder.decode(
-      ["address", "address", "uint256", "uint256"],
-      payload,
-    );
-    await context.db.ChainEvent.create({
-      id: idemKey.value,
-      data: {
-        chainId,
-        txHash,
-        logIndex,
-        eventType: "DEPOSIT_PROCESSED",
-        user: user.toLowerCase(),
-        asset: asset.toLowerCase(),
-        amount: amount.toString(),
-        blockNumber: Number(blockNumber),
-        indexedAt: new Date(),
-      },
-    });
-  }
 
   if (dataTypeHash === EASY_MINTED) {
-    const [
-      borrower,
-      lender,
-      totalMinted,
-      borrowerShare,
-      lenderShare,
-      orderId,
-      amountUsd8,
-      blockNumber,
-    ] = decoder.decode(
-      [
-        "address",
-        "address",
-        "uint256",
-        "uint256",
-        "uint256",
-        "uint256",
-        "uint256",
-        "uint256",
-      ],
+    const [borrower, lender, totalMinted, borrowerShare, lenderShare, orderId, amountValue, blockNumber] = decoder.decode(
+      ["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"],
       payload,
     );
-    await context.db.ChainEvent.create({
-      id: idemKey.value,
-      data: {
-        chainId,
-        txHash,
-        logIndex,
-        eventType: "EASY_MINTED",
-        borrower: borrower.toLowerCase(),
-        lender: lender.toLowerCase(),
+    await insertChainEvent({
+      context,
+      chainId,
+      txHash: event.transaction.hash,
+      logIndex: event.log.logIndex,
+      blockNumber: Number(blockNumber),
+      address: event.log.address,
+      eventName: "EASY_MINTED",
+      argsJson: {
+        borrower,
+        lender,
         totalMinted: totalMinted.toString(),
         borrowerShare: borrowerShare.toString(),
         lenderShare: lenderShare.toString(),
         orderId: orderId.toString(),
-        amountUsd8: amountUsd8.toString(),
-        blockNumber: Number(blockNumber),
-        indexedAt: new Date(),
+        amountUsd: amountValue.toString(), // amountValue 为字段名
       },
+      userAddress: borrower,
+      orderId: orderId.toString(),
     });
   }
+});
+
+ponder.on("StatisticsView:DataPushed", async ({ event, context }) => {
+  const { dataTypeHash, payload } = event.args;
+  if (dataTypeHash !== USER_STATS_UPDATE) return;
+
+  // 具体 decode 以当前 StatisticsView ABI 为准。
+  await insertChainEvent({
+    context,
+    chainId: context.network.chainId,
+    txHash: event.transaction.hash,
+    logIndex: event.log.logIndex,
+    blockNumber: Number(event.block.number),
+    address: event.log.address,
+    eventName: "USER_STATS_UPDATE",
+    argsJson: { payload },
+  });
 });
 ```
 
@@ -1607,9 +1809,39 @@ ponder.on("VaultRouter:DataPushed", async ({ event, context }) => {
 目标：在不引入新进程/新技术栈的前提下，先把“浏览器能力三件套”跑通：
 **链上日志 → PostgreSQL（读模型表）→ 分页 API（当前为 `/api/portfolio/*` 等路由，`/api/explorer/*` 仍为未来扩展）**。
 
-#### 8.3.1 建议新增的表结构（Prisma 模型，最小可用）
+#### 8.3.1 建议新增的表结构（Prisma 模型草案，按当前合约补全）
 
-你们当前 DB 已使用 Prisma（见 `prisma/schema.prisma`），推荐新增以下 3 个模型：
+> 字段语义、金额单位、时间字段、幂等键、主键建议，以 [../frontend-backend-unified-schema-ssot.md](../frontend-backend-unified-schema-ssot.md) 第 4 节和第 7 节为准。
+> 本节只给出后端 Prisma 命名与实现草案。
+
+你们当前 DB 已使用 Prisma（见 `prisma/schema.prisma`），建议将 schema 分成两组：
+
+1. 核心账本与多租户表：`tenants / accounts / ledger_entries / idempotency_registry / ai_requests / credit_balances`
+2. 链上索引与读模型表：`chain_sync_cursors / chain_events / loan_orders / registry_modules / assets / user_positions_current / user_health_current / system_statistics_current / loan_flow_* / reward_user_cache / fee_distributions / liquidation_records / price_snapshots / module_health_snapshots / cache_retry_queue`
+
+其中核心账本与多租户表以前文第 3 节和第 4.4 节 SQL 方案为准；本节重点补全“链上索引与读模型”这组 Prisma 草案。
+
+推荐至少新增以下 17 类模型：
+
+1. `chain_sync_cursors`
+2. `chain_events`
+3. `loan_orders`
+4. `registry_modules`
+5. `assets`
+6. `asset_whitelist_snapshots`
+7. `user_positions_current`
+8. `user_health_current`
+9. `system_statistics_current`
+10. `loan_flow_user_current`
+11. `loan_flow_global_current`
+12. `reward_user_cache`
+13. `fee_distributions`
+14. `liquidation_records`
+15. `price_snapshots`
+16. `module_health_snapshots`
+17. `cache_retry_queue`
+
+其中前 3 个仍是最小闭环，其余属于按当前协议模块补齐后的推荐增强集。
 
 ```prisma
 // prisma/schema.prisma（建议新增，字段可按需要扩展）
@@ -1674,6 +1906,246 @@ model LoanOrderReadModel {
   @@index([chainId, nftOwner])
   @@map("loan_orders")
 }
+
+model RegistryModuleReadModel {
+  id              Int      @id @default(autoincrement())
+  chainId         Int
+  moduleKeyName   String   @db.VarChar(64)
+  moduleKeyHash   String?  @db.VarChar(66)
+  moduleName      String?  @db.VarChar(64)
+  moduleAddress   String   @db.VarChar(42)
+  source          String?  @db.VarChar(16)
+  apiVersion      Int?
+  schemaVersion   Int?
+  updatedBlock    Int?
+  updatedAt       DateTime @updatedAt
+
+  @@unique([chainId, moduleKeyName])
+  @@map("registry_modules")
+}
+
+model AssetReadModel {
+  id                  Int      @id @default(autoincrement())
+  chainId             Int
+  assetAddress        String   @db.VarChar(42)
+  symbol              String?  @db.VarChar(32)
+  name                String?  @db.VarChar(128)
+  assetDecimals       Int?
+  isAllowed           Boolean  @default(false)
+  isSettlementToken   Boolean  @default(false)
+  isBlocksOnlyEnabled Boolean  @default(false)
+  sourceProvider      String?  @db.VarChar(64)
+  sourceId            String?  @db.VarChar(128)
+  bootstrapPriceUsd   Decimal? @db.Decimal(36, 0)
+  active              Boolean  @default(true)
+  updatedBlock        Int?
+  updatedAt           DateTime @updatedAt
+
+  @@unique([chainId, assetAddress])
+  @@index([chainId, isAllowed])
+  @@map("assets")
+}
+
+model AssetWhitelistSnapshot {
+  id            String   @id @db.VarChar(128)
+  chainId       Int
+  assetAddress  String   @db.VarChar(42)
+  isAllowed     Boolean
+  sourceTxHash  String?  @db.VarChar(66)
+  sourceLogIndex Int?
+  updatedBlock  Int
+  updatedAt     DateTime @default(now())
+
+  @@index([chainId, assetAddress])
+  @@map("asset_whitelist_snapshots")
+}
+
+model UserPositionCurrent {
+  id                   Int      @id @default(autoincrement())
+  chainId              Int
+  userAddress          String   @db.VarChar(42)
+  assetAddress         String   @db.VarChar(42)
+  collateralAmount     Decimal? @db.Decimal(78, 0)
+  debtAmount           Decimal? @db.Decimal(78, 0)
+  collateralValueUsd   Decimal? @db.Decimal(78, 0)
+  debtValueUsd         Decimal? @db.Decimal(78, 0)
+  isValid              Boolean  @default(false)
+  blockNumber          Int?
+  version              BigInt?
+  requestId            String?  @db.VarChar(66)
+  seq                  BigInt?
+  updatedAt            DateTime @updatedAt
+
+  @@unique([chainId, userAddress, assetAddress])
+  @@index([chainId, userAddress])
+  @@map("user_positions_current")
+}
+
+model UserHealthCurrent {
+  id                  Int      @id @default(autoincrement())
+  chainId             Int
+  userAddress         String   @db.VarChar(42)
+  healthFactor        Decimal? @db.Decimal(36, 18)
+  collateralValueUsd  Decimal? @db.Decimal(78, 0)
+  debtValueUsd        Decimal? @db.Decimal(78, 0)
+  riskLevel           String?  @db.VarChar(32)
+  isLiquidatable      Boolean?
+  isValid             Boolean  @default(false)
+  blockNumber         Int?
+  updatedAt           DateTime @updatedAt
+
+  @@unique([chainId, userAddress])
+  @@map("user_health_current")
+}
+
+model SystemStatisticsCurrent {
+  chainId             Int      @id
+  activeUsers         BigInt?
+  totalCollateralUsd  Decimal? @db.Decimal(78, 0)
+  totalDebtUsd        Decimal? @db.Decimal(78, 0)
+  totalGuaranteeUsd   Decimal? @db.Decimal(78, 0)
+  isValid             Boolean?
+  lastUpdateBlock     Int?
+  updatedAt           DateTime @updatedAt
+
+  @@map("system_statistics_current")
+}
+
+model LoanFlowUserCurrent {
+  id               Int      @id @default(autoincrement())
+  chainId          Int
+  userAddress      String   @db.VarChar(42)
+  borrowVolumeUsd  Decimal? @db.Decimal(78, 0)
+  repayVolumeUsd   Decimal? @db.Decimal(78, 0)
+  borrowCount      BigInt?
+  repayCount       BigInt?
+  lastUpdateBlock  Int?
+  updatedAt        DateTime @updatedAt
+
+  @@unique([chainId, userAddress])
+  @@map("loan_flow_user_current")
+}
+
+model LoanFlowGlobalCurrent {
+  chainId             Int      @id
+  borrowVolumeUsd     Decimal? @db.Decimal(78, 0)
+  repayVolumeUsd      Decimal? @db.Decimal(78, 0)
+  borrowCount         BigInt?
+  repayCount          BigInt?
+  uniqueBorrowerCount BigInt?
+  lastUpdateBlock     Int?
+  updatedAt           DateTime @updatedAt
+
+  @@map("loan_flow_global_current")
+}
+
+model RewardUserCache {
+  id                 Int      @id @default(autoincrement())
+  chainId            Int
+  userAddress        String   @db.VarChar(42)
+  level              Int?
+  lockedEasy         Decimal? @db.Decimal(78, 0)
+  pendingPenaltyDebt Decimal? @db.Decimal(78, 0)
+  eligibleLoanCount  BigInt?
+  onTimeRepayCount   BigInt?
+  totalEasyEarned    Decimal? @db.Decimal(78, 0)
+  lastUpdateBlock    Int?
+  updatedAt          DateTime @updatedAt
+
+  @@unique([chainId, userAddress])
+  @@map("reward_user_cache")
+}
+
+model FeeDistributionReadModel {
+  id             String   @id @db.VarChar(128)
+  chainId        Int
+  txHash         String   @db.VarChar(66)
+  logIndex       Int
+  tokenAddress   String?  @db.VarChar(42)
+  totalAmount    Decimal? @db.Decimal(78, 0)
+  platformAmount Decimal? @db.Decimal(78, 0)
+  ecosystemAmount Decimal? @db.Decimal(78, 0)
+  otherAmount    Decimal? @db.Decimal(78, 0)
+  relatedOrderId String?  @db.VarChar(78)
+  blockNumber    Int
+  createdAt      DateTime @default(now())
+
+  @@index([chainId, relatedOrderId])
+  @@map("fee_distributions")
+}
+
+model LiquidationRecordReadModel {
+  id               String   @id @db.VarChar(128)
+  chainId          Int
+  orderId          String?  @db.VarChar(78)
+  userAddress      String?  @db.VarChar(42)
+  liquidator       String?  @db.VarChar(42)
+  debtAsset        String?  @db.VarChar(42)
+  collateralAsset  String?  @db.VarChar(42)
+  repaidAmount     Decimal? @db.Decimal(78, 0)
+  seizedAmount     Decimal? @db.Decimal(78, 0)
+  penaltyAmount    Decimal? @db.Decimal(78, 0)
+  payoutAmount     Decimal? @db.Decimal(78, 0)
+  blockNumber      Int
+  txHash           String   @db.VarChar(66)
+  logIndex         Int
+  createdAt        DateTime @default(now())
+
+  @@index([chainId, orderId])
+  @@index([chainId, userAddress])
+  @@map("liquidation_records")
+}
+
+model PriceSnapshotReadModel {
+  id            Int      @id @default(autoincrement())
+  chainId       Int
+  assetAddress  String   @db.VarChar(42)
+  priceUsd      Decimal? @db.Decimal(78, 0)
+  assetDecimals Int?
+  isValid       Boolean?
+  blockNumber   Int?
+  updatedAt     DateTime @updatedAt
+
+  @@unique([chainId, assetAddress])
+  @@map("price_snapshots")
+}
+
+model ModuleHealthSnapshot {
+  id            Int      @id @default(autoincrement())
+  chainId       Int
+  moduleAddress String   @db.VarChar(42)
+  moduleKeyName String?  @db.VarChar(64)
+  isHealthy     Boolean  @default(false)
+  lastCheckTime BigInt?
+  totalChecks   BigInt?
+  failureCount  BigInt?
+  lastReason    String?  @db.Text
+  updatedAt     DateTime @updatedAt
+
+  @@unique([chainId, moduleAddress])
+  @@map("module_health_snapshots")
+}
+
+model CacheRetryQueue {
+  id            Int      @id @default(autoincrement())
+  chainId       Int
+  sourceEventId String   @db.VarChar(128)
+  moduleName    String   @db.VarChar(64)
+  userAddress   String?  @db.VarChar(42)
+  assetAddress  String?  @db.VarChar(42)
+  requestId     String?  @db.VarChar(66)
+  seq           BigInt?
+  payloadJson   Json
+  retryStatus   String   @default("PENDING") @db.VarChar(16)
+  retryCount    Int      @default(0)
+  lastError     String?  @db.Text
+  nextRetryAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([chainId, retryStatus])
+  @@map("cache_retry_queue")
+}
 ```
 
 迁移命令（可直接执行）：
@@ -1682,9 +2154,18 @@ model LoanOrderReadModel {
 cd /Volumes/AI-hosts/EasiFi-workspace/lending-backend
 
 # 生成迁移 + 更新 client
-pnpm exec prisma migrate dev --name add_chain_events_and_loan_orders
+pnpm exec prisma migrate dev --name add_chain_read_models
 pnpm exec prisma generate
 ```
+
+#### 8.3.1.1 命名去重规则（与 SSOT 文档锁定）
+
+为避免本文件与 [../frontend-backend-unified-schema-ssot.md](../frontend-backend-unified-schema-ssot.md) 后续漂移，本节 Prisma 草案固定遵守以下规则：
+
+1. 本文里的 model 名称可以偏后端实现风格，但 `@@map(...)` 的真实表名必须与 SSOT 文档一致。
+2. 任何字段如果涉及语义解释，以 SSOT 文档为准；本文不再第二次解释单位和门槛语义。
+3. 新增读模型时，应先在 SSOT 文档补充“表用途 + 字段清单”，再在本文补 Prisma model。
+4. 删除或重命名表时，也必须先改 SSOT 文档，再改本文与 migration 计划。
 
 #### 8.3.2 建议新增的 indexer 目录结构（与后端现有入口对齐）
 
@@ -1696,8 +2177,9 @@ lending-backend/
     indexer/
       cursor.ts              # 读写 ChainSyncCursor
       idempotency.ts         # chainId/txHash/logIndex → id
-      vaultRouterIndexer.ts  # getLogs + decode DataPushed
+      eventIndexer.ts        # 多合约事件消费：RewardView / StatisticsView / LoanNFT / AICreditsVault
       loanIndexer.ts         # 从 ChainEvent 派生 LoanOrderReadModel
+      registryIndexer.ts     # 周期性刷新 registry_modules
       run.ts                 # CLI 入口（可被 cron/pm2 调用）
 ```
 
@@ -1722,7 +2204,7 @@ DATABASE_URL=postgresql://rwa:rwa_password@localhost:5432/rwa_local?schema=publi
 pnpm -s indexer:run -- --chainId 421614 --fromBlock 0 --toBlock latest
 ```
 
-> 注意：即便你们未来升级为独立 Ponder 进程，上述目录结构与表设计仍然有用：
+> 注意：即便你们未来把当前 worker 形态拆成独立 Indexer 进程（例如 Ponder 实现），上述目录结构与表设计仍然有用：
 >
 > - `ChainEvent` 作为“原始事实表”（审计/对账/重放）
 > - `LoanOrderReadModel` 作为“前端友好表”（分页/筛选）
@@ -1822,6 +2304,10 @@ pnpm -s indexer:run -- --chainId 421614 --fromBlock 0 --toBlock latest
 ```yaml
 # easifi-monorepo-wt/infrastructure/docker-compose.production.yml
 
+# 约定：
+# - 架构名统一写 Indexer（职责/容量/监控/验收）
+# - 实现名仅在具体服务名、镜像名、目录名中保留 ponder-indexer
+
 services:
   api-server: # 现有 api-server（修正后）
     image: ${ECR_REPO}/api-server:latest
@@ -1836,7 +2322,7 @@ services:
     ports:
       - "3000:3000"
 
-  ponder-indexer: # 新增：链上事件索引
+  ponder-indexer: # Indexer 的 Ponder 实现服务名
     image: ${ECR_REPO}/ponder-indexer:latest
     build:
       context: ../ponder-indexer
@@ -1864,7 +2350,7 @@ services:
 | 服务                              | 规格             | 月费（估算） |
 | --------------------------------- | ---------------- | ------------ |
 | ECS Fargate（api-server × 2）     | 0.5 vCPU, 1GB    | ~$30         |
-| ECS Fargate（ponder-indexer × 1） | 0.25 vCPU, 512MB | ~$10         |
+| ECS Fargate（Indexer × 1，实现名 `ponder-indexer`） | 0.25 vCPU, 512MB | ~$10         |
 | ECS Fargate（ai-services × 1）    | 0.5 vCPU, 1GB    | ~$15         |
 | RDS PostgreSQL                    | db.t4g.micro     | ~$15         |
 | ElastiCache Redis                 | cache.t4g.micro  | ~$13         |
@@ -1924,7 +2410,7 @@ jobs:
 | `idempotency_hits_total`      | 无（信息类） | 幂等命中率，过高可能有重试风暴            |
 | `idempotency_conflicts_total` | > 10/min     | payload 不匹配的冲突，说明 Key 生成有 bug |
 | `ledger_entry_latency_p99`    | > 200ms      | 账本写入延迟                              |
-| `chain_indexer_lag_blocks`    | > 100 blocks | Ponder 索引落后                           |
+| `chain_indexer_lag_blocks`    | > 100 blocks | Indexer 落后                              |
 | `recon_diff_absolute`         | > 0.01       | 链上/链下对账差异                         |
 | `credits_balance_negative`    | > 0          | 余额透支，说明扣费与同步有竞态            |
 
@@ -1942,7 +2428,7 @@ jobs:
      user_reward_cache.rlp_balance == IERC20(Registry[KEY_EASY_TOKEN]).balanceOf(user)
 
   偏差处理：以链上为准，重新同步链下缓存
-  触发方式：Ponder 索引奖励通证 `Transfer` 的 mint/burn 事件
+  触发方式：Indexer 索引奖励通证 `Transfer` 的 mint/burn 事件
 
 维度 2: Reward 账本对账（每 6 小时）
   ∀ (tenant, user):
@@ -1975,11 +2461,13 @@ jobs:
   链上: COUNT(DataPushed events WHERE dataTypeHash IN REWARD_*) for block range
   链下: COUNT(ledger_entries WHERE source='chain_event') for same block range
 
-  偏差处理：若链下 < 链上，说明有遗漏事件 → 触发 Ponder re-index
+  偏差处理：若链下 < 链上，说明有遗漏事件 → 触发 Indexer 重放/重建；若采用 Ponder 实现，则执行对应 re-index
   补充检查：RewardViewPushFailed 事件数量 → 若 > 0，触发链下重试逻辑
 ```
 
 ### 12.2 AI Credits 批量结算对账（特别流程）
+
+> 对齐文档：`Time-Dependency-Refactor-Guide.md` 的“链下确认数口径（新增 SSOT）”。后端所有交易状态推进、结算确认、reorg 处理必须使用同一套确认数公式与 RPC 选择。
 
 ```
 结算前检查（每批次）:
@@ -2000,6 +2488,39 @@ Reorg 处理:
   → 重新生成结算批次并提交
   → 监控 block confirmations 数量（建议 ≥ 20 blocks for Arbitrum）
 ```
+
+#### 12.2.1 交易确认数 SSOT（后端 / worker / indexer 共用）
+
+- **确认数标准公式**：
+  - `confirmations = latestBlock - txBlockNumber + 1`
+  - 若 `receipt.blockNumber == null`，则确认数必须视为 `0`
+- **接口优先级**：
+  - 优先用 `eth_getTransactionReceipt` 获取 `txBlockNumber`
+  - 优先用 `eth_blockNumber` 获取 `latestBlock`
+  - 仅在确实需要完整区块对象时才调用 `eth_getBlockByNumber`
+- **状态推进规则**：
+  - `txHash` 已拿到、`receipt == null`：状态只能是 `SUBMITTED`
+  - `receipt.blockNumber != null` 且确认数未达到阈值：状态为 `MINED` 或 `PENDING_CONFIRMATIONS`
+  - 确认数达到业务阈值后：才可推进为 `CONFIRMED`
+  - 若采用更高 finality 档位：只有达到 `safe` / `finalized` 对应阈值后才可推进最终态
+- **禁止事项**：
+  - 禁止把“拿到 receipt”直接等同于“最终确认”
+  - 禁止把 `latestBlock - txBlockNumber` 当确认数，少了当前块会导致阈值判断提前/延后出错
+  - 禁止让不同 worker / service 各自定义确认数口径
+
+#### 12.2.2 Finality 分层建议
+
+- **latest**：普通状态刷新、用户进度页、低风险异步任务
+- **safe**：中高价值资金动作、批量结算结果回写、自动补账
+- **finalized**：极高价值出账、强审计节点、对 reorg 极度敏感的最终落账
+- 具体阈值应按链配置，不要硬编码在业务逻辑里；业务代码只消费统一配置项，例如 `confirmationDepth` / `finalityMode`
+
+#### 12.2.3 结算表状态机补充约束
+
+- `credit_settlement_batches.status='CONFIRMED'` 的前提，不是“receipt 已返回”，而是“确认数已达到该链配置阈值”
+- `confirmed_at` 应记录“达到确认阈值的时间”，不是“第一次拿到 receipt 的时间”
+- 若在确认窗口内发现 receipt 消失、blockHash 变化、或事件回滚，必须回退为 `REORGED` / `SUBMITTED` 并触发重试或人工介入
+- 监控指标必须区分：广播耗时、打包耗时、确认耗时、最终确认耗时；不要把这些延迟合并成一个总指标
 
 ### 12.3 对账脚本入口
 
@@ -2044,7 +2565,7 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 
 | 风险                        | 概率  | 影响                                         | 缓解措施                                                                                                 |
 | --------------------------- | ----- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Ponder 索引服务宕机         | 中    | 链上事件镜像延迟，链下 ledger_entries 滞后   | 自动重启 + 告警；冷启动快（37s）；链上 SSOT 不受影响                                                     |
+| Indexer 服务宕机（当前实现可为 `ponder-indexer`） | 中    | 链上事件镜像延迟，链下 ledger_entries 滞后   | 自动重启 + 告警；冷启动快（37s）；链上 SSOT 不受影响                                                     |
 | RPC 节点不可用              | 低-中 | 链上查询/对账失败                            | 配置多个 RPC 端点（Alchemy + Infura）；链下 AI 扣次不受影响                                              |
 | RewardView push 失败        | 中    | 链下遗漏 DataPushed 事件、读模型延迟         | 监控 `RewardViewPushFailed` 事件 → 链下重试/读模型修复；用户即时查询时回源链上主账本；链上 SSOT 不受影响 |
 | 链下/链上 AI Credits 不一致 | 低-中 | 用户可能透支或无法使用                       | 每小时对账（维度 3）；差异超 5% 暂停扣次                                                                 |
@@ -2063,7 +2584,7 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
   → 旧代码分支保留为 `pre-idempotency-fix` tag，可随时切回
   → 幂等层在 packages/shared/ 中独立，可灰度切换（feature flag）
 
-如果 Ponder 性能不足：
+如果当前 Indexer 的 Ponder 实现性能不足：
   → 回退到自建 ethers.js + WebSocket 监听（现有系统已有经验）
   → 幂等 Key 格式不变（chain:c{chainId}:tx-{hash}:log-{idx}）
 
@@ -2082,7 +2603,7 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 
 ## 14. 前后端并行实施计划
 
-> **核心思路**：后端的 Phase 1-2 修正（幂等/账本/Ponder）与前端的 P0-P2 修改（View 迁移/Meta/Reward/签名）
+> **核心思路**：后端的 Phase 1-2 修正（幂等/账本/Indexer）与前端的 P0-P2 修改（View 迁移/Meta/Reward/签名）
 > 之间**大部分互不依赖**。前端链上交互不需要等后端 API。真正需要联调的只有 Phase 3 的最后一周。
 > 合理错位后，总工期 21 天（后端主导），比串行方案节省约 3 周。
 >
@@ -2094,7 +2615,7 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 后端 Phase 1 (Day 1-5)        后端 Phase 2 (Day 6-12)       后端 Phase 3 (Day 13-21)
 ┌─────────────────────┐  ┌──────────────────────────┐  ┌─────────────────────────┐
 │ 幂等层 + 账本隔离修正 │  │ ai-services 修正          │  │ AWS 部署 + 生产加固       │
-│ packages/shared      │  │ Ponder 链上索引            │  │ Docker + CI/CD            │
+│ packages/shared      │  │ Indexer（可用 Ponder 实现）│  │ Docker + CI/CD            │
 │ LedgerService 修正   │  │ Stripe 路由                │  │ 对账脚本                  │
 │ RLS 策略             │  │ AI Credits 余额同步        │  │ 灰度发布 + E2E 联调       │
 └─────────────────────┘  └──────────────────────────┘  └─────────────────────────┘
@@ -2114,7 +2635,7 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 | 后端阶段                      | 前端需要等待？ | 原因                                                |
 | ----------------------------- | -------------- | --------------------------------------------------- |
 | Phase 1: 幂等层 + RLS         | **否**         | 前端此阶段只做链上交互（View 迁移），不调用后端 API |
-| Phase 2: ai-services + Ponder | **少量**       | AI Credits 余额查询 API 需要 Day 11 就绪            |
+| Phase 2: ai-services + Indexer | **少量**       | AI Credits 余额查询 API 需要 Day 11 就绪            |
 | Phase 2: Stripe 路由          | **否**         | 前端先用 Mock，Stripe 路由在 Day 12 前就绪即可      |
 | Phase 3: 部署 + 联调          | **是**         | E2E 联调需要后端全部就绪                            |
 
@@ -2166,7 +2687,7 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 
 ```
 ✅ ai-services 修正完成（IdempotencyKey 对齐 + 余额同步）
-✅ Ponder 索引跑通（本地 → Sepolia 链上事件→ 链下同步）
+✅ Indexer 跑通（本地 → Sepolia 链上事件 → 链下同步；若采用 Ponder 实现，则对应 `ponder-indexer` 进程）
 ✅ Stripe Webhook 路由就绪
 ✅ chainSync.ts 就绪（链上/链下 AI Credits 余额对齐）
 ✅ 接口契约全部实现（前端可切换到真实 API）
@@ -2179,8 +2700,8 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 | **Day 1**  | 项目启动     | 开始 packages/shared + 幂等层修正  | 拿到最新 ABI，开始 View 层迁移    |
 | **Day 5**  | Phase 1 验收 | 幂等层 + 账本隔离通过单元测试      | P0 完成，localhost 链上读路径跑通 |
 | **Day 8**  | API 契约交付 | 提供 API 接口文档/OpenAPI spec     | 拿到接口文档，用 Mock 先行开发    |
-| **Day 12** | Phase 2 验收 | ai-services + Ponder + Stripe 就绪 | P1/P2 完成，开始联调              |
-| **Day 15** | E2E 联调     | 配合联调，修复对接问题             | 前端 → 后端 → 链上全链路          |
+| **Day 12** | Phase 2 验收 | ai-services + Indexer + Stripe 就绪 | P1/P2 完成，开始联调              |
+| **Day 15** | E2E 联调     | 配合联调，修复对接问题             | 前端钱包写入 + 链上 View 主读 + 后端读模型联调 |
 | **Day 18** | 全部验收     | 全部功能完成                       | 所有修改完成                      |
 | **Day 21** | 灰度发布     | AWS 部署，灰度发布，监控           | 配合灰度验证                      |
 
@@ -2190,7 +2711,7 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 | ------------------------- | ---- | ----------------------------------- | ------------------------------------------------------------ |
 | Day 8 接口契约延迟        | 中   | 前端 P3 开发延迟                    | 前端持续使用 Mock + 链上直接调用                             |
 | 幂等 Key 格式前后端不一致 | 低   | 请求被拒绝                          | Day 1 统一确认 `IdempotencyKey` 格式；共用 `packages/shared` |
-| Ponder 索引延迟           | 中   | 链下数据滞后，AI Credits 余额不同步 | 前端降级到链上直接读 `AICreditsVault.creditsBalance()`       |
+| Indexer 延迟              | 中   | 链下数据滞后，AI Credits 余额不同步 | 前端降级到链上直接读 `AICreditsVault.creditsBalance()`       |
 | Stripe Webhook 集成问题   | 低   | 订阅状态不更新                      | 前端轮询 `GET /api/stripe/subscriptions` 兜底                |
 | E2E 联调发现大量 Bug      | 高   | 延误发布                            | 预留 Day 15-18 四天联调；关键路径优先修                      |
 
@@ -2270,7 +2791,7 @@ npm run recon:force-sync -- --tenant=acme-corp --user=0x1234...
 main
   ├── fix/unified-idempotency          # 后端修正主分支
   │     ├── Day 1-5: 幂等层 + 账本隔离
-  │     ├── Day 6-12: ai-services + Ponder + Stripe
+  │     ├── Day 6-12: ai-services + Indexer + Stripe
   │     └── Day 13-21: 部署 + 加固
   │
   └── feat/frontend-view-migration     # 前端修改主分支
@@ -2301,7 +2822,7 @@ Phase 1 (Day 1-5):
 
 Phase 2 (Day 6-12):
   □ 后端: ai-services 修正（幂等 Key + 余额同步）
-  □ 后端: Ponder 索引跑通
+  □ 后端: Indexer 跑通（若采用 Ponder 实现，则对应 `ponder-indexer`）
   □ 后端: Stripe Webhook 路由
   □ 后端: Day 8 提供 API 接口契约 ⚠️ 关键交付物
   □ 前端: rewardStore 重构 → RewardView
@@ -2347,7 +2868,7 @@ Phase 3 (Day 13-18/21):
 | **P3**   | `api-server/src/services/pricing/pricingEngine.ts`                | **不改** | 原样保留                                                                                                                                        |
 | **新增** | `packages/shared/src/idempotency/IdempotencyKey.ts`               | **新建** | 统一幂等 Key 生成器（本文第 2.2 节）                                                                                                            |
 | **新增** | `packages/shared/src/idempotency/IdempotencyGuard.ts`             | **新建** | 三级防御检查（本文第 2.3 节）                                                                                                                   |
-| **新增** | `ponder-indexer/`                                                 | **新建** | 链上事件索引服务（本文第 8 节）                                                                                                                 |
+| **新增** | `ponder-indexer/`                                                 | **新建** | Indexer 的 Ponder 实现目录（本文第 8 节；架构职责统一称 Indexer）                                                                                |
 | **新增** | `infrastructure/`                                                 | **新建** | Docker/Terraform 部署配置                                                                                                                       |
 
 ## 附录 B: 零修改模块清单（直接保留，不动一行）
@@ -2384,6 +2905,7 @@ cd easifi-monorepo-wt
 # 1. 启用 npm workspaces（如未启用）
 # 在根 package.json 中添加：
 #   "workspaces": ["api-server", "ai-services", "packages/*", "ponder-indexer"]
+# 说明：这里的 `ponder-indexer` 是 workspace/目录实现名；架构职责统一称 Indexer
 
 # 2. 创建共享幂等包
 mkdir -p packages/shared/src/idempotency
@@ -2407,10 +2929,10 @@ npx prisma migrate dev --name add_tenant_id_to_core_tables
 # 5. 创建 RLS 策略（手写 SQL migration）
 npx prisma migrate dev --name enable_rls_policies
 
-# ===== Day 8: 初始化 Ponder =====
+# ===== Day 8: 初始化 Indexer（Ponder 实现） =====
 cd ..
 
-# 6. 创建 Ponder 索引服务
+# 6. 创建 Indexer 的 Ponder 实现目录
 npm create ponder@latest ponder-indexer
 # 配置 ponder.config.ts（本文第 8.1 节）
 
@@ -2422,7 +2944,7 @@ docker-compose up -d postgres redis
 # 8. 启动各服务
 cd api-server && npm run dev        # API 服务（修正后）
 cd ../ai-services && npm run dev    # AI 服务（修正后）
-cd ../ponder-indexer && npm run dev  # Ponder 索引（新增）
+cd ../ponder-indexer && npm run dev  # Indexer 的 Ponder 实现（新增）
 
 # ===== 测试 =====
 
@@ -2457,7 +2979,7 @@ terraform apply
 main                          # 生产分支（不直接修改）
   └── fix/unified-idempotency # 本次修正的主分支
        ├── Day 1-5: 幂等层 + 账本隔离
-       ├── Day 6-12: ai-services 修正 + Ponder + Stripe
+      ├── Day 6-12: ai-services 修正 + Indexer + Stripe
        └── Day 13-21: 部署 + 加固
 
 建议工作流：
@@ -2477,7 +2999,8 @@ main                          # 生产分支（不直接修改）
 - [ ] 后端读模型：历史/搜索 API 走 DB，具备 cursor 分页与必要索引（不扫 RPC）
 - [ ] 幂等与重试：链上事件写库按 `(chainId, txHash, logIndex)` 幂等；失败可观测并可重放
 - [ ] 权限与多租户：Scheme U/系统权限边界清晰；后端 API 做租户隔离与鉴权（不能靠 `eth_call from` 冒充）
-- [ ] 清算执行链路：legacy / 通用订单由 keeper 调用 `SettlementManager.settleOrLiquidate`，blocks-only 订单由 keeper 调用 `BlocksOnlyCoordinator.settleOrLiquidateBlocks`；两者都不应把 `LiquidationManager.liquidate` 作为常态入口
+- [ ] 清算执行链路：legacy / 通用订单由 keeper 调用 `SettlementManager.settleOrLiquidate`；不应把 `LiquidationManager.liquidate` 作为常态入口
+- [ ] legacy / 通用订单索引链路已接纳显式 shortfall：`LiquidationShortfallOpened` / `LiquidationShortfallRecoveryApplied` / `LiquidationShortfallStatusChanged` 能落库并驱动读模型
 - [ ] 价格刷新硬步骤：清算前检查 `updateBlock/maxPriceAgeBlocks`，过期则先调用价格更新器；失败则跳过并告警
 - [ ] 失败预警：对 `PriceOracle__StalePrice`、`MissingRole`、`SettlementManager__NotLiquidatable`、`CacheUpdateFailed` 建立告警与重试队列
 
@@ -2520,14 +3043,14 @@ main                          # 生产分支（不直接修改）
 职责：
 
 1. 读取 HKDUSD、SGDUSD 等 FX 数据
-2. 把非 USD 稳定币和非 USD 计价 RWA 统一换算到 USD-8
-3. 输出 normalizedPriceUsd8
+2. 把非 USD 稳定币和非 USD 计价 RWA 统一换算到目标资产 `assetDecimals` 对应的链上价格
+3. 输出 normalizedPrice 与 normalizedPriceDecimals
 
 #### 2.3 oracle-publisher
 
 职责：
 
-1. 读取最新 normalizedPriceUsd8
+1. 读取最新 normalizedPrice
 2. 生成统一幂等键
 3. 正常路径统一调用 PriceUpdater.updateAssetPrice 写链
 4. 监听 PriceUpdated 事件回写发布结果
@@ -2562,7 +3085,7 @@ main                          # 生产分支（不直接修改）
 推荐策略：
 
 1. live-mock 允许 bootstrap seeder 或 env 手工补价
-2. launch-required-price 禁止 defaultPriceUsd8 自动补价
+2. launch-required-price 禁止 defaultPriceValue 自动补价�值语义按资产 `assetDecimals` 解释）
 3. launch-required-price 下若价格缺失，preflight 必须 hard fail
 
 ### 3.1 统一消费规则
@@ -2572,7 +3095,7 @@ main                          # 生产分支（不直接修改）
 1. 前端读取链上最终价 + 链下 publish status
 2. preflight 读取链上最终价 + 链下 publish status
 3. 缓存与读模型以 `PriceUpdated` 为链上事实，以 publish job 为链下事实
-4. 不允许某一侧单独依赖 raw source 或 defaultPriceUsd8 直接做业务判断
+4. 不允许某一侧单独依赖 raw source 或 defaultPriceValue 直接做业务判断
 
 ### 4. 建议新增的数据表
 
@@ -2597,7 +3120,7 @@ main                          # 生产分支（不直接修改）
 >
 > - v3.1（2026-02-11）：新增第 14 节"前后端并行实施计划"——与前端 Frontend-Modification-Guide 第 17 节对齐
 > - v3.0（2026-02-11）：第 4 节重写——基于链上完善的 Reward 系统建立 SSOT 分层架构（链上 SSOT + 链下镜像）；
->   新增链上会计模型（Earn/Spend/AI Credits 对照 `Reward-Best-Practices-Guide.md`）；
+>   新增链上会计模型（Earn/Spend/AI Credits 对照 `docs/Usage-Guide/Reward/Reward-System-Usage-Guide.md`）；
 >   第 12 节升级为五维对账模型；第 13 节补充链上相关风险
 > - v2.0（2026-02-11）：从"基于 Open SaaS 新建"改为"基于现有系统原地修正"，工期从 4 周缩短至 2.5–3 周
 > - v1.0（2026-02-11）：初版，基于 Open SaaS 新建方案（已废弃）
@@ -2606,5 +3129,5 @@ main                          # 生产分支（不直接修改）
 >
 > - `docs/Architecture-Guide.md`（链上架构 SSOT）
 > - `docs/FRONTEND_CONTRACTS_INTEGRATION.md`（前端集成 SSOT）
-> - `docs/Usage-Guide/Reward-Best-Practices-Guide.md`（Reward 最优实践 SSOT）
+> - `docs/Usage-Guide/Reward/Reward-System-Usage-Guide.md`（Reward 使用与实践 SSOT）
 > - `docs/Usage-Guide/AI-Credits-Billing-Guide.md`（AI Credits 计费 SSOT）

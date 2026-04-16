@@ -15,6 +15,17 @@ function calcTotalDue(principal: bigint, rateBps: bigint, termBlocks: bigint) {
   return principal + interest;
 }
 
+const LOAN_STATUS = {
+  Active: 0n,
+  Repaid: 1n,
+} as const;
+
+function expectBigintEq(label: string, actual: bigint | number, expected: bigint | number) {
+  if (BigInt(actual) !== BigInt(expected)) {
+    throw new Error(`${label}: expected=${BigInt(expected).toString()} actual=${BigInt(actual).toString()}`);
+  }
+}
+
 async function latestBlockNumber(): Promise<bigint> {
   return BigInt(await ethers.provider.getBlockNumber());
 }
@@ -66,12 +77,14 @@ async function main() {
   const vbl = (await ethers.getContractAt("VaultBusinessLogic", vblAddrFromRegistry)) as any;
 
   const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
+  const lendingEngineViewAddr = await registry.getModuleOrRevert(key("LENDING_ENGINE_VIEW"));
   const settlementManagerAddr = await registry.getModuleOrRevert(key("SETTLEMENT_MANAGER"));
   const settlementManager = (await ethers.getContractAt(
     "src/Vault/liquidation/modules/SettlementManager.sol:SettlementManager",
     settlementManagerAddr
   )) as any;
   const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr)) as any;
+  const lendingEngineView = (await ethers.getContractAt("LendingEngineView", lendingEngineViewAddr)) as any;
   const loanNftAddr = await registry.getModuleOrRevert(key("LOAN_NFT"));
   const loanNft = await ethers.getContractAt("LoanNFT", loanNftAddr);
 
@@ -117,8 +130,13 @@ async function main() {
       await po.connect(deployer).configureAsset(settlementTokenAddrFromRegistry, "usd-coin", usdcDecimals, 3600);
     }
   }
+  const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
   const blockNumber = await ethers.provider.getBlockNumber();
-  await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), blockNumber);
+  await po.connect(deployer).updatePrice(
+    settlementTokenAddrFromRegistry,
+    ethers.parseUnits("1", settlementTokenDecimals),
+    blockNumber,
+  );
 
   // FeeRouter needs supported token
   if (!(await feeRouter.isTokenSupported(settlementTokenAddrFromRegistry))) {
@@ -128,10 +146,10 @@ async function main() {
   // Best-effort: disable early repayment guarantee to avoid allowance coupling in matchflow.
   try {
     if (CONTRACT_ADDRESSES.EarlyRepaymentGuaranteeManager) {
-      const ergm = await ethers.getContractAt(
+      const ergm = (await ethers.getContractAt(
         "src/Vault/modules/EarlyRepaymentGuaranteeManager.sol:EarlyRepaymentGuaranteeManager",
         CONTRACT_ADDRESSES.EarlyRepaymentGuaranteeManager
-      );
+      )) as any;
       await ensureRole(ACTION_SET_PARAMETER, deployer.address);
       await ergm.connect(deployer).setGuaranteeEnabled(usdc.target, false);
     }
@@ -244,9 +262,23 @@ async function main() {
   }
   console.log("orderId", orderId?.toString());
 
+  const orderAfterFinalize = await lendingEngineView.getLoanOrder(orderId);
+  const orderStatusAfterFinalize = await lendingEngineView.getOrderStatus(orderId);
+  expectBigintEq("order status after finalize", orderStatusAfterFinalize, LOAN_STATUS.Active);
+  expectBigintEq(
+    "repaidAmount after finalize",
+    BigInt(orderAfterFinalize.repaidAmount ?? orderAfterFinalize[8] ?? 0),
+    0n,
+  );
+
   const borrowerTokensAfter = await loanNft.getUserTokens(borrower.address);
   const newTokenId = borrowerTokensAfter.find((t) => !borrowerTokensBefore.includes(t));
   console.log("LoanNFT tokenId", newTokenId?.toString());
+
+  if (newTokenId !== undefined) {
+    const meta = await loanNft.getLoanMetadata(newTokenId);
+    expectBigintEq("LoanNFT status after finalize", meta.status, LOAN_STATUS.Active);
+  }
 
   // repay on order engine
   if (orderId === null) throw new Error("LoanOrderCreated not found");
@@ -261,8 +293,18 @@ async function main() {
   await usdc.connect(borrower).approve(CONTRACT_ADDRESSES.VaultCore, totalDue);
   await vaultCore.connect(borrower).repay(orderId, usdc.target, totalDue);
 
+  const orderAfterRepay = await lendingEngineView.getLoanOrder(orderId);
+  const orderStatusAfterRepay = await lendingEngineView.getOrderStatus(orderId);
+  expectBigintEq("order status after repay", orderStatusAfterRepay, LOAN_STATUS.Repaid);
+  expectBigintEq(
+    "repaidAmount after repay",
+    BigInt(orderAfterRepay.repaidAmount ?? orderAfterRepay[8] ?? 0),
+    totalDue,
+  );
+
   if (newTokenId !== undefined) {
     const meta = await loanNft.getLoanMetadata(newTokenId);
+    expectBigintEq("LoanNFT status after repay", meta.status, LOAN_STATUS.Repaid);
     console.log("LoanNFT status after repay", meta.status);
   }
 

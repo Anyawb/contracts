@@ -17,4 +17,12 @@ contract MockLendingEngine {
     function getUserTotalDebtValue(address user) external view returns (uint256) {
         return _userTotalDebt[user];
     }
+
+    function getUserTotalDebtValueBestEffort(address user) external view returns (uint256) {
+        return _userTotalDebt[user];
+    }
+
+    function getUserTotalDebtValueStrict(address user) external view returns (uint256) {
+        return _userTotalDebt[user];
+    }
 } 

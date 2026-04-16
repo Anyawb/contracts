@@ -22,13 +22,20 @@ import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
 import {IBlocksOnlyCoordinator} from "../interfaces/IBlocksOnlyCoordinator.sol";
 import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
 import {ILenderPoolVault} from "../interfaces/ILenderPoolVault.sol";
-import {ILendingEngineDebtRead} from "../interfaces/ILendingEngineDebtRead.sol";
-import {ILiquidationManager} from "../interfaces/ILiquidationManager.sol";
-import {IPositionViewValuation} from "../interfaces/IPositionViewValuation.sol";
+import {IOrderStateStoreV2} from "../interfaces/IOrderStateStoreV2.sol";
 import {IRegistry} from "../interfaces/IRegistry.sol";
-import {IVaultCoreBorrowForBlocks} from "../interfaces/IVaultCoreBorrowForBlocks.sol";
 import {DataPushLibrary} from "../libraries/DataPushLibrary.sol";
 import {SystemEvents} from "../Vault/SystemEvents.sol";
+
+interface IBlocksOnlyEasyEmissionController {
+    function onBlocksOnlyTradeSettlement(
+        address borrower,
+        address lender,
+        address asset,
+        uint256 orderId,
+        uint256 amountBaseUnits
+    ) external;
+}
 
 /**
  * @title BlocksOnlyCoordinator
@@ -42,6 +49,9 @@ import {SystemEvents} from "../Vault/SystemEvents.sol";
  * - Uses the Registry as the module-address SSOT for pool, VaultCore, access control, collateral, and liquidation
  *   dependencies.
  * - Write paths are gated by either the Vault business logic module, the borrower, or explicit ActionKeys role checks.
+ * - Maturity close is permissionless by design in the current implementation.
+ * - Matched bound collateral is staged into coordinator custody at finalization and later released from the
+ *   coordinator's own balance on close or maturity delivery.
  * - Maturity is block-based. The collateral-selection helper performs best-effort valuation reads and falls back to raw
  *   collateral balances when valuation reads fail.
  */
@@ -60,7 +70,7 @@ contract BlocksOnlyCoordinator is
     uint256 private _orderIdCounter;
     mapping(uint256 orderId => BlocksOnlyOrder order) private _orders;
     mapping(address borrower => uint256[] orderIds) private _borrowerOrderIds;
-    uint256[47] private __gap;
+    uint256[46] private __gap;
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
 
@@ -98,7 +108,20 @@ contract BlocksOnlyCoordinator is
         uint256 currentBlock
     );
 
-    /// @dev Reverts when the liquidation path cannot identify any non-zero collateral for `borrower`.
+    /// @dev Reverts when the trade-close path is attempted while debt remains outstanding.
+    error BlocksOnlyCoordinator__TradeCloseRequiresZeroDebt(
+        uint256 orderId,
+        uint256 remainingDebt
+    );
+
+    /// @dev Reverts when a repayment exceeds the coordinator-local remaining settlement amount.
+    error BlocksOnlyCoordinator__RepayAmountExceedsRemaining(
+        uint256 orderId,
+        uint256 repayAmount,
+        uint256 remainingDebt
+    );
+
+    /// @dev Reverts when the coordinator custody does not hold the expected bound collateral for `borrower`.
     error BlocksOnlyCoordinator__NoCollateral(address borrower);
 
     /*━━━━━━━━━━━━━━━ EVENTS ━━━━━━━━━━━━━━━*/
@@ -161,26 +184,38 @@ contract BlocksOnlyCoordinator is
     );
 
     /**
-     * @notice Emitted when a matured order is liquidated against borrower collateral.
-     * @dev The selected collateral amount may be smaller than the borrower's full collateral balance when the optional
-     *      debt-valuation read succeeds and yields a lower target amount.
+     * @notice Emitted when a debt-free blocks-only order is closed through the trade-style close path.
+     * @dev Trade-close is distinct from maturity-gated settlement so integrations can separate trade-like lifecycle
+     *      completion from borrow-style settlement analytics.
      * @param orderId Coordinator order id.
-     * @param borrower Borrower whose order was liquidated.
-     * @param liquidator Caller that triggered the liquidation path.
+     * @param borrower Borrower whose order was closed.
      * @param asset Debt asset address.
-     * @param collateralAsset Collateral asset selected for liquidation.
-     * @param collateralAmount Collateral amount passed to the liquidation manager in token base units.
-     * @param debtAmount Remaining debt amount passed to the liquidation manager in debt-asset base units.
      * @param closeBlock Block number at which the order was closed.
      */
-    event BlocksOnlyOrderLiquidated(
+    event BlocksOnlyOrderTradeClosed(
         uint256 indexed orderId,
         address indexed borrower,
-        address indexed liquidator,
+        address indexed asset,
+        uint256 closeBlock
+    );
+
+    /**
+     * @notice Emitted when maturity closes the order by delivering bound collateral to the lender.
+     * @param orderId Coordinator order id.
+     * @param borrower Borrower whose pledged collateral was delivered.
+     * @param lender Recorded lender receiving the collateral delivery.
+     * @param asset Principal asset address used for the trade amount.
+     * @param collateralAsset Order-bound collateral asset.
+     * @param collateralAmount Order-bound collateral amount.
+     * @param closeBlock Block number at which the order was closed.
+     */
+    event BlocksOnlyOrderDelivered(
+        uint256 indexed orderId,
+        address indexed borrower,
+        address indexed lender,
         address asset,
         address collateralAsset,
         uint256 collateralAmount,
-        uint256 debtAmount,
         uint256 closeBlock
     );
 
@@ -238,26 +273,29 @@ contract BlocksOnlyCoordinator is
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
 
     /**
-     * @notice Finalizes a matched blocks-only order, transfers principal, and books debt in VaultCore.
+        * @notice Finalizes a matched blocks-only order, stages bound collateral into coordinator custody, transfers
+        *         principal, and records local settlement state.
      * @dev Reverts if:
      *      - the registry is unset or not a contract
      *      - the caller is not the registered Vault business logic module
      *      - the coordinator is paused
-     *      - `params.borrower` or `params.borrowAsset` is the zero address
-     *      - `params.amount == 0`
+        *      - `params.borrower`, `params.collateralAsset`, or `params.borrowAsset` is the zero address
+        *      - `params.collateralAmount == 0` or `params.amount == 0`
      *      - `params.termBlocks != 1`
      *      - `params.rateBps != 0`
      *      - `params.lender` does not equal the registered lender pool vault
-     *      - the asset whitelist rejects `params.borrowAsset`
-     *      - token transfer, registry lookup, or VaultCore debt-booking calls revert
+    *      - the asset whitelist rejects `params.borrowAsset` or `params.collateralAsset`
+        *      - bound-collateral staging, token transfer, or registry lookup calls revert
      *
      * Security:
-     * - Non-reentrant write path gated by the registered Vault business logic module.
-     * - Uses the lender pool vault as the only allowed funding source in the current implementation.
-     * - Emits both coordinator events and DataPush payloads after the order is stored.
+        * - Non-reentrant write path gated by the registered Vault business logic module.
+        * - Uses the lender pool vault as the only allowed funding source in the current implementation.
+        * - Moves the order-bound collateral out of the borrower's collateral ledger into coordinator custody before
+        *   creating the order, so the borrower cannot withdraw or reuse it after match.
+        * - Emits both coordinator events and DataPush payloads after the order is stored.
      *
      * @param params Matched order inputs, including participants, asset, amount, and term.
-     * @return orderId Newly assigned coordinator order id.
+        * @return orderId Newly assigned coordinator order id.
      */
 
     function finalizeMatchBlocks(
@@ -270,9 +308,14 @@ contract BlocksOnlyCoordinator is
         nonReentrant
         returns (uint256 orderId)
     {
-        if (params.borrower == address(0) || params.borrowAsset == address(0))
+        if (
+            params.borrower == address(0) ||
+            params.collateralAsset == address(0) ||
+            params.borrowAsset == address(0)
+        )
             revert ZeroAddress();
         if (params.amount == 0) revert AmountIsZero();
+        if (params.collateralAmount == 0) revert AmountIsZero();
         if (params.termBlocks != 1)
             revert BlocksOnlyCoordinator__InvalidTermBlocks(params.termBlocks);
         if (params.rateBps != 0)
@@ -295,6 +338,19 @@ contract BlocksOnlyCoordinator is
         ) {
             revert AssetNotAllowed();
         }
+        if (
+            !IAssetWhitelistRead(assetWhitelist).isAssetAllowed(
+                params.collateralAsset
+            )
+        ) {
+            revert AssetNotAllowed();
+        }
+
+        _stageBoundCollateral(
+            params.borrower,
+            params.collateralAsset,
+            params.collateralAmount
+        );
 
         ILenderPoolVault(pool).transferOut(
             params.borrowAsset,
@@ -302,16 +358,6 @@ contract BlocksOnlyCoordinator is
             params.amount
         );
         IERC20(params.borrowAsset).safeTransfer(params.borrower, params.amount);
-
-        address vaultCore = IRegistry(_registryAddr).getModuleOrRevert(
-            ModuleKeys.KEY_VAULT_CORE
-        );
-        IVaultCoreBorrowForBlocks(vaultCore).borrowForBlocks(
-            params.borrower,
-            params.borrowAsset,
-            params.amount,
-            params.termBlocks
-        );
 
         orderId = _orderIdCounter;
         unchecked {
@@ -327,13 +373,22 @@ contract BlocksOnlyCoordinator is
             termBlocks: params.termBlocks,
             borrower: params.borrower,
             lender: params.lender,
+            collateralAsset: params.collateralAsset,
+            collateralAmount: params.collateralAmount,
             asset: params.borrowAsset,
             startBlock: startBlock,
             maturityBlock: maturityBlock,
             closeBlock: 0,
-            status: BlocksOnlyOrderStatus.ACTIVE
+            status: BlocksOnlyOrderStatus.ACTIVE,
+            maturityDeliveredToLender: false
         });
         _borrowerOrderIds[params.borrower].push(orderId);
+
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+            _tryOrderStateStore();
+        if (hasOrderStateStore) {
+            orderStateStore.initializeBlocksOnlyOrderState(orderId, startBlock);
+        }
 
         emit BlocksOnlyMatchFinalized(
             orderId,
@@ -377,15 +432,16 @@ contract BlocksOnlyCoordinator is
      *      - `repayAmount == 0`
      *      - `orderId` does not reference an open order
      *      - the caller is not the borrower stored on the order
-     *      - token transfer, registry lookup, VaultCore repayment, or lending-engine debt reads revert
+        *      - token transfer or registry lookup reverts
      *
      * Security:
-     * - Borrower-only non-reentrant write path.
-     * - Local settlement state relies on the lending-engine debt SSOT; `repaidPrincipal` is informational only.
+        * - Borrower-only non-reentrant write path.
+        * - Local settlement state is the product SSOT; the generic debt ledger is not consulted.
+        * - A debt-free repay keeps the order open until an explicit close/settle transition is executed.
      *
      * @param orderId Coordinator order id.
      * @param repayAmount Repayment amount in debt-asset base units.
-     * @return remainingDebt Remaining debt reported by the lending engine after repayment.
+        * @return remainingDebt Remaining open settlement amount after repayment.
      */
     function repayBlocks(
         uint256 orderId,
@@ -403,32 +459,29 @@ contract BlocksOnlyCoordinator is
         if (msg.sender != order.borrower)
             revert BlocksOnlyCoordinator__OnlyBorrower();
 
+        uint256 remainingBefore = _remainingSettlementAmount(order);
+        if (repayAmount > remainingBefore) {
+            revert BlocksOnlyCoordinator__RepayAmountExceedsRemaining(
+                orderId,
+                repayAmount,
+                remainingBefore
+            );
+        }
+
         IERC20(order.asset).safeTransferFrom(
             msg.sender,
             order.lender,
             repayAmount
         );
-
-        address vaultCore = IRegistry(_registryAddr).getModuleOrRevert(
-            ModuleKeys.KEY_VAULT_CORE
-        );
-        IVaultCoreBorrowForBlocks(vaultCore).repayForBlocks(
-            order.borrower,
-            order.asset,
-            repayAmount
-        );
-
-        address lendingEngine = IRegistry(_registryAddr).getModuleOrRevert(
-            ModuleKeys.KEY_LE
-        );
-        remainingDebt = ILendingEngineDebtRead(lendingEngine).getDebt(
-            order.borrower,
-            order.asset
-        );
-
         order.repaidPrincipal += repayAmount;
+        remainingDebt = _remainingSettlementAmount(order);
+
         if (remainingDebt == 0) {
-            order.status = BlocksOnlyOrderStatus.REPAID;
+            (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+                _tryOrderStateStore();
+            if (hasOrderStateStore) {
+                orderStateStore.markBlocksOnlyRepaid(orderId, order.startBlock);
+            }
         }
 
         emit BlocksOnlyRepaymentRecorded(
@@ -456,29 +509,92 @@ contract BlocksOnlyCoordinator is
     }
 
     /**
-     * @notice Settles a matured order with no remaining debt or liquidates collateral for the remaining debt.
+     * @notice Closes a debt-free blocks-only order through the trade-style close path without waiting for maturity.
      * @dev Reverts if:
      *      - the registry is unset or not a contract
      *      - the coordinator is paused
-     *      - the caller lacks `ActionKeys.ACTION_LIQUIDATE`
      *      - `orderId` does not reference an open order
-     *      - the current block is below the order's maturity block
-     *      - registry lookup, debt reads, collateral release, or liquidation-manager calls revert
-     *      - no non-zero collateral can be selected for the liquidation path
+        *      - the coordinator-local remaining settlement amount is non-zero
+     *      - collateral release dependencies revert
      *
      * Security:
-     * - Privileged non-reentrant settlement path.
-     * - Debt-free settlement releases all tracked collateral assets to the borrower.
-     * - Liquidation uses best-effort valuation reads and falls back to balance-based collateral selection on valuation
-     *   failures.
+        * - Permissionless close path by design: if debt is already zero, any caller may help finalize the trade-style
+        *   order lifecycle, but collateral is always returned to the borrower.
+     * - Keeps trade-like completion separate from maturity-gated settlement and liquidation.
      *
      * @param orderId Coordinator order id.
+     */
+    function closeRepaidTradeBlocks(
+        uint256 orderId
+    ) external onlyValidRegistry whenNotPaused nonReentrant {
+        BlocksOnlyOrder storage order = _getOpenOrder(orderId);
+
+        uint256 remainingDebt = _remainingSettlementAmount(order);
+        if (remainingDebt != 0) {
+            revert BlocksOnlyCoordinator__TradeCloseRequiresZeroDebt(
+                orderId,
+                remainingDebt
+            );
+        }
+
+        uint256 closeBlock = _closeDebtFreeOrder(
+            order,
+            BlocksOnlyOrderStatus.TRADE_CLOSED
+        );
+
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+            _tryOrderStateStore();
+        if (hasOrderStateStore) {
+            orderStateStore.applyBlocksOnlyCloseTransition(
+                orderId,
+                order.startBlock,
+                IOrderStateStoreV2.CloseReason.BLOCKS_TRADE_CLOSE,
+                IOrderStateStoreV2.CollateralDispositionStatus
+                    .RETURNED_TO_BORROWER
+            );
+        }
+
+        emit BlocksOnlyOrderTradeClosed(
+            orderId,
+            order.borrower,
+            order.asset,
+            closeBlock
+        );
+
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_BLOCKS_ONLY_TRADE_CLOSED,
+            abi.encode(
+                address(this),
+                orderId,
+                order.borrower,
+                order.asset,
+                closeBlock
+            )
+        );
+
+        _tryEmitBlocksOnlyEasy(orderId, order);
+    }
+
+     /**
+      * @notice Completes maturity-gated product settlement for a blocks-only order.
+     * @dev Reverts if:
+     *      - the registry is unset or not a contract
+     *      - the coordinator is paused
+     *      - `orderId` does not reference an open order
+     *      - the current block is below the order's maturity block
+      *      - registry lookup or collateral delivery calls revert
+     *
+     * Security:
+      * - Permissionless non-reentrant maturity-close path.
+      * - Debt-free maturity close returns coordinator-held order-bound collateral to the borrower.
+      * - Unpaid maturity close delivers coordinator-held order-bound collateral to the recorded lender and
+      *   extinguishes the remaining settlement amount locally.
+     *
+      * @param orderId Coordinator order id.
      */
     function settleOrLiquidateBlocks(
         uint256 orderId
     ) external onlyValidRegistry whenNotPaused nonReentrant {
-        _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);
-
         BlocksOnlyOrder storage order = _getOpenOrder(orderId);
         if (block.number < order.maturityBlock) {
             revert BlocksOnlyCoordinator__NotMatured(
@@ -488,26 +604,31 @@ contract BlocksOnlyCoordinator is
             );
         }
 
-        address lendingEngine = IRegistry(_registryAddr).getModuleOrRevert(
-            ModuleKeys.KEY_LE
-        );
-        uint256 remainingDebt = ILendingEngineDebtRead(lendingEngine).getDebt(
-            order.borrower,
-            order.asset
-        );
+        uint256 remainingDebt = _remainingSettlementAmount(order);
 
-        if (
-            remainingDebt == 0 || order.status == BlocksOnlyOrderStatus.REPAID
-        ) {
-            _releaseAllCollateral(order.borrower);
-            order.status = BlocksOnlyOrderStatus.SETTLED;
-            order.closeBlock = block.number;
+        if (remainingDebt == 0) {
+            uint256 closeBlock = _closeDebtFreeOrder(
+                order,
+                BlocksOnlyOrderStatus.SETTLED
+            );
+
+            (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+                _tryOrderStateStore();
+            if (hasOrderStateStore) {
+                orderStateStore.applyBlocksOnlyCloseTransition(
+                    orderId,
+                    order.startBlock,
+                    IOrderStateStoreV2.CloseReason.BLOCKS_MATURITY_CLOSE,
+                    IOrderStateStoreV2.CollateralDispositionStatus
+                        .RETURNED_TO_BORROWER
+                );
+            }
 
             emit BlocksOnlyOrderSettled(
                 orderId,
                 order.borrower,
                 order.asset,
-                order.closeBlock
+                closeBlock
             );
 
             DataPushLibrary._emitData(
@@ -517,61 +638,61 @@ contract BlocksOnlyCoordinator is
                     orderId,
                     order.borrower,
                     order.asset,
-                    order.closeBlock
+                    closeBlock
                 )
             );
+
+            _tryEmitBlocksOnlyEasy(orderId, order);
             return;
         }
 
-        (
-            address collateralAsset,
-            uint256 collateralAmount
-        ) = _selectLiquidationCollateral(
-                order.borrower,
-                order.asset,
-                remainingDebt
-            );
+        _releaseBoundCollateral(order, order.lender);
 
-        address liquidationManager = IRegistry(_registryAddr).getModuleOrRevert(
-            ModuleKeys.KEY_LIQUIDATION_MANAGER
-        );
-        ILiquidationManager(liquidationManager).liquidate(
-            order.borrower,
-            collateralAsset,
-            order.asset,
-            collateralAmount,
-            remainingDebt,
-            0
-        );
+        // Maturity delivery closes the order and extinguishes local remaining settlement amount.
+        order.repaidPrincipal = order.principal;
+        order.maturityDeliveredToLender = true;
 
-        order.status = BlocksOnlyOrderStatus.LIQUIDATED;
+        order.status = BlocksOnlyOrderStatus.SETTLED;
+
         order.closeBlock = block.number;
 
-        emit BlocksOnlyOrderLiquidated(
+        (IOrderStateStoreV2 deliveredOrderStateStore, bool hasDeliveredStore) =
+            _tryOrderStateStore();
+        if (hasDeliveredStore) {
+            deliveredOrderStateStore.applyBlocksOnlyCloseTransition(
+                orderId,
+                order.startBlock,
+                IOrderStateStoreV2.CloseReason.BLOCKS_MATURITY_CLOSE,
+                IOrderStateStoreV2.CollateralDispositionStatus
+                    .DELIVERED_TO_LENDER
+            );
+        }
+
+        emit BlocksOnlyOrderDelivered(
             orderId,
             order.borrower,
-            msg.sender,
+            order.lender,
             order.asset,
-            collateralAsset,
-            collateralAmount,
-            remainingDebt,
+            order.collateralAsset,
+            order.collateralAmount,
             order.closeBlock
         );
 
         DataPushLibrary._emitData(
-            DataPushTypes.DATA_TYPE_BLOCKS_ONLY_LIQUIDATED,
+            DataPushTypes.DATA_TYPE_BLOCKS_ONLY_DELIVERED,
             abi.encode(
                 address(this),
                 orderId,
                 order.borrower,
                 order.asset,
-                msg.sender,
-                collateralAsset,
-                collateralAmount,
-                remainingDebt,
+                order.lender,
+                order.collateralAsset,
+                order.collateralAmount,
                 order.closeBlock
             )
         );
+
+        _tryEmitBlocksOnlyEasy(orderId, order);
     }
 
     /**
@@ -669,8 +790,8 @@ contract BlocksOnlyCoordinator is
     /**
      * @notice Returns an open order storage reference for `orderId`.
      * @dev Reverts if:
-     *      - `orderId` has not been created
-     *      - the referenced order is `NONE`, `SETTLED`, or `LIQUIDATED`
+        *      - `orderId` has not been created
+        *      - the referenced order is `NONE`, `SETTLED`, or `TRADE_CLOSED`
      *
      * Security:
      * - Internal state gate used by repayment and settlement paths.
@@ -689,153 +810,142 @@ contract BlocksOnlyCoordinator is
         if (
             order.status == BlocksOnlyOrderStatus.NONE ||
             order.status == BlocksOnlyOrderStatus.SETTLED ||
-            order.status == BlocksOnlyOrderStatus.LIQUIDATED
+            order.status == BlocksOnlyOrderStatus.TRADE_CLOSED
         ) {
             revert BlocksOnlyCoordinator__OrderNotActive(orderId, order.status);
         }
     }
 
     /**
-     * @notice Withdraws every currently tracked collateral balance for `borrower` back to the borrower.
-     * @dev Reverts if:
-     *      - the collateral manager dependency is missing
-     *      - collateral enumeration or withdrawal calls revert
+        * @notice Releases coordinator-held bound collateral and marks the order as closed under the provided debt-free
+        *         close status.
+        * @dev Reverts if the coordinator cannot release the staged collateral.
      *
      * Security:
-     * - Internal settlement helper used only after the order is considered debt-free.
-     * - Releases all tracked collateral assets without imposing per-asset limits.
+        * - Internal helper shared by the maturity-gated settlement path and the trade-style close path.
+        * - Always returns the staged collateral to the borrower and records `closeBlock = block.number`.
      *
-     * @param borrower Borrower whose collateral should be released.
+        * @param order Open order storage reference.
+        * @param closeStatus Final closed status to assign.
+        * @return closeBlock Block number at which the order was closed.
      */
-    function _releaseAllCollateral(address borrower) internal {
-        address collateralManager = IRegistry(_registryAddr).getModuleOrRevert(
-            ModuleKeys.KEY_CM
-        );
-        address[] memory assets = ICollateralManager(collateralManager)
-            .getUserCollateralAssets(borrower);
-        for (uint256 i; i < assets.length; ) {
-            uint256 bal = ICollateralManager(collateralManager).getCollateral(
-                borrower,
-                assets[i]
-            );
-            if (bal > 0) {
-                ICollateralManager(collateralManager).withdrawCollateralTo(
-                    borrower,
-                    assets[i],
-                    bal,
-                    borrower
-                );
-            }
-            unchecked {
-                ++i;
-            }
-        }
+    function _closeDebtFreeOrder(
+        BlocksOnlyOrder storage order,
+        BlocksOnlyOrderStatus closeStatus
+    ) internal returns (uint256 closeBlock) {
+        _releaseBoundCollateral(order, order.borrower);
+        order.maturityDeliveredToLender = false;
+        order.status = closeStatus;
+        closeBlock = block.number;
+        order.closeBlock = closeBlock;
     }
 
-    /**
-     * @notice Selects the collateral asset and amount to pass into the liquidation manager.
-     * @dev Reverts if:
-     *      - the collateral manager or lending engine dependency is missing
-     *      - collateral enumeration or balance reads revert
-     *      - no non-zero collateral balance exists for `borrower`
-     *
-     * Security:
-     * - Best-effort valuation helper: optional position-view and debt-valuation reads are wrapped in `try/catch` and
-     *   ignored on failure.
-     * - Falls back to choosing the non-zero collateral balance with the largest observed value proxy.
-     *
-     * @param borrower Borrower being liquidated.
-     * @param debtAsset Debt asset address used for optional debt valuation.
-     * @param remainingDebt Remaining debt amount in debt-asset base units.
-     * @return collateralAsset Selected collateral asset.
-     * @return collateralAmount Collateral amount to liquidate in collateral-asset base units.
-     */
-    function _selectLiquidationCollateral(
-        address borrower,
-        address debtAsset,
-        uint256 remainingDebt
-    )
+    function _tryOrderStateStore()
         internal
         view
-        returns (address collateralAsset, uint256 collateralAmount)
+        returns (IOrderStateStoreV2 orderStateStore, bool hasStore)
     {
+        address orderStateStoreAddr = IRegistry(_registryAddr).getModule(
+            ModuleKeys.KEY_ORDER_STATE_STORE
+        );
+        if (
+            orderStateStoreAddr == address(0) ||
+            orderStateStoreAddr.code.length == 0
+        ) {
+            return (IOrderStateStoreV2(address(0)), false);
+        }
+
+        return (IOrderStateStoreV2(orderStateStoreAddr), true);
+    }
+
+        /**
+         * @notice Stages the order-bound collateral out of the borrower's collateral ledger into coordinator custody.
+     * @dev Reverts if the collateral manager dependency is missing or the withdrawal call reverts.
+     *
+     * Security:
+     * - Internal finalization helper used to hard-bind collateral at match time.
+     * - Removes the pledged amount from the borrower's withdrawable collateral balance immediately.
+     *
+     * @param borrower Borrower whose collateral balance is reduced.
+     * @param collateralAsset Bound collateral asset.
+     * @param collateralAmount Bound collateral amount.
+     */
+    function _stageBoundCollateral(
+        address borrower,
+        address collateralAsset,
+        uint256 collateralAmount
+    ) internal {
         address collateralManager = IRegistry(_registryAddr).getModuleOrRevert(
             ModuleKeys.KEY_CM
         );
-        address[] memory assets = ICollateralManager(collateralManager)
-            .getUserCollateralAssets(borrower);
-
-        address positionView = IRegistry(_registryAddr).getModule(
-            ModuleKeys.KEY_POSITION_VIEW
+        ICollateralManager(collateralManager).withdrawCollateralTo(
+            borrower,
+            collateralAsset,
+            collateralAmount,
+            address(this)
         );
-        address lendingEngine = IRegistry(_registryAddr).getModuleOrRevert(
-            ModuleKeys.KEY_LE
+    }
+
+        /**
+         * @notice Releases the coordinator-held order-bound collateral to `recipient`.
+     * @dev Reverts if:
+     *      - the coordinator custody balance is below the bound collateral amount
+    *      - the ERC20 transfer reverts
+     *
+     * Security:
+     * - Internal settlement helper used only for the order-bound collateral asset/amount.
+     * - Transfer source is the coordinator's own custody, not the borrower's current collateral ledger.
+     *
+     * @param order Open order storage reference.
+     * @param recipient Recipient of the collateral release.
+     */
+    function _releaseBoundCollateral(
+        BlocksOnlyOrder storage order,
+        address recipient
+    ) internal {
+        uint256 collateralAmount = order.collateralAmount;
+        if (collateralAmount == 0) {
+            return;
+        }
+        if (
+            IERC20(order.collateralAsset).balanceOf(address(this)) <
+            collateralAmount
+        ) {
+            revert BlocksOnlyCoordinator__NoCollateral(order.borrower);
+        }
+        IERC20(order.collateralAsset).safeTransfer(recipient, collateralAmount);
+    }
+
+    function _remainingSettlementAmount(
+        BlocksOnlyOrder storage order
+    ) internal view returns (uint256 remainingDebt) {
+        if (order.repaidPrincipal >= order.principal) {
+            return 0;
+        }
+        remainingDebt = order.principal - order.repaidPrincipal;
+    }
+
+    function _tryEmitBlocksOnlyEasy(
+        uint256 orderId,
+        BlocksOnlyOrder storage order
+    ) internal {
+        address controller = IRegistry(_registryAddr).getModule(
+            ModuleKeys.KEY_EASY_EMISSION_CONTROLLER
         );
-
-        uint256 bestValue;
-        uint256 bestBalance;
-        for (uint256 i; i < assets.length; ) {
-            address asset = assets[i];
-            uint256 balance = ICollateralManager(collateralManager)
-                .getCollateral(borrower, asset);
-            if (balance > 0) {
-                uint256 value = balance;
-                if (
-                    positionView != address(0) && positionView.code.length > 0
-                ) {
-                    try
-                        IPositionViewValuation(positionView).getAssetValue(
-                            asset,
-                            balance
-                        )
-                    returns (uint256 assetValue) {
-                        if (assetValue > 0) {
-                            value = assetValue;
-                        }
-                    } catch {
-                        // Best-effort valuation fallback keeps the largest raw balance candidate.
-                        value = value;
-                    }
-                }
-                if (value > bestValue) {
-                    bestValue = value;
-                    bestBalance = balance;
-                    collateralAsset = asset;
-                }
-            }
-            unchecked {
-                ++i;
-            }
+        if (controller == address(0) || controller.code.length == 0) {
+            return;
         }
-
-        if (collateralAsset == address(0) || bestBalance == 0) {
-            revert BlocksOnlyCoordinator__NoCollateral(borrower);
-        }
-
-        collateralAmount = bestBalance;
-        if (bestValue > 0) {
-            try
-                ILendingEngineDebtRead(lendingEngine).calculateDebtValue(
-                    borrower,
-                    debtAsset
+        // solhint-disable-next-line no-empty-blocks
+        try
+            IBlocksOnlyEasyEmissionController(controller)
+                .onBlocksOnlyTradeSettlement(
+                    order.borrower,
+                    order.lender,
+                    order.asset,
+                    orderId,
+                    order.principal
                 )
-            returns (uint256 debtValue) {
-                if (debtValue > 0 && remainingDebt > 0) {
-                    uint256 targetCollateralAmount = (bestBalance * debtValue +
-                        bestValue -
-                        1) / bestValue;
-                    if (
-                        targetCollateralAmount > 0 &&
-                        targetCollateralAmount < bestBalance
-                    ) {
-                        collateralAmount = targetCollateralAmount;
-                    }
-                }
-            } catch {
-                // Best-effort debt valuation fallback keeps the full selected collateral balance.
-                collateralAmount = collateralAmount;
-            }
-        }
+        {} catch {}
     }
 
     /**

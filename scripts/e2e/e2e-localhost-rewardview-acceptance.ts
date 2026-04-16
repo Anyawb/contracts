@@ -270,8 +270,10 @@ export async function runRewardViewAcceptance() {
         return tx.wait();
       },
       strictReward,
+      rewardManager,
       rewardView,
       rewardViewAddr,
+      orderEngineAddr,
       easyEmissionConfig,
       easyEmissionConfigAddr,
       rewardAccrualManager,

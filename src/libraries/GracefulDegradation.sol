@@ -17,7 +17,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  *      - Minimum decimals: 6 (supports common stablecoins).
  *      - Maximum decimals: 18 (ERC-20 standard).
  *      Price precision:
- *      - Price units depend on the underlying oracle and MUST NOT be assumed 1e18.
+ *      - Price units are expected to follow `assetDecimals` and MUST NOT be assumed fixed to 1e8 or 1e18.
  */
 library GracefulDegradation {
     /*━━━━━━━━━━━━━━━ CONSTANTS ━━━━━━━━━━━━━━━*/
@@ -37,12 +37,12 @@ library GracefulDegradation {
     /// @notice Minimum historical price points for reasonableness checks.
     uint256 private constant MIN_HISTORICAL_PRICES = 3;
 
-    /// @notice Maximum reasonable price (backward-compatible constant).
+    /// @notice Legacy 8-decimal max-price reference, normalized to asset decimals before validation.
     uint256 internal constant MAX_REASONABLE_PRICE = 1e12;
 
     /*━━━━━━━━━━━━━━━ SEMANTIC CONSTANTS ━━━━━━━━━━━━━━━*/
-    /// @notice $1.00 in protocol USD-8 precision.
-    uint256 private constant ONE_USD = 1e8;
+    /// @notice Legacy reference decimals used by historical price caps.
+    uint256 private constant LEGACY_PRICE_REFERENCE_DECIMALS = 8;
 
     /// @notice Basis-point divisor (100% = 10_000 bps).
     uint256 private constant BASIS_POINT_DIVISOR = 10000;
@@ -131,7 +131,7 @@ library GracefulDegradation {
         address stablecoin; // Stablecoin address.
         bool isWhitelisted; // Whether whitelisted.
         bool enableDepegDetection; // Whether to detect depeg.
-        uint256 expectedPrice; // Expected price (oracle precision, protocol uses USD-8).
+        uint256 expectedPrice; // Expected price in the asset's valuation unit. Zero means derive 1.0 from assetDecimals.
         uint256 tolerance; // Tolerance (bps).
         uint256 assetDecimals; // Token decimals used for fallback valuation.
     }
@@ -331,9 +331,10 @@ library GracefulDegradation {
 
         // Validate price reasonableness (dynamic rules).
         if (
-            !validatePriceReasonableness(
+            !_validatePriceReasonablenessForDecimals(
                 price,
                 assetAddr,
+                assetDecimals,
                 config.priceValidation,
                 cacheStorage
             )
@@ -359,7 +360,10 @@ library GracefulDegradation {
             if (
                 !validateStablecoinPrice(
                     price,
-                    matchedStablecoinConfig.expectedPrice,
+                    _resolveStablecoinExpectedPrice(
+                        matchedStablecoinConfig,
+                        assetDecimals
+                    ),
                     matchedStablecoinConfig.tolerance
                 )
             ) {
@@ -506,7 +510,11 @@ library GracefulDegradation {
                 : 0;
 
             // Validate price reasonableness (simple check; no cache).
-            if (price > config.priceValidation.maxReasonablePrice) {
+            uint256 maxReasonablePrice = _normalizeLegacyPriceReference(
+                config.priceValidation.maxReasonablePrice,
+                assetDecimals
+            );
+            if (maxReasonablePrice > 0 && price > maxReasonablePrice) {
                 return
                     _applyFallbackStrategy(
                         priceOracleAddr,
@@ -528,7 +536,10 @@ library GracefulDegradation {
                 if (
                     !validateStablecoinPrice(
                         price,
-                        matchedStablecoinConfig.expectedPrice,
+                        _resolveStablecoinExpectedPrice(
+                            matchedStablecoinConfig,
+                            assetDecimals
+                        ),
                         matchedStablecoinConfig.tolerance
                     )
                 ) {
@@ -615,9 +626,10 @@ library GracefulDegradation {
                 return (false, "Zero price returned");
             }
             if (
-                !validatePriceReasonableness(
+                !_validatePriceReasonablenessForDecimals(
                     price,
                     assetAddr,
+                    assetDecimals,
                     config,
                     cacheStorage
                 )
@@ -626,6 +638,21 @@ library GracefulDegradation {
             }
             if (!validateDecimals(assetDecimals)) {
                 return (false, "Invalid decimals");
+            }
+            if (
+                !_validatePriceReasonablenessForDecimals(
+                    price,
+                    assetAddr,
+                    assetDecimals,
+                    createPriceValidationConfig(
+                        DEFAULT_MAX_PRICE_MULTIPLIER,
+                        DEFAULT_MIN_PRICE_MULTIPLIER,
+                        DEFAULT_MAX_REASONABLE_PRICE
+                    ),
+                    cacheStorage
+                )
+            ) {
+                return (false, "Unreasonable price");
             }
             return (true, "Healthy");
         } catch Error(string memory reason) {
@@ -902,6 +929,47 @@ library GracefulDegradation {
         return true;
     }
 
+    function _validatePriceReasonablenessForDecimals(
+        uint256 currentPriceValue,
+        address assetAddr,
+        uint256 assetDecimals,
+        PriceValidationConfig memory config,
+        CacheStorage storage cacheStorage
+    ) internal view returns (bool isValid) {
+        if (currentPriceValue == 0) {
+            return false;
+        }
+
+        uint256 maxReasonablePrice = _normalizeLegacyPriceReference(
+            config.maxReasonablePrice,
+            assetDecimals
+        );
+        if (maxReasonablePrice > 0 && currentPriceValue > maxReasonablePrice) {
+            return false;
+        }
+
+        if (config.enableHistoricalValidation) {
+            uint256 historicalPrice = getHistoricalPrice(
+                assetAddr,
+                cacheStorage
+            );
+            if (historicalPrice > 0) {
+                uint256 maxPrice = (historicalPrice *
+                    config.maxPriceMultiplier) / BASIS_POINT_DIVISOR;
+                uint256 minPrice = (historicalPrice *
+                    config.minPriceMultiplier) / BASIS_POINT_DIVISOR;
+
+                if (
+                    currentPriceValue < minPrice || currentPriceValue > maxPrice
+                ) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     /**
      * @notice Safely compute asset value.
      * @dev Reverts if:
@@ -1091,9 +1159,21 @@ library GracefulDegradation {
                 }
 
                 if (validateDecimals(stablecoinDecimals)) {
+                    uint256 expectedPrice = _resolveStablecoinExpectedPrice(
+                        matchedStablecoinConfig,
+                        stablecoinDecimals
+                    );
+                    if (expectedPrice == 0) {
+                        return
+                            _buildConservativeFallback(
+                                amountValue,
+                                reason,
+                                config.conservativeRatio
+                            );
+                    }
                     uint256 stablecoinValue = calculateAssetValue(
                         amountValue,
-                        matchedStablecoinConfig.expectedPrice,
+                        expectedPrice,
                         stablecoinDecimals
                     );
                     return _buildFallbackResult(stablecoinValue, reason);
@@ -1172,6 +1252,60 @@ library GracefulDegradation {
         }
     }
 
+    function _resolveStablecoinExpectedPrice(
+        StablecoinConfig memory config,
+        uint256 assetDecimals
+    ) internal pure returns (uint256 expectedPrice) {
+        if (config.expectedPrice > 0) {
+            return config.expectedPrice;
+        }
+
+        uint256 resolvedDecimals = config.assetDecimals > 0
+            ? config.assetDecimals
+            : assetDecimals;
+        if (!validateDecimals(resolvedDecimals)) {
+            return 0;
+        }
+
+        return safePow(10, resolvedDecimals);
+    }
+
+    function _normalizeLegacyPriceReference(
+        uint256 referencePrice,
+        uint256 assetDecimals
+    ) internal pure returns (uint256 normalizedPrice) {
+        if (referencePrice == 0) {
+            return 0;
+        }
+        if (!validateDecimals(assetDecimals)) {
+            return 0;
+        }
+        if (assetDecimals == LEGACY_PRICE_REFERENCE_DECIMALS) {
+            return referencePrice;
+        }
+        if (assetDecimals > LEGACY_PRICE_REFERENCE_DECIMALS) {
+            return
+                Math.mulDiv(
+                    referencePrice,
+                    safePow(
+                        10,
+                        assetDecimals - LEGACY_PRICE_REFERENCE_DECIMALS
+                    ),
+                    1
+                );
+        }
+
+        return
+            Math.mulDiv(
+                referencePrice,
+                1,
+                safePow(
+                    10,
+                    LEGACY_PRICE_REFERENCE_DECIMALS - assetDecimals
+                )
+            );
+    }
+
     /**
      * @notice Create default degradation config (legacy).
      * @dev Reverts if:
@@ -1209,7 +1343,7 @@ library GracefulDegradation {
 
         // Default stablecoin config.
         config.stablecoinConfig.stablecoin = settlementTokenAddr;
-        config.stablecoinConfig.expectedPrice = ONE_USD; // 1 USD.
+        config.stablecoinConfig.expectedPrice = 0; // Derive 1.0 from assetDecimals at valuation time.
         config.stablecoinConfig.tolerance = STABLECOIN_TOLERANCE;
         config.stablecoinConfig.isWhitelisted = true;
         config.stablecoinConfig.enableDepegDetection = false;

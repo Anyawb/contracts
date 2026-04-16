@@ -4,7 +4,7 @@ import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 
 const { ethers, upgrades } = hardhat;
 
-describe("USD-8 rounding bias with many 18-decimal valuations", function () {
+describe("value rounding bias with many 18-decimal valuations", function () {
   const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes("ACCESS_CONTROL_MANAGER"));
   const KEY_LOAN_FLOW_VIEW = ethers.keccak256(ethers.toUtf8Bytes("LOAN_FLOW_VIEW"));
   const KEY_LOAN_FLOW_PUSH_MANAGER = ethers.keccak256(ethers.toUtf8Bytes("LOAN_FLOW_PUSH_MANAGER"));

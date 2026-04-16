@@ -151,7 +151,7 @@ describe("Registry Gas Optimization", function () {
         it("Should handle large batch operations efficiently", async function () {
             // Deploy mock contracts
             const MockContract = await ethers.getContractFactory("MockSimpleContract");
-            const mocks = [];
+            const mocks: Contract[] = [];
             for (let i = 0; i < 10; i++) {
                 const mock = await MockContract.deploy();
                 await mock.waitForDeployment();
@@ -159,8 +159,8 @@ describe("Registry Gas Optimization", function () {
             }
 
             // Create a larger batch (but within limits)
-            const keys = [];
-            const addresses = [];
+            const keys: string[] = [];
+            const addresses: string[] = [];
             
             for (let i = 0; i < 10; i++) {
                 keys.push(ethers.keccak256(ethers.toUtf8Bytes(`LARGE_TEST_${i}`)));

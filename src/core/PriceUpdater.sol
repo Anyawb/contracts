@@ -18,6 +18,7 @@ import {
 } from "../errors/StandardErrors.sol";
 import {DataPushLibrary} from "../libraries/DataPushLibrary.sol";
 import {DataPushTypes} from "../constants/DataPushTypes.sol";
+import {AssetDecimalMath} from "../libraries/AssetDecimalMath.sol";
 
 /// @dev Minimal monitor interface for onPriceUpdate notifications.
 interface IPriceUpdateMonitor {
@@ -50,8 +51,8 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /// @notice Max price deviation (bps).
     uint256 private constant _MAX_PRICE_DEVIATION = 1000; // 10%
 
-    /// @notice Max reasonable price (8 decimals).
-    uint256 private constant _MAX_REASONABLE_PRICE = 1e12;
+    /// @notice Legacy 8-decimal price cap reference, normalized to each asset's decimals before validation.
+    uint256 private constant _MAX_REASONABLE_PRICE_REFERENCE_8 = 1e12;
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
@@ -63,7 +64,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
 
     /// @notice Asset -> token decimals mapping (SSOT for valuation scaling).
     /// @dev Must match the ERC20 token's `decimals()` for correct value computation:
-    ///      valueUSD8 = amount(token base units) * priceUSD8 / 10**assetDecimals
+    ///      value(assetDecimals) = amount(token base units) * price(assetDecimals) / 10**assetDecimals
     mapping(address => uint8) private _assetDecimals;
 
     /// @notice Supported asset list (legacy; no longer maintained).
@@ -126,7 +127,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /// @dev Emitted by normal or emergency update flows.
     /// @param asset Asset address.
     /// @param sourceId Offchain source ID.
-    /// @param price Price (8 decimals).
+    /// @param price Price in the asset's valuation unit.
     /// @param blockNumber Price blockNumber (blocks).
     event PriceUpdated(
         address indexed asset,
@@ -168,7 +169,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /// @notice Emitted when price validation fails.
     /// @dev Emitted without reverting; update is skipped.
     /// @param asset Asset address.
-    /// @param price Price (8 decimals).
+    /// @param price Price in the asset's valuation unit.
     /// @param reasonCode Failure reason code.
     event PriceValidationFailed(
         address indexed asset,
@@ -293,7 +294,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
      * - Best-effort update: Registry/Oracle failures are caught; falls back to local update
      *
      * @param asset Asset address
-     * @param price Price (8 decimals)
+    * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      */
     function updateAssetPrice(
@@ -347,7 +348,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
      * - Best-effort update: Registry/Oracle failures are caught; falls back to local update
      *
      * @param assets Asset address list
-     * @param prices Price list (8 decimals)
+    * @param prices Price list in each asset's valuation unit
      * @param blockNumbers BlockNumber list (blocks)
      */
     function updateAssetPrices(
@@ -742,7 +743,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Validates whether a price is within bounds.
      * @param asset Asset address
-     * @param price Price (8 decimals)
+    * @param price Price in the asset's valuation unit
      * @return isValid True if the price is valid
      */
     function _validatePrice(
@@ -751,7 +752,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     ) internal view returns (bool isValid) {
         if (price == 0) return false;
 
-        if (price > _MAX_REASONABLE_PRICE) return false;
+        if (price > _maxReasonablePriceForAsset(asset)) return false;
 
         uint256 lastPrice = _lastValidPrice[asset];
         if (lastPrice == 0) return true; // First update
@@ -786,7 +787,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Normal price update flow (internal).
      * @param asset Asset address
-     * @param price Price (8 decimals)
+    * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      */
@@ -862,7 +863,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Emergency price update flow (when Registry/Oracle is unavailable).
      * @param asset Asset address
-     * @param price Price (8 decimals)
+    * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      */
@@ -907,7 +908,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Price update flow with fallback to emergency update.
      * @param asset Asset address
-     * @param price Price (8 decimals)
+    * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      */
@@ -917,7 +918,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
         uint256 blockNumber,
         string memory sourceId
     ) internal {
-        if (price > _MAX_REASONABLE_PRICE) {
+        if (price > _maxReasonablePriceForAsset(asset)) {
             emit PriceValidationFailed(asset, price, _REASON_EXCEEDS_MAX_VALUE);
             DataPushLibrary._emitData(
                 DataPushTypes.DATA_TYPE_PRICE_VALIDATION_FAILED,
@@ -967,7 +968,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Batch price update flow with fallback to emergency update.
      * @param assets Asset address list
-     * @param prices Price list (8 decimals)
+    * @param prices Price list in each asset's valuation unit
      * @param blockNumbers BlockNumber list (blocks)
      */
     function _batchUpdatePriceWithFallback(
@@ -1004,7 +1005,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
             string memory sourceId = _assetToSourceId[asset];
             if (bytes(sourceId).length == 0) continue;
 
-            if (price > _MAX_REASONABLE_PRICE) {
+            if (price > _maxReasonablePriceForAsset(asset)) {
                 emit PriceValidationFailed(
                     asset,
                     price,
@@ -1046,7 +1047,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
      * @notice Normal update for a single asset.
      * @param priceOracleAddr PriceOracle address
      * @param asset Asset address
-     * @param price Price (8 decimals)
+    * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      * @return success True if update succeeded
@@ -1128,10 +1129,26 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
         }
     }
 
+    function _maxReasonablePriceForAsset(
+        address asset
+    ) internal view returns (uint256 maxReasonablePrice) {
+        uint8 decimals = _assetDecimals[asset];
+        if (decimals == 0 || decimals > 77) {
+            return _MAX_REASONABLE_PRICE_REFERENCE_8;
+        }
+
+        return
+            AssetDecimalMath.rescaleDown(
+                _MAX_REASONABLE_PRICE_REFERENCE_8,
+                8,
+                decimals
+            );
+    }
+
     /**
      * @notice Emergency update for a single asset.
      * @param asset Asset address
-     * @param price Price (8 decimals)
+    * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      */
@@ -1172,7 +1189,6 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
 
     /// @notice Viewer/admin check was removed; use View modules instead.
     /// @param user User address
-    /// @dev Kept as a comment for historical context.
     // Removed _requireViewerOrAdmin to reduce size; viewers should use View modules
 
     /*━━━━━━━━━━━━━━━ Internal Helpers ━━━━━━━━━━━━━━━*/

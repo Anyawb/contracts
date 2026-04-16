@@ -1,0 +1,1 @@
+import "./sync-and-verify-arbitrum-sepolia";

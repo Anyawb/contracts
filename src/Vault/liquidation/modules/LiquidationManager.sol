@@ -90,6 +90,8 @@ contract LiquidationManager is
     /// @dev Reverts when a SettlementManager-only entrypoint is called by any other address.
     ///      Used by settlement-manager compatibility paths.
     error LiquidationManager__OnlySettlementManager();
+    /// @dev Reverts when liquidator/caller attempts to liquidate the same borrower address.
+    error LiquidationManager__BorrowerCannotSelfLiquidate();
     /// @dev Reverts when a UUPS upgrade target has no deployed code. Used by {_authorizeUpgrade}.
     error LiquidationManager__InvalidImplementation();
 
@@ -155,7 +157,8 @@ contract LiquidationManager is
      * @param debtAsset Address of the debt token
      * @param collateralAmount Amount of collateral to seize (token decimals)
      * @param debtAmount Amount of debt to reduce (token decimals)
-     * @param bonus Liquidation bonus (for View/off-chain display, does not affect ledger)
+    * @param bonus Liquidation bonus for reporting only. Writers currently treat this as a token-native
+    *        collateral-side amount hint, not as a normalized value-unit field, and it does not affect ledger writes.
      */
     function liquidate(
         address targetUser,
@@ -175,6 +178,7 @@ contract LiquidationManager is
         if (collateralAmount == 0 || debtAmount == 0) revert AmountIsZero();
 
         _requireLiquidationCaller(msg.sender);
+        _requireNotSelfLiquidation(msg.sender, targetUser);
 
         address cm = Registry(_registryAddr).getModuleOrRevert(
             ModuleKeys.KEY_CM
@@ -269,6 +273,7 @@ contract LiquidationManager is
             debtAsset == address(0)
         ) revert ZeroAddress();
         if (collateralAmount == 0 || debtAmount == 0) revert AmountIsZero();
+        _requireNotSelfLiquidation(liquidator, targetUser);
 
         address cm = Registry(_registryAddr).getModuleOrRevert(
             ModuleKeys.KEY_CM
@@ -347,7 +352,8 @@ contract LiquidationManager is
      * @param debtAssets Array of debt token addresses (one per liquidation)
      * @param collateralAmounts Array of collateral amounts to seize (token decimals)
      * @param debtAmounts Array of debt amounts to reduce (token decimals)
-     * @param bonuses Array of liquidation bonuses (for View/off-chain display, does not affect ledger)
+    * @param bonuses Array of liquidation bonus reporting values. These entries are forwarded to the view/data-push
+    *        layer as writer-defined reporting fields and do not affect ledger writes.
      */
     function batchLiquidate(
         address[] calldata targetUsers,
@@ -401,6 +407,7 @@ contract LiquidationManager is
                 revert ZeroAddress();
             }
             if (cAmt == 0 || dAmt == 0) revert AmountIsZero();
+            _requireNotSelfLiquidation(msg.sender, u);
 
             _distributeCollateral(cm, payout, u, cAsset, cAmt, msg.sender);
             ILendingEngineDebtWrite(le).forceReduceDebt(u, dAsset, dAmt);
@@ -518,6 +525,17 @@ contract LiquidationManager is
         _requireRole(ActionKeys.ACTION_LIQUIDATE, caller);
     }
 
+    /// @notice Prevent borrower self-liquidation even on explicit executor entrypoints.
+    /// @dev Reverts when `liquidator` equals `targetUser`.
+    function _requireNotSelfLiquidation(
+        address liquidator,
+        address targetUser
+    ) internal pure {
+        if (liquidator == targetUser) {
+            revert LiquidationManager__BorrowerCannotSelfLiquidate();
+        }
+    }
+
     /**
      * @notice Best-effort single liquidation View push.
      * @dev Reverts if:
@@ -532,7 +550,7 @@ contract LiquidationManager is
      * @param collateralAmount Collateral seized (token decimals)
      * @param debtAmount Debt reduced (token decimals)
      * @param liquidator Liquidator address
-     * @param bonus Liquidation bonus (display only)
+    * @param bonus Liquidation bonus reporting field only; forwarded unchanged to LiquidatorView/DataPush.
      * @param payout LiquidationPayoutManager address (for share calculation)
      */
     function _pushSingle(
@@ -668,7 +686,7 @@ contract LiquidationManager is
      * @param collateralAmounts Collateral seized (token decimals)
      * @param debtAmounts Debt reduced (token decimals)
      * @param liquidator Liquidator address
-     * @param bonuses Liquidation bonuses (display only)
+    * @param bonuses Liquidation bonus reporting values only; forwarded unchanged to LiquidatorView/DataPush.
      * @param payout LiquidationPayoutManager address (for share calculation)
      */
     function _pushBatch(

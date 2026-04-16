@@ -48,8 +48,6 @@ async function main() {
   }
 
   const ACTION_LIQUIDATE = key("LIQUIDATE");
-  const ACTION_REPAY = key("REPAY");
-  const ACTION_VIEW_SYSTEM_DATA = key("VIEW_SYSTEM_DATA");
   const ACTION_VIEW_USER_DATA = key("VIEW_USER_DATA");
   const ACTION_VIEW_RISK_DATA = key("VIEW_RISK_DATA");
   const ACTION_VIEW_PUSH = key("ACTION_VIEW_PUSH");
@@ -61,19 +59,19 @@ async function main() {
   const ACTION_ADD_WHITELIST = key("ADD_WHITELIST");
   const ACTION_UPDATE_PRICE = key("UPDATE_PRICE");
   const ACTION_SET_PARAMETER = key("SET_PARAMETER");
+  const ACTION_REWARD_CONFIG_EMERGENCY = key("ACTION_REWARD_CONFIG_EMERGENCY");
 
   const grants: Array<{ role: string; who: string; label: string }> = [
     { role: ACTION_ADD_WHITELIST, who: deployer.address, label: "deployer ACTION_ADD_WHITELIST" },
     { role: ACTION_UPDATE_PRICE, who: deployer.address, label: "deployer ACTION_UPDATE_PRICE" },
     { role: ACTION_SET_PARAMETER, who: deployer.address, label: "deployer ACTION_SET_PARAMETER" },
+    { role: ACTION_REWARD_CONFIG_EMERGENCY, who: deployer.address, label: "deployer ACTION_REWARD_CONFIG_EMERGENCY" },
     { role: ACTION_ORDER_CREATE, who: vaultBusinessLogicAddr, label: "VaultBusinessLogic ACTION_ORDER_CREATE" },
     { role: ACTION_DEPOSIT, who: vaultBusinessLogicAddr, label: "VaultBusinessLogic ACTION_DEPOSIT" },
     { role: ACTION_BORROW, who: orderEngineAddr, label: "OrderEngine ACTION_BORROW (LoanNFT minter)" },
     { role: ACTION_LIQUIDATE, who: keeper.address, label: "keeper ACTION_LIQUIDATE" },
     { role: ACTION_DEPOSIT, who: liquidationManagerAddr, label: "LiquidationManager ACTION_DEPOSIT" },
     { role: ACTION_DEPOSIT, who: guaranteeFundManagerAddr, label: "GuaranteeFundManager ACTION_DEPOSIT" },
-    { role: ACTION_REPAY, who: settlementManagerAddr, label: "settlementManager ACTION_REPAY" },
-    { role: ACTION_VIEW_SYSTEM_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_SYSTEM_DATA" },
     { role: ACTION_VIEW_USER_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_USER_DATA" },
     { role: ACTION_VIEW_RISK_DATA, who: settlementManagerAddr, label: "settlementManager ACTION_VIEW_RISK_DATA" },
     { role: ACTION_VIEW_PUSH, who: vaultLendingEngineAddr, label: "VaultLendingEngine ACTION_VIEW_PUSH" },

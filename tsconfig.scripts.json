@@ -3,7 +3,6 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "CommonJS",
-    "moduleResolution": "node",
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "allowImportingTsExtensions": true,
@@ -14,7 +13,6 @@
     "strict": true,
     "skipLibCheck": true,
     "noImplicitAny": false,
-    "downlevelIteration": true,
     "typeRoots": [
       "./node_modules/@types",
       "./node_modules"

@@ -10,7 +10,7 @@ pragma solidity ^0.8.20;
  *
  * Security:
  * - This interface is the SSOT for guarantee structs, events, and lifecycle hooks consumed by offchain systems.
- * - Timing fields in this subsystem are block-based despite legacy field names containing `Time` or `Days`.
+ * - Timing fields in this subsystem are block-based (`block.number` axis).
  */
 interface IEarlyRepaymentGuaranteeManager {
     /*━━━━━━━━━━━━━━━ Structs ━━━━━━━━━━━━━━━*/
@@ -20,11 +20,11 @@ interface IEarlyRepaymentGuaranteeManager {
         uint256 principal;
         /// @notice Promised interest amount locked as guarantee (asset units).
         uint256 promisedInterest;
-        /// @dev Legacy field name. Semantics in this repo: startBlock (block.number), NOT unix time.
+        /// @dev Start block (`block.number` axis), not unix time.
         uint256 startTime;
-        /// @dev Legacy field name. Semantics in this repo: maturityBlock (block.number), NOT unix time.
+        /// @dev Maturity block (`block.number` axis), not unix time.
         uint256 maturityTime;
-        /// @dev Legacy field name. Semantics in this repo: penaltyBlocks (block.number axis), NOT days.
+        /// @dev Penalty blocks (`block.number` axis), not day-based wall-clock units.
         uint256 earlyRepayPenaltyDays;
         /// @notice Whether the guarantee is active.
         bool isActive;
@@ -206,7 +206,7 @@ interface IEarlyRepaymentGuaranteeManager {
     /**
      * @notice Settle early repayment for (borrower, asset) by distributing the guarantee.
      * @dev Reverts if:
-     *      - caller is not SettlementManager (or VaultCore for legacy flows) resolved via Registry
+        *      - caller is not SettlementManager resolved via Registry
      *        (EarlyRepaymentGuaranteeManager__OnlySettlementManager)
      *      - registry reference is zero or not a contract (ZeroAddress / NotAContract)
      *      - borrower/asset is zero (ZeroAddress)
@@ -218,7 +218,7 @@ interface IEarlyRepaymentGuaranteeManager {
      *      - GuaranteeFundManager settlement reverts (ExternalModuleRevertedRaw)
      *
      * Security:
-     * - onlySettlementManager (Registry-resolved; VaultCore allowed for legacy tests)
+    * - onlySettlementManager (Registry-resolved)
      * - nonReentrant
      * - CEI: record state is updated before external settlement call
      *
@@ -236,7 +236,7 @@ interface IEarlyRepaymentGuaranteeManager {
     /**
      * @notice Process default for (borrower, asset) by forfeiting the full guarantee to the lender.
      * @dev Reverts if:
-     *      - caller is not SettlementManager (or VaultCore for legacy flows) resolved via Registry
+        *      - caller is not SettlementManager resolved via Registry
      *        (EarlyRepaymentGuaranteeManager__OnlySettlementManager)
      *      - registry reference is zero or not a contract (ZeroAddress / NotAContract)
      *      - borrower/asset is zero (ZeroAddress)
@@ -247,7 +247,7 @@ interface IEarlyRepaymentGuaranteeManager {
      *      - GuaranteeFundManager forfeiture reverts (ExternalModuleRevertedRaw)
      *
      * Security:
-     * - onlySettlementManager (Registry-resolved; VaultCore allowed for legacy tests)
+    * - onlySettlementManager (Registry-resolved)
      * - nonReentrant
      * - CEI: record state is updated before external forfeiture call
      *

@@ -17,19 +17,6 @@ import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 import { ethers, upgrades } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
-import type {
-  MockAccessControlManager,
-  MockCollateralManager,
-  MockLendingEngineBasic,
-  MockPriceOracle,
-  MockRegistry,
-  MockVaultCoreView,
-  PositionView,
-  VaultRouter,
-} from '../../types';
-
-import type { CacheMaintenanceManager } from '../../types';
-
 const ModuleKeys = {
   KEY_CM: ethers.keccak256(ethers.toUtf8Bytes('COLLATERAL_MANAGER')),
   KEY_LE: ethers.keccak256(ethers.toUtf8Bytes('LENDING_ENGINE')),
@@ -54,19 +41,19 @@ describe('VaultRouter – strict (slim) behavior', function () {
     const [owner, user, maint] = await ethers.getSigners();
 
     const RegistryF = await ethers.getContractFactory('MockRegistry');
-    const registry = (await RegistryF.deploy()) as MockRegistry;
+    const registry = (await RegistryF.deploy()) as any;
 
     const ACMF = await ethers.getContractFactory('MockAccessControlManager');
-    const acm = (await ACMF.deploy()) as MockAccessControlManager;
+    const acm = (await ACMF.deploy()) as any;
 
     const CMF = await ethers.getContractFactory('MockCollateralManager');
-    const cm = (await CMF.deploy()) as MockCollateralManager;
+    const cm = (await CMF.deploy()) as any;
 
     const LEF = await ethers.getContractFactory('MockLendingEngineBasic');
-    const le = (await LEF.deploy()) as MockLendingEngineBasic;
+    const le = (await LEF.deploy()) as any;
 
     const PriceOracleF = await ethers.getContractFactory('MockPriceOracle');
-    const po = (await PriceOracleF.deploy()) as MockPriceOracle;
+    const po = (await PriceOracleF.deploy()) as any;
 
     const AssetWhitelistF = await ethers.getContractFactory('MockAssetWhitelist');
     const aw = await AssetWhitelistF.deploy();
@@ -79,22 +66,22 @@ describe('VaultRouter – strict (slim) behavior', function () {
       VaultRouterF,
       [await registry.getAddress(), await aw.getAddress(), await po.getAddress(), await settlementToken.getAddress(), owner.address],
       { kind: 'uups', initializer: 'initialize' }
-    )) as VaultRouter;
+    )) as any;
 
     // Deploy CacheMaintenanceManager (A-class cache SSOT entrypoint)
     const CacheMaintF = await ethers.getContractFactory('CacheMaintenanceManager');
-    const cacheMaint = (await CacheMaintF.deploy(await registry.getAddress())) as CacheMaintenanceManager;
+    const cacheMaint = (await CacheMaintF.deploy(await registry.getAddress())) as any;
     await cacheMaint.waitForDeployment();
 
     const PositionViewF = await ethers.getContractFactory('PositionView');
     const positionView = (await upgrades.deployProxy(PositionViewF, [await registry.getAddress()], {
       kind: 'uups',
       initializer: 'initialize',
-    })) as PositionView;
+    })) as any;
 
     // VaultCore mock: satisfies VaultRouter.onlyVaultCore and provides viewContractAddrVar for PositionView business allowlist.
     const VaultCoreViewF = await ethers.getContractFactory('MockVaultCoreView');
-    const vaultCoreModule = (await VaultCoreViewF.deploy()) as MockVaultCoreView;
+    const vaultCoreModule = (await VaultCoreViewF.deploy()) as any;
     await vaultCoreModule.setViewContractAddr(await vaultRouter.getAddress());
     await vaultCoreModule.setLendingEngine(await le.getAddress());
 
@@ -204,7 +191,7 @@ describe('VaultRouter – strict (slim) behavior', function () {
 
       // Swap CollateralManager module to a new contract (simulates module upgrade/replace).
       const CMF = await ethers.getContractFactory('MockCollateralManager');
-      const cm2 = (await CMF.deploy()) as MockCollateralManager;
+      const cm2 = (await CMF.deploy()) as any;
       await cm2.waitForDeployment();
       await registry.setModule(ModuleKeys.KEY_CM, await cm2.getAddress());
 

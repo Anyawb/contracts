@@ -7,8 +7,8 @@ import {
   ensureFundsFlowPrices,
   ensureTokenAllowance,
   fundFundsFlowActors,
-} from "../tests/live-test/_fundsFlowLive";
-import { explainRevert, key } from "../tests/live-test/_mockLiveUtils";
+} from "../tests/live-test/networks/arbitrum-sepolia/core/_fundsFlowLive";
+import { explainRevert, key } from "../tests/live-test/networks/arbitrum-sepolia/core/_mockLiveUtils";
 
 const BORROW_INTENT_BLOCKS_TYPES = {
   BorrowIntentBlocks: [
@@ -73,7 +73,7 @@ async function main() {
   )) as any;
   const blocksOnlyView = (await ethers.getContractAt(
     [
-      "function getBlocksOnlyOrder(uint256 orderId) view returns ((uint256 orderId,uint256 principal,uint256 repaidPrincipal,uint256 rateBps,uint256 termBlocks,address borrower,address lender,address asset,uint256 startBlock,uint256 maturityBlock,uint256 closeBlock,uint8 status,uint256 remainingDebt,bool isMatured,bool isClosed,bool canSettleOrLiquidate))",
+      "function getBlocksOnlyOrder(uint256 orderId) view returns ((uint256 orderId,uint256 principal,uint256 repaidPrincipal,uint256 rateBps,uint256 termBlocks,address borrower,address lender,address asset,uint256 startBlock,uint256 maturityBlock,uint256 closeBlock,uint8 status,uint256 remainingDebt,bool isMatured,bool isClosed,bool canSettleOrLiquidate,bool canCloseTrade))",
       "function getBorrowerOrderCount(address borrower) view returns (uint256,bool,uint256)",
       "function getBorrowerOrderIdsPaginated(address borrower,uint256 offset,uint256 limit) view returns (uint256[] memory,uint256,bool,uint256)",
     ],
@@ -152,7 +152,7 @@ async function main() {
   console.log(`runtime.principal=${BigInt(runtime.principal).toString()} repaidPrincipal=${BigInt(runtime.repaidPrincipal).toString()}`);
   console.log(`runtime.status=${BigInt(runtime.status).toString()}`);
   console.log(`runtime.remainingDebt=${BigInt(runtime.remainingDebt).toString()}`);
-  console.log(`runtime.isMatured=${String(runtime.isMatured)} isClosed=${String(runtime.isClosed)} canSettleOrLiquidate=${String(runtime.canSettleOrLiquidate)}`);
+  console.log(`runtime.isMatured=${String(runtime.isMatured)} isClosed=${String(runtime.isClosed)} canSettleOrLiquidate=${String(runtime.canSettleOrLiquidate)} canCloseTrade=${String(runtime.canCloseTrade)}`);
   console.log(`borrowerOrderCount=${borrowerOrderCount.toString()} valid=${String(borrowerOrderCountValid)} idsTotal=${borrowerOrderIdsTotal.toString()} idsValid=${String(borrowerOrderIdsValid)} ids=${borrowerOrderIds.map((id) => id.toString()).join(",")}`);
   console.log(`borrowerBalance=${borrowerBalance.toString()}`);
   console.log(`allowance=${allowance.toString()}`);

@@ -1,8 +1,8 @@
 import { ethers, network } from "hardhat";
 
 import { envBool, envStr } from "../tests/_addressResolver";
-import { createFundsFlowLiveContext, getGuaranteeState } from "../tests/live-test/_fundsFlowLive";
-import { explainRevert } from "../tests/live-test/_mockLiveUtils";
+import { createFundsFlowLiveContext, getGuaranteeState } from "../tests/live-test/networks/arbitrum-sepolia/core/_fundsFlowLive";
+import { explainRevert } from "../tests/live-test/networks/arbitrum-sepolia/core/_mockLiveUtils";
 
 const RESOLVE_ERROR_INTERFACE = new ethers.Interface([
   "error SettlementManager__InvalidOrderId()",
@@ -26,6 +26,7 @@ type CandidateOrder = {
   lender: string;
   asset: string;
   maturity: bigint;
+  orderStatus: bigint;
   repaidAmount: bigint;
 };
 
@@ -88,6 +89,7 @@ async function main() {
   const orderEngine = (await ethers.getContractAt(
     [
       "function getLoanOrderForView(uint256 orderId) view returns ((uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startTimestamp,uint256 maturity,uint256 repaidAmount))",
+      "function getOrderStatusForView(uint256 orderId) view returns (uint8)",
       "function getUserLoanCountForView(address user) view returns (uint256)",
     ],
     orderEngineAddr,
@@ -152,6 +154,7 @@ async function main() {
         lender: String(raw.lender ?? raw[4]),
         asset: String(raw.asset ?? raw[5]),
         maturity: BigInt(raw.maturity ?? raw[7]),
+        orderStatus: BigInt(await orderEngine.getOrderStatusForView(index)),
         repaidAmount: BigInt(raw.repaidAmount ?? raw[8]),
       });
     } catch {
@@ -193,15 +196,15 @@ async function main() {
   console.log("\n[Candidate Orders]");
   for (const order of candidates) {
     console.log(
-      `- orderId=${order.orderId.toString()} asset=${short(order.asset)} principal=${order.principal.toString()} repaid=${order.repaidAmount.toString()} maturity=${order.maturity.toString()} overdue=${currentBlock > order.maturity} lender=${short(order.lender)}`,
+      `- orderId=${order.orderId.toString()} status=${order.orderStatus.toString()} asset=${short(order.asset)} principal=${order.principal.toString()} repaid=${order.repaidAmount.toString()} maturity=${order.maturity.toString()} overdue=${currentBlock > order.maturity} lender=${short(order.lender)}`,
     );
   }
 
   const chosenOrder = candidates.find((order) => {
     const assetMatches = order.asset.toLowerCase() === ctx.borrowAssetAddr.toLowerCase();
     const principalMatches = !guarantee.record || order.principal === guarantee.record.principal;
-    const outstanding = order.repaidAmount < ctx.totalDue;
-    return assetMatches && principalMatches && outstanding;
+    const activeOrder = order.orderStatus === 0n;
+    return assetMatches && principalMatches && activeOrder;
   });
 
   if (!chosenOrder) {

@@ -13,7 +13,7 @@ describe('SSOT – Reward order-based entry (signature/selector)', function () {
     const RewardManager = await ethers.getContractFactory('RewardManager');
 
     const expected = selectorFromSignature(REWARD_ON_LOAN_EVENT_BY_ORDER_FULL_SIGNATURE);
-    const fromAbi = RewardManager.interface.getFunction(REWARD_ON_LOAN_EVENT_BY_ORDER_FULL_SIGNATURE).selector;
+    const fromAbi = RewardManager.interface.getFunction(REWARD_ON_LOAN_EVENT_BY_ORDER_FULL_SIGNATURE)!.selector;
 
     expect(fromAbi).to.equal(expected);
   });

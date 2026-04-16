@@ -1,16 +1,16 @@
-# Smoke / Acceptance 脚本运行指南（默认按 Arbitrum 真链模式）
+# Smoke / Acceptance 脚本运行指南（按显式网络选择运行）
 
-本 README 列出准备与运行 smoke / acceptance 脚本所需的完整 CLI 步骤，并将“真实网络（如 Arbitrum）”的运行约束写成默认口径：
+本 README 列出准备与运行 smoke / acceptance 脚本所需的完整 CLI 步骤。示例会优先展示 Arbitrum 系命令，但当前口径不再把任何真实网络当成默认网络：
 
 - **默认 read-only（推荐）**：不写链、不依赖 Hardhat 本地 RPC（无 `evm_snapshot/impersonate/hardhat_mine`）
 - **地址解析 SSOT**：优先从 `deployments/addresses.<network>.json` 或环境变量 `REGISTRY_ADDRESS` 解析 Registry
 - **写入模式（可选，谨慎）**：仅在你明确需要“真链写入验收”时开启 `ENABLE_WRITE=1`（会消耗 gas 并改变链上状态）
 
-> 说明：部分脚本本质是 localhost 写入型（用于确定性回归/CI），它们在真实网络上会自动降级为只读校验并跳过写入步骤（确保“Arbitrum 模式”可运行）。
+> 说明：部分脚本本质是 localhost 写入型（用于确定性回归/CI），它们在真实网络上会自动降级为只读校验并跳过写入步骤；运行哪条真实网络线，应由你显式传入 `--network` 与对应地址/env。
 
 ---
 
-## Arbitrum 模式（默认推荐）
+## 显式网络模式（示例以 Arbitrum 为主）
 
 ### 文档边界
 
@@ -99,7 +99,7 @@ pnpm -s run test:smoke:multi-rwa-matrix:localhost
 说明：
 
 1. 未显式传 `MULTI_COLLATERAL_SYMBOLS` / `MULTI_RWA_SYMBOLS` 时，会自动遍历 mock asset pack 中全部 `rwa-token`
-2. 价格初始化优先使用 `bootstrapPriceUsd8`，并兼容旧 pack 的 `defaultPriceUsd8`
+2. 价格初始化统一使用 `bootstrapPriceValue`
 3. smoke 目标是校验 finalizeMatch / repay 的最小链路和基础 view，不替代 strict E2E
 
 ### 5. Arbitrum Sepolia live mock price mode
@@ -113,7 +113,7 @@ LIVE_PRICE_MODE=backend-required
 
 语义：
 
-1. `bootstrap`：borrow/collateral 若缺少链上最终价，允许脚本按 `bootstrapPriceUsd8` 自动补价
+1. `bootstrap`：borrow/collateral 若缺少链上最终价，允许脚本按 `bootstrapPriceValue` 自动补价
 2. `backend-required`：borrow/collateral 若缺少链上最终价则直接 fail，要求 backend 先发布成功
 3. `ALLOW_DIRECT_PRICE_ORACLE=1` 仍然只是 break-glass；正常路径仍是 `PriceUpdater.updateAssetPrice`
 4. precheck 会直接提示当前是 `[Warning] bootstrap 可自动补价` 还是 `[Blocker] backend-required 仍缺链上最终价`

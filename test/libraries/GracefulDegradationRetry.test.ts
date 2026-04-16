@@ -13,8 +13,6 @@ import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import type { TestGracefulDegradation } from '../../types/contracts/Mocks/TestGracefulDegradation';
-import type { MockPriceOracle } from '../../types/contracts/Mocks/MockPriceOracle';
 
 describe('GracefulDegradation – 重试机制测试', function () {
   // 测试常量
@@ -22,8 +20,8 @@ describe('GracefulDegradation – 重试机制测试', function () {
   const TEST_ASSET = '0x1234567890123456789012345678901234567890'; // 有效的测试地址
 
   // 合约实例
-  let gracefulDegradation: TestGracefulDegradation;
-  let mockPriceOracle: MockPriceOracle;
+  let gracefulDegradation: any;
+  let mockPriceOracle: any;
   let owner: SignerWithAddress;
   let user: SignerWithAddress;
 

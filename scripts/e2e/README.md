@@ -102,7 +102,7 @@ pnpm -s run e2e:multi-rwa-matrix:localhost
 说明：
 
 1. 未显式传 `MULTI_COLLATERAL_SYMBOLS` / `MULTI_RWA_SYMBOLS` 时，脚本会自动选取 mock asset pack 中全部 `rwa-token`
-2. 价格初始化现在统一读取 `bootstrapPriceUsd8`，兼容旧 pack 里的 `defaultPriceUsd8`
+2. 价格初始化现在统一读取 `bootstrapPriceValue`
 3. 脚本会为矩阵组合补足独立 borrower/lender signer，避免同一 debt asset 复用旧仓位污染断言
 4. 这个脚本仍然是 localhost 严格 E2E，不承担 live mock 的 backend publish 状态校验；后者请看 runbook 和 `scripts/tests/live-test/*`
 
@@ -359,22 +359,22 @@ live 模式会：
 
 ### 1) `StatisticsView` totals 量级异常（常见表现：~100x 缩小）
 
-**现象**：在执行大幅 `mineToBlock(...)` time-travel 后，`StatisticsView` 的 `totalCollateral/totalDebt`（脚本打印为 USD-8）可能突然变成诸如 `10` / `19.999...`，与期望 `1000` / `1999.999...` 相差约 100 倍。
+**现象**：在执行大幅 `mineToBlock(...)` time-travel 后，`StatisticsView` 的 `totalCollateral/totalDebt`（脚本打印为 value）可能突然变成诸如 `10` / `19.999...`，与期望 `1000` / `1999.999...` 相差约 100 倍。
 
-**根因**（高概率）：oracle 在 time-travel 后变 stale，估值路径触发 `GracefulDegradation` 的 fallback；fallback 返回的值往往是“资产 token decimals”的金额口径，被上层当作“USD-8”显示时就会出现数量级错配。
+**根因**（高概率）：oracle 在 time-travel 后变 stale，估值路径触发 `GracefulDegradation` 的 fallback；fallback 返回的值往往是“资产 token decimals”的金额口径，被上层当作“value”显示时就会出现数量级错配。
 
 **修复/规约**：任何脚本在做“绝对时间跳跃”（如直接跳到 maturity 附近或跨越多天区块）后，都要显式刷新该资产价格。
 
 - 推荐做法：在 jump 后追加一次 `PriceOracle.updatePrice(asset, priceUsd8, nowBlock)`。
 - 经验规则：
-  - 如果你的脚本依赖 `StatisticsPushManager` / `PositionView` / `VaultLendingEngine` 的估值（USD-8），那就必须确保 oracle 不会 stale。
+  - 如果你的脚本依赖 `StatisticsPushManager` / `PositionView` / `VaultLendingEngine` 的估值（value），那就必须确保 oracle 不会 stale。
   - fork/live 上一般会有 keeper 持续刷新价格，但 fork 环境依然可能因为测试脚本“跳得太远”而超过 `maxPriceAgeBlocks`，因此 fork E2E 仍需要覆盖并处理 stale 情况。
 
 **其他补救方式（建议做成产品级防线）**：
 
 - **后端/合约侧（系统策略）**
-  - 把“oracle stale”当作明确的系统状态：在关键 read path（例如估值、健康度、风险）返回结构中暴露 `isStale` / `priceAge` / `usedFallback` 之类的 meta（哪怕只是 view 层拼出来的 meta），让上层不会把 fallback 值当成正常 USD-8。
-  - 如果某些路径必须保证 USD-8 口径（例如 `StatisticsView` snapshot），可考虑在 push 前强制校验 `usedFallback==false`，否则：
+  - 把“oracle stale”当作明确的系统状态：在关键 read path（例如估值、健康度、风险）返回结构中暴露 `isStale` / `priceAge` / `usedFallback` 之类的 meta（哪怕只是 view 层拼出来的 meta），让上层不会把 fallback 值当成正常 value。
+  - 如果某些路径必须保证 value 口径（例如 `StatisticsView` snapshot），可考虑在 push 前强制校验 `usedFallback==false`，否则：
     - 要么 revert（更严格，但会影响链上可用性），
     - 要么 push 一个“stale 标记 + 上次可信值”（不改 totals，只改 meta）。
   - keeper 侧：对每个资产配置“最大允许 priceAge”，并在接近阈值时提前刷新，避免进入 fallback。
@@ -382,7 +382,7 @@ live 模式会：
 - **前端侧（展示与交互）**
   - 不要盲信 totals 的数值：
     - 如果检测到 `usedFallback/isStale`，UI 必须显示“价格过期/已降级”的显著提示，并避免把该值用于交易决策展示（例如可借额度/清算阈值）。
-    - 对用户资产/债务展示采用“数值 + 口径标签”（USD-8 vs token-decimals），并在降级时显式切换文案。
+    - 对用户资产/债务展示采用“数值 + 口径标签”（value vs token-decimals），并在降级时显式切换文案。
   - 对 `StatisticsView` 这种聚合指标，建议增加“数据更新时间/区块高度”显示，避免用户误解为实时。
 
 - **监控/告警（最有效的补救）**
@@ -458,7 +458,7 @@ live 模式会：
 **当前 SSOT 口径**：
 
 - `VaultLendingEngine.getUserTotalDebtValue(user)` 的对外语义必须视为 **fresh valuation read**。
-- 它应基于“当前用户债务资产集合 + 当前 oracle 价格语义”逐资产重算，并返回 **USD-8** 总债务价值。
+- 它应基于“当前用户债务资产集合 + 当前 oracle 价格语义”逐资产重算，并返回 **value** 总债务价值。
 - 调用方不得假定它只是某个内部缓存字段的直返；内部即使为了性能维护缓存，也不能把对外读接口降级成 stale mirror。
 
 **E2E/脚本侧规约**：
@@ -898,7 +898,7 @@ pnpm -s exec ts-node --project ./tsconfig.scripts.json scripts/e2e/tools/quantif
 
 - 覆盖场景：
   - **隐私读取**：RewardView 的用户数据仅允许 **本人** 或 **运营团队（VIEW_USER_DATA）** 读取
-  - **协议内读取**：`RewardView.getUserLevelForBorrowCheck` 仅允许 `ORDER_ENGINE` 调用（用于链上 borrow 门槛校验）
+  - **协议内读取**：`RewardManagerCore.getUserLevelForBorrowCheck` 仅允许 `ORDER_ENGINE` 调用（用于链上 borrow 门槛校验，canonical level）
   - **Read-Gate**：`RewardManagerCore.get*` 查询接口禁止 EOA 直连（必须通过 RewardView）
   - **Easy 语义**：按期还款发放；提前还款不发放；逾期还款触发惩罚（默认 `latePenaltyBps=500`）
 

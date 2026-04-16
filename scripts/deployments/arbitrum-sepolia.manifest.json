@@ -1,38 +1,302 @@
 {
-  "schemaVersion": "1.0.0",
-  "kind": "evm-deployment-manifest",
-  "status": "workspace-snapshot",
-  "environment": "arbitrum-sepolia",
-  "network": {
-    "name": "arbitrum-sepolia",
-    "chainId": 421614,
-    "rpcUrl": "https://sepolia-rollup.arbitrum.io/rpc",
-    "explorerUrl": "https://sepolia.arbiscan.io"
-  },
-  "release": {
-    "version": "workspace-snapshot-2026-03-25",
-    "generatedAt": "2026-03-25T00:00:00Z",
-    "commitHash": "a51626ecd4cbdefd2fd38e50647ebed2577ad3ff"
-  },
-  "authority": {
-    "addressesFile": "scripts/deployments/arbitrum-sepolia.json",
-    "frontendConfigFile": "frontend-config/contracts-arbitrum-sepolia.ts",
-    "eventsDoc": "docs/events.md",
-    "errorsDoc": "docs/errors.md"
-  },
-  "anchors": {
-    "Registry": "0xD42676Ef80391ab90ef8d8c85cd2F966c16d09D2",
-    "VaultCore": "0xcB7952E94BbbB88e96936fA0Ff1Ed46C1bE02843",
-    "SettlementManager": "0x32fa1570FCD2da84f6b56976600d6360DCb2Bc2d",
-    "PositionView": "0x4BB60108A66Dad339Eb6B355e0D621B7b5Fc1558",
-    "RewardView": "0xeCA904982fC5EAf99cDEfF3A35A9b02fe28574ab"
-  },
-  "validation": {
-    "frontendConfigAligned": false,
-    "notes": [
-      "Current repo authority source is scripts/deployments/arbitrum-sepolia.json.",
-      "frontend-config/contracts-arbitrum-sepolia.ts is currently not aligned with scripts/deployments/arbitrum-sepolia.json.",
-      "Before formal release, the frontend config, backend config, and indexer config must be regenerated from the same deployment output."
-    ]
+  "network": "arbitrum-sepolia",
+  "chainId": 421614,
+  "releaseId": "arbitrum-sepolia-20260414085107261",
+  "generatedAt": "2026-04-14T08:51:07.260Z",
+  "deployOutputFile": "scripts/deployments/arbitrum-sepolia.json",
+  "frontendConfigFile": "frontend-config/networks/arbitrum-sepolia.ts",
+  "frontendReleaseFile": "frontend-config/networks/arbitrum-sepolia.release.json",
+  "baselineFile": "scripts/deployments/arbitrum-sepolia.baseline.json",
+  "mockSuiteDeployFile": "scripts/deployments/arbitrum-sepolia.mock-suite.json",
+  "registry": "0xD42676Ef80391ab90ef8d8c85cd2F966c16d09D2",
+  "contracts": {
+    "Registry": {
+      "address": "0xD42676Ef80391ab90ef8d8c85cd2F966c16d09D2",
+      "registryKey": null
+    },
+    "RegistryDynamicModuleKey": {
+      "address": "0x16dFA5C762CCb22e08a76Ab48918415aE5Edb3D4",
+      "registryKey": "DYNAMIC_MODULE_REGISTRY"
+    },
+    "AccessControlManager": {
+      "address": "0x4E744E79122c7E00Ab6329cA9b33EEf7B2de4c81",
+      "registryKey": "ACCESS_CONTROL_MANAGER"
+    },
+    "AssetWhitelist": {
+      "address": "0x25Aeb7935cC327575E9cA700b3d039677058d4a5",
+      "registryKey": "ASSET_WHITELIST"
+    },
+    "WhitelistRegistry": {
+      "address": "0xE98a9276Ae1F510E5da2cBdD6972691E698EAbE0",
+      "registryKey": "WHITELIST_REGISTRY"
+    },
+    "AuthorityWhitelist": {
+      "address": "0x24a93d669576b68a4e6829a107184E434935664e",
+      "registryKey": "AUTHORITY_WHITELIST"
+    },
+    "PriceOracle": {
+      "address": "0x3cdD4F02d216F7F351d6A112c52334b99dbFb7a7",
+      "registryKey": "PRICE_ORACLE"
+    },
+    "PriceUpdater": {
+      "address": "0xe2fCE9fD881b8F83bBeD4EEf87CF884ceb3D208E",
+      "registryKey": "COINGECKO_PRICE_UPDATER"
+    },
+    "FeeRouter": {
+      "address": "0x158D16a19Fd94272C1f75f9091da710E80C24034",
+      "registryKey": "FEE_ROUTER"
+    },
+    "AICreditsVault": {
+      "address": "0x609aC151b2E4f609638b8793c0d108F6AE588ACd",
+      "registryKey": "AI_CREDITS_VAULT"
+    },
+    "RewardManagerCore": {
+      "address": "0xc90e5155Ea471bCae128948AA9F93188d1124319",
+      "registryKey": "REWARD_MANAGER_CORE"
+    },
+    "RewardAccrualManager": {
+      "address": "0x86C76b8afB0Fb2fd4fF35a3Dc52610024c2d4FD9",
+      "registryKey": "REWARD_ACCRUAL_MANAGER"
+    },
+    "RewardManager": {
+      "address": "0x9300A3e9E39d948E57DDCF4c11E2562B9E7050Ae",
+      "registryKey": "REWARD_MANAGER"
+    },
+    "RewardConfig": {
+      "address": "0xA75bE0BE5518d909a5136780ABA53ac6b0b7A495",
+      "registryKey": "REWARD_CONFIG"
+    },
+    "EarnConfig": {
+      "address": "0xB1b15dFb56f35B14a4AA3c7273103B34AFcf0BA9",
+      "registryKey": "REWARD_EARN_CONFIG"
+    },
+    "RewardView": {
+      "address": "0xeCA904982fC5EAf99cDEfF3A35A9b02fe28574ab",
+      "registryKey": "REWARD_VIEW"
+    },
+    "EasyToken": {
+      "address": "0xb815b3c1FbD45Ab51A632AA5C4949eecbDce20B2",
+      "registryKey": "EASY_TOKEN"
+    },
+    "EasyEmissionConfig": {
+      "address": "0xBCE15AAC9DAe6A276f91e8a2C7a3ea4147D551e8",
+      "registryKey": "EASY_EMISSION_CONFIG"
+    },
+    "EasyEmissionController": {
+      "address": "0x33a418188032162bF5c16fd7Cf04f22942E859A7",
+      "registryKey": "EASY_EMISSION_CONTROLLER"
+    },
+    "EasyConsumption": {
+      "address": "0x95A6126Ac776d5DF25e63fefAb1232a358770112",
+      "registryKey": "EASY_CONSUMPTION"
+    },
+    "EasyRecycleDistributor": {
+      "address": "0xB08EF045b52f1ACE305AcE612727182214459AbF",
+      "registryKey": "EASY_RECYCLE_DISTRIBUTOR"
+    },
+    "EasyStaking": {
+      "address": "0xA8Adae3dC53BcC4Ea45f581895740171BAafd507",
+      "registryKey": "EASY_STAKING"
+    },
+    "FeatureRegistry": {
+      "address": "0x6B5e8E47Df6849Da1E4a3D7980BD7593aff9B639",
+      "registryKey": "FEATURE_REGISTRY"
+    },
+    "GovernanceGate": {
+      "address": "0xC0A7E4F6eD3A05067Fa594bA2382310b79001Cd4",
+      "registryKey": "GOVERNANCE_GATE"
+    },
+    "CrossChainGovernance": {
+      "address": "0xe03B1f330d4B1A31494f072e8B3f16fae57f396d",
+      "registryKey": "CROSS_CHAIN_GOVERNANCE"
+    },
+    "GovernanceGuardian": {
+      "address": "0x381fE833cceac267AB0e41d17373D9e16e7118a7",
+      "registryKey": "GOVERNANCE_GUARDIAN"
+    },
+    "CollateralManager": {
+      "address": "0x889eF8b359bb9e5d95d0cFBf18d5C541f5699bDc",
+      "registryKey": "COLLATERAL_MANAGER"
+    },
+    "LendingEngine": {
+      "address": "0x460B79F9d54b27588D2bF6165ACc87368fec05Ca",
+      "registryKey": "ORDER_ENGINE"
+    },
+    "LiquidationManager": {
+      "address": "0x859Fa1Db0eF3A55ecb6e47855D67b73402149d1b",
+      "registryKey": "LIQUIDATION_MANAGER"
+    },
+    "SettlementManager": {
+      "address": "0x32fa1570FCD2da84f6b56976600d6360DCb2Bc2d",
+      "registryKey": "SETTLEMENT_MANAGER"
+    },
+    "LenderPoolVault": {
+      "address": "0x20A113bAB34cC7fB11e04019CC8A5ABC1CEaE9A9",
+      "registryKey": "LENDER_POOL_VAULT"
+    },
+    "BlocksOnlyCoordinator": {
+      "address": "0x49177fd6C4EaD5d67EED586786a17840E5f395c6",
+      "registryKey": "BLOCKS_ONLY_COORDINATOR"
+    },
+    "BlocksOnlyView": {
+      "address": "0x2fc9328376B22DCE81b744D1ba0e210439caC86C",
+      "registryKey": "BLOCKS_ONLY_VIEW"
+    },
+    "LiquidationPayoutManager": {
+      "address": "0x616264CEe709f12121e40dA10D586F9fD29a59a0",
+      "registryKey": "LIQUIDATION_PAYOUT_MANAGER"
+    },
+    "SettlementToken": {
+      "address": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+      "registryKey": "SETTLEMENT_TOKEN"
+    },
+    "VaultLendingEngine": {
+      "address": "0xeBd76A02C1Faa098B8e6B75ad9255270E8725B75",
+      "registryKey": "LENDING_ENGINE"
+    },
+    "EarlyRepaymentGuaranteeManager": {
+      "address": "0x34DDB996B349692dE62491D76591D4F76F6898B6",
+      "registryKey": "EARLY_REPAYMENT_GUARANTEE_MANAGER"
+    },
+    "VaultBusinessLogic": {
+      "address": "0xD3cB1E0CC504E0cAEb67E25547dBb788A8B27f85",
+      "registryKey": "VAULT_BUSINESS_LOGIC"
+    },
+    "VaultRouter": {
+      "address": "0x4B304aa54a83fa2B9443057060B106217434688c",
+      "registryKey": null
+    },
+    "VaultCore": {
+      "address": "0xcB7952E94BbbB88e96936fA0Ff1Ed46C1bE02843",
+      "registryKey": "VAULT_CORE"
+    },
+    "GuaranteeFundManager": {
+      "address": "0x76E4A068bDf4A32B1dcB87d03AAeA1Fdb11C09d5",
+      "registryKey": "GUARANTEE_FUND_MANAGER"
+    },
+    "HealthView": {
+      "address": "0xdd4f7b25B963125B67ccBD742bDc5068EB2F79c5",
+      "registryKey": "HEALTH_VIEW"
+    },
+    "LiquidationRiskManager": {
+      "address": "0xadC1eeaA2c40086d223157F294f57F2DA1868D0A",
+      "registryKey": "LIQUIDATION_RISK_MANAGER"
+    },
+    "SystemView": {
+      "address": "0x744062d301E9fd34C3A19c0309DcaA7b281d7d47",
+      "registryKey": "SYSTEM_VIEW"
+    },
+    "RegistryView": {
+      "address": "0x7Ac436b72a4E2d203f97a47aa3A6e1564C933Aaa",
+      "registryKey": "REGISTRY_VIEW"
+    },
+    "StatisticsView": {
+      "address": "0x607e93BcFA295eFB0B4DaB94B3B5907AA4FeE961",
+      "registryKey": "VAULT_STATISTICS"
+    },
+    "StatisticsPushManager": {
+      "address": "0x35aC52b681FF3155c01938F2eD52109418923c35",
+      "registryKey": "STATISTICS_PUSH_MANAGER"
+    },
+    "LoanFlowView": {
+      "address": "0xB5eA47CD1EbDCaEB23003Ec00978f19AcCc9Bf0B",
+      "registryKey": "LOAN_FLOW_VIEW"
+    },
+    "LoanFlowPushManager": {
+      "address": "0x6AE6b91abE10a56d98dA01Eb8b47FCb93A4895DB",
+      "registryKey": "LOAN_FLOW_PUSH_MANAGER"
+    },
+    "PositionView": {
+      "address": "0x4BB60108A66Dad339Eb6B355e0D621B7b5Fc1558",
+      "registryKey": "POSITION_VIEW"
+    },
+    "PreviewView": {
+      "address": "0x50C92ef31aa6f66866CCb6e63e550F739553da52",
+      "registryKey": "PREVIEW_VIEW"
+    },
+    "DashboardView": {
+      "address": "0x7FFd04805f3aD7654c40BfFe5B321e8AB791A6A9",
+      "registryKey": "DASHBOARD_VIEW"
+    },
+    "UserView": {
+      "address": "0x490766cD41deeAd8E8b974E945B642C4009E4756",
+      "registryKey": "USER_VIEW"
+    },
+    "AccessControlView": {
+      "address": "0x9A9b6d81ffe3637ba57317BCe96c279946427CEB",
+      "registryKey": "ACCESS_CONTROL_VIEW"
+    },
+    "CacheOptimizedView": {
+      "address": "0x89DfEe8E744406e54362a81010E5e5f40139d477",
+      "registryKey": "CACHE_OPTIMIZED_VIEW"
+    },
+    "LendingEngineView": {
+      "address": "0xA3C3070BDCD2d600fB1e3105C3E33E1A16F58B86",
+      "registryKey": "LENDING_ENGINE_VIEW"
+    },
+    "LoanNFTView": {
+      "address": "0xaC5606Efa8Fd14348dcE0A90fc54c7F0c8b32d5e",
+      "registryKey": "LOAN_NFT_VIEW"
+    },
+    "FeeRouterView": {
+      "address": "0x6182A5341810a0542bb9C396E7Eda4626CAd7049",
+      "registryKey": "FEE_ROUTER_VIEW"
+    },
+    "RiskView": {
+      "address": "0x2Cc11364d23AB04E640256592470A560F72C6A6B",
+      "registryKey": "RISK_VIEW"
+    },
+    "SystemRiskView": {
+      "address": "0x4d3e1643EC75c38Cf7278dc7371dD7058211FcD1",
+      "registryKey": "SYSTEM_RISK_VIEW"
+    },
+    "ViewCache": {
+      "address": "0x39d16068c274CA62e3A973E5E45D560aA7E99a0E",
+      "registryKey": "VIEW_CACHE"
+    },
+    "EventHistoryManager": {
+      "address": "0x4a42209f413407690732589412C0Cd3aB67b9B54",
+      "registryKey": "EVENT_HISTORY_MANAGER"
+    },
+    "ValuationOracleView": {
+      "address": "0x5195B02A794914BE1F551c6a03eC00F5586DAe1b",
+      "registryKey": "VALUATION_ORACLE_VIEW"
+    },
+    "LiquidationRiskView": {
+      "address": "0x1b59C01eB0A2F5Cd77c03a16a73d3D0C423901F7",
+      "registryKey": "LIQUIDATION_RISK_VIEW"
+    },
+    "DegradationCore": {
+      "address": "0xee5C4BEea04fd69172AE2327e0Cd428239672FDD",
+      "registryKey": "DEGRADATION_CORE"
+    },
+    "DegradationStorage": {
+      "address": "0x88405915295c1655b23ec23B16AFec8a3af2f2eF",
+      "registryKey": "DEGRADATION_STORAGE"
+    },
+    "ModuleHealthView": {
+      "address": "0x2E9aB7fd79795E0B5e55cd1c14CdBf6a848df3e5",
+      "registryKey": "MODULE_HEALTH_VIEW"
+    },
+    "DegradationMonitor": {
+      "address": "0xbedC0DE3126C9F15426C1C18AefE80dAbd3178E6",
+      "registryKey": "DEGRADATION_MONITOR"
+    },
+    "BatchView": {
+      "address": "0xE9190956454eDDf928383dDa7853e8C167289117",
+      "registryKey": "BATCH_VIEW"
+    },
+    "LiquidatorView": {
+      "address": "0x48d54F5064e672A5f96640F8F2d3cB4e73a9647c",
+      "registryKey": "LIQUIDATION_VIEW"
+    },
+    "LoanNFT": {
+      "address": "0xAb981e70272b3893eAd76Cdd6D81CF4Ff5677af2",
+      "registryKey": "LOAN_NFT"
+    },
+    "CacheMaintenanceManager": {
+      "address": "0x90d0f1dB096715139824b6A51623FaCf46862d86",
+      "registryKey": "CACHE_MAINTENANCE_MANAGER"
+    }
   }
 }

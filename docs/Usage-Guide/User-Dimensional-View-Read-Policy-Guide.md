@@ -11,6 +11,8 @@
 
 本文档是**实施指南**（如何迁移 / 如何测试），不是抽象的政策宣言。
 
+> 当前跨文档主线同时覆盖 legacy / 通用订单与 blocks-only。legacy / 通用订单是否 closed / terminal，前端与脚本必须读取 `LendingEngineView.getOrderStateSnapshot(orderId)`；blocks-only 则必须读取 `BlocksOnlyView.getBlocksOnlyOrderState(orderId)`。两条产品线都不得再从 `repaidAmount`、用户 debt ledger 是否归零等会计字段反推终态。
+
 ---
 
 ### 定义
@@ -44,6 +46,15 @@
   - `ActionKeys.ACTION_ADMIN`。
 - 否则必须 **revert**：`MissingRole()`。
 
+### 生命周期读取补充（2026-04-15）
+
+对用户维度订单/清算读面，权限策略之外还要统一读取语义：
+
+- legacy / 通用订单是否 closed，必须读取显式 lifecycle status，而不是通过 debt 是否归零、liquidation 后账本副作用、或事件旁证去推断。
+- 当前 legacy / 通用订单终态不再建议通过旧混合枚举名表达；应直接读取 `lifecycle + shortfallStatus + collateralDisposition`，其中存在 shortfall 的终态仍属于 terminal，但代表后续追偿/治理流程尚未结束。
+- 若某个用户维度 View 后续暴露 shortfall 信息，应把 `IShortfallLedger` 结果视为业务事实，不得把它压平为“普通 liquidated”。
+- blocks-only 生命周期读取必须区分三层语义：`ACTIVE`、debt-free 但仍 open 的 `REPAID`、以及通过 `BLOCKS_TRADE_CLOSE` 或 `BLOCKS_MATURITY_CLOSE` 进入的 `CLOSED`。
+
 备注：
 - 这只是**读权限策略**；不改变任何写路径权限。
 - 不要把下游适配器当作权限仲裁者：当某个 View 被设计为边界（boundary）时，应在该 View 的入口处完成权限约束。
@@ -61,7 +72,7 @@
 建议参考模板：
 
 ```solidity
-/// @dev Scheme U：允许 self；非 self 需 VIEW_USER_DATA 或 ADMIN。
+/// @dev Scheme U：允许 self；非 self 需 ActionKeys.ACTION_VIEW_USER_DATA 或 ActionKeys.ACTION_ADMIN。
 modifier onlyUserOrViewer(address user) {
     if (
         msg.sender != user
@@ -153,7 +164,7 @@ modifier onlyOpsForUserBatch() {
   `ops`（具备 `ACTION_VIEW_USER_DATA`）调用 `fn(user, ...)` → 成功
 
 - **U-READ-03 Admin read 成功**  
-  `admin`（具备 `ACTION_ADMIN`，且不要求同时具备 `VIEW_USER_DATA`）调用 `fn(user, ...)` → 成功
+  `admin`（具备 `ActionKeys.ACTION_ADMIN`，且不要求同时具备 `ActionKeys.ACTION_VIEW_USER_DATA`）调用 `fn(user, ...)` → 成功
 
 - **U-READ-04 Outsider 被拒绝**  
   `outsider` 调用 `fn(user, ...)` → `revert MissingRole()`（断言 selector）
@@ -168,13 +179,13 @@ modifier onlyOpsForUserBatch() {
 
 #### 好处（Benefits）
 - **真正用户可读**：终端用户无需角色即可查询自身状态。
-- **运维灵活**：服务账号可用 `VIEW_USER_DATA` 完成代查；治理/管理员仍是“紧急开关（break-glass）”。
+- **运维灵活**：服务账号可用 `ActionKeys.ACTION_VIEW_USER_DATA` 完成代查；治理/管理员仍是“紧急开关（break-glass）”。
 - **一致性**：避免出现“模块 A 允许 admin 代查、模块 B 却拒绝”的口径漂移。
 
 #### 风险/成本（Risks / Costs）
 - **隐私面扩大（但符合预期）**：self-only 用户永远能读到自己的状态——这是目标行为。
-- **枚举风险（enumeration risk）**：必须确保 non-self 读取强制 `VIEW_USER_DATA`/`ADMIN`，且批量读取永不允许 self-bypass。
-- **角色语义需要清晰**：若 `ACTION_ADMIN` 由 timelock/multisig 持有，日常代查可能不便；建议运维使用 `VIEW_USER_DATA`，把 admin 留作应急。
+- **枚举风险（enumeration risk）**：必须确保 non-self 读取强制 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`，且批量读取永不允许 self-bypass。
+- **角色语义需要清晰**：若 `ActionKeys.ACTION_ADMIN` 由 timelock/multisig 持有，日常代查可能不便；建议运维使用 `ActionKeys.ACTION_VIEW_USER_DATA`，把 admin 留作应急。
 
 ---
 

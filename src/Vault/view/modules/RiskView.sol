@@ -232,6 +232,7 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (hv != address(0)) {
             try IHealthViewLite(hv).getUserHealthFactorWithMeta(user) returns (uint256 hf, bool valid, uint256 blockNumber) {
                 return (valid ? hf : 10_000, valid, blockNumber);
+            // solhint-disable-next-line no-empty-blocks
             } catch {
                 // best-effort: fall back below
             }

@@ -88,7 +88,8 @@ export async function scanViewModules(registryAddr: string, opts?: ViewScanOptio
     { key: "ACCESS_CONTROL_VIEW", name: "AccessControlView", expectedApi: 1n, expectedSchema: 1n },
     // CacheOptimizedView schema bumped to 2 after view-alignment / Scheme U updates.
     { key: "CACHE_OPTIMIZED_VIEW", name: "CacheOptimizedView", expectedApi: 1n, expectedSchema: 2n },
-    { key: "LENDING_ENGINE_VIEW", name: "LendingEngineView", expectedApi: 1n, expectedSchema: 1n },
+    // LendingEngineView apiVersion bumped to 2 after view surface extension.
+    { key: "LENDING_ENGINE_VIEW", name: "LendingEngineView", expectedApi: 2n, expectedSchema: 1n },
     { key: "FEE_ROUTER_VIEW", name: "FeeRouterView", expectedApi: 1n, expectedSchema: 1n },
     { key: "RISK_VIEW", name: "RiskView", expectedApi: 1n, expectedSchema: 1n },
     { key: "SYSTEM_RISK_VIEW", name: "SystemRiskView", expectedApi: 1n, expectedSchema: 1n },

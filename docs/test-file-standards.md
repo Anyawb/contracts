@@ -70,21 +70,21 @@ await expect(contract.function()).to.be.rejected;
 #### 错误表现
 ```typescript
 // ❌ 错误 - 类型不匹配
-expect(result.lastUpdateTime).to.be.gt(BigInt(0));
+expect(result.lastUpdateBlock).to.be.gt(BigInt(0));
 // 错误信息: Argument of type 'bigint' is not assignable to parameter of type 'number | Date'
 ```
 
 #### 解决方案
 ```typescript
 // ✅ 正确 - 使用数字类型
-expect(result.lastUpdateTime).to.be.gt(0);
+expect(result.lastUpdateBlock).to.be.gt(0);
 
 // ✅ 正确 - 使用 BigInt 比较
-expect(result.lastUpdateTime).to.be.gt(BigInt(0));
+expect(result.lastUpdateBlock).to.be.gt(BigInt(0));
 
 // ✅ 正确 - 使用区块号（block number）比较（推荐：Time-Dependency-Refactor SSOT）
 const currentBlock = await ethers.provider.getBlockNumber();
-expect(result.lastUpdateTime).to.be.lte(currentBlock);
+expect(result.lastUpdateBlock).to.be.lte(currentBlock);
 ```
 
 ### 3. 模块导入问题
@@ -489,14 +489,14 @@ expect(result).to.equal(ethers.parseUnits('1000', 18)); // 期望 bigint
 expect(result).to.equal('0x123...');         // 期望 string (地址)
 
 // ✅ 区块号比较（推荐）
-expect(result.lastUpdateTime).to.be.gt(0);   // 期望 number
+expect(result.lastUpdateBlock).to.be.gt(0);   // 期望 number
 const currentBlock = await ethers.provider.getBlockNumber();
-expect(result.lastUpdateTime).to.be.lte(currentBlock); // 期望 number
+expect(result.lastUpdateBlock).to.be.lte(currentBlock); // 期望 number
 
 // ❌ 避免类型不匹配
 expect(result).to.equal(100);                // 可能类型不匹配
 expect(result).to.equal('100');              // 可能类型不匹配
-expect(result.lastUpdateTime).to.be.gt(BigInt(0)); // 类型不匹配
+expect(result.lastUpdateBlock).to.be.gt(BigInt(0)); // 类型不匹配
 ```
 
 ## 测试语法规范
@@ -541,7 +541,7 @@ await expect(
 ).to.be.rejected;
 
 // ❌ 错误的类型比较
-expect(result.lastUpdateTime).to.be.gt(BigInt(0)); // 类型不匹配
+expect(result.lastUpdateBlock).to.be.gt(BigInt(0)); // 类型不匹配
 ```
 
 ### 2. 模块导入规范
@@ -703,7 +703,7 @@ const { ethers } = hardhat;
 import type { MockLendingEngineConcrete } from '../../../types';
 
 // ✅ 修复类型不匹配
-expect(result.lastUpdateTime).to.be.gt(0);  // 而不是 BigInt(0)
+expect(result.lastUpdateBlock).to.be.gt(0);  // 而不是 BigInt(0)
 ```
 
 ### 2. 测试框架语法错误
@@ -768,7 +768,7 @@ await expect(contract.function()).to.be.revertedWith('requireRole: MissingRole')
 #### 常见错误类型对照表
 | 合约类型 | 错误类型 | 测试方法 |
 |---------|---------|---------|
-| VaultBusinessLogic | 自定义错误 | `revertedWithCustomError` |
+| CollateralManager | 自定义错误 | `revertedWithCustomError` |
 | MockAccessControlManager | 字符串错误 | `revertedWith` |
 | MockCollateralManager | 自定义错误 | `revertedWithCustomError` |
 
@@ -807,16 +807,16 @@ await mockAccessControlManager.setMockRole(false);
 #### 解决方案
 ```typescript
 // ✅ 确保合约有足够代币
-await mockERC20.mint(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
+await mockERC20.mint(collateralManager.target, TEST_AMOUNT * 10n);
 
 // ✅ 确保用户有足够代币
 await mockERC20.mint(userAddress, TEST_AMOUNT * 10n);
 
 // ✅ 正确设置 approve
-await mockERC20.connect(user).approve(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
+await mockERC20.connect(user).approve(collateralManager.target, TEST_AMOUNT * 10n);
 
 // ✅ 在测试前先存入代币
-await vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT);
+await collateralManager.depositCollateral(userAddress, TEST_ASSET, TEST_AMOUNT);
 ```
 
 ### 7. 模块调用问题
@@ -1076,7 +1076,7 @@ describe('生产环境一致性测试', function () {
 #### 解决方案
 ```typescript
 // ✅ 部署有效的实现合约
-const newImplementation = await vaultBusinessLogicFactory.deploy();
+const newImplementation = await collateralManagerFactory.deploy();
 await newImplementation.waitForDeployment();
 
 // ✅ 确保有升级权限
@@ -1087,7 +1087,7 @@ await mockAccessControlManager.grantRole(
 
 // ✅ 使用有效的实现合约地址
 await expect(
-  vaultBusinessLogic.upgradeTo(newImplementation.target)
+  collateralManager.upgradeTo(newImplementation.target)
 ).to.not.be.reverted;
 ```
 
@@ -1128,11 +1128,11 @@ beforeEach(async function () {
   await mockRewardManager.setMockSuccess(true);
   
   // 确保合约有足够的代币
-  await mockERC20.mint(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
+  await mockERC20.mint(collateralManager.target, TEST_AMOUNT * 10n);
   
   // 确保用户有足够的代币
   await mockERC20.mint(userAddress, TEST_AMOUNT * 10n);
-  await mockERC20.connect(user).approve(vaultBusinessLogic.target, TEST_AMOUNT * 10n);
+  await mockERC20.connect(user).approve(collateralManager.target, TEST_AMOUNT * 10n);
 });
 ```
 
@@ -1152,18 +1152,18 @@ it('test zero address', async function () {});
 ```typescript
 // ✅ 测试成功情况
 await expect(
-  vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
+  collateralManager.depositCollateral(userAddress, TEST_ASSET, TEST_AMOUNT)
 ).to.not.be.reverted;
 
 // ✅ 测试失败情况
 await expect(
-  vaultBusinessLogic.deposit(userAddress, TEST_ASSET, 0n)
-).to.be.revertedWithCustomError(vaultBusinessLogic, 'AmountIsZero');
+  collateralManager.depositCollateral(userAddress, TEST_ASSET, 0n)
+).to.be.revertedWithCustomError(collateralManager, 'InvalidAmount');
 
 // ✅ 测试事件发出
 await expect(
-  vaultBusinessLogic.deposit(userAddress, TEST_ASSET, TEST_AMOUNT)
-).to.emit(vaultBusinessLogic, 'BusinessOperation')
+  collateralManager.depositCollateral(userAddress, TEST_ASSET, TEST_AMOUNT)
+).to.emit(collateralManager, 'CollateralDeposited')
   .withArgs('deposit', userAddress, TEST_ASSET, TEST_AMOUNT);
 ```
 
@@ -1266,14 +1266,14 @@ await expect(contract.function()).to.be.rejectedWith('Error message');
 **解决方案**: 修复类型不匹配
 ```typescript
 // ❌ 错误 - 类型不匹配
-expect(result.lastUpdateTime).to.be.gt(BigInt(0));
+expect(result.lastUpdateBlock).to.be.gt(BigInt(0));
 
 // ✅ 正确 - 使用数字类型
-expect(result.lastUpdateTime).to.be.gt(0);
+expect(result.lastUpdateBlock).to.be.gt(0);
 
 // ✅ 正确 - 使用区块号（block number）
 const currentBlock = await ethers.provider.getBlockNumber();
-expect(result.lastUpdateTime).to.be.lte(currentBlock);
+expect(result.lastUpdateBlock).to.be.lte(currentBlock);
 ```
 
 ### 问题9: "Module can only be default-imported using the 'esModuleInterop' flag"

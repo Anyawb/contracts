@@ -14,6 +14,7 @@ import {IFeeRouter} from "../interfaces/IFeeRouter.sol";
 import {IRegistry} from "../interfaces/IRegistry.sol";
 import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
 import {IRegistryDynamicModuleKey} from "../interfaces/IRegistryDynamicModuleKey.sol";
+import {IOrderStateStoreV2} from "../interfaces/IOrderStateStoreV2.sol";
 import {SystemEvents} from "../Vault/SystemEvents.sol";
 import {NotAContract, PausedSystem} from "../errors/StandardErrors.sol";
 import {GracefulDegradation} from "../libraries/GracefulDegradation.sol";
@@ -284,6 +285,14 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      */
     error LendingEngine__AlreadyRepaid();
     /**
+     * @notice Repay is blocked because the order already ended in a terminal business status.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * @param status Current LoanNFT-backed order status.
+     */
+    error LendingEngine__RepayBlockedByOrderStatus(uint8 status);
+    /**
      * @notice Invalid repay amount.
      * @dev Reverts if:
      *      - N/A (error selector only)
@@ -330,6 +339,32 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @param orderId Order id
      */
     error LendingEngine__NftMintFailed(uint256 orderId);
+    /**
+     * @notice Caller is not the configured SettlementManager.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     */
+    error LendingEngine__OnlySettlementManager();
+    /**
+     * @notice Invalid liquidation terminal status supplied.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * @param status Requested status value.
+     */
+    error LendingEngine__InvalidLiquidationStatus(uint8 status);
+    /**
+     * @notice Invalid lifecycle transition requested for an order.
+     * @dev Reverts if:
+     *      - N/A (error selector only)
+     *
+     * @param currentStatus Current status.
+     * @param nextStatus Requested next status.
+     */
+    error LendingEngine__InvalidOrderStatusTransition(
+        uint8 currentStatus,
+        uint8 nextStatus
+    );
 
     /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
 
@@ -539,12 +574,13 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         // Term whitelist check.
         if (!_isAllowedDuration(order.term))
             revert LendingEngine__InvalidTerm();
-        // Long duration (>= _DUR_90D_BLOCKS baseline) requires user level >= 4 (RewardView gate).
+        // Long duration (>= _DUR_90D_BLOCKS baseline) requires user level >= 4.
+        // Security: read canonical level from RewardManagerCore, not RewardView mirror cache.
         if (_isLongDuration(order.term)) {
-            address rewardView = IRegistry(_registryAddr).getModuleOrRevert(
-                ModuleKeys.KEY_REWARD_VIEW
+            address rewardManagerCore = IRegistry(_registryAddr).getModuleOrRevert(
+                ModuleKeys.KEY_REWARD_MANAGER_CORE
             );
-            uint8 level = IRewardViewBorrowCheck(rewardView)
+            uint8 level = IRewardManagerCoreBorrowCheck(rewardManagerCore)
                 .getUserLevelForBorrowCheck(order.borrower);
             if (level < 4) revert LendingEngine__LevelTooLow();
         }
@@ -591,6 +627,12 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         });
         uint256 tokenId = _mintNftWithRetry(orderId, order.borrower, meta);
         _orderToTokenId[orderId] = tokenId;
+
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+            _tryOrderStateStore();
+        if (hasOrderStateStore) {
+            orderStateStore.initializeLoanOrderState(orderId, startBlock);
+        }
 
         emit LoanOrderCreated(
             orderId,
@@ -690,7 +732,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @notice Repay a loan order (partial or full).
      * @dev Reverts if:
      *      - system is paused (PausedSystem)
-     *      - caller lacks ACTION_REPAY (via ACM)
+        *      - caller lacks ACTION_REPAY (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
      *      - orderId is invalid (LendingEngine__InvalidOrder)
      *      - order is already fully repaid (LendingEngine__AlreadyRepaid)
      *      - repayAmount is zero or exceeds remaining due (LendingEngine__InvalidRepayAmount)
@@ -698,7 +740,8 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      *      - ERC20 transfer/approve fails (SafeERC20)
      *
      * Security:
-     * - Role-gated via ACM (ACTION_REPAY)
+    * - Role-gated via ACM (ACTION_REPAY) for general callers; SettlementManager is the documented SSOT repay
+    *   orchestrator and is explicitly allowed without an extra runtime role grant.
      * - External calls: FeeRouter (best-effort), VaultCore.repayFor (hard requirement), ERC20 transfers
      *
      * @param orderId Target order id.
@@ -709,13 +752,28 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         uint256 orderId,
         uint256 _repayAmount
     ) external onlyValidRegistry {
-        _requireRole(ActionKeys.ACTION_REPAY, msg.sender);
+        if (!_isSettlementManagerCaller(msg.sender)) {
+            _requireRole(ActionKeys.ACTION_REPAY, msg.sender);
+        }
         if (paused()) revert PausedSystem();
         LoanOrder storage ord = _loanOrders[orderId];
         if (ord.borrower == address(0)) revert LendingEngine__InvalidOrder();
 
         // Best-effort refresh module addresses.
         _updateModuleAddresses();
+
+        ILoanNFT.LoanStatus orderStatus = _getOrderStatus(orderId, _loanNft);
+        if (orderStatus == ILoanNFT.LoanStatus.Repaid) {
+            revert LendingEngine__AlreadyRepaid();
+        }
+        if (
+            orderStatus == ILoanNFT.LoanStatus.Liquidated ||
+            orderStatus == ILoanNFT.LoanStatus.Defaulted ||
+            orderStatus == ILoanNFT.LoanStatus.LiquidatedWithShortfall ||
+            orderStatus == ILoanNFT.LoanStatus.DefaultedWithShortfall
+        ) {
+            revert LendingEngine__RepayBlockedByOrderStatus(uint8(orderStatus));
+        }
 
         uint256 totalDue = _calculateTotalDue(ord);
         if (ord.repaidAmount >= totalDue) revert LendingEngine__AlreadyRepaid();
@@ -840,6 +898,12 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
 
         // If fully repaid, update LoanNFT status.
         if (isFullyRepaid) {
+            (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+                _tryOrderStateStore();
+            if (hasOrderStateStore) {
+                orderStateStore.markLoanRepaid(orderId, ord.startTimestamp);
+            }
+
             uint256 tokenId = _orderToTokenId[orderId];
             _loanNft.updateLoanStatus(tokenId, ILoanNFT.LoanStatus.Repaid);
         }
@@ -909,11 +973,13 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     /**
      * @notice View-adapter: get loan order data by id.
      * @dev Reverts if:
-     *      - caller lacks ACTION_VIEW_SYSTEM_DATA (via ACM)
+          *      - caller lacks ACTION_VIEW_SYSTEM_DATA (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
+      *      - orderId does not exist
      *
      * Security:
-     * - View-only
-     * - Role-gated (ACTION_VIEW_SYSTEM_DATA)
+    * - View-only
+    * - Role-gated (ACTION_VIEW_SYSTEM_DATA) for general callers; SettlementManager is explicitly allowed because
+    *   the repay/settle SSOT must cross-check order ownership and debt asset before repayment.
      *
      * @param orderId Loan order id.
      * @return order Loan order snapshot.
@@ -922,9 +988,113 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         uint256 orderId
     ) external view onlyValidRegistry returns (LoanOrder memory order) {
         // System/ops-only view adapter: used by LendingEngineView and SettlementManager.
-        _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        if (!_isSettlementManagerCaller(msg.sender)) {
+            _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        }
 
-        return _loanOrders[orderId];
+        order = _loanOrders[orderId];
+        if (order.borrower == address(0)) revert LendingEngine__InvalidOrder();
+        return order;
+    }
+
+    /**
+     * @notice View-adapter: return the ORDER_ENGINE-authoritative total due for an order.
+     * @dev Reverts if:
+        *      - caller lacks ACTION_VIEW_SYSTEM_DATA (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
+     *      - orderId does not exist
+     *
+     * Security:
+    * - View-only
+    * - Role-gated (ACTION_VIEW_SYSTEM_DATA) for general callers; SettlementManager is explicitly allowed because
+    *   it is the SSOT consumer of this total-due read during unified repayment.
+     *
+     * @param orderId Loan order id.
+     * @return totalDue Total due amount (token decimals of order.asset).
+     */
+    function getOrderTotalDueForView(
+        uint256 orderId
+    ) external view onlyValidRegistry returns (uint256 totalDue) {
+        if (!_isSettlementManagerCaller(msg.sender)) {
+            _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        }
+
+        LoanOrder memory ord = _loanOrders[orderId];
+        if (ord.borrower == address(0)) revert LendingEngine__InvalidOrder();
+        return _calculateTotalDue(ord);
+    }
+
+    /**
+     * @notice View-adapter: return the LoanNFT-backed lifecycle status for an order.
+     * @dev Reverts if:
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
+     *      - orderId does not exist
+     *
+     * Architecture-Guide alignment:
+     * - This is the ORDER_ENGINE-side SSOT read consumed by LendingEngineView / SettlementManager.
+     * - It exposes lifecycle state without moving business writes into the View layer.
+     */
+    function getOrderStatusForView(
+        uint256 orderId
+    ) external view onlyValidRegistry returns (ILoanNFT.LoanStatus status) {
+        if (!_isSettlementManagerCaller(msg.sender)) {
+            _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
+        }
+
+        LoanOrder memory ord = _loanOrders[orderId];
+        if (ord.borrower == address(0)) revert LendingEngine__InvalidOrder();
+
+        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
+            _tryOrderStateStore();
+        if (
+            hasOrderStateStore &&
+            orderStateStore.hasOrderState(
+                IOrderStateStoreV2.OrderProductType.LOAN,
+                orderId
+            )
+        ) {
+            return orderStateStore.getLegacyLoanStatus(orderId);
+        }
+
+        return _getOrderStatus(orderId, _resolveLoanNftForRead());
+    }
+
+    /**
+     * @notice Mark a keeper liquidation outcome on the order lifecycle state machine.
+     * @dev Only SettlementManager may call this write adapter.
+     *      Architecture-Guide alignment: terminal lifecycle writes stay in business modules,
+     *      while View modules only read the resulting state.
+     */
+    function markOrderLiquidationStatus(
+        uint256 orderId,
+        ILoanNFT.LoanStatus status
+    ) external onlyValidRegistry {
+        if (!_isSettlementManagerCaller(msg.sender)) {
+            revert LendingEngine__OnlySettlementManager();
+        }
+        if (
+            status != ILoanNFT.LoanStatus.Liquidated &&
+            status != ILoanNFT.LoanStatus.Defaulted &&
+            status != ILoanNFT.LoanStatus.LiquidatedWithShortfall &&
+            status != ILoanNFT.LoanStatus.DefaultedWithShortfall
+        ) {
+            revert LendingEngine__InvalidLiquidationStatus(uint8(status));
+        }
+
+        LoanOrder memory ord = _loanOrders[orderId];
+        if (ord.borrower == address(0)) revert LendingEngine__InvalidOrder();
+
+        _updateModuleAddresses();
+        uint256 tokenId = _orderToTokenId[orderId];
+        ILoanNFT.LoanMetadata memory meta = _loanNft.getLoanMetadata(tokenId);
+        if (meta.loanId != orderId) revert LendingEngine__InvalidOrder();
+        if (meta.status != ILoanNFT.LoanStatus.Active) {
+            revert LendingEngine__InvalidOrderStatusTransition(
+                uint8(meta.status),
+                uint8(status)
+            );
+        }
+
+        _loanNft.updateLoanStatus(tokenId, status);
     }
 
     /**
@@ -1219,6 +1389,19 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
+    /// @dev SettlementManager is the SSOT repay/settle orchestrator and therefore may access the
+    ///      order-level repay adapter and the minimal order read adapters without extra ACM roles.
+    function _isSettlementManagerCaller(address caller) internal view returns (bool) {
+        if (_registryAddr == address(0)) {
+            return false;
+        }
+
+        address settlementManager = IRegistry(_registryAddr).getModule(
+            ModuleKeys.KEY_SETTLEMENT_MANAGER
+        );
+        return settlementManager != address(0) && caller == settlementManager;
+    }
+
     /// @dev Best-effort refresh cached module addresses from Registry.
     function _updateModuleAddresses() internal {
         if (_registryAddr == address(0)) revert LendingEngine__RegistryNotSet();
@@ -1249,6 +1432,43 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
             uint256 noop = 0;
             noop;
         }
+    }
+
+    /// @dev Resolve LoanNFT directly from Registry for view-only status reads.
+    function _resolveLoanNftForRead() internal view returns (ILoanNFT loanNft) {
+        address loanNftAddr = IRegistry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_LOAN_NFT
+        );
+        loanNft = ILoanNFT(loanNftAddr);
+    }
+
+    function _tryOrderStateStore()
+        internal
+        view
+        returns (IOrderStateStoreV2 orderStateStore, bool hasStore)
+    {
+        address orderStateStoreAddr = IRegistry(_registryAddr).getModule(
+            ModuleKeys.KEY_ORDER_STATE_STORE
+        );
+        if (
+            orderStateStoreAddr == address(0) ||
+            orderStateStoreAddr.code.length == 0
+        ) {
+            return (IOrderStateStoreV2(address(0)), false);
+        }
+
+        return (IOrderStateStoreV2(orderStateStoreAddr), true);
+    }
+
+    /// @dev Return the LoanNFT-backed lifecycle status for an order and ensure token mapping matches the order id.
+    function _getOrderStatus(
+        uint256 orderId,
+        ILoanNFT loanNft
+    ) internal view returns (ILoanNFT.LoanStatus status) {
+        uint256 tokenId = _orderToTokenId[orderId];
+        ILoanNFT.LoanMetadata memory meta = loanNft.getLoanMetadata(tokenId);
+        if (meta.loanId != orderId) revert LendingEngine__InvalidOrder();
+        return meta.status;
     }
 
     /// @dev Return true if duration is in the allowed whitelist (blocks).
@@ -1316,9 +1536,9 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     uint256[44] private __gap;
 }
 
-/// @dev Minimal read-only interface for RewardView (borrow-level gate).
-interface IRewardViewBorrowCheck {
-    /// @notice Returns the cached Reward level used by borrow gating logic.
+/// @dev Minimal read-only interface for RewardManagerCore (borrow-level gate).
+interface IRewardManagerCoreBorrowCheck {
+    /// @notice Returns canonical Reward level used by long-term borrow gating logic.
     function getUserLevelForBorrowCheck(
         address user
     ) external view returns (uint8);

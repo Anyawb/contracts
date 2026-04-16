@@ -70,7 +70,7 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
   ).toLowerCase();
   const ABI = ethers.AbiCoder.defaultAbiCoder();
 
-  const PRICE_USD8 = 10n ** 8n;
+  const PRICE_USD8 = 10n ** 18n;
   const TERM_DAYS = 5;
   const TERM_5D_BLOCKS = 36_000n;
   const ON_TIME_WINDOW_BLOCKS = 7_200n;
@@ -156,12 +156,12 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
   }
 
   function calcExpectedMint(principal: bigint) {
-    const amountUsd8Gross = (principal * PRICE_USD8) / 10n ** 18n;
-    const amountUsd8Net = (amountUsd8Gross * (BPS_DENOM - BORROW_FEE_BPS)) / BPS_DENOM;
-    const totalMinted = (amountUsd8Net * 10n * 10n ** 18n) / (1000n * PRICE_USD8);
+    const amountValueGross = (principal * PRICE_USD8) / 10n ** 18n;
+    const amountValueNet = (amountValueGross * (BPS_DENOM - BORROW_FEE_BPS)) / BPS_DENOM;
+    const totalMinted = (amountValueNet * 10n * 10n ** 18n) / (1000n * PRICE_USD8);
     const borrowerShare = totalMinted / 2n;
     const lenderShare = totalMinted - borrowerShare;
-    return { amountUsd8Net, totalMinted, borrowerShare, lenderShare };
+    return { amountValueNet, totalMinted, borrowerShare, lenderShare };
   }
 
   async function buildMatchData(params: {
@@ -384,10 +384,8 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     await acm.grantRole(ACTION_ORDER_CREATE, await vbl.getAddress());
     await acm.grantRole(ACTION_DEPOSIT, await vbl.getAddress());
     await acm.grantRole(ACTION_REPAY, borrower.address);
-    await acm.grantRole(ACTION_REPAY, await settlementManager.getAddress());
     await acm.grantRole(ACTION_VIEW_USER_DATA, owner.address);
     await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, owner.address);
-    await acm.grantRole(ACTION_VIEW_SYSTEM_DATA, await settlementManager.getAddress());
     await acm.grantRole(ACTION_BORROW, await orderEngine.getAddress());
 
     await feeRouter.connect(owner).addSupportedToken(token.target);
@@ -530,7 +528,7 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     const { orderId, order } = await finalizeMatchAndGetOrder(fixture, principal);
 
     const totalDue = principal + calcInterest(principal, RATE_BPS, BigInt(order.term));
-    const { amountUsd8Net, totalMinted, borrowerShare, lenderShare } = calcExpectedMint(principal);
+    const { amountValueNet, totalMinted, borrowerShare, lenderShare } = calcExpectedMint(principal);
 
     const currentBlock = BigInt(await ethers.provider.getBlockNumber());
     const targetBlock = BigInt(order.maturity) - ON_TIME_WINDOW_BLOCKS;
@@ -558,9 +556,9 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     const easyMintPush = rewardPushes.find((entry) => entry.dataTypeHash === DATA_TYPE_EASY_MINTED.toLowerCase());
     expect(easyMintPush).to.not.equal(undefined);
 
-    const [payloadBorrower, payloadLender, payloadTotalMinted, payloadBorrowerShare, payloadLenderShare, payloadOrderId, payloadAmountUsd8] =
+    const [payloadBorrower, payloadLender, payloadTotalMinted, payloadBorrowerShare, payloadLenderShare, payloadOrderId, payloadAmountValue, payloadValuationDecimals] =
       ABI.decode(
-        ["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"],
+        ["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint8", "uint256"],
         easyMintPush!.payload
       );
 
@@ -570,7 +568,26 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     expect(payloadBorrowerShare).to.equal(borrowerShare);
     expect(payloadLenderShare).to.equal(lenderShare);
     expect(payloadOrderId).to.equal(orderId);
-    expect(payloadAmountUsd8).to.equal(amountUsd8Net);
+    expect(payloadAmountValue).to.equal(amountValueNet);
+    expect(payloadValuationDecimals).to.equal(18n);
+  });
+
+  it("VaultCore -> SettlementManager repay bridge works without granting SettlementManager extra REPAY or VIEW_SYSTEM_DATA roles", async function () {
+    const fixture = await loadFixture(deployFixture);
+    const { acm, settlementManager, owner, borrower, token, orderEngine, lendingEngineLedger } = fixture;
+    const principal = ethers.parseEther("1100");
+    const { orderId, order } = await finalizeMatchAndGetOrder(fixture, principal);
+    const totalDue = principal + calcInterest(principal, RATE_BPS, BigInt(order.term));
+
+    expect(await acm.hasRole(ACTION_REPAY, await settlementManager.getAddress())).to.equal(false);
+    expect(await acm.hasRole(ACTION_VIEW_SYSTEM_DATA, await settlementManager.getAddress())).to.equal(false);
+
+    await expect(topUpAndRepayViaVaultCore(fixture, orderId, token.target, totalDue)).to.not.be.reverted;
+
+    const repaidOrder = await orderEngine.connect(owner).getLoanOrderForView(orderId);
+    expect(await orderEngine.connect(owner).getOrderStatusForView(orderId)).to.equal(1n);
+    expect(repaidOrder.repaidAmount).to.equal(totalDue);
+    expect(await lendingEngineLedger.getDebt(borrower.address, token.target)).to.equal(0n);
   });
 
   it("late repay keeps frontend-visible final state consistent: EASY_MINTED net of penalty and last penalty-ledger push is zero", async function () {
@@ -580,7 +597,7 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     const { orderId, order } = await finalizeMatchAndGetOrder(fixture, principal);
 
     const totalDue = principal + calcInterest(principal, RATE_BPS, BigInt(order.term));
-    const { amountUsd8Net, borrowerShare, lenderShare } = calcExpectedMint(principal);
+    const { amountValueNet, borrowerShare, lenderShare } = calcExpectedMint(principal);
 
     const currentBlock = BigInt(await ethers.provider.getBlockNumber());
     const targetBlock = BigInt(order.maturity) + ON_TIME_WINDOW_BLOCKS + 1n;
@@ -612,8 +629,8 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     const easyMintPush = rewardPushes.find((entry) => entry.dataTypeHash === DATA_TYPE_EASY_MINTED.toLowerCase());
     expect(easyMintPush).to.not.equal(undefined);
 
-    const [, , payloadTotalMinted, payloadBorrowerShare, payloadLenderShare, payloadOrderId, payloadAmountUsd8] = ABI.decode(
-      ["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"],
+    const [, , payloadTotalMinted, payloadBorrowerShare, payloadLenderShare, payloadOrderId, payloadAmountValue, payloadValuationDecimals] = ABI.decode(
+      ["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint8", "uint256"],
       easyMintPush!.payload
     );
 
@@ -621,7 +638,8 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     expect(payloadBorrowerShare).to.equal(expectedBorrowerNet);
     expect(payloadLenderShare).to.equal(lenderShare);
     expect(payloadOrderId).to.equal(orderId);
-    expect(payloadAmountUsd8).to.equal(amountUsd8Net);
+    expect(payloadAmountValue).to.equal(amountValueNet);
+    expect(payloadValuationDecimals).to.equal(18n);
 
     const penaltyPushes = rewardPushes.filter(
       (entry) => entry.dataTypeHash === DATA_TYPE_REWARD_PENALTY_LEDGER_UPDATED.toLowerCase()
@@ -663,7 +681,7 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     const guaranteeRecord = await earlyRepaymentGuaranteeManager.getGuaranteeRecord(guaranteeId);
     const feeRate = await earlyRepaymentGuaranteeManager.platformFeeRate();
     const totalDue = principal + calcInterest(principal, RATE_BPS, BigInt(order.term));
-    const { amountUsd8Net, totalMinted, borrowerShare, lenderShare } = calcExpectedMint(principal);
+    const { amountValueNet, totalMinted, borrowerShare, lenderShare } = calcExpectedMint(principal);
 
     const borrowerBalBefore = await token.balanceOf(borrower.address);
     const guaranteeBalBefore = await token.balanceOf(await guaranteeFundManager.getAddress());
@@ -737,15 +755,16 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     const easyMintPush = rewardPushes.find((entry) => entry.dataTypeHash === DATA_TYPE_EASY_MINTED.toLowerCase());
     expect(easyMintPush).to.not.equal(undefined);
 
-    const [, payloadLender, payloadTotalMinted, payloadBorrowerShare, payloadLenderShare, payloadOrderId, payloadAmountUsd8] =
-      ABI.decode(["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"], easyMintPush!.payload);
+    const [, payloadLender, payloadTotalMinted, payloadBorrowerShare, payloadLenderShare, payloadOrderId, payloadAmountValue, payloadValuationDecimals] =
+      ABI.decode(["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint8", "uint256"], easyMintPush!.payload);
 
     expect(payloadLender).to.equal(await lenderPoolVault.getAddress());
     expect(payloadTotalMinted).to.equal(totalMinted);
     expect(payloadBorrowerShare).to.equal(borrowerShare);
     expect(payloadLenderShare).to.equal(lenderShare);
     expect(payloadOrderId).to.equal(orderId);
-    expect(payloadAmountUsd8).to.equal(amountUsd8Net);
+    expect(payloadAmountValue).to.equal(amountValueNet);
+    expect(payloadValuationDecimals).to.equal(18n);
   });
 
   it("late repay still mints and clears penalty debt when RewardView is unavailable; observability degrades via RewardViewPushFailed", async function () {
@@ -755,7 +774,7 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     const { orderId, order } = await finalizeMatchAndGetOrder(fixture, principal);
 
     const totalDue = principal + calcInterest(principal, RATE_BPS, BigInt(order.term));
-    const { amountUsd8Net, borrowerShare, lenderShare } = calcExpectedMint(principal);
+    const { amountValueNet, borrowerShare, lenderShare } = calcExpectedMint(principal);
 
     expect(await registry.getModule(ModuleKeys.KEY_REWARD_VIEW)).to.equal(ethers.ZeroAddress);
 
@@ -784,8 +803,8 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     expect(easyMintFailure!.rewardView).to.equal(ethers.ZeroAddress);
     expect(easyMintFailure!.reason).to.equal(REWARD_VIEW_UNAVAILABLE_HEX.toLowerCase());
 
-    const [payloadBorrower, payloadLender, payloadTotalMinted, payloadBorrowerShare, payloadLenderShare, payloadOrderId, payloadAmountUsd8] =
-      ABI.decode(["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"], easyMintFailure!.payload);
+    const [payloadBorrower, payloadLender, payloadTotalMinted, payloadBorrowerShare, payloadLenderShare, payloadOrderId, payloadAmountValue, payloadValuationDecimals] =
+      ABI.decode(["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint8", "uint256"], easyMintFailure!.payload);
 
     expect(payloadBorrower).to.equal(borrower.address);
     expect(payloadLender).to.equal(await lenderPoolVault.getAddress());
@@ -793,7 +812,8 @@ describe("Funds-Flow – match to reward-view protocol E2E", function () {
     expect(payloadBorrowerShare).to.equal(expectedBorrowerNet);
     expect(payloadLenderShare).to.equal(lenderShare);
     expect(payloadOrderId).to.equal(orderId);
-    expect(payloadAmountUsd8).to.equal(amountUsd8Net);
+    expect(payloadAmountValue).to.equal(amountValueNet);
+    expect(payloadValuationDecimals).to.equal(18n);
 
     const penaltyPushFailures = getRewardViewPushFailedEntries(
       repayReceipt,

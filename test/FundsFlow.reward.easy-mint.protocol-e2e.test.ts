@@ -25,7 +25,7 @@ describe("Funds-Flow – protocol Easy mint E2E", function () {
   const DATA_PUSH_IFACE = new ethers.Interface(["event DataPushed(bytes32 indexed dataTypeHash, bytes payload)"]);
   const DATA_PUSH_TOPIC0 = ethers.id("DataPushed(bytes32,bytes)").toLowerCase();
 
-  const PRICE_USD8 = 10n ** 8n;
+  const PRICE_VALUE = 10n ** 18n;
   const TERM_5D_BLOCKS = 36_000n;
   const ON_TIME_WINDOW_BLOCKS = 7_200n;
   const YEAR_BLOCKS = 2_628_000n;
@@ -51,9 +51,9 @@ describe("Funds-Flow – protocol Easy mint E2E", function () {
   }
 
   function calcExpectedMintShares(principal: bigint) {
-    const amountUsd8Gross = (principal * PRICE_USD8) / 10n ** 18n;
-    const amountUsd8Net = (amountUsd8Gross * (BPS_DENOM - BORROW_FEE_BPS)) / BPS_DENOM;
-    const totalMinted = (amountUsd8Net * 10n * 10n ** 18n) / (1000n * PRICE_USD8);
+    const amountValueGross = (principal * PRICE_VALUE) / 10n ** 18n;
+    const amountValueNet = (amountValueGross * (BPS_DENOM - BORROW_FEE_BPS)) / BPS_DENOM;
+    const totalMinted = (amountValueNet * 10n * 10n ** 18n) / (1000n * PRICE_VALUE);
     const borrowerShare = totalMinted / 2n;
     const lenderShare = totalMinted - borrowerShare;
     return { totalMinted, borrowerShare, lenderShare };
@@ -171,7 +171,7 @@ describe("Funds-Flow – protocol Easy mint E2E", function () {
     await easyToken.connect(governance).grantRole(await easyToken.BURNER_ROLE(), await rewardAccrualManager.getAddress());
 
     const currentBlock = await ethers.provider.getBlockNumber();
-    await priceOracle.setPrice(await token.getAddress(), PRICE_USD8, currentBlock, 18);
+    await priceOracle.setPrice(await token.getAddress(), PRICE_VALUE, currentBlock, 18);
     await loanFlowView.setGlobalLoanFlow(0n, 0n, 0n, 0n, true, BigInt(currentBlock));
 
     await acm.grantRole(ACTION_ORDER_CREATE, governance.address);

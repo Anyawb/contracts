@@ -253,7 +253,7 @@ async function main() {
     }
     if (canUpdatePrice) {
       const blockNumber = await latestBlockNumber();
-      await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", 8), blockNumber)).wait();
+      await (await po.connect(deployer).updatePrice(assetAddr, ethers.parseUnits("1", dec), blockNumber)).wait();
     } else {
       // In production-like mode, we just require it to be readable (fresh).
       await po.getPrice(assetAddr);
@@ -487,6 +487,10 @@ async function main() {
   // Post-repay: debt must be 0 and order must reflect repayment.
   const debtAfterRepay = (await vLe.getDebt(borrower.address, assetAddr)) as bigint;
   if (debtAfterRepay !== 0n) throw new Error(`LEView: expected debt=0 after repay, got ${debtAfterRepay.toString()}`);
+  const orderStatusAfterRepay = BigInt(await lendingEngineView.connect(borrower).getOrderStatus(orderId));
+  if (orderStatusAfterRepay !== 1n) {
+    throw new Error(`LEView: expected Repaid status after repay, got ${orderStatusAfterRepay.toString()}`);
+  }
   const ordAfter = await lendingEngineView.connect(borrower).getLoanOrder(orderId);
   if ((ordAfter.repaidAmount as bigint) < totalDue) {
     throw new Error(`LEView: expected repaidAmount>=totalDue after repay (repaid=${ordAfter.repaidAmount} due=${totalDue})`);

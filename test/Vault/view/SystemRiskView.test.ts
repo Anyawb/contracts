@@ -26,11 +26,11 @@ describe('SystemRiskView', function () {
     await riskManager.updateMinHealthFactor(10_500n);
     await riskManager.updateMaxLtvBps(7_500n);
 
-    const systemRiskView = await upgrades.deployProxy(
+    const systemRiskView = (await upgrades.deployProxy(
       await ethers.getContractFactory('SystemRiskView'),
       [await registry.getAddress()],
       { kind: 'uups', initializer: 'initialize' },
-    );
+    )) as any;
 
     return { systemRiskView, registry, acm, riskManager, admin, riskViewer, other };
   }

@@ -1,0 +1,20 @@
+{
+  "network": "bnb-testnet",
+  "chainId": 97,
+  "assets": [
+    {
+      "address": "0x0000000000000000000000000000000000000001",
+      "sourceId": "usd-coin",
+      "decimals": 6,
+      "maxPriceAge": 3600,
+      "active": true
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000002",
+      "sourceId": "wbnb",
+      "decimals": 18,
+      "maxPriceAge": 3600,
+      "active": true
+    }
+  ]
+}

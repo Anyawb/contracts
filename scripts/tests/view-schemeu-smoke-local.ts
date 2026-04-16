@@ -1,6 +1,6 @@
 import { ethers, network } from "hardhat";
 import { envBool, loadAddressMap, resolveAddress } from "./_addressResolver";
-import { runWithNetworkRetry } from "./live-test/_networkRetry";
+import { runWithNetworkRetry } from "./live-test/networks/arbitrum-sepolia/core/_networkRetry";
 
 function key(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));

@@ -16,6 +16,14 @@ import './scripts/tasks/e2e-batch-advanced';
 import './scripts/tasks/e2e-batch-10-users';
 import './scripts/tasks/e2e-reward-edgecases';
 import './scripts/tasks/e2e-liquidation-reward-penalty';
+import {
+  arbitrumSepoliaNetworkConfig,
+  arbitrumSepoliaRuntimeNetworkConfig,
+  bnbTestnetNetworkConfig,
+  bnbTestnetRuntimeNetworkConfig,
+  resolveEnvFirst,
+  resolvePrivateKeyAccounts,
+} from './scripts/config/networks';
 
 const hardhatForkUrl = process.env.HARDHAT_FORK_URL;
 const hardhatForkBlockNumber = process.env.HARDHAT_FORK_BLOCK_NUMBER
@@ -24,6 +32,11 @@ const hardhatForkBlockNumber = process.env.HARDHAT_FORK_BLOCK_NUMBER
 const hardhatForkChainId = process.env.HARDHAT_FORK_CHAIN_ID
   ? Number(process.env.HARDHAT_FORK_CHAIN_ID)
   : undefined;
+const hardhatForkHardfork = hardhatForkChainId === bnbTestnetNetworkConfig.chainId ? 'shanghai' : undefined;
+const defaultAccounts = resolvePrivateKeyAccounts();
+const arbitrumRpcUrl = resolveEnvFirst(['ARBITRUM_RPC_URL', 'ARBITRUM_URL']);
+const arbitrumScanApiKey = process.env.ARBISCAN_API_KEY || '';
+const bnbTestnetScanApiKey = resolveEnvFirst(bnbTestnetNetworkConfig.verifyApiKeyEnvKeys || []);
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -51,12 +64,27 @@ const config: HardhatUserConfig = {
   networks: {
     hardhat: {
       chainId: hardhatForkChainId ?? 1337,
+      ...(hardhatForkHardfork ? { hardfork: hardhatForkHardfork } : {}),
       forking: hardhatForkUrl
         ? {
             url: hardhatForkUrl,
             blockNumber: hardhatForkBlockNumber,
           }
         : undefined,
+      chains: {
+        [bnbTestnetNetworkConfig.chainId]: {
+          hardforkHistory: {
+            berlin: 0,
+            london: 0,
+            arrowGlacier: 0,
+            grayGlacier: 0,
+            merge: 0,
+            shanghai: 0,
+            cancun: 0,
+            prague: 0,
+          },
+        },
+      },
     },
     localhost: {
       // Allow smoke runners to point localhost at an ephemeral fresh node.
@@ -64,12 +92,18 @@ const config: HardhatUserConfig = {
       url: process.env.LOCALHOST_RPC_URL || 'http://127.0.0.1:8545',
     },
     arbitrum: {
-      url: process.env.ARBITRUM_RPC_URL || process.env.ARBITRUM_URL || '',
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      url: arbitrumRpcUrl,
+      accounts: defaultAccounts,
     },
     arbitrumSepolia: {
-      url: process.env.ARBITRUM_SEPOLIA_RPC_URL || process.env.ARBITRUM_SEPOLIA_URL || '',
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: arbitrumSepoliaNetworkConfig.chainId,
+      url: arbitrumSepoliaRuntimeNetworkConfig.url,
+      accounts: arbitrumSepoliaRuntimeNetworkConfig.accounts,
+    },
+    bnbTestnet: {
+      chainId: bnbTestnetNetworkConfig.chainId,
+      url: bnbTestnetRuntimeNetworkConfig.url,
+      accounts: bnbTestnetRuntimeNetworkConfig.accounts,
     },
   },
   gasReporter: {
@@ -78,9 +112,20 @@ const config: HardhatUserConfig = {
   },
   etherscan: {
     apiKey: {
-      arbitrumOne: process.env.ARBISCAN_API_KEY || '',
-      arbitrumSepolia: process.env.ARBISCAN_API_KEY || '',
+      arbitrumOne: arbitrumScanApiKey,
+      arbitrumSepolia: arbitrumScanApiKey,
+      bnbTestnet: bnbTestnetScanApiKey,
     },
+    customChains: [
+      {
+        network: bnbTestnetNetworkConfig.key,
+        chainId: bnbTestnetNetworkConfig.chainId,
+        urls: {
+          apiURL: `${bnbTestnetNetworkConfig.explorerBaseUrl}/api`,
+          browserURL: bnbTestnetNetworkConfig.explorerBaseUrl || '',
+        },
+      },
+    ],
   },
   mocha: {
     // 部署脚本可能需要较长时间，设置较长的timeout（30分钟）

@@ -18,39 +18,123 @@ import { expect } from 'chai';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import type { ContractFactory } from 'ethers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
-
-// 导入合约类型
-import type { VaultBusinessLogic } from '../../types/contracts/Vault/modules/VaultBusinessLogic.sol/VaultBusinessLogic';
-import type { MockAccessControlManager } from '../../types/contracts/Mocks/MockAccessControlManager';
-import type { MockCollateralManager } from '../../types/contracts/Mocks/MockCollateralManager';
-import type { MockLendingEngineConcrete } from '../../types/contracts/Mocks/MockLendingEngineConcrete';
-import type { MockStatisticsView } from '../../types/contracts/Mocks/MockStatisticsView';
-import type { MockGuaranteeFundManager } from '../../types/contracts/Mocks/MockGuaranteeFundManager';
-import type { MockRewardManager } from '../../types/contracts/Mocks/MockRewardManager';
-import type { MockAssetWhitelist } from '../../types/contracts/Mocks/MockAssetWhitelist';
-import type { MockPriceOracle } from '../../types/contracts/Mocks/MockPriceOracle';
-import type { MockERC20 } from '../../types/contracts/Mocks/MockERC20';
-import type { MockRegistry } from '../../types/contracts/Mocks/MockRegistry';
-import type { MockVaultCore } from '../../types/contracts/Mocks/MockVaultCore';
-import type { MockLiquidationEventsView } from '../../types/contracts/Mocks/MockLiquidationEventsView';
-import type { MockVaultRouter } from '../../types/contracts/Mocks/MockVaultRouter';
-import type { MockEarlyRepaymentGuaranteeManager } from '../../types/contracts/Mocks/MockEarlyRepaymentGuaranteeManager';
-import type { MockLiquidationManager } from '../../types/contracts/Mocks/MockLiquidationManager';
+import { ModuleKeys } from '../frontend-config/moduleKeys';
 
 // 导入常量 - 移除未使用的导入
 
 describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
+  const ACTION_ORDER_CREATE = ethers.keccak256(ethers.toUtf8Bytes('ORDER_CREATE'));
+  const ACTION_BORROW = ethers.keccak256(ethers.toUtf8Bytes('BORROW'));
+
+  async function deployLendingEngineTermGateFixture() {
+    const [governance, borrower] = await ethers.getSigners();
+
+    const registry = await (await ethers.getContractFactory('MockRegistry')).deploy();
+    await registry.waitForDeployment();
+
+    const acm = await (await ethers.getContractFactory('MockAccessControlManager')).deploy();
+    await acm.waitForDeployment();
+    await registry.setModule(ModuleKeys.KEY_ACCESS_CONTROL, await acm.getAddress());
+
+    const pool = await (await ethers.getContractFactory('SimpleMock')).deploy();
+    await pool.waitForDeployment();
+    await registry.setModule(ModuleKeys.KEY_LENDER_POOL_VAULT, await pool.getAddress());
+
+    const rewardManager = await (await ethers.getContractFactory('MockRewardManager')).deploy();
+    await rewardManager.waitForDeployment();
+    await registry.setModule(ModuleKeys.KEY_RM, await rewardManager.getAddress());
+
+    const rewardManagerCoreBorrowCheck = await (await ethers.getContractFactory('MockRewardManagerCoreBorrowCheck')).deploy();
+    await rewardManagerCoreBorrowCheck.waitForDeployment();
+    await registry.setModule(ModuleKeys.KEY_REWARD_MANAGER_CORE, await rewardManagerCoreBorrowCheck.getAddress());
+
+    const mirror = await (await ethers.getContractFactory('MockRewardViewBorrowCheckMirror')).deploy();
+    await mirror.waitForDeployment();
+    await registry.setModule(ModuleKeys.KEY_REWARD_VIEW, await mirror.getAddress());
+
+    const feeRouter = await (await ethers.getContractFactory('MockFeeRouter')).deploy();
+    await feeRouter.waitForDeployment();
+    await registry.setModule(ModuleKeys.KEY_FR, await feeRouter.getAddress());
+
+    const { proxyContract: lendingEngine } = await deployProxyContract(
+      'src/core/LendingEngine.sol:LendingEngine',
+      (await ethers.getContractFactory('src/core/LendingEngine.sol:LendingEngine')).interface.encodeFunctionData('initialize', [
+        await registry.getAddress(),
+      ]),
+    );
+    await registry.setModule(ModuleKeys.KEY_LE, await lendingEngine.getAddress());
+
+    const { proxyContract: loanNFT } = await deployProxyContract(
+      'LoanNFT',
+      (await ethers.getContractFactory('LoanNFT')).interface.encodeFunctionData('initialize', [
+        'Loan NFT',
+        'LOAN',
+        'https://api.example.com/token/',
+        await registry.getAddress(),
+      ]),
+    );
+    await registry.setModule(ModuleKeys.KEY_LOAN_NFT, await loanNFT.getAddress());
+
+    const borrowAsset = await (await ethers.getContractFactory('MockERC20')).deploy(
+      'Borrow Asset',
+      'BAS',
+      18,
+      ethers.parseEther('1000000'),
+    );
+    await borrowAsset.waitForDeployment();
+
+    await acm.grantRole(ACTION_ORDER_CREATE, governance.address);
+    await acm.grantRole(ACTION_BORROW, await lendingEngine.getAddress());
+
+    return { lendingEngine, rewardManagerCoreBorrowCheck, mirror, governance, borrower, pool, borrowAsset };
+  }
+
   describe('期限与等级限制（LendingEngine）', function () {
-    it('应拒绝不在白名单的期限（集成占位）', async function () {
-      // 在业务集成环境下，通过 Vault 或 Router 触发创建 7 天订单，应 revert LendingEngine__InvalidTerm
-      // 由于当前文件未直接持有 LendingEngine 的创建入口，这里作为集成占位，后续补具体断言
-      expect(true).to.be.true;
+    it('应拒绝不在白名单的期限（集成）', async function () {
+      const { lendingEngine, governance, borrower, pool, borrowAsset } = await loadFixture(deployLendingEngineTermGateFixture);
+      const order = {
+        principal: ethers.parseEther('100'),
+        rate: 500n,
+        term: 50400n,
+        borrower: borrower.address,
+        lender: await pool.getAddress(),
+        asset: await borrowAsset.getAddress(),
+        startTimestamp: 0n,
+        maturity: 0n,
+        repaidAmount: 0n,
+      };
+
+      await expect(lendingEngine.connect(governance).createLoanOrder(order)).to.be.revertedWithCustomError(
+        lendingEngine,
+        'LendingEngine__InvalidTerm',
+      );
     });
 
-    it('90/180/360 天期限需等级≥4（集成占位）', async function () {
-      // 在业务集成环境下，当用户等级<4，创建 90 天订单应 revert LendingEngine__LevelTooLow
-      // 后续根据具体集成路径（例如 VaultRouter→LendingEngine）补充具体调用与断言
-      expect(true).to.be.true;
+    it('90/180/360 天期限需等级≥4，镜像抬高也不能绕过（集成）', async function () {
+      const { lendingEngine, rewardManagerCoreBorrowCheck, mirror, governance, borrower, pool, borrowAsset } =
+        await loadFixture(deployLendingEngineTermGateFixture);
+
+      await mirror.setUserLevelForBorrowCheck(borrower.address, 8);
+      await rewardManagerCoreBorrowCheck.setUserLevelForBorrowCheck(borrower.address, 3);
+
+      for (const term of [648000n, 1296000n, 2592000n]) {
+        const order = {
+          principal: ethers.parseEther('100'),
+          rate: 500n,
+          term,
+          borrower: borrower.address,
+          lender: await pool.getAddress(),
+          asset: await borrowAsset.getAddress(),
+          startTimestamp: 0n,
+          maturity: 0n,
+          repaidAmount: 0n,
+        };
+
+        await expect(lendingEngine.connect(governance).createLoanOrder(order)).to.be.revertedWithCustomError(
+          lendingEngine,
+          'LendingEngine__LevelTooLow',
+        );
+      }
     });
   });
   // 测试常量定义
@@ -65,25 +149,25 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
   let SETTLEMENT_TOKEN: string;
 
   // 合约实例
-  let vaultBusinessLogic: VaultBusinessLogic;
-  let mockAccessControlManager: MockAccessControlManager;
-  let mockCollateralManager: MockCollateralManager;
-  let mockLendingEngine: MockLendingEngineConcrete;
-  let mockStatisticsView: MockStatisticsView;
-  let mockGuaranteeFundManager: MockGuaranteeFundManager;
-  let mockRewardManager: MockRewardManager;
-  let mockAssetWhitelist: MockAssetWhitelist;
-  let mockPriceOracle: MockPriceOracle;
-  let mockERC20: MockERC20;
-  let mockERC20_2: MockERC20;
-  let mockERC20_3: MockERC20;
-  let mockSettlementToken: MockERC20;
-  let registry: MockRegistry;
-  let mockVaultCore: MockVaultCore;
-  let mockLiquidationEventsView: MockLiquidationEventsView;
-  let mockVaultRouter: MockVaultRouter;
-  let mockEarlyRepaymentGuaranteeManager: MockEarlyRepaymentGuaranteeManager;
-  let mockLiquidationManager: MockLiquidationManager;
+  let vaultBusinessLogic: any;
+  let mockAccessControlManager: any;
+  let mockCollateralManager: any;
+  let mockLendingEngine: any;
+  let mockStatisticsView: any;
+  let mockGuaranteeFundManager: any;
+  let mockRewardManager: any;
+  let mockAssetWhitelist: any;
+  let mockPriceOracle: any;
+  let mockERC20: any;
+  let mockERC20_2: any;
+  let mockERC20_3: any;
+  let mockSettlementToken: any;
+  let registry: any;
+  let mockVaultCore: any;
+  let mockLiquidationEventsView: any;
+  let mockVaultRouter: any;
+  let mockEarlyRepaymentGuaranteeManager: any;
+  let mockLiquidationManager: any;
 
   // 账户
   let owner: SignerWithAddress;
@@ -136,7 +220,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     await proxy.waitForDeployment();
 
     // 3. 通过代理访问合约
-    const proxyContract = implementation.attach(proxy.target) as VaultBusinessLogic;
+    const proxyContract = implementation.attach(proxy.target) as any;
     
     return {
       implementation,
@@ -149,7 +233,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
    * 权限设置函数
    */
   async function setupPermissions(
-    accessControlManager: MockAccessControlManager, 
+    accessControlManager: any,
     user: SignerWithAddress
   ) {
     const userAddress = await user.getAddress();
@@ -174,70 +258,70 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
 
     // 部署 Mock 合约
     mockAccessControlManagerFactory = await ethers.getContractFactory('MockAccessControlManager');
-    mockAccessControlManager = await mockAccessControlManagerFactory.deploy() as MockAccessControlManager;
+    mockAccessControlManager = await mockAccessControlManagerFactory.deploy() as any;
     await mockAccessControlManager.waitForDeployment();
 
     mockCollateralManagerFactory = await ethers.getContractFactory('MockCollateralManager');
-    mockCollateralManager = await mockCollateralManagerFactory.deploy() as MockCollateralManager;
+    mockCollateralManager = await mockCollateralManagerFactory.deploy() as any;
     await mockCollateralManager.waitForDeployment();
 
     mockLendingEngineFactory = await ethers.getContractFactory('MockLendingEngineConcrete');
-    mockLendingEngine = await mockLendingEngineFactory.deploy() as MockLendingEngineConcrete;
+    mockLendingEngine = await mockLendingEngineFactory.deploy() as any;
     await mockLendingEngine.waitForDeployment();
 
     mockStatisticsViewFactory = await ethers.getContractFactory('MockStatisticsView');
-    mockStatisticsView = await mockStatisticsViewFactory.deploy() as MockStatisticsView;
+    mockStatisticsView = await mockStatisticsViewFactory.deploy() as any;
     await mockStatisticsView.waitForDeployment();
 
     mockVaultCoreFactory = await ethers.getContractFactory('MockVaultCore');
-    mockVaultCore = await mockVaultCoreFactory.deploy() as MockVaultCore;
+    mockVaultCore = await mockVaultCoreFactory.deploy() as any;
     await mockVaultCore.waitForDeployment();
 
     mockGuaranteeFundManagerFactory = await ethers.getContractFactory('MockGuaranteeFundManager');
-    mockGuaranteeFundManager = await mockGuaranteeFundManagerFactory.deploy() as MockGuaranteeFundManager;
+    mockGuaranteeFundManager = await mockGuaranteeFundManagerFactory.deploy() as any;
     await mockGuaranteeFundManager.waitForDeployment();
 
     mockRewardManagerFactory = await ethers.getContractFactory('MockRewardManager');
-    mockRewardManager = await mockRewardManagerFactory.deploy() as MockRewardManager;
+    mockRewardManager = await mockRewardManagerFactory.deploy() as any;
     await mockRewardManager.waitForDeployment();
 
     mockAssetWhitelistFactory = await ethers.getContractFactory('MockAssetWhitelist');
-    mockAssetWhitelist = await mockAssetWhitelistFactory.deploy() as MockAssetWhitelist;
+    mockAssetWhitelist = await mockAssetWhitelistFactory.deploy() as any;
     await mockAssetWhitelist.waitForDeployment();
 
     mockPriceOracleFactory = await ethers.getContractFactory('MockPriceOracle');
-    mockPriceOracle = await mockPriceOracleFactory.deploy() as MockPriceOracle;
+    mockPriceOracle = await mockPriceOracleFactory.deploy() as any;
     await mockPriceOracle.waitForDeployment();
 
     mockLiquidationEventsViewFactory = await ethers.getContractFactory('MockLiquidationEventsView');
-    mockLiquidationEventsView = await mockLiquidationEventsViewFactory.deploy() as MockLiquidationEventsView;
+    mockLiquidationEventsView = await mockLiquidationEventsViewFactory.deploy() as any;
     await mockLiquidationEventsView.waitForDeployment();
 
     mockVaultRouterFactory = await ethers.getContractFactory('MockVaultRouter');
-    mockVaultRouter = await mockVaultRouterFactory.deploy() as MockVaultRouter;
+    mockVaultRouter = await mockVaultRouterFactory.deploy() as any;
     await mockVaultRouter.waitForDeployment();
 
     mockEarlyRepaymentGuaranteeManagerFactory = await ethers.getContractFactory('MockEarlyRepaymentGuaranteeManager');
-    mockEarlyRepaymentGuaranteeManager = await mockEarlyRepaymentGuaranteeManagerFactory.deploy() as MockEarlyRepaymentGuaranteeManager;
+    mockEarlyRepaymentGuaranteeManager = await mockEarlyRepaymentGuaranteeManagerFactory.deploy() as any;
     await mockEarlyRepaymentGuaranteeManager.waitForDeployment();
 
     // 部署 MockLiquidationManager（替代 VBL 清算用例）
     mockLiquidationManagerFactory = await ethers.getContractFactory('MockLiquidationManager');
-    mockLiquidationManager = await mockLiquidationManagerFactory.deploy() as MockLiquidationManager;
+    mockLiquidationManager = await mockLiquidationManagerFactory.deploy() as any;
     await mockLiquidationManager.waitForDeployment();
 
     mockERC20Factory = await ethers.getContractFactory('MockERC20');
-    mockERC20 = await mockERC20Factory.deploy('Test Token 1', 'TT1', 18, ethers.parseUnits('1000000', 18)) as MockERC20;
+    mockERC20 = await mockERC20Factory.deploy('Test Token 1', 'TT1', 18, ethers.parseUnits('1000000', 18)) as any;
     await mockERC20.waitForDeployment();
-    mockERC20_2 = await mockERC20Factory.deploy('Test Token 2', 'TT2', 18, ethers.parseUnits('1000000', 18)) as MockERC20;
+    mockERC20_2 = await mockERC20Factory.deploy('Test Token 2', 'TT2', 18, ethers.parseUnits('1000000', 18)) as any;
     await mockERC20_2.waitForDeployment();
-    mockERC20_3 = await mockERC20Factory.deploy('Test Token 3', 'TT3', 18, ethers.parseUnits('1000000', 18)) as MockERC20;
+    mockERC20_3 = await mockERC20Factory.deploy('Test Token 3', 'TT3', 18, ethers.parseUnits('1000000', 18)) as any;
     await mockERC20_3.waitForDeployment();
-    mockSettlementToken = await mockERC20Factory.deploy('Settlement Token', 'SETTLE', 18, ethers.parseUnits('1000000', 18)) as MockERC20;
+    mockSettlementToken = await mockERC20Factory.deploy('Settlement Token', 'SETTLE', 18, ethers.parseUnits('1000000', 18)) as any;
     await mockSettlementToken.waitForDeployment();
 
     // 部署 MockRegistry（简化测试设置）
-    registry = await (await ethers.getContractFactory('MockRegistry')).deploy() as MockRegistry;
+    registry = await (await ethers.getContractFactory('MockRegistry')).deploy() as any;
     
     // 使用与合约一致的模块键哈希
     const MODULE_KEYS = {
@@ -287,7 +371,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
 
     // 部署 VaultBusinessLogic
     const { proxyContract } = await deployProxyContract('VaultBusinessLogic');
-    vaultBusinessLogic = proxyContract as VaultBusinessLogic;
+    vaultBusinessLogic = proxyContract as any;
 
     // 设置测试资产地址
     TEST_ASSET = mockERC20.target as string;
@@ -383,7 +467,7 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
     it('应该正确初始化代理合约', async function () {
       const { proxyContract } = await deployProxyContract('VaultBusinessLogic');
       
-      await expect((proxyContract as VaultBusinessLogic).initialize(registry.target, SETTLEMENT_TOKEN)).to.not.be.reverted;
+      await expect((proxyContract as any).initialize(registry.target, SETTLEMENT_TOKEN)).to.not.be.reverted;
     });
 
     it('调试模块键', async function () {
@@ -421,10 +505,10 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
 
     it('应该拒绝重复初始化', async function () {
       const { proxyContract } = await deployProxyContract('VaultBusinessLogic');
-      await (proxyContract as VaultBusinessLogic).initialize(registry.target, SETTLEMENT_TOKEN);
+      await (proxyContract as any).initialize(registry.target, SETTLEMENT_TOKEN);
       
       await expect(
-        (proxyContract as VaultBusinessLogic).initialize(registry.target, SETTLEMENT_TOKEN)
+        (proxyContract as any).initialize(registry.target, SETTLEMENT_TOKEN)
       ).to.be.revertedWithCustomError(proxyContract, 'InvalidInitialization');
     });
 
@@ -433,12 +517,12 @@ describe('VaultBusinessLogic – 业务逻辑模块测试', function () {
       
       // 测试零地址 Registry
       await expect(
-        (proxyContract as VaultBusinessLogic).initialize(ZERO_ADDRESS, SETTLEMENT_TOKEN)
+        (proxyContract as any).initialize(ZERO_ADDRESS, SETTLEMENT_TOKEN)
       ).to.be.revertedWithCustomError(proxyContract, 'ZeroAddress');
       
       // 测试零地址结算币
       await expect(
-        (proxyContract as VaultBusinessLogic).initialize(registry.target, ZERO_ADDRESS)
+        (proxyContract as any).initialize(registry.target, ZERO_ADDRESS)
       ).to.be.revertedWithCustomError(proxyContract, 'ZeroAddress');
     });
   });

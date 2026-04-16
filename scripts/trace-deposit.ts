@@ -42,8 +42,13 @@ async function main() {
     }
   }
   const blockNumber = await ethers.provider.getBlockNumber();
-  // SSOT: price is USD-8 ($1.00 = 100000000)
-  await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), blockNumber);
+  // SSOT: price follows asset decimals ($1.00 => 1 * 10**assetDecimals)
+  const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
+  await po.connect(deployer).updatePrice(
+    settlementTokenAddrFromRegistry,
+    ethers.parseUnits("1", settlementTokenDecimals),
+    blockNumber,
+  );
 
   // Optional (legacy): enable router testing mode if supported by deployed VaultRouter.
   await ensureRole(ACTION_SET_PARAMETER, deployer.address);

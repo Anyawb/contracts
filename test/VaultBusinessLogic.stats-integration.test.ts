@@ -63,10 +63,10 @@ describe('VaultCore → VaultRouter → PositionView – delta push (SSOT)', fun
 
     // Deploy minimal PositionView to satisfy VaultRouter.pushUserPositionUpdateDelta forwarding
     const PositionViewF = await ethers.getContractFactory('PositionView');
-    const positionView = await upgrades.deployProxy(PositionViewF, [await registry.getAddress()], {
+    const positionView = (await upgrades.deployProxy(PositionViewF, [await registry.getAddress()], {
       kind: 'uups',
       initializer: 'initialize',
-    });
+    })) as any;
     await positionView.waitForDeployment();
 
     // Deploy VaultCore mock: satisfies VaultRouter.onlyVaultCore and provides viewContractAddrVar for PositionView
@@ -101,7 +101,7 @@ describe('VaultCore → VaultRouter → PositionView – delta push (SSOT)', fun
 
     // Seed + update the ledger SSOT first, then push the delta (mirrors real flow ordering).
     await cm.depositCollateral(userAddr, asset, ethers.parseUnits('10', 18));
-    await vaultCoreModule.pushUserPositionUpdateDelta(
+    await (vaultCoreModule as any).pushUserPositionUpdate(
       userAddr,
       asset,
       ethers.parseUnits('10', 18),
@@ -120,7 +120,7 @@ describe('VaultCore → VaultRouter → PositionView – delta push (SSOT)', fun
 
     // borrow: +5 debt (update ledger, then push delta)
     await le.borrow(userAddr, asset, ethers.parseUnits('5', 18), 0, 0);
-    await vaultCoreModule.pushUserPositionUpdateDelta(
+    await (vaultCoreModule as any).pushUserPositionUpdate(
       userAddr,
       asset,
       0,
@@ -135,13 +135,13 @@ describe('VaultCore → VaultRouter → PositionView – delta push (SSOT)', fun
       expect(debt).to.equal(ethers.parseUnits('5', 18));
     }
 
-    // repay: -3 debt (update ledger, then push delta)
+    // repay: update ledger, then push the new absolute snapshot.
     await le.repay(userAddr, asset, ethers.parseUnits('3', 18));
-    await vaultCoreModule.pushUserPositionUpdateDelta(
+    await (vaultCoreModule as any).pushUserPositionUpdate(
       userAddr,
       asset,
-      0,
-      -ethers.parseUnits('3', 18),
+      ethers.parseUnits('10', 18),
+      ethers.parseUnits('2', 18),
       ethers.ZeroHash,
       0,
       0
@@ -152,13 +152,13 @@ describe('VaultCore → VaultRouter → PositionView – delta push (SSOT)', fun
       expect(debt).to.equal(ethers.parseUnits('2', 18));
     }
 
-    // withdraw: -4 collateral (update ledger, then push delta)
+    // withdraw: update ledger, then push the new absolute snapshot.
     await cm.withdrawCollateral(userAddr, asset, ethers.parseUnits('4', 18));
-    await vaultCoreModule.pushUserPositionUpdateDelta(
+    await (vaultCoreModule as any).pushUserPositionUpdate(
       userAddr,
       asset,
-      -ethers.parseUnits('4', 18),
-      0,
+      ethers.parseUnits('6', 18),
+      ethers.parseUnits('2', 18),
       ethers.ZeroHash,
       0,
       0

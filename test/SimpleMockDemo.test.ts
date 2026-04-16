@@ -2,17 +2,13 @@ import { expect } from 'chai';
 import hardhat from 'hardhat';
 const { ethers } = hardhat;
 
-// 导入自动生成的类型
-import type { SimpleMock } from '../../types/contracts/Mocks/SimpleMock';
-import { SimpleMock__factory } from '../../types/factories/contracts/Mocks/SimpleMock__factory';
-
 /**
  * SimpleMock 演示测试
  * 
  * 展示如何使用自动生成的 TypeScript 类型
  */
 describe('SimpleMock 类型演示', function () {
-  let simpleMock: SimpleMock; // 使用生成的类型
+  let simpleMock: any;
   let deployer: any;
   let alice: any;
   let bob: any;
@@ -21,7 +17,7 @@ describe('SimpleMock 类型演示', function () {
     [deployer, alice, bob] = await ethers.getSigners();
 
     // 使用生成的工厂类部署合约
-    const factory = (await ethers.getContractFactory('SimpleMock')) as SimpleMock__factory;
+    const factory = await ethers.getContractFactory('SimpleMock');
     simpleMock = await factory.deploy();
     await simpleMock.waitForDeployment();
   });

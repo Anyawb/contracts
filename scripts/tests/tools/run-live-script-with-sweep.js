@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const { Wallet } = require("ethers");
+const { loadNetworkProfile } = require("./shared/network-profile");
 
 function getArg(flag) {
   const index = process.argv.indexOf(flag);
@@ -13,10 +14,17 @@ function getArg(flag) {
 
 const label = getArg("--label");
 const command = getArg("--command");
-const network = getArg("--network") || "arbitrumSepolia";
+const network = getArg("--network") || process.env.LIVE_TEST_NETWORK;
+
+if (!network || !network.trim()) {
+  console.error("run-live-script-with-sweep: missing --network <network> or LIVE_TEST_NETWORK");
+  process.exit(2);
+}
+
+const profile = loadNetworkProfile(network);
 
 if (!label || !command) {
-  console.error("Usage: node scripts/tests/tools/run-live-script-with-sweep.js --label <label> --command <command> [--network arbitrumSepolia]");
+  console.error("Usage: node scripts/tests/tools/run-live-script-with-sweep.js --label <label> --command <command> [--network <network>]");
   process.exit(2);
 }
 
@@ -26,13 +34,14 @@ const runId = `${label}-${timestamp}`;
 const logDir = path.join(workspaceRoot, "scripts/tests/logs", runId);
 const stateFile = path.join(logDir, "fresh-borrowers.json");
 const logFile = path.join(logDir, `${label}.log`);
-const sweepCommand = `pnpm -s exec hardhat run scripts/tests/live-test/sweep-fresh-borrowers.ts --network ${network}`;
+const sweepCommand = `pnpm -s exec hardhat run ${profile.LIVE_SWEEP_SCRIPT} --network ${profile.LIVE_SWEEP_NETWORK}`;
 const mnemonic = Wallet.createRandom().mnemonic.phrase;
 
 fs.mkdirSync(logDir, { recursive: true });
 
 const sharedEnv = {
   ...process.env,
+  ...profile,
   LIVE_FRESH_BORROWER_MNEMONIC: mnemonic,
   LIVE_FRESH_BORROWER_STATE_FILE: stateFile,
   FULL_LIVE_LOGDIR: logDir,

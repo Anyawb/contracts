@@ -14,6 +14,17 @@ function calcTotalDue(principal: bigint, rateBps: bigint, termBlocks: bigint) {
   return principal + interest;
 }
 
+const LOAN_STATUS = {
+  Active: 0n,
+  Repaid: 1n,
+} as const;
+
+function expectBigintEq(label: string, actual: bigint | number, expected: bigint | number) {
+  if (BigInt(actual) !== BigInt(expected)) {
+    throw new Error(`${label}: expected=${BigInt(expected).toString()} actual=${BigInt(actual).toString()}`);
+  }
+}
+
 async function main() {
   const [deployer, borrower, lender] = await ethers.getSigners();
 
@@ -36,6 +47,7 @@ async function main() {
 
   // Resolve modules from registry to avoid name confusion
   const orderEngineAddr = await registry.getModuleOrRevert(key("ORDER_ENGINE"));
+  const lendingEngineViewAddr = await registry.getModuleOrRevert(key("LENDING_ENGINE_VIEW"));
   const loanNftAddr = await registry.getModuleOrRevert(key("LOAN_NFT"));
   const feeRouterAddr = await registry.getModuleOrRevert(key("FEE_ROUTER"));
   const settlementManagerAddr = await registry.getModuleOrRevert(key("SETTLEMENT_MANAGER"));
@@ -45,6 +57,7 @@ async function main() {
   )) as any;
 
   const orderEngine = (await ethers.getContractAt("src/core/LendingEngine.sol:LendingEngine", orderEngineAddr)) as any;
+  const lendingEngineView = (await ethers.getContractAt("LendingEngineView", lendingEngineViewAddr)) as any;
   const loanNft = (await ethers.getContractAt("LoanNFT", loanNftAddr)) as any;
 
   console.log("ORDER_ENGINE", orderEngineAddr);
@@ -90,8 +103,13 @@ async function main() {
       await po.connect(deployer).configureAsset(settlementTokenAddrFromRegistry, "usd-coin", usdcDecimals, 3600);
     }
   }
+  const settlementTokenDecimals = Number(await usdc.decimals().catch(() => 6));
   const blockNumber = await ethers.provider.getBlockNumber();
-  await po.connect(deployer).updatePrice(settlementTokenAddrFromRegistry, ethers.parseUnits("1", 8), blockNumber);
+  await po.connect(deployer).updatePrice(
+    settlementTokenAddrFromRegistry,
+    ethers.parseUnits("1", settlementTokenDecimals),
+    blockNumber,
+  );
 
   // Fund users
   await usdc.connect(deployer).transfer(borrower.address, ethers.parseUnits("10000", 6));
@@ -211,10 +229,24 @@ async function main() {
   })();
   console.log("orderId", orderId.toString());
 
+  const orderAfterFinalize = await lendingEngineView.getLoanOrder(orderId);
+  const orderStatusAfterFinalize = await lendingEngineView.getOrderStatus(orderId);
+  expectBigintEq("order status after finalize", orderStatusAfterFinalize, LOAN_STATUS.Active);
+  expectBigintEq(
+    "repaidAmount after finalize",
+    BigInt(orderAfterFinalize.repaidAmount ?? orderAfterFinalize[8] ?? 0),
+    0n,
+  );
+
   const borrowerTokensAfter = await loanNft.getUserTokens(borrower.address);
   console.log("borrower LoanNFT tokens before/after", borrowerTokensBefore.length, borrowerTokensAfter.length);
   const newTokenId = borrowerTokensAfter.find((t) => !borrowerTokensBefore.includes(t));
   console.log("minted tokenId", newTokenId?.toString());
+
+  if (newTokenId !== undefined) {
+    const meta = await loanNft.getLoanMetadata(newTokenId);
+    expectBigintEq("LoanNFT status after finalize", meta.status, LOAN_STATUS.Active);
+  }
 
   // Repay full
   const termBlocks = BigInt(termDays) * BLOCKS_PER_DAY;
@@ -237,8 +269,18 @@ async function main() {
   const lenderBalAfter = await usdc.balanceOf(lender.address);
   console.log("lender balance delta", (lenderBalAfter - lenderBalBefore).toString());
 
+  const orderAfterRepay = await lendingEngineView.getLoanOrder(orderId);
+  const orderStatusAfterRepay = await lendingEngineView.getOrderStatus(orderId);
+  expectBigintEq("order status after repay", orderStatusAfterRepay, LOAN_STATUS.Repaid);
+  expectBigintEq(
+    "repaidAmount after repay",
+    BigInt(orderAfterRepay.repaidAmount ?? orderAfterRepay[8] ?? 0),
+    totalDue,
+  );
+
   if (newTokenId !== undefined) {
     const meta = await loanNft.getLoanMetadata(newTokenId);
+    expectBigintEq("LoanNFT status after repay", meta.status, LOAN_STATUS.Repaid);
     console.log("LoanNFT status after repay", meta.status);
   }
 

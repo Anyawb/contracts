@@ -82,7 +82,7 @@ describe('LendingEngineView', function () {
       expect(eventNames).to.not.include('DataPushed');
 
       // runtime-level: enumerate selectors and ensure no push*
-      const selectors = functionFragments.map((f) => view.interface.getFunction(f.format()).selector);
+      const selectors = functionFragments.map((f) => view.interface.getFunction(f.format())!.selector);
       expect(selectors.length).to.equal(new Set(selectors).size);
     });
   });
@@ -127,6 +127,40 @@ describe('LendingEngineView', function () {
 
       const [hasAccess] = await view.connect(outsider).canAccessLoanOrder(1, outsider.address);
       expect(hasAccess).to.equal(true);
+    });
+
+    it('exposes explicit order status without forcing callers to infer from order fields', async function () {
+      const { view, engine, borrower, lender, ops, admin } = await deployFixture();
+
+      await engine.setOrderStatus(1, 3);
+
+      expect(await view.connect(borrower).getOrderStatus(1)).to.equal(3n);
+      expect(await view.connect(lender).getOrderStatus(1)).to.equal(3n);
+      expect(await view.connect(ops).getOrderStatus(1)).to.equal(3n);
+      expect(await view.connect(admin).getOrderStatus(1)).to.equal(3n);
+    });
+
+    it('exposes a fallback order-state snapshot even when the dedicated state store is not registered', async function () {
+      const { view, engine, borrower } = await deployFixture();
+
+      await engine.setOrderStatus(1, 1);
+
+      const snapshot = await view.connect(borrower).getOrderStateSnapshot(1);
+      expect(snapshot.productType).to.equal(1n);
+      expect(snapshot.lifecycle).to.equal(2n);
+      expect(snapshot.closeReason).to.equal(1n);
+      expect(snapshot.shortfallStatus).to.equal(0n);
+      expect(snapshot.collateralDisposition).to.equal(0n);
+      expect(snapshot.hasLoss).to.equal(false);
+      expect(snapshot.createdBlock).to.equal(1000n);
+    });
+
+    it('rejects outsider reading getOrderStatus(orderId) with MissingRole()', async function () {
+      const { view, outsider } = await deployFixture();
+      await expect(view.connect(outsider).getOrderStatus(1)).to.be.revertedWithCustomError(
+        view,
+        'MissingRole',
+      );
     });
   });
 
@@ -240,6 +274,7 @@ describe('LendingEngineView', function () {
       await impl.waitForDeployment();
 
       await expect(impl.getLoanOrder(1)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
+      await expect(impl.getOrderStatus(1)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
       await expect(impl.getFailedFeeAmount(1)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
       await expect(impl.getNftRetryCount(1)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
       await expect(impl.isMatchEngine(ethers.ZeroAddress)).to.be.revertedWithCustomError(impl, 'ZeroAddress');
@@ -250,7 +285,7 @@ describe('LendingEngineView', function () {
   describe('version info (5.1.2 acceptance requirement)', function () {
     it('exposes apiVersion() and schemaVersion() baselines', async function () {
       const { view } = await deployFixture();
-      expect(await view.apiVersion()).to.equal(1n);
+      expect(await view.apiVersion()).to.equal(2n);
       expect(await view.schemaVersion()).to.equal(1n);
     });
 
@@ -334,6 +369,17 @@ describe('LendingEngineView', function () {
       expect(asOps.borrower).to.equal(ethers.ZeroAddress);
       expect(asOps.lender).to.equal(ethers.ZeroAddress);
       expect(asAdmin.principal).to.equal(0n);
+    });
+
+    it('bubbles invalid-order status reads for ops/admin instead of returning an inferred terminal state', async function () {
+      const { view, ops, admin } = await deployFixture();
+
+      await expect(view.connect(ops).getOrderStatus(999)).to.be.revertedWith(
+        'MockLendingEngineViewAdapter: invalid order',
+      );
+      await expect(view.connect(admin).getOrderStatus(999)).to.be.revertedWith(
+        'MockLendingEngineViewAdapter: invalid order',
+      );
     });
 
     it('ops-only diagnostics return false/0 defaults without reverting', async function () {

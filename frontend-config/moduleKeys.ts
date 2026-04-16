@@ -9,7 +9,7 @@
  * ⚠️ Do not modify manually, run: pnpm generate:module-keys to update
  *
  * SSOT: contracts/src/constants/ModuleKeys.sol
- * 生成时间 / Generated at: 2026-03-06T04:57:15.858Z
+ * 生成时间 / Generated at: 2026-04-14T08:50:09.186Z
  *
  * 设计原则:
  *   - 零硬编码哈希：仅保存 keccak256 的输入字符串
@@ -25,7 +25,7 @@ import { keccak256, toUtf8Bytes } from 'ethers';
 export const MODULE_KEY_INPUTS = {
   /** CollateralManager module key. Used by Registry to store the CollateralManager contract address. Hash: keccak256("COLLATERAL_MANAGER") */
   KEY_CM: 'COLLATERAL_MANAGER',
-  /** Lending engine (ledger) module key (VaultLendingEngine / ILendingEngineBasic). Used by Registry to store the lending engine contract address. Hash: keccak256("LENDING_ENGINE") */
+  /** Lending engine (ledger) module key (VaultLendingEngine / ILendingEngineBasic legacy umbrella). Used by Registry to store the lending engine contract address. Hash: keccak256("LENDING_ENGINE") */
   KEY_LE: 'LENDING_ENGINE',
   /** Vault lending engine module key. Used by Registry to store the VaultLendingEngine contract address. Hash: keccak256("VAULT_LENDING_ENGINE") */
   KEY_VAULT_LENDING_ENGINE: 'VAULT_LENDING_ENGINE',
@@ -37,7 +37,7 @@ export const MODULE_KEY_INPUTS = {
   KEY_STATS: 'VAULT_STATISTICS',
   /** Statistics push orchestrator module key (strict B+). Used by Registry to store the StatisticsPushManager (a.k.a. ViewPushOrchestrator) contract address. Hash: keccak256("STATISTICS_PUSH_MANAGER") */
   KEY_STATS_PUSH_MANAGER: 'STATISTICS_PUSH_MANAGER',
-  /** Loan flow view module key (protocol loan flow metrics, USD-8 SSOT). Used by Registry to store the LoanFlowView contract address. Hash: keccak256("LOAN_FLOW_VIEW") */
+  /** Loan flow view module key (protocol loan flow metrics, shared valuation-unit SSOT). Used by Registry to store the LoanFlowView contract address. Hash: keccak256("LOAN_FLOW_VIEW") */
   KEY_LOAN_FLOW_VIEW: 'LOAN_FLOW_VIEW',
   /** Loan flow push orchestrator module key (strict B+). Used by Registry to store the LoanFlowPushManager contract address. Hash: keccak256("LOAN_FLOW_PUSH_MANAGER") */
   KEY_LOAN_FLOW_PUSH_MANAGER: 'LOAN_FLOW_PUSH_MANAGER',
@@ -149,9 +149,9 @@ export const MODULE_KEY_INPUTS = {
   KEY_VAULT_UTILS: 'VAULT_UTILS',
   /** Price oracle module key. Used by Registry to store the PriceOracle contract address. Hash: keccak256("PRICE_ORACLE") */
   KEY_PRICE_ORACLE: 'PRICE_ORACLE',
-  /** Price updater module key. Uses the legacy registry hash input for onchain compatibility. Hash: keccak256("COINGECKO_PRICE_UPDATER") */
+  /** Price updater module key. Used by Registry to store the PriceUpdater contract address. Preserves the legacy CoinGecko hash input for onchain compatibility. Hash: keccak256("COINGECKO_PRICE_UPDATER") */
   KEY_PRICE_UPDATER: 'COINGECKO_PRICE_UPDATER',
-  /** Price updater view module key. Uses the legacy registry hash input for onchain compatibility. Hash: keccak256("COINGECKO_PRICE_UPDATER_VIEW") */
+  /** Price updater view module key. Used by Registry to store the PriceUpdaterView contract address. Preserves the legacy CoinGecko hash input for onchain compatibility. Hash: keccak256("COINGECKO_PRICE_UPDATER_VIEW") */
   KEY_PRICE_UPDATER_VIEW: 'COINGECKO_PRICE_UPDATER_VIEW',
   /** Settlement token module key. Used by Registry to store the SettlementToken contract address. Hash: keccak256("SETTLEMENT_TOKEN") */
   KEY_SETTLEMENT_TOKEN: 'SETTLEMENT_TOKEN',
@@ -159,6 +159,10 @@ export const MODULE_KEY_INPUTS = {
   KEY_RWA_STRATEGY: 'RWA_AUTO_LEVERAGED_STRATEGY',
   /** Vault business logic module key. Used by Registry to store the VaultBusinessLogic contract address. Hash: keccak256("VAULT_BUSINESS_LOGIC") */
   KEY_VAULT_BUSINESS_LOGIC: 'VAULT_BUSINESS_LOGIC',
+  /** Registry key for the standalone blocks-only coordinator module. Used to resolve the BlocksOnlyCoordinator contract that owns blocks-only order creation, Hash: keccak256("BLOCKS_ONLY_COORDINATOR") */
+  KEY_BLOCKS_ONLY_COORDINATOR: 'BLOCKS_ONLY_COORDINATOR',
+  /** Registry key for the dedicated blocks-only view module. Used to resolve the BlocksOnlyView contract that exposes permissioned order and runtime read helpers. Hash: keccak256("BLOCKS_ONLY_VIEW") */
+  KEY_BLOCKS_ONLY_VIEW: 'BLOCKS_ONLY_VIEW',
   /** HealthView module key. Used by Registry to store the HealthView contract address. Hash: keccak256("HEALTH_VIEW") */
   KEY_HEALTH_VIEW: 'HEALTH_VIEW',
   /** RiskView module key (legacy). Used by Registry to store the RiskView contract address. Hash: keccak256("RISK_VIEW") */
@@ -274,6 +278,8 @@ export const MODULE_KEY_STRINGS = [
   'KEY_SETTLEMENT_TOKEN',
   'KEY_RWA_STRATEGY',
   'KEY_VAULT_BUSINESS_LOGIC',
+  'KEY_BLOCKS_ONLY_COORDINATOR',
+  'KEY_BLOCKS_ONLY_VIEW',
   'KEY_HEALTH_VIEW',
   'KEY_RISK_VIEW',
   'KEY_SYSTEM_RISK_VIEW',

@@ -116,9 +116,9 @@ describe('CollateralManager – 抵押管理器测试', function () {
   it('应该正确计算抵押物价值', async function () {
     await collateralManager.depositCollateral(user, asset, amount);
     // NOTE(Architecture-Guide): 抵押估值不再由 CollateralManager 提供，已迁移到 View 层（PositionView）：
-    // valueUSD8 = amount(token base units) * price(USD-8) / 10**assetDecimals
-    const valueUSD8 = await positionView.getAssetValue(asset, amount);
-    expect(valueUSD8).to.be.a('bigint');
+    // valueUsd = amount(token base units) * priceUsd / 10**assetDecimals
+    const value统一 VALUE = await positionView.getAssetValue(asset, amount);
+    expect(value统一 VALUE).to.be.a('bigint');
   });
 });
 ```

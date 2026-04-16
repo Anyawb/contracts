@@ -11,8 +11,8 @@ pragma solidity ^0.8.20;
  * Security:
  * - Read-only surface for view modules, valuation helpers, and risk checks.
  * - Callers should depend on this interface instead of broader lending-engine write surfaces.
- * - Value-returning methods are protocol-defined valuation reads and must not be assumed to equal token units unless
- *   explicitly documented by the implementation.
+ * - Value-returning methods are protocol-defined valuation reads normalized to the shared 18-decimal system unit
+ *   unless explicitly documented otherwise by the implementation.
  */
 interface ILendingEngineDebtRead {
     /**
@@ -52,32 +52,66 @@ interface ILendingEngineDebtRead {
     ) external view returns (uint256 totalDebt);
 
     /**
-     * @notice Returns the cached total debt value for `user` in the implementation's valuation unit.
+    * @notice Returns the cached total debt value for `user` in the normalized system valuation unit.
      * @dev Reverts if:
      *      - the protocol implementation rejects an invalid `user`
      *      - the cached valuation read cannot be resolved
      *
-     * Security:
-     * - Read-only valuation helper.
-     * - The returned unit is implementation-defined and may depend on protocol pricing SSOT.
+    * Security:
+    * - Read-only valuation helper.
+    * - The returned unit is the shared 18-decimal system valuation unit.
      *
      * @param user Borrower address being queried.
-     * @return totalValue Cached total debt value for `user`.
+    * @return totalValue Cached total debt value for `user` normalized to 18 decimals.
      */
     function getUserTotalDebtValue(
         address user
     ) external view returns (uint256 totalValue);
 
     /**
-     * @notice Returns the cached protocol-wide total debt value in the implementation's valuation unit.
+     * @notice Returns the best-effort total debt value for `user` in the normalized system valuation unit.
+     * @dev Reverts if:
+     *      - the protocol implementation rejects an invalid `user`
+     *      - the cached or degraded valuation read cannot be resolved
+     *
+     * Security:
+     * - Read-only valuation helper intended for diagnostics, UI, and cache consumers.
+     * - The returned unit is the shared 18-decimal system valuation unit.
+     *
+     * @param user Borrower address being queried.
+     * @return totalValue Best-effort total debt value for `user` normalized to 18 decimals.
+     */
+    function getUserTotalDebtValueBestEffort(
+        address user
+    ) external view returns (uint256 totalValue);
+
+    /**
+     * @notice Returns the strict total debt value for `user` using authoritative oracle pricing only.
+     * @dev Reverts if:
+     *      - the protocol implementation rejects an invalid `user`
+     *      - the authoritative oracle valuation path cannot be resolved for any debt asset
+     *
+     * Security:
+     * - Read-only valuation helper intended for automated risk, liquidation, and other fail-closed decisions.
+     * - The returned unit is the shared 18-decimal system valuation unit.
+     *
+     * @param user Borrower address being queried.
+     * @return totalValue Strict total debt value for `user` normalized to 18 decimals.
+     */
+    function getUserTotalDebtValueStrict(
+        address user
+    ) external view returns (uint256 totalValue);
+
+    /**
+    * @notice Returns the cached protocol-wide total debt value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - the protocol implementation cannot resolve the cached system valuation
      *
-     * Security:
-     * - Read-only aggregation helper.
-     * - The returned unit is implementation-defined and typically follows the protocol valuation SSOT.
+    * Security:
+    * - Read-only aggregation helper.
+    * - The returned unit is the shared 18-decimal system valuation unit.
      *
-     * @return totalValue Cached system-wide debt valuation.
+    * @return totalValue Cached system-wide debt valuation normalized to 18 decimals.
      */
     function getTotalDebtValue() external view returns (uint256 totalValue);
 
@@ -140,20 +174,58 @@ interface ILendingEngineDebtRead {
     ) external view returns (uint256 reducibleAmount);
 
     /**
-     * @notice Returns the valuation of `user`'s debt in `asset` using the implementation's pricing rules.
+    * @notice Returns the valuation of `user`'s debt in `asset` using the implementation's pricing rules.
      * @dev Reverts if:
      *      - the protocol implementation rejects an invalid `user` or `asset`
      *      - the valuation path cannot be resolved
      *
      * Security:
      * - Read-only valuation helper.
-     * - The returned unit is implementation-defined and typically depends on the protocol oracle SSOT.
+    * - The returned unit is the shared 18-decimal system valuation unit.
      *
      * @param user Borrower address being queried.
      * @param asset Debt asset address being valued.
-     * @return value Debt valuation for `user` and `asset`.
+    * @return value Debt valuation for `user` and `asset` normalized to 18 decimals.
      */
     function calculateDebtValue(
+        address user,
+        address asset
+    ) external view returns (uint256 value);
+
+    /**
+     * @notice Returns the best-effort valuation of `user`'s debt in `asset`.
+     * @dev Reverts if:
+     *      - the protocol implementation rejects an invalid `user` or `asset`
+     *      - the degraded valuation path itself cannot be resolved
+     *
+     * Security:
+     * - Read-only valuation helper intended for diagnostics, UI, and cache consumers.
+     * - The returned unit is the shared 18-decimal system valuation unit.
+     *
+     * @param user Borrower address being queried.
+     * @param asset Debt asset address being valued.
+     * @return value Best-effort debt valuation for `user` and `asset` normalized to 18 decimals.
+     */
+    function calculateDebtValueBestEffort(
+        address user,
+        address asset
+    ) external view returns (uint256 value);
+
+    /**
+     * @notice Returns the strict valuation of `user`'s debt in `asset` using authoritative oracle pricing only.
+     * @dev Reverts if:
+     *      - the protocol implementation rejects an invalid `user` or `asset`
+     *      - the authoritative oracle valuation path cannot be resolved
+     *
+     * Security:
+     * - Read-only valuation helper intended for automated risk, liquidation, and other fail-closed decisions.
+     * - The returned unit is the shared 18-decimal system valuation unit.
+     *
+     * @param user Borrower address being queried.
+     * @param asset Debt asset address being valued.
+     * @return value Strict debt valuation for `user` and `asset` normalized to 18 decimals.
+     */
+    function calculateDebtValueStrict(
         address user,
         address asset
     ) external view returns (uint256 value);

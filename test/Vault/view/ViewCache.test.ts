@@ -4,7 +4,6 @@ import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 const { ethers, upgrades } = hardhat;
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { mine } from '@nomicfoundation/hardhat-network-helpers';
-import type { ViewCache, MockAccessControlManager, MockRegistry } from '../../../types';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const ACTION_ADMIN = ethers.keccak256(ethers.toUtf8Bytes('ACTION_ADMIN'));
@@ -34,9 +33,9 @@ function getDataPushedEvents(receipt: any) {
 describe('ViewCache – system snapshot cache (view layer)', function () {
   let owner: SignerWithAddress;
   let alice: SignerWithAddress;
-  let viewCache: ViewCache;
-  let registry: MockRegistry;
-  let acm: MockAccessControlManager;
+  let viewCache: any;
+  let registry: any;
+  let acm: any;
   let ASSET: string;
 
   async function deployFixture() {
@@ -337,7 +336,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('批量查询应保持数组顺序', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 5; i++) {
         const asset = ethers.Wallet.createRandom().address;
         assets.push(asset);
@@ -508,7 +507,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
 
   describe('集成场景', function () {
     it('应支持多个资产同时操作', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 10; i++) {
         assets.push(ethers.Wallet.createRandom().address);
       }
@@ -529,7 +528,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持批量操作后单个查询', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 5; i++) {
         assets.push(ethers.Wallet.createRandom().address);
         await viewCache.connect(owner).setSystemStatus(assets[i], BigInt(i + 1) * 100n, BigInt(i + 1) * 50n, BigInt(i + 1) * 10n);
@@ -592,7 +591,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持时间推进与缓存过期混合场景', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 5; i++) {
         assets.push(ethers.Wallet.createRandom().address);
         await viewCache.connect(owner).setSystemStatus(assets[i], BigInt(i + 1) * 100n, BigInt(i + 1) * 50n, BigInt(i + 1) * 10n);
@@ -614,7 +613,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持批量写入、查询、清理的混合操作', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 10; i++) {
         assets.push(ethers.Wallet.createRandom().address);
       }
@@ -669,7 +668,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持大量资产的连续操作', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 50; i++) {
         assets.push(ethers.Wallet.createRandom().address);
       }
@@ -710,7 +709,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持部分清理和部分更新的混合场景', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 8; i++) {
         assets.push(ethers.Wallet.createRandom().address);
         await viewCache.connect(owner).setSystemStatus(assets[i], BigInt(i + 1) * 100n, BigInt(i + 1) * 50n, BigInt(i + 1) * 10n);
@@ -735,7 +734,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持事件验证的集成场景', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 5; i++) {
         assets.push(ethers.Wallet.createRandom().address);
       }
@@ -756,12 +755,12 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持数据一致性的复杂验证', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 20; i++) {
         assets.push(ethers.Wallet.createRandom().address);
       }
       // 写入所有资产
-      const expectedValues = [];
+      const expectedValues: Array<{ collateral: bigint; debt: bigint; utilization: bigint }> = [];
       for (let i = 0; i < assets.length; i++) {
         const collateral = BigInt(i + 1) * 100n;
         const debt = BigInt(i + 1) * 50n;
@@ -810,7 +809,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持批量操作中的时间推进场景', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 10; i++) {
         assets.push(ethers.Wallet.createRandom().address);
       }
@@ -836,7 +835,7 @@ describe('ViewCache – system snapshot cache (view layer)', function () {
     });
 
     it('应支持多轮更新和查询的复杂场景', async function () {
-      const assets = [];
+      const assets: string[] = [];
       for (let i = 0; i < 5; i++) {
         assets.push(ethers.Wallet.createRandom().address);
       }

@@ -2,12 +2,6 @@ import { expect } from 'chai';
 import * as hardhat from 'hardhat';
 const { ethers, upgrades } = hardhat;
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import type {
-  ValuationOracleView,
-  MockAccessControlManager,
-  MockRegistry,
-  MockPriceOracle
-} from '../../../types';
 
 const KEY_ACCESS_CONTROL = ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER'));
 const KEY_PRICE_ORACLE = ethers.keccak256(ethers.toUtf8Bytes('PRICE_ORACLE'));
@@ -18,17 +12,17 @@ const MAX_BATCH_SIZE = 100n; // ViewConstants.MAX_BATCH_SIZE
 describe('ValuationOracleView – view-only price oracle facade', function () {
   let owner: SignerWithAddress;
   let alice: SignerWithAddress;
-  let valuationOracleView: ValuationOracleView;
-  let registry: MockRegistry;
-  let acm: MockAccessControlManager;
-  let priceOracle: MockPriceOracle;
+  let valuationOracleView: any;
+  let registry: any;
+  let acm: any;
+  let priceOracle: any;
   let ASSET: string;
   let BASE_TS: bigint;
 
   async function deployFixture() {
     [owner, alice] = await ethers.getSigners();
     ASSET = ethers.Wallet.createRandom().address;
-    BASE_TS = BigInt((await ethers.provider.getBlock('latest')).number);
+    BASE_TS = BigInt((await ethers.provider.getBlock('latest'))?.number ?? 0);
 
     const MockAccessControlManagerF = await ethers.getContractFactory('MockAccessControlManager');
     acm = await MockAccessControlManagerF.deploy();
@@ -109,14 +103,24 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       expect(isValid).to.equal(true);
     });
 
-    it('应将 amount(token base units) 换算为 USD-8 value', async function () {
-      // In this test setup, MockPriceOracle is configured with price=1_234_567 (USD-8) and decimals=8.
-      // amount=1e8 (1 token) => valueUsd8 should equal price.
+    it('应将 amount(token base units) 换算为 asset-native value', async function () {
       const amount = 100_000_000n;
       const [valueUsd8, blockNumber, ok] = await valuationOracleView.connect(owner).getAssetValueUsd8(ASSET, amount);
       expect(ok).to.equal(true);
       expect(blockNumber).to.equal(BASE_TS);
       expect(valueUsd8).to.equal(1_234_567n);
+    });
+
+    it('应对非 8 位资产返回同 decimals 的 value', async function () {
+      const asset6 = ethers.Wallet.createRandom().address;
+      await priceOracle.setPrice(asset6, 1_500_000n, 3333n, 6);
+      await priceOracle.configureAsset(asset6, 'asset6', 6, 3600);
+
+      const amount = 2_000_000n;
+      const [value, blockNumber, ok] = await valuationOracleView.connect(owner).getAssetValueUsd8(asset6, amount);
+      expect(ok).to.equal(true);
+      expect(blockNumber).to.equal(3333n);
+      expect(value).to.equal(3_000_000n);
     });
 
     it('应返回批量价格并校验长度', async function () {
@@ -421,9 +425,9 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
       // 不设置 KEY_PRICE_ORACLE
 
       const ValuationOracleViewF = await ethers.getContractFactory('ValuationOracleView');
-      const newView = await upgrades.deployProxy(ValuationOracleViewF, [await newRegistry.getAddress()], {
+      const newView = (await upgrades.deployProxy(ValuationOracleViewF, [await newRegistry.getAddress()], {
         kind: 'uups'
-      });
+      })) as any;
       await acm.grantRole(ACTION_VIEW_PRICE_DATA, owner.address);
       await acm.grantRole(ACTION_VIEW_PRICE_DATA, await newView.getAddress());
 
@@ -434,9 +438,9 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
 
   describe('边界情况和集成', function () {
     it('应正确处理多个资产的价格查询', async function () {
-      const assets = [];
-      const expectedPrices = [];
-      const expectedBlockNumbers = [];
+      const assets: string[] = [];
+      const expectedPrices: bigint[] = [];
+      const expectedBlockNumbers: bigint[] = [];
 
       for (let i = 0; i < 10; i++) {
         const asset = ethers.Wallet.createRandom().address;
@@ -458,8 +462,8 @@ describe('ValuationOracleView – view-only price oracle facade', function () {
     });
 
     it('应正确处理混合健康状态的批量健康检查', async function () {
-      const assets = [];
-      const expectedStatuses = [];
+      const assets: string[] = [];
+      const expectedStatuses: boolean[] = [];
 
       // 创建5个健康资产
       for (let i = 0; i < 5; i++) {

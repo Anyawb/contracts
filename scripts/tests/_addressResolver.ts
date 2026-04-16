@@ -19,6 +19,14 @@ export function envStr(name: string): string | undefined {
   return v.length ? v : undefined;
 }
 
+function resolveLiveNetworkName(networkName: string): string {
+  const alias = envStr("LIVE_NETWORK_ALIAS");
+  if ((networkName === "localhost" || networkName === "hardhat") && alias) {
+    return alias;
+  }
+  return networkName;
+}
+
 function normalizeAddress(v?: string): string | undefined {
   if (!v) return undefined;
   const out = v.trim();
@@ -55,7 +63,12 @@ function loadLocalAddressMap(): AddressMap {
 }
 
 function loadDeploymentsAddressMap(networkName: string): AddressMap {
-  const slug = networkName === "arbitrumSepolia" ? "arbitrum-sepolia" : networkName;
+  const slug =
+    networkName === "arbitrumSepolia"
+      ? "arbitrum-sepolia"
+      : networkName === "bnbTestnet"
+        ? "bnb-testnet"
+        : networkName;
   const candidates = [
     path.join(__dirname, "..", "deployments", `${slug}.json`),
     path.join(__dirname, "..", "..", "deployments", `addresses.${slug}.json`),
@@ -77,13 +90,18 @@ function loadDeploymentsAddressMap(networkName: string): AddressMap {
 }
 
 function loadPreferredDeploymentsAddressMap(networkName: string): AddressMap {
-  const slug = networkName === "arbitrumSepolia" ? "arbitrum-sepolia" : networkName;
+  const slug =
+    networkName === "arbitrumSepolia"
+      ? "arbitrum-sepolia"
+      : networkName === "bnbTestnet"
+        ? "bnb-testnet"
+        : networkName;
   const explicitDeployOutput = envStr("DEPLOY_OUTPUT_FILE");
   const candidates = explicitDeployOutput
     ? [
         path.isAbsolute(explicitDeployOutput)
           ? explicitDeployOutput
-          : path.join(__dirname, "..", "deployments", explicitDeployOutput),
+          : path.resolve(process.cwd(), explicitDeployOutput),
       ]
     : [
         path.join(__dirname, "..", "deployments", `${slug}.mock-suite.json`),
@@ -107,14 +125,15 @@ function loadPreferredDeploymentsAddressMap(networkName: string): AddressMap {
 }
 
 export function loadAddressMap(networkName: string, options?: { preferMockSuite?: boolean }): AddressMap {
-  if (networkName === "localhost") return loadLocalAddressMap();
+  const resolvedNetworkName = resolveLiveNetworkName(networkName);
+  if (networkName === "localhost" && resolvedNetworkName === "localhost") return loadLocalAddressMap();
   if (options?.preferMockSuite) {
-    const preferred = loadPreferredDeploymentsAddressMap(networkName);
+    const preferred = loadPreferredDeploymentsAddressMap(resolvedNetworkName);
     if (Object.keys(preferred).length > 0) {
       return preferred;
     }
   }
-  return loadDeploymentsAddressMap(networkName);
+  return loadDeploymentsAddressMap(resolvedNetworkName);
 }
 
 export function resolveAddress(opts: {

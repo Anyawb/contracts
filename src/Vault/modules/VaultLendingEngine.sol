@@ -70,12 +70,12 @@ contract VaultLendingEngine is
     /// @dev Aggregate outstanding debt per asset in token base units (token decimals).
     mapping(address => uint256) private _totalDebtByAsset;
 
-    /// @notice Cached total debt value per user (valuation-denominated).
-    /// @dev Best-effort cached value to avoid repeated valuation work; see `LendingEngineValuation`.
+    /// @notice Cached total debt value per user in the normalized system valuation unit.
+    /// @dev Best-effort cached value normalized to 18 decimals; see `LendingEngineValuation`.
     mapping(address => uint256) private _userTotalDebtValue;
 
-    /// @notice Cached system total debt value (valuation-denominated).
-    /// @dev Aggregate of per-user cached total debt values; maintained by valuation updates.
+    /// @notice Cached system total debt value in the normalized system valuation unit.
+    /// @dev Aggregate of per-user cached total debt values, normalized to 18 decimals.
     uint256 private _totalDebtValue;
 
     /// @notice Price oracle adapter address (legacy contract slot mirror).
@@ -83,7 +83,7 @@ contract VaultLendingEngine is
     address private _priceOracleAddr;
 
     /// @notice Settlement token address (legacy contract slot mirror).
-    /// @dev All valuation is denominated relative to this token; SSOT is `_s()._settlementTokenAddr`.
+    /// @dev Used by graceful-degradation helpers when deriving fallback valuation context; SSOT is `_s()._settlementTokenAddr`.
     address private _settlementTokenAddr;
 
     /// @notice Registry address (legacy contract slot mirror).
@@ -421,35 +421,56 @@ contract VaultLendingEngine is
     }
 
     /**
-     * @notice Return the cached total debt value for a user (valuation-denominated).
+    * @notice Return the total debt value for a user in the normalized system valuation unit.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract
      *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
      *      - user == address(0) (ZeroAddress)
      *
      * Security:
-     * - View-only; returns the cached value maintained by debt write paths.
+    * - View-only; recomputes the total from per-asset debt positions using the protocol valuation helper.
      * - Valuation is best-effort; missing price configuration does not revert debt writes.
      *
      * @param user Borrower address.
-     * @return totalValue Cached total debt value for the user.
+    * @return totalValue Total debt value for the user normalized to 18 decimals.
      */
     function getUserTotalDebtValue(
         address user
     ) external view onlyValidRegistry returns (uint256 totalValue) {
-        if (user == address(0)) revert ZeroAddress();
-
-        LendingEngineStorage.Layout storage s = _s();
-        uint256 count = s._userDebtAssetCount[user];
-        for (uint256 i; i < count; ++i) {
-            address asset = s._userDebtAssets[user][i];
-            if (asset == address(0)) continue;
-            totalValue += s.calculateDebtValue(user, asset);
-        }
+        return getUserTotalDebtValueBestEffort(user);
     }
 
     /**
-     * @notice Return the cached system total debt value (valuation-denominated).
+    * @notice Return the best-effort total debt value for a user in the normalized system valuation unit.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - user == address(0) (ZeroAddress)
+     */
+    function getUserTotalDebtValueBestEffort(
+        address user
+    ) public view onlyValidRegistry returns (uint256 totalValue) {
+        if (user == address(0)) revert ZeroAddress();
+        return LendingEngineValuation.calculateUserTotalDebtValueBestEffort(_s(), user);
+    }
+
+    /**
+    * @notice Return the strict total debt value for a user in the normalized system valuation unit.
+     * @dev Reverts if:
+     *      - Registry is not configured or not a contract
+     *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
+     *      - user == address(0) (ZeroAddress)
+     *      - any authoritative price read required for valuation fails
+     */
+    function getUserTotalDebtValueStrict(
+        address user
+    ) public view onlyValidRegistry returns (uint256 totalValue) {
+        if (user == address(0)) revert ZeroAddress();
+        return LendingEngineValuation.calculateUserTotalDebtValueStrict(_s(), user);
+    }
+
+    /**
+    * @notice Return the cached system total debt value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract
      *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
@@ -457,7 +478,7 @@ contract VaultLendingEngine is
      * Security:
      * - View-only; returns the cached system total maintained by per-user debt valuation updates.
      *
-     * @return totalValue Cached system total debt value.
+    * @return totalValue Cached system total debt value normalized to 18 decimals.
      */
     function getTotalDebtValue()
         external
@@ -951,7 +972,7 @@ contract VaultLendingEngine is
     }
 
     /**
-     * @notice Compute the valuation-denominated debt value for a user's single asset position.
+    * @notice Compute the debt value for a user's single asset position in the normalized system valuation unit.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract
      *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
@@ -964,15 +985,37 @@ contract VaultLendingEngine is
      *
      * @param user Borrower address.
      * @param asset Debt asset address.
-     * @return value Current debt value produced by the valuation helper.
+    * @return value Current debt value normalized to 18 decimals.
      */
     function calculateDebtValue(
         address user,
         address asset
     ) external view onlyValidRegistry returns (uint256 value) {
+        return calculateDebtValueBestEffort(user, asset);
+    }
+
+    /**
+    * @notice Compute the best-effort debt value for a user's single asset position in the normalized system valuation unit.
+     */
+    function calculateDebtValueBestEffort(
+        address user,
+        address asset
+    ) public view onlyValidRegistry returns (uint256 value) {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
-        return LendingEngineValuation.calculateDebtValue(_s(), user, asset);
+        return LendingEngineValuation.calculateDebtValueBestEffort(_s(), user, asset);
+    }
+
+    /**
+    * @notice Compute the strict debt value for a user's single asset position in the normalized system valuation unit.
+     */
+    function calculateDebtValueStrict(
+        address user,
+        address asset
+    ) public view onlyValidRegistry returns (uint256 value) {
+        if (user == address(0)) revert ZeroAddress();
+        if (asset == address(0)) revert ZeroAddress();
+        return LendingEngineValuation.calculateDebtValueStrict(_s(), user, asset);
     }
 
     // Reward hooks were intentionally removed from this module.

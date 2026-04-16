@@ -103,6 +103,14 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     function getUserTotalDebtValue(address user) external view override returns (uint256) {
         return _userTotalValue[user];
     }
+
+    function getUserTotalDebtValueBestEffort(address user) external view override returns (uint256) {
+        return _userTotalValue[user];
+    }
+
+    function getUserTotalDebtValueStrict(address user) external view override returns (uint256) {
+        return _userTotalValue[user];
+    }
     
     /// @notice 获取总债务价值
     /// @return 总债务价值
@@ -142,7 +150,15 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
     /// @param user 用户地址
     /// @param asset 资产地址
     /// @return 债务价值
-    function calculateDebtValue(address user, address asset) external view override returns (uint256) {
+    function calculateDebtValue(address user, address asset) external view virtual override returns (uint256) {
+        return _userDebt[user][asset];
+    }
+
+    function calculateDebtValueBestEffort(address user, address asset) external view virtual override returns (uint256) {
+        return _userDebt[user][asset];
+    }
+
+    function calculateDebtValueStrict(address user, address asset) external view virtual override returns (uint256) {
         return _userDebt[user][asset];
     }
     

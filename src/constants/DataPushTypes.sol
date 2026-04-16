@@ -83,8 +83,24 @@ library DataPushTypes {
     ///      `closeBlock` is the block number at which the order transitioned to SETTLED.
     bytes32 public constant DATA_TYPE_BLOCKS_ONLY_SETTLED =
         keccak256("BLOCKS_ONLY_SETTLED");
-    /// @notice DataPush type for a matured blocks-only order liquidated against collateral.
-    /// @dev Emitted by BlocksOnlyCoordinator after the liquidation manager call succeeds and the order closes.
+    /// @notice DataPush type for a matured blocks-only order closed through collateral delivery.
+    /// @dev Emitted by BlocksOnlyCoordinator after the bound collateral is delivered to the recorded lender.
+    ///      payload = abi.encode(address coordinator, uint256 orderId, address borrower, address asset,
+    ///      address lender, address collateralAsset, uint256 collateralAmount, uint256 closeBlock)
+    ///      `collateralAmount` uses collateral-asset base units and `closeBlock` is the block number at which the
+    ///      order transitioned to the maturity-delivery terminal state.
+    bytes32 public constant DATA_TYPE_BLOCKS_ONLY_DELIVERED =
+        keccak256("BLOCKS_ONLY_DELIVERED");
+    /// @notice DataPush type for a trade-style close of a debt-free blocks-only order.
+    /// @dev Emitted by BlocksOnlyCoordinator after collateral release and order close without waiting for maturity.
+    ///      payload = abi.encode(address coordinator, uint256 orderId, address borrower, address asset,
+    ///      uint256 closeBlock)
+    ///      `closeBlock` is the block number at which the order transitioned to TRADE_CLOSED.
+    bytes32 public constant DATA_TYPE_BLOCKS_ONLY_TRADE_CLOSED =
+        keccak256("BLOCKS_ONLY_TRADE_CLOSED");
+    /// @notice Legacy reserved DataPush type for the removed blocks-only liquidation path.
+    /// @dev Kept only for hash/ABI compatibility with historical artifacts. The current trade-like maturity-delivery
+    ///      implementation emits {DATA_TYPE_BLOCKS_ONLY_DELIVERED} instead.
     ///      payload = abi.encode(address coordinator, uint256 orderId, address borrower, address asset,
     ///      address liquidator, address collateralAsset, uint256 collateralAmount, uint256 debtAmount,
     ///      uint256 closeBlock)
@@ -94,13 +110,16 @@ library DataPushTypes {
     /// @notice Loan flow statistics update (borrow/repay volume counters).
     /// @dev payload = abi.encode(
     ///      address user,
-    ///      uint256 borrowDeltaUsd8,
-    ///      uint256 repayDeltaUsd8,
+    ///      uint256 borrowDeltaValue,
+    ///      uint256 repayDeltaValue,
+    ///      uint8 valuationDecimals,
     ///      uint64 nextVersion,
     ///      bytes32 requestId,
     ///      uint64 seq,
     ///      uint256 blockNumber
     ///      )
+    ///      `borrowDeltaValue/repayDeltaValue` use the shared system valuation unit and
+    ///      `valuationDecimals` declares the pushed precision.
     bytes32 public constant DATA_TYPE_LOAN_FLOW_UPDATED =
         keccak256("LOAN_FLOW_UPDATED");
 
@@ -257,7 +276,9 @@ library DataPushTypes {
 
     /// @notice Easy minted (borrower/lender) update.
     /// @dev payload = abi.encode(address borrower, address lender, uint256 totalMinted, uint256 borrowerShare,
-    ///      uint256 lenderShare, uint256 orderId, uint256 amountUsd8, uint256 blockNumber)
+    ///      uint256 lenderShare, uint256 orderId, uint256 amountValue, uint8 valuationDecimals, uint256 blockNumber)
+    ///      `totalMinted/borrowerShare/lenderShare` use Easy token 18-decimal base units.
+    ///      `amountValue` uses the shared system valuation unit and `valuationDecimals` declares its precision.
     bytes32 public constant DATA_TYPE_EASY_MINTED = keccak256("EASY_MINTED");
 
     /// @notice Easy spent (per-call) update.
@@ -281,12 +302,15 @@ library DataPushTypes {
 
     /// @notice Easy emission params updated.
     /// @dev payload = abi.encode(
-    ///      uint256 thresholdUsd8,
+    ///      uint256 thresholdValue,
+    ///      uint8 valuationDecimals,
     ///      uint256 mintPer1000Usd,
     ///      uint256 kNum,
     ///      uint256 kDen,
     ///      uint256 blockNumber
     ///      )
+    ///      `thresholdValue` uses the shared system valuation unit and `valuationDecimals` declares its precision.
+    ///      `mintPer1000Usd` uses Easy token 18-decimal base units.
     bytes32 public constant DATA_TYPE_EASY_EMISSION_PARAMS_UPDATED =
         keccak256("EASY_EMISSION_PARAMS_UPDATED");
 

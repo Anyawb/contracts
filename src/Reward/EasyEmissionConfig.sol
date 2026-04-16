@@ -20,12 +20,14 @@ contract EasyEmissionConfig is
     UUPSUpgradeable,
     RewardModuleBase
 {
+    uint8 private constant _SYSTEM_VALUATION_DECIMALS = 18;
+
     /// @notice Registry address
     address private _registryAddr;
 
-    /// @notice Bootstrap threshold in USD-8
-    uint256 private _bootstrapThresholdUsd8;
-    /// @notice Bootstrap mint amount per 1000 USD (18 decimals)
+    /// @notice Bootstrap threshold in the shared system valuation unit.
+    uint256 private _bootstrapThresholdValue;
+    /// @notice Bootstrap mint amount per 1000 value units (18 decimals)
     uint256 private _bootstrapMintPer1000Usd;
     /// @notice Deflation coefficient numerator (kNum)
     uint256 private _deflationKNum;
@@ -37,8 +39,9 @@ contract EasyEmissionConfig is
     /// @notice Emitted when emission parameters are updated.
     /// @dev Emitted on initialization and each successful governance write.
     event EmissionParamsUpdated(
-        uint256 thresholdUsd8,
+        uint256 thresholdValue,
         uint256 mintPer1000Usd,
+        uint8 valuationDecimals,
         uint256 kNum,
         uint256 kDen,
         uint256 blockNumber
@@ -69,22 +72,24 @@ contract EasyEmissionConfig is
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
 
-        _bootstrapThresholdUsd8 = 100_000_000 * 1e8;
+        _bootstrapThresholdValue = 100_000_000 * 1e18;
         _bootstrapMintPer1000Usd = 10 * 1e18;
         _deflationKNum = 1;
         _deflationKDen = 10_000_000;
         _updateBlock = block.number;
 
         emit EmissionParamsUpdated(
-            _bootstrapThresholdUsd8,
+            _bootstrapThresholdValue,
             _bootstrapMintPer1000Usd,
+            _SYSTEM_VALUATION_DECIMALS,
             _deflationKNum,
             _deflationKDen,
             block.number
         );
 
         _tryPushEasyEmissionParamsUpdated(
-            _bootstrapThresholdUsd8,
+            _bootstrapThresholdValue,
+            _SYSTEM_VALUATION_DECIMALS,
             _bootstrapMintPer1000Usd,
             _deflationKNum,
             _deflationKDen
@@ -112,13 +117,13 @@ contract EasyEmissionConfig is
      * - Role-gated by ACTION_SET_PARAMETER.
      * - RewardView cache push is best-effort and MUST NOT block the write path.
      *
-     * @param thresholdUsd8 Bootstrap/deflation stage threshold in USD-8.
-     * @param mintPer1000Usd Bootstrap mint amount per 1000 USD, in Easy 18 decimals.
+      * @param thresholdValue Bootstrap/deflation stage threshold in the shared system valuation unit.
+      * @param mintPer1000Usd Bootstrap mint amount per 1000 value units, in Easy 18 decimals.
      * @param kNum Deflation numerator.
      * @param kDen Deflation denominator. MUST be non-zero.
      */
     function setEmissionParams(
-        uint256 thresholdUsd8,
+          uint256 thresholdValue,
         uint256 mintPer1000Usd,
         uint256 kNum,
         uint256 kDen
@@ -127,22 +132,24 @@ contract EasyEmissionConfig is
         if (kDen == 0) revert InvalidCaller();
         if (mintPer1000Usd == 0) revert InvalidCaller();
 
-        _bootstrapThresholdUsd8 = thresholdUsd8;
+        _bootstrapThresholdValue = thresholdValue;
         _bootstrapMintPer1000Usd = mintPer1000Usd;
         _deflationKNum = kNum;
         _deflationKDen = kDen;
         _updateBlock = block.number;
 
         emit EmissionParamsUpdated(
-            thresholdUsd8,
+            thresholdValue,
             mintPer1000Usd,
+            _SYSTEM_VALUATION_DECIMALS,
             kNum,
             kDen,
             block.number
         );
 
         _tryPushEasyEmissionParamsUpdated(
-            thresholdUsd8,
+            thresholdValue,
+            _SYSTEM_VALUATION_DECIMALS,
             mintPer1000Usd,
             kNum,
             kDen
@@ -158,10 +165,11 @@ contract EasyEmissionConfig is
      * Security:
      * - View-only; no state mutation.
      *
-     * @return thresholdUsd8 Bootstrap/deflation stage threshold in USD-8.
-     * @return mintPer1000Usd Bootstrap mint amount per 1000 USD, in Easy 18 decimals.
+     * @return thresholdValue Bootstrap/deflation stage threshold in the shared system valuation unit.
+     * @return mintPer1000Usd Bootstrap mint amount per 1000 value units, in Easy 18 decimals.
      * @return kNum Deflation numerator.
      * @return kDen Deflation denominator.
+     * @return valuationDecimals Shared valuation precision for `thresholdValue`.
      * @return updateBlock Block number of the latest parameter update.
      */
     function getEmissionParams()
@@ -169,31 +177,33 @@ contract EasyEmissionConfig is
         view
         onlyValidRegistry
         returns (
-            uint256 thresholdUsd8,
+            uint256 thresholdValue,
             uint256 mintPer1000Usd,
             uint256 kNum,
             uint256 kDen,
+            uint8 valuationDecimals,
             uint256 updateBlock
         )
     {
         return (
-            _bootstrapThresholdUsd8,
+            _bootstrapThresholdValue,
             _bootstrapMintPer1000Usd,
             _deflationKNum,
             _deflationKDen,
+            _SYSTEM_VALUATION_DECIMALS,
             _updateBlock
         );
     }
 
-    /// @notice Returns the bootstrap threshold in USD-8.
+    /// @notice Returns the bootstrap threshold in the shared system valuation unit.
     /// @dev Reverts if Registry validation fails in {onlyValidRegistry}.
-    function bootstrapThresholdUsd8()
+    function bootstrapThresholdValue()
         external
         view
         onlyValidRegistry
         returns (uint256)
     {
-        return _bootstrapThresholdUsd8;
+        return _bootstrapThresholdValue;
     }
 
     /// @notice Returns the bootstrap mint amount per 1000 USD.

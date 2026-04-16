@@ -132,7 +132,7 @@ async function main() {
     await whitelistAdmin.connect(deployer).addAllowedAsset(usdc.target);
   }
 
-  // 设置价格 (1 USD = 1e8, PriceOracle uses 8 decimals)
+  // 设置价格，数值按资产 decimals 表达
   const blockNumber = await ethers.provider.getBlockNumber();
   {
     const cfg = await priceOracle.getAssetConfig(usdc.target);
@@ -143,7 +143,8 @@ async function main() {
     }
   }
   await ensureRole(ACTION_UPDATE_PRICE, deployer.address);
-  await priceOracle.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", 8), blockNumber);
+  const usdcDecimals = Number(await usdc.decimals().catch(() => 6));
+  await priceOracle.connect(deployer).updatePrice(usdc.target, ethers.parseUnits("1", usdcDecimals), blockNumber);
 
   // 授权角色给 VaultRouter / VaultCore
   const roles = [ACTION_DEPOSIT, ACTION_BORROW, ACTION_REPAY, ACTION_WITHDRAW];

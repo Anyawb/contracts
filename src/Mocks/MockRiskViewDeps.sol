@@ -27,19 +27,35 @@ contract MockDebtTotals {
     mapping(address => uint256) public totals;
     function setTotal(address user, uint256 v) external { totals[user] = v; }
     function getUserTotalDebtValue(address user) external view returns (uint256) { return totals[user]; }
+    function getUserTotalDebtValueBestEffort(address user) external view returns (uint256) { return totals[user]; }
+    function getUserTotalDebtValueStrict(address user) external view returns (uint256) { return totals[user]; }
 }
 
 /// @notice Minimal PositionView valuation mock (implements getUserTotalCollateralValue / getAssetValue / getTotalCollateralValue).
 contract MockPositionViewValuation {
     mapping(address => uint256) public totals;
     uint256 public totalSystemValue;
+    mapping(address => uint256) public assetValues;
+    mapping(address => bool) public hasAssetValueOverride;
+    mapping(address => bool) public revertAssetValue;
 
     function setTotal(address user, uint256 v) external { totals[user] = v; }
     function setTotalSystemValue(uint256 v) external { totalSystemValue = v; }
+    function setAssetValue(address asset, uint256 v) external {
+        assetValues[asset] = v;
+        hasAssetValueOverride[asset] = true;
+    }
+    function setAssetValueRevert(address asset, bool shouldRevert) external {
+        revertAssetValue[asset] = shouldRevert;
+    }
 
     function getUserTotalCollateralValue(address user) external view returns (uint256) { return totals[user]; }
     function getTotalCollateralValue() external view returns (uint256) { return totalSystemValue; }
-    function getAssetValue(address, uint256 amount) external pure returns (uint256) { return amount; }
+    function getAssetValue(address asset, uint256 amount) external view returns (uint256) {
+        if (revertAssetValue[asset]) revert("mock-asset-value-revert");
+        if (hasAssetValueOverride[asset]) return assetValues[asset];
+        return amount;
+    }
 }
 
 contract MockGuaranteeFund {

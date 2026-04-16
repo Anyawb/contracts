@@ -1,31 +1,110 @@
-# 清算残值分配配置（收款地址/参数：运维与部署用）
+# 清算残值分配配置指南（按当前代码对齐）
 
-> ⚠️ 约束：本文件只说明“部署/运维侧如何配置收款地址与参数”，不定义任何资金链、托管者、资产去向、分配含义或内部调用顺序。相关语义统一以资金链 SSOT 为准：[`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`](../Funds-Flow-Architecture-Guide.md)（Default → Liquidation 章节）。
+## References
 
-> 按产品线区分入口与模块边界的整改总纲仍以：[`SettlementManager-Refactor-Plan.md`](./SettlementManager-Refactor-Plan.md) 为准。
+- 资金链 SSOT: [`docs/Usage-Guide/Funds-Flow-Architecture-Guide.md`](../Funds-Flow-Architecture-Guide.md)
+- 完整清算逻辑: [`liquidation-complete-logic.md`](./liquidation-complete-logic.md)
+- SettlementManager 状态说明: [`SettlementManager-Refactor-Plan.md`](./SettlementManager-Refactor-Plan.md)
 
-## 1) 适用范围
+## 概述
 
-- 适用于配置 `LiquidationPayoutManager`（Registry: `KEY_LIQUIDATION_PAYOUT_MANAGER`）的 recipients/rates 等参数。
-- 该模块的“钱从哪来、转给谁、何时触发、如何对账”的口径不在此文维护，避免与 Funds-Flow SSOT 漂移。
+当前代码中，清算残值分配的配置 SSOT 是 `LiquidationPayoutManager`。
 
-## 2) 环境变量（部署脚本读取）
+- Registry key: `KEY_LIQUIDATION_PAYOUT_MANAGER`
+- 该模块只负责两件事：
+	- 保存 recipients 与 rates
+	- 按 `calculateShares(collateralAmount)` 计算四份额
+- 它本身不执行 seize collateral，也不直接转账；真正执行转账的是 `LiquidationManager` 或 `SettlementManager` fallback 路径
 
-部署脚本可读取以下 env（不同网络脚本通用；命名以实际脚本实现为准）：
+> 本文只说明如何配置 recipients / rates。清算资金从哪里来、先后顺序、具体资产去向与对账语义，统一以 Funds-Flow SSOT 为准。
 
-- `PAYOUT_PLATFORM_ADDR`：平台侧收款地址（建议为合约金库地址）
-- `PAYOUT_RESERVE_ADDR`：准备金侧收款地址（建议为合约金库地址，可选）
-- `PAYOUT_LENDER_ADDR`：出借人侧收款地址（可为路由合约或其它受控地址；语义以 Funds-Flow SSOT 为准）
+## 当前实现的 recipients 与 shares
 
-> 注意：若未提供 env，脚本可能回退为 deployer 地址；该回退仅适用于本地/演示环境，不应作为上链长期配置。
+### 固定配置的 recipients
 
-## 3) 推荐落地步骤（主网/测试网）
+`LiquidationPayoutManager` 当前只存三类固定收款地址：
 
-1) 准备地址：按 Funds-Flow SSOT 与治理要求确定各收款地址（建议为合约金库/受控合约）。
-2) 配置 env 并部署：使用 `deploylocal.ts` / `deploy-arbitrum.ts` / `deploy-arbitrum-sepolia.ts`（或对应网络脚本）部署并在 Registry 注册 `KEY_LIQUIDATION_PAYOUT_MANAGER`。
-3) 权限与调整：后续如需更新收款地址或参数，必须由具备 `ACTION_SET_PARAMETER`（或等效治理权限）的角色调用模块的配置入口（例如 `updateRecipients` / `updateRates`）。
+- `platform`
+- `reserve`
+- `lenderCompensation`
 
-## 4) 与前端/链下的对齐
+它们都必须是非零地址。
 
-- 前端/链下索引若需要读取 recipients/rates，建议通过 Registry 解析模块地址后读取，避免硬编码。
-- “如何解读这些 recipients/rates”不在本文维护，统一以 Funds-Flow SSOT 为准。
+### 非固定配置的 liquidator recipient
+
+liquidator 收款地址不存放在 `PayoutRecipients` 里。
+
+- 直接走 `LiquidationManager.liquidate(...)` 时，liquidator recipient 默认是 `msg.sender`
+- 走 `LiquidationManager.liquidateFromSettlementManager(...)` 时，liquidator recipient 是 SettlementManager 透传进来的原始 keeper 地址
+
+也就是说，当前代码没有单独的 liquidator recipient 配置项或 whitelist 模块。
+
+### rates 约束
+
+`PayoutRates` 包含四项：
+
+- `platformBps`
+- `reserveBps`
+- `lenderBps`
+- `liquidatorBps`
+
+代码硬约束：四项之和必须等于 `10_000`。
+
+### rounding 规则
+
+`calculateShares(collateralAmount)` 会：
+
+- 先按前三项做整数除法
+- 所有舍入余数统一给 `liquidatorShare`
+
+因此始终满足：
+
+`platformShare + reserveShare + lenderShare + liquidatorShare == collateralAmount`
+
+## 初始化与部署要求
+
+`LiquidationPayoutManager.initialize(...)` 需要：
+
+- `registryAddr`
+- `accessControlAddr`
+- `PayoutRecipients`
+- `PayoutRates`
+
+初始化时会校验：
+
+- `registryAddr != 0`
+- `accessControlAddr != 0`
+- 若 Registry 中已经设置 `KEY_ACCESS_CONTROL`，它必须与 `accessControlAddr` 一致
+- 三个 recipients 都不是 0 地址
+- 四项 rates 之和等于 `10_000`
+
+## 治理更新路径
+
+当前治理写入口有三种：
+
+- `updateConfig(recipients, rates)`
+- `updateRecipients(recipients)`
+- `updateRates(rates)`
+
+这三个入口都要求调用者具备 `ACTION_SET_PARAMETER`。
+
+升级路径仍单独走 UUPS `_authorizeUpgrade(...)`，要求 `ACTION_UPGRADE_MODULE`。
+
+## 运维与集成注意事项
+
+1. `lenderCompensation` 当前是固定配置地址，不是按 `orderId` 动态解析的 lender。
+2. `LiquidationPayoutManager` 只是配置模块，不会单独发起 liquidation。
+3. 如果链下要读取当前配置，应先通过 Registry 解析 `KEY_LIQUIDATION_PAYOUT_MANAGER`，再读取 `getRecipients()` 与 `getRates()`。
+4. 文档中如果仍出现“当前 lender 直接作为 payout recipient”的说法，应视为旧计划口径，不代表当前实现。
+
+## 当前代码中的常量与默认示例
+
+代码库里存在 liquidation 域常量：
+
+- `DEFAULT_LIQUIDATION_BONUS = 1000`
+- `PLATFORM_REVENUE_RATE = 300`
+- `RISK_RESERVE_RATE = 200`
+- `LENDER_COMPENSATION_RATE = 1700`
+- `LIQUIDATOR_REWARD_RATE = 7800`
+
+但要注意：这些只是 liquidation 域的常量示例。真正生效的 on-chain 分配比例仍以 `LiquidationPayoutManager.getRates()` 为准。

@@ -5,6 +5,25 @@ import type { RewardView } from "../../types/src/Vault/view/modules/RewardView.s
 
 const { ethers, upgrades } = hardhat;
 
+const DATA_PUSH_IFACE = new ethers.Interface(["event DataPushed(bytes32 indexed dataTypeHash, bytes payload)"]);
+const DATA_PUSH_TOPIC0 = ethers.id("DataPushed(bytes32,bytes)").toLowerCase();
+const DATA_TYPE_REWARD_LEVEL_UPDATED = ethers.id("REWARD_LEVEL_UPDATED");
+const DATA_TYPE_REWARD_EARN_STATE_UPDATED = ethers.id("REWARD_EARN_STATE_UPDATED");
+
+function getDataPushed(receipt: any, emitter: string) {
+  return (receipt?.logs ?? [])
+    .filter((log: any) => (log?.topics?.[0] || "").toLowerCase() === DATA_PUSH_TOPIC0)
+    .filter((log: any) => String(log.address ?? "").toLowerCase() === emitter.toLowerCase())
+    .map((log: any) => {
+      const parsed = DATA_PUSH_IFACE.parseLog(log);
+      if (!parsed) throw new Error("failed to parse DataPushed log");
+      return {
+        dataTypeHash: parsed.args.dataTypeHash as string,
+        payload: parsed.args.payload as string,
+      };
+    });
+}
+
 describe("RewardView SSOT usage (Reward-System-Usage-Guide)", function () {
   const KEY_ACCESS_CONTROL = ethers.id("ACCESS_CONTROL_MANAGER");
   const KEY_ORDER_ENGINE = ethers.id("ORDER_ENGINE");
@@ -110,20 +129,20 @@ describe("RewardView SSOT usage (Reward-System-Usage-Guide)", function () {
     await expect(
       rewardView
         .connect(rmWriter)
-        .pushEasyMinted(alice.address, alice.address, 10n, 5n, 5n, 1n, 1n, 10n),
+        .pushEasyMinted(alice.address, alice.address, 10n, 5n, 5n, 1n, 1n, 18, 10n),
     ).to.be.revertedWithCustomError(rewardView, "RewardView__UnauthorizedWriter");
 
     await expect(
       rewardView
         .connect(ecWriter)
-        .pushEasyMinted(alice.address, alice.address, 10n, 5n, 5n, 1n, 1n, 10n),
+        .pushEasyMinted(alice.address, alice.address, 10n, 5n, 5n, 1n, 1n, 18, 10n),
     ).to.not.be.reverted;
 
     const [easyEarned] = await rewardView.connect(alice).getUserEasyEarnedWithMeta(alice.address);
     expect(easyEarned).to.equal(10n);
 
     await expect(
-      rewardView.connect(econfWriter).pushEasyEmissionParamsUpdated(1n, 2n, 3n, 4n, 10n),
+      rewardView.connect(econfWriter).pushEasyEmissionParamsUpdated(1n, 18, 2n, 3n, 4n, 10n),
     ).to.not.be.reverted;
 
     await expect(rewardView.connect(econWriter).pushEasySpent(alice.address, 1, 7n, 9n)).to.not.be.reverted;
@@ -153,7 +172,11 @@ describe("RewardView SSOT usage (Reward-System-Usage-Guide)", function () {
   });
 
   it("restricts borrow-check read to OrderEngine", async function () {
-    const { rewardView, rmWriter, orderEngine, alice, bob } = await loadFixture(fixture);
+    const { rewardView, rmWriter, ecWriter, orderEngine, alice, bob } = await loadFixture(fixture);
+
+    await expect(
+      rewardView.connect(ecWriter).pushUserLevel(alice.address, 4, 9n),
+    ).to.be.revertedWithCustomError(rewardView, "RewardView__UnauthorizedWriter");
 
     await rewardView.connect(rmWriter).pushUserLevel(alice.address, 4, 10n);
 
@@ -168,7 +191,7 @@ describe("RewardView SSOT usage (Reward-System-Usage-Guide)", function () {
   it("gates system-level reads behind VIEW_SYSTEM_DATA or ADMIN", async function () {
     const { rewardView, econfWriter, bob, ops, admin } = await loadFixture(fixture);
 
-    await rewardView.connect(econfWriter).pushEasyEmissionParamsUpdated(100n, 200n, 1n, 10n, 8n);
+    await rewardView.connect(econfWriter).pushEasyEmissionParamsUpdated(100n, 18, 200n, 1n, 10n, 8n);
 
     await expect(rewardView.connect(bob).getEasyEmissionParamsWithMeta()).to.be.revertedWithCustomError(
       rewardView,
@@ -195,5 +218,123 @@ describe("RewardView SSOT usage (Reward-System-Usage-Guide)", function () {
     expect(lastActivity).to.equal(77n);
     expect(blockNumber).to.be.greaterThan(0n);
     expect(isValid).to.equal(true);
+  });
+
+  it("allows admin to replay user-level pushes so borrow-check reads recover from stale RewardView cache", async function () {
+    const { rewardView, admin, orderEngine, alice, bob } = await loadFixture(fixture);
+
+    await expect(
+      rewardView.connect(bob).retryPushUserLevel(alice.address, 4, 88n),
+    ).to.be.revertedWithCustomError(rewardView, "MissingRole");
+
+    await expect(rewardView.connect(admin).retryPushUserLevel(alice.address, 4, 88n))
+      .to.emit(rewardView, "DataPushed");
+
+    const [, , level, lastActivity] = await rewardView.connect(admin).getUserRewardSummaryWithMeta(alice.address);
+    expect(level).to.equal(4);
+    expect(lastActivity).to.equal(88n);
+
+    expect(await rewardView.connect(orderEngine).getUserLevelForBorrowCheck(alice.address)).to.equal(4n);
+  });
+
+  it("rejects admin replay of user level when the level is outside the supported 1..5 range", async function () {
+    const { rewardView, admin, alice } = await loadFixture(fixture);
+
+    await expect(
+      rewardView.connect(admin).retryPushUserLevel(alice.address, 0, 88n),
+    ).to.be.revertedWithCustomError(rewardView, "RewardView__InvalidLevel");
+
+    await expect(
+      rewardView.connect(admin).retryPushUserLevel(alice.address, 6, 88n),
+    ).to.be.revertedWithCustomError(rewardView, "RewardView__InvalidLevel");
+  });
+
+  it("keeps lastActivity monotonic when replaying user level and emits the replay payload", async function () {
+    const { rewardView, admin, rmWriter, orderEngine, alice } = await loadFixture(fixture);
+
+    await rewardView.connect(rmWriter).pushUserLevel(alice.address, 2, 120n);
+
+    const tx = await rewardView.connect(admin).retryPushUserLevel(alice.address, 4, 80n);
+    const receipt = await tx.wait();
+
+    const pushes = getDataPushed(receipt, await rewardView.getAddress()).filter(
+      (entry) => entry.dataTypeHash.toLowerCase() === DATA_TYPE_REWARD_LEVEL_UPDATED.toLowerCase(),
+    );
+    expect(pushes).to.have.length(1);
+
+    const [payloadUser, payloadLevel, payloadBlock] = ethers.AbiCoder.defaultAbiCoder().decode(
+      ["address", "uint8", "uint256"],
+      pushes[0].payload,
+    ) as unknown as [string, bigint, bigint];
+    expect(payloadUser).to.equal(alice.address);
+    expect(payloadLevel).to.equal(4n);
+    expect(payloadBlock).to.equal(80n);
+
+    const [, , level, lastActivity] = await rewardView.connect(admin).getUserRewardSummaryWithMeta(alice.address);
+    expect(level).to.equal(4);
+    expect(lastActivity).to.equal(120n);
+    expect(await rewardView.connect(orderEngine).getUserLevelForBorrowCheck(alice.address)).to.equal(4n);
+  });
+
+  it("allows admin to replay earn-state pushes and rejects non-admin callers", async function () {
+    const { rewardView, admin, alice, bob } = await loadFixture(fixture);
+
+    await expect(
+      rewardView.connect(bob).retryPushEarnState(alice.address, 11n, 2n, 1n, 99n),
+    ).to.be.revertedWithCustomError(rewardView, "MissingRole");
+
+    await expect(rewardView.connect(admin).retryPushEarnState(alice.address, 11n, 2n, 1n, 99n))
+      .to.emit(rewardView, "DataPushed");
+
+    const [lockedEasy, eligibleLoanCount, onTimeRepayCount, blockNumber, isValid] = await rewardView
+      .connect(admin)
+      .getUserEarnStateWithMeta(alice.address);
+    expect(lockedEasy).to.equal(11n);
+    expect(eligibleLoanCount).to.equal(2n);
+    expect(onTimeRepayCount).to.equal(1n);
+    expect(blockNumber).to.be.greaterThan(0n);
+    expect(isValid).to.equal(true);
+
+    const [, , , lastActivity] = await rewardView.connect(admin).getUserRewardSummaryWithMeta(alice.address);
+    expect(lastActivity).to.equal(99n);
+  });
+
+  it("replays earn-state once into activeUsers, keeps lastActivity monotonic, and does not double-count active users", async function () {
+    const { rewardView, admin, alice, ops } = await loadFixture(fixture);
+
+    const tx1 = await rewardView.connect(admin).retryPushEarnState(alice.address, 11n, 2n, 1n, 99n);
+    const receipt1 = await tx1.wait();
+    const pushes1 = getDataPushed(receipt1, await rewardView.getAddress()).filter(
+      (entry) => entry.dataTypeHash.toLowerCase() === DATA_TYPE_REWARD_EARN_STATE_UPDATED.toLowerCase(),
+    );
+    expect(pushes1).to.have.length(1);
+
+    const [payloadUser1, lockedEasy1, eligible1, onTime1, payloadBlock1] = ethers.AbiCoder.defaultAbiCoder().decode(
+      ["address", "uint256", "uint256", "uint256", "uint256"],
+      pushes1[0].payload,
+    ) as unknown as [string, bigint, bigint, bigint, bigint];
+    expect(payloadUser1).to.equal(alice.address);
+    expect(lockedEasy1).to.equal(11n);
+    expect(eligible1).to.equal(2n);
+    expect(onTime1).to.equal(1n);
+    expect(payloadBlock1).to.equal(99n);
+
+    const [, , activeUsersAfterFirst] = await rewardView.connect(ops).getSystemRewardStatsWithMeta();
+    expect(activeUsersAfterFirst).to.equal(1n);
+
+    await rewardView.connect(admin).retryPushEarnState(alice.address, 12n, 3n, 2n, 40n);
+
+    const [lockedEasy, eligibleLoanCount, onTimeRepayCount] = await rewardView
+      .connect(admin)
+      .getUserEarnStateWithMeta(alice.address);
+    expect(lockedEasy).to.equal(12n);
+    expect(eligibleLoanCount).to.equal(3n);
+    expect(onTimeRepayCount).to.equal(2n);
+
+    const [, , , lastActivity] = await rewardView.connect(admin).getUserRewardSummaryWithMeta(alice.address);
+    expect(lastActivity).to.equal(99n);
+
+    const [, , activeUsersAfterSecond] = await rewardView.connect(ops).getSystemRewardStatsWithMeta();
+    expect(activeUsersAfterSecond).to.equal(1n);
   });
 });

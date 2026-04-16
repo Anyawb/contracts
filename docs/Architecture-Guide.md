@@ -123,7 +123,7 @@
 - **UserView.sol**：用户维度只读聚合与便捷查询（与 Position/Health/Reward 等模块协作）
 - **HealthView.sol**：健康因子/风险状态缓存与批量读取（写路径由风控/账本模块推送）
 - **StatisticsView.sol**：系统级统计聚合缓存（活跃用户/全局抵押债务/保证金聚合/降级统计等）
-- **LoanFlowView.sol**：协议层 loan-flow 统计缓存（per-user/global 的 borrow+repay volume/count；**Value Unit SSOT=USD-8**；写入由 `LoanFlowPushManager` best-effort 推送）
+- **LoanFlowView.sol**：协议层 loan-flow 统计缓存（per-user/global 的 borrow+repay volume/count；**Value Unit SSOT 遵循 Units & Conversions SSOT：价格/估值按资产原生 decimals 解释，跨资产聚合前必须显式归一化**；写入由 `LoanFlowPushManager` best-effort 推送）
 - **ViewCache.sol**：系统级快照缓存（按资产聚合的系统状态，支持批量读取）
 - **AccessControlView.sol**：权限只读查询（权限缓存、权限级别等）
 - **BatchView.sol**：批量查询聚合（价格/健康/模块健康等批量接口）
@@ -135,7 +135,7 @@
 - **DashboardView.sol**：前端仪表盘聚合视图（聚合 Position/Health/奖励/活跃度等，减少 RPC 次数）
 - **PreviewView.sol**：预览类查询门面（deposit/withdraw/borrow/repay 的预估接口；可作为前端入口，但权威实现以 UserView/PositionView 为准）
 - **RiskView.sol**：风险评估视图（基于 HealthView 缓存与派生计算，提供 liquidatable/warningLevel 等）
-- **ValuationOracleView.sol**：价格/预言机只读门面（封装 `PriceOracle` 的价格读取；**健康检查走 `GracefulDegradation.checkPriceOracleHealth(...)`**，不要求 oracle 合约实现额外 health 方法；对外明确 **Value Unit SSOT=USD-8**，并暴露 `assetDecimals` 用于 ERC-20 amount→value 换算；提供批量价格与可观测性输出。正常写价链路应统一为“链下采集/归一化 -> PriceUpdater.updateAssetPrice -> PriceOracle 存储”）
+- **ValuationOracleView.sol**：价格/预言机只读门面（封装 `PriceOracle` 的价格读取；**健康检查走 `GracefulDegradation.checkPriceOracleHealth(...)`**，不要求 oracle 合约实现额外 health 方法；**目标口径**遵循 **Units & Conversions SSOT**：迁移完成后价格与估值按资产原生 decimals 解释，并显式暴露 `assetDecimals` 用于 ERC-20 amount→value 换算。注意：当前实现和部分消费侧仍保留 统一 value 语义/历史字段，不能把这里的目标描述误读成“当前已全量落地”。正常写价链路应统一为“链下采集/按资产 decimals 归一化 -> PriceUpdater.updateAssetPrice -> PriceOracle 存储”）
 - **FeeRouterView.sol**：费用数据只读镜像（由 FeeRouter 推送更新，支持低成本查询）
 - **LendingEngineView.sol**：借贷引擎只读查询适配层（订单/重试/访问控制等运维与前端查询）
 - **ModuleHealthView.sol**：模块健康检查与缓存（轻量检查 + 结果集中推送到 HealthView/供链下监控）
@@ -457,7 +457,7 @@ contract VaultRouter is OwnableUpgradeable, UUPSUpgradeable, ReentrancyGuardUpgr
 - **用户仓位查询**：`PositionView.getUserPositionWithMeta()` / `UserView.getUserPositionWithMeta()`
 - **缓存有效性**：`PositionView.getUserCacheStatusWithMeta()`
 - **批量查询**：`PositionView.batchGetUserPositionsWithMeta()` / `CacheOptimizedView.batchGetUserPositionsWithMeta()`
-- **健康因子查询**：`HealthView.getUserHealthFactorWithMeta()`（当前按 Scheme U 收口：self 放行；non-self 需 `VIEW_USER_DATA/ADMIN`；batch 无 self-bypass）
+- **健康因子查询**：`HealthView.getUserHealthFactorWithMeta()`（当前按 Scheme U 收口：self 放行；non-self 需 `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_ADMIN`；batch 无 self-bypass）
 - **统计聚合查询**：`StatisticsView.*`
 
 ### **3. AccessControlView - 双架构权限控制 ✅ 完全实现**
@@ -660,23 +660,99 @@ address public registryAddrVar;
 ### 2) 预言机路径（Price Oracle）与优雅降级（Graceful Degradation）
 
 - **价格体系架构 SSOT**：完整的来源、归一化、发布、前端消费、preflight、缓存、监控口径统一见 [`docs/Usage-Guide/RWA-Price-System-Guide.md`](Usage-Guide/RWA-Price-System-Guide.md)。本节只保留借贷架构需要知道的核心约束。
-- **统一发布链路**：所有资产价格都应按“链下价格采集 -> 统一归一化为 USD-8 -> `PriceUpdater.updateAssetPrice` -> `PriceOracle` 存储”运行；`PriceOracle.updatePrice` 仅保留 break-glass / admin / emergency 用途。
+- **统一发布链路（目标态）**：所有资产价格都应按“链下价格采集 -> 按该资产 `assetDecimals` 归一化为链上 price 口径 -> `PriceUpdater.updateAssetPrice` -> `PriceOracle` 存储”运行；`PriceOracle.updatePrice` 仅保留 break-glass / admin / emergency 用途。注意：当前仓库仍存在固定 统一 value 的存储/脚本/字段约定，迁移实施必须以 `docs/Usage-Guide/Units-And-Conversions-SSOT.md` 的当前现状与迁移矩阵为准。
 - **统一消费链路**：前端、preflight、缓存、监控都只认“链上最终价 + 链下发布状态”，不得直接使用 raw source price 或 bootstrap 默认值做正式业务判断。
+
+#### 资产价格使用分层（新增，强约束）
+
+- **Tier-1：受支持自动估值资产（auto-valued）**
+  - 只有这类资产允许进入自动放贷、自动清算、自动释放抵押、健康因子/清算阈值判断、自动结算等**会改变风险敞口或债务状态**的决策入口。
+  - 进入 Tier-1 的最低前提是：`PriceOracle` 对该资产已启用且配置正确、`PriceOracle.getPrice(asset)` 在当前决策时点可直接成功返回 fresh price、价格精度/映射口径与该资产的链下目录一致。
+  - 对 Tier-1 资产，调用方必须把 `PriceOracle.getPrice(asset)` 视为严格依赖边界；只要主价格读取失败、过期、精度异常或映射异常，就必须 fail closed，而不是把风险外移给 fallback。
+
+- **Tier-2：参考价展示资产（reference-price-only）**
+  - 这类资产可以暴露参考价、保守估值、诊断信息、运营看板、对账提示或人工处置辅助信息。
+  - 这类资产**禁止**参与自动放贷额度、自动清算资格、自动 close factor、自动 seize amount、自动释放抵押、自动债务收口等决策。
+  - `GracefulDegradation` 返回的 fallback value、缓存值、保守估值默认只属于 Tier-2 输入，除非上层入口显式声明“只读展示/诊断用途”。
+
+- **动态降级规则**
+  - 即使某资产在静态配置上属于 Tier-1，只要本次调用实际落到了 fallback / cached fallback / reference-only price，就必须在本次决策中临时降级为 Tier-2。
+  - 降级后的结果是：只允许继续展示、记录事件、生成告警、保留人工处置上下文；不允许继续自动撮合、放贷、清算或关闭债务。
+
+- **入口矩阵约束**
+  - 所有借贷/清算/结算入口都必须在实现文档和测试中标注：它们到底是**严格依赖 `PriceOracle.getPrice`**，还是只允许读 `GracefulDegradation` 作为展示/诊断 fallback。
+  - 不允许出现“代码里 silent fallback，但文档里默认当成权威估值”的灰区。
+
+#### 自动决策入口价格依赖矩阵（新增，SSOT）
+
+| 入口 / 模块 | 业务语义 | 目标价格边界 | `GracefulDegradation` 允许范围 | 当前代码事实 | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| `VaultBusinessLogic.finalizeMatch(...)` | legacy / 通用订单放款撮合，创建新债务敞口 | 若放款准入、LTV、抵押有效性依赖估值，则必须严格依赖 `PriceOracle.getPrice` | 只允许展示报价、preflight 提示、链下诊断 | 下游债务估值仍会进入 `VaultLendingEngine/LendingEngineValuation`，后者当前使用 `GracefulDegradation.getAssetValueWithFallback(...)` | 目标态应为 strict；当前实现不能宣称 strict |
+| `VaultBusinessLogic.finalizeMatchBlocks(...)` | blocks-only 放款撮合，创建新债务敞口 | 同上，任何自动放款决策都必须 strict | 只允许展示/诊断 | 同样落入下游账本估值路径；strict 与 best-effort 尚未拆分 | 目标态应为 strict；当前实现不能宣称 strict |
+| `VaultCore.borrowFor(...)` / `VaultCore.borrowForBlocks(...)` | 内部债务写入口 | 自身不应重新做 fallback 决策；若调用方不能证明 strict price，则必须回滚 | 不允许把 fallback 作为放款成功依据 | 账本更新后的估值/缓存更新仍可能走 GD fallback | 需要把自动决策估值与 best-effort 估值拆分 |
+| `VaultCore.repay(...)` -> `SettlementManager.repayAndSettle(...)` | 用户还款与按债务账本释放抵押 | **无价格依赖**；是否释放抵押只看债务是否真实归零 | 仅允许用于展示收据、诊断日志 | 当前实现按 debt ledger truth 释放 collateral，而不是按 valuation cache 释放 | 这是正确方向；应继续保持“no-price close path” |
+| `BlocksOnlyCoordinator.repayBlocks(...)` | blocks-only 用户还款 | **无价格依赖**；只依赖实际 repayment 与订单本地剩余交割额 | 仅允许展示/诊断 | `remainingDebt` 仅保留字段名兼容，业务语义应视为 order-local remaining settlement amount | 这是正确方向；不得再引入估值 close path |
+| `BlocksOnlyCoordinator.closeRepaidTradeBlocks(...)` | blocks-only 已完成交割的 trade-like 收尾 | **无价格依赖**；前提是 `remainingDebt == 0` | 仅允许展示/诊断 | 当前与目标态一致：纯 debt-free close | 这是正确方向；不得要求 fallback 估值来“证明已清” |
+| `SettlementManager.settleOrLiquidate(...)` | keeper 自动结算 / 自动清算（legacy / 通用订单） | 对 debt valuation、collateral 选择、seize sizing 都必须 strict `getPrice`；任一资产拿不到 strict price 就必须 fail closed 并转 shortfall/manual | 只允许记录事件、告警和人工处置上下文 | `calculateDebtValue(...)` 当前会吃 GD fallback；`PositionView.getAssetValue(...)` 失败后会退回 raw balance 选 collateral；fallback 分支仍可直接 `forceReduceDebt` | 当前实现与目标态不一致，必须整改 |
+| `BlocksOnlyCoordinator.settleOrLiquidateBlocks(...)` | blocks-only 到期收尾（maturity closeout，保留旧 ABI 名称；“交割收尾”仅作同义注释） | **无价格依赖**；只依赖订单本地剩余交割额与预先绑定的成交 collateral | 仅允许展示/诊断 | 目标态不再做自动清算 sizing / seize / shortfall；若 `remainingDebt == 0` 则返还 collateral 给 borrower，否则进入到期交付收尾（maturity delivery closeout）并将绑定 collateral 交付给 lender | blocks-only 必须从通用借贷处置语义剥离 |
+| `LiquidationManager.liquidate(...)` / `batchLiquidate(...)` / `liquidateFromSettlementManager(...)` | 显式参数清算执行器 | 执行器本身不应发现价格；只执行上游已经在 strict 模式下算好的 `coveredDebt` / `collateralAmount` | 不适用；执行器不应自行消费展示 fallback | 当前模块不直接读价格，但会忠实执行上游传入的 fallback-derived 参数 | 需要在上游加 strict-proof / shortfall handoff，执行器保持 price-agnostic |
+| `PositionView.getAssetValue(...)` / `getUserTotalCollateralValue(...)` | collateral 风险只读估值 | 直接读 `PriceOracle.getPrice`；失败即返回 0 / skip，不做 GD fallback | 不需要读 GD fallback | 当前 collateral 侧 view 读是 strict-or-zero | 可作为 strict collateral read 基础，但调用方必须把 0 当成不可自动决策 |
+| `VaultLendingEngine.calculateDebtValue(...)` / `updateUserTotalDebtValue(...)` | debt 风险估值与聚合 | 必须拆成 strict 自动决策口径 与 best-effort 展示口径 两条 API | 只允许 best-effort 版本暴露 GD fallback | 当前 debt valuation 主路径直接使用 `GracefulDegradation.getAssetValueWithFallback(...)` | 这是当前最大的边界泄漏点，必须先拆口径再谈 strict keeper |
+
+- **矩阵解释 1：无价格依赖入口必须保持无价格依赖**
+  - 还款、debt-free close、按真实还款释放抵押，本质上是“真实资金到账 + 真实债务归零”的账本事件，不应再被 fallback/reference price 污染。
+
+- **矩阵解释 2：自动清算入口必须先拿到 strict proof，再进入执行器**
+  - `SettlementManager` 与 `BlocksOnlyCoordinator` 这类 keeper 入口不能一边声称自己是“自动风险处置”，一边在 strict price 缺失时继续用 fallback/reference/balance heuristic 完成 seize 与减债。
+
+- **矩阵解释 3：必须拆分 strict 与 best-effort API，而不是复用同一个 valuation helper**
+  - 目标态至少要有两套显式接口：
+    - `calculateDebtValueStrict(...)` / `getAssetValueStrict(...)`：自动授信、自动清算、自动 settle 决策专用。
+    - `calculateDebtValueBestEffort(...)` / `getAssetValueBestEffort(...)`：前端展示、运维看板、故障诊断、人工处置专用。
+  - 自动决策路径禁止直接调用带 fallback 语义的 best-effort 版本。
+
+#### blocks-only 统一术语与代码映射标准（新增，三域统一）
+
+- blocks-only 主叙事统一采用三分法：
+  - 交易收尾（trade closeout）
+  - 到期收尾（maturity closeout）
+  - 到期交付收尾（maturity delivery closeout）
+- “交割收尾”只允许作为同义注释出现，不作为主术语，不单独承载断言口径。
+- 统一代码映射标准（文档、测试、脚本必须一致）：
+
+| 主术语 | 统一代码入口/分支 | 统一状态与处置语义 |
+| --- | --- | --- |
+| 交易收尾（trade closeout） | `BlocksOnlyCoordinator.closeRepaidTradeBlocks(orderId)` | `remainingDebt == 0` 的 debt-free trade-like 关闭；兼容投影应落在 `BLOCKS_TRADE_CLOSE + RETURNED_TO_BORROWER` |
+| 到期收尾（maturity closeout） | `BlocksOnlyCoordinator.settleOrLiquidateBlocks(orderId)`（ABI 历史命名保留） | maturity 后关闭总入口：`remainingDebt == 0` 时 borrower refund；`remainingDebt > 0` 时进入到期交付收尾 |
+| 到期交付收尾（maturity delivery closeout） | `settleOrLiquidateBlocks(orderId)` 的 `remainingDebt > 0` 分支 | 订单绑定 collateral 交付给 lender；兼容回退 `SETTLED` 在该分支投影到 `BLOCKS_MATURITY_CLOSE + DELIVERED_TO_LENDER` |
+
+#### blocks-only 兼容回退映射约束（新增，避免语义漂移）
+
+- 当 `ORDER_STATE_STORE` 暂不可用、读口退回到 legacy/compat projection 时，`SETTLED` 兼容映射必须绑定真实到期收尾结果：
+  - debt-free maturity closeout（borrower-return）映射为 `BLOCKS_MATURITY_CLOSE + RETURNED_TO_BORROWER`。
+  - maturity delivery closeout（lender-delivery）映射为 `BLOCKS_MATURITY_CLOSE + DELIVERED_TO_LENDER`。
+  - `TRADE_CLOSED`（trade closeout）映射为 `BLOCKS_TRADE_CLOSE + RETURNED_TO_BORROWER`。
+- 禁止“`SETTLED` 一律映射到 lender-delivery”的兼容简化，这会把 debt-free maturity closeout 误报为 borrower 损失。
+- 文档、测试、脚本三处口径必须一致：
+  - 文档按上述映射描述。
+  - 测试需覆盖 `SETTLED` 在兼容回退下的双分支投影（debt-free borrower-return / maturity-delivery lender-delivery）。
+  - live/fork 脚本不得再把 maturity delivery 断言写成 `LIQUIDATED` 或 borrower-return 语义。
 
 - 统一库
   - 唯一实现位于 `src/libraries/GracefulDegradation.sol`，提供完整的价格获取、重试、价格/精度/合理性校验、稳定币面值与脱锚检测、缓存（非 view 写入）与保守估值回退等能力。
-- 关键口径（避免 “decimals=price 精度” 误解）
-  - `IPriceOracleRead.getPrice(asset)` 返回 `(priceUsd8, blockNumber, assetDecimals)`：
-    - `price`：**USD-8**（例如 $1.00 = `100000000`）
-    - `assetDecimals`：**token decimals**，用于将 ERC-20 的 `amount(token base units)` 归一到 “1 token” 后做估值：
-      \[
-      \text{valueUSD8}=\frac{\text{amount(token base units)}\times\text{price(USD-8 per 1 token)}}{10^{\text{assetDecimals}}}
-      \]
-      **注意**：这里的 `assetDecimals` 不是 price 的精度；price 精度固定为 USD-8。
-  - 统一口径 SSOT（建议所有新代码/文档引用）：`docs/Units-And-Conversions-SSOT.md`
+ 关键口径（避免 “decimals 只是 amount 缩放” 的误解）
+  - `IPriceOracleRead.getPrice(asset)` 返回 `(price, blockNumber, assetDecimals)`：
+    - **目标状态**：`price` 按该资产 `assetDecimals` 缩放的美元价格
+    - **当前状态**：仓库主路径仍有多处把 `price/value` 当成固定 统一 value 使用，`assetDecimals` 已参与 amount→value 换算，但 price precision 迁移尚未完成
+    - `assetDecimals`：**token decimals**，在目标 SSOT 中同时决定 amount / price / value 的缩放基准：
+      $$
+      valueUsd = \frac{amount(token\ base\ units) \times priceUsd}{10^{assetDecimals}}
+      $$
+      **注意**：迁移完成后，这里的 `assetDecimals` 既参与 amount→value 换算，也决定 price/value 的精度；当前实现仍处于从“price 固定 8 位”向该目标迁移的过程中。
+  - 统一口径 SSOT（建议所有新代码/文档引用）：`docs/Usage-Guide/Units-And-Conversions-SSOT.md`
 - 估值调用位置
   - 只在 `VaultLendingEngine` 的估值路径中使用（如计算用户/系统债务价值、`calculateDebtValue`、`getUserTotalDebtValue` 等）。
-  - `VaultLendingEngine.getUserTotalDebtValue(user)` 的对外语义应视为 **fresh valuation read**：读取当前用户债务资产集合，按当前 oracle 口径逐资产重算并汇总为 USD-8；调用方不得把它当成“仅返回旧缓存总值”的接口。
+  - `VaultLendingEngine.getUserTotalDebtValue(user)` 的对外语义应视为 **fresh valuation read**：读取当前用户债务资产集合，按当前 oracle 口径逐资产重算；若业务要跨资产汇总或比较，必须先显式归一化到同一目标精度，调用方不得把它当成“仅返回旧缓存总值”的接口。
   - 业务层不再做预言机健康检查与降级处理；避免重复事件与分叉逻辑。
 - 典型调用
   - `getAssetValueWithFallback(priceOracle, asset, amount, DegradationConfig)`（view，只读缓存）；
@@ -771,6 +847,10 @@ address public registryAddrVar;
 - **SettlementManager（新增，唯一写入口）**：
   - **唯一权威写入口（SSOT）**：统一承接 **按时还款结算 / 提前还款结算 / 到期未还处置 / 抵押价值过低触发的被动清算**
   - 内部根据状态机决定进入结算或清算分支；资金链与调用顺序以 Funds-Flow SSOT 为准
+  - 订单终态的主 SSOT 现在是 `OrderStateStoreV2`（`KEY_ORDER_STATE_STORE`），按 `(productType, orderId)` 记录第一层主生命周期、`closeReason`、第二层 `shortfallStatus` 与第三层 `collateralDisposition`。`ORDER_ENGINE / LoanNFT.LoanStatus` 与 `BlocksOnlyCoordinator.BlocksOnlyOrderStatus` 仅保留为兼容镜像或旧读面来源，禁止再把它们当作唯一权威状态机。
+  - `repayAndSettle(...)` 在进入还款主路径前必须先拒绝任何终态订单（至少包括 `Repaid` / `Liquidated` / `Defaulted`），避免用户侧还款路径继续落到已关闭订单上。
+  - `repayAndSettle` 中“全量返还抵押”和“提前还款保证金结算”是两个独立判定：前者仍以“用户所有债务资产已清空”为准，后者应以“当前 order 已 fully repaid 且当前 debtAsset 已无账本债务”为准，避免把保证金结算错误绑定到全账户清仓
+  - 其中“当前 order 已 fully repaid”的唯一权威来源必须是 `ORDER_ENGINE.getOrderTotalDueForView(orderId)`；`SettlementManager` 不得在业务侧复制 totalDue 公式自行判定。
   - 对外接口建议以 “one entry” 命名：`repayAndSettle(...)` / `settleOrLiquidate(...)` / `executeLiquidation(...)`（其中任意一种对外暴露即可，保持唯一入口）
 - **LendingEngine**：
   - 借/还/强制减债的账本更新；估值路径内的优雅降级
@@ -779,6 +859,7 @@ address public registryAddrVar;
 - **View 层**：
   - `VaultRouter`：仓位缓存与事件/DataPush；聚合查询 0 gas
   - `HealthView`：健康因子/风险状态缓存与事件/DataPush
+  - `LendingEngineView`：对 loan 订单暴露 `getLoanOrder(...)`、`getOrderStatus(orderId)` 与新的 `getOrderStateSnapshot(orderId)`；`BlocksOnlyView` 对 blocks-only 暴露 `getBlocksOnlyOrderState(orderId)`。前端、脚本和链下消费者应优先消费这些显式快照口，而不是再根据 `repaidAmount`、debt ledger 是否归零、`remainingDebt == 0` 或旧 mixed enum 去推断 closed。
 
 ### 资金链口径（SSOT）
 
@@ -790,7 +871,7 @@ address public registryAddrVar;
 
 ### 配置要点
 
-- Registry 必须正确指向：`KEY_VAULT_CORE`、`KEY_LE`、`KEY_CM`、`KEY_HEALTH_VIEW`、`KEY_RM`、`KEY_SETTLEMENT_MANAGER`
+- Registry 必须正确指向：`KEY_VAULT_CORE`、`KEY_LE`、`KEY_CM`、`KEY_HEALTH_VIEW`、`KEY_RM`、`KEY_SETTLEMENT_MANAGER`、`KEY_ORDER_STATE_STORE`
 - `LendingEngine.onlyVaultCore` 校验的 Core 地址与实际 Core 部署一致
 - `LendingEngine` 配置 `priceOracle`、`settlementToken` 正确，以启用优雅降级
 
@@ -811,7 +892,9 @@ address public registryAddrVar;
 ### 统一入口（建议）
 
 - `repayAndSettle(user, debtAsset, repayAmount, orderId)`：用户 B 发起还款后，**必经 SettlementManager**，由其完成结算或清算的账本写入（资金链与调用顺序见 Funds-Flow SSOT）。
-- `settleOrLiquidate(orderId)`（可选）：keeper/机器人触发的 legacy / 通用订单“到期/风控检查后处置”入口（内部自动判定结算或清算，并计算清算参数；`orderId` 为仓位主键）。blocks-only 订单不应默认复用这里的 keeper 入口，而应走 `BlocksOnlyCoordinator.settleOrLiquidateBlocks(orderId)`。
+  - `SettlementManager` 对 `ORDER_ENGINE` 的代扣授权应保持“一次调用一次授权”：调用 `repay(orderId, repayAmount)` 前按本次金额授权，成功后立即清零，避免在结算合约上残留可复用 allowance。
+  - 由该入口触发的保证金结算/违约处理（`EarlyRepaymentGuaranteeManager.settleEarlyRepayment/processDefault`）必须仅接受 `Registry[KEY_SETTLEMENT_MANAGER]` 调用，不允许保留 `VaultCore` 直通旁路。
+- `settleOrLiquidate(orderId)`（可选）：keeper/机器人触发的 legacy / 通用订单“到期/风控检查后处置”入口（内部自动判定结算或清算，并计算清算参数；`orderId` 为仓位主键）。blocks-only 订单不应默认复用这里的 keeper 入口，而应走 `BlocksOnlyCoordinator.settleOrLiquidateBlocks(orderId)`；但对 blocks-only 而言，该入口的目标语义应收敛为“maturity 后的产品到期收尾（maturity closeout）”，不是继续复用通用处置执行器做 debt-ledger 清算。若订单已经债务归零且只需 trade-like 收尾，则应走 `BlocksOnlyCoordinator.closeRepaidTradeBlocks(orderId)`。
 
 ### 状态机分支（概念口径）
 
@@ -824,7 +907,8 @@ address public registryAddrVar;
 
 - **“统一走 LiquidationManager”不太符合语义**：LiquidationManager 更适合作为“违约处置/强制清算执行器”，而不是把正常还款也当作 liquidation。
 - 推荐结构（B）：**SettlementManager 为 keeper/用户侧的默认对外入口**；`LiquidationManager` 作为其内部的“清算执行器模块”（直达账本 + 单点事件推送）。
-  - 兼容：在具备 `ACTION_LIQUIDATE` 权限时，仍允许直接调用 `LiquidationManager.liquidate/batchLiquidate` 做“显式参数清算”（测试/应急），但不建议作为常态入口。
+  - 兼容：在具备 `ActionKeys.ACTION_LIQUIDATE` 权限时，仍允许直接调用 `LiquidationManager.liquidate/batchLiquidate` 做“显式参数清算”（测试/应急），但不建议作为常态入口。
+  - 一致性约束：即使使用显式执行器入口，也必须维持与 keeper 主路径一致的“borrower 不能自清算”语义（`liquidator != targetUser`）。
 
 ---
 
@@ -836,9 +920,10 @@ address public registryAddrVar;
 
 ### 设计
 
-- 入口方：legacy / 通用订单由 **`Registry.KEY_SETTLEMENT_MANAGER` 指向 `SettlementManager`**；blocks-only 订单由 **`Registry.KEY_BLOCKS_ONLY_COORDINATOR` 指向 `BlocksOnlyCoordinator`**。当各自进入清算分支时：
+- 入口方：legacy / 通用订单由 **`Registry.KEY_SETTLEMENT_MANAGER` 指向 `SettlementManager`**；blocks-only 订单由 **`Registry.KEY_BLOCKS_ONLY_COORDINATOR` 指向 `BlocksOnlyCoordinator`**。当各自进入终态处置分支时：
   - 账本写入只发生在账本模块（CM/LE）；View 不承载写入转发。
-  - 是否保留“清算执行器模块（LiquidationManager）”由实现选择决定；但对外入口必须保持唯一。
+  - legacy / 通用订单可继续保留“清算执行器模块（LiquidationManager）”作为内部执行器；但 blocks-only 不应再把 maturity 收尾实现成对通用借贷处置执行器的包装。
+  - 对外入口必须保持唯一。
 
 本节不复述具体函数名、参数与资金/抵押去向。完整资金链与实现细节以以下文档为准：
 
@@ -855,12 +940,91 @@ address public registryAddrVar;
 
 ### 生产 keeper 清算流程（更具体的落地方案）
 
-- **清算入口按产品线划分**：legacy / 通用订单由 keeper 调用 `SettlementManager.settleOrLiquidate(orderId)`；blocks-only 订单由 keeper 调用 `BlocksOnlyCoordinator.settleOrLiquidateBlocks(orderId)`。
+- **收尾入口按产品线与生命周期划分**：legacy / 通用订单由 keeper 调用 `SettlementManager.settleOrLiquidate(orderId)`；blocks-only debt-free trade-like 订单可由任意调用方执行 `BlocksOnlyCoordinator.closeRepaidTradeBlocks(orderId)`；blocks-only maturity-gated 到期收尾仍由 keeper 调用 `BlocksOnlyCoordinator.settleOrLiquidateBlocks(orderId)`。
+  - 对 blocks-only，`settleOrLiquidateBlocks(orderId)` 这个 ABI 名称仅为兼容保留；业务语义必须视为“maturity 后按产品约定完成到期收尾（maturity closeout）”。其中 `remainingDebt > 0` 分支属于到期交付收尾（maturity delivery closeout），“交割收尾”仅作同义注释。
+  - blocks-only 的 maturity 收尾只允许消费订单创建时已经绑定的 collateral asset / collateral amount；不得再在运行时遍历 borrower 全量 collateral 做候选挑选、估值比较、bonus sizing 或 shortfall 推导。
 - **价格刷新硬步骤**（链上不自动刷新）：
   - 对订单涉及的 collateral/debt 资产读取 `PriceOracle.getPriceUpdateBlock` 或 `getAssetConfig`。
   - 若 `block.number - updateBlock > maxPriceAgeBlocks`：先调用价格更新器刷新，再执行清算。
   - 刷新失败直接跳过本单并告警，避免估值为 0 引发 `SettlementManager__NoCollateral`。
-- **角色要求**：keeper EOA 需 `ACTION_LIQUIDATE`；`SettlementManager` 需至少具备 `ACTION_LIQUIDATE` 与 `VIEW_RISK_DATA`（当前部署还补授 `REPAY` 与 `VIEW_SYSTEM_DATA` 以兼容现有流程）；`BlocksOnlyCoordinator` 需 `ACTION_LIQUIDATE` 与 `VIEW_RISK_DATA`；`LiquidationManager` 需 `ACTION_LIQUIDATE` 与 `ACTION_DEPOSIT`。当前 `LiquidationManager` 实现本身不直接读取估值/风险 View，也不依赖通用 `VIEW_*` 角色来向 `LiquidatorView` 推送事件。
+- **清算估值边界**：
+  - 只有 Tier-1 自动估值资产允许参与自动清算资格判断、可扣押数量计算和自动 debt reduction。
+  - 若本次清算中 collateral 或 debt 资产只能拿到 fallback/reference price，则该笔清算必须转入“显式人工处置/显式 shortfall 处置”路径，不能继续按自动估值清算成交。
+- **角色要求**：keeper EOA 需 `ActionKeys.ACTION_LIQUIDATE`；`SettlementManager` 需至少具备 `ActionKeys.ACTION_LIQUIDATE` 与 `ActionKeys.ACTION_VIEW_RISK_DATA`；其 repay 侧访问 `ORDER_ENGINE.repay/getLoanOrderForView/getOrderTotalDueForView` 已由 `ORDER_ENGINE` 显式信任 `Registry[KEY_SETTLEMENT_MANAGER]`，不再依赖额外的 `REPAY` / `ActionKeys.ACTION_VIEW_SYSTEM_DATA` 运行时补授权；`BlocksOnlyCoordinator` 的 `settleOrLiquidateBlocks(...)` 与 `closeRepaidTradeBlocks(...)` 在当前实现均为 permissionless 收尾入口，不要求 liquidation role；`LiquidationManager` 需 `ActionKeys.ACTION_LIQUIDATE` 与 `ActionKeys.ACTION_DEPOSIT`。当前 `LiquidationManager` 实现本身不直接读取估值/风险 View，也不依赖通用 view role 来向 `LiquidatorView` 推送事件。
+
+### 三层终态模型与 shortfall 显式账（新增，强约束）
+
+- **禁止继续依赖“价格大致合理 + forceReduceDebt 后账面归零”来表示清算完成**。
+- 当前代码已经把订单终态拆成三层，并以 `src/interfaces/IOrderStateStoreV2.sol` / `src/core/OrderStateStoreV2.sol` 作为主 SSOT：
+  - **第一层：主生命周期 + 显式 close reason**。当前枚举为 `ACTIVE`、`REPAID`、`LIQUIDATED`、`DEFAULTED`、`CLOSED`，关闭原因为 `FULL_REPAY`、`KEEPER_LIQUIDATION`、`MATURITY_DEFAULT`、`BLOCKS_TRADE_CLOSE`、`BLOCKS_MATURITY_CLOSE`。
+  - **第二层：shortfall 子状态机**。直接复用 `IShortfallLedger.ShortfallStatus`。loan 的 liquidation/default 可进入 `ACTIVE`、`RESOLVED`、`WRITTEN_OFF` 等阶段；后续 recovery / write-off 只允许改这一层。
+  - **第三层：collateral custody / disposition 状态**。当前枚举为 `NONE`、`COORDINATOR_CUSTODY`、`RETURNED_TO_BORROWER`、`DELIVERED_TO_LENDER`、`SEIZED_AND_DISTRIBUTED`，用于显式描述 collateral 去向。
+
+- **当前实现与产品线语义的对应关系**：
+  - loan 创建时由 `LendingEngine` 初始化 `LOAN + ACTIVE`；全额还款时写成 `REPAID + FULL_REPAY`。
+  - loan 在 `SettlementManager` 的 keeper liquidation / maturity default 分支中，第一层分别写成 `LIQUIDATED` / `DEFAULTED`，`closeReason` 写成 `KEEPER_LIQUIDATION` / `MATURITY_DEFAULT`，第三层写成 `SEIZED_AND_DISTRIBUTED`；若存在 residual debt，则第二层写 `ACTIVE` 并由 shortfall ledger 继续收口。
+  - blocks-only 创建时由 `BlocksOnlyCoordinator` 初始化 `BLOCKS_ONLY + ACTIVE + COORDINATOR_CUSTODY`。
+  - blocks-only 在 `repayBlocks(...)` 把 order-local remaining settlement amount 还到 0 之后，会先进入 `REPAID`，但此时仍未终局关闭，collateral 继续保持 `COORDINATOR_CUSTODY`。
+  - blocks-only 的 `closeRepaidTradeBlocks(...)` 才是 trade-like 的显式终局关闭：第一层写 `CLOSED`，`closeReason = BLOCKS_TRADE_CLOSE`，第三层写 `RETURNED_TO_BORROWER`。
+  - blocks-only 的 `settleOrLiquidateBlocks(...)` 现在只是保留旧 ABI 名称的 maturity 收尾入口，不再代表通用借贷处置语义：若 `remainingDebt == 0`，写 `CLOSED + BLOCKS_MATURITY_CLOSE + RETURNED_TO_BORROWER`；若 maturity 时仍有未付余额，则写 `CLOSED + BLOCKS_MATURITY_CLOSE + DELIVERED_TO_LENDER`。当前正式写路径不会为 blocks-only 打开 shortfall 子状态机，第二层保持 `NONE`。
+
+- **兼容面说明**：
+  - `ILoanNFT.LoanStatus` 仍包含 `LiquidatedWithShortfall` / `DefaultedWithShortfall`，`IBlocksOnlyCoordinator.BlocksOnlyOrderStatus` 仍包含 `SETTLED`、`TRADE_CLOSED`、`LIQUIDATED_WITH_SHORTFALL` 等旧值；这些仅用于兼容旧写面、旧事件或 fallback 读面，不能再当作主状态机设计目标。
+  - 新增读写接口、事件、视图和测试都应以 `OrderStateStoreV2` 的三层结构为准。
+
+- **账本约束**
+  - `forceReduceDebt` 只允许减少已经被真实偿付、真实没收或真实补偿覆盖的那部分 debt；不得把“基于参考价猜测应该能覆盖”的部分直接减到 0。
+  - loan 的主生命周期可以已经进入 `LIQUIDATED` / `DEFAULTED` 终态，而第二层 shortfall 仍处于 `ACTIVE` / `RECOVERY_PENDING` / `WRITTEN_OFF`；这表示“业务处置已完成，但损失处理仍未 clean 收口”。因此，legacy `LoanStatus == Liquidated` 不再等价于“clean close”。
+  - `syncLoanShortfallState(orderId, createdBlockHint, shortfallStatus)` 禁止通过 shortfall-only 路径补建 `ACTIVE` 生命周期；但当 `ORDER_ENGINE` 已报告 `Liquidated*` / `Defaulted*` 且 `LOAN` 状态缺失时，必须允许做终态补偿回填，避免临时 store 不可用导致长期状态空洞。
+  - 只有在 `remainingDebt == 0` 且第二层不存在未决损失时，读面、对账与统计才可以把该订单标成 clean close；`WRITTEN_OFF` 是 loss terminal，不是 clean terminal。
+  - 对于 blocks-only 当前 trade-like 路径，第二层必须显式暴露为 `NONE`，而不是靠 `remainingDebt == 0` 去推断“肯定没有损失分支”；是否 borrower refund 还是 lender delivery 由第一层 `closeReason` 与第三层 `collateralDisposition` 共同决定。
+
+- **允许的 shortfall 收口路径**
+  - 当前实现支持三类链上收口入口：
+    - 显式入口：`SettlementManager.applyShortfallRecovery(...)` 与 `SettlementManager.setShortfallStatus(... WRITTEN_OFF ...)`。
+    - 默认自动入口：`SettlementManager.settleOrLiquidate(...)` 在 default 分支收到 `EarlyRepaymentGuaranteeManager.processDefault(...)` 的实际罚没金额后，会自动按 `RecoverySource.GUARANTEE_FUND` 冲减同单 shortfall（上限为 `remainingDebt`）。
+    - 受信自动上报入口：治理可通过 `SettlementManager.setShortfallRecoveryReporter(...)` 绑定 reporter 与 `RecoverySource`，供准备金/补偿池/链下自动化流程在“真实吸收已发生”后直接上报 recovery，无需再走人工账务脚本。
+  - 若未来接入保证金/担保基金、准备金/补偿池或链下回款吸收，必须先有真实资金事实，再通过显式链上 recovery / write-off 入口落账；不得仅因这些模块存在就默认视为已吸收。
+  - governance write-off / bad-debt absorb 必须保留独立事件与审计轨迹，不得伪装成真实回款。
+
+- **观测与对账要求**
+  - View/事件层必须能区分“business terminal reached”“loss 已 resolved / written off”“collateral 已返还还是已交付”。
+  - 对账、监控、运营 runbook 不得把 shortfall 仓位混入已正常结清仓位，也不得把 collateral delivered-to-lender 与 borrower refund 这两种完全不同的收尾方式压缩成同一个 closed 标记。
+
+#### 当前接口与读面（SSOT）
+
+- **当前已经落地的接口**
+  - 状态主存储：`src/interfaces/IOrderStateStoreV2.sol`
+  - loan 快照读口：`LendingEngineView.getOrderStateSnapshot(orderId)`
+  - blocks-only 快照读口：`BlocksOnlyView.getBlocksOnlyOrderState(orderId)`
+  - 用户维度 loan 枚举兼容口：`LoanNFTView.getUserLoansPaginated(...)`，其状态字段会优先消费 `OrderStateStoreV2` 再回退到 legacy `LoanNFT` 元数据。
+
+- **当前写路径衔接**
+  - `LendingEngine.createLoanOrder(...)` / `BlocksOnlyCoordinator.finalizeMatchBlocks(...)` 负责初始化主状态。
+  - `LendingEngine.repay(...)` 与 `BlocksOnlyCoordinator.repayBlocks(...)` 负责把已清债但尚未完成最终 close 的订单推进到 `REPAID`。
+  - `SettlementManager` 的 loan 终局分支与 `BlocksOnlyCoordinator` 的 blocks-only close 分支负责原子写入第一层与第三层状态。
+  - shortfall recovery / write-off 仍通过 `SettlementManager.applyShortfallRecovery(...)` 与 `SettlementManager.setShortfallStatus(...)` 收口，并同步回写 `OrderStateStoreV2` 的第二层。
+
+- **写路径约束**
+  - `forceReduceDebt(...)` 的输入必须收敛为 `coveredDebt`，不得再把 `requestedDebtReduction` 直接当成“应该能覆盖的债”。
+  - 若 `requestedDebtReduction > coveredDebt`，同一交易内必须：
+    - 只对 `coveredDebt` 调用 `forceReduceDebt(...)`；
+    - 对差额写入 shortfall ledger；
+    - 写入第一层主生命周期与 `closeReason`；
+    - 发出 `LiquidationShortfallOpened` 事件。
+
+- **读路径约束**
+  - 任何声称“closed-clean / fully settled / fully liquidated”的 view、统计、DataPush、前端聚合，都必须同时读取：
+    - 第一层 `OrderStateStoreV2.lifecycle`
+    - 第一层 `closeReason`
+    - 第二层 `OrderStateStoreV2.shortfallStatus`，必要时再结合 `ShortfallLedger.remainingDebt`
+    - 第三层 `OrderStateStoreV2.collateralDisposition`
+  - 不允许仅凭 legacy `LoanStatus != Active`、旧 mixed enum、`debt == 0`、`remainingDebt == 0` 或 `isClosed == true` 就把仓位视作 clean close。
+
+- **治理与恢复约束**
+  - `applyShortfallRecovery(...)` 只能用于真实 recovery 已发生的金额。
+  - governance write-off 必须走 `RecoverySource.GOVERNANCE_WRITE_OFF` 并留下 `evidenceHash`；不得复用普通 recovery event 假装是真实回款。
+  - `ShortfallStatus.RESOLVED` 仅适用于真实回收使 `remainingDebt == 0` 的场景；`ShortfallStatus.WRITTEN_OFF` 仅适用于显式核销吸收场景。两者都不得反向改写第一层主生命周期。
 
 ### 测试要求（修订）
 
@@ -938,8 +1102,8 @@ jobs:
 - 阶段一（当前）：保留 `KEY_STATS`（**Registry 注册键标签为 `VAULT_STATISTICS`**），并将其映射到 `StatisticsView`。
   - `StatisticsView` 作为 **B 类缓存** 承接“全局统计/用户统计/保证金统计”的状态存储，并提供只读聚合（`getGlobalStatisticsWithMeta` / `getGlobalSnapshotWithMeta`）。
   - **写入口径（Scheme B / Strict B+）**：`StatisticsView` 的 `push*` 写入口必须收敛为 **单一链上入口编排器** `StatisticsPushManager`（或 `ACTION_ADMIN` 紧急旁路），避免多写入口导致版本/seq 冲突与口径漂移。
-  - **单位口径（Value Unit SSOT）**：跨资产聚合的 `collateral/debt` 必须统一为 **USD-8 value**，由 `PositionView.getUserTotalCollateralValue(user)` 与 `LendingEngine.getUserTotalDebtValue(user)` 提供估值 SSOT，再由 `StatisticsPushManager` 推送 snapshot。
-  - **读取语义（Debt Value）**：这里的 `LendingEngine.getUserTotalDebtValue(user)` 指的是“按当前账本 + 当前价格语义实时重算后的用户总债务价值（USD-8）”。内部即使维护缓存，也不得把对外读接口降级成“直接返回旧缓存镜像”，否则 `SettlementManager` 的全债清零判定与 `StatisticsPushManager` 的 snapshot 口径会漂移。
+  - **单位口径（Value Unit SSOT）**：`collateral/debt` 的估值必须遵循 Units & Conversions SSOT，即按各资产原生 decimals 解释；若需要跨资产聚合，必须先统一归一化到业务明确指定的目标精度，再由 `StatisticsPushManager` 推送 snapshot。
+  - **读取语义（Debt Value）**：这里的 `LendingEngine.getUserTotalDebtValue(user)` 指的是“按当前账本 + 当前价格语义实时重算后的用户总债务价值”。内部即使维护缓存，也不得把对外读接口降级成“直接返回旧缓存镜像”，否则 `SettlementManager` 的全债清零判定与 `StatisticsPushManager` 的 snapshot 口径会漂移。
 - 活跃用户计数规则：严格以“仓位>0（collateral>0 或 debt>0）”为活跃判定。
 - 兼容性：为便于平滑迁移，`StatisticsView` 暴露与旧接口兼容的 `updateUserStats`/`updateGuaranteeStats`，内部转调新 `push*` 接口。
 - 阶段二（后续）：统一地址解析到 `KEY_VAULT_CORE -> viewContractAddrVar()`，逐步去除对 `KEY_STATS` 的依赖；清理 `VaultStatistics.sol` 与 `IVaultStatistics.sol` 遗留。
@@ -1015,6 +1179,16 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 1. 为所有 push\* 函数增加 `DataPushLibrary._emitData(...)` 调用；旧事件保留并加注 `// DEPRECATED`。
 2. 前端 / Off-chain 服务仅订阅 `DataPushed`。
 
+### Live 验收分层规则
+
+- live 脚本必须先区分目标：若脚本目标是验证资金落账、仓位迁移、清算结果、还款结果等业务成功语义，则应采用 runtime-first；若脚本目标是验证事件总线、DataPush 完整性、链下投影输入、retry/replay 入口，则应作为 observability gate 保持严格事件断言。
+- runtime-first 脚本中，`DataPushed` 缺失、延迟、或 payload 与 runtime 短暂不一致，默认记为 notice，不应直接覆盖已经成立的账本 / runtime 断言结果。
+- observability gate 脚本中，事件与 DataPush 缺失应继续 hard fail，因为脚本本身就是在验证链下消费入口是否可用。
+- 具体脚本清单与逐项理由，见 [Usage-Guide/Live-Observability-Gate-Checklist.md](Usage-Guide/Live-Observability-Gate-Checklist.md)。
+- 当前仓库下的经验分类：
+- `live-liquidation.ts`、`live-liquidation-arbitrum-sepolia.ts`、`live-liquidation-fallback.ts`、`live-batch-liquidation-pressure.ts`、`live-blocks-only-liquidation*.ts` 属于业务结果优先脚本，`DataPushed` 更适合作为 notice / attribution。
+- `live-fee-*gate.ts`、`configure-dynamic-fee.ts`、`live-guarantee-events-datapush-arbitrum-sepolia.ts`、reward push / retry / recycle 专项脚本，属于 observability gate 或 push-path 专项脚本，事件存在性应继续作为硬断言。
+
 ### View 层实现一致性（整体描述）
 
 - **目标**：确保所有 View 模块在“只读/缓存/聚合 + 统一 DataPush + 可升级”三个维度与本指南一致，便于前端/机器人统一接入、链下统一订阅、以及后续安全升级。
@@ -1034,7 +1208,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 
 ### 用户维度 View：统一读权限（方案 U，强制）
 
-> 目标：将“所有用户维度 view”统一为**真正面向用户的读接口**，避免出现“用户读取自己数据也必须先拿 VIEW 角色”的割裂体验；同时为 ops/admin 保留可审计的非本人读取通道。
+> 目标：将“所有用户维度 view”统一为**真正面向用户的读接口**，避免出现“用户读取自己数据也必须先拿只读角色”的割裂体验；同时为 ops/admin 保留可审计的非本人读取通道。
 
 #### 定义（适用范围）
 
@@ -1048,7 +1222,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
   - `ActionKeys.ACTION_VIEW_USER_DATA` **或**
   - `ActionKeys.ACTION_ADMIN`
     否则必须 `revert MissingRole()`（断言 selector，不依赖 revert string）。
-- **Batch user reads（涉及 users[]）必须更严格**：批量读取通常视为“枚举能力”，不得提供 self-bypass；应要求 `VIEW_USER_DATA` 或 `ADMIN`。
+- **Batch user reads（涉及 users[]）必须更严格**：批量读取通常视为“枚举能力”，不得提供 self-bypass；应要求 `ActionKeys.ACTION_VIEW_USER_DATA` 或 `ActionKeys.ACTION_ADMIN`。
 
 #### 实施指南（SSOT）
 
@@ -1068,7 +1242,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
   - `RewardManager/RewardManagerCore` 负责 Earn 侧计算与发放编排（锁定/释放/等级等），并在需要时**委托** `RewardAccrualManager` 做扣罚与欠账处理。
   - `RewardAccrualManager` 负责 **Penalty SSOT**：优先 burn Easy，若余额不足则累积到 penalty ledger，并统一推送 `RewardView`。
   - `RewardView` 负责只读聚合与统一 DataPush（链下订阅与前端查询入口）。
-- 口径隔离：**Reward 口径（reward-qualified）** 与 **协议口径（protocol loan flow）** 必须分离；协议层的 borrow+repay volume/count（USD-8）应读取 `LoanFlowView`（SSOT），`RewardView` 不承载协议借贷统计字段。
+- 口径隔离：**Reward 口径（reward-qualified）** 与 **协议口径（protocol loan flow）** 必须分离；协议层的 borrow+repay volume/count 应读取 `LoanFlowView`（SSOT），其 value 语义遵循 Units & Conversions SSOT，跨资产消费前必须显式归一化，`RewardView` 不承载协议借贷统计字段。
 - 统一功能库：Reward 模块的模块访问/权限校验/RewardView best-effort 推送统一由 `RewardModuleBase` 提供，避免业务合约重复实现。
 
 ### 方案 B（推荐默认）：`KEY_ORDER_ENGINE` + 按订单入口优先（运行稳定性闸门）
@@ -1083,10 +1257,11 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 2. **闸门 2：Reward 写入口只允许 `KEY_ORDER_ENGINE`（单入口收敛）**
 
 - `RewardManager.onLoanEventByOrder*` 写入口 caller gate 只认 `Registry[KEY_ORDER_ENGINE]`，明确拒绝其它模块（包括 `KEY_LE`）直连。
+- blocks-only 若需要在 trade delivery 完成后发放 Easy，必须走 **产品专用的窄入口**，不能伪装成 `RewardManager.onLoanEventByOrder*` 调用去绕过 `KEY_ORDER_ENGINE` caller gate。
 
 3. **闸门 3：文档 SSOT 必须收敛到一致**
 
-- 本章（架构 SSOT）必须与合约实现/部署脚本一致：`KEY_ORDER_ENGINE` 为唯一写入口；按订单入口为推荐主路径。
+- 本章（架构 SSOT）必须与合约实现/部署脚本一致：legacy / 通用订单上，`KEY_ORDER_ENGINE` 为唯一 Reward 写入口；blocks-only 若存在独立 Easy 发放路径，必须在文档与实现中显式标注为“产品专用交割完成入口”，不得混淆为 `RewardManager` 主写入口。
 
 4. **闸门 4：用测试把入口与顺序锁死**
    - 非 `KEY_ORDER_ENGINE` 调用写入口必 revert；并覆盖“落账失败时不应产生 Reward 侧状态变化”。
@@ -1123,6 +1298,7 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 - **清算惩罚边界（必须）**：liquidation/default 场景的 Reward penalty 不走 `KEY_ORDER_ENGINE` 主写入口；当前实现是在资金链结果已确定后，由 `GuaranteeFundManager` 独立调用 `RewardManager.applyLiquidationPenalty(user)`，且该调用是 best-effort，不得反向影响资金链账本落账。
 - **Penalty 抵扣**：在任意奖励入账前统一调用 `RewardAccrualManager.offsetPenaltyOnReward(...)` 抵扣欠账，确保“先还欠账再入账”的统一口径。
 - **重要变化（SSOT）**：`RewardManagerCore` 的 penalty ledger 存储位仅为兼容保留（不再作为 SSOT）；Penalty SSOT 以 `RewardAccrualManager` 为准。
+- **blocks-only Easy 发放边界（新增，强约束）**：blocks-only 不是 `ORDER_ENGINE` 订单，不应复用 legacy 的 borrow/on-time/early/late Reward outcome。若 blocks-only 交割完成后要发放 Easy，必须由 `BlocksOnlyCoordinator` 在主账本 / 主状态成功收尾之后，以产品专用窄入口 best-effort 触发 `EasyEmissionController`；该路径不得写入 `RewardManagerCore` 的 borrow/repay earn 状态，也不得要求 `KEY_ORDER_ENGINE` caller gate 放宽到 blocks-only。
 
 5. 只读与 DataPush：由 `RewardView` 内部统一 `DataPushLibrary._emitData(...)`：
    - **发放（Earn）侧**：`RewardManagerCore` 调用 `RewardView.push*`（writer 白名单）
@@ -1148,10 +1324,11 @@ DataPushLibrary._emitData(DATA_TYPE_EXAMPLE, abi.encode(param1, param2));
 
 > 背景：`OrderEngine` 在创建长周期订单（如 90/180/360 天）时需要读取用户等级做门槛校验。该读取属于**协议内强制校验**，不是面向前端/链下的通用查询入口。
 
-- **接口**：`RewardView.getUserLevelForBorrowCheck(user)`
+- **接口**：`RewardManagerCore.getUserLevelForBorrowCheck(user)`
 - **caller gate（必须对齐真实调用方，避免线上 revert）**：
   - **必须允许**：`Registry[KEY_ORDER_ENGINE]`（OrderEngine，推荐默认）
   - **禁止**：任意其它 caller（必须 `revert MissingRole()`）
+- **镜像边界**：`RewardView.USER_LEVEL` 仅用于观测与镜像一致性，不是长周期借款准入的 canonical authority。
 - **文档与测试要求**：
   - NatSpec 必须明确上述 caller gate（禁止只写 “KEY_LE only” 造成口径漂移）。
   - 测试必须锁死：`KEY_ORDER_ENGINE` 允许、其它地址拒绝。

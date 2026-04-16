@@ -1,7 +1,7 @@
 import { ethers } from "hardhat";
 
-import { createFundsFlowLiveContext } from "../tests/live-test/_fundsFlowLive";
-import { key } from "../tests/live-test/_mockLiveUtils";
+import { createFundsFlowLiveContext } from "../tests/live-test/networks/arbitrum-sepolia/core/_fundsFlowLive";
+import { key } from "../tests/live-test/networks/arbitrum-sepolia/core/_mockLiveUtils";
 
 async function main() {
   const ctx = await createFundsFlowLiveContext({

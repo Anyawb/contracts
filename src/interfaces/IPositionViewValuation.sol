@@ -15,7 +15,7 @@ pragma solidity ^0.8.20;
 interface IPositionViewValuation {
     /*━━━━━━━━━━━━━━━ Valuation Functions ━━━━━━━━━━━━━━━*/
     /**
-     * @notice Get a user's total collateral value (USD-8).
+    * @notice Get a user's total collateral value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - registry reference is invalid (ZeroAddress / NotAContract)
      *      - caller lacks ACTION_VIEW_RISK_DATA and is not admin (MissingRole)
@@ -26,14 +26,14 @@ interface IPositionViewValuation {
      * - Graceful degradation: returns 0 if dependent modules or oracle calls fail
      *
      * @param user Target user address.
-     * @return totalValue Total collateral value (USD-8).
+    * @return totalValue Total collateral value normalized to 18 decimals.
      */
     function getUserTotalCollateralValue(
         address user
     ) external view returns (uint256 totalValue);
 
     /**
-     * @notice Get system total collateral value (USD-8).
+    * @notice Get system total collateral value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - registry reference is invalid (ZeroAddress / NotAContract)
      *      - caller lacks ACTION_VIEW_RISK_DATA and is not admin (MissingRole)
@@ -42,7 +42,7 @@ interface IPositionViewValuation {
      * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
      * - Graceful degradation: returns 0 if dependent modules or oracle calls fail
      *
-     * @return totalValue Total collateral value (USD-8).
+    * @return totalValue Total collateral value normalized to 18 decimals.
      */
     function getTotalCollateralValue()
         external
@@ -50,7 +50,7 @@ interface IPositionViewValuation {
         returns (uint256 totalValue);
 
     /**
-     * @notice Get USD-8 value of an asset amount.
+    * @notice Get the value of an asset amount in the normalized system valuation unit.
      * @dev Reverts if:
      *      - registry reference is invalid (ZeroAddress / NotAContract)
      *      - caller lacks ACTION_VIEW_RISK_DATA and is not admin (MissingRole)
@@ -61,7 +61,7 @@ interface IPositionViewValuation {
      *
      * @param asset Asset address.
      * @param amount Asset amount (token decimals).
-     * @return value Value in USD-8.
+    * @return value Value normalized to 18 decimals.
      */
     function getAssetValue(
         address asset,

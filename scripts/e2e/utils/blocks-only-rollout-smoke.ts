@@ -50,16 +50,22 @@ const DATA_TYPE_BLOCKS_ONLY_MATCH_FINALIZED = ethers
 const DATA_TYPE_BLOCKS_ONLY_REPAID = ethers
   .keccak256(ethers.toUtf8Bytes("BLOCKS_ONLY_REPAID"))
   .toLowerCase();
-const DATA_TYPE_BLOCKS_ONLY_SETTLED = ethers
-  .keccak256(ethers.toUtf8Bytes("BLOCKS_ONLY_SETTLED"))
+const DATA_TYPE_BLOCKS_ONLY_DELIVERED = ethers
+  .keccak256(ethers.toUtf8Bytes("BLOCKS_ONLY_DELIVERED"))
   .toLowerCase();
-const DATA_TYPE_BLOCKS_ONLY_LIQUIDATED = ethers
-  .keccak256(ethers.toUtf8Bytes("BLOCKS_ONLY_LIQUIDATED"))
+const DATA_TYPE_BLOCKS_ONLY_TRADE_CLOSED = ethers
+  .keccak256(ethers.toUtf8Bytes("BLOCKS_ONLY_TRADE_CLOSED"))
   .toLowerCase();
-const MISSING_ROLE_SELECTOR = ethers
-  .id("MissingRole()")
-  .slice(0, 10)
-  .toLowerCase();
+const LIFECYCLE_ACTIVE = 1n;
+const LIFECYCLE_REPAID = 2n;
+const LIFECYCLE_CLOSED = 5n;
+const CLOSE_REASON_NONE = 0n;
+const CLOSE_REASON_BLOCKS_TRADE_CLOSE = 4n;
+const CLOSE_REASON_BLOCKS_MATURITY_CLOSE = 5n;
+const SHORTFALL_STATUS_NONE = 0n;
+const COLLATERAL_DISPOSITION_COORDINATOR_CUSTODY = 1n;
+const COLLATERAL_DISPOSITION_RETURNED_TO_BORROWER = 2n;
+const COLLATERAL_DISPOSITION_DELIVERED_TO_LENDER = 3n;
 
 type SmokeSigner = Awaited<ReturnType<typeof ethers.getSigners>>[number];
 
@@ -83,11 +89,11 @@ export type BlocksOnlyRolloutSmokeSummary = {
     liquidationBorrower: string;
   };
   orderIds: {
-    repayAndSettle: string;
+    repayAndTradeClose: string;
     liquidation: string;
   };
   checkpoints: {
-    repayAndSettle: Record<string, string | boolean>;
+    repayAndTradeClose: Record<string, string | boolean>;
     liquidation: Record<string, string | boolean>;
   };
   preflight: Record<string, boolean>;
@@ -161,7 +167,7 @@ function extractDataPushed(
       continue;
     }
     if (log.topics.length >= 2) {
-      const [payload] = coder.decode(["bytes"], log.data) as [string];
+      const [payload] = coder.decode(["bytes"], log.data) as unknown as [string];
       out.push({
         dataTypeHash: String(log.topics[1]).toLowerCase(),
         payload,
@@ -171,7 +177,7 @@ function extractDataPushed(
     const [dataTypeHash, payload] = coder.decode(
       ["bytes32", "bytes"],
       log.data,
-    ) as [string, string];
+    ) as unknown as [string, string];
     out.push({ dataTypeHash: String(dataTypeHash).toLowerCase(), payload });
   }
   return out;
@@ -238,35 +244,85 @@ function assertBigintEq(label: string, actual: bigint, expected: bigint) {
   }
 }
 
-async function expectMissingRole(
+function assertBoolEq(label: string, actual: boolean, expected: boolean) {
+  if (actual !== expected) {
+    throw new Error(`${label}: mismatch expected=${expected} actual=${actual}`);
+  }
+}
+
+function snapshotBlocksOnlyState(orderState: any): Record<string, string | boolean> {
+  return {
+    lifecycle: BigInt(orderState.lifecycle).toString(),
+    closeReason: BigInt(orderState.closeReason).toString(),
+    shortfallStatus: BigInt(orderState.shortfallStatus).toString(),
+    collateralDisposition: BigInt(orderState.collateralDisposition).toString(),
+    remainingDebt: BigInt(orderState.runtime.remainingDebt).toString(),
+    isClosed: Boolean(orderState.runtime.isClosed),
+    canCloseTrade: Boolean(orderState.runtime.canCloseTrade),
+    canSettleOrLiquidate: Boolean(orderState.runtime.canSettleOrLiquidate),
+    hasLoss: Boolean(orderState.hasLoss),
+  };
+}
+
+function assertBlocksOnlyOrderState(
   label: string,
-  action: () => Promise<unknown>,
+  orderState: any,
+  expected: {
+    lifecycle: bigint;
+    closeReason: bigint;
+    shortfallStatus: bigint;
+    collateralDisposition: bigint;
+    remainingDebt: bigint;
+    isClosed: boolean;
+    canCloseTrade: boolean;
+    hasLoss: boolean;
+    canSettleOrLiquidate?: boolean;
+  },
 ) {
-  try {
-    await action();
-  } catch (error: any) {
-    const raw =
-      typeof error?.data === "string"
-        ? error.data
-        : typeof error?.reason === "string"
-          ? error.reason
-          : typeof error?.message === "string"
-            ? error.message
-            : String(error);
-    const lowered = String(raw).toLowerCase();
-    if (
-      lowered.includes("missingrole") ||
-      lowered.includes(MISSING_ROLE_SELECTOR)
-    ) {
-      return;
-    }
-    throw new Error(
-      `[BlocksOnlySmoke] ${label} reverted, but not with MissingRole(): ${raw}`,
+  assertBigintEq(
+    `${label}.lifecycle`,
+    BigInt(orderState.lifecycle),
+    expected.lifecycle,
+  );
+  assertBigintEq(
+    `${label}.closeReason`,
+    BigInt(orderState.closeReason),
+    expected.closeReason,
+  );
+  assertBigintEq(
+    `${label}.shortfallStatus`,
+    BigInt(orderState.shortfallStatus),
+    expected.shortfallStatus,
+  );
+  assertBigintEq(
+    `${label}.collateralDisposition`,
+    BigInt(orderState.collateralDisposition),
+    expected.collateralDisposition,
+  );
+  assertBigintEq(
+    `${label}.remainingDebt`,
+    BigInt(orderState.runtime.remainingDebt),
+    expected.remainingDebt,
+  );
+  assertBoolEq(
+    `${label}.isClosed`,
+    Boolean(orderState.runtime.isClosed),
+    expected.isClosed,
+  );
+  assertBoolEq(
+    `${label}.canCloseTrade`,
+    Boolean(orderState.runtime.canCloseTrade),
+    expected.canCloseTrade,
+  );
+  assertBoolEq(`${label}.hasLoss`, Boolean(orderState.hasLoss), expected.hasLoss);
+  if (expected.canSettleOrLiquidate !== undefined) {
+    assertBoolEq(
+      `${label}.canSettleOrLiquidate`,
+      Boolean(orderState.runtime.canSettleOrLiquidate),
+      expected.canSettleOrLiquidate,
     );
   }
-  throw new Error(
-    `[BlocksOnlySmoke] ${label} should have reverted with MissingRole()`,
-  );
+  return snapshotBlocksOnlyState(orderState);
 }
 
 function auditMatchFinalizedPayload(params: {
@@ -304,7 +360,7 @@ function auditMatchFinalizedPayload(params: {
       "uint256",
     ],
     params.payload,
-  ) as [string, bigint, string, string, string, bigint, bigint, bigint, bigint];
+  ) as unknown as [string, bigint, string, string, string, bigint, bigint, bigint, bigint];
   assertAddressEq(
     `${params.label}.coordinator`,
     coordinator,
@@ -367,7 +423,7 @@ function auditRepaidPayload(params: {
       "uint256",
     ],
     params.payload,
-  ) as [string, bigint, string, string, string, bigint, bigint, bigint];
+  ) as unknown as [string, bigint, string, string, string, bigint, bigint, bigint];
   assertAddressEq(
     `${params.label}.coordinator`,
     coordinator,
@@ -413,7 +469,7 @@ function auditSettledPayload(params: {
   const [coordinator, orderId, borrower, asset, closeBlock] = coder.decode(
     ["address", "uint256", "address", "address", "uint256"],
     params.payload,
-  ) as [string, bigint, string, string, bigint];
+  ) as unknown as [string, bigint, string, string, bigint];
   assertAddressEq(
     `${params.label}.coordinator`,
     coordinator,
@@ -430,17 +486,45 @@ function auditSettledPayload(params: {
   };
 }
 
-function auditLiquidatedPayload(params: {
+function auditTradeClosedPayload(params: {
   label: string;
   payload: string;
   coordinator: string;
   orderId: bigint;
   borrower: string;
   asset: string;
-  liquidator: string;
+  closeBlock: bigint;
+}): Record<string, string | boolean> {
+  const [coordinator, orderId, borrower, asset, closeBlock] = coder.decode(
+    ["address", "uint256", "address", "address", "uint256"],
+    params.payload,
+  ) as unknown as [string, bigint, string, string, bigint];
+  assertAddressEq(
+    `${params.label}.coordinator`,
+    coordinator,
+    params.coordinator,
+  );
+  assertBigintEq(`${params.label}.orderId`, orderId, params.orderId);
+  assertAddressEq(`${params.label}.borrower`, borrower, params.borrower);
+  assertAddressEq(`${params.label}.asset`, asset, params.asset);
+  assertBigintEq(`${params.label}.closeBlock`, closeBlock, params.closeBlock);
+  return {
+    ok: true,
+    orderId: orderId.toString(),
+    closeBlock: closeBlock.toString(),
+  };
+}
+
+function auditDeliveredPayload(params: {
+  label: string;
+  payload: string;
+  coordinator: string;
+  orderId: bigint;
+  borrower: string;
+  asset: string;
+  lender: string;
   collateralAsset: string;
   collateralAmount: bigint;
-  debtAmount: bigint;
   closeBlock: bigint;
 }): Record<string, string | boolean> {
   const [
@@ -448,10 +532,9 @@ function auditLiquidatedPayload(params: {
     orderId,
     borrower,
     asset,
-    liquidator,
+    lender,
     collateralAsset,
     collateralAmount,
-    debtAmount,
     closeBlock,
   ] = coder.decode(
     [
@@ -463,10 +546,9 @@ function auditLiquidatedPayload(params: {
       "address",
       "uint256",
       "uint256",
-      "uint256",
     ],
     params.payload,
-  ) as [string, bigint, string, string, string, string, bigint, bigint, bigint];
+  ) as unknown as [string, bigint, string, string, string, string, bigint, bigint];
   assertAddressEq(
     `${params.label}.coordinator`,
     coordinator,
@@ -475,7 +557,7 @@ function auditLiquidatedPayload(params: {
   assertBigintEq(`${params.label}.orderId`, orderId, params.orderId);
   assertAddressEq(`${params.label}.borrower`, borrower, params.borrower);
   assertAddressEq(`${params.label}.asset`, asset, params.asset);
-  assertAddressEq(`${params.label}.liquidator`, liquidator, params.liquidator);
+  assertAddressEq(`${params.label}.lender`, lender, params.lender);
   assertAddressEq(
     `${params.label}.collateralAsset`,
     collateralAsset,
@@ -486,13 +568,11 @@ function auditLiquidatedPayload(params: {
     collateralAmount,
     params.collateralAmount,
   );
-  assertBigintEq(`${params.label}.debtAmount`, debtAmount, params.debtAmount);
   assertBigintEq(`${params.label}.closeBlock`, closeBlock, params.closeBlock);
   return {
     ok: true,
     orderId: orderId.toString(),
     collateralAmount: collateralAmount.toString(),
-    debtAmount: debtAmount.toString(),
     closeBlock: closeBlock.toString(),
   };
 }
@@ -634,17 +714,17 @@ async function buildBlocksOnlyMatch(params: {
 
   const lendIntentHash = ethers.TypedDataEncoder.hashStruct(
     "LendIntentBlocks",
-    LEND_INTENT_TYPES,
+    LEND_INTENT_TYPES as any,
     lendIntent,
   );
   const sigBorrower = await params.borrower.signTypedData(
     domain,
-    BORROW_INTENT_TYPES,
+    BORROW_INTENT_TYPES as any,
     borrowIntent,
   );
   const sigLender = await params.lender.signTypedData(
     domain,
-    LEND_INTENT_TYPES,
+    LEND_INTENT_TYPES as any,
     lendIntent,
   );
 
@@ -737,13 +817,14 @@ async function ensureOracleAssetReady(params: {
     isActive = false;
   }
 
+  const erc20 = new ethers.Contract(
+    params.asset,
+    ["function decimals() view returns (uint8)"],
+    params.signer,
+  );
+  const assetDecimals = Number(await erc20.decimals());
+
   if (!isActive) {
-    const erc20 = new ethers.Contract(
-      params.asset,
-      ["function decimals() view returns (uint8)"],
-      params.signer,
-    );
-    const assetDecimals = Number(await erc20.decimals());
     await waitTx(
       params.priceOracle
         .connect(params.signer)
@@ -758,7 +839,7 @@ async function ensureOracleAssetReady(params: {
   await waitTx(
     params.priceOracle
       .connect(params.signer)
-      .updatePrice(params.asset, ethers.parseUnits("1", 8), currentBlock),
+      .updatePrice(params.asset, ethers.parseUnits("1", assetDecimals), currentBlock),
     "prime PriceOracle asset price",
   );
 }
@@ -885,27 +966,13 @@ export async function runBlocksOnlyRolloutSmoke(
         "VIEW_RISK_DATA",
         deployment.blocksOnlyCoordinator,
       ),
-      unauthorizedCallerRejected: false,
+      permissionlessCallerAccepted: false,
     };
 
-    if (!preflight.coordinatorHasActionLiquidate) {
-      throw new Error(
-        "[BlocksOnlySmoke] BlocksOnlyCoordinator is missing ACTION_LIQUIDATE. Fix deploy role bindings before using this as a keeper/indexer gate.",
-      );
-    }
     if (!preflight.coordinatorHasViewRiskData) {
       throw new Error(
         "[BlocksOnlySmoke] BlocksOnlyCoordinator is missing VIEW_RISK_DATA. Fix deploy role bindings before using this as a keeper/indexer gate.",
       );
-    }
-    if (!preflight.keeperHasActionLiquidate) {
-      if (strictRolePreflight) {
-        throw new Error(
-          `[BlocksOnlySmoke] keeper signer is missing ACTION_LIQUIDATE in strict preflight mode: ${keeper.address}`,
-        );
-      }
-      await ensureActionRole(registry, keeper, "LIQUIDATE");
-      preflight.keeperHasActionLiquidate = true;
     }
 
     await whitelistParticipants(registry, deployer, [
@@ -973,6 +1040,15 @@ export async function runBlocksOnlyRolloutSmoke(
       Record<string, string | boolean>
     > = {};
 
+    const borrowerCollateralBefore = (await cm.getCollateral(
+      borrower.address,
+      deployment.asset,
+    )) as bigint;
+    const liquidationBorrowerCollateralBefore = (await cm.getCollateral(
+      liquidationBorrower.address,
+      deployment.asset,
+    )) as bigint;
+
     for (const user of [
       borrower.address,
       lender.address,
@@ -1011,7 +1087,7 @@ export async function runBlocksOnlyRolloutSmoke(
 
     await waitTx(
       vaultCore.connect(borrower).deposit(deployment.asset, collateralAmount),
-      "deposit repay-settle collateral",
+      "deposit repay-trade-close collateral",
     );
     await waitTx(
       vaultCore
@@ -1057,8 +1133,11 @@ export async function runBlocksOnlyRolloutSmoke(
           reserveAmount,
           repayMatch.lendIntentHash,
         ),
-      "reserve repay-settle",
+      "reserve repay-trade-close",
     );
+    const lenderBalanceBeforeRepayFinalize = (await usdc.balanceOf(
+      lender.address,
+    )) as bigint;
     const finalizeRepayRc = await waitTx(
       vbl
         .connect(borrower)
@@ -1068,10 +1147,10 @@ export async function runBlocksOnlyRolloutSmoke(
           repayMatch.sigBorrower,
           [repayMatch.sigLender],
         ),
-      "finalizeMatchBlocks repay-settle",
+      "finalizeMatchBlocks repay-trade-close",
     );
     assertDataPushType(
-      "finalize repay-settle",
+      "finalize repay-trade-close",
       finalizeRepayRc,
       DATA_TYPE_BLOCKS_ONLY_MATCH_FINALIZED,
       deployment.blocksOnlyCoordinator,
@@ -1098,6 +1177,23 @@ export async function runBlocksOnlyRolloutSmoke(
       termBlocks: 1n,
       txBlockNumber: BigInt(finalizeRepayRc.blockNumber),
     });
+    const lenderBalanceAfterRepayFinalize = (await usdc.balanceOf(
+      lender.address,
+    )) as bigint;
+    if (lenderBalanceAfterRepayFinalize !== lenderBalanceBeforeRepayFinalize) {
+      throw new Error(
+        `[BlocksOnlySmoke] finalize should not credit lender EOA collateral/settlement balance: before=${lenderBalanceBeforeRepayFinalize} after=${lenderBalanceAfterRepayFinalize}`,
+      );
+    }
+    const borrowerCollateralAfterRepayFinalize = (await cm.getCollateral(
+      borrower.address,
+      deployment.asset,
+    )) as bigint;
+    if (borrowerCollateralAfterRepayFinalize !== borrowerCollateralBefore) {
+      throw new Error(
+        `[BlocksOnlySmoke] finalize should stage borrower collateral out of withdrawable CM balance: expected=${borrowerCollateralBefore} actual=${borrowerCollateralAfterRepayFinalize}`,
+      );
+    }
 
     const repayOrderId = countBefore;
     const repayRuntimeBefore = await blocksOnlyView
@@ -1108,6 +1204,24 @@ export async function runBlocksOnlyRolloutSmoke(
         `[BlocksOnlySmoke] repay order remainingDebt mismatch before repay: expected=${principal} actual=${repayRuntimeBefore.remainingDebt}`,
       );
     }
+    const repayStateAfterFinalize = await blocksOnlyView
+      .connect(borrower)
+      .getBlocksOnlyOrderState(repayOrderId);
+    const repayStateAfterFinalizeRecord = assertBlocksOnlyOrderState(
+      "repay order after finalize",
+      repayStateAfterFinalize,
+      {
+        lifecycle: LIFECYCLE_ACTIVE,
+        closeReason: CLOSE_REASON_NONE,
+        shortfallStatus: SHORTFALL_STATUS_NONE,
+        collateralDisposition: COLLATERAL_DISPOSITION_COORDINATOR_CUSTODY,
+        remainingDebt: principal,
+        isClosed: false,
+        canCloseTrade: false,
+        canSettleOrLiquidate: false,
+        hasLoss: false,
+      },
+    );
 
     await expectRevert(
       "premature settleOrLiquidateBlocks before maturity",
@@ -1160,57 +1274,67 @@ export async function runBlocksOnlyRolloutSmoke(
       txBlockNumber: BigInt(repayRc.blockNumber),
     });
 
-    await network.provider.send("evm_mine", []);
-
-    const repayRuntimeAtMaturity = await blocksOnlyView
+    const repayRuntimeAfterRepay = await blocksOnlyView
       .connect(borrower)
       .getBlocksOnlyOrder(repayOrderId);
     if (
-      !repayRuntimeAtMaturity.isMatured ||
-      !repayRuntimeAtMaturity.canSettleOrLiquidate ||
-      repayRuntimeAtMaturity.isClosed
+      repayRuntimeAfterRepay.isClosed ||
+      !repayRuntimeAfterRepay.canCloseTrade ||
+      repayRuntimeAfterRepay.remainingDebt !== 0n
     ) {
       throw new Error(
-        "[BlocksOnlySmoke] matured repay-settle order should become settleable through BlocksOnlyView before closing",
+        "[BlocksOnlySmoke] repaid order should remain open and trade-closeable through BlocksOnlyView before closing",
       );
     }
-
-    await expectMissingRole(
-      "unauthorized settleOrLiquidateBlocks preflight",
-      async () => {
-        await coordinator
-          .connect(unauthorizedCaller)
-          .settleOrLiquidateBlocks.staticCall(repayOrderId);
+    const repayStateAfterRepay = await blocksOnlyView
+      .connect(borrower)
+      .getBlocksOnlyOrderState(repayOrderId);
+    const repayStateAfterRepayRecord = assertBlocksOnlyOrderState(
+      "repay order after repay",
+      repayStateAfterRepay,
+      {
+        lifecycle: LIFECYCLE_REPAID,
+        closeReason: CLOSE_REASON_NONE,
+        shortfallStatus: SHORTFALL_STATUS_NONE,
+        collateralDisposition: COLLATERAL_DISPOSITION_COORDINATOR_CUSTODY,
+        remainingDebt: 0n,
+        isClosed: false,
+        canCloseTrade: true,
+        hasLoss: false,
       },
     );
-    preflight.unauthorizedCallerRejected = true;
 
-    const settleRc = await waitTx(
-      coordinator.connect(keeper).settleOrLiquidateBlocks(repayOrderId),
-      "settleOrLiquidateBlocks settle",
+    await coordinator
+      .connect(unauthorizedCaller)
+      .settleOrLiquidateBlocks.staticCall(repayOrderId);
+    preflight.permissionlessCallerAccepted = true;
+
+    const tradeCloseRc = await waitTx(
+      coordinator.connect(unauthorizedCaller).closeRepaidTradeBlocks(repayOrderId),
+      "closeRepaidTradeBlocks",
     );
     assertDataPushType(
-      "settleOrLiquidateBlocks settle",
-      settleRc,
-      DATA_TYPE_BLOCKS_ONLY_SETTLED,
+      "closeRepaidTradeBlocks",
+      tradeCloseRc,
+      DATA_TYPE_BLOCKS_ONLY_TRADE_CLOSED,
       deployment.blocksOnlyCoordinator,
     );
-    const settlePayload = getLastDataPushPayload(
-      settleRc,
-      DATA_TYPE_BLOCKS_ONLY_SETTLED,
+    const tradeClosePayload = getLastDataPushPayload(
+      tradeCloseRc,
+      DATA_TYPE_BLOCKS_ONLY_TRADE_CLOSED,
       deployment.blocksOnlyCoordinator,
     );
-    if (!settlePayload) {
-      throw new Error("[BlocksOnlySmoke] missing settled payload");
+    if (!tradeClosePayload) {
+      throw new Error("[BlocksOnlySmoke] missing trade-closed payload");
     }
-    dataPushPayloadChecks.settle = auditSettledPayload({
-      label: "settle",
-      payload: settlePayload,
+    dataPushPayloadChecks.tradeClose = auditTradeClosedPayload({
+      label: "tradeClose",
+      payload: tradeClosePayload,
       coordinator: deployment.blocksOnlyCoordinator,
       orderId: repayOrderId,
       borrower: borrower.address,
       asset: deployment.asset,
-      closeBlock: BigInt(settleRc.blockNumber),
+      closeBlock: BigInt(tradeCloseRc.blockNumber),
     });
     const repayRuntimeAfter = await blocksOnlyView
       .connect(borrower)
@@ -1218,18 +1342,35 @@ export async function runBlocksOnlyRolloutSmoke(
     if (
       !repayRuntimeAfter.isClosed ||
       repayRuntimeAfter.remainingDebt !== 0n ||
-      repayRuntimeAfter.status !== 3n
+      repayRuntimeAfter.status !== 4n
     ) {
-      throw new Error("[BlocksOnlySmoke] settled runtime state mismatch");
+      throw new Error("[BlocksOnlySmoke] trade-closed runtime state mismatch");
     }
+    const repayStateAfterTradeClose = await blocksOnlyView
+      .connect(borrower)
+      .getBlocksOnlyOrderState(repayOrderId);
+    const repayStateAfterTradeCloseRecord = assertBlocksOnlyOrderState(
+      "repay order after trade close",
+      repayStateAfterTradeClose,
+      {
+        lifecycle: LIFECYCLE_CLOSED,
+        closeReason: CLOSE_REASON_BLOCKS_TRADE_CLOSE,
+        shortfallStatus: SHORTFALL_STATUS_NONE,
+        collateralDisposition: COLLATERAL_DISPOSITION_RETURNED_TO_BORROWER,
+        remainingDebt: 0n,
+        isClosed: true,
+        canCloseTrade: false,
+        hasLoss: false,
+      },
+    );
     if (
       ((await cm.getCollateral(
         borrower.address,
         deployment.asset,
-      )) as bigint) !== 0n
+      )) as bigint) !== borrowerCollateralBefore
     ) {
       throw new Error(
-        "[BlocksOnlySmoke] borrower collateral should be fully released after settled blocks-only order",
+        `[BlocksOnlySmoke] borrower collateral baseline drift after trade close: expected=${borrowerCollateralBefore}`,
       );
     }
 
@@ -1253,6 +1394,14 @@ export async function runBlocksOnlyRolloutSmoke(
         ),
       "reserve liquidation",
     );
+    const lenderBalanceBeforeLiquidationFinalize = (await usdc.balanceOf(
+      lender.address,
+    )) as bigint;
+    const liquidationDebtBaselineBeforeFinalize =
+      (await lendingEngine.getDebt(
+        liquidationBorrower.address,
+        deployment.asset,
+      )) as bigint;
     const finalizeLiqRc = await waitTx(
       vbl
         .connect(liquidationBorrower)
@@ -1298,7 +1447,7 @@ export async function runBlocksOnlyRolloutSmoke(
     assertDataPushType(
       "settleOrLiquidateBlocks liquidation",
       liquidationRc,
-      DATA_TYPE_BLOCKS_ONLY_LIQUIDATED,
+      DATA_TYPE_BLOCKS_ONLY_DELIVERED,
       deployment.blocksOnlyCoordinator,
     );
     dataPushPayloadChecks.finalizeLiquidation = auditMatchFinalizedPayload({
@@ -1313,55 +1462,104 @@ export async function runBlocksOnlyRolloutSmoke(
       termBlocks: 1n,
       txBlockNumber: BigInt(finalizeLiqRc.blockNumber),
     });
+    const lenderBalanceAfterLiquidationFinalize = (await usdc.balanceOf(
+      lender.address,
+    )) as bigint;
+    if (
+      lenderBalanceAfterLiquidationFinalize !==
+      lenderBalanceBeforeLiquidationFinalize
+    ) {
+      throw new Error(
+        `[BlocksOnlySmoke] liquidation finalize should not credit lender EOA collateral/settlement balance: before=${lenderBalanceBeforeLiquidationFinalize} after=${lenderBalanceAfterLiquidationFinalize}`,
+      );
+    }
+    const liquidationBorrowerCollateralAfterFinalize =
+      (await cm.getCollateral(
+        liquidationBorrower.address,
+        deployment.asset,
+      )) as bigint;
+    if (
+      liquidationBorrowerCollateralAfterFinalize !==
+      liquidationBorrowerCollateralBefore
+    ) {
+      throw new Error(
+        `[BlocksOnlySmoke] liquidation finalize should stage borrower collateral out of withdrawable CM balance: expected=${liquidationBorrowerCollateralBefore} actual=${liquidationBorrowerCollateralAfterFinalize}`,
+      );
+    }
 
     const liquidationRuntimeAfter = await blocksOnlyView
       .connect(liquidationBorrower)
       .getBlocksOnlyOrder(liquidationOrderId);
     if (
       !liquidationRuntimeAfter.isClosed ||
-      liquidationRuntimeAfter.status !== 4n
+      liquidationRuntimeAfter.status !== 3n
     ) {
-      throw new Error("[BlocksOnlySmoke] liquidated runtime state mismatch");
+      throw new Error("[BlocksOnlySmoke] maturity-delivered runtime state mismatch");
     }
-    if (
-      ((await lendingEngine.getDebt(
-        liquidationBorrower.address,
-        deployment.asset,
-      )) as bigint) !== 0n
-    ) {
+    const liquidationStateAfterFinalize = await blocksOnlyView
+      .connect(liquidationBorrower)
+      .getBlocksOnlyOrderState(liquidationOrderId);
+    const liquidationStateAfterFinalizeRecord = assertBlocksOnlyOrderState(
+      "liquidation order after finalize",
+      liquidationStateAfterFinalize,
+      {
+        lifecycle: LIFECYCLE_CLOSED,
+        closeReason: CLOSE_REASON_BLOCKS_MATURITY_CLOSE,
+        shortfallStatus: SHORTFALL_STATUS_NONE,
+        collateralDisposition: COLLATERAL_DISPOSITION_DELIVERED_TO_LENDER,
+        remainingDebt: 0n,
+        isClosed: true,
+        canCloseTrade: false,
+        hasLoss: true,
+      },
+    );
+    const liquidationDebtAfter = (await lendingEngine.getDebt(
+      liquidationBorrower.address,
+      deployment.asset,
+    )) as bigint;
+    if (liquidationDebtAfter !== liquidationDebtBaselineBeforeFinalize) {
       throw new Error(
-        "[BlocksOnlySmoke] liquidation should clear borrower debt",
+        `[BlocksOnlySmoke] liquidation debt baseline drift: expected=${liquidationDebtBaselineBeforeFinalize} actual=${liquidationDebtAfter}`,
       );
     }
     const liquidationCollateralAfter = (await cm.getCollateral(
       liquidationBorrower.address,
       deployment.asset,
     )) as bigint;
-    const expectedRemainingCollateral = collateralAmount - principal;
-    if (liquidationCollateralAfter !== expectedRemainingCollateral) {
+    if (BigInt(liquidationCollateralAfter) !== liquidationBorrowerCollateralBefore) {
       throw new Error(
-        `[BlocksOnlySmoke] liquidation collateral mismatch: expected=${expectedRemainingCollateral} actual=${liquidationCollateralAfter}`,
+        `[BlocksOnlySmoke] maturity delivery collateral baseline drift: expected=${liquidationBorrowerCollateralBefore} actual=${liquidationCollateralAfter}`,
+      );
+    }
+    const lenderBalanceAfterLiquidationDelivery = (await usdc.balanceOf(
+      lender.address,
+    )) as bigint;
+    if (
+      lenderBalanceAfterLiquidationDelivery !==
+      lenderBalanceAfterLiquidationFinalize
+    ) {
+      throw new Error(
+        `[BlocksOnlySmoke] maturity delivery should not credit lender EOA directly: before=${lenderBalanceAfterLiquidationFinalize} after=${lenderBalanceAfterLiquidationDelivery}`,
       );
     }
     const liquidationPayload = getLastDataPushPayload(
       liquidationRc,
-      DATA_TYPE_BLOCKS_ONLY_LIQUIDATED,
+      DATA_TYPE_BLOCKS_ONLY_DELIVERED,
       deployment.blocksOnlyCoordinator,
     );
     if (!liquidationPayload) {
-      throw new Error("[BlocksOnlySmoke] missing liquidated payload");
+      throw new Error("[BlocksOnlySmoke] missing delivered payload");
     }
-    dataPushPayloadChecks.liquidation = auditLiquidatedPayload({
-      label: "liquidation",
+    dataPushPayloadChecks.liquidation = auditDeliveredPayload({
+      label: "delivery",
       payload: liquidationPayload,
       coordinator: deployment.blocksOnlyCoordinator,
       orderId: liquidationOrderId,
       borrower: liquidationBorrower.address,
       asset: deployment.asset,
-      liquidator: keeper.address,
+      lender: deployment.lenderPoolVault,
       collateralAsset: deployment.asset,
-      collateralAmount: principal,
-      debtAmount: principal,
+      collateralAmount,
       closeBlock: BigInt(liquidationRc.blockNumber),
     });
 
@@ -1381,14 +1579,14 @@ export async function runBlocksOnlyRolloutSmoke(
       !borrowerOrderIds.some((id) => id === repayOrderId)
     ) {
       throw new Error(
-        "[BlocksOnlySmoke] borrower-scoped BlocksOnlyView pagination did not include repay-settle order",
+        "[BlocksOnlySmoke] borrower-scoped BlocksOnlyView pagination did not include repay-trade-close order",
       );
     }
 
     const [systemOrders, totalSystemOrders] = (await blocksOnlyView
       .connect(deployer)
       .getSystemOrdersPaginated(countBefore, 10)) as [
-      Array<{ orderId: bigint; status: bigint }>,
+      Array<{ runtime: { orderId: bigint; status: bigint } }>,
       bigint,
       boolean,
       bigint,
@@ -1398,7 +1596,9 @@ export async function runBlocksOnlyRolloutSmoke(
         "[BlocksOnlySmoke] system order count did not advance after two blocks-only orders",
       );
     }
-    const returnedIds = new Set(systemOrders.map((x) => x.orderId.toString()));
+    const returnedIds = new Set(
+      systemOrders.map((x) => x.runtime.orderId.toString()),
+    );
     if (
       !returnedIds.has(repayOrderId.toString()) ||
       !returnedIds.has(liquidationOrderId.toString())
@@ -1412,7 +1612,7 @@ export async function runBlocksOnlyRolloutSmoke(
     for (const receipt of [
       finalizeRepayRc,
       repayRc,
-      settleRc,
+      tradeCloseRc,
       finalizeLiqRc,
       liquidationRc,
     ]) {
@@ -1424,8 +1624,8 @@ export async function runBlocksOnlyRolloutSmoke(
       const expectedCounts: Record<string, number> = {
         [DATA_TYPE_BLOCKS_ONLY_MATCH_FINALIZED]: 2,
         [DATA_TYPE_BLOCKS_ONLY_REPAID]: 1,
-        [DATA_TYPE_BLOCKS_ONLY_SETTLED]: 1,
-        [DATA_TYPE_BLOCKS_ONLY_LIQUIDATED]: 1,
+        [DATA_TYPE_BLOCKS_ONLY_TRADE_CLOSED]: 1,
+        [DATA_TYPE_BLOCKS_ONLY_DELIVERED]: 1,
       };
       for (const [typeHash, expected] of Object.entries(expectedCounts)) {
         const actual = dataPushCounts[typeHash] ?? 0;
@@ -1438,10 +1638,8 @@ export async function runBlocksOnlyRolloutSmoke(
     }
 
     if (
-      !preflight.keeperHasActionLiquidate ||
-      !preflight.coordinatorHasActionLiquidate ||
       !preflight.coordinatorHasViewRiskData ||
-      !preflight.unauthorizedCallerRejected
+      !preflight.permissionlessCallerAccepted
     ) {
       throw new Error(
         "[BlocksOnlySmoke] preflight invariants were not fully satisfied",
@@ -1458,22 +1656,41 @@ export async function runBlocksOnlyRolloutSmoke(
         liquidationBorrower: liquidationBorrower.address,
       },
       orderIds: {
-        repayAndSettle: repayOrderId.toString(),
+        repayAndTradeClose: repayOrderId.toString(),
         liquidation: liquidationOrderId.toString(),
       },
       checkpoints: {
-        repayAndSettle: {
+        repayAndTradeClose: {
           finalized: true,
           repaid: true,
-          settled: true,
+          tradeClosed: true,
+          lenderWalletUnaffectedByFinalize: true,
+          borrowerCollateralStagedOutOnFinalize: true,
           remainingDebt: repayRuntimeAfter.remainingDebt.toString(),
           isClosed: repayRuntimeAfter.isClosed,
+          finalizedLifecycle: repayStateAfterFinalizeRecord.lifecycle,
+          finalizedCollateralDisposition:
+            repayStateAfterFinalizeRecord.collateralDisposition,
+          repaidLifecycle: repayStateAfterRepayRecord.lifecycle,
+          repaidCanCloseTrade: repayStateAfterRepayRecord.canCloseTrade,
+          closeLifecycle: repayStateAfterTradeCloseRecord.lifecycle,
+          closeReason: repayStateAfterTradeCloseRecord.closeReason,
+          closeCollateralDisposition:
+            repayStateAfterTradeCloseRecord.collateralDisposition,
         },
         liquidation: {
           finalized: true,
           liquidated: true,
+          lenderWalletUnaffectedByFinalize: true,
+          lenderWalletUnaffectedByDelivery: true,
+          borrowerCollateralStagedOutOnFinalize: true,
           remainingDebt: liquidationRuntimeAfter.remainingDebt.toString(),
           isClosed: liquidationRuntimeAfter.isClosed,
+          closeLifecycle: liquidationStateAfterFinalizeRecord.lifecycle,
+          closeReason: liquidationStateAfterFinalizeRecord.closeReason,
+          closeCollateralDisposition:
+            liquidationStateAfterFinalizeRecord.collateralDisposition,
+          hasLoss: liquidationStateAfterFinalizeRecord.hasLoss,
         },
       },
       preflight,
@@ -1490,11 +1707,11 @@ export async function runBlocksOnlyRolloutSmoke(
 
     if (printSummary) {
       console.log(
-        `  ✅ repay-settle orderId=${summary.orderIds.repayAndSettle}`,
+        `  ✅ repay-trade-close orderId=${summary.orderIds.repayAndTradeClose}`,
       );
       console.log(`  ✅ liquidation orderId=${summary.orderIds.liquidation}`);
       console.log(
-        `  ✅ preflight keeper=${summary.actors.keeper} actionLiquidate=${summary.preflight.keeperHasActionLiquidate} coordinatorLiquidate=${summary.preflight.coordinatorHasActionLiquidate} coordinatorRiskView=${summary.preflight.coordinatorHasViewRiskData}`,
+        `  ✅ preflight keeper=${summary.actors.keeper} permissionlessSettle=${summary.preflight.permissionlessCallerAccepted} coordinatorRiskView=${summary.preflight.coordinatorHasViewRiskData}`,
       );
       if (summary.artifactPath)
         console.log(`  📦 blocks-only artifact: ${summary.artifactPath}`);

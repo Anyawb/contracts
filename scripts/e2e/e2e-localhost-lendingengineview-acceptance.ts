@@ -25,9 +25,12 @@ function errorSelector(sig: string): string {
 function extractRevertData(e: any): string | undefined {
   const candidates: Array<unknown> = [
     e?.data,
+    e?.data?.data,
     e?.error?.data,
+    e?.error?.data?.data,
     e?.error?.error?.data,
     e?.info?.error?.data,
+    e?.info?.error?.data?.data,
     e?.info?.error?.error?.data,
     e?.receipt?.revertReason,
   ];
@@ -101,6 +104,10 @@ function assertNoPushEntryPoints(c: any, label: string) {
   const pushes = fns.filter((n: string) => n.startsWith("push"));
   assertOk(pushes.length === 0, `${label}: must not expose push* entrypoints: ${pushes.join(", ")}`);
 }
+
+const LOAN_STATUS = {
+  Active: 0n,
+} as const;
 
 async function main() {
   const snap = await snapshot();
@@ -200,7 +207,23 @@ async function main() {
     const orderId = (await orderEngine.connect(borrower).createLoanOrder.staticCall(order)) as bigint;
     await (await orderEngine.connect(borrower).createLoanOrder(order)).wait();
 
+    const createdOrderStatus = (await mustSucceed("Borrower can read own order status via view.getOrderStatus", async () =>
+      view.connect(borrower).getOrderStatus(orderId)
+    )) as bigint;
+    assertOk(createdOrderStatus === LOAN_STATUS.Active, "new order must start in Active status");
+
+    const [borrowerLoans] = (await mustSucceed("Borrower LoanNFTView returns paginated loan status", async () =>
+      loanNftView.connect(borrower).getUserLoansPaginated(borrowerAddr, 0, 10)
+    )) as [Array<{ orderId?: bigint; status?: bigint; 1?: bigint; 2?: bigint }>, bigint, boolean, bigint];
+    const borrowerLoan = borrowerLoans.find((loan) => BigInt(loan.orderId ?? loan[1] ?? 0) === orderId);
+    assertOk(!!borrowerLoan, `LoanNFTView should include orderId ${orderId.toString()}`);
+    assertOk(
+      BigInt(borrowerLoan?.status ?? borrowerLoan?.[2] ?? -1) === LOAN_STATUS.Active,
+      "LoanNFTView status must match Active order state after createLoanOrder",
+    );
+
     const missingRoleSel = errorSelector("MissingRole()");
+    const invalidOrderSel = errorSelector("LendingEngine__InvalidOrder()");
 
     // ====== MUST: privacy gates ======
     await mustSucceed("Borrower can read own order via view.getLoanOrder", async () =>
@@ -300,15 +323,15 @@ async function main() {
     // ====== Edge: non-existent order behavior ======
     const missingOrderId = orderId + 999_999n;
     await mustRevertWithSelector(
-      "Borrower cannot read missing orderId (treated as non-party) -> MissingRole",
+      "Borrower cannot read missing orderId -> LendingEngine__InvalidOrder",
       async () => view.connect(borrower).getLoanOrder(missingOrderId),
-      missingRoleSel
+      invalidOrderSel
     );
-    const missingAsOps = (await mustSucceed("opsUser can read missing orderId (default struct)", async () =>
-      view.connect(opsUser).getLoanOrder(missingOrderId)
-    )) as any;
-    assertOk(missingAsOps.principal === 0n, "missing order principal must be 0");
-    assertOk(missingAsOps.borrower === ethers.ZeroAddress, "missing order borrower must be 0");
+    await mustRevertWithSelector(
+      "opsUser with VIEW_USER_DATA cannot read missing orderId -> LendingEngine__InvalidOrder",
+      async () => view.connect(opsUser).getLoanOrder(missingOrderId),
+      invalidOrderSel
+    );
 
     console.log("\n✅ LendingEngineView acceptance PASSED");
   } finally {

@@ -36,7 +36,9 @@ const LIVE_PREFLIGHT_SCRIPT = path.join(
   "..",
   "tests",
   "live-test",
-  "live-preflight-arbitrum-sepolia.ts"
+  "networks",
+  "arbitrum-sepolia",
+  "live-preflight.ts"
 );
 const LIVE_PRIME_VIEWCACHE_SCRIPT = path.join(
   __dirname,
@@ -44,7 +46,9 @@ const LIVE_PRIME_VIEWCACHE_SCRIPT = path.join(
   "..",
   "tests",
   "live-test",
-  "live-prime-viewcache-arbitrum-sepolia.ts"
+  "networks",
+  "arbitrum-sepolia",
+  "live-prime-viewcache.ts"
 );
 
 const REGISTRY_READ_IFACE = new Interface([
@@ -67,6 +71,7 @@ const LIVE_FUNDS_FLOW_SMOKE_SCRIPTS = [
   path.join(__dirname, "..", "..", "tests", "funds-flow-smoke-create-order.ts"),
   path.join(__dirname, "..", "..", "tests", "funds-flow-smoke-conservation.ts"),
   path.join(__dirname, "..", "..", "tests", "funds-flow-smoke-local.ts"),
+  path.join(__dirname, "..", "..", "tests", "blocks-only-state-machine-smoke-local.ts"),
   path.join(__dirname, "..", "..", "tests", "funds-flow-invariants-suite.ts"),
 ];
 
@@ -77,9 +82,11 @@ const LIVE_SMOKE_SCRIPTS = [
 ];
 
 const CORE_E2E_SCRIPTS = [
+  path.join(E2E_DIR, "e2e-localhost-blocks-only-rollout-smoke.ts"),
   path.join(E2E_DIR, "e2e-localhost-batch-10-users.ts"),
   path.join(E2E_DIR, "e2e-localhost-batch-advanced-10-users.ts"),
   path.join(E2E_DIR, "e2e-localhost-liquidation-reward-penalty.ts"),
+  path.join(E2E_DIR, "e2e-localhost-reward-command-model.ts"),
   path.join(E2E_DIR, "e2e-localhost-price-liquidation-stress.ts"),
   path.join(E2E_DIR, "e2e-localhost-rewardmanager-governance.ts"),
 ];
@@ -144,7 +151,7 @@ function resolveArbSepoliaDeployOutputFile(env: Record<string, string | undefine
   }
   return path.isAbsolute(explicit)
     ? explicit
-    : path.resolve(__dirname, "..", "..", "deployments", explicit);
+    : path.resolve(process.cwd(), explicit);
 }
 
 type MockAssetPackEntry = {
@@ -802,6 +809,8 @@ function main() {
         runStep("Invariant Tests", "pnpm", ["-s", "test", "test/Registry.invariant.test.ts"]);
       }
 
+      runStep("Upgrade Gates", "pnpm", ["-s", "run", "test:upgrade:gates"]);
+
       // Live-chain smoke subset: keep read-only and avoid hardhat-only RPC.
       const liveEnv = { ...env } as Record<string, string | undefined>;
       liveEnv.READ_ONLY = "1";
@@ -954,6 +963,8 @@ function main() {
     if (!skipInvariant) {
       runStep("Invariant Tests", "pnpm", ["-s", "test", "test/Registry.invariant.test.ts"]);
     }
+
+    runStep("Upgrade Gates", "pnpm", ["-s", "run", "test:upgrade:gates"]);
 
     if (!skipGolden) {
       await runForkStepWithRecovery("Golden Path + Critical Exceptions", () =>

@@ -5,6 +5,7 @@ import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 const KEY_VAULT_CORE = ethers.id("VAULT_CORE");
 const KEY_LE = ethers.id("LENDING_ENGINE");
 const KEY_LIQUIDATION_MANAGER = ethers.id("LIQUIDATION_MANAGER");
+const KEY_BLOCKS_ONLY_COORDINATOR = ethers.id("BLOCKS_ONLY_COORDINATOR");
 const KEY_ACCESS_CONTROL = ethers.id("ACCESS_CONTROL_MANAGER");
 const KEY_PRICE_ORACLE = ethers.id("PRICE_ORACLE");
 const KEY_POSITION_VIEW = ethers.id("POSITION_VIEW");
@@ -12,7 +13,8 @@ const ACTION_LIQUIDATE = ethers.keccak256(ethers.toUtf8Bytes("LIQUIDATE"));
 
 describe("CollateralManager - liquidation caller access", function () {
   async function deployFixture() {
-    const [deployer, liquidationManager, user] = await ethers.getSigners();
+    const [deployer, liquidationManager, user, blocksOnlyCoordinator, randomThirdParty, lender] =
+      await ethers.getSigners();
 
     const MockRegistry = await ethers.getContractFactory("MockRegistry");
     const registry = await MockRegistry.deploy();
@@ -42,6 +44,7 @@ describe("CollateralManager - liquidation caller access", function () {
     await registry.setModule(KEY_VAULT_CORE, await vaultCore.getAddress());
     await registry.setModule(KEY_LE, await lendingEngine.getAddress());
     await registry.setModule(KEY_LIQUIDATION_MANAGER, liquidationManager.address);
+    await registry.setModule(KEY_BLOCKS_ONLY_COORDINATOR, blocksOnlyCoordinator.address);
     await registry.setModule(KEY_ACCESS_CONTROL, await acm.getAddress());
     await registry.setModule(KEY_PRICE_ORACLE, await priceOracle.getAddress());
     await registry.setModule(KEY_POSITION_VIEW, await positionView.getAddress());
@@ -73,7 +76,17 @@ describe("CollateralManager - liquidation caller access", function () {
     await collateralManager.connect(viewSigner).depositCollateral(user.address, asset, 100n);
     await ethers.provider.send("hardhat_stopImpersonatingAccount", [await vaultRouter.getAddress()]);
 
-    return { collateralManager, liquidationManager, user, asset };
+    return {
+      collateralManager,
+      acm,
+      liquidationManager,
+      user,
+      asset,
+      token,
+      blocksOnlyCoordinator,
+      randomThirdParty,
+      lender,
+    };
   }
 
   it("allows LiquidationManager to withdraw collateral for seizure", async function () {
@@ -83,6 +96,64 @@ describe("CollateralManager - liquidation caller access", function () {
     await collateralManager.connect(liquidationManager).withdrawCollateralTo(user.address, asset, 40n, liquidationManager.address);
 
     expect(await collateralManager.getCollateral(user.address, asset)).to.equal(60n);
+  });
+
+  it("allows BlocksOnlyCoordinator to stage bound collateral into its own custody without liquidation role", async function () {
+    const { collateralManager, blocksOnlyCoordinator, user, asset, token } =
+      await loadFixture(deployFixture);
+
+    const beforeCoordinator = await token.balanceOf(blocksOnlyCoordinator.address);
+
+    await collateralManager
+      .connect(blocksOnlyCoordinator)
+      .withdrawCollateralTo(user.address, asset, 25n, blocksOnlyCoordinator.address);
+
+    expect(await collateralManager.getCollateral(user.address, asset)).to.equal(75n);
+    expect(await token.balanceOf(blocksOnlyCoordinator.address)).to.equal(
+      beforeCoordinator + 25n,
+    );
+  });
+
+  it("rejects BlocksOnlyCoordinator sending user collateral to an arbitrary third-party receiver", async function () {
+    const {
+      collateralManager,
+      acm,
+      blocksOnlyCoordinator,
+      user,
+      asset,
+      randomThirdParty,
+    } = await loadFixture(deployFixture);
+
+    await expect(
+      collateralManager
+        .connect(blocksOnlyCoordinator)
+        .withdrawCollateralTo(user.address, asset, 25n, randomThirdParty.address),
+    ).to.be.revertedWithCustomError(acm, "MissingRole");
+
+    expect(await collateralManager.getCollateral(user.address, asset)).to.equal(100n);
+  });
+
+  it("rejects BlocksOnlyCoordinator spoofing the receiver as lender", async function () {
+    const {
+      collateralManager,
+      acm,
+      blocksOnlyCoordinator,
+      user,
+      asset,
+      lender,
+      token,
+    } = await loadFixture(deployFixture);
+
+    const lenderBalanceBefore = await token.balanceOf(lender.address);
+
+    await expect(
+      collateralManager
+        .connect(blocksOnlyCoordinator)
+        .withdrawCollateralTo(user.address, asset, 25n, lender.address),
+    ).to.be.revertedWithCustomError(acm, "MissingRole");
+
+    expect(await collateralManager.getCollateral(user.address, asset)).to.equal(100n);
+    expect(await token.balanceOf(lender.address)).to.equal(lenderBalanceBefore);
   });
 });
 

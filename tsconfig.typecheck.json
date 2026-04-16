@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "frontend-config/**/*",
+    "src/**/*",
+    "tests/**/*",
+    "test/types/**/*.d.ts",
+    "test/FeeRouter.invariant.test.ts",
+    "test/CollateralManager.invariant.test.ts",
+    "test/GuaranteeAndRisk.integrated.test.ts",
+    "test/Registry.test.ts",
+    "test/Registry.invariant.test.ts",
+    "test/RegistryDynamicModuleKey.test.ts",
+    "test/RegistryStorageMigration.test.ts",
+    "test/scripts/mockLiveUtils.price-value.test.ts",
+    "test/VaultBusinessLogic.stats-integration.test.ts",
+    "test/VaultRouter.concurrent-update-phase0.test.ts"
+  ],
+  "exclude": []
+}

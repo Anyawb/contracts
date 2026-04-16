@@ -1,10 +1,10 @@
 const hre = require("hardhat");
 
 async function main() {
-  // Test with small amount and 8 decimals
+  // Test with small amount and asset-native decimals
   const amount = 10n;
-  const price = hre.ethers.parseUnits("1", 8); // 1e8
-  const decimals = 8n;
+  const decimals = 6n;
+  const price = hre.ethers.parseUnits("1", Number(decimals));
   
   const priceMultiplier = 10n ** decimals;
   const calculatedValue = (amount * price) / priceMultiplier;

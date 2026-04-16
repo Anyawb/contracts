@@ -23,7 +23,7 @@ import {
 } from "../../../errors/StandardErrors.sol";
 import {ViewVersioned} from "../ViewVersioned.sol";
 import {IPriceOracleRead} from "../../../interfaces/IPriceOracleRead.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {AssetDecimalMath} from "../../../libraries/AssetDecimalMath.sol";
 import {CacheEvents} from "../../CacheEvents.sol";
 
 /// @title IVaultCoreViewAddr
@@ -182,6 +182,7 @@ contract PositionView is
     uint256 private constant _CACHE_DURATION_BLOCKS =
         ViewConstants.CACHE_DURATION_BLOCKS;
     uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
+    uint8 private constant _SYSTEM_VALUATION_DECIMALS = 18;
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
     modifier onlyValidRegistry() {
@@ -1002,7 +1003,7 @@ contract PositionView is
     }
 
     /**
-     * @notice Get user's total collateral value (USD-8 value).
+    * @notice Get user's total collateral value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin
@@ -1013,7 +1014,7 @@ contract PositionView is
      * - Best-effort: returns 0 if dependent modules are unavailable or external calls fail.
      *
      * @param user Target user address
-     * @return totalValue Total collateral value (USD-8 value)
+    * @return totalValue Total collateral value normalized to 18 decimals.
      */
     function getUserTotalCollateralValue(
         address user
@@ -1060,11 +1061,12 @@ contract PositionView is
                 uint256 decimals
             ) {
                 if (price == 0) continue;
-                // 10**decimals must not overflow uint256
                 if (decimals > 77) continue;
-                uint256 scale = 10 ** decimals;
-                if (scale == 0) continue;
-                totalValue += Math.mulDiv(amount, price, scale);
+                totalValue += AssetDecimalMath.normalizeValueDown(
+                    AssetDecimalMath.calcValue(amount, price, uint8(decimals)),
+                    uint8(decimals),
+                    _SYSTEM_VALUATION_DECIMALS
+                );
             } catch {
                 // best-effort: skip this asset
                 continue;
@@ -1073,7 +1075,7 @@ contract PositionView is
     }
 
     /**
-     * @notice Get system total collateral value (USD-8 value).
+    * @notice Get system total collateral value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin
@@ -1083,7 +1085,7 @@ contract PositionView is
      * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
      * - Best-effort: returns 0 if dependent modules are unavailable or external calls fail.
      *
-     * @return totalValue Total collateral value (USD-8 value)
+    * @return totalValue Total collateral value normalized to 18 decimals.
      */
     function getTotalCollateralValue()
         external
@@ -1128,9 +1130,11 @@ contract PositionView is
             ) {
                 if (price == 0) continue;
                 if (decimals > 77) continue;
-                uint256 scale = 10 ** decimals;
-                if (scale == 0) continue;
-                totalValue += Math.mulDiv(totalAmount, price, scale);
+                totalValue += AssetDecimalMath.normalizeValueDown(
+                    AssetDecimalMath.calcValue(totalAmount, price, uint8(decimals)),
+                    uint8(decimals),
+                    _SYSTEM_VALUATION_DECIMALS
+                );
             } catch {
                 continue;
             }
@@ -1138,7 +1142,7 @@ contract PositionView is
     }
 
     /**
-     * @notice Get value of an asset amount (USD-8 value).
+     * @notice Get value of an asset amount in the normalized system valuation unit.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin
@@ -1146,11 +1150,13 @@ contract PositionView is
      *
      * Security:
      * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
-     * - Best-effort: returns 0 if the oracle call fails.
+    * - Best-effort: returns 0 if the oracle call fails.
+    * - Single-asset values are normalized down to the shared 18-decimal system unit so they can be compared
+    *   directly with total collateral/debt values.
      *
      * @param asset Asset address
      * @param amount Asset amount (asset decimals)
-     * @return value Value in USD-8
+    * @return value Value normalized to 18 decimals.
      */
     function getAssetValue(
         address asset,
@@ -1172,9 +1178,12 @@ contract PositionView is
         ) {
             if (price == 0) return 0;
             if (decimals > 77) return 0;
-            uint256 scale = 10 ** decimals;
-            if (scale == 0) return 0;
-            return Math.mulDiv(amount, price, scale);
+            return
+                AssetDecimalMath.normalizeValueDown(
+                    AssetDecimalMath.calcValue(amount, price, uint8(decimals)),
+                    uint8(decimals),
+                    _SYSTEM_VALUATION_DECIMALS
+                );
         } catch {
             return 0;
         }

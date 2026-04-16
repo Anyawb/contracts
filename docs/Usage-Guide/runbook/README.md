@@ -1,5 +1,18 @@
 # 项目交接 Runbook
 
+## 0. 边界总览
+
+这套 runbook 现在按“通用索引 + 网络专用执行册”分层维护，边界固定如下：
+
+- 本文件只负责总索引、环境分层和进入哪本 runbook 的判断，不承载两条链各自的细节步骤。
+- Arbitrum 相关执行册只覆盖 Arbitrum Sepolia：
+	- mock 资产与 mock-suite 重建，看 `Arbitrum-Sepolia-Mock-Assets-Runbook.md`
+	- live runtime / observability / release gate，看 `Arbitrum-Sepolia-Live-Platform-Baseline-Runbook.md`
+- BNB 相关执行册只覆盖 BNB Testnet：
+	- 真链 live、fresh borrower 补资与统一 sweep，看 `BNB-Testnet-Live-Runbook.md`
+	- 本地 fork、runtime role 准备与 fork case 判定，看 `BNB-Testnet-Fork-Runbook.md`
+- 如果某个步骤必须同时提到两条链，本文件只写“去哪本 runbook”，不再在这里维护第二套可执行命令。
+
 ## 1. 文档定位
 
 这份文档是当前仓库唯一的标准化执行 Runbook。
@@ -11,18 +24,28 @@
 - 新同事接手项目时，先读本文件，再按文末“配套参考文档”补读细节说明。
 - 如果目标是“在 Arbitrum Sepolia 上先部署一整套 mock 资产，再用 override 方式重建协议基线”，直接转到 `docs/Usage-Guide/runbook/Arbitrum-Sepolia-Mock-Assets-Runbook.md`。
 - 如果目标是执行当前标准的 live 主资金链门禁，直接转到 `docs/Usage-Guide/runbook/Arbitrum-Sepolia-Live-Platform-Baseline-Runbook.md`。
+- 如果目标是把同样的双层 live 门禁推进到 BNB Testnet，并确保 fresh borrower 自动补资与统一 sweep，直接转到 `docs/Usage-Guide/runbook/BNB-Testnet-Live-Runbook.md`。
+- BNB guarantee flow 当前已验证“双阶段严格”稳定通过样式（age=10 连续 5 次全过）；可接受“初始链路直接收敛、未触发 `LoanFlowRetry` 也通过”的结果形态，详见 `BNB-Testnet-Live-Runbook.md` 的对应章节。
+- 如果 BNB 真链出现 `SSOT_DEPLOYMENT_MISMATCH` 或 `SettlementManager -> ORDER_ENGINE` 桥接不一致，先在 `BNB-Testnet-Live-Runbook.md` 的“部署侧修复（ORDER_ENGINE / SETTLEMENT_MANAGER）”章节执行修复，再按“审计 -> guarantee baseline -> release-gates”顺序重跑。
+- 如果目标是基于 BNB Testnet 私有 RPC 启本地 fork、补齐 runtime roles、执行 fork preflight / warmup / baseline / release-gates，并按日志判断这轮 fork 是否真的通过，直接转到 `docs/Usage-Guide/runbook/BNB-Testnet-Fork-Runbook.md`。当前可直接引用的完整通过样本为 `scripts/tests/logs/bnb-live-fork-20260403134109220/`，结论见 `BNB-Testnet-Fork-Runbook.md` 的“当前已验证证据 / 当前结论”。
 - 如果目标是标准化复现 `LIVE_PRICE_MODE=backend-required` 的 missing-final-price 阻断，请直接使用 `pnpm -s run demo:backend-required:block:localhost` 或 `pnpm -s run demo:backend-required:block:fork`，并参考 `docs/Usage-Guide/runbook/Arbitrum-Sepolia-Mock-Assets-Runbook.md` 中的“标准复现实验入口”章节。
 
 ---
 
 ## 2. 适用范围
 
-本 Runbook 统一覆盖四类操作：
+本 Runbook 索引当前统一分流四类操作：
 
 1. localhost 严格回归
 2. Arbitrum Sepolia fork pre-release
 3. Arbitrum Sepolia live deploy / live-safe 验收
-4. 事故第一响应与借贷 + Easy 奖励紧急止血
+4. BNB Testnet live / fork 验收与事故第一响应
+
+### 2.1 当前 BNB fork 状态
+
+- 截至 2026-04-03，BNB fork 已拿到同一轮目录下 `prepare-runtime-roles + preflight + warmup + platform-baseline + release-gates` 全部通过的完整证据。
+- 当前推荐把 `scripts/tests/logs/bnb-live-fork-20260403134109220/` 作为 fork 回归对照目录，把 `scripts/tests/logs/live-release-gates-bnbTestnet-via-localhost-20260403135603353/` 作为 release gates 子阶段汇总目录。
+- 这说明 BNB fork 资金链 gate 已打通，可以继续进入 BNB 真链 live 验证；但 fork 通过不等于 live 可跳过，真链仍需按 `BNB-Testnet-Live-Runbook.md` 单独执行 preflight、baseline 和 release gates。
 
 固定口径：
 
@@ -35,11 +58,15 @@
 
 ## 3. 网络边界
 
+这里的“边界”只描述环境层，不替代链专用 runbook 的执行细节。
+
 | 环境 | RPC | chainId | 用途 | 典型入口 |
 | --- | --- | --- | --- | --- |
 | localhost | http://127.0.0.1:8545 | 1337 | fresh node、本地部署、本地 smoke、本地严格 E2E | pnpm -s run node |
 | fork localhost | http://127.0.0.1:18545 | 421614 | Arbitrum Sepolia fork 行为验证、fork-only E2E | pnpm -s run e2e:pre-release |
 | arbitrumSepolia | 远程 RPC | 421614 | 真实测试网部署、live-safe smoke | pnpm -s run e2e:pre-release:arbitrum-sepolia-live |
+| bnbTestnet | 远程 RPC | 97 | BNB 真链 live baseline / release gates | 见 `BNB-Testnet-Live-Runbook.md` |
+| bnb fork localhost | runner 随机端口 | 1337 | BNB Testnet fork baseline / release gates | 见 `BNB-Testnet-Fork-Runbook.md` |
 
 硬规则：
 
@@ -47,6 +74,7 @@
 - deploy、grant 和 E2E 必须共享同一个 LOCALHOST_RPC_URL。
 - 只要重启 fresh node、切换端口或重新拉起 fork，就必须重新判断是否还能复用当前地址文件。
 - 不要把 localhost 和 fork-only 步骤串在一条未经隔离的命令链里混跑。
+- 不要在本文件里把 Arbitrum 的 live/fork 命令当成 BNB 的默认模板；两条链的运行入口已经拆分到各自 runbook。
 
 ---
 

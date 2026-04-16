@@ -49,7 +49,7 @@ describe("PositionView - 缓存有效性与回退", function () {
     await access.grantRole(ACTION_VIEW_PUSH, vbl.address);   // vaultBusinessLogic
 
     const PositionView = await ethers.getContractFactory("PositionView");
-    const pv = await upgrades.deployProxy(PositionView, [await registry.getAddress()], { kind: "uups" });
+    const pv = (await upgrades.deployProxy(PositionView, [await registry.getAddress()], { kind: "uups" })) as any;
 
     const asset = ethers.Wallet.createRandom().address;
     return { admin, user, vbl, asset, registry, access, collateral, lending, pv, vaultCoreView };
@@ -136,7 +136,7 @@ describe("PositionView - 缓存有效性与回退", function () {
   it("非业务模块调用被拒绝", async function () {
     const { pv, user, asset, collateral, access } = await loadFixture(deployFixture);
     await expect(
-      pv.connect(user).pushUserPositionUpdate(user.address, asset, 1n, 1n)
+      pv.connect(user)["pushUserPositionUpdate(address,address,uint256,uint256)"](user.address, asset, 1n, 1n)
     ).to.be.revertedWithCustomError(pv, "PositionView__Unauthorized");
 
     // 业务模块但缺角色也被拒绝（MissingRole）
@@ -730,8 +730,8 @@ describe("PositionView - 缓存有效性与回退", function () {
 
   it("批量查询：最大批量大小 100 成功返回", async function () {
     const { pv } = await loadFixture(deployFixture);
-    const users = [];
-    const assets = [];
+    const users: string[] = [];
+    const assets: string[] = [];
     for (let i = 0; i < 100; i++) {
       const wallet = ethers.Wallet.createRandom();
       users.push(wallet.address);
@@ -1524,7 +1524,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       await registry.setModule(KEY_ACM, await access.getAddress());
 
       const PositionView = await ethers.getContractFactory("PositionView");
-      const pv = await upgrades.deployProxy(PositionView, [await registry.getAddress()], { kind: "uups" });
+      const pv = (await upgrades.deployProxy(PositionView, [await registry.getAddress()], { kind: "uups" })) as any;
 
       // Non-self + no roles: should be rejected by the view without calling requireRole().
       await expect(pv.connect(stranger).getUserPositionWithMeta(user.address, ethers.Wallet.createRandom().address))
@@ -1543,7 +1543,7 @@ describe("PositionView - 缓存有效性与回退", function () {
       await registry.setModule(KEY_ACM, await access.getAddress());
 
       const PositionView = await ethers.getContractFactory("PositionView");
-      const pv = await upgrades.deployProxy(PositionView, [await registry.getAddress()], { kind: "uups" });
+      const pv = (await upgrades.deployProxy(PositionView, [await registry.getAddress()], { kind: "uups" })) as any;
 
       await expect(pv.connect(viewer).getUserTotalCollateralValue(user.address)).to.be.revertedWithCustomError(
         pv,

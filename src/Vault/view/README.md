@@ -121,7 +121,7 @@
 - 权限口径：✅ price gate `MissingRole()`
 - Meta 输出：部分接口为 price+blockNumber（非 B 类缓存）
 - 说明（SSOT）：健康检查接口通过 `GracefulDegradation.checkPriceOracleHealth(...)` 实现，不要求 `PriceOracle` 提供额外 health 方法；
-  且 `IPriceOracleRead.getPrice()` 的第三个返回值语义为 **token decimals（assetDecimals）**，用于 amount→USD-8 估值换算（不是 price 精度）。
+  且 `IPriceOracleRead.getPrice()` 的第三个返回值语义为 **token decimals（assetDecimals）**，用于 amount→value 估值换算（不是 price 精度）。
 - Batch 口径：✅ `EmptyArray/BatchTooLarge`
 - DataPush：N/A
 

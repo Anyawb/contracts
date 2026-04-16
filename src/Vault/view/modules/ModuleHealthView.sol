@@ -158,10 +158,7 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         bytes32 details;
 
         // Lightweight check: code size.
-        uint256 size;
-        assembly {
-            size := extcodesize(module)
-        }
+        uint256 size = module.code.length;
         if (size == 0) {
             isHealthy = false;
             details = _DETAILS_NO_CODE_HASH;
@@ -304,10 +301,7 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
             return (false, "Module address is zero");
         }
 
-        uint256 size;
-        assembly {
-            size := extcodesize(module)
-        }
+        uint256 size = module.code.length;
 
         if (size == 0) {
             return (false, "Module has no code");

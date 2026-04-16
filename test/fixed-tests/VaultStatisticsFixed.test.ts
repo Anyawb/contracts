@@ -1,7 +1,6 @@
 import { expect } from 'chai';
 import { ethers, upgrades } from 'hardhat';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
-import type { StatisticsView, StatisticsView__factory, Registry } from '../../types';
 import type { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -10,8 +9,8 @@ const ONE_USD = ethers.parseUnits('1', 6);
 
 describe('VaultStatistics – 修复版测试（StatisticsView 替代）', function () {
   let signers: SignerWithAddress[];
-  let vaultStatistics: StatisticsView;
-  let registry: Registry;
+  let vaultStatistics: any;
+  let registry: any;
   let governance: SignerWithAddress;
   let vault: SignerWithAddress;
   let users: SignerWithAddress[];
@@ -52,7 +51,7 @@ describe('VaultStatistics – 修复版测试（StatisticsView 替代）', funct
 
     // 部署 MockRegistry（简化测试，避免复杂的权限设置）
     const MockRegistryFactory = await ethers.getContractFactory('MockRegistry');
-    registry = await MockRegistryFactory.deploy() as unknown as Registry;
+    registry = await MockRegistryFactory.deploy() as any;
     await registry.waitForDeployment();
     
     // 部署 MockAccessControlManager（StatisticsView 需要权限检查）

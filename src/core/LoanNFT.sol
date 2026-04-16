@@ -629,7 +629,11 @@ contract LoanNFT is
         if (st == LoanStatus.Active) return "Active";
         if (st == LoanStatus.Repaid) return "Repaid";
         if (st == LoanStatus.Liquidated) return "Liquidated";
-        return "Defaulted";
+        if (st == LoanStatus.Defaulted) return "Defaulted";
+        if (st == LoanStatus.LiquidatedWithShortfall) {
+            return "LiquidatedWithShortfall";
+        }
+        return "DefaultedWithShortfall";
     }
 
     /**

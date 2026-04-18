@@ -216,7 +216,7 @@ contract RewardManagerCore is
      * @param user Borrower account.
      * @param orderId Order identifier.
      * @param amount Principal amount in the loan asset base units.
-    * @param maturity Order maturity block (`maturityBlock`, block-based SSOT).
+     * @param maturity Order maturity block (`maturityBlock`, block-based SSOT).
      * @param outcome Outcome code: 0=Borrow, 1=RepayOnTimeFull, 2=RepayEarlyFull, 3=RepayLateFull.
      */
     function onLoanEventByOrder(
@@ -386,7 +386,7 @@ contract RewardManagerCore is
     }
 
     /**
-    * @notice Updates the late-repayment penalty rate.
+     * @notice Updates the late-repayment penalty rate.
      * @dev Reverts if:
      *      - Registry validation fails in {onlyValidRegistry}
      *      - Registry missing KEY_RM
@@ -397,9 +397,7 @@ contract RewardManagerCore is
      *
      * @param lateBps Late repayment penalty in BPS.
      */
-    function setLatePenaltyBps(
-        uint256 lateBps
-    ) external onlyValidRegistry {
+    function setLatePenaltyBps(uint256 lateBps) external onlyValidRegistry {
         address rewardManager = Registry(_registryAddr).getModuleOrRevert(
             ModuleKeys.KEY_RM
         );

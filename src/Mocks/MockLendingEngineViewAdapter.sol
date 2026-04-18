@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ILoanNFT } from "../interfaces/ILoanNFT.sol";
+import {ILoanNFT} from "../interfaces/ILoanNFT.sol";
 
 /// @notice Minimal mock implementing LendingEngineView adapter surface for tests
 contract MockLendingEngineViewAdapter {
@@ -27,7 +27,7 @@ contract MockLendingEngineViewAdapter {
     mapping(uint256 => mapping(address => bool)) private _orderAccess;
     mapping(address => bool) private _matchEngine;
 
-    /* ------------------------------- Setters ------------------------------- */
+    /*━━━━━━━━━━━━━━━ Setters ━━━━━━━━━━━━━━━*/
 
     function setRegistry(address registryAddr) external {
         _registryAddr = registryAddr;
@@ -38,7 +38,10 @@ contract MockLendingEngineViewAdapter {
         _orderStatus[orderId] = ILoanNFT.LoanStatus.Active;
     }
 
-    function setOrderStatus(uint256 orderId, ILoanNFT.LoanStatus status) external {
+    function setOrderStatus(
+        uint256 orderId,
+        ILoanNFT.LoanStatus status
+    ) external {
         _orderStatus[orderId] = status;
     }
 
@@ -54,7 +57,11 @@ contract MockLendingEngineViewAdapter {
         _nftRetryCount[orderId] = retryCount;
     }
 
-    function setOrderAccess(uint256 orderId, address user, bool allowed) external {
+    function setOrderAccess(
+        uint256 orderId,
+        address user,
+        bool allowed
+    ) external {
         _orderAccess[orderId][user] = allowed;
     }
 
@@ -62,35 +69,53 @@ contract MockLendingEngineViewAdapter {
         _matchEngine[account] = isMatch;
     }
 
-    /* ------------------------------- View API ------------------------------ */
+    /*━━━━━━━━━━━━━━━ View API ━━━━━━━━━━━━━━━*/
 
-    function getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order) {
+    function getLoanOrderForView(
+        uint256 orderId
+    ) external view returns (LoanOrder memory order) {
         return _orders[orderId];
     }
 
-    function getOrderStatusForView(uint256 orderId) external view returns (ILoanNFT.LoanStatus status) {
+    function getOrderStatusForView(
+        uint256 orderId
+    ) external view returns (ILoanNFT.LoanStatus status) {
         LoanOrder memory order = _orders[orderId];
-        require(order.borrower != address(0) || order.lender != address(0), "MockLendingEngineViewAdapter: invalid order");
+        require(
+            order.borrower != address(0) || order.lender != address(0),
+            "MockLendingEngineViewAdapter: invalid order"
+        );
         return _orderStatus[orderId];
     }
 
-    function getUserLoanCountForView(address user) external view returns (uint256 count) {
+    function getUserLoanCountForView(
+        address user
+    ) external view returns (uint256 count) {
         return _userLoanCount[user];
     }
 
-    function getFailedFeeAmountForView(uint256 orderId) external view returns (uint256 feeAmount) {
+    function getFailedFeeAmountForView(
+        uint256 orderId
+    ) external view returns (uint256 feeAmount) {
         return _failedFeeAmount[orderId];
     }
 
-    function getNftRetryCountForView(uint256 orderId) external view returns (uint256 retryCount) {
+    function getNftRetryCountForView(
+        uint256 orderId
+    ) external view returns (uint256 retryCount) {
         return _nftRetryCount[orderId];
     }
 
-    function canAccessLoanOrderForView(uint256 orderId, address user) external view returns (bool hasAccess) {
+    function canAccessLoanOrderForView(
+        uint256 orderId,
+        address user
+    ) external view returns (bool hasAccess) {
         return _orderAccess[orderId][user];
     }
 
-    function isMatchEngineForView(address account) external view returns (bool isMatch) {
+    function isMatchEngineForView(
+        address account
+    ) external view returns (bool isMatch) {
         return _matchEngine[account];
     }
 
@@ -98,4 +123,3 @@ contract MockLendingEngineViewAdapter {
         return _registryAddr;
     }
 }
-

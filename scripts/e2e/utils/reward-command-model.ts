@@ -154,6 +154,18 @@ function getLevelMultiplierBps(model: RewardModelState, level: bigint) {
   return model.levelMultipliers.get(level) ?? 10_000n;
 }
 
+function applyPenaltyByBurnThenDebt(user: RewardModelUserState, amount: bigint) {
+  const burnAmount = user.easyBalance >= amount ? amount : user.easyBalance;
+  const debtAmount = amount - burnAmount;
+
+  user.easyBalance -= burnAmount;
+  user.totalBurned += burnAmount;
+  if (debtAmount > 0n) {
+    user.penaltyDebt += debtAmount;
+  }
+  syncPendingPenalty(user);
+}
+
 export function computeLockedEasy(params: {
   levelMultiplierBps: bigint;
   dynamicThresholdEasy: bigint;
@@ -355,7 +367,8 @@ async function executeRepay(
   const lender = getUserState(model, lenderAddress);
 
   if (command.type === "lateRepay") {
-    borrower.penaltyDebt += (order.lockedEasyAmount * model.latePenaltyBps) / 10_000n;
+    const latePenalty = (order.lockedEasyAmount * model.latePenaltyBps) / 10_000n;
+    applyPenaltyByBurnThenDebt(borrower, latePenalty);
     const borrowerOffset = offsetAgainstDebt(borrower.penaltyDebt, borrowerShare);
     borrower.penaltyDebt = borrowerOffset.remainingDebt;
     borrower.easyBalance += borrowerOffset.netReward;
@@ -417,8 +430,7 @@ async function executeApplyManualPenalty(
   const userAddress = env.resolveActor(command.actor);
   await env.applyManualPenalty(userAddress, command.amount);
   const user = getUserState(model, userAddress);
-  user.penaltyDebt += command.amount;
-  syncPendingPenalty(user);
+  applyPenaltyByBurnThenDebt(user, command.amount);
 }
 
 export async function runRewardCommandScenario(params: {

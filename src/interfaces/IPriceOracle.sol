@@ -72,7 +72,7 @@ interface IPriceOracle is IPriceOracleRead, IPriceOracleAdmin {
      * - View-only
      * - Returns stored values; callers MUST apply their own oracle-health policy as needed
      * @param asset Asset address.
-    * @return price Price in the asset's canonical valuation unit.
+     * @return price Price in the asset's canonical valuation unit.
      * @return blockNumber Informational block number associated with the quoted price.
      * @return assetDecimals Token decimals used for valuation scaling (NOT price precision).
      */
@@ -148,7 +148,7 @@ interface IPriceOracle is IPriceOracleRead, IPriceOracleAdmin {
      * Security:
      * - View-only
      * @param assets Asset address list.
-    * @return prices Prices in each asset's canonical valuation unit.
+     * @return prices Prices in each asset's canonical valuation unit.
      * @return blockNumbers Informational block numbers.
      * @return assetDecimalsArray Token decimals used for valuation scaling.
      */
@@ -180,7 +180,7 @@ interface IPriceOracle is IPriceOracleRead, IPriceOracleAdmin {
     ) external view override returns (bool isValid);
 
     /**
-    * @notice Returns the configured offchain source identifier for `asset`.
+     * @notice Returns the configured offchain source identifier for `asset`.
      * @dev Reverts if:
      *      - asset is zero (ZeroAddress)
      *      - asset is not active (PriceOracle__AssetNotSupported)
@@ -251,7 +251,7 @@ interface IPriceOracle is IPriceOracleRead, IPriceOracleAdmin {
      * Security:
      * - Role-gated (ACTION_UPDATE_PRICE)
      * @param asset Asset address.
-    * @param price Price in the asset's canonical valuation unit.
+     * @param price Price in the asset's canonical valuation unit.
      * @param blockNumber Informational block number associated with the quoted price.
      */
     function updatePrice(
@@ -276,7 +276,7 @@ interface IPriceOracle is IPriceOracleRead, IPriceOracleAdmin {
      * Security:
      * - Role-gated (ACTION_UPDATE_PRICE)
      * @param assets Asset list.
-    * @param prices Price list in each asset's canonical valuation unit.
+     * @param prices Price list in each asset's canonical valuation unit.
      * @param blockNumbers Informational block number list.
      */
     function updatePrices(

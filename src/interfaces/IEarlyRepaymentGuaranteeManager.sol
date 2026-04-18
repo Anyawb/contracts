@@ -206,7 +206,7 @@ interface IEarlyRepaymentGuaranteeManager {
     /**
      * @notice Settle early repayment for (borrower, asset) by distributing the guarantee.
      * @dev Reverts if:
-        *      - caller is not SettlementManager resolved via Registry
+     *      - caller is not SettlementManager resolved via Registry
      *        (EarlyRepaymentGuaranteeManager__OnlySettlementManager)
      *      - registry reference is zero or not a contract (ZeroAddress / NotAContract)
      *      - borrower/asset is zero (ZeroAddress)
@@ -218,7 +218,7 @@ interface IEarlyRepaymentGuaranteeManager {
      *      - GuaranteeFundManager settlement reverts (ExternalModuleRevertedRaw)
      *
      * Security:
-    * - onlySettlementManager (Registry-resolved)
+     * - onlySettlementManager (Registry-resolved)
      * - nonReentrant
      * - CEI: record state is updated before external settlement call
      *
@@ -236,7 +236,7 @@ interface IEarlyRepaymentGuaranteeManager {
     /**
      * @notice Process default for (borrower, asset) by forfeiting the full guarantee to the lender.
      * @dev Reverts if:
-        *      - caller is not SettlementManager resolved via Registry
+     *      - caller is not SettlementManager resolved via Registry
      *        (EarlyRepaymentGuaranteeManager__OnlySettlementManager)
      *      - registry reference is zero or not a contract (ZeroAddress / NotAContract)
      *      - borrower/asset is zero (ZeroAddress)
@@ -247,7 +247,7 @@ interface IEarlyRepaymentGuaranteeManager {
      *      - GuaranteeFundManager forfeiture reverts (ExternalModuleRevertedRaw)
      *
      * Security:
-    * - onlySettlementManager (Registry-resolved)
+     * - onlySettlementManager (Registry-resolved)
      * - nonReentrant
      * - CEI: record state is updated before external forfeiture call
      *

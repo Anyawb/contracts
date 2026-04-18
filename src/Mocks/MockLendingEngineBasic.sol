@@ -1,36 +1,52 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ILendingEngineBasic } from "../interfaces/ILendingEngineBasic.sol";
+import {ILendingEngineBasic} from "../interfaces/ILendingEngineBasic.sol";
 
 /// @title MockLendingEngineBasic
-/// @notice 借贷引擎的Mock实现，用于测试
+/// @notice Mock lending engine implementation for tests.
 contract MockLendingEngineBasic is ILendingEngineBasic {
-    // 用户债务映射
+    // User debt storage.
     mapping(address => mapping(address => uint256)) private _userDebt;
     mapping(address => uint256) private _totalByAsset;
     mapping(address => uint256) private _userTotalValue;
     uint256 private _totalValue;
     mapping(address => address[]) private _userDebtAssets;
-    mapping(address => mapping(address => uint256)) private _userDebtAssetIndexPlusOne;
-    
-    // 测试控制标志
+    mapping(address => mapping(address => uint256))
+        private _userDebtAssetIndexPlusOne;
+
+    // Test control flag.
     bool public mockSuccess = true;
-    
-    // 事件
-    event BorrowRecorded(address indexed user, address indexed asset, uint256 amount);
-    event RepayRecorded(address indexed user, address indexed asset, uint256 amount);
-    
-    /// @notice 记录借款
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 借款金额
-    /// @param collateralAdded 抵押物增加量
-    /// @param termDays 借款期限
-    function borrow(address user, address asset, uint256 amount, uint256 collateralAdded, uint16 termDays) external override {
+
+    // Events.
+    event BorrowRecorded(
+        address indexed user,
+        address indexed asset,
+        uint256 amount
+    );
+    event RepayRecorded(
+        address indexed user,
+        address indexed asset,
+        uint256 amount
+    );
+
+    /// @notice Records a borrow operation.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Borrow amount.
+    /// @param collateralAdded Collateral increment.
+    /// @param termDays Loan term in days.
+    function borrow(
+        address user,
+        address asset,
+        uint256 amount,
+        uint256 collateralAdded,
+        uint16 termDays
+    ) external override {
         if (!mockSuccess) revert("MockLendingEngine: borrow failed");
-        // 注意：collateralAdded和termDays参数在此Mock实现中未使用，但保留以符合接口规范
-        collateralAdded; termDays;
+        // Parameters are unused in this mock but preserved for interface compatibility.
+        collateralAdded;
+        termDays;
         if (_userDebt[user][asset] == 0) {
             _addDebtAsset(user, asset);
         }
@@ -40,29 +56,41 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         _totalValue += amount;
         emit BorrowRecorded(user, asset, amount);
     }
-    
-    /// @notice 记录还款
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 还款金额
-    function repay(address user, address asset, uint256 amount) external override {
+
+    /// @notice Records a repayment operation.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Repayment amount.
+    function repay(
+        address user,
+        address asset,
+        uint256 amount
+    ) external override {
         if (!mockSuccess) revert("MockLendingEngine: repay failed");
         require(_userDebt[user][asset] >= amount, "Insufficient debt");
         _userDebt[user][asset] -= amount;
         if (_userDebt[user][asset] == 0) {
             _removeDebtAsset(user, asset);
         }
-        _totalByAsset[asset] = _totalByAsset[asset] >= amount ? _totalByAsset[asset] - amount : 0;
-        _userTotalValue[user] = _userTotalValue[user] > amount ? _userTotalValue[user] - amount : 0;
+        _totalByAsset[asset] = _totalByAsset[asset] >= amount
+            ? _totalByAsset[asset] - amount
+            : 0;
+        _userTotalValue[user] = _userTotalValue[user] > amount
+            ? _userTotalValue[user] - amount
+            : 0;
         _totalValue = _totalValue > amount ? _totalValue - amount : 0;
         emit RepayRecorded(user, asset, amount);
     }
-    
-    /// @notice 强制减少债务
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 减少金额
-    function forceReduceDebt(address user, address asset, uint256 amount) external override {
+
+    /// @notice Force-reduces user debt.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Reduction amount.
+    function forceReduceDebt(
+        address user,
+        address asset,
+        uint256 amount
+    ) external override {
         uint256 currentDebt = _userDebt[user][asset];
         // For liquidation, insufficient debt should revert (matches typical engine behavior and helps test atomicity)
         require(currentDebt >= amount, "Insufficient debt");
@@ -71,117 +99,152 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
             _removeDebtAsset(user, asset);
         }
         _totalByAsset[asset] -= amount;
-        _userTotalValue[user] = _userTotalValue[user] > amount ? _userTotalValue[user] - amount : 0;
+        _userTotalValue[user] = _userTotalValue[user] > amount
+            ? _userTotalValue[user] - amount
+            : 0;
         _totalValue = _totalValue > amount ? _totalValue - amount : 0;
         emit RepayRecorded(user, asset, amount);
     }
-    
-    /// @notice 获取债务数量
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return 债务数量
-    function getDebt(address user, address asset) external view override returns (uint256) {
+
+    /// @notice Returns user debt for an asset.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @return Debt amount.
+    function getDebt(
+        address user,
+        address asset
+    ) external view override returns (uint256) {
         if (!mockSuccess) revert("MLE: get debt fail");
         return _userDebt[user][asset];
     }
-    
-    /// @notice 获取资产总债务数量
-    /// @param asset 资产地址
-    /// @return 总债务数量
-    function getTotalDebtByAsset(address asset) external view override returns (uint256) {
+
+    /// @notice Returns total debt tracked for an asset.
+    /// @param asset Asset address.
+    /// @return Total debt amount.
+    function getTotalDebtByAsset(
+        address asset
+    ) external view override returns (uint256) {
         return _totalByAsset[asset];
     }
-    
-    /// @notice 测试辅助：直接设置资产总债务
+
+    /// @notice Test helper that overrides the total debt tracked for an asset.
     function setTotalDebtByAsset(address asset, uint256 amount) external {
         _totalByAsset[asset] = amount;
     }
-    
-    /// @notice 获取用户总债务价值
-    /// @param user 用户地址
-    /// @return 总债务价值
-    function getUserTotalDebtValue(address user) external view override returns (uint256) {
+
+    /// @notice Returns the cached total debt value for a user.
+    /// @param user User address.
+    /// @return Total debt value.
+    function getUserTotalDebtValue(
+        address user
+    ) external view override returns (uint256) {
         return _userTotalValue[user];
     }
 
-    function getUserTotalDebtValueBestEffort(address user) external view override returns (uint256) {
+    function getUserTotalDebtValueBestEffort(
+        address user
+    ) external view override returns (uint256) {
         return _userTotalValue[user];
     }
 
-    function getUserTotalDebtValueStrict(address user) external view override returns (uint256) {
+    function getUserTotalDebtValueStrict(
+        address user
+    ) external view override returns (uint256) {
         return _userTotalValue[user];
     }
-    
-    /// @notice 获取总债务价值
-    /// @return 总债务价值
+
+    /// @notice Returns the cached total debt value across all users.
+    /// @return Total debt value.
     function getTotalDebtValue() external view override returns (uint256) {
         return _totalValue;
     }
-    
-    /// @notice 获取用户债务资产列表
-    /// @param user 用户地址
-    /// @return 资产地址数组
-    function getUserDebtAssets(address user) external view override returns (address[] memory) {
+
+    /// @notice Returns the debt-asset list tracked for a user.
+    /// @param user User address.
+    /// @return Asset address array.
+    function getUserDebtAssets(
+        address user
+    ) external view override returns (address[] memory) {
         address[] memory assets = _userDebtAssets[user];
         return assets;
     }
-    
-    /// @notice 计算预期利息
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 金额
-    /// @return 预期利息
-    function calculateExpectedInterest(address user, address asset, uint256 amount) external pure override returns (uint256) {
-        // Mock实现：返回0
-        // 注意：user、asset、amount参数在此Mock实现中未使用，但保留以符合接口规范
-        user; asset; amount;
+
+    /// @notice Returns the mock expected interest.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Principal amount.
+    /// @return Expected interest amount.
+    function calculateExpectedInterest(
+        address user,
+        address asset,
+        uint256 amount
+    ) external pure override returns (uint256) {
+        // Mock implementation always returns zero while preserving interface compatibility.
+        user;
+        asset;
+        amount;
         return 0;
     }
-    
-    /// @notice 获取可减少债务金额
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return 可减少金额
-    function getReducibleDebtAmount(address user, address asset) external view override returns (uint256) {
-        return _userDebt[user][asset];
-    }
-    
-    /// @notice 计算债务价值
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return 债务价值
-    function calculateDebtValue(address user, address asset) external view virtual override returns (uint256) {
+
+    /// @notice Returns the reducible debt amount for a user and asset.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @return Reducible debt amount.
+    function getReducibleDebtAmount(
+        address user,
+        address asset
+    ) external view override returns (uint256) {
         return _userDebt[user][asset];
     }
 
-    function calculateDebtValueBestEffort(address user, address asset) external view virtual override returns (uint256) {
+    /// @notice Returns the mock debt value for a user and asset.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @return Debt value.
+    function calculateDebtValue(
+        address user,
+        address asset
+    ) external view virtual override returns (uint256) {
         return _userDebt[user][asset];
     }
 
-    function calculateDebtValueStrict(address user, address asset) external view virtual override returns (uint256) {
+    function calculateDebtValueBestEffort(
+        address user,
+        address asset
+    ) external view virtual override returns (uint256) {
         return _userDebt[user][asset];
     }
-    
-    /// @notice 获取用户债务数量（兼容性方法）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return 债务数量
-    function getUserDebt(address user, address asset) external view returns (uint256) {
+
+    function calculateDebtValueStrict(
+        address user,
+        address asset
+    ) external view virtual override returns (uint256) {
         return _userDebt[user][asset];
     }
-    
-    /// @notice 检查用户是否有债务
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return 是否有债务
+
+    /// @notice Compatibility helper that returns user debt for an asset.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @return Debt amount.
+    function getUserDebt(
+        address user,
+        address asset
+    ) external view returns (uint256) {
+        return _userDebt[user][asset];
+    }
+
+    /// @notice Returns whether a user has debt for an asset.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @return True when debt is greater than zero.
     function hasDebt(address user, address asset) external view returns (bool) {
         return _userDebt[user][asset] > 0;
     }
-    
-    /// @notice 设置用户债务数量（用于测试）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 债务数量
+
+    /// @notice Sets a user's debt amount for tests.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Debt amount.
     function setUserDebt(address user, address asset, uint256 amount) external {
         // Keep derived totals consistent with _userDebt, since production paths
         // rely on getUserTotalDebtValue() for collateral release decisions.
@@ -200,13 +263,17 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
             _totalValue += delta;
         } else {
             uint256 delta = prev - amount;
-            _totalByAsset[asset] = _totalByAsset[asset] >= delta ? _totalByAsset[asset] - delta : 0;
-            _userTotalValue[user] = _userTotalValue[user] >= delta ? _userTotalValue[user] - delta : 0;
+            _totalByAsset[asset] = _totalByAsset[asset] >= delta
+                ? _totalByAsset[asset] - delta
+                : 0;
+            _userTotalValue[user] = _userTotalValue[user] >= delta
+                ? _userTotalValue[user] - delta
+                : 0;
             _totalValue = _totalValue >= delta ? _totalValue - delta : 0;
         }
     }
 
-    /// @notice 设置用户总债务价值缓存（用于测试估值缓存陈旧场景）
+    /// @notice Sets the cached total debt value for test scenarios.
     function setUserTotalDebtValue(address user, uint256 amount) external {
         uint256 prev = _userTotalValue[user];
         _userTotalValue[user] = amount;
@@ -217,35 +284,50 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         }
     }
 
-    /// @notice 强制减少债务（清算时使用）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 减少金额
-    /// @param liquidator 清算人地址
-    /// @return reducedAmount 实际减少金额
-    function forceReduceDebtWithLiquidator(address user, address asset, uint256 amount, address liquidator) external returns (uint256 reducedAmount) {
+    /// @notice Force-reduces debt while recording the liquidator.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Reduction amount.
+    /// @param liquidator Liquidator address.
+    /// @return reducedAmount Actual reduced amount.
+    function forceReduceDebtWithLiquidator(
+        address user,
+        address asset,
+        uint256 amount,
+        address liquidator
+    ) external returns (uint256 reducedAmount) {
         require(user != address(0), "Invalid user address");
         require(asset != address(0), "Invalid asset address");
         require(amount > 0, "Invalid amount");
         require(liquidator != address(0), "Invalid liquidator address");
-        
+
         uint256 currentDebt = _userDebt[user][asset];
         reducedAmount = amount > currentDebt ? currentDebt : amount;
-        
+
         if (reducedAmount > 0) {
             _userDebt[user][asset] -= reducedAmount;
             _totalByAsset[asset] -= reducedAmount;
-            _userTotalValue[user] = _userTotalValue[user] > reducedAmount ? _userTotalValue[user] - reducedAmount : 0;
-            _totalValue = _totalValue > reducedAmount ? _totalValue - reducedAmount : 0;
-            
-            // 发出债务减少事件
-            emit DebtReduced(liquidator, user, asset, reducedAmount, block.number);
+            _userTotalValue[user] = _userTotalValue[user] > reducedAmount
+                ? _userTotalValue[user] - reducedAmount
+                : 0;
+            _totalValue = _totalValue > reducedAmount
+                ? _totalValue - reducedAmount
+                : 0;
+
+            // Emit the liquidation debt-reduction event.
+            emit DebtReduced(
+                liquidator,
+                user,
+                asset,
+                reducedAmount,
+                block.number
+            );
         }
-        
+
         return reducedAmount;
     }
 
-    // 事件
+    // Events.
     event DebtReduced(
         address indexed liquidator,
         address indexed user,
@@ -254,8 +336,8 @@ contract MockLendingEngineBasic is ILendingEngineBasic {
         uint256 blockNumber
     );
 
-    /// @notice 设置成功标志（测试用）
-    /// @param success 是否成功
+    /// @notice Sets whether mock operations succeed.
+    /// @param success True when operations should succeed.
     function setMockSuccess(bool success) external {
         mockSuccess = success;
     }

@@ -28,5 +28,5 @@
 - 按期窗口口径（时间 SSOT=blocks）：链上以 `_ON_TIME_WINDOW_BLOCKS` 判定；“≈24h”仅为理解换算。
 - 前端交互/调用示例：`docs/FRONTEND_CONTRACTS_INTEGRATION.md`
 - legacy / 通用订单是否彻底收尾，必须以显式 `lifecycle + shortfallStatus + collateralDisposition` 为准；blocks-only 是否彻底收尾，则必须以 `BlocksOnlyView.getBlocksOnlyOrderState(orderId)` 为准，不能从 `remainingDebt == 0` 反推。
-- blocks-only 文案必须固定区分“债务已清但仍未关闭（debt-free open）”与“已完成交易收尾/到期收尾/到期交付收尾（trade closeout / maturity closeout / maturity delivery closeout）”。
+- blocks-only 文案必须固定区分“债务已清但仍未关闭（debt-free open）”与“已完成交易收尾/到期收尾（trade closeout / maturity closeout）”。
 触发行为	借方奖励	贷方奖励

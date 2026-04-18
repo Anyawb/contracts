@@ -1,8 +1,8 @@
 {
   "network": "bnb-testnet",
   "chainId": 97,
-  "releaseId": "bnb-testnet-20260414085007022",
-  "generatedAt": "2026-04-14T08:50:07.023Z",
+  "releaseId": "bnb-testnet-20260417132146339",
+  "generatedAt": "2026-04-17T13:21:46.340Z",
   "deployOutputFile": "scripts/deployments/bnb-testnet/core.json",
   "frontendConfigFile": "frontend-config/networks/bnb-testnet.ts",
   "frontendReleaseFile": "frontend-config/networks/bnb-testnet.release.json",
@@ -297,6 +297,10 @@
     "LiquidatorView": {
       "address": "0x56247eD81901B5030DDA971AAd8233d3BBd3cA60",
       "registryKey": "LIQUIDATION_VIEW"
+    },
+    "OrderStateStoreV2": {
+      "address": "0x86eefc6D67F615554CAa84c21ae8b80518aB9FC7",
+      "registryKey": "ORDER_STATE_STORE"
     }
   }
 }

@@ -33,9 +33,3 @@ contract ReentrantLiquidator {
         vbl.liquidate(user, collateralAsset, debtAsset, cAmt, dAmt, 0);
     }
 }
-
-
-
-
-
-

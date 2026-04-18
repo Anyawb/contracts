@@ -17,7 +17,9 @@ import { requireFeeRouterSyncAdvance } from "../core/_feeLiveUtils";
 import { primeMockLiveViewCache } from "../core/_mockLiveViewCache";
 import { logLiveScriptFailure, logLiveScriptSuccess } from "../core/_scriptStatus";
 
-const ORDER_STATUS_REPAID = 1n;
+const ORDER_PRODUCT_LOAN = 1n;
+const ORDER_LIFECYCLE_REPAID = 2n;
+const ORDER_CLOSE_REASON_FULL_REPAY = 1n;
 
 function expectTrue(condition: boolean, label: string) {
   if (!condition) {
@@ -174,7 +176,10 @@ async function main() {
   if (!ctx.lendingEngineView) {
     throw new Error("view consistency gate: LendingEngineView is required for explicit order status checks");
   }
-  expectEqual(BigInt(await ctx.lendingEngineView.getOrderStatus(finalized.orderId)), ORDER_STATUS_REPAID, "order lifecycle status");
+  const orderState = await ctx.lendingEngineView.connect(ctx.relayer).getOrderStateSnapshot(finalized.orderId);
+  expectEqual(BigInt(orderState.productType), ORDER_PRODUCT_LOAN, "order product type");
+  expectEqual(BigInt(orderState.lifecycle), ORDER_LIFECYCLE_REPAID, "order lifecycle snapshot");
+  expectEqual(BigInt(orderState.closeReason), ORDER_CLOSE_REASON_FULL_REPAY, "order close reason snapshot");
   expectEqual(order.repaidAmount, ctx.totalDue, "order repaidAmount");
   if (order.borrower.toLowerCase() !== ctx.borrower.address.toLowerCase()) {
     throw new Error(`order borrower mismatch: expected ${ctx.borrower.address} got ${order.borrower}`);

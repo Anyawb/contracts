@@ -73,8 +73,8 @@ interface ICollateralManager {
      * - If `receiver == user`, this is a user withdraw or settlement-release path.
      * - Implementations may allow VaultRouter, SettlementManager, and BlocksOnlyCoordinator on the borrower-release
      *   path while still restricting third-party receivers.
-    * - If `receiver != user`, this is usually a seizure/liquidation path, but the blocks-only coordinator may also
-    *   use it to stage order-bound collateral into its own custody before trade close or maturity delivery.
+     * - If `receiver != user`, this is usually a seizure/liquidation path, but the blocks-only coordinator may also
+     *   use it to stage order-bound collateral into its own custody before trade close or maturity delivery.
      *
      * @param user User whose collateral balance is reduced
      * @param asset Collateral asset address

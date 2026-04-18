@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { AssetDecimalMath } from "../libraries/AssetDecimalMath.sol";
+import {AssetDecimalMath} from "../libraries/AssetDecimalMath.sol";
 
 /// @notice Test harness for exercising AssetDecimalMath from Hardhat tests.
 contract TestAssetDecimalMath {
@@ -34,7 +34,12 @@ contract TestAssetDecimalMath {
         uint256 priceUsd,
         uint8 assetDecimals
     ) external pure returns (uint256) {
-        return AssetDecimalMath.calcValue(amountBaseUnits, priceUsd, assetDecimals);
+        return
+            AssetDecimalMath.calcValue(
+                amountBaseUnits,
+                priceUsd,
+                assetDecimals
+            );
     }
 
     function calcAmountFromValue(
@@ -42,7 +47,12 @@ contract TestAssetDecimalMath {
         uint256 priceUsd,
         uint8 assetDecimals
     ) external pure returns (uint256) {
-        return AssetDecimalMath.calcAmountFromValue(valueUsd, priceUsd, assetDecimals);
+        return
+            AssetDecimalMath.calcAmountFromValue(
+                valueUsd,
+                priceUsd,
+                assetDecimals
+            );
     }
 
     function normalizeValue(
@@ -50,7 +60,12 @@ contract TestAssetDecimalMath {
         uint8 valueDecimals,
         uint8 targetDecimals
     ) external pure returns (uint256) {
-        return AssetDecimalMath.normalizeValue(valueUsd, valueDecimals, targetDecimals);
+        return
+            AssetDecimalMath.normalizeValue(
+                valueUsd,
+                valueDecimals,
+                targetDecimals
+            );
     }
 
     function normalizeValueDown(
@@ -58,7 +73,12 @@ contract TestAssetDecimalMath {
         uint8 valueDecimals,
         uint8 targetDecimals
     ) external pure returns (uint256) {
-        return AssetDecimalMath.normalizeValueDown(valueUsd, valueDecimals, targetDecimals);
+        return
+            AssetDecimalMath.normalizeValueDown(
+                valueUsd,
+                valueDecimals,
+                targetDecimals
+            );
     }
 
     function normalizeValueUp(
@@ -66,6 +86,11 @@ contract TestAssetDecimalMath {
         uint8 valueDecimals,
         uint8 targetDecimals
     ) external pure returns (uint256) {
-        return AssetDecimalMath.normalizeValueUp(valueUsd, valueDecimals, targetDecimals);
+        return
+            AssetDecimalMath.normalizeValueUp(
+                valueUsd,
+                valueDecimals,
+                targetDecimals
+            );
     }
 }

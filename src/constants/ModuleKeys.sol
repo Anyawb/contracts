@@ -1025,8 +1025,7 @@ library ModuleKeys {
         if (key == KEY_VAULT_UTILS) return "KEY_VAULT_UTILS";
         if (key == KEY_PRICE_ORACLE) return "KEY_PRICE_ORACLE";
         if (key == KEY_PRICE_UPDATER) return "KEY_PRICE_UPDATER";
-        if (key == KEY_PRICE_UPDATER_VIEW)
-            return "KEY_PRICE_UPDATER_VIEW";
+        if (key == KEY_PRICE_UPDATER_VIEW) return "KEY_PRICE_UPDATER_VIEW";
         if (key == KEY_SETTLEMENT_TOKEN) return "KEY_SETTLEMENT_TOKEN";
         if (key == KEY_RWA_STRATEGY) return "KEY_RWA_STRATEGY";
         if (key == KEY_VAULT_BUSINESS_LOGIC) return "KEY_VAULT_BUSINESS_LOGIC";
@@ -1177,9 +1176,7 @@ library ModuleKeys {
             return KEY_PRICE_UPDATER;
         if (nameHash == keccak256(abi.encodePacked("coinGeckoPriceUpdater")))
             return KEY_PRICE_UPDATER;
-        if (
-            nameHash == keccak256(abi.encodePacked("priceUpdaterView"))
-        ) {
+        if (nameHash == keccak256(abi.encodePacked("priceUpdaterView"))) {
             return KEY_PRICE_UPDATER_VIEW;
         }
         if (

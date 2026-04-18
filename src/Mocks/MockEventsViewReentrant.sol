@@ -54,9 +54,3 @@ contract MockEventsViewReentrant {
         vbl.liquidate(user, collateralAsset, debtAsset, cAmt, dAmt, 0);
     }
 }
-
-
-
-
-
-

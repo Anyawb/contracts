@@ -122,11 +122,11 @@ interface IOrderStateStoreV2 {
      *      - registry/module checks fail in the implementation
      *
      * Security:
-    * - Must not bootstrap a missing loan order state into ACTIVE from a shortfall-only update path.
-    * - Implementations MAY compensate missing state only when ORDER_ENGINE already reports a terminal
-    *   lifecycle (`Liquidated*` / `Defaulted*`), so audit state remains complete after temporary
-    *   store outages.
-    * - `createdBlockHint` is kept for compatibility and may be used as bootstrap hint during such compensation.
+     * - Must not bootstrap a missing loan order state into ACTIVE from a shortfall-only update path.
+     * - Implementations MAY compensate missing state only when ORDER_ENGINE already reports a terminal
+     *   lifecycle (`Liquidated*` / `Defaulted*`), so audit state remains complete after temporary
+     *   store outages.
+     * - `createdBlockHint` is kept for compatibility and may be used as bootstrap hint during such compensation.
      *
      * @param orderId Loan order identifier
      * @param createdBlockHint Historical compatibility hint (reserved)

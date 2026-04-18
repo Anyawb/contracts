@@ -24,17 +24,7 @@ import {
     ZeroAddress
 } from "../../../errors/StandardErrors.sol";
 import {ViewVersioned} from "../ViewVersioned.sol";
-
-/// @title ISystemRiskViewLite
-/// @notice Minimal read interface for system risk thresholds.
-/// @dev Used by {HealthView} to read the system minimum health factor without importing the full risk module.
-interface ISystemRiskViewLite {
-    /// @notice Returns the minimum health factor configured for the system.
-    function getMinHealthFactor()
-        external
-        view
-        returns (uint256 minHealthFactor);
-}
+import {ISystemRiskView} from "../../../interfaces/ISystemRiskView.sol";
 
 /**
  * @title HealthView
@@ -523,7 +513,7 @@ contract HealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (srv == address(0)) return (false, false, blockNumber);
 
         uint256 minHf;
-        try ISystemRiskViewLite(srv).getMinHealthFactor() returns (uint256 v) {
+        try ISystemRiskView(srv).getMinHealthFactor() returns (uint256 v) {
             minHf = v;
         } catch {
             return (false, false, blockNumber);

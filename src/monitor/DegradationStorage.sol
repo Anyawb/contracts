@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { Registry } from "../registry/Registry.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Registry} from "../registry/Registry.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {NotAContract, ZeroAddress} from "../errors/StandardErrors.sol";
 
 /**
  * @title DegradationStorage
@@ -39,14 +39,14 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param reasonHash Hash of the degradation reason.
      * @param fallbackValue Fallback value used.
      * @param usedFallback Whether a fallback strategy was used.
-    * @param legacyBlockNumber Event block number (block.number).
+     * @param legacyBlockNumber Event block number (block.number).
      * @param blockNumber Event block number.
      */
     struct DegradationEvent {
         address module;
         bytes32 reasonHash;
         uint256 fallbackValue;
-        bool    usedFallback;
+        bool usedFallback;
         uint256 legacyBlockNumber;
         uint256 blockNumber;
     }
@@ -60,8 +60,14 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param overwrite Whether an older event was overwritten.
      * @param blockNumber Block number (block.number).
      */
-    event CircularBufferEventAdded(uint256 indexed globalIndex,uint256 indexed bufferPosition,address indexed module,bool overwrite,uint256 blockNumber);
-    
+    event CircularBufferEventAdded(
+        uint256 indexed globalIndex,
+        uint256 indexed bufferPosition,
+        address indexed module,
+        bool overwrite,
+        uint256 blockNumber
+    );
+
     /**
      * @notice Emitted when buffer statistics are updated.
      * @param currentIndex Current global index.
@@ -69,8 +75,13 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param maxCapacity Max buffer capacity.
      * @param blockNumber Block number (block.number).
      */
-    event CircularBufferStats(uint256 currentIndex,uint256 actualCount,uint256 maxCapacity,uint256 blockNumber);
-    
+    event CircularBufferStats(
+        uint256 currentIndex,
+        uint256 actualCount,
+        uint256 maxCapacity,
+        uint256 blockNumber
+    );
+
     /**
      * @notice Emitted for storage optimization accounting.
      * @param fieldType Field category label.
@@ -79,8 +90,14 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param spaceSaved Estimated storage saved.
      * @param blockNumber Block number (block.number).
      */
-    event StorageOptimizationStats(string fieldType,uint256 originalSize,uint256 optimizedSize,uint256 spaceSaved,uint256 blockNumber);
-    
+    event StorageOptimizationStats(
+        string fieldType,
+        uint256 originalSize,
+        uint256 optimizedSize,
+        uint256 spaceSaved,
+        uint256 blockNumber
+    );
+
     /**
      * @notice Emitted when health details are registered.
      * @param detailsHash Details hash.
@@ -88,38 +105,48 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param module Module address.
      * @param blockNumber Block number (block.number).
      */
-    event HealthDetailsRegistered(bytes32 indexed detailsHash,string details,address indexed module,uint256 blockNumber);
+    event HealthDetailsRegistered(
+        bytes32 indexed detailsHash,
+        string details,
+        address indexed module,
+        uint256 blockNumber
+    );
 
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
     /// @notice Max number of degradation events (buffer capacity).
     uint256 private constant _MAX_DEGRADATION_EVENTS = 100;
-    
+
     /// @notice Max health details length.
     uint256 private constant _MAX_DETAILS_LENGTH = 128;
-    
+
     /// @notice Min health details length.
     uint256 private constant _MIN_DETAILS_LENGTH = 5;
 
     /*━━━━━━━━━━━━━━━ Predefined Health Detail Hashes ━━━━━━━━━━━━━━━*/
     /// @notice Predefined health detail hashes (kept in sync with ModuleHealthView).
     bytes32 private constant _DETAILS_HEALTHY = keccak256("Module is healthy");
-    bytes32 private constant _DETAILS_ZERO_ADDRESS = keccak256("Module address is zero");
+    bytes32 private constant _DETAILS_ZERO_ADDRESS =
+        keccak256("Module address is zero");
     bytes32 private constant _DETAILS_NO_CODE = keccak256("Module has no code");
-    bytes32 private constant _DETAILS_FAILED_CHECK = keccak256("Module failed health check");
-    bytes32 private constant _DETAILS_TIMEOUT = keccak256("Health check timeout");
-    bytes32 private constant _DETAILS_CALL_FAILED = keccak256("External call failed");
-    bytes32 private constant _DETAILS_NOT_RESPONDING = keccak256("Module not responding");
+    bytes32 private constant _DETAILS_FAILED_CHECK =
+        keccak256("Module failed health check");
+    bytes32 private constant _DETAILS_TIMEOUT =
+        keccak256("Health check timeout");
+    bytes32 private constant _DETAILS_CALL_FAILED =
+        keccak256("External call failed");
+    bytes32 private constant _DETAILS_NOT_RESPONDING =
+        keccak256("Module not responding");
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     /// @notice Circular buffer: index => degradation event.
     mapping(uint256 => DegradationEvent) private _circularEvents;
-    
+
     /// @notice Current global event index.
     uint256 private _currentEventIndex;
-    
+
     /// @notice Actual event count (capped by capacity).
     uint256 private _actualEventCount;
-    
+
     /// @notice Hash-to-text mapping for health details (dedup).
     mapping(bytes32 => string) private _detailsHashToText;
 
@@ -130,12 +157,12 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      *      - registry is zero (ZeroAddress)
      *      - registry has no code (NotAContract)
      */
-    modifier onlyValidRegistry() { 
-        if (_registryAddr==address(0)) revert ZeroAddress();
+    modifier onlyValidRegistry() {
+        if (_registryAddr == address(0)) revert ZeroAddress();
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
-        _; 
+        _;
     }
-    
+
     /**
      * @notice Check whether a user has a role.
      * @dev Reverts if:
@@ -145,37 +172,44 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param user Address to check.
      * @return True if user has role, otherwise false.
      */
-    function _hasRole(bytes32 actionKey,address user) internal view returns(bool){
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        return IAccessControlManager(acm).hasRole(actionKey,user);
+    function _hasRole(
+        bytes32 actionKey,
+        address user
+    ) internal view returns (bool) {
+        address acm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
+        return IAccessControlManager(acm).hasRole(actionKey, user);
     }
-    
+
     /**
      * @notice Restrict access to system health viewers or admins.
      * @dev Reverts if caller lacks ACTION_ADMIN and ACTION_VIEW_SYSTEM_STATUS.
      */
-    modifier onlySystemHealthViewer(){
+    modifier onlySystemHealthViewer() {
         // Allow the Registry-registered DegradationMonitor to read storage without granting it viewer roles.
         // Rationale: DegradationMonitor is the coordinator and should be able to query its own submodules.
-        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        address mon = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_DEGRADATION_MONITOR
+        );
         if (mon != address(0) && msg.sender == mon) {
             _;
             return;
         }
-        bool isAllowed =
-            _hasRole(ActionKeys.ACTION_ADMIN, msg.sender)
-                || _hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender);
+        bool isAllowed = _hasRole(ActionKeys.ACTION_ADMIN, msg.sender) ||
+            _hasRole(ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender);
         if (!isAllowed) revert DegradationStorageNoPermission();
-        _; 
+        _;
     }
-    
+
     /**
      * @notice Restrict access to admins.
      * @dev Reverts if caller lacks ACTION_ADMIN.
      */
-    modifier onlyAdmin(){ 
-        if (!_hasRole(ActionKeys.ACTION_ADMIN, msg.sender)) revert DegradationStorageAdminOnly();
-        _; 
+    modifier onlyAdmin() {
+        if (!_hasRole(ActionKeys.ACTION_ADMIN, msg.sender))
+            revert DegradationStorageAdminOnly();
+        _;
     }
 
     /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
@@ -184,8 +218,8 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @dev Prevents direct initialization of the implementation contract.
      * @custom:oz-upgrades-unsafe-allow constructor
      */
-    constructor(){ 
-        _disableInitializers(); 
+    constructor() {
+        _disableInitializers();
     }
 
     /**
@@ -200,8 +234,9 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param initialRegistryAddr Initial Registry address.
      */
     function initialize(address initialRegistryAddr) external initializer {
-        if(initialRegistryAddr==address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr == address(0)) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
         _initializePredefinedHealthDetails();
@@ -222,11 +257,17 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      *
      * @param newImplementation New implementation address.
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry onlyAdmin {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry onlyAdmin {
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
-        IAccessControlManager(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL))
-            .requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
+        IAccessControlManager(
+            Registry(_registryAddr).getModuleOrRevert(
+                ModuleKeys.KEY_ACCESS_CONTROL
+            )
+        ).requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
     }
 
     /*━━━━━━━━━━━━━━━ Ring-Buffer Logic ━━━━━━━━━━━━━━━*/
@@ -243,22 +284,35 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      *
      * @param degradationEvent Event to store.
      */
-    function addEventToCircularBuffer(DegradationEvent memory degradationEvent) external onlyValidRegistry {
+    function addEventToCircularBuffer(
+        DegradationEvent memory degradationEvent
+    ) external onlyValidRegistry {
         // Allow DegradationMonitor (Registry-bound) as single-entry coordinator.
-        address mon = Registry(_registryAddr).getModule(ModuleKeys.KEY_DEGRADATION_MONITOR);
+        address mon = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_DEGRADATION_MONITOR
+        );
         if (mon == address(0) || msg.sender != mon) {
             // Fallback: allow direct admin writes (legacy / maintenance).
-            IAccessControlManager(Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL))
-                .requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
+            IAccessControlManager(
+                Registry(_registryAddr).getModuleOrRevert(
+                    ModuleKeys.KEY_ACCESS_CONTROL
+                )
+            ).requireRole(ActionKeys.ACTION_ADMIN, msg.sender);
         }
         uint256 pos = _currentEventIndex % _MAX_DEGRADATION_EVENTS;
         bool overwrite = _actualEventCount >= _MAX_DEGRADATION_EVENTS;
         _circularEvents[pos] = degradationEvent;
         _currentEventIndex++;
-        if(_actualEventCount < _MAX_DEGRADATION_EVENTS){ 
-            _actualEventCount++; 
+        if (_actualEventCount < _MAX_DEGRADATION_EVENTS) {
+            _actualEventCount++;
         }
-        emit CircularBufferEventAdded(_currentEventIndex-1,pos,degradationEvent.module,overwrite,block.number);
+        emit CircularBufferEventAdded(
+            _currentEventIndex - 1,
+            pos,
+            degradationEvent.module,
+            overwrite,
+            block.number
+        );
     }
 
     /**
@@ -275,14 +329,24 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param index Event index (0 = most recent).
      * @return evt Degradation event record.
      */
-    function getEventFromCircularBuffer(uint256 index) external view onlyValidRegistry onlySystemHealthViewer returns(DegradationEvent memory evt){
+    function getEventFromCircularBuffer(
+        uint256 index
+    )
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (DegradationEvent memory evt)
+    {
         if (index >= _actualEventCount) revert DegradationStorageIndexOOB();
         uint256 actualIndex;
-        if(_currentEventIndex>index){ 
-            actualIndex = (_currentEventIndex - 1 - index) % _MAX_DEGRADATION_EVENTS; 
-        }
-        else { 
-            actualIndex = (_MAX_DEGRADATION_EVENTS + _currentEventIndex - 1 - index) % _MAX_DEGRADATION_EVENTS; 
+        if (_currentEventIndex > index) {
+            actualIndex =
+                (_currentEventIndex - 1 - index) % _MAX_DEGRADATION_EVENTS;
+        } else {
+            actualIndex =
+                (_MAX_DEGRADATION_EVENTS + _currentEventIndex - 1 - index) %
+                _MAX_DEGRADATION_EVENTS;
         }
         return _circularEvents[actualIndex];
     }
@@ -302,7 +366,18 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @return maxCapacity Max capacity.
      * @return isFull Whether the buffer is full.
      */
-    function getCircularBufferStats() external view onlyValidRegistry onlySystemHealthViewer returns(uint256 currentIndex,uint256 actualCount,uint256 maxCapacity,bool isFull){
+    function getCircularBufferStats()
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (
+            uint256 currentIndex,
+            uint256 actualCount,
+            uint256 maxCapacity,
+            bool isFull
+        )
+    {
         return (
             _currentEventIndex,
             _actualEventCount,
@@ -321,8 +396,8 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * - Role-gated (ACTION_ADMIN)
      */
     function clearCircularBuffer() external onlyValidRegistry onlyAdmin {
-        _currentEventIndex=0; 
-        _actualEventCount=0;
+        _currentEventIndex = 0;
+        _actualEventCount = 0;
         emit CircularBufferStats(0, 0, _MAX_DEGRADATION_EVENTS, block.number);
     }
 
@@ -335,11 +410,19 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
         _detailsHashToText[_DETAILS_HEALTHY] = "Module is healthy";
         _detailsHashToText[_DETAILS_ZERO_ADDRESS] = "Module address is zero";
         _detailsHashToText[_DETAILS_NO_CODE] = "Module has no code";
-        _detailsHashToText[_DETAILS_FAILED_CHECK] = "Module failed health check";
+        _detailsHashToText[
+            _DETAILS_FAILED_CHECK
+        ] = "Module failed health check";
         _detailsHashToText[_DETAILS_TIMEOUT] = "Health check timeout";
         _detailsHashToText[_DETAILS_CALL_FAILED] = "External call failed";
         _detailsHashToText[_DETAILS_NOT_RESPONDING] = "Module not responding";
-        emit StorageOptimizationStats("HealthDetails",7*32,7*32,0,block.number);
+        emit StorageOptimizationStats(
+            "HealthDetails",
+            7 * 32,
+            7 * 32,
+            0,
+            block.number
+        );
     }
 
     /**
@@ -356,12 +439,29 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param details Human-readable details.
      * @param module Module address.
      */
-    function registerHealthDetailsIfNew(bytes32 detailsHash,string calldata details,address module) external onlyValidRegistry onlyAdmin {
-        if(bytes(_detailsHashToText[detailsHash]).length==0){
-            _detailsHashToText[detailsHash]=details;
-            emit HealthDetailsRegistered(detailsHash,details,module,block.number);
-            uint256 saved = bytes(details).length > 32 ? bytes(details).length - 32 : 0;
-            emit StorageOptimizationStats("HealthDetails",bytes(details).length,32,saved,block.number);
+    function registerHealthDetailsIfNew(
+        bytes32 detailsHash,
+        string calldata details,
+        address module
+    ) external onlyValidRegistry onlyAdmin {
+        if (bytes(_detailsHashToText[detailsHash]).length == 0) {
+            _detailsHashToText[detailsHash] = details;
+            emit HealthDetailsRegistered(
+                detailsHash,
+                details,
+                module,
+                block.number
+            );
+            uint256 saved = bytes(details).length > 32
+                ? bytes(details).length - 32
+                : 0;
+            emit StorageOptimizationStats(
+                "HealthDetails",
+                bytes(details).length,
+                32,
+                saved,
+                block.number
+            );
         }
     }
 
@@ -378,8 +478,16 @@ contract DegradationStorage is Initializable, UUPSUpgradeable {
      * @param hash Details hash.
      * @return details Details string (empty if not registered).
      */
-    function getHealthDetailsByHash(bytes32 hash) external view onlyValidRegistry onlySystemHealthViewer returns(string memory details){ 
-        return _detailsHashToText[hash]; 
+    function getHealthDetailsByHash(
+        bytes32 hash
+    )
+        external
+        view
+        onlyValidRegistry
+        onlySystemHealthViewer
+        returns (string memory details)
+    {
+        return _detailsHashToText[hash];
     }
 
     /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/

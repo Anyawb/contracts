@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
-import { DivisionByZero } from "../errors/StandardErrors.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {DivisionByZero} from "../errors/StandardErrors.sol";
 
 /// @notice Reverts when a decimal exponent exceeds the largest safe pow10 exponent for uint256.
 error AssetDecimalMath__ExponentTooHigh(uint8 exponent, uint8 maxExponent);

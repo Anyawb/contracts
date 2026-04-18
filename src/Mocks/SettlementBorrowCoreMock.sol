@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Registry } from "../registry/Registry.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ILendingEngineDebtWrite } from "../interfaces/ILendingEngineDebtWrite.sol";
-import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
-import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
+import {Registry} from "../registry/Registry.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {ILendingEngineDebtWrite} from "../interfaces/ILendingEngineDebtWrite.sol";
+import {IVaultRouter} from "../interfaces/IVaultRouter.sol";
+import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
 
-/// @notice 测试专用的 VaultCore 替身，实现核心转发逻辑，贴近现行 VaultCore（精简版）
+/// @notice Test-only VaultCore stand-in that forwards the current core paths in simplified form.
 contract SettlementBorrowCoreMock {
     address public registry;
     address private _viewContractAddr;
@@ -18,25 +18,30 @@ contract SettlementBorrowCoreMock {
         _viewContractAddr = viewContractAddr;
     }
 
-    /// @notice Registry 地址
+    /// @notice Returns the registry address.
     function registryAddrVar() external view returns (address) {
         return registry;
     }
 
-    /// @notice View 合约地址（供业务模块解析 VaultRouter）
+    /// @notice Returns the view contract address used to resolve VaultRouter.
     function viewContractAddrVar() external view returns (address) {
         return _viewContractAddr;
     }
 
-    /// @notice 供 SettlementMatchLib 调用的记账入口
-    function borrowFor(address borrower, address asset, uint256 amount, uint16 termDays) external {
-        // termDays 在当前实现中未使用，仅为兼容签名
+    /// @notice Accounting entry point used by SettlementMatchLib.
+    function borrowFor(
+        address borrower,
+        address asset,
+        uint256 amount,
+        uint16 termDays
+    ) external {
+        // termDays is unused in this simplified implementation but kept for signature compatibility.
         termDays;
         address le = Registry(registry).getModuleOrRevert(ModuleKeys.KEY_LE);
         ILendingEngineDebtWrite(le).borrow(borrower, asset, amount, 0, 0);
     }
 
-    /// @notice 存入抵押物，转发至 VaultRouter 标准入口
+    /// @notice Deposits collateral through the standard VaultRouter entrypoint.
     function deposit(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
         IVaultRouter(_viewContractAddr).processUserOperation(
@@ -48,7 +53,7 @@ contract SettlementBorrowCoreMock {
         );
     }
 
-    /// @notice 提取抵押物
+    /// @notice Withdraws collateral.
     function withdraw(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
         IVaultRouter(_viewContractAddr).processUserOperation(
@@ -60,14 +65,14 @@ contract SettlementBorrowCoreMock {
         );
     }
 
-    /// @notice 借款（透传到 LendingEngine）
+    /// @notice Borrows through the LendingEngine.
     function borrow(address asset, uint256 amount) external {
         require(amount > 0, "Amount must be positive");
         address le = Registry(registry).getModuleOrRevert(ModuleKeys.KEY_LE);
         ILendingEngineDebtWrite(le).borrow(msg.sender, asset, amount, 0, 0);
     }
 
-    /// @notice 还款（透传到 LendingEngine；兼容 VaultCore.repay(orderId, asset, amount) 新签名）
+    /// @notice Repays through the LendingEngine using the current repay signature.
     function repay(uint256 orderId, address asset, uint256 amount) external {
         orderId; // mock: orderId is not used in this simplified forwarder
         require(amount > 0, "Amount must be positive");
@@ -75,7 +80,7 @@ contract SettlementBorrowCoreMock {
         ILendingEngineDebtWrite(le).repay(msg.sender, asset, amount);
     }
 
-    /// @notice 业务模块推送用户头寸更新（简化版）
+    /// @notice Pushes a full user-position update from a business module.
     function pushUserPositionUpdate(
         address user,
         address asset,
@@ -85,10 +90,18 @@ contract SettlementBorrowCoreMock {
         uint64 seq,
         uint64 nextVersion
     ) external {
-        IVaultRouter(_viewContractAddr).pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, nextVersion);
+        IVaultRouter(_viewContractAddr).pushUserPositionUpdate(
+            user,
+            asset,
+            collateral,
+            debt,
+            requestId,
+            seq,
+            nextVersion
+        );
     }
 
-    /// @notice 业务模块推送用户头寸增量更新（简化版）
+    /// @notice Pushes a delta user-position update from a business module.
     function pushUserPositionUpdateDelta(
         address user,
         address asset,
@@ -109,4 +122,3 @@ contract SettlementBorrowCoreMock {
         );
     }
 }
-

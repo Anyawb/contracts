@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { GracefulDegradation } from "../libraries/GracefulDegradation.sol";
+import {GracefulDegradation} from "../libraries/GracefulDegradation.sol";
 
 contract TestGracefulDegradation {
     using GracefulDegradation for *;
@@ -14,18 +14,29 @@ contract TestGracefulDegradation {
         uint256 amount,
         GracefulDegradation.DegradationConfig calldata config
     ) external view returns (GracefulDegradation.PriceResult memory) {
-        return GracefulDegradation.getAssetValueWithFallback(priceOracle, asset, amount, config);
+        return
+            GracefulDegradation.getAssetValueWithFallback(
+                priceOracle,
+                asset,
+                amount,
+                config
+            );
     }
 
     function validateDecimals(uint256 decimals) external pure returns (bool) {
         return GracefulDegradation.validateDecimals(decimals);
     }
 
-    function validateDecimalsWithError(uint256 decimals) external pure returns (bool, string memory) {
+    function validateDecimalsWithError(
+        uint256 decimals
+    ) external pure returns (bool, string memory) {
         return GracefulDegradation.validateDecimalsWithError(decimals);
     }
 
-    function validateAssetDecimals(address asset, uint256 decimals) external pure returns (bool) {
+    function validateAssetDecimals(
+        address asset,
+        uint256 decimals
+    ) external pure returns (bool) {
         return GracefulDegradation.validateAssetDecimals(asset, decimals);
     }
 
@@ -34,7 +45,13 @@ contract TestGracefulDegradation {
         address asset,
         GracefulDegradation.PriceValidationConfig calldata config
     ) external view returns (bool) {
-        return GracefulDegradation.validatePriceReasonableness(currentPrice, asset, config, cacheStorage);
+        return
+            GracefulDegradation.validatePriceReasonableness(
+                currentPrice,
+                asset,
+                config,
+                cacheStorage
+            );
     }
 
     function calculateAssetValue(
@@ -50,10 +67,17 @@ contract TestGracefulDegradation {
         uint256 expectedPrice,
         uint256 tolerance
     ) external pure returns (bool) {
-        return GracefulDegradation.validateStablecoinPrice(actualPrice, expectedPrice, tolerance);
+        return
+            GracefulDegradation.validateStablecoinPrice(
+                actualPrice,
+                expectedPrice,
+                tolerance
+            );
     }
 
-    function createDefaultConfig(address settlementToken) external pure returns (GracefulDegradation.DegradationConfig memory) {
+    function createDefaultConfig(
+        address settlementToken
+    ) external pure returns (GracefulDegradation.DegradationConfig memory) {
         return GracefulDegradation.createDefaultConfig(settlementToken);
     }
 
@@ -62,7 +86,12 @@ contract TestGracefulDegradation {
         uint256 minPriceMultiplier,
         uint256 maxReasonablePrice
     ) external pure returns (GracefulDegradation.PriceValidationConfig memory) {
-        return GracefulDegradation.createPriceValidationConfig(maxPriceMultiplier, minPriceMultiplier, maxReasonablePrice);
+        return
+            GracefulDegradation.createPriceValidationConfig(
+                maxPriceMultiplier,
+                minPriceMultiplier,
+                maxReasonablePrice
+            );
     }
 
     function createStablecoinConfig(
@@ -70,7 +99,12 @@ contract TestGracefulDegradation {
         uint256 expectedPrice,
         uint256 tolerance
     ) external pure returns (GracefulDegradation.StablecoinConfig memory) {
-        return GracefulDegradation.createStablecoinConfig(stablecoin, expectedPrice, tolerance);
+        return
+            GracefulDegradation.createStablecoinConfig(
+                stablecoin,
+                expectedPrice,
+                tolerance
+            );
     }
 
     function createStablecoinConfigWithDecimals(
@@ -79,14 +113,24 @@ contract TestGracefulDegradation {
         uint256 tolerance,
         uint256 assetDecimals
     ) external pure returns (GracefulDegradation.StablecoinConfig memory) {
-        return GracefulDegradation.createStablecoinConfig(stablecoin, expectedPrice, tolerance, assetDecimals);
+        return
+            GracefulDegradation.createStablecoinConfig(
+                stablecoin,
+                expectedPrice,
+                tolerance,
+                assetDecimals
+            );
     }
 
     function createDefaultConfigWithStablecoins(
         address settlementToken,
         GracefulDegradation.StablecoinConfig[] calldata additionalStablecoinConfigs
     ) external pure returns (GracefulDegradation.DegradationConfig memory) {
-        return GracefulDegradation.createDefaultConfigWithStablecoins(settlementToken, additionalStablecoinConfigs);
+        return
+            GracefulDegradation.createDefaultConfigWithStablecoins(
+                settlementToken,
+                additionalStablecoinConfigs
+            );
     }
 
     function MIN_DECIMALS() external pure returns (uint256) {
@@ -97,4 +141,3 @@ contract TestGracefulDegradation {
         return 18;
     }
 }
-

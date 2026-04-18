@@ -116,7 +116,7 @@ contract LoanFlowPushManager is
      *
      * Security:
      * - Restricted to the order-engine source of truth via `_requireNotifier()`.
-    * - Converts token-native debt amounts into the shared 18-decimal valuation unit before pushing.
+     * - Converts token-native debt amounts into the shared 18-decimal valuation unit before pushing.
      *
      * @param user Borrower address
      * @param asset Borrowed asset address
@@ -152,7 +152,7 @@ contract LoanFlowPushManager is
      *
      * Security:
      * - Restricted to the order-engine source of truth via `_requireNotifier()`.
-    * - Converts token-native debt amounts into the shared 18-decimal valuation unit before pushing.
+     * - Converts token-native debt amounts into the shared 18-decimal valuation unit before pushing.
      *
      * @param user Borrower address
      * @param asset Repaid asset address
@@ -186,7 +186,7 @@ contract LoanFlowPushManager is
     /*━━━━━━━━━━━━━━━ Retry APIs (role-gated) ━━━━━━━━━━━━━━━*/
 
     /**
-    * @notice Retry a borrow delta push by recomputing the normalized valuation delta and replaying the view update.
+     * @notice Retry a borrow delta push by recomputing the normalized valuation delta and replaying the view update.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract
      *        (ZeroAddress / NotAContract) (via onlyValidRegistry)
@@ -216,7 +216,7 @@ contract LoanFlowPushManager is
     }
 
     /**
-    * @notice Retry a repay delta push by recomputing the normalized valuation delta and replaying the view update.
+     * @notice Retry a repay delta push by recomputing the normalized valuation delta and replaying the view update.
      * @dev Reverts if:
      *      - Registry is not configured or not a contract
      *        (ZeroAddress / NotAContract) (via onlyValidRegistry)

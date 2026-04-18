@@ -1,43 +1,66 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title RWAToken
- * @dev RWA (Real World Asset) Token - ERC20 implementation
- * @notice 用于抵押借贷/清算示例的 RWA 资产代币（与 EasyToken 不同），支持 mint 和 burn 功能
- * @dev IMPORTANT:
- *      - 该合约是“示例资产 token”，不属于 Reward/EasyToken 体系，也不是治理投票权 token。
- *      - 若要用于生产环境的资产铸造/销毁，请使用更严格的权限与发行策略（例如多签/timelock，或基于 Registry+ACM 的受控模块）。
+ * @notice Example RWA asset token used in collateral, borrow, and liquidation demonstrations.
+ * @dev Reverts if:
+ *      - mint or burn receives a zero address (RWAToken__InvalidAddress)
+ *      - mint or burn receives amount = 0 (RWAToken__ZeroAmount)
+ *      - caller is not the owner for owner-gated mint/burn flows (Ownable)
+ *
+ * Security:
+ * - This token is an example asset token, not part of the Easy / governance-token subsystem.
+ * - Owner-gated mint and burn are suitable for mocks or demos, not production issuance policy.
  */
 contract RWAToken is ERC20, Ownable {
-    // =================== 自定义错误 ===================
+    /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
+    /// @dev Reverts when an address argument is zero where a non-zero address is required.
     error RWAToken__InvalidAddress(address addr);
+    /// @dev Reverts when a mint or burn amount is zero.
     error RWAToken__ZeroAmount();
 
-    /// @notice Mint 事件（示例资产 token）
+    /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
+    /// @notice Emitted when example RWA tokens are minted.
+    /// @dev Event only.
     event TokensMinted(address indexed to, uint256 amount);
 
-    /// @notice Burn 事件（示例资产 token）
+    /// @notice Emitted when example RWA tokens are burned.
+    /// @dev Event only.
     event TokensBurned(address indexed from, uint256 amount);
 
     /**
-     * @dev 构造函数
-     * @param name_ 代币名称
-     * @param symbol_ 代币符号
+     * @notice Deploys the example RWA token and sets the deployer as owner.
+     * @dev Reverts if:
+     *      - none in this contract; upstream ERC20 / Ownable constructor assumptions apply
+     *
+     * Security:
+     * - Ownership starts at msg.sender.
+     * - All privileged mint and owner-burn flows are controlled by Ownable.
+     *
+     * @param name_ ERC20 name.
+     * @param symbol_ ERC20 symbol.
      */
     constructor(
         string memory name_,
         string memory symbol_
     ) ERC20(name_, symbol_) Ownable(msg.sender) {}
-    
+
     /**
-     * @dev 铸造代币
-     * @param to 接收地址
-     * @param amount 铸造数量
-     * @notice 只有 owner 可以调用
+     * @notice Mints example RWA tokens to to.
+     * @dev Reverts if:
+     *      - caller is not the owner (Ownable)
+     *      - to is address(0) (RWAToken__InvalidAddress)
+     *      - amount is zero (RWAToken__ZeroAmount)
+     *
+     * Security:
+     * - Owner-gated example issuance.
+     *
+     * @param to Recipient address.
+     * @param amount Mint amount in token base units.
      */
     function mint(address to, uint256 amount) external onlyOwner {
         if (to == address(0)) revert RWAToken__InvalidAddress(to);
@@ -45,12 +68,19 @@ contract RWAToken is ERC20, Ownable {
         _mint(to, amount);
         emit TokensMinted(to, amount);
     }
-    
+
     /**
-     * @dev 销毁代币
-     * @param from 销毁地址
-     * @param amount 销毁数量
-     * @notice 只有 owner 可以调用
+     * @notice Burns example RWA tokens from from.
+     * @dev Reverts if:
+     *      - caller is not the owner (Ownable)
+     *      - from is address(0) (RWAToken__InvalidAddress)
+     *      - amount is zero (RWAToken__ZeroAmount)
+     *
+     * Security:
+     * - Owner-gated forced burn for demo and fixture management only.
+     *
+     * @param from Address whose balance is burned.
+     * @param amount Burn amount in token base units.
      */
     function burn(address from, uint256 amount) external onlyOwner {
         if (from == address(0)) revert RWAToken__InvalidAddress(from);
@@ -58,14 +88,20 @@ contract RWAToken is ERC20, Ownable {
         _burn(from, amount);
         emit TokensBurned(from, amount);
     }
-    
+
     /**
-     * @dev 销毁自己的代币
-     * @param amount 销毁数量
+     * @notice Burns caller-owned example RWA tokens.
+     * @dev Reverts if:
+     *      - amount is zero (RWAToken__ZeroAmount)
+     *
+     * Security:
+     * - Self-burn only; cannot burn another account's balance.
+     *
+     * @param amount Burn amount in token base units.
      */
     function burn(uint256 amount) external {
         if (amount == 0) revert RWAToken__ZeroAmount();
         _burn(msg.sender, amount);
         emit TokensBurned(msg.sender, amount);
     }
-} 
+}

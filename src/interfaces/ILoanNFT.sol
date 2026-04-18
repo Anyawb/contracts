@@ -208,6 +208,23 @@ interface ILoanNFT {
         uint256 tokenId
     ) external view returns (LoanMetadata memory metadata);
 
+    /**
+     * @notice Get minimal loan identity and lifecycle status for a token id.
+     * @dev Reverts if:
+     *      - `tokenId` does not exist (`LoanNFT__InvalidTokenId`)
+     *
+     * Security:
+     * - View only.
+     * - This method is layout-stable and intended for cross-module status reads.
+     *
+     * @param tokenId Token id.
+     * @return loanId Loan/order id bound to this token.
+     * @return status Current coarse lifecycle status.
+     */
+    function getLoanIdentity(
+        uint256 tokenId
+    ) external view returns (uint256 loanId, LoanStatus status);
+
     /*━━━━━━━━━━━━━━━ RESERVED FOR FUTURE UPGRADE ━━━━━━━━━━━━━━━*/
     // /**
     //  * @notice Batch mint loan certificate NFTs (e.g. for bundled issuance).

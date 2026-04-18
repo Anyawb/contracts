@@ -1,57 +1,89 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface IPositionViewPush {
-    function pushUserPositionUpdate(address user, address asset, uint256 collateral, uint256 debt) external;
+    function pushUserPositionUpdate(
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt
+    ) external;
 }
 
 /// @title MockCollateralManager
-/// @notice 抵押物管理器的Mock实现，用于测试
+/// @notice Mock collateral manager implementation for tests.
 contract MockCollateralManager is ICollateralManager {
     using SafeERC20 for IERC20;
-    // 用户抵押物映射
+    // User collateral storage.
     mapping(address => mapping(address => uint256)) private _userCollateral;
     mapping(address => uint256) private _totalByAsset;
     mapping(address => address[]) private _userAssets;
-    
-    // 测试控制标志
+
+    // Test control flag.
     bool public shouldFail;
-    
-    // 事件
-    event CollateralDeposited(address indexed user, address indexed asset, uint256 amount);
-    event CollateralWithdrawn(address indexed user, address indexed asset, uint256 amount);
-    
-    /// @notice 存入抵押物
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 存入金额
-    function depositCollateral(address user, address asset, uint256 amount) external override {
+
+    // Events.
+    event CollateralDeposited(
+        address indexed user,
+        address indexed asset,
+        uint256 amount
+    );
+    event CollateralWithdrawn(
+        address indexed user,
+        address indexed asset,
+        uint256 amount
+    );
+
+    /// @notice Records a collateral deposit.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Deposit amount.
+    function depositCollateral(
+        address user,
+        address asset,
+        uint256 amount
+    ) external override {
         if (shouldFail) revert("MCM: deposit fail");
         _userCollateral[user][asset] += amount;
         _totalByAsset[asset] += amount;
         _addAsset(user, asset);
         emit CollateralDeposited(user, asset, amount);
     }
-    
-    /// @notice 提取抵押物
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 提取金额
-    function withdrawCollateral(address user, address asset, uint256 amount) external override {
+
+    /// @notice Records a collateral withdrawal.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Withdrawal amount.
+    function withdrawCollateral(
+        address user,
+        address asset,
+        uint256 amount
+    ) external override {
         if (shouldFail) revert("MCM: withdraw fail");
-        require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
+        require(
+            _userCollateral[user][asset] >= amount,
+            "Insufficient collateral"
+        );
         _userCollateral[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
         emit CollateralWithdrawn(user, asset, amount);
     }
 
-    function withdrawCollateralTo(address user, address asset, uint256 amount, address receiver) external override {
+    function withdrawCollateralTo(
+        address user,
+        address asset,
+        uint256 amount,
+        address receiver
+    ) external override {
         if (shouldFail) revert("MCM: withdraw fail");
-        require(_userCollateral[user][asset] >= amount, "Insufficient collateral");
+        require(
+            _userCollateral[user][asset] >= amount,
+            "Insufficient collateral"
+        );
         _userCollateral[user][asset] -= amount;
         _totalByAsset[asset] -= amount;
         if (asset.code.length > 0) {
@@ -60,87 +92,121 @@ contract MockCollateralManager is ICollateralManager {
         emit CollateralWithdrawn(user, asset, amount);
     }
 
-    /// @notice 获取用户抵押物数量
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return 抵押物数量
-    function getCollateral(address user, address asset) external view override returns (uint256) {
+    /// @notice Returns collateral for a user and asset.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @return Collateral amount.
+    function getCollateral(
+        address user,
+        address asset
+    ) external view override returns (uint256) {
         if (shouldFail) revert("MCM: get fail");
         return _userCollateral[user][asset];
     }
-    
-    /// @notice 获取资产总抵押物数量
-    /// @param asset 资产地址
-    /// @return 总抵押物数量
-    function getTotalCollateralByAsset(address asset) external view override returns (uint256) {
+
+    /// @notice Returns total collateral tracked for an asset.
+    /// @param asset Asset address.
+    /// @return Total collateral amount.
+    function getTotalCollateralByAsset(
+        address asset
+    ) external view override returns (uint256) {
         return _totalByAsset[asset];
     }
-    
-    /// @notice 测试辅助：直接设置资产总抵押
+
+    /// @notice Test helper that overrides the total collateral tracked for an asset.
     function setTotalCollateralByAsset(address asset, uint256 amount) external {
         _totalByAsset[asset] = amount;
     }
-    
-    /// @notice 获取用户抵押物资产列表
-    /// @param _user 用户地址
-    /// @return 资产地址数组
-    function getUserCollateralAssets(address _user) external view override returns (address[] memory) {
+
+    /// @notice Returns the collateral-asset list tracked for a user.
+    /// @param _user User address.
+    /// @return Asset address array.
+    function getUserCollateralAssets(
+        address _user
+    ) external view override returns (address[] memory) {
         return _userAssets[_user];
     }
-    
-    /// @notice 获取用户抵押物数量（兼容性方法）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return 抵押物数量
-    function getUserCollateral(address user, address asset) external view returns (uint256) {
+
+    /// @notice Compatibility helper that returns user collateral for an asset.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @return Collateral amount.
+    function getUserCollateral(
+        address user,
+        address asset
+    ) external view returns (uint256) {
         return _userCollateral[user][asset];
     }
-    
-    /// @notice 检查用户是否有足够的抵押物
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 所需金额
-    /// @return 是否有足够的抵押物
-    function hasSufficientCollateral(address user, address asset, uint256 amount) external view returns (bool) {
+
+    /// @notice Returns whether a user has at least the requested collateral amount.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Required amount.
+    /// @return True when the user has sufficient collateral.
+    function hasSufficientCollateral(
+        address user,
+        address asset,
+        uint256 amount
+    ) external view returns (bool) {
         return _userCollateral[user][asset] >= amount;
     }
 
-    /// @notice 扣押用户抵押物（清算时使用）
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 扣押金额
-    /// @param liquidator 清算人地址
-    /// @return seizedAmount 实际扣押金额
-    function seizeCollateral(address user, address asset, uint256 amount, address liquidator) external returns (uint256 seizedAmount) {
+    /// @notice Seizes collateral for liquidation flows.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Requested seizure amount.
+    /// @param liquidator Liquidator address.
+    /// @return seizedAmount Actual seized amount.
+    function seizeCollateral(
+        address user,
+        address asset,
+        uint256 amount,
+        address liquidator
+    ) external returns (uint256 seizedAmount) {
         require(user != address(0), "Invalid user address");
         require(asset != address(0), "Invalid asset address");
         require(amount > 0, "Invalid amount");
         require(liquidator != address(0), "Invalid liquidator address");
-        
+
         uint256 availableCollateral = _userCollateral[user][asset];
-        seizedAmount = amount > availableCollateral ? availableCollateral : amount;
-        
+        seizedAmount = amount > availableCollateral
+            ? availableCollateral
+            : amount;
+
         if (seizedAmount > 0) {
             _userCollateral[user][asset] -= seizedAmount;
             _totalByAsset[asset] -= seizedAmount;
-            
-            // 发出扣押事件
-            emit CollateralSeized(liquidator, user, asset, seizedAmount, block.number);
+
+            // Emit the collateral seizure event.
+            emit CollateralSeized(
+                liquidator,
+                user,
+                asset,
+                seizedAmount,
+                block.number
+            );
         }
-        
+
         return seizedAmount;
     }
 
-    /// @notice 获取用户可扣押的抵押物数量
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @return seizableAmount 可扣押数量
-    function getSeizableCollateralAmount(address user, address asset) external view returns (uint256 seizableAmount) {
+    /// @notice Returns the amount of collateral that can be seized.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @return seizableAmount Seizable amount.
+    function getSeizableCollateralAmount(
+        address user,
+        address asset
+    ) external view returns (uint256 seizableAmount) {
         return _userCollateral[user][asset];
     }
 
-    /// @notice 测试辅助：直接设置用户抵押
-    function setUserCollateral(address user, address asset, uint256 amount) external {
+    /// @notice Test helper that overrides a user's collateral amount.
+    function setUserCollateral(
+        address user,
+        address asset,
+        uint256 amount
+    ) external {
         _userCollateral[user][asset] = amount;
         _totalByAsset[asset] = amount;
         _addAsset(user, asset);
@@ -156,7 +222,7 @@ contract MockCollateralManager is ICollateralManager {
         assets.push(asset);
     }
 
-    // 事件
+    // Events.
     event CollateralSeized(
         address indexed liquidator,
         address indexed user,
@@ -165,14 +231,25 @@ contract MockCollateralManager is ICollateralManager {
         uint256 blockNumber
     );
 
-    /// @notice 设置失败标志（测试用）
-    /// @param fail 是否失败
+    /// @notice Sets whether mock operations should fail.
+    /// @param fail True when operations should fail.
     function setShouldFail(bool fail) external {
         shouldFail = fail;
     }
 
-    /// @notice 测试辅助：以本合约身份调用 PositionView 推送缓存
-    function pushToPositionView(address positionView, address user, address asset, uint256 collateral, uint256 debt) external {
-        IPositionViewPush(positionView).pushUserPositionUpdate(user, asset, collateral, debt);
+    /// @notice Test helper that pushes PositionView cache updates through this contract.
+    function pushToPositionView(
+        address positionView,
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt
+    ) external {
+        IPositionViewPush(positionView).pushUserPositionUpdate(
+            user,
+            asset,
+            collateral,
+            debt
+        );
     }
 }

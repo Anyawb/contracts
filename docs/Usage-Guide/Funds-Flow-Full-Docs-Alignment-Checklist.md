@@ -19,14 +19,14 @@
 - 第一层：`lifecycle + closeReason`。
 - 第二层：`shortfallStatus`。
 - 第三层：`collateralDisposition`。
-- blocks-only：必须显式区分“债务已清但仍未关闭（debt-free open）”与“已收尾（trade closeout / maturity closeout / maturity delivery closeout）”。
+- blocks-only：必须显式区分“债务已清但仍未关闭（debt-free open）”与“已收尾（trade closeout / maturity closeout）”。
 - 兼容枚举（如 `LiquidatedWithShortfall`、`TRADE_CLOSED`、`SETTLED`）只能作为兼容读面/事件名，不得再写成主状态机语义。
 
 ## 3) P0（必须先改）
 
 - [x] `docs/FRONTEND_CONTRACTS_INTEGRATION.md:7`
   - 问题：仍写“blocks-only 暂不作为默认前端接入/上线 checklist”。
-  - 对齐要求：改为“blocks-only 已进入主线；按 trade closeout / maturity closeout / maturity delivery closeout + 三层状态模型接入”。
+  - 对齐要求：改为“blocks-only 已进入主线；按 trade closeout / maturity closeout + 三层状态模型接入”。
 
 - [x] `docs/FRONTEND_CONTRACTS_INTEGRATION.md:30`
   - 问题：仍写“blocks-only 不纳入默认建模要求”。
@@ -42,7 +42,7 @@
 
 - [x] `docs/FRONTEND_CONTRACTS_INTEGRATION.md:2863`
   - 问题：仍写“blocks-only 不纳入默认前端/keeper 集成范围”。
-  - 对齐要求：改为“纳入默认范围，区分 trade closeout、maturity closeout 与 maturity delivery closeout”。
+  - 对齐要求：改为“纳入默认范围，区分 trade closeout 与 maturity closeout”。
 
 - [x] `docs/FRONTEND_CONTRACTS_INTEGRATION.md:2943`
   - 问题：仍写“blocks-only 订单入口不在默认 keeper 范围内”。

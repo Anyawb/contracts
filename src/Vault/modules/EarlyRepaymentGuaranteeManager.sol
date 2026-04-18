@@ -678,7 +678,7 @@ contract EarlyRepaymentGuaranteeManager is
      *      - GuaranteeFundManager settlement reverts (ExternalModuleRevertedRaw)
      *
      * Security:
-    * - onlySettlementManager
+     * - onlySettlementManager
      * - nonReentrant
      * - CEI: state is updated before calling external module
      *
@@ -780,7 +780,7 @@ contract EarlyRepaymentGuaranteeManager is
      *      - GuaranteeFundManager forfeiture reverts (ExternalModuleRevertedRaw)
      *
      * Security:
-    * - onlySettlementManager
+     * - onlySettlementManager
      * - nonReentrant
      * - CEI: state is updated before calling external module
      *

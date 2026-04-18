@@ -18,12 +18,16 @@ contract MockVotesToken {
         _totalSupply = totalSupply_;
     }
 
-    function getPastVotes(address account, uint256 /* timepoint */) external view returns (uint256) {
+    function getPastVotes(
+        address account,
+        uint256 /* timepoint */
+    ) external view returns (uint256) {
         return _votes[account];
     }
 
-    function getPastTotalSupply(uint256 /* timepoint */) external view returns (uint256) {
+    function getPastTotalSupply(
+        uint256 /* timepoint */
+    ) external view returns (uint256) {
         return _totalSupply;
     }
 }
-

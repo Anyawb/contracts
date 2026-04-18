@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
-import { ILoanNFT } from "../../../interfaces/ILoanNFT.sol";
-import { IOrderStateStoreV2 } from "../../../interfaces/IOrderStateStoreV2.sol";
-import { BatchTooLarge, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
+import {ILoanNFT} from "../../../interfaces/ILoanNFT.sol";
+import {IOrderStateStoreV2} from "../../../interfaces/IOrderStateStoreV2.sol";
+import {
+    BatchTooLarge,
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
 
 /**
  * @title LoanNFTView
@@ -63,8 +68,17 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U: self-read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyAuthorizedUser(address user) {
         if (
-            msg.sender != user && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            msg.sender != user &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -84,7 +98,8 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -107,7 +122,9 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
     * @return isValid True if the read succeeded.
     * @return blockNumber Read block number.
      */
-    function getUserLoanCount(address user)
+    function getUserLoanCount(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -119,35 +136,45 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-    * @notice Return a user's LoanNFT tokenIds with pagination.
-    * @dev Reverts if:
-    *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-    *      - caller is not authorized for `user` (MissingRole via onlyAuthorizedUser)
-    *      - limit is zero (LoanNFTView__InvalidLimit)
-    *      - limit exceeds `_MAX_BATCH_SIZE` (BatchTooLarge)
-    *
-    * Security:
-    * - Scheme U user-scoped read gate.
-    * - View-only.
-    *
-    * @param user Target user address.
-    * @param offset Zero-based offset into the user's token list.
-    * @param limit Maximum number of tokenIds to return.
-    * @return tokenIds Token ids in the requested page.
-    * @return totalCount Total token count for the user.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @notice Return a user's LoanNFT tokenIds with pagination.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not authorized for `user` (MissingRole via onlyAuthorizedUser)
+     *      - limit is zero (LoanNFTView__InvalidLimit)
+     *      - limit exceeds `_MAX_BATCH_SIZE` (BatchTooLarge)
+     *
+     * Security:
+     * - Scheme U user-scoped read gate.
+     * - View-only.
+     *
+     * @param user Target user address.
+     * @param offset Zero-based offset into the user's token list.
+     * @param limit Maximum number of tokenIds to return.
+     * @return tokenIds Token ids in the requested page.
+     * @return totalCount Total token count for the user.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
-    function getUserTokenIdsPaginated(address user, uint256 offset, uint256 limit)
+    function getUserTokenIdsPaginated(
+        address user,
+        uint256 offset,
+        uint256 limit
+    )
         external
         view
         onlyValidRegistry
         onlyAuthorizedUser(user)
-        returns (uint256[] memory tokenIds, uint256 totalCount, bool isValid, uint256 blockNumber)
+        returns (
+            uint256[] memory tokenIds,
+            uint256 totalCount,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         _validateLimit(limit);
         totalCount = _loanNftEnumerable().balanceOf(user);
-        if (offset >= totalCount) return (new uint256[](0), totalCount, true, _now());
+        if (offset >= totalCount)
+            return (new uint256[](0), totalCount, true, _now());
 
         uint256 end = offset + limit;
         if (end > totalCount) end = totalCount;
@@ -155,45 +182,60 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         tokenIds = new uint256[](pageLen);
         for (uint256 i; i < pageLen; ) {
-            tokenIds[i] = _loanNftEnumerable().tokenOfOwnerByIndex(user, offset + i);
-            unchecked { ++i; }
+            tokenIds[i] = _loanNftEnumerable().tokenOfOwnerByIndex(
+                user,
+                offset + i
+            );
+            unchecked {
+                ++i;
+            }
         }
         return (tokenIds, totalCount, true, _now());
     }
 
     /**
-    * @notice Return a user's loans as paginated LoanNFT items.
-    * @dev Reverts if:
-    *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
-    *      - caller is not authorized for `user` (MissingRole via onlyAuthorizedUser)
-    *      - limit is zero (LoanNFTView__InvalidLimit)
-    *      - limit exceeds `_MAX_BATCH_SIZE` (BatchTooLarge)
-    *
-    *      Each item includes the current LoanNFT-backed lifecycle status snapshot so user-scoped UIs
-    *      do not need to infer coarse order state from unrelated accounting fields.
-    *
-    * Security:
-    * - Scheme U user-scoped read gate.
-    * - View-only.
-    *
-    * @param user Target user address.
-    * @param offset Zero-based offset into the user's token list.
-    * @param limit Maximum number of items to return.
-    * @return items LoanNFT items for the requested page.
-    * @return totalCount Total token count for the user.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @notice Return a user's loans as paginated LoanNFT items.
+     * @dev Reverts if:
+     *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
+     *      - caller is not authorized for `user` (MissingRole via onlyAuthorizedUser)
+     *      - limit is zero (LoanNFTView__InvalidLimit)
+     *      - limit exceeds `_MAX_BATCH_SIZE` (BatchTooLarge)
+     *
+     *      Each item includes the current LoanNFT-backed lifecycle status snapshot so user-scoped UIs
+     *      do not need to infer coarse order state from unrelated accounting fields.
+     *
+     * Security:
+     * - Scheme U user-scoped read gate.
+     * - View-only.
+     *
+     * @param user Target user address.
+     * @param offset Zero-based offset into the user's token list.
+     * @param limit Maximum number of items to return.
+     * @return items LoanNFT items for the requested page.
+     * @return totalCount Total token count for the user.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
-    function getUserLoansPaginated(address user, uint256 offset, uint256 limit)
+    function getUserLoansPaginated(
+        address user,
+        uint256 offset,
+        uint256 limit
+    )
         external
         view
         onlyValidRegistry
         onlyAuthorizedUser(user)
-        returns (UserLoanNftItem[] memory items, uint256 totalCount, bool isValid, uint256 blockNumber)
+        returns (
+            UserLoanNftItem[] memory items,
+            uint256 totalCount,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         _validateLimit(limit);
         totalCount = _loanNftEnumerable().balanceOf(user);
-        if (offset >= totalCount) return (new UserLoanNftItem[](0), totalCount, true, _now());
+        if (offset >= totalCount)
+            return (new UserLoanNftItem[](0), totalCount, true, _now());
 
         uint256 end = offset + limit;
         if (end > totalCount) end = totalCount;
@@ -201,19 +243,36 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
         items = new UserLoanNftItem[](pageLen);
 
         ILoanNFT loanNft = _loanNft();
-        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) = _tryOrderStateStore();
+        (
+            IOrderStateStoreV2 orderStateStore,
+            bool hasOrderStateStore
+        ) = _tryOrderStateStore();
         for (uint256 i; i < pageLen; ) {
-            uint256 tokenId = _loanNftEnumerable().tokenOfOwnerByIndex(user, offset + i);
-            ILoanNFT.LoanMetadata memory meta = loanNft.getLoanMetadata(tokenId);
-            ILoanNFT.LoanStatus status = meta.status;
+            uint256 tokenId = _loanNftEnumerable().tokenOfOwnerByIndex(
+                user,
+                offset + i
+            );
+            (
+                uint256 loanId,
+                ILoanNFT.LoanStatus status
+            ) = _readLoanIdentityCompat(loanNft, tokenId);
             if (
-                hasOrderStateStore
-                    && orderStateStore.hasOrderState(IOrderStateStoreV2.OrderProductType.LOAN, meta.loanId)
+                hasOrderStateStore &&
+                orderStateStore.hasOrderState(
+                    IOrderStateStoreV2.OrderProductType.LOAN,
+                    loanId
+                )
             ) {
-                status = orderStateStore.getLegacyLoanStatus(meta.loanId);
+                status = orderStateStore.getLegacyLoanStatus(loanId);
             }
-            items[i] = UserLoanNftItem({ tokenId: tokenId, orderId: meta.loanId, status: status });
-            unchecked { ++i; }
+            items[i] = UserLoanNftItem({
+                tokenId: tokenId,
+                orderId: loanId,
+                status: status
+            });
+            unchecked {
+                ++i;
+            }
         }
         return (items, totalCount, true, _now());
     }
@@ -240,36 +299,80 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     function _validateLimit(uint256 limit) internal pure {
         if (limit == 0) revert LoanNFTView__InvalidLimit();
-        if (limit > _MAX_BATCH_SIZE) revert BatchTooLarge(limit, _MAX_BATCH_SIZE);
+        if (limit > _MAX_BATCH_SIZE)
+            revert BatchTooLarge(limit, _MAX_BATCH_SIZE);
     }
 
     function _loanNft() internal view returns (ILoanNFT) {
-        address loanNftAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LOAN_NFT);
+        address loanNftAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_LOAN_NFT
+        );
         if (loanNftAddr.code.length == 0) revert NotAContract(loanNftAddr);
         return ILoanNFT(loanNftAddr);
     }
 
-    function _loanNftEnumerable() internal view returns (IERC721EnumerableLike) {
-        address loanNftAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LOAN_NFT);
+    function _loanNftEnumerable()
+        internal
+        view
+        returns (IERC721EnumerableLike)
+    {
+        address loanNftAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_LOAN_NFT
+        );
         if (loanNftAddr.code.length == 0) revert NotAContract(loanNftAddr);
         return IERC721EnumerableLike(loanNftAddr);
     }
 
-    function _tryOrderStateStore() internal view returns (IOrderStateStoreV2 orderStateStore, bool hasStore) {
-        address orderStateStoreAddr = Registry(_registryAddr).getModule(ModuleKeys.KEY_ORDER_STATE_STORE);
-        if (orderStateStoreAddr == address(0) || orderStateStoreAddr.code.length == 0) {
+    function _readLoanIdentityCompat(
+        ILoanNFT loanNft,
+        uint256 tokenId
+    ) internal view returns (uint256 loanId, ILoanNFT.LoanStatus status) {
+        try loanNft.getLoanIdentity(tokenId) returns (
+            uint256 id,
+            ILoanNFT.LoanStatus st
+        ) {
+            return (id, st);
+        } catch {
+            ILoanNFT.LoanMetadata memory meta = loanNft.getLoanMetadata(
+                tokenId
+            );
+            return (meta.loanId, meta.status);
+        }
+    }
+
+    function _tryOrderStateStore()
+        internal
+        view
+        returns (IOrderStateStoreV2 orderStateStore, bool hasStore)
+    {
+        address orderStateStoreAddr = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_ORDER_STATE_STORE
+        );
+        if (
+            orderStateStoreAddr == address(0) ||
+            orderStateStoreAddr.code.length == 0
+        ) {
             return (IOrderStateStoreV2(address(0)), false);
         }
 
         return (IOrderStateStoreV2(orderStateStoreAddr), true);
     }
 
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
@@ -290,5 +393,8 @@ contract LoanNFTView is Initializable, UUPSUpgradeable, ViewVersioned {
 /// @dev Minimal ERC721Enumerable surface for LoanNFT enumeration.
 interface IERC721EnumerableLike {
     function balanceOf(address owner) external view returns (uint256);
-    function tokenOfOwnerByIndex(address owner, uint256 index) external view returns (uint256);
+    function tokenOfOwnerByIndex(
+        address owner,
+        uint256 index
+    ) external view returns (uint256);
 }

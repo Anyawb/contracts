@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { ILendingEngineDebtWrite } from "../interfaces/ILendingEngineDebtWrite.sol";
-import { IOrderEngine } from "../interfaces/IOrderEngine.sol";
-import { ILoanNFT } from "../interfaces/ILoanNFT.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ILendingEngineDebtWrite} from "../interfaces/ILendingEngineDebtWrite.sol";
+import {IOrderEngine} from "../interfaces/IOrderEngine.sol";
+import {ILoanNFT} from "../interfaces/ILoanNFT.sol";
 
 /// @title MockOrderEngineForSettlementManager
 /// @notice Minimal ORDER_ENGINE mock for SettlementManager integration tests.
@@ -37,9 +37,20 @@ contract MockOrderEngineForSettlementManager {
     /// @notice Optional linked debt ledger (KEY_LE) to simulate principal repayment effects.
     address public lendingEngineAddrVar;
 
-    event MockOrderSet(uint256 indexed orderId, address borrower, address asset);
+    event MockOrderSet(
+        uint256 indexed orderId,
+        address borrower,
+        address asset
+    );
     event MockRepaid(uint256 indexed orderId, uint256 repayAmount);
-    event MockOrderCreated(uint256 indexed orderId, address borrower, address lender, address asset, uint256 principal, uint256 maturity);
+    event MockOrderCreated(
+        uint256 indexed orderId,
+        address borrower,
+        address lender,
+        address asset,
+        uint256 principal,
+        uint256 maturity
+    );
     event MockOrderStatusUpdated(uint256 indexed orderId, uint8 status);
 
     function setLendingEngine(address le) external {
@@ -61,20 +72,31 @@ contract MockOrderEngineForSettlementManager {
         emit MockOrderStatusUpdated(orderId, status);
     }
 
-    function setOrderTotalDueOverride(uint256 orderId, uint256 totalDue) external {
+    function setOrderTotalDueOverride(
+        uint256 orderId,
+        uint256 totalDue
+    ) external {
         _totalDueOverride[orderId] = totalDue;
     }
 
     /// @notice Create a new order (for SettlementMatchLib tests).
     /// @dev Accepts IOrderEngine.LoanOrder calldata to match the SSOT interface used by production code.
-    function createLoanOrder(IOrderEngine.LoanOrder calldata order) external returns (uint256 orderId) {
+    function createLoanOrder(
+        IOrderEngine.LoanOrder calldata order
+    ) external returns (uint256 orderId) {
         // Assign id
         orderId = _nextOrderId;
-        unchecked { _nextOrderId = _nextOrderId + 1; }
+        unchecked {
+            _nextOrderId = _nextOrderId + 1;
+        }
 
         // Populate stored order; set start/maturity if caller left them as 0 (common in tests/libraries).
-        uint256 startTs = order.startTimestamp == 0 ? block.number : order.startTimestamp;
-        uint256 maturity = order.maturity == 0 ? startTs + order.term : order.maturity;
+        uint256 startTs = order.startTimestamp == 0
+            ? block.number
+            : order.startTimestamp;
+        uint256 maturity = order.maturity == 0
+            ? startTs + order.term
+            : order.maturity;
 
         _orders[orderId] = LoanOrder({
             principal: order.principal,
@@ -89,35 +111,61 @@ contract MockOrderEngineForSettlementManager {
         });
         _orderStatuses[orderId] = ILoanNFT.LoanStatus.Active;
 
-        emit MockOrderCreated(orderId, order.borrower, order.lender, order.asset, order.principal, maturity);
+        emit MockOrderCreated(
+            orderId,
+            order.borrower,
+            order.lender,
+            order.asset,
+            order.principal,
+            maturity
+        );
     }
 
-    function getLoanOrderForView(uint256 orderId) external view returns (LoanOrder memory order) {
+    function getLoanOrderForView(
+        uint256 orderId
+    ) external view returns (LoanOrder memory order) {
         return _orders[orderId];
     }
 
-    function getOrderTotalDueForView(uint256 orderId) external view returns (uint256 totalDue) {
+    function getOrderTotalDueForView(
+        uint256 orderId
+    ) external view returns (uint256 totalDue) {
         LoanOrder memory ord = _orders[orderId];
-        require(ord.borrower != address(0) && ord.asset != address(0), "MockOrderEngine: invalid order");
+        require(
+            ord.borrower != address(0) && ord.asset != address(0),
+            "MockOrderEngine: invalid order"
+        );
 
         totalDue = _totalDueOverride[orderId];
         if (totalDue != 0) {
             return totalDue;
         }
 
-        uint256 interest = (ord.principal * ord.rate * ord.term) / (2_628_000 * 1e4);
+        uint256 interest = (ord.principal * ord.rate * ord.term) /
+            (2_628_000 * 1e4);
         return ord.principal + interest;
     }
 
-    function getOrderStatusForView(uint256 orderId) external view returns (ILoanNFT.LoanStatus status) {
+    function getOrderStatusForView(
+        uint256 orderId
+    ) external view returns (ILoanNFT.LoanStatus status) {
         LoanOrder memory ord = _orders[orderId];
-        require(ord.borrower != address(0) && ord.asset != address(0), "MockOrderEngine: invalid order");
+        require(
+            ord.borrower != address(0) && ord.asset != address(0),
+            "MockOrderEngine: invalid order"
+        );
         return _orderStatuses[orderId];
     }
 
-    function markOrderLiquidationStatus(uint256 orderId, ILoanNFT.LoanStatus status) external {
+    function markOrderLiquidationStatus(
+        uint256 orderId,
+        ILoanNFT.LoanStatus status
+    ) external {
         LoanOrder memory ord = _orders[orderId];
-        require(ord.borrower != address(0) && ord.asset != address(0), "MockOrderEngine: invalid order");
+        require(
+            ord.borrower != address(0) && ord.asset != address(0),
+            "MockOrderEngine: invalid order"
+        );
         _orderStatuses[orderId] = status;
         emit MockOrderStatusUpdated(orderId, uint8(status));
     }
@@ -126,33 +174,53 @@ contract MockOrderEngineForSettlementManager {
     /// @dev This is intentionally simplified: treat repayAmount as "principal delta" for KEY_LE.
     function repay(uint256 orderId, uint256 repayAmount) external {
         LoanOrder storage ord = _orders[orderId];
-        require(ord.borrower != address(0) && ord.asset != address(0), "MockOrderEngine: invalid order");
+        require(
+            ord.borrower != address(0) && ord.asset != address(0),
+            "MockOrderEngine: invalid order"
+        );
         require(repayAmount > 0, "MockOrderEngine: repayAmount=0");
         require(
             _orderStatuses[orderId] != ILoanNFT.LoanStatus.Liquidated &&
                 _orderStatuses[orderId] != ILoanNFT.LoanStatus.Defaulted &&
-                _orderStatuses[orderId] != ILoanNFT.LoanStatus.LiquidatedWithShortfall &&
-                _orderStatuses[orderId] != ILoanNFT.LoanStatus.DefaultedWithShortfall,
+                _orderStatuses[orderId] !=
+                    ILoanNFT.LoanStatus.LiquidatedWithShortfall &&
+                _orderStatuses[orderId] !=
+                    ILoanNFT.LoanStatus.DefaultedWithShortfall,
             "MockOrderEngine: order not repayable"
         );
 
-        uint256 pullAmount = repayPullAmountOverride == 0 ? repayAmount : repayPullAmountOverride;
-        require(pullAmount <= repayAmount, "MockOrderEngine: pullAmount exceeds repay");
+        uint256 pullAmount = repayPullAmountOverride == 0
+            ? repayAmount
+            : repayPullAmountOverride;
+        require(
+            pullAmount <= repayAmount,
+            "MockOrderEngine: pullAmount exceeds repay"
+        );
 
-        IERC20(ord.asset).safeTransferFrom(msg.sender, address(this), pullAmount);
+        IERC20(ord.asset).safeTransferFrom(
+            msg.sender,
+            address(this),
+            pullAmount
+        );
         ord.repaidAmount += repayAmount;
 
         address le = lendingEngineAddrVar;
         if (le != address(0)) {
-            ILendingEngineDebtWrite(le).repay(ord.borrower, ord.asset, repayAmount);
+            ILendingEngineDebtWrite(le).repay(
+                ord.borrower,
+                ord.asset,
+                repayAmount
+            );
         }
 
         if (ord.repaidAmount >= this.getOrderTotalDueForView(orderId)) {
             _orderStatuses[orderId] = ILoanNFT.LoanStatus.Repaid;
-            emit MockOrderStatusUpdated(orderId, uint8(ILoanNFT.LoanStatus.Repaid));
+            emit MockOrderStatusUpdated(
+                orderId,
+                uint8(ILoanNFT.LoanStatus.Repaid)
+            );
         }
 
         emit MockRepaid(orderId, repayAmount);
     }
 }
-

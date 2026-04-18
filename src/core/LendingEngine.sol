@@ -577,9 +577,8 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         // Long duration (>= _DUR_90D_BLOCKS baseline) requires user level >= 4.
         // Security: read canonical level from RewardManagerCore, not RewardView mirror cache.
         if (_isLongDuration(order.term)) {
-            address rewardManagerCore = IRegistry(_registryAddr).getModuleOrRevert(
-                ModuleKeys.KEY_REWARD_MANAGER_CORE
-            );
+            address rewardManagerCore = IRegistry(_registryAddr)
+                .getModuleOrRevert(ModuleKeys.KEY_REWARD_MANAGER_CORE);
             uint8 level = IRewardManagerCoreBorrowCheck(rewardManagerCore)
                 .getUserLevelForBorrowCheck(order.borrower);
             if (level < 4) revert LendingEngine__LevelTooLow();
@@ -628,8 +627,10 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         uint256 tokenId = _mintNftWithRetry(orderId, order.borrower, meta);
         _orderToTokenId[orderId] = tokenId;
 
-        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
-            _tryOrderStateStore();
+        (
+            IOrderStateStoreV2 orderStateStore,
+            bool hasOrderStateStore
+        ) = _tryOrderStateStore();
         if (hasOrderStateStore) {
             orderStateStore.initializeLoanOrderState(orderId, startBlock);
         }
@@ -732,7 +733,7 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      * @notice Repay a loan order (partial or full).
      * @dev Reverts if:
      *      - system is paused (PausedSystem)
-        *      - caller lacks ACTION_REPAY (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
+     *      - caller lacks ACTION_REPAY (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
      *      - orderId is invalid (LendingEngine__InvalidOrder)
      *      - order is already fully repaid (LendingEngine__AlreadyRepaid)
      *      - repayAmount is zero or exceeds remaining due (LendingEngine__InvalidRepayAmount)
@@ -740,8 +741,8 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
      *      - ERC20 transfer/approve fails (SafeERC20)
      *
      * Security:
-    * - Role-gated via ACM (ACTION_REPAY) for general callers; SettlementManager is the documented SSOT repay
-    *   orchestrator and is explicitly allowed without an extra runtime role grant.
+     * - Role-gated via ACM (ACTION_REPAY) for general callers; SettlementManager is the documented SSOT repay
+     *   orchestrator and is explicitly allowed without an extra runtime role grant.
      * - External calls: FeeRouter (best-effort), VaultCore.repayFor (hard requirement), ERC20 transfers
      *
      * @param orderId Target order id.
@@ -898,8 +899,10 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
 
         // If fully repaid, update LoanNFT status.
         if (isFullyRepaid) {
-            (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
-                _tryOrderStateStore();
+            (
+                IOrderStateStoreV2 orderStateStore,
+                bool hasOrderStateStore
+            ) = _tryOrderStateStore();
             if (hasOrderStateStore) {
                 orderStateStore.markLoanRepaid(orderId, ord.startTimestamp);
             }
@@ -973,13 +976,13 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     /**
      * @notice View-adapter: get loan order data by id.
      * @dev Reverts if:
-          *      - caller lacks ACTION_VIEW_SYSTEM_DATA (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
-      *      - orderId does not exist
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
+     *      - orderId does not exist
      *
      * Security:
-    * - View-only
-    * - Role-gated (ACTION_VIEW_SYSTEM_DATA) for general callers; SettlementManager is explicitly allowed because
-    *   the repay/settle SSOT must cross-check order ownership and debt asset before repayment.
+     * - View-only
+     * - Role-gated (ACTION_VIEW_SYSTEM_DATA) for general callers; SettlementManager is explicitly allowed because
+     *   the repay/settle SSOT must cross-check order ownership and debt asset before repayment.
      *
      * @param orderId Loan order id.
      * @return order Loan order snapshot.
@@ -1000,13 +1003,13 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
     /**
      * @notice View-adapter: return the ORDER_ENGINE-authoritative total due for an order.
      * @dev Reverts if:
-        *      - caller lacks ACTION_VIEW_SYSTEM_DATA (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
+     *      - caller lacks ACTION_VIEW_SYSTEM_DATA (via ACM), unless caller is Registry[KEY_SETTLEMENT_MANAGER]
      *      - orderId does not exist
      *
      * Security:
-    * - View-only
-    * - Role-gated (ACTION_VIEW_SYSTEM_DATA) for general callers; SettlementManager is explicitly allowed because
-    *   it is the SSOT consumer of this total-due read during unified repayment.
+     * - View-only
+     * - Role-gated (ACTION_VIEW_SYSTEM_DATA) for general callers; SettlementManager is explicitly allowed because
+     *   it is the SSOT consumer of this total-due read during unified repayment.
      *
      * @param orderId Loan order id.
      * @return totalDue Total due amount (token decimals of order.asset).
@@ -1043,8 +1046,10 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         LoanOrder memory ord = _loanOrders[orderId];
         if (ord.borrower == address(0)) revert LendingEngine__InvalidOrder();
 
-        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
-            _tryOrderStateStore();
+        (
+            IOrderStateStoreV2 orderStateStore,
+            bool hasOrderStateStore
+        ) = _tryOrderStateStore();
         if (
             hasOrderStateStore &&
             orderStateStore.hasOrderState(
@@ -1391,7 +1396,9 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
 
     /// @dev SettlementManager is the SSOT repay/settle orchestrator and therefore may access the
     ///      order-level repay adapter and the minimal order read adapters without extra ACM roles.
-    function _isSettlementManagerCaller(address caller) internal view returns (bool) {
+    function _isSettlementManagerCaller(
+        address caller
+    ) internal view returns (bool) {
         if (_registryAddr == address(0)) {
             return false;
         }
@@ -1466,9 +1473,89 @@ contract LendingEngine is Initializable, PausableUpgradeable, UUPSUpgradeable {
         ILoanNFT loanNft
     ) internal view returns (ILoanNFT.LoanStatus status) {
         uint256 tokenId = _orderToTokenId[orderId];
-        ILoanNFT.LoanMetadata memory meta = loanNft.getLoanMetadata(tokenId);
-        if (meta.loanId != orderId) revert LendingEngine__InvalidOrder();
-        return meta.status;
+        (
+            bool ok,
+            uint256 loanId,
+            ILoanNFT.LoanStatus parsedStatus
+        ) = _readLoanIdentityCompat(loanNft, tokenId);
+        if (!ok || loanId != orderId) revert LendingEngine__InvalidOrder();
+        return parsedStatus;
+    }
+
+    /// @dev Read LoanNFT identity through the stable getter first, then fallback to metadata-compatible decoding.
+    function _readLoanIdentityCompat(
+        ILoanNFT loanNft,
+        uint256 tokenId
+    )
+        internal
+        view
+        returns (bool ok, uint256 loanId, ILoanNFT.LoanStatus status)
+    {
+        // Prefer dedicated identity/status getter to avoid struct layout coupling.
+        // solhint-disable-next-line avoid-low-level-calls
+        (bool identityOk, bytes memory identityRet) = address(loanNft)
+            .staticcall(
+                abi.encodeWithSelector(
+                    ILoanNFT.getLoanIdentity.selector,
+                    tokenId
+                )
+            );
+        if (identityOk && identityRet.length == 64) {
+            uint256 statusRaw;
+            (loanId, statusRaw) = abi.decode(identityRet, (uint256, uint256));
+            if (
+                statusRaw > uint256(ILoanNFT.LoanStatus.DefaultedWithShortfall)
+            ) {
+                return (false, 0, ILoanNFT.LoanStatus.Active);
+            }
+            return (true, loanId, ILoanNFT.LoanStatus(uint8(statusRaw)));
+        }
+
+        return _readLoanMetadataCompat(loanNft, tokenId);
+    }
+
+    /// @dev Read LoanNFT metadata in a layout-compatible way.
+    /// Supports both legacy 5-word metadata and current 7-word metadata return shapes.
+    function _readLoanMetadataCompat(
+        ILoanNFT loanNft,
+        uint256 tokenId
+    )
+        internal
+        view
+        returns (bool ok, uint256 loanId, ILoanNFT.LoanStatus status)
+    {
+        (bool success, bytes memory ret) = address(loanNft).staticcall(
+            abi.encodeWithSelector(ILoanNFT.getLoanMetadata.selector, tokenId)
+        );
+        if (!success) {
+            return (false, 0, ILoanNFT.LoanStatus.Active);
+        }
+
+        uint256 len = ret.length;
+        uint256 statusRaw;
+
+        // Legacy layout: (loanId, principal, rate, term, status)
+        if (len == 160) {
+            (loanId, , , , statusRaw) = abi.decode(
+                ret,
+                (uint256, uint256, uint256, uint256, uint256)
+            );
+        }
+        // Current layout: (principal, rate, term, oraclePrice, loanId, collateralHash, status)
+        else if (len == 224) {
+            (, , , , loanId, , statusRaw) = abi.decode(
+                ret,
+                (uint256, uint256, uint256, uint256, uint256, bytes32, uint256)
+            );
+        } else {
+            return (false, 0, ILoanNFT.LoanStatus.Active);
+        }
+
+        if (statusRaw > uint256(ILoanNFT.LoanStatus.DefaultedWithShortfall)) {
+            return (false, 0, ILoanNFT.LoanStatus.Active);
+        }
+
+        return (true, loanId, ILoanNFT.LoanStatus(uint8(statusRaw)));
     }
 
     /// @dev Return true if duration is in the allowed whitelist (blocks).

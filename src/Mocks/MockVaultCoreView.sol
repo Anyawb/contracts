@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ILendingEngineDebtWrite } from "../interfaces/ILendingEngineDebtWrite.sol";
-import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
+import {ILendingEngineDebtWrite} from "../interfaces/ILendingEngineDebtWrite.sol";
+import {IVaultRouter} from "../interfaces/IVaultRouter.sol";
 
 /// @notice Minimal VaultCore mock exposing viewContractAddrVar() and forwarding calls to LendingEngine for tests
 contract MockVaultCoreView {
@@ -33,7 +33,13 @@ contract MockVaultCoreView {
         uint256 blockNumber
     ) external {
         if (viewContractAddr == address(0)) return;
-        IVaultRouter(viewContractAddr).processUserOperation(user, operationType, asset, amount, blockNumber);
+        IVaultRouter(viewContractAddr).processUserOperation(
+            user,
+            operationType,
+            asset,
+            amount,
+            blockNumber
+        );
     }
 
     /**
@@ -52,7 +58,15 @@ contract MockVaultCoreView {
     ) external {
         // best-effort in tests: if view not set, just return
         if (viewContractAddr == address(0)) return;
-        IVaultRouter(viewContractAddr).pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, nextVersion);
+        IVaultRouter(viewContractAddr).pushUserPositionUpdate(
+            user,
+            asset,
+            collateral,
+            debt,
+            requestId,
+            seq,
+            nextVersion
+        );
         nextVersion; // silence (View may ignore)
     }
 
@@ -68,7 +82,15 @@ contract MockVaultCoreView {
         uint64 nextVersion
     ) external {
         if (viewContractAddr == address(0)) return;
-        IVaultRouter(viewContractAddr).pushUserPositionUpdateDelta(user, asset, collateralDelta, debtDelta, bytes32(0), 0, nextVersion);
+        IVaultRouter(viewContractAddr).pushUserPositionUpdateDelta(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            bytes32(0),
+            0,
+            nextVersion
+        );
     }
 
     /**
@@ -98,12 +120,23 @@ contract MockVaultCoreView {
     }
 
     // Forwarding helpers to satisfy onlyVaultCore guard in tests
-    function borrow(address user, address asset, uint256 amount, uint256 collateralAdded, uint16 termDays) external {
-        ILendingEngineDebtWrite(lendingEngine).borrow(user, asset, amount, collateralAdded, termDays);
+    function borrow(
+        address user,
+        address asset,
+        uint256 amount,
+        uint256 collateralAdded,
+        uint16 termDays
+    ) external {
+        ILendingEngineDebtWrite(lendingEngine).borrow(
+            user,
+            asset,
+            amount,
+            collateralAdded,
+            termDays
+        );
     }
 
     function repay(address user, address asset, uint256 amount) external {
         ILendingEngineDebtWrite(lendingEngine).repay(user, asset, amount);
     }
 }
-

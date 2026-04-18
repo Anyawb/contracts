@@ -26,8 +26,14 @@ contract LiquidationConfigModule is LiquidationConfigManager {
      * @param initialRegistryAddr Registry address
      * @param initialAccessControl AccessControlManager address
      */
-    function initialize(address initialRegistryAddr, address initialAccessControl) public override initializer {
-        _initializeLiquidationConfigManager(initialRegistryAddr, initialAccessControl);
+    function initialize(
+        address initialRegistryAddr,
+        address initialAccessControl
+    ) public override initializer {
+        _initializeLiquidationConfigManager(
+            initialRegistryAddr,
+            initialAccessControl
+        );
     }
 
     /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
@@ -43,7 +49,11 @@ contract LiquidationConfigModule is LiquidationConfigManager {
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     /// @notice Emitted when the liquidation threshold is updated.
     /// @dev Emitted by the RiskManager compatibility path after proxied caller checks and threshold validation succeed.
-    event LiquidationThresholdUpdated(uint256 oldThreshold, uint256 newThreshold, uint256 blockNumber);
+    event LiquidationThresholdUpdated(
+        uint256 oldThreshold,
+        uint256 newThreshold,
+        uint256 blockNumber
+    );
 
     /**
      * @notice Update liquidation threshold via LiquidationRiskManager (compatibility path).
@@ -59,13 +69,24 @@ contract LiquidationConfigModule is LiquidationConfigManager {
      * @param newThreshold New liquidation threshold (bps=1e4)
      * @param caller Original caller (EOA/governance) that initiated the update
      */
-    function updateLiquidationThresholdFromRiskManager(uint256 newThreshold, address caller) external {
-        address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        if (msg.sender != rm) revert LiquidationConfigModule__UnauthorizedCaller();
+    function updateLiquidationThresholdFromRiskManager(
+        uint256 newThreshold,
+        address caller
+    ) external {
+        address rm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER
+        );
+        if (msg.sender != rm)
+            revert LiquidationConfigModule__UnauthorizedCaller();
 
         // Preserve original caller semantics: validate the EOA/governance caller via global ACM.
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acm).requireRole(ActionKeys.ACTION_SET_PARAMETER, caller);
+        address acm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
+        IAccessControlManager(acm).requireRole(
+            ActionKeys.ACTION_SET_PARAMETER,
+            caller
+        );
         if (!LiquidationTypes.isValidLiquidationThreshold(newThreshold)) {
             revert LiquidationConfigModule__InvalidLiquidationThreshold();
         }
@@ -90,14 +111,28 @@ contract LiquidationConfigModule is LiquidationConfigManager {
      * @param newMinHealthFactor New minimum health factor (bps=1e4)
      * @param caller Original caller (EOA/governance) that initiated the update
      */
-    function updateMinHealthFactorFromRiskManager(uint256 newMinHealthFactor, address caller) external {
-        address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        if (msg.sender != rm) revert LiquidationConfigModule__UnauthorizedCaller();
+    function updateMinHealthFactorFromRiskManager(
+        uint256 newMinHealthFactor,
+        address caller
+    ) external {
+        address rm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER
+        );
+        if (msg.sender != rm)
+            revert LiquidationConfigModule__UnauthorizedCaller();
 
         // Preserve original caller semantics: validate the EOA/governance caller via global ACM.
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acm).requireRole(ActionKeys.ACTION_SET_PARAMETER, caller);
-        if (newMinHealthFactor == 0 || newMinHealthFactor < liquidationThresholdVar) {
+        address acm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
+        IAccessControlManager(acm).requireRole(
+            ActionKeys.ACTION_SET_PARAMETER,
+            caller
+        );
+        if (
+            newMinHealthFactor == 0 ||
+            newMinHealthFactor < liquidationThresholdVar
+        ) {
             revert LiquidationConfigManager__InvalidMinHealthFactor();
         }
 
@@ -120,13 +155,24 @@ contract LiquidationConfigModule is LiquidationConfigManager {
      * @param newMaxLtvBps New maximum LTV (bps=1e4)
      * @param caller Original caller (EOA/governance) that initiated the update
      */
-    function updateMaxLtvBpsFromRiskManager(uint256 newMaxLtvBps, address caller) external {
-        address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
-        if (msg.sender != rm) revert LiquidationConfigModule__UnauthorizedCaller();
+    function updateMaxLtvBpsFromRiskManager(
+        uint256 newMaxLtvBps,
+        address caller
+    ) external {
+        address rm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER
+        );
+        if (msg.sender != rm)
+            revert LiquidationConfigModule__UnauthorizedCaller();
 
         // Preserve original caller semantics: validate the EOA/governance caller via global ACM.
-        address acm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        IAccessControlManager(acm).requireRole(ActionKeys.ACTION_SET_PARAMETER, caller);
+        address acm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
+        IAccessControlManager(acm).requireRole(
+            ActionKeys.ACTION_SET_PARAMETER,
+            caller
+        );
         if (!LiquidationTypes.isValidMaxLtvBps(newMaxLtvBps)) {
             revert LiquidationConfigModule__InvalidMaxLtvBps();
         }
@@ -136,4 +182,3 @@ contract LiquidationConfigModule is LiquidationConfigManager {
         emit MaxLtvBpsUpdated(old, newMaxLtvBps, block.number);
     }
 }
-

@@ -60,9 +60,9 @@ abstract contract LiquidationCalculator is LiquidationConfigManager {
      * - View-only function (no state changes)
      * - Uses `liquidationThresholdVar` (bps) from ConfigManager (SSOT)
      *
-    * @param collateralValue Current collateral value (shared 18-decimal system valuation unit)
-    * @param debtValue Current debt value (shared 18-decimal system valuation unit)
-    * @return threshold Required collateral value (shared 18-decimal system valuation unit)
+     * @param collateralValue Current collateral value (shared 18-decimal system valuation unit)
+     * @param debtValue Current debt value (shared 18-decimal system valuation unit)
+     * @return threshold Required collateral value (shared 18-decimal system valuation unit)
      */
     function calculateLiquidationThreshold(
         uint256 collateralValue,
@@ -81,8 +81,8 @@ abstract contract LiquidationCalculator is LiquidationConfigManager {
      * Security:
      * - Pure function (no state changes)
      *
-    * @param collateralValue Total collateral value (shared 18-decimal system valuation unit)
-    * @param debtValue Total debt value (shared 18-decimal system valuation unit)
+     * @param collateralValue Total collateral value (shared 18-decimal system valuation unit)
+     * @param debtValue Total debt value (shared 18-decimal system valuation unit)
      * @return healthFactor Health factor in bps (10_000 = 100%, type(uint256).max if debtValue == 0)
      */
     function calculateHealthFactor(

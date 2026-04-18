@@ -107,16 +107,6 @@ pnpm -s run docs:abi
 3. 关键代理 implementation 与本地编译产物不匹配。
 4. relayer、updater 或关键模块缺角色。
 
-### 5. 自动按顺序跑 fork、gate 9、gate 10
-
-升级后的标准顺序必须是：
-
-1. fork
-2. gate 9 blocks-only funds-chain
-3. gate 10 ops extension modules
-
-gate 9 未稳定通过前，不允许进入 gate 10。
-
 ## 统一同步与审计入口
 
 BNB Testnet 已新增统一入口：

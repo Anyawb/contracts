@@ -32,9 +32,9 @@ interface ILiquidationEventsView {
      * @param collateralAmount Collateral amount seized (token native decimals)
      * @param debtAmount Debt amount reduced (token native decimals)
      * @param liquidator Keeper/liquidator address (attribution)
-    * @param bonus Liquidation bonus for reporting only. When sourced from seizure math it should use
-    *        collateral-token native decimals; callers MUST NOT treat it as a value-unit field unless they
-    *        explicitly normalize and document that conversion upstream.
+     * @param bonus Liquidation bonus for reporting only. When sourced from seizure math it should use
+     *        collateral-token native decimals; callers MUST NOT treat it as a value-unit field unless they
+     *        explicitly normalize and document that conversion upstream.
      * @param blockNumber Block number (best-effort; typically `block.number`)
      */
     function pushLiquidationUpdate(
@@ -63,8 +63,8 @@ interface ILiquidationEventsView {
      * @param collateralAmounts Collateral amounts array (token native decimals)
      * @param debtAmounts Debt amounts array (token native decimals)
      * @param liquidator Keeper/liquidator address (attribution)
-    * @param bonuses Bonus array for reporting only. Each entry should follow the writer's documented bonus
-    *        convention and MUST NOT be assumed to share the value-unit semantics of collateral/debt totals.
+     * @param bonuses Bonus array for reporting only. Each entry should follow the writer's documented bonus
+     *        convention and MUST NOT be assumed to share the value-unit semantics of collateral/debt totals.
      * @param blockNumber Block number (best-effort; typically `block.number`)
      */
     function pushBatchLiquidationUpdate(

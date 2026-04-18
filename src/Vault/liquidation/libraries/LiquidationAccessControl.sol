@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
 
 /**
  * @title LiquidationAccessControl
@@ -34,7 +34,7 @@ library LiquidationAccessControl {
     /// @dev Reverts when a keeper address is address(0) during initialization or update. Used by keeper-management paths.
     error LiquidationAccessControl__InvalidKeeperAddress();
     /*━━━━━━━━━━━━━━━ Storage Structure ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Access control storage structure
      * @dev Contains role permission mappings, account role lists, role account lists, etc.
@@ -42,47 +42,40 @@ library LiquidationAccessControl {
     struct Storage {
         /// @notice Role permission mapping: roleKey => account => hasPermission
         mapping(bytes32 => mapping(address => bool)) roles;
-        
         /// @notice List of roles owned by each account: account => roles[]
         mapping(address => bytes32[]) accountRoles;
-        
         /// @notice List of accounts for each role: roleKey => accounts[]
         mapping(bytes32 => address[]) roleAccounts;
-        
         /// @notice Count of accounts for each role: roleKey => count
         mapping(bytes32 => uint256) roleAccountCount;
-        
         /// @notice Admin role mapping for each role: roleKey => adminRoleKey
         mapping(bytes32 => bytes32) roleAdmins;
-        
         /// @notice Owner address
         address owner;
-        
         /// @notice Keeper address
         address keeper;
-        
         /// @notice Emergency pause flag
         bool emergencyPaused;
     }
 
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
-    
+
     /// @notice Emitted when a role is granted to an account.
     /// @dev Emitted by {grantRole} and internal grant flows after storage is updated.
     event RoleGranted(
-        bytes32 indexed roleKey, 
+        bytes32 indexed roleKey,
         address indexed targetAccount,
         address indexed senderAddr
     );
-    
+
     /// @notice Emitted when a role is revoked from an account.
     /// @dev Emitted by {revokeRole} and {renounceRole} after storage is updated.
     event RoleRevoked(
-        bytes32 indexed roleKey, 
+        bytes32 indexed roleKey,
         address indexed targetAccount,
         address indexed senderAddr
     );
-    
+
     /// @notice Emitted when the admin role for a role changes.
     /// @dev Emitted by role-hierarchy management flows after the admin mapping is updated.
     event RoleAdminChanged(
@@ -92,7 +85,7 @@ library LiquidationAccessControl {
     );
 
     /*━━━━━━━━━━━━━━━ Core Permission Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Check if an account has a specific role.
      * @dev Reverts if:
@@ -132,11 +125,12 @@ library LiquidationAccessControl {
         bytes32 roleKey,
         address targetAccount
     ) internal view {
-        if (!self.roles[roleKey][targetAccount]) revert LiquidationAccessControl__InsufficientPermission();
+        if (!self.roles[roleKey][targetAccount])
+            revert LiquidationAccessControl__InsufficientPermission();
     }
 
     /*━━━━━━━━━━━━━━━ Role Management Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Grant a role to an account.
      * @dev Reverts if:
@@ -156,10 +150,12 @@ library LiquidationAccessControl {
         bytes32 roleKey,
         address targetAccount
     ) internal {
-        if (targetAccount == address(0)) revert LiquidationAccessControl__InvalidAccountAddress();
-        
-        if (self.roles[roleKey][targetAccount]) revert LiquidationAccessControl__RoleAlreadyGranted();
-        
+        if (targetAccount == address(0))
+            revert LiquidationAccessControl__InvalidAccountAddress();
+
+        if (self.roles[roleKey][targetAccount])
+            revert LiquidationAccessControl__RoleAlreadyGranted();
+
         _grantRole(self, roleKey, targetAccount);
         emit RoleGranted(roleKey, targetAccount, msg.sender);
     }
@@ -183,10 +179,12 @@ library LiquidationAccessControl {
         bytes32 roleKey,
         address targetAccount
     ) internal {
-        if (targetAccount == address(0)) revert LiquidationAccessControl__InvalidAccountAddress();
-        
-        if (!self.roles[roleKey][targetAccount]) revert LiquidationAccessControl__RoleNotGranted();
-        
+        if (targetAccount == address(0))
+            revert LiquidationAccessControl__InvalidAccountAddress();
+
+        if (!self.roles[roleKey][targetAccount])
+            revert LiquidationAccessControl__RoleNotGranted();
+
         _revokeRole(self, roleKey, targetAccount);
         emit RoleRevoked(roleKey, targetAccount, msg.sender);
     }
@@ -210,16 +208,18 @@ library LiquidationAccessControl {
         bytes32 roleKey,
         address targetAccount
     ) internal {
-        if (msg.sender != targetAccount) revert LiquidationAccessControl__UnauthorizedOperation();
-        
-        if (!self.roles[roleKey][targetAccount]) revert LiquidationAccessControl__RoleNotGranted();
-        
+        if (msg.sender != targetAccount)
+            revert LiquidationAccessControl__UnauthorizedOperation();
+
+        if (!self.roles[roleKey][targetAccount])
+            revert LiquidationAccessControl__RoleNotGranted();
+
         _revokeRole(self, roleKey, targetAccount);
         emit RoleRevoked(roleKey, targetAccount, msg.sender);
     }
 
     /*━━━━━━━━━━━━━━━ Role Hierarchy Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Get the admin role for a specific role.
      * @dev Reverts if:
@@ -259,12 +259,12 @@ library LiquidationAccessControl {
     ) internal {
         bytes32 previousAdminRole = self.roleAdmins[roleKey];
         self.roleAdmins[roleKey] = newAdminRole;
-        
+
         emit RoleAdminChanged(roleKey, previousAdminRole, newAdminRole);
     }
 
     /*━━━━━━━━━━━━━━━ Role Information Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Check if a role key is valid.
      * @dev Reverts if:
@@ -325,7 +325,7 @@ library LiquidationAccessControl {
     }
 
     /*━━━━━━━━━━━━━━━ Batch Query Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Batch check if multiple accounts have their corresponding roles.
      * @dev Reverts if:
@@ -348,13 +348,15 @@ library LiquidationAccessControl {
         if (length != targetAccounts.length) {
             revert LiquidationAccessControl__ArrayLengthMismatch();
         }
-        
+
         bool[] memory results = new bool[](length);
-        for (uint256 i = 0; i < length;) {
+        for (uint256 i = 0; i < length; ) {
             results[i] = self.roles[roleKeys[i]][targetAccounts[i]];
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
-        
+
         return results;
     }
 
@@ -376,12 +378,14 @@ library LiquidationAccessControl {
     ) internal view returns (uint256[] memory) {
         uint256 length = roleKeys.length;
         uint256[] memory counts = new uint256[](length);
-        
-        for (uint256 i = 0; i < length;) {
+
+        for (uint256 i = 0; i < length; ) {
             counts[i] = self.roleAccountCount[roleKeys[i]];
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
-        
+
         return counts;
     }
 
@@ -403,17 +407,19 @@ library LiquidationAccessControl {
     ) internal view returns (bytes32[] memory) {
         uint256 length = roleKeys.length;
         bytes32[] memory admins = new bytes32[](length);
-        
-        for (uint256 i = 0; i < length;) {
+
+        for (uint256 i = 0; i < length; ) {
             admins[i] = self.roleAdmins[roleKeys[i]];
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
-        
+
         return admins;
     }
 
     /*━━━━━━━━━━━━━━━ Initialization Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Initialize access control with owner and keeper addresses.
      * @dev Reverts if:
@@ -439,11 +445,11 @@ library LiquidationAccessControl {
         if (initialKeeper == address(0)) {
             revert LiquidationAccessControl__InvalidKeeperAddress();
         }
-        
+
         self.owner = initialOwner;
         self.keeper = initialKeeper;
         self.emergencyPaused = false;
-        
+
         // Initialize default permissions.
         grantRole(self, ActionKeys.ACTION_GRANT_ROLE, initialOwner);
         grantRole(self, ActionKeys.ACTION_REVOKE_ROLE, initialOwner);
@@ -453,7 +459,7 @@ library LiquidationAccessControl {
     }
 
     /*━━━━━━━━━━━━━━━ Utility Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Check if an account is the owner.
      * @dev Reverts if:
@@ -535,21 +541,18 @@ library LiquidationAccessControl {
      * @param self Permission control storage structure
      * @param newKeeper New keeper address
      */
-    function setKeeper(
-        Storage storage self,
-        address newKeeper
-    ) internal {
+    function setKeeper(Storage storage self, address newKeeper) internal {
         if (newKeeper == address(0)) {
             revert LiquidationAccessControl__InvalidKeeperAddress();
         }
-        
+
         // Revoke liquidation permission from the old keeper (if any).
         if (self.roles[ActionKeys.ACTION_LIQUIDATE][self.keeper]) {
             _revokeRole(self, ActionKeys.ACTION_LIQUIDATE, self.keeper);
         }
-        
+
         self.keeper = newKeeper;
-        
+
         // Grant liquidation permission to the new keeper (if not already granted).
         if (!self.roles[ActionKeys.ACTION_LIQUIDATE][newKeeper]) {
             _grantRole(self, ActionKeys.ACTION_LIQUIDATE, newKeeper);
@@ -557,7 +560,7 @@ library LiquidationAccessControl {
     }
 
     /*━━━━━━━━━━━━━━━ Internal Helper Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Internal implementation of granting a role to an account.
      * @dev Reverts if:
@@ -581,7 +584,7 @@ library LiquidationAccessControl {
         self.roleAccounts[role].push(account);
         self.roleAccountCount[role]++;
     }
-    
+
     /**
      * @notice Internal implementation of revoking a role from an account.
      * @dev Reverts if:
@@ -602,7 +605,7 @@ library LiquidationAccessControl {
         address account
     ) private {
         self.roles[role][account] = false;
-        
+
         // Remove role from the account-to-roles list.
         bytes32[] storage accountRoles = self.accountRoles[account];
         for (uint256 i = 0; i < accountRoles.length; i++) {
@@ -612,7 +615,7 @@ library LiquidationAccessControl {
                 break;
             }
         }
-        
+
         // Remove account from the role-to-accounts list.
         address[] storage roleAccounts = self.roleAccounts[role];
         for (uint256 i = 0; i < roleAccounts.length; i++) {
@@ -622,7 +625,7 @@ library LiquidationAccessControl {
                 break;
             }
         }
-        
+
         self.roleAccountCount[role]--;
     }
-} 
+}

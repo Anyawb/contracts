@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { DegradationStorage } from "../monitor/DegradationStorage.sol";
+import {DegradationStorage} from "../monitor/DegradationStorage.sol";
 
 contract BatchMockHealthView {
     struct ModuleHealth {
-        bool    isHealthy;
+        bool isHealthy;
         bytes32 detailsHash;
-        uint32  lastCheckTime;
-        uint32  consecutiveFailures;
+        uint32 lastCheckTime;
+        uint32 consecutiveFailures;
     }
 
     mapping(address => uint256) private _healthFactor;
     mapping(address => bool) private _isValid;
     mapping(address => ModuleHealth) private _moduleHealth;
 
-    function setUserHealth(address user, uint256 healthFactor, bool isValid) external {
+    function setUserHealth(
+        address user,
+        uint256 healthFactor,
+        bool isValid
+    ) external {
         _healthFactor[user] = healthFactor;
         _isValid[user] = isValid;
     }
@@ -35,11 +39,15 @@ contract BatchMockHealthView {
         });
     }
 
-    function getUserHealthFactorWithMeta(address user) external view returns (uint256, bool, uint256) {
+    function getUserHealthFactorWithMeta(
+        address user
+    ) external view returns (uint256, bool, uint256) {
         return (_healthFactor[user], _isValid[user], 0);
     }
 
-    function getModuleHealthWithMeta(address module) external view returns (ModuleHealth memory, bool, uint256) {
+    function getModuleHealthWithMeta(
+        address module
+    ) external view returns (ModuleHealth memory, bool, uint256) {
         ModuleHealth memory mh = _moduleHealth[module];
         return (mh, true, uint256(mh.lastCheckTime));
     }
@@ -56,11 +64,24 @@ contract BatchMockRiskView {
 
     mapping(address => RiskAssessmentWithMeta) private _assessments;
 
-    function setRiskAssessment(address user, bool liquidatable, uint256 healthFactor, uint8 warningLevel) external {
-        _assessments[user] = RiskAssessmentWithMeta(liquidatable, true, warningLevel, healthFactor, block.number);
+    function setRiskAssessment(
+        address user,
+        bool liquidatable,
+        uint256 healthFactor,
+        uint8 warningLevel
+    ) external {
+        _assessments[user] = RiskAssessmentWithMeta(
+            liquidatable,
+            true,
+            warningLevel,
+            healthFactor,
+            block.number
+        );
     }
 
-    function getUserRiskAssessment(address user) external view returns (RiskAssessmentWithMeta memory) {
+    function getUserRiskAssessment(
+        address user
+    ) external view returns (RiskAssessmentWithMeta memory) {
         return _assessments[user];
     }
 }
@@ -72,7 +93,9 @@ contract BatchMockPriceOracle {
         _prices[asset] = price;
     }
 
-    function getPrice(address asset) external view returns (uint256 price, uint256 blockNumber, uint256) {
+    function getPrice(
+        address asset
+    ) external view returns (uint256 price, uint256 blockNumber, uint256) {
         price = _prices[asset];
         blockNumber = block.number;
         return (price, blockNumber, 0);
@@ -106,7 +129,13 @@ contract BatchMockDegradationMonitor {
         return _events.length;
     }
 
-    function getSystemDegradationHistory(uint256 limit) external view returns (DegradationStorage.DegradationEvent[] memory history) {
+    function getSystemDegradationHistory(
+        uint256 limit
+    )
+        external
+        view
+        returns (DegradationStorage.DegradationEvent[] memory history)
+    {
         uint256 available = _events.length;
         if (limit > available) {
             limit = available;
@@ -126,14 +155,31 @@ contract CacheMockPositionView {
 
     mapping(address => mapping(address => Position)) private _positions;
 
-    function setPosition(address user, address asset, uint256 collateral, uint256 debt) external {
-        _positions[user][asset] = Position({ collateral: collateral, debt: debt });
+    function setPosition(
+        address user,
+        address asset,
+        uint256 collateral,
+        uint256 debt
+    ) external {
+        _positions[user][asset] = Position({
+            collateral: collateral,
+            debt: debt
+        });
     }
 
-    function getUserPositionWithMeta(address user, address asset)
+    function getUserPositionWithMeta(
+        address user,
+        address asset
+    )
         external
         view
-        returns (uint256 collateral, uint256 debt, bool isValid, uint256 updateBlock, uint64 version)
+        returns (
+            uint256 collateral,
+            uint256 debt,
+            bool isValid,
+            uint256 updateBlock,
+            uint64 version
+        )
     {
         Position memory p = _positions[user][asset];
         return (p.collateral, p.debt, true, 0, 0);

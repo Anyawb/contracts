@@ -56,9 +56,29 @@ BNB_FORK_AUTONODE_CASES=preflight,platform-baseline \
 pnpm -s run test:live:fork:bnb-testnet
 ```
 
-如果上游公共 RPC 不稳定，可以显式指定：
+如果上游公共 RPC 不稳定，可以显式指定单个 RPC：
 
 ```bash
 BNB_FORK_UPSTREAM_RPC_URL=<your_archive_like_rpc> \
 pnpm -s run test:live:fork:bnb-testnet
 ```
+
+如果你想要“私有 RPC 优先 + 公共池兜底”的自动切换，推荐这样配：
+
+```bash
+BNB_FORK_PRIVATE_RPC_URLS="https://<private-rpc-1>,https://<private-rpc-2>" \
+BNB_FORK_RPC_POOL_URLS="https://<public-rpc-a>,https://<public-rpc-b>" \
+BNB_FORK_UPSTREAM_CHAIN_ID=97 \
+BNB_FORK_RUN_MAX_ATTEMPTS=6 \
+pnpm -s run test:live:fork:bnb-testnet
+```
+
+说明：
+
+- `BNB_FORK_PRIVATE_RPC_URLS`: 私有 RPC 列表，优先级最高（支持逗号或换行分隔）
+- `BNB_FORK_RPC_POOL_URLS`: 公共/备用 RPC 列表，会排在私有 RPC 后面
+- `BNB_FORK_UPSTREAM_CHAIN_ID`: 上游探测链 ID，BNB Testnet 默认 `97`
+- `BNB_FORK_RPC_PROBE_TIMEOUT_MS`: 单个 RPC 探测超时（默认 `8000`）
+- `BNB_FORK_RPC_POOL_START_INDEX`: 从池中哪个下标开始探测（默认 `0`）
+
+runner 在每次 run attempt 开始前会先探测池中 RPC，选健康节点启动 fork；如果运行期间出现 429/连接重置/节点不可达，会在下一次重试自动切到池里的下一个 RPC。

@@ -31,12 +31,14 @@ contract MockEventsView {
         uint256 /* blockNumber */
     ) external {
         if (shouldRevert) revert("events-view-revert");
-        emit Pushed(user, collateralAsset, debtAsset, collateralAmount, debtAmount, liquidator, bonus);
+        emit Pushed(
+            user,
+            collateralAsset,
+            debtAsset,
+            collateralAmount,
+            debtAmount,
+            liquidator,
+            bonus
+        );
     }
 }
-
-
-
-
-
-

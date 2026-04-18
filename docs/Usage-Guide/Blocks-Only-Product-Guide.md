@@ -45,7 +45,7 @@
 ### 2.1 已定稿的产品分叉语义
 
 - **借贷壳与交易语义分离**：blocks-only 不应继续维持“trade-like 表层 + debt-ledger 处置内核”的混合态。首发 `termBlocks = 1` 产品应直接收敛为 trade-like 成交与交割产品，订单内只维护本地剩余交割额，不再把通用 debt ledger / 处置执行器当成主语义。
-- **当前链上目标事实**：trade-like 主路径拥有独立的 debt-free 关闭入口 `closeRepaidTradeBlocks(...)`；maturity-gated 的 `settleOrLiquidateBlocks(...)` 保留旧 ABI 名称，但目标语义应收敛为“maturity 后完成产品到期收尾（maturity closeout）”，其中 `remainingDebt > 0` 分支属于“到期交付收尾（maturity delivery closeout）”；“交割收尾”仅作同义注释。
+- **当前链上目标事实**：trade-like 主路径拥有独立的 debt-free 关闭入口 `closeRepaidTradeBlocks(...)`；maturity-gated 的 `settleOrLiquidateBlocks(...)` 保留旧 ABI 名称，但目标语义应收敛为“maturity 后完成产品交割收尾”，而不是继续保留通用 settle/liquidate 分支。
 - **借贷主体系保持不动**：为支持 blocks-only trade-like 主路径，不会去修改借贷主体系中通用的 `settleBlocksIfRepaid` / `liquidateBlocks` 语义，也不会把这种临时交易逻辑倒灌回 legacy 借贷系统。
 - **独立交易收尾（trade closeout）入口只属于 BlocksOnlyCoordinator**：该入口的职责是处理“交易已成功、订单本地剩余交割额已归零、订单尚未关闭”的独立收尾路径；maturity 后入口只负责把同一订单按产品规则收成终态，不再做通用借贷处置编排。
 
@@ -58,7 +58,7 @@
 - **唯一期限参数**：链上与签名层的权威期限字段必须是 `termBlocks`，不是 `termDays`。
 - **termDays 的角色**：`termDays` 仅可保留为 legacy bucket 输入或旧 ABI 兼容字段，不能被解释为 blocks-only 产品语义。
 - **expireAt 语义**：在 intent 相关结构中，`expireAt` 的真实语义是 `expireBlock`，不是 unix timestamp。
-- **maturity 边界**：当 `block.number >= maturityBlock` 时，blocks-only 订单即可进入产品定义的 maturity 到期收尾轴（maturity closeout，原“交割收尾”仅作同义注释）；该轴不应再等同于通用 debt-ledger 处置 / legacy Reward outcome 判定轴。
+- **maturity 边界**：当 `block.number >= maturityBlock` 时，blocks-only 订单即可进入产品定义的 maturity 交割收尾轴；该轴不应再等同于通用 debt-ledger 处置 / legacy Reward outcome 判定轴。
 
 ### 3.2 当前仓库已验证的 SSOT 落点
 
@@ -92,7 +92,7 @@
 
 - `closeRepaidTradeBlocks(...)` 已经落地，用于 blocks-only 的 trade-like 主路径。
 - 该入口的设计目标已经成为当前实现：当 trade-like 订单已经完成链上成交、`remainingDebt = 0` 且订单尚未关闭时，可直接完成 close，不再要求额外等待 `maturityBlock`。
-- `settleOrLiquidateBlocks(...)` 不应再继续承载“借贷式结算/处置”内核；它只保留 maturity 后的到期收尾职责（`remainingDebt > 0` 为到期交付收尾），并可继续复用既有 keeper 权限门槛。
+- `settleOrLiquidateBlocks(...)` 不应再继续承载“借贷式结算/处置”内核；它只保留 maturity 后的交割收尾职责，并可继续复用既有 keeper 权限门槛。
 - 该拆分只收敛在 blocks-only 独立产品面，不改变借贷主体系、legacy day-bucket 与通用结算 / 借贷处置语义。
 
 ### 4.0B 三层状态模型（新增，强约束）

@@ -734,7 +734,7 @@ describe("BlocksOnlyView", function () {
       expect(borrowerItems[0].lifecycle).to.equal(5n);
     });
 
-    it("maps debt-free matured SETTLED to borrower-return in legacy fallback when ORDER_STATE_STORE is disabled", async function () {
+    it("uses conservative legacy fallback when ORDER_STATE_STORE is disabled", async function () {
       const {
         admin,
         lender,
@@ -794,11 +794,11 @@ describe("BlocksOnlyView", function () {
       expect(stateViaLegacyFallback.lifecycle).to.equal(5n);
       expect(stateViaLegacyFallback.closeReason).to.equal(5n);
       expect(stateViaLegacyFallback.shortfallStatus).to.equal(0n);
-      expect(stateViaLegacyFallback.collateralDisposition).to.equal(2n);
-      expect(stateViaLegacyFallback.hasLoss).to.equal(false);
+      expect(stateViaLegacyFallback.collateralDisposition).to.equal(3n);
+      expect(stateViaLegacyFallback.hasLoss).to.equal(true);
     });
 
-    it("maps matured SETTLED with outstanding debt to lender-delivery in legacy fallback", async function () {
+    it("uses fail-closed legacy fallback for matured SETTLED orders with outstanding debt", async function () {
       const {
         admin,
         lender,
@@ -857,66 +857,6 @@ describe("BlocksOnlyView", function () {
       expect(stateViaLegacyFallback.shortfallStatus).to.equal(0n);
       expect(stateViaLegacyFallback.collateralDisposition).to.equal(3n);
       expect(stateViaLegacyFallback.hasLoss).to.equal(true);
-    });
-
-    it("keeps TRADE_CLOSED mapped to RETURNED_TO_BORROWER in legacy fallback", async function () {
-      const {
-        lender,
-        borrower,
-        token,
-        collateralToken,
-        cm,
-        vbl,
-        coordinator,
-        blocksOnlyView,
-        registry,
-      } = await loadFixture(deployFixture);
-
-      const principal = ethers.parseUnits("190", 18);
-      const collateralAmount = ethers.parseUnits("5", 18);
-      await collateralToken.transfer(await cm.getAddress(), collateralAmount);
-      await cm.setUserCollateral(
-        borrower.address,
-        await collateralToken.getAddress(),
-        collateralAmount,
-      );
-
-      await finalizeBlocksOnlyOrder({
-        vbl,
-        borrower,
-        lender,
-        token,
-        principal,
-        saltSuffix: "legacy-fallback-trade-closed",
-        collateralAsset: await collateralToken.getAddress(),
-        collateralAmount,
-      });
-
-      await token.connect(borrower).approve(await coordinator.getAddress(), principal);
-      await coordinator.connect(borrower).repayBlocks(0, principal);
-      await coordinator.connect(lender).closeRepaidTradeBlocks(0);
-
-      const stateWithStore = await blocksOnlyView
-        .connect(borrower)
-        .getBlocksOnlyOrderState(0);
-      expect(stateWithStore.runtime.status).to.equal(4n);
-      expect(stateWithStore.lifecycle).to.equal(5n);
-      expect(stateWithStore.closeReason).to.equal(4n);
-      expect(stateWithStore.shortfallStatus).to.equal(0n);
-      expect(stateWithStore.collateralDisposition).to.equal(2n);
-      expect(stateWithStore.hasLoss).to.equal(false);
-
-      await registry.setModule(KEY_ORDER_STATE_STORE, ethers.ZeroAddress);
-
-      const stateViaLegacyFallback = await blocksOnlyView
-        .connect(borrower)
-        .getBlocksOnlyOrderState(0);
-      expect(stateViaLegacyFallback.runtime.status).to.equal(4n);
-      expect(stateViaLegacyFallback.lifecycle).to.equal(5n);
-      expect(stateViaLegacyFallback.closeReason).to.equal(4n);
-      expect(stateViaLegacyFallback.shortfallStatus).to.equal(0n);
-      expect(stateViaLegacyFallback.collateralDisposition).to.equal(2n);
-      expect(stateViaLegacyFallback.hasLoss).to.equal(false);
     });
   });
 

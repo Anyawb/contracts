@@ -82,7 +82,7 @@ Blocks-only 补充说明（pre-maturity guard）：
 | `RewardManager` / `RewardAccrualManager` 惩罚与 reward 写路径 | `live-reward-baseline`、`live-platform-baseline` | 之前 reward 只单独跑，不阻断最终放行 | 现已纳入统一 gate | 是 |
 | `RewardView` 奖励观测镜像 | `live-reward-baseline` | 之前 reward observability 失败不一定进入最终门禁 | 现已作为统一 gate 的独立步骤 | 是 |
 | `LiquidationManager` / `LiquidationPayoutManager` / `LiquidatorView` legacy 清算执行与残值分配 | `live-liquidation`、`live-platform-baseline` | 之前没有单独 legacy liquidation gate | 现已纳入统一 gate | 是 |
-| `BlocksOnlyCoordinator` blocks-only 产品线收尾（trade closeout / maturity closeout / maturity delivery closeout） | `live-blocks-only-liquidation` | 之前 blocks-only 路径完全不在 release gates | 现已纳入统一 gate | 是 |
+| `BlocksOnlyCoordinator` blocks-only 产品线收尾（trade closeout / maturity closeout） | `live-blocks-only-liquidation` | 之前 blocks-only 路径完全不在 release gates | 现已纳入统一 gate | 是 |
 | `VaultRouter.pause/unpause` 权限门禁 | `live-ops-extension-modules` | 之前仅文档声明，不在统一 gate 验证 | 现已纳入统一 gate（权限门禁 staticCall） | 是 |
 | `FeeRouter.batchDistribute` 批量费用入口门禁 | `live-ops-extension-modules` | 之前无 bnb live 命中 | 现已纳入统一 gate（权限门禁 staticCall） | 是 |
 | `GuaranteeFundManager.releaseGuarantee/forfeitGuarantee` 直入口门禁 | `live-ops-extension-modules` | 之前无 bnb live 命中 | 现已纳入统一 gate（onlyVaultCore 直入口防护） | 是 |
@@ -109,3 +109,34 @@ Blocks-only 补充说明（pre-maturity guard）：
 2. 只有同时进入 strict release gate，才算最终放行证据的一部分。
 3. 对 `FeeRouterView` / `RewardView` / `LiquidatorView` 这类 best-effort 镜像，最终放行要求是“观测链路有独立 strict 证据”，不是把它们与主账本混写为同一结果。
 4. 对 BNB Testnet，任何 `deployment-ssot-mismatch` 都优先归类为部署口径错误，不应被网络重试掩盖。
+
+## 5. fork 私有 RPC 配置与执行口径（BNB）
+
+虽然本矩阵聚焦真链 live，但在执行 fork 对照测试时，必须统一使用私有 fork RPC，避免公共池噪声干扰结论。
+
+推荐 `.env`：
+
+```bash
+# 常规 testnet RPC（给 live 或其他脚本使用）
+BNB_TESTNET_RPC_URL=https://...
+BSC_TESTNET_RPC_URL=https://...
+
+# fork 专用私有 RPC（archive + sticky）
+BNB_FORK_UPSTREAM_RPC_URL=https://...
+```
+
+推荐 fork 对照执行：
+
+```bash
+set -a && source .env && set +a
+BNB_FORK_AUTONODE_CASES=preflight pnpm -s run test:live:fork:bnb-testnet
+BNB_FORK_AUTONODE_CASES=warmup pnpm -s run test:live:fork:bnb-testnet
+pnpm -s run test:live:platform-baseline:fork:bnb-testnet
+pnpm -s run test:live:release-gates:fork:bnb-testnet
+```
+
+执行判定：
+
+1. 若出现 `missing trie node`，应归类为 RPC/infra 问题，不得直接归因协议回归。
+2. 若 fork 与 live 结果不一致，需在报告里拆分“协议断言差异”与“RPC 基础设施差异”。
+3. fork-only 绿色结果不能替代本矩阵中的 live 放行证据。

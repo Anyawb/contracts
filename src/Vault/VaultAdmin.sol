@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { IRegistry } from "../interfaces/IRegistry.sol";
-import { SystemEvents } from "./SystemEvents.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { InvalidHealthFactor, NotAContract, ZeroAddress } from "../errors/StandardErrors.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {IRegistry} from "../interfaces/IRegistry.sol";
+import {SystemEvents} from "./SystemEvents.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {
+    InvalidHealthFactor,
+    NotAContract,
+    ZeroAddress
+} from "../errors/StandardErrors.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
 
 /*━━━━━━━━━━━━━━━ Interfaces ━━━━━━━━━━━━━━━*/
 /// @dev Minimal governance interface; keeps this file decoupled from full implementations.
-import { ILiquidationConfigManager } from "../interfaces/ILiquidationConfigManager.sol";
+import {ILiquidationConfigManager} from "../interfaces/ILiquidationConfigManager.sol";
 
 /**
  * @title VaultAdmin
@@ -27,10 +31,7 @@ import { ILiquidationConfigManager } from "../interfaces/ILiquidationConfigManag
  * - Governance methods are role-gated via ACM `ActionKeys` (resolved through `Registry`).
  * - Parameter SSOT remains in dedicated modules such as LiquidationConfigManager; this contract only forwards.
  */
-contract VaultAdmin is 
-    Initializable,
-    UUPSUpgradeable
-{
+contract VaultAdmin is Initializable, UUPSUpgradeable {
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
     /// @dev Reverts when `newImplementation` is not a deployed contract (code length is zero).
@@ -55,7 +56,8 @@ contract VaultAdmin is
     ///      - Registry has no code (see {NotAContract})
     modifier onlyValidRegistry() {
         if (_adminRegistryAddr == address(0)) revert ZeroAddress();
-        if (_adminRegistryAddr.code.length == 0) revert NotAContract(_adminRegistryAddr);
+        if (_adminRegistryAddr.code.length == 0)
+            revert NotAContract(_adminRegistryAddr);
         _;
     }
 
@@ -81,19 +83,18 @@ contract VaultAdmin is
      *      - `initialRegistryAddr` has no code (see {NotAContract})
      *
      * Security:
-    * - Initializer: callable once.
+     * - Initializer: callable once.
      * - Sets the Registry used to resolve ACM and SSOT modules.
      *
      * @param initialRegistryAddr The Registry contract address.
      */
-    function initialize(
-        address initialRegistryAddr
-    ) external initializer {
+    function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
-        
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
+
         __UUPSUpgradeable_init();
-        
+
         _adminRegistryAddr = initialRegistryAddr;
     }
 
@@ -123,12 +124,12 @@ contract VaultAdmin is
     /**
      * @notice Returns the configured Registry address.
      * @dev Reverts if:
-        *      - (never)
+     *      - (never)
      *
      * Security:
-        * - View-only getter.
+     * - View-only getter.
      *
-        * @return registryAddr_ The Registry contract address.
+     * @return registryAddr_ The Registry contract address.
      */
     function getRegistryAddr() external view returns (address registryAddr_) {
         return _adminRegistryAddr;
@@ -152,7 +153,9 @@ contract VaultAdmin is
      *
      * @param hf The new minimum health factor in basis points (bps). \(10000 = 100%\).
      */
-    function setMinHealthFactor(uint256 hf) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function setMinHealthFactor(
+        uint256 hf
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (!(hf > 0 && hf <= 20_000)) revert InvalidHealthFactor();
 
         // 1) SSOT: parameter lives in LiquidationConfigManager
@@ -185,12 +188,13 @@ contract VaultAdmin is
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        
-        if (newImplementation.code.length == 0) revert VaultAdmin__InvalidImplementation();
-        
+
+        if (newImplementation.code.length == 0)
+            revert VaultAdmin__InvalidImplementation();
+
         _emitActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE);
     }
 
     /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
     uint256[50] private __gap;
-} 
+}

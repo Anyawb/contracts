@@ -855,6 +855,7 @@ address public registryAddrVar;
 - **LendingEngine**：
   - 借/还/强制减债的账本更新；估值路径内的优雅降级
   - 账本变更后：`VaultRouter.pushUserPositionUpdate` + `HealthView.pushRiskStatus` + 最佳努力触发 `RewardManager.onLoanEventByOrder*`
+  - `getOrderStatusForView(orderId)` 的 LoanNFT 读取必须优先使用稳定轻量读口 `LoanNFT.getLoanIdentity(tokenId)`（仅返回 `loanId/status`），并保留 metadata 兼容回退，避免 `LoanMetadata` 结构演进引发空 revert。
   - `onlyVaultCore`：拒绝任何非 Core 的账本写入
 - **View 层**：
   - `VaultRouter`：仓位缓存与事件/DataPush；聚合查询 0 gas

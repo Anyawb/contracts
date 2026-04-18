@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { IAuthorityWhitelist } from "./interfaces/IAuthorityWhitelist.sol";
-import { IAccessControlManager } from "./interfaces/IAccessControlManager.sol";
-import { ActionKeys } from "./constants/ActionKeys.sol";
-import { ModuleKeys } from "./constants/ModuleKeys.sol";
-import { SystemEvents } from "./Vault/SystemEvents.sol";
-import { NotAContract, ZeroAddress } from "./errors/StandardErrors.sol";
-import { Registry } from "./registry/Registry.sol";
+import {IAuthorityWhitelist} from "./interfaces/IAuthorityWhitelist.sol";
+import {IAccessControlManager} from "./interfaces/IAccessControlManager.sol";
+import {ActionKeys} from "./constants/ActionKeys.sol";
+import {ModuleKeys} from "./constants/ModuleKeys.sol";
+import {SystemEvents} from "./Vault/SystemEvents.sol";
+import {NotAContract, ZeroAddress} from "./errors/StandardErrors.sol";
+import {Registry} from "./registry/Registry.sol";
 
 /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
@@ -35,7 +35,11 @@ error AuthorityWhitelist__AlreadyExists();
  *
  * @custom:security-contact security@example.com
  */
-contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhitelist {
+contract AuthorityWhitelist is
+    Initializable,
+    UUPSUpgradeable,
+    IAuthorityWhitelist
+{
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
     /// @dev Authority-name membership keyed by `keccak256(bytes(name))`.
@@ -65,7 +69,10 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
 
     /// @notice Emitted when the whitelist updates the Registry dependency it uses.
     /// @dev Event only.
-    event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event RegistryUpdated(
+        address indexed oldRegistry,
+        address indexed newRegistry
+    );
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -89,18 +96,19 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
      */
     function initialize(address initialRegistryAddr) external initializer {
         __UUPSUpgradeable_init();
-        
+
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
-        
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
+
         _registryAddr = initialRegistryAddr;
-        
+
         // Seed common authority names for bootstrap compatibility.
         _add("Moody's");
         _add("Standard Chartered");
         _add("S&P Global");
         _add("Fitch Ratings");
-        
+
         // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -128,7 +136,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
     function addAuthority(string calldata name) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_ADD_WHITELIST, msg.sender);
         _add(name);
-        
+
         // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_ADD_WHITELIST,
@@ -157,7 +165,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
         if (!_whitelist[key]) revert AuthorityWhitelist__AuthorityNotExisted();
         _whitelist[key] = false;
         emit AuthorityRemoved(name, msg.sender);
-        
+
         // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_REMOVE_WHITELIST,
@@ -180,7 +188,9 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
      * @param name Authority name. Matching is case-sensitive.
      * @return existed True if `name` is currently whitelisted.
      */
-    function check(string calldata name) external view override onlyValidRegistry returns (bool) {
+    function check(
+        string calldata name
+    ) external view override onlyValidRegistry returns (bool) {
         return _whitelist[keccak256(bytes(name))];
     }
 
@@ -211,18 +221,19 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
      *
      * Security:
      * - Role-gated via ACTION_SET_PARAMETER.
-    * - Emits standardized governance and registry-update events.
+     * - Emits standardized governance and registry-update events.
      *
      * @param newRegistryAddr New Registry contract address.
      */
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (newRegistryAddr == address(0)) revert ZeroAddress();
-        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
-        
+        if (newRegistryAddr.code.length == 0)
+            revert NotAContract(newRegistryAddr);
+
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
-        
+
         // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -230,12 +241,12 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
             msg.sender,
             block.number
         );
-        
+
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
     }
 
     /*━━━━━━━━━━━━━━━ Internal Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Resolve ACM from Registry and require that `user` has `actionKey`.
      * @dev Reverts if Registry or ACM resolution fails, or if the role check fails.
@@ -243,7 +254,9 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
      * @param user User address to check.
      */
     function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
@@ -260,7 +273,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
     }
 
     /*━━━━━━━━━━━━━━━ Upgrade Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Authorize a UUPS upgrade.
      * @dev Reverts if:
@@ -276,7 +289,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
     function _authorizeUpgrade(address newImplementation) internal override {
         _requireRole(ActionKeys.ACTION_UPGRADE_MODULE, msg.sender);
         if (newImplementation == address(0)) revert ZeroAddress();
-        
+
         // Emit a standardized governance action for auditability.
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_UPGRADE_MODULE,
@@ -287,7 +300,7 @@ contract AuthorityWhitelist is Initializable, UUPSUpgradeable, IAuthorityWhiteli
     }
 
     /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
-    
+
     /// @dev Storage gap reserved for upgrade safety.
     uint256[50] private __gap;
-} 
+}

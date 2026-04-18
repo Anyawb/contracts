@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ViewConstants } from "../Vault/view/ViewConstants.sol";
+import {ViewConstants} from "../Vault/view/ViewConstants.sol";
 
 /// @title MockStatisticsViewUserSnapshot
 /// @notice Minimal StatisticsView-like mock for UserView unit tests.
@@ -39,10 +39,19 @@ contract MockStatisticsViewUserSnapshot {
         _version[user] = version_;
     }
 
-    function getUserSnapshotWithMeta(address user)
+    function getUserSnapshotWithMeta(
+        address user
+    )
         external
         view
-        returns (UserSnapshot memory s, uint64 version, uint64 seq, bytes32 lastAppliedRequestId, bool isValid, uint256 blockNumber)
+        returns (
+            UserSnapshot memory s,
+            uint64 version,
+            uint64 seq,
+            bytes32 lastAppliedRequestId,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         s = _snap[user];
         version = _version[user];
@@ -53,8 +62,9 @@ contract MockStatisticsViewUserSnapshot {
         if (blockNumber == 0 || blockNumber > block.number) {
             isValid = false;
         } else {
-            isValid = block.number - blockNumber <= ViewConstants.CACHE_DURATION_BLOCKS;
+            isValid =
+                block.number - blockNumber <=
+                ViewConstants.CACHE_DURATION_BLOCKS;
         }
     }
 }
-

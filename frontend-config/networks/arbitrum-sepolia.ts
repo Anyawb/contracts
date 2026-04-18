@@ -1,6 +1,6 @@
 // Auto-generated contract configuration file - Arbitrum Sepolia
-// Generated at: 2026-04-14T08:51:07.260Z
-// Release ID: arbitrum-sepolia-20260414085107261
+// Generated at: 2026-04-17T01:28:09.619Z
+// Release ID: arbitrum-sepolia-20260417012809620
 //
 // Naming:
 // - OrderEngine = core/LendingEngine (Registry KEY_ORDER_ENGINE)
@@ -10,8 +10,8 @@
 export const DEPLOYMENT_METADATA = {
   "network": "arbitrum-sepolia",
   "chainId": 421614,
-  "releaseId": "arbitrum-sepolia-20260414085107261",
-  "generatedAt": "2026-04-14T08:51:07.260Z",
+  "releaseId": "arbitrum-sepolia-20260417012809620",
+  "generatedAt": "2026-04-17T01:28:09.619Z",
   "registry": "0xD42676Ef80391ab90ef8d8c85cd2F966c16d09D2",
   "sourceFiles": {
     "deployOutputFile": "scripts/deployments/arbitrum-sepolia.json",

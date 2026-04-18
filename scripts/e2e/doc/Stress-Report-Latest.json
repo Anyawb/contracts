@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-04-11T14:09:14.710Z",
-  "artifact": "artifacts/price-liquidation-stress.1775916556796.json",
+  "generatedAt": "2026-04-17T11:39:55.121Z",
+  "artifact": "artifacts/price-liquidation-stress.1776425997286.json",
   "config": {
     "mode": "multi",
     "assetCount": 2,
@@ -18,16 +18,16 @@
     "grindOrders": 12,
     "guaranteeExtensionFlowEnabled": true,
     "assets": [
-      "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
-      "0x262e2b50219620226C5fB5956432A88fffd94Ba7"
+      "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
+      "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9"
     ],
     "reward": {
       "strictReward": true,
       "trackGuaranteePenalty": true,
-      "rewardViewAddr": "0x986aaa537b8cc170761FDAC6aC4fc7F9d8a20A8C",
-      "rewardAccrualManagerAddr": "0x6C2d83262fF84cBaDb3e416D527403135D757892",
-      "easyEmissionConfigAddr": "0xD49a0e9A4CD5979aE36840f542D2d7f02C4817Be",
-      "rewardManagerCoreAddr": "0x02b0B4EFd909240FCB2Eb5FAe060dC60D112E3a4"
+      "rewardViewAddr": "0x87EbDA903aaeb1213056e63F49871683E62783bE",
+      "rewardAccrualManagerAddr": "0xae44841b3634D5DEAba372f5Fb822582817ea556",
+      "easyEmissionConfigAddr": "0x70235a3ef276f104aeE67D0B634f5978AF80ce2b",
+      "rewardManagerCoreAddr": "0x0e1738e89609E64bfF795093ddCEC2Ab679edfD7"
     }
   },
   "scenarios": {
@@ -46,14 +46,14 @@
       "fallbackLiquidations": 0,
       "zeroValuations": 0,
       "assets": {
-        "0x9E545E3C0baAB3E08CdfD552C960A1050f373042": {
+        "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E": {
           "orders": 8,
           "skipped": 0,
           "liquidated": 8,
           "fallback": 0,
           "zeroVal": 0
         },
-        "0x262e2b50219620226C5fB5956432A88fffd94Ba7": {
+        "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9": {
           "orders": 8,
           "skipped": 0,
           "liquidated": 8,
@@ -64,167 +64,167 @@
       "principalUsdMin": "3037",
       "principalUsdMax": "227016",
       "liquidationThreshold": "10500",
-      "deepenedCrashRounds": 4,
+      "deepenedCrashRounds": 1,
       "riskSamples": [
         {
           "borrower": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-          "asset": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+          "asset": "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
           "cachedHf": "30000",
           "cachedValid": true,
-          "cachedBlock": "47509",
-          "liveCollateralUsd8": "515052000000000000000000",
-          "liveDebtUsd8": "171684000000000000000000",
+          "cachedBlock": "50047",
+          "liveCollateralUsd8": "4120416000000000000000000",
+          "liveDebtUsd8": "1373472000000000000000000",
           "liveLiquidatable": false
         },
         {
           "borrower": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-          "asset": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
-          "cachedHf": "6000000",
+          "asset": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
+          "cachedHf": "6000000000000000000",
           "cachedValid": true,
-          "cachedBlock": "47515",
-          "liveCollateralUsd8": "546442875000000000000000",
-          "liveDebtUsd8": "4857270000000",
-          "liveLiquidatable": false
+          "cachedBlock": "50053",
+          "liveCollateralUsd8": "4371543000000000000000000",
+          "liveDebtUsd8": "4857270000000000000000000",
+          "liveLiquidatable": true
         },
         {
           "borrower": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
-          "asset": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+          "asset": "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
           "cachedHf": "30000",
           "cachedValid": true,
-          "cachedBlock": "47521",
-          "liveCollateralUsd8": "577833750000000000000000",
-          "liveDebtUsd8": "192611250000000000000000",
+          "cachedBlock": "50059",
+          "liveCollateralUsd8": "4622670000000000000000000",
+          "liveDebtUsd8": "1540890000000000000000000",
           "liveLiquidatable": false
         },
         {
           "borrower": "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
-          "asset": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
-          "cachedHf": "6000000",
+          "asset": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
+          "cachedHf": "6000000000000000000",
           "cachedValid": true,
-          "cachedBlock": "47527",
-          "liveCollateralUsd8": "609224625000000000000000",
-          "liveDebtUsd8": "5415330000000",
-          "liveLiquidatable": false
+          "cachedBlock": "50065",
+          "liveCollateralUsd8": "4873797000000000000000000",
+          "liveDebtUsd8": "5415330000000000000000000",
+          "liveLiquidatable": true
         },
         {
           "borrower": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
-          "asset": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+          "asset": "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
           "cachedHf": "30000",
           "cachedValid": true,
-          "cachedBlock": "47533",
-          "liveCollateralUsd8": "640615500000000000000000",
-          "liveDebtUsd8": "213538500000000000000000",
+          "cachedBlock": "50071",
+          "liveCollateralUsd8": "5124924000000000000000000",
+          "liveDebtUsd8": "1708308000000000000000000",
           "liveLiquidatable": false
         },
         {
           "borrower": "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
-          "asset": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
-          "cachedHf": "6000000",
+          "asset": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
+          "cachedHf": "6000000000000000000",
           "cachedValid": true,
-          "cachedBlock": "47539",
-          "liveCollateralUsd8": "672006375000000000000000",
-          "liveDebtUsd8": "5973390000000",
-          "liveLiquidatable": false
+          "cachedBlock": "50077",
+          "liveCollateralUsd8": "5376051000000000000000000",
+          "liveDebtUsd8": "5973390000000000000000000",
+          "liveLiquidatable": true
         },
         {
           "borrower": "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955",
-          "asset": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+          "asset": "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
           "cachedHf": "30000",
           "cachedValid": true,
-          "cachedBlock": "47545",
-          "liveCollateralUsd8": "703397250000000000000000",
-          "liveDebtUsd8": "234465750000000000000000",
+          "cachedBlock": "50083",
+          "liveCollateralUsd8": "5627178000000000000000000",
+          "liveDebtUsd8": "1875726000000000000000000",
           "liveLiquidatable": false
         },
         {
           "borrower": "0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f",
-          "asset": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
-          "cachedHf": "6000000",
+          "asset": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
+          "cachedHf": "6000000000000000000",
           "cachedValid": true,
-          "cachedBlock": "47551",
-          "liveCollateralUsd8": "734788125000000000000000",
-          "liveDebtUsd8": "6531450000000",
-          "liveLiquidatable": false
+          "cachedBlock": "50089",
+          "liveCollateralUsd8": "5878305000000000000000000",
+          "liveDebtUsd8": "6531450000000000000000000",
+          "liveLiquidatable": true
         },
         {
           "borrower": "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720",
-          "asset": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+          "asset": "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
           "cachedHf": "30000",
           "cachedValid": true,
-          "cachedBlock": "47557",
-          "liveCollateralUsd8": "766179000000000000000000",
-          "liveDebtUsd8": "255393000000000000000000",
+          "cachedBlock": "50095",
+          "liveCollateralUsd8": "6129432000000000000000000",
+          "liveDebtUsd8": "2043144000000000000000000",
           "liveLiquidatable": false
         },
         {
           "borrower": "0xBcd4042DE499D14e55001CcbB24a551F3b954096",
-          "asset": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
-          "cachedHf": "6000000",
+          "asset": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
+          "cachedHf": "6000000000000000000",
           "cachedValid": true,
-          "cachedBlock": "47563",
-          "liveCollateralUsd8": "10249875000000000000000",
-          "liveDebtUsd8": "91110000000",
-          "liveLiquidatable": false
+          "cachedBlock": "50101",
+          "liveCollateralUsd8": "81999000000000000000000",
+          "liveDebtUsd8": "91110000000000000000000",
+          "liveLiquidatable": true
         },
         {
           "borrower": "0x71bE63f3384f5fb98995898A86B02Fb2426c5788",
-          "asset": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+          "asset": "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
           "cachedHf": "30000",
           "cachedValid": true,
-          "cachedBlock": "47569",
-          "liveCollateralUsd8": "41640750000000000000000",
-          "liveDebtUsd8": "13880250000000000000000",
+          "cachedBlock": "50107",
+          "liveCollateralUsd8": "333126000000000000000000",
+          "liveDebtUsd8": "111042000000000000000000",
           "liveLiquidatable": false
         },
         {
           "borrower": "0xFABB0ac9d68B0B445fB7357272Ff202C5651694a",
-          "asset": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
-          "cachedHf": "6000000",
+          "asset": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
+          "cachedHf": "6000000000000000000",
           "cachedValid": true,
-          "cachedBlock": "47575",
-          "liveCollateralUsd8": "73031625000000000000000",
-          "liveDebtUsd8": "649170000000",
-          "liveLiquidatable": false
+          "cachedBlock": "50113",
+          "liveCollateralUsd8": "584253000000000000000000",
+          "liveDebtUsd8": "649170000000000000000000",
+          "liveLiquidatable": true
         },
         {
           "borrower": "0x1CBd3b2770909D4e10f157cABC84C7264073C9Ec",
-          "asset": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+          "asset": "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
           "cachedHf": "30000",
           "cachedValid": true,
-          "cachedBlock": "47581",
-          "liveCollateralUsd8": "104422500000000000000000",
-          "liveDebtUsd8": "34807500000000000000000",
+          "cachedBlock": "50119",
+          "liveCollateralUsd8": "835380000000000000000000",
+          "liveDebtUsd8": "278460000000000000000000",
           "liveLiquidatable": false
         },
         {
           "borrower": "0xdF3e18d64BC6A983f673Ab319CCaE4f1a57C7097",
-          "asset": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
-          "cachedHf": "6000000",
+          "asset": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
+          "cachedHf": "6000000000000000000",
           "cachedValid": true,
-          "cachedBlock": "47587",
-          "liveCollateralUsd8": "135813375000000000000000",
-          "liveDebtUsd8": "1207230000000",
-          "liveLiquidatable": false
+          "cachedBlock": "50125",
+          "liveCollateralUsd8": "1086507000000000000000000",
+          "liveDebtUsd8": "1207230000000000000000000",
+          "liveLiquidatable": true
         },
         {
           "borrower": "0xcd3B766CCDd6AE721141F452C550Ca635964ce71",
-          "asset": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+          "asset": "0x488b54Cf1b3F65Fa0cf76889ccb78afD2a054f4E",
           "cachedHf": "30000",
           "cachedValid": true,
-          "cachedBlock": "47593",
-          "liveCollateralUsd8": "167204250000000000000000",
-          "liveDebtUsd8": "55734750000000000000000",
+          "cachedBlock": "50131",
+          "liveCollateralUsd8": "1337634000000000000000000",
+          "liveDebtUsd8": "445878000000000000000000",
           "liveLiquidatable": false
         },
         {
           "borrower": "0x2546BcD3c84621e976D8185a91A922aE77ECEc30",
-          "asset": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
-          "cachedHf": "6000000",
+          "asset": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
+          "cachedHf": "6000000000000000000",
           "cachedValid": true,
-          "cachedBlock": "47599",
-          "liveCollateralUsd8": "198595125000000000000000",
-          "liveDebtUsd8": "1765290000000",
-          "liveLiquidatable": false
+          "cachedBlock": "50137",
+          "liveCollateralUsd8": "1588761000000000000000000",
+          "liveDebtUsd8": "1765290000000000000000000",
+          "liveLiquidatable": true
         }
       ]
     }

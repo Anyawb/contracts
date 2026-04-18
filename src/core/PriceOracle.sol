@@ -160,9 +160,9 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      *   health policy (this contract is a price store).
      *
      * @param asset ERC-20 asset address.
-    * @return price Price in the asset's valuation unit.
+     * @return price Price in the asset's valuation unit.
      * @return blockNumber Informational blockNumber associated with the quoted price.
-    * @return assetDecimals Token decimals used for price/value scaling (see `AssetConfig.assetDecimals`).
+     * @return assetDecimals Token decimals used for price/value scaling (see `AssetConfig.assetDecimals`).
      */
     function getPrice(
         address asset
@@ -210,7 +210,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      *   their own staleness policy using `AssetConfig.maxPriceAgeBlocks` and {block.number}.
      *
      * @param asset ERC-20 asset address.
-    * @return priceData Stored price struct (includes price, blockNumber, and token decimals used for scaling).
+     * @return priceData Stored price struct (includes price, blockNumber, and token decimals used for scaling).
      */
     function getPriceData(
         address asset
@@ -321,7 +321,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - This function fails atomically: one invalid asset causes the entire call to revert.
      *
      * @param assets List of ERC-20 asset addresses.
-    * @return prices Prices in each asset's valuation unit, aligned to `assets`.
+     * @return prices Prices in each asset's valuation unit, aligned to `assets`.
      * @return blockNumbers Informational blockNumbers, aligned to `assets`.
      * @return assetDecimalsArray Token decimals used for valuation scaling, aligned to `assets`.
      */
@@ -393,7 +393,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
     }
 
     /**
-    * @notice Returns the configured offchain source id for `asset`.
+     * @notice Returns the configured offchain source id for `asset`.
      * @dev Reverts if:
      *      - `asset` is zero (see {ZeroAddress})
      *      - `asset` is not active (see {PriceOracle__AssetNotSupported})
@@ -427,7 +427,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
     }
 
     /**
-    * @notice Configures an asset (source id, token decimals for scaling, activation, and max allowed price age).
+     * @notice Configures an asset (source id, token decimals for scaling, activation, and max allowed price age).
      * @dev Reverts if:
      *      - Registry is not configured / not a contract (see {ZeroAddress}, {NotAContract}) (via {onlyValidRegistry})
      *      - caller lacks `ActionKeys.ACTION_SET_PARAMETER` (reverts in ACM via {_requireRole})
@@ -442,8 +442,8 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      *   That read is best-effort and reverts only if decimals remain unconfigured (returns 0 / unreadable).
      *
      * @param asset ERC-20 asset address to configure.
-    * @param sourceId Offchain source id used by updaters (may be empty).
-    * @param assetDecimals Token decimals used for price/value scaling.
+     * @param sourceId Offchain source id used by updaters (may be empty).
+     * @param assetDecimals Token decimals used for price/value scaling.
      * @param maxPriceAgeBlocks Maximum allowed staleness in blocks (0 uses default).
      */
     function configureAsset(
@@ -498,11 +498,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
         if (asset == address(0)) revert ZeroAddress();
 
         _assetConfigs[asset].isActive = isActive;
-        emit AssetConfigUpdated(
-            asset,
-            _assetConfigs[asset].sourceId,
-            isActive
-        );
+        emit AssetConfigUpdated(asset, _assetConfigs[asset].sourceId, isActive);
 
         emit SystemEvents.ActionExecuted(
             ActionKeys.ACTION_SET_PARAMETER,
@@ -570,7 +566,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - This is a write path; consumers should treat written values as untrusted input guarded by governance/keepers.
      *
      * @param asset ERC-20 asset address to update.
-    * @param price New price in the asset's valuation unit.
+     * @param price New price in the asset's valuation unit.
      * @param blockNumber Informational blockNumber corresponding to the quoted price.
      */
     function updatePrice(
@@ -633,7 +629,7 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - This function emits one {PriceUpdated} per asset and a single {SystemEvents.ActionExecuted} for the batch.
      *
      * @param assets List of ERC-20 asset addresses to update.
-    * @param prices List of prices aligned to `assets`, each in the asset's valuation unit.
+     * @param prices List of prices aligned to `assets`, each in the asset's valuation unit.
      * @param blockNumbers List of informational blockNumbers aligned to `assets`.
      */
     function updatePrices(
@@ -700,8 +696,8 @@ contract PriceOracle is Initializable, UUPSUpgradeable, IPriceOracle {
      * - `maxPriceAgeBlocks == 0` is normalized to {_DEFAULT_MAX_PRICE_AGE_BLOCKS_VALUE}.
      *
      * @param asset ERC-20 asset address to configure.
-    * @param sourceId Offchain source id used by updaters (may be empty).
-    * @param assetDecimals Token decimals used for price/value scaling.
+     * @param sourceId Offchain source id used by updaters (may be empty).
+     * @param assetDecimals Token decimals used for price/value scaling.
      * @param maxPriceAgeBlocks Maximum allowed staleness in blocks (0 uses default).
      * @param setActive Whether to set `isActive` to true/false.
      * @param emitConfigEvent Whether to emit {AssetConfigUpdated}.

@@ -50,4 +50,3 @@ contract UserViewSelectorHarness is UserView {
         return _SEL_BATCH_GET_HEALTH_FACTORS_WITH_META;
     }
 }
-

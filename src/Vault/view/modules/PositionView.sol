@@ -162,11 +162,11 @@ contract PositionView is
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     address private _registryAddr;
 
-    // user => asset => collateral|debt
+    // user => asset => cached collateral and debt values
     mapping(address => mapping(address => uint256)) private _collateralCache;
     mapping(address => mapping(address => uint256)) private _debtCache;
     mapping(address => uint256) private _cacheBlocks;
-    // user => asset => version (单调递增)
+    // user => asset => monotonic version
     mapping(address => mapping(address => uint64)) private _positionVersion;
     // user => asset => last updated blockNumber
     mapping(address => mapping(address => uint256)) private _positionUpdatedAt;
@@ -1003,7 +1003,7 @@ contract PositionView is
     }
 
     /**
-    * @notice Get user's total collateral value in the normalized system valuation unit.
+     * @notice Get user's total collateral value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin
@@ -1014,7 +1014,7 @@ contract PositionView is
      * - Best-effort: returns 0 if dependent modules are unavailable or external calls fail.
      *
      * @param user Target user address
-    * @return totalValue Total collateral value normalized to 18 decimals.
+     * @return totalValue Total collateral value normalized to 18 decimals.
      */
     function getUserTotalCollateralValue(
         address user
@@ -1075,7 +1075,7 @@ contract PositionView is
     }
 
     /**
-    * @notice Get system total collateral value in the normalized system valuation unit.
+     * @notice Get system total collateral value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller lacks ACTION_VIEW_RISK_DATA permission and is not an admin
@@ -1085,7 +1085,7 @@ contract PositionView is
      * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
      * - Best-effort: returns 0 if dependent modules are unavailable or external calls fail.
      *
-    * @return totalValue Total collateral value normalized to 18 decimals.
+     * @return totalValue Total collateral value normalized to 18 decimals.
      */
     function getTotalCollateralValue()
         external
@@ -1131,7 +1131,11 @@ contract PositionView is
                 if (price == 0) continue;
                 if (decimals > 77) continue;
                 totalValue += AssetDecimalMath.normalizeValueDown(
-                    AssetDecimalMath.calcValue(totalAmount, price, uint8(decimals)),
+                    AssetDecimalMath.calcValue(
+                        totalAmount,
+                        price,
+                        uint8(decimals)
+                    ),
                     uint8(decimals),
                     _SYSTEM_VALUATION_DECIMALS
                 );
@@ -1150,13 +1154,13 @@ contract PositionView is
      *
      * Security:
      * - Role-gated via ACTION_VIEW_RISK_DATA (admin bypass)
-    * - Best-effort: returns 0 if the oracle call fails.
-    * - Single-asset values are normalized down to the shared 18-decimal system unit so they can be compared
-    *   directly with total collateral/debt values.
+     * - Best-effort: returns 0 if the oracle call fails.
+     * - Single-asset values are normalized down to the shared 18-decimal system unit so they can be compared
+     *   directly with total collateral/debt values.
      *
      * @param asset Asset address
      * @param amount Asset amount (asset decimals)
-    * @return value Value normalized to 18 decimals.
+     * @return value Value normalized to 18 decimals.
      */
     function getAssetValue(
         address asset,

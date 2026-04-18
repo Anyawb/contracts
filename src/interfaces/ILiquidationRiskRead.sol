@@ -33,18 +33,18 @@ interface ILiquidationRiskRead {
 
     /**
      * @notice Check if a position is liquidatable using provided collateral/debt values.
-        * @dev Reverts if:
-        *      - `user` or `asset` is invalid
-        *      - the implementation rejects the supplied valuation inputs
-        *
-        * Security:
-        * - Read-only pure/view-style threshold probe.
-        * - `collateral` and `debt` must already be expressed in the shared 18-decimal system valuation unit,
-        *   or in another same-unit pair explicitly normalized by the caller before invocation.
-        *
+     * @dev Reverts if:
+     *      - `user` or `asset` is invalid
+     *      - the implementation rejects the supplied valuation inputs
+     *
+     * Security:
+     * - Read-only pure/view-style threshold probe.
+     * - `collateral` and `debt` must already be expressed in the shared 18-decimal system valuation unit,
+     *   or in another same-unit pair explicitly normalized by the caller before invocation.
+     *
      * @param user User address.
-    * @param collateral Collateral value, normalized to the same unit as `debt`.
-    * @param debt Debt value, normalized to the same unit as `collateral`.
+     * @param collateral Collateral value, normalized to the same unit as `debt`.
+     * @param debt Debt value, normalized to the same unit as `collateral`.
      * @param asset Asset address.
      * @return liquidatable True if liquidatable, otherwise false.
      */
@@ -57,14 +57,14 @@ interface ILiquidationRiskRead {
 
     /**
      * @notice Get a user's liquidation risk score.
-        * @dev Reverts if:
-        *      - `user` is invalid
-        *      - the implementation cannot resolve the collateral/debt data needed for scoring
-        *
-        * Security:
-        * - Read-only aggregation helper.
-        * - Score range and derivation are implementation-defined beyond the documented 0-100 convention.
-        *
+     * @dev Reverts if:
+     *      - `user` is invalid
+     *      - the implementation cannot resolve the collateral/debt data needed for scoring
+     *
+     * Security:
+     * - Read-only aggregation helper.
+     * - Score range and derivation are implementation-defined beyond the documented 0-100 convention.
+     *
      * @param user User address.
      * @return riskScore Risk score in [0,100] (0 = lowest risk, 100 = highest).
      */
@@ -74,16 +74,16 @@ interface ILiquidationRiskRead {
 
     /**
      * @notice Calculate liquidation risk score for given collateral/debt values.
-        * @dev Reverts if:
-        *      - the implementation rejects the supplied valuation inputs
-        *
-        * Security:
-        * - Pure/view helper that does not mutate protocol state.
-        * - `collateral` and `debt` must already be expressed in the shared 18-decimal system valuation unit,
-        *   or in another same-unit pair explicitly normalized by the caller before invocation.
-        *
-    * @param collateral Collateral value, normalized to the same unit as `debt`.
-    * @param debt Debt value, normalized to the same unit as `collateral`.
+     * @dev Reverts if:
+     *      - the implementation rejects the supplied valuation inputs
+     *
+     * Security:
+     * - Pure/view helper that does not mutate protocol state.
+     * - `collateral` and `debt` must already be expressed in the shared 18-decimal system valuation unit,
+     *   or in another same-unit pair explicitly normalized by the caller before invocation.
+     *
+     * @param collateral Collateral value, normalized to the same unit as `debt`.
+     * @param debt Debt value, normalized to the same unit as `collateral`.
      * @return riskScore Risk score in [0,100] (0 = lowest risk, 100 = highest).
      */
     function calculateLiquidationRiskScore(
@@ -93,14 +93,14 @@ interface ILiquidationRiskRead {
 
     /**
      * @notice Get a comprehensive liquidation risk assessment for a user.
-        * @dev Reverts if:
-        *      - `user` is invalid
-        *      - the implementation cannot resolve one or more dependencies required for the assessment
-        *
-        * Security:
-        * - Read-only aggregation helper.
-        * - Returned factors are implementation-defined but expected to share the documented bps/value semantics.
-        *
+     * @dev Reverts if:
+     *      - `user` is invalid
+     *      - the implementation cannot resolve one or more dependencies required for the assessment
+     *
+     * Security:
+     * - Read-only aggregation helper.
+     * - Returned factors are implementation-defined but expected to share the documented bps/value semantics.
+     *
      * @param user User address.
      * @return liquidatable True if liquidatable, otherwise false.
      * @return riskScore Risk score in [0,100].
@@ -123,12 +123,12 @@ interface ILiquidationRiskRead {
 
     /**
      * @notice Get liquidation threshold.
-        * @dev Reverts if:
-        *      - the implementation cannot resolve the configured threshold value
-        *
-        * Security:
-        * - Read-only configuration helper.
-        *
+     * @dev Reverts if:
+     *      - the implementation cannot resolve the configured threshold value
+     *
+     * Security:
+     * - Read-only configuration helper.
+     *
      * @return threshold Liquidation threshold (bps, 10_000 = 100%).
      */
     function getLiquidationThreshold()
@@ -138,12 +138,12 @@ interface ILiquidationRiskRead {
 
     /**
      * @notice Get minimum health factor.
-        * @dev Reverts if:
-        *      - the implementation cannot resolve the configured minimum health factor
-        *
-        * Security:
-        * - Read-only configuration helper.
-        *
+     * @dev Reverts if:
+     *      - the implementation cannot resolve the configured minimum health factor
+     *
+     * Security:
+     * - Read-only configuration helper.
+     *
      * @return minHealthFactor Minimum health factor (bps, 10_000 = 100%).
      */
     function getMinHealthFactor()
@@ -153,28 +153,28 @@ interface ILiquidationRiskRead {
 
     /**
      * @notice Get maximum LTV.
-      * @dev Reverts if:
-      *      - the implementation cannot resolve the configured maximum LTV
-      *
-      * Security:
-      * - Read-only configuration helper.
-      *
+     * @dev Reverts if:
+     *      - the implementation cannot resolve the configured maximum LTV
+     *
+     * Security:
+     * - Read-only configuration helper.
+     *
      * @return maxLtvBps Maximum LTV (bps, 10_000 = 100%).
      */
     function getMaxLtvBps() external view returns (uint256 maxLtvBps);
 
     /**
      * @notice Batch check liquidatability for multiple users.
-      * @dev Reverts if:
-      *      - the batch exceeds implementation limits
-      *      - the implementation cannot resolve dependencies needed for one or more entries
-      *
-      * Security:
-      * - Read-only batch helper.
-      * - Implementations may skip zero-address entries or treat them as `false`.
-    * - Callers should not rely on reverts for malformed batch members.
-    * - Revert behavior for malformed entries is implementation-specific unless documented otherwise.
-      *
+     * @dev Reverts if:
+     *      - the batch exceeds implementation limits
+     *      - the implementation cannot resolve dependencies needed for one or more entries
+     *
+     * Security:
+     * - Read-only batch helper.
+     * - Implementations may skip zero-address entries or treat them as `false`.
+     * - Callers should not rely on reverts for malformed batch members.
+     * - Revert behavior for malformed entries is implementation-specific unless documented otherwise.
+     *
      * @param users Array of user addresses.
      * @return liquidatableFlags Array of liquidatable flags.
      */
@@ -184,14 +184,14 @@ interface ILiquidationRiskRead {
 
     /**
      * @notice Batch get liquidation risk scores for multiple users.
-        * @dev Reverts if:
-        *      - the batch exceeds implementation limits
-        *      - the implementation cannot resolve dependencies needed for one or more entries
-        *
-        * Security:
-        * - Read-only batch helper.
-        * - Implementations may return a default score for skipped or malformed entries instead of reverting.
-        *
+     * @dev Reverts if:
+     *      - the batch exceeds implementation limits
+     *      - the implementation cannot resolve dependencies needed for one or more entries
+     *
+     * Security:
+     * - Read-only batch helper.
+     * - Implementations may return a default score for skipped or malformed entries instead of reverting.
+     *
      * @param users Array of user addresses.
      * @return riskScores Array of risk scores (0-100).
      */

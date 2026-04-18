@@ -273,29 +273,29 @@ contract BlocksOnlyCoordinator is
     /*━━━━━━━━━━━━━━━ EXTERNAL API ━━━━━━━━━━━━━━━*/
 
     /**
-        * @notice Finalizes a matched blocks-only order, stages bound collateral into coordinator custody, transfers
-        *         principal, and records local settlement state.
+     * @notice Finalizes a matched blocks-only order, stages bound collateral into coordinator custody, transfers
+     *         principal, and records local settlement state.
      * @dev Reverts if:
      *      - the registry is unset or not a contract
      *      - the caller is not the registered Vault business logic module
      *      - the coordinator is paused
-        *      - `params.borrower`, `params.collateralAsset`, or `params.borrowAsset` is the zero address
-        *      - `params.collateralAmount == 0` or `params.amount == 0`
+     *      - `params.borrower`, `params.collateralAsset`, or `params.borrowAsset` is the zero address
+     *      - `params.collateralAmount == 0` or `params.amount == 0`
      *      - `params.termBlocks != 1`
      *      - `params.rateBps != 0`
      *      - `params.lender` does not equal the registered lender pool vault
-    *      - the asset whitelist rejects `params.borrowAsset` or `params.collateralAsset`
-        *      - bound-collateral staging, token transfer, or registry lookup calls revert
+     *      - the asset whitelist rejects `params.borrowAsset` or `params.collateralAsset`
+     *      - bound-collateral staging, token transfer, or registry lookup calls revert
      *
      * Security:
-        * - Non-reentrant write path gated by the registered Vault business logic module.
-        * - Uses the lender pool vault as the only allowed funding source in the current implementation.
-        * - Moves the order-bound collateral out of the borrower's collateral ledger into coordinator custody before
-        *   creating the order, so the borrower cannot withdraw or reuse it after match.
-        * - Emits both coordinator events and DataPush payloads after the order is stored.
+     * - Non-reentrant write path gated by the registered Vault business logic module.
+     * - Uses the lender pool vault as the only allowed funding source in the current implementation.
+     * - Moves the order-bound collateral out of the borrower's collateral ledger into coordinator custody before
+     *   creating the order, so the borrower cannot withdraw or reuse it after match.
+     * - Emits both coordinator events and DataPush payloads after the order is stored.
      *
      * @param params Matched order inputs, including participants, asset, amount, and term.
-        * @return orderId Newly assigned coordinator order id.
+     * @return orderId Newly assigned coordinator order id.
      */
 
     function finalizeMatchBlocks(
@@ -312,8 +312,7 @@ contract BlocksOnlyCoordinator is
             params.borrower == address(0) ||
             params.collateralAsset == address(0) ||
             params.borrowAsset == address(0)
-        )
-            revert ZeroAddress();
+        ) revert ZeroAddress();
         if (params.amount == 0) revert AmountIsZero();
         if (params.collateralAmount == 0) revert AmountIsZero();
         if (params.termBlocks != 1)
@@ -384,8 +383,10 @@ contract BlocksOnlyCoordinator is
         });
         _borrowerOrderIds[params.borrower].push(orderId);
 
-        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
-            _tryOrderStateStore();
+        (
+            IOrderStateStoreV2 orderStateStore,
+            bool hasOrderStateStore
+        ) = _tryOrderStateStore();
         if (hasOrderStateStore) {
             orderStateStore.initializeBlocksOnlyOrderState(orderId, startBlock);
         }
@@ -432,16 +433,16 @@ contract BlocksOnlyCoordinator is
      *      - `repayAmount == 0`
      *      - `orderId` does not reference an open order
      *      - the caller is not the borrower stored on the order
-        *      - token transfer or registry lookup reverts
+     *      - token transfer or registry lookup reverts
      *
      * Security:
-        * - Borrower-only non-reentrant write path.
-        * - Local settlement state is the product SSOT; the generic debt ledger is not consulted.
-        * - A debt-free repay keeps the order open until an explicit close/settle transition is executed.
+     * - Borrower-only non-reentrant write path.
+     * - Local settlement state is the product SSOT; the generic debt ledger is not consulted.
+     * - A debt-free repay keeps the order open until an explicit close/settle transition is executed.
      *
      * @param orderId Coordinator order id.
      * @param repayAmount Repayment amount in debt-asset base units.
-        * @return remainingDebt Remaining open settlement amount after repayment.
+     * @return remainingDebt Remaining open settlement amount after repayment.
      */
     function repayBlocks(
         uint256 orderId,
@@ -477,8 +478,10 @@ contract BlocksOnlyCoordinator is
         remainingDebt = _remainingSettlementAmount(order);
 
         if (remainingDebt == 0) {
-            (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
-                _tryOrderStateStore();
+            (
+                IOrderStateStoreV2 orderStateStore,
+                bool hasOrderStateStore
+            ) = _tryOrderStateStore();
             if (hasOrderStateStore) {
                 orderStateStore.markBlocksOnlyRepaid(orderId, order.startBlock);
             }
@@ -514,12 +517,12 @@ contract BlocksOnlyCoordinator is
      *      - the registry is unset or not a contract
      *      - the coordinator is paused
      *      - `orderId` does not reference an open order
-        *      - the coordinator-local remaining settlement amount is non-zero
+     *      - the coordinator-local remaining settlement amount is non-zero
      *      - collateral release dependencies revert
      *
      * Security:
-        * - Permissionless close path by design: if debt is already zero, any caller may help finalize the trade-style
-        *   order lifecycle, but collateral is always returned to the borrower.
+     * - Permissionless close path by design: if debt is already zero, any caller may help finalize the trade-style
+     *   order lifecycle, but collateral is always returned to the borrower.
      * - Keeps trade-like completion separate from maturity-gated settlement and liquidation.
      *
      * @param orderId Coordinator order id.
@@ -542,14 +545,17 @@ contract BlocksOnlyCoordinator is
             BlocksOnlyOrderStatus.TRADE_CLOSED
         );
 
-        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
-            _tryOrderStateStore();
+        (
+            IOrderStateStoreV2 orderStateStore,
+            bool hasOrderStateStore
+        ) = _tryOrderStateStore();
         if (hasOrderStateStore) {
             orderStateStore.applyBlocksOnlyCloseTransition(
                 orderId,
                 order.startBlock,
                 IOrderStateStoreV2.CloseReason.BLOCKS_TRADE_CLOSE,
-                IOrderStateStoreV2.CollateralDispositionStatus
+                IOrderStateStoreV2
+                    .CollateralDispositionStatus
                     .RETURNED_TO_BORROWER
             );
         }
@@ -575,22 +581,22 @@ contract BlocksOnlyCoordinator is
         _tryEmitBlocksOnlyEasy(orderId, order);
     }
 
-     /**
-      * @notice Completes maturity-gated product settlement for a blocks-only order.
+    /**
+     * @notice Completes maturity-gated product settlement for a blocks-only order.
      * @dev Reverts if:
      *      - the registry is unset or not a contract
      *      - the coordinator is paused
      *      - `orderId` does not reference an open order
      *      - the current block is below the order's maturity block
-      *      - registry lookup or collateral delivery calls revert
+     *      - registry lookup or collateral delivery calls revert
      *
      * Security:
-      * - Permissionless non-reentrant maturity-close path.
-      * - Debt-free maturity close returns coordinator-held order-bound collateral to the borrower.
-      * - Unpaid maturity close delivers coordinator-held order-bound collateral to the recorded lender and
-      *   extinguishes the remaining settlement amount locally.
+     * - Permissionless non-reentrant maturity-close path.
+     * - Debt-free maturity close returns coordinator-held order-bound collateral to the borrower.
+     * - Unpaid maturity close delivers coordinator-held order-bound collateral to the recorded lender and
+     *   extinguishes the remaining settlement amount locally.
      *
-      * @param orderId Coordinator order id.
+     * @param orderId Coordinator order id.
      */
     function settleOrLiquidateBlocks(
         uint256 orderId
@@ -612,14 +618,17 @@ contract BlocksOnlyCoordinator is
                 BlocksOnlyOrderStatus.SETTLED
             );
 
-            (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
-                _tryOrderStateStore();
+            (
+                IOrderStateStoreV2 orderStateStore,
+                bool hasOrderStateStore
+            ) = _tryOrderStateStore();
             if (hasOrderStateStore) {
                 orderStateStore.applyBlocksOnlyCloseTransition(
                     orderId,
                     order.startBlock,
                     IOrderStateStoreV2.CloseReason.BLOCKS_MATURITY_CLOSE,
-                    IOrderStateStoreV2.CollateralDispositionStatus
+                    IOrderStateStoreV2
+                        .CollateralDispositionStatus
                         .RETURNED_TO_BORROWER
                 );
             }
@@ -656,14 +665,17 @@ contract BlocksOnlyCoordinator is
 
         order.closeBlock = block.number;
 
-        (IOrderStateStoreV2 deliveredOrderStateStore, bool hasDeliveredStore) =
-            _tryOrderStateStore();
+        (
+            IOrderStateStoreV2 deliveredOrderStateStore,
+            bool hasDeliveredStore
+        ) = _tryOrderStateStore();
         if (hasDeliveredStore) {
             deliveredOrderStateStore.applyBlocksOnlyCloseTransition(
                 orderId,
                 order.startBlock,
                 IOrderStateStoreV2.CloseReason.BLOCKS_MATURITY_CLOSE,
-                IOrderStateStoreV2.CollateralDispositionStatus
+                IOrderStateStoreV2
+                    .CollateralDispositionStatus
                     .DELIVERED_TO_LENDER
             );
         }
@@ -790,8 +802,8 @@ contract BlocksOnlyCoordinator is
     /**
      * @notice Returns an open order storage reference for `orderId`.
      * @dev Reverts if:
-        *      - `orderId` has not been created
-        *      - the referenced order is `NONE`, `SETTLED`, or `TRADE_CLOSED`
+     *      - `orderId` has not been created
+     *      - the referenced order is `NONE`, `SETTLED`, or `TRADE_CLOSED`
      *
      * Security:
      * - Internal state gate used by repayment and settlement paths.
@@ -817,17 +829,17 @@ contract BlocksOnlyCoordinator is
     }
 
     /**
-        * @notice Releases coordinator-held bound collateral and marks the order as closed under the provided debt-free
-        *         close status.
-        * @dev Reverts if the coordinator cannot release the staged collateral.
+     * @notice Releases coordinator-held bound collateral and marks the order as closed under the provided debt-free
+     *         close status.
+     * @dev Reverts if the coordinator cannot release the staged collateral.
      *
      * Security:
-        * - Internal helper shared by the maturity-gated settlement path and the trade-style close path.
-        * - Always returns the staged collateral to the borrower and records `closeBlock = block.number`.
+     * - Internal helper shared by the maturity-gated settlement path and the trade-style close path.
+     * - Always returns the staged collateral to the borrower and records `closeBlock = block.number`.
      *
-        * @param order Open order storage reference.
-        * @param closeStatus Final closed status to assign.
-        * @return closeBlock Block number at which the order was closed.
+     * @param order Open order storage reference.
+     * @param closeStatus Final closed status to assign.
+     * @return closeBlock Block number at which the order was closed.
      */
     function _closeDebtFreeOrder(
         BlocksOnlyOrder storage order,
@@ -858,8 +870,8 @@ contract BlocksOnlyCoordinator is
         return (IOrderStateStoreV2(orderStateStoreAddr), true);
     }
 
-        /**
-         * @notice Stages the order-bound collateral out of the borrower's collateral ledger into coordinator custody.
+    /**
+     * @notice Stages the order-bound collateral out of the borrower's collateral ledger into coordinator custody.
      * @dev Reverts if the collateral manager dependency is missing or the withdrawal call reverts.
      *
      * Security:
@@ -886,11 +898,11 @@ contract BlocksOnlyCoordinator is
         );
     }
 
-        /**
-         * @notice Releases the coordinator-held order-bound collateral to `recipient`.
+    /**
+     * @notice Releases the coordinator-held order-bound collateral to `recipient`.
      * @dev Reverts if:
      *      - the coordinator custody balance is below the bound collateral amount
-    *      - the ERC20 transfer reverts
+     *      - the ERC20 transfer reverts
      *
      * Security:
      * - Internal settlement helper used only for the order-bound collateral asset/amount.
@@ -935,17 +947,23 @@ contract BlocksOnlyCoordinator is
         if (controller == address(0) || controller.code.length == 0) {
             return;
         }
-        // solhint-disable-next-line no-empty-blocks
-        try
-            IBlocksOnlyEasyEmissionController(controller)
-                .onBlocksOnlyTradeSettlement(
+        // Best-effort hook: swallow failures to avoid blocking trade settlement.
+        // solhint-disable-next-line avoid-low-level-calls
+        (bool hookOk, ) = controller.call(
+            abi.encodeCall(
+                IBlocksOnlyEasyEmissionController.onBlocksOnlyTradeSettlement,
+                (
                     order.borrower,
                     order.lender,
                     order.asset,
                     orderId,
                     order.principal
                 )
-        {} catch {}
+            )
+        );
+        if (!hookOk) {
+            return;
+        }
     }
 
     /**

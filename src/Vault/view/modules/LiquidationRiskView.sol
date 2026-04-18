@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { LiquidationRiskLib } from "../../liquidation/libraries/LiquidationRiskLib.sol";
-import { ILiquidationRiskRead } from "../../../interfaces/ILiquidationRiskRead.sol";
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import {LiquidationRiskLib} from "../../liquidation/libraries/LiquidationRiskLib.sol";
+import {ILiquidationRiskRead} from "../../../interfaces/ILiquidationRiskRead.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
 import {
     ArrayLengthMismatch,
     BatchTooLarge,
@@ -19,7 +19,7 @@ import {
     NotAContract,
     ZeroAddress
 } from "../../../errors/StandardErrors.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
 
 /**
  * @title LiquidationRiskView
@@ -48,7 +48,7 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - _registryAddr is not a contract (see {NotAContract})
      *
      * Security:
-    * - View-only guard.
+     * - View-only guard.
      */
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert ZeroAddress();
@@ -68,9 +68,17 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     modifier onlyUserOrViewer(address user) {
         if (
-            msg.sender != user
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            msg.sender != user &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -85,8 +93,16 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     modifier onlyUserBatchViewer() {
         if (
-            !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -110,7 +126,8 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -122,11 +139,11 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - collaterals.length != debts.length (see {ArrayLengthMismatch})
      *
      * Security:
-    * - Pure function.
+     * - Pure function.
      *
-    * @param collaterals Collateral amounts in implementation-defined units.
-    * @param debts Debt amounts in implementation-defined units.
-    * @return healthFactors Health factors returned by LiquidationRiskLib.
+     * @param collaterals Collateral amounts in implementation-defined units.
+     * @param debts Debt amounts in implementation-defined units.
+     * @return healthFactors Health factors returned by LiquidationRiskLib.
      */
     function batchCalculateHealthFactors(
         uint256[] calldata collaterals,
@@ -136,8 +153,13 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (len != debts.length) revert ArrayLengthMismatch(len, debts.length);
         healthFactors = new uint256[](len);
         for (uint256 i; i < len; ) {
-            healthFactors[i] = LiquidationRiskLib.calculateHealthFactor(collaterals[i], debts[i]);
-            unchecked { ++i; }
+            healthFactors[i] = LiquidationRiskLib.calculateHealthFactor(
+                collaterals[i],
+                debts[i]
+            );
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -152,12 +174,14 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
-    * @param user Target user address.
-    * @return liquidatable True if the RiskManager reports the user as liquidatable.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @param user Target user address.
+     * @return liquidatable True if the RiskManager reports the user as liquidatable.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
-    function isLiquidatable(address user)
+    function isLiquidatable(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -179,13 +203,13 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
-    * @param user Target user address.
+     * @param user Target user address.
      * @param collateral Collateral amount (asset decimals; as expected by RiskManager)
      * @param debt Debt amount (asset decimals; as expected by RiskManager)
-    * @param asset Asset address.
-    * @return liquidatable True if the RiskManager reports the scenario as liquidatable.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @param asset Asset address.
+     * @return liquidatable True if the RiskManager reports the scenario as liquidatable.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
     function isLiquidatable(
         address user,
@@ -213,12 +237,14 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U reads (self or VIEW_USER_DATA/ADMIN)
      *
-    * @param user Target user address.
-    * @return riskScore Risk score in implementation-defined scale.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @param user Target user address.
+     * @return riskScore Risk score in implementation-defined scale.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
-    function getLiquidationRiskScore(address user)
+    function getLiquidationRiskScore(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -241,17 +267,23 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
-    * @param users Target user addresses.
-    * @return liquidatableFlags Per-user liquidation flags.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @param users Target user addresses.
+     * @return liquidatableFlags Per-user liquidation flags.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
-    function batchIsLiquidatable(address[] calldata users)
+    function batchIsLiquidatable(
+        address[] calldata users
+    )
         external
         view
         onlyValidRegistry
         onlyUserBatchViewer
-        returns (bool[] memory liquidatableFlags, bool isValid, uint256 blockNumber)
+        returns (
+            bool[] memory liquidatableFlags,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         uint256 len = users.length;
         if (len == 0) revert EmptyArray();
@@ -274,12 +306,14 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      * Security:
      * - Scheme U batch reads (VIEW_USER_DATA/ADMIN)
      *
-    * @param users Target user addresses.
-    * @return riskScores Per-user risk scores in implementation-defined scale.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @param users Target user addresses.
+     * @return riskScores Per-user risk scores in implementation-defined scale.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
-    function batchGetLiquidationRiskScores(address[] calldata users)
+    function batchGetLiquidationRiskScores(
+        address[] calldata users
+    )
         external
         view
         onlyValidRegistry
@@ -302,9 +336,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (never; may return address(0) if not initialized)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @return registry Registry address.
+     * @return registry Registry address.
      */
     function getRegistry() external view returns (address registry) {
         return _registryAddr;
@@ -317,7 +351,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     function _rm() internal view returns (ILiquidationRiskRead) {
-        address rm = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
+        address rm = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER
+        );
         return ILiquidationRiskRead(rm);
     }
 
@@ -335,12 +371,21 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
@@ -350,9 +395,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (never)
      *
      * Security:
-    * - Pure function.
+     * - Pure function.
      *
-    * @return version API version.
+     * @return version API version.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
@@ -364,9 +409,9 @@ contract LiquidationRiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - (never)
      *
      * Security:
-    * - Pure function.
+     * - Pure function.
      *
-    * @return version Schema version.
+     * @return version Schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;

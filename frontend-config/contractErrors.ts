@@ -1,6 +1,6 @@
 /**
  * Contract error artifact generated from contracts/scripts/generateContractErrors.ts
- * Generated at: 2026-04-14T08:50:09.912Z
+ * Generated at: 2026-04-17T13:21:49.247Z
  *
  * 此文件是前后端共享的 custom error selector -> 语义映射单一产物。
  * 不要在消费仓再手写第二份 selector 表。
@@ -318,7 +318,7 @@ export const CONTRACT_ERROR_DEFINITIONS = [
     signature: 'BlocksOnlyCoordinator__NoCollateral(address borrower)',
     fragment: 'error BlocksOnlyCoordinator__NoCollateral(address borrower)',
     selector: '0xcf7afaff',
-    message: 'blocks-only 到期交割路径没有识别到非零绑定抵押。',
+    message: 'blocks-only 绑定抵押没有被 coordinator 正常托管，或托管余额已被破坏。',
     category: 'blocks-only',
     source: 'BlocksOnlyCoordinator',
   },

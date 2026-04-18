@@ -117,13 +117,13 @@ contract EasyEmissionConfig is
      * - Role-gated by ACTION_SET_PARAMETER.
      * - RewardView cache push is best-effort and MUST NOT block the write path.
      *
-      * @param thresholdValue Bootstrap/deflation stage threshold in the shared system valuation unit.
-      * @param mintPer1000Usd Bootstrap mint amount per 1000 value units, in Easy 18 decimals.
+     * @param thresholdValue Bootstrap/deflation stage threshold in the shared system valuation unit.
+     * @param mintPer1000Usd Bootstrap mint amount per 1000 value units, in Easy 18 decimals.
      * @param kNum Deflation numerator.
      * @param kDen Deflation denominator. MUST be non-zero.
      */
     function setEmissionParams(
-          uint256 thresholdValue,
+        uint256 thresholdValue,
         uint256 mintPer1000Usd,
         uint256 kNum,
         uint256 kDen

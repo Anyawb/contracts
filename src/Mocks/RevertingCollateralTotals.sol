@@ -8,7 +8,9 @@ pragma solidity ^0.8.20;
 ///      - When registered as KEY_CM, PositionView's CM reads will revert (best-effort fallback to 0).
 contract RevertingCollateralTotals {
     // --- PositionView valuation interface ---
-    function getUserTotalCollateralValue(address) external pure returns (uint256) {
+    function getUserTotalCollateralValue(
+        address
+    ) external pure returns (uint256) {
         revert("revert-totalCollateral");
     }
 
@@ -17,7 +19,9 @@ contract RevertingCollateralTotals {
     }
 
     // --- CollateralManager ledger reads used by PositionView ---
-    function getUserCollateralAssets(address) external pure returns (address[] memory) {
+    function getUserCollateralAssets(
+        address
+    ) external pure returns (address[] memory) {
         revert("revert-userAssets");
     }
 
@@ -25,7 +29,3 @@ contract RevertingCollateralTotals {
         revert("revert-collateral");
     }
 }
-
-
-
-

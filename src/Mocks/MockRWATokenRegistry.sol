@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IRWATokenRegistry } from "../interfaces/IRWATokenRegistry.sol";
+import {IRWATokenRegistry} from "../interfaces/IRWATokenRegistry.sol";
 
 /// @title MockRWATokenRegistry
-/// @notice 简易白名单注册表，用于本地测试。
+/// @notice Simplified whitelist registry used in local tests.
 contract MockRWATokenRegistry is IRWATokenRegistry {
     mapping(address => bool) private _allowed;
 
@@ -15,4 +15,4 @@ contract MockRWATokenRegistry is IRWATokenRegistry {
     function isAllowed(address token) external view override returns (bool) {
         return _allowed[token];
     }
-} 
+}

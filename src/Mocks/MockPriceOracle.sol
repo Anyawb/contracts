@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
-import { IPriceOracle } from "../interfaces/IPriceOracle.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IPriceOracle} from "../interfaces/IPriceOracle.sol";
 
 /// @title MockPriceOracle
-/// @notice 简易可写入的价格预言机，用于测试
-/// @dev 实现 IPriceOracle 接口的所有方法
+/// @notice Writable mock price oracle used in tests.
+/// @dev Implements the full IPriceOracle interface.
 contract MockPriceOracle is Ownable, IPriceOracle {
     mapping(address => uint256) private _prices;
     mapping(address => uint256) private _priceBlocks;
@@ -27,13 +27,22 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         shouldFail = flag;
     }
 
-    /// @notice 设置价格（仅测试合约，无权限控制）
-    /// @notice 设置价格（含区块号）
-    function setPrice(address token, uint256 price, uint256 blockNumber, uint256 assetDecimals) external onlyOwner {
+    /// @notice Sets a mock price with an explicit block number.
+    function setPrice(
+        address token,
+        uint256 price,
+        uint256 blockNumber,
+        uint256 assetDecimals
+    ) external onlyOwner {
         _setPrice(token, price, blockNumber, assetDecimals);
     }
 
-    function _setPrice(address token, uint256 price, uint256 blockNumber, uint256 assetDecimals) internal {
+    function _setPrice(
+        address token,
+        uint256 price,
+        uint256 blockNumber,
+        uint256 assetDecimals
+    ) internal {
         if (shouldFail) revert MockFailure();
         _prices[token] = price;
         _priceBlocks[token] = blockNumber;
@@ -41,14 +50,23 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         _assetDecimals[token] = assetDecimals;
     }
 
-    function getPrice(address token) external view override returns (uint256 price, uint256 blockNumber, uint256 assetDecimals) {
+    function getPrice(
+        address token
+    )
+        external
+        view
+        override
+        returns (uint256 price, uint256 blockNumber, uint256 assetDecimals)
+    {
         if (shouldFail) revert MockFailure();
         price = _prices[token];
         blockNumber = _priceBlocks[token];
         assetDecimals = _assetDecimals[token];
     }
 
-    function getPriceData(address token) external view override returns (PriceData memory priceData) {
+    function getPriceData(
+        address token
+    ) external view override returns (PriceData memory priceData) {
         if (shouldFail) revert MockFailure();
         priceData = PriceData({
             price: _prices[token],
@@ -58,17 +76,16 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         });
     }
 
-    function getPriceUpdateBlock(address token) external view override returns (uint256 updateBlock) {
+    function getPriceUpdateBlock(
+        address token
+    ) external view override returns (uint256 updateBlock) {
         if (shouldFail) revert MockFailure();
         return _updateBlocks[token];
     }
 
-    function getPriceUpdateBlocks(address[] calldata tokens)
-        external
-        view
-        override
-        returns (uint256[] memory updateBlocks)
-    {
+    function getPriceUpdateBlocks(
+        address[] calldata tokens
+    ) external view override returns (uint256[] memory updateBlocks) {
         if (shouldFail) revert MockFailure();
         uint256 length = tokens.length;
         updateBlocks = new uint256[](length);
@@ -77,17 +94,24 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         }
     }
 
-    function getPrices(address[] calldata tokens) external view override returns (
-        uint256[] memory prices,
-        uint256[] memory blockNumbers,
-        uint256[] memory assetDecimalsArray
-    ) {
+    function getPrices(
+        address[] calldata tokens
+    )
+        external
+        view
+        override
+        returns (
+            uint256[] memory prices,
+            uint256[] memory blockNumbers,
+            uint256[] memory assetDecimalsArray
+        )
+    {
         if (shouldFail) revert MockFailure();
         uint256 length = tokens.length;
         prices = new uint256[](length);
         blockNumbers = new uint256[](length);
         assetDecimalsArray = new uint256[](length);
-        
+
         for (uint256 i = 0; i < length; i++) {
             prices[i] = _prices[tokens[i]];
             blockNumbers[i] = _priceBlocks[tokens[i]];
@@ -95,17 +119,23 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         }
     }
 
-    function isPriceValid(address token) external view override returns (bool isValid) {
+    function isPriceValid(
+        address token
+    ) external view override returns (bool isValid) {
         if (shouldFail) revert MockFailure();
         return _prices[token] > 0;
     }
 
-    function getAssetSourceId(address token) external view override returns (string memory sourceId) {
+    function getAssetSourceId(
+        address token
+    ) external view override returns (string memory sourceId) {
         if (shouldFail) revert MockFailure();
         return _sourceIds[token];
     }
 
-    function getAssetConfig(address token) external view override returns (AssetConfig memory config) {
+    function getAssetConfig(
+        address token
+    ) external view override returns (AssetConfig memory config) {
         if (shouldFail) revert MockFailure();
         config = AssetConfig({
             sourceId: _sourceIds[token],
@@ -115,7 +145,12 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         });
     }
 
-    function getSupportedAssets() external view override returns (address[] memory assets) {
+    function getSupportedAssets()
+        external
+        view
+        override
+        returns (address[] memory assets)
+    {
         if (shouldFail) revert MockFailure();
         return _supportedAssets;
     }
@@ -125,7 +160,11 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         return _supportedAssets.length;
     }
 
-    function updatePrice(address asset, uint256 price, uint256 blockNumber) external override onlyOwner {
+    function updatePrice(
+        address asset,
+        uint256 price,
+        uint256 blockNumber
+    ) external override onlyOwner {
         if (shouldFail) revert MockFailure();
         _prices[asset] = price;
         _priceBlocks[asset] = blockNumber;
@@ -157,8 +196,8 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         _assetDecimals[asset] = assetDecimals;
         _maxPriceAgeBlocks[asset] = maxPriceAgeBlocks;
         _isActive[asset] = true;
-        
-        // 添加到支持资产列表
+
+        // Add the asset to the supported list if missing.
         bool exists = false;
         for (uint256 i = 0; i < _supportedAssets.length; i++) {
             if (_supportedAssets[i] == asset) {
@@ -171,13 +210,18 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         }
     }
 
-    function setAssetActive(address asset, bool isActive) external override onlyOwner {
+    function setAssetActive(
+        address asset,
+        bool isActive
+    ) external override onlyOwner {
         if (shouldFail) revert MockFailure();
         _isActive[asset] = isActive;
     }
 
     // --- Health check helpers to satisfy legacy callers ---
-    function checkPriceOracleHealth(address asset) external view returns (bool isHealthy, string memory details) {
+    function checkPriceOracleHealth(
+        address asset
+    ) external view returns (bool isHealthy, string memory details) {
         if (shouldFail) revert MockFailure();
         if (asset == address(0)) return (false, "Zero address");
         if (!_isActive[asset]) return (false, "Asset not supported");
@@ -185,13 +229,17 @@ contract MockPriceOracle is Ownable, IPriceOracle {
         return (true, "Healthy");
     }
 
-    function batchCheckPriceOracleHealth(address[] calldata assets) external view returns (bool[] memory healthStatus) {
+    function batchCheckPriceOracleHealth(
+        address[] calldata assets
+    ) external view returns (bool[] memory healthStatus) {
         if (shouldFail) revert MockFailure();
         uint256 length = assets.length;
         healthStatus = new bool[](length);
         for (uint256 i = 0; i < length; i++) {
             address a = assets[i];
-            healthStatus[i] = (a != address(0) && _isActive[a] && _prices[a] > 0);
+            healthStatus[i] = (a != address(0) &&
+                _isActive[a] &&
+                _prices[a] > 0);
         }
     }
 }

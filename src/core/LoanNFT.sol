@@ -506,6 +506,27 @@ contract LoanNFT is
     }
 
     /**
+     * @notice Get minimal loan identity and lifecycle status for a token id.
+     * @dev Reverts if:
+     *      - `tokenId` does not exist (`LoanNFT__InvalidTokenId`)
+     *
+     * Security:
+     * - View only.
+     * - Intended as a layout-stable read API for cross-module integrations.
+     *
+     * @param tokenId Token id
+     * @return loanId Loan/order id bound to the token
+     * @return status Current coarse lifecycle status
+     */
+    function getLoanIdentity(
+        uint256 tokenId
+    ) external view override returns (uint256 loanId, LoanStatus status) {
+        if (_ownerOf(tokenId) == address(0)) revert LoanNFT__InvalidTokenId();
+        LoanMetadata memory metadata = _loanMetadata[tokenId];
+        return (metadata.loanId, metadata.status);
+    }
+
+    /**
      * @notice Get all token ids owned by `user`.
      * @dev Reverts if:
      *      - none (but may be gas-heavy for very large balances)

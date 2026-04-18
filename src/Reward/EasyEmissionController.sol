@@ -157,8 +157,8 @@ contract EasyEmissionController is
      * - Only RewardManager may call.
      * - Non-mint cases are deliberately best-effort and emit {EasyMintSkipped}
      *   instead of reverting.
-    * - Price reads and penalty offsets are best-effort; a failed price read
-    *   returns amountValue == 0 and skips minting.
+     * - Price reads and penalty offsets are best-effort; a failed price read
+     *   returns amountValue == 0 and skips minting.
      *
      * @param borrower Borrower account for the repaid order.
      * @param lender Lender account for the repaid order.
@@ -427,21 +427,19 @@ contract EasyEmissionController is
             uint256,
             uint256 assetDecimals
         ) {
-            return _normalizeToSystemValue(
-                amountBaseUnits,
-                price,
-                assetDecimals
-            );
+            return
+                _normalizeToSystemValue(amountBaseUnits, price, assetDecimals);
         } catch {
-            try
-                IPriceOracleRead(priceOracle).getPriceData(asset)
-            returns (IPriceOracleRead.PriceData memory priceData) {
+            try IPriceOracleRead(priceOracle).getPriceData(asset) returns (
+                IPriceOracleRead.PriceData memory priceData
+            ) {
                 if (!priceData.isValid) return 0;
-                return _normalizeToSystemValue(
-                    amountBaseUnits,
-                    priceData.price,
-                    priceData.assetDecimals
-                );
+                return
+                    _normalizeToSystemValue(
+                        amountBaseUnits,
+                        priceData.price,
+                        priceData.assetDecimals
+                    );
             } catch {
                 return 0;
             }

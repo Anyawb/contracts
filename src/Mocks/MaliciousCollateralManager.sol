@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
+import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
 
 interface ICollateralManagerBatchMock {
     function batchDepositCollateral(
@@ -38,13 +38,31 @@ contract MaliciousCollateralManager {
     }
 
     /// @notice Attempts to trigger a reentrant `depositCollateral`.
-    function attackDeposit(address user, address asset, uint256 amount) external {
-        _attempt(abi.encodeCall(ICollateralManager.depositCollateral, (user, asset, amount)));
+    function attackDeposit(
+        address user,
+        address asset,
+        uint256 amount
+    ) external {
+        _attempt(
+            abi.encodeCall(
+                ICollateralManager.depositCollateral,
+                (user, asset, amount)
+            )
+        );
     }
 
     /// @notice Attempts to trigger a reentrant `withdrawCollateral`.
-    function attackWithdraw(address user, address asset, uint256 amount) external {
-        _attempt(abi.encodeCall(ICollateralManager.withdrawCollateral, (user, asset, amount)));
+    function attackWithdraw(
+        address user,
+        address asset,
+        uint256 amount
+    ) external {
+        _attempt(
+            abi.encodeCall(
+                ICollateralManager.withdrawCollateral,
+                (user, asset, amount)
+            )
+        );
     }
 
     /// @notice Attempts to trigger a reentrant `batchDepositCollateral`.
@@ -53,7 +71,12 @@ contract MaliciousCollateralManager {
         address[] calldata assets,
         uint256[] calldata amounts
     ) external {
-        _attempt(abi.encodeCall(ICollateralManagerBatchMock.batchDepositCollateral, (user, assets, amounts)));
+        _attempt(
+            abi.encodeCall(
+                ICollateralManagerBatchMock.batchDepositCollateral,
+                (user, assets, amounts)
+            )
+        );
     }
 
     /// @notice Attempts to trigger a reentrant `batchWithdrawCollateral`.
@@ -62,7 +85,12 @@ contract MaliciousCollateralManager {
         address[] calldata assets,
         uint256[] calldata amounts
     ) external {
-        _attempt(abi.encodeCall(ICollateralManagerBatchMock.batchWithdrawCollateral, (user, assets, amounts)));
+        _attempt(
+            abi.encodeCall(
+                ICollateralManagerBatchMock.batchWithdrawCollateral,
+                (user, assets, amounts)
+            )
+        );
     }
 
     function _attempt(bytes memory payload) private {
@@ -70,7 +98,7 @@ contract MaliciousCollateralManager {
 
         if (_reentering) {
             // Nested call (second entry)
-            (bool success,) = address(target).call(payload);
+            (bool success, ) = address(target).call(payload);
             require(success, "reentrant call failed");
             return;
         }
@@ -79,7 +107,7 @@ contract MaliciousCollateralManager {
         _lastPayload = payload;
 
         // First call – expected to succeed (or revert with guard)
-        (bool ok,) = address(target).call(payload);
+        (bool ok, ) = address(target).call(payload);
         _reentering = false;
         delete _lastPayload;
 

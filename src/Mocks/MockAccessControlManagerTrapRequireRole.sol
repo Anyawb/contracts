@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { MissingRole } from "../errors/StandardErrors.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {MissingRole} from "../errors/StandardErrors.sol";
 
 /// @title MockAccessControlManagerTrapRequireRole
 /// @notice Test-only ACM mock: traps any call to requireRole().
@@ -19,11 +19,15 @@ contract MockAccessControlManagerTrapRequireRole is IAccessControlManager {
     error RequireRoleCalled(bytes32 role, address caller);
 
     function requireRole(bytes32 role, address caller) external pure override {
-        role; caller;
+        role;
+        caller;
         revert RequireRoleCalled(role, caller);
     }
 
-    function hasRole(bytes32 role, address caller) external view override returns (bool) {
+    function hasRole(
+        bytes32 role,
+        address caller
+    ) external view override returns (bool) {
         return _roles[role][caller];
     }
 
@@ -41,9 +45,10 @@ contract MockAccessControlManagerTrapRequireRole is IAccessControlManager {
         return address(0);
     }
 
-    function getUserPermission(address /* account */) external pure override returns (PermissionLevel level) {
+    function getUserPermission(
+        address /* account */
+    ) external pure override returns (PermissionLevel level) {
         // Not needed for trap purposes.
         return PermissionLevel.NONE;
     }
 }
-

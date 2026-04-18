@@ -196,9 +196,9 @@ library VaultBusinessLogicLibrary {
 
     /**
      * @notice Safely notify the single Statistics push orchestrator.
-        * @dev The direct `StatisticsView.pushUserStatsUpdate(...)` delta path is intentionally retired here.
+     * @dev The direct `StatisticsView.pushUserStatsUpdate(...)` delta path is intentionally retired here.
      *      Batch flows must route through `StatisticsPushManager -> StatisticsView.pushUserStatsSnapshot(...)`
-        *      so localhost and production share the same authoritative value semantics.
+     *      so localhost and production share the same authoritative value semantics.
      * @param registryAddr Registry address used to resolve `KEY_STATS_PUSH_MANAGER`.
      * @param statsView StatisticsView address, kept for failure-event context.
      * @param user User address.
@@ -227,8 +227,7 @@ library VaultBusinessLogicLibrary {
             ModuleKeys.KEY_STATS_PUSH_MANAGER
         );
         if (
-            statsPushManager == address(0) ||
-            statsPushManager.code.length == 0
+            statsPushManager == address(0) || statsPushManager.code.length == 0
         ) {
             emit CacheUpdateFailedWithContext(
                 user,
@@ -452,10 +451,10 @@ library VaultBusinessLogicLibrary {
     }
 
     /**
-      * @notice Batch borrow single operation (internal).
-      * @dev Pulls liquidity to this contract and forwards it to the user.
-      *      Debt-ledger post-write stats refresh is owned by VaultLendingEngine,
-      *      so this helper must not duplicate that responsibility.
+     * @notice Batch borrow single operation (internal).
+     * @dev Pulls liquidity to this contract and forwards it to the user.
+     *      Debt-ledger post-write stats refresh is owned by VaultLendingEngine,
+     *      so this helper must not duplicate that responsibility.
      *      Reverts if `amount` is zero or `asset` is zero; downstream helper calls may also revert.
      *
      * Security:
@@ -497,10 +496,10 @@ library VaultBusinessLogicLibrary {
     }
 
     /**
-      * @notice Batch repay single operation (internal).
-      * @dev Pulls repayment funds from the user and hands off ledger settlement.
-      *      Debt-ledger post-write stats refresh is owned by VaultLendingEngine,
-      *      so this helper must not duplicate that responsibility.
+     * @notice Batch repay single operation (internal).
+     * @dev Pulls repayment funds from the user and hands off ledger settlement.
+     *      Debt-ledger post-write stats refresh is owned by VaultLendingEngine,
+     *      so this helper must not duplicate that responsibility.
      *      Reverts if `amount` is zero or `asset` is zero; downstream helper calls may also revert.
      *
      * Security:

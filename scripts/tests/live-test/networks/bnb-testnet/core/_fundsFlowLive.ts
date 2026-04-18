@@ -1092,6 +1092,7 @@ export async function createFundsFlowLiveContext(params: {
           "function getRegistry() view returns (address)",
           "function getLoanOrder(uint256 orderId) view returns (tuple(uint256 principal,uint256 rate,uint256 term,address borrower,address lender,address asset,uint256 startBlock,uint256 maturity,uint256 repaidAmount))",
           "function getOrderStatus(uint256 orderId) view returns (uint8)",
+          "function getOrderStateSnapshot(uint256 orderId) view returns ((uint8 productType,uint8 lifecycle,uint8 closeReason,uint8 shortfallStatus,uint8 collateralDisposition,bool hasLoss,uint256 createdBlock,uint256 updatedBlock,uint256 closedBlock))",
           "function getFailedFeeAmount(uint256 orderId) view returns (uint256)",
           "function getNftRetryCount(uint256 orderId) view returns (uint256)",
           "function canAccessLoanOrder(uint256 orderId,address user) view returns (bool,bool,uint256)",

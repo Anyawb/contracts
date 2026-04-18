@@ -25,21 +25,24 @@ contract MockCollateralManagerReentrant {
         vbl = IVaultBusinessLogicLikeForCM(_vbl);
     }
 
-    function setReentryParams(address _user, address _debtAsset, uint256 _cAmt, uint256 _dAmt) external {
+    function setReentryParams(
+        address _user,
+        address _debtAsset,
+        uint256 _cAmt,
+        uint256 _dAmt
+    ) external {
         user = _user;
         debtAsset = _debtAsset;
         cAmt = _cAmt;
         dAmt = _dAmt;
     }
 
-    function withdrawCollateral(address /*_user*/, address collateralAsset, uint256 /*amount*/) external {
+    function withdrawCollateral(
+        address /*_user*/,
+        address collateralAsset,
+        uint256 /*amount*/
+    ) external {
         // re-enter with preset params; should revert via nonReentrant
         vbl.liquidate(user, collateralAsset, debtAsset, cAmt, dAmt, 0);
     }
 }
-
-
-
-
-
-

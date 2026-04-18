@@ -51,7 +51,7 @@ interface IPriceOracleRead {
      * - Implementations are expected to apply block-based staleness checks before returning.
      *
      * @param asset Asset address being queried.
-    * @return price Latest price for `asset` in the implementation's canonical valuation unit.
+     * @return price Latest price for `asset` in the implementation's canonical valuation unit.
      * @return blockNumber Informational block reference attached to the stored quote.
      * @return assetDecimals Token decimals used for valuation scaling.
      */
@@ -155,7 +155,7 @@ interface IPriceOracleRead {
     function isPriceValid(address asset) external view returns (bool isValid);
 
     /**
-    * @notice Returns the configured offchain source identifier for `asset`.
+     * @notice Returns the configured offchain source identifier for `asset`.
      * @dev Reverts if:
      *      - the implementation rejects an invalid or unsupported `asset`
      *

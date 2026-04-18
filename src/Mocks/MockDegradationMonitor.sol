@@ -2,12 +2,16 @@
 pragma solidity ^0.8.20;
 
 /// @title MockDegradationMonitor
-/// @notice 供测试使用的DegradationMonitor模拟合约
+/// @notice Mock degradation monitor used in tests.
 contract MockDegradationMonitor {
-    // 事件
-    event DegradationEventRecorded(string reason, uint256 fallbackValue, bool usedFallback);
-    
-    /// @notice 记录来自PriceOracle的降级事件
+    // Events.
+    event DegradationEventRecorded(
+        string reason,
+        uint256 fallbackValue,
+        bool usedFallback
+    );
+
+    /// @notice Records a degradation event originating from PriceOracle.
     function recordDegradationEventFromPriceOracle(
         string calldata reason,
         uint256 fallbackValue,
@@ -15,8 +19,8 @@ contract MockDegradationMonitor {
     ) external {
         emit DegradationEventRecorded(reason, fallbackValue, usedFallback);
     }
-    
-    /// @notice 记录降级事件（管理员接口）
+
+    /// @notice Records a degradation event through the admin-facing entrypoint.
     function recordDegradationEvent(
         address,
         string calldata reason,

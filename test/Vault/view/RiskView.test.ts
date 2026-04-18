@@ -20,7 +20,7 @@ describe("RiskView", function () {
     const ACM = await ethers.getContractFactory("MockAccessControlManager");
     const acm = await ACM.deploy();
 
-    const HealthView = await ethers.getContractFactory("MockHealthViewLite");
+    const HealthView = await ethers.getContractFactory("MockHealthViewBasic");
     const hv = await HealthView.deploy();
 
     const DebtTotals = await ethers.getContractFactory("MockDebtTotals");

@@ -64,6 +64,23 @@ BNB fork 不能依赖普通公共 RPC。当前必须满足：
 BNB_FORK_UPSTREAM_RPC_URL=https://...
 ```
 
+推荐同时保留业务测试网 RPC（给非 fork 命令使用），并把 fork 专用入口单独隔离：
+
+```bash
+# 常规 testnet 读写（可为公共或业务既有入口）
+BNB_TESTNET_RPC_URL=https://...
+BSC_TESTNET_RPC_URL=https://...
+
+# 仅供 fork 使用的专用入口（archive + sticky）
+BNB_FORK_UPSTREAM_RPC_URL=https://...
+```
+
+说明：
+
+1. fork runner 会优先读取 `BNB_FORK_UPSTREAM_RPC_URL`。
+2. 若未设置，才会按回退顺序读取 `BNB_TESTNET_RPC_URL` / `BSC_TESTNET_RPC_URL` 等变量。
+3. 为避免误用公共池导致 `missing trie node`，建议始终显式配置 `BNB_FORK_UPSTREAM_RPC_URL`。
+
 兼容回退顺序：
 
 1. `BNB_FORK_UPSTREAM_RPC_URL`
@@ -134,6 +151,24 @@ pnpm -s run test:live:fork:bnb-testnet
 
 ### 5.2 只跑单项 case
 
+先加载 `.env`（必须）：
+
+```bash
+set -a && source .env && set +a
+```
+
+建议先固定 fork block 再执行（降低 RPC pool 抖动影响）：
+
+```bash
+# 取最新块并回退 20 块作为 fork 锚点
+LATEST_HEX=$(curl -sS -H "content-type: application/json" \
+	-d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+	"$BNB_FORK_UPSTREAM_RPC_URL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const n=BigInt(j.result)-20n;process.stdout.write(String(n>0n?n:1n));});')
+
+export HARDHAT_FORK_BLOCK_NUMBER="$LATEST_HEX"
+export BNB_FORK_WAIT_MS=180000
+```
+
 只跑 preflight：
 
 ```bash
@@ -163,6 +198,30 @@ pnpm -s run test:live:platform-baseline:fork:bnb-testnet
 set -a && source .env && set +a && \
 pnpm -s run test:live:release-gates:fork:bnb-testnet
 ```
+
+### 5.3 fork 私有 RPC 快速验收
+
+拿到新 `BNB_FORK_UPSTREAM_RPC_URL` 后，建议先做快速验收再跑整套 gate：
+
+```bash
+set -a && source .env && set +a
+
+# 历史读一致性抽检（应无 missing trie node）
+for i in {1..20}; do
+	curl -sS -H "content-type: application/json" \
+		-d '{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionCount","params":["0x0000000000000000000000000000000000000001","latest"]}' \
+		"$BNB_FORK_UPSTREAM_RPC_URL" | rg -i "missing trie node|error" && break
+done
+
+# 最小 fork case 验证
+BNB_FORK_AUTONODE_CASES=preflight pnpm -s run test:live:fork:bnb-testnet
+```
+
+判定规则：
+
+1. `00-prepare-runtime-roles.log` 与 `01-preflight.log` 均成功。
+2. 过程中不出现 `missing trie node`。
+3. 出现 `ForkRpc=http://127.0.0.1:<port>` 且 `Registry` 仍为 BNB profile 地址。
 
 ## 6. runtime roles 与资金准备
 

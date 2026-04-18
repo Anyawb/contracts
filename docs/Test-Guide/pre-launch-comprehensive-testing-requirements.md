@@ -128,17 +128,8 @@ Blocks-Only 补充口径（pre-maturity guard）：
 词典约束（blocks-only）：
 
 1. `trade closeout` 统一称“交易收尾（trade closeout）”。
-2. `settleOrLiquidateBlocks(...)` 统一称“到期收尾入口（maturity closeout，ABI 历史命名保留）”。
-3. maturity 且 `remainingDebt > 0` 的分支统一称“到期交付收尾（maturity delivery closeout）”，不再写成“清算完成”。
-4. “交割收尾”仅允许作为“到期交付收尾（maturity delivery closeout）”的同义注释，不作为主术语。
-5. `SETTLED`（兼容状态）在 blocks-only 兼容回退中必须按真实到期收尾结果区分：debt-free maturity closeout 解释为 borrower-return，maturity delivery closeout 解释为 lender-delivery。
-6. `TRADE_CLOSED`（兼容状态）在 blocks-only 兼容回退中统一解释为“交易收尾（trade closeout）”。
-
-命名约束（blocks-only 专项 case ID）：
-
-1. 涉及 maturity 竞态或终态一致性的 case，统一包含 `maturity_closeout`。
-2. 涉及 maturity 且 `remainingDebt > 0` 的 case，统一包含 `maturity_delivery_closeout`。
-3. 涉及兼容回退的 case，统一包含 `legacy_fallback`，并显式覆盖 debt-free maturity closeout 与 maturity delivery closeout 双分支。
+2. `settleOrLiquidateBlocks(...)` 统一称“到期收尾入口（ABI 历史命名保留）”。
+3. maturity 且 `remainingDebt > 0` 的分支统一称“到期交付收尾”，不再写成“清算完成”。
 
 1. Layer-A 允许在共享 testnet 出块过快导致“finalize 后已成熟”时记录 `notice` 并跳过 pre-maturity guard 断言，但成熟后状态机与对齐断言必须继续严格通过。
 2. Layer-B 必须对 pre-maturity guard 使用硬失败策略；当无法验证 pre-maturity guard 时直接 FAIL。
@@ -1001,30 +992,21 @@ RWA 不是纯 DeFi，测试不能只覆盖链上账本，还必须覆盖链上�
 | 优先级 | 测试 ID | 场景 | 必须断言 | 当前代码审查结论 | 当前预期 |
 | --- | --- | --- | --- | --- | --- |
 | P0 | `legacy_shortfall_force_reduce_mismatch` | 债务价值高于可处分抵押价值，执行 `settleOrLiquidate` | 如果业务入口仍把全债直接 `forceReduce` 为 0，则必须显式留下 `remainingDebt/shortfallAmount` 和 with-shortfall terminal status；不得出现“账清了但损失消失了” | 当前 legacy keeper SSOT 已具备 shortfall-aware 终态与账本；该用例应固定为防回归门，专门阻止未来回退到“全债 forceReduce” | 应 PASS；若回归则 FAIL |
-| P0 | `blocks_only_maturity_delivery_closeout_shortfall_observability_gap` | `remainingDebt > selectedCollateralValue`，执行 `settleOrLiquidateBlocks` | 不能仅因订单进入到期交付收尾（maturity delivery closeout）且 collateral 已全部交付就认定系统无损；必须证明未覆盖损失有显式账，否则测试 FAIL | 当前 blocks-only 到期交付收尾仅交付 collateral 并收口为 `CLOSED + BLOCKS_MATURITY_CLOSE + DELIVERED_TO_LENDER`，没有 shortfall ledger / bad debt observability | 应 FAIL，作为设计缺口留痕 |
-| P0 | `blocks_only_legacy_fallback_settled_dual_disposition_by_maturity_outcome` | 订单 maturity 收尾为 `SETTLED`，随后禁用 `ORDER_STATE_STORE` 再读取 `BlocksOnlyView.getBlocksOnlyOrderState` | legacy 兼容回退必须与到期收尾结果一致：debt-free maturity closeout -> `CLOSED + BLOCKS_MATURITY_CLOSE + RETURNED_TO_BORROWER + hasLoss=false`；maturity delivery closeout -> `CLOSED + BLOCKS_MATURITY_CLOSE + DELIVERED_TO_LENDER + hasLoss=true`；`TRADE_CLOSED` 仍映射 `RETURNED_TO_BORROWER` | 当前修复口径为按 maturity outcome 双分支映射，需固定为 P0 防回归门 | 应 PASS，若回归则 FAIL |
+| P0 | `blocks_only_shortfall_force_reduce_full_debt` | `remainingDebt > selectedCollateralValue`，执行 `settleOrLiquidateBlocks` | 不能仅因订单关闭或 collateral 已全部交付就认定系统无损；必须证明未覆盖损失有显式账，否则测试 FAIL | 当前 blocks-only 到期交付收尾仅交付 collateral 并收口为 `CLOSED + BLOCKS_MATURITY_CLOSE + DELIVERED_TO_LENDER`，没有 shortfall ledger / bad debt observability | 应 FAIL，作为设计缺口留痕 |
 | P0 | `legacy_repay_after_liquidation_reverts_with_explicit_status` | 先清算，再 repay | 必须因 `Liquidated/Defaulted/(WithShortfall)` 显式状态直接 revert；不得落到底层 overpay/amount 校验才失败 | 当前 `LendingEngine.repay(...)` 已先检查 order status 并抛出 `RepayBlockedByOrderStatus` | 应 PASS，作为防回归 |
 | P0 | `legacy_order_state_after_liquidation` | 清算完成 | `OrderEngine` / `LoanNFT` / `OrderStateStoreV2` 对外必须能读到 `Liquidated` / `Defaulted` 或对应 with-shortfall 状态；不得只改 debt ledger 不改终态 | 当前 legacy path 已通过 `_finalizeShortfallAwareOutcome(...)` 写终态 | 应 PASS，作为防回归 |
 | P1 | `reward_penalty_multi_order_same_user` | 同一用户多笔 borrow 锁定 `lockedEasy`，交错发生 late penalty、liquidation penalty、on-time repay mint | `lockedEasy + minted + penaltyLedger` 变动必须守恒；同一用户多单交错时不得重复抵扣、漏抵扣或跨单串账 | 当前实现是 user 聚合 `lockedEasy` + order 级 unlock；已有基础设施，但缺少该专门矩阵 | 应新增并要求 PASS |
 | P1 | `reward_penalty_multi_user_cross_offset` | borrower 和 lender 都累积 `penaltyLedger`，再完成多笔订单结清 | 双方净 mint 结果必须只受各自 penalty debt 影响，不得相互污染；borrower/lender penalty conservation 必须逐边校验 | 当前已有多用户并发命令模型，但缺少“双方交叉 offset”命名明确的专项 case | 应新增并要求 PASS |
 | P1 | `reward_penalty_long_sequence` | 长序列执行 borrow、late repay、liquidation penalty、offset、mint、second borrow | 任意一步后 `penaltyLedger >= 0`；不得因重复 offset 变负，不得出现“债已清但继续吞 mint” | 当前已有 interleaved penalty/liquidation 长序列基础，但断言口径仍可继续收紧 | 应新增或补强并要求 PASS |
-| P1 | `blocks_only_maturity_closeout_repay_vs_keeper_race` | 订单已 maturity，borrower `repayBlocks` 与 keeper `settleOrLiquidateBlocks` 竞争 | 任意顺序下都不能出现重复 close、重复到期收尾（maturity closeout）、debt 已清但 collateral disposition 仍错误、或状态撕裂 | 当前仅覆盖 repay-then-settle 等单一路径，未覆盖同块/全排列竞争 | 应新增并要求 PASS |
+| P1 | `blocks_only_maturity_window_repay_vs_keeper_race` | 订单已 maturity，borrower `repayBlocks` 与 keeper `settleOrLiquidateBlocks` 竞争 | 任意顺序下都不能出现重复 close、重复到期收尾（maturity closeout）、debt 已清但 collateral disposition 仍错误、或状态撕裂 | 当前仅覆盖 repay-then-settle 等单一路径，未覆盖同块/全排列竞争 | 应新增并要求 PASS |
 | P2 | `fallback_liquidation_shortfall_observability` | `SettlementManager` fallback 路径触发且 shortfall 存在 | 除 payout 事件外，还必须在同 receipt 或同交易可读状态中暴露 `LiquidationShortfallOpened` / shortfall ledger / with-shortfall status；不得只有 payout 没有坏账证据 | 当前 fallback 路径最终仍调用 `_finalizeShortfallAwareOutcome(...)`，理论上已具备 shortfall observability，但缺少专门 receipt-level 断言 | 应新增并要求 PASS |
 | P2 | `reward_penalty_view_consistency_after_many_pushes` | 单 tx 多次 push，多 tx 连续 push | `RewardView` 最终镜像必须与主账 `pendingPenalty/lockedEasy/eligibleLoanCount/onTimeRepayCount` 完全一致；不得因多次 push 保留中间态 | 当前有单点 DataPush 与 offset 测试，但缺少“高频多 push 后最终一致性”专项 case | 应新增并要求 PASS |
 
-P2 结构性差异统一规则（Test-Guide 全目录执行）：
-
-1. 凡子文档提到 blocks-only 且未展开状态映射词典，必须增加单行锚点：术语与状态映射以本文件第 5 章 Gate 9 的“词典约束（blocks-only）”为准。
-2. 子文档正文主术语统一采用“交易收尾（trade closeout）/到期收尾（maturity closeout）/到期交付收尾（maturity delivery closeout）”三分法。
-3. “交割收尾”仅作同义注释，不作为标题术语、case 命名术语或主断言术语。
-4. 若子文档只讨论运行边界或执行入口，可不重复长定义，但必须保留上述锚点以降低跨文档跳转成本。
-
 落地要求：
 
-1. 上表中所有 P0 项必须进入 Layer-A gate；其中 `blocks_only_maturity_delivery_closeout_shortfall_observability_gap` 在实现未补齐前应允许作为已知 FAIL 留痕存在，但不得被误判为已通过。
+1. 上表中所有 P0 项必须进入 Layer-A gate；其中 `blocks_only_shortfall_force_reduce_full_debt` 在实现未补齐前应允许作为已知 FAIL 留痕存在，但不得被误判为已通过。
 2. 所有 reward penalty 类 case 都必须同时校验主账与 `RewardView` 镜像，不能只看事件或只看 view。
 3. 所有 blocks-only 类 case 都必须同时校验 order status、collateral disposition、是否存在 shortfall ledger（若期望存在），以及 lender 与 borrower 的真实资产分配结果。
-4. Test-Guide 子文档中凡出现 blocks-only 状态语义处，必须添加第 5 章 Gate 9 词典锚点，且主术语必须满足三分法。
 
 ### 14.4 权限与合规测试
 
@@ -1192,6 +1174,38 @@ fork 的主要问题不是不真实，而是“只真实了一部分”。
 1. fork 结果必须配套 live preflight 或 testnet/live strict 结果解释。
 2. 任何 fork-only 绿色结果，不能直接作为上线放行结论。
 3. fork 失败要区分协议失败与 RPC/infra 失败，避免把基础设施问题误写成协议回归，也避免反过来掩盖协议缺陷。
+
+#### 15.3.3 BNB fork 私有 RPC 执行规范
+
+为避免 BNB fork 被公共 RPC 池噪声污染，必须遵守以下执行规范：
+
+1. `.env` 必须显式配置 `BNB_FORK_UPSTREAM_RPC_URL`，且该入口应为 archive + sticky。
+2. `BNB_FORK_UPSTREAM_RPC_URL` 仅用于 fork；业务常规测试网 RPC 可继续保留在 `BNB_TESTNET_RPC_URL` / `BSC_TESTNET_RPC_URL`。
+3. 执行 fork 前必须先 `set -a && source .env && set +a`，禁止依赖 shell 历史残留变量。
+4. 执行前建议固定 `HARDHAT_FORK_BLOCK_NUMBER`，减少上游负载均衡切换导致的历史读抖动。
+
+推荐 `.env` 片段：
+
+```bash
+BNB_TESTNET_RPC_URL=https://...
+BSC_TESTNET_RPC_URL=https://...
+BNB_FORK_UPSTREAM_RPC_URL=https://...
+```
+
+推荐执行顺序（BNB）：
+
+```bash
+set -a && source .env && set +a
+BNB_FORK_AUTONODE_CASES=preflight pnpm -s run test:live:fork:bnb-testnet
+BNB_FORK_AUTONODE_CASES=warmup pnpm -s run test:live:fork:bnb-testnet
+pnpm -s run test:live:platform-baseline:fork:bnb-testnet
+pnpm -s run test:live:release-gates:fork:bnb-testnet
+```
+
+阻断判定：
+
+1. 日志出现 `missing trie node`、持续超时、或 fork node 非协议原因崩溃，归类为 RPC/infra FAIL。
+2. RPC/infra FAIL 不得写成协议回归结论，必须单独留痕并在报告中分栏。
 
 ### 15.4 如何设计 canary 测试检测错误
 

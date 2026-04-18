@@ -12,30 +12,33 @@ import {ActionKeys} from "../../../constants/ActionKeys.sol";
 import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
 import {NotAContract, ZeroAddress} from "../../../errors/StandardErrors.sol";
 
-
 import {ModuleCache} from "../libraries/ModuleCache.sol";
 import {LiquidationRiskQueryLib} from "../libraries/LiquidationRiskQueryLib.sol";
 import {Registry} from "../../../registry/Registry.sol";
 import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
 import {ICacheRefreshable} from "../../../interfaces/ICacheRefreshable.sol";
+import {IHealthViewBasic} from "../../../interfaces/IHealthViewBasic.sol";
 
-/// @dev Minimal interface for the liquidation config module (Option B).
-///      IMPORTANT: update paths must preserve original caller role checks.
+/// @dev Local mixed read/write interface for LiquidationConfigModule used by LiquidationRiskManager only.
+///      IMPORTANT: this is intentionally not a `Minimal`/`Basic` shared boundary because it mixes
+///      threshold reads with `update*FromRiskManager(...)` writeback actions. Update paths must
+///      preserve original caller role checks.
 interface ILiquidationConfigModuleLite {
     function getLiquidationThreshold() external view returns (uint256);
     function getMinHealthFactor() external view returns (uint256);
     function getMaxLtvBps() external view returns (uint256);
-    function updateLiquidationThresholdFromRiskManager(uint256 newThreshold, address caller) external;
-    function updateMinHealthFactorFromRiskManager(uint256 newMinHealthFactor, address caller) external;
-    function updateMaxLtvBpsFromRiskManager(uint256 newMaxLtvBps, address caller) external;
-}
-
-/// @dev Minimal HealthView interface (read-only cache).
-interface IHealthViewLite {
-    function getUserHealthFactorWithMeta(address user)
-        external
-        view
-        returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
+    function updateLiquidationThresholdFromRiskManager(
+        uint256 newThreshold,
+        address caller
+    ) external;
+    function updateMinHealthFactorFromRiskManager(
+        uint256 newMinHealthFactor,
+        address caller
+    ) external;
+    function updateMaxLtvBpsFromRiskManager(
+        uint256 newMaxLtvBps,
+        address caller
+    ) external;
 }
 
 /// @title LiquidationRiskManager - Liquidation Risk Manager
@@ -61,13 +64,13 @@ contract LiquidationRiskManager is
     /*━━━━━━━━━━━━━━━ Custom Errors ━━━━━━━━━━━━━━━*/
     /// @dev Reverts when a caller lacks the required permission for a risk-manager operation. Used by cache refresh and governance-gated paths.
     error LiquidationRiskManager__UnauthorizedAccess();
-    
+
     /// @dev Reverts when a risk threshold value fails validation. Used by liquidation-threshold and min-health-factor update paths.
     error LiquidationRiskManager__InvalidThreshold();
-    
+
     /// @dev Reverts when a batch request exceeds maxBatchSizeVar. Used by batch risk-query helpers.
     error LiquidationRiskManager__InvalidBatchSize();
-    
+
     /// @dev Reverts when a required module key cannot be resolved from Registry. Used by core module priming and strict resolution paths.
     error LiquidationRiskManager__MissingModule(bytes32 key);
 
@@ -97,16 +100,22 @@ contract LiquidationRiskManager is
 
     /// @notice Emitted when the minimum health factor is updated.
     /// @dev Emitted by governance-controlled update flows after the new minimum health factor is stored.
-    event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 blockNumber);
+    event MinHealthFactorUpdated(
+        uint256 oldMinHealthFactor,
+        uint256 newMinHealthFactor,
+        uint256 blockNumber
+    );
 
     /// @notice Emitted when the risk-manager module cache is refreshed.
     /// @dev Emitted by {refreshModuleCache} after cache refresh and threshold-mirror sync complete.
     event ModuleCacheRefreshed(address indexed caller, uint256 blockNumber);
 
     /// @dev Parameter key: liquidation threshold
-    bytes32 private constant _PARAM_LIQUIDATION_THRESHOLD = keccak256("LIQUIDATION_THRESHOLD");
+    bytes32 private constant _PARAM_LIQUIDATION_THRESHOLD =
+        keccak256("LIQUIDATION_THRESHOLD");
     /// @dev Parameter key: minimum health factor
-    bytes32 private constant _PARAM_MIN_HEALTH_FACTOR = keccak256("MIN_HEALTH_FACTOR");
+    bytes32 private constant _PARAM_MIN_HEALTH_FACTOR =
+        keccak256("MIN_HEALTH_FACTOR");
     /// @dev Parameter key: maximum LTV
     bytes32 private constant _PARAM_MAX_LTV_BPS = keccak256("MAX_LTV_BPS");
 
@@ -124,8 +133,6 @@ contract LiquidationRiskManager is
     // LiquidationRiskManager follows the global AccessControlManager (Registry.KEY_ACCESS_CONTROL)
     // for governance/upgrade gating.
     // Read paths remain open (no role gate) per Architecture-Guide.
-
-    
 
     /*━━━━━━━━━━━━━━━ Constructor And Initialization ━━━━━━━━━━━━━━━*/
     /**
@@ -152,13 +159,14 @@ contract LiquidationRiskManager is
      * @param initialMaxBatchSize Maximum batch operation size
      */
     function initialize(
-        address initialRegistryAddr, 
-        address initialAccessControl, 
-        uint256 initialMaxCacheDuration, 
+        address initialRegistryAddr,
+        address initialAccessControl,
+        uint256 initialMaxCacheDuration,
         uint256 initialMaxBatchSize
     ) public initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
 
@@ -168,7 +176,8 @@ contract LiquidationRiskManager is
         // RiskManager sources governance/role checks from Registry.KEY_ACCESS_CONTROL at call-time,
         // so we intentionally do NOT validate or store this parameter.
         initialAccessControl;
-        liquidationThresholdVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
+        liquidationThresholdVar = LiquidationTypes
+            .DEFAULT_LIQUIDATION_THRESHOLD;
         minHealthFactorVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
         maxLtvBpsVar = LiquidationTypes.DEFAULT_MAX_LTV_BPS;
         maxCacheDurationVar = initialMaxCacheDuration;
@@ -209,7 +218,8 @@ contract LiquidationRiskManager is
         address maint = Registry(_registryAddr).getModuleOrRevert(
             ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER
         );
-        if (msg.sender != maint) revert LiquidationRiskManager__UnauthorizedAccess();
+        if (msg.sender != maint)
+            revert LiquidationRiskManager__UnauthorizedAccess();
     }
 
     /**
@@ -237,14 +247,12 @@ contract LiquidationRiskManager is
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation)
-        internal
-        view
-        override
-        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
-    {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Core Module Resolution ━━━━━━━━━━━━━━━*/
@@ -264,12 +272,17 @@ contract LiquidationRiskManager is
     function _resolveModule(bytes32 key) internal returns (address moduleAddr) {
         moduleAddr = _moduleCache.moduleAddresses[key];
         uint256 cacheBlock = _moduleCache.cacheBlocks[key];
-        if (moduleAddr != address(0) && cacheBlock != 0 && block.number - cacheBlock <= maxCacheDurationVar) {
+        if (
+            moduleAddr != address(0) &&
+            cacheBlock != 0 &&
+            block.number - cacheBlock <= maxCacheDurationVar
+        ) {
             return moduleAddr;
         }
 
         moduleAddr = Registry(_registryAddr).getModule(key);
-        if (moduleAddr == address(0)) revert LiquidationRiskManager__MissingModule(key);
+        if (moduleAddr == address(0))
+            revert LiquidationRiskManager__MissingModule(key);
 
         _moduleCache.moduleAddresses[key] = moduleAddr;
         _moduleCache.cacheBlocks[key] = block.number;
@@ -352,7 +365,7 @@ contract LiquidationRiskManager is
     // Oracle health + valuation concerns belong to ValuationOracleView / LendingEngine.
 
     /*━━━━━━━━━━━━━━━ Risk Assessment Core Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Check if a user is liquidatable based on current health factor.
      * @dev Reverts if:
@@ -366,7 +379,9 @@ contract LiquidationRiskManager is
      * @param user User address to check
      * @return True if user is liquidatable (health factor < liquidation threshold), false otherwise
      */
-    function isLiquidatable(address user) external view override returns (bool) {
+    function isLiquidatable(
+        address user
+    ) external view override returns (bool) {
         if (user == address(0)) revert ZeroAddress();
         (uint256 hf, bool valid) = _getUserHealthFactorFromHealthView(user);
         if (!valid) return false; // safe fallback if cache is not valid
@@ -397,7 +412,12 @@ contract LiquidationRiskManager is
     ) external view override returns (bool) {
         if (user == address(0) || asset == address(0)) revert ZeroAddress();
         // Architecture-Guide recommended primary path: avoid division for threshold checks.
-        return HealthFactorLib.isUnderCollateralized(collateral, debt, _getLiquidationThresholdBps());
+        return
+            HealthFactorLib.isUnderCollateralized(
+                collateral,
+                debt,
+                _getLiquidationThresholdBps()
+            );
     }
 
     /**
@@ -413,15 +433,22 @@ contract LiquidationRiskManager is
      * @param user User address to calculate risk score for
      * @return Risk score from 0 to 100 (0 = lowest risk, 100 = highest risk)
      */
-    function getLiquidationRiskScore(address user) external view override returns (uint256) {
+    function getLiquidationRiskScore(
+        address user
+    ) external view override returns (uint256) {
         if (user == address(0)) revert ZeroAddress();
-        (uint256 collateralValue, uint256 debtValue) = LiquidationRiskQueryLib.getUserValues(
-            user,
-            _registryAddr,
-            _moduleCache,
-            maxCacheDurationVar
-        );
-        return LiquidationRiskLib.calculateLiquidationRiskScore(collateralValue, debtValue);
+        (uint256 collateralValue, uint256 debtValue) = LiquidationRiskQueryLib
+            .getUserValues(
+                user,
+                _registryAddr,
+                _moduleCache,
+                maxCacheDurationVar
+            );
+        return
+            LiquidationRiskLib.calculateLiquidationRiskScore(
+                collateralValue,
+                debtValue
+            );
     }
 
     /**
@@ -441,7 +468,8 @@ contract LiquidationRiskManager is
         uint256 collateral,
         uint256 debt
     ) public pure override returns (uint256) {
-        return LiquidationRiskLib.calculateLiquidationRiskScore(collateral, debt);
+        return
+            LiquidationRiskLib.calculateLiquidationRiskScore(collateral, debt);
     }
 
     // NOTE: Health factor read path is centralized in HealthView.
@@ -461,19 +489,26 @@ contract LiquidationRiskManager is
      * @param users Array of user addresses to check
      * @return liquidatable Array of boolean values indicating if each user is liquidatable
      */
-    function batchIsLiquidatable(address[] calldata users) external view override returns (bool[] memory liquidatable) {
+    function batchIsLiquidatable(
+        address[] calldata users
+    ) external view override returns (bool[] memory liquidatable) {
         uint256 length = users.length;
-        if (length > maxBatchSizeVar) revert LiquidationRiskManager__InvalidBatchSize();
+        if (length > maxBatchSizeVar)
+            revert LiquidationRiskManager__InvalidBatchSize();
         liquidatable = new bool[](length);
         uint256 threshold = _getLiquidationThresholdBps();
-        for (uint256 i = 0; i < length;) {
+        for (uint256 i = 0; i < length; ) {
             address u = users[i];
             if (u != address(0)) {
                 // reuse cached health factor via HealthView
-                (uint256 hf, bool valid) = _getUserHealthFactorFromHealthView(u);
+                (uint256 hf, bool valid) = _getUserHealthFactorFromHealthView(
+                    u
+                );
                 liquidatable[i] = valid && hf < threshold;
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -490,28 +525,32 @@ contract LiquidationRiskManager is
      * @param users Array of user addresses to calculate risk scores for
      * @return riskScores Array of risk scores from 0 to 100 for each user (0 = lowest risk, 100 = highest risk)
      */
-    function batchGetLiquidationRiskScores(address[] calldata users)
-        external
-        view
-        override
-        returns (uint256[] memory riskScores)
-    {
+    function batchGetLiquidationRiskScores(
+        address[] calldata users
+    ) external view override returns (uint256[] memory riskScores) {
         uint256 length = users.length;
-        if (length > maxBatchSizeVar) revert LiquidationRiskManager__InvalidBatchSize();
+        if (length > maxBatchSizeVar)
+            revert LiquidationRiskManager__InvalidBatchSize();
 
         riskScores = new uint256[](length);
-        for (uint256 i = 0; i < length;) {
+        for (uint256 i = 0; i < length; ) {
             address u = users[i];
             if (u != address(0)) {
-                (uint256 collateralValue, uint256 debtValue) = LiquidationRiskQueryLib.getUserValues(
-                    u,
-                    _registryAddr,
-                    _moduleCache,
-                    maxCacheDurationVar
-                );
-                riskScores[i] = LiquidationRiskLib.calculateLiquidationRiskScore(collateralValue, debtValue);
+                (
+                    uint256 collateralValue,
+                    uint256 debtValue
+                ) = LiquidationRiskQueryLib.getUserValues(
+                        u,
+                        _registryAddr,
+                        _moduleCache,
+                        maxCacheDurationVar
+                    );
+                riskScores[i] = LiquidationRiskLib
+                    .calculateLiquidationRiskScore(collateralValue, debtValue);
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -535,32 +574,44 @@ contract LiquidationRiskManager is
      */
     function getUserRiskAssessment(
         address user
-    ) external view override returns (
-        bool liquidatable,
-        uint256 riskScore,
-        uint256 healthFactor,
-        uint256 riskLevel,
-        uint256 safetyMargin
-    ) {
+    )
+        external
+        view
+        override
+        returns (
+            bool liquidatable,
+            uint256 riskScore,
+            uint256 healthFactor,
+            uint256 riskLevel,
+            uint256 safetyMargin
+        )
+    {
         if (user == address(0)) revert ZeroAddress();
-        
+
         (uint256 hf, bool valid) = _getUserHealthFactorFromHealthView(user);
         healthFactor = valid ? hf : 0;
         uint256 threshold = _getLiquidationThresholdBps();
-        (uint256 collateralValue, uint256 debtValue) = LiquidationRiskQueryLib.getUserValues(
-            user,
-            _registryAddr,
-            _moduleCache,
-            maxCacheDurationVar
+        (uint256 collateralValue, uint256 debtValue) = LiquidationRiskQueryLib
+            .getUserValues(
+                user,
+                _registryAddr,
+                _moduleCache,
+                maxCacheDurationVar
+            );
+        riskScore = LiquidationRiskLib.calculateLiquidationRiskScore(
+            collateralValue,
+            debtValue
         );
-        riskScore = LiquidationRiskLib.calculateLiquidationRiskScore(collateralValue, debtValue);
         riskLevel = LiquidationTypes.calculateRiskLevel(healthFactor);
         liquidatable = valid && healthFactor < threshold;
-        safetyMargin = LiquidationTypes.calculateSafetyMargin(healthFactor, threshold);
+        safetyMargin = LiquidationTypes.calculateSafetyMargin(
+            healthFactor,
+            threshold
+        );
     }
 
     /*━━━━━━━━━━━━━━━ Threshold Management Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Get the current liquidation threshold.
      * @dev Reverts if:
@@ -572,7 +623,12 @@ contract LiquidationRiskManager is
      *
      * @return Liquidation threshold in basis points (bps, 10000 = 100%)
      */
-    function getLiquidationThreshold() external view override returns (uint256) {
+    function getLiquidationThreshold()
+        external
+        view
+        override
+        returns (uint256)
+    {
         return _getLiquidationThresholdBps();
     }
 
@@ -591,24 +647,36 @@ contract LiquidationRiskManager is
      *
      * @param newThreshold New liquidation threshold in basis points (bps, 10000 = 100%)
      */
-    function updateLiquidationThreshold(uint256 newThreshold)
-        external
-        override
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function updateLiquidationThreshold(
+        uint256 newThreshold
+    ) external override onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (!LiquidationTypes.isValidLiquidationThreshold(newThreshold)) {
             revert LiquidationRiskManager__InvalidThreshold();
         }
 
-        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+        address cfg = _getModuleViewBestEffort(
+            ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER
+        );
         if (cfg != address(0)) {
-            ILiquidationConfigModuleLite(cfg).updateLiquidationThresholdFromRiskManager(newThreshold, msg.sender);
+            ILiquidationConfigModuleLite(cfg)
+                .updateLiquidationThresholdFromRiskManager(
+                    newThreshold,
+                    msg.sender
+                );
         }
 
         uint256 oldThreshold = liquidationThresholdVar;
         liquidationThresholdVar = newThreshold;
-        emit ParameterUpdated(_PARAM_LIQUIDATION_THRESHOLD, oldThreshold, newThreshold);
-        emit LiquidationThresholdUpdated(oldThreshold, newThreshold, block.number);
+        emit ParameterUpdated(
+            _PARAM_LIQUIDATION_THRESHOLD,
+            oldThreshold,
+            newThreshold
+        );
+        emit LiquidationThresholdUpdated(
+            oldThreshold,
+            newThreshold,
+            block.number
+        );
     }
 
     /**
@@ -647,18 +715,21 @@ contract LiquidationRiskManager is
      *
      * @param newMaxLtvBps New maximum LTV in basis points (bps, 10_000 = 100%)
      */
-    function updateMaxLtvBps(uint256 newMaxLtvBps)
-        external
-        override
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function updateMaxLtvBps(
+        uint256 newMaxLtvBps
+    ) external override onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (!LiquidationTypes.isValidMaxLtvBps(newMaxLtvBps)) {
             revert LiquidationRiskManager__InvalidThreshold();
         }
 
-        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+        address cfg = _getModuleViewBestEffort(
+            ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER
+        );
         if (cfg != address(0)) {
-            ILiquidationConfigModuleLite(cfg).updateMaxLtvBpsFromRiskManager(newMaxLtvBps, msg.sender);
+            ILiquidationConfigModuleLite(cfg).updateMaxLtvBpsFromRiskManager(
+                newMaxLtvBps,
+                msg.sender
+            );
         }
 
         uint256 old = maxLtvBpsVar;
@@ -682,33 +753,53 @@ contract LiquidationRiskManager is
      *
      * @param newMinHealthFactor New minimum health factor in basis points (bps, 10000 = 100%)
      */
-    function updateMinHealthFactor(uint256 newMinHealthFactor)
-        external
-        override
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function updateMinHealthFactor(
+        uint256 newMinHealthFactor
+    ) external override onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         uint256 threshold = _getLiquidationThresholdBps();
         if (newMinHealthFactor == 0 || newMinHealthFactor < threshold) {
             revert LiquidationRiskManager__InvalidThreshold();
         }
 
-        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+        address cfg = _getModuleViewBestEffort(
+            ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER
+        );
         if (cfg != address(0)) {
-            ILiquidationConfigModuleLite(cfg).updateMinHealthFactorFromRiskManager(newMinHealthFactor, msg.sender);
+            ILiquidationConfigModuleLite(cfg)
+                .updateMinHealthFactorFromRiskManager(
+                    newMinHealthFactor,
+                    msg.sender
+                );
         }
 
         uint256 oldFactor = minHealthFactorVar;
         minHealthFactorVar = newMinHealthFactor;
-        emit ParameterUpdated(_PARAM_MIN_HEALTH_FACTOR, oldFactor, newMinHealthFactor);
-        emit MinHealthFactorUpdated(oldFactor, newMinHealthFactor, block.number);
+        emit ParameterUpdated(
+            _PARAM_MIN_HEALTH_FACTOR,
+            oldFactor,
+            newMinHealthFactor
+        );
+        emit MinHealthFactorUpdated(
+            oldFactor,
+            newMinHealthFactor,
+            block.number
+        );
     }
 
     /*━━━━━━━━━━━━━━━ Internal Helper Functions ━━━━━━━━━━━━━━━*/
     /// @dev SSOT migration: prefer ConfigManager, fallback to local mirror (deployment transition only).
-    function _getLiquidationThresholdBps() internal view returns (uint256 threshold) {
-        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+    function _getLiquidationThresholdBps()
+        internal
+        view
+        returns (uint256 threshold)
+    {
+        address cfg = _getModuleViewBestEffort(
+            ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER
+        );
         if (cfg != address(0)) {
-            try ILiquidationConfigModuleLite(cfg).getLiquidationThreshold() returns (uint256 t) {
+            try
+                ILiquidationConfigModuleLite(cfg).getLiquidationThreshold()
+            returns (uint256 t) {
                 if (t != 0) return t;
             } catch {
                 _noop();
@@ -719,9 +810,13 @@ contract LiquidationRiskManager is
 
     /// @dev SSOT migration: prefer ConfigManager, fallback to local mirror (deployment transition only).
     function _getMinHealthFactorBps() internal view returns (uint256 minHf) {
-        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+        address cfg = _getModuleViewBestEffort(
+            ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER
+        );
         if (cfg != address(0)) {
-            try ILiquidationConfigModuleLite(cfg).getMinHealthFactor() returns (uint256 m) {
+            try ILiquidationConfigModuleLite(cfg).getMinHealthFactor() returns (
+                uint256 m
+            ) {
                 if (m != 0) return m;
             } catch {
                 _noop();
@@ -732,9 +827,13 @@ contract LiquidationRiskManager is
 
     /// @dev SSOT migration: prefer ConfigManager, fallback to local mirror (deployment transition only).
     function _getMaxLtvBps() internal view returns (uint256 maxLtvBps) {
-        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+        address cfg = _getModuleViewBestEffort(
+            ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER
+        );
         if (cfg != address(0)) {
-            try ILiquidationConfigModuleLite(cfg).getMaxLtvBps() returns (uint256 v) {
+            try ILiquidationConfigModuleLite(cfg).getMaxLtvBps() returns (
+                uint256 v
+            ) {
                 if (v != 0) return v;
             } catch {
                 _noop();
@@ -745,23 +844,31 @@ contract LiquidationRiskManager is
 
     /// @dev Best-effort mirror sync: used by CacheMaintenanceManager to reduce accidental direct reads of `*Var`.
     function _syncThresholdMirrorBestEffort() internal {
-        address cfg = _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER);
+        address cfg = _getModuleViewBestEffort(
+            ModuleKeys.KEY_LIQUIDATION_CONFIG_MANAGER
+        );
         if (cfg == address(0)) return;
 
         // best-effort: do not revert on interface mismatch / missing methods
-        try ILiquidationConfigModuleLite(cfg).getLiquidationThreshold() returns (uint256 t) {
+        try
+            ILiquidationConfigModuleLite(cfg).getLiquidationThreshold()
+        returns (uint256 t) {
             if (t != 0) liquidationThresholdVar = t;
         } catch {
             _noop();
         }
 
-        try ILiquidationConfigModuleLite(cfg).getMinHealthFactor() returns (uint256 m) {
+        try ILiquidationConfigModuleLite(cfg).getMinHealthFactor() returns (
+            uint256 m
+        ) {
             if (m != 0) minHealthFactorVar = m;
         } catch {
             _noop();
         }
 
-        try ILiquidationConfigModuleLite(cfg).getMaxLtvBps() returns (uint256 v) {
+        try ILiquidationConfigModuleLite(cfg).getMaxLtvBps() returns (
+            uint256 v
+        ) {
             if (v != 0) maxLtvBpsVar = v;
         } catch {
             _noop();
@@ -781,11 +888,16 @@ contract LiquidationRiskManager is
      * @return hf Health factor in bps (10000 = 100%)
      * @return valid True if health factor is valid, false if cache is invalid
      */
-    function _getUserHealthFactorFromHealthView(address user) internal view returns (uint256 hf, bool valid) {
+    function _getUserHealthFactorFromHealthView(
+        address user
+    ) internal view returns (uint256 hf, bool valid) {
         // Best-effort: prefer cached module, but if stale try Registry (view-only) to improve availability.
         address hv = _getModuleViewBestEffort(ModuleKeys.KEY_HEALTH_VIEW);
-        if (hv == address(0)) revert LiquidationRiskManager__MissingModule(ModuleKeys.KEY_HEALTH_VIEW);
-        (hf, valid, ) = IHealthViewLite(hv).getUserHealthFactorWithMeta(user);
+        if (hv == address(0))
+            revert LiquidationRiskManager__MissingModule(
+                ModuleKeys.KEY_HEALTH_VIEW
+            );
+        (hf, valid, ) = IHealthViewBasic(hv).getUserHealthFactorWithMeta(user);
     }
 
     /**
@@ -799,13 +911,16 @@ contract LiquidationRiskManager is
      * @param key Module key to lookup
      * @return moduleAddr Module address (address(0) if not found)
      */
-    function _getModuleViewBestEffort(bytes32 key) internal view returns (address moduleAddr) {
+    function _getModuleViewBestEffort(
+        bytes32 key
+    ) internal view returns (address moduleAddr) {
         moduleAddr = _moduleCache.moduleAddresses[key];
         uint256 cacheBlock = _moduleCache.cacheBlocks[key];
         if (moduleAddr != address(0) && cacheBlock != 0) {
             if (maxCacheDurationVar == 0) return moduleAddr;
             // block.number is monotonic; treat cache as valid if within age blocks.
-            if (block.number - cacheBlock <= maxCacheDurationVar) return moduleAddr;
+            if (block.number - cacheBlock <= maxCacheDurationVar)
+                return moduleAddr;
         }
         // Cache missing or stale: fall back to Registry without updating cache.
         address fromReg = Registry(_registryAddr).getModule(key);
@@ -826,7 +941,9 @@ contract LiquidationRiskManager is
      * @param caller Address to check role for
      */
     function _requireRole(bytes32 role, address caller) internal view {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(role, caller);
     }
 
@@ -838,4 +955,4 @@ contract LiquidationRiskManager is
     /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     // NOTE: Reserved storage space to allow for layout changes in future upgrades.
     uint256[49] private __gap;
-} 
+}

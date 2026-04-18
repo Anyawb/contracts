@@ -2,9 +2,9 @@
 pragma solidity ^0.8.20;
 
 /// @title MockGracefulDegradationMonitor
-/// @notice 供测试使用的优雅降级监控模拟合约
+/// @notice Mock graceful-degradation monitor used in tests.
 contract MockGracefulDegradationMonitor {
-    // 事件
+    // Events.
     event DegradationEventRecorded(
         address indexed module,
         string reason,
@@ -12,15 +12,15 @@ contract MockGracefulDegradationMonitor {
         bool usedFallback,
         uint256 blockNumber
     );
-    
+
     event GracefulDegradationStatsUpdated(
         uint256 totalDegradations,
         uint256 lastDegradationTime,
         address lastDegradedModule,
         string lastDegradationReason
     );
-    
-    // 统计数据
+
+    // Aggregate statistics.
     uint256 public totalDegradations;
     // block number of last degradation (kept name for compatibility)
     uint256 public lastDegradationTime;
@@ -29,12 +29,12 @@ contract MockGracefulDegradationMonitor {
     uint256 public fallbackValueUsed;
     uint256 public totalFallbackValue;
     uint256 public averageFallbackValue;
-    
-    /// @notice 记录降级事件（时间口径为 block number）
-    /// @param module 降级的模块地址
-    /// @param reason 降级原因
-    /// @param fallbackValue 使用的降级值
-    /// @param usedFallback 是否使用了降级
+
+    /// @notice Records a degradation event using block-number time semantics.
+    /// @param module Degraded module address.
+    /// @param reason Degradation reason.
+    /// @param fallbackValue Fallback value used.
+    /// @param usedFallback True when fallback logic was used.
     function recordDegradationEvent(
         address module,
         string memory reason,
@@ -45,14 +45,20 @@ contract MockGracefulDegradationMonitor {
         lastDegradationTime = block.number;
         lastDegradedModule = module;
         lastDegradationReason = reason;
-        
+
         if (usedFallback) {
             fallbackValueUsed = fallbackValue;
             totalFallbackValue += fallbackValue;
             averageFallbackValue = totalFallbackValue / totalDegradations;
         }
-        
-        emit DegradationEventRecorded(module, reason, fallbackValue, usedFallback, block.number);
+
+        emit DegradationEventRecorded(
+            module,
+            reason,
+            fallbackValue,
+            usedFallback,
+            block.number
+        );
         emit GracefulDegradationStatsUpdated(
             totalDegradations,
             lastDegradationTime,
@@ -60,15 +66,15 @@ contract MockGracefulDegradationMonitor {
             lastDegradationReason
         );
     }
-    
-    /// @notice 设置统计数据（用于测试）
-    /// @param _totalDegradations 总降级次数
-    /// @param _lastDegradationTime 最后降级时间（block number）
-    /// @param _lastDegradedModule 最后降级的模块
-    /// @param _lastDegradationReason 最后降级原因
-    /// @param _fallbackValueUsed 使用的降级值
-    /// @param _totalFallbackValue 总降级值
-    /// @param _averageFallbackValue 平均降级值
+
+    /// @notice Overrides graceful-degradation statistics for tests.
+    /// @param _totalDegradations Total degradation count.
+    /// @param _lastDegradationTime Last degradation block number.
+    /// @param _lastDegradedModule Last degraded module.
+    /// @param _lastDegradationReason Last degradation reason.
+    /// @param _fallbackValueUsed Fallback value used.
+    /// @param _totalFallbackValue Total fallback value.
+    /// @param _averageFallbackValue Average fallback value.
     function setGracefulDegradationStats(
         uint256 _totalDegradations,
         uint256 _lastDegradationTime,
@@ -86,24 +92,28 @@ contract MockGracefulDegradationMonitor {
         totalFallbackValue = _totalFallbackValue;
         averageFallbackValue = _averageFallbackValue;
     }
-    
-    /// @notice 获取优雅降级统计信息
-    /// @return _totalDegradations 总降级次数
-    /// @return _lastDegradationTime 最后降级时间（block number）
-    /// @return _lastDegradedModule 最后降级的模块
-    /// @return _lastDegradationReason 最后降级原因
-    /// @return _fallbackValueUsed 使用的降级值
-    /// @return _totalFallbackValue 总降级值
-    /// @return _averageFallbackValue 平均降级值
-    function getGracefulDegradationStats() external view returns (
-        uint256 _totalDegradations,
-        uint256 _lastDegradationTime,
-        address _lastDegradedModule,
-        string memory _lastDegradationReason,
-        uint256 _fallbackValueUsed,
-        uint256 _totalFallbackValue,
-        uint256 _averageFallbackValue
-    ) {
+
+    /// @notice Returns graceful-degradation statistics.
+    /// @return _totalDegradations Total degradation count.
+    /// @return _lastDegradationTime Last degradation block number.
+    /// @return _lastDegradedModule Last degraded module.
+    /// @return _lastDegradationReason Last degradation reason.
+    /// @return _fallbackValueUsed Fallback value used.
+    /// @return _totalFallbackValue Total fallback value.
+    /// @return _averageFallbackValue Average fallback value.
+    function getGracefulDegradationStats()
+        external
+        view
+        returns (
+            uint256 _totalDegradations,
+            uint256 _lastDegradationTime,
+            address _lastDegradedModule,
+            string memory _lastDegradationReason,
+            uint256 _fallbackValueUsed,
+            uint256 _totalFallbackValue,
+            uint256 _averageFallbackValue
+        )
+    {
         return (
             totalDegradations,
             lastDegradationTime,

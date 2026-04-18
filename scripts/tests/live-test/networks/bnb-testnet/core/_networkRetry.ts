@@ -157,7 +157,7 @@ export function isRetryableNetworkError(error: unknown) {
 export async function runWithNetworkRetry(
   scriptLabel: string,
   action: () => Promise<void>,
-  options?: { maxAttempts?: number; baseDelayMs?: number },
+  options?: { maxAttempts?: number; baseDelayMs?: number; attemptTimeoutMs?: number },
 ) {
   const resolvedScriptLabel = normalizeLiveScriptId(scriptLabel);
   const envAttemptsRaw = process.env.LIVE_NETWORK_MAX_ATTEMPTS?.trim();
@@ -169,7 +169,12 @@ export async function runWithNetworkRetry(
     ?? (Number.isFinite(envAttempts) && envAttempts >= 1 ? Math.floor(envAttempts) : 3);
   const baseDelayMs = options?.baseDelayMs
     ?? (Number.isFinite(envDelayMs) && envDelayMs >= 0 ? Math.floor(envDelayMs) : 1500);
-  const attemptTimeoutMs = resolveAttemptTimeoutMs();
+  const attemptTimeoutMs = options?.attemptTimeoutMs
+    ?? resolveAttemptTimeoutMs();
+
+  console.log(
+    `  [Retry.Config] script=${resolvedScriptLabel} maxAttempts=${maxAttempts} baseDelayMs=${baseDelayMs} attemptTimeoutMs=${attemptTimeoutMs <= 0 ? "disabled" : String(attemptTimeoutMs)}`,
+  );
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {

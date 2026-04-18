@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { ILiquidationPayoutManager } from "../../../interfaces/ILiquidationPayoutManager.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { LiquidationAccessControl } from "../libraries/LiquidationAccessControl.sol";
-import { LiquidationValidationLibrary } from "../libraries/LiquidationValidationLibrary.sol";
-import { Registry } from "../../../registry/Registry.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import {ILiquidationPayoutManager} from "../../../interfaces/ILiquidationPayoutManager.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {LiquidationAccessControl} from "../libraries/LiquidationAccessControl.sol";
+import {LiquidationValidationLibrary} from "../libraries/LiquidationValidationLibrary.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
+import {NotAContract, ZeroAddress} from "../../../errors/StandardErrors.sol";
 
 /**
  * @title LiquidationPayoutManager
@@ -24,7 +24,11 @@ import { NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
  * - Execution remains in LiquidationManager and SettlementManager; this module only stores config and computes shares.
  * - Integer rounding remainder is assigned to the liquidator.
  */
-contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidationPayoutManager {
+contract LiquidationPayoutManager is
+    Initializable,
+    UUPSUpgradeable,
+    ILiquidationPayoutManager
+{
     using LiquidationAccessControl for LiquidationAccessControl.Storage;
 
     /// @notice Distribution ratio denominator (in basis points), fixed at 10_000 (100%)
@@ -57,7 +61,10 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
     error LiquidationPayoutManager__InvalidRates();
 
     /// @dev Reverts when the initializer-provided AccessControlManager does not match Registry.KEY_ACCESS_CONTROL. Used by {initialize}.
-    error LiquidationPayoutManager__AccessControlMismatch(address expectedAcm, address providedAcm);
+    error LiquidationPayoutManager__AccessControlMismatch(
+        address expectedAcm,
+        address providedAcm
+    );
 
     /// @dev Reverts when a UUPS upgrade target has no deployed code. Used by {_authorizeUpgrade}.
     error LiquidationPayoutManager__InvalidImplementation();
@@ -115,9 +122,14 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
         // We validate the initializer-provided value to catch deployment misconfiguration.
         // IMPORTANT: in some unit tests a MockRegistry may not have KEY_ACCESS_CONTROL set yet at init time.
         // In that case, skip the mismatch check and rely on runtime gating via onlyRole().
-        address expectedAcm = Registry(registryAddr).getModule(ModuleKeys.KEY_ACCESS_CONTROL);
+        address expectedAcm = Registry(registryAddr).getModule(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         if (expectedAcm != address(0) && expectedAcm != accessControlAddr) {
-            revert LiquidationPayoutManager__AccessControlMismatch(expectedAcm, accessControlAddr);
+            revert LiquidationPayoutManager__AccessControlMismatch(
+                expectedAcm,
+                accessControlAddr
+            );
         }
 
         _setConfig(recipients, rates);
@@ -135,7 +147,12 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      * @notice Get current recipient address configuration
      * @return recipients Recipient address configuration struct (platform, risk reserve, lender compensation)
      */
-    function getRecipients() external view override returns (PayoutRecipients memory recipients) {
+    function getRecipients()
+        external
+        view
+        override
+        returns (PayoutRecipients memory recipients)
+    {
         return _recipients;
     }
 
@@ -143,29 +160,43 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      * @notice Get current distribution ratio configuration
      * @return rates Distribution ratio configuration struct (in basis points), sum equals 10_000
      */
-    function getRates() external view override returns (PayoutRates memory rates) {
+    function getRates()
+        external
+        view
+        override
+        returns (PayoutRates memory rates)
+    {
         return _rates;
     }
 
     /**
      * @notice Calculate distribution shares (integer distribution, remainder all goes to liquidator)
-    * - liquidatorShare is computed as collateralAmount minus the first three shares, so any rounding remainder is deterministically assigned to the liquidator.
+     * - liquidatorShare is computed as collateralAmount minus the first three shares, so any rounding remainder is deterministically assigned to the liquidator.
      * @param collateralAmount Amount of seized collateral
      * @return platformShare Platform share (collateral amount × platformBps / 10_000)
      * @return reserveShare Risk reserve share (collateral amount × reserveBps / 10_000)
      * @return lenderShare Lender compensation share (collateral amount × lenderBps / 10_000)
      * @return liquidatorShare Liquidator share (collateral amount - sum of first three, including remainder)
      */
-    function calculateShares(uint256 collateralAmount)
+    function calculateShares(
+        uint256 collateralAmount
+    )
         external
         view
         override
-        returns (uint256 platformShare, uint256 reserveShare, uint256 lenderShare, uint256 liquidatorShare)
+        returns (
+            uint256 platformShare,
+            uint256 reserveShare,
+            uint256 lenderShare,
+            uint256 liquidatorShare
+        )
     {
         if (collateralAmount == 0) return (0, 0, 0, 0);
 
-        platformShare = (collateralAmount * _rates.platformBps) / _BPS_DENOMINATOR;
-        reserveShare = (collateralAmount * _rates.reserveBps) / _BPS_DENOMINATOR;
+        platformShare =
+            (collateralAmount * _rates.platformBps) / _BPS_DENOMINATOR;
+        reserveShare =
+            (collateralAmount * _rates.reserveBps) / _BPS_DENOMINATOR;
         lenderShare = (collateralAmount * _rates.lenderBps) / _BPS_DENOMINATOR;
 
         uint256 allocated = platformShare + reserveShare + lenderShare;
@@ -186,10 +217,10 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      * @param recipients New recipient address configuration (platform, risk reserve, lender compensation)
      * @param rates New distribution ratio configuration (in basis points, must sum to 10_000)
      */
-    function updateConfig(PayoutRecipients calldata recipients, PayoutRates calldata rates)
-        external
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function updateConfig(
+        PayoutRecipients calldata recipients,
+        PayoutRates calldata rates
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         _setConfig(recipients, rates);
     }
 
@@ -204,7 +235,9 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      *
      * @param recipients New recipient address configuration (platform, risk reserve, lender compensation)
      */
-    function updateRecipients(PayoutRecipients calldata recipients) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function updateRecipients(
+        PayoutRecipients calldata recipients
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (recipients.platform == address(0)) revert ZeroAddress();
         if (recipients.reserve == address(0)) revert ZeroAddress();
         if (recipients.lenderCompensation == address(0)) revert ZeroAddress();
@@ -224,9 +257,15 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      *
      * @param rates New distribution ratio configuration (in basis points, must sum to 10_000)
      */
-    function updateRates(PayoutRates calldata rates) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
-        uint256 totalBps = rates.platformBps + rates.reserveBps + rates.lenderBps + rates.liquidatorBps;
-        if (totalBps != _BPS_DENOMINATOR) revert LiquidationPayoutManager__InvalidRates();
+    function updateRates(
+        PayoutRates calldata rates
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        uint256 totalBps = rates.platformBps +
+            rates.reserveBps +
+            rates.lenderBps +
+            rates.liquidatorBps;
+        if (totalBps != _BPS_DENOMINATOR)
+            revert LiquidationPayoutManager__InvalidRates();
 
         _rates = rates;
         emit PayoutConfigUpdated(_recipients, rates);
@@ -246,7 +285,9 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
     modifier onlyRole(bytes32 role) {
         if (_registryAddr == address(0)) revert ZeroAddress();
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(role, msg.sender);
         _;
     }
@@ -264,14 +305,15 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation)
-        internal
-        view
-        override
-        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
-    {
-        LiquidationValidationLibrary.validateAddress(newImplementation, "Implementation");
-        if (newImplementation.code.length == 0) revert LiquidationPayoutManager__InvalidImplementation();
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
+        LiquidationValidationLibrary.validateAddress(
+            newImplementation,
+            "Implementation"
+        );
+        if (newImplementation.code.length == 0)
+            revert LiquidationPayoutManager__InvalidImplementation();
     }
 
     /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
@@ -286,13 +328,20 @@ contract LiquidationPayoutManager is Initializable, UUPSUpgradeable, ILiquidatio
      * @param recipients Recipient address configuration
      * @param rates Distribution ratio configuration
      */
-    function _setConfig(PayoutRecipients calldata recipients, PayoutRates calldata rates) internal {
+    function _setConfig(
+        PayoutRecipients calldata recipients,
+        PayoutRates calldata rates
+    ) internal {
         if (recipients.platform == address(0)) revert ZeroAddress();
         if (recipients.reserve == address(0)) revert ZeroAddress();
         if (recipients.lenderCompensation == address(0)) revert ZeroAddress();
 
-        uint256 totalBps = rates.platformBps + rates.reserveBps + rates.lenderBps + rates.liquidatorBps;
-        if (totalBps != _BPS_DENOMINATOR) revert LiquidationPayoutManager__InvalidRates();
+        uint256 totalBps = rates.platformBps +
+            rates.reserveBps +
+            rates.lenderBps +
+            rates.liquidatorBps;
+        if (totalBps != _BPS_DENOMINATOR)
+            revert LiquidationPayoutManager__InvalidRates();
 
         _recipients = recipients;
         _rates = rates;

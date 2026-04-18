@@ -329,6 +329,7 @@ $$
 - **legacy / 通用订单结论**：主线消费者应优先读取 `LendingEngineView.getOrderStateSnapshot(orderId)`；旧的 `getOrderStatus(orderId)` 仍保留，但只反映兼容层 coarse status。
 - **允许的校验**：repay 后检查 `repaidAmount`、debt ledger 变化是否符合预期，仍属于账本一致性校验；但这些数值不能再被提升为 closed-state 判定条件。
 - **读口结论**：当前状态机已经有专门 view 读口。loan 读 `LendingEngineView.getOrderStateSnapshot(orderId)`，blocks-only 读 `BlocksOnlyView.getBlocksOnlyOrderState(orderId)`；`LoanNFTView` 只负责用户维度枚举并消费 store-backed 兼容状态。
+- **loan 状态读取实现约束（新增）**：`ORDER_ENGINE.getOrderStatusForView(orderId)` 读取 LoanNFT 时，必须优先走稳定轻量读口 `LoanNFT.getLoanIdentity(tokenId)`（仅 `loanId/status`），并保留 metadata 兼容回退；禁止把 compile-time `LoanMetadata` 固定布局当作唯一解码来源。
 - **blocks-only 说明**：blocks-only 现在已进入主线文档口径。消费方必须区分“债务已清但仍未关闭（debt-free open）”与“已经交易收尾/到期收尾/到期交付收尾（trade closeout / maturity closeout / maturity delivery closeout）”三分终局语义，不能把 `REPAID` 误读成终局关闭。
 
 - **债务记账（orderId SSOT）**：`ORDER_ENGINE(LendingEngine).repay(orderId, repayAmount)`（由 `SettlementManager` 作为调用方触发；资金已由 `VaultCore` 先转入 `SettlementManager`）

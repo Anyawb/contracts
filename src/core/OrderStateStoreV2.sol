@@ -15,7 +15,11 @@ import {IOrderStateStoreV2} from "../interfaces/IOrderStateStoreV2.sol";
 import {IRegistry} from "../interfaces/IRegistry.sol";
 import {IShortfallLedger} from "../interfaces/IShortfallLedger.sol";
 
-contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2 {
+contract OrderStateStoreV2 is
+    Initializable,
+    UUPSUpgradeable,
+    IOrderStateStoreV2
+{
     address private _registryAddr;
 
     mapping(uint8 productType => mapping(uint256 orderId => OrderState orderState))
@@ -113,7 +117,10 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
         uint256 orderId,
         uint256 createdBlockHint
     ) external onlyValidRegistry onlyOrderEngine {
-        OrderState storage state = _bootstrapLoanState(orderId, createdBlockHint);
+        OrderState storage state = _bootstrapLoanState(
+            orderId,
+            createdBlockHint
+        );
         if (state.lifecycle != LifecycleStatus.ACTIVE) {
             revert OrderStateStoreV2__InvalidLifecycleTransition(
                 OrderProductType.LOAN,
@@ -200,7 +207,10 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
             );
         }
 
-        OrderState storage state = _bootstrapLoanState(orderId, createdBlockHint);
+        OrderState storage state = _bootstrapLoanState(
+            orderId,
+            createdBlockHint
+        );
         if (state.lifecycle != LifecycleStatus.ACTIVE) {
             revert OrderStateStoreV2__InvalidLifecycleTransition(
                 OrderProductType.LOAN,
@@ -250,9 +260,9 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
         }
         if (
             collateralDisposition !=
-            CollateralDispositionStatus.RETURNED_TO_BORROWER &&
+                CollateralDispositionStatus.RETURNED_TO_BORROWER &&
             collateralDisposition !=
-            CollateralDispositionStatus.DELIVERED_TO_LENDER
+                CollateralDispositionStatus.DELIVERED_TO_LENDER
         ) {
             revert OrderStateStoreV2__InvalidCollateralDisposition(
                 OrderProductType.BLOCKS_ONLY,
@@ -300,10 +310,10 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
      *      - caller is not the registered SettlementManager module
      *
      * Security:
-        * - Missing state is compensated only when ORDER_ENGINE already exposes a terminal lifecycle
-        *   (`Liquidated*` / `Defaulted*`); this avoids reconstructing a fake ACTIVE lifecycle from
-        *   shortfall-only updates while still repairing state holes caused by temporary store unavailability.
-        * - `createdBlockHint` is used as bootstrap compatibility hint when compensation is required.
+     * - Missing state is compensated only when ORDER_ENGINE already exposes a terminal lifecycle
+     *   (`Liquidated*` / `Defaulted*`); this avoids reconstructing a fake ACTIVE lifecycle from
+     *   shortfall-only updates while still repairing state holes caused by temporary store unavailability.
+     * - `createdBlockHint` is used as bootstrap compatibility hint when compensation is required.
      *
      * @param orderId Loan order identifier
      * @param createdBlockHint Historical compatibility hint (reserved)
@@ -354,7 +364,9 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
         ILoanNFT.LoanStatus orderStatus;
 
         try
-            IOrderEngineViewAdapter(orderEngineAddr).getLoanOrderForView(orderId)
+            IOrderEngineViewAdapter(orderEngineAddr).getLoanOrderForView(
+                orderId
+            )
         returns (IOrderEngine.LoanOrder memory readOrder) {
             order = readOrder;
         } catch {
@@ -362,7 +374,9 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
         }
 
         try
-            IOrderEngineViewAdapter(orderEngineAddr).getOrderStatusForView(orderId)
+            IOrderEngineViewAdapter(orderEngineAddr).getOrderStatusForView(
+                orderId
+            )
         returns (ILoanNFT.LoanStatus status) {
             orderStatus = status;
         } catch {
@@ -447,16 +461,24 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
         uint256 orderId
     ) external view returns (ILoanNFT.LoanStatus status) {
         if (!_hasState(OrderProductType.LOAN, orderId)) {
-            revert OrderStateStoreV2__MissingOrder(OrderProductType.LOAN, orderId);
+            revert OrderStateStoreV2__MissingOrder(
+                OrderProductType.LOAN,
+                orderId
+            );
         }
-        return _mapLoanStateToLegacy(_orderStates[uint8(OrderProductType.LOAN)][orderId]);
+        return
+            _mapLoanStateToLegacy(
+                _orderStates[uint8(OrderProductType.LOAN)][orderId]
+            );
     }
 
     function getRegistry() external view returns (address registryAddr) {
         return _registryAddr;
     }
 
-    function _authorizeUpgrade(address newImplementation) internal view override {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override {
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) {
             revert OrderStateStoreV2__InvalidImplementation();
@@ -613,7 +635,9 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
         OrderProductType productType,
         uint256 orderId
     ) internal view returns (bool hasState) {
-        return _orderStates[uint8(productType)][orderId].productType != OrderProductType.NONE;
+        return
+            _orderStates[uint8(productType)][orderId].productType !=
+            OrderProductType.NONE;
     }
 
     function _mapLoanStateToLegacy(
@@ -623,14 +647,16 @@ contract OrderStateStoreV2 is Initializable, UUPSUpgradeable, IOrderStateStoreV2
             return ILoanNFT.LoanStatus.Repaid;
         }
         if (state.lifecycle == LifecycleStatus.LIQUIDATED) {
-            return state.shortfallStatus == IShortfallLedger.ShortfallStatus.NONE
-                ? ILoanNFT.LoanStatus.Liquidated
-                : ILoanNFT.LoanStatus.LiquidatedWithShortfall;
+            return
+                state.shortfallStatus == IShortfallLedger.ShortfallStatus.NONE
+                    ? ILoanNFT.LoanStatus.Liquidated
+                    : ILoanNFT.LoanStatus.LiquidatedWithShortfall;
         }
         if (state.lifecycle == LifecycleStatus.DEFAULTED) {
-            return state.shortfallStatus == IShortfallLedger.ShortfallStatus.NONE
-                ? ILoanNFT.LoanStatus.Defaulted
-                : ILoanNFT.LoanStatus.DefaultedWithShortfall;
+            return
+                state.shortfallStatus == IShortfallLedger.ShortfallStatus.NONE
+                    ? ILoanNFT.LoanStatus.Defaulted
+                    : ILoanNFT.LoanStatus.DefaultedWithShortfall;
         }
         return ILoanNFT.LoanStatus.Active;
     }

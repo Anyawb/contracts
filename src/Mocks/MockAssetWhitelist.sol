@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 /// @title MockAssetWhitelist
-/// @notice 简化的资产白名单，用于业务逻辑测试
+/// @notice Simplified asset whitelist used in business-logic tests.
 contract MockAssetWhitelist {
     mapping(address => bool) private _allowed;
     bool public shouldFail = false;
@@ -21,5 +21,3 @@ contract MockAssetWhitelist {
         return _allowed[asset];
     }
 }
-
-

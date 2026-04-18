@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ILiquidationEventsView } from "../interfaces/ILiquidationEventsView.sol";
+import {ILiquidationEventsView} from "../interfaces/ILiquidationEventsView.sol";
 
 /// @title MockLiquidationEventsView
-/// @notice 清算事件视图的Mock实现，用于测试
+/// @notice Mock liquidation events view used in tests.
 contract MockLiquidationEventsView is ILiquidationEventsView {
-    // 清算事件记录
+    // Liquidation statistics.
     mapping(address => uint256) private _userLiquidationCount;
     mapping(address => uint256) private _liquidatorTotalBonus;
     uint256 private _totalLiquidations;
-    
-    // 事件
+
+    // Events.
     event MockLiquidationEventPushed(
         address indexed user,
         address indexed collateralAsset,
@@ -34,15 +34,15 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         uint256 blockNumber
     );
 
-    /// @notice 推送单笔清算更新
-    /// @param user 被清算用户
-    /// @param collateralAsset 被扣押的抵押资产
-    /// @param debtAsset 被偿还的债务资产
-    /// @param collateralAmount 抵押扣押数量
-    /// @param debtAmount 债务清偿数量
-    /// @param liquidator 清算人
-    /// @param bonus 实得清算奖励
-    /// @param blockNumber 区块号（block.number）
+    /// @notice Pushes a single liquidation update.
+    /// @param user Liquidated user.
+    /// @param collateralAsset Seized collateral asset.
+    /// @param debtAsset Repaid debt asset.
+    /// @param collateralAmount Seized collateral amount.
+    /// @param debtAmount Repaid debt amount.
+    /// @param liquidator Liquidator address.
+    /// @param bonus Liquidation bonus received.
+    /// @param blockNumber Block number.
     function pushLiquidationUpdate(
         address user,
         address collateralAsset,
@@ -56,7 +56,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         _userLiquidationCount[user]++;
         _liquidatorTotalBonus[liquidator] += bonus;
         _totalLiquidations++;
-        
+
         emit MockLiquidationEventPushed(
             user,
             collateralAsset,
@@ -69,15 +69,15 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         );
     }
 
-    /// @notice 推送批量清算更新
-    /// @param users 被清算用户数组
-    /// @param collateralAssets 抵押资产数组
-    /// @param debtAssets 债务资产数组
-    /// @param collateralAmounts 抵押扣押数量数组
-    /// @param debtAmounts 债务清偿数量数组
-    /// @param liquidator 清算人
-    /// @param bonuses 奖励数组
-    /// @param blockNumber 区块号（block.number）
+    /// @notice Pushes batch liquidation updates.
+    /// @param users Liquidated user array.
+    /// @param collateralAssets Collateral asset array.
+    /// @param debtAssets Debt asset array.
+    /// @param collateralAmounts Seized collateral amount array.
+    /// @param debtAmounts Repaid debt amount array.
+    /// @param liquidator Liquidator address.
+    /// @param bonuses Bonus array.
+    /// @param blockNumber Block number.
     function pushBatchLiquidationUpdate(
         address[] calldata users,
         address[] calldata collateralAssets,
@@ -93,7 +93,7 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
             _liquidatorTotalBonus[liquidator] += bonuses[i];
             _totalLiquidations++;
         }
-        
+
         emit MockBatchLiquidationEventPushed(
             users,
             collateralAssets,
@@ -124,23 +124,27 @@ contract MockLiquidationEventsView is ILiquidationEventsView {
         noop;
     }
 
-    // 测试辅助函数
-    /// @notice 获取用户清算次数
-    /// @param user 用户地址
-    /// @return 清算次数
-    function getUserLiquidationCount(address user) external view returns (uint256) {
+    /*━━━━━━━━━━━━━━━ Test Helpers ━━━━━━━━━━━━━━━*/
+    /// @notice Returns the liquidation count for a user.
+    /// @param user User address.
+    /// @return Liquidation count.
+    function getUserLiquidationCount(
+        address user
+    ) external view returns (uint256) {
         return _userLiquidationCount[user];
     }
 
-    /// @notice 获取清算人总奖励
-    /// @param liquidator 清算人地址
-    /// @return 总奖励
-    function getLiquidatorTotalBonus(address liquidator) external view returns (uint256) {
+    /// @notice Returns the total bonus tracked for a liquidator.
+    /// @param liquidator Liquidator address.
+    /// @return Total bonus.
+    function getLiquidatorTotalBonus(
+        address liquidator
+    ) external view returns (uint256) {
         return _liquidatorTotalBonus[liquidator];
     }
 
-    /// @notice 获取总清算次数
-    /// @return 总清算次数
+    /// @notice Returns the total liquidation count.
+    /// @return Total liquidation count.
     function getTotalLiquidations() external view returns (uint256) {
         return _totalLiquidations;
     }

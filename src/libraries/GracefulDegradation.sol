@@ -354,8 +354,7 @@ library GracefulDegradation {
             StablecoinConfig memory matchedStablecoinConfig
         ) = _findStablecoinConfig(assetAddr, config);
         if (
-            hasStablecoinConfig &&
-            matchedStablecoinConfig.enableDepegDetection
+            hasStablecoinConfig && matchedStablecoinConfig.enableDepegDetection
         ) {
             if (
                 !validateStablecoinPrice(
@@ -1006,7 +1005,7 @@ library GracefulDegradation {
      * Security:
      * - Pure function
      *
-    * @param actualPriceValue Observed price from the oracle path.
+     * @param actualPriceValue Observed price from the oracle path.
      * @param expectedPriceValue Expected price (oracle precision).
      * @param toleranceValue Tolerance in bps (1e4 = 100%).
      * @return isValid True if within tolerance.
@@ -1194,8 +1193,8 @@ library GracefulDegradation {
         string memory reason,
         uint256 conservativeRatio
     ) internal pure returns (PriceResult memory result) {
-        uint256 fallbackValue =
-            (amountValue * conservativeRatio) / BASIS_POINT_DIVISOR;
+        uint256 fallbackValue = (amountValue * conservativeRatio) /
+            BASIS_POINT_DIVISOR;
         return _buildFallbackResult(fallbackValue, reason);
     }
 
@@ -1215,7 +1214,11 @@ library GracefulDegradation {
     function _findStablecoinConfig(
         address assetAddr,
         DegradationConfig memory config
-    ) internal pure returns (bool found, StablecoinConfig memory matchedConfig) {
+    )
+        internal
+        pure
+        returns (bool found, StablecoinConfig memory matchedConfig)
+    {
         if (
             config.stablecoinConfig.isWhitelisted &&
             config.stablecoinConfig.stablecoin == assetAddr
@@ -1243,9 +1246,9 @@ library GracefulDegradation {
             return 0;
         }
 
-        try IPriceOracleRead(priceOracleAddr).getAssetConfig(assetAddr) returns (
-            IPriceOracleRead.AssetConfig memory assetConfig
-        ) {
+        try
+            IPriceOracleRead(priceOracleAddr).getAssetConfig(assetAddr)
+        returns (IPriceOracleRead.AssetConfig memory assetConfig) {
             return assetConfig.assetDecimals;
         } catch {
             return 0;
@@ -1299,10 +1302,7 @@ library GracefulDegradation {
             Math.mulDiv(
                 referencePrice,
                 1,
-                safePow(
-                    10,
-                    LEGACY_PRICE_REFERENCE_DECIMALS - assetDecimals
-                )
+                safePow(10, LEGACY_PRICE_REFERENCE_DECIMALS - assetDecimals)
             );
     }
 

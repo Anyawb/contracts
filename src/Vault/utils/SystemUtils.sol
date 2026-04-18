@@ -16,7 +16,7 @@ import {ArrayLengthMismatch} from "../../errors/StandardErrors.sol";
  */
 library SystemUtils {
     uint256 internal constant _BPS_DENOMINATOR = 10_000;
-    
+
     /**
      * @notice Compute a system health score in [0..100].
      * @dev Reverts if:
@@ -43,7 +43,11 @@ library SystemUtils {
         uint256 baseScore = _calculateBaseHealthScore(averageHealthFactorBps);
 
         // Penalty derived from the warning and critical user ratios.
-        uint256 riskPenalty = _calculateRiskPenalty(totalUsers, warningUsers, criticalUsers);
+        uint256 riskPenalty = _calculateRiskPenalty(
+            totalUsers,
+            warningUsers,
+            criticalUsers
+        );
 
         // Clamp the final score at zero.
         if (baseScore > riskPenalty) {
@@ -52,11 +56,11 @@ library SystemUtils {
             healthScore = 0;
         }
     }
-    
+
     /**
      * @notice Compute a base score from average health factor.
      * @dev Reverts if:
-    *      - (none)
+     *      - (none)
      *
      * Security:
      * - Pure mapping only.
@@ -64,15 +68,17 @@ library SystemUtils {
      * @param averageHealthFactorBps Average health factor in bps.
      * @return baseScore Base score in [0..100].
      */
-    function _calculateBaseHealthScore(uint256 averageHealthFactorBps) internal pure returns (uint256 baseScore) {
+    function _calculateBaseHealthScore(
+        uint256 averageHealthFactorBps
+    ) internal pure returns (uint256 baseScore) {
         if (averageHealthFactorBps >= 12000) return 100; // >=120% => 100
-        if (averageHealthFactorBps >= 11000) return 90;  // >=110% => 90
-        if (averageHealthFactorBps >= 10500) return 80;  // >=105% => 80
-        if (averageHealthFactorBps >= 10000) return 70;  // >=100% => 70
-        if (averageHealthFactorBps >= 9500) return 50;   // >=95%  => 50
+        if (averageHealthFactorBps >= 11000) return 90; // >=110% => 90
+        if (averageHealthFactorBps >= 10500) return 80; // >=105% => 80
+        if (averageHealthFactorBps >= 10000) return 70; // >=100% => 70
+        if (averageHealthFactorBps >= 9500) return 50; // >=95%  => 50
         return 30; // <95% => 30
     }
-    
+
     /**
      * @notice Compute the penalty based on risky user ratios.
      * @dev Reverts if:
@@ -94,10 +100,10 @@ library SystemUtils {
     ) internal pure returns (uint256 riskPenalty) {
         uint256 warningPenalty = (warningUsers * 5) / totalUsers;
         uint256 criticalPenalty = (criticalUsers * 15) / totalUsers;
-        
+
         return warningPenalty + criticalPenalty;
     }
-    
+
     /**
      * @notice Compute utilization as bps (used / total).
      * @dev Reverts if:
@@ -110,11 +116,14 @@ library SystemUtils {
      * @param total Total amount (same unit as used).
      * @return utilizationBps Utilization in bps; returns 0 if total == 0.
      */
-    function calculateUtilization(uint256 used, uint256 total) internal pure returns (uint256 utilizationBps) {
+    function calculateUtilization(
+        uint256 used,
+        uint256 total
+    ) internal pure returns (uint256 utilizationBps) {
         if (total == 0) return 0;
         return (used * _BPS_DENOMINATOR) / total;
     }
-    
+
     /**
      * @notice Compute growth rate as bps ((current - previous) / previous).
      * @dev Reverts if:
@@ -128,13 +137,16 @@ library SystemUtils {
      * @param previous Previous value (same unit as current).
      * @return growthRateBps Growth rate in bps; returns 0 if previous == 0 or current < previous.
      */
-    function calculateGrowthRate(uint256 current, uint256 previous) internal pure returns (uint256 growthRateBps) {
+    function calculateGrowthRate(
+        uint256 current,
+        uint256 previous
+    ) internal pure returns (uint256 growthRateBps) {
         if (previous == 0) return 0;
         if (current < previous) return 0;
-        
+
         return ((current - previous) * _BPS_DENOMINATOR) / previous;
     }
-    
+
     /**
      * @notice Compute the arithmetic mean of an array.
      * @dev Reverts if:
@@ -146,17 +158,19 @@ library SystemUtils {
      * @param values Array of values.
      * @return average Floor(sum(values) / values.length); returns 0 if empty.
      */
-    function calculateAverage(uint256[] memory values) internal pure returns (uint256 average) {
+    function calculateAverage(
+        uint256[] memory values
+    ) internal pure returns (uint256 average) {
         if (values.length == 0) return 0;
-        
+
         uint256 sum = 0;
         for (uint256 i = 0; i < values.length; i++) {
             sum += values[i];
         }
-        
+
         return sum / values.length;
     }
-    
+
     /**
      * @notice Compute a weighted average of values with corresponding weights.
      * @dev Reverts if:
@@ -175,34 +189,38 @@ library SystemUtils {
         uint256[] memory values,
         uint256[] memory weights
     ) internal pure returns (uint256 weightedAverage) {
-        if (values.length != weights.length) revert ArrayLengthMismatch(values.length, weights.length);
+        if (values.length != weights.length)
+            revert ArrayLengthMismatch(values.length, weights.length);
         if (values.length == 0) return 0;
-        
+
         uint256 weightedSum = 0;
         uint256 totalWeight = 0;
-        
+
         for (uint256 i = 0; i < values.length; i++) {
             weightedSum += values[i] * weights[i];
             totalWeight += weights[i];
         }
-        
+
         if (totalWeight == 0) return 0;
         return weightedSum / totalWeight;
     }
-    
+
     /**
      * @notice Return whether a cache entry is expired (block-based).
      * @dev Reverts if:
      *      - cacheBlock > block.number would underflow (Solidity ^0.8.x)
      *
      * Security:
-    * - Reads block number and is suitable only for freshness heuristics.
+     * - Reads block number and is suitable only for freshness heuristics.
      *
      * @param cacheBlock Cache update block (block.number).
      * @param maxAgeBlocks Maximum allowed age (blocks).
      * @return isExpired True if (block.number - cacheBlock) > maxAgeBlocks.
      */
-    function isCacheExpiredBlocks(uint256 cacheBlock, uint256 maxAgeBlocks) internal view returns (bool isExpired) {
+    function isCacheExpiredBlocks(
+        uint256 cacheBlock,
+        uint256 maxAgeBlocks
+    ) internal view returns (bool isExpired) {
         if (cacheBlock == 0 || cacheBlock > block.number) return true;
         return (block.number - cacheBlock) > maxAgeBlocks;
     }
@@ -213,17 +231,16 @@ library SystemUtils {
      *      - cacheBlock > block.number would underflow (Solidity ^0.8.x)
      *
      * Security:
-    * - Reads block number and is suitable only for freshness heuristics.
+     * - Reads block number and is suitable only for freshness heuristics.
      *
      * @param cacheBlock Cache update block (block.number).
      * @param maxAgeBlocks Maximum allowed age (blocks).
      * @return remainingBlocks Remaining blocks; returns 0 if already expired.
      */
-    function getCacheRemainingBlocks(uint256 cacheBlock, uint256 maxAgeBlocks)
-        internal
-        view
-        returns (uint256 remainingBlocks)
-    {
+    function getCacheRemainingBlocks(
+        uint256 cacheBlock,
+        uint256 maxAgeBlocks
+    ) internal view returns (uint256 remainingBlocks) {
         if (cacheBlock == 0 || cacheBlock > block.number) {
             return 0;
         }
@@ -232,4 +249,4 @@ library SystemUtils {
         }
         return maxAgeBlocks - (block.number - cacheBlock);
     }
-} 
+}

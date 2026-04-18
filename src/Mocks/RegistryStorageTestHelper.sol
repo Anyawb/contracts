@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { RegistryStorage } from "../registry/RegistryStorageLibrary.sol";
+import {RegistryStorage} from "../registry/RegistryStorageLibrary.sol";
 
 /// @notice Helper contract to write RegistryStorage via delegatecall.
 /// @dev Deploy this contract and call its methods via delegatecall from Registry's address.
@@ -17,12 +17,13 @@ contract RegistryStorageTestHelper {
         address proposer,
         uint256 minDelaySnapshot
     ) external {
-        RegistryStorage.layout().pendingUpgrades[key] = RegistryStorage.PendingUpgrade({
-            newAddr: newAddr,
-            executeAfter: executeAfterBlock,
-            proposer: proposer,
-            minDelaySnapshot: minDelaySnapshot
-        });
+        RegistryStorage.layout().pendingUpgrades[key] = RegistryStorage
+            .PendingUpgrade({
+                newAddr: newAddr,
+                executeAfter: executeAfterBlock,
+                proposer: proposer,
+                minDelaySnapshot: minDelaySnapshot
+            });
     }
 
     function pushUpgradeHistoryDirect(
@@ -50,7 +51,3 @@ contract RegistryStorageTestHelper {
         return RegistryStorage.layout().nonces[signer];
     }
 }
-
-
-
-

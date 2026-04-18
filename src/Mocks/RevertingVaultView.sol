@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
+import {IVaultRouter} from "../interfaces/IVaultRouter.sol";
 
 /// @title RevertingVaultRouter
-/// @notice Mock router contract that always reverts on push,用于测试缓存推送失败场景
+/// @notice Mock router contract that always reverts on push calls to test cache-push failures.
 contract RevertingVaultRouter is IVaultRouter {
     function processUserOperation(
         address,
@@ -51,8 +51,3 @@ contract RevertingVaultRouter is IVaultRouter {
         revert("revert-pushAssetStatsUpdate");
     }
 }
-
-
-
-
-

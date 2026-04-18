@@ -1,40 +1,72 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IEarlyRepaymentGuaranteeManager } from "../interfaces/IEarlyRepaymentGuaranteeManager.sol";
+import {IEarlyRepaymentGuaranteeManager} from "../interfaces/IEarlyRepaymentGuaranteeManager.sol";
 
 /// @title MockEarlyRepaymentGuaranteeManager
-/// @notice 提前还款保证金管理器的Mock实现，用于测试
+/// @notice Mock early-repayment guarantee manager used in tests.
 contract MockEarlyRepaymentGuaranteeManager {
     uint256 private constant _BLOCKS_PER_DAY = 7200;
 
-    // 用户保证金记录映射
-    mapping(address => mapping(address => mapping(address => uint256))) private _userGuarantees;
+    // User guarantee record storage.
+    mapping(address => mapping(address => mapping(address => uint256)))
+        private _userGuarantees;
     mapping(address => mapping(address => bool)) private _activeGuarantees;
     mapping(address => mapping(address => uint256)) private _guaranteeIds;
-    mapping(uint256 => IEarlyRepaymentGuaranteeManager.GuaranteeRecord) private _records;
+    mapping(uint256 => IEarlyRepaymentGuaranteeManager.GuaranteeRecord)
+        private _records;
     uint256 private _nextGuaranteeId = 1;
-    
-    // 事件
-    event GuaranteeRecordLocked(address indexed user, address indexed lender, address indexed asset, uint256 amount, uint256 interest, uint256 termDays);
-    event GuaranteeRecordReleased(address indexed user, address indexed lender, address indexed asset, uint256 amount);
-    event EarlyRepaymentSettled(address indexed user, address indexed asset, uint256 amount);
+
+    // Events.
+    event GuaranteeRecordLocked(
+        address indexed user,
+        address indexed lender,
+        address indexed asset,
+        uint256 amount,
+        uint256 interest,
+        uint256 termDays
+    );
+    event GuaranteeRecordReleased(
+        address indexed user,
+        address indexed lender,
+        address indexed asset,
+        uint256 amount
+    );
+    event EarlyRepaymentSettled(
+        address indexed user,
+        address indexed asset,
+        uint256 amount
+    );
     event GuaranteeEnabledUpdated(address indexed asset, bool enabled);
-    event GuaranteeMaturityOverridden(address indexed user, address indexed asset, uint256 maturityBlock);
+    event GuaranteeMaturityOverridden(
+        address indexed user,
+        address indexed asset,
+        uint256 maturityBlock
+    );
 
     mapping(address => bool) private _enabledByAsset;
-    mapping(address => mapping(address => uint256)) private _defaultRecoveryByUserAsset;
+    mapping(address => mapping(address => uint256))
+        private _defaultRecoveryByUserAsset;
 
-    event DefaultRecoveryConfigured(address indexed user, address indexed asset, uint256 amount, bool active);
-    event DefaultProcessed(address indexed user, address indexed asset, uint256 amount);
-    
-    /// @notice 锁定保证金记录
-    /// @param user 用户地址
-    /// @param lender 出借人地址
-    /// @param asset 资产地址
-    /// @param amount 本金金额
-    /// @param interest 利息金额
-    /// @param termDays 借款期限
+    event DefaultRecoveryConfigured(
+        address indexed user,
+        address indexed asset,
+        uint256 amount,
+        bool active
+    );
+    event DefaultProcessed(
+        address indexed user,
+        address indexed asset,
+        uint256 amount
+    );
+
+    /// @notice Locks a mock guarantee record.
+    /// @param user User address.
+    /// @param lender Lender address.
+    /// @param asset Asset address.
+    /// @param amount Principal amount.
+    /// @param interest Interest amount.
+    /// @param termDays Loan term in days.
     function lockGuaranteeRecord(
         address user,
         address lender,
@@ -50,52 +82,72 @@ contract MockEarlyRepaymentGuaranteeManager {
             _nextGuaranteeId = guaranteeId + 1;
         }
         _guaranteeIds[user][asset] = guaranteeId;
-        _records[guaranteeId] = IEarlyRepaymentGuaranteeManager.GuaranteeRecord({
-            principal: amount,
-            promisedInterest: interest,
-            startTime: block.number,
-            maturityTime: block.number + (termDays * _BLOCKS_PER_DAY),
-            earlyRepayPenaltyDays: termDays,
-            isActive: true,
-            lender: lender,
-            asset: asset
-        });
-        emit GuaranteeRecordLocked(user, lender, asset, amount, interest, termDays);
+        _records[guaranteeId] = IEarlyRepaymentGuaranteeManager
+            .GuaranteeRecord({
+                principal: amount,
+                promisedInterest: interest,
+                startTime: block.number,
+                maturityTime: block.number + (termDays * _BLOCKS_PER_DAY),
+                earlyRepayPenaltyDays: termDays,
+                isActive: true,
+                lender: lender,
+                asset: asset
+            });
+        emit GuaranteeRecordLocked(
+            user,
+            lender,
+            asset,
+            amount,
+            interest,
+            termDays
+        );
     }
 
-    function setGuaranteeMaturity(address user, address asset, uint256 maturityBlock) external {
+    function setGuaranteeMaturity(
+        address user,
+        address asset,
+        uint256 maturityBlock
+    ) external {
         uint256 guaranteeId = _guaranteeIds[user][asset];
         require(guaranteeId != 0, "GuaranteeRecordNotFound");
         _records[guaranteeId].maturityTime = maturityBlock;
         emit GuaranteeMaturityOverridden(user, asset, maturityBlock);
     }
-    
-    /// @notice 释放保证金记录
-    /// @param user 用户地址
-    /// @param lender 出借人地址
-    /// @param asset 资产地址
-    /// @param amount 释放金额
+
+    /// @notice Releases a mock guarantee record.
+    /// @param user User address.
+    /// @param lender Lender address.
+    /// @param asset Asset address.
+    /// @param amount Released amount.
     function releaseGuaranteeRecord(
         address user,
         address lender,
         address asset,
         uint256 amount
     ) external {
-        require(_userGuarantees[user][lender][asset] >= amount, "Insufficient guarantee record");
+        require(
+            _userGuarantees[user][lender][asset] >= amount,
+            "Insufficient guarantee record"
+        );
         _userGuarantees[user][lender][asset] -= amount;
         emit GuaranteeRecordReleased(user, lender, asset, amount);
     }
 
-    /// @notice 结算提前还款
-    /// @param user 用户地址
-    /// @param asset 资产地址
-    /// @param amount 还款金额
+    /// @notice Settles a mock early repayment.
+    /// @param user User address.
+    /// @param asset Asset address.
+    /// @param amount Repayment amount.
     function settleEarlyRepayment(
         address user,
         address asset,
         uint256 amount
-    ) external returns (IEarlyRepaymentGuaranteeManager.EarlyRepaymentResult memory result) {
-        // Mock实现：简单记录事件
+    )
+        external
+        returns (
+            IEarlyRepaymentGuaranteeManager.EarlyRepaymentResult memory result
+        )
+    {
+        // Mock implementation only records the event and clears state.
         _activeGuarantees[user][asset] = false;
         uint256 guaranteeId = _guaranteeIds[user][asset];
         if (guaranteeId != 0) {
@@ -111,11 +163,16 @@ contract MockEarlyRepaymentGuaranteeManager {
         });
     }
 
-    function getUserGuaranteeId(address user, address asset) external view returns (uint256 guaranteeId) {
+    function getUserGuaranteeId(
+        address user,
+        address asset
+    ) external view returns (uint256 guaranteeId) {
         return _guaranteeIds[user][asset];
     }
 
-    function getGuaranteeRecord(uint256 guaranteeId)
+    function getGuaranteeRecord(
+        uint256 guaranteeId
+    )
         external
         view
         returns (IEarlyRepaymentGuaranteeManager.GuaranteeRecord memory record)
@@ -123,16 +180,21 @@ contract MockEarlyRepaymentGuaranteeManager {
         return _records[guaranteeId];
     }
 
-    function hasActiveGuarantee(address user, address asset) external view returns (bool active) {
+    function hasActiveGuarantee(
+        address user,
+        address asset
+    ) external view returns (bool active) {
         return _activeGuarantees[user][asset];
     }
 
-    /// @notice 是否启用保证金（按资产）
-    function isGuaranteeEnabled(address asset) external view returns (bool enabled) {
+    /// @notice Returns whether guarantee support is enabled for an asset.
+    function isGuaranteeEnabled(
+        address asset
+    ) external view returns (bool enabled) {
         return _enabledByAsset[asset];
     }
 
-    /// @notice 设置保证金启用开关（mock，无权限控制）
+    /// @notice Sets the guarantee-enabled flag without access control.
     function setGuaranteeEnabled(address asset, bool enabled) external {
         _enabledByAsset[asset] = enabled;
         emit GuaranteeEnabledUpdated(asset, enabled);
@@ -171,12 +233,12 @@ contract MockEarlyRepaymentGuaranteeManager {
         }
         emit DefaultProcessed(borrower, asset, forfeitedAmount);
     }
-    
-    /// @notice 获取用户保证金记录数量
-    /// @param user 用户地址
-    /// @param lender 出借人地址
-    /// @param asset 资产地址
-    /// @return 保证金记录数量
+
+    /// @notice Returns the stored mock guarantee amount for a user-lender-asset tuple.
+    /// @param user User address.
+    /// @param lender Lender address.
+    /// @param asset Asset address.
+    /// @return Stored guarantee amount.
     function getUserGuaranteeRecord(
         address user,
         address lender,

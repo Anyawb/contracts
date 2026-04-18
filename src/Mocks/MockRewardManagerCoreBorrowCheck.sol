@@ -10,7 +10,9 @@ contract MockRewardManagerCoreBorrowCheck {
         _levels[user] = level;
     }
 
-    function getUserLevelForBorrowCheck(address user) external view returns (uint8) {
+    function getUserLevelForBorrowCheck(
+        address user
+    ) external view returns (uint8) {
         return _levels[user];
     }
 }

@@ -96,7 +96,7 @@ contract RewardAccrualManager is
      * - Burn failure is downgraded into penalty-ledger debt and does not revert the penalty path.
      *
      * @param user Penalized account.
-    * @param easyAmount Easy amount to penalize, in 18 decimals.
+     * @param easyAmount Easy amount to penalize, in 18 decimals.
      */
     function applyPenaltyByGfm(
         address user,
@@ -130,7 +130,7 @@ contract RewardAccrualManager is
      * - Burn failure is downgraded into penalty-ledger debt and does not revert the penalty path.
      *
      * @param user Penalized account.
-    * @param easyAmount Easy amount to penalize, in 18 decimals.
+     * @param easyAmount Easy amount to penalize, in 18 decimals.
      * @param executor Expected liquidation executor; MUST equal Registry[KEY_GUARANTEE_FUND].
      */
     function applyPenaltyFromGateway(
@@ -173,7 +173,7 @@ contract RewardAccrualManager is
      * - Burn failure is downgraded into penalty-ledger debt and does not revert the penalty path.
      *
      * @param user Penalized account.
-    * @param easyAmount Easy amount to penalize, in 18 decimals.
+     * @param easyAmount Easy amount to penalize, in 18 decimals.
      * @param executor Upstream executor recorded in the event payload.
      */
     function applyLateRepayPenalty(
@@ -209,9 +209,9 @@ contract RewardAccrualManager is
      * - RewardView push is best-effort and MUST NOT block debt settlement.
      *
      * @param user Account whose pending debt is offset.
-    * @param easyRewardAmount Easy amount available for offset, in 18 decimals.
+     * @param easyRewardAmount Easy amount available for offset, in 18 decimals.
      * @param reason Short machine-readable reason recorded in the event payload.
-    * @return netAmount Easy amount remaining after offset, in 18 decimals.
+     * @return netAmount Easy amount remaining after offset, in 18 decimals.
      */
     function offsetPenaltyOnReward(
         address user,

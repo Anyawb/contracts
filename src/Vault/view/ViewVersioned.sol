@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IViewVersioned } from "../../interfaces/IViewVersioned.sol";
-import { ProxyIntrospectionLib } from "../../libraries/ProxyIntrospectionLib.sol";
+import {IViewVersioned} from "../../interfaces/IViewVersioned.sol";
+import {ProxyIntrospectionLib} from "../../libraries/ProxyIntrospectionLib.sol";
 
 /**
  * @title ViewVersioned
@@ -27,5 +27,3 @@ abstract contract ViewVersioned is IViewVersioned {
         implementation = ProxyIntrospectionLib.getImplementationOrSelf();
     }
 }
-
-

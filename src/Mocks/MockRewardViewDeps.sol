@@ -26,14 +26,23 @@ contract MockRewardManagerCoreView {
     uint256 public totalBatchOperations;
     uint256 public totalCachedRewards;
 
-    function setRewardParameters(uint256 _baseUsd, uint256 _perDay, uint256 _bonus, uint256 _baseEth) external {
+    function setRewardParameters(
+        uint256 _baseUsd,
+        uint256 _perDay,
+        uint256 _bonus,
+        uint256 _baseEth
+    ) external {
         baseUsd = _baseUsd;
         perDay = _perDay;
         bonus = _bonus;
         baseEth = _baseEth;
     }
 
-    function getRewardParameters() external view returns (uint256, uint256, uint256, uint256) {
+    function getRewardParameters()
+        external
+        view
+        returns (uint256, uint256, uint256, uint256)
+    {
         return (baseUsd, perDay, bonus, baseEth);
     }
 
@@ -46,10 +55,19 @@ contract MockRewardManagerCoreView {
         uint256 lastAct,
         uint256 penalty
     ) external {
-        userCache[user] = UserCache(points, blockNumber, isValid, level_, lastAct, penalty);
+        userCache[user] = UserCache(
+            points,
+            blockNumber,
+            isValid,
+            level_,
+            lastAct,
+            penalty
+        );
     }
 
-    function getUserCache(address user) external view returns (uint256, uint256, bool) {
+    function getUserCache(
+        address user
+    ) external view returns (uint256, uint256, bool) {
         UserCache memory c = userCache[user];
         return (c.points, c.blockNumber, c.isValid);
     }
@@ -58,18 +76,29 @@ contract MockRewardManagerCoreView {
         return cacheExpirationTime;
     }
 
-    function setCacheExpirationTime(uint256 v) external { cacheExpirationTime = v; }
+    function setCacheExpirationTime(uint256 v) external {
+        cacheExpirationTime = v;
+    }
 
-    function setDynamicRewardParameters(uint256 threshold, uint256 multiplier) external {
+    function setDynamicRewardParameters(
+        uint256 threshold,
+        uint256 multiplier
+    ) external {
         dynamicThreshold = threshold;
         dynamicMultiplier = multiplier;
     }
 
-    function getDynamicRewardParameters() external view returns (uint256, uint256) {
+    function getDynamicRewardParameters()
+        external
+        view
+        returns (uint256, uint256)
+    {
         return (dynamicThreshold, dynamicMultiplier);
     }
 
-    function setLastRewardResetBlock(uint256 blockNumber) external { lastRewardResetBlock = blockNumber; }
+    function setLastRewardResetBlock(uint256 blockNumber) external {
+        lastRewardResetBlock = blockNumber;
+    }
 
     function getLastRewardResetBlock() external view returns (uint256) {
         return lastRewardResetBlock;
@@ -83,7 +112,9 @@ contract MockRewardManagerCoreView {
         return userCache[user].level;
     }
 
-    function setLevelMultiplier(uint8 level_, uint256 mul) external { levelMultiplier[level_] = mul; }
+    function setLevelMultiplier(uint8 level_, uint256 mul) external {
+        levelMultiplier[level_] = mul;
+    }
 
     function getLevelMultiplier(uint8 level_) external view returns (uint256) {
         return levelMultiplier[level_];
@@ -122,4 +153,3 @@ contract MockEasyTokenMinimal {
         return balances[owner];
     }
 }
-

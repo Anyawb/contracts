@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
-import { ViewConstants } from "../ViewConstants.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
+import {ViewConstants} from "../ViewConstants.sol";
 
 /**
  * @title ModuleHealthView
@@ -21,9 +25,9 @@ import { ViewConstants } from "../ViewConstants.sol";
  *      - module is zero address for push flow (ZeroAddress)
  *
  * Security:
-    * - Role-gated: only system health viewers can run checks and read cached results.
-    * - UUPS upgradeability is role-gated via ACTION_ADMIN.
-    * - Health checks are intentionally lightweight and code-size based to keep gas bounded.
+ * - Role-gated: only system health viewers can run checks and read cached results.
+ * - UUPS upgradeability is role-gated via ACTION_ADMIN.
+ * - Health checks are intentionally lightweight and code-size based to keep gas bounded.
  */
 contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
@@ -31,13 +35,16 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @notice Registry contract address (internal use only).
     address private _registryAddr;
 
-    uint256 private constant _CACHE_DURATION_BLOCKS = ViewConstants.CACHE_DURATION_BLOCKS;
+    uint256 private constant _CACHE_DURATION_BLOCKS =
+        ViewConstants.CACHE_DURATION_BLOCKS;
 
     /*━━━━━━━━━━━━━━━ Pre-defined health detail hashes ━━━━━━━━━━━━━━━*/
 
     /// @notice Pre-defined detail hashes (keep in sync with the canonical degradation storage, if any).
-    bytes32 private constant _DETAILS_HEALTHY_HASH = keccak256("Module is healthy");
-    bytes32 private constant _DETAILS_NO_CODE_HASH = keccak256("Module has no code");
+    bytes32 private constant _DETAILS_HEALTHY_HASH =
+        keccak256("Module is healthy");
+    bytes32 private constant _DETAILS_NO_CODE_HASH =
+        keccak256("Module has no code");
 
     /*━━━━━━━━━━━━━━━ Legacy-compatible data structs ━━━━━━━━━━━━━━━*/
 
@@ -96,7 +103,8 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -129,7 +137,11 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param isHealthy Whether the module is considered healthy
      * @param failures Consecutive failure count (implementation-defined)
      */
-    event ModuleHealthChecked(address indexed module, bool isHealthy, uint32 failures);
+    event ModuleHealthChecked(
+        address indexed module,
+        bool isHealthy,
+        uint32 failures
+    );
 
     /*━━━━━━━━━━━━━━━ Push APIs ━━━━━━━━━━━━━━━*/
 
@@ -144,10 +156,12 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Role-gated (system health viewer)
      * - Pushes module health into HealthView (which emits unified DataPushed)
      *
-    * @param module Module address to check.
-    * @return isHealthy True if the module is considered healthy.
+     * @param module Module address to check.
+     * @return isHealthy True if the module is considered healthy.
      */
-    function checkAndPushModuleHealth(address module)
+    function checkAndPushModuleHealth(
+        address module
+    )
         external
         onlyValidRegistry
         onlySystemHealthViewer
@@ -172,8 +186,15 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint32 failures = isHealthy ? 0 : 1;
 
         // Push to HealthView.
-        address hvAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_HEALTH_VIEW);
-        IHealthViewPush(hvAddr).pushModuleHealth(module, isHealthy, details, failures);
+        address hvAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_HEALTH_VIEW
+        );
+        IHealthViewPush(hvAddr).pushModuleHealth(
+            module,
+            isHealthy,
+            details,
+            failures
+        );
 
         emit ModuleHealthChecked(module, isHealthy, failures);
 
@@ -188,10 +209,8 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
         s.totalChecks += 1;
         s.successRate = s.totalChecks == 0
             ? 0
-            : (
-                (s.successRate * (s.totalChecks - 1) + (isHealthy ? 100 : 0))
-                    / s.totalChecks
-            );
+            : ((s.successRate * (s.totalChecks - 1) + (isHealthy ? 100 : 0)) /
+                s.totalChecks);
     }
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
@@ -203,19 +222,25 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks required role (MissingRole via onlySystemHealthViewer)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @param module Module address to query.
-    * @return healthStatus Cached status struct.
-    * @return blockNumber Last cache-write block number.
-    * @return isValid True if the cache is valid under the configured TTL.
+     * @param module Module address to query.
+     * @return healthStatus Cached status struct.
+     * @return blockNumber Last cache-write block number.
+     * @return isValid True if the cache is valid under the configured TTL.
      */
-    function getModuleHealthStatus(address module)
+    function getModuleHealthStatus(
+        address module
+    )
         external
         view
         onlyValidRegistry
         onlySystemHealthViewer
-        returns (ModuleHealthStatus memory healthStatus, uint256 blockNumber, bool isValid)
+        returns (
+            ModuleHealthStatus memory healthStatus,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         healthStatus = _moduleHealth[module];
         blockNumber = healthStatus.lastCheckTime;
@@ -229,19 +254,25 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks required role (MissingRole via onlySystemHealthViewer)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @param module Module address to query.
-    * @return healthStatus Cached status struct.
-    * @return blockNumber Last cache-write block number.
-    * @return isValid True if the cache is valid under the configured TTL.
+     * @param module Module address to query.
+     * @return healthStatus Cached status struct.
+     * @return blockNumber Last cache-write block number.
+     * @return isValid True if the cache is valid under the configured TTL.
      */
-    function getModuleHealthStatusWithMeta(address module)
+    function getModuleHealthStatusWithMeta(
+        address module
+    )
         external
         view
         onlyValidRegistry
         onlySystemHealthViewer
-        returns (ModuleHealthStatus memory healthStatus, uint256 blockNumber, bool isValid)
+        returns (
+            ModuleHealthStatus memory healthStatus,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         healthStatus = _moduleHealth[module];
         blockNumber = healthStatus.lastCheckTime;
@@ -258,12 +289,18 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return isValid True if the cache is valid under the configured TTL.
      * @return blockNumber Last cache-write block number.
      */
-    function getModuleHealthWithMeta(address module)
+    function getModuleHealthWithMeta(
+        address module
+    )
         external
         view
         onlyValidRegistry
         onlySystemHealthViewer
-        returns (ModuleHealth memory moduleHealth, bool isValid, uint256 blockNumber)
+        returns (
+            ModuleHealth memory moduleHealth,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         ModuleHealthStatus storage s = _moduleHealth[module];
         moduleHealth = ModuleHealth({
@@ -283,14 +320,16 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks required role (MissingRole via onlySystemHealthViewer)
      *
      * Security:
-    * - View-only.
-    * - Does not push results to HealthView.
+     * - View-only.
+     * - Does not push results to HealthView.
      *
-    * @param module Module address to check.
-    * @return isHealthy True if the module is considered healthy.
-    * @return details Human-readable detail string.
+     * @param module Module address to check.
+     * @return isHealthy True if the module is considered healthy.
+     * @return details Human-readable detail string.
      */
-    function checkModuleHealth(address module)
+    function checkModuleHealth(
+        address module
+    )
         external
         view
         onlyValidRegistry
@@ -311,13 +350,13 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-    * @notice Return the Registry address used by this module.
+     * @notice Return the Registry address used by this module.
      * @dev This getter may return address(0) if the contract is not initialized.
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @return registryAddrVar Registry contract address.
+     * @return registryAddrVar Registry contract address.
      */
     function getRegistry() external view returns (address registryAddrVar) {
         return _registryAddr;
@@ -325,7 +364,10 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
-    function _hasRole(bytes32 actionKey, address user) internal view returns (bool) {
+    function _hasRole(
+        bytes32 actionKey,
+        address user
+    ) internal view returns (bool) {
         return ViewAccessLib.hasRole(_registryAddr, actionKey, user);
     }
 
@@ -337,12 +379,21 @@ contract ModuleHealthView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ UUPS upgradeability ━━━━━━━━━━━━━━━*/
 
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
@@ -374,12 +425,17 @@ interface IHealthViewPush {
      *      - HealthView rejects the call (module-specific)
      *
      * Security:
-    * - Called by ModuleHealthView after role-gated checks.
+     * - Called by ModuleHealthView after role-gated checks.
      *
-    * @param module Module address.
-    * @param ok True if the module is healthy.
-    * @param detailsHash Detail hash describing the status.
-    * @param failures Consecutive failure count.
+     * @param module Module address.
+     * @param ok True if the module is healthy.
+     * @param detailsHash Detail hash describing the status.
+     * @param failures Consecutive failure count.
      */
-    function pushModuleHealth(address module, bool ok, bytes32 detailsHash, uint32 failures) external;
+    function pushModuleHealth(
+        address module,
+        bool ok,
+        bytes32 detailsHash,
+        uint32 failures
+    ) external;
 }

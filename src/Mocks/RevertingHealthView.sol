@@ -14,7 +14,3 @@ contract RevertingHealthView {
         revert("revert-pushRiskStatus");
     }
 }
-
-
-
-

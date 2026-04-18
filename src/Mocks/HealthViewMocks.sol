@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ModuleHealthView } from "../Vault/view/modules/ModuleHealthView.sol";
-import { DegradationCore as GracefulDegradationCore } from "../monitor/DegradationCore.sol";
-import { DegradationStorage } from "../monitor/DegradationStorage.sol";
+import {ModuleHealthView} from "../Vault/view/modules/ModuleHealthView.sol";
+import {DegradationCore as GracefulDegradationCore} from "../monitor/DegradationCore.sol";
+import {DegradationStorage} from "../monitor/DegradationStorage.sol";
 
 /// @title MockHealthDegradationMonitor
 /// @notice Lightweight mock that implements the subset of APIs used by HealthView for graceful degradation data.
 contract MockHealthDegradationMonitor {
     GracefulDegradationCore.DegradationStats private _stats;
-    mapping(address => ModuleHealthView.ModuleHealthStatus) private _moduleStatuses;
+    mapping(address => ModuleHealthView.ModuleHealthStatus)
+        private _moduleStatuses;
     DegradationStorage.DegradationEvent[] private _history;
 
     bool private _checkHealthy;
@@ -101,17 +102,29 @@ contract MockHealthDegradationMonitor {
         _averageFallbackValue = averageFallbackValue;
     }
 
-    // -------- HealthView-consumed APIs --------
+    /*━━━━━━━━━━━━━━━ HealthView-Consumed APIs ━━━━━━━━━━━━━━━*/
 
-    function getGracefulDegradationStats() external view returns (GracefulDegradationCore.DegradationStats memory) {
+    function getGracefulDegradationStats()
+        external
+        view
+        returns (GracefulDegradationCore.DegradationStats memory)
+    {
         return _stats;
     }
 
-    function getModuleHealthStatus(address module) external view returns (ModuleHealthView.ModuleHealthStatus memory) {
+    function getModuleHealthStatus(
+        address module
+    ) external view returns (ModuleHealthView.ModuleHealthStatus memory) {
         return _moduleStatuses[module];
     }
 
-    function getSystemDegradationHistory(uint256 limit) external view returns (DegradationStorage.DegradationEvent[] memory history) {
+    function getSystemDegradationHistory(
+        uint256 limit
+    )
+        external
+        view
+        returns (DegradationStorage.DegradationEvent[] memory history)
+    {
         uint256 available = _history.length;
         if (limit > available) {
             limit = available;
@@ -122,17 +135,27 @@ contract MockHealthDegradationMonitor {
         }
     }
 
-    function checkModuleHealth(address /*module*/) external view returns (bool, string memory) {
+    function checkModuleHealth(
+        address /*module*/
+    ) external view returns (bool, string memory) {
         return (_checkHealthy, _checkDetails);
     }
 
-    function getSystemDegradationTrends() external view returns (
-        uint256 totalEvents,
-        uint256 recentEvents,
-        address mostFrequentModule,
-        uint256 averageFallbackValue
-    ) {
-        return (_totalEvents, _recentEvents, _mostFrequentModule, _averageFallbackValue);
+    function getSystemDegradationTrends()
+        external
+        view
+        returns (
+            uint256 totalEvents,
+            uint256 recentEvents,
+            address mostFrequentModule,
+            uint256 averageFallbackValue
+        )
+    {
+        return (
+            _totalEvents,
+            _recentEvents,
+            _mostFrequentModule,
+            _averageFallbackValue
+        );
     }
 }
-

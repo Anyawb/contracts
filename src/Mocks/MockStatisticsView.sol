@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 /// @title MockStatisticsView
-/// @notice 供测试使用的统计视图模拟合约，兼容 StatisticsView 的最小接口
+/// @notice Mock statistics view contract used in tests.
 contract MockStatisticsView {
     struct GlobalSnapshot {
         uint256 activeUsers;
@@ -41,13 +41,15 @@ contract MockStatisticsView {
     ) external {
         if (shouldFail) revert("MockStatisticsView: fail");
 
-        // 更新用户与全局
+        // Update user and global counters.
         if (collateralIn > 0) {
             userCollateral[user] += collateralIn;
             totalCollateral += collateralIn;
         }
         if (collateralOut > 0) {
-            uint256 sub = collateralOut > userCollateral[user] ? userCollateral[user] : collateralOut;
+            uint256 sub = collateralOut > userCollateral[user]
+                ? userCollateral[user]
+                : collateralOut;
             userCollateral[user] -= sub;
             totalCollateral = totalCollateral > sub ? totalCollateral - sub : 0;
         }
@@ -65,7 +67,8 @@ contract MockStatisticsView {
         bool isActive = (userCollateral[user] > 0 || userDebt[user] > 0);
         if (wasActive != isActive) {
             userActive[user] = isActive;
-            if (isActive) activeUsers += 1; else if (activeUsers > 0) activeUsers -= 1;
+            if (isActive) activeUsers += 1;
+            else if (activeUsers > 0) activeUsers -= 1;
         }
 
         lastUpdateBlock = block.number;
@@ -87,5 +90,3 @@ contract MockStatisticsView {
         isValid = blockNumber != 0;
     }
 }
-
-

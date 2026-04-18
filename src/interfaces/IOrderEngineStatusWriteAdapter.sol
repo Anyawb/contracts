@@ -18,10 +18,10 @@ interface IOrderEngineStatusWriteAdapter {
      *      - orderId is invalid
      *      - status is not a liquidation terminal status
      *      - the order is no longer in an active lifecycle state
-    *
-    * Architecture-Guide alignment:
-    * - Lifecycle writes stay in ORDER_ENGINE / SettlementManager.
-    * - View modules only read the resulting state via explicit read adapters.
+     *
+     * Architecture-Guide alignment:
+     * - Lifecycle writes stay in ORDER_ENGINE / SettlementManager.
+     * - View modules only read the resulting state via explicit read adapters.
      *
      * @param orderId Loan order id.
      * @param status Terminal liquidation status to persist.

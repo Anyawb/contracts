@@ -491,11 +491,7 @@ contract StatisticsPushManager is
     )
         internal
         view
-        returns (
-            uint256 collateralValue,
-            uint256 debtValue,
-            bytes memory err
-        )
+        returns (uint256 collateralValue, uint256 debtValue, bytes memory err)
     {
         // Collateral total value in the shared 18-decimal system valuation unit.
         try

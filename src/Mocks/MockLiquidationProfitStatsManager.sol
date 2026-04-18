@@ -36,7 +36,9 @@ contract MockLiquidationProfitStatsManager {
     /// @return totalProfit Total profit earned
     /// @return totalLiquidations Total number of liquidations
     /// @return lastLiquidationBlock Last liquidation blockNumber
-    function getProfitStats(address liquidator)
+    function getProfitStats(
+        address liquidator
+    )
         external
         view
         returns (
@@ -46,6 +48,10 @@ contract MockLiquidationProfitStatsManager {
         )
     {
         ProfitStats memory stats = _profitStats[liquidator];
-        return (stats.totalProfit, stats.totalLiquidations, stats.lastLiquidationBlock);
+        return (
+            stats.totalProfit,
+            stats.totalLiquidations,
+            stats.lastLiquidationBlock
+        );
     }
 }

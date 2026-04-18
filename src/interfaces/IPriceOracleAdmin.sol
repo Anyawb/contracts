@@ -70,7 +70,7 @@ interface IPriceOracleAdmin {
      * - `assetDecimals` describes token scaling, while `maxPriceAgeBlocks` is the block-based freshness SSOT.
      *
      * @param asset Asset address being configured.
-    * @param sourceId Offchain source identifier used by updater infrastructure.
+     * @param sourceId Offchain source identifier used by updater infrastructure.
      * @param assetDecimals Token decimals used for valuation scaling.
      * @param maxPriceAgeBlocks Maximum allowed price staleness in blocks.
      */

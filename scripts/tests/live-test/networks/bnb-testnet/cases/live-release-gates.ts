@@ -324,4 +324,7 @@ async function main() {
   logLiveScriptSuccess(__filename);
 }
 
-export const liveScriptPromise = runWithNetworkRetry(resolveLiveScriptId(__filename), main);
+export const liveScriptPromise = runWithNetworkRetry(resolveLiveScriptId(__filename), main, {
+  // Keep release-gates single-flight; timeout-based retries can overlap long child steps.
+  attemptTimeoutMs: 0,
+});

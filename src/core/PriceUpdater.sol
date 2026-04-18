@@ -286,15 +286,15 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
      *      - caller lacks ACTION_UPDATE_PRICE (via ACM.requireRole)
      *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
      *      - asset == address(0) (see {ZeroAddress})
-    *      - price == 0 (see {PriceUpdater__InvalidPrice})
-    *      - asset has no source ID (see {PriceUpdater__AssetNotConfigured})
+     *      - price == 0 (see {PriceUpdater__InvalidPrice})
+     *      - asset has no source ID (see {PriceUpdater__AssetNotConfigured})
      *
      * Security:
      * - Role-gated: ACTION_UPDATE_PRICE via ACM
      * - Best-effort update: Registry/Oracle failures are caught; falls back to local update
      *
      * @param asset Asset address
-    * @param price Price in the asset's valuation unit
+     * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      */
     function updateAssetPrice(
@@ -348,7 +348,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
      * - Best-effort update: Registry/Oracle failures are caught; falls back to local update
      *
      * @param assets Asset address list
-    * @param prices Price list in each asset's valuation unit
+     * @param prices Price list in each asset's valuation unit
      * @param blockNumbers BlockNumber list (blocks)
      */
     function updateAssetPrices(
@@ -377,14 +377,14 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     }
 
     /**
-    * @notice Configures an asset's source ID and token decimals (SSOT).
+     * @notice Configures an asset's source ID and token decimals (SSOT).
      * @dev Reverts if:
      *      - Registry is not set (see {ZeroAddress})
      *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
      *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
      *      - asset == address(0) (see {ZeroAddress})
-    *      - sourceId is empty (see {PriceUpdater__InvalidSourceId})
-    *      - token decimals cannot be read or are invalid (see {PriceUpdater__InvalidAssetDecimals})
+     *      - sourceId is empty (see {PriceUpdater__InvalidSourceId})
+     *      - token decimals cannot be read or are invalid (see {PriceUpdater__InvalidAssetDecimals})
      *
      * Security:
      * - Role-gated: ACTION_SET_PARAMETER via ACM
@@ -399,8 +399,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
 
         if (asset == address(0)) revert ZeroAddress();
-        if (bytes(sourceId).length == 0)
-            revert PriceUpdater__InvalidSourceId();
+        if (bytes(sourceId).length == 0) revert PriceUpdater__InvalidSourceId();
 
         // Determine and store token decimals (SSOT). This avoids mispricing due to hardcoded scaling.
         uint8 decimals = _readErc20Decimals(asset);
@@ -424,7 +423,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     }
 
     /**
-    * @notice Configures an asset's source ID and token decimals explicitly.
+     * @notice Configures an asset's source ID and token decimals explicitly.
      * @dev Use this for:
      *      - non-standard tokens (no ERC20Metadata `decimals()`),
      *      - assets whose decimals must be pinned by governance.
@@ -433,8 +432,8 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
      * - Registry is not set (see {ZeroAddress})
      * - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
      * - asset == address(0) (see {ZeroAddress})
-    * - sourceId is empty (see {PriceUpdater__InvalidSourceId})
-    * - decimals is 0 or too large for safe scaling (see {PriceUpdater__InvalidAssetDecimals})
+     * - sourceId is empty (see {PriceUpdater__InvalidSourceId})
+     * - decimals is 0 or too large for safe scaling (see {PriceUpdater__InvalidAssetDecimals})
      */
     function configureAssetWithDecimals(
         address asset,
@@ -443,8 +442,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         if (asset == address(0)) revert ZeroAddress();
-        if (bytes(sourceId).length == 0)
-            revert PriceUpdater__InvalidSourceId();
+        if (bytes(sourceId).length == 0) revert PriceUpdater__InvalidSourceId();
         if (decimals == 0 || decimals > 77)
             revert PriceUpdater__InvalidAssetDecimals(decimals);
 
@@ -463,13 +461,13 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     }
 
     /**
-    * @notice Removes an asset's source ID configuration.
+     * @notice Removes an asset's source ID configuration.
      * @dev Reverts if:
      *      - Registry is not set (see {ZeroAddress})
      *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
      *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
      *      - asset == address(0) (see {ZeroAddress})
-    *      - asset has no source ID (see {PriceUpdater__AssetNotConfigured})
+     *      - asset has no source ID (see {PriceUpdater__AssetNotConfigured})
      *
      * Security:
      * - Role-gated: ACTION_SET_PARAMETER via ACM
@@ -612,7 +610,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
      *      - caller lacks ACTION_SET_PARAMETER (via ACM.requireRole)
      *      - Registry missing KEY_ACCESS_CONTROL (reverts in {Registry.getModuleOrRevert})
      *      - monitorContract == address(0) (see {ZeroAddress})
-    *      - monitorContract has no code (see {PriceUpdater__MonitorNotAContract})
+     *      - monitorContract has no code (see {PriceUpdater__MonitorNotAContract})
      *
      * Security:
      * - Role-gated: ACTION_SET_PARAMETER via ACM
@@ -743,7 +741,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Validates whether a price is within bounds.
      * @param asset Asset address
-    * @param price Price in the asset's valuation unit
+     * @param price Price in the asset's valuation unit
      * @return isValid True if the price is valid
      */
     function _validatePrice(
@@ -787,7 +785,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Normal price update flow (internal).
      * @param asset Asset address
-    * @param price Price in the asset's valuation unit
+     * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      */
@@ -834,7 +832,11 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
             assert(true);
         }
 
-        IPriceOracleAdmin(priceOracleAddr).updatePrice(asset, price, blockNumber);
+        IPriceOracleAdmin(priceOracleAddr).updatePrice(
+            asset,
+            price,
+            blockNumber
+        );
         _lastUpdateBlock[asset] = block.number;
         _updateFailureCount[asset] = 0;
         _lastValidPrice[asset] = price;
@@ -863,7 +865,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Emergency price update flow (when Registry/Oracle is unavailable).
      * @param asset Asset address
-    * @param price Price in the asset's valuation unit
+     * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      */
@@ -908,7 +910,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Price update flow with fallback to emergency update.
      * @param asset Asset address
-    * @param price Price in the asset's valuation unit
+     * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      */
@@ -957,18 +959,13 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
         }
 
         // Emergency local update.
-        _executeSingleEmergencyPriceUpdate(
-            asset,
-            price,
-            blockNumber,
-            sourceId
-        );
+        _executeSingleEmergencyPriceUpdate(asset, price, blockNumber, sourceId);
     }
 
     /**
      * @notice Batch price update flow with fallback to emergency update.
      * @param assets Asset address list
-    * @param prices Price list in each asset's valuation unit
+     * @param prices Price list in each asset's valuation unit
      * @param blockNumbers BlockNumber list (blocks)
      */
     function _batchUpdatePriceWithFallback(
@@ -1047,7 +1044,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
      * @notice Normal update for a single asset.
      * @param priceOracleAddr PriceOracle address
      * @param asset Asset address
-    * @param price Price in the asset's valuation unit
+     * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      * @return success True if update succeeded
@@ -1076,7 +1073,11 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
         }
 
         try
-            IPriceOracleAdmin(priceOracleAddr).updatePrice(asset, price, blockNumber)
+            IPriceOracleAdmin(priceOracleAddr).updatePrice(
+                asset,
+                price,
+                blockNumber
+            )
         {
             _lastUpdateBlock[asset] = block.number;
             _updateFailureCount[asset] = 0;
@@ -1148,7 +1149,7 @@ contract PriceUpdater is Initializable, UUPSUpgradeable {
     /**
      * @notice Emergency update for a single asset.
      * @param asset Asset address
-    * @param price Price in the asset's valuation unit
+     * @param price Price in the asset's valuation unit
      * @param blockNumber Price blockNumber (blocks)
      * @param sourceId Offchain source ID
      */

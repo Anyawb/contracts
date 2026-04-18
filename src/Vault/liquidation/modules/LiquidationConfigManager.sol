@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {LiquidationAccessControl} from "../libraries/LiquidationAccessControl.sol";
@@ -11,7 +11,12 @@ import {ModuleCache} from "../libraries/ModuleCache.sol";
 import {LiquidationTypes} from "../types/LiquidationTypes.sol";
 import {ActionKeys} from "../../../constants/ActionKeys.sol";
 import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
-import {ArrayLengthMismatch, EmptyArray, NotAContract, ZeroAddress} from "../../../errors/StandardErrors.sol";
+import {
+    ArrayLengthMismatch,
+    EmptyArray,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
 import {ICacheRefreshable} from "../../../interfaces/ICacheRefreshable.sol";
 import {ILiquidationConfigManager} from "../../../interfaces/ILiquidationConfigManager.sol";
 import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
@@ -29,7 +34,7 @@ import {RegistryEvents} from "../../../registry/RegistryEventsLibrary.sol";
  * - Resolves dependencies through Registry and gates privileged writes through AccessControlManager.
  * - Supports pause controls and UUPS upgrades with governance-enforced permissions.
  */
-abstract contract LiquidationConfigManager is 
+abstract contract LiquidationConfigManager is
     Initializable,
     UUPSUpgradeable,
     ReentrancyGuardUpgradeable,
@@ -40,13 +45,13 @@ abstract contract LiquidationConfigManager is
     using LiquidationAccessControl for LiquidationAccessControl.Storage;
 
     /*━━━━━━━━━━━━━━━ Constants ━━━━━━━━━━━━━━━*/
-    
+
     /// @notice Maximum cache validity period for module addresses (in blocks).
     /// @dev Time-Dependency-Refactor SSOT: cache aging is block-based (block.number).
     uint256 public constant CACHE_MAX_AGE = 7200;
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
-    
+
     /// @notice Registry address (internal storage, following naming conventions)
     /// @dev Used for module address resolution and access control, exposed publicly through registryAddrVar()
     /// @dev Architecture requirement: resolve dependencies through Registry; hardcoding is prohibited
@@ -97,7 +102,7 @@ abstract contract LiquidationConfigManager is
     error LiquidationConfigManager__UnauthorizedAccess();
 
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
-    
+
     /// @notice Emitted when the system is paused.
     /// @dev Emitted by pause flows after the pause state is enabled and recorded for off-chain monitoring.
     event SystemPaused(address indexed pauser, uint256 blockNumber);
@@ -108,18 +113,26 @@ abstract contract LiquidationConfigManager is
 
     /// @notice Emitted when the minimum health factor is updated.
     /// @dev Emitted by governance-controlled min-health-factor update paths after validation succeeds.
-    event MinHealthFactorUpdated(uint256 oldMinHealthFactor, uint256 newMinHealthFactor, uint256 blockNumber);
+    event MinHealthFactorUpdated(
+        uint256 oldMinHealthFactor,
+        uint256 newMinHealthFactor,
+        uint256 blockNumber
+    );
 
     /// @notice Emitted when the maximum LTV is updated.
     /// @dev Emitted by governance-controlled max-LTV update paths after validation succeeds.
-    event MaxLtvBpsUpdated(uint256 oldMaxLtvBps, uint256 newMaxLtvBps, uint256 blockNumber);
+    event MaxLtvBpsUpdated(
+        uint256 oldMaxLtvBps,
+        uint256 newMaxLtvBps,
+        uint256 blockNumber
+    );
 
     /// @notice Emitted when the module cache is refreshed.
     /// @dev Emitted by maintenance-manager refresh flows after the cache refresh completes.
     event ModuleCacheRefreshed(address indexed caller, uint256 blockNumber);
 
     /*━━━━━━━━━━━━━━━ Constructor ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Constructor (disables initialization)
      * @dev Prevents direct calls to initialization function, ensures deployment through proxy pattern
@@ -130,7 +143,7 @@ abstract contract LiquidationConfigManager is
     }
 
     /*━━━━━━━━━━━━━━━ Initializer ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Initialize the liquidation configuration manager
      * @dev Reverts if:
@@ -145,16 +158,26 @@ abstract contract LiquidationConfigManager is
      * @param initialAccessControl Access control interface address for permission verification
      */
     /// @dev Base initializer. Derived deployable modules may call `_initializeLiquidationConfigManager`.
-    function initialize(address initialRegistryAddr, address initialAccessControl) public virtual initializer {
-        _initializeLiquidationConfigManager(initialRegistryAddr, initialAccessControl);
+    function initialize(
+        address initialRegistryAddr,
+        address initialAccessControl
+    ) public virtual initializer {
+        _initializeLiquidationConfigManager(
+            initialRegistryAddr,
+            initialAccessControl
+        );
     }
 
-    function _initializeLiquidationConfigManager(address initialRegistryAddr, address initialAccessControl)
-        internal
-        onlyInitializing
-    {
-        if (initialRegistryAddr == address(0) || initialAccessControl == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+    function _initializeLiquidationConfigManager(
+        address initialRegistryAddr,
+        address initialAccessControl
+    ) internal onlyInitializing {
+        if (
+            initialRegistryAddr == address(0) ||
+            initialAccessControl == address(0)
+        ) revert ZeroAddress();
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
@@ -174,7 +197,8 @@ abstract contract LiquidationConfigManager is
 
         // Default liquidation parameters (bps) - can be updated via governance.
         liquidationBonusRateVar = LiquidationTypes.DEFAULT_LIQUIDATION_BONUS;
-        liquidationThresholdVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
+        liquidationThresholdVar = LiquidationTypes
+            .DEFAULT_LIQUIDATION_THRESHOLD;
         minHealthFactorVar = LiquidationTypes.DEFAULT_LIQUIDATION_THRESHOLD;
         maxLtvBpsVar = LiquidationTypes.DEFAULT_MAX_LTV_BPS;
 
@@ -183,7 +207,7 @@ abstract contract LiquidationConfigManager is
     }
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Access control modifier
      * @param role Required role (ActionKeys constant)
@@ -196,21 +220,24 @@ abstract contract LiquidationConfigManager is
      * - Aligns with Architecture-Guide: write entrypoints must be gated by ACM
      */
     modifier onlyRole(bytes32 role) {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(role, msg.sender);
         _;
     }
 
-
     /*━━━━━━━━━━━━━━━ Registry Module Getter Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Get module address from Registry (internal function)
      * @param moduleKey Module key (ModuleKeys constant)
      * @return Module address (reverts if not registered)
      * @dev Architecture requirement: all module addresses are resolved through Registry, hardcoding is prohibited
      */
-    function _getModuleFromRegistry(bytes32 moduleKey) internal view returns (address) {
+    function _getModuleFromRegistry(
+        bytes32 moduleKey
+    ) internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
@@ -220,7 +247,9 @@ abstract contract LiquidationConfigManager is
      * @return Whether the module is registered
      * @dev Used to check if module exists, avoiding unnecessary reverts
      */
-    function _isModuleRegistered(bytes32 moduleKey) internal view returns (bool) {
+    function _isModuleRegistered(
+        bytes32 moduleKey
+    ) internal view returns (bool) {
         return Registry(_registryAddr).isModuleRegistered(moduleKey);
     }
 
@@ -231,7 +260,9 @@ abstract contract LiquidationConfigManager is
      * @param moduleKey Module key (ModuleKeys constant)
      * @return moduleAddress Cached module address (best-effort; may be zero if not set)
      */
-    function getModule(bytes32 moduleKey) public view returns (address moduleAddress) {
+    function getModule(
+        bytes32 moduleKey
+    ) public view returns (address moduleAddress) {
         return _getModuleViewBestEffort(moduleKey);
     }
 
@@ -249,7 +280,8 @@ abstract contract LiquidationConfigManager is
         address maint = Registry(_registryAddr).getModuleOrRevert(
             ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER
         );
-        if (msg.sender != maint) revert LiquidationConfigManager__UnauthorizedAccess();
+        if (msg.sender != maint)
+            revert LiquidationConfigManager__UnauthorizedAccess();
         _refreshModuleCacheBestEffort();
         emit ModuleCacheRefreshed(msg.sender, block.number);
     }
@@ -266,7 +298,10 @@ abstract contract LiquidationConfigManager is
      * @param key Module key (ModuleKeys constant)
      * @param addr Module address
      */
-    function updateModule(bytes32 key, address addr) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function updateModule(
+        bytes32 key,
+        address addr
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (addr == address(0)) revert ZeroAddress();
         ModuleCache.set(_moduleCache, key, addr, msg.sender);
     }
@@ -285,17 +320,20 @@ abstract contract LiquidationConfigManager is
      * @param keys Array of module keys
      * @param addresses Array of module addresses
      */
-    function batchUpdateModules(bytes32[] calldata keys, address[] calldata addresses)
-        external
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function batchUpdateModules(
+        bytes32[] calldata keys,
+        address[] calldata addresses
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         uint256 length = keys.length;
         if (length == 0) revert EmptyArray();
-        if (length != addresses.length) revert ArrayLengthMismatch(length, addresses.length);
+        if (length != addresses.length)
+            revert ArrayLengthMismatch(length, addresses.length);
 
-        for (uint256 i = 0; i < length;) {
+        for (uint256 i = 0; i < length; ) {
             if (addresses[i] == address(0)) revert ZeroAddress();
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         ModuleCache.batchSet(_moduleCache, keys, addresses, msg.sender);
@@ -311,7 +349,9 @@ abstract contract LiquidationConfigManager is
      *
      * @param key Module key (ModuleKeys constant)
      */
-    function removeModule(bytes32 key) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function removeModule(
+        bytes32 key
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         ModuleCache.remove(_moduleCache, key, msg.sender);
     }
 
@@ -327,7 +367,9 @@ abstract contract LiquidationConfigManager is
      *
      * @param newRate New bonus rate (bps=1e4)
      */
-    function updateLiquidationBonusRate(uint256 newRate) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function updateLiquidationBonusRate(
+        uint256 newRate
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         liquidationBonusRateVar = newRate;
     }
 
@@ -341,7 +383,9 @@ abstract contract LiquidationConfigManager is
      *
      * @param newThreshold New threshold (bps=1e4)
      */
-    function updateLiquidationThreshold(uint256 newThreshold) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function updateLiquidationThreshold(
+        uint256 newThreshold
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         liquidationThresholdVar = newThreshold;
     }
 
@@ -349,7 +393,11 @@ abstract contract LiquidationConfigManager is
      * @notice Get liquidation bonus rate.
      * @return bonusRate Bonus rate (bps=1e4)
      */
-    function getLiquidationBonusRate() external view returns (uint256 bonusRate) {
+    function getLiquidationBonusRate()
+        external
+        view
+        returns (uint256 bonusRate)
+    {
         return liquidationBonusRateVar;
     }
 
@@ -357,7 +405,11 @@ abstract contract LiquidationConfigManager is
      * @notice Get liquidation threshold.
      * @return threshold Threshold (bps=1e4)
      */
-    function getLiquidationThreshold() external view returns (uint256 threshold) {
+    function getLiquidationThreshold()
+        external
+        view
+        returns (uint256 threshold)
+    {
         return liquidationThresholdVar;
     }
 
@@ -365,7 +417,11 @@ abstract contract LiquidationConfigManager is
      * @notice Get minimum health factor.
      * @return minHealthFactor Minimum health factor (bps=1e4)
      */
-    function getMinHealthFactor() external view returns (uint256 minHealthFactor) {
+    function getMinHealthFactor()
+        external
+        view
+        returns (uint256 minHealthFactor)
+    {
         return minHealthFactorVar;
     }
 
@@ -389,8 +445,13 @@ abstract contract LiquidationConfigManager is
      *
      * @param newMinHealthFactor New minimum health factor (bps=1e4)
      */
-    function updateMinHealthFactor(uint256 newMinHealthFactor) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
-        if (newMinHealthFactor == 0 || newMinHealthFactor < liquidationThresholdVar) {
+    function updateMinHealthFactor(
+        uint256 newMinHealthFactor
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        if (
+            newMinHealthFactor == 0 ||
+            newMinHealthFactor < liquidationThresholdVar
+        ) {
             revert LiquidationConfigManager__InvalidMinHealthFactor();
         }
         uint256 old = minHealthFactorVar;
@@ -410,7 +471,9 @@ abstract contract LiquidationConfigManager is
      *
      * @param newMaxLtvBps New maximum LTV (bps=1e4)
      */
-    function updateMaxLtvBps(uint256 newMaxLtvBps) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function updateMaxLtvBps(
+        uint256 newMaxLtvBps
+    ) external onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (!LiquidationTypes.isValidMaxLtvBps(newMaxLtvBps)) {
             revert LiquidationConfigManager__InvalidMaxLtvBps();
         }
@@ -420,13 +483,18 @@ abstract contract LiquidationConfigManager is
     }
 
     /*━━━━━━━━━━━━━━━ Query Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Get cached orchestrator address
      * @return orchestrator Liquidation orchestrator address
      */
-    function getCachedOrchestrator() external view returns (address orchestrator) {
-        return _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR);
+    function getCachedOrchestrator()
+        external
+        view
+        returns (address orchestrator)
+    {
+        return
+            _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR);
     }
 
     /**
@@ -441,8 +509,13 @@ abstract contract LiquidationConfigManager is
      * @notice Get cached risk manager address
      * @return riskManager Liquidation risk manager address
      */
-    function getCachedRiskManager() external view returns (address riskManager) {
-        return _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
+    function getCachedRiskManager()
+        external
+        view
+        returns (address riskManager)
+    {
+        return
+            _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_RISK_MANAGER);
     }
 
     /**
@@ -453,13 +526,17 @@ abstract contract LiquidationConfigManager is
      * @return collateralManager Collateral manager address (using KEY_CM)
      * @return debtManager Debt manager address (using KEY_LE)
      */
-    function getAllCachedModules() external view returns (
-        address orchestrator,
-        address calculator,
-        address riskManager,
-        address collateralManager,
-        address debtManager
-    ) {
+    function getAllCachedModules()
+        external
+        view
+        returns (
+            address orchestrator,
+            address calculator,
+            address riskManager,
+            address collateralManager,
+            address debtManager
+        )
+    {
         return (
             _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_ORCHESTRATOR),
             _getModuleViewBestEffort(ModuleKeys.KEY_LIQUIDATION_CALCULATOR),
@@ -470,7 +547,7 @@ abstract contract LiquidationConfigManager is
     }
 
     /*━━━━━━━━━━━━━━━ Emergency Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Emergency pause the liquidation system
      * @dev Reverts if:
@@ -508,7 +585,7 @@ abstract contract LiquidationConfigManager is
     }
 
     /*━━━━━━━━━━━━━━━ Utility Functions ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Get access control interface address
      * @return Access control interface address (returns this contract address)
@@ -535,7 +612,7 @@ abstract contract LiquidationConfigManager is
     }
 
     /*━━━━━━━━━━━━━━━ UUPS Upgradeable ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice UUPS upgrade authorization function
      * @dev Reverts if:
@@ -549,12 +626,9 @@ abstract contract LiquidationConfigManager is
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation)
-        internal
-        view
-        override
-        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
-    {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
         if (newImplementation == address(0)) revert ZeroAddress();
     }
 
@@ -584,7 +658,9 @@ abstract contract LiquidationConfigManager is
     }
 
     /// @dev Best-effort cache lookup; falls back to Registry without updating cache.
-    function _getModuleViewBestEffort(bytes32 key) internal view returns (address moduleAddr) {
+    function _getModuleViewBestEffort(
+        bytes32 key
+    ) internal view returns (address moduleAddr) {
         moduleAddr = _moduleCache.moduleAddresses[key];
         uint256 cacheBlock = _moduleCache.cacheBlocks[key];
         if (moduleAddr != address(0) && cacheBlock != 0) {
@@ -598,4 +674,4 @@ abstract contract LiquidationConfigManager is
 
     /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
     uint256[49] private __gap;
-} 
+}

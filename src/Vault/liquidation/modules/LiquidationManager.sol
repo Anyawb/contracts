@@ -157,8 +157,8 @@ contract LiquidationManager is
      * @param debtAsset Address of the debt token
      * @param collateralAmount Amount of collateral to seize (token decimals)
      * @param debtAmount Amount of debt to reduce (token decimals)
-    * @param bonus Liquidation bonus for reporting only. Writers currently treat this as a token-native
-    *        collateral-side amount hint, not as a normalized value-unit field, and it does not affect ledger writes.
+     * @param bonus Liquidation bonus for reporting only. Writers currently treat this as a token-native
+     *        collateral-side amount hint, not as a normalized value-unit field, and it does not affect ledger writes.
      */
     function liquidate(
         address targetUser,
@@ -352,8 +352,8 @@ contract LiquidationManager is
      * @param debtAssets Array of debt token addresses (one per liquidation)
      * @param collateralAmounts Array of collateral amounts to seize (token decimals)
      * @param debtAmounts Array of debt amounts to reduce (token decimals)
-    * @param bonuses Array of liquidation bonus reporting values. These entries are forwarded to the view/data-push
-    *        layer as writer-defined reporting fields and do not affect ledger writes.
+     * @param bonuses Array of liquidation bonus reporting values. These entries are forwarded to the view/data-push
+     *        layer as writer-defined reporting fields and do not affect ledger writes.
      */
     function batchLiquidate(
         address[] calldata targetUsers,
@@ -550,7 +550,7 @@ contract LiquidationManager is
      * @param collateralAmount Collateral seized (token decimals)
      * @param debtAmount Debt reduced (token decimals)
      * @param liquidator Liquidator address
-    * @param bonus Liquidation bonus reporting field only; forwarded unchanged to LiquidatorView/DataPush.
+     * @param bonus Liquidation bonus reporting field only; forwarded unchanged to LiquidatorView/DataPush.
      * @param payout LiquidationPayoutManager address (for share calculation)
      */
     function _pushSingle(
@@ -686,7 +686,7 @@ contract LiquidationManager is
      * @param collateralAmounts Collateral seized (token decimals)
      * @param debtAmounts Debt reduced (token decimals)
      * @param liquidator Liquidator address
-    * @param bonuses Liquidation bonus reporting values only; forwarded unchanged to LiquidatorView/DataPush.
+     * @param bonuses Liquidation bonus reporting values only; forwarded unchanged to LiquidatorView/DataPush.
      * @param payout LiquidationPayoutManager address (for share calculation)
      */
     function _pushBatch(

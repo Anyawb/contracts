@@ -31,11 +31,9 @@ contract MockLiquidationRecordManager {
     /// @param user User address
     /// @return totalLiquidations Total number of liquidations
     /// @return totalProfit Total profit from liquidations
-    function getUserRecord(address user)
-        external
-        view
-        returns (uint256 totalLiquidations, uint256 totalProfit)
-    {
+    function getUserRecord(
+        address user
+    ) external view returns (uint256 totalLiquidations, uint256 totalProfit) {
         UserRecord memory record = _userRecords[user];
         return (record.totalLiquidations, record.totalProfit);
     }

@@ -32,7 +32,10 @@ library LendingEngineValuation {
     /// @dev Reverts when the authoritative oracle returns an invalid zero price for strict valuation.
     error LendingEngineValuation__InvalidOraclePrice(address asset);
     /// @dev Reverts when the authoritative oracle returns unsupported decimals for strict valuation.
-    error LendingEngineValuation__InvalidOracleDecimals(address asset, uint256 decimals);
+    error LendingEngineValuation__InvalidOracleDecimals(
+        address asset,
+        uint256 decimals
+    );
 
     /// @notice Emitted when a user's cached total debt value is updated.
     /// @param user Borrower address.
@@ -191,18 +194,18 @@ library LendingEngineValuation {
     }
 
     /**
-    * @notice Computes the debt value for a user's single-asset debt in the normalized system valuation unit.
+     * @notice Computes the debt value for a user's single-asset debt in the normalized system valuation unit.
      * @dev Reverts if:
      *      - (none)
      *
      * Security:
-    * - View-only helper.
+     * - View-only helper.
      * - Uses GracefulDegradation.getAssetValueWithFallback for best-effort pricing.
      *
      * @param s LendingEngine storage layout.
      * @param user Borrower address.
      * @param asset Debt asset address.
-    * @return value Current debt value normalized to 18 decimals.
+     * @return value Current debt value normalized to 18 decimals.
      */
     function calculateDebtValue(
         LendingEngineStorage.Layout storage s,
@@ -243,7 +246,10 @@ library LendingEngineValuation {
     ) internal view returns (uint256 value) {
         uint256 amount = s._userDebt[user][asset];
         if (amount == 0) return 0;
-        if (s._priceOracleAddr == address(0) || s._settlementTokenAddr == address(0)) {
+        if (
+            s._priceOracleAddr == address(0) ||
+            s._settlementTokenAddr == address(0)
+        ) {
             return 0;
         }
 
@@ -251,7 +257,11 @@ library LendingEngineValuation {
             .createDefaultConfig(s._settlementTokenAddr);
         GracefulDegradation.PriceResult memory pr = GracefulDegradation
             .getAssetValueWithFallback(s._priceOracleAddr, asset, amount, cfg);
-        return _normalizeDebtValue(pr.value, _resultAssetDecimals(s._priceOracleAddr, asset));
+        return
+            _normalizeDebtValue(
+                pr.value,
+                _resultAssetDecimals(s._priceOracleAddr, asset)
+            );
     }
 
     function calculateDebtValueStrict(
@@ -265,16 +275,25 @@ library LendingEngineValuation {
             revert LendingEngineValuation__PriceOracleNotConfigured();
         }
 
-        (uint256 price, , uint256 assetDecimalsRaw) = IPriceOracleRead(s._priceOracleAddr).getPrice(asset);
+        (uint256 price, , uint256 assetDecimalsRaw) = IPriceOracleRead(
+            s._priceOracleAddr
+        ).getPrice(asset);
         if (price == 0) {
             revert LendingEngineValuation__InvalidOraclePrice(asset);
         }
         if (assetDecimalsRaw > MAX_ASSET_DECIMALS) {
-            revert LendingEngineValuation__InvalidOracleDecimals(asset, assetDecimalsRaw);
+            revert LendingEngineValuation__InvalidOracleDecimals(
+                asset,
+                assetDecimalsRaw
+            );
         }
 
         uint8 assetDecimals = uint8(assetDecimalsRaw);
-        uint256 rawValue = AssetDecimalMath.calcValue(amount, price, assetDecimals);
+        uint256 rawValue = AssetDecimalMath.calcValue(
+            amount,
+            price,
+            assetDecimals
+        );
         return _normalizeDebtValue(rawValue, assetDecimals);
     }
 

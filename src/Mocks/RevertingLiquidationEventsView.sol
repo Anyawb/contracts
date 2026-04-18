@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ILiquidationEventsView } from "../interfaces/ILiquidationEventsView.sol";
+import {ILiquidationEventsView} from "../interfaces/ILiquidationEventsView.sol";
 
 /// @title RevertingLiquidationEventsView
 /// @notice Test-only LiquidationEventsView that always reverts to simulate downstream failures.
@@ -50,4 +50,3 @@ contract RevertingLiquidationEventsView is ILiquidationEventsView {
         revert RevertingLiquidationEventsView__ForcedRevert();
     }
 }
-

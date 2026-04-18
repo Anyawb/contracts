@@ -9,7 +9,7 @@
  * ⚠️ Do not modify manually, run: pnpm generate:module-keys to update
  *
  * SSOT: contracts/src/constants/ModuleKeys.sol
- * 生成时间 / Generated at: 2026-04-14T08:50:09.186Z
+ * 生成时间 / Generated at: 2026-04-17T13:21:48.530Z
  *
  * 设计原则:
  *   - 零硬编码哈希：仅保存 keccak256 的输入字符串
@@ -31,6 +31,8 @@ export const MODULE_KEY_INPUTS = {
   KEY_VAULT_LENDING_ENGINE: 'VAULT_LENDING_ENGINE',
   /** Order engine module key (core/LendingEngine / IOrderEngine). Used by Registry to store the order engine contract address. Hash: keccak256("ORDER_ENGINE") */
   KEY_ORDER_ENGINE: 'ORDER_ENGINE',
+  /** Canonical multi-product order-state SSOT module key. Used by Registry to store the OrderStateStoreV2 contract address. Hash: keccak256("ORDER_STATE_STORE") */
+  KEY_ORDER_STATE_STORE: 'ORDER_STATE_STORE',
   /** Deprecated: health factor calculator module key. Replaced by LiquidationRiskManager / HealthView. Preserved as a placeholder to avoid breaking legacy data/scripts; new code must not use it. Hash: keccak256("HEALTH_FACTOR_CALCULATOR") */
   KEY_HF_CALC: 'HEALTH_FACTOR_CALCULATOR',
   /** Vault statistics module key. Used by Registry to store the VaultStatistics (or StatisticsView) contract address. Hash: keccak256("VAULT_STATISTICS") */
@@ -214,6 +216,7 @@ export const MODULE_KEY_STRINGS = [
   'KEY_LE',
   'KEY_VAULT_LENDING_ENGINE',
   'KEY_ORDER_ENGINE',
+  'KEY_ORDER_STATE_STORE',
   'KEY_HF_CALC',
   'KEY_STATS',
   'KEY_STATS_PUSH_MANAGER',

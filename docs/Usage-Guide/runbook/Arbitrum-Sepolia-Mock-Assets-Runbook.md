@@ -1232,6 +1232,7 @@ BORROW_AMOUNT_UNITS=1200 \
 3. `VIEWER_ADDRESS` 最好指向有 `ActionKeys.ACTION_VIEW_SYSTEM_DATA` / `ActionKeys.ACTION_VIEW_USER_DATA` / `ActionKeys.ACTION_VIEW_PRICE_DATA` 的 deployer/ops 地址，否则 preflight 里的部分 view 读数可能不是协议真实状态，而是权限导致的假冷。
 4. 不要把所有 read 都机械地绑定到 `VIEWER_ADDRESS`。当前 live 脚本里，用户维度的 facade/read 适合用 viewer 身份，但 `ValuationOracleView.getAssetPrice(...)` 这类系统价读如果 isolated call 能过、脚本里却直接 revert，优先检查 read caller 选型是否错误；实测应优先用 relayer/ops signer，而不是把 valuation path 也强绑到 viewer。
 5. 如果目标是验证 `RewardView` 的 borrower 缓存真的被写热，`BORROW_AMOUNT_UNITS` 不能低于 `1000`。当前实现里 `RewardManagerCore` 对 `< 1000e6` 的借款会直接跳过 reward lock / earn-state 处理。
+  - 口径边界：这条仅影响 RewardView 镜像可观测性，不改变 BorrowCheck 准入 authority（BorrowCheck 读取 `RewardManagerCore.getUserLevelForBorrowCheck` canonical level）。
 6. `RewardView` 的“lender 奖励”不要拿出资 EOA 直接判断。当前订单里的 `order.lender` 是 `LenderPoolVault`，不是出资 EOA，本次脚本里 lender EOA 的 reward 读数保持冷并不代表 Reward 主链路失败。
 
 已验证可跑通并且能写热 borrower `RewardView` 的真实参数是：
@@ -1833,7 +1834,7 @@ set -a && source .env && set +a && pnpm -s exec hardhat run scripts/tests/live-t
 
 1. seed price 只能保证价格相关 view 变为可读，不等于 `RewardView`、`HealthView`、`ViewCache` 会一起变热。
 2. 默认 seed 路径是 `PriceUpdater.updateAssetPrice`；`PriceOracle.updatePrice` 只应被理解为 break-glass。
-3. `RewardView` 取决于 reward writer 是否被触发，以及借款额是否跨过最小门槛。
+3. `RewardView` 取决于 reward writer 是否被触发，以及借款额是否跨过最小门槛；该条件用于判断镜像是否写热，不是 BorrowCheck 准入判定来源。
 4. `HealthView` 取决于 `LendingEngine -> HealthView` 的角色是否完整。
 5. `ViewCache` 取决于是否额外执行系统状态 prime，而不是价格 seed 本身。
 

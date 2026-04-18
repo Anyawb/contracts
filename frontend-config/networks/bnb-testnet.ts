@@ -1,6 +1,6 @@
 // Auto-generated contract configuration file - BNB Testnet
-// Generated at: 2026-04-14T08:50:07.023Z
-// Release ID: bnb-testnet-20260414085007022
+// Generated at: 2026-04-17T13:21:46.340Z
+// Release ID: bnb-testnet-20260417132146339
 //
 // Naming:
 // - OrderEngine = core/LendingEngine (Registry KEY_ORDER_ENGINE)
@@ -10,8 +10,8 @@
 export const DEPLOYMENT_METADATA = {
   "network": "bnb-testnet",
   "chainId": 97,
-  "releaseId": "bnb-testnet-20260414085007022",
-  "generatedAt": "2026-04-14T08:50:07.023Z",
+  "releaseId": "bnb-testnet-20260417132146339",
+  "generatedAt": "2026-04-17T13:21:46.340Z",
   "registry": "0xd51D68ae91298b744d6C31BC5609BA060AA943F5",
   "sourceFiles": {
     "deployOutputFile": "scripts/deployments/bnb-testnet/core.json",
@@ -311,6 +311,10 @@ export const CONTRACT_METADATA = {
   "LiquidatorView": {
     "address": "0x56247eD81901B5030DDA971AAd8233d3BBd3cA60",
     "registryKey": "LIQUIDATION_VIEW"
+  },
+  "OrderStateStoreV2": {
+    "address": "0x86eefc6D67F615554CAa84c21ae8b80518aB9FC7",
+    "registryKey": "ORDER_STATE_STORE"
   }
 } as const;
 
@@ -386,7 +390,8 @@ export const CONTRACT_ADDRESSES = {
   DegradationMonitor: '0x046471914c387f9dd19A04Ce930d8f10363756C7',
   BatchView: '0xEe9B92361C4FA24cc23705Dc243678ECf1bfCBB2',
   LoanNFT: '0x7abc6750c3D08fA1d0F126083C30A0cD2b4d684f',
-  LiquidatorView: '0x56247eD81901B5030DDA971AAd8233d3BBd3cA60'
+  LiquidatorView: '0x56247eD81901B5030DDA971AAd8233d3BBd3cA60',
+  OrderStateStoreV2: '0x86eefc6D67F615554CAa84c21ae8b80518aB9FC7'
 };
 
 export const NETWORK_CONFIG = {

@@ -7,11 +7,18 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 
 import {Registry} from "../registry/Registry.sol";
 
-contract VaultBaseUpgradeMockV1 is Initializable, OwnableUpgradeable, UUPSUpgradeable {
+contract VaultBaseUpgradeMockV1 is
+    Initializable,
+    OwnableUpgradeable,
+    UUPSUpgradeable
+{
     uint256 public totalValue;
     address public operator;
 
-    function initialize(address initialOwner, uint256 initialValue) external initializer {
+    function initialize(
+        address initialOwner,
+        uint256 initialValue
+    ) external initializer {
         __Ownable_init(initialOwner);
         __UUPSUpgradeable_init();
         totalValue = initialValue;
@@ -53,11 +60,18 @@ contract VaultBaseUpgradeMockV2 is VaultBaseUpgradeMockV1 {
     }
 }
 
-contract VaultBaseUpgradeMockBadLayout is Initializable, OwnableUpgradeable, UUPSUpgradeable {
+contract VaultBaseUpgradeMockBadLayout is
+    Initializable,
+    OwnableUpgradeable,
+    UUPSUpgradeable
+{
     address public operator;
     uint256 public totalValue;
 
-    function initialize(address initialOwner, uint256 initialValue) external initializer {
+    function initialize(
+        address initialOwner,
+        uint256 initialValue
+    ) external initializer {
         __Ownable_init(initialOwner);
         __UUPSUpgradeable_init();
         operator = initialOwner;

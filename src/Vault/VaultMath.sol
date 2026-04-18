@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { MathConstants } from "../constants/MathConstants.sol";
-import { DivisionByZero } from "../errors/StandardErrors.sol";
+import {MathConstants} from "../constants/MathConstants.sol";
+import {DivisionByZero} from "../errors/StandardErrors.sol";
 
 /**
  * @title VaultMath
@@ -26,13 +26,12 @@ library VaultMath {
      *
      * @param value Base value (same unit as the return value).
      * @param bps Basis points where 10_000 = 100% (0 is allowed).
-    * @return result Floor(value * bps / 10_000).
+     * @return result Floor(value * bps / 10_000).
      */
-    function percentageMul(uint256 value, uint256 bps)
-        internal
-        pure
-        returns (uint256)
-    {
+    function percentageMul(
+        uint256 value,
+        uint256 bps
+    ) internal pure returns (uint256) {
         return (value * bps) / MathConstants.BPS;
     }
 
@@ -49,11 +48,10 @@ library VaultMath {
      * @param bps Basis points where 10_000 = 100% (must be non-zero).
      * @return result Floor(value * 10_000 / bps).
      */
-    function percentageDiv(uint256 value, uint256 bps)
-        internal
-        pure
-        returns (uint256)
-    {
+    function percentageDiv(
+        uint256 value,
+        uint256 bps
+    ) internal pure returns (uint256) {
         if (bps == 0) revert DivisionByZero();
         return (value * MathConstants.BPS) / bps;
     }
@@ -68,13 +66,12 @@ library VaultMath {
      *
      * @param collateral Total collateral value (any unit; must match debt unit).
      * @param debt Total debt value (same unit as collateral).
-    * @return healthFactorBps Basis points where 10_000 = 100%; returns max uint256 if debt == 0.
+     * @return healthFactorBps Basis points where 10_000 = 100%; returns max uint256 if debt == 0.
      */
-    function calculateHealthFactor(uint256 collateral, uint256 debt)
-        internal
-        pure
-        returns (uint256)
-    {
+    function calculateHealthFactor(
+        uint256 collateral,
+        uint256 debt
+    ) internal pure returns (uint256) {
         if (debt == 0) return type(uint256).max;
         return (collateral * MathConstants.BPS) / debt;
     }
@@ -91,11 +88,10 @@ library VaultMath {
      * @param collateral Total collateral value (same unit as debt).
      * @return ltvBps Basis points where 10_000 = 100%; returns 0 if collateral == 0.
      */
-    function calculateLTV(uint256 debt, uint256 collateral)
-        internal
-        pure
-        returns (uint256)
-    {
+    function calculateLTV(
+        uint256 debt,
+        uint256 collateral
+    ) internal pure returns (uint256) {
         if (collateral == 0) return 0;
         return (debt * MathConstants.BPS) / collateral;
     }
@@ -112,11 +108,10 @@ library VaultMath {
      * @param bonusBps Bonus rate in basis points (10_000 = 100%).
      * @return bonusAmount Floor(amount * bonusBps / 10_000).
      */
-    function calculateLiquidationBonus(uint256 amount, uint256 bonusBps)
-        internal
-        pure
-        returns (uint256)
-    {
+    function calculateLiquidationBonus(
+        uint256 amount,
+        uint256 bonusBps
+    ) internal pure returns (uint256) {
         return percentageMul(amount, bonusBps);
     }
 
@@ -132,11 +127,10 @@ library VaultMath {
      * @param feeBps Fee rate in basis points (10_000 = 100%).
      * @return feeAmount Floor(amount * feeBps / 10_000).
      */
-    function calculateFee(uint256 amount, uint256 feeBps)
-        internal
-        pure
-        returns (uint256)
-    {
+    function calculateFee(
+        uint256 amount,
+        uint256 feeBps
+    ) internal pure returns (uint256) {
         return percentageMul(amount, feeBps);
     }
-} 
+}

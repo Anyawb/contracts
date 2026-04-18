@@ -449,15 +449,15 @@ contract CollateralManager is
      *      - receiver == address(0) (CollateralManager__ZeroAddress)
      *      - receiver == user and caller is not VaultRouter, SettlementManager, or BlocksOnlyCoordinator
      *        (CollateralManager__UnauthorizedAccess)
-    *      - receiver != user and caller lacks ACTION_LIQUIDATE, except for the registered BlocksOnlyCoordinator
-    *        staging collateral into its own custody
+     *      - receiver != user and caller lacks ACTION_LIQUIDATE, except for the registered BlocksOnlyCoordinator
+     *        staging collateral into its own custody
      *      - user, asset, amount, balance, or token-transfer checks fail in `_withdrawCollateralTo`
      *
      * Security:
      * - Non-reentrant collateral exit point shared by withdrawal, settlement, and seizure flows.
-    * - BlocksOnlyCoordinator access is limited to staging order-bound collateral into coordinator custody during
-    *   match finalization or returning collateral to the borrower after debt-free close; it does not bypass
-    *   liquidation role checks for arbitrary third-party receivers.
+     * - BlocksOnlyCoordinator access is limited to staging order-bound collateral into coordinator custody during
+     *   match finalization or returning collateral to the borrower after debt-free close; it does not bypass
+     *   liquidation role checks for arbitrary third-party receivers.
      *
      * @param user Collateral owner address.
      * @param asset Collateral asset address.
@@ -489,8 +489,8 @@ contract CollateralManager is
         // Seizure path must be role-gated at the ledger layer (Architecture-Guide SSOT), except for the registered
         // BlocksOnlyCoordinator staging already-bound collateral into its own custody.
         if (receiver != user) {
-            bool isBlocksOnlyCustodyStage =
-                msg.sender == blocksOnlyCoordinator &&
+            bool isBlocksOnlyCustodyStage = msg.sender ==
+                blocksOnlyCoordinator &&
                 receiver == blocksOnlyCoordinator;
             if (!isBlocksOnlyCustodyStage) {
                 _requireRole(ActionKeys.ACTION_LIQUIDATE, msg.sender);

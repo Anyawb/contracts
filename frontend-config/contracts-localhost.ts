@@ -1,6 +1,6 @@
 // 自动生成的合约配置文件 - Localhost
 // Auto-generated contract configuration file - Localhost
-// 生成时间 Generated at: 2026-04-16T03:25:13.209Z
+// 生成时间 Generated at: 2026-04-18T05:31:17.820Z
 //
 // Naming:
 // - OrderEngine = core/LendingEngine (Registry KEY_ORDER_ENGINE)
@@ -87,8 +87,8 @@ export const CONTRACT_ADDRESSES = {
 
 export const NETWORK_CONFIG = {
   chainId: 1337,
-  rpcUrl: 'http://127.0.0.1:8545',
-  explorer: 'http://127.0.0.1:8545',
+  rpcUrl: 'http://127.0.0.1:18545',
+  explorer: 'http://127.0.0.1:18545',
   name: 'localhost'
 };
 

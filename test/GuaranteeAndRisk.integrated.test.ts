@@ -37,7 +37,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
   let earlyRepayGM: any;
   let feeRouter: any;
   let riskView: any;
-  let healthViewLite: any;
+  let healthViewBasic: any;
 
   // 账户
   let owner: any;
@@ -117,12 +117,12 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     await registry.setModule(KEY_FR, feeRouter.target);
     await registry.setModule(ethers.keccak256(ethers.toUtf8Bytes('ACCESS_CONTROL_MANAGER')), acm.target);
 
-    // RiskView 依赖 HealthView 的缓存（getUserHealthFactor(uint256,bool)）
-    // 这里用轻量 Mock 使风险评估测试可控、可复现
-    const MockHealthViewLiteF = await ethers.getContractFactory('MockHealthViewLite');
-    healthViewLite = await MockHealthViewLiteF.deploy();
-    await healthViewLite.waitForDeployment();
-    await registry.setModule(KEY_HEALTH_VIEW, healthViewLite.target);
+    // RiskView 依赖 HealthView 的 getUserHealthFactorWithMeta 只读边界。
+    // 这里使用只读 Basic mock 让风险评估测试保持可控、可复现。
+    const MockHealthViewBasicF = await ethers.getContractFactory('MockHealthViewBasic');
+    healthViewBasic = await MockHealthViewBasicF.deploy();
+    await healthViewBasic.waitForDeployment();
+    await registry.setModule(KEY_HEALTH_VIEW, healthViewBasic.target);
 
     if ((vaultCore as any).setRegistry) {
       await (vaultCore as any).setRegistry(registry.target);
@@ -797,7 +797,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
 
     it('健康因子小于1.0时应标记为可清算', async function () {
       // RiskView.healthFactor 单位为 bps（10_000 = 100%）
-      await healthViewLite.setHealth(await user.getAddress(), 9_000, true);
+      await healthViewBasic.setHealth(await user.getAddress(), 9_000, true);
       const assessment = await riskView.getUserRiskAssessment(await user.getAddress());
       expect(assessment.healthFactor).to.equal(9_000n);
       expect(assessment.liquidatable).to.equal(true);
@@ -805,7 +805,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     });
 
     it('健康因子在1.0-1.1之间时应标记为警告', async function () {
-      await healthViewLite.setHealth(await user.getAddress(), 10_500, true);
+      await healthViewBasic.setHealth(await user.getAddress(), 10_500, true);
       const assessment = await riskView.getUserRiskAssessment(await user.getAddress());
       expect(assessment.healthFactor).to.equal(10_500n);
       expect(assessment.liquidatable).to.equal(false);
@@ -813,7 +813,7 @@ describe('Guarantee & Risk – 保证金与风险模块集成测试', function (
     });
 
     it('健康因子大于等于1.1时应无警告', async function () {
-      await healthViewLite.setHealth(await user.getAddress(), 12_000, true);
+      await healthViewBasic.setHealth(await user.getAddress(), 12_000, true);
       const assessment = await riskView.getUserRiskAssessment(await user.getAddress());
       expect(assessment.healthFactor).to.equal(12_000n);
       expect(assessment.liquidatable).to.equal(false);

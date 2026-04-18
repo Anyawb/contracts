@@ -167,7 +167,7 @@ contract RewardManager is
      * @param user Borrower account.
      * @param orderId Order identifier.
      * @param amount Principal amount in the loan asset base units.
-    * @param maturity Order maturity block (`maturityBlock`, block-based SSOT) forwarded to RewardManagerCore.
+     * @param maturity Order maturity block (`maturityBlock`, block-based SSOT) forwarded to RewardManagerCore.
      * @param outcome Loan outcome enum defined by {IRewardManagerByOrder}.
      */
     function onLoanEventByOrder(
@@ -210,7 +210,7 @@ contract RewardManager is
      * @param asset Borrowed asset used for Easy emission valuation.
      * @param orderId Order identifier.
      * @param amount Principal amount in the loan asset base units.
-    * @param maturity Order maturity block (`maturityBlock`, block-based SSOT) forwarded downstream.
+     * @param maturity Order maturity block (`maturityBlock`, block-based SSOT) forwarded downstream.
      * @param outcome Loan outcome enum defined by {IRewardManagerByOrder}.
      */
     function onLoanEventByOrderWithLender(
@@ -418,9 +418,7 @@ contract RewardManager is
      *
      * @param lateBps Late repayment penalty in BPS.
      */
-    function setLatePenaltyBps(
-        uint256 lateBps
-    ) external onlyValidRegistry {
+    function setLatePenaltyBps(uint256 lateBps) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
         _getRewardManagerCore().setLatePenaltyBps(lateBps);
     }

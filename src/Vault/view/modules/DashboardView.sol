@@ -16,86 +16,17 @@ import {
 import {ViewConstants} from "../ViewConstants.sol";
 import {ViewVersioned} from "../ViewVersioned.sol";
 import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {IHealthViewBasic} from "../../../interfaces/IHealthViewBasic.sol";
+import {IPositionViewBasic} from "../../../interfaces/IPositionViewBasic.sol";
+import {IPriceOracleRead} from "../../../interfaces/IPriceOracleRead.sol";
+import {IStatisticsViewBasic} from "../../../interfaces/IStatisticsViewBasic.sol";
+import {ISystemRiskView} from "../../../interfaces/ISystemRiskView.sol";
 
 /*━━━━━━━━━━━━━━━ Selector SSOT ━━━━━━━━━━━━━━━*/
 // Selectors are derived from the canonical module contracts in this repository (SSOT),
 // rather than hardcoding hex values or duplicating minimal interfaces in this file.
 import {HealthView} from "./HealthView.sol";
 import {PositionView} from "./PositionView.sol";
-
-/// @title IHealthViewLite
-/// @notice Minimal read interface for HealthView.
-/// @dev Used by {DashboardView} to aggregate health data without importing the full HealthView implementation.
-interface IHealthViewLite {
-    /// @notice Returns one user's health factor together with validity metadata.
-    function getUserHealthFactorWithMeta(
-        address user
-    )
-        external
-        view
-        returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
-}
-
-/// @title IPositionViewLite
-/// @notice Minimal read interface for PositionView.
-/// @dev Used by {DashboardView} to aggregate position data without importing the full PositionView implementation.
-interface IPositionViewLite {
-    /// @notice Returns one user's position snapshot for one asset.
-    function getUserPositionWithMeta(
-        address user,
-        address asset
-    )
-        external
-        view
-        returns (
-            uint256 collateral,
-            uint256 debt,
-            bool isValid,
-            uint256 blockNumber,
-            uint64 version
-        );
-}
-
-/// @title IStatisticsViewLite
-/// @notice Minimal read interface for StatisticsView.
-/// @dev Used by {DashboardView} to aggregate global statistics without
-///      importing the full StatisticsView implementation.
-interface IStatisticsViewLite {
-    struct GlobalStatistics {
-        uint256 totalUsers;
-        uint256 activeUsers;
-        uint256 totalCollateral;
-        uint256 totalDebt;
-        uint256 lastUpdateBlock;
-    }
-
-    /// @notice Returns the global statistics snapshot together with validity metadata.
-    function getGlobalStatisticsWithMeta()
-        external
-        view
-        returns (GlobalStatistics memory g, bool isValid, uint256 blockNumber);
-}
-
-/// @title IPriceOracleLite
-/// @notice Minimal read interface for PriceOracle.
-/// @dev Used by {DashboardView} to fetch asset price tuples without importing the full oracle implementation.
-interface IPriceOracleLite {
-    /// @notice Returns the current price tuple for one asset.
-    function getPrice(
-        address asset
-    ) external view returns (uint256 price, uint256, uint256);
-}
-
-/// @title ISystemRiskViewLite
-/// @notice Minimal read interface for system risk thresholds.
-/// @dev Used by {DashboardView} to read the system minimum health factor without importing the full risk module.
-interface ISystemRiskViewLite {
-    /// @notice Returns the minimum health factor configured for the system.
-    function getMinHealthFactor()
-        external
-        view
-        returns (uint256 minHealthFactor);
-}
 
 /**
  * @title DashboardView
@@ -435,7 +366,7 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         items = new UserAssetOverviewMeta[](len);
 
         address pvAddr = _getModule(ModuleKeys.KEY_POSITION_VIEW);
-        IPriceOracleLite oracle = _priceOracle();
+        IPriceOracleRead oracle = _priceOracle();
 
         for (uint256 i; i < len; ++i) {
             (
@@ -495,7 +426,7 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (SystemOverview memory overview)
     {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
-        (IStatisticsViewLite.GlobalStatistics memory g, , ) = _statisticsView()
+        (IStatisticsViewBasic.GlobalStatistics memory g, , ) = _statisticsView()
             .getGlobalStatisticsWithMeta();
         overview = SystemOverview({
             totalUsers: g.totalUsers,
@@ -534,7 +465,7 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
         (
-            IStatisticsViewLite.GlobalStatistics memory g,
+            IStatisticsViewBasic.GlobalStatistics memory g,
             bool ok,
             uint256 statsBlockNumber
         ) = _statisticsView().getGlobalStatisticsWithMeta();
@@ -551,27 +482,27 @@ contract DashboardView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
-    function _healthView() internal view returns (IHealthViewLite) {
-        return IHealthViewLite(_getModule(ModuleKeys.KEY_HEALTH_VIEW));
+    function _healthView() internal view returns (IHealthViewBasic) {
+        return IHealthViewBasic(_getModule(ModuleKeys.KEY_HEALTH_VIEW));
     }
 
-    function _positionView() internal view returns (IPositionViewLite) {
-        return IPositionViewLite(_getModule(ModuleKeys.KEY_POSITION_VIEW));
+    function _positionView() internal view returns (IPositionViewBasic) {
+        return IPositionViewBasic(_getModule(ModuleKeys.KEY_POSITION_VIEW));
     }
 
-    function _statisticsView() internal view returns (IStatisticsViewLite) {
-        return IStatisticsViewLite(_getModule(ModuleKeys.KEY_STATS));
+    function _statisticsView() internal view returns (IStatisticsViewBasic) {
+        return IStatisticsViewBasic(_getModule(ModuleKeys.KEY_STATS));
     }
 
-    function _systemRiskView() internal view returns (ISystemRiskViewLite) {
-        return ISystemRiskViewLite(_getModule(ModuleKeys.KEY_SYSTEM_RISK_VIEW));
+    function _systemRiskView() internal view returns (ISystemRiskView) {
+        return ISystemRiskView(_getModule(ModuleKeys.KEY_SYSTEM_RISK_VIEW));
     }
 
-    function _priceOracle() internal view returns (IPriceOracleLite) {
+    function _priceOracle() internal view returns (IPriceOracleRead) {
         address oracle = Registry(_registryAddr).getModule(
             ModuleKeys.KEY_PRICE_ORACLE
         );
-        return IPriceOracleLite(oracle);
+        return IPriceOracleRead(oracle);
     }
 
     function _getModule(bytes32 key) internal view returns (address) {

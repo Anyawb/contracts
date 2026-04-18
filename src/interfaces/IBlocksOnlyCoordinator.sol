@@ -89,8 +89,8 @@ interface IBlocksOnlyCoordinator {
     /*━━━━━━━━━━━━━━━ WRITE API ━━━━━━━━━━━━━━━*/
 
     /**
-    * @notice Finalizes a matched blocks-only trade-like order, stores the pledged collateral binding, and stages
-    *         the pledged collateral into coordinator custody.
+     * @notice Finalizes a matched blocks-only trade-like order, stores the pledged collateral binding, and stages
+     *         the pledged collateral into coordinator custody.
      * @dev Reverts if:
      *      - the caller is not the registered Vault business logic module
      *      - the coordinator is paused or its registry is unset / not a contract
@@ -99,13 +99,13 @@ interface IBlocksOnlyCoordinator {
      *      - `params.termBlocks` or `params.rateBps` violates the product constraints enforced by the implementation
      *      - `params.lender` does not match the registered lender pool vault
      *      - the borrow asset is not allowed by the asset whitelist
-    *      - registry lookups or downstream pool calls revert
+     *      - registry lookups or downstream pool calls revert
      *
      * Security:
      * - Write path gated by the registry-bound Vault business logic module.
-    * - Stages the bound collateral out of the borrower's collateral ledger into coordinator custody before
-    *   recording the order.
-    * - The coordinator, not the generic debt ledger, is the product-state SSOT for remaining settlement amount.
+     * - Stages the bound collateral out of the borrower's collateral ledger into coordinator custody before
+     *   recording the order.
+     * - The coordinator, not the generic debt ledger, is the product-state SSOT for remaining settlement amount.
      *
      * @param params Matched order inputs, including participants, asset, principal, and block term.
      * @return orderId Newly assigned coordinator order id.
@@ -115,24 +115,24 @@ interface IBlocksOnlyCoordinator {
     ) external returns (uint256 orderId);
 
     /**
-    * @notice Repays a blocks-only order and forwards the repayment to the recorded lender.
+     * @notice Repays a blocks-only order and forwards the repayment to the recorded lender.
      * @dev Reverts if:
      *      - the coordinator is paused or its registry is unset / not a contract
      *      - `repayAmount == 0`
      *      - `orderId` does not reference an open order
      *      - the caller is not the recorded borrower
-    *      - token transfer or registry lookups revert
+     *      - token transfer or registry lookups revert
      *
      * Security:
      * - Borrower-only write path.
-    * - Repayment completeness is determined by the coordinator-local remaining settlement amount.
-    * - A debt-free repay does not itself close the order; closed-state consumers must read the explicit close
-    *   transition via coordinator/view status.
+     * - Repayment completeness is determined by the coordinator-local remaining settlement amount.
+     * - A debt-free repay does not itself close the order; closed-state consumers must read the explicit close
+     *   transition via coordinator/view status.
      *
      * @param orderId Coordinator order id.
      * @param repayAmount Repayment amount in debt-asset base units.
-    * @return remainingDebt Remaining open settlement amount after repayment. The field name is retained for
-    *         compatibility with existing consumers.
+     * @return remainingDebt Remaining open settlement amount after repayment. The field name is retained for
+     *         compatibility with existing consumers.
      */
     function repayBlocks(
         uint256 orderId,
@@ -144,35 +144,35 @@ interface IBlocksOnlyCoordinator {
      * @dev Reverts if:
      *      - the coordinator is paused or its registry is unset / not a contract
      *      - `orderId` does not reference an open order
-    *      - the coordinator-local remaining settlement amount is non-zero
+     *      - the coordinator-local remaining settlement amount is non-zero
      *      - collateral release dependencies revert
      *
      * Security:
-    * - Intended for the trade-like blocks-only path where a filled order should close as soon as the remaining
-    *   settlement amount is zero.
-    * - Does not alter the maturity-gated product-settlement semantics of {settleOrLiquidateBlocks}.
-    * - Releases the coordinator-held order-bound collateral back to the borrower and marks the order as
-    *   `TRADE_CLOSED`.
-    * - This explicit close path, rather than a zero-balance observation alone, is what turns a debt-free open order
-    *   into a closed order.
+     * - Intended for the trade-like blocks-only path where a filled order should close as soon as the remaining
+     *   settlement amount is zero.
+     * - Does not alter the maturity-gated product-settlement semantics of {settleOrLiquidateBlocks}.
+     * - Releases the coordinator-held order-bound collateral back to the borrower and marks the order as
+     *   `TRADE_CLOSED`.
+     * - This explicit close path, rather than a zero-balance observation alone, is what turns a debt-free open order
+     *   into a closed order.
      *
      * @param orderId Coordinator order id.
      */
     function closeRepaidTradeBlocks(uint256 orderId) external;
 
     /**
-        * @notice Completes maturity-gated trade-like close for a blocks-only order.
+     * @notice Completes maturity-gated trade-like close for a blocks-only order.
      * @dev Reverts if:
      *      - the coordinator is paused or its registry is unset / not a contract
      *      - `orderId` does not reference an open order
      *      - the order has not yet reached its maturity block
-    *      - required collateral release dependencies revert
+     *      - required collateral release dependencies revert
      *
      * Security:
-        * - Permissionless maturity-close path.
-        * - If the order is fully repaid, the coordinator-held order-bound collateral returns to the borrower.
-        * - Otherwise the coordinator-held order-bound collateral is delivered to the recorded lender as the
-        *   product-defined maturity settlement outcome.
+     * - Permissionless maturity-close path.
+     * - If the order is fully repaid, the coordinator-held order-bound collateral returns to the borrower.
+     * - Otherwise the coordinator-held order-bound collateral is delivered to the recorded lender as the
+     *   product-defined maturity settlement outcome.
      *
      * @param orderId Coordinator order id.
      */

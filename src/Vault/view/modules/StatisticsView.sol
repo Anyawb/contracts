@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { VaultMath } from "../../VaultMath.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {VaultMath} from "../../VaultMath.sol";
+import {DataPushLibrary} from "../../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../../constants/DataPushTypes.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
 
 /**
  * @title StatisticsView
@@ -35,7 +39,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @notice Thrown when an incoming user stats version is not the expected next version.
     /// @dev Reverts when `incomingVersion != currentVersion + 1`. Used by {pushUserStatsUpdate} overloads that
     ///      enforce strict optimistic concurrency via `nextVersion`.
-    error StatisticsView__StaleUserStatsVersion(uint64 currentVersion, uint64 incomingVersion);
+    error StatisticsView__StaleUserStatsVersion(
+        uint64 currentVersion,
+        uint64 incomingVersion
+    );
     /// @notice Thrown when an incoming user stats sequence number is not strictly increasing.
     /// @dev Reverts when `incomingSeq <= currentSeq`. Used by {pushUserStatsUpdate} when `seq != 0`.
     error StatisticsView__OutOfOrderSeq(uint64 currentSeq, uint64 incomingSeq);
@@ -46,22 +53,22 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Types ━━━━━━━━━━━━━━━*/
     /// @notice Per-user cached snapshot (kept compatible with legacy VaultStatistics for migration).
     struct UserSnapshot {
-        uint256 collateral;      // Collateral value in the shared 18-decimal system valuation unit
-        uint256 debt;            // Debt value in the shared 18-decimal system valuation unit
-        uint256 ltv;             // Loan-to-value (bps, 10_000 = 100%)
-        uint256 healthFactor;    // Health factor (bps, 10_000 = 100%; max uint if debt==0 in VaultMath)
-        uint256 blockNumber;     // Snapshot blockNumber (block.number)
-        bool isActive;           // Reserved for legacy compatibility (do NOT use as SSOT)
+        uint256 collateral; // Collateral value in the shared 18-decimal system valuation unit
+        uint256 debt; // Debt value in the shared 18-decimal system valuation unit
+        uint256 ltv; // Loan-to-value (bps, 10_000 = 100%)
+        uint256 healthFactor; // Health factor (bps, 10_000 = 100%; max uint if debt==0 in VaultMath)
+        uint256 blockNumber; // Snapshot blockNumber (block.number)
+        bool isActive; // Reserved for legacy compatibility (do NOT use as SSOT)
     }
 
     /// @notice Global cached snapshot (kept compatible with legacy VaultStatistics for migration).
     struct GlobalSnapshot {
-        uint256 totalCollateral;       // Total collateral value in the shared 18-decimal system valuation unit
-        uint256 totalDebt;             // Total debt value in the shared 18-decimal system valuation unit
-        uint256 averageLTV;            // Average LTV (bps, 10_000 = 100%) (currently best-effort / may be 0)
-        uint256 averageHealthFactor;   // Average health factor (bps) (currently best-effort / may be 0)
-        uint256 activeUsers;           // Active user count (position > 0)
-        uint256 blockNumber;           // Snapshot blockNumber (block.number)
+        uint256 totalCollateral; // Total collateral value in the shared 18-decimal system valuation unit
+        uint256 totalDebt; // Total debt value in the shared 18-decimal system valuation unit
+        uint256 averageLTV; // Average LTV (bps, 10_000 = 100%) (currently best-effort / may be 0)
+        uint256 averageHealthFactor; // Average health factor (bps) (currently best-effort / may be 0)
+        uint256 activeUsers; // Active user count (position > 0)
+        uint256 blockNumber; // Snapshot blockNumber (block.number)
     }
 
     struct GlobalStatistics {
@@ -72,7 +79,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 lastUpdateBlock;
     }
 
-    struct RewardStats { uint256 rewardRate; uint256 totalEasyTokenSupply; }
+    struct RewardStats {
+        uint256 rewardRate;
+        uint256 totalEasyTokenSupply;
+    }
 
     /// @notice Cached graceful degradation stats payload.
     struct GracefulDegradationStats {
@@ -115,10 +125,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @notice (user, asset) => optional monotonic sequence for guarantee snapshots.
     mapping(address => mapping(address => uint64)) private _guaranteeSeq;
     /// @notice (user, asset) => last applied idempotency key for guarantee snapshots (O(1)).
-    mapping(address => mapping(address => bytes32)) private _lastAppliedGuaranteeRequestId;
+    mapping(address => mapping(address => bytes32))
+        private _lastAppliedGuaranteeRequestId;
     /// @notice (user, asset) => last guarantee cache update block (block.number).
     /// @dev This blockNumber is per-key to avoid "asset-level freshness pollution" across users.
-    mapping(address => mapping(address => uint256)) private _guaranteeLastUpdate;
+    mapping(address => mapping(address => uint256))
+        private _guaranteeLastUpdate;
     /// @notice asset => last guarantee cache update block (block.number).
     mapping(address => uint256) private _guaranteeLastUpdateByAsset;
     /// @notice Last guarantee cache update block (block.number).
@@ -149,7 +161,11 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Emitted by {pushUserStatsUpdate} when the same `(user, version, requestId)` is replayed and can be
      *      safely ignored without mutating state.
      */
-    event IdempotentRequestIgnored(address indexed user, bytes32 indexed requestId, uint64 seq);
+    event IdempotentRequestIgnored(
+        address indexed user,
+        bytes32 indexed requestId,
+        uint64 seq
+    );
 
     /*━━━━━━━━━━━━━━━ Configuration ━━━━━━━━━━━━━━━*/
     /// @notice Registry address used for SSOT module resolution and access control.
@@ -165,8 +181,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - Pure function.
+     * Security:
+     * - Pure function.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
@@ -177,8 +193,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - Pure function.
+     * Security:
+     * - Pure function.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;
@@ -211,9 +227,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U: self-read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyUserOrViewer(address user) {
         if (
-            msg.sender != user
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            msg.sender != user &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -238,7 +262,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
 
@@ -260,12 +285,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
-    * @return g Cached global statistics snapshot.
-    * @return isValid True if the cache block number is within the configured TTL.
-    * @return blockNumber Cache block number.
+     * @return g Cached global statistics snapshot.
+     * @return isValid True if the cache block number is within the configured TTL.
+     * @return blockNumber Cache block number.
      */
     function getGlobalStatisticsWithMeta()
         external
@@ -273,11 +298,11 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (GlobalStatistics memory g, bool isValid, uint256 blockNumber)
     {
         GlobalSnapshot memory s = _globalSnapshot;
-        g.totalUsers     = _totalUsers;
-        g.activeUsers     = s.activeUsers;
+        g.totalUsers = _totalUsers;
+        g.activeUsers = s.activeUsers;
         g.totalCollateral = s.totalCollateral;
-        g.totalDebt       = s.totalDebt;
-        g.lastUpdateBlock  = s.blockNumber;
+        g.totalDebt = s.totalDebt;
+        g.lastUpdateBlock = s.blockNumber;
         blockNumber = s.blockNumber;
         isValid = _isValid(blockNumber);
     }
@@ -287,12 +312,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
-    * @return s Cached global snapshot.
-    * @return isValid True if the cache block number is within the configured TTL.
-    * @return blockNumber Cache block number.
+     * @return s Cached global snapshot.
+     * @return isValid True if the cache block number is within the configured TTL.
+     * @return blockNumber Cache block number.
      */
     function getGlobalSnapshotWithMeta()
         external
@@ -309,12 +334,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
-    * @return activeUsers Cached active user count.
-    * @return isValid True if the cache block number is within the configured TTL.
-    * @return blockNumber Cache block number.
+     * @return activeUsers Cached active user count.
+     * @return isValid True if the cache block number is within the configured TTL.
+     * @return blockNumber Cache block number.
      */
     function getActiveUsersWithMeta()
         external
@@ -333,20 +358,22 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      * - User-dimensional read follows Scheme U: self-read allowed; non-self requires `ACTION_VIEW_USER_DATA` or
      *   `ACTION_ADMIN`.
      *
      * @param user User address.
-    * @return s Cached user snapshot.
+     * @return s Cached user snapshot.
      * @return version Current optimistic concurrency version.
      * @return seq Current monotonic sequence (0 if never provided).
      * @return lastAppliedRequestId Last applied idempotency key (bytes32(0) if none).
-    * @return isValid True if the snapshot block number is within the configured TTL.
-    * @return blockNumber Snapshot block number.
+     * @return isValid True if the snapshot block number is within the configured TTL.
+     * @return blockNumber Snapshot block number.
      */
-    function getUserSnapshotWithMeta(address user)
+    function getUserSnapshotWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -374,19 +401,15 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @param user User address.
-    * @return version Current monotonic version.
+     * @return version Current monotonic version.
      */
-    function getUserStatsVersion(address user)
-        external
-        view
-        onlyValidRegistry
-        onlyUserOrViewer(user)
-        returns (uint64)
-    {
+    function getUserStatsVersion(
+        address user
+    ) external view onlyValidRegistry onlyUserOrViewer(user) returns (uint64) {
         return _userStatsVersion[user];
     }
 
@@ -396,15 +419,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is neither Registry `KEY_STATS_PUSH_MANAGER` nor has `ACTION_ADMIN` (MissingRole)
      *
-    * Security:
-    * - View-only pusher helper.
+     * Security:
+     * - View-only pusher helper.
      * - This is intended for on-chain modules that perform best-effort pushes and need to compute
      *   `nextVersion = currentVersion + 1` before calling the strict {pushUserStatsUpdate(..., requestId, seq, nextVersion)}.
      *
      * @param user User address.
-    * @return version Current monotonic version.
+     * @return version Current monotonic version.
      */
-    function getUserStatsVersionForPusher(address user) external view onlyValidRegistry returns (uint64) {
+    function getUserStatsVersionForPusher(
+        address user
+    ) external view onlyValidRegistry returns (uint64) {
         // Single-entry orchestrator helper: only stats pusher or admin may read.
         _requireStatsPusherOrAdmin();
         return _userStatsVersion[user];
@@ -416,14 +441,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is neither Registry `KEY_STATS_PUSH_MANAGER` nor has `ACTION_ADMIN` (MissingRole)
      *
-    * Security:
-    * - View-only pusher helper.
+     * Security:
+     * - View-only pusher helper.
      *
      * @param user User address.
      * @param asset Guarantee asset address.
-    * @return version Current monotonic version.
+     * @return version Current monotonic version.
      */
-    function getGuaranteeVersionForPusher(address user, address asset) external view onlyValidRegistry returns (uint64) {
+    function getGuaranteeVersionForPusher(
+        address user,
+        address asset
+    ) external view onlyValidRegistry returns (uint64) {
         // Single-entry orchestrator helper: only stats pusher or admin may read.
         _requireStatsPusherOrAdmin();
         return _guaranteeVersion[user][asset];
@@ -435,13 +463,15 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @param user User address.
-    * @return seq Current monotonic sequence.
+     * @return seq Current monotonic sequence.
      */
-    function getUserStatsSeq(address user) external view onlyValidRegistry onlyUserOrViewer(user) returns (uint64) {
+    function getUserStatsSeq(
+        address user
+    ) external view onlyValidRegistry onlyUserOrViewer(user) returns (uint64) {
         return _userStatsSeq[user];
     }
 
@@ -451,19 +481,15 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @param user User address.
-    * @return requestId Last applied idempotency key.
+     * @return requestId Last applied idempotency key.
      */
-    function getUserStatsLastAppliedRequestId(address user)
-        external
-        view
-        onlyValidRegistry
-        onlyUserOrViewer(user)
-        returns (bytes32)
-    {
+    function getUserStatsLastAppliedRequestId(
+        address user
+    ) external view onlyValidRegistry onlyUserOrViewer(user) returns (bytes32) {
         return _lastAppliedUserStatsRequestId[user];
     }
 
@@ -482,15 +508,29 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Role-gated: `ACTION_VIEW_SYSTEM_STATUS` or `ACTION_ADMIN`.
-    * - Emits {DegradationStatsCached} and `DataPushed(DATA_TYPE_DEGRADATION_STATS_UPDATE, payload)` for off-chain
-    *   monitoring.
+     * - Emits {DegradationStatsCached} and `DataPushed(DATA_TYPE_DEGRADATION_STATS_UPDATE, payload)` for off-chain
+     *   monitoring.
      *
      * @param s Degradation stats payload to cache.
      */
-    function pushDegradationStats(GracefulDegradationStats calldata s) external onlyValidRegistry {
+    function pushDegradationStats(
+        GracefulDegradationStats calldata s
+    ) external onlyValidRegistry {
         // Allow admin; otherwise require system status view permission.
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
-            if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_STATUS, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
+            if (
+                !ViewAccessLib.hasRole(
+                    _registryAddr,
+                    ActionKeys.ACTION_VIEW_SYSTEM_STATUS,
+                    msg.sender
+                )
+            ) {
                 revert MissingRole();
             }
         }
@@ -508,7 +548,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
             block.number
         );
         // Push to generic data bus
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_DEGRADATION_STATS_UPDATE, abi.encode(s));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_DEGRADATION_STATS_UPDATE,
+            abi.encode(s)
+        );
     }
 
     /**
@@ -516,8 +559,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @return stats Last cached degradation stats payload.
      */
@@ -545,10 +588,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *   requirements and enable deterministic off-chain replay/diagnostics.
      *
      * @param user User address.
-    * @param collateralIn Collateral value delta added (18-decimal valuation unit).
-    * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
-    * @param borrow Debt value delta added (18-decimal valuation unit).
-    * @param repay Debt value delta removed (18-decimal valuation unit).
+     * @param collateralIn Collateral value delta added (18-decimal valuation unit).
+     * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
+     * @param borrow Debt value delta added (18-decimal valuation unit).
+     * @param repay Debt value delta removed (18-decimal valuation unit).
      */
     function pushUserStatsUpdate(
         address user,
@@ -557,7 +600,16 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 borrow,
         uint256 repay
     ) external onlyValidRegistry onlyStatsPusherOrAdmin {
-        _pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay, bytes32(0), 0, 0);
+        _pushUserStatsUpdate(
+            user,
+            collateralIn,
+            collateralOut,
+            borrow,
+            repay,
+            bytes32(0),
+            0,
+            0
+        );
     }
 
     /**
@@ -573,10 +625,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Strict optimistic concurrency when nextVersion != 0.
      *
      * @param user User address.
-    * @param collateralIn Collateral value delta added (18-decimal valuation unit).
-    * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
-    * @param borrow Debt value delta added (18-decimal valuation unit).
-    * @param repay Debt value delta removed (18-decimal valuation unit).
+     * @param collateralIn Collateral value delta added (18-decimal valuation unit).
+     * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
+     * @param borrow Debt value delta added (18-decimal valuation unit).
+     * @param repay Debt value delta removed (18-decimal valuation unit).
      * @param nextVersion Expected next version (must be current + 1).
      */
     function pushUserStatsUpdate(
@@ -587,7 +639,16 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 repay,
         uint64 nextVersion
     ) external onlyValidRegistry onlyStatsPusherOrAdmin {
-        _pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay, bytes32(0), 0, nextVersion);
+        _pushUserStatsUpdate(
+            user,
+            collateralIn,
+            collateralOut,
+            borrow,
+            repay,
+            bytes32(0),
+            0,
+            nextVersion
+        );
     }
 
     /**
@@ -605,10 +666,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *   this function emits `IdempotentRequestIgnored` and returns without writing.
      *
      * @param user User address.
-    * @param collateralIn Collateral value delta added (18-decimal valuation unit).
-    * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
-    * @param borrow Debt value delta added (18-decimal valuation unit).
-    * @param repay Debt value delta removed (18-decimal valuation unit).
+     * @param collateralIn Collateral value delta added (18-decimal valuation unit).
+     * @param collateralOut Collateral value delta removed (18-decimal valuation unit).
+     * @param borrow Debt value delta added (18-decimal valuation unit).
+     * @param repay Debt value delta removed (18-decimal valuation unit).
      * @param requestId Offchain idempotency key (bytes32(0) disables idempotency short-circuit).
      * @param seq Optional monotonic sequence (0 disables sequence enforcement).
      * @param nextVersion Expected next version (0 means auto-increment).
@@ -623,7 +684,16 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint64 seq,
         uint64 nextVersion
     ) external onlyValidRegistry onlyStatsPusherOrAdmin {
-        _pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay, requestId, seq, nextVersion);
+        _pushUserStatsUpdate(
+            user,
+            collateralIn,
+            collateralOut,
+            borrow,
+            repay,
+            requestId,
+            seq,
+            nextVersion
+        );
     }
 
     /**
@@ -645,8 +715,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *   `(requestId, nextVersion)` can be made idempotent.
      *
      * @param user User address.
-    * @param collateralValue New authoritative total collateral value (18-decimal valuation unit).
-    * @param debtValue New authoritative total debt value (18-decimal valuation unit).
+     * @param collateralValue New authoritative total collateral value (18-decimal valuation unit).
+     * @param debtValue New authoritative total debt value (18-decimal valuation unit).
      * @param requestId Idempotency key (recommended non-zero).
      * @param seq Monotonic ordering sequence (recommended non-zero).
      * @param nextVersion Expected next version (must be current + 1).
@@ -659,7 +729,14 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint64 seq,
         uint64 nextVersion
     ) external onlyValidRegistry onlyStatsPusherOrAdmin {
-        _pushUserStatsSnapshot(user, collateralValue, debtValue, requestId, seq, nextVersion);
+        _pushUserStatsSnapshot(
+            user,
+            collateralValue,
+            debtValue,
+            requestId,
+            seq,
+            nextVersion
+        );
     }
 
     function valuationDecimals() external pure returns (uint8) {
@@ -689,7 +766,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         // - If a tx is replayed after success, currentVersion == applied nextVersion.
         // - If requestId matches the last applied requestId, ignore as idempotent replay.
         if (requestId != bytes32(0) && nextVersion != 0) {
-            if (nextVersion == currentVersion && _lastAppliedUserStatsRequestId[user] == requestId) {
+            if (
+                nextVersion == currentVersion &&
+                _lastAppliedUserStatsRequestId[user] == requestId
+            ) {
                 emit IdempotentRequestIgnored(user, requestId, seq);
                 return;
             }
@@ -698,7 +778,8 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         // Optional monotonic ordering aid (seq):
         if (seq != 0) {
             uint64 curSeq = _userStatsSeq[user];
-            if (seq <= curSeq) revert StatisticsView__OutOfOrderSeq(curSeq, seq);
+            if (seq <= curSeq)
+                revert StatisticsView__OutOfOrderSeq(curSeq, seq);
             _userStatsSeq[user] = seq;
         }
 
@@ -708,7 +789,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         } else {
             // strict: nextVersion must be exactly current + 1
             if (nextVersion != currentVersion + 1) {
-                revert StatisticsView__StaleUserStatsVersion(currentVersion, nextVersion);
+                revert StatisticsView__StaleUserStatsVersion(
+                    currentVersion,
+                    nextVersion
+                );
             }
         }
         _userStatsVersion[user] = newVersion;
@@ -722,7 +806,9 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
             snap.collateral += collateralIn;
         }
         if (collateralOut > 0) {
-            snap.collateral = snap.collateral > collateralOut ? snap.collateral - collateralOut : 0;
+            snap.collateral = snap.collateral > collateralOut
+                ? snap.collateral - collateralOut
+                : 0;
         }
         if (borrow > 0) {
             snap.debt += borrow;
@@ -732,7 +818,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
         // Compute derived metrics (bps).
         snap.ltv = VaultMath.calculateLTV(snap.debt, snap.collateral);
-        snap.healthFactor = VaultMath.calculateHealthFactor(snap.collateral, snap.debt);
+        snap.healthFactor = VaultMath.calculateHealthFactor(
+            snap.collateral,
+            snap.debt
+        );
         snap.blockNumber = block.number;
 
         // Update last activity blockNumber.
@@ -756,7 +845,9 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         }
         if (collateralOut > 0) {
             uint256 tc = _globalSnapshot.totalCollateral;
-            _globalSnapshot.totalCollateral = tc > collateralOut ? tc - collateralOut : 0;
+            _globalSnapshot.totalCollateral = tc > collateralOut
+                ? tc - collateralOut
+                : 0;
         }
         if (borrow > 0) {
             _globalSnapshot.totalDebt += borrow;
@@ -795,7 +886,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint64 currentVersion = _userStatsVersion[user];
         // Idempotency short-circuit (version-bound):
         if (requestId != bytes32(0)) {
-            if (nextVersion == currentVersion && _lastAppliedUserStatsRequestId[user] == requestId) {
+            if (
+                nextVersion == currentVersion &&
+                _lastAppliedUserStatsRequestId[user] == requestId
+            ) {
                 emit IdempotentRequestIgnored(user, requestId, seq);
                 return;
             }
@@ -804,13 +898,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         // Strict ordering (seq):
         if (seq != 0) {
             uint64 curSeq = _userStatsSeq[user];
-            if (seq <= curSeq) revert StatisticsView__OutOfOrderSeq(curSeq, seq);
+            if (seq <= curSeq)
+                revert StatisticsView__OutOfOrderSeq(curSeq, seq);
             _userStatsSeq[user] = seq;
         }
 
         // Strict optimistic concurrency: nextVersion must be exactly current + 1
         if (nextVersion != currentVersion + 1) {
-            revert StatisticsView__StaleUserStatsVersion(currentVersion, nextVersion);
+            revert StatisticsView__StaleUserStatsVersion(
+                currentVersion,
+                nextVersion
+            );
         }
         _userStatsVersion[user] = nextVersion;
         if (requestId != bytes32(0)) {
@@ -825,7 +923,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         snap.collateral = collateralValue;
         snap.debt = debtValue;
         snap.ltv = VaultMath.calculateLTV(snap.debt, snap.collateral);
-        snap.healthFactor = VaultMath.calculateHealthFactor(snap.collateral, snap.debt);
+        snap.healthFactor = VaultMath.calculateHealthFactor(
+            snap.collateral,
+            snap.debt
+        );
         snap.blockNumber = block.number;
         _userLastActiveTime[user] = block.number;
 
@@ -884,10 +985,24 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 collateralOut,
         uint256 borrow,
         uint256 repay
-    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) onlyStatsPusherOrAdmin {
+    )
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+        onlyStatsPusherOrAdmin
+    {
         // NOTE: do NOT use external self-call (`this.`), otherwise msg.sender becomes this contract and
         // would change the effective caller and may fail writer-gating. Keep this as an internal call.
-        _pushUserStatsUpdate(user, collateralIn, collateralOut, borrow, repay, bytes32(0), 0, 0);
+        _pushUserStatsUpdate(
+            user,
+            collateralIn,
+            collateralOut,
+            borrow,
+            repay,
+            bytes32(0),
+            0,
+            0
+        );
     }
 
     /**
@@ -900,7 +1015,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Writer-gated: Registry `KEY_STATS_PUSH_MANAGER` or `ACTION_ADMIN`.
-    * - Emits `DataPushed(DATA_TYPE_GUARANTEE_STATS_UPDATE, payload)` for off-chain monitoring.
+     * - Emits `DataPushed(DATA_TYPE_GUARANTEE_STATS_UPDATE, payload)` for off-chain monitoring.
      *
      * @param user User address.
      * @param asset ERC20 guarantee asset address.
@@ -990,7 +1105,10 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint64 currentVersion = _guaranteeVersion[user][asset];
         // Idempotency short-circuit (version-bound):
         if (requestId != bytes32(0)) {
-            if (nextVersion == currentVersion && _lastAppliedGuaranteeRequestId[user][asset] == requestId) {
+            if (
+                nextVersion == currentVersion &&
+                _lastAppliedGuaranteeRequestId[user][asset] == requestId
+            ) {
                 emit IdempotentRequestIgnored(user, requestId, seq);
                 return;
             }
@@ -999,13 +1117,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         // Strict ordering (seq) per (user, asset):
         if (seq != 0) {
             uint64 curSeq = _guaranteeSeq[user][asset];
-            if (seq <= curSeq) revert StatisticsView__OutOfOrderSeq(curSeq, seq);
+            if (seq <= curSeq)
+                revert StatisticsView__OutOfOrderSeq(curSeq, seq);
             _guaranteeSeq[user][asset] = seq;
         }
 
         // Strict optimistic concurrency:
         if (nextVersion != currentVersion + 1) {
-            revert StatisticsView__StaleUserStatsVersion(currentVersion, nextVersion);
+            revert StatisticsView__StaleUserStatsVersion(
+                currentVersion,
+                nextVersion
+            );
         }
         _guaranteeVersion[user][asset] = nextVersion;
         if (requestId != bytes32(0)) {
@@ -1037,12 +1159,25 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         );
     }
 
-    function _emitUserStatsDataPushed(address user, uint64 version, bytes32 requestId, uint64 seq) internal {
+    function _emitUserStatsDataPushed(
+        address user,
+        uint64 version,
+        bytes32 requestId,
+        uint64 seq
+    ) internal {
         UserSnapshot memory u = _userSnapshots[user];
         GlobalSnapshot memory g = _globalSnapshot;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_USER_STATS_UPDATE,
-            abi.encode(user, version, requestId, seq, _SYSTEM_VALUATION_DECIMALS, u, g)
+            abi.encode(
+                user,
+                version,
+                requestId,
+                seq,
+                _SYSTEM_VALUATION_DECIMALS,
+                u,
+                g
+            )
         );
     }
 
@@ -1070,7 +1205,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         address asset,
         uint256 guaranteeAmount,
         bool isLocked
-    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) onlyStatsPusherOrAdmin {
+    )
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
+        onlyStatsPusherOrAdmin
+    {
         // legacy compatibility: keep ACTION_SET_PARAMETER gate and apply directly
         _applyGuaranteeUpdate(user, asset, guaranteeAmount, isLocked);
     }
@@ -1084,7 +1224,7 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * Security:
      * - Writer-gated: Registry `KEY_STATS_PUSH_MANAGER` or `ACTION_ADMIN`.
-    * - Emits `DataPushed(DATA_TYPE_STATS_SNAPSHOT_RECORDED, payload)` for off-chain monitoring.
+     * - Emits `DataPushed(DATA_TYPE_STATS_SNAPSHOT_RECORDED, payload)` for off-chain monitoring.
      *
      * @param user User address.
      */
@@ -1099,7 +1239,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         // Emit DataPushed for off-chain monitoring and replay diagnostics.
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_STATS_SNAPSHOT_RECORDED,
-            abi.encode(user, blockNumber, _userStatsVersion[user], _userStatsSeq[user])
+            abi.encode(
+                user,
+                blockNumber,
+                _userStatsVersion[user],
+                _userStatsSeq[user]
+            )
         );
     }
 
@@ -1110,16 +1255,19 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @param user User address.
      * @param asset ERC20 guarantee asset address.
-    * @return amount Current cached locked amount in token base units.
-    * @return isValid True if the cache block number is within the configured TTL.
-    * @return blockNumber Cache block number.
+     * @return amount Current cached locked amount in token base units.
+     * @return isValid True if the cache block number is within the configured TTL.
+     * @return blockNumber Cache block number.
      */
-    function getUserGuaranteeBalanceWithMeta(address user, address asset)
+    function getUserGuaranteeBalanceWithMeta(
+        address user,
+        address asset
+    )
         external
         view
         onlyValidRegistry
@@ -1136,15 +1284,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @param asset ERC20 guarantee asset address.
-    * @return amount Current cached total locked amount in token base units.
-    * @return isValid True if the cache block number is within the configured TTL.
-    * @return blockNumber Cache block number.
+     * @return amount Current cached total locked amount in token base units.
+     * @return isValid True if the cache block number is within the configured TTL.
+     * @return blockNumber Cache block number.
      */
-    function getTotalGuaranteeByAssetWithMeta(address asset)
+    function getTotalGuaranteeByAssetWithMeta(
+        address asset
+    )
         external
         view
         returns (uint256 amount, bool isValid, uint256 blockNumber)
@@ -1155,19 +1305,19 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-    * @notice Return reward-related statistics with cache metadata through a best-effort path.
+     * @notice Return reward-related statistics with cache metadata through a best-effort path.
      * @dev Reverts if:
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *
-    * Security:
-    * - View-only.
-    * - Best-effort external dependency: if EasyToken is missing in Registry or the call reverts,
-    *   `r.totalEasyTokenSupply` is returned as 0.
+     * Security:
+     * - View-only.
+     * - Best-effort external dependency: if EasyToken is missing in Registry or the call reverts,
+     *   `r.totalEasyTokenSupply` is returned as 0.
      *   - Callers MUST treat this output as informational (not a ledger SSOT).
      *
-    * @return r Reward stats where `rewardRate` is always 0 and `totalEasyTokenSupply` is best-effort.
-    * @return isValid True if the global snapshot block number is within the configured TTL.
-    * @return blockNumber Cache block number.
+     * @return r Reward stats where `rewardRate` is always 0 and `totalEasyTokenSupply` is best-effort.
+     * @return isValid True if the global snapshot block number is within the configured TTL.
+     * @return blockNumber Cache block number.
      */
     function getRewardStatsWithMeta()
         external
@@ -1180,7 +1330,9 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         // Best-effort: EasyToken.totalSupply(); module may be unset or revert.
         address easyTokenAddr = _getModule(ModuleKeys.KEY_EASY_TOKEN);
         if (easyTokenAddr != address(0)) {
-            try IEasyTokenSupply(easyTokenAddr).totalSupply() returns (uint256 s) {
+            try IEasyTokenSupply(easyTokenAddr).totalSupply() returns (
+                uint256 s
+            ) {
                 r.totalEasyTokenSupply = s;
             } catch {
                 r.totalEasyTokenSupply = 0;
@@ -1195,49 +1347,59 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
-    * @return totalUsers Total seen user count.
-    * @return isValid True if the global snapshot block number is within the configured TTL.
-    * @return blockNumber Global snapshot block number.
+     * @return totalUsers Total seen user count.
+     * @return isValid True if the global snapshot block number is within the configured TTL.
+     * @return blockNumber Global snapshot block number.
      */
-    function getTotalUsersWithMeta() external view returns (uint256 totalUsers, bool isValid, uint256 blockNumber) {
+    function getTotalUsersWithMeta()
+        external
+        view
+        returns (uint256 totalUsers, bool isValid, uint256 blockNumber)
+    {
         totalUsers = _totalUsers;
         blockNumber = _globalSnapshot.blockNumber;
         isValid = _isValid(blockNumber);
     }
 
     /**
-    * @notice Return the last global cache update block number with cache metadata.
+     * @notice Return the last global cache update block number with cache metadata.
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
-    * @return blockNumber Last global update block number.
-    * @return isValid True if `blockNumber` is within the configured TTL.
+     * @return blockNumber Last global update block number.
+     * @return isValid True if `blockNumber` is within the configured TTL.
      */
-    function getLastGlobalUpdateWithMeta() external view returns (uint256 blockNumber, bool isValid) {
+    function getLastGlobalUpdateWithMeta()
+        external
+        view
+        returns (uint256 blockNumber, bool isValid)
+    {
         blockNumber = _lastGlobalUpdate;
         isValid = _isValid(blockNumber);
     }
 
     /**
-    * @notice Return the cached last-activity block number for a user with cache metadata.
+     * @notice Return the cached last-activity block number for a user with cache metadata.
      * @dev Reverts if:
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @param user User address.
-    * @return blockNumber Last activity block number.
-    * @return isValid True if `blockNumber` is within the configured TTL.
+     * @return blockNumber Last activity block number.
+     * @return isValid True if `blockNumber` is within the configured TTL.
      */
-    function getUserLastActiveTimeWithMeta(address user)
+    function getUserLastActiveTimeWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -1249,38 +1411,40 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-    * @notice Return the last guarantee-cache update block number with cache metadata.
+     * @notice Return the last guarantee-cache update block number with cache metadata.
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
-    * @return blockNumber Last guarantee update block number.
-    * @return isValid True if `blockNumber` is within the configured TTL.
+     * @return blockNumber Last guarantee update block number.
+     * @return isValid True if `blockNumber` is within the configured TTL.
      */
-    function getLastGuaranteeUpdateWithMeta() external view returns (uint256 blockNumber, bool isValid) {
+    function getLastGuaranteeUpdateWithMeta()
+        external
+        view
+        returns (uint256 blockNumber, bool isValid)
+    {
         blockNumber = _lastGuaranteeUpdate;
         isValid = _isValid(blockNumber);
     }
 
     /**
-    * @notice Return the last guarantee-cache update block number for an asset with metadata.
+     * @notice Return the last guarantee-cache update block number for an asset with metadata.
      * @dev Reverts if:
      *      - (none)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @param asset ERC20 guarantee asset address.
-    * @return blockNumber Last update block number for the asset.
-    * @return isValid True if `blockNumber` is within the configured TTL.
+     * @return blockNumber Last update block number for the asset.
+     * @return isValid True if `blockNumber` is within the configured TTL.
      */
-    function getGuaranteeLastUpdateByAssetWithMeta(address asset)
-        external
-        view
-        returns (uint256 blockNumber, bool isValid)
-    {
+    function getGuaranteeLastUpdateByAssetWithMeta(
+        address asset
+    ) external view returns (uint256 blockNumber, bool isValid) {
         blockNumber = _guaranteeLastUpdateByAsset[asset];
         isValid = _isValid(blockNumber);
     }
@@ -1291,15 +1455,17 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is not set (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller is not authorized for `user` (see {MissingRole} via Scheme U in onlyUserOrViewer)
      *
-    * Security:
-    * - View-only.
+     * Security:
+     * - View-only.
      *
      * @param user User address.
      * @return isActive True if cached collateral > 0 or cached debt > 0.
      * @return isValid Whether the cached user snapshot blockNumber is within `ViewConstants.CACHE_DURATION`.
      * @return blockNumber User snapshot blockNumber (block.number).
      */
-    function isUserActiveWithMeta(address user)
+    function isUserActiveWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -1311,7 +1477,12 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
         isValid = _isValid(blockNumber);
     }
 
-    function _applyGuaranteeUpdate(address user, address asset, uint256 amount, bool isLocked) internal {
+    function _applyGuaranteeUpdate(
+        address user,
+        address asset,
+        uint256 amount,
+        bool isLocked
+    ) internal {
         if (user == address(0)) revert ZeroAddress();
         if (asset == address(0)) revert ZeroAddress();
 
@@ -1349,13 +1520,23 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /*━━━━━━━━━━━━━━━ UUPS Upgrade ━━━━━━━━━━━━━━━*/
-    function _getModule(bytes32 key) internal view returns (address moduleAddr) {
+    function _getModule(
+        bytes32 key
+    ) internal view returns (address moduleAddr) {
         moduleAddr = Registry(_registryAddr).getModule(key);
     }
 
     function _requireStatsPusherOrAdmin() internal view {
-        if (ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) return;
-        address statsPusher = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_STATS_PUSH_MANAGER);
+        if (
+            ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) return;
+        address statsPusher = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_STATS_PUSH_MANAGER
+        );
         if (msg.sender != statsPusher) revert MissingRole();
     }
 
@@ -1372,14 +1553,24 @@ contract StatisticsView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation New implementation address.
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
-        if (newImplementation == address(0)) revert StatisticsView__ZeroImplementation();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation == address(0))
+            revert StatisticsView__ZeroImplementation();
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
-} 
+}
 
 /// @dev Minimal view-only interface for EasyToken (avoid importing the full implementation).
 interface IEasyTokenSupply {

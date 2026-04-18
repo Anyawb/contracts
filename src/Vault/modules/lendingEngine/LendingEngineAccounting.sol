@@ -37,7 +37,7 @@ library LendingEngineAccounting {
     );
 
     /**
-    * @notice Records a borrow by increasing debt balances and updating cached debt value.
+     * @notice Records a borrow by increasing debt balances and updating cached debt value.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)
@@ -83,7 +83,7 @@ library LendingEngineAccounting {
     }
 
     /**
-    * @notice Records a repayment by decreasing debt balances and updating cached debt value.
+     * @notice Records a repayment by decreasing debt balances and updating cached debt value.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)
@@ -132,7 +132,7 @@ library LendingEngineAccounting {
     }
 
     /**
-    * @notice Records a forced debt reduction for liquidation and updates cached debt value.
+     * @notice Records a forced debt reduction for liquidation and updates cached debt value.
      * @dev Reverts if:
      *      - amount == 0 (AmountIsZero)
      *      - asset == address(0) (ZeroAddress)

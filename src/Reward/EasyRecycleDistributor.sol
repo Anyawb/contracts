@@ -98,7 +98,7 @@ contract EasyRecycleDistributor is
      * - Settlement is not best-effort; transfer or burn failures revert the entire call.
      *
      * @param payer Original account whose Easy spend triggered this settlement.
-    * @param easyAmount Easy amount received by this contract, in 18 decimals.
+     * @param easyAmount Easy amount received by this contract, in 18 decimals.
      * @param spendType Reward spend category propagated to RewardView
      *        observability.
      */

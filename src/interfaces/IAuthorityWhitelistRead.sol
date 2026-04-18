@@ -25,5 +25,7 @@ interface IAuthorityWhitelistRead {
      * @param name Authority, institution, or subject name being queried.
      * @return whitelisted Whether `name` is currently whitelisted.
      */
-    function check(string calldata name) external view returns (bool whitelisted);
+    function check(
+        string calldata name
+    ) external view returns (bool whitelisted);
 }

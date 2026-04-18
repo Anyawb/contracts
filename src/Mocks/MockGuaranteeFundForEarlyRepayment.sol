@@ -29,7 +29,14 @@ contract MockGuaranteeFundForEarlyRepayment {
         uint256 penaltyToLender,
         uint256 platformFee
     ) external returns (bool) {
-        emit Settled(borrower, asset, lender, refundToBorrower, penaltyToLender, platformFee);
+        emit Settled(
+            borrower,
+            asset,
+            lender,
+            refundToBorrower,
+            penaltyToLender,
+            platformFee
+        );
         return true;
     }
 

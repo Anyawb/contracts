@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
 
 /// @title TestModuleKeys
 /// @notice Test-only helper contract for scripts/checks/checkKeys.ts
@@ -15,4 +15,3 @@ contract TestModuleKeys {
         return ModuleKeys.getKeyCount();
     }
 }
-

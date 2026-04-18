@@ -9,4 +9,4 @@ contract MockWhitelistRegistry {
     function check(address addr) external view returns (bool) {
         return _list[addr];
     }
-} 
+}

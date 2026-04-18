@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Registry } from "../registry/Registry.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { IVaultRouter } from "../interfaces/IVaultRouter.sol";
-import { ICollateralManager } from "../interfaces/ICollateralManager.sol";
-import { IAssetWhitelistRead } from "../interfaces/IAssetWhitelistRead.sol";
-import { NotAContract, ZeroAddress, AmountIsZero, AssetNotAllowed } from "../errors/StandardErrors.sol";
-import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import { IPositionView } from "../interfaces/IPositionView.sol";
-import { ICacheRefreshable } from "../interfaces/ICacheRefreshable.sol";
-import { IFeeRouterView } from "../interfaces/IFeeRouterView.sol";
+import {Registry} from "../registry/Registry.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {IVaultRouter} from "../interfaces/IVaultRouter.sol";
+import {ICollateralManager} from "../interfaces/ICollateralManager.sol";
+import {IAssetWhitelistRead} from "../interfaces/IAssetWhitelistRead.sol";
+import {
+    NotAContract,
+    ZeroAddress,
+    AmountIsZero,
+    AssetNotAllowed
+} from "../errors/StandardErrors.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {IPositionView} from "../interfaces/IPositionView.sol";
+import {ICacheRefreshable} from "../interfaces/ICacheRefreshable.sol";
+import {IFeeRouterView} from "../interfaces/IFeeRouterView.sol";
 
 /**
  * @title VaultRouter
@@ -66,31 +71,31 @@ contract VaultRouter is
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
     /**
      * @notice Emitted when VaultRouter is initialized.
-        * @dev Event only.
-        * @param registry Registry address.
-        * @param assetWhitelist AssetWhitelist address.
+     * @dev Event only.
+     * @param registry Registry address.
+     * @param assetWhitelist AssetWhitelist address.
      */
     event VaultRouterInitialized(
-        address indexed registry, 
+        address indexed registry,
         address indexed assetWhitelist
     );
 
     /**
      * @notice Emitted when VaultCore routes a deposit/withdraw user operation.
-        * @dev Event only.
-        * @param action Operation type defined in ActionKeys.
-        * @param user User address.
-        * @param amount1 Primary amount in token decimals.
-        * @param amount2 Secondary amount, reserved and currently zero.
-        * @param asset Asset address.
+     * @dev Event only.
+     * @param action Operation type defined in ActionKeys.
+     * @param user User address.
+     * @param amount1 Primary amount in token decimals.
+     * @param amount2 Secondary amount, reserved and currently zero.
+     * @param asset Asset address.
      * @param blockNumber Legacy field: the time axis marker supplied by VaultCore.
      *                  NOTE: in this repo, this is treated as `blockNumber` (observability only).
      */
     event VaultAction(
-        bytes32 indexed action, 
-        address indexed user, 
-        uint256 amount1, 
-        uint256 amount2, 
+        bytes32 indexed action,
+        address indexed user,
+        uint256 amount1,
+        uint256 amount2,
         address indexed asset,
         uint256 blockNumber
     );
@@ -108,14 +113,14 @@ contract VaultRouter is
 
     /**
      * @notice Emitted when a full user position push is forwarded to PositionView.
-        * @dev Event only.
-        * @param user User address.
-        * @param asset Asset address.
-        * @param collateral Collateral amount in token decimals.
-        * @param debt Debt amount in token decimals.
+     * @dev Event only.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param collateral Collateral amount in token decimals.
+     * @param debt Debt amount in token decimals.
      * @param blockNumber Legacy field: emitted time axis marker (treated as blockNumber in this repo)
-        * @param requestId Idempotency key, which may be zero.
-        * @param seq Monotonic sequence, which may be zero.
+     * @param requestId Idempotency key, which may be zero.
+     * @param seq Monotonic sequence, which may be zero.
      */
     event UserPositionPushed(
         address indexed user,
@@ -141,14 +146,14 @@ contract VaultRouter is
 
     /**
      * @notice Emitted when a delta user position push is forwarded to PositionView.
-        * @dev Event only.
-        * @param user User address.
-        * @param asset Asset address.
-        * @param collateralDelta Signed collateral delta in token decimals.
-        * @param debtDelta Signed debt delta in token decimals.
+     * @dev Event only.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param collateralDelta Signed collateral delta in token decimals.
+     * @param debtDelta Signed debt delta in token decimals.
      * @param blockNumber Legacy field: emitted time axis marker (treated as blockNumber in this repo)
-        * @param requestId Idempotency key, which may be zero.
-        * @param seq Monotonic sequence, which may be zero.
+     * @param requestId Idempotency key, which may be zero.
+     * @param seq Monotonic sequence, which may be zero.
      */
     event UserPositionDeltaPushed(
         address indexed user,
@@ -174,14 +179,14 @@ contract VaultRouter is
 
     /**
      * @notice Emitted when aggregated asset stats are pushed (for off-chain consumers).
-        * @dev Event only.
-        * @param asset Asset address.
-        * @param totalCollateral Total collateral in token decimals.
-        * @param totalDebt Total debt in token decimals.
-        * @param price Asset price in upstream oracle-defined precision.
+     * @dev Event only.
+     * @param asset Asset address.
+     * @param totalCollateral Total collateral in token decimals.
+     * @param totalDebt Total debt in token decimals.
+     * @param price Asset price in upstream oracle-defined precision.
      * @param blockNumber Legacy field: emitted time axis marker (treated as blockNumber in this repo)
-        * @param requestId Idempotency key, which may be zero.
-        * @param seq Monotonic sequence, which may be zero.
+     * @param requestId Idempotency key, which may be zero.
+     * @param seq Monotonic sequence, which may be zero.
      */
     event AssetStatsPushed(
         address indexed asset,
@@ -207,7 +212,7 @@ contract VaultRouter is
 
     /**
      * @notice Emitted when A-class module address cache is refreshed.
-        * @dev Event only.
+     * @dev Event only.
      * @param updateBlock Legacy field: refresh time axis marker (treated as updateBlock in this repo)
      */
     event ModuleCacheRefreshed(uint256 updateBlock);
@@ -217,7 +222,10 @@ contract VaultRouter is
     event ModuleCacheRefreshedAtBlock(uint256 updateBlock);
 
     /// @notice Emitted when the dedicated FeeRouterView target is updated.
-    event FeeRouterViewUpdated(address indexed oldView, address indexed newView);
+    event FeeRouterViewUpdated(
+        address indexed oldView,
+        address indexed newView
+    );
 
     /*━━━━━━━━━━━━━━━ Custom errors ━━━━━━━━━━━━━━━*/
     /// @dev Reverts when the caller is not authorized for the requested operation.
@@ -244,14 +252,14 @@ contract VaultRouter is
      *      - initialOwner == address(0)
      *
      * Security:
-    * - Initializer: callable once.
-    * - UUPS upgrade authorization is owner-gated.
+     * - Initializer: callable once.
+     * - UUPS upgrade authorization is owner-gated.
      *
-    * @param initialRegistry Registry address.
-    * @param initialAssetWhitelist AssetWhitelist address.
-    * @param initialPriceOracle Unused parameter kept for deployment compatibility.
-    * @param initialSettlementToken Unused parameter kept for deployment compatibility.
-    * @param initialOwner Initial owner of this contract.
+     * @param initialRegistry Registry address.
+     * @param initialAssetWhitelist AssetWhitelist address.
+     * @param initialPriceOracle Unused parameter kept for deployment compatibility.
+     * @param initialSettlementToken Unused parameter kept for deployment compatibility.
+     * @param initialOwner Initial owner of this contract.
      */
     function initialize(
         address initialRegistry,
@@ -300,7 +308,9 @@ contract VaultRouter is
      * @dev Reverts with VaultRouter__UnauthorizedAccess() if caller is not VaultCore.
      */
     modifier onlyVaultCore() {
-        address vaultCore = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_VAULT_CORE);
+        address vaultCore = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_VAULT_CORE
+        );
         if (msg.sender != vaultCore) revert VaultRouter__UnauthorizedAccess();
         _;
     }
@@ -310,7 +320,9 @@ contract VaultRouter is
      * @dev Reverts with VaultRouter__UnauthorizedAccess() if caller is not Registry.KEY_FR.
      */
     modifier onlyFeeRouter() {
-        address feeRouter = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_FR);
+        address feeRouter = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_FR
+        );
         if (msg.sender != feeRouter) revert VaultRouter__UnauthorizedAccess();
         _;
     }
@@ -333,7 +345,9 @@ contract VaultRouter is
      * @param user Caller to be checked
      */
     function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
@@ -367,16 +381,22 @@ contract VaultRouter is
         // A-class cache hardening (Architecture-Guide / Security-Guards SSOT):
         // If the Registry module address changed since our last refresh, we MUST NOT continue routing to the old
         // cached address (silent wrong route). Governance must refresh A-class caches via CacheMaintenanceManager.
-        address current = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
+        address current = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_CM
+        );
         uint256 nowBlock = _now();
         // Uninitialized or expired cache: refresh to current.
-        if (_cachedCmAddr == address(0) || nowBlock > _lastCacheUpdateBlock + _CACHE_EXPIRY_BLOCKS) {
+        if (
+            _cachedCmAddr == address(0) ||
+            nowBlock > _lastCacheUpdateBlock + _CACHE_EXPIRY_BLOCKS
+        ) {
             _cachedCmAddr = current;
             _lastCacheUpdateBlock = nowBlock;
             return current;
         }
         // Cache is within expiry: reject if Registry changed to avoid silent wrong route.
-        if (_cachedCmAddr != current) revert VaultRouter__StaleModuleCache(_cachedCmAddr, current);
+        if (_cachedCmAddr != current)
+            revert VaultRouter__StaleModuleCache(_cachedCmAddr, current);
         return _cachedCmAddr;
     }
 
@@ -396,7 +416,14 @@ contract VaultRouter is
         address asset
     ) internal {
         emit VaultAction(action, user, amount1, amount2, asset, block.number);
-        emit VaultActionAtBlock(action, user, amount1, amount2, asset, block.number);
+        emit VaultActionAtBlock(
+            action,
+            user,
+            amount1,
+            amount2,
+            asset,
+            block.number
+        );
     }
 
     /*━━━━━━━━━━━━━━━ Core routing ━━━━━━━━━━━━━━━*/
@@ -411,15 +438,15 @@ contract VaultRouter is
      *      - operationType is not ACTION_DEPOSIT or ACTION_WITHDRAW
      *
      * Security:
-    * - onlyVaultCore single write entrypoint.
-    * - Non-reentrant.
-    * - Pausable via `whenNotPaused`.
+     * - onlyVaultCore single write entrypoint.
+     * - Non-reentrant.
+     * - Pausable via `whenNotPaused`.
      *
-    * @param user User address.
-    * @param operationType Action key defined in ActionKeys.
-    * @param asset Asset address.
-    * @param amount Amount in token decimals.
-    * @param blockNumber Block marker supplied by VaultCore.
+     * @param user User address.
+     * @param operationType Action key defined in ActionKeys.
+     * @param asset Asset address.
+     * @param amount Amount in token decimals.
+     * @param blockNumber Block marker supplied by VaultCore.
      */
     function processUserOperation(
         address user,
@@ -427,7 +454,14 @@ contract VaultRouter is
         address asset,
         uint256 amount,
         uint256 blockNumber
-    ) external override whenNotPaused onlyValidRegistry onlyVaultCore nonReentrant {
+    )
+        external
+        override
+        whenNotPaused
+        onlyValidRegistry
+        onlyVaultCore
+        nonReentrant
+    {
         // Basic validation
         _validateAsset(asset);
         _validateAmount(amount);
@@ -445,7 +479,14 @@ contract VaultRouter is
         }
 
         emit VaultAction(operationType, user, amount, 0, asset, blockNumber);
-        emit VaultActionAtBlock(operationType, user, amount, 0, asset, blockNumber);
+        emit VaultActionAtBlock(
+            operationType,
+            user,
+            amount,
+            0,
+            asset,
+            blockNumber
+        );
     }
 
     /**
@@ -457,20 +498,20 @@ contract VaultRouter is
      *      - PositionView reverts
      *
      * Security:
-    * - onlyVaultCore single push entrypoint.
-    * - Registry-gated dependency resolution.
+     * - onlyVaultCore single push entrypoint.
+     * - Registry-gated dependency resolution.
      *
      * Architecture note:
      * - VaultRouter is a slim forwarder. It MUST NOT read PositionView to compute deltas.
      * - Statistics updates, if any, should be pushed via the delta push path.
      *
-    * @param user User address.
-    * @param asset Asset address.
-    * @param collateral Collateral amount in token decimals.
-    * @param debt Debt amount in token decimals.
-    * @param requestId Idempotency key, which may be zero.
-    * @param seq Sequence number, which may be zero.
-    * @param nextVersion Target cache version in PositionView. Zero means auto-increment mode.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param collateral Collateral amount in token decimals.
+     * @param debt Debt amount in token decimals.
+     * @param requestId Idempotency key, which may be zero.
+     * @param seq Sequence number, which may be zero.
+     * @param nextVersion Target cache version in PositionView. Zero means auto-increment mode.
      */
     function pushUserPositionUpdate(
         address user,
@@ -481,10 +522,36 @@ contract VaultRouter is
         uint64 seq,
         uint64 nextVersion
     ) external override onlyValidRegistry onlyVaultCore {
-        address pv = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
-        IPositionView(pv).pushUserPositionUpdate(user, asset, collateral, debt, requestId, seq, nextVersion);
-        emit UserPositionPushed(user, asset, collateral, debt, block.number, requestId, seq);
-        emit UserPositionPushedAtBlock(user, asset, collateral, debt, block.number, requestId, seq);
+        address pv = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_POSITION_VIEW
+        );
+        IPositionView(pv).pushUserPositionUpdate(
+            user,
+            asset,
+            collateral,
+            debt,
+            requestId,
+            seq,
+            nextVersion
+        );
+        emit UserPositionPushed(
+            user,
+            asset,
+            collateral,
+            debt,
+            block.number,
+            requestId,
+            seq
+        );
+        emit UserPositionPushedAtBlock(
+            user,
+            asset,
+            collateral,
+            debt,
+            block.number,
+            requestId,
+            seq
+        );
     }
 
     /**
@@ -496,19 +563,19 @@ contract VaultRouter is
      *      - PositionView reverts
      *
      * Security:
-    * - onlyVaultCore single push entrypoint.
-    * - Registry-gated dependency resolution.
+     * - onlyVaultCore single push entrypoint.
+     * - Registry-gated dependency resolution.
      *
      * Architecture note:
      * - StatisticsView updates are best-effort and driven by deltas (no reads in VaultRouter).
      *
-    * @param user User address.
-    * @param asset Asset address.
-    * @param collateralDelta Signed collateral delta in token decimals.
-    * @param debtDelta Signed debt delta in token decimals.
-    * @param requestId Idempotency key, which may be zero.
-    * @param seq Sequence number, which may be zero.
-    * @param nextVersion Target cache version in PositionView. Zero means auto-increment mode.
+     * @param user User address.
+     * @param asset Asset address.
+     * @param collateralDelta Signed collateral delta in token decimals.
+     * @param debtDelta Signed debt delta in token decimals.
+     * @param requestId Idempotency key, which may be zero.
+     * @param seq Sequence number, which may be zero.
+     * @param nextVersion Target cache version in PositionView. Zero means auto-increment mode.
      */
     function pushUserPositionUpdateDelta(
         address user,
@@ -519,7 +586,9 @@ contract VaultRouter is
         uint64 seq,
         uint64 nextVersion
     ) external override onlyValidRegistry onlyVaultCore {
-        address pv = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_POSITION_VIEW);
+        address pv = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_POSITION_VIEW
+        );
         IPositionView(pv).pushUserPositionUpdateDelta(
             user,
             asset,
@@ -529,8 +598,24 @@ contract VaultRouter is
             seq,
             nextVersion
         );
-        emit UserPositionDeltaPushed(user, asset, collateralDelta, debtDelta, block.number, requestId, seq);
-        emit UserPositionDeltaPushedAtBlock(user, asset, collateralDelta, debtDelta, block.number, requestId, seq);
+        emit UserPositionDeltaPushed(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            block.number,
+            requestId,
+            seq
+        );
+        emit UserPositionDeltaPushedAtBlock(
+            user,
+            asset,
+            collateralDelta,
+            debtDelta,
+            block.number,
+            requestId,
+            seq
+        );
     }
 
     function _absToUint(int256 x) internal pure returns (uint256) {
@@ -546,15 +631,15 @@ contract VaultRouter is
      *      - caller != VaultCore
      *
      * Security:
-    * - onlyVaultCore.
-    * - Non-reentrant.
+     * - onlyVaultCore.
+     * - Non-reentrant.
      *
-    * @param asset Asset address.
-    * @param totalCollateral Total collateral in token decimals.
-    * @param totalDebt Total debt in token decimals.
-    * @param price Asset price in upstream oracle-defined precision.
-    * @param requestId Idempotency key, which may be zero.
-    * @param seq Sequence number, which may be zero.
+     * @param asset Asset address.
+     * @param totalCollateral Total collateral in token decimals.
+     * @param totalDebt Total debt in token decimals.
+     * @param price Asset price in upstream oracle-defined precision.
+     * @param requestId Idempotency key, which may be zero.
+     * @param seq Sequence number, which may be zero.
      */
     function pushAssetStatsUpdate(
         address asset,
@@ -564,7 +649,14 @@ contract VaultRouter is
         bytes32 requestId,
         uint64 seq
     ) external override onlyValidRegistry onlyVaultCore nonReentrant {
-        _emitAssetStatsUpdate(asset, totalCollateral, totalDebt, price, requestId, seq);
+        _emitAssetStatsUpdate(
+            asset,
+            totalCollateral,
+            totalDebt,
+            price,
+            requestId,
+            seq
+        );
     }
 
     function _emitAssetStatsUpdate(
@@ -575,14 +667,37 @@ contract VaultRouter is
         bytes32 requestId,
         uint64 seq
     ) internal {
-        emit AssetStatsPushed(asset, totalCollateral, totalDebt, price, block.number, requestId, seq);
-        emit AssetStatsPushedAtBlock(asset, totalCollateral, totalDebt, price, block.number, requestId, seq);
+        emit AssetStatsPushed(
+            asset,
+            totalCollateral,
+            totalDebt,
+            price,
+            block.number,
+            requestId,
+            seq
+        );
+        emit AssetStatsPushedAtBlock(
+            asset,
+            totalCollateral,
+            totalDebt,
+            price,
+            block.number,
+            requestId,
+            seq
+        );
     }
 
     /// @dev Resolve the dedicated FeeRouterView module.
-    function _getFeeRouterView() internal view returns (IFeeRouterView feeRouterView) {
+    function _getFeeRouterView()
+        internal
+        view
+        returns (IFeeRouterView feeRouterView)
+    {
         address feeRouterViewAddr = _feeRouterViewAddr;
-        if (feeRouterViewAddr == address(0) || feeRouterViewAddr.code.length == 0) {
+        if (
+            feeRouterViewAddr == address(0) ||
+            feeRouterViewAddr.code.length == 0
+        ) {
             revert VaultRouter__UnauthorizedAccess();
         }
         feeRouterView = IFeeRouterView(feeRouterViewAddr);
@@ -591,7 +706,11 @@ contract VaultRouter is
     /**
      * @notice Return the configured FeeRouterView target behind the canonical gateway.
      */
-    function feeRouterViewAddrVar() external view returns (address feeRouterViewAddr) {
+    function feeRouterViewAddrVar()
+        external
+        view
+        returns (address feeRouterViewAddr)
+    {
         return _feeRouterViewAddr;
     }
 
@@ -602,9 +721,13 @@ contract VaultRouter is
      *      - caller lacks ACTION_SET_PARAMETER
      *      - newFeeRouterView is a non-zero EOA or empty-code address
      */
-    function setFeeRouterView(address newFeeRouterView) external onlyValidRegistry {
+    function setFeeRouterView(
+        address newFeeRouterView
+    ) external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender);
-        if (newFeeRouterView != address(0) && newFeeRouterView.code.length == 0) {
+        if (
+            newFeeRouterView != address(0) && newFeeRouterView.code.length == 0
+        ) {
             revert NotAContract(newFeeRouterView);
         }
 
@@ -622,7 +745,12 @@ contract VaultRouter is
         uint256 feeAmount,
         uint256 personalFeeBps
     ) external override onlyValidRegistry onlyFeeRouter {
-        _getFeeRouterView().pushUserFeeUpdate(user, feeType, feeAmount, personalFeeBps);
+        _getFeeRouterView().pushUserFeeUpdate(
+            user,
+            feeType,
+            feeAmount,
+            personalFeeBps
+        );
     }
 
     /**
@@ -632,7 +760,10 @@ contract VaultRouter is
         uint256 totalDistributions,
         uint256 totalAmountDistributed
     ) external override onlyValidRegistry onlyFeeRouter {
-        _getFeeRouterView().pushGlobalStatsUpdate(totalDistributions, totalAmountDistributed);
+        _getFeeRouterView().pushGlobalStatsUpdate(
+            totalDistributions,
+            totalAmountDistributed
+        );
     }
 
     /**
@@ -674,7 +805,7 @@ contract VaultRouter is
      *      - msg.sender lacks ACTION_PAUSE_SYSTEM
      *
      * Security:
-    * - Role-gated via ACM.
+     * - Role-gated via ACM.
      */
     function pause() external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_PAUSE_SYSTEM, msg.sender);
@@ -695,7 +826,7 @@ contract VaultRouter is
      *      - msg.sender lacks ACTION_UNPAUSE_SYSTEM
      *
      * Security:
-    * - Role-gated via ACM.
+     * - Role-gated via ACM.
      */
     function unpause() external onlyValidRegistry {
         _requireRole(ActionKeys.ACTION_UNPAUSE_SYSTEM, msg.sender);
@@ -719,14 +850,23 @@ contract VaultRouter is
      *      - Registry module resolution fails
      *
      * Security:
-    * - Restricted to CacheMaintenanceManager as the single operational refresh entrypoint.
-    * - Non-reentrant.
+     * - Restricted to CacheMaintenanceManager as the single operational refresh entrypoint.
+     * - Non-reentrant.
      */
-    function refreshModuleCache() external override onlyValidRegistry nonReentrant {
+    function refreshModuleCache()
+        external
+        override
+        onlyValidRegistry
+        nonReentrant
+    {
         // Unified entry: only CacheMaintenanceManager can refresh module caches.
-        address maint = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER);
+        address maint = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_CACHE_MAINTENANCE_MANAGER
+        );
         if (msg.sender != maint) revert VaultRouter__UnauthorizedAccess();
-        _cachedCmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_CM);
+        _cachedCmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_CM
+        );
         _lastCacheUpdateBlock = _now();
         emit ModuleCacheRefreshed(_lastCacheUpdateBlock);
         emit ModuleCacheRefreshedAtBlock(_lastCacheUpdateBlock);
@@ -734,17 +874,19 @@ contract VaultRouter is
 
     /**
      * @notice Returns true if module cache is initialized and not expired.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only cache-health check.
-        *
-        * @return isValid True if the cache block number is within the configured expiry window.
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only cache-health check.
+     *
+     * @return isValid True if the cache block number is within the configured expiry window.
      */
     function isModuleCacheValid() external view returns (bool) {
-        return _lastCacheUpdateBlock != 0 && _now() <= _lastCacheUpdateBlock + _CACHE_EXPIRY_BLOCKS;
+        return
+            _lastCacheUpdateBlock != 0 &&
+            _now() <= _lastCacheUpdateBlock + _CACHE_EXPIRY_BLOCKS;
     }
 
     /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
     uint256[49] private __gap;
-} 
+}

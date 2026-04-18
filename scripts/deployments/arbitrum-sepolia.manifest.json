@@ -1,8 +1,8 @@
 {
   "network": "arbitrum-sepolia",
   "chainId": 421614,
-  "releaseId": "arbitrum-sepolia-20260414085107261",
-  "generatedAt": "2026-04-14T08:51:07.260Z",
+  "releaseId": "arbitrum-sepolia-20260417012809620",
+  "generatedAt": "2026-04-17T01:28:09.619Z",
   "deployOutputFile": "scripts/deployments/arbitrum-sepolia.json",
   "frontendConfigFile": "frontend-config/networks/arbitrum-sepolia.ts",
   "frontendReleaseFile": "frontend-config/networks/arbitrum-sepolia.release.json",

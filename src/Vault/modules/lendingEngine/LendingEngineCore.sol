@@ -16,7 +16,8 @@ import {HealthEvents} from "../../HealthEvents.sol";
 import {LendingEngineStorage} from "./LendingEngineStorage.sol";
 import {LendingEngineAccounting} from "./LendingEngineAccounting.sol";
 
-/// @notice Minimal interface for HealthView
+/// @notice Local push-only adapter for HealthView cache writes.
+/// @dev This interface is intentionally write-scoped and must not be treated as a shared read boundary.
 interface IHealthViewMinimal {
     function pushRiskStatus(
         address user,

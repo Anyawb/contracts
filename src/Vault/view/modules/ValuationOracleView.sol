@@ -1,21 +1,27 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { IPriceOracleRead } from "../../../interfaces/IPriceOracleRead.sol";
-import { GracefulDegradation } from "../../../libraries/GracefulDegradation.sol";
-import { AssetDecimalMath } from "../../../libraries/AssetDecimalMath.sol";
-import { SystemEvents } from "../../SystemEvents.sol";
-import { BatchTooLarge, EmptyArray, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {IPriceOracleRead} from "../../../interfaces/IPriceOracleRead.sol";
+import {GracefulDegradation} from "../../../libraries/GracefulDegradation.sol";
+import {AssetDecimalMath} from "../../../libraries/AssetDecimalMath.sol";
+import {SystemEvents} from "../../SystemEvents.sol";
+import {
+    BatchTooLarge,
+    EmptyArray,
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
 
 /**
  * @title ValuationOracleView
@@ -39,7 +45,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
     /// @dev Reverts when an upgrade implementation address is the zero address.
     error ValuationOracleView__ZeroImplementation();
-    
+
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
     /// @dev Ensures the Registry address is configured and is a contract.
     modifier onlyValidRegistry() {
@@ -47,10 +53,16 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
-    
+
     /// @dev Ensures the caller has the ACTION_VIEW_PRICE_DATA role in the Registry ACM.
     modifier onlyPriceViewer() {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_PRICE_DATA, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_PRICE_DATA,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         _;
@@ -59,9 +71,17 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U: self-read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyUserOrViewer(address user) {
         if (
-            msg.sender != user
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            msg.sender != user &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -93,7 +113,8 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -123,17 +144,23 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
-    * - Best-effort oracle call: returns `(0, 0, false)` if the oracle call fails.
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+     * - Best-effort oracle call: returns `(0, 0, false)` if the oracle call fails.
      *
-    * @param asset Asset address.
-    * @return price Asset price in the asset's valuation unit.
-    * @return blockNumber Oracle update block number.
-    * @return isValid True if the oracle call succeeded.
+     * @param asset Asset address.
+     * @return price Asset price in the asset's valuation unit.
+     * @return blockNumber Oracle update block number.
+     * @return isValid True if the oracle call succeeded.
      */
     function getAssetPrice(
         address asset
-    ) external view onlyValidRegistry onlyPriceViewer returns (uint256 price, uint256 blockNumber, bool isValid) {
+    )
+        external
+        view
+        onlyValidRegistry
+        onlyPriceViewer
+        returns (uint256 price, uint256 blockNumber, bool isValid)
+    {
         address priceOracle = _priceOracle();
 
         try IPriceOracleRead(priceOracle).getPrice(asset) returns (
@@ -149,23 +176,34 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /**
      * @notice Returns the latest price, blockNumber, and token decimals for a single asset, with metadata.
-    * @dev This is the canonical "ERC-20 aware" read: `assetDecimals` is required to convert
-    *      `amount(token base units)` into asset-native value.
+     * @dev This is the canonical "ERC-20 aware" read: `assetDecimals` is required to convert
+     *      `amount(token base units)` into asset-native value.
      *
-    * @return price Asset price in the asset's valuation unit.
-    * @return blockNumber Oracle update block number.
-    * @return assetDecimals ERC-20 token decimals returned by the oracle.
-    * @return isValid True if the oracle call succeeded.
+     * @return price Asset price in the asset's valuation unit.
+     * @return blockNumber Oracle update block number.
+     * @return assetDecimals ERC-20 token decimals returned by the oracle.
+     * @return isValid True if the oracle call succeeded.
      */
-    function getAssetPriceWithDecimals(address asset)
+    function getAssetPriceWithDecimals(
+        address asset
+    )
         external
         view
         onlyValidRegistry
         onlyPriceViewer
-        returns (uint256 price, uint256 blockNumber, uint256 assetDecimals, bool isValid)
+        returns (
+            uint256 price,
+            uint256 blockNumber,
+            uint256 assetDecimals,
+            bool isValid
+        )
     {
         address priceOracle = _priceOracle();
-        try IPriceOracleRead(priceOracle).getPrice(asset) returns (uint256 p, uint256 oracleBlockNumber, uint256 dAsset) {
+        try IPriceOracleRead(priceOracle).getPrice(asset) returns (
+            uint256 p,
+            uint256 oracleBlockNumber,
+            uint256 dAsset
+        ) {
             return (p, oracleBlockNumber, dAsset, true);
         } catch {
             return (0, 0, 0, false);
@@ -173,22 +211,25 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-    * @notice Convert an ERC-20 `amount` into asset-native value using the PriceOracle SSOT.
+     * @notice Convert an ERC-20 `amount` into asset-native value using the PriceOracle SSOT.
      * @dev Best-effort: returns (0,0,false) if the oracle call fails.
      *
      * Value Unit SSOT:
-    * - price is scaled by `assetDecimals`
-    * - assetDecimals is the ERC-20 decimals
-    * - value(assetDecimals) = amount(token base units) * price(assetDecimals) / 10**assetDecimals
-    * - the function name is retained for ABI compatibility only
+     * - price is scaled by `assetDecimals`
+     * - assetDecimals is the ERC-20 decimals
+     * - value(assetDecimals) = amount(token base units) * price(assetDecimals) / 10**assetDecimals
+     * - the function name is retained for ABI compatibility only
      *
-    * @param asset ERC-20 asset address.
-    * @param amount Amount in token base units.
-    * @return valueUsd8 Converted value in the asset's valuation unit.
-    * @return priceUpdateBlock Oracle update block number.
-    * @return isValid True if the oracle call succeeded.
+     * @param asset ERC-20 asset address.
+     * @param amount Amount in token base units.
+     * @return valueUsd8 Converted value in the asset's valuation unit.
+     * @return priceUpdateBlock Oracle update block number.
+     * @return isValid True if the oracle call succeeded.
      */
-    function getAssetValueUsd8(address asset, uint256 amount)
+    function getAssetValueUsd8(
+        address asset,
+        uint256 amount
+    )
         external
         view
         onlyValidRegistry
@@ -197,10 +238,18 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         if (asset == address(0) || amount == 0) return (0, 0, true);
         address priceOracle = _priceOracle();
-        try IPriceOracleRead(priceOracle).getPrice(asset) returns (uint256 p, uint256 blockNumber, uint256 dAsset) {
+        try IPriceOracleRead(priceOracle).getPrice(asset) returns (
+            uint256 p,
+            uint256 blockNumber,
+            uint256 dAsset
+        ) {
             if (p == 0) return (0, blockNumber, true);
             if (dAsset > 77) return (0, blockNumber, false);
-            return (AssetDecimalMath.calcValue(amount, p, uint8(dAsset)), blockNumber, true);
+            return (
+                AssetDecimalMath.calcValue(amount, p, uint8(dAsset)),
+                blockNumber,
+                true
+            );
         } catch {
             return (0, 0, false);
         }
@@ -215,13 +264,13 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
-    * - Best-effort oracle call: returns zero-filled arrays if the oracle call fails.
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+     * - Best-effort oracle call: returns zero-filled arrays if the oracle call fails.
      *
-    * @param assets Asset addresses.
-    * @return prices Asset prices in oracle-defined precision.
-    * @return blockNumbers Oracle update block numbers.
-    * @return validFlags Per-asset validity flags.
+     * @param assets Asset addresses.
+     * @return prices Asset prices in oracle-defined precision.
+     * @return blockNumbers Oracle update block numbers.
+     * @return validFlags Per-asset validity flags.
      */
     function getAssetPrices(
         address[] calldata assets
@@ -230,11 +279,16 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyPriceViewer
-        returns (uint256[] memory prices, uint256[] memory blockNumbers, bool[] memory validFlags)
+        returns (
+            uint256[] memory prices,
+            uint256[] memory blockNumbers,
+            bool[] memory validFlags
+        )
     {
         uint256 length = assets.length;
         if (length == 0) revert EmptyArray();
-        if (length > _MAX_BATCH_SIZE) revert BatchTooLarge(length, _MAX_BATCH_SIZE);
+        if (length > _MAX_BATCH_SIZE)
+            revert BatchTooLarge(length, _MAX_BATCH_SIZE);
 
         prices = new uint256[](length);
         blockNumbers = new uint256[](length);
@@ -254,14 +308,17 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
                 }
                 return (prices, blockNumbers, validFlags);
             }
-        // solhint-disable-next-line no-empty-blocks
+            // solhint-disable-next-line no-empty-blocks
         } catch {
             // Fall through to per-asset best-effort reads.
         }
 
         // Best-effort per-asset fallback to avoid "all zero" on mixed lists.
         for (uint256 i; i < length; ++i) {
-            (uint256 pOne, uint256 tsOne) = _readAssetPrice(priceOracle, assets[i]);
+            (uint256 pOne, uint256 tsOne) = _readAssetPrice(
+                priceOracle,
+                assets[i]
+            );
             prices[i] = pOne;
             blockNumbers[i] = tsOne;
             validFlags[i] = tsOne != 0;
@@ -276,14 +333,16 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
-    * - Best-effort oracle call: returns false if the oracle call fails.
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+     * - Best-effort oracle call: returns false if the oracle call fails.
      *
-    * @param asset Asset address.
-    * @return isValid True if the oracle reports the price is valid.
-    * @return blockNumber Oracle update block number.
+     * @param asset Asset address.
+     * @return isValid True if the oracle reports the price is valid.
+     * @return blockNumber Oracle update block number.
      */
-    function isPriceValid(address asset)
+    function isPriceValid(
+        address asset
+    )
         external
         view
         onlyValidRegistry
@@ -292,7 +351,9 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         address priceOracle = _priceOracle();
 
-        try IPriceOracleRead(priceOracle).isPriceValid(asset) returns (bool ok) {
+        try IPriceOracleRead(priceOracle).isPriceValid(asset) returns (
+            bool ok
+        ) {
             (, uint256 oracleBlockNumber) = _readAssetPrice(priceOracle, asset);
             return (ok, oracleBlockNumber);
         } catch {
@@ -308,13 +369,13 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
-    * - Best-effort oracle call: returns `(false, "oracle call failed", 0)` if the oracle call fails.
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+     * - Best-effort oracle call: returns `(false, "oracle call failed", 0)` if the oracle call fails.
      *
-    * @param asset Asset address.
-    * @return isHealthy True if the oracle reports healthy status for the asset.
-    * @return details Human-readable diagnostic details.
-    * @return blockNumber Read block number.
+     * @param asset Asset address.
+     * @return isHealthy True if the oracle reports healthy status for the asset.
+     * @return details Human-readable diagnostic details.
+     * @return blockNumber Read block number.
      */
     function checkPriceOracleHealth(
         address asset
@@ -331,14 +392,17 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         // Best-effort: if the oracle can expose asset config, use it to provide stable, user-friendly reasons.
         // This avoids leaking low-level revert payloads into UI-facing outputs.
-        try IPriceOracleRead(priceOracle).getAssetConfig(asset) returns (IPriceOracleRead.AssetConfig memory cfg) {
+        try IPriceOracleRead(priceOracle).getAssetConfig(asset) returns (
+            IPriceOracleRead.AssetConfig memory cfg
+        ) {
             if (!cfg.isActive) return (false, "Asset not supported", _now());
         } catch {
             return (false, "oracle call failed", 0);
         }
 
         // Architecture-Guide SSOT: oracle health checks are performed via GracefulDegradation (no bespoke oracle method).
-        (bool healthy, string memory info) = GracefulDegradation.checkPriceOracleHealth(priceOracle, asset);
+        (bool healthy, string memory info) = GracefulDegradation
+            .checkPriceOracleHealth(priceOracle, asset);
         if (!healthy && _shouldMaskOracleFailure(info)) {
             return (false, "oracle call failed", 0);
         }
@@ -355,13 +419,13 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks ACTION_VIEW_PRICE_DATA role (via {ViewAccessLib})
      *
      * Security:
-    * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
-    * - Best-effort oracle call: each asset falls back to `(false, "oracle call failed", 0)` on failure.
+     * - Role-gated reads (ACTION_VIEW_PRICE_DATA).
+     * - Best-effort oracle call: each asset falls back to `(false, "oracle call failed", 0)` on failure.
      *
-    * @param assets Asset addresses.
-    * @return healthStatuses Per-asset health statuses.
-    * @return details Per-asset diagnostic details.
-    * @return blockNumbers Per-asset read block numbers.
+     * @param assets Asset addresses.
+     * @return healthStatuses Per-asset health statuses.
+     * @return details Per-asset diagnostic details.
+     * @return blockNumbers Per-asset read block numbers.
      */
     function batchCheckPriceOracleHealth(
         address[] calldata assets
@@ -370,11 +434,16 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         view
         onlyValidRegistry
         onlyPriceViewer
-        returns (bool[] memory healthStatuses, string[] memory details, uint256[] memory blockNumbers)
+        returns (
+            bool[] memory healthStatuses,
+            string[] memory details,
+            uint256[] memory blockNumbers
+        )
     {
         uint256 length = assets.length;
         if (length == 0) revert EmptyArray();
-        if (length > _MAX_BATCH_SIZE) revert BatchTooLarge(length, _MAX_BATCH_SIZE);
+        if (length > _MAX_BATCH_SIZE)
+            revert BatchTooLarge(length, _MAX_BATCH_SIZE);
 
         healthStatuses = new bool[](length);
         details = new string[](length);
@@ -392,7 +461,9 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
             }
 
             // Stable, user-friendly reasons if the oracle exposes asset config.
-            try IPriceOracleRead(priceOracle).getAssetConfig(asset) returns (IPriceOracleRead.AssetConfig memory cfg) {
+            try IPriceOracleRead(priceOracle).getAssetConfig(asset) returns (
+                IPriceOracleRead.AssetConfig memory cfg
+            ) {
                 if (!cfg.isActive) {
                     healthStatuses[i] = false;
                     details[i] = "Asset not supported";
@@ -406,7 +477,8 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
                 continue;
             }
 
-            (bool healthy, string memory info) = GracefulDegradation.checkPriceOracleHealth(priceOracle, asset);
+            (bool healthy, string memory info) = GracefulDegradation
+                .checkPriceOracleHealth(priceOracle, asset);
             healthStatuses[i] = healthy;
             if (!healthy && _shouldMaskOracleFailure(info)) {
                 details[i] = "oracle call failed";
@@ -419,13 +491,14 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /// @dev For UI-facing read APIs, keep oracle failures stable (do not leak low-level revert decoding).
-    function _shouldMaskOracleFailure(string memory info) internal pure returns (bool) {
+    function _shouldMaskOracleFailure(
+        string memory info
+    ) internal pure returns (bool) {
         bytes memory b = bytes(info);
         // "Price oracle ..." errors come from GracefulDegradation's catch paths.
         if (b.length < 11) return false;
         // Compare prefix "Price oracle"
-        return (
-            b[0] == "P" &&
+        return (b[0] == "P" &&
             b[1] == "r" &&
             b[2] == "i" &&
             b[3] == "c" &&
@@ -435,8 +508,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
             b[7] == "r" &&
             b[8] == "a" &&
             b[9] == "c" &&
-            b[10] == "l"
-        );
+            b[10] == "l");
     }
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
@@ -446,7 +518,10 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         return block.number;
     }
 
-    function _readAssetPrice(address oracle, address asset) internal view returns (uint256 price, uint256 blockNumber) {
+    function _readAssetPrice(
+        address oracle,
+        address asset
+    ) internal view returns (uint256 price, uint256 blockNumber) {
         try IPriceOracleRead(oracle).getPrice(asset) returns (
             uint256 p,
             uint256 oracleBlockNumber,
@@ -460,7 +535,7 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Admin ━━━━━━━━━━━━━━━*/
     /**
-    * @notice Return the Registry address through the admin-gated accessor.
+     * @notice Return the Registry address through the admin-gated accessor.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
      *      - caller lacks ACTION_ADMIN role (via {ViewAccessLib})
@@ -470,8 +545,19 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @return registryAddr_ Registry contract address.
      */
-    function getRegistry() external view onlyValidRegistry returns (address registryAddr_) {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function getRegistry()
+        external
+        view
+        onlyValidRegistry
+        returns (address registryAddr_)
+    {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         return _registryAddr;
@@ -486,16 +572,23 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - newRegistryAddr is not a contract (see {NotAContract})
      *
      * Security:
-    * - Role-gated (ACTION_ADMIN).
+     * - Role-gated (ACTION_ADMIN).
      *
-    * @param newRegistryAddr New Registry contract address.
+     * @param newRegistryAddr New Registry contract address.
      */
     function setRegistry(address newRegistryAddr) external onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newRegistryAddr == address(0)) revert ZeroAddress();
-        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
+        if (newRegistryAddr.code.length == 0)
+            revert NotAContract(newRegistryAddr);
 
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
@@ -536,20 +629,22 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-    * @notice Return whether a user can upgrade this module, with metadata.
+     * @notice Return whether a user can upgrade this module, with metadata.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
      *      - Registry does not have KEY_ACCESS_CONTROL configured (reverts in {Registry.getModuleOrRevert})
      *
      * Security:
-    * - View-only; consults the Registry ACM for ACTION_UPGRADE_MODULE.
+     * - View-only; consults the Registry ACM for ACTION_UPGRADE_MODULE.
      *
-    * @param user User address to check.
-    * @return hasPermission True if `user` has ACTION_UPGRADE_MODULE.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @param user User address to check.
+     * @return hasPermission True if `user` has ACTION_UPGRADE_MODULE.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
-    function hasUpgradePermission(address user)
+    function hasUpgradePermission(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -557,14 +652,22 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (bool hasPermission, bool isValid, uint256 blockNumber)
     {
         // Check upgrade permission via the Registry ACM.
-        address acmAddr = Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
-        hasPermission = IAccessControlManager(acmAddr).hasRole(ActionKeys.ACTION_UPGRADE_MODULE, user);
+        address acmAddr = Registry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
+        hasPermission = IAccessControlManager(acmAddr).hasRole(
+            ActionKeys.ACTION_UPGRADE_MODULE,
+            user
+        );
         return (hasPermission, true, _now());
     }
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
     function _priceOracle() internal view returns (address) {
-        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_PRICE_ORACLE);
+        return
+            Registry(_registryAddr).getModuleOrRevert(
+                ModuleKeys.KEY_PRICE_ORACLE
+            );
     }
 
     /*━━━━━━━━━━━━━━━ UUPS Upgradeable ━━━━━━━━━━━━━━━*/
@@ -581,13 +684,23 @@ contract ValuationOracleView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_UPGRADE_MODULE,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
 
-        if (newImplementation == address(0)) revert ValuationOracleView__ZeroImplementation();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation == address(0))
+            revert ValuationOracleView__ZeroImplementation();
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/

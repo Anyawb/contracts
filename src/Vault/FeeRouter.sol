@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import { ActionKeys } from "../constants/ActionKeys.sol";
-import { ModuleKeys } from "../constants/ModuleKeys.sol";
-import { IAccessControlManager } from "../interfaces/IAccessControlManager.sol";
-import { IRegistry } from "../interfaces/IRegistry.sol";
-import { DataPushLibrary } from "../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../constants/DataPushTypes.sol";
-import { IFeeRouter } from "../interfaces/IFeeRouter.sol";
-import { SystemEvents } from "../Vault/SystemEvents.sol";
-import { VaultMath } from "../Vault/VaultMath.sol";
-import { IVaultCoreMinimal } from "../interfaces/IVaultCoreMinimal.sol";
-import { IFeeRouterView } from "../interfaces/IFeeRouterView.sol";
-import { 
-    AmountIsZero, 
+import {ActionKeys} from "../constants/ActionKeys.sol";
+import {ModuleKeys} from "../constants/ModuleKeys.sol";
+import {IAccessControlManager} from "../interfaces/IAccessControlManager.sol";
+import {IRegistry} from "../interfaces/IRegistry.sol";
+import {DataPushLibrary} from "../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../constants/DataPushTypes.sol";
+import {IFeeRouter} from "../interfaces/IFeeRouter.sol";
+import {SystemEvents} from "../Vault/SystemEvents.sol";
+import {VaultMath} from "../Vault/VaultMath.sol";
+import {IVaultCoreMinimal} from "../interfaces/IVaultCoreMinimal.sol";
+import {IFeeRouterView} from "../interfaces/IFeeRouterView.sol";
+import {
+    AmountIsZero,
     FeeRouter__ZeroAddress,
     NotAContract
 } from "../errors/StandardErrors.sol";
@@ -38,9 +38,9 @@ import {
  * - UUPS and pause controls protect write paths without mutating fee semantics.
  * @custom:security-contact security@example.com
  */
-contract FeeRouter is 
-    Initializable, 
-    PausableUpgradeable, 
+contract FeeRouter is
+    Initializable,
+    PausableUpgradeable,
     UUPSUpgradeable,
     IFeeRouter
 {
@@ -49,68 +49,68 @@ contract FeeRouter is
     /*━━━━━━━━━━━━━━━ STATE ━━━━━━━━━━━━━━━*/
     /// @notice Registry contract address.
     address private _registryAddr;
-    
+
     /// @notice Platform treasury address.
     address private _platformTreasury;
-    
+
     /// @notice Ecosystem vault address.
     address private _ecosystemVault;
 
     /// @notice Platform fee rate (bps; 50 = 0.50%).
     uint256 private _platformFeeBps;
-    
+
     /// @notice Ecosystem fee rate (bps; 20 = 0.20%).
     uint256 private _ecosystemFeeBps;
 
     /// @notice Fee cache: token => feeType => cachedAmount.
     mapping(address => mapping(bytes32 => uint256)) private _feeCache;
-    
+
     /// @notice Dynamic fee config: token => feeType => feeBps.
     mapping(address => mapping(bytes32 => uint256)) private _dynamicFees;
-    
+
     /// @notice Supported token list.
     address[] private _supportedTokens;
-    
+
     /// @notice Supported token flags.
     mapping(address => bool) private _isSupportedToken;
-    
+
     /// @notice Fee statistics: token => feeType => totalAmount.
     mapping(address => mapping(bytes32 => uint256)) private _feeStatistics;
 
     /// @notice Operation statistics.
     uint256 private _totalDistributions;
     uint256 private _totalAmountDistributed;
-    
+
     // NOTE: This contract intentionally avoids caching ACM locally; permissions are resolved via Registry.
 
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
     /**
      * @notice Invalid configuration (e.g., fee bps sum constraints).
-        * @dev Reverts when configuration inputs violate fee invariants. Used by initializer and governance setters.
+     * @dev Reverts when configuration inputs violate fee invariants. Used by initializer and governance setters.
      */
     error FeeRouter__InvalidConfig();
-    
+
     /**
      * @notice Token is not supported.
-        * @dev Reverts when a fee-routing path is invoked for an unsupported token.
+     * @dev Reverts when a fee-routing path is invoked for an unsupported token.
      */
     error FeeRouter__TokenNotSupported();
-    
+
     /**
      * @notice Invalid fee type (no dynamic fee configured).
-        * @dev Reverts when a dynamic-fee path is invoked for an unconfigured fee type.
+     * @dev Reverts when a dynamic-fee path is invoked for an unconfigured fee type.
      */
     error FeeRouter__InvalidFeeType();
 
     /**
      * @notice Invalid batch size (arrays mismatch or exceed max size).
-        * @dev Reverts when batch inputs are malformed or exceed the supported batch limit.
+     * @dev Reverts when batch inputs are malformed or exceed the supported batch limit.
      */
     error FeeRouter__InvalidBatchSize();
 
     /**
      * @notice FeeRouter balance is insufficient for prepaid distribution.
-        * @dev Reverts when prepaid fee distribution requires more tokens than FeeRouter currently holds.
+     * @dev Reverts when prepaid fee distribution requires more tokens than FeeRouter currently holds.
      */
     error FeeRouter__InsufficientBalance(uint256 balance, uint256 required);
 
@@ -132,13 +132,17 @@ contract FeeRouter is
         bytes reason
     );
 
-    bytes32 private constant _PUSH_KIND_SYSTEM_CONFIG = keccak256("FEE_ROUTER_VIEW_PUSH_SYSTEM_CONFIG");
-    bytes32 private constant _PUSH_KIND_GLOBAL_STATS  = keccak256("FEE_ROUTER_VIEW_PUSH_GLOBAL_STATS");
-    bytes32 private constant _PUSH_KIND_USER_FEE       = keccak256("FEE_ROUTER_VIEW_PUSH_USER_FEE");
-    bytes32 private constant _PUSH_KIND_GLOBAL_FEE     = keccak256("FEE_ROUTER_VIEW_PUSH_GLOBAL_FEE_STAT");
+    bytes32 private constant _PUSH_KIND_SYSTEM_CONFIG =
+        keccak256("FEE_ROUTER_VIEW_PUSH_SYSTEM_CONFIG");
+    bytes32 private constant _PUSH_KIND_GLOBAL_STATS =
+        keccak256("FEE_ROUTER_VIEW_PUSH_GLOBAL_STATS");
+    bytes32 private constant _PUSH_KIND_USER_FEE =
+        keccak256("FEE_ROUTER_VIEW_PUSH_USER_FEE");
+    bytes32 private constant _PUSH_KIND_GLOBAL_FEE =
+        keccak256("FEE_ROUTER_VIEW_PUSH_GLOBAL_FEE_STAT");
 
     /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
-    
+
     /// @notice Ensures the registry address is non-zero and contains code.
     modifier onlyValidRegistry() {
         if (_registryAddr == address(0)) revert FeeRouter__ZeroAddress();
@@ -164,7 +168,7 @@ contract FeeRouter is
      *
      * Security:
      * - Callable only once (initializer).
-    * - Seeds core treasury and fee configuration for subsequent governance-controlled updates.
+     * - Seeds core treasury and fee configuration for subsequent governance-controlled updates.
      *
      * @param initialRegistryAddr Registry contract address.
      * @param platformTreasury Platform treasury address.
@@ -180,7 +184,11 @@ contract FeeRouter is
         uint256 ecosystemFeeBps
     ) external initializer {
         // Validate inputs.
-        if (initialRegistryAddr == address(0) || platformTreasury == address(0) || ecosystemVault == address(0)) {
+        if (
+            initialRegistryAddr == address(0) ||
+            platformTreasury == address(0) ||
+            ecosystemVault == address(0)
+        ) {
             revert FeeRouter__ZeroAddress();
         }
         if (platformFeeBps + ecosystemFeeBps >= 1e4) {
@@ -195,7 +203,7 @@ contract FeeRouter is
         _ecosystemVault = ecosystemVault;
         _platformFeeBps = platformFeeBps;
         _ecosystemFeeBps = ecosystemFeeBps;
-        
+
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
         _pushSystemConfigToView();
     }
@@ -223,16 +231,18 @@ contract FeeRouter is
      * @param token ERC20 token address (must be supported).
      * @param amount Total amount pulled from msg.sender (token decimals).
      */
-    function distributeNormal(address token, uint256 amount)
-        external
-        override
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_DEPOSIT)
-    {
+    function distributeNormal(
+        address token,
+        uint256 amount
+    ) external override onlyValidRegistry onlyRole(ActionKeys.ACTION_DEPOSIT) {
         if (amount == 0) revert AmountIsZero();
         if (!_isSupportedToken[token]) revert FeeRouter__TokenNotSupported();
-        
-        uint256 distributedFeeAmount = _distribute(token, amount, ActionKeys.ACTION_DEPOSIT);
+
+        uint256 distributedFeeAmount = _distribute(
+            token,
+            amount,
+            ActionKeys.ACTION_DEPOSIT
+        );
         _updateStats(1, distributedFeeAmount);
         _emitActionExecuted(ActionKeys.ACTION_DEPOSIT);
     }
@@ -261,18 +271,23 @@ contract FeeRouter is
         bytes32[] calldata feeTypes
     ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_DEPOSIT) {
         if (!_isSupportedToken[token]) revert FeeRouter__TokenNotSupported();
-        
+
         uint256 length = amounts.length;
-        if (length != feeTypes.length || length > 50) revert FeeRouter__InvalidBatchSize();
-        
+        if (length != feeTypes.length || length > 50)
+            revert FeeRouter__InvalidBatchSize();
+
         uint256 totalAmount = 0;
         uint256 totalDistributedFeeAmount = 0;
         for (uint256 i = 0; i < length; i++) {
             if (amounts[i] == 0) continue;
-            totalDistributedFeeAmount += _distribute(token, amounts[i], feeTypes[i]);
+            totalDistributedFeeAmount += _distribute(
+                token,
+                amounts[i],
+                feeTypes[i]
+            );
             totalAmount += amounts[i];
         }
-        
+
         // NOTE: distributions count uses the input length (even if some items are zero and skipped).
         _updateStats(length, totalDistributedFeeAmount);
         emit BatchFeeDistributed(token, totalAmount, length);
@@ -305,16 +320,21 @@ contract FeeRouter is
      * @param amount Total amount pulled from msg.sender (token decimals).
      * @param feeType Fee type identifier.
      */
-    function distributeDynamic(address token, uint256 amount, bytes32 feeType)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_DEPOSIT)
-    {
+    function distributeDynamic(
+        address token,
+        uint256 amount,
+        bytes32 feeType
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_DEPOSIT) {
         if (amount == 0) revert AmountIsZero();
         if (!_isSupportedToken[token]) revert FeeRouter__TokenNotSupported();
-        if (_dynamicFees[token][feeType] == 0) revert FeeRouter__InvalidFeeType();
-        
-        uint256 distributedFeeAmount = _distributeDynamic(token, amount, feeType);
+        if (_dynamicFees[token][feeType] == 0)
+            revert FeeRouter__InvalidFeeType();
+
+        uint256 distributedFeeAmount = _distributeDynamic(
+            token,
+            amount,
+            feeType
+        );
         _updateStats(1, distributedFeeAmount);
         _emitActionExecuted(ActionKeys.ACTION_DEPOSIT);
     }
@@ -337,22 +357,27 @@ contract FeeRouter is
      * @param feeType Fee type identifier.
      * @param payer Payer address used for fee statistics attribution.
      */
-    function distributePrepaid(address token, uint256 amount, bytes32 feeType, address payer)
-        external
-        override
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_DEPOSIT)
-    {
+    function distributePrepaid(
+        address token,
+        uint256 amount,
+        bytes32 feeType,
+        address payer
+    ) external override onlyValidRegistry onlyRole(ActionKeys.ACTION_DEPOSIT) {
         if (amount == 0) revert AmountIsZero();
         if (!_isSupportedToken[token]) revert FeeRouter__TokenNotSupported();
 
-        uint256 distributedFeeAmount = _distributePrepaid(token, amount, feeType, payer);
+        uint256 distributedFeeAmount = _distributePrepaid(
+            token,
+            amount,
+            feeType,
+            payer
+        );
         _updateStats(1, distributedFeeAmount);
         _emitActionExecuted(ActionKeys.ACTION_DEPOSIT);
     }
 
     /*━━━━━━━━━━━━━━━ VIEW FUNCTIONS ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Return whether a token is supported for fee routing.
      * @dev Reverts if: (never)
@@ -363,7 +388,9 @@ contract FeeRouter is
      * @param token ERC20 token address.
      * @return supported True if `token` is currently supported.
      */
-    function isTokenSupported(address token) external view returns (bool supported) {
+    function isTokenSupported(
+        address token
+    ) external view returns (bool supported) {
         return _isSupportedToken[token];
     }
 
@@ -382,131 +409,145 @@ contract FeeRouter is
 
     /**
      * @notice Quote the deposit fee for an amount under the fixed fee configuration.
-    * @dev Reverts if: (never)
-    *
-    * Security:
-    * - View-only quote: this path does not transfer funds.
-    *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only quote: this path does not transfer funds.
+     *
      * @param user User address (reserved for future personalization).
      * @param amount Amount to quote on (token decimals).
      * @return fee Fee amount (token decimals).
      */
-    function chargeDepositFee(address user, uint256 amount) external view override returns (uint256 fee) {
+    function chargeDepositFee(
+        address user,
+        uint256 amount
+    ) external view override returns (uint256 fee) {
         user; // reserved for future personalization
         return _calculateFee(amount);
     }
 
     /**
      * @notice Quote the borrow fee for an amount under the fixed fee configuration.
-    * @dev Reverts if: (never)
-    *
-    * Security:
-    * - View-only quote: this path does not transfer funds.
-    *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only quote: this path does not transfer funds.
+     *
      * @param user User address (reserved for future personalization).
      * @param amount Amount to quote on (token decimals).
      * @return fee Fee amount (token decimals).
      */
-    function chargeBorrowFee(address user, uint256 amount) external view override returns (uint256 fee) {
+    function chargeBorrowFee(
+        address user,
+        uint256 amount
+    ) external view override returns (uint256 fee) {
         user; // reserved for future personalization
         return _calculateFee(amount);
     }
 
     /*━━━━━━━━━━━━━━━ Safe getters ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Return the configured Registry address.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @return registry Registry address.
      */
     function getRegistry() external view returns (address registry) {
         return _registryAddr;
     }
-    
+
     /**
      * @notice Return the platform treasury address.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @return treasury Platform treasury address.
      */
     function getPlatformTreasury() external view returns (address treasury) {
         return _platformTreasury;
     }
-    
+
     /**
      * @notice Return the ecosystem vault address.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @return vault Ecosystem vault address.
      */
     function getEcosystemVault() external view returns (address vault) {
         return _ecosystemVault;
     }
-    
+
     /**
      * @notice Return the platform fee rate.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @return feeBps Platform fee rate in bps.
      */
     function getPlatformFeeBps() external view returns (uint256 feeBps) {
         return _platformFeeBps;
     }
-    
+
     /**
      * @notice Return the ecosystem fee rate.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @return feeBps Ecosystem fee rate in bps.
      */
     function getEcosystemFeeBps() external view returns (uint256 feeBps) {
         return _ecosystemFeeBps;
     }
-    
+
     /**
      * @notice Return the total number of distributions recorded by this contract.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @return distributions Total distribution count.
      */
-    function getTotalDistributions() external view returns (uint256 distributions) {
+    function getTotalDistributions()
+        external
+        view
+        returns (uint256 distributions)
+    {
         return _totalDistributions;
     }
-    
+
     /**
      * @notice Return the total distributed amount recorded by this contract.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @return amount Total distributed amount (token decimals aggregated by input amounts).
      */
-    function getTotalAmountDistributed() external view returns (uint256 amount) {
+    function getTotalAmountDistributed()
+        external
+        view
+        returns (uint256 amount)
+    {
         return _totalAmountDistributed;
     }
 
     /*━━━━━━━━━━━━━━━ Direct state views ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Return the supported token list.
      * @dev Reverts if: (never)
@@ -516,7 +557,11 @@ contract FeeRouter is
      *
      * @return tokens Supported ERC20 token addresses.
      */
-    function getSupportedTokens() external view returns (address[] memory tokens) {
+    function getSupportedTokens()
+        external
+        view
+        returns (address[] memory tokens)
+    {
         return _supportedTokens;
     }
 
@@ -531,22 +576,28 @@ contract FeeRouter is
      * @param feeType Fee type identifier.
      * @return amount Total amount recorded for `(token, feeType)` in token decimals.
      */
-    function getFeeStatistics(address token, bytes32 feeType) external view returns (uint256 amount) {
+    function getFeeStatistics(
+        address token,
+        bytes32 feeType
+    ) external view returns (uint256 amount) {
         return _feeStatistics[token][feeType];
     }
 
     /**
      * @notice Return the configured dynamic fee bps for (token, feeType).
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @param token ERC20 token address.
      * @param feeType Fee type identifier.
-        * @return feeBps Dynamic fee rate in bps.
+     * @return feeBps Dynamic fee rate in bps.
      */
-    function getDynamicFee(address token, bytes32 feeType) external view returns (uint256) {
+    function getDynamicFee(
+        address token,
+        bytes32 feeType
+    ) external view returns (uint256) {
         return _dynamicFees[token][feeType];
     }
 
@@ -561,21 +612,28 @@ contract FeeRouter is
      * @param feeType Fee type identifier.
      * @return cachedAmount Cached amount in token decimals.
      */
-    function getFeeCache(address token, bytes32 feeType) external view returns (uint256 cachedAmount) {
+    function getFeeCache(
+        address token,
+        bytes32 feeType
+    ) external view returns (uint256 cachedAmount) {
         return _feeCache[token][feeType];
     }
 
     /**
      * @notice Return operation statistics in a single call.
-        * @dev Reverts if: (never)
-        *
-        * Security:
-        * - View-only getter.
-        *
+     * @dev Reverts if: (never)
+     *
+     * Security:
+     * - View-only getter.
+     *
      * @return distributions Total distribution count.
      * @return totalAmount Total distributed amount.
      */
-    function getOperationStats() external view returns (uint256 distributions, uint256 totalAmount) {
+    function getOperationStats()
+        external
+        view
+        returns (uint256 distributions, uint256 totalAmount)
+    {
         return (_totalDistributions, _totalAmountDistributed);
     }
 
@@ -592,16 +650,16 @@ contract FeeRouter is
      * @param platformBps Platform fee rate in bps.
      * @param ecosystemBps Ecosystem fee rate in bps.
      */
-    function setFeeConfig(uint256 platformBps, uint256 ecosystemBps)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
-        if (platformBps + ecosystemBps >= 1e4) revert FeeRouter__InvalidConfig();
-        
+    function setFeeConfig(
+        uint256 platformBps,
+        uint256 ecosystemBps
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        if (platformBps + ecosystemBps >= 1e4)
+            revert FeeRouter__InvalidConfig();
+
         _platformFeeBps = platformBps;
         _ecosystemFeeBps = ecosystemBps;
-        
+
         emit FeeConfigUpdated(platformBps, ecosystemBps);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
         _pushSystemConfigToView();
@@ -629,19 +687,19 @@ contract FeeRouter is
      * @param platformTreasury Platform treasury address.
      * @param ecosystemVault Ecosystem vault address.
      */
-    function setTreasury(address platformTreasury, address ecosystemVault)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
-        if (platformTreasury == address(0) || ecosystemVault == address(0)) revert FeeRouter__ZeroAddress();
-        
+    function setTreasury(
+        address platformTreasury,
+        address ecosystemVault
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+        if (platformTreasury == address(0) || ecosystemVault == address(0))
+            revert FeeRouter__ZeroAddress();
+
         address oldPlatformTreasury = _platformTreasury;
         address oldEcosystemVault = _ecosystemVault;
-        
+
         _platformTreasury = platformTreasury;
         _ecosystemVault = ecosystemVault;
-        
+
         emit PlatformTreasuryUpdated(oldPlatformTreasury, platformTreasury);
         emit EcosystemVaultUpdated(oldEcosystemVault, ecosystemVault);
         // Interface/ABI compatibility: aggregated event (in addition to the granular updates above).
@@ -654,7 +712,14 @@ contract FeeRouter is
         uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_TREASURY_UPDATED,
-            abi.encode(oldPlatformTreasury, platformTreasury, oldEcosystemVault, ecosystemVault, msg.sender, blockNumber)
+            abi.encode(
+                oldPlatformTreasury,
+                platformTreasury,
+                oldEcosystemVault,
+                ecosystemVault,
+                msg.sender,
+                blockNumber
+            )
         );
     }
 
@@ -674,19 +739,19 @@ contract FeeRouter is
      * @param feeType Fee type identifier.
      * @param feeBps Dynamic fee rate in bps.
      */
-    function setDynamicFee(address token, bytes32 feeType, uint256 feeBps)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function setDynamicFee(
+        address token,
+        bytes32 feeType,
+        uint256 feeBps
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (token == address(0)) revert FeeRouter__ZeroAddress();
         if (feeBps >= 1e4) revert FeeRouter__InvalidConfig();
         // Constraint: dynamic fee + ecosystem share (50% of dynamic) must be < 100%.
         if (feeBps + (feeBps / 2) >= 1e4) revert FeeRouter__InvalidConfig();
-        
+
         uint256 oldFee = _dynamicFees[token][feeType];
         _dynamicFees[token][feeType] = feeBps;
-        
+
         emit DynamicFeeUpdated(token, feeType, oldFee, feeBps);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
         _pushSystemConfigToView();
@@ -713,13 +778,15 @@ contract FeeRouter is
      *
      * @param token ERC20 token address.
      */
-    function addSupportedToken(address token) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function addSupportedToken(
+        address token
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (token == address(0)) revert FeeRouter__ZeroAddress();
         if (_isSupportedToken[token]) revert FeeRouter__InvalidConfig();
-        
+
         _isSupportedToken[token] = true;
         _supportedTokens.push(token);
-        
+
         emit TokenSupported(token, true);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
         _pushSystemConfigToView();
@@ -745,20 +812,24 @@ contract FeeRouter is
      *
      * @param token ERC20 token address.
      */
-    function removeSupportedToken(address token) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
+    function removeSupportedToken(
+        address token
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         if (!_isSupportedToken[token]) revert FeeRouter__InvalidConfig();
-        
+
         _isSupportedToken[token] = false;
-        
+
         // Remove from the list (swap & pop).
         for (uint256 i = 0; i < _supportedTokens.length; i++) {
             if (_supportedTokens[i] == token) {
-                _supportedTokens[i] = _supportedTokens[_supportedTokens.length - 1];
+                _supportedTokens[i] = _supportedTokens[
+                    _supportedTokens.length - 1
+                ];
                 _supportedTokens.pop();
                 break;
             }
         }
-        
+
         emit TokenSupported(token, false);
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
         _pushSystemConfigToView();
@@ -784,11 +855,10 @@ contract FeeRouter is
      * @param token ERC20 token address.
      * @param feeType Fee type identifier.
      */
-    function clearFeeCache(address token, bytes32 feeType)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_SET_PARAMETER)
-    {
+    function clearFeeCache(
+        address token,
+        bytes32 feeType
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_SET_PARAMETER) {
         delete _feeCache[token][feeType];
         _emitActionExecuted(ActionKeys.ACTION_SET_PARAMETER);
 
@@ -810,14 +880,21 @@ contract FeeRouter is
      * Security:
      * - Role-gated via ACM.requireRole(ACTION_PAUSE_SYSTEM).
      */
-    function pause() external onlyValidRegistry onlyRole(ActionKeys.ACTION_PAUSE_SYSTEM) {
+    function pause()
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_PAUSE_SYSTEM)
+    {
         _pause();
         _emitActionExecuted(ActionKeys.ACTION_PAUSE_SYSTEM);
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
         uint256 blockNumber = block.number;
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(true, msg.sender, blockNumber));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED,
+            abi.encode(true, msg.sender, blockNumber)
+        );
     }
 
     /**
@@ -829,16 +906,23 @@ contract FeeRouter is
      * Security:
      * - Role-gated via ACM.requireRole(ACTION_UNPAUSE_SYSTEM).
      */
-    function unpause() external onlyValidRegistry onlyRole(ActionKeys.ACTION_UNPAUSE_SYSTEM) {
+    function unpause()
+        external
+        onlyValidRegistry
+        onlyRole(ActionKeys.ACTION_UNPAUSE_SYSTEM)
+    {
         _unpause();
         _emitActionExecuted(ActionKeys.ACTION_UNPAUSE_SYSTEM);
 
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
         uint256 blockNumber = block.number;
-        DataPushLibrary._emitData(DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED, abi.encode(false, msg.sender, blockNumber));
+        DataPushLibrary._emitData(
+            DataPushTypes.DATA_TYPE_PAUSE_STATUS_UPDATED,
+            abi.encode(false, msg.sender, blockNumber)
+        );
     }
-    
+
     /**
      * @notice Update the Registry address (upgrade/migration hook).
      * @dev Reverts if:
@@ -851,20 +935,19 @@ contract FeeRouter is
      *
      * @param newRegistryAddr New Registry contract address.
      */
-    function updateRegistry(address newRegistryAddr)
-        external
-        onlyValidRegistry
-        onlyRole(ActionKeys.ACTION_UPGRADE_MODULE)
-    {
+    function updateRegistry(
+        address newRegistryAddr
+    ) external onlyValidRegistry onlyRole(ActionKeys.ACTION_UPGRADE_MODULE) {
         if (newRegistryAddr == address(0)) revert FeeRouter__ZeroAddress();
-        if (newRegistryAddr.code.length == 0) revert NotAContract(newRegistryAddr);
-        
+        if (newRegistryAddr.code.length == 0)
+            revert NotAContract(newRegistryAddr);
+
         address oldRegistry = _registryAddr;
         _registryAddr = newRegistryAddr;
-        
+
         emit RegistryUpdated(oldRegistry, newRegistryAddr);
         _emitActionExecuted(ActionKeys.ACTION_UPGRADE_MODULE);
-        
+
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
         uint256 blockNumber = block.number;
 
@@ -880,7 +963,7 @@ contract FeeRouter is
     }
 
     /*━━━━━━━━━━━━━━━ Common Helpers ━━━━━━━━━━━━━━━*/
-    
+
     /**
      * @notice Emit a normalized ActionExecuted system event.
      * @param actionKey Action key.
@@ -895,7 +978,7 @@ contract FeeRouter is
             blockNumber
         );
     }
-    
+
     /**
      * @notice Update stats and push global stats to view (best-effort).
      * @param distributions Distribution count delta.
@@ -913,7 +996,9 @@ contract FeeRouter is
      * @param user Caller address.
      */
     function _requireRole(bytes32 actionKey, address user) internal view {
-        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        address acmAddr = IRegistry(_registryAddr).getModuleOrRevert(
+            ModuleKeys.KEY_ACCESS_CONTROL
+        );
         IAccessControlManager(acmAddr).requireRole(actionKey, user);
     }
 
@@ -933,14 +1018,18 @@ contract FeeRouter is
      * @param amount Total amount (token decimals).
      * @param feeType Fee type identifier.
      */
-    function _distribute(address token, uint256 amount, bytes32 feeType)
-        internal
-        whenNotPaused
-        returns (uint256 distributedFeeAmount)
-    {
+    function _distribute(
+        address token,
+        uint256 amount,
+        bytes32 feeType
+    ) internal whenNotPaused returns (uint256 distributedFeeAmount) {
         uint256 platformBps = _platformFeeBps;
         uint256 ecoBps = _ecosystemFeeBps;
-        (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) = _calculateDistribution(amount, platformBps, ecoBps);
+        (
+            uint256 platformAmt,
+            uint256 ecoAmt,
+            uint256 remaining
+        ) = _calculateDistribution(amount, platformBps, ecoBps);
         distributedFeeAmount = platformAmt + ecoAmt;
         _executeFeeDistribution(
             token,
@@ -961,16 +1050,19 @@ contract FeeRouter is
      * @param amount Total amount (token decimals).
      * @param feeType Fee type identifier.
      */
-    function _distributeDynamic(address token, uint256 amount, bytes32 feeType)
-        internal
-        whenNotPaused
-        returns (uint256 distributedFeeAmount)
-    {
+    function _distributeDynamic(
+        address token,
+        uint256 amount,
+        bytes32 feeType
+    ) internal whenNotPaused returns (uint256 distributedFeeAmount) {
         uint256 dynamicFeeBps = _dynamicFees[token][feeType];
         uint256 halfDynamicFee = dynamicFeeBps / 2; // ecosystem share = half of dynamic fee
-        
-        (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) =
-            _calculateDistribution(amount, dynamicFeeBps, halfDynamicFee);
+
+        (
+            uint256 platformAmt,
+            uint256 ecoAmt,
+            uint256 remaining
+        ) = _calculateDistribution(amount, dynamicFeeBps, halfDynamicFee);
         distributedFeeAmount = platformAmt + ecoAmt;
         _executeFeeDistribution(
             token,
@@ -992,14 +1084,19 @@ contract FeeRouter is
      * @param feeType Fee type identifier.
      * @param payer Payer address for stats attribution.
      */
-    function _distributePrepaid(address token, uint256 amount, bytes32 feeType, address payer)
-        internal
-        whenNotPaused
-        returns (uint256 distributedFeeAmount)
-    {
+    function _distributePrepaid(
+        address token,
+        uint256 amount,
+        bytes32 feeType,
+        address payer
+    ) internal whenNotPaused returns (uint256 distributedFeeAmount) {
         uint256 platformBps = _platformFeeBps;
         uint256 ecoBps = _ecosystemFeeBps;
-        (uint256 platformAmt, uint256 ecoAmt) = _calculateRevenueSplit(amount, platformBps, ecoBps);
+        (uint256 platformAmt, uint256 ecoAmt) = _calculateRevenueSplit(
+            amount,
+            platformBps,
+            ecoBps
+        );
         distributedFeeAmount = amount;
         _executePrepaidDistribution(
             token,
@@ -1022,10 +1119,14 @@ contract FeeRouter is
      * @return ecoAmt Ecosystem fee amount.
      * @return remaining Remaining amount refunded to msg.sender.
      */
-    function _calculateDistribution(uint256 amount, uint256 platformBps, uint256 ecoBps) 
-        internal 
-        pure 
-        returns (uint256 platformAmt, uint256 ecoAmt, uint256 remaining) 
+    function _calculateDistribution(
+        uint256 amount,
+        uint256 platformBps,
+        uint256 ecoBps
+    )
+        internal
+        pure
+        returns (uint256 platformAmt, uint256 ecoAmt, uint256 remaining)
     {
         platformAmt = VaultMath.calculateFee(amount, platformBps);
         ecoAmt = VaultMath.calculateFee(amount, ecoBps);
@@ -1040,11 +1141,11 @@ contract FeeRouter is
      * @return platformAmt Platform share.
      * @return ecoAmt Ecosystem share.
      */
-    function _calculateRevenueSplit(uint256 amount, uint256 platformBps, uint256 ecoBps)
-        internal
-        pure
-        returns (uint256 platformAmt, uint256 ecoAmt)
-    {
+    function _calculateRevenueSplit(
+        uint256 amount,
+        uint256 platformBps,
+        uint256 ecoBps
+    ) internal pure returns (uint256 platformAmt, uint256 ecoAmt) {
         uint256 totalBps = platformBps + ecoBps;
         if (totalBps == 0) revert FeeRouter__InvalidConfig();
         uint256 platformWeightBps = (platformBps * 10_000) / totalBps;
@@ -1053,19 +1154,24 @@ contract FeeRouter is
     }
 
     /**
-    * @notice Resolve the current view gateway address (best-effort).
-    * @dev SSOT: resolved via VaultCore.viewContractAddrVar(). No registry-key fallbacks to avoid drift.
-    *      The resolved gateway is expected to forward FeeRouter pushes to the dedicated FeeRouterView.
+     * @notice Resolve the current view gateway address (best-effort).
+     * @dev SSOT: resolved via VaultCore.viewContractAddrVar(). No registry-key fallbacks to avoid drift.
+     *      The resolved gateway is expected to forward FeeRouter pushes to the dedicated FeeRouterView.
      */
     function _resolveFeeRouterViewAddr() internal view returns (address) {
         address registryAddr = _registryAddr;
-        if (registryAddr == address(0) || registryAddr.code.length == 0) return address(0);
+        if (registryAddr == address(0) || registryAddr.code.length == 0)
+            return address(0);
 
         // SSOT (Architecture-Guide): view address is resolved via VaultCore.viewContractAddrVar().
         // NOTE: Do NOT add alternative Registry keys as fallbacks here, to avoid multi-source drift.
-        try IRegistry(registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE) returns (address vaultCore) {
+        try
+            IRegistry(registryAddr).getModule(ModuleKeys.KEY_VAULT_CORE)
+        returns (address vaultCore) {
             if (vaultCore != address(0)) {
-                try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (address viewAddr) {
+                try IVaultCoreMinimal(vaultCore).viewContractAddrVar() returns (
+                    address viewAddr
+                ) {
                     if (viewAddr != address(0)) return viewAddr;
                 } catch {
                     _noop();
@@ -1096,13 +1202,15 @@ contract FeeRouter is
         }
 
         address[] memory tokens = _copySupportedTokens();
-        try IFeeRouterView(viewAddr).pushSystemConfigUpdate(
-            _platformTreasury,
-            _ecosystemVault,
-            _platformFeeBps,
-            _ecosystemFeeBps,
-            tokens
-        ) {
+        try
+            IFeeRouterView(viewAddr).pushSystemConfigUpdate(
+                _platformTreasury,
+                _ecosystemVault,
+                _platformFeeBps,
+                _ecosystemFeeBps,
+                tokens
+            )
+        {
             _noop();
         } catch (bytes memory reason) {
             emit FeeRouterViewPushFailed(
@@ -1133,7 +1241,12 @@ contract FeeRouter is
             return;
         }
 
-        try IFeeRouterView(viewAddr).pushGlobalStatsUpdate(_totalDistributions, _totalAmountDistributed) {
+        try
+            IFeeRouterView(viewAddr).pushGlobalStatsUpdate(
+                _totalDistributions,
+                _totalAmountDistributed
+            )
+        {
             _noop();
         } catch (bytes memory reason) {
             emit FeeRouterViewPushFailed(
@@ -1159,20 +1272,54 @@ contract FeeRouter is
     ) internal {
         address viewAddr = _resolveFeeRouterViewAddr();
         if (viewAddr == address(0) || viewAddr.code.length == 0) {
-            emit FeeRouterViewPushFailed(_PUSH_KIND_USER_FEE, payer, token, feeType, viewAddr, bytes("view unavailable"));
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_USER_FEE,
+                payer,
+                token,
+                feeType,
+                viewAddr,
+                bytes("view unavailable")
+            );
             return;
         }
 
-        try IFeeRouterView(viewAddr).pushUserFeeUpdate(payer, feeType, feeAmount, appliedFeeBps) {
+        try
+            IFeeRouterView(viewAddr).pushUserFeeUpdate(
+                payer,
+                feeType,
+                feeAmount,
+                appliedFeeBps
+            )
+        {
             _noop();
         } catch (bytes memory reason) {
-            emit FeeRouterViewPushFailed(_PUSH_KIND_USER_FEE, payer, token, feeType, viewAddr, reason);
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_USER_FEE,
+                payer,
+                token,
+                feeType,
+                viewAddr,
+                reason
+            );
         }
 
-        try IFeeRouterView(viewAddr).pushGlobalFeeStatistic(token, feeType, _feeStatistics[token][feeType]) {
+        try
+            IFeeRouterView(viewAddr).pushGlobalFeeStatistic(
+                token,
+                feeType,
+                _feeStatistics[token][feeType]
+            )
+        {
             _noop();
         } catch (bytes memory reason) {
-            emit FeeRouterViewPushFailed(_PUSH_KIND_GLOBAL_FEE, payer, token, feeType, viewAddr, reason);
+            emit FeeRouterViewPushFailed(
+                _PUSH_KIND_GLOBAL_FEE,
+                payer,
+                token,
+                feeType,
+                viewAddr,
+                reason
+            );
         }
     }
 
@@ -1185,7 +1332,11 @@ contract FeeRouter is
     /**
      * @notice Copy supported token list into memory.
      */
-    function _copySupportedTokens() internal view returns (address[] memory tokens) {
+    function _copySupportedTokens()
+        internal
+        view
+        returns (address[] memory tokens)
+    {
         uint256 len = _supportedTokens.length;
         tokens = new address[](len);
         for (uint256 i = 0; i < len; i++) {
@@ -1215,7 +1366,8 @@ contract FeeRouter is
     ) internal {
         if (totalAmount > 0) {
             uint256 bal = IERC20(token).balanceOf(address(this));
-            if (bal < totalAmount) revert FeeRouter__InsufficientBalance(bal, totalAmount);
+            if (bal < totalAmount)
+                revert FeeRouter__InsufficientBalance(bal, totalAmount);
         }
 
         if (platformAmt > 0) {
@@ -1227,16 +1379,35 @@ contract FeeRouter is
 
         _feeStatistics[token][feeType] += distributedFeeAmount;
         _feeCache[token][feeType] += distributedFeeAmount;
-        _pushFeeRouterViewAfterDistribution(payer, token, feeType, distributedFeeAmount, appliedFeeBps);
+        _pushFeeRouterViewAfterDistribution(
+            payer,
+            token,
+            feeType,
+            distributedFeeAmount,
+            appliedFeeBps
+        );
 
         emit FeeDistributed(token, platformAmt, ecoAmt);
-        emit FeeStatisticsUpdated(token, feeType, _feeStatistics[token][feeType]);
+        emit FeeStatisticsUpdated(
+            token,
+            feeType,
+            _feeStatistics[token][feeType]
+        );
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
         uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_DISTRIBUTED,
-            abi.encode(token, platformAmt, ecoAmt, uint256(0), feeType, totalAmount, msg.sender, blockNumber)
+            abi.encode(
+                token,
+                platformAmt,
+                ecoAmt,
+                uint256(0),
+                feeType,
+                totalAmount,
+                msg.sender,
+                blockNumber
+            )
         );
     }
 
@@ -1262,7 +1433,11 @@ contract FeeRouter is
     ) internal {
         // Pull total amount from msg.sender (caller must approve this contract).
         if (totalAmount > 0) {
-            IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+            IERC20(token).safeTransferFrom(
+                msg.sender,
+                address(this),
+                totalAmount
+            );
         }
 
         // Distribute fees.
@@ -1280,20 +1455,37 @@ contract FeeRouter is
         // Update stats and cache.
         _feeStatistics[token][feeType] += distributedFeeAmount;
         _feeCache[token][feeType] += distributedFeeAmount;
-        _pushFeeRouterViewAfterDistribution(payer, token, feeType, distributedFeeAmount, appliedFeeBps);
+        _pushFeeRouterViewAfterDistribution(
+            payer,
+            token,
+            feeType,
+            distributedFeeAmount,
+            appliedFeeBps
+        );
 
         emit FeeDistributed(token, platformAmt, ecoAmt);
-        emit FeeStatisticsUpdated(token, feeType, _feeStatistics[token][feeType]);
+        emit FeeStatisticsUpdated(
+            token,
+            feeType,
+            _feeStatistics[token][feeType]
+        );
         // Unified data push.
         // Time-Dependency-Refactor: use block.number as the onchain time axis marker.
         uint256 blockNumber = block.number;
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_FEE_DISTRIBUTED,
-            abi.encode(token, platformAmt, ecoAmt, remaining, feeType, totalAmount, msg.sender, blockNumber)
+            abi.encode(
+                token,
+                platformAmt,
+                ecoAmt,
+                remaining,
+                feeType,
+                totalAmount,
+                msg.sender,
+                blockNumber
+            )
         );
     }
-
-
 
     /**
      * @notice Authorize UUPS upgrade.
@@ -1309,8 +1501,3 @@ contract FeeRouter is
     /*━━━━━━━━━━━━━━━ GAP ━━━━━━━━━━━━━━━*/
     uint256[32] private __gap; // Storage gap for upgrade-safe state layout changes.
 }
-
-
-
- 
- 

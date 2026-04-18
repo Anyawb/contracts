@@ -13,7 +13,7 @@
 > **核心目标**：在 2.5–3 周内完成修正并部署，**统一幂等 Key 规范**，修复账本隔离漏洞，
 > 新增链上事件索引（Indexer，必要时可用 Ponder 实现）和 Stripe 计费，杜绝"多服务幂等口径分叉"问题。
 
-> **当前范围说明**：本文当前主线覆盖 legacy / 通用订单、AI Credits 与 blocks-only 的链下后端实施。blocks-only 已纳入默认后端建模、默认 read model、默认索引和默认上线验收要求，并按 trade closeout / maturity closeout / maturity delivery closeout 三分法与三层状态模型执行。
+> **当前范围说明**：本文当前主线覆盖 legacy / 通用订单、AI Credits 与 blocks-only 的链下后端实施。blocks-only 已纳入默认后端建模、默认 read model、默认索引和默认上线验收要求，并按 trade closeout / maturity closeout 与三层状态模型执行。
 
 > **本次变更说明（2026-03-23）**：
 > 1. 统一价格发布路径继续维持为 `PriceUpdater.updateAssetPrice`，且该命名已经脱离 CoinGecko 专属语义。
@@ -37,7 +37,7 @@
 > 1. legacy / 通用订单的自动风险、自动清算、自动结算读取，当前必须使用 strict debt valuation；`getUserTotalDebtValue(...)` / `calculateDebtValue(...)` 这类兼容读口只能按 best-effort 兼容读理解。
 > 2. legacy / 通用订单清算后若抵押不足，剩余债务不会再被隐式吞没；链上会显式写入 `IShortfallLedger`。`LiquidatedWithShortfall` / `DefaultedWithShortfall` 仅作为兼容标签，主终态判定必须使用 `lifecycle + shortfallStatus + collateralDisposition`。
 > 3. 后端索引、读模型、告警和客服工具必须把 shortfall 当成一等事实对象建模，而不是继续用“liquidated 且 debt 接近 0”去猜业务结论。
-> 4. blocks-only 的状态机文档已并入本轮主线：后端落库和读模型必须显式区分 debt-free open、trade closeout、maturity closeout、maturity delivery closeout 四类业务状态，并保持第二层 shortfallStatus 的显式表达。
+> 4. blocks-only 的状态机文档已并入本轮主线：后端落库和读模型必须显式区分 debt-free open、trade closeout、maturity closeout 三类业务状态，并保持第二层 shortfallStatus 的显式表达。
 
 ## 前端直连链上可行性与接入矩阵（2026-04-07）
 

@@ -18,65 +18,15 @@ import {
 import {ViewConstants} from "../ViewConstants.sol";
 import {ViewVersioned} from "../ViewVersioned.sol";
 import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {IHealthViewBasic} from "../../../interfaces/IHealthViewBasic.sol";
+import {IPositionViewBasic} from "../../../interfaces/IPositionViewBasic.sol";
+import {IStatisticsViewBasic} from "../../../interfaces/IStatisticsViewBasic.sol";
 
 /*━━━━━━━━━━━━━━━ Selector SSOT ━━━━━━━━━━━━━━━*/
 // Selectors are derived from the canonical module contracts in this repository (SSOT),
 // rather than hardcoding hex values or duplicating minimal interfaces in this file.
 import {HealthView} from "./HealthView.sol";
 import {PositionView} from "./PositionView.sol";
-
-/// @title IHealthViewLite
-/// @notice Minimal read interface for HealthView.
-/// @dev Used by {CacheOptimizedView} to aggregate health data without importing the full HealthView implementation.
-interface IHealthViewLite {
-    /// @notice Returns one user's health factor together with validity metadata.
-    function getUserHealthFactorWithMeta(
-        address user
-    )
-        external
-        view
-        returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
-}
-
-/// @title IPositionViewLite
-/// @notice Minimal read interface for PositionView.
-/// @dev Used by {CacheOptimizedView} to aggregate position data without importing the full PositionView implementation.
-interface IPositionViewLite {
-    /// @notice Returns one user's position snapshot for one asset.
-    function getUserPositionWithMeta(
-        address user,
-        address asset
-    )
-        external
-        view
-        returns (
-            uint256 collateral,
-            uint256 debt,
-            bool isValid,
-            uint256 blockNumber,
-            uint64 version
-        );
-}
-
-/// @title IStatisticsViewLite
-/// @notice Minimal read interface for StatisticsView.
-/// @dev Used by {CacheOptimizedView} to aggregate global statistics without
-///      importing the full StatisticsView implementation.
-interface IStatisticsViewLite {
-    struct GlobalStatistics {
-        uint256 totalUsers;
-        uint256 activeUsers;
-        uint256 totalCollateral;
-        uint256 totalDebt;
-        uint256 lastUpdateBlock;
-    }
-
-    /// @notice Returns the global statistics snapshot together with validity metadata.
-    function getGlobalStatisticsWithMeta()
-        external
-        view
-        returns (GlobalStatistics memory g, bool isValid, uint256 blockNumber);
-}
 
 /// @title CacheOptimizedView
 /// @notice View facade that forwards queries to view modules and returns frontend-friendly aggregates.
@@ -279,7 +229,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint256 len = users.length;
         _validateBatchLength(len);
 
-        IHealthViewLite hv = _healthView();
+        IHealthViewBasic hv = _healthView();
         factors = new uint256[](len);
         validFlags = new bool[](len);
         blockNumbers = new uint256[](len);
@@ -560,7 +510,7 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
         returns (SystemStats memory stats)
     {
         _requireRole(ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender);
-        (IStatisticsViewLite.GlobalStatistics memory g, , ) = _statisticsView()
+        (IStatisticsViewBasic.GlobalStatistics memory g, , ) = _statisticsView()
             .getGlobalStatisticsWithMeta();
         stats = SystemStats({
             totalUsers: g.totalUsers,
@@ -573,16 +523,16 @@ contract CacheOptimizedView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
-    function _healthView() internal view returns (IHealthViewLite) {
-        return IHealthViewLite(_getModule(ModuleKeys.KEY_HEALTH_VIEW));
+    function _healthView() internal view returns (IHealthViewBasic) {
+        return IHealthViewBasic(_getModule(ModuleKeys.KEY_HEALTH_VIEW));
     }
 
-    function _positionView() internal view returns (IPositionViewLite) {
-        return IPositionViewLite(_getModule(ModuleKeys.KEY_POSITION_VIEW));
+    function _positionView() internal view returns (IPositionViewBasic) {
+        return IPositionViewBasic(_getModule(ModuleKeys.KEY_POSITION_VIEW));
     }
 
-    function _statisticsView() internal view returns (IStatisticsViewLite) {
-        return IStatisticsViewLite(_getModule(ModuleKeys.KEY_STATS));
+    function _statisticsView() internal view returns (IStatisticsViewBasic) {
+        return IStatisticsViewBasic(_getModule(ModuleKeys.KEY_STATS));
     }
 
     function _getModule(bytes32 key) internal view returns (address) {

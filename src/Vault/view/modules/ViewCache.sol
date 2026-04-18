@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { AccessControlLibrary } from "../../../libraries/AccessControlLibrary.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
-import { BatchTooLarge, EmptyArray, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {AccessControlLibrary} from "../../../libraries/AccessControlLibrary.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {DataPushLibrary} from "../../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../../constants/DataPushTypes.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
+import {
+    BatchTooLarge,
+    EmptyArray,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
 
 /**
  * @title ViewCache
@@ -38,10 +43,18 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param updater Caller that performed the write/clear.
      * @param blockNumber Legacy field: emit time axis marker (treated as updateBlock in this repo).
      */
-    event CacheUpdated(address indexed asset, address indexed updater, uint256 blockNumber);
+    event CacheUpdated(
+        address indexed asset,
+        address indexed updater,
+        uint256 blockNumber
+    );
 
     /// @notice Explicit block-based companion event for CacheUpdated.
-    event CacheUpdatedAtBlock(address indexed asset, address indexed updater, uint256 updateBlock);
+    event CacheUpdatedAtBlock(
+        address indexed asset,
+        address indexed updater,
+        uint256 updateBlock
+    );
 
     /*━━━━━━━━━━━━━━━ Errors ━━━━━━━━━━━━━━━*/
 
@@ -53,11 +66,11 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Types ━━━━━━━━━━━━━━━*/
 
     struct SystemStatusCache {
-        uint256 totalCollateral;   // Aggregated collateral amount (domain-specific unit)
-        uint256 totalDebt;         // Aggregated debt amount (domain-specific unit)
-        uint256 utilizationRate;   // Utilization rate (WAD, 1e18)
-        uint256 updateBlock;       // Legacy field: snapshot time axis marker (treated as updateBlock)
-        bool    isValid;           // Explicit validity flag (in addition to time-based freshness)
+        uint256 totalCollateral; // Aggregated collateral amount (domain-specific unit)
+        uint256 totalDebt; // Aggregated debt amount (domain-specific unit)
+        uint256 utilizationRate; // Utilization rate (WAD, 1e18)
+        uint256 updateBlock; // Legacy field: snapshot time axis marker (treated as updateBlock)
+        bool isValid; // Explicit validity flag (in addition to time-based freshness)
     }
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
@@ -100,7 +113,8 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -165,7 +179,13 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
         emit CacheUpdatedAtBlock(asset, msg.sender, updateBlock);
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_SYSTEM_STATUS,
-            abi.encode(asset, totalCollateral, totalDebt, utilizationRate, updateBlock)
+            abi.encode(
+                asset,
+                totalCollateral,
+                totalDebt,
+                utilizationRate,
+                updateBlock
+            )
         );
     }
 
@@ -181,7 +201,12 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      * @param asset Asset address.
      */
     function clearSystemCache(address asset) external onlyValidRegistry {
-        AccessControlLibrary.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender, msg.sender);
+        AccessControlLibrary.requireRole(
+            _registryAddr,
+            ActionKeys.ACTION_ADMIN,
+            msg.sender,
+            msg.sender
+        );
 
         delete _systemStatusCache[asset];
         delete _systemCacheUpdateBlocks[asset];
@@ -202,7 +227,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      * @dev Reverts if: (never)
      *
      * Security:
-        * - View-only.
+     * - View-only.
      *
      * @param asset Asset address.
      * @return status Cached snapshot struct.
@@ -213,7 +238,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     function getSystemStatus(
         address asset
     ) external view returns (SystemStatusCache memory status, bool isValid) {
-        status  = _systemStatusCache[asset];
+        status = _systemStatusCache[asset];
         isValid = _isCacheValid(status.updateBlock) && status.isValid;
     }
 
@@ -227,10 +252,17 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return updateBlock The block number when the snapshot was last written (0 if never written).
      * @return ageBlocks The number of blocks since update (0 if updateBlock==0 or in the future).
      */
-    function getSystemStatusWithBlockMeta(address asset)
+    function getSystemStatusWithBlockMeta(
+        address asset
+    )
         external
         view
-        returns (SystemStatusCache memory status, bool isValid, uint256 updateBlock, uint256 ageBlocks)
+        returns (
+            SystemStatusCache memory status,
+            bool isValid,
+            uint256 updateBlock,
+            uint256 ageBlocks
+        )
     {
         status = _systemStatusCache[asset];
         updateBlock = status.updateBlock;
@@ -249,7 +281,7 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - assets.length > ViewConstants.MAX_BATCH_SIZE (BatchTooLarge)
      *
      * Security:
-        * - View-only.
+     * - View-only.
      *
      * @param assets Asset address list.
      * @return statuses Cached snapshot structs (1:1 with `assets`).
@@ -257,17 +289,22 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function batchGetSystemStatus(
         address[] calldata assets
-    ) external view returns (SystemStatusCache[] memory statuses, bool[] memory validFlags) {
+    )
+        external
+        view
+        returns (SystemStatusCache[] memory statuses, bool[] memory validFlags)
+    {
         uint256 length = assets.length;
         if (length == 0) revert EmptyArray();
-        if (length > ViewConstants.MAX_BATCH_SIZE) revert BatchTooLarge(length, ViewConstants.MAX_BATCH_SIZE);
+        if (length > ViewConstants.MAX_BATCH_SIZE)
+            revert BatchTooLarge(length, ViewConstants.MAX_BATCH_SIZE);
 
-        statuses   = new SystemStatusCache[](length);
+        statuses = new SystemStatusCache[](length);
         validFlags = new bool[](length);
 
         for (uint256 i; i < length; ++i) {
             SystemStatusCache memory cache = _systemStatusCache[assets[i]];
-            statuses[i]   = cache;
+            statuses[i] = cache;
             validFlags[i] = _isCacheValid(cache.updateBlock) && cache.isValid;
         }
     }
@@ -296,10 +333,19 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation New implementation address.
      */
-    function _authorizeUpgrade(address newImplementation) internal override onlyValidRegistry {
-        AccessControlLibrary.requireRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender, msg.sender);
-        if (newImplementation == address(0)) revert ViewCache__ZeroImplementation();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal override onlyValidRegistry {
+        AccessControlLibrary.requireRole(
+            _registryAddr,
+            ActionKeys.ACTION_ADMIN,
+            msg.sender,
+            msg.sender
+        );
+        if (newImplementation == address(0))
+            revert ViewCache__ZeroImplementation();
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Storage Gap ━━━━━━━━━━━━━━━*/
@@ -328,4 +374,4 @@ contract ViewCache is Initializable, UUPSUpgradeable, ViewVersioned {
     function schemaVersion() public pure override returns (uint256) {
         return 1;
     }
-} 
+}

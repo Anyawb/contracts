@@ -55,7 +55,7 @@ interface IPriceOracleAdapter is
      * - View-only
      *
      * @param asset Asset address.
-    * @return price Price in the adapter's canonical valuation unit.
+     * @return price Price in the adapter's canonical valuation unit.
      * @return blockNumber Informational block number associated with the quoted price.
      * @return assetDecimals Token decimals used for valuation scaling (NOT price precision).
      */
@@ -97,7 +97,7 @@ interface IPriceOracleAdapter is
      * - View-only
      *
      * @param assets Asset address list.
-    * @return prices Price list in the adapter's canonical valuation unit.
+     * @return prices Price list in the adapter's canonical valuation unit.
      * @return blockNumbers Informational block number list.
      * @return assetDecimalsArray Token decimals used for valuation scaling (NOT price precision).
      */

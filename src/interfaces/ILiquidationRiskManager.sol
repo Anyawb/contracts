@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ILiquidationRiskRead } from "./ILiquidationRiskRead.sol";
+import {ILiquidationRiskRead} from "./ILiquidationRiskRead.sol";
 
 /**
  * @title ILiquidationRiskManager

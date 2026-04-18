@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { IRegistryDynamicModuleKey } from "../interfaces/IRegistryDynamicModuleKey.sol";
+import {IRegistryDynamicModuleKey} from "../interfaces/IRegistryDynamicModuleKey.sol";
 
 /// @title MockRegistryDynamicModuleKeyRevert
 /// @notice Test-only mock that reverts on getDynamicModuleKeys()
@@ -9,12 +9,16 @@ import { IRegistryDynamicModuleKey } from "../interfaces/IRegistryDynamicModuleK
 contract MockRegistryDynamicModuleKeyRevert is IRegistryDynamicModuleKey {
     error MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
 
-    // ============ Module key registration ============
-    function registerModuleKey(string calldata) external pure returns (bytes32) {
+    /*━━━━━━━━━━━━━━━ Module Key Registration ━━━━━━━━━━━━━━━*/
+    function registerModuleKey(
+        string calldata
+    ) external pure returns (bytes32) {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
 
-    function batchRegisterModuleKeys(string[] calldata) external pure returns (bytes32[] memory) {
+    function batchRegisterModuleKeys(
+        string[] calldata
+    ) external pure returns (bytes32[] memory) {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
 
@@ -22,7 +26,7 @@ contract MockRegistryDynamicModuleKeyRevert is IRegistryDynamicModuleKey {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
 
-    // ============ Core dynamic module key functions ============
+    /*━━━━━━━━━━━━━━━ Core Dynamic Module Key Functions ━━━━━━━━━━━━━━━*/
     function isDynamicModuleKey(bytes32) external pure returns (bool) {
         return false;
     }
@@ -31,7 +35,9 @@ contract MockRegistryDynamicModuleKeyRevert is IRegistryDynamicModuleKey {
         return false;
     }
 
-    function getModuleKeyByName(string calldata) external pure returns (bytes32) {
+    function getModuleKeyByName(
+        string calldata
+    ) external pure returns (bytes32) {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
 
@@ -39,7 +45,7 @@ contract MockRegistryDynamicModuleKeyRevert is IRegistryDynamicModuleKey {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
 
-    // ============ Dynamic module key management ============
+    /*━━━━━━━━━━━━━━━ Dynamic Module Key Management ━━━━━━━━━━━━━━━*/
     function getDynamicModuleKeys() external pure returns (bytes32[] memory) {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
@@ -48,7 +54,9 @@ contract MockRegistryDynamicModuleKeyRevert is IRegistryDynamicModuleKey {
         return 0;
     }
 
-    function getDynamicModuleKeyName(bytes32) external pure returns (string memory) {
+    function getDynamicModuleKeyName(
+        bytes32
+    ) external pure returns (string memory) {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
 
@@ -56,11 +64,13 @@ contract MockRegistryDynamicModuleKeyRevert is IRegistryDynamicModuleKey {
         return bytes32(0);
     }
 
-    function getDynamicModuleKeyByIndex(uint256) external pure returns (bytes32) {
+    function getDynamicModuleKeyByIndex(
+        uint256
+    ) external pure returns (bytes32) {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
 
-    // ============ Admin functions ============
+    /*━━━━━━━━━━━━━━━ Admin Functions ━━━━━━━━━━━━━━━*/
     function getRegistrationAdmin() external pure returns (address) {
         return address(0);
     }
@@ -85,4 +95,3 @@ contract MockRegistryDynamicModuleKeyRevert is IRegistryDynamicModuleKey {
         revert MockRegistryDynamicModuleKeyRevert__AlwaysRevert();
     }
 }
-

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ModuleCache } from "./ModuleCache.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ILendingEngineDebtRead } from "../../../interfaces/ILendingEngineDebtRead.sol";
-import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
-import { Registry } from "../../../registry/Registry.sol";
+import {ModuleCache} from "./ModuleCache.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ILendingEngineDebtRead} from "../../../interfaces/ILendingEngineDebtRead.sol";
+import {IPositionViewValuation} from "../../../interfaces/IPositionViewValuation.sol";
+import {Registry} from "../../../registry/Registry.sol";
 
 /**
  * @title LiquidationRiskQueryLib
@@ -35,7 +35,7 @@ library LiquidationRiskQueryLib {
      * @param moduleCache Module cache storage reference
      * @param key Module key identifier
      * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
-    * @return moduleAddr Module address, or address(0) if the module is missing.
+     * @return moduleAddr Module address, or address(0) if the module is missing.
      */
     function _getModuleView(
         address registryAddr,
@@ -66,15 +66,15 @@ library LiquidationRiskQueryLib {
      * Security:
      * - View function (read-only).
      * - Best-effort: returns (0, 0) if modules are not registered or calls fail.
-    * - Does not access oracles or implement graceful degradation logic.
+     * - Does not access oracles or implement graceful degradation logic.
      * - Uses try/catch to handle external call failures gracefully.
      *
      * @param user User address to query
      * @param registryAddr Registry contract address for module resolution
      * @param moduleCache Module cache storage reference
- * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
-    * @return collateralValue Total collateral value in the shared 18-decimal system valuation unit, or 0 if the query fails.
-    * @return debtValue Total debt value in the shared 18-decimal system valuation unit, or 0 if the query fails.
+     * @param maxCacheAge Maximum cache age in blocks (0 = cache always valid)
+     * @return collateralValue Total collateral value in the shared 18-decimal system valuation unit, or 0 if the query fails.
+     * @return debtValue Total debt value in the shared 18-decimal system valuation unit, or 0 if the query fails.
      */
     function getUserValues(
         address user,
@@ -82,25 +82,42 @@ library LiquidationRiskQueryLib {
         ModuleCache.ModuleCacheStorage storage moduleCache,
         uint256 maxCacheAge
     ) internal view returns (uint256 collateralValue, uint256 debtValue) {
-        address lendingEngine = _getModuleView(registryAddr, moduleCache, ModuleKeys.KEY_LE, maxCacheAge);
-        address positionView = _getModuleView(registryAddr, moduleCache, ModuleKeys.KEY_POSITION_VIEW, maxCacheAge);
+        address lendingEngine = _getModuleView(
+            registryAddr,
+            moduleCache,
+            ModuleKeys.KEY_LE,
+            maxCacheAge
+        );
+        address positionView = _getModuleView(
+            registryAddr,
+            moduleCache,
+            ModuleKeys.KEY_POSITION_VIEW,
+            maxCacheAge
+        );
 
-        if (lendingEngine == address(0) || positionView == address(0)) return (0, 0);
+        if (lendingEngine == address(0) || positionView == address(0))
+            return (0, 0);
 
         // debt value for automatic risk decisions must come from the strict oracle-backed route.
-        try ILendingEngineDebtRead(lendingEngine).getUserTotalDebtValueStrict(user) returns (uint256 v) {
+        try
+            ILendingEngineDebtRead(lendingEngine).getUserTotalDebtValueStrict(
+                user
+            )
+        returns (uint256 v) {
             debtValue = v;
         } catch {
             debtValue = 0;
         }
 
         // collateral value (shared 18-decimal system valuation unit; produced by PositionView valuation)
-        try IPositionViewValuation(positionView).getUserTotalCollateralValue(user) returns (uint256 v) {
+        try
+            IPositionViewValuation(positionView).getUserTotalCollateralValue(
+                user
+            )
+        returns (uint256 v) {
             collateralValue = v;
         } catch {
             collateralValue = 0;
         }
     }
 }
-
-

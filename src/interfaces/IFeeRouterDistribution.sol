@@ -54,15 +54,15 @@ interface IFeeRouterDistribution {
 
     /**
      * @notice Distribute a prepaid fee amount already held by FeeRouter.
-        * @dev Reverts if:
-        *      - the caller is not authorized to trigger prepaid distribution
-        *      - `token` is unsupported or `amount` is zero/invalid
-        *      - the implementation lacks sufficient prepaid balance for the requested transfer
-        *
-        * Security:
-        * - Write path for fee amounts already custodied by FeeRouter.
-        * - `payer` is typically used for attribution/observability rather than token transfer authorization.
-        *
+     * @dev Reverts if:
+     *      - the caller is not authorized to trigger prepaid distribution
+     *      - `token` is unsupported or `amount` is zero/invalid
+     *      - the implementation lacks sufficient prepaid balance for the requested transfer
+     *
+     * Security:
+     * - Write path for fee amounts already custodied by FeeRouter.
+     * - `payer` is typically used for attribution/observability rather than token transfer authorization.
+     *
      * @param token ERC20 token address.
      * @param amount Prepaid fee amount already transferred to FeeRouter.
      * @param feeType Fee type identifier.
@@ -77,16 +77,16 @@ interface IFeeRouterDistribution {
 
     /**
      * @notice Batch distribute multiple fee items for a token.
-        * @dev Reverts if:
-        *      - the caller is not authorized to trigger fee distribution
-        *      - `token` is unsupported
-        *      - batch lengths mismatch, exceed implementation limits, or otherwise violate routing constraints
-        *      - any underlying transfer or routing path fails
-        *
-        * Security:
-        * - Batch write path used to amortize multiple fee settlements into one transaction.
-        * - Implementations commonly fail atomically if the batch shape is invalid.
-        *
+     * @dev Reverts if:
+     *      - the caller is not authorized to trigger fee distribution
+     *      - `token` is unsupported
+     *      - batch lengths mismatch, exceed implementation limits, or otherwise violate routing constraints
+     *      - any underlying transfer or routing path fails
+     *
+     * Security:
+     * - Batch write path used to amortize multiple fee settlements into one transaction.
+     * - Implementations commonly fail atomically if the batch shape is invalid.
+     *
      * @param token ERC20 token address.
      * @param amounts Per-item total amounts (token decimals of `token`).
      * @param feeTypes Per-item fee type identifiers.

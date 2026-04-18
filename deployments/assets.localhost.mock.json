@@ -3,7 +3,7 @@
   "chainId": 1337,
   "assets": [
     {
-      "address": "0x5Ffe31E4676D3466268e28a75E51d1eFa4298620",
+      "address": "0xC25fFDe61dA50C5d4Cc75d088814bf32B1F5d7c9",
       "oracleAssetKey": "mock-usdc",
       "sourceId": "mock-usdc",
       "decimals": 6,
@@ -16,7 +16,7 @@
       "launchPriceRequired": false
     },
     {
-      "address": "0x627b9A657eac8c3463AD17009a424dFE3FDbd0b1",
+      "address": "0x70401A4AB04A90043BD419f56CC36B77D0587C30",
       "oracleAssetKey": "mock-usdt",
       "sourceId": "mock-usdt",
       "decimals": 6,
@@ -29,7 +29,7 @@
       "launchPriceRequired": false
     },
     {
-      "address": "0xa62835D1A6bf5f521C4e2746E1F51c923b8f3483",
+      "address": "0x4C70a29A4be0954eE358f03C18BecCb888549c01",
       "oracleAssetKey": "mock-hkd",
       "sourceId": "mock-hkd",
       "decimals": 18,
@@ -42,7 +42,7 @@
       "launchPriceRequired": false
     },
     {
-      "address": "0x8E45C0936fa1a65bDaD3222bEFeC6a03C83372cE",
+      "address": "0x2B4F80e20eaC049509C86f3B0742b6B4fB7C4bE2",
       "oracleAssetKey": "mock-sgd",
       "sourceId": "mock-sgd",
       "decimals": 18,
@@ -55,7 +55,7 @@
       "launchPriceRequired": false
     },
     {
-      "address": "0xBEe6FFc1E8627F51CcDF0b4399a1e1abc5165f15",
+      "address": "0xa6fA98A9A2496b8726897ea539344cea9890915f",
       "oracleAssetKey": "mock-bitcoin",
       "sourceId": "mock-bitcoin",
       "decimals": 8,
@@ -68,7 +68,7 @@
       "launchPriceRequired": false
     },
     {
-      "address": "0xC32609C91d6B6b51D48f2611308FEf121B02041f",
+      "address": "0x32CFdC6c4EA4BBc5f99a4F069281DcFA4447102c",
       "oracleAssetKey": "mock-ethereum",
       "sourceId": "mock-ethereum",
       "decimals": 18,
@@ -81,7 +81,7 @@
       "launchPriceRequired": false
     },
     {
-      "address": "0x262e2b50219620226C5fB5956432A88fffd94Ba7",
+      "address": "0xBc8f87CA68de19edED1c96f2789A4967F9e78E65",
       "oracleAssetKey": "mock-rwa-gold",
       "sourceId": "mock-rwa-gold",
       "decimals": 18,
@@ -98,7 +98,7 @@
       "launchPriceRequired": true
     },
     {
-      "address": "0xd753c12650c280383Ce873Cc3a898F6f53973d16",
+      "address": "0xB6b46DfD045134249e8DaC98a188e0C23B56A0b8",
       "oracleAssetKey": "mock-rwa-bond",
       "sourceId": "mock-rwa-bond",
       "decimals": 18,
@@ -115,7 +115,7 @@
       "launchPriceRequired": true
     },
     {
-      "address": "0xd30bF3219A0416602bE8D482E0396eF332b0494E",
+      "address": "0xDFDBd5A2c3cE928482bd6D6e0b1C0e8F27A51265",
       "oracleAssetKey": "mock-rwa-real-estate",
       "sourceId": "mock-rwa-real-estate",
       "decimals": 18,
@@ -132,7 +132,7 @@
       "launchPriceRequired": true
     },
     {
-      "address": "0xAD2935E147b61175D5dc3A9e7bDa93B0975A43BA",
+      "address": "0x5837440Bb467C30288289D5Cd42a4aB75b156384",
       "oracleAssetKey": "mock-rwa-invoice",
       "sourceId": "mock-rwa-invoice",
       "decimals": 18,

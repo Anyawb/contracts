@@ -2,6 +2,7 @@ import { ethers } from "hardhat";
 
 import {
   assignFreshBorrower,
+  assignFreshLender,
   createFundsFlowLiveContext,
   depositCollateral,
   ensureFundsFlowEnvironmentReady,
@@ -20,7 +21,9 @@ import { requireFeeRouterSyncAdvance } from "../core/_feeLiveUtils";
 import { runWithNetworkRetry } from "../core/_networkRetry";
 import { logLiveScriptFailure, logLiveScriptSuccess, resolveLiveScriptId } from "../core/_scriptStatus";
 
-const ORDER_STATUS_REPAID = 1n;
+const ORDER_PRODUCT_LOAN = 1n;
+const ORDER_LIFECYCLE_REPAID = 2n;
+const ORDER_CLOSE_REASON_FULL_REPAY = 1n;
 
 function uniqAddresses(addresses: string[]) {
   return [...new Set(addresses.filter((address) => address && address !== ethers.ZeroAddress))];
@@ -64,6 +67,7 @@ async function main() {
   });
 
   await assignFreshBorrower(ctx, { noticeLabel: "using fresh fee-accounting borrower" });
+  await assignFreshLender(ctx, { noticeLabel: "using fresh fee-accounting lender" });
 
   await ensureFundsFlowEnvironmentReady(ctx);
   await ensureFundsFlowPrices(ctx);
@@ -78,6 +82,7 @@ async function main() {
   });
 
   const tracked = uniqAddresses([
+    ctx.relayer.address,
     ctx.borrower.address,
     ctx.lender.address,
     platformTreasury,
@@ -118,9 +123,10 @@ async function main() {
   }
   const reserveSumBefore = sumTokenBalances(beforeBalances);
   const reserveSumAfter = sumTokenBalances(afterReserveBalances);
+  const reserveNetDelta = reserveSumAfter - reserveSumBefore;
   if (poolOnlyReserve) {
     expectEqual(
-      reserveSumAfter - reserveSumBefore,
+      reserveNetDelta,
       ctx.borrowAmount,
       "reserve tracked token conservation (pool-only mode delta)",
     );
@@ -171,7 +177,22 @@ async function main() {
   if (!ctx.lendingEngineView) {
     throw new Error("fee accounting: LendingEngineView is required for explicit order status checks");
   }
-  expectEqual(BigInt(await ctx.lendingEngineView.getOrderStatus(finalized.orderId)), ORDER_STATUS_REPAID, "order lifecycle status after fee flow");
+  const orderState = await ctx.lendingEngineView.connect(ctx.borrower).getOrderStateSnapshot(finalized.orderId);
+  expectEqual(
+    BigInt(orderState.productType),
+    ORDER_PRODUCT_LOAN,
+    "order product type after fee flow",
+  );
+  expectEqual(
+    BigInt(orderState.lifecycle),
+    ORDER_LIFECYCLE_REPAID,
+    "order lifecycle snapshot after fee flow",
+  );
+  expectEqual(
+    BigInt(orderState.closeReason),
+    ORDER_CLOSE_REASON_FULL_REPAY,
+    "order close reason snapshot after fee flow",
+  );
   expectEqual(order.repaidAmount, ctx.totalDue, "order repaidAmount after fee flow");
 
   logLiveScriptSuccess(__filename);

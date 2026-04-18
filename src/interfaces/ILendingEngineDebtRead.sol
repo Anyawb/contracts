@@ -52,17 +52,17 @@ interface ILendingEngineDebtRead {
     ) external view returns (uint256 totalDebt);
 
     /**
-    * @notice Returns the cached total debt value for `user` in the normalized system valuation unit.
+     * @notice Returns the cached total debt value for `user` in the normalized system valuation unit.
      * @dev Reverts if:
      *      - the protocol implementation rejects an invalid `user`
      *      - the cached valuation read cannot be resolved
      *
-    * Security:
-    * - Read-only valuation helper.
-    * - The returned unit is the shared 18-decimal system valuation unit.
+     * Security:
+     * - Read-only valuation helper.
+     * - The returned unit is the shared 18-decimal system valuation unit.
      *
      * @param user Borrower address being queried.
-    * @return totalValue Cached total debt value for `user` normalized to 18 decimals.
+     * @return totalValue Cached total debt value for `user` normalized to 18 decimals.
      */
     function getUserTotalDebtValue(
         address user
@@ -103,15 +103,15 @@ interface ILendingEngineDebtRead {
     ) external view returns (uint256 totalValue);
 
     /**
-    * @notice Returns the cached protocol-wide total debt value in the normalized system valuation unit.
+     * @notice Returns the cached protocol-wide total debt value in the normalized system valuation unit.
      * @dev Reverts if:
      *      - the protocol implementation cannot resolve the cached system valuation
      *
-    * Security:
-    * - Read-only aggregation helper.
-    * - The returned unit is the shared 18-decimal system valuation unit.
+     * Security:
+     * - Read-only aggregation helper.
+     * - The returned unit is the shared 18-decimal system valuation unit.
      *
-    * @return totalValue Cached system-wide debt valuation normalized to 18 decimals.
+     * @return totalValue Cached system-wide debt valuation normalized to 18 decimals.
      */
     function getTotalDebtValue() external view returns (uint256 totalValue);
 
@@ -174,18 +174,18 @@ interface ILendingEngineDebtRead {
     ) external view returns (uint256 reducibleAmount);
 
     /**
-    * @notice Returns the valuation of `user`'s debt in `asset` using the implementation's pricing rules.
+     * @notice Returns the valuation of `user`'s debt in `asset` using the implementation's pricing rules.
      * @dev Reverts if:
      *      - the protocol implementation rejects an invalid `user` or `asset`
      *      - the valuation path cannot be resolved
      *
      * Security:
      * - Read-only valuation helper.
-    * - The returned unit is the shared 18-decimal system valuation unit.
+     * - The returned unit is the shared 18-decimal system valuation unit.
      *
      * @param user Borrower address being queried.
      * @param asset Debt asset address being valued.
-    * @return value Debt valuation for `user` and `asset` normalized to 18 decimals.
+     * @return value Debt valuation for `user` and `asset` normalized to 18 decimals.
      */
     function calculateDebtValue(
         address user,

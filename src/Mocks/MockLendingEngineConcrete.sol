@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { MockLendingEngineBasic } from "./MockLendingEngineBasic.sol";
+import {MockLendingEngineBasic} from "./MockLendingEngineBasic.sol";
 
 /// @title MockLendingEngineConcrete
-/// @notice 向后兼容的 Mock，复用 MockLendingEngineBasic 的实现，满足测试中的命名依赖
+/// @notice Backward-compatible mock that reuses MockLendingEngineBasic for naming-dependent tests.
 // solhint-disable-next-line no-empty-blocks
 contract MockLendingEngineConcrete is MockLendingEngineBasic {}
-
-

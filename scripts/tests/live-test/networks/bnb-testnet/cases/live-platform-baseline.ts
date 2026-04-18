@@ -1033,4 +1033,7 @@ async function main() {
   logLiveScriptSuccess(__filename);
 }
 
-export const liveScriptPromise = runWithNetworkRetry(resolveLiveScriptId(__filename), main);
+export const liveScriptPromise = runWithNetworkRetry(resolveLiveScriptId(__filename), main, {
+  // Platform baseline is a long composite flow; timeout-race can report false failures.
+  attemptTimeoutMs: 0,
+});

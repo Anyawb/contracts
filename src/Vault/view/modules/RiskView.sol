@@ -1,28 +1,27 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { HealthFactorLib } from "../../../libraries/HealthFactorLib.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { BatchTooLarge, EmptyArray, MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
-import { ILendingEngineDebtRead } from "../../../interfaces/ILendingEngineDebtRead.sol";
-import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
-import { IGuaranteeFundManager } from "../../../interfaces/IGuaranteeFundManager.sol";
-
-/// @dev Minimal interface for HealthView reads to avoid circular dependencies.
-interface IHealthViewLite {
-    function getUserHealthFactorWithMeta(address user)
-        external
-        view
-        returns (uint256 healthFactor, bool isValid, uint256 blockNumber);
-}
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {HealthFactorLib} from "../../../libraries/HealthFactorLib.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {
+    BatchTooLarge,
+    EmptyArray,
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
+import {IHealthViewBasic} from "../../../interfaces/IHealthViewBasic.sol";
+import {ILendingEngineDebtRead} from "../../../interfaces/ILendingEngineDebtRead.sol";
+import {IPositionViewValuation} from "../../../interfaces/IPositionViewValuation.sol";
+import {IGuaranteeFundManager} from "../../../interfaces/IGuaranteeFundManager.sol";
 
 /**
  * @title RiskView
@@ -41,7 +40,11 @@ interface IHealthViewLite {
  */
 contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Types ━━━━━━━━━━━━━━━*/
-    enum WarningLevel { NONE, WARNING, CRITICAL }
+    enum WarningLevel {
+        NONE,
+        WARNING,
+        CRITICAL
+    }
 
     struct RiskAssessmentWithMeta {
         bool liquidatable;
@@ -55,7 +58,8 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
     address private _registryAddr;
     uint256 private constant _MAX_BATCH_SIZE = ViewConstants.MAX_BATCH_SIZE;
-    bytes4 private constant _SEL_GET_LOCKED_GUARANTEE = IGuaranteeFundManager.getLockedGuarantee.selector;
+    bytes4 private constant _SEL_GET_LOCKED_GUARANTEE =
+        IGuaranteeFundManager.getLockedGuarantee.selector;
 
     /*━━━━━━━━━━━━━━━ Modifiers ━━━━━━━━━━━━━━━*/
     modifier onlyValidRegistry() {
@@ -67,9 +71,17 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U: self-read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyUserOrViewer(address user) {
         if (
-            msg.sender != user
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            msg.sender != user &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -77,8 +89,16 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U batch: no self-bypass; must have VIEW_USER_DATA or ADMIN.
     modifier onlyUserBatchViewer() {
         if (
-            !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -96,30 +116,31 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - initialRegistryAddr is not a contract (see {NotAContract})
      *
      * Security:
-    * - Initializer: callable once.
+     * - Initializer: callable once.
      *
-    * @param initialRegistryAddr Registry address used for module resolution and access control.
+     * @param initialRegistryAddr Registry address used for module resolution and access control.
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
     /**
-        * @notice Return a user's risk assessment derived from HealthView cache.
+     * @notice Return a user's risk assessment derived from HealthView cache.
      * @dev Reverts if:
      *      - registry is not configured or not a contract
      *        (see {ZeroAddress}, {NotAContract} via onlyValidRegistry)
      *      - caller lacks Scheme U permission (self or VIEW_USER_DATA/ADMIN)
      *
      * Security:
-    * - Scheme U reads (self or VIEW_USER_DATA/ADMIN).
-    * - Best-effort HealthView read: falls back to healthFactor=10_000 (bps) if the cache is invalid or the call fails.
+     * - Scheme U reads (self or VIEW_USER_DATA/ADMIN).
+     * - Best-effort HealthView read: falls back to healthFactor=10_000 (bps) if the cache is invalid or the call fails.
      *
-    * @param user Target user address.
+     * @param user Target user address.
      * @return a Risk assessment with cache metadata:
      *         - healthFactor: cached HF (bps; 10_000 = 100%)
      *         - liquidatable: true if healthFactor < 10_000
@@ -127,17 +148,23 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *         - isValid: HealthView cache validity flag
      *         - blockNumber: HealthView cache blockNumber
      */
-    function getUserRiskAssessment(address user)
+    function getUserRiskAssessment(
+        address user
+    )
         external
         view
         onlyValidRegistry
         onlyUserOrViewer(user)
         returns (RiskAssessmentWithMeta memory a)
     {
-        (uint256 hf, bool ok, uint256 blockNumber) = _healthFactorWithMeta(user);
+        (uint256 hf, bool ok, uint256 blockNumber) = _healthFactorWithMeta(
+            user
+        );
         a.healthFactor = hf;
         a.liquidatable = ok && hf < 10_000;
-        a.warningLevel = hf < 10_000 ? WarningLevel.CRITICAL : (hf < 11_000 ? WarningLevel.WARNING : WarningLevel.NONE);
+        a.warningLevel = hf < 10_000
+            ? WarningLevel.CRITICAL
+            : (hf < 11_000 ? WarningLevel.WARNING : WarningLevel.NONE);
         a.isValid = ok;
         a.blockNumber = blockNumber;
     }
@@ -150,16 +177,19 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller lacks Scheme U permission (self or VIEW_USER_DATA/ADMIN)
      *
      * Security:
-    * - Scheme U reads (self or VIEW_USER_DATA/ADMIN).
-    * - Best-effort dependency reads: missing modules or failed calls default to zero totals/guarantee.
+     * - Scheme U reads (self or VIEW_USER_DATA/ADMIN).
+     * - Best-effort dependency reads: missing modules or failed calls default to zero totals/guarantee.
      *
-    * @param user Target user address.
-    * @param asset Asset address whose locked guarantee should be excluded.
-    * @return healthFactor Health factor in bps, computed from best-effort totals and guarantee reads.
-    * @return isValid True if the read succeeded.
-    * @return blockNumber Read block number.
+     * @param user Target user address.
+     * @param asset Asset address whose locked guarantee should be excluded.
+     * @return healthFactor Health factor in bps, computed from best-effort totals and guarantee reads.
+     * @return isValid True if the read succeeded.
+     * @return blockNumber Read block number.
      */
-    function calculateHealthFactorExcludingGuarantee(address user, address asset)
+    function calculateHealthFactorExcludingGuarantee(
+        address user,
+        address asset
+    )
         external
         view
         onlyValidRegistry
@@ -168,8 +198,14 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         (uint256 totalCol, uint256 totalDebt) = _getUserTotals(user);
         uint256 guarantee = _getUserGuarantee(user, asset);
-        uint256 effectiveCol = HealthFactorLib.effectiveCollateral(totalCol, guarantee);
-        healthFactor = HealthFactorLib.calcHealthFactor(effectiveCol, totalDebt);
+        uint256 effectiveCol = HealthFactorLib.effectiveCollateral(
+            totalCol,
+            guarantee
+        );
+        healthFactor = HealthFactorLib.calcHealthFactor(
+            effectiveCol,
+            totalDebt
+        );
         return (healthFactor, true, _now());
     }
 
@@ -183,13 +219,15 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - users.length exceeds the maximum batch size (see {BatchTooLarge})
      *
      * Security:
-    * - Scheme U batch reads (VIEW_USER_DATA/ADMIN).
-    * - Best-effort HealthView reads per user.
+     * - Scheme U batch reads (VIEW_USER_DATA/ADMIN).
+     * - Best-effort HealthView reads per user.
      *
-    * @param users Target user addresses.
-    * @return arr Per-user risk assessments with metadata, in the same order as `users`.
+     * @param users Target user addresses.
+     * @return arr Per-user risk assessments with metadata, in the same order as `users`.
      */
-    function batchGetRiskAssessments(address[] calldata users)
+    function batchGetRiskAssessments(
+        address[] calldata users
+    )
         external
         view
         onlyValidRegistry
@@ -206,7 +244,9 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         arr = new RiskAssessmentWithMeta[](len);
         for (uint256 i; i < len; ) {
             arr[i] = _buildRisk(users[i]);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -217,22 +257,34 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
         return block.number;
     }
 
-    function _buildRisk(address user) internal view returns (RiskAssessmentWithMeta memory a) {
-        (uint256 hf, bool ok, uint256 blockNumber) = _healthFactorWithMeta(user);
+    function _buildRisk(
+        address user
+    ) internal view returns (RiskAssessmentWithMeta memory a) {
+        (uint256 hf, bool ok, uint256 blockNumber) = _healthFactorWithMeta(
+            user
+        );
         a.healthFactor = hf;
         a.liquidatable = ok && hf < 10_000;
-        a.warningLevel = hf < 10_000 ? WarningLevel.CRITICAL : (hf < 11_000 ? WarningLevel.WARNING : WarningLevel.NONE);
+        a.warningLevel = hf < 10_000
+            ? WarningLevel.CRITICAL
+            : (hf < 11_000 ? WarningLevel.WARNING : WarningLevel.NONE);
         a.isValid = ok;
         a.blockNumber = blockNumber;
     }
 
     /// @dev Best-effort HealthView read. Returns (10_000,false,0) if the cache is invalid or the call fails.
-    function _healthFactorWithMeta(address user) internal view returns (uint256, bool, uint256) {
+    function _healthFactorWithMeta(
+        address user
+    ) internal view returns (uint256, bool, uint256) {
         address hv = _getModule(ModuleKeys.KEY_HEALTH_VIEW);
         if (hv != address(0)) {
-            try IHealthViewLite(hv).getUserHealthFactorWithMeta(user) returns (uint256 hf, bool valid, uint256 blockNumber) {
+            try IHealthViewBasic(hv).getUserHealthFactorWithMeta(user) returns (
+                uint256 hf,
+                bool valid,
+                uint256 blockNumber
+            ) {
                 return (valid ? hf : 10_000, valid, blockNumber);
-            // solhint-disable-next-line no-empty-blocks
+                // solhint-disable-next-line no-empty-blocks
             } catch {
                 // best-effort: fall back below
             }
@@ -241,18 +293,24 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /// @dev Best-effort totals read. Missing modules / failed calls default to 0 for that total.
-    function _getUserTotals(address user) internal view returns (uint256 totalCollateral, uint256 totalDebt) {
+    function _getUserTotals(
+        address user
+    ) internal view returns (uint256 totalCollateral, uint256 totalDebt) {
         address le = _getModule(ModuleKeys.KEY_LE);
         address pv = _getModule(ModuleKeys.KEY_POSITION_VIEW);
         if (le != address(0)) {
-            try ILendingEngineDebtRead(le).getUserTotalDebtValue(user) returns (uint256 v) {
+            try ILendingEngineDebtRead(le).getUserTotalDebtValue(user) returns (
+                uint256 v
+            ) {
                 totalDebt = v;
             } catch {
                 totalDebt = 0;
             }
         }
         if (pv != address(0)) {
-            try IPositionViewValuation(pv).getUserTotalCollateralValue(user) returns (uint256 v) {
+            try
+                IPositionViewValuation(pv).getUserTotalCollateralValue(user)
+            returns (uint256 v) {
                 totalCollateral = v;
             } catch {
                 totalCollateral = 0;
@@ -261,51 +319,66 @@ contract RiskView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /// @dev Best-effort guarantee read via staticcall. Returns 0 on failure or missing module.
-    function _getUserGuarantee(address user, address asset) internal view returns (uint256 amount) {
+    function _getUserGuarantee(
+        address user,
+        address asset
+    ) internal view returns (uint256 amount) {
         address gfm = _getModule(ModuleKeys.KEY_GUARANTEE_FUND);
         if (gfm != address(0)) {
             (bool success, bytes memory data) = gfm.staticcall(
                 abi.encodeWithSelector(_SEL_GET_LOCKED_GUARANTEE, user, asset)
             );
-            if (success && data.length >= 32) amount = abi.decode(data, (uint256));
+            if (success && data.length >= 32)
+                amount = abi.decode(data, (uint256));
         }
     }
 
-    function _getModule(bytes32 key) internal view returns (address moduleAddr) {
+    function _getModule(
+        bytes32 key
+    ) internal view returns (address moduleAddr) {
         moduleAddr = Registry(_registryAddr).getModule(key);
     }
 
     /*━━━━━━━━━━━━━━━ UUPS ━━━━━━━━━━━━━━━*/
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
     /**
-        * @notice Return the API semantic version for this module.
-        * @dev Reverts if: (never)
+     * @notice Return the API semantic version for this module.
+     * @dev Reverts if: (never)
      *
      * Security:
-        * - Pure function.
+     * - Pure function.
      *
-        * @return version API semantic version.
+     * @return version API semantic version.
      */
     function apiVersion() public pure override returns (uint256) {
         return 1;
     }
 
     /**
-        * @notice Return the schema version for this module's outputs and caches.
-        * @dev Reverts if: (never)
+     * @notice Return the schema version for this module's outputs and caches.
+     * @dev Reverts if: (never)
      *
      * Security:
-        * - Pure function.
+     * - Pure function.
      *
-        * @return version Schema version.
+     * @return version Schema version.
      */
     function schemaVersion() public pure override returns (uint256) {
         return 1;

@@ -50,8 +50,8 @@ interface IOrderEngineViewAdapter {
      * @dev This status is the order-level terminal-state gate for repay/liquidation flows.
      *      Downstream callers should use it for business-state decisions rather than inferring
      *      closure from debt-ledger overpay/force-reduce side effects.
-        *      This is the ORDER_ENGINE-side source consumed by LendingEngineView for order-centric
-        *      read access; it does not move the lifecycle state machine into the View layer.
+     *      This is the ORDER_ENGINE-side source consumed by LendingEngineView for order-centric
+     *      read access; it does not move the lifecycle state machine into the View layer.
      *
      * Security:
      * - View-only; must not mutate state.

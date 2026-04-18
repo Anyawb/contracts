@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { Registry } from "../../../registry/Registry.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {Registry} from "../../../registry/Registry.sol";
 import {
     ZeroAddress,
     BatchTooLarge,
@@ -16,14 +16,14 @@ import {
     NotAContract,
     InvalidCaller
 } from "../../../errors/StandardErrors.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { ILiquidationEventsView } from "../../../interfaces/ILiquidationEventsView.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
-import { ICollateralManager } from "../../../interfaces/ICollateralManager.sol";
-import { IPositionViewValuation } from "../../../interfaces/IPositionViewValuation.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {ILiquidationEventsView} from "../../../interfaces/ILiquidationEventsView.sol";
+import {DataPushLibrary} from "../../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../../constants/DataPushTypes.sol";
+import {ICollateralManager} from "../../../interfaces/ICollateralManager.sol";
+import {IPositionViewValuation} from "../../../interfaces/IPositionViewValuation.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
 
 /**
  * @title LiquidatorView
@@ -40,8 +40,12 @@ import { ViewVersioned } from "../ViewVersioned.sol";
  *   reinterpret bonus or payout amounts as normalized valuation-unit fields.
  * - Not an SSOT for ledger state; this is a view/cache push surface
  */
-contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsView, ViewVersioned {
-    
+contract LiquidatorView is
+    Initializable,
+    UUPSUpgradeable,
+    ILiquidationEventsView,
+    ViewVersioned
+{
     /*━━━━━━━━━━━━━━━ ERRORS ━━━━━━━━━━━━━━━*/
     /// @dev Reverts when a caller-provided `limit` parameter is invalid (e.g., zero).
     error LiquidatorView__InvalidLimit();
@@ -49,7 +53,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /*━━━━━━━━━━━━━━━ STATE ━━━━━━━━━━━━━━━*/
     /// @notice Registry address (module resolution SSOT).
     address private _registryAddr;
-    
+
     /// @notice Legacy SystemView placeholder (optional, backwards compatibility).
     address private _legacySystemViewAddr;
 
@@ -72,13 +76,16 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         uint256 lastLiquidationBlock;
         uint256 liquidationSuccessRate;
     }
-    
+
     /*━━━━━━━━━━━━━━━ DATA PUSH TYPES ━━━━━━━━━━━━━━━*/
     // NOTE: Prefer centralized DataPushTypes to avoid duplicated keccak256 constants across modules.
-    bytes32 public constant DATA_TYPE_LIQUIDATION_UPDATE = DataPushTypes.DATA_TYPE_LIQUIDATION_UPDATE;
-    bytes32 public constant DATA_TYPE_LIQUIDATION_BATCH_UPDATE = DataPushTypes.DATA_TYPE_LIQUIDATION_BATCH_UPDATE;
-    bytes32 public constant DATA_TYPE_LIQUIDATION_PAYOUT = DataPushTypes.DATA_TYPE_LIQUIDATION_PAYOUT;
-    
+    bytes32 public constant DATA_TYPE_LIQUIDATION_UPDATE =
+        DataPushTypes.DATA_TYPE_LIQUIDATION_UPDATE;
+    bytes32 public constant DATA_TYPE_LIQUIDATION_BATCH_UPDATE =
+        DataPushTypes.DATA_TYPE_LIQUIDATION_BATCH_UPDATE;
+    bytes32 public constant DATA_TYPE_LIQUIDATION_PAYOUT =
+        DataPushTypes.DATA_TYPE_LIQUIDATION_PAYOUT;
+
     /*━━━━━━━━━━━━━━━ MODIFIERS ━━━━━━━━━━━━━━━*/
     /**
      * @notice Ensure Registry is configured.
@@ -90,14 +97,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         if (_registryAddr.code.length == 0) revert NotAContract(_registryAddr);
         _;
     }
-    
+
     /**
      * @notice Require system-level view permission.
      * @dev Reverts if:
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      */
     modifier onlySystemViewer() {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_SYSTEM_DATA,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         _;
@@ -109,7 +122,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_RISK_DATA
      */
     modifier onlyRiskViewer() {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_RISK_DATA, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_RISK_DATA,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         _;
@@ -121,8 +140,12 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller is neither Registry.KEY_LIQUIDATION_MANAGER nor Registry.KEY_SETTLEMENT_MANAGER
      */
     modifier onlyLiquidationWriter() {
-        address lm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_MANAGER);
-        address sm = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
+        address lm = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_LIQUIDATION_MANAGER
+        );
+        address sm = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_SETTLEMENT_MANAGER
+        );
         if (msg.sender != lm && msg.sender != sm) revert InvalidCaller();
         _;
     }
@@ -134,10 +157,17 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *        or Registry.KEY_LIQUIDATION_PAYOUT_MANAGER
      */
     modifier onlyLiquidationOrPayoutModule() {
-        address lm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_MANAGER);
-        address sm = Registry(_registryAddr).getModule(ModuleKeys.KEY_SETTLEMENT_MANAGER);
-        address pm = Registry(_registryAddr).getModule(ModuleKeys.KEY_LIQUIDATION_PAYOUT_MANAGER);
-        if (msg.sender != lm && msg.sender != sm && msg.sender != pm) revert InvalidCaller();
+        address lm = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_LIQUIDATION_MANAGER
+        );
+        address sm = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_SETTLEMENT_MANAGER
+        );
+        address pm = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_LIQUIDATION_PAYOUT_MANAGER
+        );
+        if (msg.sender != lm && msg.sender != sm && msg.sender != pm)
+            revert InvalidCaller();
         _;
     }
 
@@ -147,7 +177,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_LIQUIDATION_DATA
      */
     modifier onlyLiquidationViewer() {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_LIQUIDATION_DATA, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_LIQUIDATION_DATA,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         _;
@@ -186,8 +222,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         address initialSystemView
     ) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
-        
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
+
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
         _legacySystemViewAddr = initialSystemView;
@@ -212,20 +249,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @notice Push a single liquidation update into the unified DataPush stream.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-    *      - caller is not an authorized liquidation writer (see {InvalidCaller})
+     *      - caller is not an authorized liquidation writer (see {InvalidCaller})
      *
      * Security:
-    * - Writer-gated: only the liquidation manager or settlement manager module may push updates
+     * - Writer-gated: only the liquidation manager or settlement manager module may push updates
      * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_UPDATE} for off-chain consumers
      *
      * @param user User address
      * @param collateralAsset Collateral asset address
      * @param debtAsset Debt asset address
-    * @param collateralAmount Collateral amount seized (collateral-token native decimals; as provided by writer)
-    * @param debtAmount Debt amount reduced (debt-token native decimals; as provided by writer)
+     * @param collateralAmount Collateral amount seized (collateral-token native decimals; as provided by writer)
+     * @param debtAmount Debt amount reduced (debt-token native decimals; as provided by writer)
      * @param liquidator Liquidator address
-    * @param bonus Liquidation bonus reporting value. Current writers treat this as a collateral-side token-native
-    *        amount hint; consumers MUST NOT assume it is a normalized value-unit field.
+     * @param bonus Liquidation bonus reporting value. Current writers treat this as a collateral-side token-native
+     *        amount hint; consumers MUST NOT assume it is a normalized value-unit field.
      * @param blockNumber Event block number (as provided by writer)
      */
     function pushLiquidationUpdate(
@@ -240,7 +277,16 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     ) external override onlyValidRegistry onlyLiquidationWriter {
         DataPushLibrary._emitData(
             DATA_TYPE_LIQUIDATION_UPDATE,
-            abi.encode(user, collateralAsset, debtAsset, collateralAmount, debtAmount, liquidator, bonus, blockNumber)
+            abi.encode(
+                user,
+                collateralAsset,
+                debtAsset,
+                collateralAmount,
+                debtAmount,
+                liquidator,
+                bonus,
+                blockNumber
+            )
         );
     }
 
@@ -248,21 +294,21 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @notice Push a batch liquidation update into the unified DataPush stream.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-    *      - caller is not an authorized liquidation writer (see {InvalidCaller})
+     *      - caller is not an authorized liquidation writer (see {InvalidCaller})
      *
      * Security:
-    * - Writer-gated: only the liquidation manager or settlement manager module may push updates
+     * - Writer-gated: only the liquidation manager or settlement manager module may push updates
      * - Assumes writer provides aligned arrays (this function does not validate lengths)
      * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_BATCH_UPDATE} for off-chain consumers
      *
      * @param users User addresses
      * @param collateralAssets Collateral asset addresses
      * @param debtAssets Debt asset addresses
-    * @param collateralAmounts Collateral amounts seized (collateral-token native decimals; as provided by writer)
-    * @param debtAmounts Debt amounts reduced (debt-token native decimals; as provided by writer)
+     * @param collateralAmounts Collateral amounts seized (collateral-token native decimals; as provided by writer)
+     * @param debtAmounts Debt amounts reduced (debt-token native decimals; as provided by writer)
      * @param liquidator Liquidator address (applies to the batch)
-    * @param bonuses Liquidation bonus reporting values; consumers MUST NOT assume these entries share the
-    *        normalized valuation-unit semantics of protocol value totals.
+     * @param bonuses Liquidation bonus reporting values; consumers MUST NOT assume these entries share the
+     *        normalized valuation-unit semantics of protocol value totals.
      * @param blockNumber Event block number (as provided by writer)
      */
     function pushBatchLiquidationUpdate(
@@ -294,10 +340,10 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @notice Push liquidation payout distribution into the unified DataPush stream.
      * @dev Reverts if:
      *      - registry is not configured or not a contract (see {ZeroAddress}, {NotAContract})
-    *      - caller is not liquidation manager, settlement manager, or payout manager (see {InvalidCaller})
+     *      - caller is not liquidation manager, settlement manager, or payout manager (see {InvalidCaller})
      *
      * Security:
-    * - Writer-gated: only liquidation/settlement/payout modules may push updates
+     * - Writer-gated: only liquidation/settlement/payout modules may push updates
      * - Emits {DataPushTypes.DATA_TYPE_LIQUIDATION_PAYOUT} for off-chain consumers
      *
      * @param user User address
@@ -306,10 +352,10 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param reserve Reserve payout recipient address
      * @param lender Lender payout recipient address
      * @param liquidator Liquidator payout recipient address
-    * @param platformShare Platform share amount (collateral-token native decimals; as provided by writer)
-    * @param reserveShare Reserve share amount (collateral-token native decimals; as provided by writer)
-    * @param lenderShare Lender share amount (collateral-token native decimals; as provided by writer)
-    * @param liquidatorShare Liquidator share amount (collateral-token native decimals; as provided by writer)
+     * @param platformShare Platform share amount (collateral-token native decimals; as provided by writer)
+     * @param reserveShare Reserve share amount (collateral-token native decimals; as provided by writer)
+     * @param lenderShare Lender share amount (collateral-token native decimals; as provided by writer)
+     * @param liquidatorShare Liquidator share amount (collateral-token native decimals; as provided by writer)
      * @param blockNumber Event block number (as provided by writer)
      */
     function pushLiquidationPayout(
@@ -356,18 +402,22 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param moduleKey Module key
      * @return Module address
      */
-    function _getModuleFromRegistry(bytes32 moduleKey) internal view returns (address) {
+    function _getModuleFromRegistry(
+        bytes32 moduleKey
+    ) internal view returns (address) {
         return Registry(_registryAddr).getModuleOrRevert(moduleKey);
     }
 
     /**
      * @notice Check whether a module is registered in Registry.
-        * @dev Reverts if: (never)
+     * @dev Reverts if: (never)
      *
      * @param moduleKey Module key
      * @return isRegistered True if the module is registered.
      */
-    function _isModuleRegistered(bytes32 moduleKey) internal view returns (bool isRegistered) {
+    function _isModuleRegistered(
+        bytes32 moduleKey
+    ) internal view returns (bool isRegistered) {
         return Registry(_registryAddr).isModuleRegistered(moduleKey);
     }
 
@@ -379,12 +429,14 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @param liquidator Liquidator address
      * @return profitView Profit/statistics view (placeholder values)
      */
-    function getLiquidatorProfitView(address liquidator)
+    function getLiquidatorProfitView(
+        address liquidator
+    )
         external
         view
         onlyValidRegistry
@@ -400,19 +452,25 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @param liquidator Liquidator address
      * @return profitView Profit/statistics view (placeholder values)
      * @return blockNumber Last update block number (0 for off-chain aggregation placeholder)
      * @return isValid Whether the snapshot is considered fresh (false for placeholder)
      */
-    function getLiquidatorProfitViewWithMeta(address liquidator)
+    function getLiquidatorProfitViewWithMeta(
+        address liquidator
+    )
         external
         view
         onlyValidRegistry
         onlySystemViewer
-        returns (LiquidatorProfitView memory profitView, uint256 blockNumber, bool isValid)
+        returns (
+            LiquidatorProfitView memory profitView,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         profitView = _buildLiquidatorProfitView(liquidator);
         (blockNumber, isValid) = _defaultMeta();
@@ -424,7 +482,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @return globalView Global liquidation view (placeholder values)
      */
@@ -444,7 +502,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @return globalView Global liquidation view (placeholder values)
      * @return blockNumber Last update block number (0 for off-chain aggregation placeholder)
@@ -455,7 +513,11 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         view
         onlyValidRegistry
         onlySystemViewer
-        returns (GlobalLiquidationView memory globalView, uint256 blockNumber, bool isValid)
+        returns (
+            GlobalLiquidationView memory globalView,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         globalView = _buildGlobalLiquidationView();
         (blockNumber, isValid) = _defaultMeta();
@@ -469,12 +531,14 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @param liquidators Array of liquidator addresses
      * @return views Array of views (placeholder values)
      */
-    function batchGetLiquidatorProfitViews(address[] calldata liquidators)
+    function batchGetLiquidatorProfitViews(
+        address[] calldata liquidators
+    )
         public
         view
         onlyValidRegistry
@@ -500,19 +564,25 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @param liquidators Array of liquidator addresses
      * @return views Array of views (placeholder values)
      * @return blockNumber Last update block number (0 for off-chain aggregation placeholder)
      * @return isValid Whether the snapshot is considered fresh (false for placeholder)
      */
-    function batchGetLiquidatorProfitViewsWithMeta(address[] calldata liquidators)
+    function batchGetLiquidatorProfitViewsWithMeta(
+        address[] calldata liquidators
+    )
         external
         view
         onlyValidRegistry
         onlySystemViewer
-        returns (LiquidatorProfitView[] memory views, uint256 blockNumber, bool isValid)
+        returns (
+            LiquidatorProfitView[] memory views,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         views = batchGetLiquidatorProfitViews(liquidators);
         (blockNumber, isValid) = _defaultMeta();
@@ -526,18 +596,26 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @param limit Max number of entries to return
      * @return liquidators Liquidator address list (currently empty placeholder)
      * @return profits Profit amounts (currently empty placeholder)
      * @return liquidations Liquidation counts (currently empty placeholder)
      */
-    function getLiquidatorLeaderboard(uint256 limit) public view onlyValidRegistry onlySystemViewer returns (
-        address[] memory liquidators,
-        uint256[] memory profits,
-        uint256[] memory liquidations
-    ) {
+    function getLiquidatorLeaderboard(
+        uint256 limit
+    )
+        public
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (
+            address[] memory liquidators,
+            uint256[] memory profits,
+            uint256[] memory liquidations
+        )
+    {
         if (limit == 0) revert LiquidatorView__InvalidLimit();
         if (limit > ViewConstants.MAX_BATCH_SIZE) {
             revert BatchTooLarge(limit, ViewConstants.MAX_BATCH_SIZE);
@@ -556,9 +634,11 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
-    function getLiquidatorLeaderboardWithMeta(uint256 limit)
+    function getLiquidatorLeaderboardWithMeta(
+        uint256 limit
+    )
         external
         view
         onlyValidRegistry
@@ -581,13 +661,16 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @param liquidator Liquidator address
      * @param asset Asset address
      * @return tempDebtAmount Temporary debt amount (placeholder; implementation-defined)
      */
-    function getLiquidatorTempDebt(address liquidator, address asset)
+    function getLiquidatorTempDebt(
+        address liquidator,
+        address asset
+    )
         public
         view
         onlyValidRegistry
@@ -595,7 +678,8 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (uint256 tempDebtAmount)
     {
         // Aggregated off-chain; return zero placeholder on-chain.
-        liquidator; asset;
+        liquidator;
+        asset;
         tempDebtAmount = 0;
     }
 
@@ -605,9 +689,12 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
-    function getLiquidatorTempDebtWithMeta(address liquidator, address asset)
+    function getLiquidatorTempDebtWithMeta(
+        address liquidator,
+        address asset
+    )
         external
         view
         onlyValidRegistry
@@ -624,7 +711,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @return profitRate Profit rate (bps; placeholder)
      */
@@ -645,7 +732,7 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
     function getLiquidatorProfitRateWithMeta()
         external
@@ -666,23 +753,31 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
     function getLiquidatorActivityStats(
         address liquidator,
         uint256 /* timeRange */
-    ) public view onlyValidRegistry onlySystemViewer returns (
-        uint256 totalLiquidations,
-        uint256 totalProfit,
-        uint256 averageProfit,
-        uint256 lastActivity
-    ) {
+    )
+        public
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (
+            uint256 totalLiquidations,
+            uint256 totalProfit,
+            uint256 averageProfit,
+            uint256 lastActivity
+        )
+    {
         liquidator; // silence unused (Scheme A: off-chain aggregation)
         // Aggregated off-chain; return placeholders on-chain.
         totalProfit = 0;
         totalLiquidations = 0;
         lastActivity = 0;
-        averageProfit = totalLiquidations > 0 ? totalProfit / totalLiquidations : 0;
+        averageProfit = totalLiquidations > 0
+            ? totalProfit / totalLiquidations
+            : 0;
     }
 
     /**
@@ -691,21 +786,31 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
     function getLiquidatorActivityStatsWithMeta(
         address liquidator,
         uint256 timeRange
-    ) external view onlyValidRegistry onlySystemViewer returns (
-        uint256 totalLiquidations,
-        uint256 totalProfit,
-        uint256 averageProfit,
-        uint256 lastActivity,
-        uint256 blockNumber,
-        bool isValid
-    ) {
-        (totalLiquidations, totalProfit, averageProfit, lastActivity) =
-            getLiquidatorActivityStats(liquidator, timeRange);
+    )
+        external
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (
+            uint256 totalLiquidations,
+            uint256 totalProfit,
+            uint256 averageProfit,
+            uint256 lastActivity,
+            uint256 blockNumber,
+            bool isValid
+        )
+    {
+        (
+            totalLiquidations,
+            totalProfit,
+            averageProfit,
+            lastActivity
+        ) = getLiquidatorActivityStats(liquidator, timeRange);
         (blockNumber, isValid) = _defaultMeta();
     }
 
@@ -717,18 +822,26 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
-    function getLiquidatorEfficiencyRanking(uint256 limit) public view onlyValidRegistry onlySystemViewer returns (
-        address[] memory liquidators,
-        uint256[] memory efficiencyScores,
-        uint256[] memory avgResponseTime
-    ) {
+    function getLiquidatorEfficiencyRanking(
+        uint256 limit
+    )
+        public
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (
+            address[] memory liquidators,
+            uint256[] memory efficiencyScores,
+            uint256[] memory avgResponseTime
+        )
+    {
         if (limit == 0) revert LiquidatorView__InvalidLimit();
         if (limit > ViewConstants.MAX_BATCH_SIZE) {
             revert BatchTooLarge(limit, ViewConstants.MAX_BATCH_SIZE);
         }
-        
+
         // Placeholder: ranking is aggregated off-chain; return empty arrays on-chain.
         liquidators = new address[](0);
         efficiencyScores = new uint256[](0);
@@ -743,9 +856,11 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
-    function getLiquidatorEfficiencyRankingWithMeta(uint256 limit)
+    function getLiquidatorEfficiencyRankingWithMeta(
+        uint256 limit
+    )
         external
         view
         onlyValidRegistry
@@ -758,7 +873,11 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             bool isValid
         )
     {
-        (liquidators, efficiencyScores, avgResponseTime) = getLiquidatorEfficiencyRanking(limit);
+        (
+            liquidators,
+            efficiencyScores,
+            avgResponseTime
+        ) = getLiquidatorEfficiencyRanking(limit);
         (blockNumber, isValid) = _defaultMeta();
     }
 
@@ -768,14 +887,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_RISK_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
-    function getLiquidatorRiskAnalysis(address /* liquidator */)
+    function getLiquidatorRiskAnalysis(
+        address /* liquidator */
+    )
         public
         view
         onlyValidRegistry
         onlyRiskViewer
-        returns (uint256 riskScore, uint8 riskLevel, string[] memory riskFactors)
+        returns (
+            uint256 riskScore,
+            uint8 riskLevel,
+            string[] memory riskFactors
+        )
     {
         // Placeholder: aggregated off-chain; return defaults on-chain.
         riskScore = 0;
@@ -789,16 +914,26 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_RISK_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
-    function getLiquidatorRiskAnalysisWithMeta(address liquidator)
+    function getLiquidatorRiskAnalysisWithMeta(
+        address liquidator
+    )
         external
         view
         onlyValidRegistry
         onlyRiskViewer
-        returns (uint256 riskScore, uint8 riskLevel, string[] memory riskFactors, uint256 blockNumber, bool isValid)
+        returns (
+            uint256 riskScore,
+            uint8 riskLevel,
+            string[] memory riskFactors,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
-        (riskScore, riskLevel, riskFactors) = getLiquidatorRiskAnalysis(liquidator);
+        (riskScore, riskLevel, riskFactors) = getLiquidatorRiskAnalysis(
+            liquidator
+        );
         (blockNumber, isValid) = _defaultMeta();
     }
 
@@ -810,14 +945,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *      - caller lacks ACTION_VIEW_SYSTEM_DATA
      *
      * Security:
-    * - View-only.
+     * - View-only.
      */
-    function getLiquidationMarketOverview() public view onlyValidRegistry onlySystemViewer returns (
-        uint256 totalLiquidations,
-        uint256 totalVolume,
-        uint256 activeLiquidators,
-        uint256 avgLiquidationSize
-    ) {
+    function getLiquidationMarketOverview()
+        public
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (
+            uint256 totalLiquidations,
+            uint256 totalVolume,
+            uint256 activeLiquidators,
+            uint256 avgLiquidationSize
+        )
+    {
         totalLiquidations = 0;
         totalVolume = 0;
         activeLiquidators = 0;
@@ -846,7 +987,12 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             bool isValid
         )
     {
-        (totalLiquidations, totalVolume, activeLiquidators, avgLiquidationSize) = getLiquidationMarketOverview();
+        (
+            totalLiquidations,
+            totalVolume,
+            activeLiquidators,
+            avgLiquidationSize
+        ) = getLiquidationMarketOverview();
         (blockNumber, isValid) = _defaultMeta();
     }
 
@@ -858,11 +1004,19 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * Security:
      * - View only
      */
-    function getLiquidationTrends(uint256 /* timeRange */) public view onlyValidRegistry onlySystemViewer returns (
-        uint256 liquidationCount,
-        uint256 liquidationVolume,
-        uint256 avgResponseTime
-    ) {
+    function getLiquidationTrends(
+        uint256 /* timeRange */
+    )
+        public
+        view
+        onlyValidRegistry
+        onlySystemViewer
+        returns (
+            uint256 liquidationCount,
+            uint256 liquidationVolume,
+            uint256 avgResponseTime
+        )
+    {
         liquidationCount = 0;
         liquidationVolume = 0;
         avgResponseTime = 0;
@@ -876,7 +1030,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * Security:
      * - View only
      */
-    function getLiquidationTrendsWithMeta(uint256 timeRange)
+    function getLiquidationTrendsWithMeta(
+        uint256 timeRange
+    )
         external
         view
         onlyValidRegistry
@@ -889,7 +1045,11 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             bool isValid
         )
     {
-        (liquidationCount, liquidationVolume, avgResponseTime) = getLiquidationTrends(timeRange);
+        (
+            liquidationCount,
+            liquidationVolume,
+            avgResponseTime
+        ) = getLiquidationTrends(timeRange);
         (blockNumber, isValid) = _defaultMeta();
     }
 
@@ -917,12 +1077,18 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * Security:
      * - View only
      */
-    function getUserLiquidationStats(address user)
+    function getUserLiquidationStats(
+        address user
+    )
         external
         view
         onlyValidRegistry
         onlyUserData(user)
-        returns (UserLiquidationStats memory s, uint256 blockNumber, bool isValid)
+        returns (
+            UserLiquidationStats memory s,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         s = _buildUserLiquidationStats(user);
         (blockNumber, isValid) = _defaultMeta();
@@ -936,12 +1102,18 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * Security:
      * - View only
      */
-    function getUserLiquidationStatsWithMeta(address user)
+    function getUserLiquidationStatsWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
         onlyUserData(user)
-        returns (UserLiquidationStats memory s, uint256 blockNumber, bool isValid)
+        returns (
+            UserLiquidationStats memory s,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         s = _buildUserLiquidationStats(user);
         (blockNumber, isValid) = _defaultMeta();
@@ -957,11 +1129,17 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * Security:
      * - View only
      */
-    function batchGetLiquidationStats(address[] calldata users)
+    function batchGetLiquidationStats(
+        address[] calldata users
+    )
         public
         view
         onlyValidRegistry
-        returns (UserLiquidationStats[] memory list, uint256 blockNumber, bool isValid)
+        returns (
+            UserLiquidationStats[] memory list,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         if (users.length == 0) revert EmptyArray();
         if (users.length > ViewConstants.MAX_BATCH_SIZE) {
@@ -970,15 +1148,24 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
 
         // Scheme U batch (SSOT): no self-bypass for `users[]` enumeration.
         // Caller must be ops/admin.
-        bool ok =
-            ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        bool ok = ViewAccessLib.hasRole(
+            _registryAddr,
+            ActionKeys.ACTION_VIEW_USER_DATA,
+            msg.sender
+        ) ||
+            ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            );
         if (!ok) revert MissingRole();
 
         list = new UserLiquidationStats[](users.length);
         for (uint256 i = 0; i < users.length; ) {
             list[i] = _buildUserLiquidationStats(users[i]);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         (blockNumber, isValid) = _defaultMeta();
     }
@@ -992,11 +1179,17 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * Security:
      * - View only
      */
-    function batchGetLiquidationStatsWithMeta(address[] calldata users)
+    function batchGetLiquidationStatsWithMeta(
+        address[] calldata users
+    )
         external
         view
         onlyValidRegistry
-        returns (UserLiquidationStats[] memory list, uint256 blockNumber, bool isValid)
+        returns (
+            UserLiquidationStats[] memory list,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         return batchGetLiquidationStats(users);
     }
@@ -1037,7 +1230,11 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         view
         onlyValidRegistry
         onlySystemViewer
-        returns (SystemLiquidationSnapshot memory snap, uint256 blockNumber, bool isValid)
+        returns (
+            SystemLiquidationSnapshot memory snap,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         snap = SystemLiquidationSnapshot({
             totalLiquidations: 0,
@@ -1047,8 +1244,6 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         });
         (blockNumber, isValid) = _defaultMeta();
     }
-
-    
 
     /*━━━━━━━━━━━━━━━ COLLATERAL (VIEW-ONLY, PLACEHOLDER) ━━━━━━━━━━━━━━━*/
     /**
@@ -1066,7 +1261,10 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @return blockNumber Placeholder block number (0)
      * @return isValid Placeholder validity flag (false)
      */
-    function getSeizableCollateralAmount(address user, address asset)
+    function getSeizableCollateralAmount(
+        address user,
+        address asset
+    )
         external
         view
         onlyValidRegistry
@@ -1083,7 +1281,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             (blockNumber, isValid) = _defaultMeta();
             return (0, blockNumber, isValid);
         }
-        try ICollateralManager(cm).getCollateral(user, asset) returns (uint256 amt) {
+        try ICollateralManager(cm).getCollateral(user, asset) returns (
+            uint256 amt
+        ) {
             (blockNumber, isValid) = _defaultMeta();
             return (amt, blockNumber, isValid);
         } catch {
@@ -1107,12 +1307,19 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @return blockNumber Placeholder block number (0)
      * @return isValid Placeholder validity flag (false)
      */
-    function getSeizableCollaterals(address user)
+    function getSeizableCollaterals(
+        address user
+    )
         external
         view
         onlyValidRegistry
         onlyUserData(user)
-        returns (address[] memory assets, uint256[] memory amounts, uint256 blockNumber, bool isValid)
+        returns (
+            address[] memory assets,
+            uint256[] memory amounts,
+            uint256 blockNumber,
+            bool isValid
+        )
     {
         if (user == address(0)) {
             (blockNumber, isValid) = _defaultMeta();
@@ -1124,13 +1331,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             (blockNumber, isValid) = _defaultMeta();
             return (new address[](0), new uint256[](0), blockNumber, isValid);
         }
-        address[] memory assetsList = ICollateralManager(cm).getUserCollateralAssets(user);
+        address[] memory assetsList = ICollateralManager(cm)
+            .getUserCollateralAssets(user);
         uint256[] memory amountsList = new uint256[](assetsList.length);
         for (uint256 i = 0; i < assetsList.length; ) {
-            try ICollateralManager(cm).getCollateral(user, assetsList[i]) returns (uint256 bal) {
+            try
+                ICollateralManager(cm).getCollateral(user, assetsList[i])
+            returns (uint256 bal) {
                 amountsList[i] = bal;
-            } catch { amountsList[i] = 0; }
-            unchecked { ++i; }
+            } catch {
+                amountsList[i] = 0;
+            }
+            unchecked {
+                ++i;
+            }
         }
         (blockNumber, isValid) = _defaultMeta();
         return (assetsList, amountsList, blockNumber, isValid);
@@ -1149,7 +1363,10 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param amount Amount (token decimals of `asset`)
      * @return value Value (PositionView denomination; implementation-defined)
      */
-    function calculateCollateralValue(address asset, uint256 amount)
+    function calculateCollateralValue(
+        address asset,
+        uint256 amount
+    )
         external
         view
         onlyValidRegistry
@@ -1159,7 +1376,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         if (asset == address(0) || amount == 0) return 0;
         address pv = _resolvePositionViewAddr();
         if (pv == address(0)) return 0;
-        try IPositionViewValuation(pv).getAssetValue(asset, amount) returns (uint256 v) {
+        try IPositionViewValuation(pv).getAssetValue(asset, amount) returns (
+            uint256 v
+        ) {
             return v;
         } catch {
             return 0;
@@ -1180,7 +1399,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @return blockNumber Placeholder block number (0)
      * @return isValid Placeholder validity flag (false)
      */
-    function getUserTotalCollateralValue(address user)
+    function getUserTotalCollateralValue(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -1196,7 +1417,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
             (blockNumber, isValid) = _defaultMeta();
             return (0, blockNumber, isValid);
         }
-        try IPositionViewValuation(pv).getUserTotalCollateralValue(user) returns (uint256 v) {
+        try
+            IPositionViewValuation(pv).getUserTotalCollateralValue(user)
+        returns (uint256 v) {
             (blockNumber, isValid) = _defaultMeta();
             return (v, blockNumber, isValid);
         } catch {
@@ -1219,7 +1442,10 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param assets Array of assets (aligned with users)
      * @return seizableAmounts Array of seizable amounts (token decimals)
      */
-    function batchGetSeizableAmounts(address[] calldata users, address[] calldata assets)
+    function batchGetSeizableAmounts(
+        address[] calldata users,
+        address[] calldata assets
+    )
         external
         view
         onlyValidRegistry
@@ -1227,7 +1453,8 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (uint256[] memory seizableAmounts)
     {
         if (users.length == 0) revert EmptyArray();
-        if (users.length != assets.length) revert ArrayLengthMismatch(users.length, assets.length);
+        if (users.length != assets.length)
+            revert ArrayLengthMismatch(users.length, assets.length);
         if (users.length > ViewConstants.MAX_BATCH_SIZE) {
             revert BatchTooLarge(users.length, ViewConstants.MAX_BATCH_SIZE);
         }
@@ -1237,11 +1464,17 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         if (cm == address(0)) return seizableAmounts;
         for (uint256 i = 0; i < users.length; ) {
             if (users[i] != address(0) && assets[i] != address(0)) {
-                try ICollateralManager(cm).getCollateral(users[i], assets[i]) returns (uint256 amt) {
+                try
+                    ICollateralManager(cm).getCollateral(users[i], assets[i])
+                returns (uint256 amt) {
                     seizableAmounts[i] = amt;
-                } catch { seizableAmounts[i] = 0; }
+                } catch {
+                    seizableAmounts[i] = 0;
+                }
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -1259,7 +1492,10 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param amounts Array of amounts (token decimals; aligned with assets)
      * @return values Array of values (PositionView denomination; implementation-defined)
      */
-    function batchCalculateCollateralValues(address[] calldata assets, uint256[] calldata amounts)
+    function batchCalculateCollateralValues(
+        address[] calldata assets,
+        uint256[] calldata amounts
+    )
         external
         view
         onlyValidRegistry
@@ -1267,7 +1503,8 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         returns (uint256[] memory values)
     {
         if (assets.length == 0) revert EmptyArray();
-        if (assets.length != amounts.length) revert ArrayLengthMismatch(assets.length, amounts.length);
+        if (assets.length != amounts.length)
+            revert ArrayLengthMismatch(assets.length, amounts.length);
         if (assets.length > ViewConstants.MAX_BATCH_SIZE) {
             revert BatchTooLarge(assets.length, ViewConstants.MAX_BATCH_SIZE);
         }
@@ -1277,11 +1514,20 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         if (pv == address(0)) return values;
         for (uint256 i = 0; i < assets.length; ) {
             if (assets[i] != address(0) && amounts[i] > 0) {
-                try IPositionViewValuation(pv).getAssetValue(assets[i], amounts[i]) returns (uint256 v) {
+                try
+                    IPositionViewValuation(pv).getAssetValue(
+                        assets[i],
+                        amounts[i]
+                    )
+                returns (uint256 v) {
                     values[i] = v;
-                } catch { values[i] = 0; }
+                } catch {
+                    values[i] = 0;
+                }
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -1297,7 +1543,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param users Array of users
      * @return totalValues Array of total collateral values (PositionView denomination; implementation-defined)
      */
-    function batchGetUserTotalCollateralValues(address[] calldata users)
+    function batchGetUserTotalCollateralValues(
+        address[] calldata users
+    )
         external
         view
         onlyValidRegistry
@@ -1313,29 +1561,37 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         if (pv == address(0)) return totalValues;
         for (uint256 i = 0; i < users.length; ) {
             if (users[i] != address(0)) {
-                try IPositionViewValuation(pv).getUserTotalCollateralValue(users[i]) returns (uint256 v) {
+                try
+                    IPositionViewValuation(pv).getUserTotalCollateralValue(
+                        users[i]
+                    )
+                returns (uint256 v) {
                     totalValues[i] = v;
-                } catch { totalValues[i] = 0; }
+                } catch {
+                    totalValues[i] = 0;
+                }
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
     /*━━━━━━━━━━━━━━━ REGISTRY ADMIN (DEPRECATED) ━━━━━━━━━━━━━━━*/
-    
+
     /**
-    * @notice Return the Registry address.
-    * @dev Reverts if: (never). May return address(0) if not initialized.
+     * @notice Return the Registry address.
+     * @dev Reverts if: (never). May return address(0) if not initialized.
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @return registry Registry address.
+     * @return registry Registry address.
      */
     function getRegistry() external view returns (address registry) {
         return _registryAddr;
     }
-    
+
     /**
      * @notice DEPRECATED: schedule module upgrade via Registry (kept for backwards compatibility).
      * @dev Reverts if:
@@ -1349,13 +1605,22 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param moduleKey Module key
      * @param newAddress New module address
      */
-    function upgradeModule(bytes32 moduleKey, address newAddress) external onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender)) {
+    function upgradeModule(
+        bytes32 moduleKey,
+        address newAddress
+    ) external onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_UPGRADE_MODULE,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         Registry(_registryAddr).scheduleModuleUpgrade(moduleKey, newAddress);
     }
-    
+
     /**
      * @notice DEPRECATED: execute module upgrade via Registry (kept for backwards compatibility).
      * @dev Reverts if:
@@ -1368,13 +1633,21 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *
      * @param moduleKey Module key
      */
-    function executeModuleUpgrade(bytes32 moduleKey) external onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender)) {
+    function executeModuleUpgrade(
+        bytes32 moduleKey
+    ) external onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_UPGRADE_MODULE,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         Registry(_registryAddr).executeModuleUpgrade(moduleKey);
     }
-    
+
     /**
      * @notice DEPRECATED: cancel module upgrade via Registry (kept for backwards compatibility).
      * @dev Reverts if:
@@ -1388,7 +1661,13 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      * @param moduleKey Module key
      */
     function cancelModuleUpgrade(bytes32 moduleKey) external onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_UPGRADE_MODULE,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         Registry(_registryAddr).cancelModuleUpgrade(moduleKey);
@@ -1408,16 +1687,27 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
      *
      * @param newImplementation New implementation address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_UPGRADE_MODULE, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_UPGRADE_MODULE,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ INTERNAL HELPERS ━━━━━━━━━━━━━━━*/
-    function _buildUserLiquidationStats(address /* user */) internal pure returns (UserLiquidationStats memory s) {
+    function _buildUserLiquidationStats(
+        address /* user */
+    ) internal pure returns (UserLiquidationStats memory s) {
         // Aggregated off-chain; return zero placeholders on-chain.
         s = UserLiquidationStats({
             totalLiquidations: 0,
@@ -1426,17 +1716,21 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         });
     }
 
-    function _buildLiquidatorProfitView(address liquidator)
-        internal
-        view
-        returns (LiquidatorProfitView memory profitView)
-    {
+    function _buildLiquidatorProfitView(
+        address liquidator
+    ) internal view returns (LiquidatorProfitView memory profitView) {
         // Aggregated off-chain; return zero placeholders on-chain.
-        (uint256 totalProfit, uint256 liquidationCount, uint256 lastUpdateBlock) = (0, 0, 0);
+        (
+            uint256 totalProfit,
+            uint256 liquidationCount,
+            uint256 lastUpdateBlock
+        ) = (0, 0, 0);
         uint256 avg = liquidationCount > 0 ? totalProfit / liquidationCount : 0;
         // Time-Dependency-Refactor SSOT: use block number as time axis marker.
-        uint256 blocksSince =
-            lastUpdateBlock > 0 && block.number > lastUpdateBlock ? (block.number - lastUpdateBlock) : 0;
+        uint256 blocksSince = lastUpdateBlock > 0 &&
+            block.number > lastUpdateBlock
+            ? (block.number - lastUpdateBlock)
+            : 0;
 
         profitView = LiquidatorProfitView({
             liquidator: liquidator,
@@ -1460,7 +1754,9 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         uint256 activeLiquidators = 0;
         uint256 lastUpdateBlock = 0;
 
-        uint256 avg = totalLiquidations > 0 ? totalProfit / totalLiquidations : 0;
+        uint256 avg = totalLiquidations > 0
+            ? totalProfit / totalLiquidations
+            : 0;
 
         globalView = GlobalLiquidationView({
             totalLiquidations: totalLiquidations,
@@ -1472,7 +1768,11 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         });
     }
 
-    function _defaultMeta() internal pure returns (uint256 blockNumber, bool isValid) {
+    function _defaultMeta()
+        internal
+        pure
+        returns (uint256 blockNumber, bool isValid)
+    {
         return (0, false);
     }
 
@@ -1481,12 +1781,19 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
         // - self read: allowed
         // - non-self: ops/admin only
         if (msg.sender == user) return;
-        bool ok =
-            ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        bool ok = ViewAccessLib.hasRole(
+            _registryAddr,
+            ActionKeys.ACTION_VIEW_USER_DATA,
+            msg.sender
+        ) ||
+            ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            );
         if (!ok) revert MissingRole();
     }
-    
+
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
     /**
      * @notice Returns the API version of this module.
@@ -1519,4 +1826,4 @@ contract LiquidatorView is Initializable, UUPSUpgradeable, ILiquidationEventsVie
     /*━━━━━━━━━━━━━━━ Storage gap ━━━━━━━━━━━━━━━*/
     /// @dev Storage gap reserved for future upgrades.
     uint256[50] private __gap;
-} 
+}

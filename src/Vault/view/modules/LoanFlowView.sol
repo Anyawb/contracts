@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {DataPushLibrary} from "../../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../../constants/DataPushTypes.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
 
 /**
  * @title LoanFlowView
@@ -31,7 +35,10 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @notice Incoming version is stale / violates strict optimistic concurrency.
     /// @dev Reverts if `incomingVersion != currentVersion + 1` when `incomingVersion != 0`.
-    error LoanFlowView__StaleVersion(uint64 currentVersion, uint64 incomingVersion);
+    error LoanFlowView__StaleVersion(
+        uint64 currentVersion,
+        uint64 incomingVersion
+    );
 
     /// @notice Incoming sequence is out of order (must be strictly increasing).
     /// @dev Reverts if `incomingSeq <= currentSeq` when `incomingSeq != 0`.
@@ -43,7 +50,11 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Events ━━━━━━━━━━━━━━━*/
 
     /// @notice Emitted when a replayed idempotent request is ignored (no state mutation).
-    event IdempotentRequestIgnored(address indexed user, bytes32 indexed requestId, uint64 seq);
+    event IdempotentRequestIgnored(
+        address indexed user,
+        bytes32 indexed requestId,
+        uint64 seq
+    );
 
     /*━━━━━━━━━━━━━━━ Storage ━━━━━━━━━━━━━━━*/
 
@@ -62,7 +73,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     uint256 private _totalRepayVolumeValue;
     uint256 private _globalMetaPacked;
 
-    uint256 private constant _CACHE_DURATION = ViewConstants.CACHE_DURATION_BLOCKS;
+    uint256 private constant _CACHE_DURATION =
+        ViewConstants.CACHE_DURATION_BLOCKS;
     uint8 private constant _SYSTEM_VALUATION_DECIMALS = 18;
 
     /*━━━━━━━━━━━━━━━ Packing constants ━━━━━━━━━━━━━━━*/
@@ -99,9 +111,17 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Scheme U: self-read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyUserOrViewer(address user) {
         if (
-            msg.sender != user
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            msg.sender != user &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -109,8 +129,16 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     /// @dev Gate for system/global reads: VIEW_SYSTEM_DATA or ADMIN.
     modifier onlyOpsOrAdmin() {
         if (
-            !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_SYSTEM_DATA, msg.sender)
-                && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_SYSTEM_DATA,
+                msg.sender
+            ) &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
         ) revert MissingRole();
         _;
     }
@@ -125,8 +153,17 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *   granting broad VIEW_USER_DATA permissions to the RewardManagerCore role set.
      */
     modifier onlyRewardManagerCoreOrAdmin() {
-        address rmCore = Registry(_registryAddr).getModule(ModuleKeys.KEY_REWARD_MANAGER_CORE);
-        if (msg.sender != rmCore && !ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+        address rmCore = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_REWARD_MANAGER_CORE
+        );
+        if (
+            msg.sender != rmCore &&
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         _;
@@ -134,8 +171,14 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @dev Scheme B single-entry: only LoanFlowPushManager or ADMIN may push.
     modifier onlyLoanFlowPusherOrAdmin() {
-        address pusher = Registry(_registryAddr).getModule(ModuleKeys.KEY_LOAN_FLOW_PUSH_MANAGER);
-        bool isAdmin = ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+        address pusher = Registry(_registryAddr).getModule(
+            ModuleKeys.KEY_LOAN_FLOW_PUSH_MANAGER
+        );
+        bool isAdmin = ViewAccessLib.hasRole(
+            _registryAddr,
+            ActionKeys.ACTION_ADMIN,
+            msg.sender
+        );
         if (msg.sender != pusher && !isAdmin) revert MissingRole();
         _;
     }
@@ -160,7 +203,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -168,7 +212,7 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Push APIs (single-entry orchestrated) ━━━━━━━━━━━━━━━*/
 
     /**
-    * @notice Push a per-user loan-flow delta in the shared 18-decimal valuation unit into the cache with concurrency metadata.
+     * @notice Push a per-user loan-flow delta in the shared 18-decimal valuation unit into the cache with concurrency metadata.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not `Registry[KEY_LOAN_FLOW_PUSH_MANAGER]` and lacks ACTION_ADMIN (MissingRole)
@@ -181,12 +225,12 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      * - Idempotent replay (no revert): if (nextVersion == currentVersion) AND (requestId matches lastAppliedRequestId),
      *   emits {IdempotentRequestIgnored} and returns without writing.
      *
-    * Units (SSOT):
-    * - All flow values use the shared 18-decimal system valuation unit.
+     * Units (SSOT):
+     * - All flow values use the shared 18-decimal system valuation unit.
      *
      * @param user Target user address
-    * @param borrowDeltaValue Borrow flow delta to add (18-decimal valuation unit)
-    * @param repayDeltaValue Repay flow delta to add (18-decimal valuation unit)
+     * @param borrowDeltaValue Borrow flow delta to add (18-decimal valuation unit)
+     * @param repayDeltaValue Repay flow delta to add (18-decimal valuation unit)
      * @param borrowCountDelta Borrow event count delta to add (unitless; typically 1 for a borrow event)
      * @param repayCountDelta Repay event count delta to add (unitless; typically 1 for a repay event)
      * @param requestId Idempotency key for replay detection (recommended non-zero)
@@ -205,12 +249,20 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     ) external onlyValidRegistry onlyLoanFlowPusherOrAdmin {
         if (user == address(0)) revert ZeroAddress();
 
-        (uint64 currentVersion, uint64 currentSeq, uint48 borrowCount, uint48 repayCount, ) =
-            _unpackUserMeta(_userMetaPacked[user]);
+        (
+            uint64 currentVersion,
+            uint64 currentSeq,
+            uint48 borrowCount,
+            uint48 repayCount,
+
+        ) = _unpackUserMeta(_userMetaPacked[user]);
 
         // O(1) idempotency (version-bound), aligned with StatisticsView semantics.
         if (requestId != bytes32(0) && nextVersion != 0) {
-            if (nextVersion == currentVersion && _lastAppliedRequestId[user] == requestId) {
+            if (
+                nextVersion == currentVersion &&
+                _lastAppliedRequestId[user] == requestId
+            ) {
                 emit IdempotentRequestIgnored(user, requestId, seq);
                 return;
             }
@@ -218,7 +270,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
 
         // Optional strict ordering aid (seq).
         if (seq != 0) {
-            if (seq <= currentSeq) revert LoanFlowView__OutOfOrderSeq(currentSeq, seq);
+            if (seq <= currentSeq)
+                revert LoanFlowView__OutOfOrderSeq(currentSeq, seq);
             currentSeq = seq;
         }
 
@@ -226,7 +279,8 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         if (nextVersion == 0) {
             newVersion = currentVersion + 1;
         } else {
-            if (nextVersion != currentVersion + 1) revert LoanFlowView__StaleVersion(currentVersion, nextVersion);
+            if (nextVersion != currentVersion + 1)
+                revert LoanFlowView__StaleVersion(currentVersion, nextVersion);
         }
 
         // Update user aggregates.
@@ -238,7 +292,13 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         repayCount = uint48(uint256(repayCount) + uint256(repayCountDelta));
 
         uint32 updateBlock = uint32(block.number);
-        _userMetaPacked[user] = _packUserMeta(newVersion, currentSeq, borrowCount, repayCount, updateBlock);
+        _userMetaPacked[user] = _packUserMeta(
+            newVersion,
+            currentSeq,
+            borrowCount,
+            repayCount,
+            updateBlock
+        );
         if (requestId != bytes32(0) && nextVersion != 0) {
             _lastAppliedRequestId[user] = requestId;
         }
@@ -246,7 +306,11 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         // Update global aggregates in the shared 18-decimal valuation unit.
         if (borrowDeltaValue != 0) _totalBorrowVolumeValue += borrowDeltaValue;
         if (repayDeltaValue != 0) _totalRepayVolumeValue += repayDeltaValue;
-        _updateGlobalCountsAndBlock(borrowCountDelta, repayCountDelta, updateBlock);
+        _updateGlobalCountsAndBlock(
+            borrowCountDelta,
+            repayCountDelta,
+            updateBlock
+        );
 
         DataPushLibrary._emitData(
             DataPushTypes.DATA_TYPE_LOAN_FLOW_UPDATED,
@@ -272,11 +336,11 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller is not the user and lacks VIEW_USER_DATA / ADMIN (MissingRole via onlyUserOrViewer)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @param user Target user address
-    * @return borrowVolumeValue Total borrow volume (18-decimal valuation unit)
-    * @return repayVolumeValue Total repay volume (18-decimal valuation unit)
+     * @return borrowVolumeValue Total borrow volume (18-decimal valuation unit)
+     * @return repayVolumeValue Total repay volume (18-decimal valuation unit)
      * @return borrowCount Total borrow event count (unitless)
      * @return repayCount Total repay event count (unitless)
      * @return version Current optimistic concurrency version
@@ -285,7 +349,9 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return isValid Cache validity flag (TTL heuristic; see ViewConstants.CACHE_DURATION_BLOCKS)
      * @return blockNumber Last cache update blockNumber (block.number; packed as uint32)
      */
-    function getUserLoanFlowWithMeta(address user)
+    function getUserLoanFlowWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -307,7 +373,9 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         uint48 bc;
         uint48 rc;
         uint32 lastBlock;
-        (version, seq, bc, rc, lastBlock) = _unpackUserMeta(_userMetaPacked[user]);
+        (version, seq, bc, rc, lastBlock) = _unpackUserMeta(
+            _userMetaPacked[user]
+        );
         borrowCount = uint256(bc);
         repayCount = uint256(rc);
         lastAppliedRequestId = _lastAppliedRequestId[user];
@@ -321,10 +389,10 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @return totalBorrowVolumeValue Total borrow volume (18-decimal valuation unit)
-    * @return totalRepayVolumeValue Total repay volume (18-decimal valuation unit)
+     * @return totalBorrowVolumeValue Total borrow volume (18-decimal valuation unit)
+     * @return totalRepayVolumeValue Total repay volume (18-decimal valuation unit)
      * @return totalBorrowCount Total borrow event count (unitless)
      * @return totalRepayCount Total repay event count (unitless)
      * @return isValid Cache validity flag (TTL heuristic; see ViewConstants.CACHE_DURATION_BLOCKS)
@@ -345,7 +413,9 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     {
         totalBorrowVolumeValue = _totalBorrowVolumeValue;
         totalRepayVolumeValue = _totalRepayVolumeValue;
-        (uint48 bc, uint48 rc, uint32 lastBlock) = _unpackGlobalMeta(_globalMetaPacked);
+        (uint48 bc, uint48 rc, uint32 lastBlock) = _unpackGlobalMeta(
+            _globalMetaPacked
+        );
         totalBorrowCount = uint256(bc);
         totalRepayCount = uint256(rc);
         blockNumber = uint256(lastBlock);
@@ -353,32 +423,41 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     /**
-    * @notice Internal read helper for RewardManagerCore: borrow-only flow in the shared 18-decimal valuation unit + cache validity meta.
+     * @notice Internal read helper for RewardManagerCore: borrow-only flow in the shared 18-decimal valuation unit + cache validity meta.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *      - caller is not `Registry[KEY_REWARD_MANAGER_CORE]` and lacks ACTION_ADMIN (MissingRole)
      *
      * Security:
-    * - View-only, module-gated.
+     * - View-only, module-gated.
      *
-    * Units (SSOT):
-    * - Shared 18-decimal system valuation unit.
+     * Units (SSOT):
+     * - Shared 18-decimal system valuation unit.
      *
      * @param user Target user address
-    * @return borrowVolumeValue Total borrow volume (18-decimal valuation unit)
+     * @return borrowVolumeValue Total borrow volume (18-decimal valuation unit)
      * @return borrowCount Total borrow event count (unitless)
      * @return isValid Cache validity flag (TTL heuristic)
      * @return blockNumber Last cache update blockNumber (block.number; packed as uint32)
      */
-    function getUserBorrowFlowForReward(address user)
+    function getUserBorrowFlowForReward(
+        address user
+    )
         external
         view
         onlyValidRegistry
         onlyRewardManagerCoreOrAdmin
-        returns (uint256 borrowVolumeValue, uint256 borrowCount, bool isValid, uint256 blockNumber)
+        returns (
+            uint256 borrowVolumeValue,
+            uint256 borrowCount,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         borrowVolumeValue = _borrowVolumeValue[user];
-        (, , uint48 bc, , uint32 lastBlock) = _unpackUserMeta(_userMetaPacked[user]);
+        (, , uint48 bc, , uint32 lastBlock) = _unpackUserMeta(
+            _userMetaPacked[user]
+        );
         borrowCount = uint256(bc);
         blockNumber = uint256(lastBlock);
         isValid = _isValid(lastBlock);
@@ -395,12 +474,14 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *      - caller is not `Registry[KEY_LOAN_FLOW_PUSH_MANAGER]` and lacks ACTION_ADMIN (MissingRole)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @param user Target user address
      * @return version Current version (monotonic)
      */
-    function getUserLoanFlowVersionForPusher(address user)
+    function getUserLoanFlowVersionForPusher(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -412,10 +493,10 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /**
      * @notice Return the current Registry address.
-    * @dev Reverts if: (never)
+     * @dev Reverts if: (never)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
      * @return registryAddr Registry contract address
      */
@@ -431,45 +512,73 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
         return block.number >= b && block.number - b <= _CACHE_DURATION;
     }
 
-    function _unpackUserMeta(uint256 packed)
+    function _unpackUserMeta(
+        uint256 packed
+    )
         internal
         pure
-        returns (uint64 version, uint64 seq, uint48 borrowCount, uint48 repayCount, uint32 lastUpdateBlock)
+        returns (
+            uint64 version,
+            uint64 seq,
+            uint48 borrowCount,
+            uint48 repayCount,
+            uint32 lastUpdateBlock
+        )
     {
         version = uint64(packed & _MASK_64);
         seq = uint64((packed >> _SHIFT_SEQ) & _MASK_64);
         borrowCount = uint48((packed >> _SHIFT_BORROW_COUNT) & _MASK_48);
         repayCount = uint48((packed >> _SHIFT_REPAY_COUNT) & _MASK_48);
-        lastUpdateBlock = uint32((packed >> _SHIFT_LAST_UPDATE_BLOCK) & _MASK_32);
+        lastUpdateBlock = uint32(
+            (packed >> _SHIFT_LAST_UPDATE_BLOCK) & _MASK_32
+        );
     }
 
-    function _packUserMeta(uint64 version, uint64 seq, uint48 borrowCount, uint48 repayCount, uint32 lastUpdateBlock)
+    function _packUserMeta(
+        uint64 version,
+        uint64 seq,
+        uint48 borrowCount,
+        uint48 repayCount,
+        uint32 lastUpdateBlock
+    ) internal pure returns (uint256 packed) {
+        packed =
+            uint256(version) |
+            (uint256(seq) << _SHIFT_SEQ) |
+            (uint256(borrowCount) << _SHIFT_BORROW_COUNT) |
+            (uint256(repayCount) << _SHIFT_REPAY_COUNT) |
+            (uint256(lastUpdateBlock) << _SHIFT_LAST_UPDATE_BLOCK);
+    }
+
+    function _unpackGlobalMeta(
+        uint256 packed
+    )
         internal
         pure
-        returns (uint256 packed)
+        returns (uint48 borrowCount, uint48 repayCount, uint32 lastUpdateBlock)
     {
-        packed =
-            uint256(version)
-            | (uint256(seq) << _SHIFT_SEQ)
-            | (uint256(borrowCount) << _SHIFT_BORROW_COUNT)
-            | (uint256(repayCount) << _SHIFT_REPAY_COUNT)
-            | (uint256(lastUpdateBlock) << _SHIFT_LAST_UPDATE_BLOCK);
-    }
-
-    function _unpackGlobalMeta(uint256 packed) internal pure returns (uint48 borrowCount, uint48 repayCount, uint32 lastUpdateBlock) {
         borrowCount = uint48(packed & _MASK_48);
         repayCount = uint48((packed >> _SHIFT_G_REPAY_COUNT) & _MASK_48);
-        lastUpdateBlock = uint32((packed >> _SHIFT_G_LAST_UPDATE_BLOCK) & _MASK_32);
+        lastUpdateBlock = uint32(
+            (packed >> _SHIFT_G_LAST_UPDATE_BLOCK) & _MASK_32
+        );
     }
 
-    function _packGlobalMeta(uint48 borrowCount, uint48 repayCount, uint32 lastUpdateBlock) internal pure returns (uint256 packed) {
+    function _packGlobalMeta(
+        uint48 borrowCount,
+        uint48 repayCount,
+        uint32 lastUpdateBlock
+    ) internal pure returns (uint256 packed) {
         packed =
-            uint256(borrowCount)
-            | (uint256(repayCount) << _SHIFT_G_REPAY_COUNT)
-            | (uint256(lastUpdateBlock) << _SHIFT_G_LAST_UPDATE_BLOCK);
+            uint256(borrowCount) |
+            (uint256(repayCount) << _SHIFT_G_REPAY_COUNT) |
+            (uint256(lastUpdateBlock) << _SHIFT_G_LAST_UPDATE_BLOCK);
     }
 
-    function _updateGlobalCountsAndBlock(uint64 borrowCountDelta, uint64 repayCountDelta, uint32 updateBlock) internal {
+    function _updateGlobalCountsAndBlock(
+        uint64 borrowCountDelta,
+        uint64 repayCountDelta,
+        uint32 updateBlock
+    ) internal {
         (uint48 bc, uint48 rc, ) = _unpackGlobalMeta(_globalMetaPacked);
         bc = uint48(uint256(bc) + uint256(borrowCountDelta));
         rc = uint48(uint256(rc) + uint256(repayCountDelta));
@@ -490,9 +599,18 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation New implementation address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) revert MissingRole();
-        if (newImplementation == address(0)) revert LoanFlowView__ZeroImplementation();
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) revert MissingRole();
+        if (newImplementation == address(0))
+            revert LoanFlowView__ZeroImplementation();
     }
 
     /*━━━━━━━━━━━━━━━ Versioning ━━━━━━━━━━━━━━━*/
@@ -509,4 +627,3 @@ contract LoanFlowView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     uint256[50] private __gap;
 }
-

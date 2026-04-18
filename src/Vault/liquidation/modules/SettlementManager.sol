@@ -160,15 +160,27 @@ contract SettlementManager is
     error SettlementManager__InvalidImplementation();
     error SettlementManager__ShortfallMissing(uint256 orderId);
     error SettlementManager__ShortfallAlreadyExists(uint256 orderId);
-    error SettlementManager__InvalidShortfallRecovery(uint256 orderId, uint256 recoveryAmount);
-    error SettlementManager__InvalidShortfallStatus(uint256 orderId, uint8 status);
-    error SettlementManager__InvalidShortfallRecoverySource(uint256 orderId, uint8 source);
+    error SettlementManager__InvalidShortfallRecovery(
+        uint256 orderId,
+        uint256 recoveryAmount
+    );
+    error SettlementManager__InvalidShortfallStatus(
+        uint256 orderId,
+        uint8 status
+    );
+    error SettlementManager__InvalidShortfallRecoverySource(
+        uint256 orderId,
+        uint8 source
+    );
     error SettlementManager__InvalidShortfallStatusTransition(
         uint256 orderId,
         uint8 previousStatus,
         uint8 newStatus
     );
-    error SettlementManager__EvidenceHashRequired(uint256 orderId, uint8 status);
+    error SettlementManager__EvidenceHashRequired(
+        uint256 orderId,
+        uint8 status
+    );
     error SettlementManager__RecoveryEvidenceHashRequired(
         uint256 orderId,
         uint8 recoverySource
@@ -368,12 +380,16 @@ contract SettlementManager is
         debtToken.forceApprove(orderEngine, repayAmount);
         IOrderEngineRepayAdapter(orderEngine).repay(orderId, repayAmount);
         debtToken.forceApprove(orderEngine, 0);
-        if (debtToken.balanceOf(address(this)) != balanceBeforeRepay - repayAmount) {
+        if (
+            debtToken.balanceOf(address(this)) !=
+            balanceBeforeRepay - repayAmount
+        ) {
             revert SettlementManager__RepayPullMismatch();
         }
 
-        IOrderEngine.LoanOrder memory repaidOrd = IOrderEngineViewAdapter(orderEngine)
-            .getLoanOrderForView(orderId);
+        IOrderEngine.LoanOrder memory repaidOrd = IOrderEngineViewAdapter(
+            orderEngine
+        ).getLoanOrderForView(orderId);
         uint256 orderTotalDue = IOrderEngineViewAdapter(orderEngine)
             .getOrderTotalDueForView(orderId);
         bool isOrderFullyRepaid = repaidOrd.repaidAmount >= orderTotalDue;
@@ -437,10 +453,13 @@ contract SettlementManager is
                 // Guarantee early-ness must be determined from the active guarantee record itself,
                 // not from whichever order happened to clear the asset debt last.
                 if (
-                    IEarlyRepaymentGuaranteeManager(ergm)
-                        .isGuaranteeEnabled(debtAsset) &&
-                    IEarlyRepaymentGuaranteeManager(ergm)
-                        .hasActiveGuarantee(user, debtAsset)
+                    IEarlyRepaymentGuaranteeManager(ergm).isGuaranteeEnabled(
+                        debtAsset
+                    ) &&
+                    IEarlyRepaymentGuaranteeManager(ergm).hasActiveGuarantee(
+                        user,
+                        debtAsset
+                    )
                 ) {
                     uint256 guaranteeId = IEarlyRepaymentGuaranteeManager(ergm)
                         .getUserGuaranteeId(user, debtAsset);
@@ -449,8 +468,8 @@ contract SettlementManager is
                             memory guaranteeRecord = IEarlyRepaymentGuaranteeManager(
                                 ergm
                             ).getGuaranteeRecord(guaranteeId);
-                        bool isGuaranteeEarly =
-                            block.number + _ON_TIME_WINDOW_BLOCKS <
+                        bool isGuaranteeEarly = block.number +
+                            _ON_TIME_WINDOW_BLOCKS <
                             guaranteeRecord.maturityTime;
                         if (guaranteeRecord.isActive && isGuaranteeEarly) {
                             IEarlyRepaymentGuaranteeManager(ergm)
@@ -508,7 +527,7 @@ contract SettlementManager is
      * - Best-effort LoanNFT validation (does not block main flow)
      * - Follows Architecture-Guide.md §647-652, §696-713: as sole external write entry,
      *   unified handling of overdue and passive liquidation
-    * - This entrypoint is the non-blocks-only keeper SSOT; current blocks-only orders instead mature through
+     * - This entrypoint is the non-blocks-only keeper SSOT; current blocks-only orders instead mature through
      *   `BlocksOnlyCoordinator.settleOrLiquidateBlocks(...)`, which may later call into the same downstream
      *   liquidation executor modules.
      *
@@ -595,11 +614,9 @@ contract SettlementManager is
                         debtAsset
                     )
                 ) {
-                    guaranteeRecoveredAmount =
-                        IEarlyRepaymentGuaranteeManager(ergm).processDefault(
-                            targetUser,
-                            debtAsset
-                        );
+                    guaranteeRecoveredAmount = IEarlyRepaymentGuaranteeManager(
+                        ergm
+                    ).processDefault(targetUser, debtAsset);
                 }
             }
         }
@@ -615,10 +632,8 @@ contract SettlementManager is
         if (debtAmount == 0) revert AmountIsZero();
         if (totalDebt == 0) revert SettlementManager__NotLiquidatable();
 
-        uint256 debtValueTotal = ILendingEngineDebtRead(le).calculateDebtValueStrict(
-            targetUser,
-            debtAsset
-        );
+        uint256 debtValueTotal = ILendingEngineDebtRead(le)
+            .calculateDebtValueStrict(targetUser, debtAsset);
         uint256 targetDebtValue = (debtValueTotal * debtAmount) / totalDebt;
 
         // Select highest-value collateral asset for single-asset liquidation
@@ -641,7 +656,9 @@ contract SettlementManager is
                     bal
                 );
                 if (candidateValuation > 0) {
-                    if (!bestHasValuation || candidateValuation > bestComparable) {
+                    if (
+                        !bestHasValuation || candidateValuation > bestComparable
+                    ) {
                         bestComparable = candidateValuation;
                         bestValuation = candidateValuation;
                         bestHasValuation = true;
@@ -727,8 +744,7 @@ contract SettlementManager is
                 );
                 if (payout == address(0)) revert ZeroAddress();
                 (
-                    ILiquidationPayoutManager.PayoutRecipients
-                        memory payoutRecipients,
+                    ILiquidationPayoutManager.PayoutRecipients memory payoutRecipients,
                     uint256 platformShare,
                     uint256 reserveShare,
                     uint256 lenderShare,
@@ -787,8 +803,7 @@ contract SettlementManager is
             );
             if (payout == address(0)) revert ZeroAddress();
             (
-                ILiquidationPayoutManager.PayoutRecipients
-                    memory payoutRecipients,
+                ILiquidationPayoutManager.PayoutRecipients memory payoutRecipients,
                 uint256 platformShare,
                 uint256 reserveShare,
                 uint256 lenderShare,
@@ -827,7 +842,10 @@ contract SettlementManager is
                 sizing.coveredDebtAmount,
                 sizing.remainingDebtAmount
             );
-            _autoApplyGuaranteeDefaultRecovery(orderId, guaranteeRecoveredAmount);
+            _autoApplyGuaranteeDefaultRecovery(
+                orderId,
+                guaranteeRecoveredAmount
+            );
         }
     }
 
@@ -862,9 +880,13 @@ contract SettlementManager is
         bytes32 evidenceHash
     ) external onlyValidRegistry {
         if (!_hasRole(ActionKeys.ACTION_SET_PARAMETER, msg.sender)) {
-            IShortfallLedger.RecoverySource trustedSource =
-                _shortfallRecoveryReporterSources[msg.sender];
-            if (trustedSource == IShortfallLedger.RecoverySource.NONE || trustedSource != recoverySource) {
+            IShortfallLedger.RecoverySource trustedSource = _shortfallRecoveryReporterSources[
+                    msg.sender
+                ];
+            if (
+                trustedSource == IShortfallLedger.RecoverySource.NONE ||
+                trustedSource != recoverySource
+            ) {
                 revert SettlementManager__UnauthorizedShortfallRecoveryReporter(
                     msg.sender,
                     uint8(recoverySource)
@@ -872,7 +894,12 @@ contract SettlementManager is
             }
         }
 
-        _applyShortfallRecovery(orderId, recoverySource, recoveryAmount, evidenceHash);
+        _applyShortfallRecovery(
+            orderId,
+            recoverySource,
+            recoveryAmount,
+            evidenceHash
+        );
     }
 
     /// @notice Configure whether a reporter contract/account can post automated shortfall recovery facts.
@@ -888,10 +915,7 @@ contract SettlementManager is
         IShortfallLedger.RecoverySource stored = enabled
             ? recoverySource
             : IShortfallLedger.RecoverySource.NONE;
-        if (
-            enabled &&
-            recoverySource == IShortfallLedger.RecoverySource.NONE
-        ) {
+        if (enabled && recoverySource == IShortfallLedger.RecoverySource.NONE) {
             revert SettlementManager__InvalidRecoverySource(
                 uint8(recoverySource)
             );
@@ -977,7 +1001,8 @@ contract SettlementManager is
                     ledger.remainingDebt
                 );
             }
-            ledger.recoverySource = IShortfallLedger.RecoverySource
+            ledger.recoverySource = IShortfallLedger
+                .RecoverySource
                 .GOVERNANCE_WRITE_OFF;
             ledger.remainingDebt = 0;
             ledger.shortfallAmount = 0;
@@ -1114,52 +1139,60 @@ contract SettlementManager is
             return;
         }
 
-        // solhint-disable-next-line no-empty-blocks
-        try
-            ILiquidationEventsView(viewAddr).pushLiquidationUpdate(
-                user,
-                collateralAsset,
-                debtAsset,
-                collateralAmount,
-                debtAmount,
-                liquidator,
-                bonus,
-                block.number
+        // solhint-disable-next-line avoid-low-level-calls
+        (bool updateOk, bytes memory updateReason) = viewAddr.call(
+            abi.encodeCall(
+                ILiquidationEventsView.pushLiquidationUpdate,
+                (
+                    user,
+                    collateralAsset,
+                    debtAsset,
+                    collateralAmount,
+                    debtAmount,
+                    liquidator,
+                    bonus,
+                    block.number
+                )
             )
-        {} catch (bytes memory reason) {
+        );
+        if (!updateOk) {
             emit CacheUpdateFailed(
                 user,
                 collateralAsset,
                 viewAddr,
                 collateralAmount,
                 debtAmount,
-                abi.encode("pushLiquidationUpdate failed", reason)
+                abi.encode("pushLiquidationUpdate failed", updateReason)
             );
         }
 
-        // solhint-disable-next-line no-empty-blocks
-        try
-            ILiquidationEventsView(viewAddr).pushLiquidationPayout(
-                user,
-                collateralAsset,
-                recipients.platform,
-                recipients.reserve,
-                recipients.lenderCompensation,
-                liquidator,
-                platformShare,
-                reserveShare,
-                lenderShare,
-                liquidatorShare,
-                block.number
+        // solhint-disable-next-line avoid-low-level-calls
+        (bool payoutOk, bytes memory payoutReason) = viewAddr.call(
+            abi.encodeCall(
+                ILiquidationEventsView.pushLiquidationPayout,
+                (
+                    user,
+                    collateralAsset,
+                    recipients.platform,
+                    recipients.reserve,
+                    recipients.lenderCompensation,
+                    liquidator,
+                    platformShare,
+                    reserveShare,
+                    lenderShare,
+                    liquidatorShare,
+                    block.number
+                )
             )
-        {} catch (bytes memory reason) {
+        );
+        if (!payoutOk) {
             emit CacheUpdateFailed(
                 user,
                 collateralAsset,
                 viewAddr,
                 collateralAmount,
                 debtAmount,
-                abi.encode("pushLiquidationPayout failed", reason)
+                abi.encode("pushLiquidationPayout failed", payoutReason)
             );
         }
     }
@@ -1255,14 +1288,14 @@ contract SettlementManager is
             IOrderStateStoreV2 orderStateStore,
             bool hasOrderStateStore
         ) = _tryOrderStateStore();
-        IOrderStateStoreV2.LifecycleStatus lifecycle =
-            cleanTerminalStatus == ILoanNFT.LoanStatus.Defaulted
-                ? IOrderStateStoreV2.LifecycleStatus.DEFAULTED
-                : IOrderStateStoreV2.LifecycleStatus.LIQUIDATED;
-        IOrderStateStoreV2.CloseReason closeReason =
-            cleanTerminalStatus == ILoanNFT.LoanStatus.Defaulted
-                ? IOrderStateStoreV2.CloseReason.MATURITY_DEFAULT
-                : IOrderStateStoreV2.CloseReason.KEEPER_LIQUIDATION;
+        IOrderStateStoreV2.LifecycleStatus lifecycle = cleanTerminalStatus ==
+            ILoanNFT.LoanStatus.Defaulted
+            ? IOrderStateStoreV2.LifecycleStatus.DEFAULTED
+            : IOrderStateStoreV2.LifecycleStatus.LIQUIDATED;
+        IOrderStateStoreV2.CloseReason closeReason = cleanTerminalStatus ==
+            ILoanNFT.LoanStatus.Defaulted
+            ? IOrderStateStoreV2.CloseReason.MATURITY_DEFAULT
+            : IOrderStateStoreV2.CloseReason.KEEPER_LIQUIDATION;
 
         if (remainingDebtAmount > 0) {
             _recordLiquidationShortfall(
@@ -1306,7 +1339,8 @@ contract SettlementManager is
                 lifecycle,
                 closeReason,
                 IShortfallLedger.ShortfallStatus.NONE,
-                IOrderStateStoreV2.CollateralDispositionStatus
+                IOrderStateStoreV2
+                    .CollateralDispositionStatus
                     .SEIZED_AND_DISTRIBUTED
             );
         }
@@ -1320,7 +1354,10 @@ contract SettlementManager is
     function _recordLiquidationShortfall(
         IShortfallLedger.RecordShortfallParams memory params
     ) internal {
-        if (_shortfallLedgers[params.orderId].status != IShortfallLedger.ShortfallStatus.NONE) {
+        if (
+            _shortfallLedgers[params.orderId].status !=
+            IShortfallLedger.ShortfallStatus.NONE
+        ) {
             revert SettlementManager__ShortfallAlreadyExists(params.orderId);
         }
 
@@ -1379,7 +1416,7 @@ contract SettlementManager is
         if (
             recoverySource == IShortfallLedger.RecoverySource.NONE ||
             recoverySource ==
-            IShortfallLedger.RecoverySource.GOVERNANCE_WRITE_OFF
+                IShortfallLedger.RecoverySource.GOVERNANCE_WRITE_OFF
         ) {
             revert SettlementManager__InvalidShortfallRecoverySource(
                 orderId,
@@ -1445,8 +1482,7 @@ contract SettlementManager is
     ) internal pure returns (bool) {
         return
             recoverySource == IShortfallLedger.RecoverySource.INSURANCE_FUND ||
-            recoverySource ==
-            IShortfallLedger.RecoverySource.OFFCHAIN_RECOVERY;
+            recoverySource == IShortfallLedger.RecoverySource.OFFCHAIN_RECOVERY;
     }
 
     function _isPendingShortfallStatus(
@@ -1469,36 +1505,34 @@ contract SettlementManager is
 
         if (previousStatus == IShortfallLedger.ShortfallStatus.ACTIVE) {
             return
-                newStatus
-                    == IShortfallLedger.ShortfallStatus.RECOVERY_PENDING ||
-                newStatus
-                    == IShortfallLedger.ShortfallStatus.GUARANTEE_PENDING ||
-                newStatus
-                    == IShortfallLedger.ShortfallStatus.GOVERNANCE_PENDING ||
+                newStatus ==
+                    IShortfallLedger.ShortfallStatus.RECOVERY_PENDING ||
+                newStatus ==
+                    IShortfallLedger.ShortfallStatus.GUARANTEE_PENDING ||
+                newStatus ==
+                    IShortfallLedger.ShortfallStatus.GOVERNANCE_PENDING ||
                 newStatus == IShortfallLedger.ShortfallStatus.RESOLVED ||
                 newStatus == IShortfallLedger.ShortfallStatus.WRITTEN_OFF;
         }
 
         if (
-            previousStatus ==
-            IShortfallLedger.ShortfallStatus.RECOVERY_PENDING
+            previousStatus == IShortfallLedger.ShortfallStatus.RECOVERY_PENDING
         ) {
             return
-                newStatus
-                    == IShortfallLedger.ShortfallStatus.GUARANTEE_PENDING ||
-                newStatus
-                    == IShortfallLedger.ShortfallStatus.GOVERNANCE_PENDING ||
+                newStatus ==
+                    IShortfallLedger.ShortfallStatus.GUARANTEE_PENDING ||
+                newStatus ==
+                    IShortfallLedger.ShortfallStatus.GOVERNANCE_PENDING ||
                 newStatus == IShortfallLedger.ShortfallStatus.RESOLVED ||
                 newStatus == IShortfallLedger.ShortfallStatus.WRITTEN_OFF;
         }
 
         if (
-            previousStatus ==
-            IShortfallLedger.ShortfallStatus.GUARANTEE_PENDING
+            previousStatus == IShortfallLedger.ShortfallStatus.GUARANTEE_PENDING
         ) {
             return
-                newStatus
-                    == IShortfallLedger.ShortfallStatus.GOVERNANCE_PENDING ||
+                newStatus ==
+                    IShortfallLedger.ShortfallStatus.GOVERNANCE_PENDING ||
                 newStatus == IShortfallLedger.ShortfallStatus.RESOLVED ||
                 newStatus == IShortfallLedger.ShortfallStatus.WRITTEN_OFF;
         }
@@ -1581,8 +1615,10 @@ contract SettlementManager is
         uint256 orderCreatedBlock,
         IShortfallLedger.ShortfallStatus shortfallStatus
     ) internal {
-        (IOrderStateStoreV2 orderStateStore, bool hasOrderStateStore) =
-            _tryOrderStateStore();
+        (
+            IOrderStateStoreV2 orderStateStore,
+            bool hasOrderStateStore
+        ) = _tryOrderStateStore();
         if (!hasOrderStateStore) {
             return;
         }
@@ -1628,7 +1664,10 @@ contract SettlementManager is
         IAccessControlManager(acmAddr).requireRole(actionKey, caller);
     }
 
-    function _hasRole(bytes32 actionKey, address caller) internal view returns (bool) {
+    function _hasRole(
+        bytes32 actionKey,
+        address caller
+    ) internal view returns (bool) {
         address acmAddr = Registry(_registryAddr).getModuleOrRevert(
             ModuleKeys.KEY_ACCESS_CONTROL
         );

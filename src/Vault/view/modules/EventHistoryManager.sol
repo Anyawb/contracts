@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
-import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {DataPushLibrary} from "../../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../../constants/DataPushTypes.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
+import {
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
 
 /**
  * @title EventHistoryManager
@@ -58,7 +62,13 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
     }
 
     modifier onlyAuthorizedModule() {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_MANAGE_EVENT_HISTORY, msg.sender)) {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_MANAGE_EVENT_HISTORY,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         _;
@@ -84,7 +94,8 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
     }
@@ -114,7 +125,14 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
         bytes calldata extraData
     ) external onlyValidRegistry onlyAuthorizedModule {
         uint256 eventBlock = block.number;
-        emit HistoryRecorded(eventType, user, asset, amount, extraData, eventBlock);
+        emit HistoryRecorded(
+            eventType,
+            user,
+            asset,
+            amount,
+            extraData,
+            eventBlock
+        );
 
         // Unified DataPush event (off-chain consumers should subscribe to DataPushed)
         DataPushLibrary._emitData(
@@ -125,24 +143,33 @@ contract EventHistoryManager is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /*━━━━━━━━━━━━━━━ UUPS upgradeability ━━━━━━━━━━━━━━━*/
 
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-    * @notice Return the Registry contract address.
+     * @notice Return the Registry contract address.
      * @dev Prefer this function over the legacy `registryAddr()` getter.
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @return registryAddrVar Registry contract address.
+     * @return registryAddrVar Registry contract address.
      */
     function getRegistry() external view returns (address registryAddrVar) {
         return _registryAddr;

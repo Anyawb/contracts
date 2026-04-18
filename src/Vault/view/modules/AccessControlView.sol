@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import { Registry } from "../../../registry/Registry.sol";
-import { IAccessControlManager } from "../../../interfaces/IAccessControlManager.sol";
-import { ActionKeys } from "../../../constants/ActionKeys.sol";
-import { ModuleKeys } from "../../../constants/ModuleKeys.sol";
-import { ViewConstants } from "../ViewConstants.sol";
-import { DataPushLibrary } from "../../../libraries/DataPushLibrary.sol";
-import { DataPushTypes } from "../../../constants/DataPushTypes.sol";
-import { ViewVersioned } from "../ViewVersioned.sol";
-import { MissingRole, NotAContract, ZeroAddress } from "../../../errors/StandardErrors.sol";
-import { ViewAccessLib } from "../../../libraries/ViewAccessLib.sol";
+import {Registry} from "../../../registry/Registry.sol";
+import {IAccessControlManager} from "../../../interfaces/IAccessControlManager.sol";
+import {ActionKeys} from "../../../constants/ActionKeys.sol";
+import {ModuleKeys} from "../../../constants/ModuleKeys.sol";
+import {ViewConstants} from "../ViewConstants.sol";
+import {DataPushLibrary} from "../../../libraries/DataPushLibrary.sol";
+import {DataPushTypes} from "../../../constants/DataPushTypes.sol";
+import {ViewVersioned} from "../ViewVersioned.sol";
+import {
+    MissingRole,
+    NotAContract,
+    ZeroAddress
+} from "../../../errors/StandardErrors.sol";
+import {ViewAccessLib} from "../../../libraries/ViewAccessLib.sol";
 
 /**
  * @title AccessControlView
@@ -70,20 +74,29 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     mapping(address => mapping(bytes32 => bool)) private _userPermissionsCache;
 
     /// @dev User permission level cache.
-    mapping(address => IAccessControlManager.PermissionLevel) private _userPermissionLevelCache;
+    mapping(address => IAccessControlManager.PermissionLevel)
+        private _userPermissionLevelCache;
 
     /// @dev Last cache update block (block.number).
     mapping(address => uint256) private _cacheUpdateBlocks;
 
-    uint256 private constant _CACHE_DURATION_BLOCKS = ViewConstants.CACHE_DURATION_BLOCKS;
+    uint256 private constant _CACHE_DURATION_BLOCKS =
+        ViewConstants.CACHE_DURATION_BLOCKS;
 
     /*━━━━━━━━━━━━━━━ Access helpers ━━━━━━━━━━━━━━━*/
     /// @dev Scheme U: self read allowed; non-self requires VIEW_USER_DATA or ADMIN.
     modifier onlyAuthorizedFor(address targetUser) {
         if (msg.sender != targetUser) {
-            bool ok =
-                ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_VIEW_USER_DATA, msg.sender)
-                    || ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender);
+            bool ok = ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_VIEW_USER_DATA,
+                msg.sender
+            ) ||
+                ViewAccessLib.hasRole(
+                    _registryAddr,
+                    ActionKeys.ACTION_ADMIN,
+                    msg.sender
+                );
             if (!ok) revert MissingRole();
         }
         _;
@@ -123,7 +136,8 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
      */
     function initialize(address initialRegistryAddr) external initializer {
         if (initialRegistryAddr == address(0)) revert ZeroAddress();
-        if (initialRegistryAddr.code.length == 0) revert NotAContract(initialRegistryAddr);
+        if (initialRegistryAddr.code.length == 0)
+            revert NotAContract(initialRegistryAddr);
 
         __UUPSUpgradeable_init();
         _registryAddr = initialRegistryAddr;
@@ -190,30 +204,40 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Read APIs ━━━━━━━━━━━━━━━*/
 
     /**
-    * @notice Return the current AccessControlManager contract address.
+     * @notice Return the current AccessControlManager contract address.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @return accessControlManagerAddr AccessControlManager contract address.
+     * @return accessControlManagerAddr AccessControlManager contract address.
      */
-    function getACM() external view onlyValidRegistry returns (address accessControlManagerAddr) {
+    function getACM()
+        external
+        view
+        onlyValidRegistry
+        returns (address accessControlManagerAddr)
+    {
         return _getACM();
     }
 
     /**
-    * @notice Return the current Registry address.
+     * @notice Return the current Registry address.
      * @dev Reverts if:
      *      - registry is zero / not a contract (ZeroAddress / NotAContract via onlyValidRegistry)
      *
      * Security:
-    * - View-only.
+     * - View-only.
      *
-    * @return registryAddr Registry contract address.
+     * @return registryAddr Registry contract address.
      */
-    function registryAddrVar() external view onlyValidRegistry returns (address registryAddr) {
+    function registryAddrVar()
+        external
+        view
+        onlyValidRegistry
+        returns (address registryAddr)
+    {
         return _registryAddr;
     }
 
@@ -233,7 +257,10 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return isValid Whether the cache is valid (within CACHE_DURATION_BLOCKS)
      * @return blockNumber Cache update blockNumber (block.number)
      */
-    function getUserPermissionWithMeta(address user, bytes32 actionKey)
+    function getUserPermissionWithMeta(
+        address user,
+        bytes32 actionKey
+    )
         external
         view
         onlyValidRegistry
@@ -260,7 +287,9 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return isValid Whether the cache is valid (within CACHE_DURATION_BLOCKS)
      * @return blockNumber Cache update blockNumber (block.number)
      */
-    function isUserAdminWithMeta(address user)
+    function isUserAdminWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
@@ -287,12 +316,18 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
      * @return isValid Whether the cache is valid (within CACHE_DURATION_BLOCKS)
      * @return blockNumber Cache update blockNumber (block.number)
      */
-    function getUserPermissionLevelWithMeta(address user)
+    function getUserPermissionLevelWithMeta(
+        address user
+    )
         external
         view
         onlyValidRegistry
         onlyAuthorizedFor(user)
-        returns (IAccessControlManager.PermissionLevel level, bool isValid, uint256 blockNumber)
+        returns (
+            IAccessControlManager.PermissionLevel level,
+            bool isValid,
+            uint256 blockNumber
+        )
     {
         blockNumber = _cacheUpdateBlocks[user];
         level = _userPermissionLevelCache[user];
@@ -302,7 +337,10 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
     /*━━━━━━━━━━━━━━━ Internal helpers ━━━━━━━━━━━━━━━*/
 
     function _getACM() internal view returns (address) {
-        return Registry(_registryAddr).getModuleOrRevert(ModuleKeys.KEY_ACCESS_CONTROL);
+        return
+            Registry(_registryAddr).getModuleOrRevert(
+                ModuleKeys.KEY_ACCESS_CONTROL
+            );
     }
 
     function _isCacheValid(uint256 updateBlock) internal view returns (bool) {
@@ -326,38 +364,52 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
      *
      * @param newImplementation New implementation contract address
      */
-    function _authorizeUpgrade(address newImplementation) internal view override onlyValidRegistry {
-        if (!ViewAccessLib.hasRole(_registryAddr, ActionKeys.ACTION_ADMIN, msg.sender)) {
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal view override onlyValidRegistry {
+        if (
+            !ViewAccessLib.hasRole(
+                _registryAddr,
+                ActionKeys.ACTION_ADMIN,
+                msg.sender
+            )
+        ) {
             revert MissingRole();
         }
         if (newImplementation == address(0)) revert ZeroAddress();
-        if (newImplementation.code.length == 0) revert NotAContract(newImplementation);
+        if (newImplementation.code.length == 0)
+            revert NotAContract(newImplementation);
     }
 
     /*━━━━━━━━━━━━━━━ Versioning (C+B baseline) ━━━━━━━━━━━━━━━*/
     /**
-    * @notice Return the API semantic version for this module.
-    * @dev Reverts if: (never)
+     * @notice Return the API semantic version for this module.
+     * @dev Reverts if: (never)
      *
      * Security:
-    * - Pure function.
+     * - Pure function.
      *
-    * @return apiVersion_ API semantic version.
+     * @return apiVersion_ API semantic version.
      */
     function apiVersion() public pure override returns (uint256 apiVersion_) {
         return 1;
     }
 
     /**
-    * @notice Return the output/schema version for this module's cached data.
-    * @dev Reverts if: (never)
+     * @notice Return the output/schema version for this module's cached data.
+     * @dev Reverts if: (never)
      *
      * Security:
-    * - Pure function.
+     * - Pure function.
      *
-    * @return schemaVersion_ Schema version.
+     * @return schemaVersion_ Schema version.
      */
-    function schemaVersion() public pure override returns (uint256 schemaVersion_) {
+    function schemaVersion()
+        public
+        pure
+        override
+        returns (uint256 schemaVersion_)
+    {
         return 1;
     }
 
@@ -365,4 +417,4 @@ contract AccessControlView is Initializable, UUPSUpgradeable, ViewVersioned {
 
     /// @notice Storage gap for future upgrades
     uint256[50] private __gap;
-} 
+}
